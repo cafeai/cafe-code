@@ -36,7 +36,9 @@ import * as Cause from "effect/Cause";
 import { makeProviderUsageReset } from "../ProviderUsageReset.ts";
 import { discoverBoundProviderSkills } from "../providerSkillsDiscovery.ts";
 import * as Effect from "effect/Effect";
+import * as Deferred from "effect/Deferred";
 import * as Equal from "effect/Equal";
+import * as Exit from "effect/Exit";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Path from "effect/Path";
@@ -48,6 +50,7 @@ import * as Semaphore from "effect/Semaphore";
 import { ServerConfig } from "../../config.ts";
 import { ProviderInstanceRegistry } from "../Services/ProviderInstanceRegistry.ts";
 import { ProviderRegistry, type ProviderRegistryShape } from "../Services/ProviderRegistry.ts";
+import { ProviderAdapterRequestError } from "../Errors.ts";
 import {
   hydrateCachedProvider,
   isCachedProviderCorrelated,
@@ -301,8 +304,20 @@ const buildSnapshotSource = (instance: ProviderInstance): ProviderSnapshotSource
   streamChanges: instance.snapshot.streamChanges,
 });
 
-export const ProviderRegistryLive = Layer.effect(
-  ProviderRegistry,
+/**
+ * Every process owning native adapters must admit their initial status probes
+ * through this same bounded registry. The backend owns the durable presentation
+ * cache; detached runtime owners need only volatile, locally observed status.
+ * Disabling the cache skips both reads and writes, so an independent daemon
+ * cannot borrow backend evidence or race its persisted probe-history counters.
+ */
+interface ProviderRegistryOptions {
+  readonly statusCache?: "disabled";
+  /** Detached owners expose HTTP readiness while the same bounded queue runs. */
+  readonly initialAdmission?: "background";
+}
+
+const makeProviderRegistry = (options?: ProviderRegistryOptions) =>
   Effect.gen(function* () {
     const instanceRegistry = yield* ProviderInstanceRegistry;
     const usageReset = yield* makeProviderUsageReset;
@@ -323,6 +338,82 @@ export const ProviderRegistryLive = Layer.effect(
     // `providersRef` comes from the reactive `syncLiveSources` pass
     // below.
     const bootInstances = yield* instanceRegistry.listInstances;
+    // Barriers are keyed by the exact process-owning instance object, not its
+    // reusable account id. Weak keys avoid retaining retired generations. A
+    // capability reader can create a missing barrier but never starts a probe;
+    // the sole serialized registry queue is responsible for settling it.
+    const initialAdmissionBarriers = new WeakMap<
+      ProviderInstance,
+      Deferred.Deferred<void, ProviderAdapterRequestError>
+    >();
+    // Retain only unsettled exact generations, allowing an early pass setup
+    // defect to fail boot/read-created barriers even before instance enumeration.
+    // Every settlement removes the strong reference; historical keys remain weak.
+    const pendingAdmissionInstances = new Set<ProviderInstance>();
+    const barrierFor = (instance: ProviderInstance) =>
+      Effect.gen(function* () {
+        const existing = initialAdmissionBarriers.get(instance);
+        if (existing) return existing;
+        const created = yield* Deferred.make<void, ProviderAdapterRequestError>();
+        // Deferred creation can yield. Preserve any exact-generation barrier
+        // installed by another reader before this operation resumes.
+        const retained = initialAdmissionBarriers.get(instance) ?? created;
+        initialAdmissionBarriers.set(instance, retained);
+        if (retained === created) pendingAdmissionInstances.add(instance);
+        return retained;
+      });
+    const failIncompleteAdmissions = (instances: ReadonlySet<ProviderInstance>) =>
+      Effect.forEach(
+        instances,
+        (instance) =>
+          barrierFor(instance).pipe(
+            Effect.flatMap((barrier) =>
+              Deferred.fail(
+                barrier,
+                new ProviderAdapterRequestError({
+                  provider: instance.driverKind,
+                  method: "getCapabilities",
+                  detail: "Provider runtime capability qualification did not complete.",
+                }),
+              ),
+            ),
+            Effect.andThen(
+              Effect.sync(() => {
+                pendingAdmissionInstances.delete(instance);
+              }),
+            ),
+          ),
+        { discard: true },
+      );
+    for (const instance of bootInstances) yield* barrierFor(instance);
+    const awaitInstanceInitialRefresh = (instanceId: ProviderInstanceId) =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          // Register before observing the current owner so replacement cannot be
+          // lost between the read and waiting on that generation's barrier.
+          const changes = yield* instanceRegistry.subscribeChanges;
+          while (true) {
+            const instance = yield* instanceRegistry.getInstance(instanceId);
+            if (!instance) return undefined;
+            const barrier = yield* barrierFor(instance);
+            if (yield* Deferred.isDone(barrier)) {
+              const completion = yield* Effect.exit(Deferred.await(barrier));
+              if ((yield* instanceRegistry.getInstance(instanceId)) !== instance) continue;
+              if (Exit.isFailure(completion)) return yield* Effect.failCause(completion.cause);
+              return instance;
+            }
+            // Only these read-only waits are raced/cancelled, never the owner
+            // queue or its provider operation. Unrelated changes simply recheck.
+            const wakeup = yield* Effect.exit(
+              Effect.raceFirst(Deferred.await(barrier), PubSub.take(changes)),
+            );
+            // A failed retired generation is not authority over a replacement
+            // or removed account. Re-observe ownership before propagating it.
+            if ((yield* instanceRegistry.getInstance(instanceId)) !== instance) continue;
+            if (Exit.isFailure(wakeup)) return yield* Effect.failCause(wakeup.cause);
+          }
+        }),
+      );
     const bootSources = bootInstances.map(buildSnapshotSource);
     const fallbackProviders = yield* loadProviders(bootSources);
     const fallbackByInstance = new Map<ProviderInstanceId, ServerProvider>();
@@ -335,55 +426,61 @@ export const ProviderRegistryLive = Layer.effect(
       fallbackByInstance.set(source.instanceId, provider);
     }
 
-    const cachedProviders = yield* Effect.forEach(
-      bootSources,
-      (source) =>
-        Effect.gen(function* () {
-          // One cache file per configured instance. For the default
-          // instance of a built-in kind the path equals `<kind>.json` —
-          // identical to the legacy filename. We still require the cache
-          // payload to carry matching instance id + driver kind; old
-          // identity-less payloads are discarded and the awaited refresh
-          // below repopulates the cache.
-          const filePath = yield* resolveProviderStatusCachePath({
-            cacheDir: config.providerStatusCacheDir,
-            instanceId: source.instanceId,
-          }).pipe(Effect.provideService(Path.Path, path));
-          const fallbackProvider = fallbackByInstance.get(source.instanceId);
-          if (fallbackProvider === undefined) {
-            return undefined;
-          }
-          return yield* readProviderStatusCache(filePath).pipe(
-            Effect.provideService(FileSystem.FileSystem, fileSystem),
-            Effect.flatMap((cachedProvider) => {
-              if (cachedProvider === undefined) {
-                return Effect.void.pipe(Effect.as(undefined as ServerProvider | undefined));
-              }
-              const correlation = {
-                cachedProvider,
-                fallbackProvider,
-              } as const;
-              if (!isCachedProviderCorrelated(correlation)) {
-                return Effect.logWarning("provider status cache identity mismatch, ignoring", {
-                  path: filePath,
+    const cachedProviders =
+      options?.statusCache === "disabled"
+        ? []
+        : yield* Effect.forEach(
+            bootSources,
+            (source) =>
+              Effect.gen(function* () {
+                // One cache file per configured instance. For the default
+                // instance of a built-in kind the path equals `<kind>.json` —
+                // identical to the legacy filename. We still require the cache
+                // payload to carry matching instance id + driver kind; old
+                // identity-less payloads are discarded and the awaited refresh
+                // below repopulates the cache.
+                const filePath = yield* resolveProviderStatusCachePath({
+                  cacheDir: config.providerStatusCacheDir,
                   instanceId: source.instanceId,
-                  cachedInstanceId: cachedProvider.instanceId ?? null,
-                  driver: source.driverKind,
-                  cachedDriver: cachedProvider.driver ?? null,
-                }).pipe(Effect.as(undefined as ServerProvider | undefined));
-              }
-              return Effect.succeed(hydrateCachedProvider(correlation));
-            }),
+                }).pipe(Effect.provideService(Path.Path, path));
+                const fallbackProvider = fallbackByInstance.get(source.instanceId);
+                if (fallbackProvider === undefined) {
+                  return undefined;
+                }
+                return yield* readProviderStatusCache(filePath).pipe(
+                  Effect.provideService(FileSystem.FileSystem, fileSystem),
+                  Effect.flatMap((cachedProvider) => {
+                    if (cachedProvider === undefined) {
+                      return Effect.void.pipe(Effect.as(undefined as ServerProvider | undefined));
+                    }
+                    const correlation = {
+                      cachedProvider,
+                      fallbackProvider,
+                    } as const;
+                    if (!isCachedProviderCorrelated(correlation)) {
+                      return Effect.logWarning(
+                        "provider status cache identity mismatch, ignoring",
+                        {
+                          path: filePath,
+                          instanceId: source.instanceId,
+                          cachedInstanceId: cachedProvider.instanceId ?? null,
+                          driver: source.driverKind,
+                          cachedDriver: cachedProvider.driver ?? null,
+                        },
+                      ).pipe(Effect.as(undefined as ServerProvider | undefined));
+                    }
+                    return Effect.succeed(hydrateCachedProvider(correlation));
+                  }),
+                );
+              }),
+            { concurrency: "unbounded" },
+          ).pipe(
+            Effect.map((providers) =>
+              orderProviderSnapshots(
+                providers.filter((provider): provider is ServerProvider => provider !== undefined),
+              ),
+            ),
           );
-        }),
-      { concurrency: "unbounded" },
-    ).pipe(
-      Effect.map((providers) =>
-        orderProviderSnapshots(
-          providers.filter((provider): provider is ServerProvider => provider !== undefined),
-        ),
-      ),
-    );
     const providersRef = yield* Ref.make<ReadonlyArray<ServerProvider>>(cachedProviders);
     const maintenanceActionStatesRef = yield* Ref.make<
       ReadonlyMap<ProviderInstanceId, { readonly update?: ServerProviderUpdateState | undefined }>
@@ -406,6 +503,9 @@ export const ProviderRegistryLive = Layer.effect(
 
     const persistProvider = (provider: ServerProvider) =>
       Effect.gen(function* () {
+        if (options?.statusCache === "disabled") {
+          return;
+        }
         // Persist every instance — the file name is the instance id, so
         // multi-instance setups (e.g. `codex_personal`, `codex_work`) each
         // get their own cache. We resolve the path fresh so snapshots
@@ -760,18 +860,17 @@ export const ProviderRegistryLive = Layer.effect(
      *     attachment race that otherwise drops the initial probe;
      *   - prune `providersRef` of instances that no longer exist.
      *
-     * Initial refreshes are awaited with bounded parallelism rather than
-     * forked, so
-     * callers (layer build; `streamChanges` watcher) see fully-probed
-     * state on return. This matters for layer build in particular:
-     * consumers reading `getProviders` immediately after layer build
-     * expect the probe to have already landed.
+     * Each serialized pass awaits its bounded initial refreshes. The backend's
+     * default layer awaits the boot pass too, so immediate consumers retain
+     * fully-probed startup state. The daemon forks that same pass in its owner
+     * scope to keep listener readiness independent of the account count;
+     * native capability reads await the exact instance's admission barrier.
      *
      * Per-instance subscription fibers are not tracked explicitly. When
      * a rebuilt instance's old child scope closes, its PubSub shuts
      * down and our `Stream.runForEach` fiber exits naturally.
      */
-    const syncLiveSources = syncSemaphore.withPermits(1)(
+    const syncLiveSourcesBody = (admissions: Set<ProviderInstance>) =>
       Effect.gen(function* () {
         const instances = yield* instanceRegistry.listInstances;
         const unavailableProviders = yield* instanceRegistry.listUnavailable;
@@ -804,6 +903,20 @@ export const ProviderRegistryLive = Layer.effect(
             continue;
           }
           newlyAdded.push([instanceId, instance] as const);
+          yield* barrierFor(instance);
+          admissions.add(instance);
+        }
+
+        if (options?.initialAdmission === "background") {
+          // Rich health must describe this owner's pending generation rather
+          // than retaining a replaced runtime's known version during admission.
+          yield* upsertProviders(
+            yield* loadProviders(newlyAdded.map(([, instance]) => buildSnapshotSource(instance))),
+            {
+              persist: false,
+              replace: true,
+            },
+          );
         }
 
         // Fork long-lived subscriptions to each new/rebuilt instance's
@@ -839,7 +952,32 @@ export const ProviderRegistryLive = Layer.effect(
         yield* Effect.forEach(
           newlyAdded,
           ([, instance]) =>
-            refreshOneSource(buildSnapshotSource(instance)).pipe(Effect.ignoreCause({ log: true })),
+            Effect.gen(function* () {
+              const barrier = yield* barrierFor(instance);
+              yield* Effect.gen(function* () {
+                if ((yield* instanceRegistry.getInstance(instance.instanceId)) !== instance) return;
+                const source = buildSnapshotSource(instance);
+                const provider = yield* source.refresh;
+                // The instance may be replaced while its probe is in flight.
+                // Direct startup results need the same generation fence as the
+                // stream subscription; a stale result cannot qualify its heir.
+                if ((yield* instanceRegistry.getInstance(instance.instanceId)) !== instance) return;
+                yield* correlateSnapshotWithSource(source, provider).pipe(
+                  Effect.flatMap(syncProvider),
+                );
+              }).pipe(
+                Effect.ignoreCause({ log: true }),
+                Effect.ensuring(
+                  Deferred.succeed(barrier, undefined).pipe(
+                    Effect.andThen(
+                      Effect.sync(() => {
+                        pendingAdmissionInstances.delete(instance);
+                      }),
+                    ),
+                  ),
+                ),
+              );
+            }),
           { concurrency: INITIAL_PROVIDER_REFRESH_CONCURRENCY, discard: true },
         );
         yield* upsertProviders(unavailableProviders, {
@@ -878,6 +1016,19 @@ export const ProviderRegistryLive = Layer.effect(
           }
           return next;
         });
+      });
+    const syncLiveSources = syncSemaphore.withPermits(1)(
+      Effect.suspend(() => {
+        // Snapshot before any registry reads. A later replacement/read-created
+        // generation belongs to the next serialized pass, not this failure.
+        const admissions = new Set(pendingAdmissionInstances);
+        return syncLiveSourcesBody(admissions).pipe(
+          // Setup/identity defects cannot hang readers or release uncertified
+          // getters. Completed outcomes are immutable. A successful pass also
+          // retires seeded candidates removed before its enumeration.
+          Effect.onError(() => failIncompleteAdmissions(admissions)),
+          Effect.tap(() => failIncompleteAdmissions(admissions)),
+        );
       }),
     );
     const syncLiveSourcesAndContinue = syncLiveSources.pipe(
@@ -930,10 +1081,17 @@ export const ProviderRegistryLive = Layer.effect(
     // was dropped, which made any settings change that replaced an
     // instance never propagate to the aggregator's `providersRef`.)
     const instanceChanges = yield* instanceRegistry.subscribeChanges;
-    // Initial sync: subscribe + kick off refreshes for every instance
-    // present at boot. Run synchronously so consumers pulling immediately
-    // after the layer build see the correct aggregator state.
-    yield* syncLiveSources;
+    // Initial sync subscribes and admits every boot instance. The backend
+    // waits for the resulting aggregate; the daemon publishes pending status
+    // immediately and lets exact-generation capability readers await admission.
+    if (options?.initialAdmission === "background") {
+      // All boot barriers and the mutation subscription already exist. Keep
+      // owner admission scoped and serialized, but do not hold daemon listener
+      // readiness behind an unbounded number of two-wide health-check waves.
+      yield* syncLiveSourcesAndContinue.pipe(Effect.forkScoped);
+    } else {
+      yield* syncLiveSources;
+    }
     // React to registry mutations — instance added / removed / rebuilt.
     // `Stream.fromSubscription` builds a stream over the pre-acquired
     // subscription rather than subscribing on stream start, which is
@@ -957,6 +1115,7 @@ export const ProviderRegistryLive = Layer.effect(
 
     return {
       getProviders: Ref.get(providersRef),
+      awaitInstanceInitialRefresh,
       discoverSkills: (instanceId, cwd) =>
         discoverBoundProviderSkills(instanceRegistry.getInstance(instanceId), cwd),
       usageReset,
@@ -975,5 +1134,10 @@ export const ProviderRegistryLive = Layer.effect(
         return Stream.fromPubSub(changesPubSub);
       },
     } satisfies ProviderRegistryShape;
-  }),
-);
+  });
+
+export const makeProviderRegistryLive = (options?: ProviderRegistryOptions) =>
+  Layer.effect(ProviderRegistry, makeProviderRegistry(options));
+
+// Preserve the backend's existing cache-enabled layer identity and behavior.
+export const ProviderRegistryLive = makeProviderRegistryLive();

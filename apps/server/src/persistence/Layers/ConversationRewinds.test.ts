@@ -53,6 +53,30 @@ const prepareInput = {
   retainedTurnCount: 1,
   expectedControlSequence: 1,
 };
+const volatileMetadata: Pick<
+  ProviderSession,
+  "quotaReport" | "commandCatalog" | "commandCatalogConfigurationKey"
+> = {
+  quotaReport: {
+    source: "claude-session",
+    observedAt: timestamp,
+    meters: [
+      {
+        kind: "quota-report-marker",
+        group: "session",
+        usedPercent: 43,
+        resetsAt: timestamp,
+        severity: "warning",
+        isActive: true,
+      },
+    ],
+  },
+  commandCatalog: {
+    status: "available",
+    commands: [{ name: "catalog-marker", description: "volatile-catalog-marker" }],
+  },
+  commandCatalogConfigurationKey: "a".repeat(64),
+};
 
 // These helpers populate the real migrated schema. They contain no provider
 // credentials, child processes or user data; all ids/cursors are synthetic.
@@ -113,6 +137,98 @@ const eventFor = (
 });
 
 describe("ConversationRewinds", () => {
+  it.effect(
+    "omits volatile metadata from both durable snapshots without losing recovery fields",
+    () =>
+      Effect.gen(function* () {
+        const { sql, store } = yield* fixture;
+        const durableOriginal: ProviderSession = {
+          ...original,
+          interactionMode: "plan",
+          additionalDirectories: ["/synthetic-inert-additional"],
+          model: "synthetic-model",
+          modelSelection: {
+            instanceId: original.providerInstanceId!,
+            model: "synthetic-model",
+          },
+          maxConcurrentSubagents: 2,
+          codexRootTurnCompletion: {
+            turnId: TurnId.make("synthetic-retained-root"),
+            providerThreadId: "synthetic-provider-thread",
+            observedAt: timestamp,
+          },
+          lastError: "synthetic-retained-diagnostic",
+        };
+        const durableCandidate: ProviderSession = {
+          ...candidate,
+          interactionMode: durableOriginal.interactionMode,
+          additionalDirectories: durableOriginal.additionalDirectories,
+          model: durableOriginal.model,
+          modelSelection: durableOriginal.modelSelection,
+          maxConcurrentSubagents: durableOriginal.maxConcurrentSubagents,
+          codexRootTurnCompletion: durableOriginal.codexRootTurnCompletion,
+          lastError: durableOriginal.lastError,
+        };
+        assert.isTrue(
+          yield* store.reserve(prepareInput, { ...durableOriginal, ...volatileMetadata }),
+        );
+        assert.isTrue(
+          yield* store.prepared(identity, { ...durableCandidate, ...volatileMetadata }),
+        );
+        // Inspect actual SQL bytes, not only a decoded view that could hide a
+        // writer leak. Both paths must exclude the field names and their markers.
+        const rows = yield* sql<{ original: string; candidate: string }>`
+        SELECT original_session_json AS original,candidate_session_json AS candidate
+        FROM provider_conversation_rewinds WHERE thread_id=${identity.threadId}
+      `;
+        assert.lengthOf(rows, 1);
+        for (const json of [rows[0]!.original, rows[0]!.candidate]) {
+          for (const marker of [
+            "quotaReport",
+            "commandCatalog",
+            "commandCatalogConfigurationKey",
+            "quota-report-marker",
+            "volatile-catalog-marker",
+            volatileMetadata.commandCatalogConfigurationKey!,
+          ])
+            assert.notInclude(json, marker);
+        }
+        assert.deepEqual(JSON.parse(rows[0]!.original), durableOriginal);
+        assert.deepEqual(JSON.parse(rows[0]!.candidate), durableCandidate);
+        const restored = yield* store.read(identity.threadId);
+        assert.deepEqual(restored?.original, durableOriginal);
+        assert.deepEqual(restored?.candidate, durableCandidate);
+      }).pipe(Effect.provide(SqlitePersistenceMemory)),
+  );
+
+  it.effect(
+    "cannot rehydrate even malformed volatile fields from old saved session snapshots",
+    () =>
+      Effect.gen(function* () {
+        const { sql, store } = yield* fixture;
+        assert.isTrue(yield* store.reserve(prepareInput, original));
+        assert.isTrue(yield* store.prepared(identity, candidate));
+        // Older versions encoded the entire ProviderSession. Removed fields are
+        // ignored on decode even when they no longer match a live metadata schema;
+        // they cannot become recovered query evidence or break cursor recovery.
+        const legacyVolatile = {
+          quotaReport: { private: "legacy-quota-marker", meters: "not-a-report" },
+          commandCatalog: "legacy-catalog-marker",
+          commandCatalogConfigurationKey: "legacy-private-configuration-marker",
+        };
+        yield* sql`UPDATE provider_conversation_rewinds
+        SET original_session_json=${JSON.stringify({ ...original, ...legacyVolatile })},
+          candidate_session_json=${JSON.stringify({ ...candidate, ...legacyVolatile })}
+        WHERE thread_id=${identity.threadId}`;
+        const restored = yield* store.read(identity.threadId);
+        assert.equal(restored?.phase, "prepared");
+        assert.deepEqual(restored?.original, original);
+        assert.deepEqual(restored?.candidate, candidate);
+        assert.isTrue(yield* store.commit(identity));
+        assert.deepEqual(JSON.parse((yield* runtimeRows(sql))[0]!.cursor), candidate.resumeCursor);
+      }).pipe(Effect.provide(SqlitePersistenceMemory)),
+  );
+
   it.effect(
     "reserves only the exact durable session owner, generation, cursor and control boundary",
     () =>

@@ -27,6 +27,10 @@ import {
 } from "@cafecode/contracts";
 import { scopedThreadKey, scopeThreadRef } from "@cafecode/client-runtime";
 import { createModelCapabilities, createModelSelection } from "@cafecode/shared/model";
+import {
+  CLAUDE_RESPONSE_LIMIT_MESSAGE,
+  CLAUDE_SHORTER_CONTINUATION_PROMPT,
+} from "@cafecode/shared/claudeResponseLimits";
 import { RouterProvider, createMemoryHistory } from "@tanstack/react-router";
 import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
@@ -50,7 +54,11 @@ import { isMacPlatform } from "../lib/utils";
 import { resetSourceControlDiscoveryStateForTests } from "../lib/sourceControlDiscoveryState";
 import { __resetLocalApiForTests } from "../localApi";
 import { AppAtomRegistryProvider } from "../rpc/atomRegistry";
-import { applyClientSettingsUpdated, getServerConfig } from "../rpc/serverState";
+import {
+  applyClientSettingsUpdated,
+  applySettingsUpdated,
+  getServerConfig,
+} from "../rpc/serverState";
 import { getRouter } from "../router";
 import { deriveLogicalProjectKeyFromSettings } from "../logicalProject";
 import { selectBootstrapCompleteForActiveEnvironment, selectThreadByRef, useStore } from "../store";
@@ -1969,6 +1977,8 @@ function createDesktopBridgeForChatViewTests(
     openPath: async () => true,
     revealPath: async () => true,
     copyText: async () => undefined,
+    copyPng: async () => undefined,
+    savePng: async () => "cancelled",
     onMenuAction: () => () => undefined,
     getUpdateState: async () => {
       throw new Error("getUpdateState not implemented in ChatView browser test");
@@ -2186,6 +2196,564 @@ describe(`ChatView full app (${chatViewBrowserPart})`, () => {
   });
 
   if (chatViewBrowserPart === "composer") {
+    const createCodexRecoverySnapshot = (uncertain = false): OrchestrationReadModel => {
+      const base = createSnapshotWithActiveSubagent();
+      const failedAt = new Date().toISOString();
+      return {
+        ...base,
+        threads: base.threads.map((thread) =>
+          thread.id !== THREAD_ID
+            ? thread
+            : {
+                ...thread,
+                latestTurn: { ...thread.latestTurn!, state: "error", completedAt: failedAt },
+                session: {
+                  ...thread.session!,
+                  status: "ready",
+                  activeTurnId: null,
+                  providerInstanceId: ProviderInstanceId.make("codex"),
+                  lastError: "Synthetic transient root failure",
+                  updatedAt: failedAt,
+                },
+                activities: [
+                  // Unknown ACK evidence must keep an explicit Stop path even
+                  // without any observed child. It is not a running-task fact
+                  // and cannot authorize an automatic resend or countdown.
+                  ...(uncertain ? [] : thread.activities),
+                  {
+                    id: EventId.make("browser-codex-recovery-waiting"),
+                    kind: "runtime.warning",
+                    tone: "info",
+                    summary: "Recovery waiting",
+                    turnId: thread.latestTurn!.turnId,
+                    createdAt: failedAt,
+                    payload: {
+                      recovery: uncertain
+                        ? "codex-transient-recovery-uncertain"
+                        : "codex-transient-recovery-waiting",
+                      providerInstanceId: "codex",
+                      subagentRuntimeId: SUBAGENT_RUNTIME_ID,
+                      sessionUpdatedAt: failedAt,
+                      ...(uncertain
+                        ? {}
+                        : {
+                            retryAttempt: 3,
+                            stage: "backoff",
+                            retryAt: new Date(Date.parse(failedAt) + 60_000).toISOString(),
+                          }),
+                    },
+                  },
+                ],
+              },
+        ),
+      };
+    };
+    it.each([false, true])(
+      "keeps terminal-root recovery Stop independent from input with rail docked=%s",
+      async (docked) => {
+        const snapshot = createCodexRecoverySnapshot();
+        const mounted = await mountChatView({
+          viewport: WIDE_FOOTER_VIEWPORT,
+          snapshot,
+          resolveRpc: (body) =>
+            body._tag === ORCHESTRATION_WS_METHODS.dispatchCommand
+              ? { sequence: snapshot.snapshotSequence + 1 }
+              : undefined,
+        });
+        try {
+          await waitForComposerEditor();
+          if (docked) {
+            await page
+              .getByRole("button", { name: /^1 active subagent\. Show task list$/i })
+              .click();
+            await page.getByRole("button", { name: "Show on the side", exact: true }).click();
+          }
+          useComposerDraftStore.getState().setPrompt(THREAD_REF, "Keep this unsent instruction");
+          const stop = page.getByRole("button", {
+            name: "Stop recovery and running agents",
+            exact: true,
+          });
+          await expect.element(stop).toBeVisible();
+          const notice = document.querySelector<HTMLElement>(
+            '[data-codex-recovery-notice="true"]',
+          )!;
+          expect(document.querySelectorAll('[data-codex-recovery-notice="true"]')).toHaveLength(1);
+          expect(notice.textContent).toContain("Root failed");
+          expect(notice.textContent).toContain("1 agent active");
+          expect(notice.textContent).toMatch(/Retry in \d+s/u);
+          if (docked) expect(findSessionRail()?.contains(notice)).toBe(true);
+          await stop.click();
+          await vi.waitFor(() => {
+            const actions = wsRequests.filter(
+              (request) => request._tag === ORCHESTRATION_WS_METHODS.dispatchCommand,
+            );
+            expect(actions.filter((action) => action.type === "thread.session.stop")).toHaveLength(
+              1,
+            );
+            expect(
+              actions.some(
+                (action) =>
+                  action.type === "thread.turn.start" || action.type === "thread.turn.interrupt",
+              ),
+            ).toBe(false);
+          });
+          expect(useComposerDraftStore.getState().getComposerDraft(THREAD_REF)?.prompt).toBe(
+            "Keep this unsent instruction",
+          );
+          expect(selectThreadByRef(useStore.getState(), THREAD_REF)?.latestTurn).toEqual(
+            snapshot.threads[0]!.latestTurn,
+          );
+        } finally {
+          await mounted.cleanup();
+        }
+      },
+    );
+    it("allows a new manual turn while terminal-root recovery is waiting", async () => {
+      const snapshot = createCodexRecoverySnapshot();
+      const mounted = await mountChatView({
+        viewport: WIDE_FOOTER_VIEWPORT,
+        snapshot,
+        resolveRpc: (body) =>
+          body._tag === ORCHESTRATION_WS_METHODS.dispatchCommand
+            ? { sequence: snapshot.snapshotSequence + 1 }
+            : undefined,
+      });
+      try {
+        await waitForComposerEditor();
+        useComposerDraftStore.getState().setPrompt(THREAD_REF, "Change direction instead");
+        await expect
+          .element(
+            page.getByRole("button", { name: "Stop recovery and running agents", exact: true }),
+          )
+          .toBeVisible();
+        const send = await waitForSendButton();
+        expect(send.disabled).toBe(false);
+        send.click();
+        await vi.waitFor(() => {
+          const turn = wsRequests.find(
+            (request) =>
+              request._tag === ORCHESTRATION_WS_METHODS.dispatchCommand &&
+              request.type === "thread.turn.start",
+          );
+          expect(turn?.message).toMatchObject({ text: "Change direction instead" });
+          expect(wsRequests.some((request) => request.type === "thread.session.stop")).toBe(false);
+        });
+      } finally {
+        await mounted.cleanup();
+      }
+    });
+    it("keeps unknown continuation ACK stoppable without claiming an active task or retry", async () => {
+      const snapshot = createCodexRecoverySnapshot(true);
+      const mounted = await mountChatView({
+        viewport: WIDE_FOOTER_VIEWPORT,
+        snapshot,
+        resolveRpc: (body) =>
+          body._tag === ORCHESTRATION_WS_METHODS.dispatchCommand
+            ? { sequence: snapshot.snapshotSequence + 1 }
+            : undefined,
+      });
+      try {
+        await waitForComposerEditor();
+        useComposerDraftStore.getState().setPrompt(THREAD_REF, "Keep this unsubmitted prompt");
+        const stop = page.getByRole("button", {
+          name: "Stop recovery and running agents",
+          exact: true,
+        });
+        await expect.element(stop).toBeVisible();
+        const notice = document.querySelector<HTMLElement>('[data-codex-recovery-notice="true"]')!;
+        expect(notice.textContent).toContain("Needs reconciliation");
+        expect(notice.textContent).not.toMatch(/Retry in|agent active|agents active/u);
+        await stop.click();
+        await vi.waitFor(() => {
+          const actions = wsRequests.filter(
+            (request) => request._tag === ORCHESTRATION_WS_METHODS.dispatchCommand,
+          );
+          expect(actions.filter((action) => action.type === "thread.session.stop")).toHaveLength(1);
+          expect(actions.some((action) => action.type === "thread.turn.start")).toBe(false);
+        });
+        expect(useComposerDraftStore.getState().getComposerDraft(THREAD_REF)?.prompt).toBe(
+          "Keep this unsubmitted prompt",
+        );
+        expect(selectThreadByRef(useStore.getState(), THREAD_REF)?.latestTurn).toEqual(
+          snapshot.threads[0]!.latestTurn,
+        );
+      } finally {
+        await mounted.cleanup();
+      }
+    });
+    const responseLimitSelection = createModelSelection(
+      ProviderInstanceId.make("claudeAgent"),
+      "claude-opus-4-8",
+      [{ id: "effort", value: "max" }],
+    );
+    const createResponseLimitSnapshot = (): OrchestrationReadModel => {
+      const base = createSnapshotForTargetUser({
+        targetMessageId: MessageId.make("response-limit-request"),
+        targetText: "Existing work",
+        provider: "claudeAgent",
+        runtimeMode: "approval-required",
+        sessionStatus: "error",
+      });
+      return {
+        ...base,
+        threads: base.threads.map((thread) => ({
+          ...thread,
+          modelSelection: responseLimitSelection,
+          latestTurn: {
+            turnId: "response-limit-failed-turn" as TurnId,
+            state: "error" as const,
+            requestedAt: isoAt(1),
+            startedAt: isoAt(2),
+            completedAt: isoAt(3200),
+            assistantMessageId: null,
+          },
+          session: {
+            ...thread.session!,
+            providerInstanceId: ProviderInstanceId.make("claudeAgent"),
+            subagentRuntimeId: "c5278b1d-70a1-4b9f-9741-0ed1d8dbe9f2",
+            lastError: CLAUDE_RESPONSE_LIMIT_MESSAGE,
+            updatedAt: isoAt(3200),
+          },
+        })),
+      };
+    };
+    const configureResponseLimitFixture = (nextFixture: TestFixture) => {
+      nextFixture.serverConfig = {
+        ...nextFixture.serverConfig,
+        providers: [
+          ...nextFixture.serverConfig.providers,
+          {
+            driver: ProviderDriverKind.make("claudeAgent"),
+            instanceId: ProviderInstanceId.make("claudeAgent"),
+            enabled: true,
+            installed: true,
+            version: "2.1.288",
+            status: "ready",
+            auth: { status: "authenticated" },
+            checkedAt: NOW_ISO,
+            models: [
+              {
+                slug: responseLimitSelection.model,
+                name: "Claude Opus 4.8",
+                isCustom: false,
+                capabilities: createModelCapabilities({
+                  optionDescriptors: [
+                    {
+                      id: "effort",
+                      label: "Effort",
+                      type: "select",
+                      currentValue: "high",
+                      options: [
+                        { id: "high", label: "High", isDefault: true },
+                        { id: "max", label: "Max" },
+                      ],
+                    },
+                  ],
+                }),
+              },
+            ],
+            slashCommands: [],
+            skills: [],
+          },
+        ],
+      };
+    };
+
+    it.each([DEFAULT_VIEWPORT, COMPACT_FOOTER_VIEWPORT])(
+      "prepares an editable Claude shorter response at $name width and submits only through normal Send",
+      async (viewport) => {
+        const mounted = await mountChatView({
+          viewport,
+          snapshot: createResponseLimitSnapshot(),
+          configureFixture: configureResponseLimitFixture,
+          resolveRpc: (body) =>
+            body._tag === ORCHESTRATION_WS_METHODS.dispatchCommand ? { sequence: 2 } : undefined,
+        });
+        try {
+          const editor = await waitForComposerEditor();
+          const prepare = page.getByRole("button", { name: "Prepare shorter response" });
+          await expect.element(prepare).toBeEnabled();
+          const settingsBefore = useComposerDraftStore.getState().getComposerDraft(THREAD_REF);
+          await prepare.click();
+          await waitForComposerText(CLAUDE_SHORTER_CONTINUATION_PROMPT);
+          await vi.waitFor(() => expect(editor.contains(document.activeElement)).toBe(true));
+          await expect.element(prepare).toBeDisabled();
+          // A second stale click cannot prepare or submit another copy.
+          (prepare.element() as HTMLButtonElement).click();
+          expect(useComposerDraftStore.getState().getComposerDraft(THREAD_REF)).toMatchObject({
+            prompt: CLAUDE_SHORTER_CONTINUATION_PROMPT,
+            modelSelectionByProvider: settingsBefore?.modelSelectionByProvider ?? {},
+            activeProvider: settingsBefore?.activeProvider ?? null,
+            runtimeMode: settingsBefore?.runtimeMode ?? null,
+            interactionMode: settingsBefore?.interactionMode ?? null,
+          });
+          expect(selectThreadByRef(useStore.getState(), THREAD_REF)?.error).toBe(
+            CLAUDE_RESPONSE_LIMIT_MESSAGE,
+          );
+          expect(
+            wsRequests.filter(
+              (request) => request._tag === ORCHESTRATION_WS_METHODS.dispatchCommand,
+            ),
+          ).toHaveLength(0);
+          const rect = prepare.element().getBoundingClientRect();
+          expect(rect.left).toBeGreaterThanOrEqual(0);
+          expect(rect.right).toBeLessThanOrEqual(viewport.width);
+          await page
+            .getByTestId("composer-editor")
+            .fill("Give a concise answer from the existing work.");
+          (await waitForSendButton()).click();
+          await vi.waitFor(() => {
+            const commands = wsRequests.filter(
+              (request) => request._tag === ORCHESTRATION_WS_METHODS.dispatchCommand,
+            );
+            expect(commands).toHaveLength(1);
+            expect(commands[0]).toMatchObject({
+              type: "thread.turn.start",
+              threadId: THREAD_ID,
+              message: { text: "Give a concise answer from the existing work.", attachments: [] },
+              modelSelection: responseLimitSelection,
+              runtimeMode: "approval-required",
+              interactionMode: "default",
+            });
+          });
+        } finally {
+          await mounted.cleanup();
+        }
+      },
+    );
+
+    it.each([
+      "draft",
+      "file",
+      "image",
+      "queue edit",
+      "approval",
+      "question",
+      "account",
+      "error",
+      "new turn",
+    ] as const)(
+      "rejects a stale Claude shorter-response click after %s replacement",
+      async (state) => {
+        const mounted = await mountChatView({
+          viewport: DEFAULT_VIEWPORT,
+          snapshot: createResponseLimitSnapshot(),
+          configureFixture: configureResponseLimitFixture,
+        });
+        try {
+          await waitForComposerEditor();
+          const prepare = page.getByRole("button", { name: "Prepare shorter response" });
+          await expect.element(prepare).toBeEnabled();
+          const staleButton = prepare.element() as HTMLButtonElement;
+          if (state === "draft") {
+            useComposerDraftStore.getState().setPrompt(THREAD_REF, "My unsent draft");
+          } else if (state === "file") {
+            useComposerDraftStore.getState().setFiles(THREAD_REF, [
+              {
+                id: "unsent-file",
+                environmentId: LOCAL_ENVIRONMENT_ID,
+                targetThreadId: THREAD_ID,
+                name: "draft.txt",
+                mimeType: "text/plain",
+                sizeBytes: 1,
+                status: "failed",
+                error: "Synthetic unavailable upload",
+              },
+            ]);
+          } else if (state === "image") {
+            useComposerDraftStore.getState().addImages(THREAD_REF, [
+              {
+                id: "unsent-image",
+                type: "image",
+                name: "draft.png",
+                mimeType: "image/png",
+                sizeBytes: 1,
+                previewUrl: "data:image/png;base64,eA==",
+                file: new File(["x"], "draft.png", { type: "image/png" }),
+              },
+            ]);
+          } else if (state === "queue edit") {
+            expect(
+              useComposerDraftStore.getState().beginQueueEdit(THREAD_REF, "queued-edit", {
+                prompt: "",
+                images: [],
+                files: [],
+                modelSelection: responseLimitSelection,
+                runtimeMode: "approval-required",
+                interactionMode: "default",
+              }),
+            ).toBe(true);
+          } else if (state === "approval" || state === "question") {
+            const activity: OrchestrationReadModel["threads"][number]["activities"][number] = {
+              id: EventId.make(`response-limit-new-${state}`),
+              kind: state === "approval" ? "approval.requested" : "user-input.requested",
+              tone: "info",
+              summary: "Synthetic pending decision",
+              turnId: "response-limit-failed-turn" as TurnId,
+              createdAt: isoAt(3201),
+              payload: {
+                requestId: `response-limit-${state}`,
+                ...(state === "approval"
+                  ? { requestKind: "command" }
+                  : {
+                      isBlocking: true,
+                      questions: [
+                        {
+                          id: "choice",
+                          header: "Choice",
+                          question: "Choose a direction",
+                          options: [
+                            { label: "First", description: "First direction" },
+                            { label: "Second", description: "Second direction" },
+                          ],
+                        },
+                      ],
+                    }),
+              },
+            };
+            useStore.setState((store) => {
+              const environment = store.environmentStateById[LOCAL_ENVIRONMENT_ID]!;
+              return {
+                environmentStateById: {
+                  ...store.environmentStateById,
+                  [LOCAL_ENVIRONMENT_ID]: {
+                    ...environment,
+                    activityIdsByThreadId: {
+                      ...environment.activityIdsByThreadId,
+                      [THREAD_ID]: [activity.id],
+                    },
+                    activityByThreadId: {
+                      ...environment.activityByThreadId,
+                      [THREAD_ID]: { [activity.id]: activity },
+                    },
+                  },
+                },
+              };
+            });
+          } else if (state === "account") {
+            useComposerDraftStore
+              .getState()
+              .setModelSelection(
+                THREAD_REF,
+                createModelSelection(ProviderInstanceId.make("codex"), "gpt-5"),
+              );
+          } else if (state === "error") {
+            useStore.getState().setError(THREAD_REF, "A newer command failed.");
+          } else {
+            useStore.setState((store) => {
+              const environment = store.environmentStateById[LOCAL_ENVIRONMENT_ID]!;
+              return {
+                environmentStateById: {
+                  ...store.environmentStateById,
+                  [LOCAL_ENVIRONMENT_ID]: {
+                    ...environment,
+                    threadSessionById: {
+                      ...environment.threadSessionById,
+                      [THREAD_ID]: {
+                        ...environment.threadSessionById[THREAD_ID]!,
+                        status: "running",
+                        orchestrationStatus: "running",
+                        activeTurnId: "new-response" as TurnId,
+                      },
+                    },
+                  },
+                },
+              };
+            });
+          }
+          // Invoke before React commits the replacement, exercising the live
+          // store recheck rather than only the next render's disabled button.
+          staleButton.click();
+          await waitForLayout();
+          expect(useComposerDraftStore.getState().getComposerDraft(THREAD_REF)?.prompt ?? "").toBe(
+            state === "draft" ? "My unsent draft" : "",
+          );
+          expect(
+            wsRequests.filter(
+              (request) => request._tag === ORCHESTRATION_WS_METHODS.dispatchCommand,
+            ),
+          ).toHaveLength(0);
+          if (["draft", "file", "image", "queue edit", "approval", "question"].includes(state))
+            await expect.element(prepare).toBeDisabled();
+          else await expect.element(prepare).not.toBeInTheDocument();
+          const currentDraft = useComposerDraftStore.getState().getComposerDraft(THREAD_REF);
+          if (state === "file") expect(currentDraft?.files[0]?.id).toBe("unsent-file");
+          if (state === "image") expect(currentDraft?.images[0]?.id).toBe("unsent-image");
+          if (state === "queue edit") expect(currentDraft?.queueEditingItemId).toBe("queued-edit");
+          if (state === "error")
+            await expect.element(page.getByText("A newer command failed.")).toBeVisible();
+        } finally {
+          await mounted.cleanup();
+        }
+      },
+    );
+
+    it("does not prepare Claude continuation after navigating away and back to the failed chat", async () => {
+      const base = createResponseLimitSnapshot();
+      const secondId = ThreadId.make("response-limit-second-chat");
+      const source = base.threads[0]!;
+      const mounted = await mountChatView({
+        viewport: DEFAULT_VIEWPORT,
+        snapshot: {
+          ...base,
+          threads: [
+            ...base.threads,
+            {
+              ...source,
+              id: secondId,
+              title: "Another chat",
+              messages: [],
+              latestTurn: null,
+              session: { ...source.session!, threadId: secondId, status: "ready", lastError: null },
+            },
+          ],
+        },
+        configureFixture: configureResponseLimitFixture,
+      });
+      try {
+        await waitForComposerEditor();
+        const prepare = page.getByRole("button", { name: "Prepare shorter response" });
+        await expect.element(prepare).toBeEnabled();
+        const previousButton = prepare.element() as HTMLButtonElement;
+        await mounted.router.navigate({
+          to: "/$environmentId/$threadId",
+          params: { environmentId: LOCAL_ENVIRONMENT_ID, threadId: secondId },
+        });
+        await waitForURL(
+          mounted.router,
+          (path) => path === serverThreadPath(secondId),
+          "Navigate to second chat.",
+        );
+        previousButton.click();
+        expect(useComposerDraftStore.getState().getComposerDraft(THREAD_REF)?.prompt ?? "").toBe(
+          "",
+        );
+        expect(
+          useComposerDraftStore
+            .getState()
+            .getComposerDraft(scopeThreadRef(LOCAL_ENVIRONMENT_ID, secondId))?.prompt ?? "",
+        ).toBe("");
+        await mounted.router.navigate({
+          to: "/$environmentId/$threadId",
+          params: { environmentId: LOCAL_ENVIRONMENT_ID, threadId: THREAD_ID },
+        });
+        await waitForURL(
+          mounted.router,
+          (path) => path === serverThreadPath(THREAD_ID),
+          "Return to failed chat.",
+        );
+        await expect.element(prepare).toBeEnabled();
+        expect(useComposerDraftStore.getState().getComposerDraft(THREAD_REF)?.prompt ?? "").toBe(
+          "",
+        );
+        expect(
+          wsRequests.filter((request) => request._tag === ORCHESTRATION_WS_METHODS.dispatchCommand),
+        ).toHaveLength(0);
+      } finally {
+        await mounted.cleanup();
+      }
+    });
+
     it("shows manual compaction in the used-tools list without a user turn or composer notice", async () => {
       const base = createSnapshotForTargetUser({
         targetMessageId: "compact-history" as MessageId,
@@ -6907,6 +7475,806 @@ describe(`ChatView full app (${chatViewBrowserPart})`, () => {
       }
     });
 
+    describe("live account subagent defaults", () => {
+      const account = ProviderInstanceId.make("codex");
+      const peer = ProviderInstanceId.make("codex-live-peer");
+      function configureLiveDefaults(next: TestFixture) {
+        const own = next.serverConfig.providers.find(
+          (provider) => provider.instanceId === account,
+        )!;
+        next.serverConfig = {
+          ...next.serverConfig,
+          providers: [
+            ...next.serverConfig.providers,
+            { ...own, instanceId: peer, displayName: "Live peer account" },
+          ].map((provider) => ({
+            ...provider,
+            runtimeCapabilities: {
+              liveSteer: "unsupported",
+              threadGoals: "unsupported",
+              ...provider.runtimeCapabilities,
+              subagentConcurrency: true,
+            },
+          })),
+          settings: {
+            ...next.serverConfig.settings,
+            providerInstances: {
+              ...next.serverConfig.settings.providerInstances,
+              [account]: {
+                driver: ProviderDriverKind.make("codex"),
+                defaultMaxConcurrentSubagents: 12,
+              },
+              [peer]: {
+                driver: ProviderDriverKind.make("codex"),
+                defaultMaxConcurrentSubagents: 64,
+              },
+            },
+          },
+        };
+      }
+      function updateAccountDefault(value: number | undefined) {
+        fixture.serverConfig = {
+          ...fixture.serverConfig,
+          settings: {
+            ...fixture.serverConfig.settings,
+            providerInstances: {
+              ...fixture.serverConfig.settings.providerInstances,
+              [account]: {
+                driver: ProviderDriverKind.make("codex"),
+                ...(value !== undefined ? { defaultMaxConcurrentSubagents: value } : {}),
+              },
+            },
+          },
+        };
+        applySettingsUpdated(fixture.serverConfig.settings);
+      }
+      async function revokeLiveAccountCapability() {
+        updateAccountDefault(24);
+        fixture.serverConfig = {
+          ...fixture.serverConfig,
+          providers: fixture.serverConfig.providers.map((provider) =>
+            provider.instanceId === account
+              ? {
+                  ...provider,
+                  runtimeCapabilities: {
+                    liveSteer: "supported",
+                    threadGoals: "unsupported",
+                    ...provider.runtimeCapabilities,
+                    subagentConcurrency: false,
+                  },
+                }
+              : provider,
+          ),
+        };
+        rpcHarness.emitStreamValue(WS_METHODS.subscribeServerConfig, {
+          version: 1,
+          type: "snapshot",
+          config: encodeServerConfig(fixture.serverConfig),
+        });
+        await vi.waitFor(() =>
+          expect(
+            getServerConfig()?.providers.find((provider) => provider.instanceId === account)
+              ?.runtimeCapabilities?.subagentConcurrency,
+          ).toBe(false),
+        );
+      }
+      function publishPolicy(
+        limits: { codex?: number; claude?: number },
+        configured: number | null,
+      ) {
+        const original = fixture.snapshot.threads[0]!;
+        const nextThread = {
+          ...original,
+          subagentLimits: limits,
+          session: original.session
+            ? { ...original.session, maxConcurrentSubagents: configured }
+            : null,
+        };
+        const snapshotSequence = fixture.snapshot.snapshotSequence + 10;
+        fixture.snapshot = { ...fixture.snapshot, snapshotSequence, threads: [nextThread] };
+        rpcHarness.emitStreamValue(ORCHESTRATION_WS_METHODS.subscribeThread, {
+          kind: "snapshot",
+          snapshot: { snapshotSequence, thread: nextThread },
+        });
+      }
+      function policySnapshot(override: number | undefined, configured: number) {
+        const base = createSnapshotForTargetUser({
+          targetMessageId: MessageId.make("live-account-policy"),
+          targetText: "Existing chat uses account policy",
+        });
+        return {
+          ...base,
+          threads: base.threads.map((thread) => ({
+            ...thread,
+            subagentLimits: override === undefined ? {} : { codex: override },
+            session: thread.session
+              ? {
+                  ...thread.session,
+                  providerInstanceId: account,
+                  maxConcurrentSubagents: configured,
+                }
+              : null,
+          })),
+        };
+      }
+      it.each(["plan follow-up", "native review"] as const)(
+        "refuses unsupported inherited account policy in direct %s actions before dispatch or consuming work",
+        async (action) => {
+          const original = createSnapshotWithPlanFollowUpPrompt();
+          const base = {
+            ...original,
+            threads: original.threads.map((thread) => ({
+              ...thread,
+              session: thread.session ? { ...thread.session, providerInstanceId: account } : null,
+            })),
+          };
+          const mounted = await mountChatView({
+            viewport: WIDE_FOOTER_VIEWPORT,
+            snapshot: base,
+            configureFixture: (next) => {
+              configureLiveDefaults(next);
+              next.serverConfig = {
+                ...next.serverConfig,
+                providers: next.serverConfig.providers.map((provider) => ({
+                  ...provider,
+                  runtimeCapabilities: {
+                    liveSteer: "unsupported",
+                    threadGoals: "unsupported",
+                    ...provider.runtimeCapabilities,
+                    subagentConcurrency: false,
+                  },
+                })),
+              };
+            },
+          });
+          try {
+            await waitForServerConfigToApply();
+            const originalPlan = selectThreadByRef(useStore.getState(), THREAD_REF)?.proposedPlans;
+            if (action === "plan follow-up") {
+              (await waitForButtonByText("Implement")).click();
+            } else {
+              const prompt = "Keep this unsent review draft";
+              useComposerDraftStore.getState().setPrompt(THREAD_REF, prompt);
+              await page
+                .getByRole("button", { name: "More composer controls", exact: true })
+                .click();
+              await page.getByRole("menuitem", { name: "Codex review", exact: true }).click();
+              await page.getByRole("button", { name: "Start review", exact: true }).click();
+              await expect
+                .element(page.getByRole("dialog", { name: "Start a Codex review" }))
+                .toBeVisible();
+              expect(useComposerDraftStore.getState().getComposerDraft(THREAD_REF)?.prompt).toBe(
+                prompt,
+              );
+            }
+            await vi.waitFor(() =>
+              expect(document.body.textContent).toContain(
+                "This provider runtime does not support the account subagent limit.",
+              ),
+            );
+            expect(
+              wsRequests.some(
+                (body) =>
+                  body.type === "thread.turn.start" ||
+                  body.type === "thread.create" ||
+                  body.type === "thread.meta.update",
+              ),
+            ).toBe(false);
+            expect(selectThreadByRef(useStore.getState(), THREAD_REF)?.proposedPlans).toEqual(
+              originalPlan,
+            );
+          } finally {
+            await mounted.cleanup();
+          }
+        },
+      );
+      it.each(["ordinary send", "plan follow-up", "plan new chat"] as const)(
+        "rechecks live account policy after deferred preparation for %s and preserves unsent work",
+        async (action) => {
+          const original =
+            action === "ordinary send"
+              ? policySnapshot(undefined, 12)
+              : createSnapshotWithPlanFollowUpPrompt();
+          const base = {
+            ...original,
+            threads: original.threads.map((thread) => ({
+              ...thread,
+              subagentLimits: {},
+              session: thread.session
+                ? { ...thread.session, providerInstanceId: account, maxConcurrentSubagents: 12 }
+                : null,
+            })),
+          };
+          const blockedType =
+            action === "ordinary send"
+              ? "thread.runtime-mode.set"
+              : action === "plan follow-up"
+                ? "thread.interaction-mode.set"
+                : "thread.create";
+          let release!: (value: { sequence: number }) => void;
+          const pending = new Promise<{ sequence: number }>((resolve) => {
+            release = resolve;
+          });
+          const mounted = await mountChatView({
+            viewport: WIDE_FOOTER_VIEWPORT,
+            snapshot: base,
+            configureFixture: configureLiveDefaults,
+            resolveRpc: (body) =>
+              body._tag === ORCHESTRATION_WS_METHODS.dispatchCommand
+                ? body.type === blockedType
+                  ? pending
+                  : { sequence: 2 }
+                : undefined,
+          });
+          const prompt = "Keep this exact unsent policy-race draft";
+          try {
+            await waitForServerConfigToApply();
+            const originalPlan = selectThreadByRef(useStore.getState(), THREAD_REF)?.proposedPlans;
+            if (action === "ordinary send") {
+              useComposerDraftStore
+                .getState()
+                .setRuntimeMode(
+                  THREAD_REF,
+                  base.threads[0]!.runtimeMode === "approval-required"
+                    ? "full-access"
+                    : "approval-required",
+                );
+              useComposerDraftStore.getState().setPrompt(THREAD_REF, prompt);
+              await vi.waitFor(() =>
+                expect(document.querySelector('[contenteditable="true"]')?.textContent).toContain(
+                  prompt,
+                ),
+              );
+              (await waitForSendButton()).click();
+            } else if (action === "plan follow-up") {
+              (await waitForButtonByText("Implement")).click();
+            } else {
+              await page
+                .getByRole("button", { name: "Implementation actions", exact: true })
+                .click();
+              await page
+                .getByRole("menuitem", { name: "Implement in a new chat", exact: true })
+                .click();
+            }
+            await vi.waitFor(() =>
+              expect(wsRequests.some((body) => body.type === blockedType)).toBe(true),
+            );
+            expect(wsRequests.some((body) => body.type === "thread.turn.start")).toBe(false);
+            await revokeLiveAccountCapability();
+            release({ sequence: 2 });
+            await vi.waitFor(() =>
+              expect(document.body.textContent).toContain(
+                "This provider runtime does not support the account subagent limit.",
+              ),
+            );
+            expect(wsRequests.some((body) => body.type === "thread.turn.start")).toBe(false);
+            expect(selectThreadByRef(useStore.getState(), THREAD_REF)?.proposedPlans).toEqual(
+              originalPlan,
+            );
+            if (action === "ordinary send") {
+              expect(useComposerDraftStore.getState().getComposerDraft(THREAD_REF)?.prompt).toBe(
+                prompt,
+              );
+              await vi.waitFor(() =>
+                expect(document.querySelector('[contenteditable="true"]')?.textContent).toContain(
+                  prompt,
+                ),
+              );
+            } else if (action === "plan follow-up") {
+              await expect
+                .element(page.getByRole("button", { name: "Implement", exact: true }))
+                .toBeEnabled();
+            } else {
+              await vi.waitFor(() =>
+                expect(wsRequests.some((body) => body.type === "thread.delete")).toBe(true),
+              );
+              expect(mounted.router.state.location.pathname).toBe(serverThreadPath(THREAD_ID));
+            }
+          } finally {
+            release({ sequence: 2 });
+            await mounted.cleanup();
+          }
+        },
+      );
+      it("leaves a deferred queued send definitely unclaimed when the live account policy becomes unsupported", async () => {
+        const queue = createFollowUpQueuePersistence();
+        const base = policySnapshot(undefined, 12);
+        const queuedRuntime =
+          base.threads[0]!.runtimeMode === "approval-required"
+            ? "full-access"
+            : "approval-required";
+        expect(
+          (
+            await queue.save(LOCAL_ENVIRONMENT_ID, [
+              {
+                id: "live-policy-queued",
+                environmentId: LOCAL_ENVIRONMENT_ID,
+                threadId: THREAD_ID,
+                promptText: "Preserve this exact queued input",
+                images: [],
+                files: [],
+                provider: ProviderDriverKind.make("codex"),
+                model: "gpt-5",
+                promptEffort: null,
+                modelSelection: createModelSelection(account, "gpt-5"),
+                runtimeMode: queuedRuntime,
+                interactionMode: "default",
+                queuedAt: isoAt(1000),
+                blockedReason: null,
+              },
+            ])
+          ).ok,
+        ).toBe(true);
+        let release!: (value: { sequence: number }) => void;
+        const pending = new Promise<{ sequence: number }>((resolve) => {
+          release = resolve;
+        });
+        const mounted = await mountChatView({
+          viewport: WIDE_FOOTER_VIEWPORT,
+          snapshot: base,
+          configureFixture: configureLiveDefaults,
+          resolveRpc: (body) =>
+            body._tag === ORCHESTRATION_WS_METHODS.dispatchCommand
+              ? body.type === "thread.runtime-mode.set"
+                ? pending
+                : { sequence: 2 }
+              : undefined,
+        });
+        try {
+          await vi.waitFor(() =>
+            expect(wsRequests.some((body) => body.type === "thread.runtime-mode.set")).toBe(true),
+          );
+          await revokeLiveAccountCapability();
+          release({ sequence: 2 });
+          await vi.waitFor(() =>
+            expect(document.body.textContent).toContain(
+              "This provider runtime does not support the account subagent limit.",
+            ),
+          );
+          expect(wsRequests.some((body) => body.type === "thread.turn.start")).toBe(false);
+          const persisted = queue.load(LOCAL_ENVIRONMENT_ID);
+          expect(persisted.ok).toBe(true);
+          if (persisted.ok) {
+            expect(persisted.value.claimed).toHaveLength(0);
+            expect(persisted.value.pending).toHaveLength(1);
+            // Durable storage intentionally records only a blocked bit, not
+            // arbitrary error text; hydration uses this exact review label.
+            expect(persisted.value.pending[0]).toMatchObject({
+              promptText: "Preserve this exact queued input",
+              blockedReason: "Review this queued follow-up before sending.",
+            });
+          }
+        } finally {
+          release({ sequence: 2 });
+          await mounted.cleanup();
+        }
+      });
+      it("rechecks the actual steer session's account after deferred image preparation without claiming or consuming input", async () => {
+        const original = createSnapshotForTargetUser({
+          targetMessageId: MessageId.make("live-steer-policy"),
+          targetText: "Active steer policy fixture",
+          sessionStatus: "running",
+        });
+        const activeTurnId = "live-steer-policy-active-turn" as TurnId;
+        const base = {
+          ...original,
+          threads: original.threads.map((thread) => ({
+            ...thread,
+            subagentLimits: {},
+            latestTurn: {
+              turnId: activeTurnId,
+              state: "running" as const,
+              requestedAt: isoAt(1000),
+              startedAt: isoAt(1001),
+              completedAt: null,
+              assistantMessageId: null,
+            },
+            session: thread.session
+              ? {
+                  ...thread.session,
+                  providerInstanceId: account,
+                  maxConcurrentSubagents: 12,
+                  activeTurnId,
+                }
+              : null,
+          })),
+        };
+        const mounted = await mountChatView({
+          viewport: WIDE_FOOTER_VIEWPORT,
+          snapshot: base,
+          configureFixture: (next) => {
+            configureLiveDefaults(next);
+            next.serverConfig = {
+              ...next.serverConfig,
+              keybindings: [
+                {
+                  command: "composer.steer",
+                  shortcut: {
+                    key: "enter",
+                    modKey: false,
+                    ctrlKey: true,
+                    metaKey: false,
+                    altKey: false,
+                    shiftKey: false,
+                  },
+                },
+              ],
+              providers: next.serverConfig.providers.map((provider) => ({
+                ...provider,
+                runtimeCapabilities: {
+                  threadGoals: "unsupported",
+                  ...provider.runtimeCapabilities,
+                  liveSteer: "supported",
+                },
+              })),
+            };
+          },
+        });
+        const originalRead = FileReader.prototype.readAsDataURL;
+        const prepared: { reader: FileReader; blob: Blob }[] = [];
+        let restoreReadSpy: (() => void) | undefined;
+        const releaseReaders = () => {
+          for (const { reader, blob } of prepared.splice(0)) originalRead.call(reader, blob);
+        };
+        const prompt = "Keep this exact unsent steer input";
+        try {
+          await waitForServerConfigToApply();
+          useComposerDraftStore.getState().setPrompt(THREAD_REF, prompt);
+          useComposerDraftStore.getState().addImages(THREAD_REF, [
+            {
+              id: "live-steer-image",
+              type: "image",
+              name: "draft.png",
+              mimeType: "image/png",
+              sizeBytes: 1,
+              previewUrl: "data:image/png;base64,eA==",
+              file: new File(["x"], "draft.png", { type: "image/png" }),
+            },
+          ]);
+          // Let the independent composer image-persistence effect finish its
+          // own read first. The only deferred read below is turn preparation,
+          // not an arbitrary earlier image/storage operation.
+          await vi.waitFor(() =>
+            expect(
+              useComposerDraftStore
+                .getState()
+                .getComposerDraft(THREAD_REF)
+                ?.persistedAttachments.map((image) => image.id),
+            ).toEqual(["live-steer-image"]),
+          );
+          const readSpy = vi
+            .spyOn(FileReader.prototype, "readAsDataURL")
+            .mockImplementation(function (this: FileReader, blob: Blob) {
+              prepared.push({ reader: this, blob });
+            });
+          restoreReadSpy = () => readSpy.mockRestore();
+          await vi.waitFor(() =>
+            expect(document.querySelector('[contenteditable="true"]')?.textContent).toContain(
+              prompt,
+            ),
+          );
+          // Direct steering is the dedicated keyboard action; the visible
+          // primary running-turn button intentionally queues instead.
+          (await waitForComposerEditor()).focus();
+          await userEvent.keyboard("{Control>}{Enter}{/Control}");
+          await vi.waitFor(() => expect(prepared).toHaveLength(1));
+          await revokeLiveAccountCapability();
+          releaseReaders();
+          await vi.waitFor(() =>
+            expect(document.body.textContent).toContain(
+              "This provider runtime does not support the account subagent limit.",
+            ),
+          );
+          expect(
+            wsRequests.some(
+              (body) => body.type === "thread.turn.steer" || body.type === "thread.turn.start",
+            ),
+          ).toBe(false);
+          expect(useComposerDraftStore.getState().getComposerDraft(THREAD_REF)?.prompt).toBe(
+            prompt,
+          );
+          expect(
+            useComposerDraftStore
+              .getState()
+              .getComposerDraft(THREAD_REF)
+              ?.images.map((image) => image.id),
+          ).toEqual(["live-steer-image"]);
+          const persisted = createFollowUpQueuePersistence().load(LOCAL_ENVIRONMENT_ID);
+          expect(persisted.ok).toBe(true);
+          if (persisted.ok) expect(persisted.value.claimed).toHaveLength(0);
+        } finally {
+          restoreReadSpy?.();
+          releaseReaders();
+          await mounted.cleanup();
+        }
+      });
+      it("does not borrow an unsent supported account's capability when the active steer owner is unrecorded", async () => {
+        const original = createSnapshotForTargetUser({
+          targetMessageId: MessageId.make("legacy-steer-owner"),
+          targetText: "Legacy session owner fixture",
+          sessionStatus: "running",
+        });
+        const activeTurnId = "legacy-steer-owner-active-turn" as TurnId;
+        // Deliberately retain the older snapshot shape without instance ID.
+        // The canonical chat account and newly selected peer both advertise
+        // support, but neither proves which process receives native steer.
+        const base = {
+          ...original,
+          threads: original.threads.map((thread) => ({
+            ...thread,
+            subagentLimits: {},
+            latestTurn: {
+              turnId: activeTurnId,
+              state: "running" as const,
+              requestedAt: isoAt(1000),
+              startedAt: isoAt(1001),
+              completedAt: null,
+              assistantMessageId: null,
+            },
+            session: thread.session
+              ? { ...thread.session, maxConcurrentSubagents: 12, activeTurnId }
+              : null,
+          })),
+        };
+        const mounted = await mountChatView({
+          viewport: WIDE_FOOTER_VIEWPORT,
+          snapshot: base,
+          configureFixture: (next) => {
+            configureLiveDefaults(next);
+            next.serverConfig = {
+              ...next.serverConfig,
+              keybindings: [
+                {
+                  command: "composer.steer",
+                  shortcut: {
+                    key: "enter",
+                    modKey: false,
+                    ctrlKey: true,
+                    metaKey: false,
+                    altKey: false,
+                    shiftKey: false,
+                  },
+                },
+              ],
+              providers: next.serverConfig.providers.map((provider) => ({
+                ...provider,
+                runtimeCapabilities: {
+                  threadGoals: "unsupported",
+                  ...provider.runtimeCapabilities,
+                  liveSteer: "supported",
+                },
+              })),
+            };
+          },
+        });
+        const prompt = "Preserve my unsent owner-bound steer";
+        try {
+          await waitForServerConfigToApply();
+          useComposerDraftStore
+            .getState()
+            .setModelSelection(THREAD_REF, createModelSelection(peer, "gpt-5"));
+          useComposerDraftStore.getState().setPrompt(THREAD_REF, prompt);
+          await vi.waitFor(() =>
+            expect(
+              useComposerDraftStore.getState().getComposerDraft(THREAD_REF)?.activeProvider,
+            ).toBe(peer),
+          );
+          await vi.waitFor(() =>
+            expect(document.querySelector('[contenteditable="true"]')?.textContent).toContain(
+              prompt,
+            ),
+          );
+          (await waitForComposerEditor()).focus();
+          await userEvent.keyboard("{Control>}{Enter}{/Control}");
+          await vi.waitFor(() =>
+            expect(document.body.textContent).toContain(
+              "The active session’s account is not recorded.",
+            ),
+          );
+          expect(
+            wsRequests.some(
+              (body) => body.type === "thread.turn.steer" || body.type === "thread.turn.start",
+            ),
+          ).toBe(false);
+          expect(useComposerDraftStore.getState().getComposerDraft(THREAD_REF)?.prompt).toBe(
+            prompt,
+          );
+          const persisted = createFollowUpQueuePersistence().load(LOCAL_ENVIRONMENT_ID);
+          expect(persisted.ok).toBe(true);
+          if (persisted.ok) expect(persisted.value.claimed).toHaveLength(0);
+        } finally {
+          await mounted.cleanup();
+        }
+      });
+      it("updates an existing inherited chat and shows live current-to-requested account transitions without dispatch", async () => {
+        const mounted = await mountChatView({
+          viewport: WIDE_FOOTER_VIEWPORT,
+          snapshot: policySnapshot(undefined, 12),
+          configureFixture: configureLiveDefaults,
+        });
+        try {
+          await waitForServerConfigToApply();
+          useUiStateStore.getState().setSessionRailDocked(true);
+          await vi.waitFor(() =>
+            expect(findSessionRail()?.textContent).toContain("Subagent limit: 12"),
+          );
+          updateAccountDefault(24);
+          await vi.waitFor(() =>
+            expect(findSessionRail()?.textContent).toContain("Subagent limit: 12 → 24 when idle"),
+          );
+          expect(selectThreadByRef(useStore.getState(), THREAD_REF)?.subagentLimits).toEqual({});
+          expect(
+            wsRequests.some(
+              (body) =>
+                body.type === "thread.turn.start" ||
+                body.type === "thread.meta.update" ||
+                body.type === "thread.session.stop",
+            ),
+          ).toBe(false);
+          publishPolicy({}, 24);
+          await vi.waitFor(() => {
+            expect(findSessionRail()?.textContent).toContain("Subagent limit: 24");
+            expect(findSessionRail()?.textContent).not.toContain("→");
+          });
+          updateAccountDefault(undefined);
+          await vi.waitFor(() =>
+            expect(findSessionRail()?.textContent).toContain(
+              "Subagent limit: 24 → Provider default when idle",
+            ),
+          );
+          publishPolicy({}, null);
+          await vi.waitFor(() =>
+            expect(findSessionRail()?.textContent).not.toContain("Subagent limit:"),
+          );
+          expect(
+            wsRequests.some(
+              (body) =>
+                body.type === "thread.turn.start" ||
+                body.type === "thread.meta.update" ||
+                body.type === "thread.session.stop",
+            ),
+          ).toBe(false);
+        } finally {
+          await mounted.cleanup();
+        }
+      });
+      it.each(["no draft account", "disabled draft account", "missing draft account"] as const)(
+        "uses the retained session account consistently in the rail, editor and send when durable selection differs (%s)",
+        async (selection) => {
+          const original = policySnapshot(undefined, 12);
+          const base = {
+            ...original,
+            threads: original.threads.map((thread) => ({
+              ...thread,
+              modelSelection: createModelSelection(peer, "gpt-5"),
+            })),
+          };
+          const mounted = await mountChatView({
+            viewport: WIDE_FOOTER_VIEWPORT,
+            snapshot: base,
+            configureFixture: (next) => {
+              configureLiveDefaults(next);
+              if (selection === "disabled draft account")
+                next.serverConfig = {
+                  ...next.serverConfig,
+                  providers: next.serverConfig.providers.map((provider) =>
+                    provider.instanceId === peer ? { ...provider, enabled: false } : provider,
+                  ),
+                };
+            },
+            resolveRpc: (body) =>
+              body._tag === ORCHESTRATION_WS_METHODS.dispatchCommand ? { sequence: 2 } : undefined,
+          });
+          try {
+            await waitForServerConfigToApply();
+            if (selection === "no draft account") {
+              expect(
+                useComposerDraftStore.getState().getComposerDraft(THREAD_REF)?.activeProvider,
+              ).toBeUndefined();
+            } else {
+              const stale =
+                selection === "disabled draft account"
+                  ? peer
+                  : ProviderInstanceId.make("missing-draft-account");
+              useComposerDraftStore
+                .getState()
+                .setModelSelection(THREAD_REF, createModelSelection(stale, "gpt-5"));
+              await vi.waitFor(() =>
+                expect(
+                  useComposerDraftStore.getState().getComposerDraft(THREAD_REF)?.activeProvider,
+                ).toBe(stale),
+              );
+            }
+            useUiStateStore.getState().setSessionRailDocked(true);
+            await vi.waitFor(() => {
+              expect(findSessionRail()?.textContent).toContain("Subagent limit: 12");
+              expect(findSessionRail()?.textContent).not.toContain("64");
+              expect(findSessionRail()?.textContent).not.toContain("→");
+            });
+            await page.getByRole("button", { name: "More composer controls", exact: true }).click();
+            await page.getByRole("menuitem", { name: "Subagent limit…", exact: true }).click();
+            const dialog = page.getByRole("dialog", { name: "Subagent limit", exact: true });
+            await expect.element(dialog).toBeVisible();
+            expect(dialog.element().textContent).toContain("Subagent limit: 12");
+            expect(dialog.element().textContent).not.toContain("Subagent limit: 64");
+            await page.getByRole("button", { name: "Close", exact: true }).click();
+            await expect.element(dialog).not.toBeInTheDocument();
+            const prompt = "Send with the exact retained session account";
+            useComposerDraftStore.getState().setPrompt(THREAD_REF, prompt);
+            await vi.waitFor(() =>
+              expect(document.querySelector('[contenteditable="true"]')?.textContent).toContain(
+                prompt,
+              ),
+            );
+            (await waitForSendButton()).click();
+            await vi.waitFor(() =>
+              expect(wsRequests.find((body) => body.type === "thread.turn.start")).toMatchObject({
+                threadId: THREAD_ID,
+                modelSelection: { instanceId: account },
+                message: { text: prompt },
+              }),
+            );
+            const start = wsRequests.find((body) => body.type === "thread.turn.start");
+            expect(start?.subagentLimits).not.toMatchObject({ codex: 12 });
+            expect(start?.subagentLimits).not.toMatchObject({ codex: 64 });
+          } finally {
+            await mounted.cleanup();
+          }
+        },
+      );
+      it("preserves explicit overrides, resets to the live account default and isolates another selected account's session evidence", async () => {
+        const mounted = await mountChatView({
+          viewport: WIDE_FOOTER_VIEWPORT,
+          snapshot: policySnapshot(5, 5),
+          configureFixture: configureLiveDefaults,
+          resolveRpc: (body) =>
+            body._tag === ORCHESTRATION_WS_METHODS.dispatchCommand ? { sequence: 2 } : undefined,
+        });
+        try {
+          await waitForServerConfigToApply();
+          useUiStateStore.getState().setSessionRailDocked(true);
+          await vi.waitFor(() =>
+            expect(findSessionRail()?.textContent).toContain("Subagent limit: 5"),
+          );
+          updateAccountDefault(24);
+          await vi.waitFor(() => {
+            expect(findSessionRail()?.textContent).toContain("Subagent limit: 5");
+            expect(findSessionRail()?.textContent).not.toContain("→");
+          });
+          await page.getByRole("button", { name: "More composer controls", exact: true }).click();
+          await page.getByRole("menuitem", { name: "Subagent limit…", exact: true }).click();
+          await page.getByRole("button", { name: "Reset", exact: true }).click();
+          await vi.waitFor(() =>
+            expect(wsRequests.find((body) => body.type === "thread.meta.update")).toMatchObject({
+              threadId: THREAD_ID,
+              subagentLimits: {},
+            }),
+          );
+          await vi.waitFor(() =>
+            expect(findSessionRail()?.textContent).toContain("Subagent limit: 5 → 24 when idle"),
+          );
+          publishPolicy({}, 5);
+          await vi.waitFor(() =>
+            expect(selectThreadByRef(useStore.getState(), THREAD_REF)?.subagentLimits).toEqual({}),
+          );
+          useComposerDraftStore
+            .getState()
+            .setModelSelection(THREAD_REF, createModelSelection(peer, "gpt-5"));
+          await vi.waitFor(() => {
+            expect(findSessionRail()?.textContent).toContain("Subagent limit: 64 · saved");
+            expect(findSessionRail()?.textContent).not.toContain("5 → 64");
+          });
+          expect(
+            wsRequests.some(
+              (body) => body.type === "thread.turn.start" || body.type === "thread.session.stop",
+            ),
+          ).toBe(false);
+        } finally {
+          await mounted.cleanup();
+        }
+      });
+    });
+
     it("edits the exact standalone chat policy, preserves the other driver and sends its captured override", async () => {
       const base = createSnapshotForTargetUser({
         targetMessageId: MessageId.make("limit-integration"),
@@ -7457,7 +8825,7 @@ describe(`ChatView full app (${chatViewBrowserPart})`, () => {
           await mounted.cleanup();
         }
       });
-      it("preserves a remembered draft on an unsupported runtime and permits reset before bootstrap", async () => {
+      it("preserves an inherited numeric draft on an unsupported runtime and requires clearing account intent before bootstrap", async () => {
         const mounted = await mountChatView({
           viewport: DEFAULT_VIEWPORT,
           snapshot: createProjectlessSnapshot(),
@@ -7492,13 +8860,13 @@ describe(`ChatView full app (${chatViewBrowserPart})`, () => {
           const prompt = "Retain this prompt until the unsupported request is reset";
           expect(
             useComposerDraftStore.getState().getComposerDraft(draftId)?.subagentLimits,
-          ).toEqual({ codex: 6 });
+          ).toBeUndefined();
           useComposerDraftStore.getState().setPrompt(draftId, prompt);
           await waitForStandaloneComposerText(prompt);
           (await waitForSendButton()).click();
           await vi.waitFor(() =>
             expect(document.body.textContent).toContain(
-              "This provider runtime does not support the saved subagent limit. Reset it in More composer controls before sending.",
+              "This provider runtime does not support the account subagent limit. Clear it in account settings or use a supported runtime before sending.",
             ),
           );
           expect(wsRequests.some((body) => body.type === "thread.turn.start")).toBe(false);
@@ -7509,13 +8877,40 @@ describe(`ChatView full app (${chatViewBrowserPart})`, () => {
             .toBeDisabled();
           await expect
             .element(page.getByRole("button", { name: "Save", exact: true }))
-            .toBeDisabled();
+            .toBeEnabled();
+          await expect
+            .element(page.getByRole("spinbutton", { name: "Maximum concurrent subagents" }))
+            .toHaveValue(null);
           await page.getByRole("button", { name: "Reset", exact: true }).click();
           await vi.waitFor(() =>
             expect(
               useComposerDraftStore.getState().getComposerDraft(draftId)?.subagentLimits,
             ).toEqual({}),
           );
+          (await waitForSendButton()).click();
+          // Reset clears only chat intent. The same live account default must
+          // still block an unsupported runtime without consuming this prompt.
+          await vi.waitFor(() =>
+            expect(document.body.textContent).toContain(
+              "This provider runtime does not support the account subagent limit.",
+            ),
+          );
+          expect(wsRequests.some((body) => body.type === "thread.turn.start")).toBe(false);
+          expect(useComposerDraftStore.getState().getComposerDraft(draftId)?.prompt).toBe(prompt);
+          fixture.serverConfig = {
+            ...fixture.serverConfig,
+            settings: {
+              ...fixture.serverConfig.settings,
+              providerInstances: {
+                ...fixture.serverConfig.settings.providerInstances,
+                [ProviderInstanceId.make("codex")]: {
+                  driver: ProviderDriverKind.make("codex"),
+                  defaultModel: "gpt-5",
+                },
+              },
+            },
+          };
+          applySettingsUpdated(fixture.serverConfig.settings);
           (await waitForSendButton()).click();
           await vi.waitFor(() =>
             expect(wsRequests.find((body) => body.type === "thread.turn.start")).toMatchObject({
@@ -7878,9 +9273,11 @@ describe(`ChatView full app (${chatViewBrowserPart})`, () => {
         expect(useComposerDraftStore.getState().getDraftSession(draftId)?.projectId).toBeNull();
         expect(useComposerDraftStore.getState().getComposerDraft(draftId)).toMatchObject({
           activeProvider: account,
-          subagentLimits: { codex: 6 },
           modelSelectionByProvider: { [account]: { instanceId: account, model: "gpt-5" } },
         });
+        expect(
+          useComposerDraftStore.getState().getComposerDraft(draftId)?.subagentLimits,
+        ).toBeUndefined();
         expect(
           useComposerDraftStore.getState().logicalProjectDraftThreadKeyByLogicalProjectKey,
         ).toEqual({});
@@ -7938,6 +9335,19 @@ describe(`ChatView full app (${chatViewBrowserPart})`, () => {
         ]);
         await waitForStandaloneComposerText("First standalone conversation");
         await page.getByRole("button", { name: "Desk", exact: true }).click();
+        await page
+          .getByLabelText("Desk open chats", { exact: true })
+          .getByRole("button", { name: "New chat in active tab group", exact: true })
+          .click();
+        await waitForLayout();
+        expect(mounted.router.state.location.pathname).toBe(`/draft/${draftId}`);
+        expect(Object.keys(useComposerDraftStore.getState().draftThreadsByThreadKey)).toEqual([
+          draftId,
+        ]);
+        await waitForStandaloneComposerText("First standalone conversation");
+        expect(useComposerDraftStore.getState().getComposerDraft(draftId)?.subagentLimits).toEqual({
+          codex: 5,
+        });
         newChatShortcut();
         await waitForLayout();
         expect(mounted.router.state.location.pathname).toBe(`/draft/${draftId}`);
@@ -8050,7 +9460,12 @@ describe(`ChatView full app (${chatViewBrowserPart})`, () => {
         desk.dispatch({ type: "sidebarMode", mode: "desk" });
         const capturedGroup = useDeskStore.getState().desk.activeGroupId;
         await waitForLayout();
-        newChatShortcut();
+        // The heading action must capture the same exact active-group owner as
+        // the shortcut, not the saved chat currently visible in another pane.
+        await page
+          .getByLabelText("Desk open chats", { exact: true })
+          .getByRole("button", { name: "New chat in active tab group", exact: true })
+          .click();
         await vi.waitFor(() =>
           expect(mounted.router.state.location.pathname).toMatch(UUID_ROUTE_RE),
         );

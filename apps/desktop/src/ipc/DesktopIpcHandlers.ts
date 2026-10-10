@@ -36,6 +36,7 @@ import { checkSourceUpdate, getSourceUpdateState } from "./methods/sourceUpdates
 import { setPowerSaveBlockerState } from "./methods/powerSaveBlocker.ts";
 import { prepareRemoteCertificate } from "./methods/remoteCertificates.ts";
 import { getDebugEndpointState, publishDebugSnapshot } from "./methods/debug.ts";
+import { copyPng, savePng } from "./methods/imageExport.ts";
 import {
   copyText,
   confirm,
@@ -89,6 +90,8 @@ export const installDesktopIpcHandlers = Effect.gen(function* () {
   yield* ipc.handle(openPath);
   yield* ipc.handle(revealPath);
   yield* ipc.handle(copyText);
+  yield* ipc.handle(copyPng);
+  yield* ipc.handle(savePng);
 
   yield* ipc.handle(getUpdateState);
   yield* ipc.handle(setUpdateChannel);

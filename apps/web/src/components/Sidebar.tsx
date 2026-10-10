@@ -3463,6 +3463,7 @@ export const SidebarChromeHeader = memo(function SidebarChromeHeader({
 
   return isElectron ? (
     <SidebarHeader
+      data-mac-titlebar={isMacDesktop}
       className={cn(
         persistentHeaderClassName,
         "drag-region h-[max(var(--app-titlebar-height),2.75rem)] flex-row items-center gap-2 px-4 py-0 pl-[90px] wco:h-[max(var(--app-titlebar-height),2.75rem,env(titlebar-area-height,40px))] wco:pl-[calc(env(titlebar-area-x)+1em)]",
@@ -4676,7 +4677,13 @@ export default function Sidebar() {
                   onExpansionChange={setStandaloneCatalogExpanded}
                 />
               }
-              deskContent={<DeskSidebar onNavigate={navigateToDeskTarget} />}
+              deskContent={
+                <DeskSidebar
+                  onNavigate={navigateToDeskTarget}
+                  onNewChat={createStandaloneChat}
+                  newChatDisabled={!primaryEnvironmentBootstrapped}
+                />
+              }
               primaryEnvironmentBootstrapped={primaryEnvironmentBootstrapped}
               bootstrappedEnvironmentIds={bootstrappedEnvironmentIdSet}
               showArm64IntelBuildWarning={showArm64IntelBuildWarning}

@@ -3,7 +3,12 @@ import type {
   VcsStatusRemoteResult,
   VcsStatusStreamEvent,
 } from "@cafecode/contracts";
-import { ORCHESTRATION_WS_METHODS, ThreadId, WS_METHODS } from "@cafecode/contracts";
+import {
+  ORCHESTRATION_WS_METHODS,
+  ProviderInstanceId,
+  ThreadId,
+  WS_METHODS,
+} from "@cafecode/contracts";
 import * as Effect from "effect/Effect";
 import * as Stream from "effect/Stream";
 import { describe, expect, it, vi } from "vitest";
@@ -39,6 +44,43 @@ const baseRemoteStatus: VcsStatusRemoteResult = {
 };
 
 describe("wsRpcClient", () => {
+  it("routes passive quota subscriptions with the exact binding and content-free method tag", () => {
+    const input = {
+      instanceId: ProviderInstanceId.make("claude-personal"),
+      session: {
+        threadId: ThreadId.make("quota-chat"),
+        runtimeId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      },
+    };
+    const quota = vi.fn(() => Stream.make({ report: null }));
+    const protocol = {
+      [WS_METHODS.serverSubscribeProviderQuota]: quota,
+    } as unknown as WsRpcProtocolClient;
+    const stop = vi.fn();
+    const subscribe = vi.fn((execute: (client: WsRpcProtocolClient) => unknown) => {
+      execute(protocol);
+      return stop;
+    });
+    const transport = {
+      dispose: vi.fn(async () => undefined),
+      reconnect: vi.fn(async () => undefined),
+      request: vi.fn(),
+      requestStream: vi.fn(),
+      subscribe: subscribe as unknown as WsTransport["subscribe"],
+    };
+    const listener = vi.fn();
+    const client = createWsRpcClient(transport as unknown as WsTransport);
+    expect(client.server.subscribeProviderQuota(input, listener)).toBe(stop);
+    expect(quota).toHaveBeenCalledWith(input);
+    expect(subscribe).toHaveBeenCalledWith(expect.any(Function), listener, {
+      tag: WS_METHODS.serverSubscribeProviderQuota,
+    });
+    client.server.subscribeProviderQuota({ instanceId: input.instanceId }, listener);
+    expect(quota).toHaveBeenLastCalledWith({ instanceId: input.instanceId });
+    expect(transport.request).not.toHaveBeenCalled();
+    expect(transport.requestStream).not.toHaveBeenCalled();
+  });
+
   it("opts nullable-aware clients into every chat catalog and detail read", async () => {
     const emptyCatalog = {
       snapshotSequence: 0,

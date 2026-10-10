@@ -1,8 +1,37 @@
 # Usage statistics
 
-Last updated: 2026-10-04 12:21:42 JST (UTC+0900)
+Last updated: 2026-10-09 08:52:36 JST (UTC+0900)
 
 Settings → Usage has one date-range selector for its reporting statistics. The default is 30 days. Selecting 7 days, 30 days, 90 days or All updates generated tokens, chats sent, generating time, estimated USD cost, provider/model breakdowns, token composition, cache savings, cost quality and usage charts together. Activity always shows all recorded daily history, independently of this selector. Cost/Tokens changes the graph's measurement without changing the selected period. The shared detailed cost view in Atrium uses the same range semantics; Atrium's ambient lifetime counters remain lifetime counters.
+
+## Claude plan quotas
+
+Settings → Providers and the current chat's session rail/context popover can show
+the full bounded structured quota report received from a user-requested native
+Claude `/usage`. All reported five-hour, weekly, model-specific, surface-specific
+and unknown meter rows remain in source order; no model names or missing limits
+are invented. These are session-reported observations, not independently verified
+current account allowances. Sparse reset-only events cannot fill in missing
+report percentages. The source-bound Claude view does not fall back to anonymous
+cached events when its report is unavailable, loading or disconnected.
+
+The presenter shows percentage remaining, reset time and receipt time in the
+viewer computer's locale/timezone, including the zone label. An old observation
+or passed reset is marked stale, not refilled to 100%. Extra usage stays separate:
+disabled/absent values are explicit, known currency uses reported minor units,
+and missing currency is not guessed to be USD. Quotas do not change context-window
+tokens or the recorded API-equivalent cost estimates below.
+
+There is no automatic `/usage` or independent Refresh. If unavailable, request
+`/usage` through the existing native command path when the configured runtime
+supports it. Configured instance/selection, chat, runtime and environment changes and disconnection clear the
+old scope. Settings selects only that configured instance's eligible current
+sessions; the chat surfaces remain exact-chat bound. This does not detect otherwise
+unreported changes to the provider's authenticated principal. Reports are volatile
+and lost when their execution owner/runtime restarts, not restored by scanning
+saved transcripts. A presentation-backend reconnect can reread a surviving owner
+inventory after revalidating its saved source authority.
+See the [quota report decision](decisions/claude-account-quota-report.md).
 
 ## Calendar and data boundaries
 
@@ -102,7 +131,7 @@ Long activity histories retain their complete scrollable extent while rendering 
 
 Money is an API-equivalent USD estimate using the shared pricing table or explicit user overrides, not a subscription invoice. Long-context and speed-tier adjustments cannot be reconstructed from aggregate counters and remain excluded. Unknown model rates and missing model attribution remain unpriced; the priced/unpriced percentages include the recorded unattributed gap. The cost table shows unattributed usage as its own unpriced row.
 
-Each surface labels the currency once (for example "Cost (USD)") and keeps the `$` on individual figures. Token totals display in compact `K`/`M`/`B` notation; hovering or focusing a total shows the exact comma-separated count. The long-context/speed-tier exclusion sits in an info tooltip beside the estimate, while "Estimates from recorded usage; may be incomplete." stays visible.
+Each surface labels the currency once (for example "Cost (USD)") and keeps the `$` on individual figures. Token totals show the full comma-separated count on top and a smaller `K`/`M`/`B` abbreviation below. Both lines use the same animated value; the abbreviation is hidden only from screen readers to avoid repeating the total. Provider totals and the range total use the same shared ticker as composition and model figures. The long-context/speed-tier exclusion sits in an info tooltip beside the estimate, while "Estimates from recorded usage; may be incomplete." stays visible.
 
 “Model not reported” means the provider is known but the effective serving model is absent from the recorded observation. One-shot Codex `exec --json` helpers report terminal token counts without authoritative model attribution; requested model settings and generic reroute text cannot reliably assign aggregate usage. Older ordinary records can also lack a model. The cost table explains this category on hover. Its tokens stay counted and unpriced by default, unless the user explicitly supplies a custom rate for that category; the UI never hides them or relabels historical usage with a guessed model. The [pinned Codex exec event definitions](https://github.com/openai/codex/blob/ff6aec96948b70d94983af2641a6b67c94faeff5/codex-rs/exec/src/exec_events.rs#L36-L68) and [terminal/reroute mapping](https://github.com/openai/codex/blob/ff6aec96948b70d94983af2641a6b67c94faeff5/codex-rs/exec/src/event_processor_with_jsonl_output.rs#L473-L514) document this attribution limitation.
 

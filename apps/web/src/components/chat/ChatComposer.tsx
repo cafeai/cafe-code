@@ -1,5 +1,6 @@
 import { providerSkillsScopeRevision, useProviderSkills } from "./useProviderSkills";
 import { useProviderCommands } from "./useProviderCommands";
+import type { ProviderQuotaContext } from "./useProviderQuota";
 import { useWsConnectionStatus } from "../../rpc/wsConnectionState";
 import { usePrimaryEnvironmentId } from "../../environments/primary";
 import { useSavedEnvironmentRuntimeStore } from "../../environments/runtime";
@@ -99,7 +100,7 @@ import { getComposerProviderState, renderProviderTraitsMenuContent } from "./com
 import { ContextWindowMeter } from "./ContextWindowMeter";
 import { SubagentConcurrencyControl } from "./SubagentConcurrencyControl";
 import {
-  configuredInstanceSubagentLimit,
+  inheritedInstanceSubagentPolicy,
   deriveSubagentConcurrencyPresentation,
   subagentLimitKey,
   subagentLimitsEqual,
@@ -133,6 +134,7 @@ import { getProviderInteractionModeToggle } from "../../providerModels";
 import {
   deriveProviderInstanceEntries,
   resolveProviderDriverKindForInstanceSelection,
+  resolveComposerProviderInstance,
   sortProviderInstanceEntries,
   type ProviderInstanceEntry,
 } from "../../providerInstances";
@@ -234,6 +236,7 @@ const ComposerFooterPrimaryActions = memo(function ComposerFooterPrimaryActions(
   compact: boolean;
   activeContextWindow: ReturnType<typeof deriveLatestContextWindowSnapshot>;
   codexRateLimits: ServerProvider["accountRateLimits"] | null;
+  quotaContext?: ProviderQuotaContext | undefined;
   usageResetAction: ReactNode;
   subagentConcurrency?: SubagentConcurrencyPresentation | null;
   sessionRailVisible: boolean;
@@ -269,6 +272,7 @@ const ComposerFooterPrimaryActions = memo(function ComposerFooterPrimaryActions(
         <ContextWindowMeter
           usage={props.activeContextWindow}
           codexRateLimits={props.codexRateLimits}
+          quotaContext={props.quotaContext}
           subagentConcurrency={props.subagentConcurrency}
           {...(props.onShowSessionRail ? { onShowOnSide: props.onShowSessionRail } : {})}
         />
@@ -1061,49 +1065,17 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
   //   6. First enabled entry overall / default instance for the kind.
   //
   const selectedInstanceId = useMemo<ProviderInstanceId>(() => {
-    const candidates: Array<string | null | undefined> = [
-      composerDraft.activeProvider,
-      activeThread?.session?.providerInstanceId,
-      activeThreadModelSelection?.instanceId,
-      settings.defaultProviderInstanceId,
-      activeProjectDefaultModelSelection?.instanceId,
-    ];
-    for (const candidate of candidates) {
-      if (!candidate) continue;
-      const match = providerInstanceEntries.find(
-        (entry) => entry.instanceId === candidate && entry.enabled,
-      );
-      if (match) {
-        // When locked to a specific driver kind, ignore persisted instance
-        // ids from a different kind or continuation group.
-        if (lockedProvider && match.driverKind !== lockedProvider) continue;
-        if (
-          lockedContinuationGroupKey &&
-          match.continuationGroupKey !== lockedContinuationGroupKey
-        ) {
-          continue;
-        }
-        return match.instanceId;
-      }
-    }
-    if (explicitSelectedInstanceId) {
-      return ProviderInstanceId.make(explicitSelectedInstanceId);
-    }
-    const byKind = providerInstanceEntries.find(
-      (entry) =>
-        entry.enabled &&
-        entry.driverKind === selectedProvider &&
-        (!lockedContinuationGroupKey || entry.continuationGroupKey === lockedContinuationGroupKey),
-    );
-    if (byKind) return byKind.instanceId;
-    const anyEnabled = providerInstanceEntries.find((entry) => entry.enabled);
-    return (
-      anyEnabled?.instanceId ??
-      providerInstanceEntries[0]?.instanceId ??
-      activeThreadModelSelection?.instanceId ??
-      activeProjectDefaultModelSelection?.instanceId ??
-      ProviderInstanceId.make("codex")
-    );
+    return resolveComposerProviderInstance({
+      entries: providerInstanceEntries,
+      activeProvider: composerDraft.activeProvider,
+      sessionInstanceId: activeThread?.session?.providerInstanceId,
+      threadInstanceId: activeThreadModelSelection?.instanceId,
+      defaultInstanceId: settings.defaultProviderInstanceId,
+      projectInstanceId: activeProjectDefaultModelSelection?.instanceId,
+      selectedProvider,
+      lockedProvider,
+      lockedContinuationGroupKey,
+    });
   }, [
     activeProjectDefaultModelSelection?.instanceId,
     activeThread?.session?.providerInstanceId,
@@ -1307,13 +1279,20 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
   const concurrencySupported =
     selectedProviderStatus?.runtimeCapabilities?.subagentConcurrency === true;
   const configuredLimit =
-    activeThread?.session?.providerInstanceId === selectedInstanceId
+    activeThread?.session?.providerInstanceId === selectedInstanceId &&
+    activeThread.session.provider === selectedProvider
       ? activeThread.session.maxConcurrentSubagents
       : undefined;
+  const inheritedSubagentPolicy = inheritedInstanceSubagentPolicy(
+    settings,
+    selectedInstanceId,
+    selectedProvider,
+  );
   const concurrencyPresentation = deriveSubagentConcurrencyPresentation({
     provider: selectedProvider,
     limits: desiredSubagentLimits,
-    inheritedLimit: configuredInstanceSubagentLimit(settings, selectedInstanceId),
+    inheritedLimit: inheritedSubagentPolicy.limit,
+    inheritedSource: inheritedSubagentPolicy.source,
     configuredLimit,
   });
   const concurrencySaveScope = useRef<{
@@ -1443,7 +1422,11 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
   const concurrencyMenuItem = concurrencyKey ? (
     <MenuItem
       inset
-      disabled={!concurrencySupported && desiredSubagentLimits?.[concurrencyKey] === undefined}
+      disabled={
+        !concurrencySupported &&
+        desiredSubagentLimits?.[concurrencyKey] === undefined &&
+        inheritedSubagentPolicy.limit === undefined
+      }
       title={
         !concurrencySupported
           ? "This provider runtime cannot apply a numeric subagent limit. An existing chat override can still be reset."
@@ -1790,6 +1773,20 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     commandsScopeRevision,
     commandsConnected,
   );
+  const quotaContext: ProviderQuotaContext | undefined =
+    selectedProvider === "claudeAgent"
+      ? {
+          environmentId,
+          input: commandsInput
+            ? {
+                instanceId: commandsInput.instanceId,
+                session: { threadId: commandsInput.threadId, runtimeId: commandsInput.runtimeId },
+              }
+            : null,
+          scopeRevision: commandsScopeRevision,
+          connected: commandsConnected,
+        }
+      : undefined;
   const selectedProviderCommands =
     selectedProvider === "claudeAgent"
       ? discoveredCommands.commands
@@ -4026,6 +4023,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                   compact={isComposerPrimaryActionsCompact}
                   activeContextWindow={activeContextWindow}
                   codexRateLimits={selectedCodexRateLimits}
+                  quotaContext={quotaContext}
                   usageResetAction={
                     <ProviderUsageResetButton
                       key={`${environmentId}:${selectedProviderStatus?.instanceId ?? ""}`}

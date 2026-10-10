@@ -261,7 +261,7 @@ describe("ProviderInstanceRegistryLive — non-runtime settings", () => {
           { defaultModel: "gpt-6-astra" },
           { defaultModelOptions: [{ id: "reasoningEffort", value: "max" }] },
           { defaultModelOptions: [{ id: "reasoningEffort", value: "ultra" }] },
-          // This default seeds only new-chat intent. Editing or clearing it
+          // This default is inherited at a safe turn boundary. Saving or clearing it
           // must not retire a running provider or duplicate its subscription.
           { defaultMaxConcurrentSubagents: 4 },
           { defaultMaxConcurrentSubagents: 64 },

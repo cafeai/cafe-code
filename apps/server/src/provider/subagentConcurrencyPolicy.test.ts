@@ -24,12 +24,13 @@ const session = (overrides: Partial<ProviderSession> = {}): ProviderSession => (
 });
 
 describe("subagent concurrency execution policy", () => {
-  it("selects only the native driver key and prefers chat overrides to legacy instance config", () => {
+  it("selects only the native driver key and prefers chat overrides to account and legacy defaults", () => {
     const limits = { codex: 2, claude: 8 };
     expect(
       resolveSubagentConcurrencyPolicy({
         driver: "codex",
         limits,
+        instanceDefaultMaxConcurrentSubagents: 15,
         instanceConfig: { maxConcurrentSubagents: 6 },
       }),
     ).toEqual({ requested: 2, configured: 2 });
@@ -41,9 +42,61 @@ describe("subagent concurrency execution policy", () => {
       resolveSubagentConcurrencyPolicy({
         driver: "grok",
         limits,
+        instanceDefaultMaxConcurrentSubagents: 15,
         instanceConfig: { maxConcurrentSubagents: 6 },
       }),
     ).toEqual({ requested: undefined, configured: null });
+  });
+
+  it.each(["codex", "claudeAgent"])(
+    "treats the %s account default as explicit numeric intent ahead of legacy configuration",
+    (driver) => {
+      expect(
+        resolveSubagentConcurrencyPolicy({
+          driver,
+          limits: {},
+          instanceDefaultMaxConcurrentSubagents: 15,
+          instanceConfig: { maxConcurrentSubagents: 4 },
+        }),
+      ).toEqual({ requested: 15, configured: 15 });
+      // Explicit account intent reconciles an old unknown process policy;
+      // inherited native policy alone must still preserve that old context.
+      expect(
+        hasSubagentConcurrencyChange(
+          session(),
+          resolveSubagentConcurrencyPolicy({
+            driver,
+            instanceDefaultMaxConcurrentSubagents: 15,
+          }),
+        ),
+      ).toBe(true);
+    },
+  );
+
+  it("clearing the account default reveals legacy or native inheritance without restoring old intent", () => {
+    expect(
+      resolveSubagentConcurrencyPolicy({
+        driver: "codex",
+        limits: {},
+        instanceConfig: { maxConcurrentSubagents: 4 },
+      }),
+    ).toEqual({ requested: undefined, configured: 4 });
+    expect(resolveSubagentConcurrencyPolicy({ driver: "codex", limits: {} })).toEqual({
+      requested: undefined,
+      configured: null,
+    });
+  });
+
+  it("rejects malformed account defaults as numeric authority while preserving validated legacy fallback", () => {
+    for (const value of [0, 65, 1.5, "15", null, NaN, Infinity, {}, []]) {
+      expect(
+        resolveSubagentConcurrencyPolicy({
+          driver: "codex",
+          instanceDefaultMaxConcurrentSubagents: value,
+          instanceConfig: { maxConcurrentSubagents: 4 },
+        }),
+      ).toEqual({ requested: undefined, configured: 4 });
+    }
   });
 
   it("reset falls back to validated legacy configuration, never to a model-derived guess", () => {

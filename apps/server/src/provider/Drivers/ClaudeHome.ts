@@ -1,6 +1,10 @@
 import * as NodeOS from "node:os";
 
-import { CLAUDE_MAX_CONCURRENT_SUBAGENTS, type ClaudeSettings } from "@cafecode/contracts";
+import {
+  CLAUDE_MAX_CONCURRENT_SUBAGENTS,
+  CLAUDE_MAX_OUTPUT_TOKENS,
+  type ClaudeSettings,
+} from "@cafecode/contracts";
 import * as Effect from "effect/Effect";
 import * as Path from "effect/Path";
 
@@ -15,7 +19,7 @@ export const resolveClaudeHomePath = Effect.fn("resolveClaudeHomePath")(function
 });
 
 export const makeClaudeEnvironment = Effect.fn("makeClaudeEnvironment")(function* (
-  config: Pick<ClaudeSettings, "homePath" | "maxConcurrentSubagents">,
+  config: Pick<ClaudeSettings, "homePath" | "maxConcurrentSubagents" | "maxOutputTokens">,
   baseEnv: NodeJS.ProcessEnv = process.env,
   platform: NodeJS.Platform = process.platform,
 ): Effect.fn.Return<NodeJS.ProcessEnv, never, Path.Path> {
@@ -23,6 +27,7 @@ export const makeClaudeEnvironment = Effect.fn("makeClaudeEnvironment")(function
   const resolvedHomePath = yield* resolveClaudeHomePath(config);
   const configuredConfigDir = baseEnv.CLAUDE_CONFIG_DIR?.trim();
   const maxConcurrentSubagents = config.maxConcurrentSubagents;
+  const maxOutputTokens = config.maxOutputTokens;
 
   // Revalidate at the process boundary as well as in the persisted schema:
   // internal callers and restored settings must not serialize malformed values
@@ -39,6 +44,22 @@ export const makeClaudeEnvironment = Effect.fn("makeClaudeEnvironment")(function
     return yield* Effect.die(
       new Error(
         `Claude maxConcurrentSubagents must be an integer between 1 and ${CLAUDE_MAX_CONCURRENT_SUBAGENTS}.`,
+      ),
+    );
+  }
+
+  // Keep the public response-budget override a fixed key plus plain digits.
+  // The CLI still owns each model's ceiling; this launch check only enforces
+  // Cafe's admitted explicit preference and never inspects inherited values.
+  if (
+    maxOutputTokens !== undefined &&
+    (!Number.isInteger(maxOutputTokens) ||
+      maxOutputTokens < 1 ||
+      maxOutputTokens > CLAUDE_MAX_OUTPUT_TOKENS)
+  ) {
+    return yield* Effect.die(
+      new Error(
+        `Claude maxOutputTokens must be an integer between 1 and ${CLAUDE_MAX_OUTPUT_TOKENS}.`,
       ),
     );
   }
@@ -60,6 +81,9 @@ export const makeClaudeEnvironment = Effect.fn("makeClaudeEnvironment")(function
     ...(maxConcurrentSubagents !== undefined
       ? { CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS: String(maxConcurrentSubagents) }
       : {}),
+    ...(maxOutputTokens !== undefined
+      ? { CLAUDE_CODE_MAX_OUTPUT_TOKENS: String(maxOutputTokens) }
+      : {}),
   };
   if (configuredConfigDir) {
     env.CLAUDE_CONFIG_DIR = path.resolve(configuredConfigDir);
@@ -69,6 +93,29 @@ export const makeClaudeEnvironment = Effect.fn("makeClaudeEnvironment")(function
     env.CLAUDE_CONFIG_DIR = path.join(resolvedHomePath, ".claude");
   }
   return env;
+});
+
+/**
+ * Login, metadata and read-only SDK operations share the selected account but
+ * do not acquire its user-chat response budget. Centralize this field selection
+ * so a full settings object passed by a driver cannot accidentally enlarge
+ * unrelated provider requests. Inherited output policy remains untouched.
+ */
+export const makeClaudeNonChatEnvironment = Effect.fn("makeClaudeNonChatEnvironment")(function* (
+  config: Pick<ClaudeSettings, "homePath" | "maxConcurrentSubagents">,
+  baseEnv: NodeJS.ProcessEnv = process.env,
+  platform: NodeJS.Platform = process.platform,
+): Effect.fn.Return<NodeJS.ProcessEnv, never, Path.Path> {
+  return yield* makeClaudeEnvironment(
+    {
+      homePath: config.homePath,
+      ...(config.maxConcurrentSubagents !== undefined
+        ? { maxConcurrentSubagents: config.maxConcurrentSubagents }
+        : {}),
+    },
+    baseEnv,
+    platform,
+  );
 });
 
 export const makeClaudeContinuationGroupKey = Effect.fn("makeClaudeContinuationGroupKey")(

@@ -5,6 +5,7 @@ import * as Schema from "effect/Schema";
 
 import {
   ProviderDaemonBootstrap,
+  ProviderDaemonAdapterCapabilities,
   ProviderDaemonLiveness,
   ProviderDaemonMarker,
   ProviderDaemonSubagentDetail,
@@ -14,6 +15,45 @@ import {
 
 const OWNERSHIP_ID = "9a90b48d-868f-4614-ae9c-66d50293d52b";
 const decodeDaemonLiveness = Schema.decodeUnknownSync(ProviderDaemonLiveness);
+
+it("preserves explicit subagent concurrency support across daemon capability encode/decode", () => {
+  const decode = Schema.decodeUnknownSync(ProviderDaemonAdapterCapabilities);
+  const encode = Schema.encodeSync(ProviderDaemonAdapterCapabilities);
+  const capabilities = {
+    sessionModelSwitch: "restart-resume",
+    liveSteer: "unsupported",
+    manualCompaction: "supported",
+    threadGoals: "unsupported",
+    sessionFork: "supported",
+  } as const;
+  for (const subagentConcurrency of [true, false]) {
+    const value = { ...capabilities, subagentConcurrency };
+    assert.deepEqual(decode(value), value);
+    assert.deepEqual(decode(encode(value)), value);
+  }
+  // Older daemons omit optional capabilities. Preserve that absence: a missing
+  // field is not evidence that native concurrency controls are supported.
+  assert.deepEqual(decode(capabilities), capabilities);
+  assert.deepEqual(encode(capabilities), capabilities);
+  assert.equal(decode(capabilities).subagentConcurrency, undefined);
+});
+
+it("rejects malformed concurrency support without relaxing other required daemon capabilities", () => {
+  const decode = Schema.decodeUnknownSync(ProviderDaemonAdapterCapabilities);
+  const capabilities = { sessionModelSwitch: "in-session", liveSteer: "supported" };
+  for (const subagentConcurrency of [null, "true", "false", 0, 1, {}, [], () => true]) {
+    assert.throws(() => decode({ ...capabilities, subagentConcurrency }));
+  }
+  for (const invalid of [
+    { subagentConcurrency: true },
+    { sessionModelSwitch: "in-session", subagentConcurrency: true },
+    { liveSteer: "supported", subagentConcurrency: true },
+    { ...capabilities, sessionModelSwitch: "unknown", subagentConcurrency: true },
+    { ...capabilities, liveSteer: true, subagentConcurrency: true },
+  ]) {
+    assert.throws(() => decode(invalid));
+  }
+});
 
 it("requires exact rewind identities, checkpoint boundaries and outcome values across daemon RPC", () => {
   const decode = Schema.decodeUnknownSync(ProviderDaemonRpcRequest);

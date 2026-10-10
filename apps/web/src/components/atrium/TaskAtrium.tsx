@@ -1,7 +1,5 @@
 import {
   memo,
-  lazy,
-  Suspense,
   useCallback,
   useEffect,
   useId,
@@ -34,6 +32,7 @@ import {
 } from "../Sidebar.logic";
 import { PROVIDER_ICON_BY_PROVIDER } from "../chat/providerIconUtils";
 import { SubagentAvatar } from "../subagents/SubagentAvatar";
+import { SubagentDetailView } from "../chat/SubagentDetailView";
 import { UsageCostContent } from "../settings/UsageCostSection";
 import { formatCompactTokenCount, formatFullTokenCount } from "../settings/usageStatsPresentation";
 import { useUsageCostSummary } from "../stats/useUsageCostSummary";
@@ -48,6 +47,7 @@ import {
   type AtriumCardState,
 } from "./taskAtriumData";
 import { useTaskAtriumStore } from "./taskAtriumStore";
+import { AtriumSubagentDetailBoundary } from "./AtriumSubagentDetailBoundary";
 import {
   paginateAtriumSubagents,
   partitionAtriumSubagents,
@@ -58,11 +58,10 @@ import { subagentToWorkLogEntry } from "../../session-logic";
 import { presentTurnConfiguration } from "../../turnConfiguration";
 import { Dialog as DialogPrimitive } from "@base-ui/react/dialog";
 
-// Reuse the bounded, authorization-checked transcript reader. The potentially
-// large Markdown/detail bundle is loaded only when a worker is selected.
-const AtriumSubagentDetail = lazy(() =>
-  import("../chat/SubagentDetailView").then((module) => ({ default: module.SubagentDetailView })),
-);
+// MessagesTimeline already includes this authorization-checked reader in the
+// renderer bundle. A dynamic import here only created a hashed re-export shim:
+// rebuilding assets under an open renderer could remove it before the first
+// worker click. Reuse the loaded implementation without another asset request.
 
 /**
  * Task Atrium — a read-only view of everything running, staged as a scene.
@@ -1374,14 +1373,18 @@ export function TaskAtriumBoard() {
             )}
           >
             {selectedCard && selectedSubagent ? (
-              <Suspense
-                fallback={
-                  <div className="p-6 text-sm text-muted-foreground">
-                    Loading subagent activity…
-                  </div>
-                }
+              <AtriumSubagentDetailBoundary
+                key={JSON.stringify([
+                  selectedCard.key,
+                  selectedSubagent.rowKey,
+                  selectedSubagent.activity.turnId ?? null,
+                  selectedSubagent.activity.id,
+                  selectedSubagent.activity.historyId ?? null,
+                ])}
+                backButtonRef={detailBackRef}
+                onBack={closeSubagent}
               >
-                <AtriumSubagentDetail
+                <SubagentDetailView
                   key={`${selectedCard.key}:${selectedSubagent.rowKey}`}
                   selection={{
                     environmentId: selectedCard.environmentId,
@@ -1399,7 +1402,7 @@ export function TaskAtriumBoard() {
                   backButtonRef={detailBackRef}
                   onBack={closeSubagent}
                 />
-              </Suspense>
+              </AtriumSubagentDetailBoundary>
             ) : null}
           </DialogPrimitive.Popup>
         </DialogPrimitive.Portal>

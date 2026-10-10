@@ -4,6 +4,7 @@ import {
   type OrchestrationEvent,
   type ThreadForkMessageCutoff,
   type MessageId,
+  RuntimeSubagentPresentation,
   ThreadId,
   type TurnId,
 } from "@cafecode/contracts";
@@ -12,6 +13,7 @@ import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Path from "effect/Path";
+import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
 import { materializedSubagentLimitFields } from "../sessionSubagentLimits.ts";
@@ -91,6 +93,8 @@ interface AttachmentSideEffects {
   readonly deletedThreadIds: Set<string>;
   readonly prunedThreadRelativePaths: Map<string, Set<string>>;
 }
+
+const isRuntimeSubagentPresentation = Schema.is(RuntimeSubagentPresentation);
 
 const materializeAttachmentsForProjection = Effect.fn("materializeAttachmentsForProjection")(
   (input: { readonly attachments: ReadonlyArray<ChatAttachment> }) =>
@@ -1290,7 +1294,8 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
                   turnId: existingRow.value.latestTurnId,
                 });
           const latestTurnId =
-            activeTurnId !== null &&
+            event.payload.codexFailedRoot?.turnId ??
+            (activeTurnId !== null &&
             shouldPromoteLatestTurnFromSessionSet({
               currentLatestTurn,
               candidateActiveTurn,
@@ -1298,7 +1303,7 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
               sessionUpdatedAt: event.payload.session.updatedAt,
             })
               ? activeTurnId
-              : existingRow.value.latestTurnId;
+              : existingRow.value.latestTurnId);
           yield* projectionThreadRepository.upsert({
             ...existingRow.value,
             latestTurnId,
@@ -1538,6 +1543,14 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
         }
 
         case "thread.session-set": {
+          if (event.payload.codexFailedRoot !== undefined) {
+            yield* closeStreamingMessagesForTerminalTurn({
+              threadId: event.payload.threadId,
+              turnId: event.payload.codexFailedRoot.turnId,
+              updatedAt: event.payload.codexFailedRoot.completedAt,
+            });
+            return;
+          }
           if (
             event.payload.session.activeTurnId !== null ||
             (event.payload.session.status !== "ready" &&
@@ -1703,13 +1716,52 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
           if (
             event.payload.activity.turnId !== null &&
             event.payload.activity.kind !== "provider.turn.configuration" &&
-            event.payload.activity.kind !== "provider.context.bootstrap.accepted"
+            event.payload.activity.kind !== "provider.context.bootstrap.accepted" &&
+            // A delayed root diagnostic is not additional execution. Recovery
+            // bookkeeping likewise belongs to a new continuation, never to
+            // the already-failed root's frozen clock. Keep genuine late tool
+            // work's existing duration semantics; exclude only these exact
+            // server-authored operational markers and terminal diagnostics.
+            event.payload.activity.kind !== "runtime.error" &&
+            !(
+              event.commandId?.startsWith("server:") &&
+              event.payload.activity.kind === "runtime.warning" &&
+              event.payload.activity.payload !== null &&
+              typeof event.payload.activity.payload === "object" &&
+              "recovery" in event.payload.activity.payload &&
+              typeof event.payload.activity.payload.recovery === "string" &&
+              [
+                "codex-transient-recovery-waiting",
+                "codex-transient-continuation-attempted",
+                "codex-transient-continuation-accepted",
+                "codex-transient-recovery-cancelled",
+                "codex-transient-recovery-uncertain",
+              ].includes(event.payload.activity.payload.recovery)
+            )
           ) {
             const existingTurn = yield* projectionTurnRepository.getByTurnId({
               threadId: event.payload.threadId,
               turnId: event.payload.activity.turnId,
             });
             if (Option.isSome(existingTurn) && isTerminalTurnState(existingTurn.value.state)) {
+              // Children retain their own received activity timestamps. Their
+              // parent turnId groups history; it is not proof that a failed
+              // root resumed inference. Keep completed-root late-work handling
+              // unchanged, and reserve this exception for schema-valid child
+              // lifecycle events beneath an already failed root.
+              const payload = event.payload.activity.payload;
+              if (
+                existingTurn.value.state === "error" &&
+                ["task.started", "task.progress", "task.completed"].includes(
+                  event.payload.activity.kind,
+                ) &&
+                payload !== null &&
+                typeof payload === "object" &&
+                "subagent" in payload &&
+                isRuntimeSubagentPresentation(payload.subagent)
+              ) {
+                return;
+              }
               yield* projectionTurnRepository.upsertByTurnId(
                 extendCompletedTurnAt(existingTurn.value, event.payload.activity.createdAt),
               );
@@ -1818,6 +1870,14 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
       "applyThreadSessionsProjection",
     )(function* (event, _attachmentSideEffects) {
       if (event.type === "thread.turn-start-requested") {
+        if (event.payload.runtimeRecovery?.codexTransientFailure !== undefined) {
+          // This admitted intent is a backed-off continuation of an exact
+          // failed root in a still-live context, not evidence that native work
+          // started. Retain the error/ready timestamp used by its final CAS and
+          // keep surviving children visible until a concrete native start.
+          // Ordinary starts and verified owner-loss recovery are unchanged.
+          return;
+        }
         const existingSession = yield* projectionThreadSessionRepository.getByThreadId({
           threadId: event.payload.threadId,
         });
@@ -2158,6 +2218,42 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
         }
 
         case "thread.session-set": {
+          const failedRoot = event.payload.codexFailedRoot;
+          if (failedRoot !== undefined) {
+            // Serialized engine admission already bound this exact ACK to the
+            // saved request. Create a failed row directly: no observed start
+            // exists, and neither acceptance nor context readiness is running.
+            const existing = yield* projectionTurnRepository.getByTurnId({
+              threadId: event.payload.threadId,
+              turnId: failedRoot.turnId,
+            });
+            yield* projectionTurnRepository.upsertByTurnId({
+              threadId: event.payload.threadId,
+              turnId: failedRoot.turnId,
+              pendingMessageId: failedRoot.messageId,
+              sourceProposedPlanThreadId: null,
+              sourceProposedPlanId: null,
+              assistantMessageId: Option.isSome(existing)
+                ? existing.value.assistantMessageId
+                : null,
+              state: "error",
+              requestedAt: failedRoot.requestedAt,
+              startedAt: Option.isSome(existing) ? existing.value.startedAt : null,
+              completedAt: Option.isSome(existing)
+                ? (existing.value.completedAt ?? failedRoot.completedAt)
+                : failedRoot.completedAt,
+              checkpointTurnCount: Option.isSome(existing)
+                ? existing.value.checkpointTurnCount
+                : null,
+              checkpointRef: Option.isSome(existing) ? existing.value.checkpointRef : null,
+              checkpointStatus: Option.isSome(existing) ? existing.value.checkpointStatus : null,
+              checkpointFiles: Option.isSome(existing) ? existing.value.checkpointFiles : [],
+            });
+            yield* projectionTurnRepository.deletePendingTurnStartByThreadId({
+              threadId: event.payload.threadId,
+            });
+            return;
+          }
           const turnId = event.payload.session.activeTurnId;
           if (
             turnId === null &&

@@ -1,4 +1,11 @@
-import type { ThreadId, ThreadTurnRuntimeRecovery } from "@cafecode/contracts";
+import { createHash } from "node:crypto";
+import type {
+  ProviderInstanceId,
+  SubagentRuntimeId,
+  ThreadId,
+  ThreadTurnRuntimeRecovery,
+  TurnId,
+} from "@cafecode/contracts";
 import * as Effect from "effect/Effect";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
 
@@ -14,15 +21,150 @@ export interface RuntimeRecoveryBarrierInput extends ThreadTurnRuntimeRecovery {
   readonly recoveryIntentSequence?: number;
 }
 
-// The loss marker is recent in the normal path. Do not scan an arbitrarily old
-// transcript on node:sqlite's synchronous event loop: an old/busy suffix is
-// inconclusive and therefore denies unattended recovery. The stream-sequence
-// index makes this a bounded range read independent of other busy threads.
+// The legacy ownership-loss path retains its bounded transcript window. The
+// transient path instead uses the append-time intent/control indexes below;
+// no automatic recovery path may scan arbitrary old transcript JSON on the
+// synchronous SQLite event loop.
 const MAX_RECOVERY_SUFFIX_EVENTS = 256;
 // This separate, append-time ledger contains controls only, never streaming
 // deltas or synthetic recovery starts. It keeps the last explicit user intent
 // available through arbitrarily long turns and repeated automatic retries.
 const MAX_PRIOR_RECOVERY_CONTROLS = 64;
+
+export const buildCodexTransientFailureMarkerPayload = (input: {
+  readonly providerInstanceId: ProviderInstanceId;
+  readonly subagentRuntimeId: SubagentRuntimeId;
+  readonly sessionUpdatedAt: string;
+}) => ({ recovery: "codex-transient-root-failed", ...input });
+
+/** Saturate bookkeeping, not retries: there is deliberately no attempt limit. */
+export const saturateRuntimeRecoveryAttempt = (attempt: number) =>
+  Math.min(30, Math.max(0, Number.isSafeInteger(attempt) ? attempt : 30));
+
+/** Equal jitter never removes the wait and cannot exceed the 60-second cap. */
+export const codexTransientRecoveryDelayMs = (attempt: number, jitter: number) => {
+  const boundedJitter = Number.isFinite(jitter) ? Math.min(1, Math.max(0, jitter)) : 1;
+  const base = Math.min(60_000, 1_000 * 2 ** Math.min(saturateRuntimeRecoveryAttempt(attempt), 6));
+  return Math.ceil(base * (0.75 + 0.25 * boundedJitter));
+};
+
+// Only server receipts are authoritative. Hashing a turn makes the identity
+// fixed-size and keeps native identifiers out of public activity/command IDs.
+export const codexTransientAcceptanceCommandId = (threadId: ThreadId, turnId: TurnId) =>
+  `server:codex-transient-accepted:${createHash("sha256")
+    .update(JSON.stringify(["cafe-codex-transient-accepted-v1", threadId, turnId]))
+    .digest("hex")}`;
+
+export type CodexTransientRecoveryChain =
+  | {
+      readonly status: "fresh";
+      readonly chainSourceEventSequence: number;
+      readonly retryAttempt: 0;
+    }
+  | {
+      readonly status: "accepted";
+      readonly chainSourceEventSequence: number;
+      readonly retryAttempt: number;
+    }
+  | { readonly status: "pending" };
+
+/**
+ * A failed native turn is a new retry generation only after Cafe durably knows
+ * that the preceding generation was accepted. The append-time index outlives
+ * streamed messages and includes uncertain submissions even when turn.started
+ * was lost. Source events, the one-use owner claim and the exact ACK receipt
+ * are joined back together; projections and provider warnings confer no grant.
+ * Fresh human input supersedes an old chain through the existing control index.
+ */
+export const makeCodexTransientRecoveryChainReader = Effect.gen(function* () {
+  const sql = yield* SqlClient.SqlClient;
+  return (input: {
+    readonly threadId: ThreadId;
+    readonly turnId: TurnId;
+    readonly sourceEventSequence: number;
+    readonly providerInstanceId: ProviderInstanceId;
+    readonly subagentRuntimeId: SubagentRuntimeId;
+  }) =>
+    Effect.gen(function* () {
+      const intents = yield* sql<{
+        readonly sequence: number;
+        readonly chainSource: number;
+        readonly retryAttempt: number;
+        readonly instanceId: string;
+        readonly runtimeId: string;
+      }>`
+      WITH latest_control AS (
+        SELECT COALESCE(MAX(sequence), 0) AS sequence
+        FROM orchestration_runtime_recovery_controls
+          INDEXED BY idx_runtime_recovery_controls_thread_sequence
+        WHERE thread_id = ${input.threadId} AND sequence < ${input.sourceEventSequence}
+      ), latest_intent AS (
+        SELECT sequence FROM orchestration_codex_transient_recovery_intents
+          INDEXED BY idx_codex_transient_recovery_intents_thread_kind_sequence
+        WHERE thread_id = ${input.threadId}
+          AND source_kind = 'intent'
+          AND sequence > (SELECT sequence FROM latest_control)
+        ORDER BY sequence DESC LIMIT 1
+      )
+      SELECT event.sequence,
+        json_extract(event.payload_json, '$.runtimeRecovery.codexTransientFailure.chainSourceEventSequence') AS chainSource,
+        json_extract(event.payload_json, '$.runtimeRecovery.codexTransientFailure.retryAttempt') AS retryAttempt,
+        json_extract(event.payload_json, '$.runtimeRecovery.codexTransientFailure.providerInstanceId') AS instanceId,
+        json_extract(event.payload_json, '$.runtimeRecovery.codexTransientFailure.subagentRuntimeId') AS runtimeId
+      FROM latest_intent JOIN orchestration_events AS event ON event.sequence = latest_intent.sequence
+      WHERE event.aggregate_kind = 'thread' AND event.stream_id = ${input.threadId}
+        AND event.actor_kind = 'server' AND event.event_type = 'thread.turn-start-requested'
+        AND json_extract(event.payload_json, '$.threadId') = ${input.threadId}
+    `.pipe(Effect.mapError(toPersistenceSqlError("CodexTransientRecoveryChain.intent")));
+      const intent = intents[0];
+      if (intent === undefined)
+        return {
+          status: "fresh",
+          chainSourceEventSequence: input.sourceEventSequence,
+          retryAttempt: 0,
+        } as const;
+      if (
+        intent.instanceId !== input.providerInstanceId ||
+        intent.runtimeId !== input.subagentRuntimeId ||
+        !Number.isSafeInteger(intent.chainSource) ||
+        intent.chainSource <= 0 ||
+        intent.chainSource > intent.sequence ||
+        !Number.isSafeInteger(intent.retryAttempt) ||
+        intent.retryAttempt < 0 ||
+        intent.retryAttempt > 30
+      ) {
+        return { status: "pending" } as const;
+      }
+      const receipts = yield* sql<{ readonly accepted: number }>`
+      SELECT 1 AS accepted FROM orchestration_events AS receipt
+      JOIN orchestration_events AS attempt
+        ON attempt.command_id = ${`server:runtime-recovery-attempt:${intent.sequence}`}
+      WHERE receipt.command_id = ${codexTransientAcceptanceCommandId(input.threadId, input.turnId)}
+        AND receipt.aggregate_kind = 'thread' AND receipt.stream_id = ${input.threadId}
+        AND receipt.actor_kind = 'server' AND receipt.event_type = 'thread.activity-appended'
+        AND json_extract(receipt.payload_json, '$.activity.kind') = 'runtime.warning'
+        AND json_extract(receipt.payload_json, '$.activity.turnId') = ${input.turnId}
+        AND json_extract(receipt.payload_json, '$.activity.payload.recovery') = 'codex-transient-continuation-accepted'
+        AND json_extract(receipt.payload_json, '$.activity.payload.recoveryIntentSequence') = ${intent.sequence}
+        AND json_extract(receipt.payload_json, '$.activity.payload.providerInstanceId') = ${input.providerInstanceId}
+        AND json_extract(receipt.payload_json, '$.activity.payload.subagentRuntimeId') = ${input.subagentRuntimeId}
+        AND attempt.aggregate_kind = 'thread' AND attempt.stream_id = ${input.threadId}
+        AND attempt.actor_kind = 'server' AND attempt.event_type = 'thread.activity-appended'
+        AND json_extract(attempt.payload_json, '$.activity.payload.recovery') = 'codex-transient-continuation-attempted'
+        AND json_type(attempt.payload_json, '$.activity.payload.attemptOwnerId') = 'text'
+        AND json_extract(receipt.payload_json, '$.activity.payload.attemptOwnerId') =
+          json_extract(attempt.payload_json, '$.activity.payload.attemptOwnerId')
+      LIMIT 1
+    `.pipe(Effect.mapError(toPersistenceSqlError("CodexTransientRecoveryChain.receipt")));
+      return receipts[0]?.accepted === 1
+        ? ({
+            status: "accepted",
+            chainSourceEventSequence: intent.chainSource,
+            retryAttempt: saturateRuntimeRecoveryAttempt(intent.retryAttempt + 1),
+          } as const)
+        : ({ status: "pending" } as const);
+    });
+});
 
 /**
  * Build the shared admission/pre-provider-I/O guard. A projection alone cannot
@@ -43,10 +185,21 @@ export const makeRuntimeRecoveryBarrierReader = Effect.gen(function* () {
   return (input: RuntimeRecoveryBarrierInput) =>
     Effect.gen(function* () {
       const { sourceEventSequence, threadId, turnId, sessionUpdatedAt } = input;
+      const transient = input.codexTransientFailure;
+      const chainSourceSequence = transient?.chainSourceEventSequence ?? sourceEventSequence;
+      const markerKind =
+        transient === undefined ? "provider-runtime-ownership-lost" : "codex-transient-root-failed";
       const recoveryIntentSequence = input.recoveryIntentSequence ?? null;
       if (
         !Number.isSafeInteger(sourceEventSequence) ||
         sourceEventSequence <= 0 ||
+        !Number.isSafeInteger(chainSourceSequence) ||
+        chainSourceSequence <= 0 ||
+        chainSourceSequence > sourceEventSequence ||
+        (transient !== undefined &&
+          (!Number.isSafeInteger(transient.retryAttempt) ||
+            transient.retryAttempt < 0 ||
+            transient.retryAttempt > 30)) ||
         (recoveryIntentSequence !== null &&
           (!Number.isSafeInteger(recoveryIntentSequence) ||
             recoveryIntentSequence <= sourceEventSequence))
@@ -64,8 +217,12 @@ export const makeRuntimeRecoveryBarrierReader = Effect.gen(function* () {
             AND json_extract(payload_json, '$.threadId') = ${threadId}
             AND json_extract(payload_json, '$.activity.kind') = 'runtime.warning'
             AND json_extract(payload_json, '$.activity.turnId') = ${turnId}
-            AND json_extract(payload_json, '$.activity.payload.recovery') = 'provider-runtime-ownership-lost'
+            AND json_extract(payload_json, '$.activity.payload.recovery') = ${markerKind}
             AND json_extract(payload_json, '$.activity.payload.sessionUpdatedAt') = ${sessionUpdatedAt}
+            AND (${transient === undefined ? 1 : 0} = 1 OR (
+              json_extract(payload_json, '$.activity.payload.providerInstanceId') = ${transient?.providerInstanceId ?? null}
+              AND json_extract(payload_json, '$.activity.payload.subagentRuntimeId') = ${transient?.subagentRuntimeId ?? null}
+            ))
           LIMIT 1
         ), prior_control_candidates AS MATERIALIZED (
           SELECT sequence, thread_id, event_type, turn_id
@@ -129,6 +286,12 @@ export const makeRuntimeRecoveryBarrierReader = Effect.gen(function* () {
             AND json_extract(payload_json, '$.runtimeRecovery.sourceEventSequence') = ${sourceEventSequence}
             AND json_extract(payload_json, '$.runtimeRecovery.turnId') = ${turnId}
             AND json_extract(payload_json, '$.runtimeRecovery.sessionUpdatedAt') = ${sessionUpdatedAt}
+            AND (${transient === undefined ? 1 : 0} = 1 OR (
+              json_extract(payload_json, '$.runtimeRecovery.codexTransientFailure.providerInstanceId') = ${transient?.providerInstanceId ?? null}
+              AND json_extract(payload_json, '$.runtimeRecovery.codexTransientFailure.subagentRuntimeId') = ${transient?.subagentRuntimeId ?? null}
+              AND json_extract(payload_json, '$.runtimeRecovery.codexTransientFailure.chainSourceEventSequence') = ${chainSourceSequence}
+              AND json_extract(payload_json, '$.runtimeRecovery.codexTransientFailure.retryAttempt') = ${transient?.retryAttempt ?? null}
+            ))
           LIMIT 1
         ), later_events AS MATERIALIZED (
           SELECT sequence, event_type, actor_kind,
@@ -159,7 +322,7 @@ export const makeRuntimeRecoveryBarrierReader = Effect.gen(function* () {
               AND scheduled_followup = 0
           )
           AND (${recoveryIntentSequence} IS NULL OR EXISTS (SELECT 1 FROM exact_recovery_intent))
-          AND (SELECT COUNT(*) FROM later_events) <= ${MAX_RECOVERY_SUFFIX_EVENTS}
+          AND (${transient === undefined ? 1 : 0} = 0 OR ((SELECT COUNT(*) FROM later_events) <= ${MAX_RECOVERY_SUFFIX_EVENTS}
           AND NOT EXISTS (
             SELECT 1 FROM later_events
             WHERE actor_kind IN ('client', 'server')
@@ -178,7 +341,12 @@ export const makeRuntimeRecoveryBarrierReader = Effect.gen(function* () {
                 'thread.reverted'
               )
               AND (${recoveryIntentSequence} IS NULL OR sequence <> ${recoveryIntentSequence})
-          )
+          )))
+          AND (${transient === undefined ? 1 : 0} = 1 OR NOT EXISTS (
+            SELECT 1 FROM orchestration_runtime_recovery_controls
+              INDEXED BY idx_runtime_recovery_controls_thread_sequence
+            WHERE thread_id = ${threadId} AND sequence > ${chainSourceSequence}
+          ))
         ) AS allowed
       `.pipe(Effect.mapError(toPersistenceSqlError("RuntimeRecoveryBarrier.read")));
       return rows[0]?.allowed === 1;

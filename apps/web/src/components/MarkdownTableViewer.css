@@ -11,6 +11,8 @@
 .markdown-table-inline-toolbar {
   display: flex;
   justify-content: flex-end;
+  align-items: center;
+  gap: 0.25rem;
   padding-bottom: 0.125rem;
 }
 
@@ -80,6 +82,10 @@
   text-align: center;
   font-size: 0.75rem;
   font-variant-numeric: tabular-nums;
+}
+
+.markdown-table-expanded-export {
+  margin-left: auto;
 }
 
 .markdown-table-expanded-viewport {

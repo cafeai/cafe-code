@@ -2,6 +2,10 @@ import {
   useWorkspaceEnvironmentId,
   useIsSavedRemoteEnvironment,
 } from "../../environments/workspace";
+import { usePrimaryEnvironmentId } from "../../environments/primary";
+import { useSavedEnvironmentRuntimeStore } from "../../environments/runtime";
+import { useWsConnectionStatus } from "../../rpc/wsConnectionState";
+import { providerSkillsScopeRevision } from "../chat/useProviderSkills";
 import {
   ArchiveIcon,
   ArchiveX,
@@ -1640,6 +1644,11 @@ export function SystemSettingsPanel() {
 
 export function ProviderSettingsPanel() {
   const environmentId = useWorkspaceEnvironmentId();
+  const primaryEnvironmentId = usePrimaryEnvironmentId();
+  const quotaConnectionStatus = useWsConnectionStatus();
+  const quotaSavedConnectionState = useSavedEnvironmentRuntimeStore((state) =>
+    environmentId ? state.byId[environmentId]?.connectionState : undefined,
+  );
   const remote = useIsSavedRemoteEnvironment(environmentId);
   const settings = useSettings();
   const { updateSettings } = useUpdateSettings();
@@ -2113,6 +2122,24 @@ export function ProviderSettingsPanel() {
               instance={row.instance}
               driverOption={driverOption}
               liveProvider={liveProvider}
+              quotaContext={
+                environmentId && row.driver === "claudeAgent"
+                  ? {
+                      environmentId,
+                      input: { instanceId: row.instanceId },
+                      scopeRevision: providerSkillsScopeRevision({
+                        cwd: null,
+                        instanceId: row.instanceId,
+                        settings,
+                        snapshot: liveProvider ?? null,
+                      }),
+                      connected:
+                        environmentId === primaryEnvironmentId
+                          ? quotaConnectionStatus.phase === "connected"
+                          : quotaSavedConnectionState === "connected",
+                    }
+                  : undefined
+              }
               isSettingsOpen={openInstanceDetails[row.instanceId] ?? false}
               onSettingsOpenChange={(open) =>
                 setOpenInstanceDetails((existing) => ({

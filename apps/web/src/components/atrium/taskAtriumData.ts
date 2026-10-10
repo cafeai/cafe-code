@@ -499,23 +499,38 @@ export function selectAtriumSnapshot(
           ? buildThreadErrorDismissal({ environmentId, threadId, session, latestTurn, summary })
           : null;
 
+      const activityIds = environment.activityIdsByThreadId[threadId];
+      const activityById = environment.activityByThreadId[threadId];
+      const rows = collectSubagents(
+        activityIds,
+        activityById,
+        latestTurn?.turnId ?? null,
+        cardState === "done" || cardState === "error",
+        session,
+      );
+      // Root failure and native context failure are independent. An exact
+      // current-generation worker remains discoverable even if its failed
+      // root's presentation-only failure was dismissed or became historical.
+      // The shared liveness overlay has already refused missing/replaced/
+      // stopped/error runtime evidence; raw saved Working text is not enough.
+      const hasLiveSubagents = rows.some((row) => row.running);
+
       // Age stale failures off the board entirely. Without this, one old
       // crashed thread sits on the wall forever and the only way to clear it is
-      // to dismiss it by hand.
-      if (errorDismissal !== null) {
+      // to dismiss it by hand. Live native children are current work, not an
+      // old failure, and must not vanish with that independent root clock.
+      if (errorDismissal !== null && !hasLiveSubagents) {
         const failedAt = toEpoch(errorDismissal.observedAt);
         if (failedAt !== null && now - failedAt > RECENTLY_ERRORED_MS) continue;
       }
 
-      if (errorDismissal !== null) {
+      if (errorDismissal !== null && !hasLiveSubagents) {
         const dismissed = dismissedErrorByScope.get(errorDismissalScopeKey(errorDismissal));
         if (dismissed !== undefined && isSameErrorDismissal(dismissed, errorDismissal)) {
           continue;
         }
       }
 
-      const activityIds = environment.activityIdsByThreadId[threadId];
-      const activityById = environment.activityByThreadId[threadId];
       const lastActivity =
         activityIds && activityIds.length > 0
           ? activityById?.[activityIds[activityIds.length - 1]!]
@@ -527,13 +542,6 @@ export function selectAtriumSnapshot(
         session,
       );
 
-      const rows = collectSubagents(
-        activityIds,
-        activityById,
-        latestTurn?.turnId ?? null,
-        cardState === "done" || cardState === "error",
-        session,
-      );
       subagentCount += rows.filter((row) => row.running).length;
 
       // Projectless chats still have normal task/session state. Null is not a

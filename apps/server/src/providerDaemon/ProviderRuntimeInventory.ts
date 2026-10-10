@@ -2,17 +2,21 @@ import {
   PROVIDER_DAEMON_HEALTH_PATH,
   ProviderDaemonHealth,
   type ProviderDaemonUpstreamSupervisorHealth,
+  type ProviderDaemonQualificationSummary,
+  type ServerProvider,
 } from "@cafecode/contracts";
 import { requestProviderDaemonJson } from "@cafecode/shared/providerDaemonHttp";
 import * as Context from "effect/Context";
 import * as Data from "effect/Data";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 import { performance } from "node:perf_hooks";
 
 import { ServerConfig } from "../config.ts";
 import { ProviderAdapterRegistry } from "../provider/Services/ProviderAdapterRegistry.ts";
+import { ProviderRegistry } from "../provider/Services/ProviderRegistry.ts";
 
 const decodeProviderDaemonHealthJson = Schema.decodeUnknownSync(
   Schema.fromJsonString(ProviderDaemonHealth),
@@ -24,6 +28,7 @@ class ProviderRuntimeInventoryError extends Data.TaggedError("ProviderRuntimeInv
 
 export interface ProviderRuntimeInventorySnapshot {
   readonly configuredInstanceCount: number;
+  readonly providerQualification?: ProviderDaemonQualificationSummary | undefined;
   readonly upstreamSupervisor?: ProviderDaemonUpstreamSupervisorHealth | undefined;
 }
 
@@ -35,6 +40,19 @@ export class ProviderRuntimeInventory extends Context.Service<
   ProviderRuntimeInventory,
   ProviderRuntimeInventoryShape
 >()("cafecode/providerDaemon/ProviderRuntimeInventory") {}
+
+/** Aggregate only existing owner observations; this never proves native support. */
+export function summarizeProviderQualification(
+  providers: ReadonlyArray<ServerProvider>,
+): ProviderDaemonQualificationSummary {
+  return {
+    versionKnownCount: providers.filter((provider) => provider.version !== null).length,
+    versionUnknownCount: providers.filter((provider) => provider.version === null).length,
+    pendingCount: providers.filter(
+      (provider) => provider.probeDiagnostics?.lastOutcome === "pending",
+    ).length,
+  };
+}
 
 function sanitizeError(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
@@ -65,12 +83,22 @@ export const ProviderRuntimeInventoryLocalLive = Layer.effect(
   ProviderRuntimeInventory,
   Effect.gen(function* () {
     const providerAdapterRegistry = yield* ProviderAdapterRegistry;
+    // Optional for legacy/synthetic inventory consumers. The production local
+    // owner provides its own volatile status registry through the same layer
+    // graph. Never fetch backend status or initiate a probe from health reads.
+    const statusRegistry = yield* Effect.serviceOption(ProviderRegistry);
     return {
-      snapshot: providerAdapterRegistry.listInstances().pipe(
-        Effect.map((instances) => ({
+      snapshot: Effect.gen(function* () {
+        const instances = yield* providerAdapterRegistry.listInstances();
+        if (Option.isNone(statusRegistry)) {
+          return { configuredInstanceCount: instances.length };
+        }
+        const providers = yield* statusRegistry.value.getProviders;
+        return {
           configuredInstanceCount: instances.length,
-        })),
-      ),
+          providerQualification: summarizeProviderQualification(providers),
+        };
+      }),
     } satisfies ProviderRuntimeInventoryShape;
   }),
 );

@@ -25,6 +25,7 @@ import {
   type ProviderRuntimeEvent,
 } from "@cafecode/contracts";
 import { readCafeCodeEnv } from "@cafecode/shared/compatEnv";
+import { claudePublicSummaryDisplayText } from "../../provider/claudePublicSummary.ts";
 import { normalizeCodexAsyncQuestions } from "@cafecode/shared/codexAsyncQuestions";
 import { PROVIDER_PIPELINE_POLICY } from "@cafecode/shared/providerPipelinePolicy";
 import * as Cache from "effect/Cache";
@@ -86,6 +87,7 @@ import {
 import { sanitizeProviderToolData } from "@cafecode/shared/activityPayloadSanitizer";
 import { ServerSettingsService } from "../../serverSettings.ts";
 import { isSupersededSessionLifecycle, sessionLifecycleSnapshot } from "../sessionLifecycle.ts";
+import { buildCodexTransientFailureMarkerPayload } from "../providerRuntimeRecovery.ts";
 
 const providerTurnKey = (threadId: ThreadId, turnId: TurnId) => `${threadId}:${turnId}`;
 const providerRuntimeEventKey = (event: ProviderRuntimeEvent) =>
@@ -537,15 +539,120 @@ function requestKindFromCanonicalRequestType(
   }
 }
 
+function runtimeToolPresentationData(
+  event: Extract<
+    ProviderRuntimeEvent,
+    { type: "item.started" | "item.updated" | "item.completed" }
+  >,
+) {
+  const sanitized = sanitizeProviderToolData(event.payload.data, {
+    itemType: event.payload.itemType,
+  });
+  const source = readUnknownRecord(sanitized);
+  if (!source) return sanitized;
+  const data = { ...source };
+  // Provider-controlled raw data from other adapters cannot counterfeit this
+  // newly reserved inspector contract. Only trusted canonical Claude identity
+  // plus its primary-adapter versioned marker mints presentation provenance.
+  delete data.commandInspectionVersion;
+  delete data.inspectionProvider;
+  if (
+    event.provider === "claudeAgent" &&
+    event.payload.itemType === "command_execution" &&
+    source.toolName === "Bash" &&
+    source.commandInspectionVersion === 1
+  ) {
+    data.commandInspectionVersion = 1;
+    data.inspectionProvider = "claudeAgent";
+  }
+  return data;
+}
+
 function runtimeEventToActivities(
   event: ProviderRuntimeEvent,
 ): ReadonlyArray<OrchestrationThreadActivity> {
+  // Workflow rows cannot borrow another account/query's presentation. The
+  // compact retention id is content-free and host-minted from the full exact
+  // tuple; it is never a task control target or a provider transcript id.
+  const workflow =
+    (event.type === "task.started" ||
+      event.type === "task.progress" ||
+      event.type === "task.completed") &&
+    event.provider === "claudeAgent" &&
+    event.payload.workflow?.runtimeId === event.subagentRuntimeId &&
+    event.payload.workflow?.providerInstanceId === event.providerInstanceId
+      ? event.payload.workflow
+      : undefined;
+  const workflowRetentionId = workflow
+    ? `sha256:workflow:${Crypto.createHash("sha256")
+        .update(
+          JSON.stringify([
+            event.turnId ?? null,
+            event.type === "task.started" ||
+            event.type === "task.progress" ||
+            event.type === "task.completed"
+              ? event.payload.taskId
+              : null,
+            workflow.providerInstanceId,
+            workflow.runtimeId,
+          ]),
+          "utf8",
+        )
+        .digest("hex")}`
+    : undefined;
   const maybeSequence = (() => {
     const eventWithSequence = event as ProviderRuntimeEvent & { sessionSequence?: number };
     return eventWithSequence.sessionSequence !== undefined
       ? { sequence: eventWithSequence.sessionSequence }
       : {};
   })();
+  if (
+    (event.type === "item.updated" || event.type === "item.completed") &&
+    event.provider === "claudeAgent" &&
+    event.payload.itemType === "reasoning" &&
+    event.itemId !== undefined &&
+    event.turnId !== undefined
+  ) {
+    const data = readUnknownRecord(event.payload.data);
+    const status = event.payload.status ?? "inProgress";
+    // Only the adapter's bounded disclosed-summary contract is promoted.
+    // Generic reasoning/content deltas and other providers remain unchanged.
+    if (
+      data?.summaryVersion !== 1 ||
+      data.streamKind !== "reasoning_summary_text" ||
+      typeof data.truncated !== "boolean" ||
+      typeof event.payload.detail !== "string" ||
+      event.payload.detail.trim().length === 0 ||
+      event.payload.detail.length > 4_096 ||
+      claudePublicSummaryDisplayText(event.payload.detail) !== event.payload.detail ||
+      (status !== "inProgress" && status !== "completed" && status !== "failed")
+    )
+      return [];
+    return [
+      {
+        id: EventId.make(
+          `claude-summary:${Crypto.createHash("sha256")
+            .update(JSON.stringify([event.turnId, event.itemId]), "utf8")
+            .digest("hex")}`,
+        ),
+        createdAt: event.createdAt,
+        tone: "info",
+        kind: "reasoning.summary",
+        summary: "Claude summary",
+        payload: {
+          summaryVersion: 1,
+          provider: "claudeAgent",
+          itemId: event.itemId,
+          streamKind: "reasoning_summary_text",
+          detail: event.payload.detail,
+          status,
+          truncated: data.truncated,
+        },
+        turnId: toTurnId(event.turnId) ?? null,
+        ...maybeSequence,
+      },
+    ];
+  }
   switch (event.type) {
     case "request.opened": {
       if (event.payload.requestType === "tool_user_input") {
@@ -740,6 +847,7 @@ function runtimeEventToActivities(
             ...(event.payload.taskType ? { taskType: event.payload.taskType } : {}),
             ...(event.payload.visibility ? { visibility: event.payload.visibility } : {}),
             ...(event.payload.subagent ? { subagent: event.payload.subagent } : {}),
+            ...(workflow ? { workflow, workflowRetentionId } : {}),
             ...(event.payload.description
               ? { detail: truncateDetail(event.payload.description) }
               : {}),
@@ -767,6 +875,7 @@ function runtimeEventToActivities(
             detail: truncateDetail(event.payload.summary ?? event.payload.description),
             ...(event.payload.visibility ? { visibility: event.payload.visibility } : {}),
             ...(event.payload.subagent ? { subagent: event.payload.subagent } : {}),
+            ...(workflow ? { workflow, workflowRetentionId } : {}),
             ...(event.payload.summary ? { summary: truncateDetail(event.payload.summary) } : {}),
             ...(event.payload.lastToolName ? { lastToolName: event.payload.lastToolName } : {}),
             ...(event.payload.usage !== undefined ? { usage: event.payload.usage } : {}),
@@ -802,6 +911,7 @@ function runtimeEventToActivities(
             status: event.payload.status,
             ...(event.payload.visibility ? { visibility: event.payload.visibility } : {}),
             ...(event.payload.subagent ? { subagent: event.payload.subagent } : {}),
+            ...(workflow ? { workflow, workflowRetentionId } : {}),
             ...(event.payload.summary ? { detail: truncateDetail(event.payload.summary) } : {}),
             ...(event.payload.usage !== undefined ? { usage: event.payload.usage } : {}),
             ...(event.payload.resourceLinks ? { resourceLinks: event.payload.resourceLinks } : {}),
@@ -922,9 +1032,7 @@ function runtimeEventToActivities(
       if (!isToolLifecycleItemType(event.payload.itemType)) {
         return [];
       }
-      const sanitizedData = sanitizeProviderToolData(event.payload.data, {
-        itemType: event.payload.itemType,
-      });
+      const sanitizedData = runtimeToolPresentationData(event);
       return [
         {
           id: event.eventId,
@@ -978,9 +1086,7 @@ function runtimeEventToActivities(
       if (!isToolLifecycleItemType(event.payload.itemType)) {
         return [];
       }
-      const sanitizedData = sanitizeProviderToolData(event.payload.data, {
-        itemType: event.payload.itemType,
-      });
+      const sanitizedData = runtimeToolPresentationData(event);
       return [
         {
           id: event.eventId,
@@ -1024,6 +1130,7 @@ function runtimeEventToActivities(
       if (!isToolLifecycleItemType(event.payload.itemType)) {
         return [];
       }
+      const sanitizedData = runtimeToolPresentationData(event);
       return [
         {
           id: event.eventId,
@@ -1040,6 +1147,7 @@ function runtimeEventToActivities(
             ...(event.itemId !== undefined ? { itemId: event.itemId } : {}),
             ...(event.payload.title !== undefined ? { title: event.payload.title } : {}),
             ...(event.payload.detail ? { detail: truncateDetail(event.payload.detail) } : {}),
+            ...(sanitizedData !== undefined ? { data: sanitizedData } : {}),
           },
           turnId: toTurnId(event.turnId) ?? null,
           ...maybeSequence,
@@ -1217,6 +1325,28 @@ const make = Effect.gen(function* () {
       );
   const projectionSnapshotQuery = yield* ProjectionSnapshotQuery;
   const providerService = yield* ProviderService;
+  // Availability is a fresh native-owner fact, never inferred from projected
+  // status or a received error string. Share the exact identity check between
+  // definitive failure publication and late thread-diagnostic suppression.
+  const readCurrentCodexFailedRootProof = (event: ProviderRuntimeEvent, turnId: TurnId) =>
+    providerService.listSessions().pipe(
+      Effect.map(
+        (sessions) =>
+          sessions.find(
+            (session) =>
+              session.threadId === event.threadId &&
+              session.provider === "codex" &&
+              session.providerInstanceId === event.providerInstanceId &&
+              session.subagentRuntimeId === event.subagentRuntimeId &&
+              session.status === "ready" &&
+              session.activeTurnId === undefined &&
+              session.codexRootTurnFailure?.turnId === turnId,
+          )?.codexRootTurnFailure,
+      ),
+      Effect.catchCause((cause) =>
+        Cause.hasInterruptsOnly(cause) ? Effect.failCause(cause) : Effect.succeed(undefined),
+      ),
+    );
   const usageStats = yield* UsageStatsService;
   const receiptBus = yield* RuntimeReceiptBus;
   const projectionStateRepository = yield* ProjectionStateRepository;
@@ -2702,7 +2832,9 @@ const make = Effect.gen(function* () {
       const observedLifecycleTurn =
         terminalTurnRecovery === undefined &&
         eventTurnId !== undefined &&
-        (event.type === "turn.started" || event.type === "turn.completed")
+        (event.type === "turn.started" ||
+          event.type === "turn.completed" ||
+          (event.type === "runtime.error" && event.provider === "codex"))
           ? yield* projectionTurnRepository.getByTurnId({
               threadId: thread.id,
               turnId: eventTurnId,
@@ -2713,6 +2845,38 @@ const make = Effect.gen(function* () {
         (observedLifecycleTurn.value.state === "completed" ||
           observedLifecycleTurn.value.state === "interrupted" ||
           observedLifecycleTurn.value.state === "error");
+
+      // A continuation may fail before its start notification or RPC ACK.
+      // Without a bound native turn, that terminal/error notification cannot
+      // consume the pending input or erase the previous failed-root tuple.
+      // The exact server ACK receipt plus fresh native failed-root proof binds
+      // the new terminal turn separately; no synthetic running turn is needed.
+      const isUnboundCodexTerminalDuringRecoveryCandidate =
+        event.provider === "codex" &&
+        ((event.type === "turn.completed" && completedTurnState === "failed") ||
+          event.type === "runtime.error") &&
+        activeTurnId === null &&
+        eventTurnId !== undefined &&
+        thread.session?.status === "ready" &&
+        (yield* hasPendingTurnStartForThread());
+      const isUnboundCodexTerminalDuringRecovery =
+        isUnboundCodexTerminalDuringRecoveryCandidate &&
+        (yield* sql<{ readonly present: number }>`
+          WITH latest_intent AS (
+            SELECT sequence, thread_id FROM orchestration_codex_transient_recovery_intents
+              INDEXED BY idx_codex_transient_recovery_intents_thread_kind_sequence
+            WHERE thread_id = ${thread.id} AND source_kind = 'intent'
+            ORDER BY sequence DESC LIMIT 1
+          )
+          SELECT 1 AS present FROM latest_intent AS recovery
+          JOIN orchestration_events AS intent ON intent.sequence = recovery.sequence
+          JOIN projection_turns AS pending ON pending.thread_id = recovery.thread_id
+            AND pending.turn_id IS NULL
+            AND pending.pending_message_id = json_extract(intent.payload_json, '$.messageId')
+          WHERE intent.aggregate_kind = 'thread' AND intent.stream_id = ${thread.id}
+            AND intent.actor_kind = 'server' AND intent.event_type = 'thread.turn-start-requested'
+          LIMIT 1
+        `)[0]?.present === 1;
 
       // Only the runtime owner's positively reconciled loss can authorize
       // automatic continuation. A delayed loss from an older turn must never
@@ -2784,6 +2948,7 @@ const make = Effect.gen(function* () {
         }
       })();
       const shouldApplyThreadLifecycle =
+        !isUnboundCodexTerminalDuringRecovery &&
         !shouldSuppressFailedSessionHeartbeat &&
         passesStrictProviderLifecycleGuard &&
         // Resume backfills include turn.started for historical terminal turns.
@@ -2802,6 +2967,52 @@ const make = Effect.gen(function* () {
         (!isCodexAggregateReopenEvent ||
           explicitTerminalTurnRecovery !== undefined ||
           restoresFalseOrphanTerminal);
+      // Codex may publish its unscoped systemError immediately before the
+      // definitive failed turn (official app-server error/turn lifecycle).
+      // The thread diagnostic must not discard the concrete root identity:
+      // doing so closes SQL truth early and makes the exact terminal-time
+      // availability guard reject the following authoritative completion.
+      // Nor may a delayed diagnostic demote an already verified failed-root
+      // context. Only that exact current owner/root/time proof permits ignoring
+      // it; unknown, replaced, stopped and legacy contexts stay conservative.
+      const isCodexThreadError =
+        event.provider === "codex" &&
+        event.type === "thread.state.changed" &&
+        event.payload.state === "error";
+      const preservesTrackedCodexRoot = isCodexThreadError && activeTurnId !== null;
+      const suppressesVerifiedFailedRootThreadError =
+        isCodexThreadError &&
+        runtimeGenerationVerified &&
+        sameRuntimeBinding &&
+        incomingRuntimeId !== undefined &&
+        incomingRuntimeId === currentRuntimeId &&
+        activeTurnId === null &&
+        thread.session?.status === "ready" &&
+        thread.session.lastError !== null &&
+        thread.latestTurn?.state === "error" &&
+        (eventTurnId === undefined || sameId(eventTurnId, thread.latestTurn.turnId)) &&
+        (yield* readCurrentCodexFailedRootProof(event, thread.latestTurn.turnId))?.observedAt ===
+          thread.session.updatedAt;
+      // A watch diagnostic has no turn id and cannot consume newer input.
+      // Manual starts project starting/null, while fenced recovery admission
+      // deliberately retains ready/null and its failed-root tuple. Protect both
+      // without publishing readiness or changing any session/root timestamp.
+      // Read the pending row freshly after the inventory await above: the
+      // memoized pre-await pending observation may already be superseded.
+      const isCurrentUnscopedCodexThreadWatchError =
+        isCodexThreadError &&
+        eventTurnId === undefined &&
+        event.raw?.source === "codex.app-server.notification" &&
+        event.raw.method === "thread/status/changed" &&
+        runtimeGenerationVerified &&
+        sameRuntimeBinding &&
+        incomingRuntimeId !== undefined &&
+        incomingRuntimeId === currentRuntimeId;
+      const suppressesPendingInputThreadWatchError =
+        isCurrentUnscopedCodexThreadWatchError &&
+        Option.isSome(
+          yield* projectionTurnRepository.getPendingTurnStartByThreadId({ threadId: thread.id }),
+        );
       const acceptedTurnStartedSourcePlan =
         event.type === "turn.started" && shouldApplyThreadLifecycle
           ? yield* getSourceProposedPlanReferenceForAcceptedTurnStart(thread.id, eventTurnId)
@@ -2889,7 +3100,7 @@ const make = Effect.gen(function* () {
                   ? (eventTurnId ??
                     activeTurnId ??
                     (thread.latestTurn?.state === "running" ? thread.latestTurn.turnId : null))
-                  : sessionRelevantThreadState === "idle"
+                  : sessionRelevantThreadState === "idle" || preservesTrackedCodexRoot
                     ? activeTurnId
                     : null
                 : event.type === "turn.aborted" ||
@@ -2907,6 +3118,12 @@ const make = Effect.gen(function* () {
               return runtimeStatus === "ready" && hasPendingTurnStart ? "starting" : runtimeStatus;
             }
             case "thread.state.changed":
+              if (preservesTrackedCodexRoot) {
+                // Preserve the observed lifecycle, not a manufactured running
+                // state. The subsequent root-scoped error/completion supplies
+                // the real failure detail and terminal boundary.
+                return thread.session!.status;
+              }
               if (
                 sessionRelevantThreadState === "idle" &&
                 interruptedGoalThreadIds.has(thread.id)
@@ -2971,22 +3188,28 @@ const make = Effect.gen(function* () {
         })();
         const lastError = mayRecoverRuntimeOwnershipLoss
           ? PROVIDER_RUNTIME_OWNERSHIP_LOST_REASON
-          : event.type === "session.state.changed" && event.payload.state === "error"
-            ? (event.payload.reason ?? thread.session?.lastError ?? "Provider session error")
-            : event.type === "thread.state.changed" && sessionRelevantThreadState === "error"
-              ? (thread.session?.lastError ?? "Provider thread error")
-              : event.type === "turn.aborted"
-                ? event.payload.reason
-                : event.type === "turn.completed" &&
-                    normalizeRuntimeTurnState(event.payload.state) === "failed"
-                  ? (event.payload.errorMessage ?? thread.session?.lastError ?? "Turn failed")
-                  : restoresFalseOrphanTerminal
-                    ? null
-                    : status === "ready" || status === "starting"
+          : preservesTrackedCodexRoot
+            ? (thread.session?.lastError ?? null)
+            : event.type === "session.state.changed" && event.payload.state === "error"
+              ? (event.payload.reason ?? thread.session?.lastError ?? "Provider session error")
+              : event.type === "thread.state.changed" && sessionRelevantThreadState === "error"
+                ? (thread.session?.lastError ?? "Provider thread error")
+                : event.type === "turn.aborted"
+                  ? event.payload.reason
+                  : event.type === "turn.completed" &&
+                      normalizeRuntimeTurnState(event.payload.state) === "failed"
+                    ? (event.payload.errorMessage ?? thread.session?.lastError ?? "Turn failed")
+                    : restoresFalseOrphanTerminal
                       ? null
-                      : (thread.session?.lastError ?? null);
+                      : status === "ready" || status === "starting"
+                        ? null
+                        : (thread.session?.lastError ?? null);
 
-        if (shouldApplyThreadLifecycle) {
+        if (
+          shouldApplyThreadLifecycle &&
+          !suppressesVerifiedFailedRootThreadError &&
+          !suppressesPendingInputThreadWatchError
+        ) {
           if (event.type === "turn.started" && acceptedTurnStartedSourcePlan !== null) {
             yield* markSourceProposedPlanImplemented(
               acceptedTurnStartedSourcePlan.sourceThreadId,
@@ -3012,6 +3235,12 @@ const make = Effect.gen(function* () {
             commandId: providerCommandId(event, "thread-session-set"),
             threadId: thread.id,
             expectedSubagentRuntimeId: currentRuntimeId ?? null,
+            // Repeat the pending-input refusal inside serialized admission.
+            // An automatic continuation can commit after the fresh read above
+            // without changing the captured ready/null lifecycle tuple.
+            ...(isCurrentUnscopedCodexThreadWatchError
+              ? { requiresNoPendingTurnStart: true as const }
+              : {}),
             session: {
               threadId: thread.id,
               status,
@@ -3080,6 +3309,117 @@ const make = Effect.gen(function* () {
               },
               createdAt: now,
             });
+          }
+        }
+      }
+
+      // A terminal root and its native context have independent lifetimes.
+      // First let the ordinary error transition above close the root as failed;
+      // setting ready in that transition would incorrectly complete it in the
+      // projection. Only then can exact fresh native inventory establish that
+      // the same context still owns children and may accept a continuation.
+      // The second phase also completes a partially committed journal fanout
+      // after restart, but only for this exact failed turn/time/generation. It
+      // never reopens the turn or borrows liveness from a replacement process.
+      if (
+        event.type === "turn.completed" &&
+        event.provider === "codex" &&
+        completedTurnState === "failed" &&
+        event.payload.nativeContextAvailable === true &&
+        event.providerInstanceId !== undefined &&
+        incomingRuntimeId !== undefined &&
+        sameRuntimeBinding &&
+        incomingRuntimeId === currentRuntimeId &&
+        eventTurnId !== undefined
+      ) {
+        const failedThread = yield* resolveThreadShell(thread.id);
+        const failedSession = failedThread?.session;
+        if (
+          failedThread?.latestTurn?.state === "error" &&
+          sameId(failedThread.latestTurn.turnId, eventTurnId) &&
+          failedSession !== undefined &&
+          failedSession !== null &&
+          (failedSession.status === "error" || failedSession.status === "ready") &&
+          failedSession.providerName === "codex" &&
+          failedSession.providerInstanceId === event.providerInstanceId &&
+          failedSession.subagentRuntimeId === incomingRuntimeId &&
+          failedSession.activeTurnId === null &&
+          failedSession.lastError !== null &&
+          failedSession.updatedAt === now &&
+          Option.isNone(
+            yield* projectionTurnRepository.getPendingTurnStartByThreadId({ threadId: thread.id }),
+          )
+        ) {
+          // Read-only inventory: no process start, credential probe or provider
+          // request. The proof is freshly minted by the current native owner;
+          // missing/closed/uncertain inventory preserves the conservative error
+          // state. Do not log provider-controlled failure text on this path.
+          const nativeFailure = yield* readCurrentCodexFailedRootProof(event, eventTurnId);
+          if (nativeFailure !== undefined && nativeFailure.observedAt === now) {
+            // A ready replay has already committed this availability phase.
+            // Repeating ready/null would clear a recovery start admitted while
+            // inventory was awaited (such an intent deliberately leaves the
+            // session tuple unchanged). Append its idempotent marker without
+            // another lifecycle write. From error, the serialized CAS is safe:
+            // transient intent admission itself requires ready, while manual
+            // starts/Stop change the captured lifecycle and make this CAS fail.
+            const acceptedAvailability =
+              failedSession.status === "ready" ||
+              (yield* dispatchObservedSession(
+                {
+                  type: "thread.session.set",
+                  commandId: providerCommandId(event, "failed-root-context-available"),
+                  threadId: thread.id,
+                  expectedSubagentRuntimeId: incomingRuntimeId,
+                  session: { ...failedSession, status: "ready", activeTurnId: null },
+                  createdAt: now,
+                },
+                failedSession,
+              )) !== undefined;
+            if (
+              acceptedAvailability &&
+              event.payload.codexTransientFailure !== undefined &&
+              nativeFailure.category === event.payload.codexTransientFailure
+            ) {
+              // Content-free, deterministic and replay-idempotent. Durable
+              // recovery rechecks Stop/newer-input/account/runtime barriers;
+              // a marker is not permission to replay the original request.
+              // This is Cafe's decision after fresh private proof, not an
+              // ordinary provider-authored activity. Its server actor is
+              // required by the append-time authority index and barrier.
+              const markerIdentity = Crypto.createHash("sha256")
+                .update(
+                  JSON.stringify([
+                    "cafe-codex-transient-failure-v1",
+                    thread.id,
+                    event.providerInstanceId,
+                    incomingRuntimeId,
+                    eventTurnId,
+                    now,
+                    event.eventId,
+                  ]),
+                )
+                .digest("hex");
+              yield* orchestrationEngine.dispatch({
+                type: "thread.activity.append",
+                commandId: CommandId.make(`server:codex-transient-root-failed:${markerIdentity}`),
+                threadId: thread.id,
+                activity: {
+                  id: EventId.make(`codex-transient-root-failed:${markerIdentity}`),
+                  kind: "runtime.warning",
+                  tone: "info",
+                  summary: "Reconnecting after a transient provider failure",
+                  turnId: eventTurnId,
+                  payload: buildCodexTransientFailureMarkerPayload({
+                    providerInstanceId: event.providerInstanceId,
+                    subagentRuntimeId: incomingRuntimeId,
+                    sessionUpdatedAt: now,
+                  }),
+                  createdAt: now,
+                },
+                createdAt: now,
+              });
+            }
           }
         }
       }
@@ -3368,9 +3708,34 @@ const make = Effect.gen(function* () {
       if (event.type === "runtime.error") {
         const runtimeErrorMessage = event.payload.message;
 
-        const shouldApplyRuntimeError = !STRICT_PROVIDER_LIFECYCLE_GUARD
-          ? true
-          : activeTurnId === null || eventTurnId === undefined || sameId(activeTurnId, eventTurnId);
+        // The native error notification precedes turn/completed and is not a
+        // separate process-loss boundary. Keep an exact tracked root until its
+        // terminal frame: publishing error with a concrete active id yields
+        // different shell/read-model normalization and can make the following
+        // terminal lifecycle CAS fail. Received diagnostic activity still
+        // records the error below; unscoped/process/transport failures retain
+        // their existing authority and no provider call is retried here.
+        const isPreliminaryTrackedCodexRootError =
+          event.provider === "codex" &&
+          event.raw?.source === "codex.app-server.notification" &&
+          event.raw.method === "error" &&
+          eventMatchesTrackedActiveTurn;
+
+        // A delayed root-scoped diagnostic is not process-death evidence. The
+        // exact indexed terminal outcome remains immutable when no native root
+        // is active; otherwise this old error could erase ready-context proof
+        // and hide surviving children again. Unscoped runtime failures and an
+        // actually active matching root retain their ordinary error authority.
+        const isLateTerminalCodexError =
+          event.provider === "codex" && activeTurnId === null && observesAlreadyTerminalTurn;
+        const shouldApplyRuntimeError =
+          !isPreliminaryTrackedCodexRootError &&
+          !isLateTerminalCodexError &&
+          !isUnboundCodexTerminalDuringRecovery &&
+          (!STRICT_PROVIDER_LIFECYCLE_GUARD ||
+            activeTurnId === null ||
+            eventTurnId === undefined ||
+            sameId(activeTurnId, eventTurnId));
 
         if (runtimeGenerationVerified && shouldApplyRuntimeError) {
           yield* dispatchObservedSession(

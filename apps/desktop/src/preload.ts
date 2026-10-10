@@ -87,6 +87,8 @@ if (process.isMainFrame === true) {
     openPath: (path: string) => ipcRenderer.invoke(IpcChannels.OPEN_PATH_CHANNEL, path),
     revealPath: (path: string) => ipcRenderer.invoke(IpcChannels.REVEAL_PATH_CHANNEL, path),
     copyText: (text: string) => ipcRenderer.invoke(IpcChannels.COPY_TEXT_CHANNEL, text),
+    copyPng: (png) => ipcRenderer.invoke(IpcChannels.COPY_PNG_CHANNEL, png),
+    savePng: (input) => ipcRenderer.invoke(IpcChannels.SAVE_PNG_CHANNEL, input),
     onMenuAction: (listener) => {
       const wrappedListener = (_event: Electron.IpcRendererEvent, action: unknown) => {
         if (typeof action !== "string") return;

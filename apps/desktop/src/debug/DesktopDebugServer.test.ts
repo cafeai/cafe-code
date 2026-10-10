@@ -34,6 +34,61 @@ const makeGlobalDictationShortcutSnapshot = (
   ...overrides,
 });
 
+describe("Daemon-local qualification debug summary", () => {
+  it("retains only allowlisted numeric counts and keeps older owners unavailable", () => {
+    debugServer.reset();
+    debugServer.publishProviderDaemonSnapshot({
+      lastHealth: {
+        providerQualification: {
+          versionKnownCount: 1,
+          versionUnknownCount: 2,
+          pendingCount: 1,
+          account: "private-account-secret",
+          version: "private-version-secret",
+          output: "private-output-secret",
+        },
+      },
+    });
+    const snapshot = debugServer.buildCompactDebugSnapshot().providerDaemon as Record<
+      string,
+      unknown
+    >;
+    const health = snapshot.lastHealth as Record<string, unknown>;
+    assert.deepEqual(health.providerQualification, {
+      versionKnownCount: 1,
+      versionUnknownCount: 2,
+      pendingCount: 1,
+    });
+    assert.notInclude(JSON.stringify(snapshot), "private-");
+    for (const value of [-1, 0.5, "1", Number.POSITIVE_INFINITY, Number.MAX_SAFE_INTEGER + 1]) {
+      debugServer.publishProviderDaemonSnapshot({
+        lastHealth: {
+          providerQualification: {
+            versionKnownCount: value,
+            versionUnknownCount: value,
+            pendingCount: value,
+          },
+        },
+      });
+      const malformed = debugServer.buildCompactDebugSnapshot().providerDaemon as Record<
+        string,
+        unknown
+      >;
+      assert.deepEqual((malformed.lastHealth as Record<string, unknown>).providerQualification, {
+        versionKnownCount: null,
+        versionUnknownCount: null,
+        pendingCount: null,
+      });
+    }
+    debugServer.publishProviderDaemonSnapshot({ lastHealth: {} });
+    const legacy = debugServer.buildCompactDebugSnapshot().providerDaemon as Record<
+      string,
+      unknown
+    >;
+    assert.isNull((legacy.lastHealth as Record<string, unknown>).providerQualification);
+  });
+});
+
 const makeLargeRendererSnapshot = (index: number) => ({
   debugSnapshotVersion: 50,
   source: "test",

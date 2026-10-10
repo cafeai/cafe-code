@@ -815,6 +815,18 @@ export const staticAndDevRouteLayer = HttpRouter.add(
       .stat(filePath)
       .pipe(Effect.catch(() => Effect.succeed(null)));
     if (!fileInfo || fileInfo.type !== "File") {
+      // Asset URLs identify exact build bytes. An older renderer can request a
+      // retired hash after a rebuild; returning the app HTML here disguises
+      // that absence as a successful module response and fails MIME admission.
+      // Keep the miss uncached so a transient publication gap cannot become a
+      // durable cached failure. Application routes retain their HTML fallback.
+      if (url.value.pathname === "/assets" || url.value.pathname.startsWith("/assets/")) {
+        return HttpServerResponse.text("Not Found", {
+          status: 404,
+          headers: { "Cache-Control": "no-store" },
+        });
+      }
+
       const indexPath = path.resolve(staticRoot, "index.html");
       const indexInfo = yield* fileSystem
         .stat(indexPath)

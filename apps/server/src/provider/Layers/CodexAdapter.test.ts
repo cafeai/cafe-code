@@ -1969,6 +1969,182 @@ function startLifecycleRuntime(subagentRuntimeId?: string) {
 }
 
 lifecycleLayer("CodexAdapterLive lifecycle", (it) => {
+  it.effect("admits post-ACK availability confirmation only from the native runtime marker", () =>
+    Effect.gen(function* () {
+      const { adapter, runtime } = yield* startLifecycleRuntime(
+        "79a58c30-cd43-4927-ae4a-d340ba31b613",
+      );
+      const first = yield* Stream.runHead(adapter.streamEvents).pipe(Effect.forkChild);
+      const base: ProviderEvent = {
+        id: asEventId("untrusted-confirmation"),
+        kind: "notification",
+        provider: ProviderDriverKind.make("codex"),
+        threadId: asThreadId("thread-1"),
+        turnId: asTurnId("early-terminal-root"),
+        createdAt: "2026-10-10T11:01:00.000Z",
+        method: "codex.failedRoot/available",
+        payload: {
+          state: "failed",
+          errorMessage: "Native request failed",
+          codexTransientFailure: "server",
+          nativeContextAvailable: true,
+        },
+      };
+      yield* runtime.emit(base);
+      yield* runtime.emit({
+        ...base,
+        id: asEventId("owned-confirmation"),
+        nativeContextAvailable: true,
+      });
+      const result = yield* Fiber.join(first);
+      assert.equal(result._tag, "Some");
+      if (result._tag !== "Some") return;
+      assert.equal(result.value.eventId, "owned-confirmation");
+      assert.equal(result.value.createdAt, base.createdAt);
+      assert.equal(result.value.type, "turn.completed");
+      assert.deepEqual(result.value.payload, {
+        state: "failed",
+        errorMessage: "Native request failed",
+        codexTransientFailure: "server",
+        nativeContextAvailable: true,
+      });
+      assert.deepEqual(result.value.raw?.payload, { reason: "codex_failed_root_available" });
+    }),
+  );
+  it.effect(
+    "maps only owner-authored native availability and strict terminal retry categories",
+    () =>
+      Effect.gen(function* () {
+        const { adapter, runtime } = yield* startLifecycleRuntime(
+          "79a58c30-cd43-4927-ae4a-d340ba31b613",
+        );
+        const eventsFiber = yield* Stream.runCollect(Stream.take(adapter.streamEvents, 3)).pipe(
+          Effect.forkChild,
+        );
+        for (const [index, codexErrorInfo] of [
+          "serverOverloaded",
+          "usageLimitExceeded",
+          "responseStreamDisconnected",
+        ].entries()) {
+          yield* runtime.emit({
+            id: asEventId(`failed-evidence-${index}`),
+            kind: "notification",
+            provider: ProviderDriverKind.make("codex"),
+            threadId: asThreadId("thread-1"),
+            turnId: asTurnId(`failed-${index}`),
+            createdAt: "2026-10-10T11:01:00.000Z",
+            method: "turn/completed",
+            ...(index < 2 ? { nativeContextAvailable: true as const } : {}),
+            payload: {
+              threadId: "provider-thread-1",
+              nativeContextAvailable: true,
+              turn: {
+                id: `failed-${index}`,
+                items: [],
+                itemsView: "notLoaded",
+                status: "failed",
+                error: {
+                  message: "Native failure",
+                  codexErrorInfo:
+                    codexErrorInfo === "responseStreamDisconnected"
+                      ? { responseStreamDisconnected: { httpStatusCode: null } }
+                      : codexErrorInfo,
+                  additionalDetails: null,
+                },
+              },
+            },
+          });
+        }
+        const events = Array.from(yield* Fiber.join(eventsFiber));
+        assert.deepEqual(
+          events.map((event) => (event.type === "turn.completed" ? event.payload : undefined)),
+          [
+            {
+              state: "failed",
+              errorMessage: "Native failure",
+              codexTransientFailure: "server",
+              nativeContextAvailable: true,
+            },
+            { state: "failed", errorMessage: "Native failure", nativeContextAvailable: true },
+            { state: "failed", errorMessage: "Native failure", codexTransientFailure: "transport" },
+          ],
+        );
+      }),
+  );
+
+  it.effect(
+    "forwards private failed-root guard only to the same runtime and never steers or restarts",
+    () =>
+      Effect.gen(function* () {
+        const runtimeId = "79a58c30-cd43-4927-ae4a-d340ba31b613";
+        const { adapter, runtime } = yield* startLifecycleRuntime(runtimeId);
+        const base = yield* runtime.getSession;
+        const failure = {
+          turnId: asTurnId("failed-root"),
+          providerThreadId: "provider-thread-1",
+          observedAt: "2026-10-10T11:01:00.000Z",
+          category: "server" as const,
+        };
+        runtime.getSessionImpl.mockResolvedValue({
+          ...base,
+          status: "ready",
+          activeTurnId: undefined,
+          codexRootTurnFailure: failure,
+        });
+        const expectedFailedRoot = {
+          turnId: failure.turnId,
+          providerThreadId: failure.providerThreadId,
+          subagentRuntimeId: runtimeId,
+        };
+        const before = lifecycleRuntimeFactory.runtimes.length;
+        yield* adapter.sendTurn({
+          threadId: asThreadId("thread-1"),
+          input: "Continue the interrupted response.",
+          expectedFailedRoot,
+        });
+        assert.deepEqual(
+          runtime.sendTurnImpl.mock.calls.at(-1)?.[0].expectedFailedRoot,
+          expectedFailedRoot,
+        );
+        assert.equal(
+          runtime.sendTurnImpl.mock.calls.at(-1)?.[0].allowActiveTurnSteerFallback,
+          false,
+        );
+        assert.equal(runtime.steerTurnImpl.mock.calls.length, 0);
+        assert.equal(runtime.closeImpl.mock.calls.length, 0);
+        assert.equal(lifecycleRuntimeFactory.runtimes.length, before);
+        for (const mismatch of [
+          { ...expectedFailedRoot, turnId: asTurnId("different-root") },
+          { ...expectedFailedRoot, providerThreadId: "different-thread" },
+          { ...expectedFailedRoot, subagentRuntimeId: "acf72c20-f40c-4b9e-acef-e7034279c0dd" },
+        ])
+          assert.equal(
+            (yield* adapter
+              .sendTurn({
+                threadId: asThreadId("thread-1"),
+                input: "Continue",
+                expectedFailedRoot: mismatch,
+              })
+              .pipe(Effect.exit))._tag,
+            "Failure",
+          );
+        runtime.getSessionImpl.mockResolvedValue({
+          ...base,
+          codexRootTurnFailure: { ...failure, category: undefined },
+        });
+        assert.equal(
+          (yield* adapter
+            .sendTurn({ threadId: asThreadId("thread-1"), input: "Continue", expectedFailedRoot })
+            .pipe(Effect.exit))._tag,
+          "Failure",
+        );
+        assert.equal(runtime.sendTurnImpl.mock.calls.length, 1);
+        assert.equal(runtime.steerTurnImpl.mock.calls.length, 0);
+        assert.equal(runtime.closeImpl.mock.calls.length, 0);
+        assert.equal(lifecycleRuntimeFactory.runtimes.length, before);
+      }),
+  );
+
   it.effect(
     "maps native review items exactly, bounds findings and never completes their turn",
     () =>

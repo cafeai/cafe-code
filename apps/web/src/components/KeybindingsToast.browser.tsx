@@ -23,6 +23,7 @@ import { setupWorker } from "msw/browser";
 import * as Schema from "effect/Schema";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { render } from "vitest-browser-react";
+import { page } from "vitest/browser";
 
 import { useComposerDraftStore } from "../composerDraftStore";
 import { __resetLocalApiForTests } from "../localApi";
@@ -571,6 +572,14 @@ describe("Keybindings update toast", () => {
     try {
       sendServerConfigUpdatedPush([]);
       await waitForToast("Keybindings updated");
+      // This fixture verifies cached subscription replay, not auto-dismiss.
+      // Base UI intentionally pauses dismissal while a window is blurred or a
+      // toast is hovered/focused. Dismiss this exact prerequisite notification
+      // through its accessible control before preserving the empty-toast gate.
+      await page
+        .getByRole("dialog", { name: "Keybindings updated", exact: true })
+        .getByRole("button", { name: "Dismiss notification", exact: true })
+        .click();
       await waitForNoToast("Keybindings updated");
 
       // Remount the app — onServerConfigUpdated replays the cached value

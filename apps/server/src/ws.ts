@@ -7,6 +7,7 @@ import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Ref from "effect/Ref";
+import * as References from "effect/References";
 import * as Schedule from "effect/Schedule";
 import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
@@ -14,6 +15,7 @@ import { type AuthAccessStreamEvent, AuthSessionId } from "@cafecode/contracts/a
 import {
   DEFAULT_AUTOMATIC_GIT_FETCH_INTERVAL,
   CommandId,
+  ClaudeSettings,
   type ClientOrchestrationCommand,
   EventId,
   type OrchestrationCommand,
@@ -65,6 +67,12 @@ import {
   subscribeProviderCommands,
   type ProviderCommandsAuthority,
 } from "./provider/providerCommandsSubscription.ts";
+import {
+  readBoundProviderQuota,
+  subscribeProviderQuota,
+  unavailableProviderQuotaStream,
+  type ProviderQuotaAuthority,
+} from "./provider/providerQuotaSubscription.ts";
 import {
   claudeCommandsConfigurationKey,
   UNAVAILABLE_COMMAND_CATALOG,
@@ -131,6 +139,7 @@ import {
 } from "./dictation/Services/OpenAiRealtimeDictation.ts";
 import { isLoopbackRemoteAddress } from "./http.ts";
 const isOrchestrationDispatchCommandError = Schema.is(OrchestrationDispatchCommandError);
+const decodeQuotaClaudeSettings = Schema.decodeUnknownSync(ClaudeSettings);
 const isWorkspacePathOutsideRootError = Schema.is(WorkspacePathOutsideRootError);
 
 const nowIso = Effect.map(DateTime.now, DateTime.formatIso);
@@ -1266,6 +1275,107 @@ const makeWsRpcLayer = (
             ),
             { "rpc.aggregate": "server" },
           );
+        },
+        [WS_METHODS.serverSubscribeProviderQuota]: (input) => {
+          if (currentSession.role !== "owner") return unavailableProviderQuotaStream();
+          const resolveAuthority = Effect.gen(function* () {
+            const settings = yield* serverSettings.getSettings;
+            const explicit = settings.providerInstances[input.instanceId];
+            const legacy =
+              !explicit && input.instanceId === "claudeAgent"
+                ? settings.providers.claudeAgent
+                : undefined;
+            if (
+              (!explicit && !legacy) ||
+              explicit?.enabled === false ||
+              legacy?.enabled === false ||
+              (explicit && explicit.driver !== "claudeAgent")
+            )
+              return undefined;
+            // Instance envelopes can inherit enabled from their decoded
+            // driver config; an omitted envelope flag is not automatic consent.
+            const config = decodeQuotaClaudeSettings(explicit ? (explicit.config ?? {}) : legacy);
+            const enabled = explicit?.enabled ?? config.enabled;
+            if (!enabled) return undefined;
+            const configuration = claudeCommandsConfigurationKey({
+              config,
+              enabled,
+              ...(explicit?.environment ? { environment: explicit.environment } : {}),
+            });
+            // Lightweight saved shells establish current runtime/workspace
+            // authority without hydrating message bodies or archived chats.
+            for (let observation = 0; observation < 2; observation++) {
+              const snapshot = yield* projectionSnapshotQuery.getShellSnapshot();
+              const sessions: ProviderQuotaAuthority["sessions"][number][] = [];
+              for (const thread of snapshot.threads) {
+                const runtimeId = thread.session?.subagentRuntimeId;
+                if (
+                  thread.archivedAt !== null ||
+                  thread.deletedAt !== null ||
+                  thread.modelSelection.instanceId !== input.instanceId ||
+                  thread.session?.providerName !== "claudeAgent" ||
+                  thread.session.providerInstanceId !== input.instanceId ||
+                  !runtimeId ||
+                  thread.session.status === "stopped" ||
+                  thread.session.status === "error" ||
+                  (input.session &&
+                    (thread.id !== input.session.threadId || runtimeId !== input.session.runtimeId))
+                )
+                  continue;
+                const project = snapshot.projects.find((entry) => entry.id === thread.projectId);
+                const cwd =
+                  thread.projectId === null
+                    ? yield* standaloneWorkspaces.readExisting(thread.id)
+                    : project
+                      ? (thread.worktreePath ?? project.workspaceRoot)
+                      : undefined;
+                if (cwd) sessions.push({ threadId: thread.id, runtimeId, cwd });
+              }
+              // A sequence is only an assembly-coherence fence: an unrelated
+              // chat advancing the projection is not a new quota authority.
+              // Reobserve this metadata once if asynchronous cwd resolution
+              // crossed a revision. Relevant ABA is fenced by the subscribed
+              // invalidation generation, not global sequence equality.
+              const current = yield* projectionSnapshotQuery.getSnapshotSequence();
+              if (current.snapshotSequence !== snapshot.snapshotSequence) continue;
+              sessions.sort((left, right) => left.threadId.localeCompare(right.threadId));
+              return { configuration, snapshotSequence: snapshot.snapshotSequence, sessions };
+            }
+            return undefined;
+          }).pipe(Effect.catchCause(() => Effect.succeed(undefined)));
+          // This is a read-only, volatile stream: report values never enter a
+          // command ledger, activity event, durable status cache or RPC trace.
+          return subscribeProviderQuota(
+            readBoundProviderQuota(input, resolveAuthority, providerService.listSessions()),
+            [
+              providerService.streamEvents.pipe(
+                Stream.filter(
+                  (event) =>
+                    event.provider === "claudeAgent" &&
+                    event.providerInstanceId === input.instanceId &&
+                    (!input.session || event.threadId === input.session.threadId) &&
+                    (event.type === "session.configured" ||
+                      event.type === "session.started" ||
+                      event.type === "session.exited"),
+                ),
+              ),
+              serverSettings.streamChanges,
+              orchestrationEngine.streamDomainEvents.pipe(
+                Stream.filter(
+                  (event) =>
+                    event.aggregateKind === "project" ||
+                    ((!input.session || event.aggregateId === input.session.threadId) &&
+                      (event.type === "thread.created" ||
+                        event.type === "thread.restored" ||
+                        event.type === "thread.unarchived" ||
+                        event.type === "thread.session-set" ||
+                        event.type === "thread.meta-updated" ||
+                        event.type === "thread.deleted" ||
+                        event.type === "thread.archived")),
+                ),
+              ),
+            ],
+          ).pipe(Stream.provideService(References.TracerEnabled, false));
         },
         [WS_METHODS.serverListProviderSkills]: (input) =>
           observeRpcEffect(

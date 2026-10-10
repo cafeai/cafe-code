@@ -18,6 +18,18 @@ Local `auth status` establishes that login material is available; it does not pr
 
 The selected configuration scope also determines whether Claude reads `~/.claude/.claude.json` or `~/.claude.json`. Cafe's MCP installer retains both default targets. It does not merge unrelated user configuration between those files.
 
+## Passive quota diagnostics
+
+Claude quota presentation does not add an authentication probe or choose a new
+credential store. It displays bounded structured reports received from an
+existing query after a user-requested native `/usage`, when supported by that
+runtime. Source-session/configuration binding is not a stable authenticated
+principal: the UI explicitly calls this a session-reported observation and shows
+receipt/freshness information. No independent Refresh, experimental usage getter,
+inspection query, credential read or billing change is introduced. See the
+[quota report decision](decisions/claude-account-quota-report.md) for privacy,
+ownership, compatibility and integration-policy limits.
+
 Default tests use synthetic status output and in-memory child handles. Focused qualification:
 
 ```sh

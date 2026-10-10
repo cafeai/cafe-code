@@ -8,6 +8,7 @@ import { stackedThreadToast, toastManager } from "./ui/toast";
 import { ContentSidebarTriggerWithUnreadDot } from "./sidebar/unseenCompletions";
 import { useNewThreadHandler } from "../hooks/useHandleNewThread";
 import { isElectron } from "../env";
+import { useMacDesktopTitlebar } from "../hooks/useMacDesktopTitlebar";
 import { cn } from "~/lib/utils";
 
 /**
@@ -20,6 +21,7 @@ export function NoActiveThreadState({
 }: {
   readonly secondaryActions?: ReactNode;
 } = {}) {
+  const isMacDesktopTitlebar = useMacDesktopTitlebar();
   const { handleNewStandaloneChat } = useNewThreadHandler();
   const startNewChat = () => {
     void handleNewStandaloneChat().catch((error: unknown) => {
@@ -39,6 +41,7 @@ export function NoActiveThreadState({
         {/* The header only carries the sidebar trigger and window chrome; the
             empty state below names the view once. */}
         <header
+          data-mac-titlebar={isMacDesktopTitlebar}
           className={cn(
             "border-b border-border px-3 sm:px-5",
             isElectron

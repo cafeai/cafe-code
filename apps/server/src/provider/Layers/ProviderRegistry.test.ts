@@ -76,6 +76,7 @@ import { ProviderInstanceRegistryMutator } from "../Services/ProviderInstanceReg
 import { ProviderRegistry } from "../Services/ProviderRegistry.ts";
 import { makeManualOnlyProviderMaintenanceCapabilities } from "../providerMaintenance.ts";
 import { parseCodexRateLimitUpdate } from "../codexRateLimits.ts";
+import { supportsSubagentConcurrency } from "../Drivers/SubagentConcurrency.ts";
 const decodeServerSettings = Schema.decodeSync(ServerSettings);
 const decodeCodexSettings = Schema.decodeSync(CodexSettings);
 const encodeServerSettings = Schema.encodeSync(ServerSettings);
@@ -3202,6 +3203,65 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsService.layerTest(), T
     // ── checkClaudeProviderStatus tests ──────────────────────────
 
     describe("checkClaudeProviderStatus", () => {
+      it.effect("rejects failed version output as native concurrency evidence", () =>
+        Effect.gen(function* () {
+          const calls: string[] = [];
+          let capabilityProbeCalls = 0;
+          const status = yield* checkClaudeProviderStatus(
+            defaultClaudeSettings,
+            () =>
+              Effect.sync(() => {
+                capabilityProbeCalls += 1;
+                return undefined;
+              }),
+            {},
+          ).pipe(
+            Effect.provide(
+              mockSpawnerLayer((args) => {
+                calls.push(args.join(" "));
+                return {
+                  stdout: "2.1.288\n",
+                  stderr: "synthetic-private-version-failure-marker",
+                  code: 1,
+                };
+              }),
+            ),
+          );
+          assert.strictEqual(supportsSubagentConcurrency("claudeAgent", status.version), false);
+          assert.strictEqual(status.version, null);
+          assert.strictEqual(status.installed, true);
+          assert.strictEqual(status.status, "error");
+          assert.strictEqual(status.auth.status, "unknown");
+          assert.strictEqual(capabilityProbeCalls, 0);
+          assert.deepStrictEqual(calls, ["--version"]);
+        }),
+      );
+
+      it.effect("does not publish failed version stdout or stderr as repair guidance", () =>
+        Effect.gen(function* () {
+          const status = yield* checkClaudeProviderStatus(
+            defaultClaudeSettings,
+            undefined,
+            {},
+          ).pipe(
+            Effect.provide(
+              mockSpawnerLayer(() => ({
+                stdout: "Node.js 24.21.0 synthetic-private-stdout-marker\n",
+                stderr: "dependency 2.1.288 synthetic-private-stderr-marker\n",
+                code: 1,
+              })),
+            ),
+          );
+          assert.strictEqual(
+            status.message,
+            "Claude Agent CLI is installed but failed to run. Check its installation and the binary selected in provider settings.",
+          );
+          assert.notInclude(JSON.stringify(status), "synthetic-private-");
+          assert.strictEqual(status.version, null);
+          assert.strictEqual(supportsSubagentConcurrency("claudeAgent", status.version), false);
+        }),
+      );
+
       it.effect("returns ready when claude is installed and authenticated", () =>
         Effect.gen(function* () {
           const status = yield* checkClaudeProviderStatus(
@@ -3239,12 +3299,16 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsService.layerTest(), T
           assert.strictEqual(status.status, "error");
           assert.strictEqual(status.installed, true);
           assert.strictEqual(status.auth.status, "unauthenticated");
+          // Authentication loss does not revoke independently successful native
+          // version evidence. The support bit is not proof of authentication.
+          assert.strictEqual(status.version, "2.1.288");
+          assert.strictEqual(supportsSubagentConcurrency("claudeAgent", status.version), true);
           assert.include(String(status.message), "/login");
         }).pipe(
           Effect.provide(
             mockSpawnerLayer((args) => {
               const joined = args.join(" ");
-              if (joined === "--version") return { stdout: "2.1.198\n", stderr: "", code: 0 };
+              if (joined === "--version") return { stdout: "2.1.288\n", stderr: "", code: 0 };
               throw new Error(`Unexpected args: ${joined}`);
             }),
           ),
@@ -3501,6 +3565,10 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsService.layerTest(), T
           (model) => model.slug === "claude-opus-5-5",
         );
         const opus55Descriptors = opus55?.capabilities?.optionDescriptors ?? [];
+        assert.equal(
+          opus55Descriptors.some((descriptor) => descriptor.id === "ultracode"),
+          false,
+        );
         const opus55Effort = opus55Descriptors.find((descriptor) => descriptor.id === "effort");
         assert.deepStrictEqual(
           opus55Effort?.type === "select"
@@ -3533,6 +3601,41 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsService.layerTest(), T
           (model) => model.slug === "claude-sonnet-5-5",
         );
         const sonnet55Descriptors = sonnet55?.capabilities?.optionDescriptors ?? [];
+        assert.equal(
+          sonnet55Descriptors.some(
+            (descriptor) => descriptor.id === "ultracode" && descriptor.type === "boolean",
+          ),
+          true,
+        );
+        const qualifiedUltraModels = getBuiltInClaudeModelsForVersion("2.1.288").filter((model) =>
+          model.capabilities?.optionDescriptors?.some(
+            (descriptor) => descriptor.id === "ultracode",
+          ),
+        );
+        assert.isAbove(qualifiedUltraModels.length, 0);
+        for (const model of qualifiedUltraModels) {
+          const effort = model.capabilities?.optionDescriptors?.find(
+            (descriptor) => descriptor.id === "effort",
+          );
+          assert.equal(
+            effort?.type === "select" && effort.options.some((option) => option.id === "xhigh"),
+            true,
+          );
+          assert.equal(
+            effort?.type === "select" && effort.options.some((option) => option.id === "ultracode"),
+            false,
+          );
+        }
+        for (const version of [undefined, "unknown", "2.1.283"]) {
+          assert.equal(
+            getBuiltInClaudeModelsForVersion(version).some((model) =>
+              model.capabilities?.optionDescriptors?.some(
+                (descriptor) => descriptor.id === "ultracode",
+              ),
+            ),
+            false,
+          );
+        }
         const sonnet55Effort = sonnet55Descriptors.find((descriptor) => descriptor.id === "effort");
         assert.deepStrictEqual(
           sonnet55Effort?.type === "select"
@@ -3658,6 +3761,35 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsService.layerTest(), T
           );
         }).pipe(Effect.provide(recorded.layer));
       });
+
+      it.effect(
+        "keeps Claude status probes on inherited output policy rather than the chat cap",
+        () => {
+          const recorded = recordingMockSpawnerLayer((args) => {
+            assert.deepEqual(args, ["--version"]);
+            return { stdout: "2.1.288\n", stderr: "", code: 0 };
+          });
+          const parent = Object.freeze({ CLAUDE_CODE_MAX_OUTPUT_TOKENS: "32000" });
+          return Effect.gen(function* () {
+            const path = yield* Path.Path;
+            const status = yield* checkClaudeProviderStatus(
+              {
+                ...defaultClaudeSettings,
+                homePath: path.resolve("synthetic-claude-status-home"),
+                maxOutputTokens: 128_000,
+              },
+              claudeCapabilities(),
+              parent,
+            );
+            assert.equal(status.status, "ready");
+            assert.deepEqual(
+              recorded.commands.map((command) => command.env?.CLAUDE_CODE_MAX_OUTPUT_TOKENS),
+              ["32000"],
+            );
+            assert.equal(parent.CLAUDE_CODE_MAX_OUTPUT_TOKENS, "32000");
+          }).pipe(Effect.provide(recorded.layer));
+        },
+      );
 
       it.effect("includes probed claude slash commands in the provider snapshot", () =>
         Effect.gen(function* () {

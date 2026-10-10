@@ -31,15 +31,15 @@ import {
 import {
   buildServerProvider,
   DEFAULT_TIMEOUT_MS,
-  detailFromResult,
   isCommandMissingCause,
   parseGenericCliVersion,
   providerModelsFromSettings,
   spawnAndCollect,
   type ServerProviderDraft,
 } from "../providerSnapshot.ts";
-import { makeClaudeEnvironment } from "../Drivers/ClaudeHome.ts";
+import { makeClaudeNonChatEnvironment } from "../Drivers/ClaudeHome.ts";
 import {
+  gateClaudeUltracodeCapabilities,
   normalizeClaudeNativeModels,
   reconcileClaudeModels,
   type ClaudeNativeModel,
@@ -96,7 +96,20 @@ function decodeClaudeModelCatalog(raw: unknown) {
   const decodedModels = models.map((rawModel) => {
     const model = decodeVersionedClaudeModel(rawModel);
     const modelOptionDescriptors = model.capabilities?.optionDescriptors ?? [];
-    const optionDescriptors = [...modelOptionDescriptors, ...sharedOptionDescriptors];
+    // The catalog owns the shared presentation, but standing workflows need
+    // xhigh-capable models. The executable version is qualified separately.
+    const supportsXhigh = modelOptionDescriptors.some(
+      (descriptor) =>
+        descriptor.id === "effort" &&
+        descriptor.type === "select" &&
+        descriptor.options.some((option) => option.id === "xhigh"),
+    );
+    const optionDescriptors = [
+      ...modelOptionDescriptors,
+      ...sharedOptionDescriptors.filter(
+        (descriptor) => descriptor.id !== "ultracode" || supportsXhigh,
+      ),
+    ];
     const optionIds = new Set<string>();
     for (const descriptor of optionDescriptors) {
       if (optionIds.has(descriptor.id)) {
@@ -137,7 +150,9 @@ const BUILT_IN_MODELS: ReadonlyArray<ServerProviderModel> = VERSIONED_BUILT_IN_M
 const DEFAULT_CLAUDE_MODEL_CAPABILITIES: ModelCapabilities = createModelCapabilities({
   // Output style and SDK progress policy are provider-wide controls, so keep
   // them available even when a user enters a custom Claude model slug.
-  optionDescriptors: DECODED_CLAUDE_MODEL_CATALOG.sharedOptionDescriptors,
+  optionDescriptors: DECODED_CLAUDE_MODEL_CATALOG.sharedOptionDescriptors.filter(
+    (descriptor) => descriptor.id !== "ultracode",
+  ),
 });
 
 function isClaudeModelSupportedByVersion(
@@ -154,7 +169,12 @@ export function getBuiltInClaudeModelsForVersion(
 ): ReadonlyArray<ServerProviderModel> {
   return VERSIONED_BUILT_IN_MODELS.filter((model) =>
     isClaudeModelSupportedByVersion(model, version),
-  ).map(({ minimumClaudeCodeVersion: _minimumClaudeCodeVersion, ...model }) => model);
+  ).map(({ minimumClaudeCodeVersion: _minimumClaudeCodeVersion, ...model }) => ({
+    ...model,
+    capabilities: model.capabilities
+      ? gateClaudeUltracodeCapabilities(model.capabilities, version)
+      : model.capabilities,
+  }));
 }
 
 export function formatClaudeModelUpgradeMessage(version: string | null): string | undefined {
@@ -484,7 +504,7 @@ const probeClaudeCapabilities = (
 ) => {
   const abort = new AbortController();
   return Effect.gen(function* () {
-    const claudeEnvironment = yield* makeClaudeEnvironment(claudeSettings, environment);
+    const claudeEnvironment = yield* makeClaudeNonChatEnvironment(claudeSettings, environment);
     return yield* Effect.tryPromise(async () => {
       const q = claudeQuery({
         // Never yield — we only need initialization data, not a conversation.
@@ -539,7 +559,7 @@ const runClaudeCommand = Effect.fn("runClaudeCommand")(function* (
   args: ReadonlyArray<string>,
   environment: NodeJS.ProcessEnv = process.env,
 ) {
-  const claudeEnvironment = yield* makeClaudeEnvironment(claudeSettings, environment);
+  const claudeEnvironment = yield* makeClaudeNonChatEnvironment(claudeSettings, environment);
   const command = ChildProcess.make(claudeSettings.binaryPath, [...args], {
     env: claudeEnvironment,
     shell: process.platform === "win32",
@@ -634,9 +654,7 @@ export const checkClaudeProviderStatus = Effect.fn("checkClaudeProviderStatus")(
   }
 
   const version = versionProbe.success.value;
-  const parsedVersion = parseGenericCliVersion(`${version.stdout}\n${version.stderr}`);
   if (version.code !== 0) {
-    const detail = detailFromResult(version);
     return buildServerProvider({
       presentation: CLAUDE_PRESENTATION,
       enabled: claudeSettings.enabled,
@@ -644,15 +662,18 @@ export const checkClaudeProviderStatus = Effect.fn("checkClaudeProviderStatus")(
       models: allModels,
       probe: {
         installed: true,
-        version: parsedVersion,
+        // A failed launcher can print dependency versions or private output.
+        // Only a successful --version result can establish native capability
+        // evidence; keep failed output out of both status and repair guidance.
+        version: null,
         status: "error",
         auth: { status: "unknown" },
-        message: detail
-          ? `Claude Agent CLI is installed but failed to run. ${detail}`
-          : "Claude Agent CLI is installed but failed to run.",
+        message:
+          "Claude Agent CLI is installed but failed to run. Check its installation and the binary selected in provider settings.",
       },
     });
   }
+  const parsedVersion = parseGenericCliVersion(`${version.stdout}\n${version.stderr}`);
 
   const models = providerModelsFromSettings(
     getBuiltInClaudeModelsForVersion(parsedVersion),
@@ -711,7 +732,16 @@ export const checkClaudeProviderStatus = Effect.fn("checkClaudeProviderStatus")(
     presentation: CLAUDE_PRESENTATION,
     enabled: claudeSettings.enabled,
     checkedAt,
-    models: reconcileClaudeModels(models, capabilities.models, DEFAULT_CLAUDE_MODEL_CAPABILITIES),
+    models: reconcileClaudeModels(
+      models,
+      capabilities.models,
+      DEFAULT_CLAUDE_MODEL_CAPABILITIES,
+    ).map((model) => ({
+      ...model,
+      capabilities: model.capabilities
+        ? gateClaudeUltracodeCapabilities(model.capabilities, parsedVersion)
+        : model.capabilities,
+    })),
     slashCommands: dedupedSlashCommands,
     probe: {
       installed: true,

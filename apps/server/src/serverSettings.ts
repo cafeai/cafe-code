@@ -15,6 +15,8 @@ import {
   DEFAULT_GIT_TEXT_GENERATION_MODEL_BY_PROVIDER,
   DEFAULT_GIT_TEXT_GENERATION_REASONING_EFFORT,
   DEFAULT_SERVER_SETTINGS,
+  CLAUDE_MAX_OUTPUT_TOKENS,
+  ClaudeMaxOutputTokens,
   isProviderDriverKind,
   isRetiredProviderDriverKind,
   type ModelSelection,
@@ -59,18 +61,59 @@ const decodeServerSettings = Schema.decodeUnknownEffect(ServerSettings);
 const textEncoder = new TextEncoder();
 const textDecoder = new TextDecoder();
 
+const isClaudeMaxOutputTokens = Schema.is(ClaudeMaxOutputTokens);
+
+/**
+ * Keep the open driver-config envelope intact while enforcing the one typed
+ * Claude chat budget at settings read/write boundaries. The registry remains
+ * responsible for every other driver-owned setting and unknown-driver payload.
+ * Reject before secret persistence or settings publication, with a fixed error
+ * that cannot echo a malformed value or the surrounding credential-bearing
+ * instance config.
+ */
+const validateClaudeOutputCaps = (
+  settings: ServerSettings,
+  settingsPath = "<memory>",
+): Effect.Effect<ServerSettings, ServerSettingsError> => {
+  const legacyCap = settings.providers.claudeAgent.maxOutputTokens;
+  const invalidInstanceCap = Object.values(settings.providerInstances).some((instance) => {
+    if (
+      instance.driver !== "claudeAgent" ||
+      instance.config === null ||
+      typeof instance.config !== "object"
+    ) {
+      return false;
+    }
+    const config = instance.config as Record<string, unknown>;
+    return config.maxOutputTokens !== undefined && !isClaudeMaxOutputTokens(config.maxOutputTokens);
+  });
+  if ((legacyCap !== undefined && !isClaudeMaxOutputTokens(legacyCap)) || invalidInstanceCap) {
+    return Effect.fail(
+      new ServerSettingsError({
+        settingsPath,
+        detail: `Claude maximum response tokens must be an integer between 1 and ${CLAUDE_MAX_OUTPUT_TOKENS}.`,
+      }),
+    );
+  }
+  return Effect.succeed(settings);
+};
+
 const normalizeServerSettings = (
   settings: ServerSettings,
 ): Effect.Effect<ServerSettings, ServerSettingsError> =>
-  encodeServerSettings(settings).pipe(
-    Effect.flatMap(decodeServerSettings),
-    Effect.mapError(
-      (cause) =>
-        new ServerSettingsError({
-          settingsPath: "<memory>",
-          detail: `failed to normalize server settings: ${SchemaIssue.makeFormatterDefault()(cause.issue)}`,
-          cause,
-        }),
+  validateClaudeOutputCaps(settings).pipe(
+    Effect.flatMap((validated) =>
+      encodeServerSettings(validated).pipe(
+        Effect.flatMap(decodeServerSettings),
+        Effect.mapError(
+          (cause) =>
+            new ServerSettingsError({
+              settingsPath: "<memory>",
+              detail: `failed to normalize server settings: ${SchemaIssue.makeFormatterDefault()(cause.issue)}`,
+              cause,
+            }),
+        ),
+      ),
     ),
   );
 
@@ -389,7 +432,10 @@ const makeServerSettings = Effect.gen(function* () {
       });
       return DEFAULT_SERVER_SETTINGS;
     }
-    return stripRetiredProviderInstances(decoded.value);
+    return yield* validateClaudeOutputCaps(
+      stripRetiredProviderInstances(decoded.value),
+      settingsPath,
+    );
   });
 
   const settingsCache = yield* Cache.make<typeof cacheKey, ServerSettings, ServerSettingsError>({
@@ -805,10 +851,11 @@ const makeServerSettings = Effect.gen(function* () {
       writeSemaphore.withPermits(1)(
         Effect.gen(function* () {
           const current = yield* getSettingsFromCache;
-          const nextWithProviderSecrets = yield* persistOpenCodeServerPasswords(
-            current,
+          const candidate = yield* validateClaudeOutputCaps(
             stripRetiredProviderInstances(applyServerSettingsPatch(current, patch)),
+            settingsPath,
           );
+          const nextWithProviderSecrets = yield* persistOpenCodeServerPasswords(current, candidate);
           const nextPersisted = yield* persistProviderEnvironmentSecrets(
             current,
             nextWithProviderSecrets,

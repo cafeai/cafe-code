@@ -13,9 +13,10 @@ import * as Schema from "effect/Schema";
 export function resolveSubagentConcurrencyPolicy(input: {
   readonly driver: string;
   readonly limits?: SubagentLimits;
+  readonly instanceDefaultMaxConcurrentSubagents?: unknown;
   readonly instanceConfig?: unknown;
 }): { readonly requested: number | undefined; readonly configured: number | null } {
-  const requested =
+  const override =
     input.driver === "codex"
       ? input.limits?.codex
       : input.driver === "claudeAgent"
@@ -23,6 +24,18 @@ export function resolveSubagentConcurrencyPolicy(input: {
         : undefined;
   const config = input.instanceConfig;
   const supportedDriver = input.driver === "codex" || input.driver === "claudeAgent";
+  // The account preference is live inherited intent, not a value to copy into
+  // this chat's durable override map. Keep it distinct from legacy native
+  // configuration: an explicit account preference must trigger qualified
+  // capability admission and safe materialization even for an old session
+  // whose process policy was never recorded. Malformed values cannot become
+  // native argv/environment values if this helper receives untrusted input.
+  const accountDefault =
+    supportedDriver &&
+    Schema.is(MaxConcurrentSubagents)(input.instanceDefaultMaxConcurrentSubagents)
+      ? input.instanceDefaultMaxConcurrentSubagents
+      : undefined;
+  const requested = override ?? accountDefault;
   const legacy =
     supportedDriver &&
     config !== null &&

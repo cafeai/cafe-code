@@ -6,6 +6,8 @@ import {
 } from "@cafecode/contracts";
 import {
   configuredInstanceSubagentLimit,
+  effectiveSubagentLimit,
+  inheritedInstanceSubagentPolicy,
   deriveSubagentConcurrencyPresentation,
   formatSubagentConcurrencyLimit,
   subagentLimitKey,
@@ -70,7 +72,7 @@ describe("subagent concurrency policy", () => {
       })?.configured,
     ).toBeUndefined();
   });
-  it("does not treat the new-chat default as a legacy runtime override", () => {
+  it("keeps live account defaults distinct from legacy runtime configuration", () => {
     const id = ProviderInstanceId.make("codex_personal");
     const settings = {
       ...DEFAULT_UNIFIED_SETTINGS,
@@ -94,6 +96,120 @@ describe("subagent concurrency policy", () => {
     ).toBeUndefined();
   });
 
+  it("inherits live account policy without overwriting explicit chat intent", () => {
+    const id = ProviderInstanceId.make("codex_personal");
+    const settings = (limit: number | undefined) => ({
+      ...DEFAULT_UNIFIED_SETTINGS,
+      providerInstances: {
+        [id]: {
+          driver: codex,
+          ...(limit !== undefined ? { defaultMaxConcurrentSubagents: limit } : {}),
+          config: { maxConcurrentSubagents: 6 },
+        },
+      },
+    });
+    const resolve = (
+      limit: number | undefined,
+      limits: { codex?: number; claude?: number } | undefined,
+    ) =>
+      effectiveSubagentLimit({
+        settings: settings(limit),
+        instanceId: id,
+        provider: codex,
+        limits,
+      });
+    expect(resolve(12, undefined)).toBe(12);
+    expect(resolve(24, undefined)).toBe(24);
+    expect(resolve(24, {})).toBe(24);
+    expect(resolve(24, { codex: 5 })).toBe(5);
+    expect(resolve(24, { claude: 20 })).toBe(24);
+    expect(resolve(undefined, {})).toBe(6);
+    expect(inheritedInstanceSubagentPolicy(settings(24), id, codex)).toEqual({
+      limit: 24,
+      source: "Account default",
+    });
+    expect(inheritedInstanceSubagentPolicy(settings(undefined), id, codex)).toEqual({
+      limit: 6,
+      source: "Legacy instance configuration",
+    });
+  });
+
+  it("never borrows another account, disabled envelope or wrong-driver numeric default", () => {
+    const own = ProviderInstanceId.make("codex-own");
+    const peer = ProviderInstanceId.make("codex-peer");
+    const settings = {
+      ...DEFAULT_UNIFIED_SETTINGS,
+      providerInstances: {
+        [own]: { driver: codex, defaultMaxConcurrentSubagents: 12 },
+        [peer]: { driver: codex, defaultMaxConcurrentSubagents: 64 },
+      },
+    };
+    expect(inheritedInstanceSubagentPolicy(settings, own, codex).limit).toBe(12);
+    expect(inheritedInstanceSubagentPolicy(settings, peer, codex).limit).toBe(64);
+    for (const instance of [
+      {
+        driver: codex,
+        enabled: false,
+        defaultMaxConcurrentSubagents: 15,
+        config: { maxConcurrentSubagents: 5 },
+      },
+      { driver: claude, defaultMaxConcurrentSubagents: 15, config: { maxConcurrentSubagents: 5 } },
+    ]) {
+      expect(
+        inheritedInstanceSubagentPolicy(
+          { ...settings, providerInstances: { ...settings.providerInstances, [own]: instance } },
+          own,
+          codex,
+        ).limit,
+      ).toBeUndefined();
+    }
+    expect(
+      inheritedInstanceSubagentPolicy(settings, ProviderInstanceId.make("absent"), codex).limit,
+    ).toBeUndefined();
+    expect(inheritedInstanceSubagentPolicy(settings, own, claude).limit).toBeUndefined();
+  });
+
+  it("exposes account source and pending materialization while preserving unknown native defaults", () => {
+    const presentation = (
+      inheritedLimit: number | undefined,
+      configuredLimit: number | null | undefined,
+      limits = {},
+    ) =>
+      deriveSubagentConcurrencyPresentation({
+        provider: codex,
+        limits,
+        inheritedLimit,
+        inheritedSource: "Account default",
+        configuredLimit,
+      });
+    expect(presentation(12, 12)).toEqual({
+      requested: 12,
+      configured: 12,
+      source: "Account default",
+      pending: false,
+    });
+    expect(presentation(24, 12)).toEqual({
+      requested: 24,
+      configured: 12,
+      source: "Account default",
+      pending: true,
+    });
+    expect(presentation(24, 24)?.pending).toBe(false);
+    expect(presentation(24, 12, { codex: 5 })).toMatchObject({
+      requested: 5,
+      source: "Chat override",
+      pending: true,
+    });
+    expect(presentation(undefined, 12)).toMatchObject({
+      requested: undefined,
+      source: "Provider / inherited default",
+      pending: true,
+    });
+    expect(formatSubagentConcurrencyLimit(presentation(undefined, 12))).toBe(
+      "Subagent limit: 12 → Provider default when idle",
+    );
+  });
+
   it("shows the saved chat limit while a provider-managed session is still pending", () => {
     const presentation = deriveSubagentConcurrencyPresentation({
       provider: codex,
@@ -101,9 +217,11 @@ describe("subagent concurrency policy", () => {
       inheritedLimit: undefined,
       configuredLimit: null,
     })!;
-    expect(formatSubagentConcurrencyLimit(presentation)).toBe("Subagent limit: 5");
+    expect(formatSubagentConcurrencyLimit(presentation)).toBe(
+      "Subagent limit: Provider default → 5 when idle",
+    );
     expect(formatSubagentConcurrencyLimit({ ...presentation, configured: 3 })).toBe(
-      "Subagent limit: 5",
+      "Subagent limit: 3 → 5 when idle",
     );
   });
 
@@ -126,7 +244,9 @@ describe("subagent concurrency policy", () => {
         inheritedLimit: undefined,
         configuredLimit,
       })!;
-      expect(formatSubagentConcurrencyLimit(presentation)).toBeNull();
+      expect(formatSubagentConcurrencyLimit(presentation)).toBe(
+        configuredLimit === 8 ? "Subagent limit: 8 → Provider default when idle" : null,
+      );
     },
   );
 
@@ -137,7 +257,7 @@ describe("subagent concurrency policy", () => {
       inheritedLimit: undefined,
       configuredLimit: undefined,
     })!;
-    expect(formatSubagentConcurrencyLimit(presentation)).toBe("Subagent limit: 12");
+    expect(formatSubagentConcurrencyLimit(presentation)).toBe("Subagent limit: 12 · saved");
   });
 
   it.each([null, undefined])("omits missing presentation %s", (presentation) => {

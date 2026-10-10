@@ -12,6 +12,7 @@ import {
   type TurnId,
 } from "@cafecode/contracts";
 import { CODEX_HISTORY_RECOVERY_REQUIRED_MESSAGE } from "@cafecode/shared/codexHistorySafety";
+import { CLAUDE_RESPONSE_LIMIT_MESSAGE } from "@cafecode/shared/claudeResponseLimits";
 
 vi.mock("../../localApi", () => ({
   ensureLocalApi: () => ({
@@ -130,7 +131,107 @@ function StoreThreadErrorBanner({ mountKey }: { mountKey: string }) {
   );
 }
 
+function seedClaudeResponseLimitFailure() {
+  seedFailure(ENV, FIRST_FAILURE, undefined, THREAD, CLAUDE_RESPONSE_LIMIT_MESSAGE);
+  useStore.setState((state) => {
+    const environment = selectEnvironmentState(state, ENV);
+    const summary = environment.sidebarThreadSummaryById[THREAD]!;
+    const session = {
+      ...summary.session!,
+      provider: ProviderDriverKind.make("claudeAgent"),
+      providerInstanceId: ProviderInstanceId.make("claudeAgent"),
+    };
+    return {
+      environmentStateById: {
+        ...state.environmentStateById,
+        [ENV]: {
+          ...environment,
+          threadSessionById: { ...environment.threadSessionById, [THREAD]: session },
+          sidebarThreadSummaryById: {
+            ...environment.sidebarThreadSummaryById,
+            [THREAD]: {
+              ...summary,
+              session,
+              latestTurn: {
+                turnId: "claude-failed-turn" as TurnId,
+                state: "error",
+                requestedAt: FIRST_FAILURE,
+                startedAt: FIRST_FAILURE,
+                completedAt: FIRST_FAILURE,
+                assistantMessageId: null,
+              },
+            },
+          },
+        },
+      },
+    };
+  });
+}
+
 describe("ThreadErrorBanner", () => {
+  it("offers classified Claude draft preparation with explicit review guidance and no dismissal", async () => {
+    seedClaudeResponseLimitFailure();
+    const prepare = vi.fn();
+    const props = {
+      error: CLAUDE_RESPONSE_LIMIT_MESSAGE,
+      scopeKey: "local/thread-1",
+      environmentId: ENV,
+      threadId: THREAD,
+      onPrepareShorterResponse: prepare,
+    };
+    const screen = await render(<ThreadErrorBanner {...props} canPrepareShorterResponse />);
+    try {
+      await expect
+        .element(page.getByText("Review effort, then send from the composer."))
+        .toBeVisible();
+      expect(prepare).not.toHaveBeenCalled();
+      await page.getByRole("button", { name: "Prepare shorter response" }).click();
+      expect(prepare).toHaveBeenCalledOnce();
+      await expect.element(page.getByText(CLAUDE_RESPONSE_LIMIT_MESSAGE)).toBeVisible();
+      expect(getClientSettingsSnapshot().dismissedTaskAtriumErrors).toEqual([]);
+      await screen.rerender(<ThreadErrorBanner {...props} canPrepareShorterResponse={false} />);
+      await expect
+        .element(page.getByRole("button", { name: "Prepare shorter response" }))
+        .toBeDisabled();
+      expect(prepare).toHaveBeenCalledOnce();
+    } finally {
+      await screen.unmount();
+    }
+  });
+
+  it("does not expose Claude preparation for lookalike, local or different-provider errors", async () => {
+    seedClaudeResponseLimitFailure();
+    const prepare = vi.fn();
+    const props = {
+      scopeKey: "local/thread-1",
+      environmentId: ENV,
+      threadId: THREAD,
+      onPrepareShorterResponse: prepare,
+      canPrepareShorterResponse: true,
+    };
+    const screen = await render(
+      <ThreadErrorBanner {...props} error="Response exceeded 64000 tokens" />,
+    );
+    try {
+      await expect
+        .element(page.getByRole("button", { name: "Prepare shorter response" }))
+        .not.toBeInTheDocument();
+      await screen.rerender(
+        <ThreadErrorBanner {...props} error={`${CLAUDE_RESPONSE_LIMIT_MESSAGE} extra`} />,
+      );
+      await expect
+        .element(page.getByRole("button", { name: "Prepare shorter response" }))
+        .not.toBeInTheDocument();
+      seedFailure(ENV, LATER_FAILURE, undefined, THREAD, CLAUDE_RESPONSE_LIMIT_MESSAGE);
+      await screen.rerender(<ThreadErrorBanner {...props} error={CLAUDE_RESPONSE_LIMIT_MESSAGE} />);
+      await expect
+        .element(page.getByRole("button", { name: "Prepare shorter response" }))
+        .not.toBeInTheDocument();
+      expect(prepare).not.toHaveBeenCalled();
+    } finally {
+      await screen.unmount();
+    }
+  });
   it.each([
     { error: "Codex App Server exited unexpectedly.", turnId: undefined },
     { error: "Synthetic provider error", turnId: "turn-1" as TurnId },

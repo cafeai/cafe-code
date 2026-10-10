@@ -44,7 +44,7 @@ import {
   resolveClaudeApiModelId,
   resolveClaudeEffort,
 } from "../provider/Layers/ClaudeProvider.ts";
-import { makeClaudeEnvironment } from "../provider/Drivers/ClaudeHome.ts";
+import { makeClaudeNonChatEnvironment } from "../provider/Drivers/ClaudeHome.ts";
 import { AuxiliaryUsage } from "../usageStats/Services/AuxiliaryUsage.ts";
 import { readClaudeAuxiliaryUsage } from "./auxiliaryUsage.ts";
 
@@ -68,7 +68,10 @@ export const makeClaudeTextGeneration = Effect.fn("makeClaudeTextGeneration")(fu
 ) {
   const commandSpawner = yield* ChildProcessSpawner.ChildProcessSpawner;
   const auxiliaryUsage = yield* Effect.serviceOption(AuxiliaryUsage);
-  const claudeEnvironment = yield* makeClaudeEnvironment(claudeSettings, environment);
+  // The interactive account's response budget must not silently inflate title,
+  // branch or metadata generation. Preserve inherited environment policy, but
+  // omit the typed chat-only cap both here and in the shared login resolver.
+  const claudeEnvironment = yield* makeClaudeNonChatEnvironment(claudeSettings, environment);
 
   const readStreamAsString = <E>(
     operation: string,

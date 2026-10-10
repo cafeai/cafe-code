@@ -74,6 +74,12 @@
 .desk-group-bar[data-desktop-titlebar="true"][data-window-right="true"] > .desk-icon {
   order: 1;
 }
+/* Native Mac controls do not grow with root-rem interface scaling. Keep this
+   more specific than the general desktop band so every top pane shares the
+   same vertical center as the sidebar, Settings and empty-state headers. */
+.desk-group-bar[data-desktop-titlebar="true"][data-mac-titlebar="true"] {
+  height: var(--app-mac-titlebar-height);
+}
 /* Native geometry describes the usable window titlebar. Subtract this pane's
    actual window-edge gaps so only controls overlapping it consume tab space. */
 .wco .desk-group-bar[data-desktop-titlebar="true"] {

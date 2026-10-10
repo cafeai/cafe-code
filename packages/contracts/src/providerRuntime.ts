@@ -302,6 +302,9 @@ const SessionConfiguredPayload = Schema.Struct({
   config: UnknownRecordSchema,
   // Content-free invalidation only: catalogs remain volatile session metadata.
   commandCatalogChanged: Schema.optional(Schema.Boolean),
+  // Only an invalidation crosses canonical/durable event paths. Quota values
+  // stay in the owner's volatile ProviderSession and the metadata subscription.
+  quotaReportChanged: Schema.optional(Schema.Boolean),
 });
 export type SessionConfiguredPayload = typeof SessionConfiguredPayload.Type;
 
@@ -502,13 +505,22 @@ const TurnStartedPayload = Schema.Struct({
 });
 export type TurnStartedPayload = typeof TurnStartedPayload.Type;
 
-const TurnCompletedPayload = Schema.Struct({
+// Content-free native failure evidence. These categories describe a terminal
+// Codex root, not a general permission to retry an arbitrary provider action.
+export const CodexTransientFailureCategory = Schema.Literals(["transport", "server", "rate-limit"]);
+export type CodexTransientFailureCategory = typeof CodexTransientFailureCategory.Type;
+
+export const TurnCompletedPayload = Schema.Struct({
   state: RuntimeTurnState,
   stopReason: Schema.optional(Schema.NullOr(TrimmedNonEmptyStringSchema)),
   usage: Schema.optional(Schema.Unknown),
   modelUsage: Schema.optional(UnknownRecordSchema),
   totalCostUsd: Schema.optional(Schema.Number),
   errorMessage: Schema.optional(TrimmedNonEmptyStringSchema),
+  codexTransientFailure: Schema.optional(CodexTransientFailureCategory),
+  // Only the native owner may emit this positive observation. Omission from
+  // older daemons or a closed/unknown context is never equivalent to true.
+  nativeContextAvailable: Schema.optional(Schema.Literal(true)),
 });
 export type TurnCompletedPayload = typeof TurnCompletedPayload.Type;
 
@@ -549,7 +561,13 @@ export const ItemLifecyclePayload = Schema.Struct({
   itemType: CanonicalItemType,
   status: Schema.optional(RuntimeItemStatus),
   title: Schema.optional(TrimmedNonEmptyStringSchema),
-  detail: Schema.optional(TrimmedNonEmptyStringSchema),
+  // Detail carries provider source text, not a normalized display label. This
+  // shared codec runs on journal publication/replay and remote event transport;
+  // trimming in either direction changes the UTF-16 stream commitment and can
+  // strand a valid completed message at its first projected chunk. Validate
+  // nonblank content without transforming a single source code unit. The same
+  // refinement also rejects blank values on encode, before durable publication.
+  detail: Schema.optional(Schema.String.check(Schema.isPattern(/\S/))),
   data: Schema.optional(Schema.Unknown),
 });
 export type ItemLifecyclePayload = typeof ItemLifecyclePayload.Type;
@@ -705,6 +723,70 @@ export type RuntimeResourceLink = typeof RuntimeResourceLink.Type;
 export const RuntimeResourceLinks = Schema.Array(RuntimeResourceLink).check(Schema.isMaxLength(50));
 export type RuntimeResourceLinks = typeof RuntimeResourceLinks.Type;
 
+const WorkflowIndex = Schema.Int.check(Schema.isBetween({ minimum: 1, maximum: 10_000 }));
+// This is already canonical display metadata, not source text. Reject unsafe
+// boundary characters before any trim transform could make them disappear.
+const WorkflowLabel = Schema.String.check(
+  Schema.isMaxLength(240),
+  Schema.isPattern(/^[^\p{Cc}\p{Cf}\p{Zl}\p{Zp}]+$/u),
+  Schema.makeFilter((value) => value.length > 0 && value.trim() === value),
+  Schema.makeFilter(
+    (value) =>
+      !/(?:https?:\/\/|file:\/\/|(?:\/[^\s/]+){2,}|[A-Za-z]:[\\/]|(?:api[_ -]?key|token|secret|password)\s*[:=]|Bearer\s+|sk-[A-Za-z0-9_-]{8,}|eyJ[A-Za-z0-9_-]{16,}\.)/i.test(
+        value,
+      ),
+  ),
+);
+const WorkflowModel = WorkflowLabel.check(Schema.isMaxLength(120));
+const WorkflowCounter = NonNegativeInt.check(Schema.isLessThanOrEqualTo(Number.MAX_SAFE_INTEGER));
+
+/**
+ * Received-only workflow display metadata. The host stamps query/account
+ * provenance; numeric phase/agent indexes are inert local rows, never native
+ * task controls or transcript identities. Counters describe the latest native
+ * snapshot, not deltas to add to billed usage or the main context window.
+ * Absent arrays retain the previous snapshot; supplied arrays replace it.
+ */
+export const RuntimeWorkflowPresentation = Schema.Struct({
+  runtimeId: SubagentRuntimeId,
+  providerInstanceId: ProviderInstanceId,
+  name: Schema.optional(WorkflowLabel),
+  phases: Schema.optional(
+    Schema.Array(
+      Schema.Struct({
+        index: WorkflowIndex,
+        title: Schema.optional(WorkflowLabel),
+        kind: Schema.optional(WorkflowModel),
+      }),
+    ).check(Schema.isMaxLength(128)),
+  ),
+  agents: Schema.optional(
+    Schema.Array(
+      Schema.Struct({
+        index: WorkflowIndex,
+        phaseIndex: Schema.optional(WorkflowIndex),
+        label: Schema.optional(WorkflowLabel),
+        model: Schema.optional(WorkflowModel),
+        fallbackModel: Schema.optional(WorkflowModel),
+        status: Schema.optional(Schema.Literals(["pending", "running", "completed", "failed"])),
+        totalTokens: Schema.optional(WorkflowCounter),
+        durationMs: Schema.optional(WorkflowCounter),
+      }),
+    ).check(Schema.isMaxLength(128)),
+  ),
+  truncated: Schema.optional(Schema.Boolean),
+}).check(
+  Schema.makeFilter((value) => {
+    if ((value.phases === undefined) !== (value.agents === undefined)) return false;
+    if ((value.phases?.length ?? 0) + (value.agents?.length ?? 0) > 128) return false;
+    return (
+      new Set(value.phases?.map((row) => row.index)).size === (value.phases?.length ?? 0) &&
+      new Set(value.agents?.map((row) => row.index)).size === (value.agents?.length ?? 0)
+    );
+  }),
+);
+export type RuntimeWorkflowPresentation = typeof RuntimeWorkflowPresentation.Type;
+
 const TaskStartedPayload = Schema.Struct({
   individualTaskControl: Schema.optional(ProviderIndividualTaskControl),
   taskId: RuntimeTaskId,
@@ -712,6 +794,7 @@ const TaskStartedPayload = Schema.Struct({
   taskType: Schema.optional(TrimmedNonEmptyStringSchema),
   visibility: Schema.optional(RuntimeTaskVisibility),
   subagent: Schema.optional(RuntimeSubagentPresentation),
+  workflow: Schema.optional(RuntimeWorkflowPresentation),
 });
 export type TaskStartedPayload = typeof TaskStartedPayload.Type;
 
@@ -724,6 +807,7 @@ const TaskProgressPayload = Schema.Struct({
   lastToolName: Schema.optional(TrimmedNonEmptyStringSchema),
   visibility: Schema.optional(RuntimeTaskVisibility),
   subagent: Schema.optional(RuntimeSubagentPresentation),
+  workflow: Schema.optional(RuntimeWorkflowPresentation),
 });
 export type TaskProgressPayload = typeof TaskProgressPayload.Type;
 
@@ -735,6 +819,7 @@ const TaskCompletedPayload = Schema.Struct({
   usage: Schema.optional(Schema.Unknown),
   visibility: Schema.optional(RuntimeTaskVisibility),
   subagent: Schema.optional(RuntimeSubagentPresentation),
+  workflow: Schema.optional(RuntimeWorkflowPresentation),
   resourceLinks: Schema.optional(RuntimeResourceLinks),
 });
 export type TaskCompletedPayload = typeof TaskCompletedPayload.Type;

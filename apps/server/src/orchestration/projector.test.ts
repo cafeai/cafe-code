@@ -1,6 +1,7 @@
 import {
   CommandId,
   EventId,
+  MessageId,
   ProjectId,
   ProviderDriverKind,
   RuntimeItemId,
@@ -41,6 +42,280 @@ function makeEvent(input: {
 }
 
 describe("orchestration projector", () => {
+  it.each(["unobserved", "running", "error"] as const)(
+    "associates an accepted failed root without inventing or erasing observed timing: %s",
+    async (state) => {
+      const createdAt = "2026-01-01T00:00:00.000Z";
+      const requestedAt = "2026-01-01T00:00:03.000Z";
+      const startedAt = "2026-01-01T00:00:04.000Z";
+      const completedAt = "2026-01-01T00:00:05.000Z";
+      const confirmationAt = "2026-01-01T00:00:06.000Z";
+      const threadId = ThreadId.make("thread-failed-acceptance");
+      const turnId = TurnId.make("accepted-failed-B");
+      let model = await Effect.runPromise(
+        projectEvent(
+          createEmptyReadModel(createdAt),
+          makeEvent({
+            sequence: 1,
+            type: "thread.created",
+            aggregateKind: "thread",
+            aggregateId: threadId,
+            occurredAt: createdAt,
+            commandId: "server:create-acceptance-thread",
+            payload: {
+              threadId,
+              projectId: "project-1",
+              title: "Accepted failure",
+              modelSelection: { instanceId: "codex", model: "gpt-6-astra" },
+              runtimeMode: "full-access",
+              interactionMode: "default",
+              branch: null,
+              worktreePath: null,
+              createdAt,
+              updatedAt: createdAt,
+            },
+          }),
+        ),
+      );
+      const thread = model.threads[0]!;
+      const session = {
+        threadId,
+        providerName: "codex",
+        providerInstanceId: thread.modelSelection.instanceId,
+        status: "ready" as const,
+        runtimeMode: "full-access" as const,
+        activeTurnId: null,
+        lastError: "Root failed.",
+        updatedAt: createdAt,
+      };
+      // These fixtures explicitly distinguish genuinely observed B timing
+      // from an absent B: an accepted-send receipt is never a turn-start event.
+      model = {
+        ...model,
+        threads: [
+          {
+            ...thread,
+            session,
+            latestTurn:
+              state === "unobserved"
+                ? {
+                    turnId: TurnId.make("failed-A"),
+                    state: "error",
+                    requestedAt: createdAt,
+                    startedAt: createdAt,
+                    completedAt: createdAt,
+                    assistantMessageId: null,
+                  }
+                : {
+                    turnId,
+                    state,
+                    requestedAt,
+                    startedAt,
+                    completedAt: state === "error" ? completedAt : null,
+                    assistantMessageId: MessageId.make("assistant-B"),
+                  },
+            messages:
+              state === "unobserved"
+                ? []
+                : [
+                    {
+                      id: MessageId.make("assistant-B"),
+                      role: "assistant",
+                      text: "Visible partial answer",
+                      turnId,
+                      streaming: true,
+                      createdAt: startedAt,
+                      updatedAt: completedAt,
+                    },
+                  ],
+          },
+        ],
+      };
+      const associated = await Effect.runPromise(
+        projectEvent(
+          model,
+          makeEvent({
+            sequence: 2,
+            type: "thread.session-set",
+            aggregateKind: "thread",
+            aggregateId: threadId,
+            occurredAt: confirmationAt,
+            commandId: "server:associate-failed-B",
+            payload: {
+              threadId,
+              session: { ...session, updatedAt: confirmationAt },
+              codexFailedRoot: {
+                turnId,
+                previousTurnId: "failed-A",
+                messageId: "admitted-continuation",
+                intentSequence: 10,
+                requestedAt,
+                completedAt: confirmationAt,
+              },
+            },
+          }),
+        ),
+      );
+      expect(associated.threads[0]?.latestTurn).toEqual({
+        turnId,
+        state: "error",
+        requestedAt,
+        startedAt: state === "unobserved" ? null : startedAt,
+        completedAt: state === "error" ? completedAt : confirmationAt,
+        assistantMessageId: state === "unobserved" ? null : MessageId.make("assistant-B"),
+      });
+      expect(associated.threads[0]?.session).toMatchObject({ status: "ready", activeTurnId: null });
+      if (state !== "unobserved")
+        expect(associated.threads[0]?.messages[0]).toMatchObject({
+          text: "Visible partial answer",
+          streaming: false,
+          turnId,
+        });
+      expect(model.threads[0]?.latestTurn?.state).toBe(state === "unobserved" ? "error" : state);
+      // Replaying the same terminal association cannot advance its completion
+      // clock or resurrect the provider/assistant spinner.
+      const replayed = await Effect.runPromise(
+        projectEvent(
+          associated,
+          makeEvent({
+            sequence: 3,
+            type: "thread.session-set",
+            aggregateKind: "thread",
+            aggregateId: threadId,
+            occurredAt: confirmationAt,
+            commandId: "server:associate-failed-B-replay",
+            payload: {
+              threadId,
+              session: associated.threads[0]!.session,
+              codexFailedRoot: {
+                turnId,
+                previousTurnId: "failed-A",
+                messageId: "admitted-continuation",
+                intentSequence: 10,
+                requestedAt,
+                completedAt: confirmationAt,
+              },
+            },
+          }),
+        ),
+      );
+      expect(replayed.threads[0]?.latestTurn).toEqual(associated.threads[0]?.latestTurn);
+    },
+  );
+
+  it.each([false, true])(
+    "preserves failed context only for a transient recovery intent: %s",
+    async (transient) => {
+      const createdAt = "2026-01-01T00:00:00.000Z";
+      const failedAt = "2026-01-01T00:00:02.000Z";
+      let model = createEmptyReadModel(createdAt);
+      const append = async (
+        sequence: number,
+        type: OrchestrationEvent["type"],
+        payload: unknown,
+        occurredAt = failedAt,
+      ) => {
+        model = await Effect.runPromise(
+          projectEvent(
+            model,
+            makeEvent({
+              sequence,
+              type,
+              payload,
+              aggregateKind: "thread",
+              aggregateId: "thread-recovery",
+              occurredAt,
+              commandId: `cmd-recovery-${sequence}`,
+            }),
+          ),
+        );
+      };
+      await append(
+        1,
+        "thread.created",
+        {
+          threadId: "thread-recovery",
+          projectId: "project-1",
+          title: "Recovery",
+          modelSelection: { instanceId: "codex", model: "gpt-5-codex" },
+          runtimeMode: "approval-required",
+          interactionMode: "default",
+          branch: null,
+          worktreePath: null,
+          createdAt,
+          updatedAt: createdAt,
+        },
+        createdAt,
+      );
+      const session = {
+        threadId: "thread-recovery",
+        providerName: "codex",
+        providerInstanceId: "codex",
+        subagentRuntimeId: "00000000-0000-4000-8000-000000000051",
+        runtimeMode: "approval-required",
+        status: "running",
+        activeTurnId: "failed-root",
+        lastError: null,
+        updatedAt: createdAt,
+      };
+      await append(2, "thread.session-set", { threadId: "thread-recovery", session });
+      await append(3, "thread.session-set", {
+        threadId: "thread-recovery",
+        session: {
+          ...session,
+          status: "error",
+          activeTurnId: null,
+          lastError: "Root failed",
+          updatedAt: failedAt,
+        },
+      });
+      await append(4, "thread.session-set", {
+        threadId: "thread-recovery",
+        session: {
+          ...session,
+          status: "ready",
+          activeTurnId: null,
+          lastError: "Root failed",
+          updatedAt: failedAt,
+        },
+      });
+      const ready = model.threads[0]!.session;
+      const failedRoot = model.threads[0]!.latestTurn;
+      await append(
+        5,
+        "thread.turn-start-requested",
+        {
+          threadId: "thread-recovery",
+          messageId: "recovery-message",
+          runtimeMode: "approval-required",
+          interactionMode: "default",
+          createdAt: "2026-01-01T00:00:03.000Z",
+          ...(transient
+            ? {
+                runtimeRecovery: {
+                  sourceEventSequence: 4,
+                  turnId: "failed-root",
+                  sessionUpdatedAt: failedAt,
+                  codexTransientFailure: {
+                    providerInstanceId: "codex",
+                    subagentRuntimeId: session.subagentRuntimeId,
+                    chainSourceEventSequence: 4,
+                    retryAttempt: 0,
+                  },
+                },
+              }
+            : {}),
+        },
+        "2026-01-01T00:00:03.000Z",
+      );
+      expect(model.threads[0]!.session?.status).toBe(transient ? "ready" : "starting");
+      expect(model.threads[0]!.session?.lastError).toBe(transient ? "Root failed" : null);
+      expect(model.threads[0]!.latestTurn).toEqual(failedRoot);
+      if (transient) expect(model.threads[0]!.session).toEqual(ready);
+      expect(failedRoot?.state).toBe("error");
+    },
+  );
+
   it("applies thread.created events", async () => {
     const now = "2026-01-01T00:00:00.000Z";
     const model = createEmptyReadModel(now);

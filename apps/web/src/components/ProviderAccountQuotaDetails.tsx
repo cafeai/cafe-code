@@ -1,7 +1,9 @@
-import type { ReactNode } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 
 import type { CodexRateLimitPresentation } from "../lib/codexRateLimits";
 import { cn } from "../lib/utils";
+import { CLAUDE_QUOTA_STALE_AFTER_MS, formatClaudeSessionQuota } from "../lib/claudeSessionQuota";
+import type { ProviderQuotaState } from "./chat/useProviderQuota";
 
 export function UsageMeterBar(props: { readonly percent: number; readonly testId: string }) {
   const normalized = Math.max(0, Math.min(100, props.percent));
@@ -24,12 +26,38 @@ export function UsageMeterBar(props: { readonly percent: number; readonly testId
  * Additional buckets scroll within every surface; the reset count stays at
  * the bottom outside that scroll region so account-wide availability is clear. */
 export function ProviderAccountQuotaDetails(props: {
-  readonly presentation: CodexRateLimitPresentation;
+  readonly presentation?: CodexRateLimitPresentation | null;
+  readonly sessionQuota?: ProviderQuotaState | undefined;
   readonly layout?: "compact" | "popover" | "panel" | "settings";
   readonly action?: ReactNode;
 }) {
-  const { presentation } = props;
+  const presentation = props.presentation;
   const layout = props.layout ?? "compact";
+  const report = props.sessionQuota?.report;
+  const [clock, setClock] = useState(0);
+  useEffect(() => {
+    if (!report) return;
+    const now = Date.now();
+    const deadlines = [
+      Date.parse(report.observedAt) + CLAUDE_QUOTA_STALE_AFTER_MS,
+      ...(report.meters ?? []).flatMap((meter) =>
+        meter.resetsAt ? [Date.parse(meter.resetsAt)] : [],
+      ),
+    ].filter((deadline) => Number.isFinite(deadline) && deadline > now);
+    if (!deadlines.length) return;
+    // A display-only deadline, never provider polling. Each reset/receipt age
+    // boundary updates all rows together without guessing replenished usage.
+    const timer = setTimeout(
+      () => setClock((value) => value + 1),
+      Math.min(2_147_483_647, Math.min(...deadlines) - now + 1),
+    );
+    return () => clearTimeout(timer);
+  }, [report, clock]);
+  const session = report ? formatClaudeSessionQuota(report) : null;
+  // Anonymous historical event windows have no current query/config binding.
+  // They must not reappear beneath a newly scoped unavailable/offline report.
+  // Existing unscoped consumers and other provider drivers remain unchanged.
+  const legacy = props.sessionQuota ? null : presentation;
   return (
     <div
       className={cn(
@@ -44,21 +72,100 @@ export function ProviderAccountQuotaDetails(props: {
         // leaving an empty heading row (and flex gap) in that case.
         <div className="contents [&>button]:self-end">{props.action}</div>
       ) : null}
-      {presentation.buckets.length ? (
+      {props.sessionQuota ? (
+        <section
+          className="flex min-h-0 min-w-0 flex-col gap-1.5"
+          aria-label="Account usage"
+          data-claude-session-quota
+        >
+          <div className="label-overline">Account usage</div>
+          <p>Session-reported · not account-verified</p>
+          {session ? (
+            <>
+              <p>
+                {session.observed} · local time{session.stale ? " · Stale reading" : ""}
+              </p>
+              <div
+                className="focus-ring min-h-0 min-w-0 max-h-[40vh] space-y-2.5 overflow-y-auto rounded-sm"
+                data-account-quota-scroll
+                tabIndex={0}
+                role="region"
+                aria-label="Claude reported quota meters and extra usage"
+              >
+                {session.meters === null ? (
+                  <p>Quota meters unavailable in this report.</p>
+                ) : session.meters.length === 0 ? (
+                  <p>Claude reported no quota meters.</p>
+                ) : (
+                  session.meters.map((meter, index) => (
+                    <section
+                      key={meter.id}
+                      aria-label={`${meter.label} quota`}
+                      className="min-w-0 space-y-1.5"
+                      data-claude-quota-meter={meter.id}
+                    >
+                      {index === 0 || session.meters?.[index - 1]?.group !== meter.group ? (
+                        <div className="font-medium text-foreground">{meter.group}</div>
+                      ) : null}
+                      <div className="flex min-w-0 flex-wrap items-baseline justify-between gap-x-3 gap-y-1">
+                        <span>{meter.label}</span>
+                        <span className="font-medium text-foreground tabular-nums">
+                          {meter.value}
+                        </span>
+                      </div>
+                      <UsageMeterBar
+                        percent={meter.remainingPercent}
+                        testId={`claude-${meter.id}`}
+                      />
+                      {meter.reset ? <p>{meter.reset}</p> : null}
+                      <p>
+                        {meter.severity}
+                        {meter.isActive ? " · Provider headline" : ""}
+                        {meter.stale ? " · Stale; request a new report" : ""}
+                      </p>
+                    </section>
+                  ))
+                )}
+                {session.extraUsage ? (
+                  <section
+                    aria-label="Extra usage"
+                    className="min-w-0 space-y-1.5 border-t border-border-subtle pt-2"
+                  >
+                    <div className="font-medium text-foreground">
+                      Extra usage (separate from plan quota)
+                    </div>
+                    {session.extraUsage.map((line) => (
+                      <p key={line}>{line}</p>
+                    ))}
+                  </section>
+                ) : null}
+              </div>
+            </>
+          ) : (
+            <p>
+              {props.sessionQuota.status === "loading"
+                ? "Loading session report…"
+                : props.sessionQuota.status === "offline"
+                  ? "Session report unavailable while disconnected."
+                  : "No session quota report available."}
+            </p>
+          )}
+          <p>Request /usage in Claude to update. Opening this view does not refresh it.</p>
+        </section>
+      ) : null}
+      {legacy?.buckets.length ? (
         <div
           className="min-h-0 min-w-0 max-h-[40vh] space-y-2.5 overflow-y-auto"
           data-account-quota-scroll
         >
-          {presentation.buckets.map((bucket) => (
+          {legacy.buckets.map((bucket) => (
             <section
               key={bucket.id}
               aria-label={`${bucket.label} quota`}
               data-account-quota-bucket={bucket.id}
               className="min-w-0 space-y-1.5"
             >
-              {presentation.buckets.length > 1 ||
-              bucket.id !== "codex" ||
-              bucket.label !== "codex" ? (
+              {legacy.buckets.length > 1 || bucket.id !== "codex" || bucket.label !== "codex" ? (
                 <div className="font-medium text-foreground">{bucket.label}</div>
               ) : null}
               {(["primary", "secondary"] as const).map((kind) => {
@@ -146,9 +253,7 @@ export function ProviderAccountQuotaDetails(props: {
           ))}
         </div>
       ) : null}
-      {presentation.resetAvailability ? (
-        <p className="shrink-0">{presentation.resetAvailability}</p>
-      ) : null}
+      {legacy?.resetAvailability ? <p className="shrink-0">{legacy.resetAvailability}</p> : null}
     </div>
   );
 }

@@ -5,11 +5,13 @@ concurrent subagents, or Reset to remove its override. Cafe accepts whole number
 from 1 through 64. Codex and Claude have separate saved values: changing one does
 not erase the other. Model effort, including Ultra, does not select this limit.
 
-Provider settings also offer a **New-chat subagent limit**. This is copied into
-new chats once; editing it does not reconfigure existing chats or restart an
-account. It is a future preference, not evidence that an older CLI supports the
-feature. A numeric chat override requires the configured runtime to advertise
-support; unsupported or unknown runtimes reject it explicitly.
+Provider settings also offer a **Default subagent limit**. New and existing chats
+without a saved override inherit this setting from their selected account. Editing
+the account default updates their saved-limit display immediately; native changes
+wait for the next safe idle send, never an account restart on save. An explicit
+per-chat override takes precedence. A numeric override or inherited account
+default requires the configured runtime to advertise support; unsupported or
+unknown runtimes reject it explicitly.
 Reset remains available if a provider is downgraded or its version becomes
 unknown. Sends preserve the prompt and refuse an unsupported selected-driver
 numeric policy, including queued sends; they never silently discard it on an
@@ -17,21 +19,26 @@ older server. Another driver's remembered value does not block the current one.
 
 ## Saved limit and session configuration
 
-The context popover, pinned rail and limit editor show one **Subagent limit: N**
-label for the saved numeric chat setting or an inherited numeric account setting.
-The label updates with the acknowledged saved choice, even while the current
-provider session still uses its previous configuration. It describes a setting,
-not an independently verified hard cap or confirmation that a change has applied.
-If no numeric setting is known, the label and its section are omitted; Cafe never
-guesses a provider default. Reset removes the chat override and shows an inherited
-numeric account setting, or hides the label if that inherited number is unknown.
-The editor remains available without a status label.
+The context popover, pinned rail and limit editor use one compact label. Matching
+current and saved numbers show **Subagent limit: N**. When a known recorded
+process policy differs from the saved chat/account setting, the label shows both,
+for example **Subagent limit: 5 → 15 when idle**. Active work keeps its current
+configuration until the native idle boundary permits the saved change; the
+immediately next turn may still be a steer rather than an idle turn.
 
-Separate selected/current-session rows and a pending-state row are not displayed.
-The labelled **About subagent limits** info tooltip explains the saved-setting
-semantics, safe application boundary and enforcement caveat. The editor also
-explains when changes take effect. All three surfaces share this presentation;
-it does not add provider calls or change runtime policy.
+The saved choice updates immediately with acknowledged settings. A known null
+process policy means provider inheritance, not a guessed numeric default; unknown
+process evidence is not treated as null or an applied number. A saved number with
+unknown materialization is marked saved. Clearing/resetting a saved number still
+shows any known current number while the return to inheritance is pending. If
+neither numeric policy is known, the label and section are omitted. The editor
+remains available. These labels describe recorded settings, not independently
+verified capacity or a universal hard cap.
+
+No separate selected/current-session or pending rows are added. The labelled
+**About subagent limits** info tooltip and editor explain source, recorded process
+evidence, the safe application boundary and enforcement caveat. All three surfaces
+share this presentation; it adds no provider calls or runtime changes on render.
 
 Saving during work changes durable chat metadata
 only. Cafe applies a changed process limit at the next safe idle send boundary;
@@ -41,8 +48,14 @@ The guard covers the owned bindings and frames observed by the current runtime;
 it does not prove physical idleness in unread native/OS buffers or historical
 children absent from that runtime's bounded metadata.
 
-Resolution is chat override, then an existing explicit account runtime override,
-then native configuration/environment. Reset does not edit global provider files.
+Resolution is the selected driver's chat override, then the exact selected
+account's Default subagent limit, then its existing legacy runtime override,
+then native configuration/environment. New chats do not copy the default into an
+override, so later account edits remain inherited. Older releases copied defaults
+into numeric per-chat values without recording their origin. Those values remain
+overrides because Cafe cannot distinguish a copied default from a manual choice;
+use Reset on such a chat to opt into live account inheritance. Reset does not edit
+global provider files.
 An inherited provider default is not a known numeric limit. Internally, a null
 session policy records the absence of a Cafe override, while an omitted policy
 records unknown process evidence; neither is a numeric default. Old snapshots
@@ -56,6 +69,55 @@ intentionally session-unbound until its first send.
 Cafe qualifies Codex CLI 0.159.0+ and Claude Code 2.1.217+ from the configured
 runtime's existing health result, not model names or SDK package versions.
 Unknown and prerelease versions do not qualify automatically.
+The native version parser preserves prerelease identity. Malformed tokens and
+build-metadata spellings that the shared version comparison does not support
+remain unknown; it never strips a suffix or selects a later unrelated SDK version
+to grant support.
+
+The authenticated provider-daemon capability response preserves the selected
+adapter's optional subagent-support boolean through remote result decoding.
+An explicit true is required; false or omission from an older daemon remains
+unsupported. This transport evidence does not bypass the native idle boundary or
+prove available worker capacity. Adopting the rebuilt backend fixes reception of
+an explicit true already emitted by its daemon. A daemon that omits the field
+still cannot certify support; Cafe does not restart an active daemon or replay a
+rejected prompt to apply this repair.
+
+Qualification runs inside the daemon that owns the native adapter, separately
+from the backend’s presentation snapshot. Both reuse the same registry-owned
+two-wide initial admission policy within their own process. The daemon does not
+read or write the backend’s durable status cache. Its listener can become ready
+while slow account probes run; a capability read waits for the exact selected
+instance’s existing admission and rechecks ownership after replacement. It does
+not launch another probe, cancel the owner’s probe when the caller disconnects,
+or use a different account’s result. Failed or inconclusive native version
+evidence cannot grant support; a later authentication failure does not erase a
+successfully observed version or certify session usability. Periodic checks begin
+only after initial admission settles.
+
+Rich daemon health and compact desktop debug include optional
+`providerQualification` counts for known versions, unknown versions and explicitly
+reported pending probes. These are volatile owner observations, not a capacity
+claim; absence on an older daemon is unavailable evidence, not zero. They contain
+no account labels, provider output or native version strings.
+Reported pending counts describe retained snapshots, not necessarily unresolved
+admission: a failed probe can leave pending presentation while its capability
+has already settled false. Registry setup failure instead yields a fixed bounded
+request failure; it never waits forever or grants unqualified support.
+
+This initialization repair requires a rebuilt **daemon**, not only a backend/UI
+reload that adopts a surviving old daemon. Cafe never interrupts active work to
+apply it automatically. For a source checkout, after all provider work is safely
+stopped and saved, the existing user-requested restart command replaces the
+desktop/backend and provider runtimes and relaunches with debug enabled:
+
+```sh
+yarn restart:desktop -- node apps/desktop/scripts/start-electron.mjs --cafe-debug
+```
+
+This command terminates Cafe-owned processes; do not use it while work should
+continue. Rejected input is never replayed automatically. See the
+[runtime qualification decision](decisions/provider-runtime-qualification.md).
 
 - Codex receives the existing structured native agent overrides: N spawned
   threads and N+1 total resident threads including the root. Completed history is
@@ -66,7 +128,8 @@ Unknown and prerelease versions do not qualify automatically.
   resume, and Ultracode/team exceptions remain native behavior; this preference
   is not a universal spending cap.
 
-See the [implementation decision](decisions/per-chat-subagent-concurrency.md),
+See the [live inheritance decision](decisions/live-account-subagent-default.md),
+the [original implementation decision](decisions/per-chat-subagent-concurrency.md),
 [Codex configuration reference](https://learn.chatgpt.com/docs/config-file/config-reference),
 and [Claude concurrency documentation](https://code.claude.com/docs/en/sub-agents#concurrent-subagent-limit).
 
@@ -81,6 +144,15 @@ inspection. A fresh native observation can confirm a worker again. Reconnecting
 to the same surviving daemon preserves its confirmed workers; a new native
 runtime cannot inherit the previous runtime's Working claims. See
 [runtime-bound observation](decisions/subagent-runtime-observation.md).
+An independently failed Codex root may have a freshly verified surviving native
+context. Its children then remain active; the root still shows failed, not
+completed or stopped. A compact notice distinguishes live agents from the root
+outcome and exposes Stop during recovery. Terminal-root Stop closes that owned
+session, including children; starting an intentional new turn supersedes pending
+automatic recovery. Only definitive transient failures retry indefinitely with
+capped jittered backoff, and no ambiguous submission is resent. Atrium failure
+age/dismissal cannot hide confirmed active children. See
+[persistent recovery](decisions/codex-persistent-transient-recovery.md).
 Closed, completed, failed, and stopped workers leave those active rosters.
 Atrium cards start on **Active (N)**, showing confirmed active/waiting workers.
 Choose **History (N)** to inspect completed, failed, stopped, or unverified workers.

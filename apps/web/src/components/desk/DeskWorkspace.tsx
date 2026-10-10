@@ -72,6 +72,7 @@ import { readLocalApi } from "../../localApi";
 import { useRenameChat } from "../../hooks/useRenameChat";
 import { isMacPlatform } from "../../lib/utils";
 import { isElectron } from "../../env";
+import { useMacDesktopTitlebar } from "../../hooks/useMacDesktopTitlebar";
 import { useDeskTabMetadata, readDeskTabMetadata } from "./useDeskTabMetadata";
 import { useDeskChatActions } from "./useDeskChatActions";
 import { useDeskOpenActions } from "./useDeskOpenActions";
@@ -496,6 +497,7 @@ function GroupTabs({
   const desk = useDeskStore((s) => s.desk);
   const strip = useRef<HTMLDivElement>(null);
   const titlebar = useRef<HTMLDivElement>(null);
+  const isMacDesktopTitlebar = useMacDesktopTitlebar();
   useLayoutEffect(() => {
     const bar = titlebar.current;
     if (!bar || !isElectron || rect.y !== 0) return;
@@ -581,6 +583,7 @@ function GroupTabs({
       ref={titlebar}
       className={`desk-group-bar${isElectron && rect.y === 0 ? " drag-region" : ""}`}
       data-desktop-titlebar={isElectron && rect.y === 0}
+      data-mac-titlebar={isMacDesktopTitlebar && rect.y === 0}
       data-window-left={rect.x === 0}
       data-window-top={rect.y === 0}
       data-window-right={rect.x + rect.width >= 0.999}

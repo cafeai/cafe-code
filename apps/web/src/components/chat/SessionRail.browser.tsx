@@ -3,11 +3,20 @@ import "../../index.css";
 import { page } from "vitest/browser";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { render } from "vitest-browser-react";
-import { EventId, TurnId } from "@cafecode/contracts";
+import {
+  EnvironmentId,
+  EventId,
+  ProviderInstanceId,
+  SubagentRuntimeId,
+  ThreadId,
+  TurnId,
+  type OrchestrationThreadActivity,
+} from "@cafecode/contracts";
 
 import { deriveLatestContextWindowSnapshot } from "../../lib/contextWindow";
-import type { WorkLogEntry } from "../../session-logic";
-import { SessionRail } from "./SessionRail";
+import { deriveActiveSubagentWorkEntries, type WorkLogEntry } from "../../session-logic";
+import type { SubagentRuntimeContext } from "../../subagent-activity";
+import { CodexRecoveryNotice, SessionRail } from "./SessionRail";
 import type { ComposerTaskProgressPlan } from "./taskProgressPresentation";
 
 function makeUsage() {
@@ -31,7 +40,118 @@ function makeUsage() {
 
 describe("SessionRail", () => {
   afterEach(() => {
+    document.documentElement.classList.remove("dark");
     document.body.innerHTML = "";
+  });
+
+  it.each(["light", "dark"])(
+    "shows compact truthful recovery with independent Stop in %s",
+    async (theme) => {
+      document.documentElement.classList.toggle("dark", theme === "dark");
+      const previousViewport = { width: window.innerWidth, height: window.innerHeight };
+      await page.viewport(414, 700);
+      const onStop = vi.fn();
+      const view = await render(
+        <div style={{ width: 260 }}>
+          <CodexRecoveryNotice
+            presentation={{ activeAgentCount: 2, stage: "backoff", retryAtMs: Date.now() + 60_000 }}
+            onStop={onStop}
+          />
+        </div>,
+      );
+      try {
+        const notice = document.querySelector<HTMLElement>('[data-codex-recovery-notice="true"]')!;
+        await expect.element(page.getByRole("status")).toMatchTextContent("Root failed");
+        await expect.element(page.getByRole("status")).toMatchTextContent(/Retry in \d+s/u);
+        await expect.element(page.getByRole("status")).toMatchTextContent("2 agents active");
+        const stop = page.getByRole("button", {
+          name: "Stop recovery and running agents",
+          exact: true,
+        });
+        await expect.element(stop).toBeEnabled();
+        const buttonBounds = stop.element().getBoundingClientRect();
+        const noticeBounds = notice.getBoundingClientRect();
+        expect(buttonBounds.right).toBeLessThanOrEqual(noticeBounds.right);
+        await stop.click();
+        expect(onStop).toHaveBeenCalledOnce();
+        await view.rerender(
+          <div style={{ width: 260 }}>
+            <CodexRecoveryNotice
+              presentation={{ activeAgentCount: 2, stage: "backoff", retryAtMs: Date.now() - 1 }}
+              onStop={onStop}
+              disabled
+            />
+          </div>,
+        );
+        await expect.element(page.getByRole("status")).toMatchTextContent("Reconnecting");
+        await expect.element(stop).toBeDisabled();
+        expect(document.body.textContent).not.toContain("Running root");
+        await view.rerender(
+          <div style={{ width: 260 }}>
+            <CodexRecoveryNotice
+              presentation={{ activeAgentCount: 0, stage: "uncertain", retryAtMs: null }}
+              onStop={onStop}
+            />
+          </div>,
+        );
+        await expect.element(page.getByRole("status")).toMatchTextContent("Needs reconciliation");
+        await expect.element(stop).toBeEnabled();
+        expect(document.body.textContent).not.toContain("Retry in");
+      } finally {
+        await view.unmount();
+        await page.viewport(previousViewport.width, previousViewport.height);
+      }
+    },
+  );
+
+  it("keeps a workflow-only Tasks rail available without inventing an active subagent or ordinary controls", async () => {
+    const providerInstanceId = ProviderInstanceId.make("claude-workflow");
+    const runtimeId = SubagentRuntimeId.make("10000000-0000-4000-8000-000000000001");
+    const screen = await render(
+      <SessionRail
+        plan={null}
+        subagents={[]}
+        usage={null}
+        onShowInComposer={vi.fn()}
+        providerTasks={{
+          environmentId: EnvironmentId.make("local"),
+          threadId: ThreadId.make("workflow-parent"),
+          providerInstanceId,
+          runtimeSession: { orchestrationStatus: "running", subagentRuntimeId: runtimeId },
+          activities: [
+            {
+              id: EventId.make("workflow-rail-start"),
+              kind: "task.started",
+              tone: "info",
+              summary: "Workflow started",
+              turnId: TurnId.make("workflow-turn"),
+              createdAt: "2026-10-09T00:00:00.000Z",
+              payload: {
+                taskId: "workflow-root",
+                workflow: { runtimeId, providerInstanceId, name: "Review workflow" },
+              },
+            },
+          ],
+        }}
+      />,
+    );
+    try {
+      await expect
+        .element(page.getByRole("region", { name: "Workflows", exact: true }))
+        .toBeVisible();
+      await expect
+        .element(page.getByText("No tasks yet.", { exact: true }))
+        .not.toBeInTheDocument();
+      await expect
+        .element(page.getByText("Phase details unavailable.", { exact: true }))
+        .toBeVisible();
+      expect(document.querySelector('[data-composer-subagent-list="true"]')).toBeNull();
+      await expect
+        .element(page.getByRole("button", { name: "Stop task", exact: true }))
+        .not.toBeInTheDocument();
+    } finally {
+      await screen.unmount();
+    }
   });
 
   it("counts only current workers and clears terminal rows without deleting historical input", async () => {
@@ -88,6 +208,68 @@ describe("SessionRail", () => {
         "stopped",
         "unknown",
       ]);
+    } finally {
+      await screen.unmount();
+    }
+  });
+
+  it("shows exact surviving workers after root failure and withdraws unverified runtime evidence", async () => {
+    const rootTurn = TurnId.make("failed-root-turn");
+    const runtimeId = SubagentRuntimeId.make("20000000-0000-4000-8000-000000000002");
+    const rows: OrchestrationThreadActivity[] = [
+      {
+        id: EventId.make("surviving-child-progress"),
+        kind: "task.progress",
+        tone: "info",
+        summary: "Subagent update",
+        turnId: rootTurn,
+        createdAt: "2026-10-10T00:00:00.000Z",
+        payload: {
+          taskId: "surviving-child",
+          subagent: {
+            threadId: "surviving-child",
+            label: "Surviving worker",
+            status: "active",
+            runtimeId,
+          },
+        },
+      },
+    ];
+    const snapshot = structuredClone(rows);
+    const currentRuntime = {
+      orchestrationStatus: "ready" as const,
+      subagentRuntimeId: runtimeId,
+      lastError: "Synthetic failed root request.",
+    };
+    const rail = (runtimeSession: SubagentRuntimeContext | null) => (
+      <SessionRail
+        plan={null}
+        subagents={deriveActiveSubagentWorkEntries(rows, null, { runtimeSession })}
+        usage={null}
+        onShowInComposer={vi.fn()}
+      />
+    );
+    const screen = await render(rail(currentRuntime));
+    try {
+      await expect.element(page.getByText("1 active", { exact: true })).toBeVisible();
+      await expect.element(page.getByText("Surviving worker", { exact: true })).toBeVisible();
+      await expect
+        .element(page.getByText("No tasks yet.", { exact: true }))
+        .not.toBeInTheDocument();
+
+      // A saved failure is not runtime death, but stopped, legacy error,
+      // replacement and unknown contexts still cannot supply live child proof.
+      for (const unavailable of [
+        { ...currentRuntime, orchestrationStatus: "stopped" as const },
+        { ...currentRuntime, orchestrationStatus: "error" as const },
+        { ...currentRuntime, subagentRuntimeId: "replacement-native-context" },
+        null,
+      ]) {
+        await screen.rerender(rail(unavailable));
+        await expect.element(page.getByText("No tasks yet.", { exact: true })).toBeVisible();
+        expect(document.querySelector('[data-composer-subagent-list="true"]')).toBeNull();
+      }
+      expect(rows).toEqual(snapshot);
     } finally {
       await screen.unmount();
     }

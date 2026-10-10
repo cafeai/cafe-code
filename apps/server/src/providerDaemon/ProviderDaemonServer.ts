@@ -1647,6 +1647,9 @@ export const runProviderDaemonServer = (
                 ...processIdentity,
                 activeSessionCount: sessions.length,
                 configuredInstanceCount: inventorySnapshot.configuredInstanceCount,
+                ...(inventorySnapshot.providerQualification === undefined
+                  ? {}
+                  : { providerQualification: inventorySnapshot.providerQualification }),
                 eventCursor: journalSnapshot.eventCursor,
                 transport,
                 activeStreamCount,

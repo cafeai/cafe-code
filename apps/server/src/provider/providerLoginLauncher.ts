@@ -21,7 +21,7 @@ import * as Schema from "effect/Schema";
 
 import { ServerSettingsService } from "../serverSettings.ts";
 import { deriveProviderInstanceConfigMap } from "./Layers/ProviderInstanceRegistryHydration.ts";
-import { makeClaudeEnvironment } from "./Drivers/ClaudeHome.ts";
+import { makeClaudeNonChatEnvironment } from "./Drivers/ClaudeHome.ts";
 import { materializeCodexShadowHome, resolveCodexHomeLayout } from "./Drivers/CodexHomeLayout.ts";
 import { withDefaultCodexShadowHome } from "./Drivers/CodexDriver.ts";
 import { mergeProviderInstanceEnvironment } from "./ProviderInstanceEnvironment.ts";
@@ -391,7 +391,7 @@ const resolveClaudeLoginPlan = Effect.fn("ProviderLoginLauncher.resolveClaude")(
       baseEnv: input.environment,
     },
   });
-  const env = yield* makeClaudeEnvironment(claudeSettings, runtime.env);
+  const env = yield* makeClaudeNonChatEnvironment(claudeSettings, runtime.env);
 
   return {
     instanceId: input.instanceId,

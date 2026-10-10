@@ -1,4 +1,5 @@
 // @effect-diagnostics nodeBuiltinImport:off
+import { createHash } from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -37,6 +38,7 @@ import * as Logger from "effect/Logger";
 import * as ManagedRuntime from "effect/ManagedRuntime";
 import * as Option from "effect/Option";
 import * as PubSub from "effect/PubSub";
+import * as Schema from "effect/Schema";
 import * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
@@ -83,6 +85,10 @@ import { buildCodexSteerClientCorrelationId } from "../../provider/codexSteerCor
 import { PROVIDER_RUNTIME_OWNERSHIP_LOST_REASON } from "../../provider/providerRuntimeOwnerEvidence.ts";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { PROVIDER_PIPELINE_POLICY } from "@cafecode/shared/providerPipelinePolicy";
+import {
+  codexTransientAcceptanceCommandId,
+  makeCodexTransientRecoveryChainReader,
+} from "../providerRuntimeRecovery.ts";
 
 function makeTestServerSettingsLayer(overrides: Partial<ServerSettings> = {}) {
   return ServerSettingsService.layerTest(overrides);
@@ -111,6 +117,9 @@ const asEventId = (value: string): EventId => EventId.make(value);
 const asMessageId = (value: string): MessageId => MessageId.make(value);
 const asThreadId = (value: string): ThreadId => ThreadId.make(value);
 const asTurnId = (value: string): TurnId => TurnId.make(value);
+const providerRuntimeEventJson = Schema.fromJsonString(ProviderRuntimeEvent);
+const encodeProviderRuntimeEventJson = Schema.encodeSync(providerRuntimeEventJson);
+const decodeProviderRuntimeEventJson = Schema.decodeUnknownSync(providerRuntimeEventJson);
 
 function codexAsyncQuestionCompletion(
   itemId: string,
@@ -356,6 +365,9 @@ describe("ProviderRuntimeIngestion", () => {
       command: OrchestrationCommand,
       dispatch: OrchestrationEngineShape["dispatch"],
     ) => ReturnType<OrchestrationEngineShape["dispatch"]>;
+    listSessionsGate?: (
+      read: ReturnType<ProviderServiceShape["listSessions"]>,
+    ) => ReturnType<ProviderServiceShape["listSessions"]>;
   }) {
     const workspaceRoot = makeTempDir("t3-provider-project-");
     fs.mkdirSync(path.join(workspaceRoot, ".git"));
@@ -410,7 +422,15 @@ describe("ProviderRuntimeIngestion", () => {
       Layer.provideMerge(projectionSnapshotLayer),
       Layer.provideMerge(persistenceLayer),
       Layer.provideMerge(RuntimeReceiptBusLive),
-      Layer.provideMerge(Layer.succeed(ProviderService, provider.service)),
+      Layer.provideMerge(
+        Layer.succeed(ProviderService, {
+          ...provider.service,
+          listSessions: () =>
+            options?.listSessionsGate
+              ? options.listSessionsGate(provider.service.listSessions())
+              : provider.service.listSessions(),
+        }),
+      ),
       // These projection tests intentionally substitute only the required
       // settlement boundary; ledger correctness has its own real-SQL suite.
       Layer.provideMerge(
@@ -655,6 +675,222 @@ describe("ProviderRuntimeIngestion", () => {
         .map((message) => message.text),
     ).toEqual(["No findings."]);
   });
+
+  it.each([
+    ["manual", "already-pending"],
+    ["automatic", "already-pending"],
+    ["manual", "pending-during-proof"],
+    ["automatic", "pending-during-proof"],
+    ["manual", "pending-during-dispatch"],
+    ["automatic", "pending-during-dispatch"],
+  ] as const)(
+    "retains newer %s pending input through a late Codex system error: %s",
+    async (kind, scenario) => {
+      const reached = Effect.runSync(Deferred.make<void>());
+      const release = Effect.runSync(Deferred.make<void>());
+      let gateInventory = false;
+      const harness = await createHarness({
+        dispatchGate: (command, dispatch) =>
+          scenario === "pending-during-dispatch" &&
+          command.type === "thread.session.set" &&
+          String(command.commandId).includes(
+            ":late-system-error-after-newer-input:thread-session-set",
+          )
+            ? Deferred.succeed(reached, undefined).pipe(
+                Effect.andThen(Deferred.await(release)),
+                Effect.andThen(dispatch(command)),
+              )
+            : dispatch(command),
+        listSessionsGate: (read) =>
+          gateInventory
+            ? Deferred.succeed(reached, undefined).pipe(
+                Effect.andThen(Deferred.await(release)),
+                Effect.andThen(read),
+              )
+            : read,
+      });
+      const threadId = asThreadId("thread-1");
+      const turnId = asTurnId("late-system-error-failed-root");
+      const messageId = asMessageId("late-system-error-newer-input");
+      const failedAt = "2026-01-01T00:00:02.000Z";
+      const requestedAt = "2026-01-01T00:00:03.000Z";
+      const identity = {
+        provider: ProviderDriverKind.make("codex"),
+        providerInstanceId: ProviderInstanceId.make("codex"),
+        subagentRuntimeId: SubagentRuntimeId.make("00000000-0000-4000-8000-000000000063"),
+        threadId,
+      };
+      const nativeSession: ProviderSession = {
+        ...identity,
+        status: "ready",
+        runtimeMode: "approval-required",
+        createdAt: "2026-01-01T00:00:01.000Z",
+        updatedAt: failedAt,
+        codexRootTurnFailure: {
+          turnId,
+          providerThreadId: "private-late-system-error-native-conversation",
+          observedAt: failedAt,
+          category: "server",
+        },
+      };
+      harness.setProviderSession(nativeSession);
+      await Effect.runPromise(
+        harness.engine.dispatch({
+          type: "thread.turn.start",
+          commandId: CommandId.make("late-system-error-original-human-input"),
+          threadId,
+          message: {
+            messageId: asMessageId("late-system-error-original-message"),
+            role: "user",
+            text: "Do the original work",
+            attachments: [],
+          },
+          runtimeMode: "approval-required",
+          interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+          createdAt: "2026-01-01T00:00:01.000Z",
+        }),
+      );
+      harness.emit({
+        ...identity,
+        type: "turn.started",
+        eventId: asEventId("late-system-error-root-start"),
+        turnId,
+        createdAt: "2026-01-01T00:00:01.000Z",
+      });
+      await harness.drain();
+      harness.emit({
+        ...identity,
+        type: "turn.completed",
+        eventId: asEventId("late-system-error-root-completed"),
+        turnId,
+        createdAt: failedAt,
+        payload: {
+          state: "failed",
+          errorMessage: "The earlier root failed",
+          nativeContextAvailable: true,
+          codexTransientFailure: "server",
+        },
+      });
+      await harness.drain();
+      const readyThread = (await harness.readModel()).threads[0]!;
+      expect(readyThread.session).toMatchObject({
+        status: "ready",
+        activeTurnId: null,
+        lastError: "The earlier root failed",
+        updatedAt: failedAt,
+      });
+      const failureEvent = (
+        await Effect.runPromise(Stream.runCollect(harness.engine.readEvents(0)))
+      ).find(
+        (event) =>
+          event.type === "thread.activity-appended" &&
+          (event.payload.activity.payload as { recovery?: unknown } | undefined)?.recovery ===
+            "codex-transient-root-failed",
+      )!;
+      expect(failureEvent).toBeDefined();
+      let pendingSession: ProviderRuntimeTestThread["session"] = null;
+      const admitNewInput = async () => {
+        await Effect.runPromise(
+          harness.engine.dispatch({
+            type: "thread.turn.start",
+            commandId: CommandId.make(
+              kind === "automatic"
+                ? "server:late-system-error-newer-input-start"
+                : "late-system-error-newer-input-start",
+            ),
+            threadId,
+            message: {
+              messageId,
+              role: "user",
+              text: "This newly submitted input must remain pending",
+              attachments: [],
+            },
+            runtimeMode: readyThread.runtimeMode,
+            interactionMode: readyThread.interactionMode,
+            ...(kind === "automatic"
+              ? {
+                  modelSelection: readyThread.modelSelection,
+                  subagentLimits: readyThread.subagentLimits ?? {},
+                  runtimeRecovery: {
+                    sourceEventSequence: failureEvent.sequence,
+                    turnId,
+                    sessionUpdatedAt: failedAt,
+                    codexTransientFailure: {
+                      providerInstanceId: identity.providerInstanceId,
+                      subagentRuntimeId: identity.subagentRuntimeId,
+                      chainSourceEventSequence: failureEvent.sequence,
+                      retryAttempt: 0,
+                    },
+                  },
+                }
+              : {}),
+            createdAt: requestedAt,
+          }),
+        );
+        pendingSession = (await harness.readModel()).threads[0]!.session;
+        expect(pendingSession).toMatchObject({ status: kind === "manual" ? "starting" : "ready" });
+      };
+      if (scenario === "already-pending") {
+        await admitNewInput();
+      } else if (scenario === "pending-during-proof") {
+        gateInventory = true;
+      } else {
+        // The diagnostic has no current failed-root proof. It therefore reads
+        // no pending input and prepares an ordinary conservative error write.
+        // Only the serialized engine can fence input admitted after that read.
+        const { codexRootTurnFailure: _proof, ...withoutProof } = nativeSession;
+        harness.setProviderSession(withoutProof);
+      }
+      harness.emit({
+        ...identity,
+        type: "thread.state.changed",
+        eventId: asEventId("late-system-error-after-newer-input"),
+        createdAt: "2026-01-01T00:00:04.000Z",
+        raw: {
+          source: "codex.app-server.notification",
+          method: "thread/status/changed",
+          payload: { status: { type: "systemError" } },
+        },
+        payload: { state: "error" },
+      });
+      if (scenario !== "already-pending") {
+        await Effect.runPromise(Deferred.await(reached));
+        try {
+          // An automatic start retains ready/null and the failure clock, so
+          // the usual captured session-tuple CAS cannot detect this new input.
+          // Admission can win during either the proof read or queued dispatch;
+          // neither boundary permits the old watch to consume that input.
+          await admitNewInput();
+        } finally {
+          await Effect.runPromise(Deferred.succeed(release, undefined));
+        }
+      }
+      await harness.drain();
+      const afterDiagnostic = (await harness.readModel()).threads[0]!;
+      expect(await harness.readTurnStartBinding(threadId, null)).toMatchObject({
+        messageId,
+        requestedAt,
+      });
+      expect(afterDiagnostic.messages.find((message) => message.id === messageId)).toMatchObject({
+        role: "user",
+        text: "This newly submitted input must remain pending",
+      });
+      expect(afterDiagnostic.session).toEqual(pendingSession);
+      expect(
+        await Effect.runPromise(harness.sql<{ state: string; completedAt: string }>`
+          SELECT state, completed_at AS "completedAt" FROM projection_turns
+          WHERE thread_id = ${threadId} AND turn_id = ${turnId}
+        `),
+      ).toEqual([{ state: "error", completedAt: failedAt }]);
+      expect(
+        afterDiagnostic.activities.filter(
+          (activity) =>
+            (activity.payload as { recovery?: unknown } | undefined)?.recovery ===
+            "codex-transient-root-failed",
+        ),
+      ).toHaveLength(1);
+    },
+  );
 
   it.each([
     { phase: "prepared", restart: false },
@@ -1039,6 +1275,623 @@ describe("ProviderRuntimeIngestion", () => {
       });
       const afterCompletion = await Effect.runPromise(harness.engine.diagnosticsSnapshot);
       expect(afterCompletion.rejectedCommandCount).toBe(beforeCompletion.rejectedCommandCount);
+    },
+  );
+
+  it("ready availability replay cannot clear a concurrently admitted recovery intent", async () => {
+    const reached = Effect.runSync(Deferred.make<void>());
+    const release = Effect.runSync(Deferred.make<void>());
+    let gateInventory = false;
+    const harness = await createHarness({
+      listSessionsGate: (read) =>
+        gateInventory
+          ? Deferred.succeed(reached, undefined).pipe(
+              Effect.andThen(Deferred.await(release)),
+              Effect.andThen(read),
+            )
+          : read,
+    });
+    const threadId = asThreadId("thread-1");
+    const turnId = asTurnId("failed-root-ready-replay");
+    const instanceId = ProviderInstanceId.make("codex");
+    const runtimeId = SubagentRuntimeId.make("00000000-0000-4000-8000-000000000061");
+    const failedAt = "2026-01-01T00:00:02.000Z";
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.turn.start",
+        commandId: CommandId.make("explicit-user-recovery-consent"),
+        threadId,
+        message: {
+          messageId: MessageId.make("original-human-input"),
+          role: "user",
+          text: "Do the work",
+          attachments: [],
+        },
+        runtimeMode: "approval-required",
+        interactionMode: "default",
+        createdAt: "2026-01-01T00:00:01.000Z",
+      }),
+    );
+    harness.setProviderSession({
+      provider: ProviderDriverKind.make("codex"),
+      providerInstanceId: instanceId,
+      subagentRuntimeId: runtimeId,
+      threadId,
+      status: "ready",
+      runtimeMode: "approval-required",
+      createdAt: "2026-01-01T00:00:01.000Z",
+      updatedAt: failedAt,
+      codexRootTurnFailure: {
+        turnId,
+        providerThreadId: "native-context",
+        observedAt: failedAt,
+        category: "server",
+      },
+    });
+    harness.emit({
+      type: "turn.started",
+      eventId: asEventId("ready-replay-start"),
+      provider: ProviderDriverKind.make("codex"),
+      providerInstanceId: instanceId,
+      subagentRuntimeId: runtimeId,
+      threadId,
+      turnId,
+      createdAt: "2026-01-01T00:00:01.000Z",
+    });
+    await harness.drain();
+    const completion = {
+      type: "turn.completed" as const,
+      eventId: asEventId("ready-replay-failed"),
+      provider: ProviderDriverKind.make("codex"),
+      providerInstanceId: instanceId,
+      subagentRuntimeId: runtimeId,
+      threadId,
+      turnId,
+      createdAt: failedAt,
+      payload: {
+        state: "failed" as const,
+        errorMessage: "Root failed",
+        nativeContextAvailable: true as const,
+        codexTransientFailure: "server" as const,
+      },
+    };
+    harness.emit(completion);
+    await harness.drain();
+    const events = await Effect.runPromise(Stream.runCollect(harness.engine.readEvents(0)));
+    const marker = events.find(
+      (event) =>
+        event.type === "thread.activity-appended" &&
+        (event.payload.activity.payload as { recovery?: unknown } | undefined)?.recovery ===
+          "codex-transient-root-failed",
+    )!;
+    expect(marker).toBeDefined();
+    expect(
+      await Effect.runPromise(harness.sql<{ actorKind: string; sourceKind: string }>`
+      SELECT event.actor_kind AS "actorKind", recovery.source_kind AS "sourceKind"
+      FROM orchestration_events AS event
+      JOIN orchestration_codex_transient_recovery_intents AS recovery ON recovery.sequence = event.sequence
+      WHERE event.sequence = ${marker.sequence}
+    `),
+    ).toEqual([{ actorKind: "server", sourceKind: "failure" }]);
+    const currentThread = (await harness.readModel()).threads[0]!;
+    gateInventory = true;
+    harness.emit({ ...completion, eventId: asEventId("ready-replay-confirmation") });
+    await Effect.runPromise(Deferred.await(reached));
+    try {
+      await Effect.runPromise(
+        harness.engine.dispatch({
+          type: "thread.turn.start",
+          commandId: CommandId.make("server:ready-replay-recovery-intent"),
+          threadId,
+          message: {
+            messageId: MessageId.make("ready-replay-continuation"),
+            role: "user",
+            text: "Continue current work",
+            attachments: [],
+          },
+          runtimeMode: currentThread.runtimeMode,
+          interactionMode: currentThread.interactionMode,
+          modelSelection: currentThread.modelSelection,
+          subagentLimits: currentThread.subagentLimits ?? {},
+          createdAt: "2026-01-01T00:00:03.000Z",
+          runtimeRecovery: {
+            sourceEventSequence: marker.sequence,
+            turnId,
+            sessionUpdatedAt: failedAt,
+            codexTransientFailure: {
+              providerInstanceId: instanceId,
+              subagentRuntimeId: runtimeId,
+              chainSourceEventSequence: marker.sequence,
+              retryAttempt: 0,
+            },
+          },
+        }),
+      );
+      expect((await harness.readTurnStartBinding(threadId, null))?.messageId).toBe(
+        "ready-replay-continuation",
+      );
+    } finally {
+      await Effect.runPromise(Deferred.succeed(release, undefined));
+    }
+    await harness.drain();
+    expect((await harness.readTurnStartBinding(threadId, null))?.messageId).toBe(
+      "ready-replay-continuation",
+    );
+    expect((await harness.readModel()).threads[0]!.session).toMatchObject({
+      status: "ready",
+      activeTurnId: null,
+      lastError: "Root failed",
+      updatedAt: failedAt,
+    });
+    // No native start or ACK has associated this new root yet. Its early
+    // failure/diagnostic must not consume the exact continuation input or
+    // replace A's verified context tuple with an unbound error lifecycle.
+    gateInventory = false;
+    const earlyTurnId = asTurnId("ready-replay-terminal-before-ack");
+    harness.emit({
+      ...completion,
+      eventId: asEventId("early-unbound-completion"),
+      turnId: earlyTurnId,
+      createdAt: "2026-01-01T00:00:04.000Z",
+      payload: { state: "failed", errorMessage: "Early continuation failure" },
+    });
+    harness.emit({
+      type: "runtime.error",
+      eventId: asEventId("early-unbound-diagnostic"),
+      provider: ProviderDriverKind.make("codex"),
+      providerInstanceId: instanceId,
+      subagentRuntimeId: runtimeId,
+      threadId,
+      turnId: earlyTurnId,
+      createdAt: "2026-01-01T00:00:04.000Z",
+      payload: { message: "Early continuation failure" },
+    });
+    await harness.drain();
+    expect((await harness.readTurnStartBinding(threadId, null))?.messageId).toBe(
+      "ready-replay-continuation",
+    );
+    expect((await harness.readModel()).threads[0]!.session).toMatchObject({
+      status: "ready",
+      activeTurnId: null,
+      lastError: "Root failed",
+      updatedAt: failedAt,
+    });
+    expect((await harness.readModel()).threads[0]!.latestTurn).toMatchObject({
+      turnId,
+      state: "error",
+      completedAt: failedAt,
+    });
+    const afterIntentEvents = await Effect.runPromise(
+      Stream.runCollect(harness.engine.readEvents(marker.sequence)),
+    );
+    const intent = afterIntentEvents.find((entry) => entry.type === "thread.turn-start-requested")!;
+    const attemptOwnerId = "00000000-0000-4000-8000-000000000081";
+    const acceptedAt = "2026-01-01T00:00:05.000Z";
+    for (const [id, associatedTurn, payload] of [
+      [
+        `server:runtime-recovery-attempt:${intent.sequence}`,
+        turnId,
+        {
+          recovery: "codex-transient-continuation-attempted",
+          sourceEventSequence: marker.sequence,
+          attemptOwnerId,
+        },
+      ],
+      [
+        codexTransientAcceptanceCommandId(threadId, earlyTurnId),
+        earlyTurnId,
+        {
+          recovery: "codex-transient-continuation-accepted",
+          recoveryIntentSequence: intent.sequence,
+          attemptOwnerId,
+          providerInstanceId: instanceId,
+          subagentRuntimeId: runtimeId,
+        },
+      ],
+    ] as const) {
+      await Effect.runPromise(
+        harness.engine.dispatch({
+          type: "thread.activity.append",
+          commandId: CommandId.make(id),
+          threadId,
+          activity: {
+            id: EventId.make(id),
+            kind: "runtime.warning",
+            tone: "info",
+            summary: "Owned recovery fact",
+            turnId: associatedTurn,
+            payload,
+            createdAt: acceptedAt,
+          },
+          createdAt: acceptedAt,
+        }),
+      );
+    }
+    // A real accepted receipt and fresh owner proof let the server bind B
+    // directly as failed, without ever emitting a fictitious native start.
+    const beforeAssociation = (await harness.readModel()).threads[0]!.session!;
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.session.set",
+        commandId: CommandId.make("server:terminal-before-ack-association"),
+        threadId,
+        expectedSubagentRuntimeId: runtimeId,
+        expectedSessionLifecycle: {
+          status: beforeAssociation.status,
+          activeTurnId: beforeAssociation.activeTurnId,
+          providerName: beforeAssociation.providerName,
+          providerInstanceId: instanceId,
+          subagentRuntimeId: runtimeId,
+          updatedAt: failedAt,
+        },
+        session: {
+          ...beforeAssociation,
+          status: "ready",
+          activeTurnId: null,
+          lastError: "Early continuation failure",
+          updatedAt: "2026-01-01T00:00:04.000Z",
+        },
+        codexFailedRoot: {
+          turnId: earlyTurnId,
+          previousTurnId: turnId,
+          messageId: MessageId.make("ready-replay-continuation"),
+          intentSequence: intent.sequence,
+          requestedAt: "2026-01-01T00:00:03.000Z",
+          completedAt: "2026-01-01T00:00:04.000Z",
+        },
+        createdAt: acceptedAt,
+      }),
+    );
+    harness.setProviderSession({
+      provider: ProviderDriverKind.make("codex"),
+      providerInstanceId: instanceId,
+      subagentRuntimeId: runtimeId,
+      threadId,
+      status: "ready",
+      runtimeMode: "approval-required",
+      createdAt: "2026-01-01T00:00:01.000Z",
+      updatedAt: "2026-01-01T00:00:04.000Z",
+      codexRootTurnFailure: {
+        turnId: earlyTurnId,
+        providerThreadId: "native-context",
+        observedAt: "2026-01-01T00:00:04.000Z",
+        category: "server",
+      },
+    });
+    harness.emit({
+      ...completion,
+      eventId: asEventId("terminal-before-ack-owner-confirmation"),
+      turnId: earlyTurnId,
+      createdAt: "2026-01-01T00:00:04.000Z",
+      payload: {
+        state: "failed",
+        errorMessage: "Early continuation failure",
+        nativeContextAvailable: true,
+        codexTransientFailure: "server",
+      },
+    });
+    await harness.drain();
+    const associated = (await harness.readModel()).threads[0]!;
+    expect(associated.latestTurn).toMatchObject({
+      turnId: earlyTurnId,
+      state: "error",
+      requestedAt: "2026-01-01T00:00:03.000Z",
+      startedAt: null,
+      completedAt: "2026-01-01T00:00:04.000Z",
+    });
+    expect(associated.session).toMatchObject({
+      status: "ready",
+      activeTurnId: null,
+      lastError: "Early continuation failure",
+    });
+    expect(await harness.readTurnStartBinding(threadId, null)).toBeNull();
+    expect((await harness.readTurnStartBinding(threadId, earlyTurnId))?.messageId).toBe(
+      "ready-replay-continuation",
+    );
+    const associatedEvents = await Effect.runPromise(
+      Stream.runCollect(harness.engine.readEvents(intent.sequence)),
+    );
+    const nextMarker = associatedEvents.find(
+      (entry) =>
+        entry.type === "thread.activity-appended" &&
+        entry.payload.activity.turnId === earlyTurnId &&
+        (entry.payload.activity.payload as { recovery?: unknown } | undefined)?.recovery ===
+          "codex-transient-root-failed",
+    )!;
+    expect(nextMarker).toBeDefined();
+    const chain = await Effect.runPromise(
+      makeCodexTransientRecoveryChainReader.pipe(
+        Effect.flatMap((read) =>
+          read({
+            threadId,
+            turnId: earlyTurnId,
+            sourceEventSequence: nextMarker.sequence,
+            providerInstanceId: instanceId,
+            subagentRuntimeId: runtimeId,
+          }),
+        ),
+        Effect.provideService(SqlClient.SqlClient, harness.sql),
+      ),
+    );
+    expect(chain).toEqual({
+      status: "accepted",
+      chainSourceEventSequence: marker.sequence,
+      retryAttempt: 1,
+    });
+  });
+
+  it("retains exact failed-root recovery through an earlier unscoped Codex system error", async () => {
+    const harness = await createHarness();
+    const threadId = asThreadId("thread-1");
+    const turnId = asTurnId("system-error-before-root-failure");
+    const instanceId = ProviderInstanceId.make("codex");
+    const runtimeId = SubagentRuntimeId.make("00000000-0000-4000-8000-000000000061");
+    const startedAt = "2026-01-01T00:00:01.000Z";
+    const diagnosticAt = "2026-01-01T00:00:02.123Z";
+    const completedAt = "2026-01-01T00:00:02.124Z";
+    const definitiveMessage = "The root response failed after native retries.";
+    const identity = {
+      provider: ProviderDriverKind.make("codex"),
+      providerInstanceId: instanceId,
+      subagentRuntimeId: runtimeId,
+      threadId,
+    };
+    harness.setProviderSession({
+      ...identity,
+      status: "ready",
+      runtimeMode: "approval-required",
+      createdAt: startedAt,
+      updatedAt: completedAt,
+      lastError: definitiveMessage,
+      codexRootTurnFailure: {
+        turnId,
+        providerThreadId: "private-system-error-native-conversation",
+        observedAt: completedAt,
+        category: "server",
+      },
+    });
+    harness.emit({
+      ...identity,
+      type: "turn.started",
+      eventId: asEventId("system-error-root-start"),
+      turnId,
+      createdAt: startedAt,
+    });
+    await harness.drain();
+
+    // Codex reports the thread's systemError before the authoritative failed
+    // turn. The former is intentionally unscoped; it cannot erase the exact
+    // native root identity needed by the later definitive completion.
+    harness.emit({
+      ...identity,
+      type: "thread.state.changed",
+      eventId: asEventId("system-error-unscoped-thread-error"),
+      createdAt: diagnosticAt,
+      payload: { state: "error" },
+    });
+    harness.emit({
+      ...identity,
+      type: "runtime.error",
+      eventId: asEventId("system-error-root-diagnostic"),
+      turnId,
+      createdAt: diagnosticAt,
+      raw: {
+        source: "codex.app-server.notification",
+        method: "error",
+        payload: { willRetry: false, error: { message: "A preliminary root diagnostic" } },
+      },
+      payload: { message: "A preliminary root diagnostic", class: "provider_error" },
+    });
+    await harness.drain();
+    expect((await harness.readModel()).threads[0]!.session).toMatchObject({
+      status: "running",
+      activeTurnId: turnId,
+    });
+    harness.emit({
+      ...identity,
+      type: "turn.completed",
+      eventId: asEventId("system-error-definitive-root-failure"),
+      turnId,
+      createdAt: completedAt,
+      payload: {
+        state: "failed",
+        errorMessage: definitiveMessage,
+        nativeContextAvailable: true,
+        codexTransientFailure: "server",
+      },
+    });
+    await harness.drain();
+    const thread = (await harness.readModel()).threads[0]!;
+    expect(thread.session).toMatchObject({
+      status: "ready",
+      activeTurnId: null,
+      lastError: definitiveMessage,
+      providerInstanceId: instanceId,
+      subagentRuntimeId: runtimeId,
+      updatedAt: completedAt,
+    });
+    expect(thread.latestTurn).toMatchObject({ turnId, state: "error", completedAt });
+    const markers = thread.activities.filter(
+      (activity) =>
+        (activity.payload as { recovery?: unknown } | undefined)?.recovery ===
+        "codex-transient-root-failed",
+    );
+    expect(markers).toHaveLength(1);
+    expect(markers[0]?.payload).toEqual({
+      recovery: "codex-transient-root-failed",
+      providerInstanceId: instanceId,
+      subagentRuntimeId: runtimeId,
+      sessionUpdatedAt: completedAt,
+    });
+    expect(JSON.stringify(markers[0]?.payload)).not.toContain(
+      "private-system-error-native-conversation",
+    );
+
+    // Replayed non-conclusive diagnostics may remain useful received history,
+    // but are not evidence that the positively verified context died later.
+    harness.emit({
+      ...identity,
+      type: "thread.state.changed",
+      eventId: asEventId("system-error-delayed-thread-error"),
+      createdAt: "2026-01-01T00:00:03.000Z",
+      payload: { state: "error" },
+    });
+    await harness.drain();
+    expect((await harness.readModel()).threads[0]!.session).toEqual(thread.session);
+  });
+
+  it.each([
+    "unchanged-tuple",
+    "stop-intent",
+    "new-input",
+    "other-account",
+    "new-runtime",
+    "other-latest-turn",
+    "different-proof-time",
+  ] as const)(
+    "reconciles an already failed Codex diagnostic only with exact authority: %s",
+    async (scenario) => {
+      const harness = await createHarness();
+      const threadId = asThreadId("thread-1");
+      const turnId = asTurnId("preterminalized-system-error-root");
+      const instanceId = ProviderInstanceId.make("codex");
+      const runtimeId = SubagentRuntimeId.make("00000000-0000-4000-8000-000000000071");
+      const startedAt = "2026-01-01T00:00:01.000Z";
+      const diagnosticAt = "2026-01-01T00:00:02.123Z";
+      const completedAt = "2026-01-01T00:00:02.124Z";
+      const definitiveMessage = "Definitive server-side root failure";
+      const identity = {
+        provider: ProviderDriverKind.make("codex"),
+        providerInstanceId: instanceId,
+        subagentRuntimeId: runtimeId,
+        threadId,
+      };
+      harness.setProviderSession({
+        ...identity,
+        status: "ready",
+        runtimeMode: "approval-required",
+        createdAt: startedAt,
+        updatedAt: completedAt,
+        codexRootTurnFailure: {
+          turnId,
+          providerThreadId: "private-preterminalized-native-conversation",
+          observedAt: scenario === "different-proof-time" ? diagnosticAt : completedAt,
+          category: "server",
+        },
+      });
+      harness.emit({
+        ...identity,
+        type: "turn.started",
+        eventId: asEventId("preterminalized-system-error-start"),
+        turnId,
+        createdAt: startedAt,
+      });
+      await harness.drain();
+
+      // Reproduce the old build's committed public tuple directly: the exact
+      // root has already become failed at the preliminary diagnostic timestamp.
+      // Native availability is not enough to reconcile this historical tuple:
+      // its diagnostic publication time is not the definitive failure time.
+      // Do not relax the existing exact-publication fence or infer authority.
+      const startedSession = (await harness.readModel()).threads[0]!.session!;
+      await Effect.runPromise(
+        harness.engine.dispatch({
+          type: "thread.session.set",
+          commandId: CommandId.make("preterminalized-system-error-public-tuple"),
+          threadId,
+          session: {
+            ...startedSession,
+            status: "error",
+            activeTurnId: null,
+            lastError: "Provider thread error",
+            updatedAt: diagnosticAt,
+          },
+          createdAt: diagnosticAt,
+        }),
+      );
+      const failedSession = (await harness.readModel()).threads[0]!.session!;
+      if (scenario === "stop-intent") {
+        // Stop authority exists as soon as the client command commits, before
+        // the asynchronous provider close can publish a stopped session tuple.
+        await Effect.runPromise(
+          harness.engine.dispatch({
+            type: "thread.session.stop",
+            commandId: CommandId.make("preterminalized-system-error-stop"),
+            threadId,
+            createdAt: "2026-01-01T00:00:02.1235Z",
+          }),
+        );
+      } else if (scenario === "new-input") {
+        await Effect.runPromise(
+          harness.engine.dispatch({
+            type: "thread.turn.start",
+            commandId: CommandId.make("preterminalized-system-error-new-input"),
+            threadId,
+            message: {
+              messageId: asMessageId("preterminalized-system-error-new-input-message"),
+              role: "user",
+              text: "New explicit input",
+              attachments: [],
+            },
+            interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+            runtimeMode: "approval-required",
+            createdAt: "2026-01-01T00:00:02.1235Z",
+          }),
+        );
+      } else if (scenario === "other-account" || scenario === "new-runtime") {
+        await Effect.runPromise(
+          harness.engine.dispatch({
+            type: "thread.session.set",
+            commandId: CommandId.make("preterminalized-system-error-replacement-owner"),
+            threadId,
+            session: {
+              ...failedSession,
+              providerInstanceId:
+                scenario === "other-account" ? ProviderInstanceId.make("codex-other") : instanceId,
+              subagentRuntimeId:
+                scenario === "new-runtime"
+                  ? SubagentRuntimeId.make("00000000-0000-4000-8000-000000000072")
+                  : runtimeId,
+              updatedAt: "2026-01-01T00:00:02.1235Z",
+            },
+            createdAt: "2026-01-01T00:00:02.1235Z",
+          }),
+        );
+      } else if (scenario === "other-latest-turn") {
+        harness.emit({
+          ...identity,
+          type: "turn.started",
+          eventId: asEventId("preterminalized-system-error-new-root"),
+          turnId: asTurnId("preterminalized-newer-root"),
+          createdAt: "2026-01-01T00:00:02.1235Z",
+        });
+        await harness.drain();
+      }
+      const beforeCompletion = (await harness.readModel()).threads[0]!;
+      const completion = {
+        ...identity,
+        type: "turn.completed" as const,
+        eventId: asEventId("preterminalized-system-error-definitive"),
+        turnId,
+        createdAt: completedAt,
+        payload: {
+          state: "failed" as const,
+          errorMessage: definitiveMessage,
+          nativeContextAvailable: true as const,
+          codexTransientFailure: "server" as const,
+        },
+      };
+      harness.emit(completion);
+      await harness.drain();
+      const afterCompletion = (await harness.readModel()).threads[0]!;
+      const markers = afterCompletion.activities.filter(
+        (activity) =>
+          (activity.payload as { recovery?: unknown } | undefined)?.recovery ===
+          "codex-transient-root-failed",
+      );
+      expect(afterCompletion.session).toEqual(beforeCompletion.session);
+      expect(afterCompletion.latestTurn).toEqual(beforeCompletion.latestTurn);
+      expect(markers).toHaveLength(0);
     },
   );
 
@@ -2067,6 +2920,330 @@ describe("ProviderRuntimeIngestion", () => {
     expect(thread.session?.status).toBe("error");
     expect(thread.session?.lastError).toBe("turn failed");
   });
+
+  it.each([
+    "transient",
+    "permanent",
+    "missing-marker",
+    "missing-proof",
+    "replaced-runtime",
+    "active-native-root",
+    "closed-native-context",
+    "partial-fanout",
+    "delayed-error",
+    "category-disagreement",
+    "proof-time-disagreement",
+    "child-start",
+    "child-progress",
+    "child-completed",
+  ] as const)("keeps root failure separate from native availability: %s", async (scenario) => {
+    const harness = await createHarness();
+    const threadId = asThreadId("thread-1");
+    const turnId = asTurnId("failed-root-availability");
+    const instanceId = ProviderInstanceId.make("codex");
+    const runtimeId = SubagentRuntimeId.make("00000000-0000-4000-8000-000000000021");
+    const completedAt = "2026-01-01T00:00:02.000Z";
+    const transient = scenario !== "permanent";
+    const session: ProviderSession = {
+      provider: ProviderDriverKind.make("codex"),
+      providerInstanceId: instanceId,
+      subagentRuntimeId: runtimeId,
+      threadId,
+      status: "ready",
+      runtimeMode: "approval-required",
+      createdAt: "2026-01-01T00:00:01.000Z",
+      updatedAt: completedAt,
+      lastError: "Root response failed",
+      codexRootTurnFailure: {
+        turnId,
+        providerThreadId: "private-native-conversation",
+        observedAt:
+          scenario === "proof-time-disagreement" ? "2026-01-01T00:00:01.999Z" : completedAt,
+        ...(transient && scenario !== "category-disagreement"
+          ? { category: "server" as const }
+          : {}),
+      },
+    };
+    harness.setProviderSession(session);
+    harness.emit({
+      type: "turn.started",
+      eventId: asEventId("failed-root-availability-start"),
+      provider: session.provider,
+      providerInstanceId: instanceId,
+      subagentRuntimeId: runtimeId,
+      threadId,
+      turnId,
+      createdAt: session.createdAt,
+    });
+    await harness.drain();
+    if (scenario === "partial-fanout") {
+      // Simulate a crash after the ordinary terminal command but before its
+      // availability fanout. Replayed terminal data must not complete/reopen
+      // the failed root, yet may finish this exact two-phase transition.
+      const current = (await harness.readModel()).threads[0]!.session!;
+      await Effect.runPromise(
+        harness.engine.dispatch({
+          type: "thread.session.set",
+          commandId: CommandId.make("partial-failed-root"),
+          threadId,
+          session: {
+            ...current,
+            status: "error",
+            activeTurnId: null,
+            lastError: "Root response failed",
+            updatedAt: completedAt,
+          },
+          createdAt: completedAt,
+        }),
+      );
+    }
+    if (scenario === "missing-proof") {
+      const { codexRootTurnFailure: _proof, ...withoutProof } = session;
+      harness.setProviderSession(withoutProof);
+    } else if (scenario === "replaced-runtime") {
+      harness.setProviderSession({
+        ...session,
+        subagentRuntimeId: SubagentRuntimeId.make("00000000-0000-4000-8000-000000000022"),
+      });
+    } else if (scenario === "active-native-root") {
+      harness.setProviderSession({
+        ...session,
+        status: "running",
+        activeTurnId: asTurnId("new-root"),
+      });
+    } else if (scenario === "closed-native-context") {
+      harness.setProviderSession({ ...session, status: "closed" });
+    }
+    harness.emit({
+      type: "turn.completed",
+      eventId: asEventId("failed-root-availability-completion"),
+      provider: session.provider,
+      providerInstanceId: instanceId,
+      subagentRuntimeId: runtimeId,
+      threadId,
+      turnId,
+      createdAt: completedAt,
+      payload: {
+        state: "failed",
+        errorMessage: "Root response failed",
+        ...(scenario === "missing-marker" ? {} : { nativeContextAvailable: true as const }),
+        ...(transient ? { codexTransientFailure: "server" as const } : {}),
+      },
+    });
+    await harness.drain();
+    if (
+      scenario === "child-start" ||
+      scenario === "child-progress" ||
+      scenario === "child-completed"
+    ) {
+      const childAt = "2026-01-01T00:00:04.000Z";
+      const identity = {
+        provider: session.provider,
+        providerInstanceId: instanceId,
+        subagentRuntimeId: runtimeId,
+        threadId,
+        turnId,
+        createdAt: childAt,
+      };
+      const subagent = { threadId: "surviving-child", runtimeId, status: "active" as const };
+      harness.emit(
+        scenario === "child-start"
+          ? {
+              ...identity,
+              type: "task.started",
+              eventId: asEventId("surviving-child-start"),
+              payload: { taskId: RuntimeTaskId.make("surviving-child"), subagent },
+            }
+          : scenario === "child-progress"
+            ? {
+                ...identity,
+                type: "task.progress",
+                eventId: asEventId("surviving-child-progress"),
+                payload: {
+                  taskId: RuntimeTaskId.make("surviving-child"),
+                  subagent,
+                  summary: "Still working",
+                },
+              }
+            : {
+                ...identity,
+                type: "task.completed",
+                eventId: asEventId("surviving-child-completed"),
+                payload: {
+                  taskId: RuntimeTaskId.make("surviving-child"),
+                  status: "completed",
+                  subagent: { ...subagent, status: "completed" },
+                },
+              },
+      );
+      await harness.drain();
+      expect(
+        (await harness.readModel()).threads[0]!.activities.find(
+          (entry) => entry.id === `surviving-child-${scenario.slice(6)}`,
+        )?.createdAt,
+      ).toBe(childAt);
+      expect(
+        await Effect.runPromise(harness.sql<{ completedAt: string }>`
+        SELECT completed_at AS "completedAt" FROM projection_turns
+        WHERE thread_id = ${threadId} AND turn_id = ${turnId}
+      `),
+      ).toEqual([{ completedAt }]);
+    }
+    if (scenario === "delayed-error") {
+      harness.emit({
+        type: "runtime.error",
+        eventId: asEventId("failed-root-delayed-error"),
+        provider: session.provider,
+        providerInstanceId: instanceId,
+        subagentRuntimeId: runtimeId,
+        threadId,
+        turnId,
+        createdAt: "2026-01-01T00:00:03.000Z",
+        payload: { message: "Delayed root diagnostic" },
+      });
+      await harness.drain();
+      expect(
+        await Effect.runPromise(harness.sql<{ completedAt: string }>`
+        SELECT completed_at AS "completedAt" FROM projection_turns
+        WHERE thread_id = ${threadId} AND turn_id = ${turnId}
+      `),
+      ).toEqual([{ completedAt }]);
+    }
+    const thread = (await harness.readModel()).threads[0]!;
+    const available =
+      scenario === "transient" ||
+      scenario === "permanent" ||
+      scenario === "partial-fanout" ||
+      scenario === "delayed-error" ||
+      scenario === "category-disagreement" ||
+      scenario === "child-start" ||
+      scenario === "child-progress" ||
+      scenario === "child-completed";
+    expect(thread.session).toMatchObject({
+      status: available ? "ready" : "error",
+      activeTurnId: null,
+      lastError: "Root response failed",
+      subagentRuntimeId: runtimeId,
+    });
+    expect(thread.latestTurn).toMatchObject({ turnId, state: "error", completedAt });
+    const markers = thread.activities.filter(
+      (entry) =>
+        (entry.payload as { recovery?: unknown } | undefined)?.recovery ===
+        "codex-transient-root-failed",
+    );
+    expect(markers).toHaveLength(
+      available && transient && scenario !== "category-disagreement" ? 1 : 0,
+    );
+    if (markers[0]) {
+      expect(markers[0].payload).toEqual({
+        recovery: "codex-transient-root-failed",
+        providerInstanceId: instanceId,
+        subagentRuntimeId: runtimeId,
+        sessionUpdatedAt: completedAt,
+      });
+      expect(JSON.stringify(markers[0].payload)).not.toContain("private-native-conversation");
+    }
+  });
+
+  it.each(["stopped", "new-turn", "new-runtime"] as const)(
+    "failed-root availability CAS cannot overwrite %s",
+    async (replacement) => {
+      const reached = Effect.runSync(Deferred.make<void>());
+      const release = Effect.runSync(Deferred.make<void>());
+      const harness = await createHarness({
+        dispatchGate: (command, dispatch) =>
+          command.type === "thread.session.set" &&
+          String(command.commandId).endsWith(":failed-root-context-available")
+            ? Deferred.succeed(reached, undefined).pipe(
+                Effect.andThen(Deferred.await(release)),
+                Effect.andThen(dispatch(command)),
+              )
+            : dispatch(command),
+      });
+      const threadId = asThreadId("thread-1");
+      const turnId = asTurnId("failed-root-race");
+      const instanceId = ProviderInstanceId.make("codex");
+      const runtimeId = SubagentRuntimeId.make("00000000-0000-4000-8000-000000000031");
+      harness.setProviderSession({
+        provider: ProviderDriverKind.make("codex"),
+        providerInstanceId: instanceId,
+        subagentRuntimeId: runtimeId,
+        threadId,
+        status: "ready",
+        runtimeMode: "approval-required",
+        createdAt: "2026-01-01T00:00:01.000Z",
+        updatedAt: "2026-01-01T00:00:02.000Z",
+        codexRootTurnFailure: {
+          turnId,
+          providerThreadId: "native-root",
+          observedAt: "2026-01-01T00:00:02.000Z",
+          category: "transport",
+        },
+      });
+      harness.emit({
+        type: "turn.started",
+        eventId: asEventId("failed-root-race-start"),
+        provider: ProviderDriverKind.make("codex"),
+        providerInstanceId: instanceId,
+        subagentRuntimeId: runtimeId,
+        threadId,
+        turnId,
+        createdAt: "2026-01-01T00:00:01.000Z",
+      });
+      await harness.drain();
+      harness.emit({
+        type: "turn.completed",
+        eventId: asEventId("failed-root-race-completed"),
+        provider: ProviderDriverKind.make("codex"),
+        providerInstanceId: instanceId,
+        subagentRuntimeId: runtimeId,
+        threadId,
+        turnId,
+        createdAt: "2026-01-01T00:00:02.000Z",
+        payload: {
+          state: "failed",
+          errorMessage: "Root failed",
+          nativeContextAvailable: true,
+          codexTransientFailure: "transport",
+        },
+      });
+      await Effect.runPromise(Deferred.await(reached));
+      const failed = (await harness.readModel()).threads[0]!.session!;
+      const next = {
+        ...failed,
+        status: replacement === "stopped" ? ("stopped" as const) : ("running" as const),
+        activeTurnId: replacement === "new-turn" ? asTurnId("new-root") : null,
+        subagentRuntimeId:
+          replacement === "new-runtime"
+            ? SubagentRuntimeId.make("00000000-0000-4000-8000-000000000032")
+            : runtimeId,
+        updatedAt: "2026-01-01T00:00:03.000Z",
+      };
+      try {
+        await Effect.runPromise(
+          harness.engine.dispatch({
+            type: "thread.session.set",
+            commandId: CommandId.make("competing-failed-root-lifecycle"),
+            threadId,
+            session: next,
+            createdAt: next.updatedAt,
+          }),
+        );
+      } finally {
+        await Effect.runPromise(Deferred.succeed(release, undefined));
+      }
+      await harness.drain();
+      const thread = (await harness.readModel()).threads[0]!;
+      expect(thread.session).toMatchObject(next);
+      expect(
+        thread.activities.some(
+          (entry) =>
+            (entry.payload as { recovery?: unknown } | undefined)?.recovery ===
+            "codex-transient-root-failed",
+        ),
+      ).toBe(false);
+    },
+  );
 
   it("keeps an active Codex goal non-idle across provider-owned continuation turns", async () => {
     const harness = await createHarness();
@@ -4220,137 +5397,170 @@ describe("ProviderRuntimeIngestion", () => {
     expect(message?.streaming).toBe(false);
   });
 
-  it("repairs exact late assistant completion without reopening an older terminal turn", async () => {
-    const logMessages: unknown[] = [];
-    const harness = await createHarness({
-      serverSettings: { enableAssistantStreaming: true },
-      logMessages,
-    });
-    const threadId = asThreadId("thread-1");
-    const oldTurnId = asTurnId("turn-late-assistant-old");
-    const newTurnId = asTurnId("turn-late-assistant-new");
-    const itemId = RuntimeItemId.make("item-late-assistant");
-    const messageId = "assistant:item-late-assistant";
-    const startedAt = "2026-01-01T00:00:01.000Z";
-    const completedAt = "2026-01-01T00:00:02.000Z";
-    const newStartedAt = "2026-01-01T00:00:03.000Z";
-    const lateAt = "2026-01-01T00:00:04.000Z";
-    const finalText = "The complete paragraph retains its final newline.\n";
+  it.each([
+    {
+      whitespace: "trailing newline",
+      firstChunk: "The",
+      finalText: "The complete paragraph retains its final newline.\n",
+    },
+    {
+      whitespace: "leading spaces",
+      firstChunk: "  I",
+      finalText: "  I retain the leading spaces in the complete answer.\n",
+    },
+    {
+      whitespace: "CRLF and Unicode",
+      firstChunk: "Both",
+      finalText: "Both café and 日本語 retain Unicode 😀 and CRLF.\r\n",
+    },
+  ])(
+    "repairs exact late assistant completion with $whitespace across the wire without reopening an older terminal turn",
+    async ({ firstChunk, finalText }) => {
+      const logMessages: unknown[] = [];
+      const harness = await createHarness({
+        serverSettings: { enableAssistantStreaming: true },
+        logMessages,
+      });
+      const threadId = asThreadId("thread-1");
+      const oldTurnId = asTurnId("turn-late-assistant-old");
+      const newTurnId = asTurnId("turn-late-assistant-new");
+      const itemId = RuntimeItemId.make("item-late-assistant");
+      const messageId = "assistant:item-late-assistant";
+      const startedAt = "2026-01-01T00:00:01.000Z";
+      const completedAt = "2026-01-01T00:00:02.000Z";
+      const newStartedAt = "2026-01-01T00:00:03.000Z";
+      const lateAt = "2026-01-01T00:00:04.000Z";
 
-    harness.emit({
-      type: "turn.started",
-      eventId: asEventId("evt-late-assistant-old-start"),
-      provider: ProviderDriverKind.make("codex"),
-      threadId,
-      turnId: oldTurnId,
-      createdAt: startedAt,
-    });
-    await waitForThread(harness.readModel, (thread) => thread.session?.activeTurnId === oldTurnId);
-    harness.emit({
-      type: "turn.completed",
-      eventId: asEventId("evt-late-assistant-old-complete"),
-      provider: ProviderDriverKind.make("codex"),
-      threadId,
-      turnId: oldTurnId,
-      createdAt: completedAt,
-      payload: { state: "completed" },
-    });
-    await waitForThread(harness.readModel, (thread) => thread.latestTurn?.state === "completed");
-    harness.emit({
-      type: "turn.started",
-      eventId: asEventId("evt-late-assistant-new-start"),
-      provider: ProviderDriverKind.make("codex"),
-      threadId,
-      turnId: newTurnId,
-      createdAt: newStartedAt,
-    });
-    const before = await waitForThread(
-      harness.readModel,
-      (thread) => thread.session?.activeTurnId === newTurnId,
-    );
-    const readOldTurn = () =>
-      runtime!.runPromise(
-        Effect.gen(function* () {
-          const sql = yield* SqlClient.SqlClient;
-          return yield* sql<{ readonly state: string; readonly completedAt: string | null }>`
+      harness.emit({
+        type: "turn.started",
+        eventId: asEventId("evt-late-assistant-old-start"),
+        provider: ProviderDriverKind.make("codex"),
+        threadId,
+        turnId: oldTurnId,
+        createdAt: startedAt,
+      });
+      await waitForThread(
+        harness.readModel,
+        (thread) => thread.session?.activeTurnId === oldTurnId,
+      );
+      harness.emit({
+        type: "turn.completed",
+        eventId: asEventId("evt-late-assistant-old-complete"),
+        provider: ProviderDriverKind.make("codex"),
+        threadId,
+        turnId: oldTurnId,
+        createdAt: completedAt,
+        payload: { state: "completed" },
+      });
+      await waitForThread(harness.readModel, (thread) => thread.latestTurn?.state === "completed");
+      harness.emit({
+        type: "turn.started",
+        eventId: asEventId("evt-late-assistant-new-start"),
+        provider: ProviderDriverKind.make("codex"),
+        threadId,
+        turnId: newTurnId,
+        createdAt: newStartedAt,
+      });
+      const before = await waitForThread(
+        harness.readModel,
+        (thread) => thread.session?.activeTurnId === newTurnId,
+      );
+      const readOldTurn = () =>
+        runtime!.runPromise(
+          Effect.gen(function* () {
+            const sql = yield* SqlClient.SqlClient;
+            return yield* sql<{ readonly state: string; readonly completedAt: string | null }>`
             SELECT state, completed_at AS "completedAt"
             FROM projection_turns
             WHERE thread_id = ${threadId} AND turn_id = ${oldTurnId}
           `;
+          }),
+        );
+      const oldTurnBefore = await readOldTurn();
+      expect(oldTurnBefore).toEqual([{ state: "completed", completedAt }]);
+
+      // Late child/root output may still name the terminal turn while a newer
+      // turn runs. The first tiny chunk becomes a non-streaming snapshot row;
+      // later appends intentionally cannot reopen it. Exact item completion is
+      // the content-only repair boundary, including every final whitespace unit.
+      for (const [index, delta] of [firstChunk, finalText.slice(firstChunk.length)].entries()) {
+        harness.emit({
+          type: "content.delta",
+          eventId: asEventId(`evt-late-assistant-delta-${index}`),
+          provider: ProviderDriverKind.make("codex"),
+          threadId,
+          turnId: oldTurnId,
+          itemId,
+          createdAt: lateAt,
+          payload: { streamKind: "assistant_text", delta },
+        });
+      }
+      await harness.drain();
+      const fragmented = await waitForThread(harness.readModel, (thread) =>
+        thread.messages.some((message) => message.id === messageId),
+      );
+      expect(fragmented.messages.find((message) => message.id === messageId)).toMatchObject({
+        text: firstChunk,
+        streaming: false,
+        createdAt: completedAt,
+        updatedAt: completedAt,
+      });
+
+      // Production daemon persistence/transport crosses this exact schema JSON
+      // boundary. Feeding a typed object directly hid the old detail transform,
+      // which trimmed final whitespace and broke the strict stream commitment.
+      const completion = decodeProviderRuntimeEventJson(
+        encodeProviderRuntimeEventJson({
+          type: "item.completed",
+          eventId: asEventId("evt-late-assistant-item-complete"),
+          provider: ProviderDriverKind.make("codex"),
+          threadId,
+          turnId: oldTurnId,
+          itemId,
+          createdAt: lateAt,
+          payload: { itemType: "assistant_message", status: "completed", detail: finalText },
         }),
       );
-    const oldTurnBefore = await readOldTurn();
-    expect(oldTurnBefore).toEqual([{ state: "completed", completedAt }]);
-
-    // Late child/root output may still name the terminal turn while a newer
-    // turn runs. The first tiny chunk becomes a non-streaming snapshot row;
-    // later appends intentionally cannot reopen it. Exact item completion is
-    // the content-only repair boundary, including every final whitespace unit.
-    for (const [index, delta] of ["The", finalText.slice(3)].entries()) {
-      harness.emit({
-        type: "content.delta",
-        eventId: asEventId(`evt-late-assistant-delta-${index}`),
-        provider: ProviderDriverKind.make("codex"),
-        threadId,
+      harness.emit(completion);
+      const repaired = await waitForThread(harness.readModel, (thread) =>
+        thread.messages.some((message) => message.id === messageId && message.text === finalText),
+      );
+      expect(repaired.messages.find((message) => message.id === messageId)).toMatchObject({
         turnId: oldTurnId,
-        itemId,
-        createdAt: lateAt,
-        payload: { streamKind: "assistant_text", delta },
+        text: finalText,
+        streaming: false,
+        createdAt: completedAt,
+        updatedAt: completedAt,
       });
-    }
-    await harness.drain();
-    const fragmented = await waitForThread(harness.readModel, (thread) =>
-      thread.messages.some((message) => message.id === messageId),
-    );
-    expect(fragmented.messages.find((message) => message.id === messageId)).toMatchObject({
-      text: "The",
-      streaming: false,
-      createdAt: completedAt,
-      updatedAt: completedAt,
-    });
+      expect(repaired.session).toEqual(before.session);
+      expect(repaired.latestTurn).toEqual(before.latestTurn);
+      expect(await readOldTurn()).toEqual(oldTurnBefore);
 
-    const completion: ProviderRuntimeEvent = {
-      type: "item.completed",
-      eventId: asEventId("evt-late-assistant-item-complete"),
-      provider: ProviderDriverKind.make("codex"),
-      threadId,
-      turnId: oldTurnId,
-      itemId,
-      createdAt: lateAt,
-      payload: { itemType: "assistant_message", status: "completed", detail: finalText },
-    };
-    harness.emit(completion);
-    const repaired = await waitForThread(harness.readModel, (thread) =>
-      thread.messages.some((message) => message.id === messageId && message.text === finalText),
-    );
-    expect(repaired.messages.find((message) => message.id === messageId)).toMatchObject({
-      turnId: oldTurnId,
-      text: finalText,
-      streaming: false,
-      createdAt: completedAt,
-      updatedAt: completedAt,
-    });
-    expect(repaired.session).toEqual(before.session);
-    expect(repaired.latestTurn).toEqual(before.latestTurn);
-    expect(await readOldTurn()).toEqual(oldTurnBefore);
-
-    // Replaying the same completion cannot append the answer twice or produce
-    // a mismatch warning merely because the old turn remains terminal.
-    harness.emit(completion);
-    await harness.drain();
-    const replayed = await harness.readModel();
-    expect(
-      replayed.threads
-        .find((thread) => thread.id === threadId)
-        ?.messages.find((message) => message.id === messageId)?.text,
-    ).toBe(finalText);
-    expect(
-      logMessages.filter(
-        (message) =>
-          Array.isArray(message) && message[0] === "provider.assistantCompletion/textMismatch",
-      ),
-    ).toEqual([]);
-  });
+      // Replaying the same completion cannot append the answer twice or produce
+      // a mismatch warning merely because the old turn remains terminal. Its
+      // content-only authority must also preserve both turn lifecycles again.
+      harness.emit(completion);
+      await harness.drain();
+      const replayed = await harness.readModel();
+      const replayedThread = replayed.threads.find((thread) => thread.id === threadId);
+      expect(replayedThread?.messages.find((message) => message.id === messageId)).toMatchObject({
+        turnId: oldTurnId,
+        text: finalText,
+        streaming: false,
+        createdAt: completedAt,
+        updatedAt: completedAt,
+      });
+      expect(replayedThread?.session).toEqual(before.session);
+      expect(replayedThread?.latestTurn).toEqual(before.latestTurn);
+      expect(await readOldTurn()).toEqual(oldTurnBefore);
+      expect(
+        logMessages.filter(
+          (message) =>
+            Array.isArray(message) && message[0] === "provider.assistantCompletion/textMismatch",
+        ),
+      ).toEqual([]);
+    },
+  );
 
   it("consolidates a completed assistant stream without appending it twice", async () => {
     const harness = await createHarness({ serverSettings: { enableAssistantStreaming: true } });
@@ -4514,6 +5724,7 @@ describe("ProviderRuntimeIngestion", () => {
   it.each([
     { finalText: "Different completed provider text.", reason: "completion-prefix-mismatch" },
     { finalText: "Streamed", reason: "completion-shorter-than-stream" },
+    { finalText: " Streamed provider text.", reason: "completion-prefix-mismatch" },
   ])(
     "preserves streamed output and reports only counts for $reason",
     async ({ finalText, reason }) => {
@@ -4547,20 +5758,24 @@ describe("ProviderRuntimeIngestion", () => {
         ),
       );
 
-      const completion: ProviderRuntimeEvent = {
-        type: "item.completed",
-        eventId: asEventId("evt-divergent-completion-completed"),
-        provider: ProviderDriverKind.make("codex"),
-        createdAt: now,
-        threadId: asThreadId("thread-1"),
-        turnId,
-        itemId,
-        payload: {
-          itemType: "assistant_message",
-          status: "completed",
-          detail: finalText,
-        },
-      };
+      // Transport must preserve a real leading-space mismatch as faithfully as
+      // accepted whitespace; normalization cannot grant replacement authority.
+      const completion = decodeProviderRuntimeEventJson(
+        encodeProviderRuntimeEventJson({
+          type: "item.completed",
+          eventId: asEventId("evt-divergent-completion-completed"),
+          provider: ProviderDriverKind.make("codex"),
+          createdAt: now,
+          threadId: asThreadId("thread-1"),
+          turnId,
+          itemId,
+          payload: {
+            itemType: "assistant_message",
+            status: "completed",
+            detail: finalText,
+          },
+        }),
+      );
       harness.emit(completion);
 
       const thread = await waitForThread(harness.readModel, (entry) =>
@@ -7956,6 +9171,178 @@ describe("ProviderRuntimeIngestion", () => {
     ).toBe(false);
   });
 
+  it("retains bounded Claude summary snapshots separately from answers and keeps sanitized primary command starts", async () => {
+    const harness = await createHarness();
+    const now = "2026-01-01T00:00:00.000Z";
+    harness.emit({
+      type: "turn.started",
+      eventId: asEventId("summary-turn"),
+      provider: ProviderDriverKind.make("claudeAgent"),
+      createdAt: now,
+      threadId: asThreadId("thread-1"),
+      turnId: asTurnId("turn-summary"),
+      payload: {},
+    });
+    let liveSummaryId: string | undefined;
+    for (const [id, type, detail] of [
+      ["summary-live", "item.updated", "Inspected the adapter"],
+      ["summary-final", "item.completed", "Inspected the adapter; tests next"],
+    ] as const) {
+      harness.emit({
+        type,
+        eventId: asEventId(id),
+        provider: ProviderDriverKind.make("claudeAgent"),
+        createdAt: now,
+        threadId: asThreadId("thread-1"),
+        turnId: asTurnId("turn-summary"),
+        itemId: asItemId("summary-block"),
+        payload: {
+          itemType: "reasoning",
+          status: type === "item.completed" ? "completed" : "inProgress",
+          title: "Claude summary",
+          detail,
+          data: {
+            summaryVersion: 1,
+            streamKind: "reasoning_summary_text",
+            truncated: false,
+            signature: "must-not-promote",
+          },
+        },
+      });
+      if (type === "item.updated") {
+        const live = await waitForThread(harness.readModel, (entry) =>
+          entry.activities.some(
+            (activity) =>
+              activity.kind === "reasoning.summary" &&
+              (activity.payload as { status?: string }).status === "inProgress",
+          ),
+        );
+        const snapshots = live.activities.filter(
+          (activity) => activity.kind === "reasoning.summary",
+        );
+        expect(snapshots).toHaveLength(1);
+        expect((snapshots[0]?.payload as { detail?: string }).detail).toBe("Inspected the adapter");
+        expect(snapshots[0]?.createdAt).toBe(now);
+        liveSummaryId = snapshots[0]?.id;
+      }
+    }
+    harness.emit({
+      type: "item.started",
+      eventId: asEventId("bash-start"),
+      provider: ProviderDriverKind.make("claudeAgent"),
+      createdAt: now,
+      threadId: asThreadId("thread-1"),
+      turnId: asTurnId("turn-summary"),
+      itemId: asItemId("bash-item"),
+      payload: {
+        itemType: "command_execution",
+        status: "inProgress",
+        title: "Command run",
+        data: {
+          toolName: "Bash",
+          commandInspectionVersion: 1,
+          input: { command: "corepack yarn test", description: "Verify" },
+          startedAt: now,
+        },
+      },
+    });
+    // Neither another provider nor an unmarked Claude reasoning item is public
+    // summary authority, and tool heartbeats retain their existing quiet path.
+    for (const [provider, data] of [
+      ["codex", { streamKind: "reasoning_summary_text", truncated: false }],
+      ["claudeAgent", { streamKind: "reasoning_text" }],
+    ] as const) {
+      harness.emit({
+        type: "item.updated",
+        eventId: asEventId(`unowned-${provider}`),
+        provider: ProviderDriverKind.make(provider),
+        createdAt: now,
+        threadId: asThreadId("thread-1"),
+        turnId: asTurnId("turn-summary"),
+        itemId: asItemId(`unowned-${provider}`),
+        payload: { itemType: "reasoning", detail: "not promoted", data },
+      });
+    }
+    const thread = await waitForThread(
+      harness.readModel,
+      (entry) =>
+        entry.activities.some((activity) => activity.id === "bash-start") &&
+        entry.activities.some(
+          (activity) =>
+            activity.kind === "reasoning.summary" &&
+            (activity.payload as { status?: string }).status === "completed",
+        ),
+    );
+    const summaries = thread.activities.filter((activity) => activity.kind === "reasoning.summary");
+    expect(summaries).toHaveLength(1);
+    expect(summaries[0]?.id).toBe(liveSummaryId);
+    expect(summaries[0]?.createdAt).toBe(now);
+    expect(summaries[0]?.payload).toEqual({
+      summaryVersion: 1,
+      provider: "claudeAgent",
+      itemId: "summary-block",
+      streamKind: "reasoning_summary_text",
+      detail: "Inspected the adapter; tests next",
+      status: "completed",
+      truncated: false,
+    });
+    expect(thread.messages).toHaveLength(0);
+    const started = thread.activities.find((activity) => activity.id === "bash-start");
+    expect((started?.payload as { data?: unknown }).data).toEqual({
+      toolName: "Bash",
+      commandInspectionVersion: 1,
+      inspectionProvider: "claudeAgent",
+      input: { command: "corepack yarn test", description: "Verify" },
+      startedAt: now,
+    });
+    expect(thread.activities.some((activity) => activity.id.startsWith("unowned-"))).toBe(false);
+  });
+
+  it("strips counterfeit command inspector provenance from other provider lifecycle data", async () => {
+    const harness = await createHarness();
+    const now = "2026-01-01T00:00:00.000Z";
+    harness.emit({
+      type: "turn.started",
+      eventId: asEventId("counterfeit-turn"),
+      provider: ProviderDriverKind.make("codex"),
+      createdAt: now,
+      threadId: asThreadId("thread-1"),
+      turnId: asTurnId("turn-counterfeit"),
+      payload: {},
+    });
+    for (const type of ["item.started", "item.updated", "item.completed"] as const)
+      harness.emit({
+        type,
+        eventId: asEventId(`counterfeit-${type}`),
+        provider: ProviderDriverKind.make("codex"),
+        createdAt: now,
+        threadId: asThreadId("thread-1"),
+        turnId: asTurnId("turn-counterfeit"),
+        itemId: asItemId("counterfeit-item"),
+        payload: {
+          itemType: "command_execution",
+          status: type === "item.completed" ? "completed" : "inProgress",
+          data: {
+            toolName: "Bash",
+            commandInspectionVersion: 1,
+            inspectionProvider: "claudeAgent",
+            input: { command: "counterfeit" },
+            output: "counterfeit",
+          },
+        },
+      });
+    const thread = await waitForThread(harness.readModel, (entry) =>
+      entry.activities.some((activity) => activity.id === "counterfeit-item.completed"),
+    );
+    for (const activity of thread.activities.filter((entry) =>
+      entry.id.startsWith("counterfeit-item."),
+    )) {
+      const data = (activity.payload as { data?: Record<string, unknown> }).data;
+      expect(data?.commandInspectionVersion).toBeUndefined();
+      expect(data?.inspectionProvider).toBeUndefined();
+    }
+  });
+
   it("maps session/thread lifecycle and item.started into session/activity projections", async () => {
     const harness = await createHarness();
     const now = "2026-01-01T00:00:00.000Z";
@@ -8798,6 +10185,176 @@ describe("ProviderRuntimeIngestion", () => {
         subagent: { ...subagent, status: "completed" },
       },
     });
+  });
+
+  it("persists exact stamped Claude workflow lifecycle digests without adding snapshot counters to billing", async () => {
+    const recordAccounting = vi.fn(() => Effect.void);
+    const harness = await createHarness({ recordAccounting });
+    const provider = ProviderDriverKind.make("claudeAgent");
+    const providerInstanceId = ProviderInstanceId.make("claudeAgent");
+    const subagentRuntimeId = SubagentRuntimeId.make("10000000-0000-4000-8000-000000000001");
+    const threadId = asThreadId("thread-1");
+    const turnId = asTurnId("turn-workflow-persistence");
+    const taskId = RuntimeTaskId.make("native-root");
+    const createdAt = "2026-10-09T00:00:00.000Z";
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.session.set",
+        commandId: CommandId.make("workflow-runtime-binding"),
+        threadId,
+        createdAt,
+        session: {
+          threadId,
+          providerName: provider,
+          providerInstanceId,
+          subagentRuntimeId,
+          status: "ready",
+          runtimeMode: "approval-required",
+          activeTurnId: null,
+          lastError: null,
+          updatedAt: createdAt,
+        },
+      }),
+    );
+    const workflow = {
+      runtimeId: subagentRuntimeId,
+      providerInstanceId,
+      name: "Independent review",
+      phases: [{ index: 1, title: "Review" }],
+      agents: [
+        {
+          index: 1,
+          phaseIndex: 1,
+          label: "Reviewer",
+          model: "claude-fable-5-1",
+          status: "running" as const,
+          totalTokens: 120_000,
+          durationMs: 45_000,
+        },
+      ],
+    };
+    const base = { provider, providerInstanceId, subagentRuntimeId, threadId, turnId, createdAt };
+    const started = {
+      ...base,
+      type: "task.started" as const,
+      eventId: asEventId("workflow-persist-start"),
+      payload: { taskId, taskType: "local_workflow", description: "Workflow started", workflow },
+    };
+    harness.emit(started);
+    harness.emit(started); // At-least-once journal replay remains idempotent.
+    harness.emit({
+      ...base,
+      type: "task.progress",
+      eventId: asEventId("workflow-persist-progress"),
+      payload: { taskId, description: "Workflow updated", workflow },
+    });
+    harness.emit({
+      ...base,
+      type: "task.completed",
+      eventId: asEventId("workflow-persist-completed"),
+      payload: {
+        taskId,
+        status: "completed",
+        workflow: {
+          ...workflow,
+          agents: [{ ...workflow.agents[0]!, status: "completed" }],
+        },
+      },
+    });
+    const thread = await waitForThread(harness.readModel, (entry) =>
+      entry.activities.some((activity) => activity.id === "workflow-persist-completed"),
+    );
+    const digest = `sha256:workflow:${createHash("sha256")
+      .update(JSON.stringify([turnId, taskId, providerInstanceId, subagentRuntimeId]), "utf8")
+      .digest("hex")}`;
+    const rows = thread.activities.filter((activity) =>
+      activity.id.startsWith("workflow-persist-"),
+    );
+    const payloads = rows.map(
+      (activity) => activity.payload as Readonly<Record<string, unknown>> | undefined,
+    );
+    expect(rows.map((activity) => activity.kind)).toEqual([
+      "task.started",
+      "task.progress",
+      "task.completed",
+    ]);
+    expect(payloads.map((value) => value?.workflowRetentionId)).toEqual([digest, digest, digest]);
+    expect(payloads[0]?.workflow).toEqual(workflow);
+    expect(payloads[1]?.workflow).toEqual(workflow);
+    expect(payloads[2]?.workflow).toEqual({
+      ...workflow,
+      agents: [{ ...workflow.agents[0]!, status: "completed" }],
+    });
+    expect(
+      await Effect.runPromise(harness.sql<{ readonly kind: string; readonly childId: string }>`
+      SELECT kind, child_id AS "childId" FROM projection_subagent_lifecycle_sources
+      WHERE thread_id = ${threadId} ORDER BY kind
+    `),
+    ).toEqual([
+      { kind: "task.completed", childId: digest },
+      { kind: "task.progress", childId: digest },
+      { kind: "task.started", childId: digest },
+    ]);
+    expect(recordAccounting).not.toHaveBeenCalled();
+  });
+
+  it("does not retain workflow metadata borrowed from another query, account, or driver", async () => {
+    const harness = await createHarness();
+    const threadId = asThreadId("thread-1");
+    const turnId = asTurnId("turn-workflow-borrowed");
+    const providerInstanceId = ProviderInstanceId.make("claudeAgent");
+    const subagentRuntimeId = SubagentRuntimeId.make("10000000-0000-4000-8000-000000000001");
+    const workflow = {
+      runtimeId: subagentRuntimeId,
+      providerInstanceId,
+      name: "Independent review",
+    };
+    for (const [index, overrides] of [
+      {
+        workflow: {
+          ...workflow,
+          runtimeId: SubagentRuntimeId.make("20000000-0000-4000-8000-000000000001"),
+        },
+      },
+      { workflow: { ...workflow, providerInstanceId: ProviderInstanceId.make("claude-other") } },
+      { workflow, subagentRuntimeId: undefined },
+      { workflow, provider: ProviderDriverKind.make("codex") },
+    ].entries()) {
+      harness.emit({
+        type: "task.progress",
+        eventId: asEventId(`workflow-borrowed-${index}`),
+        provider: overrides.provider ?? ProviderDriverKind.make("claudeAgent"),
+        providerInstanceId,
+        ...(index === 2 ? {} : { subagentRuntimeId }),
+        threadId,
+        turnId,
+        createdAt: "2026-10-09T00:00:00.000Z",
+        payload: {
+          taskId: "native-root",
+          description: "Ordinary task update",
+          workflow: overrides.workflow,
+        },
+      });
+    }
+    const thread = await waitForThread(harness.readModel, (entry) =>
+      entry.activities.some((activity) => activity.id === "workflow-borrowed-3"),
+    );
+    const rows = thread.activities.filter((activity) =>
+      activity.id.startsWith("workflow-borrowed-"),
+    );
+    expect(rows).toHaveLength(4);
+    for (const row of rows) {
+      expect(row.payload).not.toHaveProperty("workflow");
+      expect(row.payload).not.toHaveProperty("workflowRetentionId");
+      expect((row.payload as Readonly<Record<string, unknown>> | undefined)?.detail).toBe(
+        "Ordinary task update",
+      );
+    }
+    expect(
+      await Effect.runPromise(harness.sql<{ readonly count: number }>`
+      SELECT COUNT(*) AS count FROM projection_subagent_lifecycle_sources WHERE thread_id = ${threadId}
+    `),
+    ).toEqual([{ count: 0 }]);
   });
 
   it("does not reopen a settled root turn for ambient task visibility", async () => {

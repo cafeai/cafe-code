@@ -75,7 +75,12 @@ export const ModelPickerSidebar = memo(function ModelPickerSidebar(props: {
     <ScrollArea
       hideScrollbars
       scrollFade
-      className="w-12 shrink-0 border-r border-border-subtle bg-muted/30"
+      // This content-sized flex row has only a maximum height. Do not inherit
+      // ScrollArea's percentage height: it can resolve to the entire account
+      // stack, leaving no overflow inside the viewport while the popup clips it.
+      // Auto height lets flex stretching bound this independent scroll owner to
+      // the popup's used height without fixing the height of small pickers.
+      className="h-auto w-12 shrink-0 border-r border-border-subtle bg-muted/30"
       data-model-picker-sidebar="true"
     >
       <div className="flex min-h-full flex-col gap-1 p-1">

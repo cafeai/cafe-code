@@ -1,9 +1,25 @@
 import * as Effect from "effect/Effect";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
+import workflowLifecycleRetention from "./090_WorkflowLifecycleRetention.ts";
 
 /** A small, incremental projection: shell subscriptions never hydrate tool history. */
 export default Effect.gen(function* () {
   const sql = yield* SqlClient.SqlClient;
+  // Local source builds shipped LiveWork at id 90 before upstream reserved that
+  // id for workflow retention. The migrator skips ids rather than comparing
+  // names, so repair only that recorded lineage without rewriting its ledger.
+  // Reuse the upstream trigger migration inside this migration's transaction.
+  const legacy = yield* sql<{ name: string }>`
+    SELECT name FROM effect_sql_migrations WHERE migration_id = 90
+  `;
+  if (legacy[0]?.name === "LiveWork") yield* workflowLifecycleRetention;
+
+  // Preserve already-materialized local work, including newer terminal edges.
+  // Its one-time backfill must not replace rows written after the old migration.
+  const existing = yield* sql<{ name: string }>`
+    SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'projection_live_work'
+  `;
+  if (existing.length > 0) return;
   yield* sql`CREATE TABLE projection_live_work (
     thread_id TEXT NOT NULL,
     runtime_id TEXT NOT NULL,

@@ -4,6 +4,7 @@ import {
   deriveProviderInstanceEntries,
   resolveSelectableProviderInstance,
   resolveProviderDriverKindForInstanceSelection,
+  resolveComposerProviderInstance,
 } from "./providerInstances";
 
 function provider(input: {
@@ -41,6 +42,86 @@ describe("deriveProviderInstanceEntries", () => {
     expect(entry?.instanceId).toBe("codex_personal");
     expect(entry?.driverKind).toBe("codex");
     expect(entry?.isDefault).toBe(false);
+  });
+});
+
+describe("resolveComposerProviderInstance", () => {
+  const account = ProviderInstanceId.make("codex-session-account");
+  const peer = ProviderInstanceId.make("codex-peer-account");
+  const disabled = ProviderInstanceId.make("codex-disabled-account");
+  const otherDriver = ProviderInstanceId.make("claude-peer-account");
+  const providers = [
+    provider({ provider: ProviderDriverKind.make("codex"), instanceId: account }),
+    provider({ provider: ProviderDriverKind.make("codex"), instanceId: peer }),
+    provider({ provider: ProviderDriverKind.make("codex"), instanceId: disabled, enabled: false }),
+    provider({ provider: ProviderDriverKind.make("claudeAgent"), instanceId: otherDriver }),
+  ];
+  const entries = deriveProviderInstanceEntries(providers).map((entry) => ({
+    ...entry,
+    continuationGroupKey: entry.instanceId === account ? "retained-group" : "peer-group",
+  }));
+  const base = {
+    entries,
+    activeProvider: undefined,
+    sessionInstanceId: account,
+    threadInstanceId: peer,
+    defaultInstanceId: peer,
+    projectInstanceId: peer,
+    selectedProvider: ProviderDriverKind.make("codex"),
+    lockedProvider: null,
+    lockedContinuationGroupKey: null,
+  };
+
+  it("retains session before durable selection, while a valid explicit peer remains first", () => {
+    expect(resolveComposerProviderInstance(base)).toBe(account);
+    expect(resolveComposerProviderInstance({ ...base, activeProvider: peer })).toBe(peer);
+  });
+  it.each([disabled, ProviderInstanceId.make("missing-account")])(
+    "skips stale disabled or missing draft candidates %s without borrowing their policy",
+    (activeProvider) => {
+      expect(resolveComposerProviderInstance({ ...base, activeProvider })).toBe(account);
+    },
+  );
+  it("preserves locked-driver and continuation candidate filters", () => {
+    expect(
+      resolveComposerProviderInstance({
+        ...base,
+        activeProvider: otherDriver,
+        lockedProvider: ProviderDriverKind.make("codex"),
+      }),
+    ).toBe(account);
+    expect(
+      resolveComposerProviderInstance({
+        ...base,
+        activeProvider: peer,
+        lockedProvider: ProviderDriverKind.make("codex"),
+        lockedContinuationGroupKey: "retained-group",
+      }),
+    ).toBe(account);
+  });
+  it("preserves later enabled defaults and the existing explicit unavailable fallback", () => {
+    expect(resolveComposerProviderInstance({ ...base, sessionInstanceId: disabled })).toBe(peer);
+    expect(
+      resolveComposerProviderInstance({
+        ...base,
+        activeProvider: disabled,
+        sessionInstanceId: undefined,
+        threadInstanceId: undefined,
+        defaultInstanceId: undefined,
+        projectInstanceId: undefined,
+      }),
+    ).toBe(disabled);
+    expect(
+      resolveComposerProviderInstance({
+        ...base,
+        entries: [],
+        activeProvider: undefined,
+        sessionInstanceId: undefined,
+        threadInstanceId: undefined,
+        defaultInstanceId: undefined,
+        projectInstanceId: undefined,
+      }),
+    ).toBe("codex");
   });
 });
 

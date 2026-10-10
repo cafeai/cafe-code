@@ -53,6 +53,7 @@ import {
 } from "./ProviderDaemonServer.ts";
 import type { ProviderDaemonPersistentEventJournal } from "./EventJournal.ts";
 import { ProviderRuntimeInventoryLocalLive } from "./ProviderRuntimeInventory.ts";
+import { requestProviderDaemonCapabilities } from "./RemoteProviderService.ts";
 import {
   SCHEDULING_SESSION_DAEMON_PATH,
   installSchedulingSessionRuntime,
@@ -168,6 +169,97 @@ const makeProviderDaemonServerTestLayer = (providerService: ProviderServiceShape
 const providerDaemonServerTestLayer = makeProviderDaemonServerTestLayer(mockProviderService);
 
 describe("ProviderDaemonServer", () => {
+  it.effect(
+    "preserves exact-instance concurrency capability through authenticated remote RPC",
+    () => {
+      const requestedInstances: ProviderInstanceId[] = [];
+      const supported = ProviderInstanceId.make("codex-qualified-account");
+      const unsupported = ProviderInstanceId.make("claude-unsupported-account");
+      const legacy = ProviderInstanceId.make("legacy-account");
+      const malformed = ProviderInstanceId.make("malformed-account");
+      const otherCapabilities = {
+        sessionModelSwitch: "restart-resume",
+        liveSteer: "unsupported",
+        manualCompaction: "supported",
+        threadGoals: "unsupported",
+        sessionFork: "supported",
+      } as const;
+      const providerService: ProviderServiceShape = {
+        ...mockProviderService,
+        getCapabilities: (instanceId) =>
+          Effect.sync(() => {
+            requestedInstances.push(instanceId);
+            if (instanceId === supported)
+              return { ...otherCapabilities, subagentConcurrency: true };
+            if (instanceId === unsupported)
+              return { ...otherCapabilities, subagentConcurrency: false };
+            if (instanceId === legacy) return otherCapabilities;
+            if (instanceId === malformed) {
+              // Deliberately malformed synthetic wire data must fail decoding,
+              // never become truthy support or silently turn into omission.
+              return { ...otherCapabilities, subagentConcurrency: "true" as unknown as boolean };
+            }
+            throw new Error("Unexpected synthetic provider instance");
+          }),
+      };
+      return Effect.gen(function* () {
+        const port = yield* startProviderDaemonServerOnEphemeralPort({
+          host: "127.0.0.1",
+          token: TEST_TOKEN,
+          version: "0.0.0-test",
+          protocolVersion: 1,
+        });
+        const denied = yield* Effect.promise(() =>
+          fetch(`http://127.0.0.1:${port}/api/provider-daemon/rpc`, {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: encodeProviderDaemonRpcRequestJson({
+              method: "getCapabilities",
+              payload: { instanceId: supported },
+            }),
+          }),
+        );
+        assert.equal(denied.status, 401);
+        assert.deepEqual(requestedInstances, []);
+        // Exercise the actual finite request used by remote getCapabilities,
+        // including both method-result and adapter-capability decoding, rather
+        // than a test-local replacement. Its only peer is this scoped synthetic
+        // daemon; there is no perpetual event bridge, provider/profile, prompt,
+        // provider process or process-reaping assumption in this default test.
+        const endpoint = { httpBaseUrl: `http://127.0.0.1:${port}`, token: TEST_TOKEN };
+        const unauthorized = yield* requestProviderDaemonCapabilities(
+          { ...endpoint, token: "invalid-synthetic-capability" },
+          supported,
+        ).pipe(Effect.flip);
+        assert.instanceOf(unauthorized, ProviderAdapterRequestError);
+        assert.equal(unauthorized.remoteErrorTag, "ProviderDaemonAuthenticationError");
+        assert.deepEqual(requestedInstances, []);
+        assert.deepEqual(yield* requestProviderDaemonCapabilities(endpoint, supported), {
+          ...otherCapabilities,
+          subagentConcurrency: true,
+        });
+        assert.deepEqual(yield* requestProviderDaemonCapabilities(endpoint, unsupported), {
+          ...otherCapabilities,
+          subagentConcurrency: false,
+        });
+        const oldCapabilities = yield* requestProviderDaemonCapabilities(endpoint, legacy);
+        assert.deepEqual(oldCapabilities, otherCapabilities);
+        assert.equal(oldCapabilities.subagentConcurrency, undefined);
+        const invalid = yield* requestProviderDaemonCapabilities(endpoint, malformed).pipe(
+          Effect.flip,
+        );
+        assert.instanceOf(invalid, ProviderAdapterRequestError);
+        assert.equal(invalid.method, "getCapabilities");
+        assert.deepEqual(requestedInstances, [supported, unsupported, legacy, malformed]);
+        const sql = yield* SqlClient.SqlClient;
+        const ledger = yield* sql<{
+          count: number;
+        }>`SELECT COUNT(*) AS count FROM provider_daemon_commands`;
+        assert.equal(ledger[0]?.count, 0);
+      }).pipe(Effect.scoped, Effect.provide(makeProviderDaemonServerTestLayer(providerService)));
+    },
+  );
+
   it.effect(
     "verifies scheduling capabilities only over authenticated ephemeral RPC without ledger writes",
     () =>

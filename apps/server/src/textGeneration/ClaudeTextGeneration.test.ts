@@ -123,6 +123,8 @@ function withFakeClaudeEnv<A, E, R>(
     resolveEnvironment?: Effect.Effect<NodeJS.ProcessEnv>;
     selectedEnvironmentMustBe?: NodeJS.ProcessEnv;
     claudeConfig?: Partial<ClaudeSettings>;
+    environment?: NodeJS.ProcessEnv;
+    outputTokenCapMustBe?: string | undefined;
   },
   effectFn: (textGeneration: TextGenerationShape) => Effect.Effect<A, E, R>,
 ) {
@@ -168,12 +170,20 @@ function withFakeClaudeEnv<A, E, R>(
         if (input.selectedEnvironmentMustBe !== undefined) {
           expect(command.options.env).toBe(input.selectedEnvironmentMustBe);
         }
+        if (Object.hasOwn(input, "outputTokenCapMustBe")) {
+          expect(command.options.env?.CLAUDE_CODE_MAX_OUTPUT_TOKENS).toBe(
+            input.outputTokenCapMustBe,
+          );
+          expect(Object.hasOwn(command.options.env ?? {}, "CLAUDE_CODE_MAX_OUTPUT_TOKENS")).toBe(
+            input.outputTokenCapMustBe !== undefined,
+          );
+        }
         return makeClaudeHandle(input);
       }),
     );
     const textGeneration = yield* makeClaudeTextGeneration(
       config,
-      {
+      input.environment ?? {
         PATH: "/test/bin",
         HOME: "/test/home",
       },
@@ -184,6 +194,31 @@ function withFakeClaudeEnv<A, E, R>(
 }
 
 it.layer(ClaudeTextGenerationTestLayer)("ClaudeTextGeneration", (it) => {
+  for (const inherited of [undefined, "32000"]) {
+    it.effect(
+      `keeps helper output policy separate from the configured chat cap with inherited ${String(inherited)}`,
+      () =>
+        withFakeClaudeEnv(
+          {
+            output: '{"structured_output":{"title":"Scoped helper budget"}}',
+            claudeConfig: { maxOutputTokens: 128_000 },
+            environment:
+              inherited === undefined ? {} : { CLAUDE_CODE_MAX_OUTPUT_TOKENS: inherited },
+            outputTokenCapMustBe: inherited,
+          },
+          (generation) =>
+            generation.generateThreadTitle({
+              cwd: process.cwd(),
+              message: "Name this task",
+              modelSelection: createModelSelection(
+                ProviderInstanceId.make("claudeAgent"),
+                "claude-sonnet-4-6",
+              ),
+            }),
+        ),
+    );
+  }
+
   it.effect("uses the shared login selection when a metadata command is launched", () => {
     const selectedEnvironment = Object.freeze({ CAFE_TEST_LOGIN_SELECTION: "selected" });
     let resolutions = 0;

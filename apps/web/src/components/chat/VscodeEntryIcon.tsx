@@ -29,6 +29,9 @@ export const VscodeEntryIcon = memo(function VscodeEntryIcon(props: {
       src={iconUrl}
       alt=""
       aria-hidden="true"
+      // PNG table export substitutes Cafe's local File/Folder glyph for this
+      // decorative CDN icon without fetching or omitting the link's label.
+      data-cafe-image-export-fallback={props.kind}
       className={cn("size-4 shrink-0", props.className)}
       loading="lazy"
       onError={() => setFailedIconUrl(iconUrl)}

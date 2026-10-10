@@ -5923,6 +5923,262 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
   );
 
   it.effect(
+    "aligns historical primary command starts and disclosed summary presence with rendered contracts",
+    () =>
+      Effect.gen(function* () {
+        const snapshotQuery = yield* ProjectionSnapshotQuery;
+        const sql = yield* SqlClient.SqlClient;
+        yield* sql`DELETE FROM projection_thread_activities`;
+        const rows = [
+          {
+            id: "bash-start",
+            turn: "turn-bash-only",
+            kind: "tool.started",
+            payload: {
+              itemType: "command_execution",
+              data: {
+                toolName: "Bash",
+                commandInspectionVersion: 1,
+                inspectionProvider: "claudeAgent",
+                input: { command: "corepack yarn test" },
+              },
+            },
+          },
+          {
+            id: "legacy-bash",
+            turn: "turn-hidden",
+            kind: "tool.started",
+            payload: {
+              itemType: "command_execution",
+              data: { toolName: "Bash", inspectionProvider: "claudeAgent" },
+            },
+          },
+          {
+            id: "future-bash",
+            turn: "turn-hidden",
+            kind: "tool.started",
+            payload: {
+              itemType: "command_execution",
+              data: {
+                toolName: "Bash",
+                commandInspectionVersion: 2,
+                inspectionProvider: "claudeAgent",
+              },
+            },
+          },
+          {
+            id: "boolean-bash",
+            turn: "turn-hidden",
+            kind: "tool.started",
+            payload: {
+              itemType: "command_execution",
+              data: {
+                toolName: "Bash",
+                commandInspectionVersion: true,
+                inspectionProvider: "claudeAgent",
+              },
+            },
+          },
+          {
+            id: "read-start",
+            turn: "turn-hidden",
+            kind: "tool.started",
+            payload: { itemType: "file_read", data: { toolName: "Read" } },
+          },
+          {
+            id: "summary",
+            turn: "turn-summary-only",
+            kind: "reasoning.summary",
+            payload: {
+              summaryVersion: 1,
+              provider: "claudeAgent",
+              itemId: "summary-block",
+              streamKind: "reasoning_summary_text",
+              detail: "Tests are next",
+              truncated: false,
+              status: "completed",
+            },
+          },
+          {
+            id: "malformed-summary",
+            turn: "turn-hidden",
+            kind: "reasoning.summary",
+            payload: { streamKind: "reasoning_text", detail: "Not a public snapshot" },
+          },
+          {
+            id: "boolean-summary",
+            turn: "turn-hidden",
+            kind: "reasoning.summary",
+            payload: {
+              summaryVersion: true,
+              provider: "claudeAgent",
+              itemId: "summary-boolean",
+              streamKind: "reasoning_summary_text",
+              detail: "Not numeric version",
+              truncated: false,
+              status: "completed",
+            },
+          },
+          {
+            id: "blank-detail-summary",
+            turn: "turn-hidden",
+            kind: "reasoning.summary",
+            payload: {
+              summaryVersion: 1,
+              provider: "claudeAgent",
+              itemId: "summary-blank-detail",
+              streamKind: "reasoning_summary_text",
+              detail: "\n\t\u00a0\ufeff",
+              truncated: false,
+              status: "completed",
+            },
+          },
+          {
+            id: "blank-id-summary",
+            turn: "turn-hidden",
+            kind: "reasoning.summary",
+            payload: {
+              summaryVersion: 1,
+              provider: "claudeAgent",
+              itemId: "\n\t\u00a0\ufeff",
+              streamKind: "reasoning_summary_text",
+              detail: "Blank id",
+              truncated: false,
+              status: "completed",
+            },
+          },
+          {
+            id: "oversized-summary",
+            turn: "turn-hidden",
+            kind: "reasoning.summary",
+            payload: {
+              summaryVersion: 1,
+              provider: "claudeAgent",
+              itemId: "summary-large",
+              streamKind: "reasoning_summary_text",
+              detail: "x".repeat(4_097),
+              truncated: false,
+              status: "completed",
+            },
+          },
+          {
+            id: "astral-summary",
+            turn: "turn-hidden",
+            kind: "reasoning.summary",
+            payload: {
+              summaryVersion: 1,
+              provider: "claudeAgent",
+              itemId: "summary-astral",
+              streamKind: "reasoning_summary_text",
+              detail: "😀".repeat(2_049),
+              truncated: false,
+              status: "completed",
+            },
+          },
+          {
+            id: "astral-admitted",
+            turn: "turn-astral",
+            kind: "reasoning.summary",
+            payload: {
+              summaryVersion: 1,
+              provider: "claudeAgent",
+              itemId: "summary-valid-astral",
+              streamKind: "reasoning_summary_text",
+              detail: "😀".repeat(2_048),
+              truncated: false,
+              status: "completed",
+            },
+          },
+          {
+            id: "control-summary",
+            turn: "turn-hidden",
+            kind: "reasoning.summary",
+            payload: {
+              summaryVersion: 1,
+              provider: "claudeAgent",
+              itemId: "summary-controls",
+              streamKind: "reasoning_summary_text",
+              detail: "\u0001\u0085\u202e",
+              truncated: false,
+              status: "completed",
+            },
+          },
+          {
+            id: "nul-summary",
+            turn: "turn-hidden",
+            kind: "reasoning.summary",
+            payload: {
+              summaryVersion: 1,
+              provider: "claudeAgent",
+              itemId: "summary-nul",
+              streamKind: "reasoning_summary_text",
+              detail: "abc\u0000" + "x".repeat(4_096),
+              truncated: false,
+              status: "completed",
+            },
+          },
+          {
+            id: "bash-completed",
+            turn: "turn-completed",
+            kind: "tool.completed",
+            payload: {
+              itemId: "bash",
+              itemType: "command_execution",
+              status: "failed",
+              data: {
+                toolName: "Bash",
+                commandInspectionVersion: 1,
+                output: "Synthetic failure",
+                outputTruncated: false,
+              },
+            },
+          },
+        ];
+        for (const [index, row] of rows.entries())
+          yield* sql`
+        INSERT INTO projection_thread_activities (activity_id,thread_id,turn_id,tone,kind,summary,payload_json,sequence,created_at)
+        VALUES (${row.id},'thread-inspection-history',${row.turn},'info',${row.kind},'Fixture',${JSON.stringify(row.payload)},${index + 1},'2026-04-06T00:00:00.000Z')
+      `;
+        const presence = yield* snapshotQuery.getThreadTurnWorkLogPresence({
+          threadId: ThreadId.make("thread-inspection-history"),
+          turnIds: [
+            "turn-bash-only",
+            "turn-summary-only",
+            "turn-completed",
+            "turn-astral",
+            "turn-hidden",
+          ].map((id) => TurnId.make(id)),
+        });
+        assert.deepStrictEqual([...presence.turnIdsWithWorkLog].sort(), [
+          "turn-astral",
+          "turn-bash-only",
+          "turn-completed",
+          "turn-summary-only",
+        ]);
+        for (const turn of [
+          "turn-bash-only",
+          "turn-summary-only",
+          "turn-completed",
+          "turn-astral",
+          "turn-hidden",
+        ]) {
+          const page = yield* snapshotQuery.getThreadTurnActivityPage({
+            threadId: ThreadId.make("thread-inspection-history"),
+            turnId: TurnId.make(turn),
+            offset: 0,
+            limit: 10,
+          });
+          assert.equal(page.totalCount, turn === "turn-hidden" ? 0 : 1);
+          if (turn === "turn-completed")
+            assert.equal(
+              (page.activities[0]?.payload as { data?: { output?: string } }).data?.output,
+              "Synthetic failure",
+            );
+        }
+      }),
+  );
+
+  it.effect(
     "keeps structured subagents out of historical Work Log pages, counts, and presence",
     () =>
       Effect.gen(function* () {

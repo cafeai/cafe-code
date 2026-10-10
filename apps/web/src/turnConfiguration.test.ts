@@ -25,6 +25,40 @@ const configuration: ProviderTurnConfiguration = {
 };
 
 describe("accepted turn configuration presentation", () => {
+  it("keeps explicit requested Ultracode independent from Max effort and unknown native defaults", () => {
+    const claude: ProviderTurnConfiguration = {
+      ...configuration,
+      provider: ProviderDriverKind.make("claudeAgent"),
+      providerInstanceId: ProviderInstanceId.make("claude-personal"),
+      providerDisplayName: "Claude Personal",
+      modelDisplayName: "Claude Opus",
+      effort: "max",
+    };
+    for (const ultracode of [true, false]) {
+      const snapshot = readTurnConfiguration({ turnConfiguration: { ...claude, ultracode } });
+      expect(snapshot?.ultracode).toBe(ultracode);
+      const label = `Ultracode requested ${ultracode ? "on" : "off"}`;
+      expect(presentTurnConfiguration(snapshot!).settings).toBe(
+        `Claude Opus · Effort: Max · ${label} · Fast on`,
+      );
+      expect(presentTurnConfigurationSummary(snapshot!).summary).toBe(
+        `Claude Opus · Max · ${label} · Fast on · Claude Personal · Bypass permissions`,
+      );
+      expect(presentTurnConfigurationSummary(snapshot!).detail).toContain(
+        "not independent execution or billing confirmation",
+      );
+    }
+    expect(presentTurnConfiguration(claude).settings).not.toContain("Ultracode");
+    expect(presentTurnConfigurationSummary(claude).summary).not.toContain("Ultracode");
+    // A provider-neutral historical field never creates a Claude claim on a
+    // Codex row; its own effort remains the separately frozen value.
+    expect(presentTurnConfiguration({ ...configuration, ultracode: true }).settings).not.toContain(
+      "Ultracode",
+    );
+    expect(
+      readTurnConfiguration({ turnConfiguration: { ...claude, ultracode: "true" } }),
+    ).toBeUndefined();
+  });
   it("displays Fast state with the frozen exact tier instead of a stale legacy toggle", () => {
     for (const [serviceTier, label] of [
       ["ultrafast", "Ultra fast"],

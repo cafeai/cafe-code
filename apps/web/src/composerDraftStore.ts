@@ -42,7 +42,7 @@ import {
   createMemoryStorage,
 } from "./lib/storage";
 import { getDefaultServerModel } from "./providerModels";
-import { subagentLimitKey, subagentLimitsEqual, validSubagentLimit } from "./subagentConcurrency";
+import { subagentLimitsEqual } from "./subagentConcurrency";
 import { UnifiedSettings } from "@cafecode/contracts/settings";
 import {
   PersistedComposerFileAttachment,
@@ -430,7 +430,6 @@ interface ComposerDraftStoreState {
   applyStickyState: (
     threadRef: ComposerThreadTarget,
     newChatDefaults?: NewChatComposerDefaults | null,
-    initialInstanceId?: ProviderInstanceId,
   ) => void;
   setProviderModelOptions: (
     threadRef: ComposerThreadTarget,
@@ -516,9 +515,6 @@ export interface EffectiveComposerModelState {
 export interface NewChatComposerDefaults {
   activeProvider: ProviderInstanceId | null;
   modelSelectionByProvider: Partial<Record<ProviderInstanceId, ModelSelection>>;
-  subagentLimitsByInstance?: Partial<
-    Record<ProviderInstanceId, { provider: ProviderDriverKind; limit: number }>
-  >;
 }
 
 function isProviderInstanceEnabledInSettings(
@@ -548,20 +544,9 @@ export function deriveNewChatComposerDefaults(
   settings: UnifiedSettings,
 ): NewChatComposerDefaults | null {
   const modelSelectionByProvider: Partial<Record<ProviderInstanceId, ModelSelection>> = {};
-  const subagentLimitsByInstance: NonNullable<NewChatComposerDefaults["subagentLimitsByInstance"]> =
-    {};
   for (const [rawId, instance] of Object.entries(settings.providerInstances ?? {})) {
     if (instance.enabled === false || isRetiredProviderDriverKind(instance.driver)) continue;
     const instanceId = rawId as ProviderInstanceId;
-    if (
-      subagentLimitKey(instance.driver) &&
-      validSubagentLimit(instance.defaultMaxConcurrentSubagents)
-    ) {
-      subagentLimitsByInstance[instanceId] = {
-        provider: instance.driver,
-        limit: instance.defaultMaxConcurrentSubagents,
-      };
-    }
     if (!instance.defaultModel) continue;
     modelSelectionByProvider[instanceId] = createModelSelection(
       instanceId,
@@ -577,17 +562,12 @@ export function deriveNewChatComposerDefaults(
       ? configuredDefaultProvider
       : null;
 
-  if (
-    activeProvider === null &&
-    Object.keys(modelSelectionByProvider).length === 0 &&
-    Object.keys(subagentLimitsByInstance).length === 0
-  ) {
+  if (activeProvider === null && Object.keys(modelSelectionByProvider).length === 0) {
     return null;
   }
   return {
     activeProvider,
     modelSelectionByProvider,
-    ...(Object.keys(subagentLimitsByInstance).length ? { subagentLimitsByInstance } : {}),
   };
 }
 
@@ -2460,7 +2440,7 @@ const composerDraftStore = create<ComposerDraftStoreState>()(
             };
           });
         },
-        applyStickyState: (threadRef, newChatDefaults, initialInstanceId) => {
+        applyStickyState: (threadRef, newChatDefaults) => {
           const threadKey = resolveComposerDraftKey(get(), threadRef) ?? "";
           if (threadKey.length === 0) {
             return;
@@ -2474,8 +2454,7 @@ const composerDraftStore = create<ComposerDraftStoreState>()(
               Object.keys(stickyMap).length === 0 &&
               stickyActiveProvider === null &&
               Object.keys(defaultsMap).length === 0 &&
-              defaultsActiveProvider === null &&
-              Object.keys(newChatDefaults?.subagentLimitsByInstance ?? {}).length === 0
+              defaultsActiveProvider === null
             ) {
               return state;
             }
@@ -2503,24 +2482,12 @@ const composerDraftStore = create<ComposerDraftStoreState>()(
               }
             }
             const nextActiveProvider = defaultsActiveProvider ?? stickyActiveProvider;
-            // Copy only the exact initial instance's default. Multiple accounts
-            // using the same driver must not overwrite each other's policy.
-            const concurrencyDefault =
-              newChatDefaults?.subagentLimitsByInstance?.[
-                nextActiveProvider ?? initialInstanceId ?? ProviderInstanceId.make("codex")
-              ];
-            const concurrencyKey = concurrencyDefault
-              ? subagentLimitKey(concurrencyDefault.provider)
-              : null;
-            const nextSubagentLimits =
-              base.subagentLimits ??
-              (concurrencyDefault && concurrencyKey
-                ? { [concurrencyKey]: concurrencyDefault.limit }
-                : undefined);
+            // Account concurrency is live inherited policy, never draft intent.
+            // Preserve old explicit numbers and empty resets without copying an
+            // account default into an accidental permanent per-chat override.
             if (
               Equal.equals(base.modelSelectionByProvider, nextMap) &&
-              base.activeProvider === nextActiveProvider &&
-              subagentLimitsEqual(base.subagentLimits, nextSubagentLimits)
+              base.activeProvider === nextActiveProvider
             ) {
               return state;
             }
@@ -2528,7 +2495,6 @@ const composerDraftStore = create<ComposerDraftStoreState>()(
               ...base,
               modelSelectionByProvider: nextMap,
               activeProvider: nextActiveProvider,
-              ...(nextSubagentLimits !== undefined ? { subagentLimits: nextSubagentLimits } : {}),
             };
             const nextDraftsByThreadKey = { ...state.draftsByThreadKey };
             if (shouldRemoveDraft(nextDraft)) {

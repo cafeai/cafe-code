@@ -1,6 +1,7 @@
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import {
   DEFAULT_SERVER_SETTINGS,
+  CLAUDE_MAX_OUTPUT_TOKENS,
   ProviderDriverKind,
   ProviderInstanceId,
   ServerSettings,
@@ -13,6 +14,7 @@ import * as Duration from "effect/Duration";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Schema from "effect/Schema";
+import * as Result from "effect/Result";
 import { ServerConfig } from "./config.ts";
 import {
   redactServerSettingsForClient,
@@ -243,6 +245,136 @@ it.layer(NodeServices.layer)("server settings", (it) => {
         instanceId: ProviderInstanceId.make("claude_openrouter"),
         model: "openai/gpt-5.5",
       });
+    }).pipe(Effect.provide(makeServerSettingsLayer())),
+  );
+
+  it.effect(
+    "keeps Claude response budgets bound to their exact account and resets by omission",
+    () =>
+      Effect.gen(function* () {
+        const service = yield* ServerSettingsService;
+        const first = ProviderInstanceId.make("claude_output_first");
+        const second = ProviderInstanceId.make("claude_output_second");
+        const accounts = {
+          [first]: {
+            driver: ProviderDriverKind.make("claudeAgent"),
+            config: { maxOutputTokens: 64_000 },
+          },
+          [second]: {
+            driver: ProviderDriverKind.make("claudeAgent"),
+            config: { maxOutputTokens: CLAUDE_MAX_OUTPUT_TOKENS },
+          },
+        };
+        const saved = yield* service.updateSettings({ providerInstances: accounts });
+        assert.deepEqual(saved.providerInstances[first]?.config, { maxOutputTokens: 64_000 });
+        assert.deepEqual(saved.providerInstances[second]?.config, {
+          maxOutputTokens: CLAUDE_MAX_OUTPUT_TOKENS,
+        });
+        const reset = yield* service.updateSettings({
+          providerInstances: {
+            ...accounts,
+            [first]: { driver: ProviderDriverKind.make("claudeAgent"), config: {} },
+          },
+        });
+        assert.deepEqual(reset.providerInstances[first]?.config, {});
+        assert.deepEqual(reset.providerInstances[second]?.config, {
+          maxOutputTokens: CLAUDE_MAX_OUTPUT_TOKENS,
+        });
+        // Whole-map replacement is the reset authority; the prior snapshot must
+        // retain the account's old cap rather than being mutated by a later save.
+        assert.deepEqual(saved.providerInstances[first]?.config, { maxOutputTokens: 64_000 });
+      }).pipe(Effect.provide(makeServerSettingsLayer())),
+  );
+
+  for (const maxOutputTokens of [
+    0,
+    -1,
+    1.5,
+    CLAUDE_MAX_OUTPUT_TOKENS + 1,
+    Number.NaN,
+    Number.POSITIVE_INFINITY,
+    "private-cap-sentinel",
+    null,
+  ]) {
+    it.effect(
+      `rejects malformed per-account Claude output cap ${String(maxOutputTokens)} before persistence`,
+      () =>
+        Effect.gen(function* () {
+          const service = yield* ServerSettingsService;
+          const config = yield* ServerConfig;
+          const fs = yield* FileSystem.FileSystem;
+          const instanceId = ProviderInstanceId.make("claude_output_validation");
+          yield* service.updateSettings({
+            providerInstances: {
+              [instanceId]: {
+                driver: ProviderDriverKind.make("claudeAgent"),
+                config: { maxOutputTokens: 64_000 },
+              },
+            },
+          });
+          const before = yield* fs.readFileString(config.settingsPath);
+          const result = yield* service
+            .updateSettings({
+              providerInstances: {
+                [instanceId]: {
+                  driver: ProviderDriverKind.make("claudeAgent"),
+                  environment: [
+                    {
+                      name: "CAFE_OUTPUT_TEST_SECRET",
+                      value: "private-env-sentinel",
+                      sensitive: true,
+                    },
+                  ],
+                  config: { maxOutputTokens },
+                },
+              },
+            })
+            .pipe(Effect.result);
+          assert.isTrue(Result.isFailure(result));
+          if (Result.isFailure(result)) {
+            assert.equal(
+              result.failure.detail,
+              "Claude maximum response tokens must be an integer between 1 and 128000.",
+            );
+            assert.notInclude(JSON.stringify(result.failure), "private-cap-sentinel");
+            assert.notInclude(JSON.stringify(result.failure), "private-env-sentinel");
+          }
+          assert.equal(yield* fs.readFileString(config.settingsPath), before);
+          assert.deepEqual((yield* service.getSettings).providerInstances[instanceId]?.config, {
+            maxOutputTokens: 64_000,
+          });
+        }).pipe(Effect.provide(makeServerSettingsLayer())),
+    );
+  }
+
+  it.effect("rejects invalid Claude output caps on a persisted full-settings read", () =>
+    Effect.gen(function* () {
+      const config = yield* ServerConfig;
+      const fs = yield* FileSystem.FileSystem;
+      const persisted =
+        '{"providerInstances":{"claude_output_invalid":{"driver":"claudeAgent","config":{"maxOutputTokens":"private-cap-sentinel"}}}}';
+      yield* fs.writeFileString(config.settingsPath, persisted);
+      const service = yield* ServerSettingsService;
+      const result = yield* service.getSettings.pipe(Effect.result);
+      assert.isTrue(Result.isFailure(result));
+      if (Result.isFailure(result)) {
+        assert.notInclude(JSON.stringify(result.failure), "private-cap-sentinel");
+      }
+      assert.equal(yield* fs.readFileString(config.settingsPath), persisted);
+    }).pipe(Effect.provide(makeServerSettingsLayer())),
+  );
+
+  it.effect("retains opaque unknown-driver output fields without Claude policy coercion", () =>
+    Effect.gen(function* () {
+      const service = yield* ServerSettingsService;
+      const instanceId = ProviderInstanceId.make("custom_output_driver");
+      const opaque = { maxOutputTokens: "custom-driver-owned", future: { privateShape: true } };
+      const saved = yield* service.updateSettings({
+        providerInstances: {
+          [instanceId]: { driver: ProviderDriverKind.make("future_driver"), config: opaque },
+        },
+      });
+      assert.deepEqual(saved.providerInstances[instanceId]?.config, opaque);
     }).pipe(Effect.provide(makeServerSettingsLayer())),
   );
 

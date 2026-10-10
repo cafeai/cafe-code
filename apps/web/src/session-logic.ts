@@ -21,6 +21,13 @@ import { readDesktopObservationItem } from "@cafecode/shared/desktopObservation"
 import { isRoutineProviderWorkLogActivity } from "@cafecode/shared/providerWorkLog";
 import { readComputerUsePresentation } from "./components/chat/computerUsePresentation";
 import { readTurnConfiguration, presentTurnConfiguration } from "./turnConfiguration";
+import {
+  readClaudeCommandInspection,
+  readClaudePublicSummary,
+  mergeClaudeCommandInspections,
+  type ClaudeCommandInspection,
+  type ClaudePublicSummary,
+} from "./components/chat/providerOperationVisibility";
 
 import {
   deriveSubagentActivities,
@@ -76,6 +83,9 @@ export interface WorkLogEntry {
   requestKind?: PendingApproval["requestKind"];
   desktopObservation?: NonNullable<ReturnType<typeof readDesktopObservationItem>>;
   computerUse?: boolean;
+  /** Explicit bounded public presentation, never arbitrary native payloads. */
+  publicSummary?: ClaudePublicSummary;
+  commandInspection?: ClaudeCommandInspection;
   /** Frozen accepted-turn settings; never reconstructed from today's catalog. */
   turnConfiguration?: ProviderTurnConfiguration;
   subagent?: {
@@ -615,12 +625,33 @@ export function deriveWorkLogEntries(
     // Removing both here avoids rendering `Subagent task - Started /root/x`
     // next to the richer, identity-stable subagent row.
     .filter((activity) => !isSubagentWorkActivity(activity))
+    // Provenance-stamped workflow roots have their own richer Tasks card.
+    // Malformed/future workflow objects must not fall through to a generic
+    // task row, which could expose fields outside the admitted display schema.
+    .filter(
+      (activity) =>
+        !activity.kind.startsWith("task.") || asRecord(activity.payload)?.workflow === undefined,
+    )
     .filter((activity) => {
       const identity = taskActivityIdentityKey(activity);
       if (identity && latestTaskVisibility.get(identity) === "ambient") return false;
       return !isAmbientTaskActivity(activity);
     })
-    .filter((activity) => activity.kind !== "tool.started" || isContextCompactionActivity(activity))
+    .filter(
+      (activity) =>
+        activity.kind !== "tool.started" ||
+        isContextCompactionActivity(activity) ||
+        readClaudeCommandInspection(activity.payload) !== undefined,
+    )
+    // Reject malformed/future summary contracts instead of falling through to
+    // generic detail rendering, where private native fields could be mistaken
+    // for disclosed provider text.
+    .filter(
+      (activity) =>
+        activity.kind !== "reasoning.summary" ||
+        (asTrimmedString(asRecord(activity.payload)?.itemId) !== null &&
+          readClaudePublicSummary(activity.payload) !== undefined),
+    )
     .filter(
       (activity) => activity.kind !== "task.started" || isUserVisibleTaskStartedActivity(activity),
     )
@@ -647,7 +678,7 @@ export function deriveWorkLogEntries(
       return payload?.taskId !== `codex-turn-start:${activity.turnId}`;
     })
     .map((activity) => toDerivedWorkLogEntry(activity, configurationByActivityId.get(activity.id)));
-  const collapsed = collapseDerivedWorkLogEntries(entries).map(
+  const collapsed = collapseDerivedWorkLogEntries(foldClaudeOperationSnapshots(entries)).map(
     ({ activityKind: _activityKind, collapseKey: _collapseKey, ...entry }) => entry,
   );
   return collapsed;
@@ -993,6 +1024,37 @@ function toDerivedWorkLogEntry(
           : activity.tone,
     activityKind: activity.kind,
   };
+  const publicSummary =
+    activity.kind === "reasoning.summary" ? readClaudePublicSummary(payload) : undefined;
+  if (publicSummary) {
+    entry.label = "Claude summary";
+    entry.tone = "info";
+    entry.publicSummary = publicSummary;
+    entry.detail = publicSummary.text;
+    const summaryItemId = asTrimmedString(payload?.itemId);
+    if (summaryItemId) entry.toolCallId = summaryItemId;
+  }
+  const commandInspection = readClaudeCommandInspection(payload);
+  if (commandInspection) {
+    entry.commandInspection = {
+      ...commandInspection,
+      ...(activity.kind === "tool.started" &&
+      !commandInspection.startedAt &&
+      Number.isFinite(Date.parse(activity.createdAt))
+        ? { startedAt: activity.createdAt, status: "inProgress" as const }
+        : {}),
+      ...(activity.kind === "tool.completed" &&
+      !commandInspection.completedAt &&
+      Number.isFinite(Date.parse(activity.createdAt))
+        ? { completedAt: activity.createdAt }
+        : {}),
+    };
+    // Claude's canonical item identity is not repeated inside data.toolCallId.
+    // Restrict this fallback to the admitted command contract, preserving the
+    // collapse behavior of all other providers and legacy tool rows.
+    const commandItemId = asTrimmedString(payload?.itemId);
+    if (commandItemId) entry.toolCallId = commandItemId;
+  }
   if (turnConfiguration) {
     const presentation = presentTurnConfiguration(turnConfiguration);
     // The plain label remains useful for transcript copy/search consumers; the
@@ -1005,7 +1067,7 @@ function toDerivedWorkLogEntry(
   const requestKind = extractWorkLogRequestKind(payload);
   const observation = readDesktopObservationItem(asRecord(payload?.data)?.item);
   if (observation) entry.desktopObservation = observation;
-  if (detail && !turnConfiguration && !computerUse) {
+  if (detail && !turnConfiguration && !computerUse && !publicSummary) {
     entry.detail = detail;
   }
   if (commandPreview.command) {
@@ -1029,14 +1091,62 @@ function toDerivedWorkLogEntry(
   if (requestKind) {
     entry.requestKind = requestKind;
   }
-  if (toolCallId) {
+  if (toolCallId && !publicSummary && !commandInspection) {
     entry.toolCallId = toolCallId;
+  }
+  if (commandInspection) {
+    // Copy/search and path presentation use the same admitted strings as the
+    // disclosure, not an unsanitized legacy detail fallback.
+    delete entry.command;
+    delete entry.detail;
+    if (commandInspection.command) entry.command = commandInspection.command;
+    if (commandInspection.description) entry.detail = commandInspection.description;
+    delete entry.rawCommand;
   }
   const collapseKey = deriveToolLifecycleCollapseKey(entry);
   if (collapseKey) {
     entry.collapseKey = collapseKey;
   }
   return entry;
+}
+
+/**
+ * Snapshots update one primary block/tool in place, even if another operation
+ * has appeared between updates. Preserve its initial chronological position
+ * and stable row key so live/replayed history never reorders or resets an open
+ * detail disclosure. Identity includes the turn; native block ids can repeat.
+ */
+function foldClaudeOperationSnapshots(entries: DerivedWorkLogEntry[]): DerivedWorkLogEntry[] {
+  const folded: DerivedWorkLogEntry[] = [];
+  const positions = new Map<string, number>();
+  for (const entry of entries) {
+    const kind = entry.publicSummary ? "summary" : entry.commandInspection ? "command" : null;
+    if (!kind || !entry.toolCallId || !entry.turnId) {
+      folded.push(entry);
+      continue;
+    }
+    const key = JSON.stringify([entry.turnId, kind, entry.toolCallId]);
+    const position = positions.get(key);
+    const previous = position === undefined ? undefined : folded[position];
+    if (!previous || position === undefined) {
+      positions.set(key, folded.length);
+      folded.push(entry);
+      continue;
+    }
+    // A delayed replay/update cannot revive an already terminal operation.
+    // Summary completion may have a same-status proven snapshot repair, but
+    // an ordinary tool's authoritative completion is its final disclosure.
+    if (previous.commandInspection && previous.activityKind === "tool.completed") continue;
+    const previousSummaryStatus = previous.publicSummary?.status;
+    if (
+      (previousSummaryStatus === "completed" || previousSummaryStatus === "failed") &&
+      entry.publicSummary?.status !== previousSummaryStatus
+    )
+      continue;
+    const merged = mergeDerivedWorkLogEntries(previous, entry);
+    folded[position] = { ...merged, id: previous.id, createdAt: previous.createdAt };
+  }
+  return folded;
 }
 
 function collapseDerivedWorkLogEntries(
@@ -1115,6 +1225,14 @@ function mergeDerivedWorkLogEntries(
     ...(requestKind ? { requestKind } : {}),
     ...(collapseKey ? { collapseKey } : {}),
     ...(toolCallId ? { toolCallId } : {}),
+    ...(previous.commandInspection && next.commandInspection
+      ? {
+          commandInspection: mergeClaudeCommandInspections(
+            previous.commandInspection,
+            next.commandInspection,
+          ),
+        }
+      : {}),
   };
 }
 

@@ -59,19 +59,18 @@ function replaceDescriptorCurrentValue(
   descriptorId: string,
   currentValue: string | boolean | undefined,
 ): ReadonlyArray<ProviderOptionDescriptor> {
-  return descriptors.map((descriptor) =>
-    descriptor.id !== descriptorId
-      ? descriptor
-      : descriptor.type === "boolean"
-        ? {
-            ...descriptor,
-            ...(typeof currentValue === "boolean" ? { currentValue } : {}),
-          }
-        : {
-            ...descriptor,
-            ...(typeof currentValue === "string" ? { currentValue } : {}),
-          },
-  );
+  return descriptors.map((descriptor) => {
+    if (descriptor.id !== descriptorId) return descriptor;
+    if (descriptor.type === "boolean") {
+      // Clear only a fresh descriptor copy. An omitted native workflow flag
+      // delegates upstream; retaining the prior Boolean would silently keep
+      // a paid orchestration request after choosing Native default.
+      const next = { ...descriptor };
+      delete next.currentValue;
+      return { ...next, ...(typeof currentValue === "boolean" ? { currentValue } : {}) };
+    }
+    return { ...descriptor, ...(typeof currentValue === "string" ? { currentValue } : {}) };
+  });
 }
 
 function getDescriptorStringValue(
@@ -236,6 +235,15 @@ export function getTraitsTriggerLabel(
           : undefined;
       }
       if (descriptor.type === "boolean") {
+        if (descriptor.id === "ultracode") {
+          // This summarizes the requested flag, not native account eligibility.
+          // Absence must not be mislabeled Off when upstream settings apply.
+          return descriptor.currentValue === true
+            ? "Ultracode"
+            : descriptor.currentValue === false
+              ? "Ultracode Off"
+              : undefined;
+        }
         if (descriptor.id === "fastMode") {
           return descriptor.currentValue === true ? "Fast" : "Normal";
         }
@@ -406,14 +414,32 @@ export const TraitsMenuContent = memo(function TraitsMenuContentImpl({
             <div className="px-2 py-1.5 font-medium text-muted-foreground text-xs">
               {descriptor.label}
             </div>
+            {descriptor.description ? (
+              <p className="max-w-72 px-2 pb-1.5 text-muted-foreground text-xs">
+                {descriptor.description}
+              </p>
+            ) : null}
             <MenuRadioGroup
-              value={descriptor.currentValue === true ? "on" : "off"}
+              value={
+                descriptor.id === "ultracode" && descriptor.currentValue === undefined
+                  ? "providerDefault"
+                  : descriptor.currentValue === true
+                    ? "on"
+                    : "off"
+              }
               onValueChange={(value) => {
                 updateDescriptors(
-                  replaceDescriptorCurrentValue(descriptors, descriptor.id, value === "on"),
+                  replaceDescriptorCurrentValue(
+                    descriptors,
+                    descriptor.id,
+                    value === "providerDefault" ? undefined : value === "on",
+                  ),
                 );
               }}
             >
+              {descriptor.id === "ultracode" ? (
+                <MenuRadioItem value="providerDefault">Native default</MenuRadioItem>
+              ) : null}
               <MenuRadioItem value="on">On</MenuRadioItem>
               <MenuRadioItem value="off">Off</MenuRadioItem>
             </MenuRadioGroup>

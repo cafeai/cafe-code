@@ -676,13 +676,28 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
         sql`COALESCE(json_extract(payload_json, '$.message'), '') GLOB ${`${format.prefix}*${format.suffix}`}`,
     ),
   ]);
+  // JS readers use String.trim(); SQLite's default trim removes ASCII space
+  // only. Bind the exact ECMAScript WhiteSpace/LineTerminator character set in
+  // this application-owned SQL so blank ids/details cannot create empty pages.
+  const ecmaTrimCharacters =
+    "char(9,10,11,12,13,32,160,5760,8192,8193,8194,8195,8196,8197,8198,8199,8200,8201,8202,8232,8233,8239,8287,12288,65279)";
+  const summaryDetail = "json_extract(payload_json, '$.detail')";
+  // Printable multiline summaries allow LF/CR/tab. Reject other Cc and all
+  // bidi controls; NUL needs instr() because SQLite GLOB stops at NUL.
+  const unsafeSummaryPattern =
+    "('*[' || char(1) || '-' || char(8) || char(11) || char(12) || char(14) || '-' || char(31) || char(127) || '-' || char(159) || char(1564,8206,8207,8234,8235,8236,8237,8238,8294,8295,8296,8297) || ']*')";
+  // SQLite length counts Unicode scalars; JS presentation bounds UTF-16 units.
+  // The common ASCII/BMP path is constant work. Only an astral-containing near-
+  // limit row needs a bounded walk, stopped as soon as 4,097 units are reached.
+  const summaryUtf16Bound = `(CASE WHEN length(${summaryDetail}) > 4096 THEN 0 WHEN length(${summaryDetail}) <= 2048 OR ${summaryDetail} NOT GLOB ('*[' || char(65536) || '-' || char(1114111) || ']*') THEN 1 ELSE (WITH RECURSIVE summary_source(detail) AS (SELECT ${summaryDetail}), summary_units(position,total) AS (VALUES(0,0) UNION ALL SELECT position+1,total+CASE WHEN unicode(substr(detail,position+1,1)) > 65535 THEN 2 ELSE 1 END FROM summary_units,summary_source WHERE position < length(detail) AND total <= 4096) SELECT max(total) <= 4096 FROM summary_units) END)`;
   const historicalWorkLogActivityPredicate = sql.and([
     "kind != 'context-window.updated'",
     "kind != 'checkpoint.captured'",
     "kind != 'task.started'",
     "kind != 'provider.async-questions'",
     "summary != 'Checkpoint captured'",
-    "(kind != 'tool.started' OR json_extract(payload_json, '$.itemType') = 'context_compaction')",
+    "(kind != 'tool.started' OR json_extract(payload_json, '$.itemType') = 'context_compaction' OR (json_extract(payload_json, '$.itemType') = 'command_execution' AND json_extract(payload_json, '$.data.toolName') = 'Bash' AND json_type(payload_json, '$.data.commandInspectionVersion') IN ('integer', 'real') AND json_extract(payload_json, '$.data.commandInspectionVersion') = 1 AND json_extract(payload_json, '$.data.inspectionProvider') = 'claudeAgent'))",
+    `(kind != 'reasoning.summary' OR (json_type(payload_json, '$.summaryVersion') IN ('integer', 'real') AND json_extract(payload_json, '$.summaryVersion') = 1 AND json_extract(payload_json, '$.provider') = 'claudeAgent' AND json_extract(payload_json, '$.streamKind') = 'reasoning_summary_text' AND json_type(payload_json, '$.itemId') = 'text' AND length(trim(json_extract(payload_json, '$.itemId'), ${ecmaTrimCharacters})) > 0 AND json_type(payload_json, '$.detail') = 'text' AND length(trim(${summaryDetail}, ${ecmaTrimCharacters})) > 0 AND instr(${summaryDetail},char(0)) = 0 AND ${summaryDetail} NOT GLOB ${unsafeSummaryPattern} AND ${summaryUtf16Bound} AND json_type(payload_json, '$.truncated') IN ('true', 'false') AND json_extract(payload_json, '$.status') IN ('inProgress', 'completed', 'failed')))`,
     "NOT (kind IN ('task.started', 'task.progress', 'task.completed') AND json_type(payload_json, '$.subagent') IS NOT NULL)",
     "NOT (kind IN ('tool.updated', 'tool.completed') AND COALESCE(json_extract(payload_json, '$.detail'), '') LIKE 'ExitPlanMode:%')",
     "NOT (kind = 'provider.turn.steer.failed' AND COALESCE(json_extract(payload_json, '$.retryableFollowUp'), 0) = 1)",
@@ -2555,6 +2570,20 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
             CASE WHEN json_valid(activities.payload_json) THEN
               CASE WHEN json_type(activities.payload_json, '$.subagent.threadId') = 'text'
                 THEN json_extract(activities.payload_json, '$.subagent.threadId')
+                WHEN json_type(activities.payload_json, '$.workflow.runtimeId') = 'text'
+                  AND length(json_extract(activities.payload_json, '$.workflow.runtimeId')) BETWEEN 1 AND 128
+                  AND instr(CAST(json_extract(activities.payload_json, '$.workflow.runtimeId') AS BLOB), X'00') = 0
+                  AND json_extract(activities.payload_json, '$.workflow.runtimeId') NOT GLOB '*[^A-Za-z0-9_-]*'
+                  AND json_type(activities.payload_json, '$.workflow.providerInstanceId') = 'text'
+                  AND length(json_extract(activities.payload_json, '$.workflow.providerInstanceId')) BETWEEN 1 AND 128
+                  AND instr(CAST(json_extract(activities.payload_json, '$.workflow.providerInstanceId') AS BLOB), X'00') = 0
+                  AND json_extract(activities.payload_json, '$.workflow.providerInstanceId') NOT GLOB '*[^A-Za-z0-9_-]*'
+                  AND json_type(activities.payload_json, '$.workflowRetentionId') = 'text'
+                  AND length(json_extract(activities.payload_json, '$.workflowRetentionId')) = 80
+                  AND instr(CAST(json_extract(activities.payload_json, '$.workflowRetentionId') AS BLOB), X'00') = 0
+                  AND substr(json_extract(activities.payload_json, '$.workflowRetentionId'), 1, 16) = 'sha256:workflow:'
+                  AND substr(json_extract(activities.payload_json, '$.workflowRetentionId'), 17) NOT GLOB '*[^a-f0-9]*'
+                THEN json_extract(activities.payload_json, '$.workflowRetentionId')
                 ELSE NULL
               END
             ELSE NULL END AS presentation_child_id,

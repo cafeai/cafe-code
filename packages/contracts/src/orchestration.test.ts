@@ -559,6 +559,58 @@ it.effect("keeps provider journal repair out of client-dispatchable commands", (
   }),
 );
 
+it.effect("keeps the no-pending diagnostic admission fence server-only and opt-in", () =>
+  Effect.gen(function* () {
+    const command = {
+      type: "thread.session.set",
+      commandId: "server:unscoped-thread-error",
+      threadId: "thread-1",
+      session: {
+        threadId: "thread-1",
+        status: "error",
+        providerName: "codex",
+        providerInstanceId: "codex",
+        runtimeMode: "full-access",
+        activeTurnId: null,
+        lastError: "Provider thread error",
+        updatedAt: "2026-01-01T00:00:00.000Z",
+      },
+      createdAt: "2026-01-01T00:00:00.000Z",
+    };
+    // Older internal callers remain valid. A caller cannot disable the fence
+    // with false: only the explicit true literal opts into serialized refusal.
+    assert.strictEqual((yield* decodeOrchestrationCommand(command)).type, "thread.session.set");
+    const parsed = yield* decodeOrchestrationCommand({
+      ...command,
+      requiresNoPendingTurnStart: true,
+    });
+    if (parsed.type === "thread.session.set") {
+      assert.strictEqual(parsed.requiresNoPendingTurnStart, true);
+    } else {
+      assert.fail("Expected a server session update.");
+    }
+    assert.strictEqual(
+      (yield* Effect.exit(
+        decodeOrchestrationCommand({ ...command, requiresNoPendingTurnStart: false }),
+      ))._tag,
+      "Failure",
+    );
+    // A client cannot mint this internal mutation with either command spelling.
+    for (const commandId of [command.commandId, "client:unscoped-thread-error"]) {
+      assert.strictEqual(
+        (yield* Effect.exit(
+          decodeClientOrchestrationCommand({
+            ...command,
+            commandId,
+            requiresNoPendingTurnStart: true,
+          }),
+        ))._tag,
+        "Failure",
+      );
+    }
+  }),
+);
+
 it.effect("keeps startup-failure intent guards server-only and validates their sequence", () =>
   Effect.gen(function* () {
     const command = {

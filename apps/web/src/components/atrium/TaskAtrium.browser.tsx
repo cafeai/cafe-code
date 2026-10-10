@@ -3,6 +3,7 @@ import "../../index.css";
 import {
   ProviderDriverKind,
   ProviderInstanceId,
+  type EnvironmentApi,
   type ProviderTurnConfiguration,
 } from "@cafecode/contracts";
 import { page } from "vitest/browser";
@@ -46,7 +47,7 @@ const atriumHarness = vi.hoisted(() => {
   const now = Date.now();
   const thread = "thread-1";
   const env = "env-1";
-  const state = {
+  const initialState = {
     activeEnvironmentId: env,
     environmentStateById: {
       [env]: {
@@ -153,7 +154,7 @@ const atriumHarness = vi.hoisted(() => {
               state: "running",
               requestedAt: new Date(now - 66_000).toISOString(),
               startedAt: new Date(now - 66_000).toISOString(),
-              completedAt: null,
+              completedAt: null as string | null,
               assistantMessageId: null,
             },
             branch: null,
@@ -167,6 +168,14 @@ const atriumHarness = vi.hoisted(() => {
       },
     },
   };
+  // The fixture starts with one server, but environment isolation tests add
+  // another server with exactly the same projection shape. Widen only the
+  // map's keys; every stored environment retains the inferred field types.
+  const environmentStateById: Record<
+    string,
+    (typeof initialState.environmentStateById)[typeof env]
+  > = initialState.environmentStateById;
+  const state = { ...initialState, environmentStateById };
   const useStore = Object.assign((selector: (value: typeof state) => unknown) => selector(state), {
     getState: () => state,
   });
@@ -195,12 +204,20 @@ const atriumHarness = vi.hoisted(() => {
     cacheSavings: 0,
     raw: null,
   };
-  const subagentDetailReads = vi.fn(async (_request: unknown) => ({
-    provider: "claudeAgent",
-    messages: [{ key: "public-report", role: "assistant", text: "Latest worker report" }],
-    gaps: [],
-    truncated: false,
-  }));
+  const subagentDetailReads = vi.fn<EnvironmentApi["orchestration"]["getThreadTurnSubagentDetail"]>(
+    async (_request) => ({
+      provider: "claudeAgent" as ProviderDriverKind,
+      messages: [{ key: "public-report", role: "assistant", text: "Latest worker report" }],
+      gaps: [],
+      truncated: false,
+    }),
+  );
+  // Each synthetic server owns its own reader. Equal native child IDs in two
+  // servers must never allow the renderer to fall back to the primary API.
+  const subagentDetailReadersByEnvironment = new Map<
+    string,
+    EnvironmentApi["orchestration"]["getThreadTurnSubagentDetail"]
+  >([[env, subagentDetailReads]]);
   const loadedUsage = {
     cost: 2.5,
     tokens: 3_539_966_200,
@@ -278,6 +295,7 @@ const atriumHarness = vi.hoisted(() => {
     },
     useStore,
     subagentDetailReads,
+    subagentDetailReadersByEnvironment,
   };
 });
 
@@ -309,13 +327,13 @@ vi.mock("../../store", () => ({
 }));
 
 vi.mock("../../environmentApi", () => ({
-  readEnvironmentApi: (environmentId: string) =>
-    environmentId === "env-1"
-      ? { orchestration: { getThreadTurnSubagentDetail: atriumHarness.subagentDetailReads } }
-      : undefined,
+  readEnvironmentApi: (environmentId: string) => {
+    const read = atriumHarness.subagentDetailReadersByEnvironment.get(environmentId);
+    return read ? { orchestration: { getThreadTurnSubagentDetail: read } } : undefined;
+  },
 }));
 vi.mock("../../localApi", () => ({ readLocalApi: () => undefined }));
-// Lazy worker details render real Markdown, whose workspace selector must use
+// Worker details render real Markdown, whose workspace selector must use
 // this fixture's exact environment without importing saved-host bootstrap or
 // native persistence. Detail retrieval still uses the exact environment API
 // fixture above, preserving the owner/history assertions in these tests.
@@ -474,6 +492,71 @@ type TurnConfigurationHarnessActivity = {
   turnId: string | null;
   createdAt: string;
 };
+
+type SubagentDetail = Awaited<
+  ReturnType<EnvironmentApi["orchestration"]["getThreadTurnSubagentDetail"]>
+>;
+
+/**
+ * Preserve every durable detail-routing field in these received lifecycle
+ * fixtures. Native child IDs can be reused across turns or servers; unique
+ * display names alone cannot establish that the correct history was read.
+ */
+function installExactSubagentActivities(
+  fixtures: readonly {
+    activityId: string;
+    turnId: string;
+    subagentId: string;
+    historyId: string;
+    label: string;
+    status: "active" | "completed";
+  }[],
+  environmentId = "env-1",
+): () => void {
+  const environment = atriumHarness.useStore.getState().environmentStateById[environmentId]!;
+  const activityIdsByThreadId = environment.activityIdsByThreadId as Record<string, string[]>;
+  const activityByThreadId = environment.activityByThreadId as unknown as Record<
+    string,
+    Record<string, TurnConfigurationHarnessActivity>
+  >;
+  const previousIds = activityIdsByThreadId["thread-1"];
+  const previousActivities = activityByThreadId["thread-1"];
+  const activities: Record<string, TurnConfigurationHarnessActivity> = {};
+  const fixtureNow = Date.now();
+  for (const [index, fixture] of fixtures.entries()) {
+    const createdAt = new Date(fixtureNow - (fixtures.length - index) * 1_000).toISOString();
+    activities[fixture.activityId] = {
+      id: fixture.activityId,
+      tone: "info",
+      kind: fixture.status === "completed" ? "task.completed" : "task.progress",
+      summary: "Subagent update",
+      payload: {
+        taskId: fixture.subagentId,
+        status: fixture.status,
+        subagent: {
+          threadId: fixture.subagentId,
+          historyId: fixture.historyId,
+          runtimeId: "native-runtime-a",
+          label: fixture.label,
+          objective: "Inspect only the selected synthetic history",
+          status: fixture.status,
+          startedAt: new Date(fixtureNow - 60_000).toISOString(),
+          ...(fixture.status === "completed" ? { completedAt: createdAt } : {}),
+        },
+      },
+      turnId: fixture.turnId,
+      createdAt,
+    };
+  }
+  activityIdsByThreadId["thread-1"] = fixtures.map((fixture) => fixture.activityId);
+  activityByThreadId["thread-1"] = activities;
+  return () => {
+    if (previousIds) activityIdsByThreadId["thread-1"] = previousIds;
+    else delete activityIdsByThreadId["thread-1"];
+    if (previousActivities) activityByThreadId["thread-1"] = previousActivities;
+    else delete activityByThreadId["thread-1"];
+  };
+}
 
 /**
  * Install the same durable activity shape the server projects for an accepted
@@ -1198,6 +1281,335 @@ describe("TaskAtriumBoard", () => {
     }
   });
 
+  it("reads distinct active and retained histories for a reused child after the parent provider changes", async () => {
+    const restore = installExactSubagentActivities([
+      {
+        activityId: "retained-worker",
+        turnId: "turn-before-provider-change",
+        subagentId: "reused-native-child",
+        historyId: "retained-claude-history",
+        label: "Retained history worker",
+        status: "completed",
+      },
+      {
+        activityId: "current-worker",
+        turnId: "turn-1",
+        subagentId: "reused-native-child",
+        historyId: "current-codex-history",
+        label: "Current history worker",
+        status: "active",
+      },
+    ]);
+    const environment = atriumHarness.useStore.getState().environmentStateById["env-1"]!;
+    const summary = environment.sidebarThreadSummaryById["thread-1"]!;
+    const previousSession = summary.session;
+    const previousRead = atriumHarness.subagentDetailReads.getMockImplementation()!;
+    summary.session = { ...previousSession, provider: "codex" };
+    const retainedText =
+      "Claude retained literal \uE200cite\uE202turn4search3\uE201 remains readable.";
+    atriumHarness.subagentDetailReads.mockClear();
+    atriumHarness.subagentDetailReads.mockImplementation(async (request) => {
+      if (request.historyId === "retained-claude-history") {
+        return {
+          provider: ProviderDriverKind.make("claudeAgent"),
+          messages: [{ key: "retained-report", role: "assistant", text: retainedText }],
+          activities: [{ key: "retained-read", kind: "file_read", detail: "src/retained.ts" }],
+          gaps: [],
+          truncated: false,
+        };
+      }
+      if (request.historyId !== "current-codex-history") {
+        throw new Error("Unexpected synthetic history binding");
+      }
+      return {
+        provider: ProviderDriverKind.make("codex"),
+        messages: [{ key: "current-report", role: "assistant", text: "Current Codex report" }],
+        activities: [{ key: "current-command", kind: "command", detail: "rg current src" }],
+        gaps: [],
+        truncated: false,
+      };
+    });
+    const { host, screen } = await renderInTheme("dark");
+    try {
+      await page.getByRole("button", { name: "View Current history worker activity" }).click();
+      await expect.element(page.getByText("Current Codex report", { exact: true })).toBeVisible();
+      await expect.element(page.getByText("rg current src", { exact: true })).toBeVisible();
+      expect(atriumHarness.subagentDetailReads).toHaveBeenCalledExactlyOnceWith({
+        threadId: "thread-1",
+        turnId: "turn-1",
+        subagentId: "reused-native-child",
+        historyId: "current-codex-history",
+      });
+      await page.getByRole("button", { name: "Back to conversation", exact: true }).click();
+      await workerView().getByRole("button", { name: "History (1)", exact: true }).click();
+      await page.getByRole("button", { name: "View Retained history worker activity" }).click();
+      // The historical response owns formatting even though the parent now
+      // uses Codex. Claude's literal private-use text must not become a Codex
+      // citation or vanish, and no current-history activity may remain.
+      await expect.element(page.getByText(retainedText, { exact: true })).toBeVisible();
+      await expect.element(page.getByText("src/retained.ts", { exact: true })).toBeVisible();
+      expect(document.body.textContent).not.toContain("Current Codex report");
+      expect(document.body.textContent).not.toContain("rg current src");
+      expect(atriumHarness.subagentDetailReads.mock.calls).toEqual([
+        [
+          {
+            threadId: "thread-1",
+            turnId: "turn-1",
+            subagentId: "reused-native-child",
+            historyId: "current-codex-history",
+          },
+        ],
+        [
+          {
+            threadId: "thread-1",
+            turnId: "turn-before-provider-change",
+            subagentId: "reused-native-child",
+            historyId: "retained-claude-history",
+          },
+        ],
+      ]);
+      await expect
+        .element(page.getByRole("region", { name: "Subagent detail: Retained history worker" }))
+        .toMatchTextContent("Completed");
+    } finally {
+      await screen.unmount();
+      summary.session = previousSession;
+      atriumHarness.subagentDetailReads.mockImplementation(previousRead);
+      restore();
+      host.remove();
+    }
+  });
+
+  it("binds equal native child IDs to their environment and discards a delayed read after a workspace switch", async () => {
+    const state = atriumHarness.useStore.getState();
+    const remoteEnvironmentId = "synthetic-saved-server";
+    const previousEnvironmentId = state.activeEnvironmentId;
+    const previousRead = atriumHarness.subagentDetailReads.getMockImplementation()!;
+    const remoteEnvironment = structuredClone(state.environmentStateById["env-1"]!);
+    for (const summary of Object.values(remoteEnvironment.sidebarThreadSummaryById)) {
+      summary.environmentId = remoteEnvironmentId;
+    }
+    remoteEnvironment.sidebarThreadSummaryById["thread-1"]!.title = "Saved server conversation";
+    state.environmentStateById[remoteEnvironmentId] = remoteEnvironment;
+    const fixture = {
+      activityId: "equal-lifecycle-row",
+      turnId: "turn-1",
+      subagentId: "equal-native-child",
+      historyId: "equal-native-history",
+      label: "Environment bound worker",
+      status: "active" as const,
+    };
+    const restoreLocal = installExactSubagentActivities([fixture]);
+    const restoreRemote = installExactSubagentActivities([fixture], remoteEnvironmentId);
+    let resolveLocal!: (detail: SubagentDetail) => void;
+    const delayedLocal = new Promise<SubagentDetail>((resolve) => {
+      resolveLocal = resolve;
+    });
+    atriumHarness.subagentDetailReads.mockClear();
+    atriumHarness.subagentDetailReads.mockImplementation(() => delayedLocal);
+    const remoteRead = vi.fn<EnvironmentApi["orchestration"]["getThreadTurnSubagentDetail"]>(
+      async () => ({
+        provider: ProviderDriverKind.make("claudeAgent"),
+        messages: [{ key: "remote-report", role: "assistant", text: "Saved server public report" }],
+        activities: [{ key: "remote-read", kind: "file_read", detail: "src/saved-server.ts" }],
+        gaps: [],
+        truncated: false,
+      }),
+    );
+    atriumHarness.subagentDetailReadersByEnvironment.set(remoteEnvironmentId, remoteRead);
+    const { host, screen } = await renderInTheme("dark");
+    try {
+      await page.getByRole("button", { name: "View Environment bound worker activity" }).click();
+      await vi.waitFor(() => expect(atriumHarness.subagentDetailReads).toHaveBeenCalledTimes(1));
+      state.activeEnvironmentId = remoteEnvironmentId;
+      await screen.rerender(<TaskAtriumBoard />);
+      await vi.waitFor(
+        () => expect(document.querySelector('[data-cafe-atrium-subagent-popup="true"]')).toBeNull(),
+        { timeout: 3_000 },
+      );
+      await expect
+        .element(page.getByRole("button", { name: "Open Saved server conversation", exact: true }))
+        .toBeVisible();
+      await page.getByRole("button", { name: "View Environment bound worker activity" }).click();
+      await expect
+        .element(page.getByText("Saved server public report", { exact: true }))
+        .toBeVisible();
+      await expect.element(page.getByText("src/saved-server.ts", { exact: true })).toBeVisible();
+      const exactRequest = {
+        threadId: "thread-1",
+        turnId: "turn-1",
+        subagentId: "equal-native-child",
+        historyId: "equal-native-history",
+      };
+      expect(atriumHarness.subagentDetailReads).toHaveBeenCalledExactlyOnceWith(exactRequest);
+      expect(remoteRead).toHaveBeenCalledExactlyOnceWith(exactRequest);
+
+      // Resolve the primary server only after the saved server has painted.
+      // A same-ID response from a retired component cannot overwrite the
+      // selected environment's messages or activities.
+      resolveLocal({
+        provider: ProviderDriverKind.make("codex"),
+        messages: [{ key: "retired-report", role: "assistant", text: "Retired primary report" }],
+        activities: [{ key: "retired-command", kind: "command", detail: "rg retired-primary src" }],
+        gaps: [],
+        truncated: false,
+      });
+      await delayedLocal;
+      await screen.rerender(<TaskAtriumBoard />);
+      await expect
+        .element(page.getByText("Saved server public report", { exact: true }))
+        .toBeVisible();
+      expect(document.body.textContent).not.toContain("Retired primary report");
+      expect(document.body.textContent).not.toContain("rg retired-primary src");
+      expect(atriumHarness.subagentDetailReads).toHaveBeenCalledTimes(1);
+      expect(remoteRead).toHaveBeenCalledTimes(1);
+    } finally {
+      await screen.unmount();
+      resolveLocal({
+        provider: ProviderDriverKind.make("codex"),
+        messages: [],
+        gaps: [],
+        truncated: false,
+      });
+      state.activeEnvironmentId = previousEnvironmentId;
+      restoreRemote();
+      restoreLocal();
+      delete state.environmentStateById[remoteEnvironmentId];
+      atriumHarness.subagentDetailReadersByEnvironment.delete(remoteEnvironmentId);
+      atriumHarness.subagentDetailReads.mockImplementation(previousRead);
+      host.remove();
+    }
+  });
+
+  it("revokes a removed worker selection and keeps replacement-history failure and Retry inside its popup", async () => {
+    const fixture = {
+      activityId: "reused-lifecycle-row",
+      turnId: "turn-1",
+      subagentId: "reused-selected-child",
+      historyId: "removed-history",
+      label: "Removed worker",
+      status: "active" as const,
+    };
+    const restore = installExactSubagentActivities([fixture]);
+    const previousRead = atriumHarness.subagentDetailReads.getMockImplementation()!;
+    let resolveRemoved!: (detail: SubagentDetail) => void;
+    const delayedRemoved = new Promise<SubagentDetail>((resolve) => {
+      resolveRemoved = resolve;
+    });
+    let replacementAttempts = 0;
+    atriumHarness.subagentDetailReads.mockClear();
+    atriumHarness.subagentDetailReads.mockImplementation(async (request) => {
+      if (request.historyId === "removed-history") return delayedRemoved;
+      if (request.historyId !== "replacement-history") {
+        throw new Error("Unexpected synthetic replacement history");
+      }
+      replacementAttempts += 1;
+      if (replacementAttempts === 1) throw new Error("PRIVATE_SYNTHETIC_PROVIDER_FAILURE");
+      return {
+        provider: ProviderDriverKind.make("claudeAgent"),
+        messages: [
+          { key: "replacement-report", role: "assistant", text: "Replacement public report" },
+        ],
+        activities: [{ key: "replacement-edit", kind: "file_edit", detail: "src/replacement.ts" }],
+        gaps: [],
+        truncated: false,
+      };
+    });
+    const { host, screen } = await renderInTheme("dark");
+    let restoreReplacement: (() => void) | undefined;
+    try {
+      await page.getByRole("button", { name: "View Removed worker activity" }).click();
+      await vi.waitFor(() => expect(atriumHarness.subagentDetailReads).toHaveBeenCalledTimes(1));
+      const environment = atriumHarness.useStore.getState().environmentStateById["env-1"]!;
+      environment.activityIdsByThreadId["thread-1"] = [];
+      environment.activityByThreadId["thread-1"] =
+        {} as (typeof environment.activityByThreadId)["thread-1"];
+      // Reuse the board fixtures' existing bounded three-second allowance
+      // for its one-second projection clock plus the popup's closing motion.
+      await vi.waitFor(
+        () => expect(document.querySelector('[data-cafe-atrium-subagent-popup="true"]')).toBeNull(),
+        { timeout: 3_000 },
+      );
+      restoreReplacement = installExactSubagentActivities([
+        { ...fixture, historyId: "replacement-history", label: "Replacement worker" },
+      ]);
+      await expect
+        .element(page.getByRole("button", { name: "View Replacement worker activity" }))
+        .toBeVisible();
+      resolveRemoved({
+        provider: ProviderDriverKind.make("codex"),
+        messages: [
+          { key: "removed-report", role: "assistant", text: "Removed worker private history" },
+        ],
+        activities: [{ key: "removed-command", kind: "command", detail: "rg removed-history src" }],
+        gaps: [],
+        truncated: false,
+      });
+      await delayedRemoved;
+      await screen.rerender(<TaskAtriumBoard />);
+      expect(document.querySelector('[data-cafe-atrium-subagent-popup="true"]')).toBeNull();
+      expect(document.body.textContent).not.toContain("Removed worker private history");
+      expect(document.body.textContent).not.toContain("rg removed-history src");
+
+      await page.getByRole("button", { name: "View Replacement worker activity" }).click();
+      await expect
+        .element(page.getByText("Transcript unavailable.", { exact: true }))
+        .toBeVisible();
+      // Base UI marks the underlying board inert while the detail dialog is
+      // open; inspect its retained DOM rather than querying an accessible
+      // role which the modal deliberately hides from assistive technology.
+      expect(
+        host.querySelector('button[aria-label="Open Port the ambiance engine to WebGL"]'),
+      ).not.toBeNull();
+      expect(document.body.textContent).not.toContain("PRIVATE_SYNTHETIC_PROVIDER_FAILURE");
+      await page.getByRole("button", { name: "Retry", exact: true }).click();
+      await expect
+        .element(page.getByText("Replacement public report", { exact: true }))
+        .toBeVisible();
+      await expect.element(page.getByText("src/replacement.ts", { exact: true })).toBeVisible();
+      expect(document.querySelector('[data-subagent-detail-unavailable="true"]')).toBeNull();
+      expect(document.body.textContent).not.toContain("Removed worker private history");
+      expect(atriumHarness.subagentDetailReads.mock.calls).toEqual([
+        [
+          {
+            threadId: "thread-1",
+            turnId: "turn-1",
+            subagentId: "reused-selected-child",
+            historyId: "removed-history",
+          },
+        ],
+        [
+          {
+            threadId: "thread-1",
+            turnId: "turn-1",
+            subagentId: "reused-selected-child",
+            historyId: "replacement-history",
+          },
+        ],
+        [
+          {
+            threadId: "thread-1",
+            turnId: "turn-1",
+            subagentId: "reused-selected-child",
+            historyId: "replacement-history",
+          },
+        ],
+      ]);
+    } finally {
+      await screen.unmount();
+      resolveRemoved({
+        provider: ProviderDriverKind.make("codex"),
+        messages: [],
+        gaps: [],
+        truncated: false,
+      });
+      restoreReplacement?.();
+      restore();
+      atriumHarness.subagentDetailReads.mockImplementation(previousRead);
+      host.remove();
+    }
+  });
+
   it("stops old worker clocks after native replacement while keeping exact history inspectable", async () => {
     const restore = installStructuredSubagents(1);
     const environment = atriumHarness.useStore.getState().environmentStateById["env-1"]!;
@@ -1245,6 +1657,118 @@ describe("TaskAtriumBoard", () => {
       host.remove();
     }
   });
+
+  it.each(["dark", "light"] as const)(
+    "keeps a failed Codex root terminal while its exact surviving child remains inspectable in %s",
+    async (theme) => {
+      const restore = installExactSubagentActivities([
+        {
+          activityId: "surviving-codex-child",
+          turnId: "turn-1",
+          subagentId: "surviving-codex-child",
+          historyId: "surviving-codex-history",
+          label: "Surviving Codex worker",
+          status: "active",
+        },
+        {
+          activityId: "settled-codex-child",
+          turnId: "turn-1",
+          subagentId: "settled-codex-child",
+          historyId: "settled-codex-history",
+          label: "Settled Codex worker",
+          status: "completed",
+        },
+      ]);
+      const environment = atriumHarness.useStore.getState().environmentStateById["env-1"]!;
+      const summary = environment.sidebarThreadSummaryById["thread-1"]!;
+      const previousSession = summary.session;
+      const previousLatestTurn = summary.latestTurn;
+      const previousRead = atriumHarness.subagentDetailReads.getMockImplementation()!;
+      const failedAt = Date.now() - 13 * 60 * 60 * 1000;
+      const failedTurn = {
+        ...previousLatestTurn,
+        state: "error",
+        requestedAt: new Date(failedAt - 40_000).toISOString(),
+        startedAt: new Date(failedAt - 40_000).toISOString(),
+        completedAt: new Date(failedAt).toISOString(),
+      };
+      const survivingSession = {
+        ...previousSession,
+        provider: "codex",
+        orchestrationStatus: "ready",
+        activeTurnId: null,
+        lastError: "Synthetic failed root request.",
+      };
+      summary.session = survivingSession;
+      summary.latestTurn = failedTurn;
+      atriumHarness.subagentDetailReads.mockClear();
+      atriumHarness.subagentDetailReads.mockImplementation(async () => ({
+        provider: ProviderDriverKind.make("codex"),
+        messages: [{ key: "surviving-report", role: "assistant", text: "Surviving worker report" }],
+        gaps: [],
+        truncated: false,
+      }));
+      const { host, screen } = await renderInTheme(theme);
+      try {
+        const worker = page.getByRole("button", {
+          name: "View Surviving Codex worker activity",
+          exact: true,
+        });
+        await expect.element(worker).toBeVisible();
+        await expect.element(worker).toMatchTextContent("Working");
+        await expect
+          .element(workerView().getByRole("button", { name: "Active (1)", exact: true }))
+          .toBeVisible();
+        const card = taskCard(host, summary.title);
+        const parentStatus = card.querySelector('[data-cafe-atrium-card-status="error"]');
+        expect(parentStatus).not.toBeNull();
+        // The decorative shared indicator also contains a hidden accessible
+        // label. Assert the visible sibling label, not both text copies.
+        expect(parentStatus?.lastChild?.textContent).toBe("Failed");
+        // A late child update cannot restart the failed root's elapsed clock.
+        expect(card.textContent).toContain("40s");
+        await worker.click();
+        await expect
+          .element(page.getByText("Surviving worker report", { exact: true }))
+          .toBeVisible();
+        expect(atriumHarness.subagentDetailReads).toHaveBeenCalledExactlyOnceWith({
+          threadId: "thread-1",
+          turnId: "turn-1",
+          subagentId: "surviving-codex-child",
+          historyId: "surviving-codex-history",
+        });
+        const liveElapsed = document.querySelector('[data-subagent-detail-elapsed="true"]');
+        expect(liveElapsed).not.toBeNull();
+        expect(liveElapsed?.textContent).toMatch(/^Working for /);
+        await page.getByRole("button", { name: "Back to conversation", exact: true }).click();
+        await workerView().getByRole("button", { name: "History (1)", exact: true }).click();
+        await expect
+          .element(
+            page.getByRole("button", { name: "View Settled Codex worker activity", exact: true }),
+          )
+          .toMatchTextContent("Done");
+        expect(summary.latestTurn).toEqual(failedTurn);
+        expect(summary.session).toEqual(survivingSession);
+
+        // Replacement evidence cannot borrow the old generation to keep even
+        // a previously proven worker active or preserve this historical card.
+        summary.session = { ...survivingSession, subagentRuntimeId: "replacement-native-runtime" };
+        await expect.element(workerView()).not.toBeInTheDocument();
+        expect(
+          host.querySelector(`button[aria-label=${JSON.stringify(`Open ${summary.title}`)}]`),
+        ).toBeNull();
+        expect(summary.latestTurn).toEqual(failedTurn);
+      } finally {
+        summary.session = previousSession;
+        summary.latestTurn = previousLatestTurn;
+        restore();
+        atriumHarness.subagentDetailReads.mockImplementation(previousRead);
+        await screen.unmount();
+        host.remove();
+        document.documentElement.classList.remove("dark");
+      }
+    },
+  );
 
   it("shows only active workers by default and pages every retained history status without navigating", async () => {
     const statuses: readonly FixtureSubagentStatus[] = [

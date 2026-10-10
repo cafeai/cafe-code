@@ -1,5 +1,19 @@
 # Codex model settings and skills
 
+## Account picker
+
+The composer model picker scrolls its account-icon rail and model list
+independently. Scroll over the left rail to reach additional accounts; keyboard
+focus also reveals accounts below the visible area. Icons retain their normal
+size, including in compact and provider-locked pickers. Small pickers still size
+to their content rather than filling a fixed-height panel.
+
+Scrolling does not select an account or model. Selecting an account previews its
+models and returns focus to Search; only choosing a model commits that exact
+account/model pair. Disabled accounts and locked continuation boundaries keep
+their existing restrictions. Opening the picker retains the ordinary bounded
+catalogue refresh; scrolling does not add provider requests.
+
 ## Service tier
 
 Open the composer model settings to choose **Service tier**. Cafe shows **Standard**

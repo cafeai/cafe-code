@@ -43,8 +43,10 @@ describe("ContextWindowDetails reset availability", () => {
       );
       expect(details).not.toBeNull();
       expect(details?.textContent?.match(/Subagent limit/g)).toHaveLength(1);
-      await expect.element(page.getByText("Subagent limit: 12", { exact: true })).toBeVisible();
-      expect(details?.textContent).toBe("Subagent limit: 12");
+      await expect
+        .element(page.getByText("Subagent limit: 3 → 12 when idle", { exact: true }))
+        .toBeVisible();
+      expect(details?.textContent).toBe("Subagent limit: 3 → 12 when idle");
       await mounted.rerender(
         <ContextWindowDetails
           usage={null}
@@ -57,9 +59,11 @@ describe("ContextWindowDetails reset availability", () => {
           }}
         />,
       );
-      await expect.element(page.getByText("Subagent limit: 5", { exact: true })).toBeVisible();
+      await expect
+        .element(page.getByText("Subagent limit: Provider default → 5 when idle", { exact: true }))
+        .toBeVisible();
       expect(document.querySelector("[data-subagent-concurrency-details]")?.textContent).toBe(
-        "Subagent limit: 5",
+        "Subagent limit: Provider default → 5 when idle",
       );
       for (const configured of [undefined, null, 8]) {
         await mounted.rerender(
@@ -74,14 +78,85 @@ describe("ContextWindowDetails reset availability", () => {
             }}
           />,
         );
-        expect(document.querySelector("[data-subagent-concurrency-details]")).toBeNull();
-        await expect
-          .element(page.getByRole("heading", { name: "Subagent limit", exact: false }))
-          .not.toBeInTheDocument();
-        await expect.element(page.getByText("Waiting for usage from this chat.")).toBeVisible();
+        if (configured === 8) {
+          await expect
+            .element(
+              page.getByText("Subagent limit: 8 → Provider default when idle", { exact: true }),
+            )
+            .toBeVisible();
+        } else {
+          expect(document.querySelector("[data-subagent-concurrency-details]")).toBeNull();
+          await expect
+            .element(page.getByRole("heading", { name: "Subagent limit", exact: false }))
+            .not.toBeInTheDocument();
+          await expect.element(page.getByText("Waiting for usage from this chat.")).toBeVisible();
+        }
       }
     },
   );
+
+  it("keeps account-default transitions compact, including clear and unrecorded sessions", async () => {
+    mounted = await render(
+      <ContextWindowDetails
+        usage={null}
+        layout="panel"
+        subagentConcurrency={{
+          requested: 12,
+          configured: 12,
+          source: "Account default",
+          pending: false,
+        }}
+      />,
+    );
+    await expect.element(page.getByText("Subagent limit: 12", { exact: true })).toBeVisible();
+    await mounted.rerender(
+      <ContextWindowDetails
+        usage={null}
+        layout="panel"
+        subagentConcurrency={{
+          requested: 24,
+          configured: 12,
+          source: "Account default",
+          pending: true,
+        }}
+      />,
+    );
+    await expect
+      .element(page.getByText("Subagent limit: 12 → 24 when idle", { exact: true }))
+      .toBeVisible();
+    expect(document.querySelectorAll("[data-subagent-concurrency-details]")).toHaveLength(1);
+    await mounted.rerender(
+      <ContextWindowDetails
+        usage={null}
+        layout="panel"
+        subagentConcurrency={{
+          requested: undefined,
+          configured: 24,
+          source: "Provider / inherited default",
+          pending: true,
+        }}
+      />,
+    );
+    await expect
+      .element(page.getByText("Subagent limit: 24 → Provider default when idle", { exact: true }))
+      .toBeVisible();
+    await mounted.rerender(
+      <ContextWindowDetails
+        usage={null}
+        layout="panel"
+        subagentConcurrency={{
+          requested: 15,
+          configured: undefined,
+          source: "Account default",
+          pending: false,
+        }}
+      />,
+    );
+    await expect
+      .element(page.getByText("Subagent limit: 15 · saved", { exact: true }))
+      .toBeVisible();
+    expect(document.body.textContent).not.toContain("next turn");
+  });
 
   it.each(["popover", "panel"] as const)(
     "puts the known count last in the %s summary, including zero",

@@ -2,6 +2,12 @@
   "schemaVersion": 2,
   "sharedOptionDescriptors": [
     {
+      "id": "ultracode",
+      "label": "Ultracode",
+      "description": "Native workflow orchestration at the selected reasoning effort. May use substantially more tokens and agents; workflows have separate concurrency limits. Requires Claude Code 2.1.284+ and native workflow eligibility.",
+      "type": "boolean"
+    },
+    {
       "id": "outputStyle",
       "label": "Output Style",
       "type": "select",

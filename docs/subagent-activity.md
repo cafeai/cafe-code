@@ -1,6 +1,6 @@
 # Subagent history and activity
 
-Select a subagent in Tasks to open its detail. Cafe shows its saved assignment,
+Select a subagent in Tasks or Atrium to open its detail. Cafe shows its saved assignment,
 progress and status, available public messages, and an **Activity** section for
 verified Codex and Claude histories.
 
@@ -21,6 +21,17 @@ activity outside the retrieval window. Activity and public messages are separate
 sections; provider timestamps appear only when available. While following the end,
 new activity stays in view. Scrolling back preserves your position and offers a
 jump to new updates. Switching to another child clears the previous child's data.
+Selection remains bound to the exact server, parent chat, turn, child and retained
+history. A delayed result from a closed or replaced selection cannot appear under
+another worker, and historical formatting follows the verified history provider.
+
+Atrium uses the same already-loaded detail reader as the chat, without a separate
+hashed module fetch when a worker is clicked. Unexpected detail rendering failures
+stay inside the popup with a **Back to Atrium** action; they do not replace the
+whole app or reload drafts. Missing renderer assets return an uncached 404 rather
+than application HTML. Cafe never substitutes new code for an old asset hash.
+An already-open renderer from before this fix needs an explicit app reload after
+adopting the rebuilt version; the fix does not repair an old renderer in place.
 
 An unavailable refresh preserves the last safe snapshot and shows Retry; it does
 not claim that old data is current. Native indexed history can lag active work.

@@ -158,6 +158,73 @@ describe("ProviderSettingsForm helpers", () => {
     });
   });
 
+  it("derives, renders, bounds and clears the per-account Claude response cap", () => {
+    const claude = DRIVER_OPTION_BY_VALUE[ProviderDriverKind.make("claudeAgent")];
+    expect(claude).toBeDefined();
+    const field = deriveProviderSettingsFields(claude!).find(
+      (candidate) => candidate.key === "maxOutputTokens",
+    );
+    expect(field).toMatchObject({
+      label: "Maximum response tokens",
+      control: "number",
+      step: 1,
+      minimum: 1,
+      maximum: 128000,
+      integerOnly: true,
+      placeholder: "Inherited / model default",
+      clearWhenEmpty: "omit",
+    });
+    expect(field?.defaultNumberValue).toBeUndefined();
+    expect(field?.description).toContain("Cafe supports 1–128,000");
+    expect(field?.detail).toContain("CLAUDE_CODE_MAX_OUTPUT_TOKENS");
+    expect(field?.detail).toContain("model's ceiling");
+    expect(field?.detail).toContain("Saving reloads this account");
+    expect(field?.detail).toContain("Metadata helpers and login/health checks");
+    const markup = renderToStaticMarkup(
+      createElement(ProviderSettingsForm, {
+        definition: claude!,
+        value: undefined,
+        idPrefix: "claude-cap-account",
+        variant: "dialog",
+        onChange: () => undefined,
+      }),
+    );
+    expect(markup).toMatch(
+      /<input[^>]*id="claude-cap-account-maxOutputTokens"[^>]*type="number"[^>]*step="1"[^>]*min="1"[^>]*max="128000"[^>]*aria-describedby="claude-cap-account-maxOutputTokens-description"[^>]*>/,
+    );
+    expect(markup).toContain('placeholder="Inherited / model default"');
+    expect(
+      nextProviderConfigWithFieldValue(
+        { homePath: "/cap-test-home", maxOutputTokens: 64000 },
+        field!,
+        "",
+      ),
+    ).toEqual({ homePath: "/cap-test-home" });
+    for (const valid of ["1", "64001", "128000"]) {
+      expect(nextProviderConfigWithFieldValue({}, field!, valid)).toEqual({
+        maxOutputTokens: Number(valid),
+      });
+    }
+    for (const invalid of [
+      "0",
+      "-1",
+      "128001",
+      "64000.5",
+      "Infinity",
+      "9007199254740993",
+      "invalid",
+    ]) {
+      expect(nextProviderConfigWithFieldValue({ maxOutputTokens: 96000 }, field!, invalid)).toEqual(
+        { maxOutputTokens: 96000 },
+      );
+    }
+    expect(
+      deriveProviderSettingsFields(DRIVER_OPTION_BY_VALUE[ProviderDriverKind.make("codex")]!).some(
+        (candidate) => candidate.key === "maxOutputTokens",
+      ),
+    ).toBe(false);
+  });
+
   it("exposes Grok Build as Early Access with only structured launch settings", () => {
     const grok = DRIVER_OPTION_BY_VALUE[ProviderDriverKind.make("grok")];
     expect(grok).toMatchObject({ label: "Grok Build", badgeLabel: "Early Access" });

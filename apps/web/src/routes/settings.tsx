@@ -8,6 +8,7 @@ import { Button } from "../components/ui/button";
 import { SidebarInset } from "../components/ui/sidebar";
 import { ContentSidebarTriggerWithUnreadDot } from "../components/sidebar/unseenCompletions";
 import { isElectron } from "../env";
+import { useMacDesktopTitlebar } from "../hooks/useMacDesktopTitlebar";
 import { useWorkspaceEnvironmentId } from "../environments/workspace";
 
 function RestoreDefaultsButton({ onRestored }: { onRestored: () => void }) {
@@ -27,6 +28,7 @@ function RestoreDefaultsButton({ onRestored }: { onRestored: () => void }) {
 }
 
 function SettingsContentLayout() {
+  const isMacDesktopTitlebar = useMacDesktopTitlebar();
   const environmentId = useWorkspaceEnvironmentId();
   const location = useLocation();
   const navigateBackWithinApp = useSettingsBackNavigation();
@@ -67,7 +69,10 @@ function SettingsContentLayout() {
         )}
 
         {isElectron && (
-          <div className="drag-region flex h-(--app-titlebar-height) shrink-0 items-center border-b border-border px-5 wco:h-[env(titlebar-area-height)] wco:pr-[calc(100vw-env(titlebar-area-width)-env(titlebar-area-x)+1em)]">
+          <div
+            data-mac-titlebar={isMacDesktopTitlebar}
+            className="drag-region flex h-(--app-titlebar-height) shrink-0 items-center border-b border-border px-5 wco:h-[env(titlebar-area-height)] wco:pr-[calc(100vw-env(titlebar-area-width)-env(titlebar-area-x)+1em)]"
+          >
             <ContentSidebarTriggerWithUnreadDot className="mr-2" />
             <span className="text-xs font-medium tracking-wide text-subtle-foreground">
               Settings

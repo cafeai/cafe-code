@@ -47,6 +47,7 @@ import {
   RuntimeTaskId,
   type RuntimeSubagentPresentation,
   UsageAccountingSnapshot,
+  TurnCompletedPayload,
 } from "@cafecode/contracts";
 import * as Cause from "effect/Cause";
 import * as Data from "effect/Data";
@@ -72,6 +73,7 @@ import { getModelSelectionStringOptionValue } from "@cafecode/shared/model";
 import { summarizeToolArguments } from "@cafecode/shared/toolActivity";
 import { resolveCodexServiceTier } from "../codexServiceTier.ts";
 import { resolveCodexDaybreak } from "../codexDaybreak.ts";
+import { classifyCodexTransientFailure } from "../codexTransientFailure.ts";
 import { isCodexHistoryRecoveryRequiredError } from "@cafecode/shared/codexHistorySafety";
 import { makeCodexHistorySafetyStore } from "../../persistence/CodexHistorySafety.ts";
 
@@ -3619,6 +3621,24 @@ function mapToRuntimeEvents(
     ];
   }
 
+  if (event.method === "codex.failedRoot/available") {
+    // Native JSON cannot mint this outer runtime-owned marker. This narrow
+    // confirmation is emitted only after the pending request's matching ACK
+    // binds an early definitive terminal root to the same live context.
+    if (event.nativeContextAvailable !== true) return [];
+    const payload = readPayload(TurnCompletedPayload, event.payload);
+    if (payload?.state !== "failed") return [];
+    return [
+      {
+        ...runtimeEventBase(event, canonicalThreadId, {
+          rawPayload: { reason: "codex_failed_root_available" },
+        }),
+        type: "turn.completed",
+        payload: { ...payload, nativeContextAvailable: true },
+      },
+    ];
+  }
+
   if (event.method === "turn/completed") {
     const payload = readPayload(EffectCodexSchema.V2TurnCompletedNotification, event.payload);
     if (!payload) {
@@ -3627,6 +3647,10 @@ function mapToRuntimeEvents(
     const errorMessage = trimText(payload.turn.error?.message);
     const historyRecoveryRequired =
       errorMessage !== undefined && isCodexHistoryRecoveryRequiredError(errorMessage);
+    const codexTransientFailure =
+      payload.turn.status === "failed" && !historyRecoveryRequired
+        ? classifyCodexTransientFailure(payload.turn.error)
+        : undefined;
     return [
       {
         ...runtimeEventBase(
@@ -3642,6 +3666,10 @@ function mapToRuntimeEvents(
         payload: {
           state: toTurnStatus(payload.turn.status),
           ...(errorMessage ? { errorMessage } : {}),
+          ...(codexTransientFailure !== undefined ? { codexTransientFailure } : {}),
+          ...(event.nativeContextAvailable === true
+            ? { nativeContextAvailable: true as const }
+            : {}),
         },
       },
     ];
@@ -5333,6 +5361,26 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
   });
 
   const sendTurn: CodexAdapterShape["sendTurn"] = Effect.fn("sendTurn")(function* (input) {
+    if (input.expectedFailedRoot !== undefined) {
+      const current = yield* (yield* requireSession(input.threadId)).runtime.getSession;
+      const failure = current.codexRootTurnFailure;
+      if (
+        input.codexReview !== undefined ||
+        input.expectedCompletedRootTurnId !== undefined ||
+        (input.modelSelection !== undefined &&
+          input.modelSelection.instanceId !== boundInstanceId) ||
+        (input.attachments?.length ?? 0) > 0 ||
+        failure?.category === undefined ||
+        failure.turnId !== input.expectedFailedRoot.turnId ||
+        failure.providerThreadId !== input.expectedFailedRoot.providerThreadId ||
+        current.subagentRuntimeId !== input.expectedFailedRoot.subagentRuntimeId
+      )
+        return yield* new ProviderAdapterRequestError({
+          provider: PROVIDER,
+          method: "turn/start",
+          detail: "The failed Codex root is no longer available in its original runtime.",
+        });
+    }
     if (
       input.codexReview !== undefined &&
       (input.attachments?.length ||
@@ -5398,6 +5446,9 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
           : {}),
         ...(input.expectedCompletedRootTurnId !== undefined
           ? { expectedCompletedRootTurnId: input.expectedCompletedRootTurnId }
+          : {}),
+        ...(input.expectedFailedRoot !== undefined
+          ? { expectedFailedRoot: input.expectedFailedRoot, allowActiveTurnSteerFallback: false }
           : {}),
         ...(prompt !== undefined ? { input: prompt } : {}),
         ...(input.codexReview === undefined && input.modelSelection?.instanceId === boundInstanceId

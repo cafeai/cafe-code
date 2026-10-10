@@ -41,6 +41,51 @@ const request: ProviderSendTurnInput = {
 };
 
 describe("snapshotProviderTurnConfiguration", () => {
+  it("records a separate Claude Ultracode request without changing native effort", () => {
+    for (const ultracode of [true, false]) {
+      const snapshot = snapshotProviderTurnConfiguration({
+        session: { ...session, provider: ProviderDriverKind.make("claudeAgent") },
+        request: {
+          ...request,
+          modelSelection: {
+            instanceId,
+            model: "claude-opus-5-5",
+            options: [
+              { id: "effort", value: "max" },
+              { id: "ultracode", value: ultracode },
+            ],
+          },
+        },
+        instanceId,
+        settingsSource: "submitted",
+      });
+      expect(snapshot?.effort).toBe("max");
+      expect(snapshot?.ultracode).toBe(ultracode);
+    }
+    expect(
+      snapshotProviderTurnConfiguration({
+        session,
+        request: {
+          ...request,
+          modelSelection: {
+            instanceId,
+            model: "gpt-6.1-sol",
+            options: [{ id: "ultracode", value: true }],
+          },
+        },
+        instanceId,
+        settingsSource: "submitted",
+      }),
+    ).not.toHaveProperty("ultracode");
+    expect(
+      snapshotProviderTurnConfiguration({
+        session: { ...session, provider: ProviderDriverKind.make("claudeAgent") },
+        request: { ...request, modelSelection: { instanceId, model: "claude-opus-5-5" } },
+        instanceId,
+        settingsSource: "submitted",
+      }),
+    ).not.toHaveProperty("ultracode");
+  });
   it("freezes exact Codex service tiers independently of legacy Fast and does not copy another account", () => {
     const tierRequest = {
       ...request,

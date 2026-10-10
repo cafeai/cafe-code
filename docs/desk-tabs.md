@@ -1,5 +1,7 @@
 # Desk and chat tabs
 
+Last updated: 2026-10-09 14:03:31 JST (UTC+0900)
+
 Use **Projects** to browse the saved project/chat catalog, including the separate
 **Chats** section for conversations without a project. Use **Desk** to
 show only your open chats, grouped the way you are working. Atrium, Settings,
@@ -15,6 +17,16 @@ button, without a tab strip or group controls. Open the sidebar to switch chats
 in Projects or Desk. Saved tabs, drafts and split layouts remain intact; tabs and
 splits return when the browser becomes wide enough. The desktop app retains tabs
 at every width.
+On macOS desktop, the sidebar reopen button stays clear of the traffic lights
+when the sidebar is hidden. Desk, chat, Settings, empty-state and sidebar
+headers share a fixed native-sized vertical band, so changing interface size
+does not move that control toward the window buttons. Only the top-left split
+pane reserves their leading space; lower panes keep normal tab spacing. This
+does not reposition the native window buttons or alter browser/mobile layouts.
+Renderer geometry and hide/reopen behavior are covered by
+`SidebarChromeHeader.browser.tsx`, `MacTitlebar.browser.tsx`,
+`MacBrowserTitlebar.browser.tsx` and `DeskWorkspace.browser.tsx` in the web browser suite; native AppKit placement
+remains a separate desktop smoke check.
 
 - In **Settings → Chats → Single-click behavior**, choose **Preview** (the default)
   or **Open**. Open keeps each clicked chat as a regular tab.
@@ -27,9 +39,9 @@ at every width.
   normal titles and restore on restart.
   Previews are excluded from saved layouts and reopen history. Dragging a tab to
   rearrange or split it keeps it open. Closing a preview retains its input and work.
-- Use the **New chat** icon beside **Chats** in Projects, or the global New chat
+- Use the **New chat** pencil icon beside **Chats** in Desk or Projects, or the global New chat
   shortcut, to create a standalone conversation in the active group without a folder.
-  Desk's **Open chats** heading has no creation button.
+  Both headings share the same action and keep the selected sidebar view unchanged.
   Existing per-project New chat actions still create project-associated chats.
 - Drag tabs to reorder, into another group to move, or to a chat pane edge to
   split. Hover the left or right half of a tab to see an insertion line before

@@ -16,6 +16,10 @@
       "types": "./src/nativeControl.ts",
       "import": "./src/nativeControl.ts"
     },
+    "./claudeResponseLimits": {
+      "types": "./src/claudeResponseLimits.ts",
+      "import": "./src/claudeResponseLimits.ts"
+    },
     "./codexHistorySafety": {
       "types": "./src/codexHistorySafety.ts",
       "import": "./src/codexHistorySafety.ts"

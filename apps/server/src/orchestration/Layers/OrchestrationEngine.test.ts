@@ -16,6 +16,7 @@ import {
   type OrchestrationEvent,
   ProviderDriverKind,
   ProviderInstanceId,
+  SubagentRuntimeId,
 } from "@cafecode/contracts";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as Effect from "effect/Effect";
@@ -58,7 +59,11 @@ import {
   threadForkSourceVersionStatement,
 } from "../threadForkSourceVersion.ts";
 import { ServerConfig } from "../../config.ts";
-import { makeRuntimeRecoveryBarrierReader } from "../providerRuntimeRecovery.ts";
+import {
+  buildCodexTransientFailureMarkerPayload,
+  codexTransientAcceptanceCommandId,
+  makeRuntimeRecoveryBarrierReader,
+} from "../providerRuntimeRecovery.ts";
 import { seedScheduledFollowUp } from "../scheduledFollowUp.testSupport.ts";
 import {
   isSupersededSessionLifecycle,
@@ -440,6 +445,317 @@ describe("OrchestrationEngine scheduled admission transaction", () => {
   });
 });
 
+describe("OrchestrationEngine accepted failed-root association", () => {
+  it.each([
+    "accepted",
+    "observed timing",
+    "missing receipt",
+    "wrong nonce",
+    "wrong account",
+    "provider receipt",
+    "missing binding",
+    "wrong message",
+    "Stop",
+    "newer input",
+  ] as const)(
+    "requires the exact immutable intent/attempt/receipt and pending-message join: %s",
+    async (variant) => {
+      const system = await createOrchestrationSystem();
+      const threadId = ThreadId.make("failed-root-association-thread");
+      const account = ProviderInstanceId.make("codex");
+      const runtimeId = SubagentRuntimeId.make("00000000-0000-4000-8000-000000000142");
+      const previousTurnId = TurnId.make("failed-root-A");
+      const turnId = TurnId.make("accepted-failed-root-B");
+      const messageId = MessageId.make("accepted-recovery-message");
+      const failedAt = "2026-01-01T00:00:02.000Z";
+      const requestedAt = "2026-01-01T00:00:03.000Z";
+      const observedStartedAt = "2026-01-01T00:00:04.000Z";
+      const observedCompletedAt = "2026-01-01T00:00:05.000Z";
+      const completedAt = "2026-01-01T00:00:06.000Z";
+      const modelSelection = { instanceId: account, model: "gpt-6-astra" };
+      const dispatch = (command: OrchestrationCommand) =>
+        system.run(system.engine.dispatch(command));
+      const start = (
+        id: string,
+        createdAt: string,
+      ): Extract<OrchestrationCommand, { type: "thread.turn.start" }> => ({
+        type: "thread.turn.start",
+        commandId: CommandId.make(id),
+        threadId,
+        message: {
+          messageId: MessageId.make(id),
+          role: "user",
+          text: "Continue the work.",
+          attachments: [],
+        },
+        modelSelection,
+        runtimeMode: "full-access",
+        interactionMode: "default",
+        createdAt,
+      });
+      const session = {
+        threadId,
+        providerName: "codex",
+        providerInstanceId: account,
+        subagentRuntimeId: runtimeId,
+        runtimeMode: "full-access" as const,
+        status: "running" as const,
+        activeTurnId: previousTurnId,
+        lastError: null,
+        updatedAt: now(),
+      };
+      try {
+        await dispatch({
+          type: "thread.create",
+          commandId: CommandId.make("association-create"),
+          threadId,
+          projectId: null,
+          title: "Association",
+          modelSelection,
+          runtimeMode: "full-access",
+          interactionMode: "default",
+          branch: null,
+          worktreePath: null,
+          createdAt: now(),
+        });
+        await dispatch(start("association-human-intent", now()));
+        await dispatch({
+          type: "thread.session.set",
+          commandId: CommandId.make("provider:association-A-start"),
+          threadId,
+          session,
+          createdAt: now(),
+        });
+        await dispatch({
+          type: "thread.session.set",
+          commandId: CommandId.make("provider:association-A-failed"),
+          threadId,
+          session: {
+            ...session,
+            status: "error",
+            activeTurnId: null,
+            lastError: "Root failed.",
+            updatedAt: failedAt,
+          },
+          createdAt: failedAt,
+        });
+        await dispatch({
+          type: "thread.session.set",
+          commandId: CommandId.make("provider:association-A-available"),
+          threadId,
+          session: {
+            ...session,
+            status: "ready",
+            activeTurnId: null,
+            lastError: "Root failed.",
+            updatedAt: failedAt,
+          },
+          createdAt: failedAt,
+        });
+        const markerId = "server:association-root-failed";
+        const marker = await dispatch({
+          type: "thread.activity.append",
+          commandId: CommandId.make(markerId),
+          threadId,
+          activity: {
+            id: EventId.make(markerId),
+            kind: "runtime.warning",
+            tone: "info",
+            summary: "Recovery",
+            turnId: previousTurnId,
+            payload: buildCodexTransientFailureMarkerPayload({
+              providerInstanceId: account,
+              subagentRuntimeId: runtimeId,
+              sessionUpdatedAt: failedAt,
+            }),
+            createdAt: failedAt,
+          },
+          createdAt: failedAt,
+        });
+        const recovery = {
+          sourceEventSequence: marker.sequence,
+          turnId: previousTurnId,
+          sessionUpdatedAt: failedAt,
+          codexTransientFailure: {
+            providerInstanceId: account,
+            subagentRuntimeId: runtimeId,
+            chainSourceEventSequence: marker.sequence,
+            retryAttempt: 0,
+          },
+        };
+        const intent = await dispatch({
+          ...start("server:association-recovery-intent", requestedAt),
+          message: {
+            messageId,
+            role: "user",
+            text: "Continue after the transient failure.",
+            attachments: [],
+          },
+          runtimeRecovery: recovery,
+        });
+        const attemptId = `server:runtime-recovery-attempt:${intent.sequence}`;
+        await dispatch({
+          type: "thread.activity.append",
+          commandId: CommandId.make(attemptId),
+          threadId,
+          activity: {
+            id: EventId.make(attemptId),
+            kind: "runtime.warning",
+            tone: "info",
+            summary: "Attempt",
+            turnId: previousTurnId,
+            payload: {
+              recovery: "codex-transient-continuation-attempted",
+              sourceEventSequence: marker.sequence,
+              attemptOwnerId: "immutable-winning-owner",
+            },
+            createdAt: requestedAt,
+          },
+          createdAt: requestedAt,
+        });
+        const receiptId = codexTransientAcceptanceCommandId(threadId, turnId);
+        if (variant !== "missing receipt") {
+          await dispatch({
+            type: "thread.activity.append",
+            commandId: CommandId.make(receiptId),
+            threadId,
+            activity: {
+              id: EventId.make(receiptId),
+              kind: "runtime.warning",
+              tone: "info",
+              summary: "Accepted",
+              turnId,
+              payload: {
+                recovery: "codex-transient-continuation-accepted",
+                recoveryIntentSequence: intent.sequence,
+                attemptOwnerId:
+                  variant === "wrong nonce" ? "different-owner" : "immutable-winning-owner",
+                providerInstanceId: variant === "wrong account" ? "peer" : account,
+                subagentRuntimeId: runtimeId,
+              },
+              createdAt: completedAt,
+            },
+            createdAt: completedAt,
+          });
+          if (variant === "provider receipt")
+            await system.run(
+              system.sql`UPDATE orchestration_events SET actor_kind = 'provider' WHERE command_id = ${receiptId}`,
+            );
+        }
+        if (variant === "observed timing") {
+          await dispatch({
+            type: "thread.session.set",
+            commandId: CommandId.make("provider:association-B-start"),
+            threadId,
+            session: { ...session, activeTurnId: turnId, updatedAt: observedStartedAt },
+            createdAt: observedStartedAt,
+          });
+          await dispatch({
+            type: "thread.session.set",
+            commandId: CommandId.make("provider:association-B-fail"),
+            threadId,
+            session: {
+              ...session,
+              status: "error",
+              activeTurnId: null,
+              lastError: "Continuation failed.",
+              updatedAt: observedCompletedAt,
+            },
+            createdAt: observedCompletedAt,
+          });
+        }
+        if (variant === "missing binding")
+          await system.run(
+            system.sql`DELETE FROM projection_turns WHERE thread_id = ${threadId} AND turn_id IS NULL`,
+          );
+        if (variant === "Stop")
+          await dispatch({
+            type: "thread.session.stop",
+            commandId: CommandId.make("client:association-stop"),
+            threadId,
+            createdAt: completedAt,
+          });
+        if (variant === "newer input")
+          await dispatch(start("client:association-newer-input", completedAt));
+        const before = await system.readModel();
+        const current = before.threads[0]!;
+        const command: Extract<OrchestrationCommand, { type: "thread.session.set" }> = {
+          type: "thread.session.set",
+          commandId: CommandId.make("server:association-B-terminal"),
+          threadId,
+          expectedSessionLifecycle: sessionLifecycleSnapshot(current.session),
+          expectedSubagentRuntimeId: runtimeId,
+          codexFailedRoot: {
+            turnId,
+            previousTurnId,
+            messageId:
+              variant === "wrong message" ? MessageId.make("unrelated-message") : messageId,
+            intentSequence: intent.sequence,
+            requestedAt,
+            completedAt,
+          },
+          session: {
+            ...current.session!,
+            status: "ready",
+            activeTurnId: null,
+            lastError: "Continuation failed.",
+            updatedAt: completedAt,
+          },
+          createdAt: completedAt,
+        };
+        if (variant === "accepted" || variant === "observed timing") {
+          await dispatch(command);
+          const after = await system.readModel();
+          expect(after.threads[0]?.latestTurn).toMatchObject({
+            turnId,
+            state: "error",
+            requestedAt,
+            startedAt: variant === "observed timing" ? observedStartedAt : null,
+            completedAt: variant === "observed timing" ? observedCompletedAt : completedAt,
+          });
+          expect(after.threads[0]?.session).toMatchObject({ status: "ready", activeTurnId: null });
+          const [row] = await system.run(system.sql<{
+            pendingMessageId: string;
+            startedAt: string | null;
+            completedAt: string;
+            state: string;
+          }>`
+            SELECT pending_message_id AS "pendingMessageId", started_at AS "startedAt", completed_at AS "completedAt", state FROM projection_turns WHERE thread_id = ${threadId} AND turn_id = ${turnId}`);
+          expect(row).toEqual({
+            pendingMessageId: messageId,
+            state: "error",
+            startedAt: variant === "observed timing" ? observedStartedAt : null,
+            completedAt: variant === "observed timing" ? observedCompletedAt : completedAt,
+          });
+          const [old] = await system.run(
+            system.sql<{
+              completedAt: string;
+            }>`SELECT completed_at AS "completedAt" FROM projection_turns WHERE thread_id = ${threadId} AND turn_id = ${previousTurnId}`,
+          );
+          expect(old?.completedAt).toBe(failedAt);
+          const sequence = after.snapshotSequence;
+          await dispatch(command);
+          expect((await system.readModel()).snapshotSequence).toBe(sequence);
+        } else {
+          await expect(dispatch(command)).rejects.toThrow(
+            "Codex failed-root acceptance is no longer authorized.",
+          );
+          expect((await system.readModel()).snapshotSequence).toBe(before.snapshotSequence);
+          expect((await system.readModel()).threads[0]?.session).toEqual(current.session);
+          const [row] = await system.run(
+            system.sql<{
+              count: number;
+            }>`SELECT COUNT(*) AS count FROM projection_turns WHERE thread_id = ${threadId} AND turn_id = ${turnId}`,
+          );
+          expect(row?.count).toBe(0);
+        }
+      } finally {
+        await system.dispose();
+      }
+    },
+  );
+});
+
 describe("OrchestrationEngine startup-failure admission", () => {
   it.each([
     "accepted",
@@ -569,6 +885,183 @@ describe("OrchestrationEngine startup-failure admission", () => {
         expect(replay && isSupersededSessionLifecycle(replay)).toBe(true);
         expect((await system.readModel()).snapshotSequence).toBe(before.snapshotSequence);
       }
+    } finally {
+      await system.dispose();
+    }
+  });
+});
+
+async function createWatchFixture() {
+  const system = await createOrchestrationSystem();
+  const threadId = ThreadId.make("unscoped-watch-thread");
+  const session = {
+    threadId,
+    status: "ready" as const,
+    providerName: "codex" as const,
+    providerInstanceId: ProviderInstanceId.make("codex"),
+    subagentRuntimeId: SubagentRuntimeId.make("00000000-0000-4000-8000-000000000143"),
+    runtimeMode: "full-access" as const,
+    activeTurnId: null,
+    lastError: null,
+    updatedAt: now(),
+  };
+  const dispatch = (command: OrchestrationCommand) => system.run(system.engine.dispatch(command));
+  await dispatch({
+    type: "thread.create",
+    commandId: CommandId.make("unscoped-watch-create"),
+    threadId,
+    projectId: null,
+    title: "Unscoped watch",
+    modelSelection: { instanceId: session.providerInstanceId, model: "gpt-6-astra" },
+    runtimeMode: "full-access",
+    interactionMode: "default",
+    branch: null,
+    worktreePath: null,
+    createdAt: now(),
+  });
+  await dispatch({
+    type: "thread.session.set",
+    commandId: CommandId.make("server:unscoped-watch-ready"),
+    threadId,
+    session,
+    createdAt: now(),
+  });
+  const command: Extract<OrchestrationCommand, { type: "thread.session.set" }> = {
+    type: "thread.session.set",
+    commandId: CommandId.make("server:unscoped-watch-error"),
+    threadId,
+    session: { ...session, status: "error", lastError: "Provider thread error" },
+    expectedSessionLifecycle: sessionLifecycleSnapshot(session),
+    expectedSubagentRuntimeId: session.subagentRuntimeId,
+    requiresNoPendingTurnStart: true,
+    createdAt: now(),
+  };
+  // Seed only isolated in-memory projection state. The dispatch-race
+  // ingestion fixture separately creates the automatic continuation through
+  // its durable command; here the test focuses on this exact atomic guard.
+  const seedTurn = (
+    input: {
+      threadId?: ThreadId;
+      turnId?: TurnId;
+      state?: "pending" | "completed";
+    } = {},
+  ) =>
+    system.run(system.sql`
+        INSERT INTO projection_turns
+          (thread_id, turn_id, pending_message_id, state, requested_at,
+           checkpoint_files_json)
+        VALUES (${input.threadId ?? threadId}, ${input.turnId ?? null},
+          'unscoped-watch-pending-message', ${input.state ?? "pending"}, ${now()}, '[]')
+      `);
+  const readTurns = () =>
+    system.run(system.sql<Record<string, unknown>>`
+        SELECT * FROM projection_turns WHERE thread_id = ${threadId} ORDER BY row_id
+      `);
+  return { ...system, dispatch, threadId, session, command, seedTurn, readTurns };
+}
+
+describe("OrchestrationEngine unscoped-watch pending admission", () => {
+  it.each(["absent", "foreign-thread", "bound-turn", "terminal-row"] as const)(
+    "admits an exact watch without pending input: %s",
+    async (variant) => {
+      const system = await createWatchFixture();
+      try {
+        if (variant === "foreign-thread")
+          await system.seedTurn({ threadId: ThreadId.make("unscoped-watch-peer") });
+        if (variant === "bound-turn")
+          await system.seedTurn({ turnId: TurnId.make("unscoped-watch-bound-turn") });
+        if (variant === "terminal-row") await system.seedTurn({ state: "completed" });
+        const before = await system.readModel();
+        await system.dispatch(system.command);
+        const after = await system.readModel();
+        expect(after.threads[0]?.session?.status).toBe("error");
+        const events = await system.run(
+          system.engine.readEvents(before.snapshotSequence).pipe(Stream.runCollect),
+        );
+        expect(events).toHaveLength(1);
+        expect(events[0]?.type).toBe("thread.session-set");
+        expect(events[0]?.payload).not.toHaveProperty("requiresNoPendingTurnStart");
+        const [row] = await system.run(system.sql<{ payload_json: string }>`
+          SELECT payload_json FROM orchestration_events
+          WHERE command_id = ${system.command.commandId}
+        `);
+        expect(row).toBeDefined();
+        expect(JSON.parse(row!.payload_json)).not.toHaveProperty("requiresNoPendingTurnStart");
+      } finally {
+        await system.dispose();
+      }
+    },
+  );
+
+  it("rejects pending work without events or row consumption and keeps rejected replay fenced", async () => {
+    const system = await createWatchFixture();
+    try {
+      await system.seedTurn();
+      const before = await system.readModel();
+      const pendingBefore = await system.readTurns();
+      const result = await system.run(
+        system.engine
+          .dispatch(system.command)
+          .pipe(Effect.match({ onSuccess: () => null, onFailure: (error) => error })),
+      );
+      expect(result).toMatchObject({
+        _tag: "OrchestrationCommandInvariantError",
+        detail: SESSION_LIFECYCLE_SUPERSEDED,
+      });
+      expect(await system.readModel()).toEqual(before);
+      expect(await system.readTurns()).toEqual(pendingBefore);
+      expect(
+        await system.run(system.engine.readEvents(before.snapshotSequence).pipe(Stream.runCollect)),
+      ).toHaveLength(0);
+      const receipts = await system.run(system.sql<{ status: string }>`
+        SELECT status FROM orchestration_command_receipts
+        WHERE command_id = ${system.command.commandId}
+      `);
+      expect(receipts).toEqual([{ status: "rejected" }]);
+      // A removed provisional row is not permission to replay an old watch.
+      // Its existing rejected receipt must retain benign supersession, with no
+      // later session mutation even though the original condition disappeared.
+      await system.run(system.sql`
+        DELETE FROM projection_turns WHERE thread_id = ${system.threadId} AND turn_id IS NULL
+      `);
+      const replay = await system.run(
+        system.engine
+          .dispatch(system.command)
+          .pipe(Effect.match({ onSuccess: () => null, onFailure: (error) => error })),
+      );
+      expect(replay?._tag).toBe("OrchestrationCommandPreviouslyRejectedError");
+      expect(replay && isSupersededSessionLifecycle(replay)).toBe(true);
+      expect(await system.readModel()).toEqual(before);
+    } finally {
+      await system.dispose();
+    }
+  });
+
+  it("replays an accepted receipt without consuming subsequently pending work", async () => {
+    const system = await createWatchFixture();
+    try {
+      const receipt = await system.dispatch(system.command);
+      await system.dispatch({
+        type: "thread.session.set",
+        commandId: CommandId.make("server:unscoped-watch-current-ready"),
+        threadId: system.threadId,
+        session: system.session,
+        createdAt: now(),
+      });
+      await system.seedTurn();
+      const before = await system.readModel();
+      const pendingBefore = await system.readTurns();
+      expect(await system.dispatch(system.command)).toEqual(receipt);
+      expect(await system.readModel()).toEqual(before);
+      expect(await system.readTurns()).toEqual(pendingBefore);
+      expect(
+        await system.run(system.engine.readEvents(before.snapshotSequence).pipe(Stream.runCollect)),
+      ).toHaveLength(0);
+      const receipts = await system.run(system.sql<{ status: string }>`
+        SELECT status FROM orchestration_command_receipts
+        WHERE command_id = ${system.command.commandId}
+      `);
+      expect(receipts).toEqual([{ status: "accepted" }]);
     } finally {
       await system.dispose();
     }

@@ -1076,14 +1076,27 @@ export type ThreadTurnStartBootstrap = typeof ThreadTurnStartBootstrap.Type;
 
 /**
  * Server-only compare-and-recover authority. The source sequence names an
- * immutable, server-authored ownership-loss observation; admission and the
- * provider reactor both check the durable controls after that observation.
+ * immutable, server-authored terminal-root observation (owner loss or a
+ * transient Codex failure); admission and the provider reactor both check
+ * the durable controls after that observation.
  * This field intentionally does not exist on ClientThreadTurnStartCommand.
  */
 export const ThreadTurnRuntimeRecovery = Schema.Struct({
   sourceEventSequence: NonNegativeInt,
   turnId: TurnId,
   sessionUpdatedAt: IsoDateTime,
+  // A transient failure continues an existing native context, unlike owner
+  // loss. Bind its exact account/generation and retain the original chain's
+  // delay ramp across definitively accepted, subsequently failed turns.
+  // No provider cursor or raw native thread identity crosses this boundary.
+  codexTransientFailure: Schema.optional(
+    Schema.Struct({
+      providerInstanceId: ProviderInstanceId,
+      subagentRuntimeId: SubagentRuntimeId,
+      chainSourceEventSequence: PositiveInt,
+      retryAttempt: NonNegativeInt.check(Schema.isLessThanOrEqualTo(30)),
+    }),
+  ),
 });
 export type ThreadTurnRuntimeRecovery = typeof ThreadTurnRuntimeRecovery.Type;
 
@@ -1362,6 +1375,16 @@ export type ClientOrchestrationCommand = typeof ClientOrchestrationCommand.Type;
 export const TerminalTurnRecoveryReason = Schema.Literal("live-provider-continuation");
 export type TerminalTurnRecoveryReason = typeof TerminalTurnRecoveryReason.Type;
 
+/** An accepted root which failed before any observed native start. Server-only. */
+export const CodexFailedRootAssociation = Schema.Struct({
+  turnId: TurnId,
+  previousTurnId: TurnId,
+  messageId: MessageId,
+  intentSequence: PositiveInt,
+  requestedAt: IsoDateTime,
+  completedAt: IsoDateTime,
+});
+
 const ThreadSessionSetCommand = Schema.Struct({
   type: Schema.Literal("thread.session.set"),
   commandId: CommandId,
@@ -1389,9 +1412,18 @@ const ThreadSessionSetCommand = Schema.Struct({
   // session tuple above. The engine checks this sequence in its serial worker;
   // this server-only admission field is never copied into the persisted event.
   expectedTurnStartIntentSequence: Schema.optional(NonNegativeInt),
+  // Server-only admission fence for unscoped diagnostics. Automatic recovery
+  // can queue a new input without changing the lifecycle tuple, so its pending
+  // row must be checked under the engine's serialized worker as well. This
+  // guard is never accepted from clients or copied into persisted events.
+  requiresNoPendingTurnStart: Schema.optional(Schema.Literal(true)),
   // Positive native starts have their own turn-admission semantics, but must
   // still not replace a newer native context while their observation is queued.
   expectedSubagentRuntimeId: Schema.optional(Schema.NullOr(SubagentRuntimeId)),
+  // Fresh private native proof alone cannot select a saved request. The
+  // engine also verifies its exact durable intent, one-use attempt and ACK.
+  // This association creates a terminal error directly, never a running turn.
+  codexFailedRoot: Schema.optional(CodexFailedRootAssociation),
   // Server-only admission proof for a replacement ACK. This is deliberately
   // absent from the persisted event: the engine verifies the durable intent
   // and current projection while serializing this command with user controls.
@@ -1794,6 +1826,7 @@ export const ThreadSessionSetPayload = Schema.Struct({
   threadId: ThreadId,
   session: OrchestrationSession,
   terminalTurnRecovery: Schema.optional(TerminalTurnRecoveryReason),
+  codexFailedRoot: Schema.optional(CodexFailedRootAssociation),
 });
 
 export const ThreadGoalSetRequestedPayload = Schema.Struct({

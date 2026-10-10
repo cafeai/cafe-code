@@ -65,6 +65,15 @@ describe("desktop preload capability boundary", () => {
       IpcChannels.PREPARE_REMOTE_CERTIFICATE_CHANNEL,
       "https://pc.example:3775/",
     );
+
+    const png = new Uint8Array([137, 80, 78, 71]);
+    electron.invoke.mockResolvedValueOnce(undefined);
+    await expect(bridge.copyPng(png)).resolves.toBeUndefined();
+    expect(electron.invoke).toHaveBeenLastCalledWith(IpcChannels.COPY_PNG_CHANNEL, png);
+    const imageSave = { png, suggestedName: "diagram.png" };
+    electron.invoke.mockResolvedValueOnce("cancelled");
+    await expect(bridge.savePng(imageSave)).resolves.toBe("cancelled");
+    expect(electron.invoke).toHaveBeenLastCalledWith(IpcChannels.SAVE_PNG_CHANNEL, imageSave);
   });
 
   it.each([false, undefined])(

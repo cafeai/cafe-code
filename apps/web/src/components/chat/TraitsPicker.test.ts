@@ -18,6 +18,21 @@ function selectDescriptor(
 }
 
 describe("getTraitsTriggerLabel", () => {
+  it("summarizes requested native Ultracode separately from Max and leaves inheritance unstated", () => {
+    const effort = selectDescriptor("effort", "Reasoning", [{ id: "max", label: "Max" }], "max");
+    const ultracode: Extract<ProviderOptionDescriptor, { type: "boolean" }> = {
+      id: "ultracode",
+      label: "Ultracode",
+      type: "boolean",
+    };
+    expect(getTraitsTriggerLabel([effort, ultracode], effort, false)).toBe("Max");
+    expect(
+      getTraitsTriggerLabel([effort, { ...ultracode, currentValue: true }], effort, false),
+    ).toBe("Max · Ultracode");
+    expect(
+      getTraitsTriggerLabel([effort, { ...ultracode, currentValue: false }], effort, false),
+    ).toBe("Max · Ultracode Off");
+  });
   it("keeps the Claude reasoning and context summary compact", () => {
     const effort = selectDescriptor(
       "effort",

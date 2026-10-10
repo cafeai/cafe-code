@@ -1,4 +1,5 @@
 import type { ServerProviderAccountRateLimits } from "@cafecode/contracts";
+import { useState } from "react";
 
 import { cn } from "~/lib/utils";
 import { type ContextWindowSnapshot, formatContextWindowTokens } from "~/lib/contextWindow";
@@ -6,6 +7,7 @@ import { Popover, PopoverPopup, PopoverTrigger } from "../ui/popover";
 import { ContextWindowDetails } from "./ContextWindowDetails";
 import { SessionPlacementButton } from "./SessionRail";
 import type { SubagentConcurrencyPresentation } from "../../subagentConcurrency";
+import { useProviderQuota, type ProviderQuotaContext } from "./useProviderQuota";
 
 function formatPercentage(value: number | null): string | null {
   if (value === null || !Number.isFinite(value)) {
@@ -20,10 +22,13 @@ function formatPercentage(value: number | null): string | null {
 export function ContextWindowMeter(props: {
   usage: ContextWindowSnapshot;
   codexRateLimits?: ServerProviderAccountRateLimits | null | undefined;
+  quotaContext?: ProviderQuotaContext | undefined;
   onShowOnSide?: () => void;
   subagentConcurrency?: SubagentConcurrencyPresentation | null | undefined;
 }) {
   const { usage } = props;
+  const [open, setOpen] = useState(false);
+  const sessionQuota = useProviderQuota(props.quotaContext, open);
   const usedPercentage = formatPercentage(usage.usedPercentage);
   const normalizedPercentage = Math.max(0, Math.min(100, usage.usedPercentage ?? 0));
   const radius = 9.75;
@@ -31,7 +36,7 @@ export function ContextWindowMeter(props: {
   const dashOffset = circumference - (normalizedPercentage / 100) * circumference;
 
   return (
-    <Popover>
+    <Popover open={open} onOpenChange={setOpen}>
       <PopoverTrigger
         openOnHover
         delay={150}
@@ -94,6 +99,7 @@ export function ContextWindowMeter(props: {
         <ContextWindowDetails
           usage={usage}
           rateLimits={props.codexRateLimits}
+          sessionQuota={sessionQuota}
           layout="popover"
           subagentConcurrency={props.subagentConcurrency}
           {...(props.onShowOnSide

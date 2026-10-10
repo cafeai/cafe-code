@@ -3,9 +3,8 @@ import { scopedThreadKey, scopeThreadRef } from "@cafecode/client-runtime";
 
 import { useWorkspaceSidebarThreads } from "../../environments/workspaceData";
 import { useUiStateStore } from "../../uiStateStore";
-import { hasUnseenCompletion, shouldInsetContentSidebarTrigger } from "../Sidebar.logic";
+import { hasUnseenCompletion } from "../Sidebar.logic";
 import { SidebarTrigger, useSidebar } from "../ui/sidebar";
-import { isElectron } from "../../env";
 import { cn } from "~/lib/utils";
 
 /** True when any thread has a completed turn the user hasn't viewed yet. */
@@ -78,15 +77,12 @@ export function ContentSidebarTriggerWithUnreadDot({ className }: { className?: 
   if (!isMobile && open) {
     return null;
   }
-  const needsMacTitlebarInset = shouldInsetContentSidebarTrigger({
-    isElectronHost: isElectron,
-    isMobile,
-    platform: typeof navigator === "undefined" ? "" : navigator.platform,
-  });
   return (
     <SidebarTriggerWithUnreadDot
       className={cn(
-        needsMacTitlebarInset && "ml-[70px]",
+        // The actual titlebar owns native clearance. This control is shared
+        // by flush Desk bars and padded chat/settings headers, so a child
+        // margin cannot safely assume any particular parent padding.
         // Desktop: the trigger appears as soon as the sidebar starts its 200ms
         // slide out, so fade it in as the slide finishes instead of popping it
         // into the header mid-slide. Mobile (a modal sheet) keeps it static.
