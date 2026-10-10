@@ -20,10 +20,16 @@ import {
 } from "../ui/dialog";
 
 const SUBAGENT_LIMIT_HELP =
-  "This is the saved limit. Changes take effect before a new turn when the session can safely restart. Cafe can’t independently confirm the limit the provider enforces.";
+  "Shows Cafe’s recorded session setting and requested setting. Changes wait for a safe idle turn; active children can delay them. Cafe can’t independently confirm the limit the provider enforces.";
 
 /** The labelled info tooltip is the one explanation surface for subagent limits. */
-function SubagentLimitHelp({ extra }: { readonly extra?: ReactNode }) {
+function SubagentLimitHelp({
+  extra,
+  presentation,
+}: {
+  readonly extra?: ReactNode;
+  readonly presentation?: SubagentConcurrencyPresentation | null | undefined;
+}) {
   return (
     <Tooltip>
       <TooltipTrigger
@@ -40,6 +46,19 @@ function SubagentLimitHelp({ extra }: { readonly extra?: ReactNode }) {
       </TooltipTrigger>
       <TooltipPopup className="max-w-[min(20rem,calc(100vw-2rem))]">
         <span className="block">{SUBAGENT_LIMIT_HELP}</span>
+        {presentation ? (
+          <>
+            <span className="mt-1 block">Source: {presentation.source}.</span>
+            <span className="mt-1 block">
+              {presentation.configured === undefined
+                ? "Current session configuration is not recorded."
+                : presentation.configured === null
+                  ? "Current session has no Cafe numeric override."
+                  : `Current session was configured with ${presentation.configured}.`}
+              {presentation.pending ? " The requested setting is pending a safe idle turn." : ""}
+            </span>
+          </>
+        ) : null}
         {extra}
       </TooltipPopup>
     </Tooltip>
@@ -69,7 +88,7 @@ export function SubagentConcurrencyDetails({
       ) : (
         <span className="min-w-0">{label}</span>
       )}
-      <SubagentLimitHelp extra={extraHelp} />
+      <SubagentLimitHelp extra={extraHelp} presentation={presentation} />
     </div>
   );
 }
@@ -134,7 +153,7 @@ function SubagentConcurrencyEditor(props: SubagentConcurrencyControlProps) {
       </span>
     </>
   );
-  const hasSavedLimit = formatSubagentConcurrencyLimit(props.presentation) !== null;
+  const hasPolicyDetails = formatSubagentConcurrencyLimit(props.presentation) !== null;
   const inputId = useId();
   return (
     <>
@@ -148,9 +167,11 @@ function SubagentConcurrencyEditor(props: SubagentConcurrencyControlProps) {
             <label htmlFor={inputId} className="text-sm">
               Maximum concurrent subagents
             </label>
-            {/* With no saved limit there is no status row; keep the one
+            {/* With neither requested nor recorded pending policy there is no status row; keep the one
                 explanation surface beside the field instead. */}
-            {hasSavedLimit ? null : <SubagentLimitHelp extra={editorHelp} />}
+            {hasPolicyDetails ? null : (
+              <SubagentLimitHelp extra={editorHelp} presentation={props.presentation} />
+            )}
           </div>
           <Input
             id={inputId}
@@ -170,7 +191,7 @@ function SubagentConcurrencyEditor(props: SubagentConcurrencyControlProps) {
             Enter a whole number from 1 to 64.
           </p>
         ) : null}
-        {hasSavedLimit ? (
+        {hasPolicyDetails ? (
           <SubagentConcurrencyDetails
             presentation={props.presentation}
             showHeading={false}
@@ -179,7 +200,9 @@ function SubagentConcurrencyEditor(props: SubagentConcurrencyControlProps) {
         ) : null}
         {!props.supported ? (
           <p className="text-xs text-muted-foreground">
-            This account can’t apply a numeric limit. Reset clears this chat’s saved value.
+            This account can’t apply a numeric limit. Reset clears only this chat’s override; an
+            inherited numeric account limit must be cleared in account settings or used with a
+            supported runtime.
           </p>
         ) : null}
         {error ? (

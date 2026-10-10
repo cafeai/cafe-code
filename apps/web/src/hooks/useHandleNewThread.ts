@@ -196,10 +196,10 @@ function useNewThreadState() {
           envMode: options?.envMode ?? "local",
           runtimeMode: DEFAULT_RUNTIME_MODE,
         });
-        // Project defaults are the initial provider only when neither an
-        // explicit global default nor the existing sticky picker wins. Copy
-        // that exact account's numeric default once, never a same-driver peer.
-        applyStickyState(draftId, newChatDefaults, project?.defaultModelSelection?.instanceId);
+        // Model defaults/sticky selection keep their existing precedence.
+        // Concurrency remains inherited from the selected account at send time,
+        // not copied into a permanent per-chat override during draft creation.
+        applyStickyState(draftId, newChatDefaults);
 
         await router.navigate({
           to: "/draft/$draftId",

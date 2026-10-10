@@ -5,11 +5,13 @@ concurrent subagents, or Reset to remove its override. Cafe accepts whole number
 from 1 through 64. Codex and Claude have separate saved values: changing one does
 not erase the other. Model effort, including Ultra, does not select this limit.
 
-Provider settings also offer a **New-chat subagent limit**. This is copied into
-new chats once; editing it does not reconfigure existing chats or restart an
-account. It is a future preference, not evidence that an older CLI supports the
-feature. A numeric chat override requires the configured runtime to advertise
-support; unsupported or unknown runtimes reject it explicitly.
+Provider settings also offer a **Default subagent limit**. New and existing chats
+without a saved override inherit this setting from their selected account. Editing
+the account default updates their saved-limit display immediately; native changes
+wait for the next safe idle send, never an account restart on save. An explicit
+per-chat override takes precedence. A numeric override or inherited account
+default requires the configured runtime to advertise support; unsupported or
+unknown runtimes reject it explicitly.
 Reset remains available if a provider is downgraded or its version becomes
 unknown. Sends preserve the prompt and refuse an unsupported selected-driver
 numeric policy, including queued sends; they never silently discard it on an
@@ -17,21 +19,26 @@ older server. Another driver's remembered value does not block the current one.
 
 ## Saved limit and session configuration
 
-The context popover, pinned rail and limit editor show one **Subagent limit: N**
-label for the saved numeric chat setting or an inherited numeric account setting.
-The label updates with the acknowledged saved choice, even while the current
-provider session still uses its previous configuration. It describes a setting,
-not an independently verified hard cap or confirmation that a change has applied.
-If no numeric setting is known, the label and its section are omitted; Cafe never
-guesses a provider default. Reset removes the chat override and shows an inherited
-numeric account setting, or hides the label if that inherited number is unknown.
-The editor remains available without a status label.
+The context popover, pinned rail and limit editor use one compact label. Matching
+current and saved numbers show **Subagent limit: N**. When a known recorded
+process policy differs from the saved chat/account setting, the label shows both,
+for example **Subagent limit: 5 → 15 when idle**. Active work keeps its current
+configuration until the native idle boundary permits the saved change; the
+immediately next turn may still be a steer rather than an idle turn.
 
-Separate selected/current-session rows and a pending-state row are not displayed.
-The labelled **About subagent limits** info tooltip explains the saved-setting
-semantics, safe application boundary and enforcement caveat. The editor also
-explains when changes take effect. All three surfaces share this presentation;
-it does not add provider calls or change runtime policy.
+The saved choice updates immediately with acknowledged settings. A known null
+process policy means provider inheritance, not a guessed numeric default; unknown
+process evidence is not treated as null or an applied number. A saved number with
+unknown materialization is marked saved. Clearing/resetting a saved number still
+shows any known current number while the return to inheritance is pending. If
+neither numeric policy is known, the label and section are omitted. The editor
+remains available. These labels describe recorded settings, not independently
+verified capacity or a universal hard cap.
+
+No separate selected/current-session or pending rows are added. The labelled
+**About subagent limits** info tooltip and editor explain source, recorded process
+evidence, the safe application boundary and enforcement caveat. All three surfaces
+share this presentation; it adds no provider calls or runtime changes on render.
 
 Saving during work changes durable chat metadata
 only. Cafe applies a changed process limit at the next safe idle send boundary;
@@ -41,8 +48,14 @@ The guard covers the owned bindings and frames observed by the current runtime;
 it does not prove physical idleness in unread native/OS buffers or historical
 children absent from that runtime's bounded metadata.
 
-Resolution is chat override, then an existing explicit account runtime override,
-then native configuration/environment. Reset does not edit global provider files.
+Resolution is the selected driver's chat override, then the exact selected
+account's Default subagent limit, then its existing legacy runtime override,
+then native configuration/environment. New chats do not copy the default into an
+override, so later account edits remain inherited. Older releases copied defaults
+into numeric per-chat values without recording their origin. Those values remain
+overrides because Cafe cannot distinguish a copied default from a manual choice;
+use Reset on such a chat to opt into live account inheritance. Reset does not edit
+global provider files.
 An inherited provider default is not a known numeric limit. Internally, a null
 session policy records the absence of a Cafe override, while an omitted policy
 records unknown process evidence; neither is a numeric default. Old snapshots
@@ -66,7 +79,8 @@ Unknown and prerelease versions do not qualify automatically.
   resume, and Ultracode/team exceptions remain native behavior; this preference
   is not a universal spending cap.
 
-See the [implementation decision](decisions/per-chat-subagent-concurrency.md),
+See the [live inheritance decision](decisions/live-account-subagent-default.md),
+the [original implementation decision](decisions/per-chat-subagent-concurrency.md),
 [Codex configuration reference](https://learn.chatgpt.com/docs/config-file/config-reference),
 and [Claude concurrency documentation](https://code.claude.com/docs/en/sub-agents#concurrent-subagent-limit).
 

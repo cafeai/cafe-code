@@ -1517,6 +1517,8 @@ const make = Effect.gen(function* () {
       readonly activeSession?: ProviderSession | undefined;
       readonly activeSessionResolved?: boolean;
       readonly interactionMode?: ProviderInteractionMode;
+      /** Only an actual turn request may reconcile pending numeric execution policy. */
+      readonly applySubagentPolicyForTurn?: boolean;
     },
   ) {
     const thread = options?.thread ?? (yield* resolveThread(threadId));
@@ -1587,12 +1589,29 @@ const make = Effect.gen(function* () {
       });
     }
     const preferredProvider: ProviderDriverKind = desiredDriverKind;
-    const settingsForConcurrency = yield* serverSettingsService.getSettings;
-    const concurrencyPolicy = resolveSubagentConcurrencyPolicy({
-      driver: desiredDriverKind,
-      ...(thread.subagentLimits !== undefined ? { limits: thread.subagentLimits } : {}),
-      instanceConfig: settingsForConcurrency.providerInstances[desiredInstanceId]?.config,
-    });
+    const applySubagentPolicyForTurn = options?.applySubagentPolicyForTurn === true;
+    const settingsForConcurrency = applySubagentPolicyForTurn
+      ? yield* serverSettingsService.getSettings
+      : undefined;
+    const concurrencyInstance = settingsForConcurrency?.providerInstances[desiredInstanceId];
+    const concurrencyPolicy = applySubagentPolicyForTurn
+      ? resolveSubagentConcurrencyPolicy({
+          driver: desiredDriverKind,
+          ...(thread.subagentLimits !== undefined ? { limits: thread.subagentLimits } : {}),
+          // Read the selected account's latest preference for every turn's
+          // materialization attempt. Saving it never retires the runtime; the
+          // whole-tree idle boundary below remains replacement authority.
+          // Registry/settings transitions cannot borrow another driver's default.
+          instanceDefaultMaxConcurrentSubagents:
+            concurrencyInstance?.driver === desiredDriverKind
+              ? concurrencyInstance.defaultMaxConcurrentSubagents
+              : undefined,
+          instanceConfig:
+            concurrencyInstance?.driver === desiredDriverKind
+              ? concurrencyInstance.config
+              : undefined,
+        })
+      : { requested: undefined, configured: null };
     const desiredCapabilities = yield* providerService.getCapabilities(desiredInstanceId);
     if (
       concurrencyPolicy.requested !== undefined &&
@@ -1601,14 +1620,16 @@ const make = Effect.gen(function* () {
       return yield* new ProviderAdapterRequestError({
         provider: providerErrorLabel(desiredDriverKind),
         method: "thread.turn.start",
-        detail: "This provider runtime does not support per-chat subagent limits.",
+        detail: "This provider runtime does not support configured subagent limits.",
       });
     }
     // A materialized policy belongs to its exact native instance. Never carry
     // a former Codex process limit across an account/driver switch.
     const concurrencyChanged =
+      applySubagentPolicyForTurn &&
       activeSession !== undefined &&
       activeSession.providerInstanceId === desiredInstanceId &&
+      activeSession.provider === desiredDriverKind &&
       (desiredDriverKind === "codex" || desiredDriverKind === "claudeAgent") &&
       hasSubagentConcurrencyChange(activeSession, concurrencyPolicy);
     const concurrencyPending =
@@ -1650,6 +1671,27 @@ const make = Effect.gen(function* () {
         ? yield* resolveStandaloneTurnWorkspace(thread.id)
         : workspaceDirectories.cwd;
     const effectiveAdditionalDirectories = workspaceDirectories.additionalDirectories;
+    // Goal controls, startup adoption and runtime-mode changes are not new
+    // numeric-policy turn requests. If another legitimate session change needs
+    // materialization, retain only this exact selected owner's recorded policy.
+    // Omitted legacy evidence stays omitted (ProviderService may recover its
+    // authenticated durable binding); known native inheritance stays null. A
+    // different account must explicitly clear the former owner's numeric value.
+    const retainedControlSubagentPolicy =
+      activeSession !== undefined
+        ? activeSession.providerInstanceId === desiredInstanceId &&
+          activeSession.provider === desiredDriverKind
+          ? activeSession.maxConcurrentSubagents
+          : null
+        : thread.session?.providerInstanceId === desiredInstanceId &&
+            thread.session.providerName === desiredDriverKind
+          ? thread.session.maxConcurrentSubagents
+          : null;
+    const maxConcurrentSubagents = applySubagentPolicyForTurn
+      ? concurrencyPending
+        ? (activeSession?.maxConcurrentSubagents ?? null)
+        : concurrencyPolicy.configured
+      : retainedControlSubagentPolicy;
 
     const startProviderSession = (input?: {
       readonly resumeCursor?: unknown;
@@ -1671,9 +1713,7 @@ const make = Effect.gen(function* () {
         // service recover its old durable numeric value. Active work keeps its
         // current configuration; only a later idle materialization may apply
         // a pending request. Native final admission checks children as well.
-        maxConcurrentSubagents: concurrencyPending
-          ? (activeSession?.maxConcurrentSubagents ?? null)
-          : concurrencyPolicy.configured,
+        ...(maxConcurrentSubagents !== undefined ? { maxConcurrentSubagents } : {}),
         ...(concurrencyChanged && !concurrencyPending
           ? { requireIdleForSubagentLimitChange: true }
           : {}),
@@ -2006,6 +2046,7 @@ const make = Effect.gen(function* () {
       ...(input.project !== undefined ? { project: input.project } : {}),
       activeSession,
       activeSessionResolved: true,
+      applySubagentPolicyForTurn: true,
       ...(input.interactionMode !== undefined ? { interactionMode: input.interactionMode } : {}),
     });
     if (input.modelSelection !== undefined && input.rememberModelSelection !== false) {

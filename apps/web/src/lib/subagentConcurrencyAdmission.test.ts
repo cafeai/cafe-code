@@ -1,9 +1,16 @@
-import { EnvironmentId, ProviderDriverKind, ProviderInstanceId } from "@cafecode/contracts";
+import {
+  DEFAULT_SERVER_SETTINGS,
+  EnvironmentId,
+  ProviderDriverKind,
+  ProviderInstanceId,
+} from "@cafecode/contracts";
 import { describe, expect, it } from "vitest";
 
 import {
   subagentConcurrencyAdmissionError,
   UNSUPPORTED_SUBAGENT_LIMIT_MESSAGE,
+  UNSUPPORTED_ACCOUNT_SUBAGENT_LIMIT_MESSAGE,
+  UNRECORDED_STEER_SUBAGENT_OWNER_MESSAGE,
 } from "./subagentConcurrencyAdmission";
 
 const environmentId = EnvironmentId.make("owner");
@@ -78,5 +85,135 @@ describe("subagent limit send admission", () => {
         },
       }),
     ).toBeNull();
+  });
+
+  it("requires capability for live inherited account limits even after Reset", () => {
+    for (const instance of [{ driver: provider, defaultMaxConcurrentSubagents: 15 }]) {
+      const configuration = {
+        ...supported,
+        providers: [{ instanceId, driver: provider }],
+        settings: { ...DEFAULT_SERVER_SETTINGS, providerInstances: { [instanceId]: instance } },
+      };
+      for (const limits of [undefined, {}, { claude: 8 }]) {
+        expect(subagentConcurrencyAdmissionError({ ...base, limits, configuration })).toBe(
+          UNSUPPORTED_ACCOUNT_SUBAGENT_LIMIT_MESSAGE,
+        );
+        expect(
+          subagentConcurrencyAdmissionError({
+            ...base,
+            limits,
+            configuration: { ...configuration, providers: supported.providers },
+          }),
+        ).toBeNull();
+      }
+      // An explicit chat override still reports its own correction surface.
+      expect(subagentConcurrencyAdmissionError({ ...base, configuration })).toBe(
+        UNSUPPORTED_SUBAGENT_LIMIT_MESSAGE,
+      );
+      const cleared = {
+        ...configuration,
+        settings: {
+          ...DEFAULT_SERVER_SETTINGS,
+          providerInstances: { [instanceId]: { driver: provider } },
+        },
+      };
+      expect(
+        subagentConcurrencyAdmissionError({ ...base, limits: {}, configuration: cleared }),
+      ).toBeNull();
+      expect(
+        subagentConcurrencyAdmissionError({
+          ...base,
+          limits: {},
+          configuration: {
+            ...configuration,
+            environment: { environmentId: EnvironmentId.make("foreign") },
+          },
+        }),
+      ).toBeNull();
+    }
+  });
+
+  it("preserves existing legacy runtime-config admission semantics", () => {
+    const configuration = {
+      ...supported,
+      providers: [{ instanceId, driver: provider }],
+      settings: {
+        ...DEFAULT_SERVER_SETTINGS,
+        providerInstances: {
+          [instanceId]: { driver: provider, config: { maxConcurrentSubagents: 5 } },
+        },
+      },
+    };
+    expect(subagentConcurrencyAdmissionError({ ...base, limits: {}, configuration })).toBeNull();
+  });
+  it("never borrows selected account support for a numeric steer with an unrecorded session owner", () => {
+    expect(
+      subagentConcurrencyAdmissionError({
+        ...base,
+        configuration: supported,
+        hasRecordedSessionOwner: false,
+      }),
+    ).toBe(UNRECORDED_STEER_SUBAGENT_OWNER_MESSAGE);
+    const inherited = {
+      ...supported,
+      settings: {
+        ...DEFAULT_SERVER_SETTINGS,
+        providerInstances: {
+          [instanceId]: { driver: provider, defaultMaxConcurrentSubagents: 15 },
+        },
+      },
+    };
+    expect(
+      subagentConcurrencyAdmissionError({
+        ...base,
+        limits: {},
+        configuration: inherited,
+        hasRecordedSessionOwner: false,
+      }),
+    ).toBe(UNRECORDED_STEER_SUBAGENT_OWNER_MESSAGE);
+    expect(
+      subagentConcurrencyAdmissionError({
+        ...base,
+        limits: {},
+        configuration: supported,
+        hasRecordedSessionOwner: false,
+      }),
+    ).toBeNull();
+    const legacy = {
+      ...supported,
+      settings: {
+        ...DEFAULT_SERVER_SETTINGS,
+        providerInstances: {
+          [instanceId]: { driver: provider, config: { maxConcurrentSubagents: 5 } },
+        },
+      },
+    };
+    expect(
+      subagentConcurrencyAdmissionError({
+        ...base,
+        limits: {},
+        configuration: legacy,
+        hasRecordedSessionOwner: false,
+      }),
+    ).toBeNull();
+    // Numeric intent uses the actual session driver; a foreign-driver saved
+    // map never becomes its execution policy merely because the picker moved.
+    expect(
+      subagentConcurrencyAdmissionError({
+        ...base,
+        provider: ProviderDriverKind.make("claudeAgent"),
+        configuration: inherited,
+        hasRecordedSessionOwner: false,
+      }),
+    ).toBeNull();
+    expect(
+      subagentConcurrencyAdmissionError({
+        ...base,
+        provider: ProviderDriverKind.make("claudeAgent"),
+        limits: { claude: 8 },
+        configuration: inherited,
+        hasRecordedSessionOwner: false,
+      }),
+    ).toBe(UNRECORDED_STEER_SUBAGENT_OWNER_MESSAGE);
   });
 });

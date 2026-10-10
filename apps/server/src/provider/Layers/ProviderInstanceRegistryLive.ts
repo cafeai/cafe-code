@@ -86,9 +86,9 @@ interface RegistryState {
 
 /**
  * Only settings consumed by the driver may replace its process-owning scope.
- * Presentation and new-chat defaults can change during a multi-hour turn;
+ * Presentation and lifecycle-neutral defaults can change during a multi-hour turn;
  * closing that scope would kill the turn merely to rename its provider or
- * change the next chat's reasoning preference. Keep opaque driver config and
+ * change reasoning or inherited subagent preferences. Keep opaque driver config and
  * environment comparisons structural, including credential-bearing values,
  * so a real runtime change still follows the existing reload boundary.
  */
@@ -345,8 +345,8 @@ const makeReconcile = <R>(input: {
 
         const existing = previousEntries.get(instanceId);
         if (existing !== undefined && !replacedIds.has(instanceId)) {
-          // Defaults are read from ServerSettings by the composer, not by the
-          // driver. Retain the newest envelope for later comparisons without
+          // Defaults are read from ServerSettings by the composer/turn reactor,
+          // not by the driver. Retain the newest envelope for comparisons without
           // changing the process, session inventory, or subscription identity.
           if (!Equal.equals(existing.entry, entry)) {
             presentationOrDefaultsChanged = true;

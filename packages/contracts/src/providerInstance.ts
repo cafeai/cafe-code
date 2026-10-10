@@ -163,7 +163,8 @@ export const ProviderInstanceConfig = Schema.Struct({
   config: Schema.optionalKey(Schema.Unknown),
   defaultModel: Schema.optionalKey(TrimmedNonEmptyString),
   defaultModelOptions: Schema.optionalKey(Schema.Array(ProviderInstanceDefaultOption)),
-  // New-chat intent only; changing this must not retire the instance's scope.
+  // Live fallback for chats without a driver-specific override. Saving this
+  // remains lifecycle-neutral; materialization waits for a safe idle turn.
   defaultMaxConcurrentSubagents: Schema.optionalKey(MaxConcurrentSubagents),
 });
 export type ProviderInstanceConfig = typeof ProviderInstanceConfig.Type;

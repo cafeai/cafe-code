@@ -235,7 +235,7 @@ function expectNoHorizontalOverflow(element: HTMLElement) {
   expect(element.scrollWidth).toBeLessThanOrEqual(element.clientWidth + 1);
 }
 
-it("edits a scoped new-chat concurrency default without changing runtime config or restarting", async () => {
+it("edits a scoped account concurrency default without changing runtime config or restarting", async () => {
   const fixture = cardFixture("minimal", true);
   const instance = { ...fixture.instance, config: { maxConcurrentSubagents: 6 } };
   const card = (current: ProviderInstanceConfig) => (

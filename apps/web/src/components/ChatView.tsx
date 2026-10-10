@@ -57,10 +57,8 @@ import {
   useSavedEnvironmentRuntimeStore,
 } from "../environments/runtime/catalog";
 import {
-  configuredInstanceSubagentLimit,
+  inheritedInstanceSubagentPolicy,
   deriveSubagentConcurrencyPresentation,
-  subagentLimitKey,
-  validSubagentLimit,
 } from "../subagentConcurrency";
 import { useDesktopDebugEnabled } from "~/lib/desktopDebugState";
 import { useWorkspaceProjects, useWorkspaceThreads } from "../environments/workspaceData";
@@ -154,6 +152,12 @@ import {
   useMessageForkAdmission,
 } from "../lib/messageForkAdmission";
 import { getProviderModelCapabilities, resolveSelectableProvider } from "../providerModels";
+import {
+  deriveProviderInstanceEntries,
+  sortProviderInstanceEntries,
+  resolveComposerProviderInstance,
+  resolveProviderDriverKindForInstanceSelection,
+} from "../providerInstances";
 import { useSettings } from "../hooks/useSettings";
 import { getWsConnectionDiagnostics } from "../rpc/wsConnectionState";
 import { getUsageStatsDetailDiagnostics } from "./stats/usageStatsDetailResource";
@@ -532,6 +536,7 @@ function readSubagentConcurrencyAdmissionError(input: {
   readonly modelSelection: ModelSelection;
   readonly provider: ProviderDriverKind;
   readonly limits: SubagentLimits | undefined;
+  readonly hasRecordedSessionOwner?: boolean;
 }): string | null {
   const primary = getServerConfig();
   const configuration =
@@ -543,6 +548,9 @@ function readSubagentConcurrencyAdmissionError(input: {
     instanceId: input.modelSelection.instanceId,
     provider: input.provider,
     limits: input.limits,
+    ...(input.hasRecordedSessionOwner !== undefined
+      ? { hasRecordedSessionOwner: input.hasRecordedSessionOwner }
+      : {}),
     configuration,
   });
 }
@@ -2045,23 +2053,9 @@ export default function ChatView(props: ChatViewProps) {
         interactionMode: DEFAULT_INTERACTION_MODE,
         ...input,
       });
-      // This PR-specific creation path intentionally keeps its existing project
-      // model resolution (no sticky picker changes), but must still copy that
-      // exact initial account's numeric new-chat default once. Reused drafts
-      // above never revisit settings or erase an intentional reset.
-      const initialInstanceId =
-        activeProject.defaultModelSelection?.instanceId ?? ProviderInstanceId.make("codex");
-      const initialInstance = settings.providerInstances?.[initialInstanceId];
-      const limitKey = initialInstance ? subagentLimitKey(initialInstance.driver) : null;
-      if (
-        initialInstance?.enabled !== false &&
-        limitKey &&
-        validSubagentLimit(initialInstance?.defaultMaxConcurrentSubagents)
-      ) {
-        useComposerDraftStore.getState().setSubagentLimits(nextDraftId, {
-          [limitKey]: initialInstance.defaultMaxConcurrentSubagents,
-        });
-      }
+      // This PR-specific creation path retains its project model resolution.
+      // No numeric chat override is seeded: the exact selected account's live
+      // default is resolved again at presentation and the safe send boundary.
       await navigate({
         to: "/draft/$draftId",
         params: buildDraftThreadRouteParams(nextDraftId),
@@ -2080,7 +2074,6 @@ export default function ChatView(props: ChatViewProps) {
       routeKind,
       setDraftThreadContext,
       setLogicalProjectDraftThreadId,
-      settings.providerInstances,
     ],
   );
 
@@ -5026,6 +5019,20 @@ export default function ChatView(props: ChatViewProps) {
         stoppedBeforeSubmission = true;
         throw new Error(stoppedBeforeSubmissionMessage);
       }
+      // Re-read both live account authority and the chat's durable policy at
+      // the delivery boundary. Queue snapshots intentionally carry no policy
+      // replacement, so a captured map must not bypass a later account edit
+      // or overwrite a chat edit made during asynchronous preparation.
+      const finalConcurrencyIssue = readSubagentConcurrencyAdmissionError({
+        environmentId: item.environmentId,
+        modelSelection: item.modelSelection,
+        provider: item.provider,
+        limits: selectThreadByRef(
+          useStore.getState(),
+          scopeThreadRef(item.environmentId, item.threadId),
+        )?.subagentLimits,
+      });
+      if (finalConcurrencyIssue) throw new Error(finalConcurrencyIssue);
       // Claim only at the actual delivery boundary, after all awaited setup.
       // Stop during setup leaves a definitely unattempted durable pending item,
       // rather than manufacturing an ambiguous claim that cannot be retried.
@@ -5208,23 +5215,21 @@ export default function ChatView(props: ChatViewProps) {
     }
 
     setSendInFlight(true);
-    // Finish asynchronous priority preparation before taking a durable claim.
+    // Finish all asynchronous attachment preparation before taking a durable claim.
     // A local account/runtime change is definitely unsubmitted, so it must not
     // become an ambiguous claimed row merely because file reading took time.
-    let priorityTurnAttachments: OrchestrationUploadChatAttachment[] | undefined;
-    if (snapshot.deliveryPriority !== undefined) {
-      try {
-        priorityTurnAttachments = await buildAttachmentsForSnapshot(snapshot);
-      } catch (error) {
-        const message = describeSendFailureMessage(error, "Failed to prepare the message.");
-        if (options?.queuedItem) {
-          blockFollowUpQueueItem(options.queuedItem.threadId, options.queuedItem.id, message);
-        } else {
-          setThreadError(activeThread.id, message);
-        }
-        setSendInFlight(false);
-        return;
+    let turnAttachments: OrchestrationUploadChatAttachment[];
+    try {
+      turnAttachments = await buildAttachmentsForSnapshot(snapshot);
+    } catch (error) {
+      const message = describeSendFailureMessage(error, "Failed to prepare the message.");
+      if (options?.queuedItem) {
+        blockFollowUpQueueItem(options.queuedItem.threadId, options.queuedItem.id, message);
+      } else {
+        setThreadError(activeThread.id, message);
       }
+      setSendInFlight(false);
+      return;
     }
     const messageIdForSend =
       options?.queuedItem?.automaticSteerRetry?.sourceMessageId ??
@@ -5277,6 +5282,42 @@ export default function ChatView(props: ChatViewProps) {
         return;
       }
     }
+    // Steer reaches the existing process, not a newly selected account. Bind
+    // the admission check to that current session's owner and the canonical
+    // chat policy; an unsent composer override is not part of the steer RPC.
+    const currentSteerThread = selectThreadByRef(
+      useStore.getState(),
+      scopeThreadRef(activeThread.environmentId, activeThread.id),
+    );
+    const currentSteerSession = currentSteerThread?.session;
+    const finalSteerConcurrencyIssue = readSubagentConcurrencyAdmissionError({
+      environmentId: activeThread.environmentId,
+      modelSelection: {
+        ...snapshot.modelSelection,
+        instanceId:
+          currentSteerSession?.providerInstanceId ??
+          currentSteerThread?.modelSelection.instanceId ??
+          snapshot.modelSelection.instanceId,
+      },
+      provider: currentSteerSession?.provider ?? snapshot.provider,
+      limits: currentSteerThread?.subagentLimits,
+      hasRecordedSessionOwner: currentSteerSession?.providerInstanceId !== undefined,
+    });
+    if (finalSteerConcurrencyIssue) {
+      // Nothing has been claimed, removed, or sent. Preserve the queue row or
+      // exact direct composer content for a local correction and explicit retry.
+      if (options?.queuedItem) {
+        blockFollowUpQueueItem(
+          options.queuedItem.threadId,
+          options.queuedItem.id,
+          finalSteerConcurrencyIssue,
+        );
+      } else {
+        setThreadError(activeThread.id, finalSteerConcurrencyIssue);
+      }
+      setSendInFlight(false);
+      return;
+    }
     if (claim) {
       const claimed = queuePersistence.claim(claim, options!.queuedItem!);
       if (!claimed.ok) {
@@ -5289,9 +5330,6 @@ export default function ChatView(props: ChatViewProps) {
       claim && options?.queuedItem ? options.queuedItem.queuedAt : new Date().toISOString();
     const outgoingMessageText = outgoingTextForSnapshot(snapshot);
     const optimisticAttachments = optimisticAttachmentsForSnapshot(snapshot);
-    const turnAttachmentsPromise =
-      priorityTurnAttachments === undefined ? buildAttachmentsForSnapshot(snapshot) : undefined;
-
     updatePendingSteerDispatches((current) => {
       const next = {
         ...current,
@@ -5326,9 +5364,8 @@ export default function ChatView(props: ChatViewProps) {
     ]);
 
     try {
-      // Priority's reads completed before the canonical admission above; do
-      // not introduce another await between that check and command dispatch.
-      const turnAttachments = priorityTurnAttachments ?? (await turnAttachmentsPromise!);
+      // All reads completed before the final admission and durable claim;
+      // no await can interleave an account edit before command dispatch.
       const receipt = await api.orchestration.dispatchCommand({
         type: "thread.turn.steer",
         commandId: commandIdForSend,
@@ -5873,6 +5910,18 @@ export default function ChatView(props: ChatViewProps) {
                 : {}),
             }
           : undefined;
+      // A send's explicit map (including Reset's empty map) remains its
+      // replacement intent. With no replacement, mirror the server's latest
+      // durable chat policy rather than the earlier renderer snapshot.
+      const finalConcurrencyIssue = readSubagentConcurrencyAdmissionError({
+        environmentId: sendAttemptThreadRef.environmentId,
+        modelSelection: ctxSelectedModelSelection,
+        provider: ctxSelectedProvider,
+        limits:
+          snapshot.subagentLimits ??
+          selectThreadByRef(useStore.getState(), sendAttemptThreadRef)?.subagentLimits,
+      });
+      if (finalConcurrencyIssue) throw new Error(finalConcurrencyIssue);
       beginLocalDispatch({ preparingWorktree: false });
       await api.orchestration.dispatchCommand({
         type: "thread.turn.start",
@@ -6874,6 +6923,17 @@ export default function ChatView(props: ChatViewProps) {
         selectedModelSelection: ctxSelectedModelSelection,
       } = sendCtx;
 
+      const concurrencyIssue = readSubagentConcurrencyAdmissionError({
+        environmentId,
+        modelSelection: ctxSelectedModelSelection,
+        provider: ctxSelectedProvider,
+        limits: sendCtx.subagentLimits ?? activeThread.subagentLimits,
+      });
+      if (concurrencyIssue) {
+        setThreadError(activeThread.id, concurrencyIssue);
+        return;
+      }
+
       const threadIdForSend = activeThread.id;
       const messageIdForSend = newMessageId();
       const messageCreatedAt = new Date().toISOString();
@@ -6911,6 +6971,19 @@ export default function ChatView(props: ChatViewProps) {
           runtimeMode,
           interactionMode: nextInteractionMode,
         });
+
+        // Settings can change while metadata persistence is awaited. Re-read
+        // the owning server's account preference/capability before dispatch.
+        const changedConcurrencyIssue = readSubagentConcurrencyAdmissionError({
+          environmentId,
+          modelSelection: ctxSelectedModelSelection,
+          provider: ctxSelectedProvider,
+          limits:
+            sendCtx.subagentLimits ??
+            selectThreadByRef(useStore.getState(), scopeThreadRef(environmentId, threadIdForSend))
+              ?.subagentLimits,
+        });
+        if (changedConcurrencyIssue) throw new Error(changedConcurrencyIssue);
 
         // Keep the mode toggle and plan-follow-up banner in sync immediately
         // while the same-thread implementation turn is starting.
@@ -7060,6 +7133,19 @@ export default function ChatView(props: ChatViewProps) {
         createdAt,
       })
       .then(() => {
+        // Thread creation is awaited. A capability/account edit during that
+        // wait must refuse the provider turn before submission; the existing
+        // failure path removes the unused synthetic thread and retains the plan.
+        const finalConcurrencyIssue = readSubagentConcurrencyAdmissionError({
+          environmentId,
+          modelSelection: ctxSelectedModelSelection,
+          provider: ctxSelectedProvider,
+          limits:
+            sendCtx.subagentLimits ??
+            selectThreadByRef(useStore.getState(), scopeThreadRef(environmentId, nextThreadId))
+              ?.subagentLimits,
+        });
+        if (finalConcurrencyIssue) throw new Error(finalConcurrencyIssue);
         return api.orchestration.dispatchCommand({
           type: "thread.turn.start",
           commandId: newCommandId(),
@@ -7500,6 +7586,16 @@ export default function ChatView(props: ChatViewProps) {
       }
       const api = readEnvironmentApi(currentThread.environmentId);
       if (!api) throw new Error("The chat is disconnected.");
+      const concurrencyIssue = readSubagentConcurrencyAdmissionError({
+        environmentId: currentThread.environmentId,
+        modelSelection: currentThread.modelSelection,
+        provider: ProviderDriverKind.make("codex"),
+        limits: currentThread.subagentLimits,
+      });
+      if (concurrencyIssue) {
+        setThreadError(currentThread.id, concurrencyIssue);
+        throw new Error(concurrencyIssue);
+      }
       const text =
         codexReview.type === "uncommittedChanges"
           ? "Code review: uncommitted changes"
@@ -7527,7 +7623,7 @@ export default function ChatView(props: ChatViewProps) {
         createdAt: new Date().toISOString(),
       });
     },
-    [activeThread, composerRef, isServerThread, reviewDisabled, routeThreadKey],
+    [activeThread, composerRef, isServerThread, reviewDisabled, routeThreadKey, setThreadError],
   );
 
   if (!activeThread) {
@@ -7542,6 +7638,60 @@ export default function ChatView(props: ChatViewProps) {
     ? (paneWidth ?? 0) >= 540
     : !shouldUsePlanSidebarSheet;
   const sessionRailVisible = sessionRailDocked && canDockSessionRail;
+  // Requested policy follows the composer's exact account resolution: a valid
+  // draft pick wins, otherwise the retained session precedes durable selection.
+  // Materialized evidence is comparable only for that same account
+  // and driver; an unsent account switch must not borrow another process's cap.
+  const subagentPolicyEntries = sortProviderInstanceEntries(
+    deriveProviderInstanceEntries(providerStatuses),
+  );
+  const subagentPolicyExplicitInstanceId =
+    composerActiveProvider ??
+    activeThread.session?.providerInstanceId ??
+    activeThread.modelSelection.instanceId ??
+    activeProject?.defaultModelSelection?.instanceId ??
+    null;
+  const subagentPolicyDriver =
+    lockedProvider ??
+    resolveProviderDriverKindForInstanceSelection(
+      subagentPolicyEntries,
+      providerStatuses,
+      subagentPolicyExplicitInstanceId,
+    ) ??
+    ProviderDriverKind.make("codex");
+  const subagentPolicyLockedInstanceId =
+    activeThread.session?.providerInstanceId ?? activeThread.modelSelection.instanceId;
+  const subagentPolicyLockedContinuationGroupKey = lockedProvider
+    ? (subagentPolicyEntries.find((entry) => entry.instanceId === subagentPolicyLockedInstanceId)
+        ?.continuationGroupKey ?? null)
+    : null;
+  const subagentPolicyInstanceId = resolveComposerProviderInstance({
+    entries: subagentPolicyEntries,
+    activeProvider: composerActiveProvider,
+    sessionInstanceId: activeThread.session?.providerInstanceId,
+    threadInstanceId: activeThread.modelSelection.instanceId,
+    defaultInstanceId: settings.defaultProviderInstanceId,
+    projectInstanceId: activeProject?.defaultModelSelection?.instanceId,
+    selectedProvider: subagentPolicyDriver,
+    lockedProvider,
+    lockedContinuationGroupKey: subagentPolicyLockedContinuationGroupKey,
+  });
+  const inheritedSubagentPolicy = inheritedInstanceSubagentPolicy(
+    settings,
+    subagentPolicyInstanceId,
+    subagentPolicyDriver,
+  );
+  const sessionRailSubagentConcurrency = deriveSubagentConcurrencyPresentation({
+    provider: subagentPolicyDriver,
+    limits: composerSubagentLimits ?? activeThread.subagentLimits,
+    inheritedLimit: inheritedSubagentPolicy.limit,
+    inheritedSource: inheritedSubagentPolicy.source,
+    configuredLimit:
+      activeThread.session?.providerInstanceId === subagentPolicyInstanceId &&
+      activeThread.session.provider === subagentPolicyDriver
+        ? activeThread.session.maxConcurrentSubagents
+        : undefined,
+  });
   const sessionRailUsage = deriveLatestContextWindowSnapshot(threadActivities);
   const sessionRailRateLimits = shouldSurfaceProviderAccountRateLimits(activeProviderStatus)
     ? (activeProviderStatus?.accountRateLimits ?? null)
@@ -7941,20 +8091,7 @@ export default function ChatView(props: ChatViewProps) {
                 usage={sessionRailUsage}
                 rateLimits={sessionRailRateLimits}
                 quotaContext={sessionRailQuotaContext}
-                subagentConcurrency={
-                  activeThread
-                    ? deriveSubagentConcurrencyPresentation({
-                        provider:
-                          activeProviderStatus?.driver ?? activeThread.session?.provider ?? "codex",
-                        limits: composerSubagentLimits ?? activeThread.subagentLimits,
-                        inheritedLimit: configuredInstanceSubagentLimit(
-                          settings,
-                          activeThread.modelSelection.instanceId,
-                        ),
-                        configuredLimit: activeThread.session?.maxConcurrentSubagents,
-                      })
-                    : null
-                }
+                subagentConcurrency={sessionRailSubagentConcurrency}
                 usageResetAction={
                   <ProviderUsageResetButton
                     key={`${environmentId}:${activeProviderStatus?.instanceId ?? ""}`}

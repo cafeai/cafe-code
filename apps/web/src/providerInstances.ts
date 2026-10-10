@@ -15,7 +15,7 @@
 import {
   defaultInstanceIdForDriver,
   PROVIDER_DISPLAY_NAMES,
-  type ProviderDriverKind,
+  ProviderDriverKind,
   type ProviderInstanceId,
   type ServerProvider,
   type ServerProviderModel,
@@ -49,6 +49,66 @@ export interface ProviderInstanceEntry {
   readonly isAvailable: boolean;
   readonly snapshot: ServerProvider;
   readonly models: ReadonlyArray<ServerProviderModel>;
+}
+
+/**
+ * The composer's established exact-account resolution, shared with policy
+ * presentation so the rail cannot describe a different account from send.
+ * Preserve the existing enabled/driver/continuation candidate filters and
+ * explicit unavailable fallback: this extraction does not change routing or
+ * assert that an unavailable fallback is eligible for execution.
+ */
+export function resolveComposerProviderInstance(input: {
+  readonly entries: ReadonlyArray<ProviderInstanceEntry>;
+  readonly activeProvider: ProviderInstanceId | null | undefined;
+  readonly sessionInstanceId: ProviderInstanceId | null | undefined;
+  readonly threadInstanceId: ProviderInstanceId | null | undefined;
+  readonly defaultInstanceId: ProviderInstanceId | null | undefined;
+  readonly projectInstanceId: ProviderInstanceId | null | undefined;
+  readonly selectedProvider: ProviderDriverKind;
+  readonly lockedProvider: ProviderDriverKind | null;
+  readonly lockedContinuationGroupKey: string | null;
+}): ProviderInstanceId {
+  const candidates = [
+    input.activeProvider,
+    input.sessionInstanceId,
+    input.threadInstanceId,
+    input.defaultInstanceId,
+    input.projectInstanceId,
+  ];
+  for (const candidate of candidates) {
+    if (!candidate) continue;
+    const match = input.entries.find((entry) => entry.instanceId === candidate && entry.enabled);
+    if (!match) continue;
+    if (input.lockedProvider && match.driverKind !== input.lockedProvider) continue;
+    if (
+      input.lockedContinuationGroupKey &&
+      match.continuationGroupKey !== input.lockedContinuationGroupKey
+    )
+      continue;
+    return match.instanceId;
+  }
+  const explicit =
+    input.activeProvider ??
+    input.sessionInstanceId ??
+    input.threadInstanceId ??
+    input.projectInstanceId;
+  if (explicit) return explicit;
+  const byKind = input.entries.find(
+    (entry) =>
+      entry.enabled &&
+      entry.driverKind === input.selectedProvider &&
+      (!input.lockedContinuationGroupKey ||
+        entry.continuationGroupKey === input.lockedContinuationGroupKey),
+  );
+  if (byKind) return byKind.instanceId;
+  return (
+    input.entries.find((entry) => entry.enabled)?.instanceId ??
+    input.entries[0]?.instanceId ??
+    input.threadInstanceId ??
+    input.projectInstanceId ??
+    defaultInstanceIdForDriver(ProviderDriverKind.make("codex"))
+  );
 }
 
 /**

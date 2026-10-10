@@ -1570,7 +1570,7 @@ describe("composerDraftStore sticky composer settings", () => {
 });
 
 describe("deriveNewChatComposerDefaults", () => {
-  it("copies the exact project account's default when no global or sticky provider overrides it", () => {
+  it("does not freeze a project account's live default into new draft metadata", () => {
     resetComposerDraftStore();
     const target = scopeThreadRef(TEST_ENVIRONMENT_ID, ThreadId.make("project-limit-chat"));
     const projectInstance = ProviderInstanceId.make("claude-project");
@@ -1584,16 +1584,19 @@ describe("deriveNewChatComposerDefaults", () => {
       },
     });
     const store = useComposerDraftStore.getState();
-    store.applyStickyState(target, defaults, projectInstance);
-    expect(store.getComposerDraft(target)?.subagentLimits).toEqual({ claude: 20 });
-    // Neither an explicit reset nor a persisted draft is reinitialized later.
+    store.applyStickyState(target, defaults);
+    expect(store.getComposerDraft(target)?.subagentLimits).toBeUndefined();
+    // Both explicit reset and remembered numeric intent remain untouched.
     store.setSubagentLimits(target, {});
-    store.applyStickyState(target, defaults, peerInstance);
+    store.applyStickyState(target, defaults);
     expect(store.getComposerDraft(target)?.subagentLimits).toEqual({});
+    store.setSubagentLimits(target, { claude: 8 });
+    store.applyStickyState(target, defaults);
+    expect(store.getComposerDraft(target)?.subagentLimits).toEqual({ claude: 8 });
     resetComposerDraftStore();
   });
 
-  it("copies the initial instance's numeric default once, without sticky or retroactive changes", () => {
+  it("leaves fresh drafts inheriting live account defaults and preserves old explicit numbers", () => {
     resetComposerDraftStore();
     const target = scopeThreadRef(TEST_ENVIRONMENT_ID, ThreadId.make("new-limit-chat"));
     const settings = {
@@ -1605,7 +1608,7 @@ describe("deriveNewChatComposerDefaults", () => {
     };
     const store = useComposerDraftStore.getState();
     store.applyStickyState(target, deriveNewChatComposerDefaults(settings));
-    expect(store.getComposerDraft(target)?.subagentLimits).toEqual({ codex: 12 });
+    expect(store.getComposerDraft(target)?.subagentLimits).toBeUndefined();
     store.applyStickyState(
       target,
       deriveNewChatComposerDefaults({
@@ -1615,7 +1618,11 @@ describe("deriveNewChatComposerDefaults", () => {
         },
       }),
     );
-    expect(store.getComposerDraft(target)?.subagentLimits).toEqual({ codex: 12 });
+    expect(store.getComposerDraft(target)?.subagentLimits).toBeUndefined();
+    // Historical copied numbers have no provenance and must be treated as
+    // explicit overrides until the user deliberately resets them.
+    store.setSubagentLimits(target, { codex: 12 });
+    store.applyStickyState(target, deriveNewChatComposerDefaults(settings));
     store.setModelSelection(target, createModelSelection(CLAUDE_AGENT_INSTANCE, "claude-test"));
     expect(store.getComposerDraft(target)?.subagentLimits).toEqual({ codex: 12 });
     expect(

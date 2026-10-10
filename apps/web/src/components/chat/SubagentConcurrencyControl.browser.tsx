@@ -17,7 +17,7 @@ function Harness(props: {
   provider?: "codex" | "claudeAgent";
   configured?: number | null;
   override?: number | undefined;
-  presentationRequested?: number;
+  presentationRequested?: number | undefined;
   presentationSource?: SubagentConcurrencyPresentation["source"];
   presentationPending?: boolean;
 }) {
@@ -92,16 +92,18 @@ describe("per-chat subagent concurrency editor", () => {
     const onChange = vi.fn(async () => {});
     mounted = await render(<Harness onChange={onChange} override={5} configured={3} running />);
     await openEditor();
-    await expect.element(page.getByText("Subagent limit: 5", { exact: true })).toBeVisible();
+    await expect
+      .element(page.getByText("Subagent limit: 3 → 5 when idle", { exact: true }))
+      .toBeVisible();
     expect(document.querySelector("[data-subagent-concurrency-details]")?.textContent).toBe(
-      "Subagent limit: 5",
+      "Subagent limit: 3 → 5 when idle",
     );
     expect(document.body.textContent).not.toContain("Source:");
     expect(document.body.textContent).not.toContain("Native effective limit is not verified.");
 
     const information = page.getByRole("button", { name: "About subagent limits" });
     const tooltipCopy =
-      "This is the saved limit. Changes take effect before a new turn when the session can safely restart. Cafe can’t independently confirm the limit the provider enforces.";
+      "Shows Cafe’s recorded session setting and requested setting. Changes wait for a safe idle turn; active children can delay them. Cafe can’t independently confirm the limit the provider enforces.";
     const tooltip = page.getByText(tooltipCopy, { exact: true });
     page.getByRole("spinbutton", { name: "Maximum concurrent subagents" }).element().focus();
     await userEvent.keyboard("{Tab}");
@@ -133,7 +135,9 @@ describe("per-chat subagent concurrency editor", () => {
       <Harness onChange={onChange} provider="claudeAgent" override={20} configured={null} />,
     );
     await openEditor();
-    await expect.element(page.getByText("Subagent limit: 20", { exact: true })).toBeVisible();
+    await expect
+      .element(page.getByText("Subagent limit: Provider default → 20 when idle", { exact: true }))
+      .toBeVisible();
     expect(document.body.textContent).not.toContain("Provider-managed");
     // Provider-specific scope notes live in the one labelled info tooltip.
     // A visible mobile dialog can still be entering. A one-shot hover during
@@ -166,6 +170,41 @@ describe("per-chat subagent concurrency editor", () => {
     expect(document.querySelector("[data-subagent-concurrency-details]")?.textContent).toBe(
       "Subagent limit: 5",
     );
+  });
+
+  it("explains account inheritance and current configuration without promising a busy next turn", async () => {
+    mounted = await render(
+      <Harness
+        onChange={async () => {}}
+        presentationRequested={15}
+        presentationSource="Account default"
+        configured={5}
+        running
+      />,
+    );
+    await openEditor();
+    await expect
+      .element(page.getByText("Subagent limit: 5 → 15 when idle", { exact: true }))
+      .toBeVisible();
+    await expect
+      .element(page.getByRole("spinbutton", { name: "Maximum concurrent subagents" }))
+      .toHaveValue(null);
+    const dialog = page.getByRole("dialog").element();
+    await vi.waitFor(() => expect(dialog.hasAttribute("data-starting-style")).toBe(false));
+    await page.getByRole("button", { name: "About subagent limits" }).hover();
+    await expect.element(page.getByText("Source: Account default.", { exact: true })).toBeVisible();
+    await expect
+      .element(
+        page.getByText(
+          "Current session was configured with 5. The requested setting is pending a safe idle turn.",
+          { exact: true },
+        ),
+      )
+      .toBeVisible();
+    await expect
+      .element(page.getByText("Your current work won’t be interrupted.", { exact: true }))
+      .toBeVisible();
+    expect(document.body.textContent).not.toContain("next turn");
   });
   it("gates an older unsupported runtime without presenting an enabled editor", async () => {
     const onChange = vi.fn(async () => {});
@@ -225,7 +264,9 @@ describe("per-chat subagent concurrency editor", () => {
       if (limit === undefined) {
         expect(document.querySelector("[data-subagent-concurrency-details]")).toBeNull();
       } else {
-        await expect.element(page.getByText("Subagent limit: 64", { exact: true })).toBeVisible();
+        await expect
+          .element(page.getByText("Subagent limit: 64 · saved", { exact: true }))
+          .toBeVisible();
       }
       await expect
         .element(page.getByRole("spinbutton", { name: "Maximum concurrent subagents" }))
@@ -233,6 +274,37 @@ describe("per-chat subagent concurrency editor", () => {
       await expect.element(page.getByRole("button", { name: "Save", exact: true })).toBeEnabled();
       expect(document.documentElement.scrollWidth).toBeLessThanOrEqual(window.innerWidth);
       const box = document.querySelector('[role="dialog"]')!.getBoundingClientRect();
+      expect(box.left).toBeGreaterThanOrEqual(0);
+      expect(box.right).toBeLessThanOrEqual(window.innerWidth);
+    },
+  );
+  it.each([
+    { requested: 15, configured: 5, label: "Subagent limit: 5 → 15 when idle" },
+    {
+      requested: undefined,
+      configured: 15,
+      label: "Subagent limit: 15 → Provider default when idle",
+    },
+  ])(
+    "contains the compact transition $label at 320px and 130% scale",
+    async ({ requested, configured, label }) => {
+      await page.viewport(320, 800);
+      applyInterfaceScalePercent(130);
+      mounted = await render(
+        <Harness
+          onChange={async () => {}}
+          presentationRequested={requested}
+          configured={configured}
+          presentationSource="Account default"
+        />,
+      );
+      await openEditor();
+      await expect.element(page.getByText(label, { exact: true })).toBeVisible();
+      expect(document.querySelectorAll("[data-subagent-concurrency-details]")).toHaveLength(1);
+      expect(document.documentElement.scrollWidth).toBeLessThanOrEqual(window.innerWidth);
+      const details = document.querySelector<HTMLElement>("[data-subagent-concurrency-details]")!;
+      expect(details.scrollWidth).toBeLessThanOrEqual(details.clientWidth + 1);
+      const box = page.getByRole("dialog").element().getBoundingClientRect();
       expect(box.left).toBeGreaterThanOrEqual(0);
       expect(box.right).toBeLessThanOrEqual(window.innerWidth);
     },
@@ -254,7 +326,9 @@ describe("per-chat subagent concurrency editor", () => {
       .element(page.getByRole("alert"))
       .toHaveTextContent("Could not save this chat's subagent limit. Try again when connected.");
     expect(document.body.textContent).not.toContain("private provider detail");
-    await expect.element(page.getByText("Subagent limit: 12", { exact: true })).toBeVisible();
+    await expect
+      .element(page.getByText("Subagent limit: 3 → 12 when idle", { exact: true }))
+      .toBeVisible();
     await expect
       .element(page.getByRole("spinbutton", { name: "Maximum concurrent subagents" }))
       .toHaveValue(24);

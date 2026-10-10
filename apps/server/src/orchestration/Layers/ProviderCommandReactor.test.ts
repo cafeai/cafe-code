@@ -15,6 +15,7 @@ import {
   ProviderDriverKind,
   ProviderInstanceId,
   PROVIDER_SESSION_TITLE_MAX_CHARS,
+  type ServerSettings,
 } from "@cafecode/contracts";
 import { createModelSelection } from "@cafecode/shared/model";
 import {
@@ -154,6 +155,7 @@ describe("ProviderCommandReactor", () => {
     | OrchestrationEngineService
     | ProviderCommandReactor
     | ProjectionSnapshotQuery
+    | ServerSettingsService
     | SqlClient.SqlClient,
     unknown
   > | null = null;
@@ -251,7 +253,8 @@ describe("ProviderCommandReactor", () => {
     readonly providerDisplayNames?: ReadonlyMap<string, string>;
     readonly testClock?: TestClock.TestClock;
     readonly standalone?: boolean;
-    readonly subagentConcurrency?: boolean;
+    readonly subagentConcurrency?: boolean | "unknown";
+    readonly providerInstances?: ServerSettings["providerInstances"];
   }) {
     const now = "2026-01-01T00:00:00.000Z";
     const baseDir = input?.baseDir ?? fs.mkdtempSync(path.join(os.tmpdir(), "t3code-reactor-"));
@@ -472,6 +475,17 @@ describe("ProviderCommandReactor", () => {
     );
 
     const unsupported = () => Effect.die(new Error("Unsupported provider call in test")) as never;
+    const getCapabilities = vi.fn<ProviderServiceShape["getCapabilities"]>((_provider) =>
+      Effect.succeed({
+        sessionModelSwitch: input?.sessionModelSwitch ?? "in-session",
+        liveSteer: input?.liveSteer ?? "unsupported",
+        threadGoals: input?.threadGoals ?? "unsupported",
+        manualCompaction: input?.manualCompaction ?? "unsupported",
+        ...(input?.subagentConcurrency === "unknown"
+          ? {}
+          : { subagentConcurrency: input?.subagentConcurrency ?? true }),
+      }),
+    );
     const service: ProviderServiceShape = {
       startSession: startSession as ProviderServiceShape["startSession"],
       forkSession: () => unsupported(),
@@ -487,14 +501,7 @@ describe("ProviderCommandReactor", () => {
       quiesceThreadForHardDelete: () => unsupported(),
       restartProviderRuntime: () => unsupported(),
       listSessions,
-      getCapabilities: (_provider) =>
-        Effect.succeed({
-          sessionModelSwitch: input?.sessionModelSwitch ?? "in-session",
-          liveSteer: input?.liveSteer ?? "unsupported",
-          threadGoals: input?.threadGoals ?? "unsupported",
-          manualCompaction: input?.manualCompaction ?? "unsupported",
-          subagentConcurrency: input?.subagentConcurrency ?? true,
-        }),
+      getCapabilities,
       getInstanceInfo: (instanceId) => {
         const raw = String(instanceId);
         if (input?.missingProviderInstanceIds?.has(raw)) {
@@ -649,11 +656,14 @@ describe("ProviderCommandReactor", () => {
         }),
       ),
       Layer.provideMerge(
-        ServerSettingsService.layerTest(
-          input?.textGenerationModelSelection === undefined
-            ? {}
-            : { textGenerationModelSelection: input.textGenerationModelSelection },
-        ),
+        ServerSettingsService.layerTest({
+          ...(input?.textGenerationModelSelection !== undefined
+            ? { textGenerationModelSelection: input.textGenerationModelSelection }
+            : {}),
+          ...(input?.providerInstances !== undefined
+            ? { providerInstances: input.providerInstances }
+            : {}),
+        }),
       ),
       Layer.provideMerge(ServerConfig.layerTest(process.cwd(), baseDir)),
       Layer.provideMerge(NodeServices.layer),
@@ -683,6 +693,7 @@ describe("ProviderCommandReactor", () => {
     const sql = await runtime.runPromise(Effect.service(SqlClient.SqlClient));
     const snapshotQuery = await runtime.runPromise(Effect.service(ProjectionSnapshotQuery));
     const reactor = await runtime.runPromise(Effect.service(ProviderCommandReactor));
+    const serverSettings = await runtime.runPromise(Effect.service(ServerSettingsService));
     scope = await Effect.runPromise(Scope.make("sequential"));
     const startReactor = () => {
       const start = reactor.start().pipe(Scope.provide(scope!));
@@ -807,6 +818,8 @@ describe("ProviderCommandReactor", () => {
 
     return {
       engine,
+      serverSettings,
+      getCapabilities,
       sql,
       readModel: () => Effect.runPromise(snapshotQuery.getSnapshot()),
       readThreadDetail: async (threadId: ThreadId) =>
@@ -1236,6 +1249,7 @@ describe("ProviderCommandReactor", () => {
       harness: Awaited<ReturnType<typeof createHarness>>,
       key: string,
       fails = false,
+      modelSelection?: ModelSelection,
     ) {
       const sentBefore = harness.sendTurn.mock.calls.length;
       const turnId = asTurnId(`${key}-native-turn`);
@@ -1256,6 +1270,7 @@ describe("ProviderCommandReactor", () => {
           message: { messageId: asMessageId(key), role: "user", text: "Hello", attachments: [] },
           runtimeMode: "approval-required",
           interactionMode: "default",
+          ...(modelSelection !== undefined ? { modelSelection } : {}),
           createdAt: new Date(Date.UTC(2026, 0, 1, 0, 0, ++sendIndex * 2 - 1)).toISOString(),
         }),
       );
@@ -1295,6 +1310,528 @@ describe("ProviderCommandReactor", () => {
       );
       await harness.drain();
     }
+
+    async function accountDefault(
+      harness: Awaited<ReturnType<typeof createHarness>>,
+      value: number | undefined,
+      instanceId = ProviderInstanceId.make("codex"),
+    ) {
+      const settings = await Effect.runPromise(harness.serverSettings.getSettings);
+      const instance = settings.providerInstances[instanceId] ?? {
+        driver: ProviderDriverKind.make("codex"),
+      };
+      const { defaultMaxConcurrentSubagents: _previous, ...retained } = instance;
+      await Effect.runPromise(
+        harness.serverSettings.updateSettings({
+          providerInstances: {
+            ...settings.providerInstances,
+            [instanceId]: {
+              ...retained,
+              ...(value !== undefined ? { defaultMaxConcurrentSubagents: value } : {}),
+            },
+          },
+        }),
+      );
+      await harness.drain();
+    }
+
+    it.each(["known inherited", "unknown legacy"] as const)(
+      "inherits an edited account default for an existing chat with %s process evidence on its next idle send",
+      async (evidence) => {
+        const harness = await createHarness({ standalone: true });
+        await send(harness, "before-account-default");
+        await harness.markThreadReady(threadId, "2026-01-01T00:00:02.000Z");
+        expect(harness.runtimeSessions[0]?.maxConcurrentSubagents).toBeNull();
+        if (evidence === "unknown legacy") {
+          // Simulate a retained pre-policy process record without inventing a
+          // native default. The projected session may know null, but final
+          // reconciliation must consume the authoritative runtime inventory.
+          const { maxConcurrentSubagents: _old, ...legacy } = harness.runtimeSessions[0]!;
+          harness.runtimeSessions[0] = legacy;
+          expect(harness.runtimeSessions[0]).not.toHaveProperty("maxConcurrentSubagents");
+        }
+        await accountDefault(harness, 15);
+        expect(harness.startSession).toHaveBeenCalledTimes(1);
+        expect(harness.stopSession).not.toHaveBeenCalled();
+        expect((await harness.readThreadDetail(threadId))?.subagentLimits).toBeUndefined();
+        await send(harness, "after-account-default");
+        expect(harness.startSession.mock.calls[1]?.[1]).toMatchObject({
+          providerInstanceId: "codex",
+          maxConcurrentSubagents: 15,
+          requireIdleForSubagentLimitChange: true,
+        });
+        expect(harness.runtimeSessions[0]?.maxConcurrentSubagents).toBe(15);
+        // Inheritance remains live. It must not become a durable per-chat
+        // numeric override that would silently mask later account edits.
+        expect((await harness.readThreadDetail(threadId))?.subagentLimits).toBeUndefined();
+      },
+    );
+
+    it("keeps an explicit chat override above account edits and clearing restores current account inheritance", async () => {
+      const harness = await createHarness({ standalone: true });
+      await accountDefault(harness, 15);
+      await change(harness, "explicit-limit-nine", { codex: 9, claude: 8 });
+      await send(harness, "explicit-account-override");
+      expect(harness.startSession.mock.calls[0]?.[1]).toMatchObject({ maxConcurrentSubagents: 9 });
+      await harness.markThreadReady(threadId, "2026-01-01T00:00:02.000Z");
+      await accountDefault(harness, 20);
+      await send(harness, "account-edit-override-retained");
+      expect(harness.startSession).toHaveBeenCalledTimes(1);
+      expect(harness.runtimeSessions[0]?.maxConcurrentSubagents).toBe(9);
+      expect((await harness.readThreadDetail(threadId))?.subagentLimits).toEqual({
+        codex: 9,
+        claude: 8,
+      });
+      await harness.markThreadReady(threadId, "2026-01-01T00:00:04.000Z");
+      // Remove only Codex's override. Claude's independent policy survives.
+      await change(harness, "reset-codex-to-account", { claude: 8 });
+      await send(harness, "reset-account-inheritance");
+      expect(harness.startSession.mock.calls[1]?.[1]).toMatchObject({
+        maxConcurrentSubagents: 20,
+        requireIdleForSubagentLimitChange: true,
+      });
+      expect((await harness.readThreadDetail(threadId))?.subagentLimits).toEqual({ claude: 8 });
+    });
+
+    it("clearing an inherited account default explicitly restores native inheritance on the next idle send", async () => {
+      const harness = await createHarness({ standalone: true });
+      await accountDefault(harness, 15);
+      await send(harness, "initial-inherited-account");
+      await harness.markThreadReady(threadId, "2026-01-01T00:00:02.000Z");
+      await accountDefault(harness, undefined);
+      expect(harness.startSession).toHaveBeenCalledTimes(1);
+      await send(harness, "cleared-inherited-account");
+      expect(harness.startSession.mock.calls[1]?.[1]).toMatchObject({
+        maxConcurrentSubagents: null,
+        requireIdleForSubagentLimitChange: true,
+      });
+      expect(harness.runtimeSessions[0]?.maxConcurrentSubagents).toBeNull();
+      expect((await harness.readThreadDetail(threadId))?.subagentLimits).toBeUndefined();
+    });
+
+    it("keeps an account default pending after a native child-wake refusal without retiring or replaying work", async () => {
+      const harness = await createHarness({ standalone: true });
+      await accountDefault(harness, 15);
+      await send(harness, "account-before-child-wake");
+      await harness.markThreadReady(threadId, "2026-01-01T00:00:02.000Z");
+      await accountDefault(harness, 20);
+      harness.startSession.mockImplementationOnce(() =>
+        Effect.fail(
+          new ProviderAdapterRequestError({
+            provider: "codex",
+            method: "session/reconfigure",
+            detail: "Subagent work is active.",
+            remoteErrorTag: "subagent-concurrency-active",
+          }),
+        ),
+      );
+      await send(harness, "account-child-woke-send");
+      expect(harness.runtimeSessions[0]?.maxConcurrentSubagents).toBe(15);
+      expect(harness.sendTurn).toHaveBeenCalledTimes(2);
+      expect(harness.stopSession).not.toHaveBeenCalled();
+      expect((await harness.readThreadDetail(threadId))?.subagentLimits).toBeUndefined();
+      await harness.markThreadReady(threadId, "2026-01-01T00:00:04.000Z");
+      await send(harness, "account-child-idle-send");
+      expect(harness.startSession.mock.calls[2]?.[1]).toMatchObject({
+        maxConcurrentSubagents: 20,
+        requireIdleForSubagentLimitChange: true,
+      });
+      expect(harness.runtimeSessions[0]?.maxConcurrentSubagents).toBe(20);
+      expect(harness.sendTurn).toHaveBeenCalledTimes(3);
+      expect(harness.stopSession).not.toHaveBeenCalled();
+    });
+
+    it("does not alter active root work on account save and applies the newest preference only after native idle", async () => {
+      const harness = await createHarness({ standalone: true });
+      await send(harness, "active-before-account-edit");
+      const current = harness.runtimeSessions[0]!;
+      harness.runtimeSessions[0] = {
+        ...current,
+        status: "running",
+        activeTurnId: asTurnId("active-before-account-edit-native-turn"),
+      };
+      await accountDefault(harness, 15);
+      await accountDefault(harness, 20);
+      expect(harness.startSession).toHaveBeenCalledTimes(1);
+      expect(harness.stopSession).not.toHaveBeenCalled();
+      expect(harness.runtimeSessions[0]).toMatchObject({
+        status: "running",
+        activeTurnId: "active-before-account-edit-native-turn",
+        maxConcurrentSubagents: null,
+      });
+      expect(harness.sendTurn).toHaveBeenCalledTimes(1);
+      await harness.markThreadReady(threadId, "2026-01-01T00:00:02.000Z");
+      // The synthetic provider separately observes native idle. Merely marking
+      // the renderer/projection ready cannot grant replacement authority.
+      const { activeTurnId: _completed, ...idle } = harness.runtimeSessions[0]!;
+      harness.runtimeSessions[0] = { ...idle, status: "ready" };
+      await send(harness, "idle-after-account-edit");
+      expect(harness.startSession.mock.calls[1]?.[1]).toMatchObject({
+        maxConcurrentSubagents: 20,
+        requireIdleForSubagentLimitChange: true,
+      });
+      expect(harness.sendTurn).toHaveBeenCalledTimes(2);
+      expect(harness.stopSession).not.toHaveBeenCalled();
+    });
+
+    it("selects only the exact requested account default and does not borrow a sibling account's limit", async () => {
+      const account = ProviderInstanceId.make("codex-inherited-account");
+      const harness = await createHarness({
+        standalone: true,
+        threadModelSelection: { instanceId: account, model: "synthetic-model" },
+        providerInstances: {
+          [account]: {
+            driver: ProviderDriverKind.make("codex"),
+            defaultMaxConcurrentSubagents: 15,
+          },
+          [ProviderInstanceId.make("codex-sibling")]: {
+            driver: ProviderDriverKind.make("codex"),
+            defaultMaxConcurrentSubagents: 3,
+          },
+        },
+      });
+      await send(harness, "exact-account-default");
+      expect(harness.startSession.mock.calls[0]?.[1]).toMatchObject({
+        providerInstanceId: account,
+        maxConcurrentSubagents: 15,
+      });
+      expect((await harness.readThreadDetail(threadId))?.subagentLimits).toBeUndefined();
+      await harness.markThreadReady(threadId, "2026-01-01T00:00:02.000Z");
+      await send(harness, "exact-sibling-account-default", false, {
+        instanceId: ProviderInstanceId.make("codex-sibling"),
+        model: "synthetic-model",
+      });
+      expect(harness.startSession.mock.calls[1]?.[1]).toMatchObject({
+        providerInstanceId: "codex-sibling",
+        maxConcurrentSubagents: 3,
+      });
+      expect((await harness.readThreadDetail(threadId))?.subagentLimits).toBeUndefined();
+    });
+
+    it("rejects an inherited account default when the selected runtime is unqualified", async () => {
+      const harness = await createHarness({ standalone: true, subagentConcurrency: false });
+      await accountDefault(harness, 15);
+      await send(harness, "unsupported-inherited-account", true);
+      expect(harness.startSession).not.toHaveBeenCalled();
+      expect(harness.sendTurn).not.toHaveBeenCalled();
+      expect(harness.stopSession).not.toHaveBeenCalled();
+      expect((await harness.readThreadDetail(threadId))?.subagentLimits).toBeUndefined();
+    });
+
+    it("does not borrow account or legacy numeric policy across a settings/registry driver transition", async () => {
+      const account = ProviderInstanceId.make("codex-transition-account");
+      const harness = await createHarness({
+        standalone: true,
+        threadModelSelection: { instanceId: account, model: "synthetic-model" },
+        providerInstances: {
+          [account]: {
+            // The fixture registry still resolves this exact account as Codex
+            // while its newly saved envelope belongs to Claude. Neither the
+            // new default nor its config may authorize Codex numeric policy.
+            driver: ProviderDriverKind.make("claudeAgent"),
+            defaultMaxConcurrentSubagents: 15,
+            config: { maxConcurrentSubagents: 6 },
+          },
+        },
+      });
+      await send(harness, "driver-transition-no-numeric-borrowing");
+      expect(harness.startSession.mock.calls[0]?.[1]).toMatchObject({
+        provider: "codex",
+        providerInstanceId: account,
+        maxConcurrentSubagents: null,
+      });
+      expect((await harness.readThreadDetail(threadId))?.subagentLimits).toBeUndefined();
+    });
+
+    it("does not classify another driver's same-ID native policy as a concurrency-only replacement", async () => {
+      const harness = await createHarness({ standalone: true, sessionModelSwitch: "unsupported" });
+      await send(harness, "before-native-driver-transition");
+      await harness.markThreadReady(threadId, "2026-01-01T00:00:02.000Z");
+      harness.runtimeSessions[0] = {
+        ...harness.runtimeSessions[0]!,
+        provider: ProviderDriverKind.make("claudeAgent"),
+        maxConcurrentSubagents: 9,
+      };
+      await accountDefault(harness, 15);
+      // A normal unsupported-model change already requires materialization.
+      // Its request may use the selected Codex account's intent, but the old
+      // Claude process's numeric evidence cannot add Codex's limit-only guard
+      // or qualify the special child-wake refusal as a safe continuation.
+      await send(harness, "native-driver-transition-model-change", false, {
+        instanceId: ProviderInstanceId.make("codex"),
+        model: "synthetic-changed-model",
+      });
+      expect(harness.startSession).toHaveBeenCalledTimes(2);
+      const replacement = harness.startSession.mock.calls[1]?.[1];
+      expect(replacement).toMatchObject({
+        provider: "codex",
+        providerInstanceId: "codex",
+        maxConcurrentSubagents: 15,
+        modelSelection: { model: "synthetic-changed-model" },
+      });
+      expect(replacement).not.toHaveProperty("requireIdleForSubagentLimitChange");
+      expect(replacement).not.toHaveProperty("resumeCursor");
+      expect(harness.sendTurn).toHaveBeenCalledTimes(2);
+      expect(harness.stopSession).not.toHaveBeenCalled();
+    });
+
+    it.each([true, false, "unknown"] as const)(
+      "keeps goal set/replace/clear usable with %s concurrency support without applying a pending account default",
+      async (subagentConcurrency) => {
+        const harness = await createHarness({
+          standalone: true,
+          threadGoals: "supported",
+          subagentConcurrency,
+        });
+        await send(harness, "before-control-only-account-edit");
+        await harness.markThreadReady(threadId, "2026-01-01T00:00:02.000Z");
+        await accountDefault(harness, 15);
+        await Effect.runPromise(
+          harness.engine.dispatch({
+            type: "thread.goal.set",
+            commandId: CommandId.make("pending-account-goal-set"),
+            threadId,
+            objective: "Synthetic control-only goal",
+            status: "active",
+            expectedUpdatedAt: null,
+            createdAt: "2026-01-01T00:00:03.000Z",
+          }),
+        );
+        await waitFor(
+          async () =>
+            (await harness.readThreadDetail(threadId))?.goal?.objective ===
+            "Synthetic control-only goal",
+        );
+        await harness.drain();
+        const firstGoal = (await harness.readThreadDetail(threadId))!.goal!;
+        await Effect.runPromise(
+          harness.engine.dispatch({
+            type: "thread.goal.set",
+            commandId: CommandId.make("pending-account-goal-replace"),
+            threadId,
+            objective: "Synthetic replacement goal",
+            replaceExisting: true,
+            expectedUpdatedAt: firstGoal.updatedAt,
+            createdAt: "2026-01-01T00:00:04.000Z",
+          }),
+        );
+        await waitFor(
+          async () =>
+            (await harness.readThreadDetail(threadId))?.goal?.objective ===
+            "Synthetic replacement goal",
+        );
+        await harness.drain();
+        const replacement = (await harness.readThreadDetail(threadId))!.goal!;
+        await Effect.runPromise(
+          harness.engine.dispatch({
+            type: "thread.goal.clear",
+            commandId: CommandId.make("pending-account-goal-clear"),
+            threadId,
+            expectedUpdatedAt: replacement.updatedAt,
+            createdAt: "2026-01-01T00:00:05.000Z",
+          }),
+        );
+        await waitFor(async () => (await harness.readThreadDetail(threadId))?.goal === null);
+        await harness.drain();
+        expect(harness.goalOperations).toEqual(["set", "clear", "set", "clear"]);
+        expect(harness.startSession).toHaveBeenCalledTimes(1);
+        expect(harness.stopSession).not.toHaveBeenCalled();
+        expect(harness.sendTurn).toHaveBeenCalledTimes(1);
+        expect(harness.runtimeSessions[0]?.maxConcurrentSubagents).toBeNull();
+        expect((await harness.readThreadDetail(threadId))?.subagentLimits).toBeUndefined();
+        // Only an actual next turn requests account policy. Unknown/unsupported
+        // capability remains a strict turn admission failure, not a reason to
+        // prevent control-only goal cleanup or manufacture a continuation.
+        await send(harness, "turn-after-control-only-account-edit", subagentConcurrency !== true);
+        if (subagentConcurrency === true) {
+          expect(harness.startSession.mock.calls[1]?.[1]).toMatchObject({
+            maxConcurrentSubagents: 15,
+            requireIdleForSubagentLimitChange: true,
+          });
+          expect(harness.sendTurn).toHaveBeenCalledTimes(2);
+        } else {
+          expect(harness.startSession).toHaveBeenCalledTimes(1);
+          expect(harness.sendTurn).toHaveBeenCalledTimes(1);
+        }
+      },
+    );
+
+    it.each([false, "unknown"] as const)(
+      "adopts an existing active-goal context at startup with %s concurrency support without replacing unknown policy",
+      async (subagentConcurrency) => {
+        const logMessages: unknown[] = [];
+        const harness = await createHarness({
+          startReactor: false,
+          threadGoals: "supported",
+          subagentConcurrency,
+          logMessages,
+          providerInstances: {
+            [ProviderInstanceId.make("codex")]: {
+              driver: ProviderDriverKind.make("codex"),
+              defaultMaxConcurrentSubagents: 15,
+            },
+          },
+        });
+        await harness.setRunningCodexTurn(
+          asTurnId("synthetic-pre-start-goal-turn"),
+          "2026-01-01T00:00:01.000Z",
+        );
+        await harness.markThreadReady(threadId, "2026-01-01T00:00:02.000Z");
+        const project = (await harness.readModel()).projects.find(
+          (entry) => entry.id === asProjectId("project-1"),
+        )!;
+        const { activeTurnId: _completed, ...retained } = harness.runtimeSessions[0]!;
+        harness.runtimeSessions[0] = {
+          ...retained,
+          status: "ready",
+          cwd: project.workspaceRoot,
+          additionalDirectories: [],
+          model: "gpt-5-codex",
+        };
+        const goal = await Effect.runPromise(
+          harness.setGoal({
+            threadId,
+            objective: "Synthetic retained active goal",
+            status: "active",
+          }),
+        );
+        await Effect.runPromise(
+          harness.engine.dispatch({
+            type: "thread.goal.sync",
+            commandId: CommandId.make("seed-retained-active-goal"),
+            threadId,
+            goal,
+            createdAt: goal.updatedAt,
+          }),
+        );
+        const original = harness.runtimeSessions[0];
+        expect(original).not.toHaveProperty("maxConcurrentSubagents");
+        await harness.startReactor();
+        await harness.drain();
+        // Both startup goal eligibility and session adoption inspect exact
+        // account capabilities. Lack of numeric-policy support must not abort
+        // adoption or guess policy from the new account preference.
+        expect(harness.getCapabilities).toHaveBeenCalledTimes(2);
+        expect(harness.getCapabilities).toHaveBeenCalledWith(ProviderInstanceId.make("codex"));
+        expect(harness.runtimeSessions[0]).toBe(original);
+        expect(harness.runtimeSessions[0]).not.toHaveProperty("maxConcurrentSubagents");
+        expect(harness.startSession).not.toHaveBeenCalled();
+        expect(harness.stopSession).not.toHaveBeenCalled();
+        expect(harness.sendTurn).not.toHaveBeenCalled();
+        expect(harness.goalOperations).toEqual(["set"]);
+        expect(logMessages.join(" ")).not.toContain("provider goal resume failed during startup");
+        expect((await harness.readThreadDetail(threadId))?.goal?.objective).toBe(
+          "Synthetic retained active goal",
+        );
+      },
+    );
+
+    it.each([
+      ["known exact-owner numeric policy", "codex", "codex", 9, 9],
+      ["known exact-owner native inheritance", "codex", "codex", null, null],
+      ["unknown exact-owner policy", "codex", "codex", undefined, undefined],
+      ["a different account's policy", "codex", "codex-former-account", 9, null],
+      ["a different driver's same-id policy", "claudeAgent", "codex", 9, null],
+    ] as const)(
+      "materializes goal controls retaining only %s without applying an account preference",
+      async (_label, providerName, providerInstanceId, priorPolicy, expectedPolicy) => {
+        const harness = await createHarness({
+          standalone: true,
+          threadGoals: "supported",
+          subagentConcurrency: false,
+        });
+        await accountDefault(harness, 15);
+        // Seed a durable old session without any current native inventory.
+        // Account plus driver identity jointly authorize retaining its policy;
+        // an absent numeric witness must not be replaced by a guessed default.
+        await Effect.runPromise(
+          harness.engine.dispatch({
+            type: "thread.session.set",
+            commandId: CommandId.make("seed-control-materialized-policy"),
+            threadId,
+            session: {
+              threadId,
+              providerName,
+              providerInstanceId: ProviderInstanceId.make(providerInstanceId),
+              ...(priorPolicy !== undefined ? { maxConcurrentSubagents: priorPolicy } : {}),
+              status: "ready",
+              activeTurnId: null,
+              runtimeMode: "approval-required",
+              lastError: null,
+              updatedAt: "2026-01-01T00:00:01.000Z",
+            },
+            createdAt: "2026-01-01T00:00:01.000Z",
+          }),
+        );
+        await Effect.runPromise(
+          harness.engine.dispatch({
+            type: "thread.goal.set",
+            commandId: CommandId.make("control-retained-policy-goal"),
+            threadId,
+            objective: "Synthetic policy-preserving goal",
+            status: "active",
+            expectedUpdatedAt: null,
+            createdAt: "2026-01-01T00:00:02.000Z",
+          }),
+        );
+        await waitFor(() => harness.setGoal.mock.calls.length === 1);
+        await harness.drain();
+        const nativeStart = harness.startSession.mock.calls[0]?.[1];
+        expect(harness.startSession).toHaveBeenCalledTimes(1);
+        expect(nativeStart).toMatchObject({ provider: "codex", providerInstanceId: "codex" });
+        if (expectedPolicy === undefined)
+          expect(nativeStart).not.toHaveProperty("maxConcurrentSubagents");
+        else expect(nativeStart).toHaveProperty("maxConcurrentSubagents", expectedPolicy);
+        expect(harness.sendTurn).not.toHaveBeenCalled();
+        expect(harness.stopSession).not.toHaveBeenCalled();
+        expect((await harness.readThreadDetail(threadId))?.subagentLimits).toBeUndefined();
+      },
+    );
+
+    it("leaves a fresh goal context's validated legacy config to its selected adapter rather than injecting the new account preference", async () => {
+      const harness = await createHarness({
+        standalone: true,
+        threadGoals: "supported",
+        subagentConcurrency: false,
+        providerInstances: {
+          [ProviderInstanceId.make("codex")]: {
+            driver: ProviderDriverKind.make("codex"),
+            defaultMaxConcurrentSubagents: 15,
+            config: { maxConcurrentSubagents: 6 },
+          },
+        },
+      });
+      await Effect.runPromise(
+        harness.engine.dispatch({
+          type: "thread.goal.set",
+          commandId: CommandId.make("fresh-control-legacy-config-goal"),
+          threadId,
+          objective: "Synthetic fresh control-only goal",
+          status: "active",
+          expectedUpdatedAt: null,
+          createdAt: "2026-01-01T00:00:01.000Z",
+        }),
+      );
+      await waitFor(() => harness.setGoal.mock.calls.length === 1);
+      await harness.drain();
+      expect(harness.startSession.mock.calls[0]?.[1]).toMatchObject({
+        providerInstanceId: "codex",
+        // This revokes old durable override recovery. Native adapters resolve
+        // null through their own validated legacy instance config (separately
+        // qualified by Drivers/SubagentConcurrency and CodexAdapter fixtures).
+        maxConcurrentSubagents: null,
+      });
+      expect(
+        (await Effect.runPromise(harness.serverSettings.getSettings)).providerInstances[
+          ProviderInstanceId.make("codex")
+        ],
+      ).toMatchObject({
+        defaultMaxConcurrentSubagents: 15,
+        config: { maxConcurrentSubagents: 6 },
+      });
+      expect(harness.sendTurn).not.toHaveBeenCalled();
+      expect(harness.stopSession).not.toHaveBeenCalled();
+    });
 
     it("materializes only on the next send and keeps a child-wake race pending without replay", async () => {
       const harness = await createHarness({ standalone: true });

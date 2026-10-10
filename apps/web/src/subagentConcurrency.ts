@@ -2,7 +2,7 @@ import type {
   ProviderDriverKind,
   ProviderInstanceId,
   SubagentLimits,
-  UnifiedSettings,
+  ServerSettings,
 } from "@cafecode/contracts";
 
 /** Provider-native controls have different semantics; never share their remembered choice. */
@@ -43,9 +43,9 @@ export function subagentLimitsEqual(
   );
 }
 
-/** Legacy configuration remains a runtime fallback, never the new-chat default editor's target. */
+/** Legacy runtime fallback remains separate from the live account preference. */
 export function configuredInstanceSubagentLimit(
-  settings: UnifiedSettings,
+  settings: ServerSettings,
   instanceId: ProviderInstanceId,
 ): number | undefined {
   const envelope = settings.providerInstances?.[instanceId];
@@ -61,31 +61,90 @@ export function configuredInstanceSubagentLimit(
   return validSubagentLimit(value) ? value : undefined;
 }
 
+export interface InheritedSubagentPolicy {
+  readonly limit: number | undefined;
+  readonly source:
+    | "Account default"
+    | "Legacy instance configuration"
+    | "Provider / inherited default";
+}
+
+/**
+ * Resolve only the selected account. The mutable account preference is not
+ * copied into chat metadata: an absent/reset chat policy keeps inheriting it.
+ * Disabled, missing and wrong-driver envelopes cannot lend numeric authority
+ * to another account. Legacy built-in slots retain their existing fallback.
+ */
+export function inheritedInstanceSubagentPolicy(
+  settings: ServerSettings,
+  instanceId: ProviderInstanceId,
+  provider: ProviderDriverKind | string,
+): InheritedSubagentPolicy {
+  const unknown = { limit: undefined, source: "Provider / inherited default" } as const;
+  if (subagentLimitKey(provider) === null) return unknown;
+  const envelope = settings.providerInstances?.[instanceId];
+  if (envelope) {
+    if (envelope.enabled === false || envelope.driver !== provider) return unknown;
+    if (validSubagentLimit(envelope.defaultMaxConcurrentSubagents)) {
+      return { limit: envelope.defaultMaxConcurrentSubagents, source: "Account default" };
+    }
+  } else if (instanceId !== provider) {
+    return unknown;
+  } else {
+    const legacy = provider === "codex" ? settings.providers.codex : settings.providers.claudeAgent;
+    if (!legacy.enabled) return unknown;
+  }
+  const limit = configuredInstanceSubagentLimit(settings, instanceId);
+  return limit === undefined ? unknown : { limit, source: "Legacy instance configuration" };
+}
+
+/** Exact current settings plus durable chat intent, used at every send boundary. */
+export function effectiveSubagentLimit(input: {
+  readonly settings: ServerSettings;
+  readonly instanceId: ProviderInstanceId;
+  readonly provider: ProviderDriverKind | string;
+  readonly limits: SubagentLimits | undefined;
+}): number | undefined {
+  const key = subagentLimitKey(input.provider);
+  return key === null
+    ? undefined
+    : (input.limits?.[key] ??
+        inheritedInstanceSubagentPolicy(input.settings, input.instanceId, input.provider).limit);
+}
+
 export interface SubagentConcurrencyPresentation {
   readonly requested: number | undefined;
   readonly configured: number | null | undefined;
   readonly source:
     | "Chat override"
+    | "Account default"
     | "Legacy instance configuration"
     | "Provider / inherited default";
   readonly pending: boolean;
 }
 
 /**
- * Show the saved numeric choice immediately, including while a session still
- * uses its previous policy. An inherited provider default has no known number.
- * The label describes a setting, not independently verified native enforcement.
+ * Compact configured → requested transition, never a native-enforcement claim.
+ * "When idle" is deliberately not "next turn": live children can keep the
+ * replacement fenced across turns. Unrecorded process evidence stays unknown.
  */
 export function formatSubagentConcurrencyLimit(
   presentation: SubagentConcurrencyPresentation | null | undefined,
 ): string | null {
-  return presentation?.requested === undefined ? null : `Subagent limit: ${presentation.requested}`;
+  if (!presentation) return null;
+  const { requested, configured, pending } = presentation;
+  if (pending && configured !== undefined) {
+    return `Subagent limit: ${configured ?? "Provider default"} → ${requested ?? "Provider default"} when idle`;
+  }
+  if (requested === undefined) return null;
+  return `Subagent limit: ${requested}${configured === undefined ? " · saved" : ""}`;
 }
 
 export function deriveSubagentConcurrencyPresentation(input: {
   readonly provider: ProviderDriverKind | string;
   readonly limits: SubagentLimits | undefined;
   readonly inheritedLimit: number | undefined;
+  readonly inheritedSource?: InheritedSubagentPolicy["source"];
   readonly configuredLimit: number | null | undefined;
 }): SubagentConcurrencyPresentation | null {
   const key = subagentLimitKey(input.provider);
@@ -99,7 +158,7 @@ export function deriveSubagentConcurrencyPresentation(input: {
       override !== undefined
         ? "Chat override"
         : input.inheritedLimit !== undefined
-          ? "Legacy instance configuration"
+          ? (input.inheritedSource ?? "Legacy instance configuration")
           : "Provider / inherited default",
     // A numeric value is Cafe's configured override, not proof that the native
     // provider admits that many agents. Older snapshots remain explicitly unknown.

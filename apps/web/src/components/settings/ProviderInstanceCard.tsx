@@ -513,7 +513,9 @@ function DefaultsSelectField(props: {
  * model plus explicit defaults for the option traits that model reports
  * (reasoning effort, fast mode, …). Anything left on "No default" falls back
  * to the composer's usual resolution, so this section only stores values the
- * user deliberately picked.
+ * user deliberately picked. The separately headed account subagent default
+ * is a lifecycle-neutral preference: existing inherited chats use its current
+ * value at a safe idle turn, without restarting or changing active work here.
  */
 function ProviderInstanceDefaultsSection(props: {
   readonly instanceId: ProviderInstanceId;
@@ -592,6 +594,56 @@ function ProviderInstanceDefaultsSection(props: {
     });
   };
 
+  const accountSubagentControl =
+    props.driver && subagentLimitKey(props.driver) ? (
+      <div className="grid gap-1.5 border-t border-border-subtle pt-3">
+        <span className="text-xs font-medium text-foreground">Account defaults</span>
+        <div className="flex min-w-0 items-center gap-1">
+          <label
+            className="text-xs font-medium text-foreground"
+            htmlFor={`provider-instance-${props.instanceId}-default-subagent-limit`}
+          >
+            Default subagent limit
+          </label>
+          {/* Outside the label so its button is not part of the input name. */}
+          <InfoTip label="About the default subagent limit">
+            New and existing chats inherit this unless they have a per-chat override. Changing it
+            doesn&apos;t interrupt active work; inherited chats use the new setting at their next
+            safe idle turn. The main agent isn&apos;t counted.{" "}
+            {props.driver === "claudeAgent"
+              ? "Claude limits Agent-tool spawning, not all running work."
+              : "Codex limits spawned agents that stay open."}
+          </InfoTip>
+        </div>
+        <DraftInput
+          id={`provider-instance-${props.instanceId}-default-subagent-limit`}
+          aria-describedby={`provider-instance-${props.instanceId}-default-subagent-limit-description`}
+          type="number"
+          min={1}
+          max={64}
+          step={1}
+          value={
+            props.defaultMaxConcurrentSubagents === undefined
+              ? ""
+              : String(props.defaultMaxConcurrentSubagents)
+          }
+          placeholder="Provider default"
+          onCommit={(value) => {
+            if (value.trim() === "") props.onConcurrencyDefaultChange(undefined);
+            else if (validSubagentLimit(Number(value)))
+              props.onConcurrencyDefaultChange(Number(value));
+          }}
+        />
+        <span
+          id={`provider-instance-${props.instanceId}-default-subagent-limit-description`}
+          className="text-xs text-muted-foreground"
+        >
+          1–64. Inherited by new and existing chats without an override, at their next safe idle
+          turn. Blank uses legacy runtime configuration or the provider default.
+        </span>
+      </div>
+    ) : null;
+
   return (
     <div className="grid gap-3">
       <div className="grid gap-0.5">
@@ -607,51 +659,6 @@ function ProviderInstanceDefaultsSection(props: {
         items={modelItems}
         onValueChange={handleModelChange}
       />
-      {props.driver && subagentLimitKey(props.driver) ? (
-        <div className="grid gap-1.5">
-          <div className="flex min-w-0 items-center gap-1">
-            <label
-              className="text-xs font-medium text-foreground"
-              htmlFor={`provider-instance-${props.instanceId}-default-subagent-limit`}
-            >
-              Default subagent limit
-            </label>
-            {/* Outside the label so its button is not part of the input name. */}
-            <InfoTip label="About the default subagent limit">
-              Copied to new chats only; changing it doesn&apos;t restart the provider or change
-              existing chats. The main agent isn&apos;t counted.{" "}
-              {props.driver === "claudeAgent"
-                ? "Claude limits Agent-tool spawning, not all running work."
-                : "Codex limits spawned agents that stay open."}
-            </InfoTip>
-          </div>
-          <DraftInput
-            id={`provider-instance-${props.instanceId}-default-subagent-limit`}
-            aria-describedby={`provider-instance-${props.instanceId}-default-subagent-limit-description`}
-            type="number"
-            min={1}
-            max={64}
-            step={1}
-            value={
-              props.defaultMaxConcurrentSubagents === undefined
-                ? ""
-                : String(props.defaultMaxConcurrentSubagents)
-            }
-            placeholder="Provider default"
-            onCommit={(value) => {
-              if (value.trim() === "") props.onConcurrencyDefaultChange(undefined);
-              else if (validSubagentLimit(Number(value)))
-                props.onConcurrencyDefaultChange(Number(value));
-            }}
-          />
-          <span
-            id={`provider-instance-${props.instanceId}-default-subagent-limit-description`}
-            className="text-xs text-muted-foreground"
-          >
-            1–64. New chats only; blank uses the provider default.
-          </span>
-        </div>
-      ) : null}
       {props.defaultModel && selectedModel && optionDescriptors.length === 0 ? (
         <p className="text-xs text-muted-foreground">
           This model does not report configurable options.
@@ -725,6 +732,7 @@ function ProviderInstanceDefaultsSection(props: {
           />
         );
       })}
+      {accountSubagentControl}
     </div>
   );
 }
@@ -1484,7 +1492,7 @@ export function ProviderInstanceCard({
                 customizedCount={advancedCustomizedCount}
                 reloadDetail={
                   driverKind && subagentLimitKey(driverKind)
-                    ? "To change the subagent limit without a reload, use the default subagent limit above or the per-chat control."
+                    ? "To change the subagent limit without interrupting active work, use the account subagent limit above or the per-chat control; it applies at the next safe idle turn."
                     : undefined
                 }
               >
