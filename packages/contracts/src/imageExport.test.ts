@@ -1,3 +1,4 @@
+import * as Result from "effect/Result";
 import * as Schema from "effect/Schema";
 import { describe, expect, it } from "vitest";
 
@@ -18,7 +19,27 @@ describe("image export capability contracts", () => {
     expect(() => decode("data:image/png;base64,private")).toThrow();
     expect(() => decode([137, 80, 78, 71])).toThrow();
     expect(() => decode(new Uint8Array(0))).toThrow();
-    expect(() => decode(new Uint8Array(MAX_PNG_BYTES + 1))).toThrow();
+    const oversizedBytes = new Uint8Array(MAX_PNG_BYTES + 1);
+    const oversizedResult = Schema.decodeUnknownResult(PngBytesSchema)(oversizedBytes);
+    // Keep the real one-byte-over-limit parser rejection, but inspect only
+    // bounded issue metadata. Effect's synchronous throwing wrapper eagerly
+    // formats its Error message by stringifying the entire rejected typed array,
+    // unnecessarily rendering 32 MiB of pixels under the test deadline. The
+    // Result API runs the same parser without that diagnostic formatting step.
+    // Boolean identity assertions also keep an unexpected failure from dumping
+    // the payload while still binding this issue to the exact oversized input.
+    expect(Result.isFailure(oversizedResult)).toBe(true);
+    if (Result.isFailure(oversizedResult)) {
+      expect(oversizedResult.failure._tag).toBe("Composite");
+      if (oversizedResult.failure._tag === "Composite") {
+        expect(oversizedResult.failure.issues.length).toBe(1);
+        const issue = oversizedResult.failure.issues[0];
+        expect(issue?._tag).toBe("Filter");
+        if (issue?._tag === "Filter") {
+          expect(issue.actual === oversizedBytes).toBe(true);
+        }
+      }
+    }
     expect(MAX_PNG_BYTES).toBe(32 * 1024 * 1024);
     expect(MAX_PNG_DIMENSION).toBe(8192);
     expect(MAX_PNG_PIXELS).toBe(16_777_216);
