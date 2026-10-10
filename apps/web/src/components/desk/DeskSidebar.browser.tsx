@@ -8,7 +8,6 @@ import { page, userEvent } from "vitest/browser";
 import type { DraftId } from "../../composerDraftStore";
 import { createDeskState, deskTabKey } from "../../deskModel";
 import { useDeskStore } from "../../deskStore";
-import { applyInterfaceScalePercent } from "../../interfaceScale";
 import type { ThreadRouteTarget } from "../../threadRoutes";
 import { DeskSidebar } from "./DeskSidebar";
 
@@ -97,22 +96,17 @@ afterEach(() => {
   localStorage.removeItem(`cafe-code:desk:v1:${environmentId}`);
 });
 
-async function setup({ newChatDisabled = false }: { newChatDisabled?: boolean } = {}) {
+async function setup() {
   useDeskStore.getState().dispatch({ type: "open", target: chat });
   useDeskStore.getState().dispatch({ type: "open", target: draft });
   const onNavigate = vi.fn();
-  const onNewChat = vi.fn();
   const screen = await render(
     <>
-      <DeskSidebar
-        onNavigate={onNavigate}
-        onNewChat={onNewChat}
-        newChatDisabled={newChatDisabled}
-      />
+      <DeskSidebar onNavigate={onNavigate} />
       <button type="button">Outside Desk</button>
     </>,
   );
-  return { screen, onNavigate, onNewChat };
+  return { screen, onNavigate };
 }
 
 function deferredMenu() {
@@ -128,161 +122,10 @@ function openRowMenu(element: Element) {
 }
 
 describe("Desk sidebar", () => {
-  it("shows the Chats heading and a visible, labelled new-chat pencil", async () => {
-    const { screen } = await setup();
-    try {
-      await expect.element(screen.getByText("Chats", { exact: true })).toBeVisible();
-      await expect.element(screen.getByText("Open chats", { exact: true })).not.toBeInTheDocument();
-      const pencil = screen.getByRole("button", {
-        name: "New chat in active tab group",
-        exact: true,
-      });
-      await expect.element(pencil).toBeVisible();
-      await expect.element(pencil).toBeEnabled();
-      const icon = pencil.element().querySelector("svg.lucide-square-pen");
-      expect(icon).not.toBeNull();
-      expect(icon?.getAttribute("aria-hidden")).toBe("true");
-      expect(icon?.getBoundingClientRect().width).toBeGreaterThan(0);
-      await pencil.hover();
-      await expect
-        .poll(() => document.querySelector('[data-slot="tooltip-popup"]')?.textContent)
-        .toBe("New chat");
-    } finally {
-      await screen.unmount();
-    }
-  });
-
-  it("creates once for each click, Enter and Space gesture without changing open-chat intent", async () => {
-    const { screen, onNavigate, onNewChat } = await setup();
-    const before = useDeskStore.getState();
-    try {
-      const pencil = screen.getByRole("button", {
-        name: "New chat in active tab group",
-        exact: true,
-      });
-      await pencil.click();
-      expect(onNewChat).toHaveBeenCalledTimes(1);
-      pencil.element().focus();
-      await userEvent.keyboard("{Enter}");
-      expect(onNewChat).toHaveBeenCalledTimes(2);
-      await userEvent.keyboard("{Space}");
-      expect(onNewChat).toHaveBeenCalledTimes(3);
-      // The button delegates creation to Sidebar's existing handler. Its own
-      // keyboard/click behavior cannot select, close or mutate a saved view.
-      expect(useDeskStore.getState().desk).toBe(before.desk);
-      expect(useDeskStore.getState().draftEditors).toBe(before.draftEditors);
-      expect(useDeskStore.getState().activeDraftId).toBe(before.activeDraftId);
-      expect(onNavigate).not.toHaveBeenCalled();
-      for (const action of [
-        mocks.rename,
-        mocks.archive,
-        mocks.recycle,
-        mocks.delete,
-        mocks.hardDelete,
-        mocks.showMenu,
-        mocks.confirm,
-      ])
-        expect(action).not.toHaveBeenCalled();
-    } finally {
-      await screen.unmount();
-    }
-  });
-
-  it("keeps the new-chat pencil inert until its environment is bootstrapped", async () => {
-    const { screen, onNavigate, onNewChat } = await setup({ newChatDisabled: true });
-    const before = useDeskStore.getState();
-    try {
-      const pencil = screen.getByRole("button", {
-        name: "New chat in active tab group",
-        exact: true,
-      });
-      await expect.element(pencil).toBeVisible();
-      await expect.element(pencil).toBeDisabled();
-      // Locator click intentionally refuses disabled controls; the native DOM
-      // click and attempted focus exercise the browser's disabled admission.
-      (pencil.element() as HTMLButtonElement).click();
-      screen.getByRole("button", { name: "Outside Desk", exact: true }).element().focus();
-      pencil.element().focus();
-      expect(document.activeElement).not.toBe(pencil.element());
-      await userEvent.keyboard("{Enter}{Space}");
-      expect(onNewChat).not.toHaveBeenCalled();
-      expect(onNavigate).not.toHaveBeenCalled();
-      expect(useDeskStore.getState().desk).toBe(before.desk);
-      expect(useDeskStore.getState().draftEditors).toBe(before.draftEditors);
-      expect(useDeskStore.getState().activeDraftId).toBe(before.activeDraftId);
-      for (const action of [
-        mocks.rename,
-        mocks.archive,
-        mocks.recycle,
-        mocks.delete,
-        mocks.hardDelete,
-        mocks.showMenu,
-        mocks.confirm,
-      ])
-        expect(action).not.toHaveBeenCalled();
-    } finally {
-      await screen.unmount();
-    }
-  });
-
-  it.each(([80, 130] as const).flatMap((scale) => [false, true].map((dark) => ({ scale, dark }))))(
-    "keeps the narrow Chats header usable at $scale%, dark=$dark",
-    async ({ scale, dark }) => {
-      const root = document.documentElement;
-      const originalRootClassName = root.className;
-      const originalRootStyle = root.style.cssText;
-      let screen: Awaited<ReturnType<typeof render>> | undefined;
-      try {
-        await page.viewport(390, 800);
-        applyInterfaceScalePercent(100);
-        const baseRootFontSize = parseFloat(getComputedStyle(root).fontSize);
-        applyInterfaceScalePercent(scale);
-        root.classList.toggle("dark", dark);
-        // Keep the fixture at the desktop sidebar's narrow width while using
-        // actual root-rem scaling and the same theme classes as sidebar chrome.
-        screen = await render(
-          <div className="bg-sidebar text-sidebar-foreground" style={{ width: 200 }}>
-            <DeskSidebar onNavigate={vi.fn()} onNewChat={vi.fn()} />
-          </div>,
-        );
-        const heading = screen.getByText("Chats", { exact: true });
-        const pencil = screen.getByRole("button", {
-          name: "New chat in active tab group",
-          exact: true,
-        });
-        await expect.element(heading).toBeVisible();
-        await expect.element(pencil).toBeVisible();
-        const header = heading.element().parentElement!;
-        const headerBounds = header.getBoundingClientRect();
-        const headingBounds = heading.element().getBoundingClientRect();
-        const pencilBounds = pencil.element().getBoundingClientRect();
-        expect(parseFloat(getComputedStyle(root).fontSize)).toBeCloseTo(
-          (baseRootFontSize * scale) / 100,
-          1,
-        );
-        expect(headingBounds.left).toBeGreaterThanOrEqual(headerBounds.left);
-        expect(headingBounds.right).toBeLessThan(pencilBounds.left);
-        expect(pencilBounds.right).toBeLessThanOrEqual(headerBounds.right + 0.5);
-        expect(pencilBounds.top).toBeGreaterThanOrEqual(headerBounds.top);
-        expect(pencilBounds.bottom).toBeLessThanOrEqual(headerBounds.bottom + 0.5);
-        expect(header.scrollWidth).toBeLessThanOrEqual(header.clientWidth);
-        expect(pencilBounds.width).toBeCloseTo((32 * scale) / 100, 1);
-      } finally {
-        try {
-          await screen?.unmount();
-        } finally {
-          root.className = originalRootClassName;
-          root.style.cssText = originalRootStyle;
-        }
-      }
-    },
-  );
-
   it("keeps an italic preview row when double-clicked without renaming the chat", async () => {
     useDeskStore.getState().dispatch({ type: "open", target: chat, preview: true });
     const onNavigate = vi.fn();
-    const onNewChat = vi.fn();
-    const screen = await render(<DeskSidebar onNavigate={onNavigate} onNewChat={onNewChat} />);
+    const screen = await render(<DeskSidebar onNavigate={onNavigate} />);
     const row = screen.getByRole("button", { name: "Chat fixture", exact: true });
     const title = row.element().querySelector("[data-desk-row-title]")!;
     expect(getComputedStyle(title).fontStyle).toBe("italic");
@@ -797,7 +640,7 @@ describe("Desk sidebar", () => {
       expect(onNavigate).toHaveBeenLastCalledWith(draft);
       await expect
         .element(screen.getByRole("button", { name: "New chat in active tab group" }))
-        .toBeVisible();
+        .not.toBeInTheDocument();
     } finally {
       await screen.unmount();
     }

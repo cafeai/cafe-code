@@ -106,7 +106,9 @@ export function deriveActiveProviderTasks(context: ProviderTasksContext): Active
     )) {
       if (observation.agent || !activity.turnId) continue;
       const key = JSON.stringify([observation.lane, activity.turnId, observation.workId]);
-      if (current.has(key)) continue;
+      // Workflows already have their own admitted card, and malformed workflow
+      // metadata must not regain presentation through the read-only fallback.
+      if (current.has(key) || workflowKeys.has(key)) continue;
       const entry = deriveWorkLogEntries([activity], activity.turnId)[0];
       current.set(key, {
         key,

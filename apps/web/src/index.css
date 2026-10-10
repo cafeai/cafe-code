@@ -556,10 +556,11 @@ body::after {
   height: var(--app-mac-titlebar-height);
   flex-shrink: 0;
 }
-[data-mac-titlebar="true"]:not([data-slot="sidebar-header"]) {
+[data-mac-titlebar="true"]:not([data-slot="sidebar-header"]):not(.desk-group-bar) {
   /* Content bars have a 1px bottom divider, unlike the borderless sidebar.
      Balance that line at the top of the content box so their control centers
-     match rather than landing half a pixel above the sidebar's center. */
+     match rather than landing half a pixel above the sidebar's center. Desk
+     draws its divider with an inset shadow and needs no border compensation. */
   padding-top: 1px;
 }
 [data-mac-titlebar="true"]:has([data-sidebar="trigger"]):not([data-slot="sidebar-header"]):not(

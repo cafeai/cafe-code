@@ -4677,13 +4677,7 @@ export default function Sidebar() {
                   onExpansionChange={setStandaloneCatalogExpanded}
                 />
               }
-              deskContent={
-                <DeskSidebar
-                  onNavigate={navigateToDeskTarget}
-                  onNewChat={createStandaloneChat}
-                  newChatDisabled={!primaryEnvironmentBootstrapped}
-                />
-              }
+              deskContent={<DeskSidebar onNavigate={navigateToDeskTarget} />}
               primaryEnvironmentBootstrapped={primaryEnvironmentBootstrapped}
               bootstrappedEnvironmentIds={bootstrappedEnvironmentIdSet}
               showArm64IntelBuildWarning={showArm64IntelBuildWarning}

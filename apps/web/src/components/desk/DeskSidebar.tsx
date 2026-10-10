@@ -10,7 +10,6 @@ import { readLocalApi } from "../../localApi";
 import type { ThreadRouteTarget } from "../../threadRoutes";
 import { formatRelativeTimeLabel } from "../../timestampFormat";
 import { resolveThreadRowClassName } from "../Sidebar.logic";
-import { SidebarNewChatButton } from "../sidebar/SidebarNewChatButton";
 import { ThreadStatusLabel } from "../ThreadStatusLabel";
 import { SidebarMenuSub, SidebarMenuSubButton, SidebarMenuSubItem } from "../ui/sidebar";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
@@ -480,15 +479,7 @@ const DeskSidebarGroupHeading = memo(function DeskSidebarGroupHeading({
 /** The Desk lists open views, not a second chat catalog. All chat mutations
  * continue through existing APIs; closing a view only updates local layout.
  */
-export function DeskSidebar({
-  onNavigate,
-  onNewChat,
-  newChatDisabled = false,
-}: {
-  onNavigate: (target: ThreadRouteTarget) => void;
-  onNewChat: () => void;
-  newChatDisabled?: boolean;
-}) {
+export function DeskSidebar({ onNavigate }: { onNavigate: (target: ThreadRouteTarget) => void }) {
   const desk = useDeskStore((state) => state.desk);
   const dispatch = useDeskStore((state) => state.dispatch);
   const chatActions = useDeskChatActions();
@@ -525,12 +516,7 @@ export function DeskSidebar({
   return (
     <section aria-label="Desk open chats" className="px-2 py-2">
       <div className="mb-1 flex items-center justify-between pl-2 pr-1.5">
-        <span className="label-overline">Chats</span>
-        <SidebarNewChatButton
-          label="New chat in active tab group"
-          disabled={newChatDisabled}
-          onClick={onNewChat}
-        />
+        <span className="label-overline">Open chats</span>
       </div>
       {deskGroupIds(desk.layout).map((groupId) => {
         const group = desk.groups[groupId];

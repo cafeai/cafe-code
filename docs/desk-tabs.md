@@ -39,9 +39,9 @@ remains a separate desktop smoke check.
   normal titles and restore on restart.
   Previews are excluded from saved layouts and reopen history. Dragging a tab to
   rearrange or split it keeps it open. Closing a preview retains its input and work.
-- Use the **New chat** pencil icon beside **Chats** in Desk or Projects, or the global New chat
+- Use the **New chat** pencil icon beside **Chats** in Projects, or the global New chat
   shortcut, to create a standalone conversation in the active group without a folder.
-  Both headings share the same action and keep the selected sidebar view unchanged.
+  The Projects heading and shortcut share the same action and keep the selected sidebar view unchanged.
   Existing per-project New chat actions still create project-associated chats.
 - Drag tabs to reorder, into another group to move, or to a chat pane edge to
   split. Hover the left or right half of a tab to see an insertion line before

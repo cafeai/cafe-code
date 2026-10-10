@@ -9335,10 +9335,10 @@ describe(`ChatView full app (${chatViewBrowserPart})`, () => {
         ]);
         await waitForStandaloneComposerText("First standalone conversation");
         await page.getByRole("button", { name: "Desk", exact: true }).click();
-        await page
-          .getByLabelText("Desk open chats", { exact: true })
-          .getByRole("button", { name: "New chat in active tab group", exact: true })
-          .click();
+        await expect
+          .element(page.getByRole("button", { name: "New chat in active tab group", exact: true }))
+          .not.toBeInTheDocument();
+        newChatShortcut();
         await waitForLayout();
         expect(mounted.router.state.location.pathname).toBe(`/draft/${draftId}`);
         expect(Object.keys(useComposerDraftStore.getState().draftThreadsByThreadKey)).toEqual([
@@ -9460,12 +9460,12 @@ describe(`ChatView full app (${chatViewBrowserPart})`, () => {
         desk.dispatch({ type: "sidebarMode", mode: "desk" });
         const capturedGroup = useDeskStore.getState().desk.activeGroupId;
         await waitForLayout();
-        // The heading action must capture the same exact active-group owner as
-        // the shortcut, not the saved chat currently visible in another pane.
-        await page
-          .getByLabelText("Desk open chats", { exact: true })
-          .getByRole("button", { name: "New chat in active tab group", exact: true })
-          .click();
+        // The global shortcut must capture the exact active-group owner, not
+        // the saved chat currently visible in another pane. Desk stays view-only.
+        await expect
+          .element(page.getByRole("button", { name: "New chat in active tab group", exact: true }))
+          .not.toBeInTheDocument();
+        newChatShortcut();
         await vi.waitFor(() =>
           expect(mounted.router.state.location.pathname).toMatch(UUID_ROUTE_RE),
         );

@@ -1,13 +1,22 @@
-# Desk Chats heading and shared New chat action
+# Desk Chats heading and shared New chat action (superseded)
 
-Decision status: Accepted by the user's explicit request for a Desk heading pencil action.
+Decision status: Superseded in this integration by the user's request to remove the Desk creation action.
 Created: 2026-10-09 14:03:31 JST (UTC+0900).
-Last updated: 2026-10-09 14:03:31 JST (UTC+0900).
-Implementation status: Implemented; source-bound release checks must qualify each revision.
-Supersedes: Only the no-Desk-heading-creation-button placement choice in
-[Standalone chats](standalone-chats.md). Its other decisions remain in force.
+Last updated: 2026-10-10.
+Implementation status: The shared Projects button remains implemented; Desk has no heading creation button.
+Current placement follows [Standalone chats](standalone-chats.md); this upstream
+entrypoint proposal is historical and does not supersede that placement.
 
-## Context and rationale
+## Current integration behavior
+
+Desk retains the Open chats heading and lists existing views without a New chat
+button. Projects retains the shared Chats heading action. The global New chat
+shortcut remains usable while viewing Desk, including draft reuse and exact
+active-group ownership. Browser fixtures exercise these actual entrypoints and
+assert that Desk does not regain the removed action. The original upstream
+decision below is retained as historical context.
+
+## Original context and rationale
 
 Projects exposes a pencil beside its Chats heading, but Desk previously labelled
 its view list Open chats and offered no equivalent creation action. A user working

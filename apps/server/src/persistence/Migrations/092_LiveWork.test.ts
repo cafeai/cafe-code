@@ -1,6 +1,7 @@
 import { assert, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
+import { describe } from "vitest";
 
 import { runMigrations } from "../Migrations.ts";
 import * as TestSqliteClient from "../TestSqliteClient.ts";
@@ -37,7 +38,7 @@ const assertWorkflowRetention = (sql: SqlClient.SqlClient) =>
     );
   });
 
-it.layer(TestSqliteClient.layerMemory())("092_LiveWork", (it) => {
+describe("092_LiveWork", () => {
   it.effect("adds live work after the upstream migrations and preserves workflow retention", () =>
     Effect.gen(function* () {
       const sql = yield* SqlClient.SqlClient;
@@ -58,7 +59,7 @@ it.layer(TestSqliteClient.layerMemory())("092_LiveWork", (it) => {
       assert.deepEqual(yield* sql`SELECT * FROM projection_live_work`, []);
       yield* assertWorkflowRetention(sql);
       assert.deepEqual(yield* runMigrations(), []);
-    }),
+    }).pipe(Effect.provide(TestSqliteClient.layerMemory())),
   );
 
   it.effect("repairs the local id collision without changing the ledger or existing work", () =>
@@ -83,12 +84,14 @@ it.layer(TestSqliteClient.layerMemory())("092_LiveWork", (it) => {
       ]);
       assert.deepEqual(yield* sql`SELECT * FROM projection_live_work`, before);
       assert.deepEqual(
-        yield* sql<{ name: string }>`SELECT name FROM effect_sql_migrations WHERE migration_id = 90`,
+        yield* sql<{
+          name: string;
+        }>`SELECT name FROM effect_sql_migrations WHERE migration_id = 90`,
         [{ name: "LiveWork" }],
       );
       yield* assertWorkflowRetention(sql);
       assert.deepEqual(yield* runMigrations(), []);
       assert.deepEqual(yield* sql`SELECT * FROM projection_live_work`, before);
-    }),
+    }).pipe(Effect.provide(TestSqliteClient.layerMemory())),
   );
 });

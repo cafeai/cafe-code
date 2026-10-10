@@ -497,7 +497,7 @@ function GroupTabs({
   const desk = useDeskStore((s) => s.desk);
   const strip = useRef<HTMLDivElement>(null);
   const titlebar = useRef<HTMLDivElement>(null);
-  const isMacDesktopTitlebar = useMacDesktopTitlebar();
+  const isMacDesktopTitlebar = useMacDesktopTitlebar({ includeNarrowDesktop: true });
   useLayoutEffect(() => {
     const bar = titlebar.current;
     if (!bar || !isElectron || rect.y !== 0) return;
