@@ -64,7 +64,10 @@ describe("qualified major Actions and Ubuntu runner boundaries", () => {
         .flatMap((job) => job.steps ?? [])
         .filter((step) => step.uses?.startsWith("actions/")),
     );
-    expect(actions).toHaveLength(34);
+    // The new failure-only synthetic fixture upload reuses the independently
+    // reviewed artifact Action. Keep the exact total and qualify that extra
+    // publication boundary below, rather than admitting arbitrary new steps.
+    expect(actions).toHaveLength(35);
     for (const step of actions) {
       const [action, commit] = step.uses!.split("@");
       expect(commit, step.uses).toBe(qualifiedActionPins[action!]);
@@ -87,6 +90,30 @@ describe("qualified major Actions and Ubuntu runner boundaries", () => {
     // The privileged label job reads PR objects as passive Git data only. Its
     // checkout remains the default trusted base, never a PR-selected ref/repo.
     expect(privilegedCheckout?.with).toEqual({ "fetch-depth": 0 });
+  });
+
+  it("retains only the synthetic Desk fixture attachments after a quality failure", () => {
+    const steps = readWorkflow("ci.yml").jobs.quality?.steps ?? [];
+    const retention = steps.filter(
+      (step) => step.name === "Retain synthetic Desk sidebar failure artifacts",
+    );
+    expect(retention).toHaveLength(1);
+    // Hidden-file admission is safe only for this fixed synthetic-only folder.
+    // An exact step assertion prevents broad globs, successful-run uploads,
+    // longer retention, mutable Action references, or new execution overrides
+    // from riding along with this narrowly reviewed diagnostic publication.
+    expect(retention[0]).toEqual({
+      name: "Retain synthetic Desk sidebar failure artifacts",
+      if: "failure()",
+      uses: `actions/upload-artifact@${qualifiedActionPins["actions/upload-artifact"]}`,
+      with: {
+        name: "desk-sidebar-failure-${{ matrix.os }}-${{ github.run_attempt }}",
+        path: "apps/web/.vitest/attachments/failure-screenshots/DeskSidebar.browser.tsx/",
+        "include-hidden-files": true,
+        "if-no-files-found": "ignore",
+        "retention-days": 7,
+      },
+    });
   });
 
   it("keeps the published Linux artifact on Ubuntu 24 while qualifying Ubuntu 26", () => {

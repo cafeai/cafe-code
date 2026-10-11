@@ -10,6 +10,11 @@ import { createDeskState, deskTabKey } from "../../deskModel";
 import { useDeskStore } from "../../deskStore";
 import type { ThreadRouteTarget } from "../../threadRoutes";
 import { DeskSidebar } from "./DeskSidebar";
+import {
+  collectDeskSidebarFailureDiagnostics,
+  rethrowWithDeskSidebarFailureDiagnostics,
+  trackDeskDiagnosticPointer,
+} from "./DeskSidebar.failureDiagnostics";
 
 const mocks = vi.hoisted(() => ({
   rename: vi.fn(),
@@ -75,9 +80,27 @@ const chat: ThreadRouteTarget = {
   threadRef: { environmentId, threadId: ThreadId.make("chat-1") },
 };
 const draft: ThreadRouteTarget = { kind: "draft", draftId: "draft-1" as DraftId };
+let diagnosticPointer: ReturnType<typeof trackDeskDiagnosticPointer> | null = null;
+
+function rethrowDeskHoverFailure(error: unknown): never {
+  // Capture synchronously before the fixture's finally unmounts. Vitest's
+  // automatic onTaskFinished screenshot runs later, after that DOM is gone.
+  // Only fixed synthetic state is logged; the exact assertion still fails.
+  return rethrowWithDeskSidebarFailureDiagnostics(
+    error,
+    () =>
+      collectDeskSidebarFailureDiagnostics(
+        document,
+        diagnosticPointer?.read() ?? { count: 0, last: null },
+      ),
+    (record) => console.error("[desk-sidebar-failure-state]", record),
+  );
+}
 
 beforeEach(async () => {
   await page.viewport(1100, 800);
+  diagnosticPointer?.stop();
+  diagnosticPointer = trackDeskDiagnosticPointer(document);
   useDeskStore.setState({
     desk: createDeskState(environmentId),
     draftEditors: {},
@@ -92,6 +115,8 @@ beforeEach(async () => {
   mocks.working = false;
 });
 afterEach(() => {
+  diagnosticPointer?.stop();
+  diagnosticPointer = null;
   useDeskStore.setState({ desk: createDeskState(), draftEditors: {}, activeDraftId: null });
   localStorage.removeItem(`cafe-code:desk:v1:${environmentId}`);
 });
@@ -122,6 +147,33 @@ function openRowMenu(element: Element) {
 }
 
 describe("Desk sidebar", () => {
+  it("captures bounded synthetic failure state before the fixture unmounts", async () => {
+    const { screen } = await setup();
+    try {
+      const snapshot = collectDeskSidebarFailureDiagnostics(
+        document,
+        diagnosticPointer?.read() ?? { count: 0, last: null },
+      );
+      expect(snapshot).toMatchObject({
+        version: 1,
+        available: true,
+        targets: { count: { opacity: 1 }, actions: { opacity: 0 } },
+        outer: { frameScaleX: 1, frameScaleY: 1, centerHit: "fixture-iframe" },
+      });
+      if (!snapshot.available) throw new Error("Synthetic fixture diagnostics unavailable");
+      expect(snapshot.css.rowHover).toBeGreaterThan(0);
+      expect(snapshot.css.groupHover).toBeGreaterThan(0);
+      expect(snapshot.css.rowFocus).toBeGreaterThan(0);
+      expect(snapshot.css.groupFocus).toBeGreaterThan(0);
+      const record = JSON.stringify(snapshot);
+      expect(record.length).toBeLessThanOrEqual(8_192);
+      expect(record).not.toContain("Chat fixture");
+      expect(record).not.toContain("Fixture project");
+    } finally {
+      await screen.unmount();
+    }
+  });
+
   it("keeps an italic preview row when double-clicked without renaming the chat", async () => {
     useDeskStore.getState().dispatch({ type: "open", target: chat, preview: true });
     const onNavigate = vi.fn();
@@ -450,6 +502,8 @@ describe("Desk sidebar", () => {
         expect(getComputedStyle(pencil.element()).opacity).toBe("1");
       });
       expect(name.getBoundingClientRect().width).toBe(idleNameWidth);
+    } catch (error) {
+      rethrowDeskHoverFailure(error);
     } finally {
       await screen.unmount();
     }
@@ -491,6 +545,8 @@ describe("Desk sidebar", () => {
       await heading.click();
       expect(useDeskStore.getState().desk.activeGroupId).toBe("g1");
       expect(onNavigate).toHaveBeenCalledExactlyOnceWith(chat);
+    } catch (error) {
+      rethrowDeskHoverFailure(error);
     } finally {
       await screen.unmount();
     }
@@ -542,6 +598,8 @@ describe("Desk sidebar", () => {
       expect(useDeskStore.getState().desk.groups.g1?.name).toBe("Main");
       expect(onNavigate).not.toHaveBeenCalled();
       expect(mocks.rename).not.toHaveBeenCalled();
+    } catch (error) {
+      rethrowDeskHoverFailure(error);
     } finally {
       await screen.unmount();
     }
@@ -567,6 +625,8 @@ describe("Desk sidebar", () => {
         .element(screen.getByRole("button", { name: "Activate group Main" }))
         .toBeVisible();
       expect(mocks.rename).not.toHaveBeenCalled();
+    } catch (error) {
+      rethrowDeskHoverFailure(error);
     } finally {
       await screen.unmount();
       localStorage.removeItem(`cafe-code:desk:v1:${otherEnvironmentId}`);
@@ -655,6 +715,8 @@ describe("Desk sidebar", () => {
       expect(useDeskStore.getState().desk.closed[0]?.tabKey).toBe(deskTabKey(chat));
       expect(onNavigate).not.toHaveBeenCalled();
       expect(mocks.rename).not.toHaveBeenCalled();
+    } catch (error) {
+      rethrowDeskHoverFailure(error);
     } finally {
       await screen.unmount();
     }
@@ -687,6 +749,8 @@ describe("Desk sidebar", () => {
         "Chat fixture",
       );
       expect(mocks.rename).toHaveBeenCalledTimes(2);
+    } catch (error) {
+      rethrowDeskHoverFailure(error);
     } finally {
       await screen.unmount();
     }
@@ -745,6 +809,8 @@ describe("Desk sidebar", () => {
         expect(getComputedStyle(timestamp).opacity).toBe("0");
       });
       expect(document.activeElement?.getAttribute("aria-label")).toBe("Rename Chat fixture");
+    } catch (error) {
+      rethrowDeskHoverFailure(error);
     } finally {
       await screen.unmount();
     }
@@ -772,6 +838,8 @@ describe("Desk sidebar", () => {
         "Chat fixture",
       );
       expect(onNavigate).not.toHaveBeenCalled();
+    } catch (error) {
+      rethrowDeskHoverFailure(error);
     } finally {
       await screen.unmount();
     }
@@ -801,6 +869,8 @@ describe("Desk sidebar", () => {
       await expect.element(input).not.toBeInTheDocument();
       expect(document.activeElement).toBe(outside.element());
       expect(mocks.rename).toHaveBeenCalledOnce();
+    } catch (error) {
+      rethrowDeskHoverFailure(error);
     } finally {
       resolve?.();
       await screen.unmount();
