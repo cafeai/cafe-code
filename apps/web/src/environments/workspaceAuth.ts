@@ -1,3 +1,4 @@
+import { uiText } from "@cafecode/shared/i18n";
 import type {
   AuthAdminPasswordStatus,
   AuthPairingCredentialResult,
@@ -22,7 +23,7 @@ export function createWorkspaceAuthApi(environmentId: EnvironmentId | null) {
     const record = getSavedEnvironmentRecord(environmentId!);
     const bearerToken = await readSavedEnvironmentBearerToken(environmentId!);
     if (!record || !bearerToken)
-      throw new Error("Sign in to the selected server before managing access.");
+      throw new Error(uiText("Sign in to the selected server before managing access."));
     return fetchRemoteJson<T>({
       httpBaseUrl: record.httpBaseUrl,
       pathname,
@@ -36,7 +37,7 @@ export function createWorkspaceAuthApi(environmentId: EnvironmentId | null) {
       const record = getSavedEnvironmentRecord(environmentId);
       const bearerToken = await readSavedEnvironmentBearerToken(environmentId);
       if (!record || !bearerToken)
-        throw new Error("Sign in to the selected server before managing access.");
+        throw new Error(uiText("Sign in to the selected server before managing access."));
       return fetchRemoteSessionState({ httpBaseUrl: record.httpBaseUrl, bearerToken });
     },
     fetchServerAdminPasswordStatus: () =>

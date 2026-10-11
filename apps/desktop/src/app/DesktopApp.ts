@@ -1,3 +1,4 @@
+import { uiText } from "@cafecode/shared/i18n";
 import * as Cause from "effect/Cause";
 import * as Data from "effect/Data";
 import * as Duration from "effect/Duration";
@@ -26,6 +27,7 @@ import * as DesktopLifecycle from "./DesktopLifecycle.ts";
 import * as DesktopObservability from "./DesktopObservability.ts";
 import * as DesktopServerExposure from "../backend/DesktopServerExposure.ts";
 import * as DesktopAppSettings from "../settings/DesktopAppSettings.ts";
+import * as DesktopUiLocale from "../settings/DesktopUiLocale.ts";
 import * as DesktopShellEnvironment from "../shell/DesktopShellEnvironment.ts";
 import * as DesktopState from "./DesktopState.ts";
 import * as DesktopUpdates from "../updates/DesktopUpdates.ts";
@@ -190,8 +192,8 @@ const handleFatalStartupError = Effect.fn("desktop.startup.handleFatalStartupErr
   const wasQuitting = yield* Ref.getAndSet(state.quitting, true);
   if (!wasQuitting) {
     yield* electronDialog.showErrorBox(
-      "Cafe Code failed to start",
-      `Stage: ${stage}\n${message}${detail}`,
+      uiText("Cafe Code failed to start"),
+      `${uiText("Stage: {stage}", { stage })}\n${message}${detail}`,
     );
   }
   yield* shutdown.request;
@@ -549,6 +551,8 @@ const startup = Effect.gen(function* () {
     return startupRole;
   }
   yield* desktopSettings.load;
+  const locale = yield* Effect.serviceOption(DesktopUiLocale.DesktopUiLocale);
+  if (Option.isSome(locale)) yield* locale.value.initialize;
 
   if (environment.platform === "linux") {
     yield* electronApp.appendCommandLineSwitch("class", environment.linuxWmClass);

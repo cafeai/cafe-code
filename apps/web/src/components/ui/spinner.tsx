@@ -1,3 +1,5 @@
+import { useUiLocale } from "~/i18n";
+import { uiText } from "@cafecode/shared/i18n";
 import { Loader2Icon } from "lucide-react";
 import { cn } from "~/lib/utils";
 
@@ -11,10 +13,12 @@ import { cn } from "~/lib/utils";
  * then dropped so the hidden icon carries no orphaned semantics.
  */
 function Spinner({ className, ...props }: React.ComponentProps<typeof Loader2Icon>) {
+  const uiLocale = useUiLocale();
+
   const hidden = props["aria-hidden"] === true || props["aria-hidden"] === "true";
   return (
     <Loader2Icon
-      aria-label={hidden ? undefined : "Loading"}
+      aria-label={hidden ? undefined : uiText("Loading", undefined, undefined, uiLocale)}
       className={cn("size-4 shrink-0 animate-spin", className)}
       data-slot="spinner"
       role={hidden ? undefined : "status"}

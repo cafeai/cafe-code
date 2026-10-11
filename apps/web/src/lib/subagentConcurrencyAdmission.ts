@@ -1,3 +1,4 @@
+import { uiText } from "@cafecode/shared/i18n";
 import type {
   EnvironmentId,
   ProviderDriverKind,
@@ -18,12 +19,27 @@ import {
 
 export const UNSUPPORTED_SUBAGENT_LIMIT_MESSAGE =
   "This provider runtime does not support the saved subagent limit. Reset it in More composer controls before sending.";
+export function getUNSUPPORTED_SUBAGENT_LIMIT_MESSAGE() {
+  return uiText(
+    "This provider runtime does not support the saved subagent limit. Reset it in More composer controls before sending.",
+  );
+}
 
 export const UNSUPPORTED_ACCOUNT_SUBAGENT_LIMIT_MESSAGE =
   "This provider runtime does not support the account subagent limit. Clear it in account settings or use a supported runtime before sending.";
+export function getUNSUPPORTED_ACCOUNT_SUBAGENT_LIMIT_MESSAGE() {
+  return uiText(
+    "This provider runtime does not support the account subagent limit. Clear it in account settings or use a supported runtime before sending.",
+  );
+}
 
 export const UNRECORDED_STEER_SUBAGENT_OWNER_MESSAGE =
   "Wait for a safe idle turn before sending with this subagent limit. The active session’s account is not recorded.";
+export function getUNRECORDED_STEER_SUBAGENT_OWNER_MESSAGE() {
+  return uiText(
+    "Wait for a safe idle turn before sending with this subagent limit. The active session’s account is not recorded.",
+  );
+}
 
 /** Only the selected account's owning server can attest native support.
  * The fleet's continuation flag advertises Cafe implementation availability,
@@ -98,7 +114,7 @@ export function subagentConcurrencyAdmissionError(input: {
   // process's capability. This flag is used only by native steer; ordinary
   // turns bind their selected account directly, and nonnumeric legacy behavior
   // remains unchanged.
-  if (input.hasRecordedSessionOwner === false) return UNRECORDED_STEER_SUBAGENT_OWNER_MESSAGE;
+  if (input.hasRecordedSessionOwner === false) return getUNRECORDED_STEER_SUBAGENT_OWNER_MESSAGE();
   const account =
     configuration?.environment.environmentId === input.environmentId
       ? configuration.providers.find(
@@ -152,6 +168,6 @@ export function subagentConcurrencyAdmissionError(input: {
   return account?.runtimeCapabilities?.subagentConcurrency === true || sameMaterializedContinuation
     ? null
     : key !== null && input.limits?.[key] !== undefined
-      ? UNSUPPORTED_SUBAGENT_LIMIT_MESSAGE
-      : UNSUPPORTED_ACCOUNT_SUBAGENT_LIMIT_MESSAGE;
+      ? getUNSUPPORTED_SUBAGENT_LIMIT_MESSAGE()
+      : getUNSUPPORTED_ACCOUNT_SUBAGENT_LIMIT_MESSAGE();
 }

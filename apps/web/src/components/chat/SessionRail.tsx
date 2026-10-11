@@ -1,3 +1,5 @@
+import { useUiLocale, useUiPresentation } from "~/i18n";
+import { uiText } from "@cafecode/shared/i18n";
 import type { ServerProviderAccountRateLimits } from "@cafecode/contracts";
 import { PanelBottomIcon, PanelRightIcon, SquareIcon } from "lucide-react";
 import { forwardRef, memo, useEffect, useState, type ReactNode } from "react";
@@ -24,7 +26,12 @@ export function SessionPlacementButton(props: {
   readonly placement: "side" | "composer";
   readonly onClick: () => void;
 }) {
-  const label = props.placement === "side" ? "Show on the side" : "Show in composer";
+  const uiLocale = useUiLocale();
+
+  const label =
+    props.placement === "side"
+      ? uiText("Show on the side", undefined, undefined, uiLocale)
+      : uiText("Show in composer", undefined, undefined, uiLocale);
   const Icon = props.placement === "side" ? PanelRightIcon : PanelBottomIcon;
 
   return (
@@ -60,6 +67,9 @@ export function CodexRecoveryNotice(props: {
   readonly onStop: () => void;
   readonly disabled?: boolean | undefined;
 }) {
+  const uiLocale = useUiLocale();
+  const uiPresentation = useUiPresentation(UI_PRESENTATION_SOURCES);
+
   const [nowMs, setNowMs] = useState(Date.now);
   const retryAtMs = props.presentation.retryAtMs;
   useEffect(() => {
@@ -72,7 +82,7 @@ export function CodexRecoveryNotice(props: {
     }, 1_000);
     return () => window.clearInterval(timer);
   }, [retryAtMs]);
-  const label = codexRecoveryLabel(props.presentation, nowMs);
+  const label = uiPresentation.codexRecoveryLabel(props.presentation, nowMs);
   const count = props.presentation.activeAgentCount;
   // Lead with the current whole-chat operation, not the historical failed root.
   // The work log retains that terminal fact; a tooltip explains it without
@@ -80,12 +90,12 @@ export function CodexRecoveryNotice(props: {
   // countdown never upgrades received waiting metadata into a running turn.
   const heading =
     props.presentation.stage === "backoff" || props.presentation.stage === "reconnecting"
-      ? "Reconnecting"
+      ? uiText("Reconnecting", undefined, undefined, uiLocale)
       : props.presentation.stage === "reconciling"
-        ? "Checking recovery"
+        ? uiText("Checking recovery", undefined, undefined, uiLocale)
         : props.presentation.stage === "uncertain"
-          ? "Needs reconciliation"
-          : "Agents running";
+          ? uiText("Needs reconciliation", undefined, undefined, uiLocale)
+          : uiText("Agents running", undefined, undefined, uiLocale);
 
   return (
     <div
@@ -95,7 +105,12 @@ export function CodexRecoveryNotice(props: {
       <p className="min-w-0 flex-1 text-xs leading-5 text-muted-foreground" role="status">
         <span
           className="font-medium text-foreground"
-          title="The root response failed; this chat still has pending recovery or running agents. Retry numbers count Cafe continuation attempts, separately from provider-managed retries. A + means only a lower bound is known."
+          title={uiText(
+            "The root response failed; this chat still has pending recovery or running agents. Retry numbers count Cafe continuation attempts, separately from provider-managed retries. A + means only a lower bound is known.",
+            undefined,
+            undefined,
+            uiLocale,
+          )}
         >
           {heading}
         </span>
@@ -103,7 +118,15 @@ export function CodexRecoveryNotice(props: {
         {count > 0 ? (
           <span>
             {" "}
-            · {count} {count === 1 ? "agent active" : "agents active"}
+            ·{" "}
+            {uiText(
+              "{count, plural, one {{count} agent active} other {{count} agents active}}",
+              {
+                count,
+              },
+              undefined,
+              uiLocale,
+            )}
           </span>
         ) : null}
       </p>
@@ -114,11 +137,16 @@ export function CodexRecoveryNotice(props: {
         className="h-7 shrink-0 gap-1.5 px-2 text-muted-foreground hover:text-foreground"
         disabled={props.disabled}
         onClick={props.onStop}
-        aria-label="Stop recovery and running agents"
-        title="Stop pending recovery and all running agents in this chat"
+        aria-label={uiText("Stop recovery and running agents", undefined, undefined, uiLocale)}
+        title={uiText(
+          "Stop pending recovery and all running agents in this chat",
+          undefined,
+          undefined,
+          uiLocale,
+        )}
       >
         <SquareIcon aria-hidden="true" className="size-3" />
-        Stop
+        {uiText("Stop", undefined, undefined, uiLocale)}
       </Button>
     </div>
   );
@@ -146,6 +174,8 @@ interface SessionRailProps {
 
 export const SessionRail = memo(
   forwardRef<HTMLDivElement, SessionRailProps>(function SessionRail(props, ref) {
+    const uiLocale = useUiLocale();
+
     const sessionQuota = useProviderQuota(props.quotaContext, true);
     const plan = props.plan;
     const hasPlan = Boolean(plan && plan.steps.length > 0);
@@ -171,12 +201,26 @@ export const SessionRail = memo(
       >
         <div className="flex h-12 shrink-0 items-center justify-between border-b border-border-subtle px-3">
           <div className="flex min-w-0 items-baseline gap-2">
-            <h2 className="text-sm font-medium leading-5">Tasks</h2>
+            <h2 className="text-sm font-medium leading-5">
+              {uiText("Tasks", undefined, undefined, uiLocale)}
+            </h2>
             {hasPlan || hasSubagents ? (
               <span className="shrink-0 text-muted-foreground text-xs tabular-nums">
-                {hasPlan ? `${completedCount} of ${total} completed` : null}
+                {hasPlan
+                  ? uiText(
+                      "{value0} of {value1} completed",
+                      {
+                        value0: completedCount,
+                        value1: total,
+                      },
+                      undefined,
+                      uiLocale,
+                    )
+                  : null}
                 {hasPlan && hasSubagents ? " · " : null}
-                {hasSubagents ? `${subagents.length} active` : null}
+                {hasSubagents
+                  ? uiText("{value0} active", { value0: subagents.length }, undefined, uiLocale)
+                  : null}
               </span>
             ) : null}
           </div>
@@ -185,7 +229,7 @@ export const SessionRail = memo(
 
         <ScrollArea className="min-h-0 flex-1">
           <div
-            aria-label="Task details"
+            aria-label={uiText("Task details", undefined, undefined, uiLocale)}
             className="p-3"
             data-session-rail-tasks="true"
             data-task-list-scroll="true"
@@ -207,7 +251,9 @@ export const SessionRail = memo(
                 onOpenSubagentDetail={props.onOpenSubagentDetail}
               />
             ) : !hasProviderTasks ? (
-              <p className="text-ui text-subtle-foreground">No tasks yet.</p>
+              <p className="text-ui text-subtle-foreground">
+                {uiText("No tasks yet.", undefined, undefined, uiLocale)}
+              </p>
             ) : null}
             {props.scheduledFollowups ? (
               <ScheduledFollowups
@@ -238,3 +284,6 @@ export const SessionRail = memo(
     );
   }),
 );
+
+// Finite source-owned labels/helpers only; no received or user data.
+const UI_PRESENTATION_SOURCES = { codexRecoveryLabel };

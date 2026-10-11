@@ -1,4 +1,6 @@
+import { useUiLocale, useUiPresentation } from "~/i18n";
 import type { ThreadStatusPill } from "./Sidebar.logic";
+import { threadStatusDisplayLabel } from "./Sidebar.logic";
 import { cn } from "~/lib/utils";
 import { Spinner } from "./ui/spinner";
 
@@ -52,11 +54,13 @@ export function ThreadStatusLabel({
   /** Reserves a wider slot for chevron-sized columns. */
   compact?: boolean;
 }) {
+  const uiPresentation = useUiPresentation(UI_PRESENTATION_SOURCES);
+
   const visible = status !== null;
 
   return (
     <span
-      title={status?.label}
+      title={status ? uiPresentation.threadStatusDisplayLabel(status.label) : undefined}
       data-visible={visible ? "true" : "false"}
       data-compact={compact ? "true" : "false"}
       data-status={status?.label}
@@ -68,7 +72,12 @@ export function ThreadStatusLabel({
     >
       {/* Keep the dot mounted while hidden so the shell can fade it out. */}
       <ThreadStatusDot status={status ?? { dotClass: "", pulse: false }} />
-      {status ? <span className="sr-only">{status.label}</span> : null}
+      {status ? (
+        <span className="sr-only">{uiPresentation.threadStatusDisplayLabel(status.label)}</span>
+      ) : null}
     </span>
   );
 }
+
+// Finite source-owned labels/helpers only; no received or user data.
+const UI_PRESENTATION_SOURCES = { threadStatusDisplayLabel };

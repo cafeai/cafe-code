@@ -1,3 +1,5 @@
+import { uiText } from "@cafecode/shared/i18n";
+
 /**
  * WebPushNotifications - Web Push subscription store + turn-completion pusher.
  *
@@ -56,6 +58,7 @@ const VapidKeyPair = Schema.Struct({
 });
 
 export const WebPushSubscriptionInput = Schema.Struct({
+  uiLocale: Schema.optionalKey(Schema.Literals(["en", "ja", "ko"])),
   endpoint: Schema.String,
   keys: Schema.Struct({
     p256dh: Schema.String,
@@ -70,6 +73,28 @@ const StoredWebPushSubscription = Schema.Struct({
   createdAt: Schema.String,
 });
 type StoredWebPushSubscription = typeof StoredWebPushSubscription.Type;
+
+/** Locale is data owned by an already admitted endpoint and its key pair.
+ * This pure range-preserving update cannot add/rebind subscriptions, including
+ * when a delayed browser update arrives after an explicit unsubscribe. */
+export function withWebPushSubscriptionLocale<T extends WebPushSubscriptionInput>(
+  subscriptions: readonly T[],
+  input: WebPushSubscriptionInput,
+): readonly T[] {
+  if (input.uiLocale !== "en" && input.uiLocale !== "ja" && input.uiLocale !== "ko")
+    return subscriptions;
+  return subscriptions.map((subscription) =>
+    subscription.endpoint === input.endpoint &&
+    subscription.keys.p256dh === input.keys.p256dh &&
+    subscription.keys.auth === input.keys.auth
+      ? { ...subscription, uiLocale: input.uiLocale }
+      : subscription,
+  );
+}
+
+export function webPushCompletionBody(locale: WebPushSubscriptionInput["uiLocale"]): string {
+  return uiText("Finished running", undefined, undefined, locale ?? "en");
+}
 
 const WebPushState = Schema.Struct({
   vapid: Schema.NullOr(VapidKeyPair).pipe(Schema.withDecodingDefault(Effect.succeed(null))),
@@ -104,6 +129,10 @@ export interface WebPushNotificationsShape {
     readonly label?: string | undefined;
   }) => Effect.Effect<void, WebPushNotificationsError>;
   readonly removeSubscription: (endpoint: string) => Effect.Effect<void, WebPushNotificationsError>;
+  /** Presentation-only update of an existing exact endpoint/key owner. */
+  readonly updateSubscriptionLocale: (
+    subscription: WebPushSubscriptionInput,
+  ) => Effect.Effect<void, WebPushNotificationsError>;
   /** Subscribe to provider runtime events and push on turn completion. */
   readonly start: () => Effect.Effect<void, never, Scope.Scope>;
 }
@@ -241,6 +270,12 @@ const make = Effect.gen(function* () {
     }));
   });
 
+  const updateSubscriptionLocale: WebPushNotificationsShape["updateSubscriptionLocale"] = (input) =>
+    updateState((state) => ({
+      ...state,
+      subscriptions: [...withWebPushSubscriptionLocale(state.subscriptions, input)],
+    }));
+
   const pushToSubscription = (input: {
     readonly subscription: StoredWebPushSubscription;
     readonly vapid: { readonly publicKey: string; readonly privateKey: string };
@@ -276,36 +311,39 @@ const make = Effect.gen(function* () {
       return;
     }
     const descriptor = yield* serverEnvironment.getDescriptor;
-    const payload = yield* encodeWebPushPayload({
-      title: shell.value.title,
-      body: "Finished running",
-      tag: `cafe-code-thread-${threadId}`,
-      threadPath: `/${descriptor.environmentId}/${threadId}`,
-    }).pipe(
-      Effect.mapError(
-        (cause) =>
-          new WebPushNotificationsError({ detail: "Failed to encode push payload", cause }),
-      ),
-    );
-
     const staleEndpoints: string[] = [];
     yield* Effect.forEach(
       state.subscriptions,
       (subscription) =>
-        pushToSubscription({ subscription, vapid, payload }).pipe(
-          Effect.catch((error) => {
-            if (error.statusCode === 404 || error.statusCode === 410) {
-              // The push service says this subscription no longer exists
-              // (browser data cleared, permission revoked) — drop it.
-              staleEndpoints.push(subscription.endpoint);
-              return Effect.void;
-            }
-            return Effect.logWarning("web push delivery failed", {
-              endpointHost: safeEndpointHost(subscription.endpoint),
-              statusCode: error.statusCode,
-            });
-          }),
-        ),
+        Effect.gen(function* () {
+          // Every recipient selects an isolated bundled translator; changing
+          // one browser's language never mutates shared server presentation.
+          const payload = yield* encodeWebPushPayload({
+            title: shell.value.title,
+            body: webPushCompletionBody(subscription.uiLocale),
+            tag: `cafe-code-thread-${threadId}`,
+            threadPath: `/${descriptor.environmentId}/${threadId}`,
+          }).pipe(
+            Effect.mapError(
+              (cause) =>
+                new WebPushNotificationsError({ detail: "Failed to encode push payload", cause }),
+            ),
+          );
+          yield* pushToSubscription({ subscription, vapid, payload }).pipe(
+            Effect.catch((error) => {
+              if (error.statusCode === 404 || error.statusCode === 410) {
+                // The push service says this subscription no longer exists
+                // (browser data cleared, permission revoked) — drop it.
+                staleEndpoints.push(subscription.endpoint);
+                return Effect.void;
+              }
+              return Effect.logWarning("web push delivery failed", {
+                endpointHost: safeEndpointHost(subscription.endpoint),
+                statusCode: error.statusCode,
+              });
+            }),
+          );
+        }),
       { concurrency: 4, discard: true },
     );
 
@@ -353,6 +391,7 @@ const make = Effect.gen(function* () {
     getPublicKey,
     saveSubscription,
     removeSubscription,
+    updateSubscriptionLocale,
     start,
   } satisfies WebPushNotificationsShape;
 });
@@ -364,5 +403,6 @@ export const WebPushNotificationsTest = Layer.succeed(WebPushNotifications, {
   getPublicKey: () => Effect.succeed("test-vapid-public-key"),
   saveSubscription: () => Effect.void,
   removeSubscription: () => Effect.void,
+  updateSubscriptionLocale: () => Effect.void,
   start: () => Effect.void,
 });

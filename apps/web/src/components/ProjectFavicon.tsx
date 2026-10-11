@@ -53,3 +53,5 @@ export function ProjectFavicon(input: {
     </>
   );
 }
+
+// Finite source-owned labels/helpers only; no received or user data.

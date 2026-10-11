@@ -26,6 +26,11 @@ import { page, userEvent } from "vitest/browser";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { render } from "vitest-browser-react";
 import type { ReactNode } from "react";
+import { getUiLocale, resolveUiLocale, setUiLocale } from "@cafecode/shared/i18n";
+import { useEffect } from "react";
+import { useSettings } from "../../hooks/useSettings";
+import { useUiLocale } from "../../i18n";
+import { selectWorkspaceEnvironment } from "../../environments/workspace";
 import {
   RouterProvider,
   createMemoryHistory,
@@ -49,6 +54,7 @@ import { DiagnosticsSettingsPanel } from "./DiagnosticsSettings";
 import { KeybindingsSettingsPanel } from "./KeybindingsSettings";
 import {
   AppearanceSettingsPanel,
+  LanguageSettingsRow,
   ChatSettingsPanel,
   FilesSettingsPanel,
   ProviderSettingsPanel,
@@ -77,6 +83,17 @@ function renderWithTestRouter(children: ReactNode) {
   });
 
   return render(<RouterProvider router={router} />);
+}
+
+function LanguageSelectionHarness() {
+  const preference = useSettings((settings) => settings.languagePreference, {
+    environmentId: null,
+  });
+  useEffect(() => {
+    setUiLocale(resolveUiLocale(preference, ["ja-JP"]));
+  }, [preference]);
+  useUiLocale();
+  return <LanguageSettingsRow />;
 }
 
 const authAccessHarness = vi.hoisted(() => {
@@ -692,6 +709,8 @@ describe("settings panels", () => {
     | null = null;
 
   beforeEach(async () => {
+    setUiLocale("en");
+    selectWorkspaceEnvironment(null);
     resetServerStateForTests();
     await __resetLocalApiForTests();
     localStorage.clear();
@@ -705,6 +724,8 @@ describe("settings panels", () => {
       await teardown?.call(mounted).catch(() => {});
     }
     mounted = null;
+    setUiLocale("en");
+    selectWorkspaceEnvironment(null);
     vi.unstubAllGlobals();
     Reflect.deleteProperty(window, "desktopBridge");
     Reflect.deleteProperty(window, "nativeApi");
@@ -712,6 +733,49 @@ describe("settings panels", () => {
     resetServerStateForTests();
     await __resetLocalApiForTests();
     authAccessHarness.reset();
+  });
+
+  it("persists explicit language choices independently of the selected remote workspace", async () => {
+    const desktopBridge = createDesktopBridgeStub();
+    window.desktopBridge = desktopBridge;
+    const { updateClientSettings } = installClientSettingsNativeApi(desktopBridge);
+    const config = createBaseServerConfig();
+    setServerConfigSnapshot({
+      ...config,
+      clientSettings: { ...config.clientSettings, languagePreference: "en" },
+    });
+    selectWorkspaceEnvironment(EnvironmentId.make("isolated-remote-language-fixture"));
+    mounted = await renderWithTestRouter(
+      <AppAtomRegistryProvider>
+        <LanguageSelectionHarness />
+      </AppAtomRegistryProvider>,
+    );
+    await expect
+      .element(page.getByRole("combobox", { name: "Interface language" }))
+      .toHaveTextContent("English");
+    expect(getUiLocale()).toBe("en");
+    for (const [value, name] of [
+      ["ja", "日本語"],
+      ["ko", "한국어"],
+      ["en", "English"],
+    ] as const) {
+      await page.getByRole("combobox").click();
+      await page.getByRole("option", { name, exact: true }).click();
+      await vi.waitFor(() => {
+        expect(getServerConfig()?.clientSettings.languagePreference).toBe(value);
+        expect(getUiLocale()).toBe(value);
+        expect(updateClientSettings).toHaveBeenLastCalledWith({ languagePreference: value });
+      });
+      await expect.element(page.getByRole("combobox")).toHaveTextContent(name);
+    }
+    await page.getByRole("combobox").click();
+    await page.getByRole("option", { name: "System default", exact: true }).click();
+    await vi.waitFor(() => {
+      expect(getServerConfig()?.clientSettings.languagePreference).toBe("system");
+      expect(getUiLocale()).toBe("ja");
+      expect(updateClientSettings).toHaveBeenLastCalledWith({ languagePreference: "system" });
+    });
+    expect(updateClientSettings).toHaveBeenCalledTimes(4);
   });
 
   it("preserves saved helper choices and resets to Sol 6.1 with Medium reasoning", async () => {

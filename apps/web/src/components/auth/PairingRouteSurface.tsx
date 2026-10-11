@@ -1,3 +1,6 @@
+import { useUiLocale, useUiPresentation } from "~/i18n";
+import { uiText } from "@cafecode/shared/i18n";
+import { UiMessage } from "~/i18n";
 import type { AuthSessionState } from "@cafecode/contracts";
 import React, { startTransition, useEffect, useRef, useState, useCallback } from "react";
 
@@ -14,6 +17,8 @@ import { SegmentedControl } from "../ui/segmented-control";
 import { Spinner } from "../ui/spinner";
 
 export function PairingPendingSurface() {
+  const uiLocale = useUiLocale();
+
   return (
     <div className="relative flex min-h-screen items-center justify-center overflow-hidden bg-background px-4 py-10 text-foreground sm:px-6">
       {/* A quiet accent glow; the user's accent colour, never a fixed hue. */}
@@ -24,11 +29,13 @@ export function PairingPendingSurface() {
       <section className="relative w-full max-w-xl animate-enter-rise rounded-2xl border border-border bg-card p-6 shadow-lg/5 sm:p-8">
         <p className="label-overline">{APP_DISPLAY_NAME}</p>
         <h1 className="mt-3 text-2xl font-semibold tracking-tight sm:text-3xl">
-          Pairing with this environment
+          {uiText("Pairing with this environment", undefined, undefined, uiLocale)}
         </h1>
         <p className="mt-2 flex items-center gap-2 text-sm text-muted-foreground">
-          <Spinner aria-hidden="true" className="size-3.5" />
-          Checking the pairing link…
+          <UiMessage
+            message={"<slot1></slot1>Checking the pairing link…"}
+            slots={{ slot1: <Spinner aria-hidden="true" className="size-3.5" /> }}
+          />
         </p>
       </section>
     </div>
@@ -44,6 +51,9 @@ export function PairingRouteSurface({
   initialErrorMessage?: string;
   onAuthenticated: () => void;
 }) {
+  const uiLocale = useUiLocale();
+  const uiPresentation = useUiPresentation(UI_PRESENTATION_SOURCES);
+
   const autoPairTokenRef = useRef<string | null>(peekPairingTokenFromUrl());
   const supportsPassword = auth.bootstrapMethods.includes("password");
   const supportsPairingToken = auth.bootstrapMethods.includes("one-time-token");
@@ -63,7 +73,7 @@ export function PairingRouteSurface({
 
       const submitError = await submitServerAuthCredential(nextCredential).then(
         () => null,
-        (error) => errorMessageFromUnknown(error),
+        (error) => uiPresentation.errorMessageFromUnknown(error),
       );
 
       setIsSubmitting(false);
@@ -77,7 +87,7 @@ export function PairingRouteSurface({
         onAuthenticated();
       });
     },
-    [onAuthenticated],
+    [onAuthenticated, uiPresentation],
   );
 
   const submitPassword = useCallback(
@@ -87,7 +97,7 @@ export function PairingRouteSurface({
 
       const submitError = await submitServerPasswordCredential({ password: nextPassword }).then(
         () => null,
-        (error) => errorMessageFromUnknown(error),
+        (error) => uiPresentation.errorMessageFromUnknown(error),
       );
 
       setIsSubmitting(false);
@@ -101,7 +111,7 @@ export function PairingRouteSurface({
         onAuthenticated();
       });
     },
-    [onAuthenticated],
+    [onAuthenticated, uiPresentation],
   );
 
   const handleSubmit = useCallback(
@@ -137,21 +147,29 @@ export function PairingRouteSurface({
       <section className="relative w-full max-w-xl animate-enter-rise rounded-2xl border border-border bg-card p-6 shadow-lg/5 sm:p-8">
         <p className="label-overline">{APP_DISPLAY_NAME}</p>
         <h1 className="mt-3 text-2xl font-semibold tracking-tight sm:text-3xl">
-          Pair with this environment
+          {uiText("Pair with this environment", undefined, undefined, uiLocale)}
         </h1>
         <p className="mt-2 text-sm leading-relaxed text-muted-foreground">
-          {describeAuthGate(auth.bootstrapMethods)}
+          {uiPresentation.describeAuthGate(auth.bootstrapMethods)}
         </p>
 
         <form className="mt-6 space-y-4" onSubmit={(event) => void handleSubmit(event)}>
           {supportsPassword && supportsPairingToken ? (
             <SegmentedControl
-              aria-label="Sign-in method"
+              aria-label={uiText("Sign-in method", undefined, undefined, uiLocale)}
               value={authMode}
               onValueChange={setAuthMode}
               options={[
-                { value: "password", label: "Password", disabled: isSubmitting },
-                { value: "pairing-token", label: "Pairing token", disabled: isSubmitting },
+                {
+                  value: "password",
+                  label: uiText("Password", undefined, undefined, uiLocale),
+                  disabled: isSubmitting,
+                },
+                {
+                  value: "pairing-token",
+                  label: uiText("Pairing token", undefined, undefined, uiLocale),
+                  disabled: isSubmitting,
+                },
               ]}
             />
           ) : null}
@@ -159,7 +177,7 @@ export function PairingRouteSurface({
           {authMode === "password" && supportsPassword ? (
             <div className="space-y-2">
               <label className="text-sm font-medium" htmlFor="admin-password">
-                Admin password
+                {uiText("Admin password", undefined, undefined, uiLocale)}
               </label>
               <Input
                 id="admin-password"
@@ -167,7 +185,7 @@ export function PairingRouteSurface({
                 disabled={isSubmitting}
                 nativeInput
                 onChange={(event) => setPassword(event.currentTarget.value)}
-                placeholder="Enter the admin password"
+                placeholder={uiText("Enter the admin password", undefined, undefined, uiLocale)}
                 type="password"
                 value={password}
               />
@@ -175,7 +193,7 @@ export function PairingRouteSurface({
           ) : (
             <div className="space-y-2">
               <label className="text-sm font-medium" htmlFor="pairing-token">
-                Pairing token
+                {uiText("Pairing token", undefined, undefined, uiLocale)}
               </label>
               <Input
                 id="pairing-token"
@@ -185,7 +203,12 @@ export function PairingRouteSurface({
                 disabled={isSubmitting}
                 nativeInput
                 onChange={(event) => setCredential(event.currentTarget.value)}
-                placeholder="Paste a one-time token or pairing secret"
+                placeholder={uiText(
+                  "Paste a one-time token or pairing secret",
+                  undefined,
+                  undefined,
+                  uiLocale,
+                )}
                 spellCheck={false}
                 value={credential}
               />
@@ -205,7 +228,7 @@ export function PairingRouteSurface({
             {/* Keep the label and width while signing in. */}
             <Button className="min-w-24" disabled={isSubmitting} size="sm" type="submit">
               {isSubmitting ? <Spinner aria-hidden="true" className="size-3.5" /> : null}
-              Continue
+              {uiText("Continue", undefined, undefined, uiLocale)}
             </Button>
             <Button
               disabled={isSubmitting}
@@ -213,7 +236,7 @@ export function PairingRouteSurface({
               size="sm"
               variant="outline"
             >
-              Reload app
+              {uiText("Reload app", undefined, undefined, uiLocale)}
             </Button>
           </div>
         </form>
@@ -231,20 +254,23 @@ function errorMessageFromUnknown(error: unknown): string {
     return error;
   }
 
-  return "Couldn't sign in. Check the password or token, then try again.";
+  return uiText("Couldn''t sign in. Check the password or token, then try again.");
 }
 
 /** One line saying how to get in; the form below shows the matching field. */
 function describeAuthGate(bootstrapMethods: ReadonlyArray<string>): string {
   if (bootstrapMethods.includes("password")) {
     return bootstrapMethods.includes("one-time-token")
-      ? "Sign in with the admin password or a one-time pairing token."
-      : "Sign in with the admin password.";
+      ? uiText("Sign in with the admin password or a one-time pairing token.")
+      : uiText("Sign in with the admin password.");
   }
 
   if (bootstrapMethods.includes("desktop-bootstrap")) {
-    return "Open this from the Cafe desktop app, or paste a pairing credential.";
+    return uiText("Open this from the Cafe desktop app, or paste a pairing credential.");
   }
 
-  return "Open a pairing link, or paste a one-time pairing token.";
+  return uiText("Open a pairing link, or paste a one-time pairing token.");
 }
+
+// Finite source-owned labels/helpers only; no received or user data.
+const UI_PRESENTATION_SOURCES = { describeAuthGate, errorMessageFromUnknown };

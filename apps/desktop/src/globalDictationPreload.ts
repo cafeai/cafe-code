@@ -2,6 +2,11 @@ import type { DesktopBridge, GlobalDictationEvent } from "@cafecode/contracts";
 import { contextBridge, ipcRenderer } from "electron";
 
 import * as IpcChannels from "./ipc/channels.ts";
+import {
+  DESKTOP_UI_LOCALE_CHANGED_CHANNEL,
+  isDesktopUiLocale,
+  readDesktopUiLocaleArguments,
+} from "./settings/DesktopUiLocaleBridge.ts";
 
 /**
  * The floating dictation renderer is not a full Cafe app window. Never give
@@ -13,8 +18,21 @@ import * as IpcChannels from "./ipc/channels.ts";
  */
 const panelBridge: Pick<
   DesktopBridge,
-  "getLocalEnvironmentBootstrap" | "onGlobalDictationEvent" | "globalDictationAction"
+  | "getLocalEnvironmentBootstrap"
+  | "onGlobalDictationEvent"
+  | "globalDictationAction"
+  | "systemUiLocale"
+  | "initialUiLocale"
+  | "onUiLocaleChanged"
 > = {
+  ...readDesktopUiLocaleArguments(process.argv),
+  onUiLocaleChanged: (listener) => {
+    const wrapped = (_event: Electron.IpcRendererEvent, value: unknown) => {
+      if (isDesktopUiLocale(value)) listener(value);
+    };
+    ipcRenderer.on(DESKTOP_UI_LOCALE_CHANGED_CHANNEL, wrapped);
+    return () => ipcRenderer.removeListener(DESKTOP_UI_LOCALE_CHANGED_CHANNEL, wrapped);
+  },
   getLocalEnvironmentBootstrap: () => {
     const result = ipcRenderer.sendSync(IpcChannels.GET_LOCAL_ENVIRONMENT_BOOTSTRAP_CHANNEL);
     if (typeof result !== "object" || result === null) return null;
@@ -33,7 +51,10 @@ const panelBridge: Pick<
           event.type !== "cancel") ||
         (event.insertionMethod !== undefined &&
           event.insertionMethod !== "accessibility" &&
-          event.insertionMethod !== "paste")
+          event.insertionMethod !== "paste") ||
+        (event.guidance !== undefined &&
+          event.guidance !== "accessibility_permission_required" &&
+          event.guidance !== "target_unavailable")
       ) {
         return;
       }

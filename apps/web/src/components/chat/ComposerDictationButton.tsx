@@ -1,4 +1,6 @@
+import { useUiLocale } from "~/i18n";
 import { memo, type PointerEventHandler } from "react";
+import { uiText } from "@cafecode/shared/i18n";
 import { LoaderCircleIcon, MicIcon, SquareIcon } from "lucide-react";
 
 import type { ComposerDictationPhase } from "~/hooks/useComposerDictation";
@@ -21,18 +23,25 @@ export const ComposerDictationButton = memo(function ComposerDictationButton(pro
   readonly className?: string;
   readonly onToggle: () => void;
 }) {
+  const uiLocale = useUiLocale();
+
   const isRecording = props.phase === "recording";
   const isTransitioning = props.phase === "starting" || props.phase === "finalizing";
   const label =
     props.phase === "starting"
-      ? "Connecting microphone"
+      ? uiText("Connecting microphone", undefined, undefined, uiLocale)
       : props.phase === "recording"
-        ? "Stop dictation"
+        ? uiText("Stop dictation", undefined, undefined, uiLocale)
         : props.phase === "finalizing"
-          ? "Finishing dictation"
+          ? uiText("Finishing dictation", undefined, undefined, uiLocale)
           : props.disabled
-            ? "Dictation unavailable while the composer is busy"
-            : "Start dictation";
+            ? uiText(
+                "Dictation unavailable while the composer is busy",
+                undefined,
+                undefined,
+                uiLocale,
+              )
+            : uiText("Start dictation", undefined, undefined, uiLocale);
 
   return (
     <>

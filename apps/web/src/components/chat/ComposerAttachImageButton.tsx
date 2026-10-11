@@ -1,3 +1,5 @@
+import { useUiLocale } from "~/i18n";
+import { uiText } from "@cafecode/shared/i18n";
 import { memo, type PointerEventHandler } from "react";
 import { PaperclipIcon } from "lucide-react";
 import { cn } from "~/lib/utils";
@@ -18,6 +20,8 @@ export const ComposerAttachImageButton = memo(function ComposerAttachImageButton
   className?: string;
   onClick: () => void;
 }) {
+  const uiLocale = useUiLocale();
+
   return (
     <Button
       type="button"
@@ -25,8 +29,13 @@ export const ComposerAttachImageButton = memo(function ComposerAttachImageButton
       variant="ghost"
       className={cn("shrink-0 text-muted-foreground hover:text-foreground", className)}
       disabled={disabled}
-      aria-label="Attach files or images"
-      title="Upload copies of files or images. Workspace @ references stay linked."
+      aria-label={uiText("Attach files or images", undefined, undefined, uiLocale)}
+      title={uiText(
+        "Upload copies of files or images. Workspace @ references stay linked.",
+        undefined,
+        undefined,
+        uiLocale,
+      )}
       {...(preserveComposerFocusOnPointerDown ? { onPointerDown: preventPointerFocus } : {})}
       onClick={onClick}
     >

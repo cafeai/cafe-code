@@ -558,3 +558,5 @@ export function AmbianceLayer() {
   }
   return <AmbianceCanvas />;
 }
+
+// Finite source-owned labels/helpers only; no received or user data.

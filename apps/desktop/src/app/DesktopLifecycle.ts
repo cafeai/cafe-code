@@ -1,3 +1,4 @@
+import { uiText } from "@cafecode/shared/i18n";
 import * as Cause from "effect/Cause";
 import * as Context from "effect/Context";
 import * as Duration from "effect/Duration";
@@ -143,12 +144,13 @@ const resolveProviderDaemonQuitAction = Effect.fn(
   const activeSessionCount = health.value.activeSessionCount;
   const result = yield* electronDialog.showMessageBox({
     type: "question",
-    title: "Provider sessions are still running",
-    message: "Provider sessions are still running",
-    detail: `${activeSessionCount} provider session${
-      activeSessionCount === 1 ? " is" : "s are"
-    } still active. Leave Codex, Claude, and other provider sessions running so Cafe Code can reconnect after restart, or stop them now?`,
-    buttons: ["Leave Running", "Stop Sessions", "Cancel Quit"],
+    title: uiText("Provider sessions are still running"),
+    message: uiText("Provider sessions are still running"),
+    detail: uiText(
+      "{count, plural, one {# provider session is} other {# provider sessions are}} still active. Leave Codex, Claude, and other provider sessions running so Cafe Code can reconnect after restart, or stop them now?",
+      { count: activeSessionCount },
+    ),
+    buttons: [uiText("Leave Running"), uiText("Stop Sessions"), uiText("Cancel Quit")],
     defaultId: 0,
     cancelId: CANCEL_PROVIDER_DAEMON_QUIT_BUTTON_INDEX,
     noLink: true,

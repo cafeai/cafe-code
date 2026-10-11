@@ -380,12 +380,21 @@ export interface GlobalDictationSettingsState {
 /** Selected by the native target capture, never supplied as insertion authority by a renderer. */
 export type GlobalDictationInsertionMethod = "accessibility" | "paste";
 
+/** Presentation guidance is finite and grants no target or insertion authority. */
+export const GlobalDictationGuidanceSchema = Schema.Literals([
+  "accessibility_permission_required",
+  "target_unavailable",
+]);
+export type GlobalDictationGuidance = typeof GlobalDictationGuidanceSchema.Type;
+
 export interface GlobalDictationEvent {
   readonly type: "start" | "stop" | "review" | "cancel";
   readonly sessionId: string;
   readonly insertAvailable?: boolean;
   /** Older desktop senders use the original direct Accessibility insertion path. */
   readonly insertionMethod?: GlobalDictationInsertionMethod;
+  readonly guidance?: GlobalDictationGuidance;
+  /** Legacy sanitized display text remains opaque; never parse it as a code. */
   readonly reason?: string;
 }
 
@@ -436,6 +445,10 @@ export const NativeControlResultSchema = Schema.Struct({
 export type NativeControlResult = typeof NativeControlResultSchema.Type;
 
 export interface DesktopBridge {
+  /** Main-owned finite presentation data, not a settings-write capability. */
+  readonly systemUiLocale?: "en" | "ja" | "ko";
+  readonly initialUiLocale?: "en" | "ja" | "ko";
+  readonly onUiLocaleChanged?: (listener: (locale: "en" | "ja" | "ko") => void) => () => void;
   getNativeControlState?: () => Promise<NativeControlState>;
   setNativeControlEnabled?: (enabled: boolean) => Promise<NativeControlState>;
   getNativeControlChatState?: (threadId: ThreadId) => Promise<NativeControlChatState>;

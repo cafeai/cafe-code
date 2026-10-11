@@ -1,10 +1,13 @@
 import { createRequire } from "node:module";
 import { spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import {
   copyFileSync,
+  constants,
   cpSync,
   existsSync,
   mkdirSync,
+  lstatSync,
   readFileSync,
   rmSync,
   statSync,
@@ -13,7 +16,11 @@ import {
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { MAC_LOCAL_NETWORK_USAGE_DESCRIPTION } from "../../../scripts/lib/mac-app-privacy.ts";
+import {
+  MAC_LOCAL_NETWORK_USAGE_DESCRIPTION,
+  MAC_MICROPHONE_USAGE_DESCRIPTION,
+  renderMacPrivacyStrings,
+} from "../../../scripts/lib/mac-app-privacy.ts";
 import {
   MAC_SOURCE_BUNDLE_IDENTIFIER,
   signMacSourceRuntime,
@@ -27,7 +34,7 @@ const macAppName = "Cafe Code";
 const macBundleIdentifier = MAC_SOURCE_BUNDLE_IDENTIFIER;
 // Rebuild cached bundles with signatures matching their branded plists. A
 // leftover Electron signing identity can fail macOS Local Network admission.
-const macRuntimeLauncherVersion = 3;
+const macRuntimeLauncherVersion = 4;
 const macRuntimeDir = join(desktopDir, ".electron-runtime");
 const macRuntimeMetadataPath = join(macRuntimeDir, "metadata.json");
 const macRuntimeAppBundlePath = join(macRuntimeDir, `${macAppName}.app`);
@@ -80,6 +87,12 @@ function patchMacAppBundlePlists(appBundlePath) {
     "NSLocalNetworkUsageDescription",
     MAC_LOCAL_NETWORK_USAGE_DESCRIPTION,
   );
+  replacePlistString(
+    appInfoPlistPath,
+    "NSMicrophoneUsageDescription",
+    MAC_MICROPHONE_USAGE_DESCRIPTION,
+  );
+  stageMacSourcePrivacyLocalizations(join(appBundlePath, "Contents", "Resources"));
 
   const frameworkPath = join(appBundlePath, "Contents", "Frameworks");
   const helperPlists = [
@@ -114,6 +127,25 @@ function patchMacAppBundlePlists(appBundlePath) {
   }
 }
 
+/** Operates only on the launcher's copied task-owned bundle, never installed
+ * Electron or another application's resources. Tests pass scoped temp roots. */
+export function stageMacSourcePrivacyLocalizations(resourcesDirectory) {
+  const resources = lstatSync(resourcesDirectory);
+  if (!resources.isDirectory() || resources.isSymbolicLink())
+    throw new Error("Invalid source runtime resource directory.");
+  for (const locale of ["en", "ja", "ko"]) {
+    const destination = join(resourcesDirectory, `${locale}.lproj`);
+    mkdirSync(destination, { recursive: true });
+    const metadata = lstatSync(destination);
+    if (!metadata.isDirectory() || metadata.isSymbolicLink())
+      throw new Error("Invalid source runtime locale directory.");
+    writeFileSync(join(destination, "InfoPlist.strings"), renderMacPrivacyStrings(locale), {
+      encoding: "utf8",
+      flag: constants.O_WRONLY | constants.O_CREAT | constants.O_TRUNC | constants.O_NOFOLLOW,
+    });
+  }
+}
+
 function resolveBrandedMacElectronPath(electronExecutablePath) {
   const sourceAppBundlePath = resolveMacSourceAppBundlePath(electronExecutablePath);
   const expectedMetadata = {
@@ -124,6 +156,9 @@ function resolveBrandedMacElectronPath(electronExecutablePath) {
     sourceInfoFingerprint: statFingerprint(join(sourceAppBundlePath, "Contents", "Info.plist")),
     sourceExecutableFingerprint: statFingerprint(electronExecutablePath),
     iconFingerprint: existsSync(macRuntimeIconPath) ? statFingerprint(macRuntimeIconPath) : null,
+    privacyFingerprint: createHash("sha256")
+      .update(JSON.stringify(["en", "ja", "ko"].map(renderMacPrivacyStrings)))
+      .digest("hex"),
   };
   const currentMetadata = readJsonFile(macRuntimeMetadataPath);
 

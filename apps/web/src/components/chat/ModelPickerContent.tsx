@@ -1,3 +1,5 @@
+import { useUiLocale } from "~/i18n";
+import { uiText } from "@cafecode/shared/i18n";
 import {
   type ProviderInstanceId,
   type ProviderDriverKind,
@@ -86,6 +88,8 @@ export const ModelPickerContent = memo(function ModelPickerContent(props: {
   onRequestClose?: () => void;
   onInstanceModelChange: (instanceId: ProviderInstanceId, model: string) => void;
 }) {
+  const uiLocale = useUiLocale();
+
   const pane = useChatPane();
   // Stale models stay usable during the refresh; only a noticeable wait earns
   // the thin progress line (docs/style-guide.md §9).
@@ -620,7 +624,7 @@ export const ModelPickerContent = memo(function ModelPickerContent(props: {
                 // A borderless search field inside the popup: a 1px accent
                 // ring is enough focus indication (the default is 3px).
                 inputClassName="border-0 shadow-none ring-0 focus-visible:ring-0 has-focus-visible:ring-1"
-                placeholder="Search models..."
+                placeholder={uiText("Search models...", undefined, undefined, uiLocale)}
                 showTrigger={false}
                 startAddon={<SearchIcon className="size-4 shrink-0 text-subtle-foreground" />}
                 value={searchQuery}
@@ -689,7 +693,7 @@ export const ModelPickerContent = memo(function ModelPickerContent(props: {
               </ComboboxList>
             </div>
             <ComboboxEmpty className="not-empty:py-6 empty:h-0 text-xs font-normal leading-snug">
-              No models found
+              {uiText("No models found", undefined, undefined, uiLocale)}
             </ComboboxEmpty>
           </div>
         </Combobox>

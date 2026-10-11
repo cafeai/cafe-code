@@ -101,3 +101,5 @@ export function WebSocketConnectionCoordinator() {
 export function WebSocketConnectionSurface({ children }: { readonly children: ReactNode }) {
   return children;
 }
+
+// Finite source-owned labels/helpers only; no received or user data.

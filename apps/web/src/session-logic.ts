@@ -1,6 +1,7 @@
 import * as Option from "effect/Option";
 import * as Arr from "effect/Array";
 import * as Schema from "effect/Schema";
+import { uiFormatNumber, uiText } from "@cafecode/shared/i18n";
 import {
   ApprovalRequestId,
   isToolLifecycleItemType,
@@ -34,6 +35,8 @@ import {
 
 import {
   deriveSubagentActivities,
+  subagentDisplayLabel,
+  subagentDisplayDescription,
   isSubagentRuntimeCurrent,
   type DeriveSubagentActivityOptions,
   type DerivedSubagentActivity,
@@ -50,6 +53,7 @@ import type {
   TurnDiffSummary,
 } from "./types";
 import { compareActivityWindowOrder } from "./activityOrder";
+import { cafeWorkLogDisplayLabel, contextCompactionDisplayLabel } from "./workLogPresentation";
 
 export type ProviderPickerKind = ProviderDriverKind;
 const isProviderInteraction = Schema.is(ProviderInteraction);
@@ -77,12 +81,15 @@ export interface WorkLogEntry {
   turnId?: TurnId | null;
   createdAt: string;
   label: string;
+  /** Cafe-authored display copy is separate from canonical lifecycle labels. */
+  displayLabel?: string;
   detail?: string;
   command?: string;
   rawCommand?: string;
   changedFiles?: ReadonlyArray<string>;
   tone: "thinking" | "tool" | "info" | "error";
   toolTitle?: string;
+  displayToolTitle?: string;
   itemType?: ToolLifecycleItemType;
   requestKind?: PendingApproval["requestKind"];
   desktopObservation?: NonNullable<ReturnType<typeof readDesktopObservationItem>>;
@@ -113,6 +120,24 @@ export interface WorkLogEntry {
     runtimeId?: string;
     taskControl?: import("@cafecode/contracts").ProviderTaskControlCapability;
   };
+}
+
+/** Render Cafe-owned copy without translating opaque provider/user labels or
+ * the canonical strings consumed by legacy operation folding. */
+export function workLogDisplayLabel(entry: WorkLogEntry): string {
+  return entry.displayLabel ?? entry.label;
+}
+
+export function workLogDisplayToolTitle(entry: WorkLogEntry): string | undefined {
+  // Resolve the current canonical lifecycle result after folding. Storing only
+  // the start's display title would survive a later canonical completion.
+  return (
+    (entry.itemType === "context_compaction" && entry.toolTitle
+      ? contextCompactionDisplayLabel(entry.toolTitle)
+      : undefined) ??
+    entry.displayToolTitle ??
+    entry.toolTitle
+  );
 }
 
 export interface HistoricalWorkLogSummary {
@@ -196,7 +221,7 @@ export type TimelineEntry =
     };
 
 export function formatDuration(durationMs: number): string {
-  if (!Number.isFinite(durationMs) || durationMs < 0) return "0s";
+  if (!Number.isFinite(durationMs) || durationMs < 0) return uiText("{seconds}s", { seconds: 0 });
 
   // Turn-duration labels are user-facing liveness/status text, not precise
   // profiling metrics. Keep the same whole-second model for both the live
@@ -204,7 +229,7 @@ export function formatDuration(durationMs: number): string {
   // label does not change shape when a turn finishes.
   const elapsedSeconds = Math.max(0, Math.floor(durationMs / 1_000));
   if (elapsedSeconds < 60) {
-    return `${elapsedSeconds}s`;
+    return uiText("{seconds}s", { seconds: elapsedSeconds });
   }
 
   const hours = Math.floor(elapsedSeconds / 3_600);
@@ -213,16 +238,16 @@ export function formatDuration(durationMs: number): string {
   const parts: string[] = [];
 
   if (hours > 0) {
-    parts.push(`${hours}h`);
+    parts.push(uiText("{hours}h", { hours }));
   }
   if (minutes > 0) {
-    parts.push(`${minutes}m`);
+    parts.push(uiText("{minutes}m", { minutes }));
   }
   if (seconds > 0) {
-    parts.push(`${seconds}s`);
+    parts.push(uiText("{seconds}s", { seconds }));
   }
 
-  return parts.length > 0 ? parts.join(" ") : "0s";
+  return parts.length > 0 ? parts.join(" ") : uiText("{seconds}s", { seconds: 0 });
 }
 
 export function formatElapsed(startIso: string, endIso: string | undefined): string | null {
@@ -792,22 +817,23 @@ export function subagentToWorkLogEntry(subagent: DerivedSubagentActivity): WorkL
 } {
   const fallback =
     subagent.status === "waiting"
-      ? "Waiting"
+      ? uiText("Waiting")
       : subagent.status === "active"
-        ? "Working"
+        ? uiText("Working")
         : subagent.status === "failed"
-          ? "Failed"
+          ? uiText("Failed")
           : subagent.status === "stopped"
-            ? "Stopped"
+            ? uiText("Stopped")
             : subagent.status === "unknown"
-              ? "Status unavailable"
-              : "Completed";
+              ? uiText("Status unavailable")
+              : uiText("Completed");
   return {
     id: subagent.rowId,
     turnId: subagent.turnId,
     createdAt: subagent.startedAt,
     label: subagent.label,
-    detail: subagent.objective ?? subagent.description ?? fallback,
+    ...(subagent.displayLabel !== undefined ? { displayLabel: subagent.displayLabel } : {}),
+    detail: subagent.objective ?? subagentDisplayDescription(subagent) ?? fallback,
     tone:
       subagent.status === "failed"
         ? "error"
@@ -817,7 +843,7 @@ export function subagentToWorkLogEntry(subagent: DerivedSubagentActivity): WorkL
     itemType: "collab_agent_tool_call",
     subagent: {
       id: subagent.id,
-      label: subagent.label,
+      label: subagentDisplayLabel(subagent),
       ...(subagent.objective ? { objective: subagent.objective } : {}),
       ...(subagent.description ? { description: subagent.description } : {}),
       status: subagent.status,
@@ -1054,6 +1080,8 @@ function toDerivedWorkLogEntry(
       ? payload.detail
       : null;
   const taskLabel = taskSummary || taskDetailAsLabel;
+  const displayLabel =
+    computerUse?.displayLabel ?? (!taskLabel ? cafeWorkLogDisplayLabel(activity) : undefined);
   const detail = isTaskActivity
     ? !taskDetailAsLabel &&
       payload &&
@@ -1070,6 +1098,7 @@ function toDerivedWorkLogEntry(
     turnId: activity.turnId,
     createdAt: activity.createdAt,
     label: computerUse?.label ?? taskLabel ?? activity.summary,
+    ...(displayLabel !== undefined ? { displayLabel } : {}),
     tone:
       activity.kind === "task.progress"
         ? "thinking"
@@ -1082,6 +1111,7 @@ function toDerivedWorkLogEntry(
     activity.kind === "reasoning.summary" ? readClaudePublicSummary(payload) : undefined;
   if (publicSummary) {
     entry.label = "Claude summary";
+    entry.displayLabel = uiText("Claude summary");
     entry.tone = "info";
     entry.publicSummary = publicSummary;
     entry.detail = publicSummary.text;
@@ -1114,6 +1144,7 @@ function toDerivedWorkLogEntry(
     // The plain label remains useful for transcript copy/search consumers; the
     // row renderer uses the same frozen object to show the two compact lines.
     entry.label = `Turn accepted · ${presentation.settings}`;
+    entry.displayLabel = uiText("Turn accepted · {settings}", { settings: presentation.settings });
     entry.detail = `${presentation.account} · ${presentation.modes} · ${presentation.source}`;
     entry.turnConfiguration = turnConfiguration;
   }
@@ -1136,6 +1167,7 @@ function toDerivedWorkLogEntry(
   if (computerUse) {
     entry.computerUse = true;
     entry.toolTitle = "Computer use";
+    entry.displayToolTitle = uiText("Computer use");
   } else if (title) {
     entry.toolTitle = title;
   }
@@ -1267,9 +1299,18 @@ function mergeDerivedWorkLogEntries(
   const requestKind = next.requestKind ?? previous.requestKind;
   const collapseKey = next.collapseKey ?? previous.collapseKey;
   const toolCallId = next.toolCallId ?? previous.toolCallId;
+  const {
+    displayLabel: _previousDisplayLabel,
+    displayToolTitle: previousDisplayToolTitle,
+    ...previousCanonical
+  } = previous;
+  const displayToolTitle =
+    next.displayToolTitle ??
+    (toolTitle === previous.toolTitle ? previousDisplayToolTitle : undefined);
   return {
-    ...previous,
+    ...previousCanonical,
     ...next,
+    ...(displayToolTitle !== undefined ? { displayToolTitle } : {}),
     ...(detail ? { detail } : {}),
     ...(command ? { command } : {}),
     ...(rawCommand ? { rawCommand } : {}),
@@ -1583,7 +1624,10 @@ function summarizeToolTextOutput(value: string): string | null {
     return truncateInlinePreview(firstLine);
   }
   if (lines.length > 1) {
-    return `${lines.length.toLocaleString()} lines`;
+    return uiText("{count, plural, one {{formatted} line} other {{formatted} lines}}", {
+      count: lines.length,
+      formatted: uiFormatNumber(lines.length),
+    });
   }
   return null;
 }
@@ -1598,7 +1642,11 @@ function summarizeToolRawOutput(payload: Record<string, unknown> | null): string
   const totalFiles = asNumber(rawOutput.totalFiles);
   if (totalFiles !== null) {
     const suffix = rawOutput.truncated === true ? "+" : "";
-    return `${totalFiles.toLocaleString()} file${totalFiles === 1 ? "" : "s"}${suffix}`;
+    return uiText("{count, plural, one {{formatted} file} other {{formatted} files}}{suffix}", {
+      count: totalFiles,
+      formatted: uiFormatNumber(totalFiles),
+      suffix,
+    });
   }
 
   const content = asTrimmedString(rawOutput.content);

@@ -1,3 +1,5 @@
+import { useUiLocale } from "~/i18n";
+import { uiText } from "@cafecode/shared/i18n";
 import {
   SubagentRuntimeId,
   type ProviderIndividualTaskControl,
@@ -58,6 +60,8 @@ export function IndividualTaskControls({
    * detail surfaces keep the default footer; delivery semantics are identical. */
   layout?: "footer" | "inline";
 }) {
+  const uiLocale = useUiLocale();
+
   const [pending, setPending] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
   const [requested, setRequested] = useState<ReadonlySet<"stop" | "background">>(new Set());
@@ -65,7 +69,14 @@ export function IndividualTaskControls({
   const send = async (action: "stop" | "background") => {
     const api = readEnvironmentApi(environmentId);
     if (!api?.orchestration.controlTask) {
-      setMessage("Task controls are unavailable. Reconnect and refresh the task.");
+      setMessage(
+        uiText(
+          "Task controls are unavailable. Reconnect and refresh the task.",
+          undefined,
+          undefined,
+          uiLocale,
+        ),
+      );
       return;
     }
     setPending(true);
@@ -83,17 +94,42 @@ export function IndividualTaskControls({
       setMessage(
         result.status === "accepted"
           ? action === "stop"
-            ? "Stop requested. Waiting for the provider’s status update."
-            : "Background requested. This task may continue running."
+            ? uiText(
+                "Stop requested. Waiting for the provider’s status update.",
+                undefined,
+                undefined,
+                uiLocale,
+              )
+            : uiText(
+                "Background requested. This task may continue running.",
+                undefined,
+                undefined,
+                uiLocale,
+              )
           : result.status === "already-terminal"
-            ? "The provider reports this task has already ended."
+            ? uiText(
+                "The provider reports this task has already ended.",
+                undefined,
+                undefined,
+                uiLocale,
+              )
             : result.status === "not-foreground"
-              ? "This task is no longer in the foreground."
-              : "Delivery is uncertain. Waiting for a provider update; this action will not be repeated automatically.",
+              ? uiText("This task is no longer in the foreground.", undefined, undefined, uiLocale)
+              : uiText(
+                  "Delivery is uncertain. Waiting for a provider update; this action will not be repeated automatically.",
+                  undefined,
+                  undefined,
+                  uiLocale,
+                ),
       );
     } catch {
       setMessage(
-        "Could not confirm this action. Refresh the task status before taking another action.",
+        uiText(
+          "Could not confirm this action. Refresh the task status before taking another action.",
+          undefined,
+          undefined,
+          uiLocale,
+        ),
       );
     } finally {
       setPending(false);
@@ -107,7 +143,10 @@ export function IndividualTaskControls({
           : "space-y-2 border-t border-border-subtle px-4 py-3 sm:px-6",
       )}
     >
-      <div className="flex flex-wrap items-center gap-2" aria-label="Individual task controls">
+      <div
+        className="flex flex-wrap items-center gap-2"
+        aria-label={uiText("Individual task controls", undefined, undefined, uiLocale)}
+      >
         {control.canBackground && (
           <Button
             size="xs"
@@ -115,7 +154,7 @@ export function IndividualTaskControls({
             disabled={pending || requested.has("background")}
             onClick={() => void send("background")}
           >
-            Run in background
+            {uiText("Run in background", undefined, undefined, uiLocale)}
           </Button>
         )}
         {control.canStop && (
@@ -126,10 +165,15 @@ export function IndividualTaskControls({
               disabled={pending || requested.has("stop")}
               onClick={() => void send("stop")}
             >
-              Stop task
+              {uiText("Stop task", undefined, undefined, uiLocale)}
             </Button>
-            <InfoTip label="About stopping a task">
-              Stops only this task. Stop chat remains a separate control.
+            <InfoTip label={uiText("About stopping a task", undefined, undefined, uiLocale)}>
+              {uiText(
+                "Stops only this task. Stop chat remains a separate control.",
+                undefined,
+                undefined,
+                uiLocale,
+              )}
             </InfoTip>
           </span>
         )}

@@ -1,3 +1,4 @@
+import { uiText } from "@cafecode/shared/i18n";
 import { toastManager } from "../components/ui/toast";
 /**
  * Unified settings hook.
@@ -11,7 +12,7 @@ import { toastManager } from "../components/ui/toast";
  * store.
  */
 import { useCallback, useEffect, useMemo, useSyncExternalStore } from "react";
-import { ServerSettings, type ServerSettingsPatch } from "@cafecode/contracts";
+import { ServerSettings, type ServerSettingsPatch, type EnvironmentId } from "@cafecode/contracts";
 import {
   type ClientSettingsPatch,
   type ClientSettings,
@@ -20,6 +21,7 @@ import {
   UnifiedSettings,
 } from "@cafecode/contracts/settings";
 import { ensureLocalApi } from "~/localApi";
+import { writeBrowserClientSettings } from "../clientPersistenceStorage";
 import {
   ensureWorkspaceApi,
   getWorkspaceServerConfig,
@@ -134,8 +136,10 @@ function reportRemoteSettingsWriteFailure(scope: "server" | "client"): void {
   console.error(`${CLIENT_SETTINGS_PERSISTENCE_ERROR_SCOPE} ${scope} update failed`);
   toastManager.add({
     type: "error",
-    title: "Settings were not saved",
-    description: "Check the selected server connection and owner access before trying again.",
+    title: uiText("Settings were not saved"),
+    description: uiText(
+      "Check the selected server connection and owner access before trying again.",
+    ),
   });
 }
 
@@ -178,9 +182,15 @@ export function getClientSettings(): ClientSettings {
   return getServerConfig()?.clientSettings ?? getClientSettingsSnapshot();
 }
 
-export function useClientSettingsHydrated(): boolean {
-  const serverConfig = useServerConfig();
-  const environmentId = useWorkspaceEnvironmentId();
+type SettingsEnvironment = { environmentId: EnvironmentId | null };
+
+// Explicit null selects this client's primary environment rather than a
+// remote workspace. Interface language is a client preference, not a setting
+// inherited from whichever remote pane happens to be selected.
+export function useClientSettingsHydrated(options?: SettingsEnvironment): boolean {
+  const workspaceEnvironmentId = useWorkspaceEnvironmentId();
+  const environmentId = options ? options.environmentId : workspaceEnvironmentId;
+  const serverConfig = useServerConfig(options?.environmentId);
   const remote =
     environmentId && environmentId !== readPrimaryEnvironmentDescriptor()?.environmentId;
   const localHydrated = useSyncExternalStore(
@@ -199,12 +209,16 @@ function useLocalClientSettings(): ClientSettings {
   );
 }
 
-export function useSettings<T = UnifiedSettings>(selector?: (s: UnifiedSettings) => T): T {
-  const environmentId = useWorkspaceEnvironmentId();
+export function useSettings<T = UnifiedSettings>(
+  selector?: (s: UnifiedSettings) => T,
+  options?: SettingsEnvironment,
+): T {
+  const workspaceEnvironmentId = useWorkspaceEnvironmentId();
+  const environmentId = options ? options.environmentId : workspaceEnvironmentId;
   const remote =
     environmentId && environmentId !== readPrimaryEnvironmentDescriptor()?.environmentId;
-  const serverConfig = useServerConfig();
-  const serverSettings = useServerSettings();
+  const serverConfig = useServerConfig(options?.environmentId);
+  const serverSettings = useServerSettings(options?.environmentId);
   const localClientSettings = useLocalClientSettings();
 
   useEffect(() => {
@@ -237,8 +251,9 @@ export function useSettings<T = UnifiedSettings>(selector?: (s: UnifiedSettings)
  * Server keys are optimistically patched in atom-backed server state, then
  * persisted via RPC. Client keys go through client persistence.
  */
-export function useUpdateSettings() {
-  const environmentId = useWorkspaceEnvironmentId();
+export function useUpdateSettings(options?: SettingsEnvironment) {
+  const workspaceEnvironmentId = useWorkspaceEnvironmentId();
+  const environmentId = options ? options.environmentId : workspaceEnvironmentId;
   const updateSettings = useCallback(
     (patch: Partial<UnifiedSettings>) => {
       const { serverPatch, clientPatch } = splitPatch(patch);
@@ -276,6 +291,17 @@ export function useUpdateSettings() {
               clientPatch,
             );
             applyClientSettingsUpdated(nextClientSettings);
+            // Browser restart has no native settings reader before pairing.
+            // Mirror only its public preference using the existing browser
+            // store; never race a second desktop writer against the backend's
+            // authoritative client-settings document.
+            if (clientPatch.languagePreference !== undefined && !window.desktopBridge) {
+              const local = applyClientSettingsPatch(getClientSettingsSnapshot(), {
+                languagePreference: clientPatch.languagePreference,
+              });
+              replaceClientSettingsSnapshot(local);
+              writeBrowserClientSettings(local);
+            }
             try {
               void ensureLocalApi()
                 .server.updateClientSettings(clientPatch)
@@ -340,3 +366,5 @@ export function __resetClientSettingsPersistenceForTests(): void {
   clientSettingsImportAttempted = false;
   resetClientSettingsPersistenceStateForTests();
 }
+
+// Finite source-owned labels/helpers only; no received or user data.

@@ -22,6 +22,7 @@ import {
   otlpTracesProxyRouteLayer,
   webPushPublicKeyRouteLayer,
   webPushSubscribeRouteLayer,
+  webPushLocaleRouteLayer,
   webPushUnsubscribeRouteLayer,
   projectFaviconRouteLayer,
   serverEnvironmentRouteLayer,
@@ -372,6 +373,7 @@ export const makeRoutesLayer = Layer.mergeAll(
   staticAndDevRouteLayer,
   webPushPublicKeyRouteLayer,
   webPushSubscribeRouteLayer,
+  webPushLocaleRouteLayer,
   webPushUnsubscribeRouteLayer,
   websocketRpcRouteLayer.pipe(Layer.provide(DictationLayerLive)),
 ).pipe(Layer.provide(browserApiCorsLayer));

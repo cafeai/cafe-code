@@ -1,3 +1,6 @@
+import { useUiLocale, useUiPresentation } from "~/i18n";
+import { uiText } from "@cafecode/shared/i18n";
+import { UiMessage } from "~/i18n";
 import {
   ProviderIndividualTaskControl,
   type EnvironmentId,
@@ -145,10 +148,13 @@ export function hasProviderTaskContent(context: ProviderTasksContext): boolean {
 }
 
 export function ProviderTasks({ context }: { context: ProviderTasksContext }) {
+  const uiLocale = useUiLocale();
+  const uiPresentation = useUiPresentation(UI_PRESENTATION_SOURCES);
+
   const [page, setPage] = useState(0);
   const [workflowPage, setWorkflowPage] = useState(0);
-  const tasks = deriveActiveProviderTasks(context);
-  const workflows = deriveWorkflowTasks(context);
+  const tasks = uiPresentation.deriveActiveProviderTasks(context);
+  const workflows = uiPresentation.deriveWorkflowTasks(context);
   if (!tasks.length && !workflows.length) return null;
   const pages = Math.ceil(tasks.length / 5);
   const selectedPage = Math.max(0, Math.min(page, pages - 1));
@@ -157,8 +163,13 @@ export function ProviderTasks({ context }: { context: ProviderTasksContext }) {
   return (
     <>
       {workflows.length > 0 ? (
-        <section aria-label="Workflows" className="mb-3 border-b border-border-subtle pb-3">
-          <p className="mb-2 text-xs font-medium text-muted-foreground">Workflows</p>
+        <section
+          aria-label={uiText("Workflows", undefined, undefined, uiLocale)}
+          className="mb-3 border-b border-border-subtle pb-3"
+        >
+          <p className="mb-2 text-xs font-medium text-muted-foreground">
+            {uiText("Workflows", undefined, undefined, uiLocale)}
+          </p>
           <div className="space-y-2">
             {workflows
               .slice(selectedWorkflowPage * 5, (selectedWorkflowPage + 1) * 5)
@@ -182,17 +193,17 @@ export function ProviderTasks({ context }: { context: ProviderTasksContext }) {
           </div>
           {workflowPages > 1 ? (
             <nav
-              aria-label="Workflow pages"
+              aria-label={uiText("Workflow pages", undefined, undefined, uiLocale)}
               className="mt-2 flex items-center justify-between text-xs"
             >
               <Button
                 size="xs"
                 variant="ghost"
-                aria-label="Previous workflow page"
+                aria-label={uiText("Previous workflow page", undefined, undefined, uiLocale)}
                 disabled={selectedWorkflowPage === 0}
                 onClick={() => setWorkflowPage(selectedWorkflowPage - 1)}
               >
-                Previous
+                {uiText("Previous", undefined, undefined, uiLocale)}
               </Button>
               <span className="tabular-nums text-muted-foreground">
                 {selectedWorkflowPage + 1} / {workflowPages}
@@ -200,11 +211,11 @@ export function ProviderTasks({ context }: { context: ProviderTasksContext }) {
               <Button
                 size="xs"
                 variant="ghost"
-                aria-label="Next workflow page"
+                aria-label={uiText("Next workflow page", undefined, undefined, uiLocale)}
                 disabled={selectedWorkflowPage + 1 === workflowPages}
                 onClick={() => setWorkflowPage(selectedWorkflowPage + 1)}
               >
-                Next
+                {uiText("Next", undefined, undefined, uiLocale)}
               </Button>
             </nav>
           ) : null}
@@ -212,11 +223,14 @@ export function ProviderTasks({ context }: { context: ProviderTasksContext }) {
       ) : null}
       {tasks.length > 0 ? (
         <section
-          aria-label="Active provider tasks"
+          aria-label={uiText("Active provider tasks", undefined, undefined, uiLocale)}
           className="mb-3 border-b border-border-subtle pb-3"
         >
           <p className="mb-2 text-xs font-medium text-muted-foreground">
-            Provider tasks · <span className="tabular-nums">{tasks.length}</span> active
+            <UiMessage
+              message={"Provider tasks · <slot1></slot1> active"}
+              slots={{ slot1: <span className="tabular-nums">{tasks.length}</span> }}
+            />
           </p>
           <div className="space-y-2">
             {tasks.slice(selectedPage * 5, (selectedPage + 1) * 5).map((task) => (
@@ -263,7 +277,7 @@ export function ProviderTasks({ context }: { context: ProviderTasksContext }) {
           </div>
           {pages > 1 && (
             <nav
-              aria-label="Provider task pages"
+              aria-label={uiText("Provider task pages", undefined, undefined, uiLocale)}
               className="mt-2 flex items-center justify-between text-xs"
             >
               <Button
@@ -272,7 +286,7 @@ export function ProviderTasks({ context }: { context: ProviderTasksContext }) {
                 disabled={selectedPage === 0}
                 onClick={() => setPage(selectedPage - 1)}
               >
-                Previous
+                {uiText("Previous", undefined, undefined, uiLocale)}
               </Button>
               <span className="tabular-nums text-muted-foreground">
                 {selectedPage + 1} / {pages}
@@ -283,7 +297,7 @@ export function ProviderTasks({ context }: { context: ProviderTasksContext }) {
                 disabled={selectedPage + 1 === pages}
                 onClick={() => setPage(selectedPage + 1)}
               >
-                Next
+                {uiText("Next", undefined, undefined, uiLocale)}
               </Button>
             </nav>
           )}
@@ -292,3 +306,6 @@ export function ProviderTasks({ context }: { context: ProviderTasksContext }) {
     </>
   );
 }
+
+// Finite source-owned labels/helpers only; no received or user data.
+const UI_PRESENTATION_SOURCES = { deriveActiveProviderTasks, deriveWorkflowTasks };

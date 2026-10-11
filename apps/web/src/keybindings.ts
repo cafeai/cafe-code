@@ -1,3 +1,4 @@
+import { uiText } from "@cafecode/shared/i18n";
 import {
   type KeybindingCommand,
   type KeybindingShortcut,
@@ -200,13 +201,13 @@ export function resolveShortcutCommand(
 }
 
 function formatShortcutKeyLabel(key: string): string {
-  if (key === " ") return "Space";
+  if (key === " ") return uiText("Space");
   if (key.length === 1) return key.toUpperCase();
-  if (key === "escape") return "Esc";
-  if (key === "arrowup") return "Up";
-  if (key === "arrowdown") return "Down";
-  if (key === "arrowleft") return "Left";
-  if (key === "arrowright") return "Right";
+  if (key === "escape") return uiText("Esc");
+  if (key === "arrowup") return uiText("Up");
+  if (key === "arrowdown") return uiText("Down");
+  if (key === "arrowleft") return uiText("Left");
+  if (key === "arrowright") return uiText("Right");
   return key.slice(0, 1).toUpperCase() + key.slice(1);
 }
 
@@ -226,10 +227,10 @@ export function formatShortcutLabel(
   }
 
   const parts: string[] = [];
-  if (showCtrl) parts.push("Ctrl");
-  if (showAlt) parts.push("Alt");
-  if (showShift) parts.push("Shift");
-  if (showMeta) parts.push("Meta");
+  if (showCtrl) parts.push(uiText("Ctrl"));
+  if (showAlt) parts.push(uiText("Alt"));
+  if (showShift) parts.push(uiText("Shift"));
+  if (showMeta) parts.push(uiText("Meta"));
   parts.push(keyLabel);
   return parts.join("+");
 }

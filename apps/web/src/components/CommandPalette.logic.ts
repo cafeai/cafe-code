@@ -1,3 +1,4 @@
+import { uiText } from "@cafecode/shared/i18n";
 import { type KeybindingCommand, type FilesystemBrowseEntry } from "@cafecode/contracts";
 import type { SidebarThreadSortOrder } from "@cafecode/contracts/settings";
 import { type ReactNode } from "react";
@@ -142,7 +143,7 @@ export function buildThreadActionItems<TThread extends BuildThreadActionItemsThr
 
   return visibleThreads.map((thread) => {
     const projectTitle =
-      thread.projectId === null ? "Chats" : input.projectTitleById.get(thread.projectId);
+      thread.projectId === null ? uiText("Chats") : input.projectTitleById.get(thread.projectId);
     const descriptionParts: string[] = [];
 
     if (projectTitle) {
@@ -152,7 +153,7 @@ export function buildThreadActionItems<TThread extends BuildThreadActionItemsThr
       descriptionParts.push(`#${thread.branch}`);
     }
     if (thread.id === input.activeThreadId) {
-      descriptionParts.push("Current chat");
+      descriptionParts.push(uiText("Current chat"));
     }
 
     const leadingContent = input.renderLeadingContent?.(thread);
@@ -244,14 +245,14 @@ export function filterCommandPaletteGroups(input: {
     if (input.projectSearchItems.length > 0) {
       searchableGroups.push({
         value: "projects-search",
-        label: "Projects",
+        label: uiText("Projects"),
         items: input.projectSearchItems,
       });
     }
     if (input.threadSearchItems.length > 0) {
       searchableGroups.push({
         value: "threads-search",
-        label: "Chats",
+        label: uiText("Chats"),
         items: input.threadSearchItems,
       });
     }
@@ -325,7 +326,7 @@ export function buildBrowseGroups(input: {
     });
   }
 
-  return [{ value: "directories", label: "Directories", items }];
+  return [{ value: "directories", label: uiText("Directories"), items }];
 }
 
 export function getCommandPaletteMode(input: {
@@ -344,12 +345,12 @@ export function buildRootGroups(input: {
 }): CommandPaletteGroup[] {
   const groups: CommandPaletteGroup[] = [];
   if (input.actionItems.length > 0) {
-    groups.push({ value: "actions", label: "Actions", items: input.actionItems });
+    groups.push({ value: "actions", label: uiText("Actions"), items: input.actionItems });
   }
   if (input.recentThreadItems.length > 0) {
     groups.push({
       value: "recent-threads",
-      label: "Recent chats",
+      label: uiText("Recent chats"),
       items: input.recentThreadItems,
     });
   }
@@ -359,12 +360,12 @@ export function buildRootGroups(input: {
 export function getCommandPaletteInputPlaceholder(mode: CommandPaletteMode): string {
   switch (mode) {
     case "root":
-      return "Search commands, projects and chats…";
+      return uiText("Search commands, projects and chats…");
     case "root-browse":
-      return "Enter project path (e.g. ~/projects/my-app)";
+      return uiText("Enter project path (e.g. ~/projects/my-app)");
     case "submenu":
-      return "Search...";
+      return uiText("Search...");
     case "submenu-browse":
-      return "Enter path (e.g. ~/projects/my-app)";
+      return uiText("Enter path (e.g. ~/projects/my-app)");
   }
 }

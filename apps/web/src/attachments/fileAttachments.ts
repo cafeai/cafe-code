@@ -1,3 +1,4 @@
+import { uiText } from "@cafecode/shared/i18n";
 import {
   ChatFileAttachment,
   PROVIDER_SEND_TURN_MAX_FILE_BYTES,
@@ -84,7 +85,7 @@ export async function readBounded(response: Response, limit: number): Promise<Ui
       const next = await reader.read();
       if (next.done) break;
       size += next.value.byteLength;
-      if (size > limit) throw new Error("The attachment response was too large.");
+      if (size > limit) throw new Error(uiText("The attachment response was too large."));
       chunks.push(next.value);
     }
   } finally {
@@ -109,7 +110,7 @@ export async function uploadFileAttachment(input: {
   shouldRetain?: () => boolean;
 }): Promise<ChatFileAttachment> {
   if (input.file.size > PROVIDER_SEND_TURN_MAX_FILE_BYTES)
-    throw new Error("Files must be 25 MiB or smaller.");
+    throw new Error(uiText("Files must be 25 MiB or smaller."));
   const response = await fileRequest(input.environmentId, "/api/attachments", {
     method: "POST",
     body: input.file,
@@ -135,7 +136,7 @@ export async function uploadFileAttachment(input: {
     );
     if (attachment.sizeBytes !== input.file.size) throw new Error("size mismatch");
   } catch {
-    throw new Error("The server returned an invalid attachment. Please retry the upload.");
+    throw new Error(uiText("The server returned an invalid attachment. Please retry the upload."));
   }
   if (response.headers.get("x-cafe-attachment-lifecycle") === "provisional-v1") {
     const retain = input.shouldRetain?.() ?? true;
@@ -153,8 +154,8 @@ export async function uploadFileAttachment(input: {
     );
     await acknowledgement.body?.cancel();
     if (acknowledgement.status !== 204)
-      throw new Error("The attachment could not be retained. Please retry the upload.");
-    if (!retain) throw new Error("This file was removed before its upload finished.");
+      throw new Error(uiText("The attachment could not be retained. Please retry the upload."));
+    if (!retain) throw new Error(uiText("This file was removed before its upload finished."));
   }
   return attachment;
 }

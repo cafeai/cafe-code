@@ -1,3 +1,4 @@
+import { uiText } from "@cafecode/shared/i18n";
 import type {
   ProviderDriverKind,
   UsageStatsDay,
@@ -13,7 +14,13 @@ export const USAGE_RANGES = [
   { key: "7", label: "7 days", days: 7 },
   { key: "30", label: "30 days", days: 30 },
   { key: "90", label: "90 days", days: 90 },
-  { key: "all", label: "All", days: Infinity },
+  {
+    key: "all",
+    get label() {
+      return uiText("All");
+    },
+    days: Infinity,
+  },
 ] as const satisfies ReadonlyArray<{ key: UsageRangeKey; label: string; days: number }>;
 
 export interface UsageRangeBounds {
@@ -53,7 +60,7 @@ function currentDayIndex(usage: Pick<UsageStatsGetResult, "today">): number {
   if (dayIndex === undefined) {
     // A client clock cannot safely repair an invalid server calendar anchor.
     // Keep the error fixed so corrupt server data is not copied into UI text.
-    throw new Error("Usage statistics returned an invalid current day.");
+    throw new Error(uiText("Usage statistics returned an invalid current day."));
   }
   return dayIndex;
 }

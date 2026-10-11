@@ -134,4 +134,22 @@ describe("diagnosticsRuntimeViewModel", () => {
       },
     ]);
   });
+
+  it.each([
+    [0, "0 provider daemon events"],
+    [1, "1 provider daemon event"],
+    [10_000, "10000 provider daemon events"],
+  ] as const)("preserves ungrouped lag %i with complete count grammar", (lag, countLabel) => {
+    const data = {
+      errors: [],
+      orchestrator: { providerRuntimeIngestion: { lag, status: "offline" } },
+    } as unknown as ServerRuntimeLayerDiagnosticsResult;
+
+    expect(visibleRuntimeErrors(data, null)).toEqual([
+      {
+        source: "provider-runtime-ingestion",
+        message: `Backend ingestion is ${countLabel} behind; chats may lag provider output.`,
+      },
+    ]);
+  });
 });

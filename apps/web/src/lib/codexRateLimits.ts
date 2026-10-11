@@ -1,3 +1,4 @@
+import { uiFormatDateTime, uiText } from "@cafecode/shared/i18n";
 import type {
   ServerProvider,
   ServerProviderAccountRateLimitSnapshot,
@@ -60,7 +61,9 @@ function clampPercentage(value: number): number {
 
 function formatPercentage(value: number): string {
   const rounded = Math.round(clampPercentage(value) * 10) / 10;
-  return Number.isInteger(rounded) ? `${rounded}%` : `${rounded.toFixed(1)}%`;
+  return uiText("{percent}%", {
+    percent: Number.isInteger(rounded) ? rounded : rounded.toFixed(1),
+  });
 }
 
 function formatWindowDuration(minutes: number | null | undefined): string | null {
@@ -76,7 +79,12 @@ function formatWindowDuration(minutes: number | null | undefined): string | null
   const parts: Array<string> = [];
   const appendPart = (value: number, unit: "day" | "hour" | "minute") => {
     if (value > 0) {
-      parts.push(`${value} ${unit}${value === 1 ? "" : "s"}`);
+      parts.push(
+        uiText(
+          "{unit, select, day {{value, plural, one {# day} other {# days}}} hour {{value, plural, one {# hour} other {# hours}}} other {{value, plural, one {# minute} other {# minutes}}}}",
+          { value, unit },
+        ),
+      );
     }
   };
 
@@ -101,7 +109,11 @@ function formatShortDuration(minutes: number | null | undefined): string | null 
   const days = Math.floor(rounded / 1_440);
   const hours = Math.floor((rounded % 1_440) / 60);
   const remainder = rounded % 60;
-  return [days ? `${days}d` : null, hours ? `${hours}h` : null, remainder ? `${remainder}m` : null]
+  return [
+    days ? uiText("{days}d", { days }) : null,
+    hours ? uiText("{hours}h", { hours }) : null,
+    remainder ? uiText("{minutes}m", { minutes: remainder }) : null,
+  ]
     .filter(Boolean)
     .join(" ");
 }
@@ -109,22 +121,26 @@ function formatShortDuration(minutes: number | null | undefined): string | null 
 function formatResetTime(epochSeconds: number, options: FormatOptions): string | null {
   if (!Number.isFinite(epochSeconds) || epochSeconds <= 0) return null;
   try {
-    return new Intl.DateTimeFormat(options.locale, {
-      year: "numeric",
-      month: "short",
-      day: "numeric",
-      hour: "numeric",
-      minute: "2-digit",
-      timeZoneName: "short",
-      ...(options.timeZone ? { timeZone: options.timeZone } : {}),
-    }).format(new Date(epochSeconds * 1_000));
+    return uiFormatDateTime(
+      new Date(epochSeconds * 1_000),
+      {
+        year: "numeric",
+        month: "short",
+        day: "numeric",
+        hour: "numeric",
+        minute: "2-digit",
+        timeZoneName: "short",
+        ...(options.timeZone ? { timeZone: options.timeZone } : {}),
+      },
+      options.locale,
+    );
   } catch {
     return null;
   }
 }
 
 function formatWindowLine(input: {
-  readonly label: "Primary window" | "Secondary window";
+  readonly label: string;
   readonly durationLabel: string | null;
   readonly window: ServerProviderAccountRateLimitWindow | null | undefined;
 }): CodexRateLimitWindowSummary | null {
@@ -136,13 +152,15 @@ function formatWindowLine(input: {
   if (typeof usedPercent !== "number" || !Number.isFinite(usedPercent)) {
     return null;
   }
-  const label = input.durationLabel ? `${input.label} (${input.durationLabel})` : input.label;
+  const label = input.durationLabel
+    ? uiText("{label} ({duration})", { label: input.label, duration: input.durationLabel })
+    : input.label;
   const remainingPercent = clampPercentage(100 - usedPercent);
-  const value = `${formatPercentage(remainingPercent)} left`;
+  const value = uiText("{percent} left", { percent: formatPercentage(remainingPercent) });
   return {
     label,
     value,
-    text: `${label}: ${value}`,
+    text: uiText("{label}: {value}", { label, value }),
     remainingPercent,
   };
 }
@@ -166,7 +184,7 @@ export function selectCodexRateLimitBuckets(
   if (!buckets.some((bucket) => bucket.id === legacyId || bucket.snapshot.limitId === legacyId)) {
     buckets.unshift({
       id: legacyId,
-      label: legacy.limitName ?? legacy.limitId ?? "Account usage",
+      label: legacy.limitName ?? legacy.limitId ?? uiText("Account usage"),
       snapshot: legacy,
     });
   }
@@ -187,7 +205,9 @@ export function formatCodexRateLimitResetAvailability(
   rateLimits: ServerProviderAccountRateLimits | null | undefined,
 ): string | null {
   const availableCount = selectCodexAvailableResetCount(rateLimits);
-  return availableCount === null ? null : `Usage limit resets available: ${availableCount}`;
+  return availableCount === null
+    ? null
+    : uiText("Usage limit resets available: {count}", { count: availableCount });
 }
 
 export function selectCodexAvailableResetCount(
@@ -247,8 +267,13 @@ function formatCreditValue(
   const rounded = balance ? formatCreditBalance(balance) : null;
   const displayBalance = rounded ?? balance;
   if (credits.unlimited)
-    return displayBalance ? `Unlimited (balance: ${displayBalance})` : "Unlimited";
-  if (!balance) return credits.hasCredits ? "Available (balance not reported)" : "None available";
+    return displayBalance
+      ? uiText("Unlimited (balance: {balance})", { balance: displayBalance })
+      : uiText("Unlimited");
+  if (!balance)
+    return credits.hasCredits
+      ? uiText("Available (balance not reported)")
+      : uiText("None available");
 
   // Amounts are provider decimal strings, not floating-point numbers or
   // currency. Availability uses the original unrounded value, never its
@@ -256,8 +281,12 @@ function formatCreditValue(
   // override hasCredits=false. A genuinely reported decimal zero is safe to
   // describe as zero available; all other amounts require the provider flag.
   const zero = /^[+-]?(?:0+(?:\.0*)?|\.0+)$/u.test(balance);
-  if ((credits.hasCredits && rounded !== null) || zero) return `${displayBalance} available`;
-  return `${credits.hasCredits ? "Available" : "None available"} (balance: ${displayBalance})`;
+  if ((credits.hasCredits && rounded !== null) || zero)
+    return uiText("{balance} available", { balance: displayBalance });
+  return uiText(
+    "{available, select, yes {Available} other {None available}} (balance: {balance})",
+    { available: credits.hasCredits ? "yes" : "no", balance: displayBalance },
+  );
 }
 
 function formatSnapshot(
@@ -265,63 +294,75 @@ function formatSnapshot(
   options: FormatOptions,
 ): CodexRateLimitSummary | null {
   const primary = formatWindowLine({
-    label: "Primary window",
+    label: uiText("Primary window"),
     durationLabel: formatWindowDuration(snapshot.primary?.windowDurationMins),
     window: snapshot.primary,
   });
   const secondary = formatWindowLine({
-    label: "Secondary window",
+    label: uiText("Secondary window"),
     durationLabel: formatWindowDuration(snapshot.secondary?.windowDurationMins),
     window: snapshot.secondary,
   });
   const primaryResetAt = snapshot.primary?.resetsAt ?? null;
   const primaryResetTime = primaryResetAt ? formatResetTime(primaryResetAt, options) : null;
-  const primaryResetLabel = formatShortDuration(snapshot.primary?.windowDurationMins) ?? "Primary";
-  const primaryReset = primaryResetTime ? `${primaryResetLabel} reset: ${primaryResetTime}` : null;
+  const primaryResetLabel =
+    formatShortDuration(snapshot.primary?.windowDurationMins) ?? uiText("Primary");
+  const primaryReset = primaryResetTime
+    ? uiText("{window} reset: {time}", { window: primaryResetLabel, time: primaryResetTime })
+    : null;
 
   const secondaryResetAt = snapshot.secondary?.resetsAt ?? null;
   const secondaryResetTime = secondaryResetAt ? formatResetTime(secondaryResetAt, options) : null;
   const secondaryResetLabel =
-    formatShortDuration(snapshot.secondary?.windowDurationMins) ?? "Secondary";
+    formatShortDuration(snapshot.secondary?.windowDurationMins) ?? uiText("Secondary");
   const secondaryReset = secondaryResetTime
-    ? `${secondaryResetLabel} reset: ${secondaryResetTime}`
+    ? uiText("{window} reset: {time}", { window: secondaryResetLabel, time: secondaryResetTime })
     : null;
   const details: CodexRateLimitSummaryLine[] = [];
   const append = (label: string, value: string) =>
-    details.push({ label, value, text: `${label}: ${value}` });
+    details.push({ label, value, text: uiText("{label}: {value}", { label, value }) });
   const credits = snapshot.credits;
   if (credits) {
-    append("Credits", formatCreditValue(credits));
+    append(uiText("Credits"), formatCreditValue(credits));
   }
   const individual = snapshot.individualLimit;
   if (individual) {
     // One row for one limit: amount, remaining share and reset together.
     const remaining = Number.isFinite(individual.remainingPercent)
-      ? ` (${formatPercentage(individual.remainingPercent)} left)`
+      ? uiText(" ({percent} left)", { percent: formatPercentage(individual.remainingPercent) })
       : "";
     const reset = formatResetTime(individual.resetsAt, options);
     append(
-      "Individual spend limit",
-      `${individual.used} used of ${individual.limit}${remaining}${reset ? `, resets ${reset}` : ""}`,
+      uiText("Individual spend limit"),
+      uiText(
+        "{used} used of {limit}{remaining}{resetKnown, select, yes {, resets {reset}} other {}}",
+        {
+          used: individual.used,
+          limit: individual.limit,
+          remaining,
+          resetKnown: reset ? "yes" : "no",
+          reset: reset ?? "",
+        },
+      ),
     );
   }
   // Only a reached spend control is worth a row; "not reached" is the normal
   // state and restates nothing the usage windows don't already show.
   if (snapshot.spendControlReached === true) {
-    append("Spend control", "Limit reached");
+    append(uiText("Spend control"), uiText("Limit reached"));
   }
   const reason = snapshot.rateLimitReachedType?.trim();
   if (reason) {
     // These values come from Codex's generated RateLimitReachedType. Preserve
     // future identifiers as inert text instead of guessing their billing cause.
     const reasons = new Map([
-      ["rate_limit_reached", "Usage limit reached"],
-      ["workspace_owner_credits_depleted", "Workspace owner credits depleted"],
-      ["workspace_member_credits_depleted", "Workspace member credits depleted"],
-      ["workspace_owner_usage_limit_reached", "Workspace owner usage limit reached"],
-      ["workspace_member_usage_limit_reached", "Workspace member usage limit reached"],
+      ["rate_limit_reached", uiText("Usage limit reached")],
+      ["workspace_owner_credits_depleted", uiText("Workspace owner credits depleted")],
+      ["workspace_member_credits_depleted", uiText("Workspace member credits depleted")],
+      ["workspace_owner_usage_limit_reached", uiText("Workspace owner usage limit reached")],
+      ["workspace_member_usage_limit_reached", uiText("Workspace member usage limit reached")],
     ]);
-    append("Limit reached", reasons.get(reason) ?? reason);
+    append(uiText("Limit reached"), reasons.get(reason) ?? reason);
   }
 
   if (!primary && !secondary && !primaryReset && !secondaryReset && details.length === 0) {
@@ -378,7 +419,9 @@ export function formatCodexRateLimitInlineText(
     ]
       .filter((part): part is string => Boolean(part))
       .join(" · ");
-    return buckets.length > 1 || summary.id !== "codex" ? `${summary.label}: ${text}` : text;
+    return buckets.length > 1 || summary.id !== "codex"
+      ? uiText("{label}: {value}", { label: summary.label, value: text })
+      : text;
   });
   return parts.length > 0 ? parts.join(" · ") : null;
 }

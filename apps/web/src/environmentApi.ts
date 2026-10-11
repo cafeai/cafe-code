@@ -1,3 +1,4 @@
+import { uiText } from "@cafecode/shared/i18n";
 import type { EnvironmentId, EnvironmentApi } from "@cafecode/contracts";
 
 import type { WsRpcClient } from "./rpc/wsRpcClient";
@@ -79,7 +80,11 @@ export function readEnvironmentApi(environmentId: EnvironmentId): EnvironmentApi
 export function ensureEnvironmentApi(environmentId: EnvironmentId): EnvironmentApi {
   const api = readEnvironmentApi(environmentId);
   if (!api) {
-    throw new Error(`Environment API not found for environment ${environmentId}`);
+    throw new Error(
+      uiText("Environment API not found for environment {environmentId}", {
+        environmentId: environmentId,
+      }),
+    );
   }
   return api;
 }

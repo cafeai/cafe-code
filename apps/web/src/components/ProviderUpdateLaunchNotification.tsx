@@ -1,3 +1,5 @@
+import { UiMessage, useUiPresentation } from "~/i18n";
+import { uiText } from "@cafecode/shared/i18n";
 import { useNavigate } from "@tanstack/react-router";
 import { DownloadIcon } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef } from "react";
@@ -19,6 +21,7 @@ import {
   getProviderUpdateRejectedToastView,
   getProviderUpdateRunningToastView,
   providerUpdateNotificationKey,
+  type ProviderUpdateCandidate,
   type ProviderUpdateToastView,
 } from "./ProviderUpdateLaunchNotification.logic";
 import { stackedThreadToast, toastManager } from "./ui/toast";
@@ -35,6 +38,67 @@ type ActiveProviderUpdateToast =
       readonly providerInstanceIds: ReadonlySet<ProviderInstanceId>;
       readonly providerCount: number;
     };
+
+/** Retain the same finite phase inputs as the existing toast update, not its
+ * translated strings. These snapshots are display-only: a locale render never
+ * rechecks update eligibility, changes a phase or calls the provider/manager. */
+type ProviderUpdateToastCopy =
+  | {
+      readonly kind: "initial";
+      readonly updateProviders: ReadonlyArray<ProviderUpdateCandidate>;
+      readonly oneClickProviders: ReadonlyArray<ProviderUpdateCandidate>;
+    }
+  | { readonly kind: "running"; readonly providerCount: number }
+  | {
+      readonly kind: "rejected";
+      readonly providerCount: number;
+      /** Received Error.message is opaque; null admits only Cafe's fallback. */
+      readonly rawMessage: string | null;
+    }
+  | {
+      readonly kind: "progress";
+      readonly providers: Parameters<typeof getProviderUpdateProgressToastView>[0]["providers"];
+      readonly providerCount: number;
+    };
+
+function resolveProviderUpdateToastCopy(copy: ProviderUpdateToastCopy): ProviderUpdateToastView {
+  switch (copy.kind) {
+    case "initial":
+      return getProviderUpdateInitialToastView(copy);
+    case "running":
+      return getProviderUpdateRunningToastView(copy.providerCount);
+    case "rejected":
+      return getProviderUpdateRejectedToastView(
+        copy.providerCount,
+        copy.rawMessage ?? uiText("Provider update failed."),
+      );
+    case "progress":
+      return getProviderUpdateProgressToastView(copy);
+  }
+}
+
+// Only this code-owned pure formatter enters the locale-keyed presentation
+// cache. Captured provider snapshots/received error strings do not enter it.
+const TOAST_COPY_PRESENTATION = { resolveProviderUpdateToastCopy };
+
+function ProviderUpdateToastText({
+  copy,
+  field,
+}: {
+  copy: ProviderUpdateToastCopy;
+  field: "title" | "description";
+}) {
+  const presentation = useUiPresentation(TOAST_COPY_PRESENTATION);
+  const view = presentation.resolveProviderUpdateToastCopy(copy);
+  // The shared toast clamps string error descriptions at 180 characters. A
+  // React copy node must retain that same visual bound rather than expanding a
+  // long opaque provider error. Copy is already disabled for these notices;
+  // React still escapes the complete received string without interpreting it.
+  if (field === "description" && view.type === "error" && view.description.length >= 180) {
+    return <span className="line-clamp-4">{view.description}</span>;
+  }
+  return <>{view[field]}</>;
+}
 
 function ProviderUpdateToastIcon({ provider }: { provider: ProviderDriverKind }) {
   const ProviderIcon = PROVIDER_ICON_BY_PROVIDER[provider];
@@ -60,13 +124,14 @@ function ProviderUpdateToastIcon({ provider }: { provider: ProviderDriverKind })
 function updateProviderUpdateToast(input: {
   readonly toastId: ProviderUpdateToastId;
   readonly view: ProviderUpdateToastView;
+  readonly copy: ProviderUpdateToastCopy;
   readonly openSettings: () => void;
 }) {
   if (input.view.type === "loading" || input.view.type === "success") {
     toastManager.update(input.toastId, {
       type: input.view.type,
-      title: input.view.title,
-      description: input.view.description,
+      title: <ProviderUpdateToastText copy={input.copy} field="title" />,
+      description: <ProviderUpdateToastText copy={input.copy} field="description" />,
       timeout: 0,
       // Toast updates merge fields; omission would retain the prompt's Update
       // action while the command runs and after it succeeds.
@@ -85,11 +150,11 @@ function updateProviderUpdateToast(input: {
     input.toastId,
     stackedThreadToast({
       type: input.view.type,
-      title: input.view.title,
-      description: input.view.description,
+      title: <ProviderUpdateToastText copy={input.copy} field="title" />,
+      description: <ProviderUpdateToastText copy={input.copy} field="description" />,
       timeout: 0,
       actionProps: {
-        children: "Settings",
+        children: <UiMessage message="Settings" />,
         onClick: input.openSettings,
       },
       actionVariant: "outline",
@@ -167,6 +232,11 @@ export function ProviderUpdateLaunchNotification() {
     updateProviderUpdateToast({
       toastId: activeToast.toastId,
       view,
+      copy: {
+        kind: "progress",
+        providers: activeProviders,
+        providerCount: activeToast.providerCount,
+      },
       openSettings: () => openProviderSettings(activeToast.toastId),
     });
 
@@ -221,6 +291,7 @@ export function ProviderUpdateLaunchNotification() {
       updateProviderUpdateToast({
         toastId,
         view: getProviderUpdateRunningToastView(providerCount),
+        copy: { kind: "running", providerCount },
         openSettings,
       });
 
@@ -239,9 +310,15 @@ export function ProviderUpdateLaunchNotification() {
 
         const rejectedMessage = firstRejectedProviderUpdateMessage(results);
         if (rejectedMessage) {
+          const rejection = results.find((result) => result.status === "rejected");
           updateProviderUpdateToast({
             toastId,
             view: getProviderUpdateRejectedToastView(providerCount, rejectedMessage),
+            copy: {
+              kind: "rejected",
+              providerCount,
+              rawMessage: rejection?.reason instanceof Error ? rejectedMessage : null,
+            },
             openSettings,
           });
           activeToastRef.current = null;
@@ -259,6 +336,7 @@ export function ProviderUpdateLaunchNotification() {
         updateProviderUpdateToast({
           toastId,
           view,
+          copy: { kind: "progress", providers: updatedProviderSnapshots, providerCount },
           openSettings,
         });
 
@@ -271,17 +349,27 @@ export function ProviderUpdateLaunchNotification() {
     toastId = toastManager.add(
       stackedThreadToast({
         type: initialView.type,
-        title: initialView.title,
-        description: initialView.description,
+        title: (
+          <ProviderUpdateToastText
+            copy={{ kind: "initial", updateProviders, oneClickProviders }}
+            field="title"
+          />
+        ),
+        description: (
+          <ProviderUpdateToastText
+            copy={{ kind: "initial", updateProviders, oneClickProviders }}
+            field="description"
+          />
+        ),
         timeout: 0,
         actionProps:
           oneClickProviders.length > 0
             ? {
-                children: "Update",
+                children: <UiMessage message="Update" />,
                 onClick: runUpdates,
               }
             : {
-                children: "Settings",
+                children: <UiMessage message="Settings" />,
                 onClick: openSettings,
               },
         actionVariant: oneClickProviders.length > 0 ? "default" : "outline",
@@ -295,7 +383,7 @@ export function ProviderUpdateLaunchNotification() {
           ...(oneClickProviders.length > 0
             ? {
                 secondaryActionProps: {
-                  children: "Settings",
+                  children: <UiMessage message="Settings" />,
                   onClick: openSettings,
                 },
                 secondaryActionVariant: "outline" as const,

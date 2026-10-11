@@ -1,3 +1,5 @@
+import { getUiDirection, getUiLocale, uiText } from "./i18n.ts";
+
 /**
  * This boot-only token adapter deliberately does not load the web application,
  * fonts, icons or stylesheet: those resources require the backend whose
@@ -45,13 +47,13 @@ export function desktopStartupCopy(phase: DesktopStartupPhase): {
   switch (phase) {
     case "migrating":
       return {
-        label: "Updating your workspace…",
-        detail: "Large workspaces can take a while. Your chats stay saved.",
+        label: uiText("Updating your workspace…"),
+        detail: uiText("Large workspaces can take a while. Your chats stay saved."),
       };
     case "ready":
-      return { label: "Opening your workspace…", detail: "" };
+      return { label: uiText("Opening your workspace…"), detail: "" };
     default:
-      return { label: "Starting…", detail: "" };
+      return { label: uiText("Starting…"), detail: "" };
   }
 }
 
@@ -71,10 +73,25 @@ export function createDesktopStartupDocument(
     throw new Error("Invalid startup stylesheet identity.");
   }
   const { label, detail } = desktopStartupCopy(phase);
+  // Catalogs are trusted bundled text, never markup. Escape the complete result
+  // as an additional boundary: a future translation cannot create boot-time
+  // script, links, inline styles or additional capability-bearing elements.
+  const escape = (value: string): string =>
+    value.replace(
+      /[&<>"']/g,
+      (character) =>
+        ({
+          "&": "&amp;",
+          "<": "&lt;",
+          ">": "&gt;",
+          '"': "&quot;",
+          "'": "&#39;",
+        })[character]!,
+    );
   return `<!doctype html>
-<html lang="en"><head><meta charset="UTF-8">
+<html lang="${getUiLocale()}" dir="${getUiDirection()}"><head><meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'sha256-${styleSha256}'; script-src 'none'; connect-src 'none'; img-src 'none'; font-src 'none'; object-src 'none'; frame-src 'none'; base-uri 'none'; form-action 'none'">
 <title>Cafe Code</title><style>${DESKTOP_STARTUP_STYLE}</style></head>
-<body><main><h1>Cafe Code</h1><div class="status" role="status" aria-live="polite"><span class="spinner" aria-hidden="true"></span><span class="label">${label}</span></div>${detail ? `<p class="detail">${detail}</p>` : ""}</main></body></html>`;
+<body><main><h1>Cafe Code</h1><div class="status" role="status" aria-live="polite"><span class="spinner" aria-hidden="true"></span><span class="label">${escape(label)}</span></div>${detail ? `<p class="detail">${escape(detail)}</p>` : ""}</main></body></html>`;
 }

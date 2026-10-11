@@ -17,6 +17,8 @@ export interface ElectronAppMetadata {
 export interface ElectronAppShape {
   readonly metadata: Effect.Effect<ElectronAppMetadata>;
   readonly name: Effect.Effect<string>;
+  /** Presentation only; this API is valid before ready on every host. */
+  readonly preferredSystemLanguages?: Effect.Effect<readonly string[]>;
   readonly whenReady: Effect.Effect<void>;
   readonly quit: Effect.Effect<void>;
   readonly exit: (code: number) => Effect.Effect<void>;
@@ -67,6 +69,10 @@ const make = ElectronApp.of({
     runningUnderArm64Translation: Electron.app.runningUnderARM64Translation === true,
   })),
   name: Effect.sync(() => Electron.app.name),
+  preferredSystemLanguages: Effect.try({
+    try: () => Electron.app.getPreferredSystemLanguages(),
+    catch: () => undefined,
+  }).pipe(Effect.catch(() => Effect.succeed([]))),
   whenReady: Effect.promise(() => Electron.app.whenReady()).pipe(Effect.asVoid),
   quit: Effect.sync(() => {
     Electron.app.quit();

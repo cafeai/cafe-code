@@ -1,3 +1,4 @@
+import { uiText } from "@cafecode/shared/i18n";
 import type { OrchestrationThreadActivity } from "@cafecode/contracts";
 import type { WorkLogEntry } from "./session-logic";
 import type { Thread } from "./types";
@@ -126,8 +127,11 @@ export function nativeRetryWorkLogLabel(payloadValue: unknown): string | null {
     (retry.observedCount as number) > 1_024 ||
     (Object.hasOwn(retry, "countLimited") && retry.countLimited !== true)
   )
-    return "Provider retry";
-  return `Provider retry · ${retry.observedCount}${retry.countLimited === true ? "+" : ""}`;
+    return uiText("Provider retry");
+  return uiText("Provider retry · {count}{lowerBound, select, yes {+} other {}}", {
+    count: retry.observedCount as number,
+    lowerBound: retry.countLimited === true ? "yes" : "no",
+  });
 }
 
 /** Saved rows stay static; historical waits must not acquire live countdown timers. */
@@ -135,12 +139,28 @@ export function codexRecoveryWorkLogLabel(activity: OrchestrationThreadActivity)
   const payload = activity.kind === "runtime.warning" ? ownRecord(activity.payload) : null;
   if (payload?.recovery === "codex-transient-continuation-attempted") {
     const count = continuationCount(payload);
-    return `Cafe recovery${count.continuationOrdinal === undefined ? "" : ` · Retry #${count.continuationOrdinal}${count.continuationOrdinalLowerBound ? "+" : ""}`}`;
+    return uiText(
+      "Cafe recovery{hasCount, select, yes { · Retry #{count}{lowerBound, select, yes {+} other {}}} other {}}",
+      {
+        hasCount: count.continuationOrdinal === undefined ? "no" : "yes",
+        count: count.continuationOrdinal ?? 0,
+        lowerBound: count.continuationOrdinalLowerBound ? "yes" : "no",
+      },
+    );
   }
   const wait = readCodexRecoveryWait(activity);
   if (!wait) return null;
   const count = wait.continuationOrdinal;
-  return `Cafe recovery${count === undefined ? "" : ` · Retry #${count}${wait.continuationOrdinalLowerBound ? "+" : ""}`} · ${wait.stage === "reconciling" ? "check in" : "backoff"} ${wait.backoffSeconds}s`;
+  return uiText(
+    "Cafe recovery{hasCount, select, yes { · Retry #{count}{lowerBound, select, yes {+} other {}}} other {}} · {stage, select, reconciling {check in} other {backoff}} {seconds}s",
+    {
+      hasCount: count === undefined ? "no" : "yes",
+      count: count ?? 0,
+      lowerBound: wait.continuationOrdinalLowerBound ? "yes" : "no",
+      stage: wait.stage,
+      seconds: wait.backoffSeconds,
+    },
+  );
 }
 
 /**
@@ -298,16 +318,16 @@ export function shouldSuppressCodexRecoveryErrorNotification(input: {
 
 /** Deadline expiry is only a presentation boundary, never proof of dispatch. */
 export function codexRecoveryLabel(presentation: CodexRecoveryPresentation, nowMs: number): string {
-  if (presentation.stage === "uncertain") return "Needs reconciliation";
-  if (presentation.stage === "reconciling") return "Checking recovery";
+  if (presentation.stage === "uncertain") return uiText("Needs reconciliation");
+  if (presentation.stage === "reconciling") return uiText("Checking recovery");
   const count = presentation.continuationOrdinal;
   const retry =
     count === undefined
-      ? "Retry"
+      ? uiText("Retry")
       : `Retry #${count}${presentation.continuationOrdinalLowerBound ? "+" : ""}`;
   if (presentation.retryAtMs !== null && presentation.retryAtMs > nowMs) {
     return `${retry} in ${Math.ceil((presentation.retryAtMs - nowMs) / 1_000)}s`;
   }
   if (count !== undefined) return retry;
-  return presentation.stage === null ? "" : "Reconnecting";
+  return presentation.stage === null ? "" : uiText("Reconnecting");
 }

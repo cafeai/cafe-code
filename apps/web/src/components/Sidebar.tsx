@@ -1,3 +1,6 @@
+import { useUiLocale, useUiPresentation } from "~/i18n";
+import { uiText } from "@cafecode/shared/i18n";
+import { UiMessage } from "~/i18n";
 import {
   ArchiveIcon,
   ArrowUpDownIcon,
@@ -226,13 +229,23 @@ import {
   type StandaloneCatalogEntry,
 } from "./sidebar/standaloneNavigation.logic";
 const SIDEBAR_SORT_LABELS: Record<SidebarProjectSortOrder, string> = {
-  updated_at: "Last user message",
-  created_at: "Created at",
-  manual: "Manual",
+  get updated_at() {
+    return uiText("Last user message");
+  },
+  get created_at() {
+    return uiText("Created at");
+  },
+  get manual() {
+    return uiText("Manual");
+  },
 };
 const SIDEBAR_THREAD_SORT_LABELS: Record<SidebarThreadSortOrder, string> = {
-  updated_at: "Last user message",
-  created_at: "Created at",
+  get updated_at() {
+    return uiText("Last user message");
+  },
+  get created_at() {
+    return uiText("Created at");
+  },
 };
 const SIDEBAR_LIST_ANIMATION_OPTIONS = {
   duration: 180,
@@ -251,9 +264,15 @@ function pathContainsPath(parentPath: string, childPath: string): boolean {
   return child.startsWith(`${parent}/`);
 }
 const PROJECT_GROUPING_MODE_LABELS: Record<SidebarProjectGroupingMode, string> = {
-  repository: "Group by repository",
-  repository_path: "Group by repository path",
-  separate: "Keep separate",
+  get repository() {
+    return uiText("Group by repository");
+  },
+  get repository_path() {
+    return uiText("Group by repository path");
+  },
+  get separate() {
+    return uiText("Keep separate");
+  },
 };
 
 function sortThreadMoveCandidates(projects: readonly Project[]): Project[] {
@@ -280,17 +299,22 @@ function formatProjectMemberActionLabel(
     return member.name;
   }
 
-  return member.environmentLabel ? `${member.environmentLabel} — ${member.cwd}` : member.cwd;
+  return member.environmentLabel
+    ? uiText("{environment} — {path}", {
+        environment: member.environmentLabel,
+        path: member.cwd,
+      })
+    : member.cwd;
 }
 
 function projectGroupingModeDescription(mode: SidebarProjectGroupingMode): string {
   switch (mode) {
     case "repository":
-      return "Projects from the same repository share one sidebar row.";
+      return uiText("Projects from the same repository share one sidebar row.");
     case "repository_path":
-      return "Projects group only when both the repository and repo-relative path match.";
+      return uiText("Projects group only when both the repository and repo-relative path match.");
     case "separate":
-      return "Every project path gets its own sidebar row.";
+      return uiText("Every project path gets its own sidebar row.");
   }
 }
 
@@ -401,6 +425,8 @@ function ThreadRepairProgressDialog({
   state: ThreadRepairDialogState | null;
   onClose: () => void;
 }) {
+  const uiLocale = useUiLocale();
+
   const running = state?.phase === "running";
   const result = state?.phase === "complete" ? state.result : null;
   const skipped = result ? repairDialogSkippedCount(result) : 0;
@@ -416,9 +442,13 @@ function ThreadRepairProgressDialog({
     >
       <DialogPopup className="max-w-md" showCloseButton={!running}>
         <DialogHeader>
-          <DialogTitle>Repair chat messages</DialogTitle>
+          <DialogTitle>
+            {uiText("Repair chat messages", undefined, undefined, uiLocale)}
+          </DialogTitle>
           <DialogDescription>
-            {state ? `"${state.thread.title}"` : "Repairing the selected chat."}
+            {state
+              ? uiText('"{title}"', { title: state.thread.title }, undefined, uiLocale)
+              : uiText("Repairing the selected chat.", undefined, undefined, uiLocale)}
           </DialogDescription>
         </DialogHeader>
         <DialogPanel className="space-y-4">
@@ -426,33 +456,53 @@ function ThreadRepairProgressDialog({
             <div className="space-y-3">
               <div
                 role="progressbar"
-                aria-label="Repair progress"
+                aria-label={uiText("Repair progress", undefined, undefined, uiLocale)}
                 className="h-2 overflow-hidden rounded-full bg-muted"
               >
                 <div className="h-full w-1/2 animate-pulse rounded-full bg-primary" />
               </div>
-              <p className="text-sm text-muted-foreground">Checking saved and provider history…</p>
+              <p className="text-sm text-muted-foreground">
+                {uiText("Checking saved and provider history…", undefined, undefined, uiLocale)}
+              </p>
             </div>
           ) : null}
 
           {result ? (
             <div className="space-y-2">
               <div className="grid grid-cols-2 gap-2 text-sm">
-                <RepairCountCell label="Messages" value={result.counts.totalMessages} />
-                <RepairCountCell label="Repaired" value={result.counts.repaired} />
-                <RepairCountCell label="Already complete" value={result.counts.unchanged} />
-                <RepairCountCell label="Skipped" value={skipped} />
+                <RepairCountCell
+                  label={uiText("Messages", undefined, undefined, uiLocale)}
+                  value={result.counts.totalMessages}
+                />
+                <RepairCountCell
+                  label={uiText("Repaired", undefined, undefined, uiLocale)}
+                  value={result.counts.repaired}
+                />
+                <RepairCountCell
+                  label={uiText("Already complete", undefined, undefined, uiLocale)}
+                  value={result.counts.unchanged}
+                />
+                <RepairCountCell
+                  label={uiText("Skipped", undefined, undefined, uiLocale)}
+                  value={skipped}
+                />
               </div>
               {/* Which history sources were consulted is diagnostic detail,
                   so it stays collapsed (docs/style-guide.md §10). */}
               <details className="group/repair-details text-xs text-muted-foreground">
                 <summary className="focus-ring inline-flex cursor-pointer list-none items-center gap-1 rounded-sm select-none hover:text-foreground [&::-webkit-details-marker]:hidden">
                   <ChevronRightIcon className="size-3.5 transition-transform duration-(--duration-fast) group-open/repair-details:rotate-90" />
-                  Details
+                  {uiText("Details", undefined, undefined, uiLocale)}
                 </summary>
                 <div className="mt-2 grid animate-enter-rise grid-cols-2 gap-2 text-sm">
-                  <RepairCountCell label="Local checks" value={result.counts.localAttempts} />
-                  <RepairCountCell label="Upstream checks" value={result.counts.upstreamAttempts} />
+                  <RepairCountCell
+                    label={uiText("Local checks", undefined, undefined, uiLocale)}
+                    value={result.counts.localAttempts}
+                  />
+                  <RepairCountCell
+                    label={uiText("Upstream checks", undefined, undefined, uiLocale)}
+                    value={result.counts.upstreamAttempts}
+                  />
                 </div>
               </details>
             </div>
@@ -461,14 +511,16 @@ function ThreadRepairProgressDialog({
           {state?.phase === "error" ? (
             <Alert variant="error">
               <TriangleAlertIcon className="size-4" />
-              <AlertTitle>Could not repair chat</AlertTitle>
+              <AlertTitle>
+                {uiText("Could not repair chat", undefined, undefined, uiLocale)}
+              </AlertTitle>
               <AlertDescription>{state.message}</AlertDescription>
             </Alert>
           ) : null}
         </DialogPanel>
         {!running ? (
           <DialogFooter>
-            <Button onClick={onClose}>Close</Button>
+            <Button onClick={onClose}>{uiText("Close", undefined, undefined, uiLocale)}</Button>
           </DialogFooter>
         ) : null}
       </DialogPopup>
@@ -477,6 +529,9 @@ function ThreadRepairProgressDialog({
 }
 
 const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowProps) {
+  const uiLocale = useUiLocale();
+  const uiPresentation = useUiPresentation(UI_PRESENTATION_SOURCES);
+
   const {
     orderedProjectThreadKeys,
     isActive,
@@ -539,7 +594,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
     },
   });
   const pr = thread.projectId === null ? null : resolveThreadPr(thread.branch, gitStatus.data);
-  const prStatus = prStatusIndicator(pr, gitStatus.data?.sourceControlProvider);
+  const prStatus = uiPresentation.prStatusIndicator(pr, gitStatus.data?.sourceControlProvider);
   const isConfirmingArchive = confirmingArchiveThreadKey === threadKey && !isThreadRunning;
   const threadMetaClassName = isConfirmingArchive
     ? "pointer-events-none opacity-0"
@@ -742,7 +797,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
           {renamingThreadKey === threadKey ? (
             <input
               ref={handleRenameInputRef}
-              aria-label="Chat title"
+              aria-label={uiText("Chat title", undefined, undefined, uiLocale)}
               className="min-w-0 flex-1 truncate rounded-sm border border-ring bg-transparent px-0.5 text-base outline-none sm:text-ui"
               value={renamingTitle}
               onChange={handleRenameInputChange}
@@ -782,7 +837,12 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
                     <button
                       type="button"
                       data-thread-selection-safe
-                      aria-label={`Rename ${thread.title}`}
+                      aria-label={uiText(
+                        "Rename {value0}",
+                        { value0: thread.title },
+                        undefined,
+                        uiLocale,
+                      )}
                       className="inline-flex size-5 shrink-0 items-center justify-center rounded-sm text-subtle-foreground transition-colors duration-(--duration-fast) hover:text-foreground focus-visible:ring-1 focus-visible:ring-ring max-md:size-8 pointer-coarse:size-8"
                       onPointerDown={stopPropagationOnPointerDown}
                       onClick={(event) => {
@@ -795,7 +855,9 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
                     </button>
                   }
                 />
-                <TooltipPopup side="top">Rename (F2)</TooltipPopup>
+                <TooltipPopup side="top">
+                  {uiText("Rename (F2)", undefined, undefined, uiLocale)}
+                </TooltipPopup>
               </Tooltip>
             ) : null}
             {isConfirmingArchive ? (
@@ -804,12 +866,17 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
                 type="button"
                 data-thread-selection-safe
                 data-testid={`thread-archive-confirm-${thread.id}`}
-                aria-label={`Confirm archive ${thread.title}`}
+                aria-label={uiText(
+                  "Confirm archive {value0}",
+                  { value0: thread.title },
+                  undefined,
+                  uiLocale,
+                )}
                 className="inline-flex h-5 cursor-pointer items-center rounded-full bg-destructive/12 px-2 text-2xs font-medium text-destructive-foreground transition-colors duration-(--duration-fast) hover:bg-destructive/18 focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-destructive/40"
                 onPointerDown={stopPropagationOnPointerDown}
                 onClick={handleConfirmArchiveClick}
               >
-                Confirm
+                {uiText("Confirm", undefined, undefined, uiLocale)}
               </button>
             ) : !isThreadRunning ? (
               appSettingsConfirmThreadArchive ? (
@@ -817,7 +884,12 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
                   type="button"
                   data-thread-selection-safe
                   data-testid={`thread-archive-${thread.id}`}
-                  aria-label={`Archive ${thread.title}`}
+                  aria-label={uiText(
+                    "Archive {value0}",
+                    { value0: thread.title },
+                    undefined,
+                    uiLocale,
+                  )}
                   className="inline-flex size-5 cursor-pointer items-center justify-center rounded-sm text-subtle-foreground transition-colors duration-(--duration-fast) hover:text-foreground focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-ring max-md:size-8 pointer-coarse:size-8"
                   onPointerDown={stopPropagationOnPointerDown}
                   onClick={handleStartArchiveConfirmation}
@@ -835,7 +907,12 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
                           type="button"
                           data-thread-selection-safe
                           data-testid={`thread-archive-${thread.id}`}
-                          aria-label={`Archive ${thread.title}`}
+                          aria-label={uiText(
+                            "Archive {value0}",
+                            { value0: thread.title },
+                            undefined,
+                            uiLocale,
+                          )}
                           className="inline-flex size-5 cursor-pointer items-center justify-center rounded-sm text-subtle-foreground transition-colors duration-(--duration-fast) hover:text-foreground focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-ring max-md:size-8 pointer-coarse:size-8"
                           onPointerDown={stopPropagationOnPointerDown}
                           onClick={handleArchiveImmediateClick}
@@ -845,7 +922,9 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
                       </span>
                     }
                   />
-                  <TooltipPopup side="top">Archive</TooltipPopup>
+                  <TooltipPopup side="top">
+                    {uiText("Archive", undefined, undefined, uiLocale)}
+                  </TooltipPopup>
                 </Tooltip>
               )
             ) : null}
@@ -861,7 +940,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
                   isHighlighted ? "text-muted-foreground" : "text-subtle-foreground"
                 }`}
               >
-                {formatRelativeTimeLabel(
+                {uiPresentation.formatRelativeTimeLabel(
                   thread.latestUserMessageAt ?? thread.updatedAt ?? thread.createdAt,
                 )}
               </span>
@@ -900,6 +979,9 @@ export const SidebarStandaloneChats = memo(function SidebarStandaloneChats({
   onNewChat: () => void;
   newChatDisabled?: boolean;
 }) {
+  const uiLocale = useUiLocale();
+  const uiPresentation = useUiPresentation(UI_PRESENTATION_SOURCES);
+
   const [renamingThreadKey, setRenamingThreadKey] = useState<string | null>(null);
   const [renamingTitle, setRenamingTitle] = useState("");
   const [confirmingArchiveThreadKey, setConfirmingArchiveThreadKey] = useState<string | null>(null);
@@ -938,7 +1020,7 @@ export const SidebarStandaloneChats = memo(function SidebarStandaloneChats({
     () =>
       expanded
         ? null
-        : summarizeHiddenThreadStatuses(
+        : uiPresentation.summarizeHiddenThreadStatuses(
             entries.slice(previewCount).map((entry, index) => {
               const lastVisitedAt = hiddenLastVisitedAts[index];
               return resolveThreadStatusPill({
@@ -951,7 +1033,7 @@ export const SidebarStandaloneChats = memo(function SidebarStandaloneChats({
               });
             }),
           ),
-    [entries, expanded, hiddenLastVisitedAts, previewCount],
+    [entries, expanded, hiddenLastVisitedAts, previewCount, uiPresentation],
   );
   const cancelRename = useCallback(() => {
     setRenamingThreadKey(null);
@@ -972,16 +1054,20 @@ export const SidebarStandaloneChats = memo(function SidebarStandaloneChats({
         toastManager.add(
           stackedThreadToast({
             type: "error",
-            title: "Could not rename chat",
-            description:
+            title: uiText("Could not rename chat", undefined, undefined, uiLocale),
+            description: uiText(
               "Check the chat title and reconnect to its environment before trying again.",
+              undefined,
+              undefined,
+              uiLocale,
+            ),
           }),
         );
       } finally {
         setRenamingThreadKey((current) => (current === key ? null : current));
       }
     },
-    [],
+    [uiLocale],
   );
   const attemptArchiveThread = useCallback(
     async (threadRef: ScopedThreadRef) => {
@@ -992,13 +1078,18 @@ export const SidebarStandaloneChats = memo(function SidebarStandaloneChats({
         toastManager.add(
           stackedThreadToast({
             type: "error",
-            title: "Could not archive chat",
-            description: "Reconnect to the chat's environment before trying again.",
+            title: uiText("Could not archive chat", undefined, undefined, uiLocale),
+            description: uiText(
+              "Reconnect to the chat''s environment before trying again.",
+              undefined,
+              undefined,
+              uiLocale,
+            ),
           }),
         );
       }
     },
-    [archiveThread, removeFromSelection],
+    [archiveThread, removeFromSelection, uiLocale],
   );
   const navigateToThread = useCallback(
     (threadRef: ScopedThreadRef) => onOpen({ kind: "server", threadRef }),
@@ -1015,15 +1106,20 @@ export const SidebarStandaloneChats = memo(function SidebarStandaloneChats({
         toastManager.add(
           stackedThreadToast({
             type: "error",
-            title: "Could not delete chat",
-            description: "Reconnect to the chat's environment before trying again.",
+            title: uiText("Could not delete chat", undefined, undefined, uiLocale),
+            description: uiText(
+              "Reconnect to the chat''s environment before trying again.",
+              undefined,
+              undefined,
+              uiLocale,
+            ),
           }),
         );
       } finally {
         deletingThreadKeysRef.current.delete(key);
       }
     },
-    [confirmAndDeleteThread],
+    [confirmAndDeleteThread, uiLocale],
   );
   const handleThreadClick = useCallback(
     (event: React.MouseEvent, threadRef: ScopedThreadRef, keys: readonly string[]) => {
@@ -1048,9 +1144,17 @@ export const SidebarStandaloneChats = memo(function SidebarStandaloneChats({
       const running = thread.session?.status === "running" && thread.session.activeTurnId != null;
       const action = await api.contextMenu.show(
         [
-          { id: "rename", label: "Rename" },
-          { id: "archive", label: "Archive", disabled: running },
-          { id: "delete", label: "Move to Recycle Bin", destructive: true },
+          { id: "rename", label: uiText("Rename", undefined, undefined, uiLocale) },
+          {
+            id: "archive",
+            label: uiText("Archive", undefined, undefined, uiLocale),
+            disabled: running,
+          },
+          {
+            id: "delete",
+            label: uiText("Move to Recycle Bin", undefined, undefined, uiLocale),
+            destructive: true,
+          },
         ],
         position,
       );
@@ -1072,6 +1176,7 @@ export const SidebarStandaloneChats = memo(function SidebarStandaloneChats({
       attemptDeleteThread,
       beginRename,
       rowsByKey,
+      uiLocale,
     ],
   );
   const handleMultiSelectContextMenu = useCallback(
@@ -1085,14 +1190,30 @@ export const SidebarStandaloneChats = memo(function SidebarStandaloneChats({
       );
       if (keys.length === 0) return;
       const action = await api.contextMenu.show(
-        [{ id: "delete", label: `Move to Recycle Bin (${keys.length})`, destructive: true }],
+        [
+          {
+            id: "delete",
+            label: uiText(
+              "Move to Recycle Bin ({value0})",
+              { value0: keys.length },
+              undefined,
+              uiLocale,
+            ),
+            destructive: true,
+          },
+        ],
         position,
       );
       if (action !== "delete") return;
       if (
         confirmThreadDelete &&
         !(await api.dialogs.confirm(
-          `Move ${keys.length} chats to the Recycle Bin?\nYou can review them later in Settings > Recently Deleted.`,
+          uiText(
+            "Move {count} {count, plural, one {chat} other {chats}} to the Recycle Bin?\nYou can review them later in Settings '>' Recently Deleted.",
+            { count: keys.length },
+            undefined,
+            uiLocale,
+          ),
         ))
       )
         return;
@@ -1110,13 +1231,18 @@ export const SidebarStandaloneChats = memo(function SidebarStandaloneChats({
         toastManager.add(
           stackedThreadToast({
             type: "error",
-            title: "Could not delete selected chats",
-            description: "Some chats may remain. Reconnect before trying again.",
+            title: uiText("Could not delete selected chats", undefined, undefined, uiLocale),
+            description: uiText(
+              "Some chats may remain. Reconnect before trying again.",
+              undefined,
+              undefined,
+              uiLocale,
+            ),
           }),
         );
       }
     },
-    [confirmThreadDelete, deleteThread, removeFromSelection, rowsByKey],
+    [confirmThreadDelete, deleteThread, removeFromSelection, rowsByKey, uiLocale],
   );
   // Same list motion as project chat lists (docs/style-guide.md §8).
   const animatedListRef = useRef<HTMLElement | null>(null);
@@ -1133,9 +1259,12 @@ export const SidebarStandaloneChats = memo(function SidebarStandaloneChats({
   }, []);
 
   return (
-    <SidebarGroup aria-label="Standalone chats" className="px-2 pt-2 pb-1">
+    <SidebarGroup
+      aria-label={uiText("Standalone chats", undefined, undefined, uiLocale)}
+      className="px-2 pt-2 pb-1"
+    >
       <div className="mb-1 flex items-center justify-between pl-2 pr-1.5">
-        <span className="label-overline">Chats</span>
+        <span className="label-overline">{uiText("Chats", undefined, undefined, uiLocale)}</span>
         <SidebarNewChatButton disabled={newChatDisabled} onClick={onNewChat} />
       </div>
       <SidebarMenuSub
@@ -1184,7 +1313,9 @@ export const SidebarStandaloneChats = memo(function SidebarStandaloneChats({
         ) : null}
       </SidebarMenuSub>
       {entries.length === 0 ? (
-        <p className="px-3 py-1 text-xs text-subtle-foreground">No chats yet</p>
+        <p className="px-3 py-1 text-xs text-subtle-foreground">
+          {uiText("No chats yet", undefined, undefined, uiLocale)}
+        </p>
       ) : null}
     </SidebarGroup>
   );
@@ -1242,6 +1373,8 @@ interface SidebarProjectThreadListProps {
 const SidebarProjectThreadList = memo(function SidebarProjectThreadList(
   props: SidebarProjectThreadListProps,
 ) {
+  const uiLocale = useUiLocale();
+
   const {
     projectKey,
     projectExpanded,
@@ -1292,7 +1425,7 @@ const SidebarProjectThreadList = memo(function SidebarProjectThreadList(
             data-testid="sidebar-project-empty-chats"
             className="flex h-7 w-full translate-x-0 items-center px-2 text-left text-xs text-subtle-foreground"
           >
-            <span>No chats yet</span>
+            <span>{uiText("No chats yet", undefined, undefined, uiLocale)}</span>
           </div>
         </SidebarMenuSubItem>
       ) : null}
@@ -1370,6 +1503,9 @@ interface SidebarProjectItemProps {
 }
 
 const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjectItemProps) {
+  const uiLocale = useUiLocale();
+  const uiPresentation = useUiPresentation(UI_PRESENTATION_SOURCES);
+
   const {
     project,
     bootstrappedEnvironmentIds,
@@ -1430,7 +1566,12 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
   }>({
     onError: (error) => {
       console.warn("Failed to copy chat ID", { error });
-      toastManager.add(stackedThreadToast({ type: "error", title: "Could not copy chat ID" }));
+      toastManager.add(
+        stackedThreadToast({
+          type: "error",
+          title: uiText("Could not copy chat ID", undefined, undefined, uiLocale),
+        }),
+      );
     },
   });
   const { copyToClipboard: copyPathToClipboard } = useCopyToClipboard<{
@@ -1438,32 +1579,40 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
   }>({
     onError: (error) => {
       console.warn("Failed to copy path", { error });
-      toastManager.add(stackedThreadToast({ type: "error", title: "Could not copy path" }));
-    },
-  });
-  const openPrLink = useCallback((event: React.MouseEvent<HTMLElement>, prUrl: string) => {
-    event.preventDefault();
-    event.stopPropagation();
-
-    const api = readLocalApi();
-    if (!api) {
-      toastManager.add({
-        type: "error",
-        title: "Links can't be opened here",
-      });
-      return;
-    }
-
-    void api.shell.openExternal(prUrl).catch((error) => {
-      console.warn("Failed to open pull request link", { error });
       toastManager.add(
         stackedThreadToast({
           type: "error",
-          title: "Could not open pull request link",
+          title: uiText("Could not copy path", undefined, undefined, uiLocale),
         }),
       );
-    });
-  }, []);
+    },
+  });
+  const openPrLink = useCallback(
+    (event: React.MouseEvent<HTMLElement>, prUrl: string) => {
+      event.preventDefault();
+      event.stopPropagation();
+
+      const api = readLocalApi();
+      if (!api) {
+        toastManager.add({
+          type: "error",
+          title: uiText("Links can''t be opened here", undefined, undefined, uiLocale),
+        });
+        return;
+      }
+
+      void api.shell.openExternal(prUrl).catch((error) => {
+        console.warn("Failed to open pull request link", { error });
+        toastManager.add(
+          stackedThreadToast({
+            type: "error",
+            title: uiText("Could not open pull request link", undefined, undefined, uiLocale),
+          }),
+        );
+      });
+    },
+    [uiLocale],
+  );
   const sidebarThreads = useStore(
     useShallow(
       useMemo(
@@ -1658,7 +1807,7 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
     return {
       hasOverflowingThreads,
       hiddenThreadCount: Math.max(0, visibleProjectThreads.length - sidebarThreadPreviewCount),
-      hiddenThreadSummary: summarizeHiddenThreadStatuses(
+      hiddenThreadSummary: uiPresentation.summarizeHiddenThreadStatuses(
         hiddenThreads.map((thread) => resolveProjectThreadStatus(thread)),
       ),
       renderedThreads,
@@ -1675,6 +1824,7 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
     sidebarThreadPreviewCount,
     threadLastVisitedAts,
     visibleProjectThreads,
+    uiPresentation,
   ]);
 
   const handleProjectButtonClick = useCallback(
@@ -1802,24 +1952,29 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
       ]);
       const confirmed = await api.dialogs.confirm(
         latestProjectThreads.length > 0
-          ? [
-              `Remove project "${member.name}" and delete its ${latestProjectThreads.length} chat${
-                latestProjectThreads.length === 1 ? "" : "s"
-              }?`,
-              `Path: ${member.cwd}`,
-              ...(member.environmentLabel ? [`Environment: ${member.environmentLabel}`] : []),
-              "This permanently clears conversation history for those chats.",
-              "This removes only this project entry.",
-              "This action cannot be undone.",
-            ].join("\n")
-          : [
-              `Force remove project "${member.name}"?`,
-              `Path: ${member.cwd}`,
-              ...(member.environmentLabel ? [`Environment: ${member.environmentLabel}`] : []),
-              "This project still has hidden or stale chats attached to it.",
-              "This removes the project entry and any chats still attached to it.",
-              "This action cannot be undone.",
-            ].join("\n"),
+          ? uiText(
+              'Remove project "{name}" and delete its {count} {count, plural, one {chat} other {chats}}?\nPath: {path}\n{hasEnvironment, select, yes {Environment: {environment}\n} other {}}This permanently clears conversation history for those chats.\nThis removes only this project entry.\nThis action cannot be undone.',
+              {
+                name: member.name,
+                count: latestProjectThreads.length,
+                path: member.cwd,
+                hasEnvironment: member.environmentLabel ? "yes" : "no",
+                environment: member.environmentLabel ?? "",
+              },
+              undefined,
+              uiLocale,
+            )
+          : uiText(
+              'Force remove project "{name}"?\nPath: {path}\n{hasEnvironment, select, yes {Environment: {environment}\n} other {}}This project still has hidden or stale chats attached to it.\nThis removes the project entry and any chats still attached to it.\nThis action cannot be undone.',
+              {
+                name: member.name,
+                path: member.cwd,
+                hasEnvironment: member.environmentLabel ? "yes" : "no",
+                environment: member.environmentLabel ?? "",
+              },
+              undefined,
+              uiLocale,
+            ),
       );
       if (!confirmed) {
         return;
@@ -1827,7 +1982,7 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
 
       await removeProject(member, { force: true });
     },
-    [removeProject],
+    [removeProject, uiLocale],
   );
 
   const showForceRemoveProjectToast = useCallback(
@@ -1835,11 +1990,16 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
       const forceToastId = toastManager.add(
         stackedThreadToast({
           type: "warning",
-          title: `Could not remove "${member.name}"`,
+          title: uiText(
+            'Could not remove "{value0}"',
+            { value0: member.name },
+            undefined,
+            uiLocale,
+          ),
           description,
           actionVariant: "destructive",
           actionProps: {
-            children: "Force remove",
+            children: uiText("Force remove", undefined, undefined, uiLocale),
             onClick: () => {
               void (async () => {
                 toastManager.close(forceToastId);
@@ -1851,7 +2011,12 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
                 const message =
                   forceError instanceof Error
                     ? forceError.message
-                    : "Unknown error force-removing project.";
+                    : uiText(
+                        "Unknown error force-removing project.",
+                        undefined,
+                        undefined,
+                        uiLocale,
+                      );
                 console.error("Failed to force remove project", {
                   projectId: member.id,
                   environmentId: member.environmentId,
@@ -1860,7 +2025,12 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
                 toastManager.add(
                   stackedThreadToast({
                     type: "error",
-                    title: `Failed to force remove "${member.name}"`,
+                    title: uiText(
+                      'Failed to force remove "{value0}"',
+                      { value0: member.name },
+                      undefined,
+                      uiLocale,
+                    ),
                     description: message,
                   }),
                 );
@@ -1870,7 +2040,7 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
         }),
       );
     },
-    [confirmAndForceRemoveProject],
+    [confirmAndForceRemoveProject, uiLocale],
   );
 
   const handleRemoveProject = useCallback(
@@ -1885,11 +2055,16 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
         const warningToastId = toastManager.add(
           stackedThreadToast({
             type: "warning",
-            title: "Project is not empty",
-            description: "Delete its chats first, or delete the project anyway.",
+            title: uiText("Project is not empty", undefined, undefined, uiLocale),
+            description: uiText(
+              "Delete its chats first, or delete the project anyway.",
+              undefined,
+              undefined,
+              uiLocale,
+            ),
             actionVariant: "destructive",
             actionProps: {
-              children: "Delete anyway",
+              children: uiText("Delete anyway", undefined, undefined, uiLocale),
               onClick: () => {
                 void (async () => {
                   toastManager.close(warningToastId);
@@ -1899,7 +2074,9 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
                   await confirmAndForceRemoveProject(member);
                 })().catch((error) => {
                   const message =
-                    error instanceof Error ? error.message : "Unknown error removing project.";
+                    error instanceof Error
+                      ? error.message
+                      : uiText("Unknown error removing project.", undefined, undefined, uiLocale);
                   console.error("Failed to remove project", {
                     projectId: member.id,
                     environmentId: member.environmentId,
@@ -1908,7 +2085,12 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
                   toastManager.add(
                     stackedThreadToast({
                       type: "error",
-                      title: `Failed to remove "${member.name}"`,
+                      title: uiText(
+                        'Failed to remove "{value0}"',
+                        { value0: member.name },
+                        undefined,
+                        uiLocale,
+                      ),
                       description: message,
                     }),
                   );
@@ -1920,12 +2102,17 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
         return;
       }
 
-      const message = [
-        `Remove project "${member.name}"?`,
-        `Path: ${member.cwd}`,
-        ...(member.environmentLabel ? [`Environment: ${member.environmentLabel}`] : []),
-        "This removes only this project entry.",
-      ].join("\n");
+      const message = uiText(
+        'Remove project "{name}"?\nPath: {path}\n{hasEnvironment, select, yes {Environment: {environment}\n} other {}}This removes only this project entry.',
+        {
+          name: member.name,
+          path: member.cwd,
+          hasEnvironment: member.environmentLabel ? "yes" : "no",
+          environment: member.environmentLabel ?? "",
+        },
+        undefined,
+        uiLocale,
+      );
       const confirmed = await api.dialogs.confirm(message);
       if (!confirmed) {
         return;
@@ -1934,7 +2121,10 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
       try {
         await removeProject(member);
       } catch (error) {
-        const message = error instanceof Error ? error.message : "Unknown error removing project.";
+        const message =
+          error instanceof Error
+            ? error.message
+            : uiText("Unknown error removing project.", undefined, undefined, uiLocale);
         if (isProjectDeleteRequiresForceError(error)) {
           console.warn("Project removal requires force after backend invariant rejection", {
             projectId: member.id,
@@ -1943,7 +2133,12 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
           });
           showForceRemoveProjectToast(
             member,
-            "This project still has hidden or stale chats. Force remove clears them too.",
+            uiText(
+              "This project still has hidden or stale chats. Force remove clears them too.",
+              undefined,
+              undefined,
+              uiLocale,
+            ),
           );
           return;
         }
@@ -1955,7 +2150,12 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
         toastManager.add(
           stackedThreadToast({
             type: "error",
-            title: `Failed to remove "${member.name}"`,
+            title: uiText(
+              'Failed to remove "{value0}"',
+              { value0: member.name },
+              undefined,
+              uiLocale,
+            ),
             description: message,
           }),
         );
@@ -1966,6 +2166,7 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
       memberThreadCountByPhysicalKey,
       removeProject,
       showForceRemoveProjectToast,
+      uiLocale,
     ],
   );
 
@@ -2008,7 +2209,10 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
 
           return {
             id,
-            label: formatProjectMemberActionLabel(member, project.groupedProjectCount),
+            label: uiPresentation.formatProjectMemberActionLabel(
+              member,
+              project.groupedProjectCount,
+            ),
             ...(options?.destructive ? { destructive: true } : {}),
             ...(options?.disabled ? { disabled: true } : {}),
           };
@@ -2047,11 +2251,20 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
 
         const clicked = await api.contextMenu.show(
           [
-            buildTargetedItem("rename", "Rename project"),
-            buildTargetedItem("directories", "Configure additional directories…"),
-            buildTargetedItem("grouping", "Project grouping…"),
-            buildTargetedItem("copy-path", "Copy Project Path"),
-            buildTargetedItem("delete", "Remove project", {
+            buildTargetedItem("rename", uiText("Rename project", undefined, undefined, uiLocale)),
+            buildTargetedItem(
+              "directories",
+              uiText("Configure additional directories…", undefined, undefined, uiLocale),
+            ),
+            buildTargetedItem(
+              "grouping",
+              uiText("Project grouping…", undefined, undefined, uiLocale),
+            ),
+            buildTargetedItem(
+              "copy-path",
+              uiText("Copy Project Path", undefined, undefined, uiLocale),
+            ),
+            buildTargetedItem("delete", uiText("Remove project", undefined, undefined, uiLocale), {
               destructive: true,
             }),
           ],
@@ -2077,6 +2290,8 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
       project.groupedProjectCount,
       project.memberProjects,
       suppressProjectClickForContextMenuRef,
+      uiLocale,
+      uiPresentation,
     ],
   );
 
@@ -2155,7 +2370,13 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
       const count = threadKeys.length;
 
       const clicked = await api.contextMenu.show(
-        [{ id: "delete", label: `Move to Recycle Bin (${count})`, destructive: true }],
+        [
+          {
+            id: "delete",
+            label: uiText("Move to Recycle Bin ({value0})", { value0: count }, undefined, uiLocale),
+            destructive: true,
+          },
+        ],
         position,
       );
 
@@ -2163,10 +2384,12 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
 
       if (appSettingsConfirmThreadDelete) {
         const confirmed = await api.dialogs.confirm(
-          [
-            `Move ${count} chat${count === 1 ? "" : "s"} to the Recycle Bin?`,
-            "You can review them later in Settings > Recently Deleted.",
-          ].join("\n"),
+          uiText(
+            "Move {count} {count, plural, one {chat} other {chats}} to the Recycle Bin?\nYou can review them later in Settings '>' Recently Deleted.",
+            { count },
+            undefined,
+            uiLocale,
+          ),
         );
         if (!confirmed) return;
       }
@@ -2181,7 +2404,7 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
       }
       removeFromSelection(threadKeys);
     },
-    [appSettingsConfirmThreadDelete, deleteThread, removeFromSelection],
+    [appSettingsConfirmThreadDelete, deleteThread, removeFromSelection, uiLocale],
   );
 
   const createThreadForProjectMember = useCallback(
@@ -2255,7 +2478,10 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
         const clicked = await api.contextMenu.show(
           project.memberProjects.map((member) => ({
             id: member.physicalProjectKey,
-            label: formatProjectMemberActionLabel(member, project.groupedProjectCount),
+            label: uiPresentation.formatProjectMemberActionLabel(
+              member,
+              project.groupedProjectCount,
+            ),
           })),
           {
             x: event.clientX,
@@ -2274,7 +2500,12 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
         createThreadForProjectMember(targetMember);
       })();
     },
-    [createThreadForProjectMember, project.groupedProjectCount, project.memberProjects],
+    [
+      createThreadForProjectMember,
+      project.groupedProjectCount,
+      project.memberProjects,
+      uiPresentation,
+    ],
   );
 
   const attemptArchiveThread = useCallback(
@@ -2283,10 +2514,15 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
         await archiveThread(threadRef);
       } catch (error) {
         console.warn("Failed to archive chat", { error });
-        toastManager.add(stackedThreadToast({ type: "error", title: "Could not archive chat" }));
+        toastManager.add(
+          stackedThreadToast({
+            type: "error",
+            title: uiText("Could not archive chat", undefined, undefined, uiLocale),
+          }),
+        );
       }
     },
-    [archiveThread],
+    [archiveThread, uiLocale],
   );
 
   const cancelRename = useCallback(() => {
@@ -2315,7 +2551,7 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
       if (trimmed.length === 0) {
         toastManager.add({
           type: "warning",
-          title: "Chat title can't be empty",
+          title: uiText("Chat title can''t be empty", undefined, undefined, uiLocale),
         });
         finishRename();
         return;
@@ -2328,11 +2564,16 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
         await renameThread(threadRef, trimmed, originalTitle);
       } catch (error) {
         console.warn("Failed to rename chat", { error });
-        toastManager.add(stackedThreadToast({ type: "error", title: "Could not rename chat" }));
+        toastManager.add(
+          stackedThreadToast({
+            type: "error",
+            title: uiText("Could not rename chat", undefined, undefined, uiLocale),
+          }),
+        );
       }
       finishRename();
     },
-    [],
+    [uiLocale],
   );
 
   const closeProjectRenameDialog = useCallback(() => {
@@ -2349,7 +2590,7 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
     if (trimmed.length === 0) {
       toastManager.add({
         type: "warning",
-        title: "Project title cannot be empty",
+        title: uiText("Project title cannot be empty", undefined, undefined, uiLocale),
       });
       return;
     }
@@ -2364,8 +2605,13 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
       toastManager.add(
         stackedThreadToast({
           type: "error",
-          title: "Could not rename project",
-          description: "Reconnect to the project's environment and try again.",
+          title: uiText("Could not rename project", undefined, undefined, uiLocale),
+          description: uiText(
+            "Reconnect to the project''s environment and try again.",
+            undefined,
+            undefined,
+            uiLocale,
+          ),
         }),
       );
       return;
@@ -2381,9 +2627,14 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
       closeProjectRenameDialog();
     } catch (error) {
       console.warn("Failed to rename project", { error });
-      toastManager.add(stackedThreadToast({ type: "error", title: "Could not rename project" }));
+      toastManager.add(
+        stackedThreadToast({
+          type: "error",
+          title: uiText("Could not rename project", undefined, undefined, uiLocale),
+        }),
+      );
     }
-  }, [closeProjectRenameDialog, projectRenameTarget, projectRenameTitle]);
+  }, [closeProjectRenameDialog, projectRenameTarget, projectRenameTitle, uiLocale]);
 
   const closeProjectGroupingDialog = useCallback(() => {
     setProjectGroupingTarget(null);
@@ -2444,7 +2695,9 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
     }
     const api = readEnvironmentApi(additionalDirectoriesTarget.environmentId);
     if (!api) {
-      setAdditionalDirectoriesError("Project API unavailable.");
+      setAdditionalDirectoriesError(
+        uiText("Project API unavailable.", undefined, undefined, uiLocale),
+      );
       return;
     }
 
@@ -2461,11 +2714,15 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
       setAdditionalDirectoriesDraft([]);
       setAdditionalDirectoryInput("");
     } catch (error) {
-      setAdditionalDirectoriesError(error instanceof Error ? error.message : "An error occurred.");
+      setAdditionalDirectoriesError(
+        error instanceof Error
+          ? error.message
+          : uiText("An error occurred.", undefined, undefined, uiLocale),
+      );
     } finally {
       setAdditionalDirectoriesSubmitting(false);
     }
-  }, [additionalDirectoriesDraft, additionalDirectoriesTarget]);
+  }, [additionalDirectoriesDraft, additionalDirectoriesTarget, uiLocale]);
 
   const closeThreadMoveDialog = useCallback(() => {
     setThreadMoveTarget(null);
@@ -2517,8 +2774,13 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
         toastManager.add(
           stackedThreadToast({
             type: "warning",
-            title: "No project folder to move to",
-            description: "Add another project in this environment first.",
+            title: uiText("No project folder to move to", undefined, undefined, uiLocale),
+            description: uiText(
+              "Add another project in this environment first.",
+              undefined,
+              undefined,
+              uiLocale,
+            ),
           }),
         );
         return;
@@ -2527,7 +2789,7 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
       setThreadMoveTarget(thread);
       setThreadMoveProjectId(candidates[0]!.id);
     },
-    [getThreadMoveCandidates],
+    [getThreadMoveCandidates, uiLocale],
   );
 
   const threadMoveCandidateProjects = useMemo(
@@ -2556,8 +2818,8 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
       toastManager.add(
         stackedThreadToast({
           type: "error",
-          title: "Project folder unavailable",
-          description: "Choose another project folder.",
+          title: uiText("Project folder unavailable", undefined, undefined, uiLocale),
+          description: uiText("Choose another project folder.", undefined, undefined, uiLocale),
         }),
       );
       return;
@@ -2568,8 +2830,13 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
       toastManager.add(
         stackedThreadToast({
           type: "error",
-          title: "Could not move chat",
-          description: "Reconnect to the chat's environment and try again.",
+          title: uiText("Could not move chat", undefined, undefined, uiLocale),
+          description: uiText(
+            "Reconnect to the chat''s environment and try again.",
+            undefined,
+            undefined,
+            uiLocale,
+          ),
         }),
       );
       return;
@@ -2589,42 +2856,64 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
     } catch (error) {
       setThreadMoveSubmitting(false);
       console.warn("Failed to move chat", { error });
-      toastManager.add(stackedThreadToast({ type: "error", title: "Could not move chat" }));
+      toastManager.add(
+        stackedThreadToast({
+          type: "error",
+          title: uiText("Could not move chat", undefined, undefined, uiLocale),
+        }),
+      );
     }
-  }, [closeThreadMoveDialog, threadMoveCandidateProjects, threadMoveProjectId, threadMoveTarget]);
+  }, [
+    closeThreadMoveDialog,
+    threadMoveCandidateProjects,
+    threadMoveProjectId,
+    threadMoveTarget,
+    uiLocale,
+  ]);
 
   const closeThreadRepairDialog = useCallback(() => {
     setThreadRepairDialog((current) => (current?.phase === "running" ? current : null));
   }, []);
 
-  const startThreadRepair = useCallback(async (thread: SidebarThreadSummary) => {
-    const api = readEnvironmentApi(thread.environmentId);
-    if (!api) {
-      toastManager.add(
-        stackedThreadToast({
-          type: "error",
-          title: "Could not repair chat",
-          description: "Reconnect to the chat's environment and try again.",
-        }),
-      );
-      return;
-    }
+  const startThreadRepair = useCallback(
+    async (thread: SidebarThreadSummary) => {
+      const api = readEnvironmentApi(thread.environmentId);
+      if (!api) {
+        toastManager.add(
+          stackedThreadToast({
+            type: "error",
+            title: uiText("Could not repair chat", undefined, undefined, uiLocale),
+            description: uiText(
+              "Reconnect to the chat''s environment and try again.",
+              undefined,
+              undefined,
+              uiLocale,
+            ),
+          }),
+        );
+        return;
+      }
 
-    setThreadRepairDialog({ phase: "running", thread });
-    try {
-      const result = await api.orchestration.repairThreadAssistantMessages({
-        threadId: thread.id,
-        sourcePolicy: "local-then-upstream",
-      });
-      setThreadRepairDialog({ phase: "complete", thread, result });
-    } catch (error) {
-      setThreadRepairDialog({
-        phase: "error",
-        thread,
-        message: error instanceof Error ? error.message : "The repair request failed.",
-      });
-    }
-  }, []);
+      setThreadRepairDialog({ phase: "running", thread });
+      try {
+        const result = await api.orchestration.repairThreadAssistantMessages({
+          threadId: thread.id,
+          sourcePolicy: "local-then-upstream",
+        });
+        setThreadRepairDialog({ phase: "complete", thread, result });
+      } catch (error) {
+        setThreadRepairDialog({
+          phase: "error",
+          thread,
+          message:
+            error instanceof Error
+              ? error.message
+              : uiText("The repair request failed.", undefined, undefined, uiLocale),
+        });
+      }
+    },
+    [uiLocale],
+  );
 
   const handleThreadContextMenu = useCallback(
     async (threadRef: ScopedThreadRef, position: { x: number; y: number }) => {
@@ -2641,7 +2930,7 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
             );
       const threadWorkspacePath = thread.worktreePath ?? threadProject?.cwd ?? project.cwd ?? null;
       const clicked = await api.contextMenu.show(
-        buildSidebarThreadContextMenuItems({
+        uiPresentation.buildSidebarThreadContextMenuItems({
           debugEnabled: desktopDebugEnabled,
           repairRunning: threadRepairDialog?.phase === "running",
           forkDisabled:
@@ -2662,8 +2951,13 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
           toastManager.add(
             stackedThreadToast({
               type: "error",
-              title: "Could not fork chat",
-              description: "Reconnect to the chat's environment and try again.",
+              title: uiText("Could not fork chat", undefined, undefined, uiLocale),
+              description: uiText(
+                "Reconnect to the chat''s environment and try again.",
+                undefined,
+                undefined,
+                uiLocale,
+              ),
             }),
           );
           return;
@@ -2676,7 +2970,7 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
             commandId: newCommandId(),
             sourceThreadId: threadRef.threadId,
             targetThreadId: targetThreadRef.threadId,
-            title: `${thread.title} (fork)`,
+            title: uiText("{value0} (fork)", { value0: thread.title }, undefined, uiLocale),
             createdAt: new Date().toISOString(),
           });
           void router.navigate({
@@ -2685,7 +2979,12 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
           });
         } catch (error) {
           console.warn("Failed to fork chat", { error });
-          toastManager.add(stackedThreadToast({ type: "error", title: "Could not fork chat" }));
+          toastManager.add(
+            stackedThreadToast({
+              type: "error",
+              title: uiText("Could not fork chat", undefined, undefined, uiLocale),
+            }),
+          );
         }
         return;
       }
@@ -2699,8 +2998,13 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
           toastManager.add(
             stackedThreadToast({
               type: "error",
-              title: "No folder to copy",
-              description: "This chat has no workspace folder.",
+              title: uiText("No folder to copy", undefined, undefined, uiLocale),
+              description: uiText(
+                "This chat has no workspace folder.",
+                undefined,
+                undefined,
+                uiLocale,
+              ),
             }),
           );
           return;
@@ -2719,10 +3023,12 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
       if (clicked !== "delete") return;
       if (appSettingsConfirmThreadDelete) {
         const confirmed = await api.dialogs.confirm(
-          [
-            `Move "${thread.title}" to the Recycle Bin?`,
-            "You can review it later in Settings > Recently Deleted.",
-          ].join("\n"),
+          uiText(
+            "Move \"{title}\" to the Recycle Bin?\nYou can review it later in Settings '>' Recently Deleted.",
+            { title: thread.title },
+            undefined,
+            uiLocale,
+          ),
         );
         if (!confirmed) {
           return;
@@ -2743,6 +3049,8 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
       router,
       startThreadRepair,
       threadRepairDialog?.phase,
+      uiLocale,
+      uiPresentation,
     ],
   );
 
@@ -2750,7 +3058,14 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
     additionalDirectoriesDraft.some(
       (other, otherIndex) => otherIndex !== index && pathContainsPath(other, candidate),
     )
-      ? [`${candidate} is inside another configured directory.`]
+      ? [
+          uiText(
+            "{path} is inside another configured directory.",
+            { path: candidate },
+            undefined,
+            uiLocale,
+          ),
+        ]
       : [],
   );
 
@@ -2801,7 +3116,10 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
             </span>
             {project.groupedProjectCount > 1 ? (
               <span className="shrink-0 text-2xs text-subtle-foreground">
-                {project.groupedProjectCount} projects
+                <UiMessage
+                  message={"<slot1></slot1> projects"}
+                  slots={{ slot1: project.groupedProjectCount }}
+                />
               </span>
             ) : null}
           </span>
@@ -2812,7 +3130,12 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
               <div className="pointer-events-none absolute top-1 right-1.5 opacity-0 transition-opacity duration-150 max-md:pointer-events-auto max-md:opacity-100 group-hover/project-header:pointer-events-auto group-hover/project-header:opacity-100 group-focus-within/project-header:pointer-events-auto group-focus-within/project-header:opacity-100">
                 <button
                   type="button"
-                  aria-label={`New chat in ${project.displayName}`}
+                  aria-label={uiText(
+                    "New chat in {value0}",
+                    { value0: project.displayName },
+                    undefined,
+                    uiLocale,
+                  )}
                   data-testid="new-thread-button"
                   className="inline-flex size-5 cursor-pointer items-center justify-center rounded-sm text-subtle-foreground transition-colors duration-(--duration-fast) hover:bg-secondary hover:text-foreground focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-ring max-md:size-8"
                   onClick={handleCreateThreadClick}
@@ -2823,7 +3146,14 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
             }
           />
           <TooltipPopup side="top">
-            {newThreadShortcutLabel ? `New chat (${newThreadShortcutLabel})` : "New chat"}
+            {newThreadShortcutLabel
+              ? uiText(
+                  "New chat ({value0})",
+                  { value0: newThreadShortcutLabel },
+                  undefined,
+                  uiLocale,
+                )
+              : uiText("New chat", undefined, undefined, uiLocale)}
           </TooltipPopup>
         </Tooltip>
       </div>
@@ -2878,18 +3208,25 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
       >
         <DialogPopup className="max-w-lg">
           <DialogHeader>
-            <DialogTitle>Rename project</DialogTitle>
+            <DialogTitle>{uiText("Rename project", undefined, undefined, uiLocale)}</DialogTitle>
             <DialogDescription>
               {projectRenameTarget
-                ? `Update the title for ${projectRenameTarget.cwd}.`
-                : "Update the project title."}
+                ? uiText(
+                    "Update the title for {value0}.",
+                    { value0: projectRenameTarget.cwd },
+                    undefined,
+                    uiLocale,
+                  )
+                : uiText("Update the project title.", undefined, undefined, uiLocale)}
             </DialogDescription>
           </DialogHeader>
           <DialogPanel className="space-y-4">
             <div className="grid gap-1.5">
-              <span className="text-xs font-medium text-foreground">Project title</span>
+              <span className="text-xs font-medium text-foreground">
+                {uiText("Project title", undefined, undefined, uiLocale)}
+              </span>
               <Input
-                aria-label="Project title"
+                aria-label={uiText("Project title", undefined, undefined, uiLocale)}
                 value={projectRenameTitle}
                 onChange={(event) => setProjectRenameTitle(event.target.value)}
                 onKeyDown={(event) => {
@@ -2902,15 +3239,20 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
             </div>
             {projectRenameTarget?.environmentLabel ? (
               <p className="text-xs text-muted-foreground">
-                Environment: {projectRenameTarget.environmentLabel}
+                <UiMessage
+                  message={"Environment: <slot1></slot1>"}
+                  slots={{ slot1: projectRenameTarget.environmentLabel }}
+                />
               </p>
             ) : null}
           </DialogPanel>
           <DialogFooter>
             <Button variant="outline" onClick={closeProjectRenameDialog}>
-              Cancel
+              {uiText("Cancel", undefined, undefined, uiLocale)}
             </Button>
-            <Button onClick={() => void submitProjectRename()}>Save</Button>
+            <Button onClick={() => void submitProjectRename()}>
+              {uiText("Save", undefined, undefined, uiLocale)}
+            </Button>
           </DialogFooter>
         </DialogPopup>
       </Dialog>
@@ -2925,23 +3267,41 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
       >
         <DialogPopup className="max-w-2xl">
           <DialogHeader>
-            <DialogTitle>Additional directories</DialogTitle>
+            <DialogTitle>
+              {uiText("Additional directories", undefined, undefined, uiLocale)}
+            </DialogTitle>
             <DialogDescription>
               {additionalDirectoriesTarget
-                ? `Configure directories available to agents for ${additionalDirectoriesTarget.cwd}.`
-                : "Configure directories available to agents."}
+                ? uiText(
+                    "Configure directories available to agents for {value0}.",
+                    {
+                      value0: additionalDirectoriesTarget.cwd,
+                    },
+                    undefined,
+                    uiLocale,
+                  )
+                : uiText(
+                    "Configure directories available to agents.",
+                    undefined,
+                    undefined,
+                    uiLocale,
+                  )}
             </DialogDescription>
           </DialogHeader>
           <DialogPanel className="space-y-4">
             <div className="grid gap-1.5">
-              <span className="text-xs font-medium text-foreground">Primary directory</span>
+              <span className="text-xs font-medium text-foreground">
+                {uiText("Primary directory", undefined, undefined, uiLocale)}
+              </span>
               <div className="min-h-9 overflow-hidden rounded-lg border bg-muted px-3 py-2 text-xs text-muted-foreground">
                 <span className="block truncate">{additionalDirectoriesTarget?.cwd ?? ""}</span>
               </div>
             </div>
 
             <div className="grid gap-2">
-              <span className="text-xs font-medium text-foreground">Additional directories</span>
+              <span className="text-xs font-medium text-foreground">
+                {uiText("Additional directories", undefined, undefined, uiLocale)}
+              </span>
               {additionalDirectoriesDraft.length > 0 ? (
                 <div className="grid gap-2">
                   {additionalDirectoriesDraft.map((directory, index) => (
@@ -2953,7 +3313,12 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
                         type="button"
                         variant="ghost"
                         size="icon"
-                        aria-label={`Remove ${directory}`}
+                        aria-label={uiText(
+                          "Remove {value0}",
+                          { value0: directory },
+                          undefined,
+                          uiLocale,
+                        )}
                         onClick={() => removeAdditionalDirectoryDraft(index)}
                       >
                         <Trash2Icon className="size-4" />
@@ -2963,16 +3328,16 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
                 </div>
               ) : (
                 <p className="rounded-lg border border-dashed px-3 py-4 text-xs text-muted-foreground">
-                  No additional directories configured.
+                  {uiText("No additional directories configured.", undefined, undefined, uiLocale)}
                 </p>
               )}
             </div>
 
             <div className="flex flex-col gap-2 sm:flex-row">
               <Input
-                aria-label="Additional directory path"
+                aria-label={uiText("Additional directory path", undefined, undefined, uiLocale)}
                 value={additionalDirectoryInput}
-                placeholder="Absolute path"
+                placeholder={uiText("Absolute path", undefined, undefined, uiLocale)}
                 onChange={(event) => setAdditionalDirectoryInput(event.target.value)}
                 onKeyDown={(event) => {
                   if (event.key === "Enter") {
@@ -2988,7 +3353,7 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
                   onClick={() => addAdditionalDirectoryDraft(additionalDirectoryInput)}
                 >
                   <PlusIcon className="size-4" />
-                  Add
+                  {uiText("Add", undefined, undefined, uiLocale)}
                 </Button>
                 <Button
                   type="button"
@@ -2996,7 +3361,7 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
                   onClick={() => void browseAdditionalDirectory()}
                 >
                   <FolderPlusIcon className="size-4" />
-                  Browse
+                  {uiText("Browse", undefined, undefined, uiLocale)}
                 </Button>
               </div>
             </div>
@@ -3004,7 +3369,9 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
             {additionalDirectoryWarnings.length > 0 ? (
               <Alert>
                 <TriangleAlertIcon className="size-4" />
-                <AlertTitle>Redundant directories</AlertTitle>
+                <AlertTitle>
+                  {uiText("Redundant directories", undefined, undefined, uiLocale)}
+                </AlertTitle>
                 <AlertDescription>{additionalDirectoryWarnings.join(" ")}</AlertDescription>
               </Alert>
             ) : null}
@@ -3012,7 +3379,9 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
             {additionalDirectoriesError ? (
               <Alert variant="error">
                 <TriangleAlertIcon className="size-4" />
-                <AlertTitle>Unable to save directories</AlertTitle>
+                <AlertTitle>
+                  {uiText("Unable to save directories", undefined, undefined, uiLocale)}
+                </AlertTitle>
                 <AlertDescription>{additionalDirectoriesError}</AlertDescription>
               </Alert>
             ) : null}
@@ -3023,13 +3392,13 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
               onClick={closeAdditionalDirectoriesDialog}
               disabled={additionalDirectoriesSubmitting}
             >
-              Cancel
+              {uiText("Cancel", undefined, undefined, uiLocale)}
             </Button>
             <Button
               onClick={() => void submitAdditionalDirectories()}
               disabled={additionalDirectoriesSubmitting}
             >
-              Save
+              {uiText("Save", undefined, undefined, uiLocale)}
             </Button>
           </DialogFooter>
         </DialogPopup>
@@ -3045,16 +3414,30 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
       >
         <DialogPopup className="max-w-lg">
           <DialogHeader>
-            <DialogTitle>Project grouping</DialogTitle>
+            <DialogTitle>{uiText("Project grouping", undefined, undefined, uiLocale)}</DialogTitle>
             <DialogDescription>
               {projectGroupingTarget
-                ? `Choose how ${projectGroupingTarget.cwd} should be grouped in the sidebar.`
-                : "Choose how this project should be grouped in the sidebar."}
+                ? uiText(
+                    "Choose how {value0} should be grouped in the sidebar.",
+                    {
+                      value0: projectGroupingTarget.cwd,
+                    },
+                    undefined,
+                    uiLocale,
+                  )
+                : uiText(
+                    "Choose how this project should be grouped in the sidebar.",
+                    undefined,
+                    undefined,
+                    uiLocale,
+                  )}
             </DialogDescription>
           </DialogHeader>
           <DialogPanel className="space-y-4">
             <div className="grid gap-1.5">
-              <span className="text-xs font-medium text-foreground">Grouping rule</span>
+              <span className="text-xs font-medium text-foreground">
+                {uiText("Grouping rule", undefined, undefined, uiLocale)}
+              </span>
               <Select
                 value={projectGroupingSelection}
                 onValueChange={(value) => {
@@ -3068,40 +3451,57 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
                   }
                 }}
               >
-                <SelectTrigger className="w-full" aria-label="Project grouping rule">
+                <SelectTrigger
+                  className="w-full"
+                  aria-label={uiText("Project grouping rule", undefined, undefined, uiLocale)}
+                >
                   <SelectValue>
                     {projectGroupingSelection === "inherit"
-                      ? `Use global default (${PROJECT_GROUPING_MODE_LABELS[projectGroupingSettings.sidebarProjectGroupingMode]})`
-                      : PROJECT_GROUPING_MODE_LABELS[projectGroupingSelection]}
+                      ? uiText(
+                          "Use global default ({value0})",
+                          {
+                            value0:
+                              uiPresentation.PROJECT_GROUPING_MODE_LABELS[
+                                projectGroupingSettings.sidebarProjectGroupingMode
+                              ],
+                          },
+                          undefined,
+                          uiLocale,
+                        )
+                      : uiPresentation.PROJECT_GROUPING_MODE_LABELS[projectGroupingSelection]}
                   </SelectValue>
                 </SelectTrigger>
                 <SelectPopup align="end" alignItemWithTrigger={false}>
                   <SelectItem hideIndicator value="inherit">
-                    Use global default
+                    {uiText("Use global default", undefined, undefined, uiLocale)}
                   </SelectItem>
                   <SelectItem hideIndicator value="repository">
-                    {PROJECT_GROUPING_MODE_LABELS.repository}
+                    {uiPresentation.PROJECT_GROUPING_MODE_LABELS.repository}
                   </SelectItem>
                   <SelectItem hideIndicator value="repository_path">
-                    {PROJECT_GROUPING_MODE_LABELS.repository_path}
+                    {uiPresentation.PROJECT_GROUPING_MODE_LABELS.repository_path}
                   </SelectItem>
                   <SelectItem hideIndicator value="separate">
-                    {PROJECT_GROUPING_MODE_LABELS.separate}
+                    {uiPresentation.PROJECT_GROUPING_MODE_LABELS.separate}
                   </SelectItem>
                 </SelectPopup>
               </Select>
             </div>
             <p className="text-xs text-muted-foreground">
               {projectGroupingSelection === "inherit"
-                ? projectGroupingModeDescription(projectGroupingSettings.sidebarProjectGroupingMode)
-                : projectGroupingModeDescription(projectGroupingSelection)}
+                ? uiPresentation.projectGroupingModeDescription(
+                    projectGroupingSettings.sidebarProjectGroupingMode,
+                  )
+                : uiPresentation.projectGroupingModeDescription(projectGroupingSelection)}
             </p>
           </DialogPanel>
           <DialogFooter>
             <Button variant="outline" onClick={closeProjectGroupingDialog}>
-              Cancel
+              {uiText("Cancel", undefined, undefined, uiLocale)}
             </Button>
-            <Button onClick={saveProjectGroupingPreference}>Save</Button>
+            <Button onClick={saveProjectGroupingPreference}>
+              {uiText("Save", undefined, undefined, uiLocale)}
+            </Button>
           </DialogFooter>
         </DialogPopup>
       </Dialog>
@@ -3116,16 +3516,30 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
       >
         <DialogPopup className="max-w-lg">
           <DialogHeader>
-            <DialogTitle>Move chat</DialogTitle>
+            <DialogTitle>{uiText("Move chat", undefined, undefined, uiLocale)}</DialogTitle>
             <DialogDescription>
               {threadMoveTarget
-                ? `Move "${threadMoveTarget.title}" to another project folder.`
-                : "Move this chat to another project folder."}
+                ? uiText(
+                    'Move "{value0}" to another project folder.',
+                    {
+                      value0: threadMoveTarget.title,
+                    },
+                    undefined,
+                    uiLocale,
+                  )
+                : uiText(
+                    "Move this chat to another project folder.",
+                    undefined,
+                    undefined,
+                    uiLocale,
+                  )}
             </DialogDescription>
           </DialogHeader>
           <DialogPanel className="space-y-4">
             <div className="grid gap-1.5">
-              <span className="text-xs font-medium text-foreground">Project folder</span>
+              <span className="text-xs font-medium text-foreground">
+                {uiText("Project folder", undefined, undefined, uiLocale)}
+              </span>
               <Select
                 value={threadMoveProjectId ?? ""}
                 onValueChange={(value) => {
@@ -3137,11 +3551,14 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
                   }
                 }}
               >
-                <SelectTrigger className="w-full" aria-label="Destination project folder">
+                <SelectTrigger
+                  className="w-full"
+                  aria-label={uiText("Destination project folder", undefined, undefined, uiLocale)}
+                >
                   <SelectValue>
                     {selectedThreadMoveProject
                       ? selectedThreadMoveProject.name
-                      : "Choose a project folder"}
+                      : uiText("Choose a project folder", undefined, undefined, uiLocale)}
                   </SelectValue>
                 </SelectTrigger>
                 <SelectPopup align="end" alignItemWithTrigger={false}>
@@ -3160,19 +3577,24 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
             </div>
             {selectedThreadMoveProject ? (
               <p className="text-xs text-muted-foreground">
-                Destination path: {selectedThreadMoveProject.cwd}
+                <UiMessage
+                  message={"Destination path: <slot1></slot1>"}
+                  slots={{ slot1: selectedThreadMoveProject.cwd }}
+                />
               </p>
             ) : null}
           </DialogPanel>
           <DialogFooter>
             <Button variant="outline" onClick={closeThreadMoveDialog}>
-              Cancel
+              {uiText("Cancel", undefined, undefined, uiLocale)}
             </Button>
             <Button
               disabled={threadMoveSubmitting || !threadMoveTarget || !selectedThreadMoveProject}
               onClick={() => void submitThreadMove()}
             >
-              {threadMoveSubmitting ? "Moving…" : "Move"}
+              {threadMoveSubmitting
+                ? uiText("Moving…", undefined, undefined, uiLocale)
+                : uiText("Move", undefined, undefined, uiLocale)}
             </Button>
           </DialogFooter>
         </DialogPopup>
@@ -3190,17 +3612,21 @@ const SidebarProjectListRow = memo(function SidebarProjectListRow(props: Sidebar
 });
 
 function CafeCodeWordmark({ className }: { className?: string }) {
+  const uiLocale = useUiLocale();
+
   const prefix = useSettings((s) => {
     const raw = s.brandWordmarkPrefix?.trim();
     return raw || DEFAULT_BRAND_WORDMARK_PREFIX;
   });
   return (
     <span
-      aria-label={`${prefix} Code`}
+      aria-label={uiText("{value0} Code", { value0: prefix }, undefined, uiLocale)}
       className={cn("shrink-0 text-sm text-foreground", className)}
     >
       <span className="font-bold">{prefix}</span>
-      <span className="font-medium text-muted-foreground"> Code</span>
+      <span className="font-medium text-muted-foreground">
+        {uiText(" Code", undefined, undefined, uiLocale)}
+      </span>
     </span>
   );
 }
@@ -3229,6 +3655,9 @@ function ProjectSortMenu({
   onProjectGroupingModeChange: (mode: SidebarProjectGroupingMode) => void;
   onThreadPreviewCountChange: (count: SidebarThreadPreviewCount) => void;
 }) {
+  const uiLocale = useUiLocale();
+  const uiPresentation = useUiPresentation(UI_PRESENTATION_SOURCES);
+
   const handleThreadPreviewCountChange = useCallback(
     (nextValue: number | null) => {
       if (nextValue === null) {
@@ -3253,12 +3682,14 @@ function ProjectSortMenu({
         >
           <ArrowUpDownIcon className="size-3.5" />
         </TooltipTrigger>
-        <TooltipPopup side="right">Sidebar options</TooltipPopup>
+        <TooltipPopup side="right">
+          {uiText("Sidebar options", undefined, undefined, uiLocale)}
+        </TooltipPopup>
       </Tooltip>
       <MenuPopup align="end" side="bottom" className="min-w-52">
         <MenuGroup>
           <div className="px-2 py-1 sm:text-xs font-medium text-muted-foreground">
-            Sort projects
+            {uiText("Sort projects", undefined, undefined, uiLocale)}
           </div>
           <MenuRadioGroup
             value={projectSortOrder}
@@ -3266,18 +3697,20 @@ function ProjectSortMenu({
               onProjectSortOrderChange(value as SidebarProjectSortOrder);
             }}
           >
-            {(Object.entries(SIDEBAR_SORT_LABELS) as Array<[SidebarProjectSortOrder, string]>).map(
-              ([value, label]) => (
-                <MenuRadioItem key={value} value={value} className="min-h-7 py-1 sm:text-xs">
-                  {label}
-                </MenuRadioItem>
-              ),
-            )}
+            {(
+              Object.entries(uiPresentation.SIDEBAR_SORT_LABELS) as Array<
+                [SidebarProjectSortOrder, string]
+              >
+            ).map(([value, label]) => (
+              <MenuRadioItem key={value} value={value} className="min-h-7 py-1 sm:text-xs">
+                {label}
+              </MenuRadioItem>
+            ))}
           </MenuRadioGroup>
         </MenuGroup>
         <MenuGroup>
           <div className="px-2 pt-2 pb-1 sm:text-xs font-medium text-muted-foreground">
-            Sort chats
+            {uiText("Sort chats", undefined, undefined, uiLocale)}
           </div>
           <MenuRadioGroup
             value={threadSortOrder}
@@ -3286,7 +3719,9 @@ function ProjectSortMenu({
             }}
           >
             {(
-              Object.entries(SIDEBAR_THREAD_SORT_LABELS) as Array<[SidebarThreadSortOrder, string]>
+              Object.entries(uiPresentation.SIDEBAR_THREAD_SORT_LABELS) as Array<
+                [SidebarThreadSortOrder, string]
+              >
             ).map(([value, label]) => (
               <MenuRadioItem key={value} value={value} className="min-h-7 py-1 sm:text-xs">
                 {label}
@@ -3296,11 +3731,11 @@ function ProjectSortMenu({
         </MenuGroup>
         <MenuGroup>
           <div className="px-2 pt-2 pb-1 text-muted-foreground sm:text-xs font-medium">
-            Visible chats
+            {uiText("Visible chats", undefined, undefined, uiLocale)}
           </div>
           <div className="px-2 py-1">
             <NumberField
-              aria-label="Visible chat count"
+              aria-label={uiText("Visible chat count", undefined, undefined, uiLocale)}
               className="w-28 gap-0"
               max={MAX_SIDEBAR_THREAD_PREVIEW_COUNT}
               min={MIN_SIDEBAR_THREAD_PREVIEW_COUNT}
@@ -3311,11 +3746,11 @@ function ProjectSortMenu({
             >
               <NumberFieldGroup className="h-7 rounded-md sm:h-6.5">
                 <NumberFieldDecrement
-                  aria-label="Decrease visible chat count"
+                  aria-label={uiText("Decrease visible chat count", undefined, undefined, uiLocale)}
                   className="px-2 sm:px-2 [&_svg]:size-3.5"
                 />
                 <NumberFieldInput
-                  aria-label="Visible chat count"
+                  aria-label={uiText("Visible chat count", undefined, undefined, uiLocale)}
                   className="h-7 w-9 grow-0 px-0 text-xs leading-7 sm:h-6.5 sm:leading-6.5"
                   inputMode="numeric"
                   onKeyDownCapture={(event) => {
@@ -3323,7 +3758,7 @@ function ProjectSortMenu({
                   }}
                 />
                 <NumberFieldIncrement
-                  aria-label="Increase visible chat count"
+                  aria-label={uiText("Increase visible chat count", undefined, undefined, uiLocale)}
                   className="px-2 sm:px-2 [&_svg]:size-3.5"
                 />
               </NumberFieldGroup>
@@ -3333,7 +3768,7 @@ function ProjectSortMenu({
         <MenuSeparator />
         <MenuGroup>
           <div className="px-2 pt-2 pb-1 font-medium text-muted-foreground sm:text-xs">
-            Group projects
+            {uiText("Group projects", undefined, undefined, uiLocale)}
           </div>
           <MenuRadioGroup
             value={projectGroupingMode}
@@ -3344,7 +3779,7 @@ function ProjectSortMenu({
             }}
           >
             {(
-              Object.entries(PROJECT_GROUPING_MODE_LABELS) as Array<
+              Object.entries(uiPresentation.PROJECT_GROUPING_MODE_LABELS) as Array<
                 [SidebarProjectGroupingMode, string]
               >
             ).map(([value, label]) => (
@@ -3406,6 +3841,8 @@ export const SidebarChromeHeader = memo(function SidebarChromeHeader({
 }: {
   isElectron: boolean;
 }) {
+  const uiLocale = useUiLocale();
+
   const { isMobile } = useSidebar();
   const isMacDesktop = isElectron && !isMobile && isMacPlatform(navigator.platform);
   const wordmark = (
@@ -3443,7 +3880,7 @@ export const SidebarChromeHeader = memo(function SidebarChromeHeader({
               </span>
             ) : (
               <Link
-                aria-label="Go to chats"
+                aria-label={uiText("Go to chats", undefined, undefined, uiLocale)}
                 className="ml-1 flex min-w-0 flex-1 cursor-pointer items-center gap-1 rounded-md outline-hidden ring-ring transition-colors hover:text-foreground focus-visible:ring-2"
                 to="/"
               >
@@ -3454,7 +3891,7 @@ export const SidebarChromeHeader = memo(function SidebarChromeHeader({
           }
         />
         <TooltipPopup side="bottom" sideOffset={2}>
-          Version {APP_VERSION}
+          <UiMessage message={"Version <slot1></slot1>"} slots={{ slot1: APP_VERSION }} />
         </TooltipPopup>
       </Tooltip>
     </div>
@@ -3569,13 +4006,26 @@ interface SidebarProjectsContentProps {
 }
 
 const SIDEBAR_MODE_OPTIONS = [
-  { value: "desk", label: "Desk" },
-  { value: "projects", label: "Projects" },
+  {
+    value: "desk",
+    get label() {
+      return uiText("Desk");
+    },
+  },
+  {
+    value: "projects",
+    get label() {
+      return uiText("Projects");
+    },
+  },
 ] as const;
 
 const SidebarProjectsContent = memo(function SidebarProjectsContent(
   props: SidebarProjectsContentProps,
 ) {
+  const uiLocale = useUiLocale();
+  const uiPresentation = useUiPresentation(UI_PRESENTATION_SOURCES);
+
   const {
     sidebarMode,
     onSidebarModeChange,
@@ -3660,11 +4110,11 @@ const SidebarProjectsContent = memo(function SidebarProjectsContent(
       <div className="mx-3 mt-2">
         {/* ToggleGroup keeps the existing group + pressed-button semantics. */}
         <SegmentedControl
-          aria-label="Sidebar view"
+          aria-label={uiText("Sidebar view", undefined, undefined, uiLocale)}
           size="sm"
           value={sidebarMode}
           onValueChange={onSidebarModeChange}
-          options={SIDEBAR_MODE_OPTIONS}
+          options={uiPresentation.SIDEBAR_MODE_OPTIONS}
           className="w-full [&>[data-segment]]:flex-1"
         />
       </div>
@@ -3682,7 +4132,9 @@ const SidebarProjectsContent = memo(function SidebarProjectsContent(
                 }
               >
                 <SearchIcon className="size-3.5" />
-                <span className="flex-1 truncate text-left text-ui">Search</span>
+                <span className="flex-1 truncate text-left text-ui">
+                  {uiText("Search", undefined, undefined, uiLocale)}
+                </span>
                 {commandPaletteShortcutLabel ? (
                   <Kbd className="h-4 min-w-0 rounded-sm px-1.5 text-2xs">
                     {commandPaletteShortcutLabel}
@@ -3697,7 +4149,9 @@ const SidebarProjectsContent = memo(function SidebarProjectsContent(
         <SidebarGroup className="px-2 pt-2 pb-0">
           <Alert variant="warning" className="rounded-xl">
             <TriangleAlertIcon />
-            <AlertTitle>Intel build on Apple Silicon</AlertTitle>
+            <AlertTitle>
+              {uiText("Intel build on Apple Silicon", undefined, undefined, uiLocale)}
+            </AlertTitle>
             <AlertDescription>{arm64IntelBuildWarningDescription}</AlertDescription>
             {desktopUpdateButtonAction !== "none" ? (
               <AlertAction>
@@ -3708,10 +4162,10 @@ const SidebarProjectsContent = memo(function SidebarProjectsContent(
                   onClick={handleDesktopUpdateButtonClick}
                 >
                   {desktopUpdateButtonAction === "download"
-                    ? "Download ARM build"
+                    ? uiText("Download ARM build", undefined, undefined, uiLocale)
                     : desktopUpdateButtonAction === "manual"
-                      ? "View ARM build"
-                      : "Install ARM build"}
+                      ? uiText("View ARM build", undefined, undefined, uiLocale)
+                      : uiText("Install ARM build", undefined, undefined, uiLocale)}
                 </Button>
               </AlertAction>
             ) : null}
@@ -3725,7 +4179,9 @@ const SidebarProjectsContent = memo(function SidebarProjectsContent(
           {standaloneContent}
           <SidebarGroup className="px-2 py-2">
             <div className="mb-1 flex items-center justify-between pl-2 pr-1.5">
-              <span className="label-overline">Projects</span>
+              <span className="label-overline">
+                {uiText("Projects", undefined, undefined, uiLocale)}
+              </span>
               <div className="flex items-center gap-1">
                 <ProjectSortMenu
                   projectSortOrder={projectSortOrder}
@@ -3743,7 +4199,7 @@ const SidebarProjectsContent = memo(function SidebarProjectsContent(
                       <button
                         ref={addProjectHintAnchorRef}
                         type="button"
-                        aria-label="Add project"
+                        aria-label={uiText("Add project", undefined, undefined, uiLocale)}
                         data-testid="sidebar-add-project-trigger"
                         className="inline-flex size-5 cursor-pointer items-center justify-center rounded-sm text-subtle-foreground transition-colors duration-(--duration-fast) hover:bg-accent hover:text-foreground focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-ring"
                         onClick={openAddProject}
@@ -3752,11 +4208,18 @@ const SidebarProjectsContent = memo(function SidebarProjectsContent(
                   >
                     <FolderPlusIcon className="size-3.5" />
                   </TooltipTrigger>
-                  <TooltipPopup side="right">Add project</TooltipPopup>
+                  <TooltipPopup side="right">
+                    {uiText("Add project", undefined, undefined, uiLocale)}
+                  </TooltipPopup>
                 </Tooltip>
                 <FirstRunHint
                   anchor={addProjectHintAnchorRef}
-                  message="Start by adding your first project"
+                  message={uiText(
+                    "Start by adding your first project",
+                    undefined,
+                    undefined,
+                    uiLocale,
+                  )}
                   onDismiss={onDismissAddProjectHint}
                   open={showAddProjectHint}
                   testId="add-project-hint"
@@ -3844,7 +4307,9 @@ const SidebarProjectsContent = memo(function SidebarProjectsContent(
             )}
 
             {primaryEnvironmentBootstrapped && projectsLength === 0 && (
-              <p className="px-3 py-1 text-xs text-subtle-foreground">No projects yet</p>
+              <p className="px-3 py-1 text-xs text-subtle-foreground">
+                {uiText("No projects yet", undefined, undefined, uiLocale)}
+              </p>
             )}
           </SidebarGroup>
         </>
@@ -3866,13 +4331,14 @@ const SidebarProjectsContent = memo(function SidebarProjectsContent(
           />
           {showSidebarAttribution ? (
             <a
-              aria-label="Cafe Code on GitHub"
+              aria-label={uiText("Cafe Code on GitHub", undefined, undefined, uiLocale)}
               className="text-2xs font-medium text-disabled-foreground underline-offset-2 transition-colors duration-(--duration-fast) hover:text-muted-foreground hover:underline focus-visible:rounded-sm focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring"
               href="https://github.com/cafeai/cafe-code"
               rel="noreferrer"
               target="_blank"
             >
-              by cafeai <span className="opacity-60">♡</span>
+              {uiText("by cafeai ", undefined, undefined, uiLocale)}
+              <span className="opacity-60">{uiText("♡", undefined, undefined, uiLocale)}</span>
             </a>
           ) : null}
         </div>
@@ -3882,6 +4348,9 @@ const SidebarProjectsContent = memo(function SidebarProjectsContent(
 });
 
 export default function Sidebar() {
+  const uiLocale = useUiLocale();
+  const uiPresentation = useUiPresentation(UI_PRESENTATION_SOURCES);
+
   const desk = useDeskStore((state) => state.desk);
   const deskDispatch = useDeskStore((state) => state.dispatch);
   const workspaceEnvironmentId = useWorkspaceEnvironmentId();
@@ -4074,8 +4543,12 @@ export default function Sidebar() {
     [platform],
   );
   const newThreadShortcutLabel =
-    shortcutLabelForCommand(keybindings, "chat.newLocal", newThreadShortcutLabelOptions) ??
-    shortcutLabelForCommand(keybindings, "chat.new", newThreadShortcutLabelOptions);
+    uiPresentation.shortcutLabelForCommand(
+      keybindings,
+      "chat.newLocal",
+      newThreadShortcutLabelOptions,
+    ) ??
+    uiPresentation.shortcutLabelForCommand(keybindings, "chat.new", newThreadShortcutLabelOptions);
 
   const navigateToThread = useCallback(
     (threadRef: ScopedThreadRef) => {
@@ -4126,14 +4599,24 @@ export default function Sidebar() {
         toastManager.add(
           stackedThreadToast({
             type: "error",
-            title: "Could not create chat",
+            title: uiText("Could not create chat", undefined, undefined, uiLocale),
             description: remoteWorkspace
-              ? "Reconnect to a compatible Cafe server before trying again."
-              : "Reconnect to a compatible local Cafe environment before trying again.",
+              ? uiText(
+                  "Reconnect to a compatible Cafe server before trying again.",
+                  undefined,
+                  undefined,
+                  uiLocale,
+                )
+              : uiText(
+                  "Reconnect to a compatible local Cafe environment before trying again.",
+                  undefined,
+                  undefined,
+                  uiLocale,
+                ),
           }),
         );
       });
-  }, [clearSelection, handleNewStandaloneChat, isMobile, setOpenMobile, remoteWorkspace]);
+  }, [clearSelection, handleNewStandaloneChat, isMobile, setOpenMobile, remoteWorkspace, uiLocale]);
   const openStandaloneTarget = useCallback(
     (target: ThreadRouteTarget, preview = true) => {
       deskDispatch({
@@ -4149,15 +4632,15 @@ export default function Sidebar() {
         toastManager.add(
           stackedThreadToast({
             type: "warning",
-            title: "Could not open chat",
-            description: "Close an open tab and try again.",
+            title: uiText("Could not open chat", undefined, undefined, uiLocale),
+            description: uiText("Close an open tab and try again.", undefined, undefined, uiLocale),
           }),
         );
         return;
       }
       navigateToDeskTarget(target);
     },
-    [deskDispatch, navigateToDeskTarget],
+    [deskDispatch, navigateToDeskTarget, uiLocale],
   );
 
   const projectDnDSensors = useSensors(
@@ -4351,12 +4834,12 @@ export default function Sidebar() {
   );
   const threadJumpLabelByKey = useMemo(
     () =>
-      buildThreadJumpLabelMap({
+      uiPresentation.buildThreadJumpLabelMap({
         keybindings,
         platform,
         threadJumpCommandByKey,
       }),
-    [keybindings, platform, threadJumpCommandByKey],
+    [keybindings, platform, threadJumpCommandByKey, uiPresentation],
   );
   const shouldShowThreadJumpHintsNow = shouldShowThreadJumpHintsForModifiers(
     shortcutModifiers,
@@ -4533,9 +5016,9 @@ export default function Sidebar() {
     isElectron && shouldShowArm64IntelBuildWarning(desktopUpdateState);
   const arm64IntelBuildWarningDescription =
     desktopUpdateState && showArm64IntelBuildWarning
-      ? getArm64IntelBuildWarningDescription(desktopUpdateState)
+      ? uiPresentation.getArm64IntelBuildWarningDescription(desktopUpdateState)
       : null;
-  const commandPaletteShortcutLabel = shortcutLabelForCommand(
+  const commandPaletteShortcutLabel = uiPresentation.shortcutLabelForCommand(
     keybindings,
     "commandPalette.toggle",
     newThreadShortcutLabelOptions,
@@ -4552,15 +5035,25 @@ export default function Sidebar() {
           if (opened) return;
           toastManager.add({
             type: "error",
-            title: "Could not open release",
-            description: "Open the Cafe Code releases page in your browser to install the DMG.",
+            title: uiText("Could not open release", undefined, undefined, uiLocale),
+            description: uiText(
+              "Open the Cafe Code releases page in your browser to install the DMG.",
+              undefined,
+              undefined,
+              uiLocale,
+            ),
           });
         })
         .catch(() => {
           toastManager.add({
             type: "error",
-            title: "Could not open release",
-            description: "Open the Cafe Code releases page in your browser to install the DMG.",
+            title: uiText("Could not open release", undefined, undefined, uiLocale),
+            description: uiText(
+              "Open the Cafe Code releases page in your browser to install the DMG.",
+              undefined,
+              undefined,
+              uiLocale,
+            ),
           });
         });
       return;
@@ -4573,8 +5066,13 @@ export default function Sidebar() {
           if (result.completed) {
             toastManager.add({
               type: "success",
-              title: "Update downloaded",
-              description: "Restart the app from the update button to install it.",
+              title: uiText("Update downloaded", undefined, undefined, uiLocale),
+              description: uiText(
+                "Restart the app from the update button to install it.",
+                undefined,
+                undefined,
+                uiLocale,
+              ),
             });
           }
           if (!shouldToastDesktopUpdateActionResult(result)) return;
@@ -4583,7 +5081,7 @@ export default function Sidebar() {
           toastManager.add(
             stackedThreadToast({
               type: "error",
-              title: "Could not download update",
+              title: uiText("Could not download update", undefined, undefined, uiLocale),
               description: actionError,
             }),
           );
@@ -4592,8 +5090,11 @@ export default function Sidebar() {
           toastManager.add(
             stackedThreadToast({
               type: "error",
-              title: "Could not start update download",
-              description: error instanceof Error ? error.message : "An unexpected error occurred.",
+              title: uiText("Could not start update download", undefined, undefined, uiLocale),
+              description:
+                error instanceof Error
+                  ? error.message
+                  : uiText("An unexpected error occurred.", undefined, undefined, uiLocale),
             }),
           );
         });
@@ -4602,7 +5103,7 @@ export default function Sidebar() {
 
     if (desktopUpdateButtonAction === "install") {
       const confirmed = window.confirm(
-        getDesktopUpdateInstallConfirmationMessage(desktopUpdateState),
+        uiPresentation.getDesktopUpdateInstallConfirmationMessage(desktopUpdateState),
       );
       if (!confirmed) return;
       void bridge
@@ -4614,7 +5115,7 @@ export default function Sidebar() {
           toastManager.add(
             stackedThreadToast({
               type: "error",
-              title: "Could not install update",
+              title: uiText("Could not install update", undefined, undefined, uiLocale),
               description: actionError,
             }),
           );
@@ -4623,13 +5124,22 @@ export default function Sidebar() {
           toastManager.add(
             stackedThreadToast({
               type: "error",
-              title: "Could not install update",
-              description: error instanceof Error ? error.message : "An unexpected error occurred.",
+              title: uiText("Could not install update", undefined, undefined, uiLocale),
+              description:
+                error instanceof Error
+                  ? error.message
+                  : uiText("An unexpected error occurred.", undefined, undefined, uiLocale),
             }),
           );
         });
     }
-  }, [desktopUpdateButtonAction, desktopUpdateButtonDisabled, desktopUpdateState]);
+  }, [
+    desktopUpdateButtonAction,
+    desktopUpdateButtonDisabled,
+    desktopUpdateState,
+    uiLocale,
+    uiPresentation,
+  ]);
 
   const expandThreadListForProject = useCallback((projectKey: string) => {
     setExpandedThreadListsByProject((current) => {
@@ -4732,3 +5242,21 @@ export default function Sidebar() {
     </>
   );
 }
+
+// Finite source-owned labels/helpers only; no received or user data.
+const UI_PRESENTATION_SOURCES = {
+  PROJECT_GROUPING_MODE_LABELS,
+  SIDEBAR_MODE_OPTIONS,
+  SIDEBAR_SORT_LABELS,
+  SIDEBAR_THREAD_SORT_LABELS,
+  buildSidebarThreadContextMenuItems,
+  buildThreadJumpLabelMap,
+  formatProjectMemberActionLabel,
+  formatRelativeTimeLabel,
+  getArm64IntelBuildWarningDescription,
+  getDesktopUpdateInstallConfirmationMessage,
+  prStatusIndicator,
+  projectGroupingModeDescription,
+  shortcutLabelForCommand,
+  summarizeHiddenThreadStatuses,
+};

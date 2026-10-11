@@ -1,3 +1,4 @@
+import { uiText } from "@cafecode/shared/i18n";
 import {
   type EnvironmentId,
   type ChatFileAttachment,
@@ -35,7 +36,7 @@ export function buildLocalDraftThread(
     environmentId: draftThread.environmentId,
     codexThreadId: null,
     projectId: draftThread.projectId,
-    title: "New chat",
+    title: uiText("New chat"),
     modelSelection: fallbackModelSelection,
     runtimeMode: draftThread.runtimeMode,
     interactionMode: draftThread.interactionMode,
@@ -121,10 +122,10 @@ export function readFileAsDataUrl(file: File): Promise<string> {
         resolve(reader.result);
         return;
       }
-      reject(new Error("Could not read image data."));
+      reject(new Error(uiText("Could not read image data.")));
     });
     reader.addEventListener("error", () => {
-      reject(reader.error ?? new Error("Failed to read image."));
+      reject(reader.error ?? new Error(uiText("Failed to read image.")));
     });
     reader.readAsDataURL(file);
   });

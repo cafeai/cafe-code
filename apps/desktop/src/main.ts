@@ -34,6 +34,7 @@ import * as DesktopObservability from "./app/DesktopObservability.ts";
 import * as DesktopPowerSaveBlocker from "./app/DesktopPowerSaveBlocker.ts";
 import * as DesktopServerExposure from "./backend/DesktopServerExposure.ts";
 import * as DesktopClientSettings from "./settings/DesktopClientSettings.ts";
+import * as DesktopUiLocale from "./settings/DesktopUiLocale.ts";
 import * as DesktopSavedEnvironments from "./settings/DesktopSavedEnvironments.ts";
 import * as DesktopRemoteCertificates from "./settings/DesktopRemoteCertificates.ts";
 import * as DesktopAppSettings from "./settings/DesktopAppSettings.ts";
@@ -112,9 +113,13 @@ const desktopFoundationLayer = Layer.mergeAll(
   DesktopNativeControl.layer,
 ).pipe(Layer.provideMerge(desktopEnvironmentLayer));
 
+const desktopLocalizedFoundationLayer = DesktopUiLocale.layer.pipe(
+  Layer.provideMerge(desktopFoundationLayer),
+);
+
 const desktopServerExposureLayer = DesktopServerExposure.layer.pipe(
   Layer.provideMerge(DesktopServerExposure.networkInterfacesLayer),
-  Layer.provideMerge(desktopFoundationLayer),
+  Layer.provideMerge(desktopLocalizedFoundationLayer),
 );
 
 const desktopStartupWindowLayer = DesktopStartupWindow.layer.pipe(
@@ -123,7 +128,7 @@ const desktopStartupWindowLayer = DesktopStartupWindow.layer.pipe(
 const desktopWindowLayer = DesktopWindow.layer.pipe(Layer.provideMerge(desktopStartupWindowLayer));
 
 const desktopProviderDaemonLayer = DesktopProviderDaemonManager.layer.pipe(
-  Layer.provideMerge(desktopFoundationLayer),
+  Layer.provideMerge(desktopLocalizedFoundationLayer),
 );
 
 const desktopBackendLayer = DesktopBackendManager.layer.pipe(

@@ -1,15 +1,19 @@
 import "../../index.css";
-import { afterEach, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { page } from "vitest/browser";
 import { render } from "vitest-browser-react";
 import type { NativeControlState } from "@cafecode/contracts";
+import { getUiLocale, setUiLocale, uiText } from "@cafecode/shared/i18n";
 import { NativeControlSettings } from "./NativeControlSettings";
 import { applyInterfaceScalePercent } from "../../interfaceScale";
 
 let mounted: Awaited<ReturnType<typeof render>> | undefined;
+const originalLocale = getUiLocale();
+beforeEach(() => setUiLocale("en"));
 afterEach(async () => {
   await mounted?.unmount();
   mounted = undefined;
+  setUiLocale(originalLocale);
 });
 function fixture(platform = "darwin", available = true) {
   let state: NativeControlState = {
@@ -99,6 +103,64 @@ it("keeps failed checks retryable without displaying raw IPC error contents", as
     .element(page.getByRole("switch", { name: "Enable local desktop control" }))
     .toBeEnabled();
   await expect.element(page.getByText("private IPC details")).not.toBeInTheDocument();
+});
+
+it("retranslates retained Cafe feedback without repeating the failed state read", async () => {
+  const bridge = fixture();
+  bridge.getNativeControlState.mockRejectedValueOnce(new Error("private IPC details"));
+  mounted = await render(<NativeControlSettings bridge={bridge} />);
+  await expect
+    .element(page.getByRole("status"))
+    .toHaveTextContent("Could not read the local controller state. Restart Cafe or refresh.");
+  setUiLocale("ko");
+  await expect
+    .element(page.getByRole("status"))
+    .toHaveTextContent("로컬 컨트롤러 상태를 읽지 못했습니다. Cafe를 재시작하거나 새로고침하세요.");
+  expect(bridge.getNativeControlState).toHaveBeenCalledTimes(1);
+  expect(bridge.setNativeControlEnabled).not.toHaveBeenCalled();
+  expect(document.body.textContent).not.toContain("private IPC details");
+});
+
+it("keeps received controller text opaque while retranslating Cafe's empty-result fallback", async () => {
+  const bridge = fixture();
+  // Matching an English source is not translation provenance: this text came
+  // from the synthetic controller, not from Cafe's finite fallback descriptor.
+  bridge.getNativeControlDiagnostics.mockResolvedValueOnce({
+    content: [{ type: "text", text: "Native operation completed." }],
+  });
+  mounted = await render(<NativeControlSettings bridge={bridge} />);
+  const toggle = page.getByRole("switch", { name: "Enable local desktop control" });
+  await expect.element(toggle).toBeEnabled();
+  await toggle.click();
+  await page.getByRole("button", { name: "Check permissions" }).click();
+  await expect.element(page.getByRole("status")).toHaveTextContent("Native operation completed.");
+  const stateReads = bridge.getNativeControlState.mock.calls.length;
+  setUiLocale("ko");
+  await expect
+    .element(
+      page.getByRole("button", {
+        name: uiText("Test screenshot", undefined, undefined, "ko"),
+      }),
+    )
+    .toBeEnabled();
+  await expect.element(page.getByRole("status")).toHaveTextContent("Native operation completed.");
+  expect(bridge.getNativeControlState).toHaveBeenCalledTimes(stateReads);
+  expect(bridge.getNativeControlDiagnostics).toHaveBeenCalledTimes(1);
+  expect(bridge.setNativeControlEnabled).toHaveBeenCalledTimes(1);
+
+  await page
+    .getByRole("button", {
+      name: uiText("Test screenshot", undefined, undefined, "ko"),
+    })
+    .click();
+  await expect
+    .element(page.getByRole("status"))
+    .toHaveTextContent("네이티브 작업이 완료되었습니다.");
+  const readsAfterCapture = bridge.getNativeControlState.mock.calls.length;
+  setUiLocale("en");
+  await expect.element(page.getByRole("status")).toHaveTextContent("Native operation completed.");
+  expect(bridge.captureNativeControlPreview).toHaveBeenCalledTimes(1);
+  expect(bridge.getNativeControlState).toHaveBeenCalledTimes(readsAfterCapture);
 });
 
 it.each([

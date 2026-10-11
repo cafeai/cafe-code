@@ -15,6 +15,7 @@ import {
   type TerminalAvailability,
 } from "@cafecode/contracts";
 import { DEFAULT_RESOLVED_KEYBINDINGS } from "@cafecode/shared/keybindings";
+import { uiText } from "@cafecode/shared/i18n";
 import { Atom } from "effect/unstable/reactivity";
 import { useCallback, useRef } from "react";
 
@@ -54,8 +55,14 @@ const EMPTY_AVAILABLE_EDITORS: ReadonlyArray<EditorId> = [];
 const EMPTY_SERVER_PROVIDERS: ReadonlyArray<ServerProvider> = [];
 const UNAVAILABLE_TERMINAL: TerminalAvailability = {
   available: false,
-  label: "Terminal",
-  unavailableReason: "$TERMINAL needs to be set.",
+  // Only this Cafe-authored absence fallback is presentation copy. Configured
+  // terminal labels and received availability details remain opaque metadata.
+  get label() {
+    return uiText("Terminal");
+  },
+  get unavailableReason() {
+    return uiText("{variable} needs to be set.", { variable: "$TERMINAL" });
+  },
 };
 
 const selectAvailableEditors = (config: ServerConfig | null): ReadonlyArray<EditorId> =>
@@ -327,8 +334,8 @@ export function useServerConfig(environmentId?: EnvironmentId | null): ServerCon
     : savedConfig;
 }
 
-export function useServerSettings(): ServerSettings {
-  return selectSettings(useServerConfig());
+export function useServerSettings(environmentId?: EnvironmentId | null): ServerSettings {
+  return selectSettings(useServerConfig(environmentId));
 }
 
 export function useServerClientSettings(): ClientSettings {
@@ -370,3 +377,5 @@ export function useServerConfigUpdatedSubscription(
 ): void {
   useLatestAtomSubscription(serverConfigUpdatedAtom, listener);
 }
+
+// Finite source-owned labels/helpers only; no received or user data.

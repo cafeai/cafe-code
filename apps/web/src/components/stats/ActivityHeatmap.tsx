@@ -1,3 +1,6 @@
+import { useUiLocale, useUiPresentation } from "~/i18n";
+import { uiLabelList } from "@cafecode/shared/i18n";
+import { uiFormatDateTime, uiText } from "@cafecode/shared/i18n";
 import { useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { UsageStatsDay } from "@cafecode/contracts";
 
@@ -29,28 +32,43 @@ const DEFAULT_VIEWPORT_WIDTH = 640;
  * range apart (peak days stand out more) at the cost of dimming mid days.
  */
 const CURVE_STEEPNESS = 2;
-const MONTH_LABELS = [
-  "Jan",
-  "Feb",
-  "Mar",
-  "Apr",
-  "May",
-  "Jun",
-  "Jul",
-  "Aug",
-  "Sep",
-  "Oct",
-  "Nov",
-  "Dec",
-];
+const MONTH_LABELS = uiLabelList([
+  () => uiText("Jan"),
+  () => uiText("Feb"),
+  () => uiText("Mar"),
+  () => uiText("Apr"),
+  () => uiText("May"),
+  () => uiText("Jun"),
+  () => uiText("Jul"),
+  () => uiText("Aug"),
+  () => uiText("Sep"),
+  () => uiText("Oct"),
+  () => uiText("Nov"),
+  () => uiText("Dec"),
+] as const);
 /** GitHub labels alternating weekday rows; row 0 is Sunday. */
 const WEEKDAY_LABELS = [
   { day: "sunday", label: "" },
-  { day: "monday", label: "Mon" },
+  {
+    day: "monday",
+    get label() {
+      return uiText("Mon");
+    },
+  },
   { day: "tuesday", label: "" },
-  { day: "wednesday", label: "Wed" },
+  {
+    day: "wednesday",
+    get label() {
+      return uiText("Wed");
+    },
+  },
   { day: "thursday", label: "" },
-  { day: "friday", label: "Fri" },
+  {
+    day: "friday",
+    get label() {
+      return uiText("Fri");
+    },
+  },
   { day: "saturday", label: "" },
 ] as const;
 
@@ -93,17 +111,26 @@ function cellColor(intensity: number): string {
 
 function formatCellDuration(generatingMs: number): string {
   if (generatingMs <= 0) {
-    return "No generating time";
+    return uiText("No generating time");
   }
   const totalSeconds = Math.round(generatingMs / 1000);
   const hours = Math.floor(totalSeconds / 3600);
   const minutes = Math.floor((totalSeconds % 3600) / 60);
   const seconds = totalSeconds % 60;
-  const parts: Array<string> = [];
-  if (hours > 0) parts.push(`${hours}h`);
-  if (minutes > 0) parts.push(`${minutes}m`);
-  if (hours === 0 && (seconds > 0 || parts.length === 0)) parts.push(`${seconds}s`);
-  return `${parts.join(" ")} generating`;
+  // The complete label owns unit order and conditional spacing. Preserve the
+  // existing display policy (seconds hidden when hours are present), without
+  // constructing English-only unit fragments outside the catalog.
+  return uiText(
+    "{hasHours, select, yes {{hours}h{hasMinutes, select, yes { {minutes}m} other {}}} other {{hasMinutes, select, yes {{minutes}m{hasSeconds, select, yes { {seconds}s} other {}}} other {{seconds}s}}}} generating",
+    {
+      hours,
+      minutes,
+      seconds,
+      hasHours: hours > 0 ? "yes" : "no",
+      hasMinutes: minutes > 0 ? "yes" : "no",
+      hasSeconds: seconds > 0 ? "yes" : "no",
+    },
+  );
 }
 
 function formatCellDate(dayKey: string): string {
@@ -113,7 +140,7 @@ function formatCellDate(dayKey: string): string {
   const dayIndex = usageDayToUtcDayIndex(dayKey);
   if (dayIndex === undefined) return dayKey;
   const date = new Date(dayIndex * 86_400_000);
-  return date.toLocaleDateString(undefined, {
+  return uiFormatDateTime(date, {
     weekday: "short",
     month: "short",
     day: "numeric",
@@ -173,6 +200,9 @@ export function ActivityHeatmap({
   layout?: "compact" | "responsive";
   className?: string;
 }) {
+  const uiLocale = useUiLocale();
+  const uiPresentation = useUiPresentation(UI_PRESENTATION_SOURCES);
+
   const [hovered, setHovered] = useState<HoveredCell | null>(null);
   const calendarViewportRef = useRef<HTMLDivElement>(null);
   const scrollerRef = useRef<HTMLDivElement>(null);
@@ -354,7 +384,7 @@ export function ActivityHeatmap({
       // crammed into the very last columns.
       if (firstOfColumn.getUTCMonth() !== previousMonth) {
         if (bounded || week > 0 || firstOfColumn.getUTCDate() <= 7) {
-          labels.set(week, MONTH_LABELS[firstOfColumn.getUTCMonth()] ?? "");
+          labels.set(week, uiPresentation.MONTH_LABELS[firstOfColumn.getUTCMonth()] ?? "");
         }
         previousMonth = firstOfColumn.getUTCMonth();
       }
@@ -374,10 +404,11 @@ export function ActivityHeatmap({
     bounded,
     todayDayKey,
     todayGeneratingMs,
+    uiPresentation,
   ]);
   const activeHover = hovered?.calendarKey === calendarKey ? hovered : null;
   const tooltipDuration = activeHover
-    ? formatCellDuration(
+    ? uiPresentation.formatCellDuration(
         activeHover.dayKey === todayDayKey
           ? (todayGeneratingMs ?? 0)
           : (byDay.get(activeHover.dayKey) ?? 0),
@@ -448,7 +479,11 @@ export function ActivityHeatmap({
           className={bounded ? "min-w-0 max-w-full overflow-x-auto pb-1" : "w-full"}
           data-activity-heatmap-scroll={bounded ? "true" : undefined}
           role={virtualized ? "region" : undefined}
-          aria-label={virtualized ? "Scroll through daily activity history" : undefined}
+          aria-label={
+            virtualized
+              ? uiText("Scroll through daily activity history", undefined, undefined, uiLocale)
+              : undefined
+          }
           tabIndex={virtualized ? 0 : undefined}
           onScroll={
             bounded
@@ -502,7 +537,7 @@ export function ActivityHeatmap({
                 }
                 aria-hidden
               >
-                {WEEKDAY_LABELS.map(({ day, label }) => (
+                {uiPresentation.WEEKDAY_LABELS.map(({ day, label }) => (
                   <span key={day} className="flex items-center">
                     {label}
                   </span>
@@ -519,8 +554,18 @@ export function ActivityHeatmap({
                 data-activity-range-day-count={Math.max(0, endDay - rangeStart + 1)}
                 aria-label={
                   bounds
-                    ? `Daily generating time from ${bounds.startDay} through ${bounds.endDay}; brighter cells mean more time.`
-                    : "Daily generating time for the last few months; brighter cells mean more time."
+                    ? uiText(
+                        "Daily generating time from {value0} through {value1}; brighter cells mean more time.",
+                        { value0: bounds.startDay, value1: bounds.endDay },
+                        undefined,
+                        uiLocale,
+                      )
+                    : uiText(
+                        "Daily generating time for the last few months; brighter cells mean more time.",
+                        undefined,
+                        undefined,
+                        uiLocale,
+                      )
                 }
                 onPointerLeave={() => setHovered(null)}
               >
@@ -592,7 +637,7 @@ export function ActivityHeatmap({
               : undefined
           }
         >
-          <span>Less</span>
+          <span>{uiText("Less", undefined, undefined, uiLocale)}</span>
           {[0, 0.25, 0.5, 0.75, 1].map((intensity) => (
             <span
               key={intensity}
@@ -601,9 +646,12 @@ export function ActivityHeatmap({
               aria-hidden
             />
           ))}
-          <span>More</span>
+          <span>{uiText("More", undefined, undefined, uiLocale)}</span>
         </div>
       </div>
     </div>
   );
 }
+
+// Finite source-owned labels/helpers only; no received or user data.
+const UI_PRESENTATION_SOURCES = { MONTH_LABELS, WEEKDAY_LABELS, formatCellDuration };

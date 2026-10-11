@@ -258,6 +258,11 @@ The app prints a localhost-only debug URL on startup.
 
 Useful checks:
 
+The interface supports English, Japanese and Korean. Settings → Appearance →
+Language offers System default or a remembered explicit choice. System default
+uses Japanese/Korean only when it is the primary system language; otherwise it
+uses English. See the [internationalization authoring guide](./docs/internationalization.md).
+
 ```bash
 yarn fmt
 yarn lint

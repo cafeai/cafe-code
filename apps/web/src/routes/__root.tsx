@@ -1,3 +1,5 @@
+import { useUiLocale, useUiPresentation } from "~/i18n";
+import { resolveUiLocale, setUiLocale, uiText } from "@cafecode/shared/i18n";
 import { type ServerLifecycleWelcomePayload } from "@cafecode/contracts";
 import { scopedProjectKey, scopeProjectRef } from "@cafecode/client-runtime";
 import {
@@ -39,7 +41,7 @@ import {
 import { TooltipProvider } from "../components/ui/tooltip";
 import { resolveAndPersistPreferredEditor } from "../editorPreferences";
 import { readLocalApi } from "../localApi";
-import { useSettings } from "../hooks/useSettings";
+import { useSettings, useClientSettingsHydrated } from "../hooks/useSettings";
 import {
   deriveLogicalProjectKeyFromSettings,
   derivePhysicalProjectKeyFromPath,
@@ -191,6 +193,7 @@ function RootRouteView() {
   return (
     <ToastProvider>
       <AnchoredToastProvider>
+        <LanguageSettingsSync />
         {primaryEnvironmentAuthenticated ? <AuthenticatedTracingBootstrap /> : null}
         {primaryEnvironmentAuthenticated ? <ServerStateBootstrap /> : null}
         <EnvironmentConnectionManagerBootstrap />
@@ -211,7 +214,30 @@ function RootRouteView() {
   );
 }
 
+/** Primary client presentation only. Remote pane/provider settings cannot
+ * change this process's language, and a locale update never remounts chats or
+ * starts/stops/replays a provider turn. Native main independently observes the
+ * exact same saved preference for its menus/auxiliary windows. */
+function LanguageSettingsSync() {
+  const preference = useSettings((settings) => settings.languagePreference, {
+    environmentId: null,
+  });
+  const hydrated = useClientSettingsHydrated({ environmentId: null });
+  useEffect(() => {
+    if (!hydrated) return;
+    const languages = window.desktopBridge?.systemUiLocale
+      ? [window.desktopBridge.systemUiLocale]
+      : navigator.languages?.length
+        ? navigator.languages
+        : [navigator.language];
+    setUiLocale(resolveUiLocale(preference, languages));
+  }, [preference, hydrated]);
+  return null;
+}
+
 function DesktopShutdownOverlay() {
+  const uiLocale = useUiLocale();
+
   return (
     <div
       aria-live="assertive"
@@ -227,13 +253,18 @@ function DesktopShutdownOverlay() {
         </div>
         <div className="grid gap-1">
           <div className="flex items-center justify-center gap-2 text-sm font-semibold tracking-normal">
-            <span>See ya later...</span>
+            <span>{uiText("See ya later...", undefined, undefined, uiLocale)}</span>
             <span aria-hidden="true" className="cafe-shutdown-heart">
-              💙
+              {uiText("💙", undefined, undefined, uiLocale)}
             </span>
           </div>
           <div className="max-w-56 text-xs leading-5 text-muted-foreground">
-            Saving your progress before Cafe Code takes a nap.
+            {uiText(
+              "Saving your progress before Cafe Code takes a nap.",
+              undefined,
+              undefined,
+              uiLocale,
+            )}
           </div>
         </div>
       </div>
@@ -242,8 +273,11 @@ function DesktopShutdownOverlay() {
 }
 
 function RootRouteErrorView({ error, reset }: ErrorComponentProps) {
-  const message = errorMessage(error);
-  const details = errorDetails(error);
+  const uiLocale = useUiLocale();
+  const uiPresentation = useUiPresentation(UI_PRESENTATION_SOURCES);
+
+  const message = uiPresentation.errorMessage(error);
+  const details = uiPresentation.errorDetails(error);
 
   return (
     <div className="relative flex min-h-screen items-center justify-center overflow-hidden bg-background px-4 py-10 text-foreground sm:px-6">
@@ -257,23 +291,27 @@ function RootRouteErrorView({ error, reset }: ErrorComponentProps) {
           {APP_DISPLAY_NAME}
         </p>
         <h1 className="mt-3 text-2xl font-semibold tracking-tight sm:text-3xl">
-          Something went wrong.
+          {uiText("Something went wrong.", undefined, undefined, uiLocale)}
         </h1>
         <p className="mt-2 text-sm leading-relaxed text-muted-foreground">{message}</p>
 
         <div className="mt-5 flex flex-wrap gap-2">
           <Button size="sm" onClick={() => reset()}>
-            Try again
+            {uiText("Try again", undefined, undefined, uiLocale)}
           </Button>
           <Button size="sm" variant="outline" onClick={() => window.location.reload()}>
-            Reload app
+            {uiText("Reload app", undefined, undefined, uiLocale)}
           </Button>
         </div>
 
         <details className="group mt-5 overflow-hidden rounded-lg border border-border/70 bg-background/55">
           <summary className="cursor-pointer list-none px-3 py-2 text-xs font-medium text-muted-foreground">
-            <span className="group-open:hidden">Show error details</span>
-            <span className="hidden group-open:inline">Hide error details</span>
+            <span className="group-open:hidden">
+              {uiText("Show error details", undefined, undefined, uiLocale)}
+            </span>
+            <span className="hidden group-open:inline">
+              {uiText("Hide error details", undefined, undefined, uiLocale)}
+            </span>
           </summary>
           <pre className="max-h-56 overflow-auto border-t border-border/70 bg-background/80 px-3 py-2 text-xs text-foreground/85">
             {details}
@@ -293,7 +331,7 @@ function errorMessage(error: unknown): string {
     return error;
   }
 
-  return "An unexpected router error occurred.";
+  return uiText("An unexpected router error occurred.");
 }
 
 function errorDetails(error: unknown): string {
@@ -308,7 +346,7 @@ function errorDetails(error: unknown): string {
   try {
     return JSON.stringify(error, null, 2);
   } catch {
-    return "No additional error details are available.";
+    return uiText("No additional error details are available.");
   }
 }
 
@@ -409,6 +447,8 @@ function AppearanceSettingsSync() {
 }
 
 function EventRouter() {
+  const uiLocale = useUiLocale();
+
   const setActiveEnvironmentId = useStore((store) => store.setActiveEnvironmentId);
   const navigate = useNavigate();
   const pathname = useLocation({ select: (loc) => loc.pathname });
@@ -496,8 +536,13 @@ function EventRouter() {
         lastKeybindingsSuccessToastAtRef.current = now;
         toastManager.add({
           type: "success",
-          title: "Keybindings updated",
-          description: "Keybindings configuration reloaded successfully.",
+          title: uiText("Keybindings updated", undefined, undefined, uiLocale),
+          description: uiText(
+            "Keybindings configuration reloaded successfully.",
+            undefined,
+            undefined,
+            uiLocale,
+          ),
         });
         return;
       }
@@ -505,11 +550,11 @@ function EventRouter() {
       toastManager.add(
         stackedThreadToast({
           type: "warning",
-          title: "Invalid keybindings configuration",
+          title: uiText("Invalid keybindings configuration", undefined, undefined, uiLocale),
           description: issue.message,
           actionVariant: "outline",
           actionProps: {
-            children: "Open keybindings.json",
+            children: uiText("Open keybindings.json", undefined, undefined, uiLocale),
             onClick: () => {
               const api = readLocalApi();
               if (!api) {
@@ -528,9 +573,18 @@ function EventRouter() {
                   toastManager.add(
                     stackedThreadToast({
                       type: "error",
-                      title: "Unable to open keybindings file",
+                      title: uiText(
+                        "Unable to open keybindings file",
+                        undefined,
+                        undefined,
+                        uiLocale,
+                      ),
                       description:
-                        error instanceof Error ? error.message : "Unknown error opening file.",
+                        error instanceof Error
+                          ? error.message === "No available editors found."
+                            ? uiText("No available editors found.", undefined, undefined, uiLocale)
+                            : error.message
+                          : uiText("Unknown error opening file.", undefined, undefined, uiLocale),
                     }),
                   );
                 });
@@ -562,3 +616,6 @@ function EventRouter() {
 
   return null;
 }
+
+// Finite source-owned labels/helpers only; no received or user data.
+const UI_PRESENTATION_SOURCES = { errorDetails, errorMessage };

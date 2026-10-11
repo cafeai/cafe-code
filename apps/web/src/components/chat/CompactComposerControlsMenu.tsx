@@ -1,3 +1,5 @@
+import { useUiLocale, useUiPresentation } from "~/i18n";
+import { uiText } from "@cafecode/shared/i18n";
 import {
   type ProviderDriverKind,
   ProviderInteractionMode,
@@ -45,20 +47,32 @@ const RUNTIME_MODE_OPTIONS: ReadonlyArray<{
 }> = [
   {
     id: "approval-required",
-    label: "Supervised",
-    description: "Ask before commands and file changes.",
+    get label() {
+      return uiText("Supervised");
+    },
+    get description() {
+      return uiText("Ask before commands and file changes.");
+    },
     icon: LockIcon,
   },
   {
     id: "auto-accept-edits",
-    label: "Auto-accept edits",
-    description: "Approve edits automatically; ask before other actions.",
+    get label() {
+      return uiText("Auto-accept edits");
+    },
+    get description() {
+      return uiText("Approve edits automatically; ask before other actions.");
+    },
     icon: PenLineIcon,
   },
   {
     id: "full-access",
-    label: "Full access",
-    description: "Run commands and edits without asking.",
+    get label() {
+      return uiText("Full access");
+    },
+    get description() {
+      return uiText("Run commands and edits without asking.");
+    },
     icon: LockOpenIcon,
   },
 ];
@@ -142,11 +156,14 @@ export const CompactComposerControlsMenu = memo(function CompactComposerControls
   onRuntimeModeChange: (mode: RuntimeMode) => void;
   onOpenGoal?: () => void;
 }) {
+  const uiLocale = useUiLocale();
+  const uiPresentation = useUiPresentation(UI_PRESENTATION_SOURCES);
+
   const isClaude = props.provider === "claudeAgent";
   const usesNativePermissionModes = isClaude || props.provider === "grok";
   const permissionModeOptions = isClaude
-    ? CLAUDE_PERMISSION_MODE_OPTIONS
-    : GROK_PERMISSION_MODE_OPTIONS;
+    ? uiPresentation.CLAUDE_PERMISSION_MODE_OPTIONS
+    : uiPresentation.GROK_PERMISSION_MODE_OPTIONS;
   const hasTraits = props.traitsMenuContent !== null && props.traitsMenuContent !== undefined;
   const hasSecondaryControls = Boolean(props.subagentConcurrencyControl || props.providerActions);
   const showAccessControls = !usesNativePermissionModes;
@@ -163,7 +180,7 @@ export const CompactComposerControlsMenu = memo(function CompactComposerControls
             size="sm"
             variant="ghost"
             className="max-w-40 shrink-0 justify-start gap-1.5 px-2 text-muted-foreground hover:text-foreground"
-            aria-label="More composer controls"
+            aria-label={uiText("More composer controls", undefined, undefined, uiLocale)}
             title={props.traitsTriggerLabel ?? undefined}
           />
         }
@@ -199,7 +216,9 @@ export const CompactComposerControlsMenu = memo(function CompactComposerControls
         {props.showInteractionModeToggle ? (
           <>
             {hasTraits || hasSecondaryControls ? <MenuDivider /> : null}
-            <div className={MODE_GROUP_LABEL_CLASS_NAME}>Mode</div>
+            <div className={MODE_GROUP_LABEL_CLASS_NAME}>
+              {uiText("Mode", undefined, undefined, uiLocale)}
+            </div>
             <MenuRadioGroup
               value={usesNativePermissionModes ? claudePermissionMode : props.interactionMode}
               onValueChange={(value) => {
@@ -228,8 +247,12 @@ export const CompactComposerControlsMenu = memo(function CompactComposerControls
                 ))
               ) : (
                 <>
-                  <MenuRadioItem value="default">Build</MenuRadioItem>
-                  <MenuRadioItem value="plan">Plan</MenuRadioItem>
+                  <MenuRadioItem value="default">
+                    {uiText("Build", undefined, undefined, uiLocale)}
+                  </MenuRadioItem>
+                  <MenuRadioItem value="plan">
+                    {uiText("Plan", undefined, undefined, uiLocale)}
+                  </MenuRadioItem>
                 </>
               )}
             </MenuRadioGroup>
@@ -240,7 +263,9 @@ export const CompactComposerControlsMenu = memo(function CompactComposerControls
             {hasTraits || hasSecondaryControls || props.showInteractionModeToggle ? (
               <MenuDivider />
             ) : null}
-            <div className={MODE_GROUP_LABEL_CLASS_NAME}>Access</div>
+            <div className={MODE_GROUP_LABEL_CLASS_NAME}>
+              {uiText("Access", undefined, undefined, uiLocale)}
+            </div>
             <MenuRadioGroup
               value={props.runtimeMode}
               onValueChange={(value) => {
@@ -248,7 +273,7 @@ export const CompactComposerControlsMenu = memo(function CompactComposerControls
                 props.onRuntimeModeChange(value as RuntimeMode);
               }}
             >
-              {RUNTIME_MODE_OPTIONS.map((option) => (
+              {uiPresentation.RUNTIME_MODE_OPTIONS.map((option) => (
                 <ComposerModeRadioItem
                   key={option.id}
                   value={option.id}
@@ -271,8 +296,13 @@ export const CompactComposerControlsMenu = memo(function CompactComposerControls
             <MenuItem className="[&>svg]:mx-0" onClick={props.onOpenGoal}>
               <TargetIcon className="size-4 shrink-0" />
               {props.goalStatus == null
-                ? "Goal"
-                : `Goal: ${threadGoalStatusLabel(props.goalStatus)}`}
+                ? uiText("Goal", undefined, undefined, uiLocale)
+                : uiText(
+                    "Goal: {value0}",
+                    { value0: uiPresentation.threadGoalStatusLabel(props.goalStatus) },
+                    undefined,
+                    uiLocale,
+                  )}
             </MenuItem>
           </>
         ) : null}
@@ -288,8 +318,8 @@ export const CompactComposerControlsMenu = memo(function CompactComposerControls
             <MenuItem className="[&>svg]:mx-0" onClick={props.onTogglePlanSidebar}>
               <ListTodoIcon className="size-4 shrink-0" />
               {props.planSidebarOpen
-                ? `Hide ${props.planSidebarLabel.toLowerCase()} sidebar`
-                : `Show ${props.planSidebarLabel.toLowerCase()} sidebar`}
+                ? uiText("Hide plan sidebar", undefined, undefined, uiLocale)
+                : uiText("Show plan sidebar", undefined, undefined, uiLocale)}
             </MenuItem>
           </>
         ) : null}
@@ -297,3 +327,11 @@ export const CompactComposerControlsMenu = memo(function CompactComposerControls
     </Menu>
   );
 });
+
+// Finite source-owned labels/helpers only; no received or user data.
+const UI_PRESENTATION_SOURCES = {
+  CLAUDE_PERMISSION_MODE_OPTIONS,
+  GROK_PERMISSION_MODE_OPTIONS,
+  RUNTIME_MODE_OPTIONS,
+  threadGoalStatusLabel,
+};

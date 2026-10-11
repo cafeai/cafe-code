@@ -47,7 +47,10 @@ export function useProviderCommands(
       close = requireEnvironmentConnection(environmentId).client.server.subscribeProviderCommands(
         input,
         publish,
-        { onResubscribe: awaitingSnapshot, retryNonTransportErrors: true },
+        {
+          onResubscribe: awaitingSnapshot,
+          retryNonTransportErrors: true,
+        },
       );
     } catch {
       publish(UNAVAILABLE);
@@ -61,3 +64,5 @@ export function useProviderCommands(
   if (!input || !connected) return UNAVAILABLE;
   return state?.request === request ? state.catalog : LOADING;
 }
+
+// Finite source-owned labels/helpers only; no received or user data.

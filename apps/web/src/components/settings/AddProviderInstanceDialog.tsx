@@ -1,5 +1,8 @@
-"use client";
+import { useUiLocale, useUiPresentation } from "~/i18n";
+("use client");
 
+import { uiText } from "@cafecode/shared/i18n";
+import { UiMessage } from "~/i18n";
 import { CheckIcon } from "lucide-react";
 import { Radio as RadioPrimitive } from "@base-ui/react/radio";
 import { useCallback, useEffect, useMemo, useState } from "react";
@@ -34,7 +37,13 @@ import { ProviderSettingsForm, deriveProviderSettingsFields } from "./ProviderSe
 import { AnimatedHeight } from "../AnimatedHeight";
 
 function OptionalMark() {
-  return <span className="font-normal text-subtle-foreground">(optional)</span>;
+  const uiLocale = useUiLocale();
+
+  return (
+    <span className="font-normal text-subtle-foreground">
+      {uiText("(optional)", undefined, undefined, uiLocale)}
+    </span>
+  );
 }
 
 /**
@@ -69,12 +78,14 @@ const EMPTY_CONFIG_DRAFT: Record<string, unknown> = {};
  * Returns a user-facing error string, or `null` if valid.
  */
 function validateInstanceId(id: string, existing: ReadonlySet<string>): string | null {
-  if (id.length === 0) return "Instance ID is required.";
-  if (id.length > 64) return "Instance ID must be 64 characters or fewer.";
+  if (id.length === 0) return uiText("Instance ID is required.");
+  if (id.length > 64) return uiText("Instance ID must be 64 characters or fewer.");
   if (!INSTANCE_ID_PATTERN.test(id)) {
-    return "Instance ID must start with a letter and use only letters, digits, '-', or '_'.";
+    return uiText(
+      "Instance ID must start with a letter and use only letters, digits, ''-'', or ''_''.",
+    );
   }
-  if (existing.has(id)) return `An instance named '${id}' already exists.`;
+  if (existing.has(id)) return uiText("An instance named ''{id}'' already exists.", { id });
   return null;
 }
 
@@ -84,6 +95,9 @@ interface AddProviderInstanceDialogProps {
 }
 
 export function AddProviderInstanceDialog({ open, onOpenChange }: AddProviderInstanceDialogProps) {
+  const uiLocale = useUiLocale();
+  const uiPresentation = useUiPresentation(UI_PRESENTATION_SOURCES);
+
   const settings = useSettings();
   const { updateSettings } = useUpdateSettings();
 
@@ -126,15 +140,22 @@ export function AddProviderInstanceDialog({ open, onOpenChange }: AddProviderIns
     setInstanceId(deriveInstanceId(driver, label));
   }, [driver, label, instanceIdDirty]);
 
-  const driverOption = DRIVER_OPTION_BY_VALUE[driver] ?? DEFAULT_DRIVER_OPTION;
+  const driverOption =
+    uiPresentation.DRIVER_OPTION_BY_VALUE[driver] ?? uiPresentation.DEFAULT_DRIVER_OPTION;
   const driverSettingsFields = useMemo(
     () => deriveProviderSettingsFields(driverOption),
     [driverOption],
   );
-  const instanceIdError = validateInstanceId(instanceId, existingIds);
+  const instanceIdError = uiPresentation.validateInstanceId(instanceId, existingIds);
   const showInstanceIdError = hasAttemptedSubmit && instanceIdError !== null;
-  const previewLabel = label.trim() || `${driverOption.label} Workspace`;
-  const wizardSteps = ["Provider", "Identity", "Config"] as const;
+  const previewLabel =
+    label.trim() ||
+    uiText("{provider} Workspace", { provider: driverOption.label }, undefined, uiLocale);
+  const wizardSteps = [
+    uiText("Provider", undefined, undefined, uiLocale),
+    uiText("Identity", undefined, undefined, uiLocale),
+    uiText("Config", undefined, undefined, uiLocale),
+  ] as const;
   const wizardStepSummaries = [driverOption.label, previewLabel, null] as const;
 
   const configDraft = configByDriver[driver] ?? EMPTY_CONFIG_DRAFT;
@@ -186,8 +207,11 @@ export function AddProviderInstanceDialog({ open, onOpenChange }: AddProviderIns
     } catch (error) {
       toastManager.add({
         type: "error",
-        title: "Could not add provider",
-        description: error instanceof Error ? error.message : "Update failed.",
+        title: uiText("Could not add provider", undefined, undefined, uiLocale),
+        description:
+          error instanceof Error
+            ? error.message
+            : uiText("Update failed.", undefined, undefined, uiLocale),
       });
     }
   }, [
@@ -200,6 +224,7 @@ export function AddProviderInstanceDialog({ open, onOpenChange }: AddProviderIns
     onOpenChange,
     settings.providerInstances,
     updateSettings,
+    uiLocale,
   ]);
 
   return (
@@ -207,12 +232,19 @@ export function AddProviderInstanceDialog({ open, onOpenChange }: AddProviderIns
       <DialogPopup className="max-w-xl overflow-hidden">
         <div className="flex min-h-0 flex-col overflow-hidden">
           <DialogHeader className="border-b border-border-subtle">
-            <DialogTitle>Add provider</DialogTitle>
-            <DialogDescription>Add another account or install of a provider.</DialogDescription>
+            <DialogTitle>{uiText("Add provider", undefined, undefined, uiLocale)}</DialogTitle>
+            <DialogDescription>
+              {uiText(
+                "Add another account or install of a provider.",
+                undefined,
+                undefined,
+                uiLocale,
+              )}
+            </DialogDescription>
             <div className="grid grid-cols-3 gap-2">
               {wizardSteps.map((step, index) => (
                 <button
-                  key={step}
+                  key={index}
                   type="button"
                   className={cn(
                     "focus-ring grid min-w-0 cursor-pointer grid-cols-[1rem_minmax(0,1fr)] gap-x-2 rounded-lg border px-3 py-2 text-left transition-colors duration-(--duration-fast)",
@@ -237,7 +269,9 @@ export function AddProviderInstanceDialog({ open, onOpenChange }: AddProviderIns
                   >
                     {index < wizardStep ? <CheckIcon className="size-3" /> : null}
                   </span>
-                  <span className="text-2xs text-subtle-foreground">Step {index + 1}</span>
+                  <span className="text-2xs text-subtle-foreground">
+                    <UiMessage message={"Step <slot1></slot1>"} slots={{ slot1: index + 1 }} />
+                  </span>
                   <span className="truncate text-xs font-semibold text-foreground">
                     {step}
                     {index < wizardStep && wizardStepSummaries[index]
@@ -256,7 +290,7 @@ export function AddProviderInstanceDialog({ open, onOpenChange }: AddProviderIns
                   id="add-instance-driver-label"
                   className="text-xs font-medium text-foreground"
                 >
-                  Provider
+                  {uiText("Provider", undefined, undefined, uiLocale)}
                 </span>
                 <RadioGroup
                   value={driver}
@@ -264,7 +298,7 @@ export function AddProviderInstanceDialog({ open, onOpenChange }: AddProviderIns
                   aria-labelledby="add-instance-driver-label"
                   className="grid grid-cols-2 gap-2.5"
                 >
-                  {DRIVER_OPTIONS.map((option) => {
+                  {uiPresentation.DRIVER_OPTIONS.map((option) => {
                     const IconComponent = option.icon;
                     const isSelected = option.value === driver;
                     return (
@@ -296,21 +330,26 @@ export function AddProviderInstanceDialog({ open, onOpenChange }: AddProviderIns
 
               <label className={cn("grid gap-2", wizardStep !== 1 && "hidden")}>
                 <span className="text-xs font-medium text-foreground">
-                  Display name <OptionalMark />
+                  <UiMessage
+                    message={"Display name <slot1></slot1>"}
+                    slots={{ slot1: <OptionalMark /> }}
+                  />
                 </span>
                 <Input
                   className="bg-background"
-                  placeholder="e.g. Work"
+                  placeholder={uiText("e.g. Work", undefined, undefined, uiLocale)}
                   value={label}
                   onChange={(event) => setLabel(event.target.value)}
                 />
               </label>
 
               <label className={cn("grid gap-2", wizardStep !== 1 && "hidden")}>
-                <span className="text-xs font-medium text-foreground">Instance ID</span>
+                <span className="text-xs font-medium text-foreground">
+                  {uiText("Instance ID", undefined, undefined, uiLocale)}
+                </span>
                 <Input
                   className="bg-background"
-                  placeholder={`${driver}_work`}
+                  placeholder={uiText("{value0}_work", { value0: driver }, undefined, uiLocale)}
                   value={instanceId}
                   onChange={(event) => {
                     setInstanceIdDirty(true);
@@ -322,7 +361,12 @@ export function AddProviderInstanceDialog({ open, onOpenChange }: AddProviderIns
                   <span className="text-xs text-destructive-foreground">{instanceIdError}</span>
                 ) : (
                   <span className="text-xs text-muted-foreground">
-                    Internal ID: letters, digits, - or _.
+                    {uiText(
+                      "Internal ID: letters, digits, - or _.",
+                      undefined,
+                      undefined,
+                      uiLocale,
+                    )}
                   </span>
                 )}
               </label>
@@ -331,10 +375,16 @@ export function AddProviderInstanceDialog({ open, onOpenChange }: AddProviderIns
                 <ProviderAccentColorPicker
                   label={
                     <>
-                      Accent color <OptionalMark />
+                      {uiText("Accent color ", undefined, undefined, uiLocale)}
+                      <OptionalMark />
                     </>
                   }
-                  customColorLabel="Custom provider accent color"
+                  customColorLabel={uiText(
+                    "Custom provider accent color",
+                    undefined,
+                    undefined,
+                    uiLocale,
+                  )}
                   value={accentColor}
                   onCommit={setAccentColor}
                 />
@@ -353,7 +403,9 @@ export function AddProviderInstanceDialog({ open, onOpenChange }: AddProviderIns
                 </div>
               ) : wizardStep === 2 ? (
                 <div className="grid gap-2">
-                  <p className="text-sm text-muted-foreground">No other settings needed.</p>
+                  <p className="text-sm text-muted-foreground">
+                    {uiText("No other settings needed.", undefined, undefined, uiLocale)}
+                  </p>
                 </div>
               ) : null}
             </AnimatedHeight>
@@ -371,15 +423,17 @@ export function AddProviderInstanceDialog({ open, onOpenChange }: AddProviderIns
                 setWizardStep((step) => Math.max(0, step - 1));
               }}
             >
-              {wizardStep === 0 ? "Cancel" : "Back"}
+              {wizardStep === 0
+                ? uiText("Cancel", undefined, undefined, uiLocale)
+                : uiText("Back", undefined, undefined, uiLocale)}
             </Button>
             {wizardStep < wizardSteps.length - 1 ? (
               <Button size="sm" onClick={() => setWizardStep((step) => Math.min(2, step + 1))}>
-                Next
+                {uiText("Next", undefined, undefined, uiLocale)}
               </Button>
             ) : (
               <Button size="sm" onClick={handleSave}>
-                Add provider
+                {uiText("Add provider", undefined, undefined, uiLocale)}
               </Button>
             )}
           </DialogFooter>
@@ -388,3 +442,11 @@ export function AddProviderInstanceDialog({ open, onOpenChange }: AddProviderIns
     </Dialog>
   );
 }
+
+// Finite source-owned labels/helpers only; no received or user data.
+const UI_PRESENTATION_SOURCES = {
+  DEFAULT_DRIVER_OPTION,
+  DRIVER_OPTIONS,
+  DRIVER_OPTION_BY_VALUE,
+  validateInstanceId,
+};

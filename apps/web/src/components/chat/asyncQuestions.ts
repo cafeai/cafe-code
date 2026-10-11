@@ -1,3 +1,4 @@
+import { uiText } from "@cafecode/shared/i18n";
 import type { OrchestrationThreadActivity } from "@cafecode/contracts";
 import { normalizeCodexAsyncQuestions } from "@cafecode/shared/codexAsyncQuestions";
 import { sha256 } from "@noble/hashes/sha2.js";
@@ -82,8 +83,9 @@ export async function persistExactAsyncQuestionAnswer(input: {
   }
   return {
     ok: false,
-    error:
+    error: uiText(
       "This question's answer changed in another view. Review the follow-up queue before trying again.",
+    ),
   };
 }
 

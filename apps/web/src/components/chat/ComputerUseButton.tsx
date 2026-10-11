@@ -1,3 +1,5 @@
+import { useUiLocale } from "~/i18n";
+import { uiText } from "@cafecode/shared/i18n";
 import type { NativeControlChatState, ProviderDriverKind, ThreadId } from "@cafecode/contracts";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { ComputerUseIcon } from "./ComputerUseIcon";
@@ -17,6 +19,8 @@ export function ComputerUseButton({
   provider: ProviderDriverKind;
   local: boolean;
 }) {
+  const uiLocale = useUiLocale();
+
   const bridge = window.desktopBridge;
   const supported = Boolean(
     local &&
@@ -63,12 +67,24 @@ export function ComputerUseButton({
   const failed = mutation.isError && mutation.variables?.threadId === threadId;
   const unavailable = data.control.phase !== "ready" || !data.control.runtimeAvailable;
   const detail = pending
-    ? "Updating computer use…"
+    ? uiText("Updating computer use…", undefined, undefined, uiLocale)
     : failed
-      ? "Could not change computer use. Try again."
+      ? uiText("Could not change computer use. Try again.", undefined, undefined, uiLocale)
       : unavailable
-        ? "Check local desktop control in Settings → MCP."
-        : `Computer use is ${data.enabled ? "on" : "off"} for this chat. Click to ${data.enabled ? "disable" : "enable"} desktop control and browser page access.`;
+        ? uiText("Check local desktop control in Settings → MCP.", undefined, undefined, uiLocale)
+        : data.enabled
+          ? uiText(
+              "Computer use is on for this chat. Click to disable desktop control and browser page access.",
+              undefined,
+              undefined,
+              uiLocale,
+            )
+          : uiText(
+              "Computer use is off for this chat. Click to enable desktop control and browser page access.",
+              undefined,
+              undefined,
+              uiLocale,
+            );
   return (
     <Tooltip>
       <TooltipTrigger
@@ -77,7 +93,7 @@ export function ComputerUseButton({
             type="button"
             size="sm"
             variant="ghost"
-            aria-label="Computer use"
+            aria-label={uiText("Computer use", undefined, undefined, uiLocale)}
             aria-pressed={data.enabled}
             aria-disabled={pending || unavailable}
             className={cn(
@@ -95,7 +111,7 @@ export function ComputerUseButton({
         }
       >
         <ComputerUseIcon className="size-4 shrink-0" />
-        <span>Computer use</span>
+        <span>{uiText("Computer use", undefined, undefined, uiLocale)}</span>
       </TooltipTrigger>
       <TooltipPopup className="max-w-64">{detail}</TooltipPopup>
     </Tooltip>

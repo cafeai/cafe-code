@@ -4,6 +4,7 @@ import type {
   SubagentLimits,
   ServerSettings,
 } from "@cafecode/contracts";
+import { uiText } from "@cafecode/shared/i18n";
 
 /** Provider-native controls have different semantics; never share their remembered choice. */
 export function subagentLimitKey(provider: ProviderDriverKind | string): "codex" | "claude" | null {
@@ -22,7 +23,8 @@ export function withSubagentLimit(
 ): SubagentLimits {
   const key = subagentLimitKey(provider);
   if (key === null) return current ?? {};
-  if (value !== undefined && !validSubagentLimit(value)) throw new RangeError("Enter 1–64.");
+  if (value !== undefined && !validSubagentLimit(value))
+    throw new RangeError(uiText("Enter 1–64."));
   const next = { ...current };
   delete next[key];
   if (value !== undefined) next[key] = value;
@@ -134,10 +136,33 @@ export function formatSubagentConcurrencyLimit(
   if (!presentation) return null;
   const { requested, configured, pending } = presentation;
   if (pending && configured !== undefined) {
-    return `Subagent limit: ${configured ?? "Provider default"} → ${requested ?? "Provider default"} when idle`;
+    return uiText("Subagent limit: {configured} → {requested} when idle", {
+      configured: configured ?? uiText("Provider default"),
+      requested: requested ?? uiText("Provider default"),
+    });
   }
   if (requested === undefined) return null;
-  return `Subagent limit: ${requested}${configured === undefined ? " · saved" : ""}`;
+  return uiText("Subagent limit: {requested}{recorded, select, no { · saved} other {}}", {
+    requested,
+    recorded: configured === undefined ? "no" : "yes",
+  });
+}
+
+/** Source spellings remain canonical policy discriminants in admission. Only
+ * this final display resolver may give them localized presentation copy. */
+export function subagentPolicySourceLabel(
+  source: SubagentConcurrencyPresentation["source"],
+): string {
+  switch (source) {
+    case "Chat override":
+      return uiText("Chat override");
+    case "Account default":
+      return uiText("Account default");
+    case "Legacy instance configuration":
+      return uiText("Legacy instance configuration");
+    case "Provider / inherited default":
+      return uiText("Provider / inherited default");
+  }
 }
 
 export function deriveSubagentConcurrencyPresentation(input: {

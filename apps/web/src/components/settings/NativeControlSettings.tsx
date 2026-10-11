@@ -1,3 +1,6 @@
+import { useUiLocale } from "~/i18n";
+import { uiText, type UiLocale } from "@cafecode/shared/i18n";
+import { UiMessage } from "~/i18n";
 import { useEffect, useState } from "react";
 import type {
   DesktopBridge,
@@ -20,13 +23,80 @@ type ControlBridge = Pick<
   | "requestNativeControlPermissions"
   | "onNativeControlChanged"
 >;
+
+/**
+ * Retain provenance, not a translated result: changing the interface language
+ * can redraw Cafe's feedback without repeating an IPC operation. Received
+ * controller output remains opaque even if it happens to match a catalog key.
+ */
+type NativeControlFeedback =
+  | { readonly kind: "received"; readonly text: string }
+  | {
+      readonly kind:
+        | "initial-state-failed"
+        | "state-failed"
+        | "permission-setup-failed"
+        | "enable-failed"
+        | "operation-failed"
+        | "operation-completed"
+        | "check-failed";
+    };
+
+function formatNativeControlFeedback(feedback: NativeControlFeedback, locale: UiLocale): string {
+  switch (feedback.kind) {
+    case "received":
+      return feedback.text;
+    case "initial-state-failed":
+      return uiText(
+        "Could not read the local controller state. Restart Cafe or refresh.",
+        undefined,
+        undefined,
+        locale,
+      );
+    case "state-failed":
+      return uiText("Could not read the local controller state.", undefined, undefined, locale);
+    case "permission-setup-failed":
+      return uiText(
+        "Could not open permission setup. Use System Settings → Privacy & Security.",
+        undefined,
+        undefined,
+        locale,
+      );
+    case "enable-failed":
+      return uiText(
+        "Could not change desktop control. Refresh before retrying.",
+        undefined,
+        undefined,
+        locale,
+      );
+    case "operation-failed":
+      return uiText(
+        "The native operation failed. Check permissions and refresh.",
+        undefined,
+        undefined,
+        locale,
+      );
+    case "operation-completed":
+      return uiText("Native operation completed.", undefined, undefined, locale);
+    case "check-failed":
+      return uiText(
+        "The controller could not complete this check. Refresh its state before retrying.",
+        undefined,
+        undefined,
+        locale,
+      );
+  }
+}
+
 export function NativeControlSettings({
   bridge = window.desktopBridge,
 }: { bridge?: ControlBridge } = {}) {
+  const uiLocale = useUiLocale();
+
   const [state, setState] = useState<NativeControlState>();
   const [permissions, setPermissions] = useState<NativeControlPermissionsState>();
   const [pending, setPending] = useState(false);
-  const [feedback, setFeedback] = useState<string>();
+  const [feedback, setFeedback] = useState<NativeControlFeedback>();
   const [preview, setPreview] = useState<string>();
   useEffect(() => {
     let active = true;
@@ -40,8 +110,7 @@ export function NativeControlSettings({
           }
         })
         .catch(() => {
-          if (active)
-            setFeedback("Could not read the local controller state. Restart Cafe or refresh.");
+          if (active) setFeedback({ kind: "initial-state-failed" });
         });
     };
     update();
@@ -61,7 +130,7 @@ export function NativeControlSettings({
       setState(await bridge!.getNativeControlState!());
       setPermissions(await bridge?.getNativeControlPermissions?.());
     } catch {
-      setFeedback("Could not read the local controller state.");
+      setFeedback({ kind: "state-failed" });
     } finally {
       setPending(false);
     }
@@ -73,7 +142,7 @@ export function NativeControlSettings({
       setPermissions(await bridge!.requestNativeControlPermissions!());
       setState(await bridge!.getNativeControlState!());
     } catch {
-      setFeedback("Could not open permission setup. Use System Settings → Privacy & Security.");
+      setFeedback({ kind: "permission-setup-failed" });
     } finally {
       setPending(false);
     }
@@ -85,7 +154,7 @@ export function NativeControlSettings({
     try {
       setState(await bridge!.setNativeControlEnabled!(value));
     } catch {
-      setFeedback("Could not change desktop control. Refresh before retrying.");
+      setFeedback({ kind: "enable-failed" });
     } finally {
       setPending(false);
     }
@@ -95,11 +164,11 @@ export function NativeControlSettings({
       .filter((item) => item.type === "text" && typeof item.text === "string")
       .map((item) => item.text as string)
       .join("\n");
+    const receivedText = text.slice(0, 8192);
     setFeedback(
-      text.slice(0, 8192) ||
-        (result.isError
-          ? "The native operation failed. Check permissions and refresh."
-          : "Native operation completed."),
+      receivedText
+        ? { kind: "received", text: receivedText }
+        : { kind: result.isError ? "operation-failed" : "operation-completed" },
     );
     const image = result.content.find(
       (item) =>
@@ -119,22 +188,28 @@ export function NativeControlSettings({
       );
       setState(await bridge!.getNativeControlState!());
     } catch {
-      setFeedback(
-        "The controller could not complete this check. Refresh its state before retrying.",
-      );
+      setFeedback({ kind: "check-failed" });
     } finally {
       setPending(false);
     }
   };
   if (!bridge?.getNativeControlState || (state && state.platform !== "darwin")) return null;
   return (
-    <SettingsSection title="Local desktop control" icon={<MonitorIcon className="size-3.5" />}>
+    <SettingsSection
+      title={uiText("Local desktop control", undefined, undefined, uiLocale)}
+      icon={<MonitorIcon className="size-3.5" />}
+    >
       <SettingsRow
-        title="Codex and Claude"
-        description="Allow desktop tools through local Cua. Each chat starts with computer use off; click the cursor beside the thinking settings to enable it. No Cua account or subscription is needed."
+        title={uiText("Codex and Claude", undefined, undefined, uiLocale)}
+        description={uiText(
+          "Allow desktop tools through local Cua. Each chat starts with computer use off; click the cursor beside the thinking settings to enable it. No Cua account or subscription is needed.",
+          undefined,
+          undefined,
+          uiLocale,
+        )}
         control={
           <Switch
-            aria-label="Enable local desktop control"
+            aria-label={uiText("Enable local desktop control", undefined, undefined, uiLocale)}
             checked={state?.enabled ?? false}
             disabled={pending || !state?.runtimeAvailable || !bridge?.setNativeControlEnabled}
             onCheckedChange={(value) => {
@@ -144,34 +219,39 @@ export function NativeControlSettings({
         }
       />
       <div className="space-y-3 px-5 py-3.5 text-sm text-muted-foreground">
-        <p>{state?.detail ?? "Reading local controller state…"}</p>
+        <p>
+          {state?.detail ??
+            uiText("Reading local controller state…", undefined, undefined, uiLocale)}
+        </p>
         {state && !state.runtimeAvailable && (
           <p>
-            The reviewed native runtime is unavailable for this build. Complete the local runtime
-            setup before enabling control, then refresh.
+            {uiText(
+              "The reviewed native runtime is unavailable for this build. Complete the local runtime setup before enabling control, then refresh.",
+              undefined,
+              undefined,
+              uiLocale,
+            )}
           </p>
         )}
         {state?.platform === "darwin" && (
           <p>
-            Allow Cafe Code in System Settings → Privacy &amp; Security. A restart may be required
-            after granting access.
+            {uiText(
+              "Allow Cafe Code in System Settings → Privacy & Security. A restart may be required after granting access.",
+              undefined,
+              undefined,
+              uiLocale,
+            )}
           </p>
         )}
         {permissions && (
           <p role="status">
-            Accessibility:{" "}
-            {permissions.accessibility === "granted"
-              ? "Allowed"
-              : permissions.accessibility === "unknown"
-                ? "Unknown"
-                : "Needed"}
-            {" · "}
-            Screen Recording:{" "}
-            {permissions.screenRecording === "granted"
-              ? "Allowed"
-              : permissions.screenRecording === "unknown"
-                ? "Unknown"
-                : "Needed"}
+            <UiMessage
+              message="Accessibility: {accessibility, select, granted {Allowed} unknown {Unknown} other {Needed}} · Screen Recording: {screenRecording, select, granted {Allowed} unknown {Unknown} other {Needed}}"
+              values={{
+                accessibility: permissions.accessibility,
+                screenRecording: permissions.screenRecording,
+              }}
+            />
           </p>
         )}
         <div className="flex flex-wrap gap-2">
@@ -184,7 +264,7 @@ export function NativeControlSettings({
             }}
           >
             <RefreshCwIcon className="mr-1.5 size-3.5" />
-            Refresh state
+            {uiText("Refresh state", undefined, undefined, uiLocale)}
           </Button>
           <Button
             size="sm"
@@ -194,7 +274,7 @@ export function NativeControlSettings({
               void check(false);
             }}
           >
-            Check permissions
+            {uiText("Check permissions", undefined, undefined, uiLocale)}
           </Button>
           <Button
             size="sm"
@@ -210,7 +290,7 @@ export function NativeControlSettings({
               void requestPermissions();
             }}
           >
-            Set up permissions
+            {uiText("Set up permissions", undefined, undefined, uiLocale)}
           </Button>
           <Button
             size="sm"
@@ -220,14 +300,17 @@ export function NativeControlSettings({
               void check(true);
             }}
           >
-            Test screenshot
+            {uiText("Test screenshot", undefined, undefined, uiLocale)}
           </Button>
         </div>
         {state?.enabled && (
           <p>
-            Use a new Codex or Claude session, or normally stop/resume an existing session, to
-            connect its desktop tools. Ask it to check desktop health, observe before acting, and
-            release control when finished.
+            {uiText(
+              "Use a new Codex or Claude session, or normally stop/resume an existing session, to connect its desktop tools. Ask it to check desktop health, observe before acting, and release control when finished.",
+              undefined,
+              undefined,
+              uiLocale,
+            )}
           </p>
         )}
         {feedback && (
@@ -235,12 +318,12 @@ export function NativeControlSettings({
             role="status"
             className="max-h-64 overflow-auto whitespace-pre-wrap break-words rounded-md bg-muted p-3 text-xs"
           >
-            {feedback}
+            {formatNativeControlFeedback(feedback, uiLocale)}
           </pre>
         )}
         {preview && (
           <img
-            alt="Native desktop test screenshot"
+            alt={uiText("Native desktop test screenshot", undefined, undefined, uiLocale)}
             src={preview}
             className="max-h-96 w-full rounded-md border object-contain"
           />

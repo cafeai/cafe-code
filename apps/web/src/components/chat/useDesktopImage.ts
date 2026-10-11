@@ -122,3 +122,5 @@ export function useDesktopImage(
     onError: () => setValue({ identity, src: null, error: "invalid-image" }),
   };
 }
+
+// Finite source-owned labels/helpers only; no received or user data.

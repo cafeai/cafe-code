@@ -1,3 +1,6 @@
+import { useUiLocale, useUiPresentation } from "~/i18n";
+import { uiText } from "@cafecode/shared/i18n";
+import { UiMessage } from "~/i18n";
 import {
   PlusIcon,
   RefreshCcwIcon,
@@ -62,9 +65,9 @@ const DEFAULT_SAVED_ENVIRONMENT_ACTIONS: SavedEnvironmentActions = {
 
 function safeSavedEnvironmentHost(httpBaseUrl: string): string {
   try {
-    return new URL(httpBaseUrl).host || "Invalid server address";
+    return new URL(httpBaseUrl).host || uiText("Invalid server address");
   } catch {
-    return "Invalid server address";
+    return uiText("Invalid server address");
   }
 }
 
@@ -112,6 +115,9 @@ function SavedEnvironmentRow({
   runtime: SavedEnvironmentRuntimeState | undefined;
   actions: SavedEnvironmentActions;
 }) {
+  const uiLocale = useUiLocale();
+  const uiPresentation = useUiPresentation(UI_PRESENTATION_SOURCES);
+
   const [pendingAction, setPendingAction] = useState<"reconnect" | "disconnect" | "remove" | null>(
     null,
   );
@@ -124,23 +130,26 @@ function SavedEnvironmentRow({
   const isConnected = runtime?.connectionState === "connected";
   const isError = runtime?.connectionState === "error" || runtime?.reconnectPhase === "exhausted";
   const requiresAuth = runtime?.authState === "requires-auth";
-  const versionMismatch = resolveServerConfigVersionMismatch(runtime?.serverConfig);
+  const versionMismatch = uiPresentation.resolveServerConfigVersionMismatch(runtime?.serverConfig);
   const actionsDisabled = isConnecting || pendingAction !== null;
-  const displayLabel = record.label.trim() || "Unnamed environment";
+  const displayLabel =
+    record.label.trim() || uiText("Unnamed environment", undefined, undefined, uiLocale);
 
-  let statusText = "Disconnected";
+  let statusText = uiText("Disconnected", undefined, undefined, uiLocale);
   let dotColor = "bg-muted-foreground";
   if (requiresAuth) {
-    statusText = "Pairing required";
+    statusText = uiText("Pairing required", undefined, undefined, uiLocale);
     dotColor = "bg-destructive";
   } else if (isConnecting) {
-    statusText = runtime?.connectedAt ? "Reconnecting" : "Connecting";
+    statusText = runtime?.connectedAt
+      ? uiText("Reconnecting", undefined, undefined, uiLocale)
+      : uiText("Connecting", undefined, undefined, uiLocale);
     dotColor = "bg-warning";
   } else if (isConnected) {
-    statusText = "Connected";
+    statusText = uiText("Connected", undefined, undefined, uiLocale);
     dotColor = "bg-success";
   } else if (isError) {
-    statusText = "Connection failed";
+    statusText = uiText("Connection failed", undefined, undefined, uiLocale);
     dotColor = "bg-destructive";
   }
 
@@ -161,8 +170,18 @@ function SavedEnvironmentRow({
     } catch {
       setActionError(
         action === "remove"
-          ? "Could not remove this saved environment. Try again."
-          : "Could not update this connection. Check that the server is reachable and try again.",
+          ? uiText(
+              "Could not remove this saved environment. Try again.",
+              undefined,
+              undefined,
+              uiLocale,
+            )
+          : uiText(
+              "Could not update this connection. Check that the server is reachable and try again.",
+              undefined,
+              undefined,
+              uiLocale,
+            ),
       );
     } finally {
       setPendingAction(null);
@@ -170,9 +189,19 @@ function SavedEnvironmentRow({
   };
 
   const runtimeError = requiresAuth
-    ? "The saved credential is missing or expired. Pair this server again."
+    ? uiText(
+        "The saved credential is missing or expired. Pair this server again.",
+        undefined,
+        undefined,
+        uiLocale,
+      )
     : isError
-      ? "The server could not be reached or rejected the saved session."
+      ? uiText(
+          "The server could not be reached or rejected the saved session.",
+          undefined,
+          undefined,
+          uiLocale,
+        )
       : null;
 
   return (
@@ -192,13 +221,19 @@ function SavedEnvironmentRow({
               />
             </div>
             <span className="break-all text-xs text-muted-foreground">
-              {safeSavedEnvironmentHost(record.httpBaseUrl)}
+              {uiPresentation.safeSavedEnvironmentHost(record.httpBaseUrl)}
             </span>
             {versionMismatch ? (
               <span className="flex items-start gap-1.5 text-xs text-warning-foreground">
                 <TriangleAlertIcon className="mt-0.5 size-3.5 shrink-0" />
                 <span className="break-all">
-                  Client {versionMismatch.clientVersion}, server {versionMismatch.serverVersion}
+                  <UiMessage
+                    message="Client <slot1></slot1>, server <slot3></slot3>"
+                    slots={{
+                      slot1: versionMismatch.clientVersion,
+                      slot3: versionMismatch.serverVersion,
+                    }}
+                  />
                 </span>
               </span>
             ) : null}
@@ -220,7 +255,9 @@ function SavedEnvironmentRow({
                   size="icon"
                   disabled={actionsDisabled}
                   aria-label={
-                    isConnected ? `Disconnect ${displayLabel}` : `Reconnect ${displayLabel}`
+                    isConnected
+                      ? uiText("Disconnect {value0}", { value0: displayLabel }, undefined, uiLocale)
+                      : uiText("Reconnect {value0}", { value0: displayLabel }, undefined, uiLocale)
                   }
                   onClick={() => void runAction(isConnected ? "disconnect" : "reconnect")}
                 />
@@ -234,7 +271,11 @@ function SavedEnvironmentRow({
                 <RefreshCcwIcon className="size-4" />
               )}
             </TooltipTrigger>
-            <TooltipPopup>{isConnected ? "Disconnect" : "Reconnect"}</TooltipPopup>
+            <TooltipPopup>
+              {isConnected
+                ? uiText("Disconnect", undefined, undefined, uiLocale)
+                : uiText("Reconnect", undefined, undefined, uiLocale)}
+            </TooltipPopup>
           </Tooltip>
 
           <Tooltip>
@@ -245,7 +286,12 @@ function SavedEnvironmentRow({
                   size="icon"
                   className="text-muted-foreground hover:text-destructive"
                   disabled={actionsDisabled}
-                  aria-label={`Remove ${displayLabel}`}
+                  aria-label={uiText(
+                    "Remove {value0}",
+                    { value0: displayLabel },
+                    undefined,
+                    uiLocale,
+                  )}
                   onClick={() => {
                     setActionError(null);
                     setIsRemoveDialogOpen(true);
@@ -255,7 +301,9 @@ function SavedEnvironmentRow({
             >
               <TrashIcon className="size-4" />
             </TooltipTrigger>
-            <TooltipPopup>Remove saved environment</TooltipPopup>
+            <TooltipPopup>
+              {uiText("Remove saved environment", undefined, undefined, uiLocale)}
+            </TooltipPopup>
           </Tooltip>
         </div>
       </div>
@@ -268,16 +316,21 @@ function SavedEnvironmentRow({
       >
         <AlertDialogPopup>
           <AlertDialogHeader>
-            <AlertDialogTitle>Remove saved environment?</AlertDialogTitle>
+            <AlertDialogTitle>
+              {uiText("Remove saved environment?", undefined, undefined, uiLocale)}
+            </AlertDialogTitle>
             <AlertDialogDescription>
-              This removes {displayLabel} and its saved credential from this client.
+              <UiMessage
+                message="This removes <slot1></slot1> and its saved credential from this client."
+                slots={{ slot1: displayLabel }}
+              />
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
             <AlertDialogClose
               render={<Button variant="outline" disabled={pendingAction !== null} />}
             >
-              Cancel
+              {uiText("Cancel", undefined, undefined, uiLocale)}
             </AlertDialogClose>
             <Button
               variant="destructive"
@@ -285,7 +338,9 @@ function SavedEnvironmentRow({
               aria-busy={pendingAction === "remove" || undefined}
               onClick={() => void runAction("remove")}
             >
-              <BusyButtonLabel busy={pendingAction === "remove"}>Remove</BusyButtonLabel>
+              <BusyButtonLabel busy={pendingAction === "remove"}>
+                {uiText("Remove", undefined, undefined, uiLocale)}
+              </BusyButtonLabel>
             </Button>
           </AlertDialogFooter>
         </AlertDialogPopup>
@@ -295,6 +350,9 @@ function SavedEnvironmentRow({
 }
 
 function AddSavedEnvironmentDialog({ actions }: { actions: SavedEnvironmentActions }) {
+  const uiLocale = useUiLocale();
+  const uiPresentation = useUiPresentation(UI_PRESENTATION_SOURCES);
+
   const [isOpen, setIsOpen] = useState(false);
   const [tab, setTab] = useState<"url" | "code" | "login">("url");
   const [label, setLabel] = useState("");
@@ -367,11 +425,21 @@ function AddSavedEnvironmentDialog({ actions }: { actions: SavedEnvironmentActio
       setIsOpen(false);
     } catch (error) {
       setError(
-        remoteEnvironmentErrorMessage(
+        uiPresentation.remoteEnvironmentErrorMessage(
           error,
           submittedTab === "login"
-            ? "Could not sign in. Check the server address and admin password, then try again."
-            : "Could not add this environment. Check the server address and pairing credential, then try again.",
+            ? uiText(
+                "Could not sign in. Check the server address and admin password, then try again.",
+                undefined,
+                undefined,
+                uiLocale,
+              )
+            : uiText(
+                "Could not add this environment. Check the server address and pairing credential, then try again.",
+                undefined,
+                undefined,
+                uiLocale,
+              ),
         ),
       );
     } finally {
@@ -387,42 +455,58 @@ function AddSavedEnvironmentDialog({ actions }: { actions: SavedEnvironmentActio
             <Button
               variant="ghost"
               size="icon-xs"
-              aria-label="Add environment"
+              aria-label={uiText("Add environment", undefined, undefined, uiLocale)}
               onClick={() => setIsOpen(true)}
             />
           }
         >
           <PlusIcon className="size-4" />
         </TooltipTrigger>
-        <TooltipPopup>Add environment</TooltipPopup>
+        <TooltipPopup>{uiText("Add environment", undefined, undefined, uiLocale)}</TooltipPopup>
       </Tooltip>
       <DialogPopup showCloseButton={!isSubmitting} className="max-h-[calc(100dvh-3rem)]">
         <DialogHeader className="shrink-0">
-          <DialogTitle>Add saved environment</DialogTitle>
-          <DialogDescription>Remote Cafe Code server</DialogDescription>
+          <DialogTitle>
+            {uiText("Add saved environment", undefined, undefined, uiLocale)}
+          </DialogTitle>
+          <DialogDescription>
+            {uiText("Remote Cafe Code server", undefined, undefined, uiLocale)}
+          </DialogDescription>
         </DialogHeader>
         <form onSubmit={handleSubmit} className="flex min-h-0 flex-col">
           <DialogPanel className="flex flex-col gap-4">
             <SegmentedControl
-              aria-label="Connection method"
+              aria-label={uiText("Connection method", undefined, undefined, uiLocale)}
               value={tab}
               onValueChange={changeTab}
               options={[
-                { value: "url", label: "Pairing URL", disabled: isSubmitting },
-                { value: "code", label: "Host + code", disabled: isSubmitting },
-                { value: "login", label: "Host + password", disabled: isSubmitting },
+                {
+                  value: "url",
+                  label: uiText("Pairing URL", undefined, undefined, uiLocale),
+                  disabled: isSubmitting,
+                },
+                {
+                  value: "code",
+                  label: uiText("Host + code", undefined, undefined, uiLocale),
+                  disabled: isSubmitting,
+                },
+                {
+                  value: "login",
+                  label: uiText("Host + password", undefined, undefined, uiLocale),
+                  disabled: isSubmitting,
+                },
               ]}
             />
 
             <div className="flex flex-col gap-2">
               <label htmlFor="env-label" className="text-sm font-medium">
-                Label (optional)
+                {uiText("Label (optional)", undefined, undefined, uiLocale)}
               </label>
               <Input
                 id="env-label"
                 value={label}
                 onChange={(event) => setLabel(event.target.value)}
-                placeholder="Production server"
+                placeholder={uiText("Production server", undefined, undefined, uiLocale)}
                 disabled={isSubmitting}
               />
             </div>
@@ -430,7 +514,7 @@ function AddSavedEnvironmentDialog({ actions }: { actions: SavedEnvironmentActio
             {tab === "url" ? (
               <div className="flex flex-col gap-2">
                 <label htmlFor="env-url" className="text-sm font-medium">
-                  Pairing URL
+                  {uiText("Pairing URL", undefined, undefined, uiLocale)}
                 </label>
                 <Input
                   id="env-url"
@@ -446,13 +530,13 @@ function AddSavedEnvironmentDialog({ actions }: { actions: SavedEnvironmentActio
               <>
                 <div className="flex flex-col gap-2">
                   <label htmlFor="env-host" className="text-sm font-medium">
-                    Host
+                    {uiText("Host", undefined, undefined, uiLocale)}
                   </label>
                   <Input
                     id="env-host"
                     value={host}
                     onChange={(event) => setHost(event.target.value)}
-                    placeholder="server.example:3000"
+                    placeholder={uiText("server.example:3000", undefined, undefined, uiLocale)}
                     required
                     disabled={isSubmitting}
                   />
@@ -461,7 +545,7 @@ function AddSavedEnvironmentDialog({ actions }: { actions: SavedEnvironmentActio
                   <>
                     <div className="flex flex-col gap-2">
                       <label htmlFor="env-password" className="text-sm font-medium">
-                        Admin password
+                        {uiText("Admin password", undefined, undefined, uiLocale)}
                       </label>
                       <Input
                         id="env-password"
@@ -477,13 +561,13 @@ function AddSavedEnvironmentDialog({ actions }: { actions: SavedEnvironmentActio
                 ) : (
                   <div className="flex flex-col gap-2">
                     <label htmlFor="env-code" className="text-sm font-medium">
-                      Pairing code
+                      {uiText("Pairing code", undefined, undefined, uiLocale)}
                     </label>
                     <Input
                       id="env-code"
                       value={pairingCode}
                       onChange={(event) => setPairingCode(event.target.value)}
-                      placeholder="Pairing code"
+                      placeholder={uiText("Pairing code", undefined, undefined, uiLocale)}
                       required
                       disabled={isSubmitting}
                       autoComplete="off"
@@ -503,10 +587,12 @@ function AddSavedEnvironmentDialog({ actions }: { actions: SavedEnvironmentActio
               onClick={() => handleOpenChange(false)}
               disabled={isSubmitting}
             >
-              Cancel
+              {uiText("Cancel", undefined, undefined, uiLocale)}
             </Button>
             <Button type="submit" disabled={isSubmitting} aria-busy={isSubmitting || undefined}>
-              <BusyButtonLabel busy={isSubmitting}>Add environment</BusyButtonLabel>
+              <BusyButtonLabel busy={isSubmitting}>
+                {uiText("Add environment", undefined, undefined, uiLocale)}
+              </BusyButtonLabel>
             </Button>
           </DialogFooter>
         </form>
@@ -520,6 +606,8 @@ export function SavedEnvironmentsSettings({
 }: {
   actions?: SavedEnvironmentActions;
 } = {}) {
+  const uiLocale = useUiLocale();
+
   const registryById = useSavedEnvironmentRegistryStore((state) => state.byId);
   const runtimeById = useSavedEnvironmentRuntimeStore((state) => state.byId);
   const records = useMemo(
@@ -529,12 +617,12 @@ export function SavedEnvironmentsSettings({
 
   return (
     <SettingsSection
-      title="Saved environments"
+      title={uiText("Saved environments", undefined, undefined, uiLocale)}
       headerAction={<AddSavedEnvironmentDialog actions={actions} />}
     >
       {records.length === 0 ? (
         <p className="px-4 py-3.5 text-xs text-muted-foreground sm:px-5">
-          No remote servers paired.
+          {uiText("No remote servers paired.", undefined, undefined, uiLocale)}
         </p>
       ) : (
         records.map((record) => (
@@ -549,3 +637,10 @@ export function SavedEnvironmentsSettings({
     </SettingsSection>
   );
 }
+
+// Finite source-owned labels/helpers only; no received or user data.
+const UI_PRESENTATION_SOURCES = {
+  remoteEnvironmentErrorMessage,
+  resolveServerConfigVersionMismatch,
+  safeSavedEnvironmentHost,
+};

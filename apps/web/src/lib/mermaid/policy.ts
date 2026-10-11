@@ -1,9 +1,13 @@
+import { uiText } from "@cafecode/shared/i18n";
 /** Version the policy with the renderer pin: cached images must never cross a policy upgrade. */
 export const MERMAID_POLICY = "tiny-12.0.0/cafe-2";
 export const MAX_MERMAID_SOURCE_BYTES = 32 * 1024;
 export const MAX_MERMAID_GRAPH_ITEMS = 250;
 export const MAX_MERMAID_SVG_BYTES = 2 * 1024 * 1024;
 export const MERMAID_FAILURE = "Diagram unavailable. View or copy the source instead.";
+export function getMERMAID_FAILURE() {
+  return uiText("Diagram unavailable. View or copy the source instead.");
+}
 
 export function admitMermaidSource(source: string): void {
   // Reject oversized transcripts before scanning or allocating an encoded copy.
@@ -11,7 +15,7 @@ export function admitMermaidSource(source: string): void {
     source.length > MAX_MERMAID_SOURCE_BYTES ||
     new TextEncoder().encode(source).byteLength > MAX_MERMAID_SOURCE_BYTES
   ) {
-    throw new Error(MERMAID_FAILURE);
+    throw new Error(getMERMAID_FAILURE());
   }
   const family =
     /^(?:\s|%%[^\r\n]*(?:\r?\n|$))*(flowchart|graph|sequenceDiagram|classDiagram|stateDiagram(?:-v2)?|erDiagram|xychart(?:-beta)?|pie)\b/.exec(
@@ -32,6 +36,6 @@ export function admitMermaidSource(source: string): void {
     source.trimStart().startsWith("---") ||
     !family
   ) {
-    throw new Error(MERMAID_FAILURE);
+    throw new Error(getMERMAID_FAILURE());
   }
 }

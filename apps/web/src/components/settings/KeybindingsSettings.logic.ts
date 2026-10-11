@@ -1,3 +1,4 @@
+import { uiText } from "@cafecode/shared/i18n";
 import {
   type KeybindingCommand,
   type KeybindingShortcut,
@@ -88,7 +89,7 @@ export function parseWhenExpressionDraft(
   if (!ast) {
     return {
       ok: false,
-      message: "Use variables with !, &&, ||, and parentheses.",
+      message: uiText("Use variables with !, &&, ||, and parentheses."),
     };
   }
 
@@ -110,6 +111,18 @@ function sourceForBinding(binding: ResolvedKeybindingRule): KeybindingSource {
   );
 
   return isDefault ? "Default" : "Custom";
+}
+
+/** Keep the row's source identity stable for default/reset behavior. */
+export function keybindingSourceLabel(source: KeybindingSource): string {
+  switch (source) {
+    case "Default":
+      return uiText("Default");
+    case "Custom":
+      return uiText("Custom");
+    case "Project":
+      return uiText("Project");
+  }
 }
 
 function defaultBindingForBinding(
@@ -276,19 +289,43 @@ export function buildKeybindingCommandOptions(
 export function commandLabel(command: KeybindingCommand): string {
   const raw = String(command);
   if (raw === "composer.submit") {
-    return "Composer: Submit / Queue Follow-Up";
+    return uiText("Composer: Submit / Queue Follow-Up");
   }
   if (raw === "composer.steer") {
-    return "Composer: Steer Active Turn";
+    return uiText("Composer: Steer Active Turn");
   }
   if (raw.startsWith("script.") && raw.endsWith(".run")) {
-    return `Run Script: ${titleCaseCommandSegment(raw.slice("script.".length, -".run".length))}`;
+    return uiText("Run Script: {script}", {
+      script: titleCaseCommandSegment(raw.slice("script.".length, -".run".length)),
+    });
   }
+  // Complete messages for Cafe's fixed command ids. Unknown/script ids remain
+  // inert metadata; they are never interpreted as translation source text.
+  switch (raw) {
+    case "commandPalette.toggle":
+      return uiText("Command Palette: Toggle");
+    case "chat.new":
+      return uiText("Chat: New");
+    case "chat.newLocal":
+      return uiText("Chat: New Local");
+    case "editor.openFavorite":
+      return uiText("Editor: Open Favorite");
+    case "modelPicker.toggle":
+      return uiText("Model Picker: Toggle");
+    case "thread.previous":
+      return uiText("Chat: Previous");
+    case "thread.next":
+      return uiText("Chat: Next");
+  }
+  const chatJump = /^thread\.jump\.([1-9])$/u.exec(raw);
+  if (chatJump) return uiText("Chat: Jump: {index}", { index: chatJump[1]! });
+  const modelJump = /^modelPicker\.jump\.([1-9])$/u.exec(raw);
+  if (modelJump) return uiText("Model Picker: Jump: {index}", { index: modelJump[1]! });
   return raw
     .split(".")
     .map((segment, index) =>
       // Command ids keep their protocol names (`thread.next`), but the UI says "chat".
-      index === 0 && segment === "thread" ? "Chat" : titleCaseCommandSegment(segment),
+      index === 0 && segment === "thread" ? uiText("Chat") : titleCaseCommandSegment(segment),
     )
     .join(": ");
 }

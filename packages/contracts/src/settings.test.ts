@@ -55,6 +55,21 @@ const decodeGrokSettings = Schema.decodeSync(GrokSettings);
 const decodeServerSettingsPatch = Schema.decodeUnknownSync(ServerSettingsPatch);
 
 describe("client settings", () => {
+  it("preserves explicit language choices and defaults legacy documents to system", () => {
+    expect(DEFAULT_CLIENT_SETTINGS.languagePreference).toBe("system");
+    expect(decodeClientSettings({}).languagePreference).toBe("system");
+    for (const languagePreference of ["system", "en", "ja", "ko"] as const) {
+      const settings = decodeClientSettings({ languagePreference });
+      expect(settings.languagePreference).toBe(languagePreference);
+      expect(decodeClientSettings(JSON.parse(JSON.stringify(settings))).languagePreference).toBe(
+        languagePreference,
+      );
+      expect(decodeClientSettingsPatch({ languagePreference })).toEqual({ languagePreference });
+    }
+    for (const languagePreference of ["fr", "ja-JP", "", "__proto__", null, 1]) {
+      expect(() => decodeClientSettingsPatch({ languagePreference })).toThrow();
+    }
+  });
   it("defaults chat clicks to preview and accepts only preview or open", () => {
     expect(decodeClientSettings({}).chatClickBehavior).toBe("preview");
     expect(DEFAULT_CLIENT_SETTINGS.chatClickBehavior).toBe("preview");

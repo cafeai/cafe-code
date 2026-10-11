@@ -1,3 +1,5 @@
+import { useUiLocale, useUiPresentation } from "~/i18n";
+import { uiText } from "@cafecode/shared/i18n";
 import { memo, type PointerEventHandler } from "react";
 import { ArrowUpIcon, ChevronDownIcon, ChevronLeftIcon, LoaderCircleIcon } from "lucide-react";
 import { cn } from "~/lib/utils";
@@ -41,15 +43,17 @@ export const formatPendingPrimaryActionLabel = (input: {
   questionIndex: number;
 }) => {
   if (input.isResponding) {
-    return "Submitting…";
+    return uiText("Submitting…");
   }
   if (input.compact) {
-    return input.isLastQuestion ? "Submit" : "Next";
+    return input.isLastQuestion ? uiText("Submit") : uiText("Next");
   }
   if (!input.isLastQuestion) {
-    return "Next question";
+    return uiText("Next question");
   }
-  return input.questionIndex > 0 ? "Submit answers" : "Submit answer";
+  return uiText("{count, plural, one {Submit answer} other {Submit answers}}", {
+    count: input.questionIndex > 0 ? input.questionIndex + 1 : 1,
+  });
 };
 
 const preventPointerFocus: PointerEventHandler<HTMLElement> = (event) => {
@@ -85,6 +89,9 @@ export const ComposerPrimaryActions = memo(function ComposerPrimaryActions({
   onInterrupt,
   onImplementPlanInNewThread,
 }: ComposerPrimaryActionsProps) {
+  const uiLocale = useUiLocale();
+  const uiPresentation = useUiPresentation(UI_PRESENTATION_SOURCES);
+
   if (isQueueEditing) return null;
   const pointerFocusProps = preserveComposerFocusOnPointerDown
     ? { onPointerDown: preventPointerFocus }
@@ -102,7 +109,7 @@ export const ComposerPrimaryActions = memo(function ComposerPrimaryActions({
               {...pointerFocusProps}
               onClick={onPreviousPendingQuestion}
               disabled={pendingAction.isResponding}
-              aria-label="Previous question"
+              aria-label={uiText("Previous question", undefined, undefined, uiLocale)}
             >
               <ChevronLeftIcon className="size-3.5" />
             </Button>
@@ -115,7 +122,7 @@ export const ComposerPrimaryActions = memo(function ComposerPrimaryActions({
               onClick={onPreviousPendingQuestion}
               disabled={pendingAction.isResponding}
             >
-              Previous
+              {uiText("Previous", undefined, undefined, uiLocale)}
             </Button>
           )
         ) : null}
@@ -130,7 +137,7 @@ export const ComposerPrimaryActions = memo(function ComposerPrimaryActions({
             (pendingAction.isLastQuestion ? !pendingAction.isComplete : !pendingAction.canAdvance)
           }
         >
-          {formatPendingPrimaryActionLabel({
+          {uiPresentation.formatPendingPrimaryActionLabel({
             compact,
             isLastQuestion: pendingAction.isLastQuestion,
             isResponding: pendingAction.isResponding,
@@ -163,7 +170,11 @@ export const ComposerPrimaryActions = memo(function ComposerPrimaryActions({
           disabled={
             isSendBusy || isConnecting || isEnvironmentUnavailable || sendTemporarilyGuarded
           }
-          aria-label={isRunning ? "Queue message" : "Send message"}
+          aria-label={
+            isRunning
+              ? uiText("Queue message", undefined, undefined, uiLocale)
+              : uiText("Send message", undefined, undefined, uiLocale)
+          }
         >
           <ArrowUpIcon aria-hidden="true" className="size-4" strokeWidth={2.25} />
         </button>
@@ -180,7 +191,11 @@ export const ComposerPrimaryActions = memo(function ComposerPrimaryActions({
         {...pointerFocusProps}
         onClick={onInterrupt}
         disabled={recoveryStopAvailable && (isSendBusy || isConnecting || isEnvironmentUnavailable)}
-        aria-label={recoveryStopAvailable ? "Stop recovery" : "Stop generation"}
+        aria-label={
+          recoveryStopAvailable
+            ? uiText("Stop recovery", undefined, undefined, uiLocale)
+            : uiText("Stop generation", undefined, undefined, uiLocale)
+        }
       >
         <svg width="12" height="12" viewBox="0 0 12 12" fill="currentColor" aria-hidden="true">
           <rect x="2" y="2" width="8" height="8" rx="1.5" />
@@ -199,7 +214,9 @@ export const ComposerPrimaryActions = memo(function ComposerPrimaryActions({
           {...pointerFocusProps}
           disabled={isSendBusy || isConnecting || isEnvironmentUnavailable}
         >
-          {isConnecting || isSendBusy ? "Sending…" : "Refine"}
+          {isConnecting || isSendBusy
+            ? uiText("Sending…", undefined, undefined, uiLocale)
+            : uiText("Refine", undefined, undefined, uiLocale)}
         </Button>
       );
     }
@@ -213,7 +230,9 @@ export const ComposerPrimaryActions = memo(function ComposerPrimaryActions({
           {...pointerFocusProps}
           disabled={isSendBusy || isConnecting || isEnvironmentUnavailable}
         >
-          {isConnecting || isSendBusy ? "Sending…" : "Implement"}
+          {isConnecting || isSendBusy
+            ? uiText("Sending…", undefined, undefined, uiLocale)
+            : uiText("Implement", undefined, undefined, uiLocale)}
         </Button>
         <Menu>
           {/* This popup owns focus. Preventing its pointer default, unlike an
@@ -227,7 +246,7 @@ export const ComposerPrimaryActions = memo(function ComposerPrimaryActions({
                   "h-9 rounded-l-none rounded-r-full border-l-white/12 sm:h-8",
                   compact ? "px-1" : "px-2",
                 )}
-                aria-label="Implementation actions"
+                aria-label={uiText("Implementation actions", undefined, undefined, uiLocale)}
                 disabled={isSendBusy || isConnecting || isEnvironmentUnavailable}
               />
             }
@@ -239,7 +258,7 @@ export const ComposerPrimaryActions = memo(function ComposerPrimaryActions({
               disabled={isSendBusy || isConnecting || isEnvironmentUnavailable}
               onClick={() => void onImplementPlanInNewThread()}
             >
-              Implement in a new chat
+              {uiText("Implement in a new chat", undefined, undefined, uiLocale)}
             </MenuItem>
           </MenuPopup>
         </Menu>
@@ -255,14 +274,14 @@ export const ComposerPrimaryActions = memo(function ComposerPrimaryActions({
       disabled={isSendBusy || isConnecting || isEnvironmentUnavailable || !hasSendableContent}
       aria-label={
         isEnvironmentUnavailable
-          ? "Environment disconnected"
+          ? uiText("Environment disconnected", undefined, undefined, uiLocale)
           : isConnecting
-            ? "Connecting"
+            ? uiText("Connecting", undefined, undefined, uiLocale)
             : isPreparingWorktree
-              ? "Preparing worktree"
+              ? uiText("Preparing worktree", undefined, undefined, uiLocale)
               : isSendBusy
-                ? "Sending"
-                : "Send message"
+                ? uiText("Sending", undefined, undefined, uiLocale)
+                : uiText("Send message", undefined, undefined, uiLocale)
       }
     >
       {isConnecting || isSendBusy ? (
@@ -273,3 +292,6 @@ export const ComposerPrimaryActions = memo(function ComposerPrimaryActions({
     </button>
   );
 });
+
+// Finite source-owned labels/helpers only; no received or user data.
+const UI_PRESENTATION_SOURCES = { formatPendingPrimaryActionLabel };

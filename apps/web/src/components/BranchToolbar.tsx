@@ -1,3 +1,5 @@
+import { useUiLocale, useUiPresentation } from "~/i18n";
+import { uiText } from "@cafecode/shared/i18n";
 import { scopeProjectRef, scopeThreadRef } from "@cafecode/client-runtime";
 import type { EnvironmentId, ThreadId } from "@cafecode/contracts";
 import {
@@ -76,6 +78,9 @@ const MobileRunContextSelector = memo(function MobileRunContextSelector({
   activeWorktreePath,
   onEnvModeChange,
 }: MobileRunContextSelectorProps) {
+  const uiLocale = useUiLocale();
+  const uiPresentation = useUiPresentation(UI_PRESENTATION_SOURCES);
+
   const activeEnvironment = useMemo(
     () => availableEnvironments?.find((env) => env.environmentId === environmentId) ?? null,
     [availableEnvironments, environmentId],
@@ -87,10 +92,10 @@ const MobileRunContextSelector = memo(function MobileRunContextSelector({
         ? FolderGitIcon
         : FolderIcon;
   const workspaceLabel = envModeLocked
-    ? resolveLockedWorkspaceLabel(activeWorktreePath)
+    ? uiPresentation.resolveLockedWorkspaceLabel(activeWorktreePath)
     : effectiveEnvMode === "worktree"
-      ? resolveEnvModeLabel("worktree")
-      : resolveCurrentWorkspaceLabel(activeWorktreePath);
+      ? uiPresentation.resolveEnvModeLabel("worktree")
+      : uiPresentation.resolveCurrentWorkspaceLabel(activeWorktreePath);
   const isLocked = envLocked || envModeLocked;
   const EnvironmentIcon = activeEnvironment?.isPrimary ? MonitorIcon : CloudIcon;
   const icon = showEnvironmentPicker ? (
@@ -107,7 +112,9 @@ const MobileRunContextSelector = memo(function MobileRunContextSelector({
     <>
       {icon}
       <span className="min-w-0 truncate">
-        {showEnvironmentPicker ? (activeEnvironment?.label ?? "Run on") : workspaceLabel}
+        {showEnvironmentPicker
+          ? (activeEnvironment?.label ?? uiText("Run on", undefined, undefined, uiLocale))
+          : workspaceLabel}
       </span>
     </>
   );
@@ -133,7 +140,7 @@ const MobileRunContextSelector = memo(function MobileRunContextSelector({
         {showEnvironmentPicker && availableEnvironments && onEnvironmentChange ? (
           <>
             <MenuGroup>
-              <MenuGroupLabel>Run on</MenuGroupLabel>
+              <MenuGroupLabel>{uiText("Run on", undefined, undefined, uiLocale)}</MenuGroupLabel>
               <MenuRadioGroup
                 value={environmentId}
                 onValueChange={(value) => onEnvironmentChange(value as EnvironmentId)}
@@ -159,7 +166,7 @@ const MobileRunContextSelector = memo(function MobileRunContextSelector({
           </>
         ) : null}
         <MenuGroup>
-          <MenuGroupLabel>Workspace</MenuGroupLabel>
+          <MenuGroupLabel>{uiText("Workspace", undefined, undefined, uiLocale)}</MenuGroupLabel>
           <MenuRadioGroup
             value={effectiveEnvMode}
             onValueChange={(value) => onEnvModeChange(value as EnvMode)}
@@ -172,14 +179,16 @@ const MobileRunContextSelector = memo(function MobileRunContextSelector({
                   <FolderIcon className="size-3" />
                 )}
                 <span className="min-w-0 truncate">
-                  {resolveCurrentWorkspaceLabel(activeWorktreePath)}
+                  {uiPresentation.resolveCurrentWorkspaceLabel(activeWorktreePath)}
                 </span>
               </span>
             </MenuRadioItem>
             <MenuRadioItem disabled={envModeLocked} value="worktree">
               <span className="flex min-w-0 items-center gap-1.5">
                 <FolderGit2Icon className="size-3" />
-                <span className="min-w-0 truncate">{resolveEnvModeLabel("worktree")}</span>
+                <span className="min-w-0 truncate">
+                  {uiPresentation.resolveEnvModeLabel("worktree")}
+                </span>
               </span>
             </MenuRadioItem>
           </MenuRadioGroup>
@@ -291,3 +300,10 @@ export const BranchToolbar = memo(function BranchToolbar({
     </div>
   );
 });
+
+// Finite source-owned labels/helpers only; no received or user data.
+const UI_PRESENTATION_SOURCES = {
+  resolveCurrentWorkspaceLabel,
+  resolveEnvModeLabel,
+  resolveLockedWorkspaceLabel,
+};

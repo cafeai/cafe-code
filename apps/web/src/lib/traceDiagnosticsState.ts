@@ -72,3 +72,5 @@ export function useTraceDiagnostics(): TraceDiagnosticsState {
     refresh,
   };
 }
+
+// Finite source-owned labels/helpers only; no received or user data.

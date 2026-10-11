@@ -5,8 +5,75 @@ import { describe, expect, it, vi } from "vitest";
 import { render } from "vitest-browser-react";
 
 import { FollowUpQueueShelf } from "./ChatComposer";
+import { getUiLocale, setUiLocale } from "@cafecode/shared/i18n";
+import { useUiLocale } from "~/i18n";
+import {
+  createQueuedFollowUpFeedback,
+  formatQueuedFollowUpFeedback,
+} from "./queuedFollowUpFeedback";
 
 describe("FollowUpQueueShelf", () => {
+  it("retranslates retained Cafe queue feedback without submitting or replacing saved input", async () => {
+    const previousLocale = getUiLocale();
+    setUiLocale("en");
+    const feedback = createQueuedFollowUpFeedback({ code: "missing-attachments", count: 2 });
+    const onAction = vi.fn();
+    const onRemove = vi.fn();
+    function RetainedQueue() {
+      const locale = useUiLocale();
+      return (
+        <FollowUpQueueShelf
+          items={[
+            {
+              id: "exact-retry-id",
+              preview: "Received user prompt",
+              promptText: "Received user prompt",
+              images: [],
+              queuedAt: "2026-09-09T00:00:00.000Z",
+              expanded: true,
+              canExpand: true,
+              blockedReason: formatQueuedFollowUpFeedback(
+                feedback.blockedReason,
+                feedback.blockedFeedback,
+                locale,
+              ),
+              canRetryDelivery: false,
+              automaticSteerRetry: { nonSteerableTurnKind: "compact" },
+            },
+          ]}
+          actionLabel="Send"
+          actionTitle="Send message"
+          onToggleExpanded={vi.fn()}
+          onAction={onAction}
+          onRemove={onRemove}
+          onClear={vi.fn()}
+          onExpandImage={vi.fn()}
+        />
+      );
+    }
+    const screen = await render(<RetainedQueue />);
+    try {
+      await expect.element(page.getByText(feedback.blockedReason, { exact: true })).toBeVisible();
+      const prompt = page.getByLabelText("Queued message prompt");
+      const promptNode = prompt.element();
+      for (const locale of ["ja", "ko", "en"] as const) {
+        setUiLocale(locale);
+        const message = formatQueuedFollowUpFeedback(
+          feedback.blockedReason,
+          feedback.blockedFeedback,
+          locale,
+        )!;
+        await expect.element(page.getByText(message, { exact: true })).toBeVisible();
+        expect(document.body.textContent).toContain("Received user prompt");
+        expect(promptNode.isConnected).toBe(true);
+        expect(onAction).not.toHaveBeenCalled();
+        expect(onRemove).not.toHaveBeenCalled();
+      }
+    } finally {
+      await screen.unmount();
+      setUiLocale(previousLocale);
+    }
+  });
   it.each([
     { deliveryStatus: "sending" as const, label: "Sending" },
     { deliveryStatus: "received" as const, label: "Received" },

@@ -7,6 +7,8 @@ import * as Ref from "effect/Ref";
 
 import type * as Electron from "electron";
 import { vi } from "vitest";
+import { setUiLocale } from "@cafecode/shared/i18n";
+import { DESKTOP_UI_LOCALE_CHANGED_CHANNEL } from "../settings/DesktopUiLocaleBridge.ts";
 
 import * as DesktopAssets from "../app/DesktopAssets.ts";
 import * as DesktopConfig from "../app/DesktopConfig.ts";
@@ -186,6 +188,43 @@ function makeTestLayer(input: {
 }
 
 describe("DesktopWindow", () => {
+  it.effect(
+    "reconciles the selected locale after document load and retires its exact-window observer",
+    () =>
+      Effect.gen(function* () {
+        setUiLocale("en");
+        const fixture = makeFakeBrowserWindow();
+        const createCount = yield* Ref.make(0);
+        const mainWindow = yield* Ref.make<Option.Option<Electron.BrowserWindow>>(Option.none());
+        yield* Effect.scoped(
+          Effect.gen(function* () {
+            const windows = yield* DesktopWindow.DesktopWindow;
+            yield* windows.handleBackendReady;
+            const loadListener = (
+              fixture.window.webContents.on as ReturnType<typeof vi.fn>
+            ).mock.calls.find(([name]) => name === "did-finish-load")?.[1];
+            assert.isFunction(loadListener);
+            setUiLocale("ja");
+            loadListener!();
+            const send = fixture.window.webContents.send as ReturnType<typeof vi.fn>;
+            assert.deepEqual(send.mock.calls.at(-1), [DESKTOP_UI_LOCALE_CHANGED_CHANNEL, "ja"]);
+            setUiLocale("ko");
+            assert.deepEqual(send.mock.calls.at(-1), [DESKTOP_UI_LOCALE_CHANGED_CHANNEL, "ko"]);
+            assert.equal(
+              yield* Ref.get(createCount),
+              1,
+              "presentation never creates another window",
+            );
+          }).pipe(
+            Effect.provide(makeTestLayer({ window: fixture.window, createCount, mainWindow })),
+          ),
+        );
+        const send = fixture.window.webContents.send as ReturnType<typeof vi.fn>;
+        const calls = send.mock.calls.length;
+        setUiLocale("en");
+        assert.equal(send.mock.calls.length, calls);
+      }).pipe(Effect.ensuring(Effect.sync(() => setUiLocale("en")))),
+  );
   it.effect("keeps startup feedback until the real main window is revealed", () =>
     Effect.gen(function* () {
       const fakeWindow = makeFakeBrowserWindow();

@@ -7,6 +7,7 @@ import "../../index.css";
 
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import type { DesktopBridge, GlobalDictationSettingsState } from "@cafecode/contracts";
+import { getUiLocale, setUiLocale, uiText } from "@cafecode/shared/i18n";
 import { page } from "vitest/browser";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { render } from "vitest-browser-react";
@@ -86,6 +87,7 @@ function getAlertDialogButton(name: string): HTMLButtonElement {
 }
 
 describe("DictationSettings", () => {
+  const originalLocale = getUiLocale();
   const originalDesktopBridge = window.desktopBridge;
   const originalPlatformDescriptor = Object.getOwnPropertyDescriptor(navigator, "platform");
   let mounted:
@@ -97,6 +99,7 @@ describe("DictationSettings", () => {
   let queryClient: QueryClient | null = null;
 
   beforeEach(() => {
+    setUiLocale("en");
     dictationHarness.reset();
     queryClient = new QueryClient({
       defaultOptions: {
@@ -120,6 +123,7 @@ describe("DictationSettings", () => {
     } else {
       Reflect.deleteProperty(navigator, "platform");
     }
+    setUiLocale(originalLocale);
   });
 
   async function renderSettings() {
@@ -245,6 +249,149 @@ describe("DictationSettings", () => {
     await expect.element(page.getByLabelText("New OpenAI API key")).toHaveValue("");
     expect(document.body.textContent).not.toContain(apiKey);
     expect(document.body.textContent).not.toContain("unsafe provider detail");
+  });
+
+  it("retranslates retained credential feedback without retaining the rejected key or repeating RPC", async () => {
+    const apiKey = "sk-isolated-language-rejection";
+    dictationHarness.setApiKey.mockRejectedValueOnce({
+      code: "secret_store_failed",
+      message: `unsafe fixture detail ${apiKey}`,
+    });
+    await renderSettings();
+    await expect.element(page.getByText("Not configured", { exact: true })).toBeVisible();
+    await page.getByLabelText("New OpenAI API key").fill(apiKey);
+    await page.getByRole("button", { name: "Save key" }).click();
+    await expect
+      .element(page.getByRole("alert"))
+      .toHaveTextContent("Cafe Code could not update its private credential store.");
+    setUiLocale("ko");
+    await expect
+      .element(page.getByRole("alert"))
+      .toHaveTextContent("Cafe Code가 비공개 인증 정보 저장소를 업데이트하지 못했습니다.");
+    expect(dictationHarness.setApiKey).toHaveBeenCalledTimes(1);
+    expect(dictationHarness.getStatus).toHaveBeenCalledTimes(1);
+    expect(document.querySelector<HTMLInputElement>('input[type="password"]')?.value).toBe("");
+    expect(document.body.textContent).not.toContain(apiKey);
+    expect(document.body.textContent).not.toContain("unsafe fixture detail");
+  });
+
+  it("retranslates a retained removal error without resubmitting or changing the owner status", async () => {
+    dictationHarness.reset({ configured: true, canManage: true });
+    dictationHarness.clearApiKey.mockRejectedValueOnce({ code: "secret_store_failed" });
+    await renderSettings();
+    await expect.element(page.getByText("Configured", { exact: true })).toBeVisible();
+    await page.getByRole("button", { name: "Remove key" }).click();
+    await expect.element(page.getByRole("alertdialog")).toBeVisible();
+    getAlertDialogButton("Remove key").click();
+    await expect
+      .element(page.getByRole("alert"))
+      .toHaveTextContent("Cafe Code could not update its private credential store.");
+    setUiLocale("ko");
+    await expect
+      .element(page.getByRole("alert"))
+      .toHaveTextContent("Cafe Code가 비공개 인증 정보 저장소를 업데이트하지 못했습니다.");
+    expect(dictationHarness.clearApiKey).toHaveBeenCalledTimes(1);
+    expect(queryClient?.getQueryData(["dictation", "status", PRIMARY_ENVIRONMENT_ID])).toEqual({
+      configured: true,
+      canManage: true,
+    });
+    await expect.element(page.getByRole("alertdialog")).toBeVisible();
+  });
+
+  it("retranslates saved-key confirmation without another credential write", async () => {
+    await renderSettings();
+    await expect.element(page.getByText("Not configured", { exact: true })).toBeVisible();
+    await page.getByLabelText("New OpenAI API key").fill("sk-isolated-language-save");
+    await page.getByRole("button", { name: "Save key" }).click();
+    await expect
+      .element(page.getByText("Key saved. Access is checked when dictation starts."))
+      .toBeVisible();
+    setUiLocale("ko");
+    await expect
+      .element(page.getByText("키를 저장했습니다. 받아쓰기를 시작할 때 접근 권한을 확인합니다."))
+      .toBeVisible();
+    expect(dictationHarness.setApiKey).toHaveBeenCalledTimes(1);
+    expect(dictationHarness.getStatus).toHaveBeenCalledTimes(1);
+  });
+
+  it("retranslates shortcut hints without replaying desktop settings operations", async () => {
+    dictationHarness.reset({ configured: true, canManage: true });
+    Object.defineProperty(navigator, "platform", { configurable: true, value: "MacIntel" });
+    const settings: GlobalDictationSettingsState = {
+      enabled: false,
+      shortcut: "CommandOrControl+Shift+,",
+      registered: false,
+      error: null,
+    };
+    const getSettings = vi.fn(async () => settings);
+    const setEnabled = vi.fn(async () => settings);
+    const setShortcut = vi.fn(async () => settings);
+    window.desktopBridge = {
+      getGlobalDictationSettings: getSettings,
+      setGlobalDictationEnabled: setEnabled,
+      setGlobalDictationShortcut: setShortcut,
+    } as unknown as DesktopBridge;
+    await renderSettings();
+    const change = page.getByRole("button", { name: "Change", exact: true });
+    await expect.element(change).toBeEnabled();
+    await change.click();
+    window.dispatchEvent(
+      new KeyboardEvent("keydown", {
+        code: "KeyD",
+        key: "d",
+        bubbles: true,
+        cancelable: true,
+      }),
+    );
+    await expect
+      .element(page.getByRole("alert"))
+      .toHaveTextContent("Press ⌘ ⇧ with a letter, number, or punctuation key.");
+    setUiLocale("ko");
+    await expect
+      .element(page.getByRole("alert"))
+      .toHaveTextContent("⌘ ⇧와 함께 영문자, 숫자 또는 문장부호 키를 누르세요.");
+    expect(getSettings).toHaveBeenCalledTimes(1);
+    expect(setEnabled).not.toHaveBeenCalled();
+    expect(setShortcut).not.toHaveBeenCalled();
+    // Capture remains active across the display update; only this explicit
+    // physical-key event may request the shortcut operation.
+    window.dispatchEvent(
+      new KeyboardEvent("keydown", {
+        code: "KeyD",
+        key: "D",
+        metaKey: true,
+        shiftKey: true,
+        bubbles: true,
+        cancelable: true,
+      }),
+    );
+    await expect.poll(() => setShortcut.mock.calls.length).toBe(1);
+  });
+
+  it("keeps received global dictation errors opaque after a language change", async () => {
+    dictationHarness.reset({ configured: true, canManage: true });
+    Object.defineProperty(navigator, "platform", { configurable: true, value: "MacIntel" });
+    const receivedError = "Could not update global dictation. Try again.";
+    const getSettings = vi.fn(async () => ({
+      enabled: false,
+      shortcut: "CommandOrControl+Shift+,",
+      registered: false,
+      error: receivedError,
+    }));
+    window.desktopBridge = { getGlobalDictationSettings: getSettings } as unknown as DesktopBridge;
+    await renderSettings();
+    await expect.element(page.getByRole("alert")).toHaveTextContent(receivedError);
+    setUiLocale("ko");
+    await expect
+      .element(
+        page.getByRole("heading", {
+          name: uiText("Global dictation", undefined, undefined, "ko"),
+          exact: true,
+        }),
+      )
+      .toBeVisible();
+    await expect.element(page.getByRole("alert")).toHaveTextContent(receivedError);
+    expect(getSettings).toHaveBeenCalledTimes(1);
   });
 
   it("keeps Mac global capture opt-in and saves a recorded Command–Shift shortcut", async () => {

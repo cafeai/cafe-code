@@ -1,4 +1,5 @@
 import type { OrchestrationLiveWork } from "@cafecode/contracts";
+import { uiText } from "@cafecode/shared/i18n";
 import { deriveLiveWorkObservations, isLiveWorkRuntimeCurrent } from "@cafecode/shared/liveWork";
 import { deriveCodexRecoveryPresentation } from "../../codexRecovery";
 import {
@@ -57,15 +58,16 @@ export function deriveTurnCompletionSummary(input: {
     activities: thread.activities,
     activeSubagents,
   });
-  if (recovery?.stage === "uncertain") return `Needs reconciliation · root ${elapsed}`;
-  if (recovery?.stage) return `Reconnecting · root ${elapsed}`;
+  if (recovery?.stage === "uncertain")
+    return uiText("Needs reconciliation · root {elapsed}", { elapsed });
+  if (recovery?.stage) return uiText("Reconnecting · root {elapsed}", { elapsed });
   const agentCount = summary?.agentCount ?? activeSubagents.length;
-  if (agentCount > 0) return `Agents running · root ${elapsed}`;
+  if (agentCount > 0) return uiText("Agents running · root {elapsed}", { elapsed });
   const taskCount =
     summary?.taskCount ??
     deriveLiveWorkObservations(thread.activities, runtimeSession).filter(
       ({ observation }) => !observation.agent,
     ).length;
-  if (taskCount > 0) return `Tasks running · root ${elapsed}`;
-  return `Worked for ${elapsed}`;
+  if (taskCount > 0) return uiText("Tasks running · root {elapsed}", { elapsed });
+  return uiText("Worked for {elapsed}", { elapsed });
 }

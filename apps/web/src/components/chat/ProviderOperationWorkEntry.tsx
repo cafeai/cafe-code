@@ -1,3 +1,6 @@
+import { useUiLocale, useUiPresentation } from "~/i18n";
+import { uiText } from "@cafecode/shared/i18n";
+import { UiMessage } from "~/i18n";
 import { memo, useId, useState } from "react";
 import { ChevronRightIcon, MessageSquareTextIcon, TerminalIcon } from "lucide-react";
 import type { TimestampFormat } from "@cafecode/contracts/settings";
@@ -11,6 +14,8 @@ import type { ClaudeCommandInspection, ClaudePublicSummary } from "./providerOpe
 export const ClaudeSummaryWorkEntry = memo(function ClaudeSummaryWorkEntry(props: {
   readonly summary: ClaudePublicSummary;
 }) {
+  const uiLocale = useUiLocale();
+
   const panelId = useId();
   const [expanded, setExpanded] = useState(false);
   return (
@@ -24,11 +29,15 @@ export const ClaudeSummaryWorkEntry = memo(function ClaudeSummaryWorkEntry(props
         <span className="flex size-5 shrink-0 items-center justify-center">
           <MessageSquareTextIcon className="size-3" aria-hidden />
         </span>
-        <span>Claude summary</span>
+        <span>{uiText("Claude summary", undefined, undefined, uiLocale)}</span>
         {props.summary.status === "inProgress" ? (
-          <span className="text-subtle-foreground">Updating…</span>
+          <span className="text-subtle-foreground">
+            {uiText("Updating…", undefined, undefined, uiLocale)}
+          </span>
         ) : props.summary.status === "failed" ? (
-          <span className="text-muted-foreground">Partial</span>
+          <span className="text-muted-foreground">
+            {uiText("Partial", undefined, undefined, uiLocale)}
+          </span>
         ) : null}
       </div>
       {!expanded ? (
@@ -47,7 +56,7 @@ export const ClaudeSummaryWorkEntry = memo(function ClaudeSummaryWorkEntry(props
           className="size-3 transition-transform duration-(--duration-fast) group-data-[panel-open]:rotate-90"
           aria-hidden
         />
-        Inspect summary
+        {uiText("Inspect summary", undefined, undefined, uiLocale)}
       </CollapsibleTrigger>
       <CollapsiblePanel id={panelId}>
         <p
@@ -58,7 +67,7 @@ export const ClaudeSummaryWorkEntry = memo(function ClaudeSummaryWorkEntry(props
         </p>
         {props.summary.truncated ? (
           <p className="pl-7 text-2xs text-muted-foreground">
-            Summary truncated to the retained preview.
+            {uiText("Summary truncated to the retained preview.", undefined, undefined, uiLocale)}
           </p>
         ) : null}
       </CollapsiblePanel>
@@ -71,32 +80,47 @@ export const ClaudeCommandWorkEntry = memo(function ClaudeCommandWorkEntry(props
   readonly inspection: ClaudeCommandInspection;
   readonly timestampFormat: TimestampFormat;
 }) {
+  const uiLocale = useUiLocale();
+  const uiPresentation = useUiPresentation(UI_PRESENTATION_SOURCES);
+
   const { inspection } = props;
   const panelId = useId();
   const status =
     inspection.status === "inProgress"
-      ? "Running…"
+      ? uiText("Running…", undefined, undefined, uiLocale)
       : inspection.status === "completed"
-        ? "Completed"
+        ? uiText("Completed", undefined, undefined, uiLocale)
         : inspection.status === "failed"
-          ? "Failed"
-          : "Status not recorded";
+          ? uiText("Failed", undefined, undefined, uiLocale)
+          : uiText("Status not recorded", undefined, undefined, uiLocale);
   const observedDuration =
     inspection.startedAt && inspection.completedAt
-      ? formatElapsed(inspection.startedAt, inspection.completedAt)
+      ? uiPresentation.formatElapsed(inspection.startedAt, inspection.completedAt)
       : null;
   return (
     <Collapsible className="min-w-0 rounded-lg px-1 py-1" data-claude-command-inspection="true">
       <CollapsibleTrigger
         aria-controls={panelId}
-        aria-label={`Inspect command: ${inspection.description ?? inspection.command ?? "Command"}`}
+        aria-label={uiText(
+          "Inspect command: {value0}",
+          {
+            value0:
+              inspection.description ??
+              inspection.command ??
+              uiText("Command", undefined, undefined, uiLocale),
+          },
+          undefined,
+          uiLocale,
+        )}
         className="focus-ring group flex min-h-7 w-full min-w-0 items-center gap-2 rounded-sm text-left text-xs leading-5 hover:bg-accent"
       >
         <span className="flex size-5 shrink-0 items-center justify-center text-muted-foreground">
           <TerminalIcon className="size-3" aria-hidden />
         </span>
         <span className="min-w-0 flex-1 truncate text-foreground">
-          {inspection.description ?? inspection.command ?? "Command"}
+          {inspection.description ??
+            inspection.command ??
+            uiText("Command", undefined, undefined, uiLocale)}
         </span>
         <span
           className={cn(
@@ -119,10 +143,17 @@ export const ClaudeCommandWorkEntry = memo(function ClaudeCommandWorkEntry(props
             <p className="whitespace-pre-wrap wrap-break-word">{inspection.description}</p>
           ) : null}
           {inspection.descriptionTruncated ? (
-            <p className="text-2xs">Description truncated to the retained preview.</p>
+            <p className="text-2xs">
+              {uiText(
+                "Description truncated to the retained preview.",
+                undefined,
+                undefined,
+                uiLocale,
+              )}
+            </p>
           ) : null}
-          <section aria-label="Command">
-            <p className="mb-1 text-2xs">Command</p>
+          <section aria-label={uiText("Command", undefined, undefined, uiLocale)}>
+            <p className="mb-1 text-2xs">{uiText("Command", undefined, undefined, uiLocale)}</p>
             {inspection.command ? (
               <pre
                 className="font-mono text-xs leading-5 whitespace-pre-wrap wrap-anywhere"
@@ -131,22 +162,31 @@ export const ClaudeCommandWorkEntry = memo(function ClaudeCommandWorkEntry(props
                 {inspection.command}
               </pre>
             ) : (
-              <p>Command not recorded.</p>
+              <p>{uiText("Command not recorded.", undefined, undefined, uiLocale)}</p>
             )}
             {inspection.commandTruncated ? (
-              <p className="mt-1 text-2xs">Command truncated to the retained preview.</p>
+              <p className="mt-1 text-2xs">
+                {uiText(
+                  "Command truncated to the retained preview.",
+                  undefined,
+                  undefined,
+                  uiLocale,
+                )}
+              </p>
             ) : null}
           </section>
-          <section aria-label="Received output">
-            <p className="mb-1 text-2xs">Received output</p>
+          <section aria-label={uiText("Received output", undefined, undefined, uiLocale)}>
+            <p className="mb-1 text-2xs">
+              {uiText("Received output", undefined, undefined, uiLocale)}
+            </p>
             {inspection.output === undefined ? (
               <p>
                 {inspection.status === "inProgress"
-                  ? "No output received yet."
-                  : "Output not recorded."}
+                  ? uiText("No output received yet.", undefined, undefined, uiLocale)
+                  : uiText("Output not recorded.", undefined, undefined, uiLocale)}
               </p>
             ) : inspection.output.length === 0 ? (
-              <p>No displayable output retained.</p>
+              <p>{uiText("No displayable output retained.", undefined, undefined, uiLocale)}</p>
             ) : (
               <pre
                 className="font-mono text-xs leading-5 whitespace-pre-wrap wrap-anywhere"
@@ -156,7 +196,14 @@ export const ClaudeCommandWorkEntry = memo(function ClaudeCommandWorkEntry(props
               </pre>
             )}
             {inspection.outputTruncated ? (
-              <p className="mt-1 text-2xs">Output truncated to the retained preview.</p>
+              <p className="mt-1 text-2xs">
+                {uiText(
+                  "Output truncated to the retained preview.",
+                  undefined,
+                  undefined,
+                  uiLocale,
+                )}
+              </p>
             ) : null}
           </section>
           <div
@@ -165,17 +212,30 @@ export const ClaudeCommandWorkEntry = memo(function ClaudeCommandWorkEntry(props
           >
             {inspection.startedAt ? (
               <span>
-                Start observed {formatTimestamp(inspection.startedAt, props.timestampFormat)}
+                <UiMessage
+                  message={"Start observed <slot1></slot1>"}
+                  slots={{ slot1: formatTimestamp(inspection.startedAt, props.timestampFormat) }}
+                />
               </span>
             ) : null}
             {inspection.completedAt ? (
               <span>
-                Completion observed {formatTimestamp(inspection.completedAt, props.timestampFormat)}
+                <UiMessage
+                  message={"Completion observed <slot1></slot1>"}
+                  slots={{ slot1: formatTimestamp(inspection.completedAt, props.timestampFormat) }}
+                />
               </span>
             ) : null}
-            {observedDuration ? <span>Observed duration {observedDuration}</span> : null}
+            {observedDuration ? (
+              <span>
+                <UiMessage
+                  message={"Observed duration <slot1></slot1>"}
+                  slots={{ slot1: observedDuration }}
+                />
+              </span>
+            ) : null}
             {!inspection.startedAt && !inspection.completedAt ? (
-              <span>Timing not recorded.</span>
+              <span>{uiText("Timing not recorded.", undefined, undefined, uiLocale)}</span>
             ) : null}
           </div>
         </div>
@@ -183,3 +243,6 @@ export const ClaudeCommandWorkEntry = memo(function ClaudeCommandWorkEntry(props
     </Collapsible>
   );
 });
+
+// Finite source-owned labels/helpers only; no received or user data.
+const UI_PRESENTATION_SOURCES = { formatElapsed };

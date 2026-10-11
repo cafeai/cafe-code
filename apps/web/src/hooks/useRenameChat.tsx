@@ -1,3 +1,6 @@
+import { useUiLocale } from "~/i18n";
+import { uiText } from "@cafecode/shared/i18n";
+import { UiMessage } from "~/i18n";
 import type { ScopedThreadRef } from "@cafecode/contracts";
 import { useCallback, useRef, useState } from "react";
 
@@ -19,6 +22,8 @@ import { Input } from "../components/ui/input";
  * temporarily unavailable. Only the server command changes the actual title.
  */
 export function useRenameChat() {
+  const uiLocale = useUiLocale();
+
   const [target, setTarget] = useState<{ ref: ScopedThreadRef; title: string } | null>(null);
   const [title, setTitle] = useState("");
   const [error, setError] = useState<string | null>(null);
@@ -42,7 +47,11 @@ export function useRenameChat() {
       await renameThread(target.ref, title, target.title);
       setTarget(null);
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : "Could not rename this chat.");
+      setError(
+        cause instanceof Error
+          ? cause.message
+          : uiText("Could not rename this chat.", undefined, undefined, uiLocale),
+      );
     } finally {
       savingRef.current = false;
       setSaving(false);
@@ -59,23 +68,36 @@ export function useRenameChat() {
       >
         <DialogPopup className="sm:max-w-sm">
           <DialogHeader>
-            <DialogTitle>Rename chat</DialogTitle>
-            <DialogDescription>Change the title everywhere this chat appears.</DialogDescription>
+            <DialogTitle>{uiText("Rename chat", undefined, undefined, uiLocale)}</DialogTitle>
+            <DialogDescription>
+              {uiText(
+                "Change the title everywhere this chat appears.",
+                undefined,
+                undefined,
+                uiLocale,
+              )}
+            </DialogDescription>
           </DialogHeader>
           <DialogPanel>
             <label className="flex flex-col gap-2 text-sm">
-              Chat title
-              <Input
-                autoFocus
-                value={title}
-                disabled={saving}
-                onFocus={(event) => event.currentTarget.select()}
-                onChange={(event) => setTitle(event.target.value)}
-                onKeyDown={(event) => {
-                  if (event.key === "Enter") {
-                    event.preventDefault();
-                    void save();
-                  }
+              <UiMessage
+                message={"Chat title<slot1></slot1>"}
+                slots={{
+                  slot1: (
+                    <Input
+                      autoFocus
+                      value={title}
+                      disabled={saving}
+                      onFocus={(event) => event.currentTarget.select()}
+                      onChange={(event) => setTitle(event.target.value)}
+                      onKeyDown={(event) => {
+                        if (event.key === "Enter") {
+                          event.preventDefault();
+                          void save();
+                        }
+                      }}
+                    />
+                  ),
                 }}
               />
             </label>
@@ -87,10 +109,12 @@ export function useRenameChat() {
           </DialogPanel>
           <DialogFooter>
             <Button variant="outline" disabled={saving} onClick={close}>
-              Cancel
+              {uiText("Cancel", undefined, undefined, uiLocale)}
             </Button>
             <Button disabled={saving || title.trim().length === 0} onClick={() => void save()}>
-              {saving ? "Saving…" : "Save"}
+              {saving
+                ? uiText("Saving…", undefined, undefined, uiLocale)
+                : uiText("Save", undefined, undefined, uiLocale)}
             </Button>
           </DialogFooter>
         </DialogPopup>
@@ -98,3 +122,5 @@ export function useRenameChat() {
     ),
   };
 }
+
+// Finite source-owned labels/helpers only; no received or user data.

@@ -1,3 +1,6 @@
+import { useUiLocale, useUiPresentation } from "~/i18n";
+import { uiText } from "@cafecode/shared/i18n";
+import { UiMessage } from "~/i18n";
 import { CodexReviewTarget, type RuntimeMode } from "@cafecode/contracts";
 import * as Schema from "effect/Schema";
 import { useLayoutEffect, useRef, useState } from "react";
@@ -19,17 +22,43 @@ const REVIEW_TARGET_OPTIONS: ReadonlyArray<{
   readonly value: CodexReviewTarget["type"];
   readonly label: string;
 }> = [
-  { value: "uncommittedChanges", label: "Uncommitted changes" },
-  { value: "baseBranch", label: "Changes against a base branch" },
-  { value: "commit", label: "A specific commit" },
-  { value: "custom", label: "Custom instructions" },
+  {
+    value: "uncommittedChanges",
+    get label() {
+      return uiText("Uncommitted changes");
+    },
+  },
+  {
+    value: "baseBranch",
+    get label() {
+      return uiText("Changes against a base branch");
+    },
+  },
+  {
+    value: "commit",
+    get label() {
+      return uiText("A specific commit");
+    },
+  },
+  {
+    value: "custom",
+    get label() {
+      return uiText("Custom instructions");
+    },
+  },
 ];
 
 /** Same access names as the composer's Access menu (CompactComposerControlsMenu). */
 const RUNTIME_MODE_LABELS: Record<RuntimeMode, string> = {
-  "approval-required": "Supervised",
-  "auto-accept-edits": "Auto-accept edits",
-  "full-access": "Full access",
+  get "approval-required"() {
+    return uiText("Supervised");
+  },
+  get "auto-accept-edits"() {
+    return uiText("Auto-accept edits");
+  },
+  get "full-access"() {
+    return uiText("Full access");
+  },
 };
 
 function isReviewTargetType(value: unknown): value is CodexReviewTarget["type"] {
@@ -56,6 +85,9 @@ export function NativeCodexReview({
   onOpenChange,
   onStart,
 }: NativeCodexReviewProps) {
+  const uiLocale = useUiLocale();
+  const uiPresentation = useUiPresentation(UI_PRESENTATION_SOURCES);
+
   const [kind, setKind] = useState<CodexReviewTarget["type"]>("uncommittedChanges");
   const [value, setValue] = useState("");
   const [pending, setPending] = useState(false);
@@ -94,9 +126,16 @@ export function NativeCodexReview({
     >
       <DialogPopup className="no-drag max-w-lg">
         <DialogHeader>
-          <DialogTitle>Start a Codex review</DialogTitle>
+          <DialogTitle>
+            {uiText("Start a Codex review", undefined, undefined, uiLocale)}
+          </DialogTitle>
           <DialogDescription>
-            Codex reviews code for bugs and risks; findings appear in this chat.
+            {uiText(
+              "Codex reviews code for bugs and risks; findings appear in this chat.",
+              undefined,
+              undefined,
+              uiLocale,
+            )}
           </DialogDescription>
         </DialogHeader>
         <DialogPanel>
@@ -118,7 +157,12 @@ export function NativeCodexReview({
               } catch {
                 if (mountedRef.current) {
                   setError(
-                    "The review could not be confirmed. Check the chat’s work log and provider connection before trying again; it was not automatically resent.",
+                    uiText(
+                      "The review could not be confirmed. Check the chat’s work log and provider connection before trying again; it was not automatically resent.",
+                      undefined,
+                      undefined,
+                      uiLocale,
+                    ),
                   );
                 }
               } finally {
@@ -128,7 +172,9 @@ export function NativeCodexReview({
             }}
           >
             <div className="space-y-1.5 text-sm">
-              <span aria-hidden="true">Review target</span>
+              <span aria-hidden="true">
+                {uiText("Review target", undefined, undefined, uiLocale)}
+              </span>
               <Select
                 value={kind}
                 disabled={pending}
@@ -139,13 +185,16 @@ export function NativeCodexReview({
                   setError(null);
                 }}
               >
-                <SelectTrigger aria-label="Review target">
+                <SelectTrigger aria-label={uiText("Review target", undefined, undefined, uiLocale)}>
                   <SelectValue>
-                    {REVIEW_TARGET_OPTIONS.find((option) => option.value === kind)?.label}
+                    {
+                      uiPresentation.REVIEW_TARGET_OPTIONS.find((option) => option.value === kind)
+                        ?.label
+                    }
                   </SelectValue>
                 </SelectTrigger>
                 <SelectPopup alignItemWithTrigger={false}>
-                  {REVIEW_TARGET_OPTIONS.map((option) => (
+                  {uiPresentation.REVIEW_TARGET_OPTIONS.map((option) => (
                     <SelectItem hideIndicator key={option.value} value={option.value}>
                       {option.label}
                     </SelectItem>
@@ -157,10 +206,10 @@ export function NativeCodexReview({
               <label className="block space-y-1 text-sm">
                 <span>
                   {kind === "baseBranch"
-                    ? "Base branch"
+                    ? uiText("Base branch", undefined, undefined, uiLocale)
                     : kind === "commit"
-                      ? "Commit SHA"
-                      : "Review instructions"}
+                      ? uiText("Commit SHA", undefined, undefined, uiLocale)
+                      : uiText("Review instructions", undefined, undefined, uiLocale)}
                 </span>
                 {kind === "custom" ? (
                   <textarea
@@ -176,7 +225,11 @@ export function NativeCodexReview({
                     value={value}
                     maxLength={kind === "commit" ? 64 : 512}
                     disabled={pending}
-                    placeholder={kind === "commit" ? "7–64 hexadecimal characters" : "main"}
+                    placeholder={
+                      kind === "commit"
+                        ? uiText("7–64 hexadecimal characters", undefined, undefined, uiLocale)
+                        : uiText("main", undefined, undefined, uiLocale)
+                    }
                     onChange={(event) => setValue(event.target.value)}
                   />
                 )}
@@ -190,13 +243,30 @@ export function NativeCodexReview({
               data-native-review-disclosure="true"
             >
               <span className="min-w-0">
-                {accountLabel} · {RUNTIME_MODE_LABELS[runtimeMode]} · runs without approval prompts
+                <UiMessage
+                  message={"<slot1></slot1> · <slot3></slot3> · runs without approval prompts"}
+                  slots={{
+                    slot1: accountLabel,
+                    slot3: uiPresentation.RUNTIME_MODE_LABELS[runtimeMode],
+                  }}
+                />
               </span>
-              <InfoTip label="About Codex reviews">
-                Uses this chat’s current Codex session and its review-model settings, not unsent
-                composer changes. The reviewer runs under the session’s sandbox
-                {runtimeMode === "full-access" ? ", which has full access" : ", unexpanded"}. Stop
-                chat cancels the review. For a separate review, open a separate chat first.
+              <InfoTip label={uiText("About Codex reviews", undefined, undefined, uiLocale)}>
+                {uiText(
+                  "Uses this chat’s current Codex session and its review-model settings, not unsent composer changes. The reviewer runs under the session’s sandbox",
+                  undefined,
+                  undefined,
+                  uiLocale,
+                )}
+                {runtimeMode === "full-access"
+                  ? uiText(", which has full access", undefined, undefined, uiLocale)
+                  : uiText(", unexpanded", undefined, undefined, uiLocale)}
+                {uiText(
+                  ". Stop chat cancels the review. For a separate review, open a separate chat first.",
+                  undefined,
+                  undefined,
+                  uiLocale,
+                )}
               </InfoTip>
             </p>
             {error && (
@@ -206,7 +276,12 @@ export function NativeCodexReview({
             )}
             {disabled && (
               <p role="status" className="text-sm text-muted-foreground">
-                Wait for current work to finish and reconnect first.
+                {uiText(
+                  "Wait for current work to finish and reconnect first.",
+                  undefined,
+                  undefined,
+                  uiLocale,
+                )}
               </p>
             )}
             <div className="flex flex-wrap justify-end gap-2">
@@ -219,10 +294,12 @@ export function NativeCodexReview({
                   onOpenChange(false);
                 }}
               >
-                Cancel
+                {uiText("Cancel", undefined, undefined, uiLocale)}
               </Button>
               <Button type="submit" disabled={disabled || pending || !valid}>
-                {pending ? "Starting review…" : "Start review"}
+                {pending
+                  ? uiText("Starting review…", undefined, undefined, uiLocale)
+                  : uiText("Start review", undefined, undefined, uiLocale)}
               </Button>
             </div>
           </form>
@@ -231,3 +308,6 @@ export function NativeCodexReview({
     </Dialog>
   );
 }
+
+// Finite source-owned labels/helpers only; no received or user data.
+const UI_PRESENTATION_SOURCES = { REVIEW_TARGET_OPTIONS, RUNTIME_MODE_LABELS };

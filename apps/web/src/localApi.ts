@@ -1,3 +1,4 @@
+import { uiText } from "@cafecode/shared/i18n";
 import type { ContextMenuItem, LocalApi } from "@cafecode/contracts";
 
 import { resetGitStatusStateForTests } from "./lib/gitStatusState";
@@ -31,11 +32,11 @@ import {
 let cachedApi: LocalApi | undefined;
 
 function unavailableLocalBackendError(): Error {
-  return new Error("Local backend API is unavailable before a backend is paired.");
+  return new Error(uiText("Local backend API is unavailable before a backend is paired."));
 }
 
 function unavailableLocalShellCapabilityError(action: string): Error {
-  return new Error(`${action} is only available in the desktop app.`);
+  return new Error(uiText("{action} is only available in the desktop app.", { action }));
 }
 
 function createBrowserLocalApi(rpcClient?: WsRpcClient): LocalApi {
@@ -55,7 +56,9 @@ function createBrowserLocalApi(rpcClient?: WsRpcClient): LocalApi {
     shell: {
       openInEditor: (cwd, editor) => {
         if (!getLocalShellCapabilities().canOpenLocalEditor) {
-          return Promise.reject(unavailableLocalShellCapabilityError("Opening local editors"));
+          return Promise.reject(
+            unavailableLocalShellCapabilityError(uiText("Opening local editors")),
+          );
         }
         return rpcClient
           ? rpcClient.shell.openInEditor({ cwd, editor })
@@ -63,7 +66,9 @@ function createBrowserLocalApi(rpcClient?: WsRpcClient): LocalApi {
       },
       openTerminal: (cwd) => {
         if (!getLocalShellCapabilities().canOpenLocalTerminal) {
-          return Promise.reject(unavailableLocalShellCapabilityError("Opening local terminals"));
+          return Promise.reject(
+            unavailableLocalShellCapabilityError(uiText("Opening local terminals")),
+          );
         }
         return rpcClient
           ? rpcClient.shell.openTerminal({ cwd })
@@ -73,7 +78,7 @@ function createBrowserLocalApi(rpcClient?: WsRpcClient): LocalApi {
         if (window.desktopBridge) {
           const opened = await window.desktopBridge.openExternal(url);
           if (!opened) {
-            throw new Error("Unable to open link.");
+            throw new Error(uiText("Unable to open link."));
           }
           return;
         }
@@ -86,7 +91,7 @@ function createBrowserLocalApi(rpcClient?: WsRpcClient): LocalApi {
         }
         const opened = await window.desktopBridge.openPath(path);
         if (!opened) {
-          throw new Error("Unable to open file.");
+          throw new Error(uiText("Unable to open file."));
         }
       },
       revealPath: async (path) => {
@@ -95,7 +100,7 @@ function createBrowserLocalApi(rpcClient?: WsRpcClient): LocalApi {
         }
         const revealed = await window.desktopBridge.revealPath(path);
         if (!revealed) {
-          throw new Error("Unable to reveal file.");
+          throw new Error(uiText("Unable to reveal file."));
         }
       },
     },
@@ -265,7 +270,7 @@ export function readLocalApi(): LocalApi | undefined {
 export function ensureLocalApi(): LocalApi {
   const api = readLocalApi();
   if (!api) {
-    throw new Error("Local API not found");
+    throw new Error(uiText("Local API not found"));
   }
   return api;
 }

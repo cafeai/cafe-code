@@ -1,3 +1,4 @@
+import { uiText } from "@cafecode/shared/i18n";
 import type { OrchestrationThreadActivity } from "@cafecode/contracts";
 import { sanitizePlanText } from "./taskProgressPresentation";
 
@@ -54,9 +55,9 @@ export function readProviderTaskPresentation(
       title && !placeholder
         ? title
         : kind === "agent"
-          ? "Agent task"
+          ? uiText("Agent task")
           : kind === "command"
-            ? "Shell command"
-            : "Provider task",
+            ? uiText("Shell command")
+            : uiText("Provider task"),
   };
 }

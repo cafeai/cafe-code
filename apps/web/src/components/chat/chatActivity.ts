@@ -1,3 +1,4 @@
+import { uiText } from "@cafecode/shared/i18n";
 import type {
   OrchestrationLiveWork,
   OrchestrationThreadActivity,
@@ -68,12 +69,17 @@ export function deriveChatActivityPresentation(input: {
   const canInspect = taskCount + agentCount + foreground.length > 0;
   const base = { attention: false, taskCount, agentCount, canInspect };
   if (input.approvalCount)
-    return { ...base, label: "Waiting for approval", attention: true, canInspect: false };
+    return { ...base, label: uiText("Waiting for approval"), attention: true, canInspect: false };
   if (input.questionCount)
-    return { ...base, label: "Waiting for your answer", attention: true, canInspect: false };
-  if (input.connecting) return { ...base, label: "Connecting…", canInspect: false };
-  if (input.preparing) return { ...base, label: "Preparing workspace…", canInspect: false };
-  if (input.running && input.streaming) return { ...base, label: "Working…" };
+    return {
+      ...base,
+      label: uiText("Waiting for your answer"),
+      attention: true,
+      canInspect: false,
+    };
+  if (input.connecting) return { ...base, label: uiText("Connecting…"), canInspect: false };
+  if (input.preparing) return { ...base, label: uiText("Preparing workspace…"), canInspect: false };
+  if (input.running && input.streaming) return { ...base, label: uiText("Working…") };
   if (input.running && foreground.length) {
     const latest = foreground.at(-1)!;
     const computer = readComputerUsePresentation(latest);
@@ -83,29 +89,36 @@ export function deriveChatActivityPresentation(input: {
       label:
         computer?.active ??
         (itemType === "command_execution"
-          ? "Running command…"
+          ? uiText("Running command…")
           : itemType === "context_compaction"
-            ? "Compacting context…"
-            : "Waiting for a tool…"),
+            ? uiText("Compacting context…")
+            : uiText("Waiting for a tool…")),
     };
   }
   if (input.running && agentCount)
     return {
       ...base,
-      label: `Waiting for ${agentCount} ${agentCount === 1 ? "agent" : "agents"}…`,
+      label: uiText("Waiting for {count, plural, one {# agent} other {# agents}}…", {
+        count: agentCount,
+      }),
     };
   if (input.running && taskCount)
     return {
       ...base,
-      label: `Waiting for ${taskCount} background ${taskCount === 1 ? "task" : "tasks"}…`,
+      label: uiText(
+        "Waiting for {count, plural, one {# background task} other {# background tasks}}…",
+        { count: taskCount },
+      ),
     };
-  if (input.running) return { ...base, label: "Working…" };
+  if (input.running) return { ...base, label: uiText("Working…") };
   if (agentCount || taskCount) {
-    const parts = [
-      taskCount ? `${taskCount} ${taskCount === 1 ? "task" : "tasks"}` : null,
-      agentCount ? `${agentCount} ${agentCount === 1 ? "agent" : "agents"}` : null,
-    ].filter(Boolean);
-    return { ...base, label: `Background work running · ${parts.join(" · ")}` };
+    return {
+      ...base,
+      label: uiText(
+        "Background work running{tasks, plural, =0 {} one { · # task} other { · # tasks}}{agents, plural, =0 {} one { · # agent} other { · # agents}}",
+        { tasks: taskCount, agents: agentCount },
+      ),
+    };
   }
   return null;
 }

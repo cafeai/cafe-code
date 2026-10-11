@@ -1,3 +1,4 @@
+import { uiText } from "@cafecode/shared/i18n";
 import type { DesktopEnvironmentBootstrap } from "@cafecode/contracts";
 import type { KnownEnvironment } from "@cafecode/client-runtime";
 
@@ -98,7 +99,9 @@ function resolveWindowOriginPrimaryTarget(): PrimaryEnvironmentTarget {
   } else if (url.protocol === "https:") {
     url.protocol = "wss:";
   } else {
-    throw new Error(`Unsupported HTTP base URL protocol: ${url.protocol}`);
+    throw new Error(
+      uiText("Unsupported HTTP base URL protocol: {protocol}", { protocol: url.protocol }),
+    );
   }
   return {
     source: "window-origin",
@@ -119,7 +122,9 @@ function resolveDesktopPrimaryTarget(): PrimaryEnvironmentTarget | null {
   }
   if (!desktopBootstrap.httpBaseUrl || !desktopBootstrap.wsBaseUrl) {
     throw new Error(
-      "Desktop bootstrap must provide both httpBaseUrl and wsBaseUrl for the local environment.",
+      uiText(
+        "Desktop bootstrap must provide both httpBaseUrl and wsBaseUrl for the local environment.",
+      ),
     );
   }
 
@@ -138,7 +143,7 @@ export function resolvePrimaryEnvironmentHttpUrl(
 ): string {
   const primaryTarget = readPrimaryEnvironmentTarget();
   if (!primaryTarget) {
-    throw new Error("Unable to resolve the primary environment HTTP base URL.");
+    throw new Error(uiText("Unable to resolve the primary environment HTTP base URL."));
   }
 
   const url = new URL(resolveHttpRequestBaseUrl(primaryTarget.target.httpBaseUrl));

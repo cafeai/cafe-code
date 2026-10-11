@@ -8,6 +8,7 @@ import {
 } from "@cafecode/contracts";
 import { DEFAULT_UNIFIED_SETTINGS } from "@cafecode/contracts/settings";
 import { createModelCapabilities, createModelSelection } from "@cafecode/shared/model";
+import { getUiLocale, setUiLocale } from "@cafecode/shared/i18n";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { createRef } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -316,6 +317,43 @@ describe("provider-specific composer menu actions", () => {
       stickyModelSelectionByProvider: {},
     });
   });
+
+  it.each(["connecting", "disconnected", "error"] as const)(
+    "repaints the complete %s environment placeholder without changing the draft or actions",
+    async (connectionState) => {
+      const originalLocale = getUiLocale();
+      const label = "Synthetic <iframe> server";
+      setUiLocale("en");
+      try {
+        await using fixture = await mountComposer(1100, {
+          environmentUnavailable: { label, connectionState },
+        });
+        const editor = document.querySelector<HTMLElement>("[aria-placeholder]")!;
+        await expect
+          .element(page.elementLocator(editor))
+          .toHaveAttribute(
+            "aria-placeholder",
+            `${label} is ${connectionState === "connecting" ? "connecting" : "disconnected"}`,
+          );
+        setUiLocale("ko");
+        await expect
+          .element(page.elementLocator(editor))
+          .toHaveAttribute(
+            "aria-placeholder",
+            connectionState === "connecting" ? `${label}에 연결 중` : `${label} 연결이 끊어짐`,
+          );
+        expect(fixture.props.promptRef.current).toBe("Unsent prompt must remain here");
+        expect(fixture.composerRef.current?.getSendContext().prompt).toBe(
+          "Unsent prompt must remain here",
+        );
+        expect(fixture.onSend).not.toHaveBeenCalled();
+        expect(fixture.props.onSteer).not.toHaveBeenCalled();
+        expect(fixture.onStartCodeReview).not.toHaveBeenCalled();
+      } finally {
+        setUiLocale(originalLocale);
+      }
+    },
+  );
 
   it.each([
     { width: 1100, scale: 100, dark: false },

@@ -8,6 +8,7 @@ import * as Option from "effect/Option";
 import * as Path from "effect/Path";
 import * as Sink from "effect/Sink";
 import * as Stream from "effect/Stream";
+import { getUiTranslator } from "@cafecode/shared/i18n";
 import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process";
 
 import {
@@ -25,6 +26,8 @@ import {
   resolveManagedWindowsNodeArchive,
   resolveMockUpdateServerPort,
   resolveMockUpdateServerUrl,
+  renderMacPrivacyStrings,
+  stageMacPrivacyLocalizations,
   shouldStageWindowsManagedRuntime,
 } from "./build-desktop-artifact.ts";
 import { BRAND_ASSET_PATHS } from "./lib/brand-assets.ts";
@@ -256,12 +259,17 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
           from: "apps/desktop/resources/mac-dictation-target",
           to: "mac-dictation-target",
         },
+        ...(["en", "ja", "ko"] as const).map((locale) => ({
+          from: `apps/desktop/resources/ui-locales/${locale}.lproj`,
+          to: `${locale}.lproj`,
+        })),
       ],
       mac: {
         target: ["dmg", "zip"],
         icon: "icon.icns",
         category: "public.app-category.developer-tools",
         extendInfo: {
+          CFBundleLocalizations: ["en", "ja", "ko"],
           NSMicrophoneUsageDescription:
             "Cafe Code uses microphone audio only when you start dictation.",
           NSLocalNetworkUsageDescription:
@@ -272,6 +280,31 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
       },
     });
   });
+
+  it.effect("stages only reviewed locale privacy strings in a scoped native resource tree", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const temporary = yield* fs.makeTempDirectoryScoped({ prefix: "cafe-privacy-languages-" });
+        yield* stageMacPrivacyLocalizations(temporary);
+        for (const locale of ["en", "ja", "ko"] as const) {
+          const document = yield* fs.readFileString(
+            path.join(temporary, "ui-locales", `${locale}.lproj`, "InfoPlist.strings"),
+          );
+          assert.equal(document, renderMacPrivacyStrings(locale));
+          assert.include(
+            document,
+            getUiTranslator(locale).text(
+              "Cafe Code uses microphone audio only when you start dictation.",
+            ),
+          );
+          assert.include(document, '"NSLocalNetworkUsageDescription" = ');
+          assert.equal(document.split("\n").filter(Boolean).length, 2);
+        }
+      }).pipe(Effect.provide(NodeServices.layer)),
+    ),
+  );
 
   it("requires a Debian artifact instead of accepting builder metadata alone", () => {
     assert.equal(

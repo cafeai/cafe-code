@@ -1,4 +1,5 @@
 import type { EnvironmentId, ServerConfig } from "@cafecode/contracts";
+import { uiText } from "@cafecode/shared/i18n";
 import * as Schema from "effect/Schema";
 
 import { APP_VERSION } from "./branding";
@@ -44,7 +45,9 @@ export function resolveVersionMismatch(
   return {
     clientVersion: normalizedClientVersion,
     serverVersion: normalizedServerVersion,
-    hint: "Version mismatch. Try syncing the client and server to the same Cafe Code version.",
+    hint: uiText(
+      "Version mismatch. Try syncing the client and server to the same Cafe Code version.",
+    ),
   };
 }
 
@@ -119,5 +122,5 @@ export function appendVersionMismatchHint(
   if (!mismatch) {
     return normalizedMessage;
   }
-  return `${normalizedMessage} Hint: ${mismatch.hint}`;
+  return uiText("{message} Hint: {hint}", { message: normalizedMessage, hint: mismatch.hint });
 }

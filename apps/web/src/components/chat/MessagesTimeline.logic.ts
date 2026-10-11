@@ -1,4 +1,5 @@
 import * as Equal from "effect/Equal";
+import { uiText } from "@cafecode/shared/i18n";
 import {
   type HistoricalWorkLogSummary,
   type TimelineEntry,
@@ -289,7 +290,13 @@ export function deriveHistoricalWorkLogDisplayState(
       : input.rawTotalCount !== null
         ? input.rawTotalCount > input.previewEntryCount
         : input.snapshotEntryCount > 0;
-  const countLabel = displayCount > 0 ? ` (${displayCount}${countIsLowerBound ? "+" : ""})` : "";
+  const countLabel =
+    displayCount > 0
+      ? uiText(" ({count}{lowerBound, select, yes {+} other {}})", {
+          count: displayCount,
+          lowerBound: countIsLowerBound ? "yes" : "no",
+        })
+      : "";
 
   return {
     countLabel,

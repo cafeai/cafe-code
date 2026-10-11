@@ -1,5 +1,7 @@
-"use client";
+import { useUiLocale, useUiPresentation } from "~/i18n";
+("use client");
 
+import { uiText } from "@cafecode/shared/i18n";
 import { useMemo } from "react";
 import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
@@ -18,6 +20,7 @@ import { Select, SelectItem, SelectPopup, SelectTrigger, SelectValue } from "../
 import { Switch } from "../ui/switch";
 import { Textarea } from "../ui/textarea";
 import type { ProviderClientDefinition } from "./providerDriverMeta";
+import { localizeProviderSettingsField } from "./providerSettingsPresentation";
 
 export interface ProviderSettingsFieldModel {
   readonly key: string;
@@ -165,7 +168,8 @@ export function deriveProviderSettingsFields(
             : {}),
         } satisfies ProviderSettingsFieldModel,
       ];
-    });
+    })
+    .map((field) => localizeProviderSettingsField(definition, field));
 }
 
 export function readProviderConfigString(config: unknown, key: string): string {
@@ -357,6 +361,8 @@ function FieldLabel(props: {
   readonly htmlFor?: string | undefined;
   readonly id?: string | undefined;
 }) {
+  const uiLocale = useUiLocale();
+
   return (
     <div className="flex min-w-0 items-center gap-1">
       {props.htmlFor !== undefined ? (
@@ -369,7 +375,11 @@ function FieldLabel(props: {
         </span>
       )}
       {props.field.detail ? (
-        <InfoTip label={`About ${props.field.label}`}>{props.field.detail}</InfoTip>
+        <InfoTip
+          label={uiText("About {value0}", { value0: props.field.label }, undefined, uiLocale)}
+        >
+          {props.field.detail}
+        </InfoTip>
       ) : null}
     </div>
   );
@@ -382,6 +392,8 @@ function ProviderSettingsFieldRow({
   variant,
   onChange,
 }: ProviderSettingsFieldRowProps) {
+  const uiLocale = useUiLocale();
+
   const inputId = `${idPrefix}-${field.key}`;
   const descriptionId = field.description ? `${inputId}-description` : undefined;
   // The add dialog sits on a muted panel, so its inputs need their own surface.
@@ -524,7 +536,7 @@ function ProviderSettingsFieldRow({
   const passwordRedacted =
     field.control === "password" && readProviderConfigBoolean(value, `${field.key}Redacted`);
   const placeholder = passwordRedacted
-    ? "Saved. Type a new value to replace it."
+    ? uiText("Saved. Type a new value to replace it.", undefined, undefined, uiLocale)
     : field.placeholder;
   return (
     <div className="grid gap-1.5">
@@ -564,7 +576,7 @@ function ProviderSettingsFieldRow({
           className="justify-self-start text-muted-foreground"
           onClick={() => onChange(clearProviderConfigPassword(value, field))}
         >
-          Clear saved password
+          {uiText("Clear saved password", undefined, undefined, uiLocale)}
         </Button>
       ) : null}
     </div>
@@ -584,7 +596,12 @@ export function ProviderSettingsForm({
   hiddenFieldKeys,
   onChange,
 }: ProviderSettingsFormProps) {
-  const fields = useMemo(() => deriveProviderSettingsFields(definition), [definition]);
+  const uiPresentation = useUiPresentation(UI_PRESENTATION_SOURCES);
+
+  const fields = useMemo(
+    () => uiPresentation.deriveProviderSettingsFields(definition),
+    [definition, uiPresentation],
+  );
   const visibleFields = hiddenFieldKeys
     ? fields.filter((field) => !hiddenFieldKeys.has(field.key))
     : fields;
@@ -608,3 +625,6 @@ export function ProviderSettingsForm({
     </>
   );
 }
+
+// Finite source-owned labels/helpers only; no received or user data.
+const UI_PRESENTATION_SOURCES = { deriveProviderSettingsFields };

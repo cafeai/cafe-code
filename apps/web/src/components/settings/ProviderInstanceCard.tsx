@@ -1,5 +1,8 @@
-"use client";
+import { useUiLocale, useUiPresentation } from "~/i18n";
+("use client");
 
+import { uiText } from "@cafecode/shared/i18n";
+import { UiMessage } from "~/i18n";
 import {
   ArrowUpCircleIcon,
   CheckIcon,
@@ -206,6 +209,8 @@ export function ProviderAccentColorPicker(props: {
   readonly value: string | undefined;
   readonly onCommit: (value: string) => void;
 }) {
+  const uiLocale = useUiLocale();
+
   const labelId = useId();
   const [draft, setDraft] = useState(props.value ?? "");
   const [isEditing, setIsEditing] = useState(false);
@@ -253,7 +258,7 @@ export function ProviderAccentColorPicker(props: {
               )}
               style={{ backgroundColor: swatch }}
               onClick={() => commitSwatch(swatch)}
-              aria-label={`Use ${swatch} accent`}
+              aria-label={uiText("Use {value0} accent", { value0: swatch }, undefined, uiLocale)}
               aria-pressed={selected}
             />
           );
@@ -295,7 +300,7 @@ export function ProviderAccentColorPicker(props: {
               props.onCommit("");
             }}
           >
-            Clear
+            {uiText("Clear", undefined, undefined, uiLocale)}
           </Button>
         ) : null}
       </div>
@@ -307,6 +312,8 @@ function ProviderEnvironmentSection(props: {
   readonly environment: ReadonlyArray<ProviderInstanceEnvironmentVariable>;
   readonly onChange: (environment: ReadonlyArray<ProviderInstanceEnvironmentVariable>) => void;
 }) {
+  const uiLocale = useUiLocale();
+
   const [rows, setRows] = useState<ReadonlyArray<EnvironmentDraftRow>>(() =>
     props.environment.map(makeEnvironmentDraftRow),
   );
@@ -359,7 +366,9 @@ function ProviderEnvironmentSection(props: {
   return (
     <div className="grid gap-2">
       <div className="flex items-center justify-between gap-3">
-        <span className="text-xs font-medium text-foreground">Environment variables</span>
+        <span className="text-xs font-medium text-foreground">
+          {uiText("Environment variables", undefined, undefined, uiLocale)}
+        </span>
         <Button
           type="button"
           size="xs"
@@ -377,12 +386,17 @@ function ProviderEnvironmentSection(props: {
           }
         >
           <PlusIcon />
-          Add
+          {uiText("Add", undefined, undefined, uiLocale)}
         </Button>
       </div>
       {rows.length === 0 ? (
         <p className="text-xs text-muted-foreground">
-          Pass API keys, base URLs or other CLI settings to this account.
+          {uiText(
+            "Pass API keys, base URLs or other CLI settings to this account.",
+            undefined,
+            undefined,
+            uiLocale,
+          )}
         </p>
       ) : (
         <div className="grid gap-2">
@@ -394,9 +408,14 @@ function ProviderEnvironmentSection(props: {
               <DraftInput
                 value={variable.name}
                 onCommit={(name) => updateVariable(variable.id, { name: name.trim() })}
-                placeholder="VARIABLE_NAME"
+                placeholder={uiText("VARIABLE_NAME", undefined, undefined, uiLocale)}
                 spellCheck={false}
-                aria-label={`Environment variable name ${index + 1}`}
+                aria-label={uiText(
+                  "Environment variable name {value0}",
+                  { value0: index + 1 },
+                  undefined,
+                  uiLocale,
+                )}
               />
               <DraftInput
                 value={variable.valueRedacted ? "" : variable.value}
@@ -404,32 +423,55 @@ function ProviderEnvironmentSection(props: {
                 type={variable.sensitive ? "password" : undefined}
                 autoComplete="off"
                 placeholder={
-                  variable.valueRedacted ? "Saved. Type a new value to replace it." : "Value"
+                  variable.valueRedacted
+                    ? uiText(
+                        "Saved. Type a new value to replace it.",
+                        undefined,
+                        undefined,
+                        uiLocale,
+                      )
+                    : uiText("Value", undefined, undefined, uiLocale)
                 }
                 spellCheck={false}
-                aria-label={`Environment variable value ${index + 1}`}
+                aria-label={uiText(
+                  "Environment variable value {value0}",
+                  { value0: index + 1 },
+                  undefined,
+                  uiLocale,
+                )}
               />
               <div className="inline-flex h-8 items-center gap-1">
                 <label className="inline-flex items-center gap-2 text-xs text-muted-foreground">
-                  <input
-                    type="checkbox"
-                    className="size-3.5 cursor-pointer accent-primary"
-                    checked={variable.sensitive}
-                    onChange={(event) => {
-                      const sensitive = event.currentTarget.checked;
-                      updateVariable(variable.id, {
-                        sensitive,
-                        ...(sensitive && variable.valueRedacted === undefined
-                          ? {}
-                          : { valueRedacted: sensitive ? variable.valueRedacted : false }),
-                      });
+                  <UiMessage
+                    message={"<slot1></slot1>Sensitive"}
+                    slots={{
+                      slot1: (
+                        <input
+                          type="checkbox"
+                          className="size-3.5 cursor-pointer accent-primary"
+                          checked={variable.sensitive}
+                          onChange={(event) => {
+                            const sensitive = event.currentTarget.checked;
+                            updateVariable(variable.id, {
+                              sensitive,
+                              ...(sensitive && variable.valueRedacted === undefined
+                                ? {}
+                                : { valueRedacted: sensitive ? variable.valueRedacted : false }),
+                            });
+                          }}
+                        />
+                      ),
                     }}
                   />
-                  Sensitive
                 </label>
                 {/* Outside the label so its button is not part of the checkbox name. */}
-                <InfoTip label="About sensitive values">
-                  Sensitive values are stored separately and aren&apos;t shown again after saving.
+                <InfoTip label={uiText("About sensitive values", undefined, undefined, uiLocale)}>
+                  {uiText(
+                    "Sensitive values are stored separately and aren''t shown again after saving.",
+                    undefined,
+                    undefined,
+                    uiLocale,
+                  )}
                 </InfoTip>
               </div>
               <Button
@@ -438,7 +480,14 @@ function ProviderEnvironmentSection(props: {
                 variant="ghost"
                 className="size-8 justify-self-start text-muted-foreground hover:text-destructive sm:justify-self-end"
                 onClick={() => removeVariable(variable.id)}
-                aria-label={`Remove environment variable ${variable.name || index + 1}`}
+                aria-label={uiText(
+                  "Remove environment variable {value0}",
+                  {
+                    value0: variable.name || index + 1,
+                  },
+                  undefined,
+                  uiLocale,
+                )}
               >
                 <XIcon className="size-3.5" />
               </Button>
@@ -531,6 +580,8 @@ function ProviderInstanceDefaultsSection(props: {
     readonly defaultModelOptions: ReadonlyArray<ProviderInstanceDefaultOption> | undefined;
   }) => void;
 }) {
+  const uiLocale = useUiLocale();
+
   const selectableModels = props.models.filter(
     (model) => !props.hiddenModels.includes(model.slug) || model.slug === props.defaultModel,
   );
@@ -542,8 +593,8 @@ function ProviderInstanceDefaultsSection(props: {
   const modelItems: DefaultsSelectItem[] = [
     {
       value: NO_DEFAULT_SELECT_VALUE,
-      label: "No default",
-      description: "New chats keep the last model used.",
+      label: uiText("No default", undefined, undefined, uiLocale),
+      description: uiText("New chats keep the last model used.", undefined, undefined, uiLocale),
     },
     ...selectableModels.map((model) => ({
       value: model.slug,
@@ -558,7 +609,12 @@ function ProviderInstanceDefaultsSection(props: {
     modelItems.push({
       value: props.defaultModel,
       label: props.defaultModel,
-      description: "Not currently reported by this provider.",
+      description: uiText(
+        "Not currently reported by this provider.",
+        undefined,
+        undefined,
+        uiLocale,
+      ),
     });
   }
 
@@ -597,22 +653,39 @@ function ProviderInstanceDefaultsSection(props: {
   const accountSubagentControl =
     props.driver && subagentLimitKey(props.driver) ? (
       <div className="grid gap-1.5 border-t border-border-subtle pt-3">
-        <span className="text-xs font-medium text-foreground">Account defaults</span>
+        <span className="text-xs font-medium text-foreground">
+          {uiText("Account defaults", undefined, undefined, uiLocale)}
+        </span>
         <div className="flex min-w-0 items-center gap-1">
           <label
             className="text-xs font-medium text-foreground"
             htmlFor={`provider-instance-${props.instanceId}-default-subagent-limit`}
           >
-            Default subagent limit
+            {uiText("Default subagent limit", undefined, undefined, uiLocale)}
           </label>
           {/* Outside the label so its button is not part of the input name. */}
-          <InfoTip label="About the default subagent limit">
-            New and existing chats inherit this unless they have a per-chat override. Changing it
-            doesn&apos;t interrupt active work; inherited chats use the new setting at their next
-            safe idle turn. The main agent isn&apos;t counted.{" "}
+          <InfoTip
+            label={uiText("About the default subagent limit", undefined, undefined, uiLocale)}
+          >
+            {uiText(
+              "New and existing chats inherit this unless they have a per-chat override. Changing it doesn''t interrupt active work; inherited chats use the new setting at their next safe idle turn. The main agent isn''t counted.",
+              undefined,
+              undefined,
+              uiLocale,
+            )}{" "}
             {props.driver === "claudeAgent"
-              ? "Claude limits Agent-tool spawning, not all running work."
-              : "Codex limits spawned agents that stay open."}
+              ? uiText(
+                  "Claude limits Agent-tool spawning, not all running work.",
+                  undefined,
+                  undefined,
+                  uiLocale,
+                )
+              : uiText(
+                  "Codex limits spawned agents that stay open.",
+                  undefined,
+                  undefined,
+                  uiLocale,
+                )}
           </InfoTip>
         </div>
         <DraftInput
@@ -627,7 +700,7 @@ function ProviderInstanceDefaultsSection(props: {
               ? ""
               : String(props.defaultMaxConcurrentSubagents)
           }
-          placeholder="Provider default"
+          placeholder={uiText("Provider default", undefined, undefined, uiLocale)}
           onCommit={(value) => {
             if (value.trim() === "") props.onConcurrencyDefaultChange(undefined);
             else if (validSubagentLimit(Number(value)))
@@ -638,8 +711,12 @@ function ProviderInstanceDefaultsSection(props: {
           id={`provider-instance-${props.instanceId}-default-subagent-limit-description`}
           className="text-xs text-muted-foreground"
         >
-          1–64. Inherited by new and existing chats without an override, at their next safe idle
-          turn. Blank uses legacy runtime configuration or the provider default.
+          {uiText(
+            "1–64. Inherited by new and existing chats without an override, at their next safe idle turn. Blank uses legacy runtime configuration or the provider default.",
+            undefined,
+            undefined,
+            uiLocale,
+          )}
         </span>
       </div>
     ) : null;
@@ -647,26 +724,43 @@ function ProviderInstanceDefaultsSection(props: {
   return (
     <div className="grid gap-3">
       <div className="grid gap-0.5">
-        <span className="text-xs font-medium text-foreground">New chat defaults</span>
+        <span className="text-xs font-medium text-foreground">
+          {uiText("New chat defaults", undefined, undefined, uiLocale)}
+        </span>
         <span className="text-xs text-muted-foreground">
-          Used for new chats. “No default” uses the model&apos;s default.
+          {uiText(
+            "Used for new chats. “No default” uses the model''s default.",
+            undefined,
+            undefined,
+            uiLocale,
+          )}
         </span>
       </div>
       <DefaultsSelectField
         id={`provider-instance-${props.instanceId}-default-model`}
-        label="Default model"
+        label={uiText("Default model", undefined, undefined, uiLocale)}
         value={props.defaultModel ?? NO_DEFAULT_SELECT_VALUE}
         items={modelItems}
         onValueChange={handleModelChange}
       />
       {props.defaultModel && selectedModel && optionDescriptors.length === 0 ? (
         <p className="text-xs text-muted-foreground">
-          This model does not report configurable options.
+          {uiText(
+            "This model does not report configurable options.",
+            undefined,
+            undefined,
+            uiLocale,
+          )}
         </p>
       ) : null}
       {props.defaultModel && !selectedModel ? (
         <p className="text-xs text-muted-foreground">
-          Option defaults become editable once the provider reports this model.
+          {uiText(
+            "Option defaults become editable once the provider reports this model.",
+            undefined,
+            undefined,
+            uiLocale,
+          )}
         </p>
       ) : null}
       {optionDescriptors.map((descriptor) => {
@@ -686,9 +780,18 @@ function ProviderInstanceDefaultsSection(props: {
               description={descriptor.description}
               value={value}
               items={[
-                { value: NO_DEFAULT_SELECT_VALUE, label: "No default" },
-                { value: BOOLEAN_DEFAULT_ON_VALUE, label: "On" },
-                { value: BOOLEAN_DEFAULT_OFF_VALUE, label: "Off" },
+                {
+                  value: NO_DEFAULT_SELECT_VALUE,
+                  label: uiText("No default", undefined, undefined, uiLocale),
+                },
+                {
+                  value: BOOLEAN_DEFAULT_ON_VALUE,
+                  label: uiText("On", undefined, undefined, uiLocale),
+                },
+                {
+                  value: BOOLEAN_DEFAULT_OFF_VALUE,
+                  label: uiText("Off", undefined, undefined, uiLocale),
+                },
               ]}
               onValueChange={(next) =>
                 setOptionDefault(
@@ -715,9 +818,18 @@ function ProviderInstanceDefaultsSection(props: {
             items={[
               {
                 value: NO_DEFAULT_SELECT_VALUE,
-                label: "No default",
+                label: uiText("No default", undefined, undefined, uiLocale),
                 ...(modelDefaultChoice
-                  ? { description: `Model default: ${modelDefaultChoice.label}` }
+                  ? {
+                      description: uiText(
+                        "Model default: {value0}",
+                        {
+                          value0: modelDefaultChoice.label,
+                        },
+                        undefined,
+                        uiLocale,
+                      ),
+                    }
                   : {}),
               },
               ...descriptor.options.map((choice) => ({
@@ -774,6 +886,8 @@ function ProviderAdvancedSection(props: {
   readonly reloadDetail?: string | undefined;
   readonly children: ReactNode;
 }) {
+  const uiLocale = useUiLocale();
+
   const [open, setOpen] = useState(false);
   return (
     <Collapsible open={open} onOpenChange={setOpen} className={DIALOG_SECTION_CLASS_NAME}>
@@ -782,10 +896,13 @@ function ProviderAdvancedSection(props: {
           aria-hidden="true"
           className="size-3.5 text-muted-foreground transition-transform duration-(--duration-fast) ease-out group-data-[panel-open]:rotate-90"
         />
-        Advanced
+        {uiText("Advanced", undefined, undefined, uiLocale)}
         {props.customizedCount > 0 ? (
           <span className="font-normal text-subtle-foreground tabular-nums">
-            · {props.customizedCount} customized
+            <UiMessage
+              message={"· <slot1></slot1> customized"}
+              slots={{ slot1: props.customizedCount }}
+            />
           </span>
         ) : null}
       </CollapsibleTrigger>
@@ -795,10 +912,17 @@ function ProviderAdvancedSection(props: {
         <div className="grid animate-enter-rise gap-4 pt-3 pb-1">
           <div className="flex min-w-0 items-center gap-1">
             <p className="text-xs text-muted-foreground">
-              Saving these reloads the account and can end active chats.
+              {uiText(
+                "Saving these reloads the account and can end active chats.",
+                undefined,
+                undefined,
+                uiLocale,
+              )}
             </p>
             {props.reloadDetail ? (
-              <InfoTip label="About reloading">{props.reloadDetail}</InfoTip>
+              <InfoTip label={uiText("About reloading", undefined, undefined, uiLocale)}>
+                {props.reloadDetail}
+              </InfoTip>
             ) : null}
           </div>
           {props.children}
@@ -903,6 +1027,9 @@ export function ProviderInstanceCard({
   onRestartRuntime,
   isRestartingRuntime = false,
 }: ProviderInstanceCardProps) {
+  const uiLocale = useUiLocale();
+  const uiPresentation = useUiPresentation(UI_PRESENTATION_SOURCES);
+
   const sessionQuota = useProviderQuota(quotaContext, true, instance.driver === "claudeAgent");
   const enabled = instance.enabled ?? true;
   // The server-reported status wins when present; otherwise fall back to
@@ -915,7 +1042,7 @@ export function ProviderInstanceCard({
   const summary =
     !liveProvider && !enabled
       ? { headline: "Disabled", detail: null }
-      : getProviderSummary(liveProvider);
+      : uiPresentation.getProviderSummary(liveProvider);
   const authEmail = liveProvider?.auth.email;
   const hasSandboxFailure =
     instance.driver === "grok" && liveProvider?.sandbox?.status === "unavailable";
@@ -927,10 +1054,12 @@ export function ProviderInstanceCard({
     ? (liveProvider?.auth.label ?? liveProvider?.auth.type ?? null)
     : null;
   const accountQuota = shouldSurfaceProviderAccountRateLimits(liveProvider)
-    ? formatCodexRateLimitPresentation(liveProvider?.accountRateLimits)
+    ? uiPresentation.formatCodexRateLimitPresentation(liveProvider?.accountRateLimits)
     : null;
   const versionLabel = getProviderVersionLabel(liveProvider?.version);
-  const versionAdvisory = getProviderVersionAdvisoryPresentation(liveProvider?.versionAdvisory);
+  const versionAdvisory = uiPresentation.getProviderVersionAdvisoryPresentation(
+    liveProvider?.versionAdvisory,
+  );
   const updateCommand = versionAdvisory?.updateCommand ?? null;
   const FallbackIconComponent = driverOption?.icon;
   const displayName =
@@ -945,7 +1074,12 @@ export function ProviderInstanceCard({
       toastManager.add(
         stackedThreadToast({
           type: "error",
-          title: `Could not copy ${providerName} update command`,
+          title: uiText(
+            "Could not copy {value0} update command",
+            { value0: providerName },
+            undefined,
+            uiLocale,
+          ),
           description: error.message,
         }),
       );
@@ -1034,8 +1168,8 @@ export function ProviderInstanceCard({
 
   const hiddenSettingsFieldKeys = useHiddenProviderSettingsFieldKeys(instance.config);
   const settingsFields = useMemo(
-    () => (driverOption ? deriveProviderSettingsFields(driverOption) : []),
-    [driverOption],
+    () => (driverOption ? uiPresentation.deriveProviderSettingsFields(driverOption) : []),
+    [driverOption, uiPresentation],
   );
   // Advanced starts collapsed; this count keeps configured values discoverable.
   const advancedCustomizedCount =
@@ -1105,13 +1239,20 @@ export function ProviderInstanceCard({
                   variant="ghost"
                   className="size-5 rounded-sm p-0 text-muted-foreground hover:text-destructive"
                   onClick={onDelete}
-                  aria-label={`Delete provider instance ${instanceId}`}
+                  aria-label={uiText(
+                    "Delete provider instance {value0}",
+                    { value0: instanceId },
+                    undefined,
+                    uiLocale,
+                  )}
                 >
                   <Trash2Icon className="size-3" />
                 </Button>
               }
             />
-            <TooltipPopup side="top">Delete</TooltipPopup>
+            <TooltipPopup side="top">
+              {uiText("Delete", undefined, undefined, uiLocale)}
+            </TooltipPopup>
           </Tooltip>
         </span>
       ) : null}
@@ -1122,7 +1263,7 @@ export function ProviderInstanceCard({
     <p className="flex min-w-0 flex-wrap items-center gap-x-1 text-xs text-muted-foreground [overflow-wrap:anywhere]">
       {hasAuthenticatedEmail ? (
         <>
-          <span>Authenticated as</span>
+          <span>{uiText("Authenticated as", undefined, undefined, uiLocale)}</span>
           <ProviderAuthEmail email={authEmail} />
           {authenticatedDetail ? <span>· {authenticatedDetail}</span> : null}
         </>
@@ -1172,7 +1313,12 @@ export function ProviderInstanceCard({
                           ? "text-warning hover:text-warning"
                           : "text-primary hover:text-primary",
                       )}
-                      aria-label="Update available — view details"
+                      aria-label={uiText(
+                        "Update available — view details",
+                        undefined,
+                        undefined,
+                        uiLocale,
+                      )}
                     >
                       <ArrowUpCircleIcon className="size-3.5 animate-bounce [--cafe-bounce-duration:2.4s] [--cafe-bounce-steps:72] motion-reduce:animate-none" />
                     </Button>
@@ -1185,7 +1331,9 @@ export function ProviderInstanceCard({
                 >
                   <div className="grid min-w-0 gap-3">
                     <div className="grid gap-0.5">
-                      <p className="text-ui font-semibold text-foreground">Update available</p>
+                      <p className="text-ui font-semibold text-foreground">
+                        {uiText("Update available", undefined, undefined, uiLocale)}
+                      </p>
                       <p
                         className={cn(
                           "text-xs leading-snug",
@@ -1207,13 +1355,15 @@ export function ProviderInstanceCard({
                         onClick={onRunUpdate}
                       >
                         {isUpdating ? <Spinner aria-hidden="true" /> : <DownloadIcon />}
-                        {isUpdating ? "Updating…" : "Update now"}
+                        {isUpdating
+                          ? uiText("Updating…", undefined, undefined, uiLocale)
+                          : uiText("Update now", undefined, undefined, uiLocale)}
                       </Button>
                     ) : null}
                     {onRunUpdate && updateCommand ? (
                       <div className="flex items-center gap-2 text-2xs text-subtle-foreground">
                         <span aria-hidden className="h-px flex-1 bg-border-subtle" />
-                        or update manually
+                        {uiText("or update manually", undefined, undefined, uiLocale)}
                         <span aria-hidden className="h-px flex-1 bg-border-subtle" />
                       </div>
                     ) : null}
@@ -1237,7 +1387,12 @@ export function ProviderInstanceCard({
                                     providerName: displayName,
                                   })
                                 }
-                                aria-label="Copy update command"
+                                aria-label={uiText(
+                                  "Copy update command",
+                                  undefined,
+                                  undefined,
+                                  uiLocale,
+                                )}
                               >
                                 {isUpdateCommandCopied ? (
                                   <CheckIcon className="size-3 text-success" />
@@ -1248,7 +1403,9 @@ export function ProviderInstanceCard({
                             }
                           />
                           <TooltipPopup side="top">
-                            {isUpdateCommandCopied ? "Copied" : "Copy command"}
+                            {isUpdateCommandCopied
+                              ? uiText("Copied", undefined, undefined, uiLocale)
+                              : uiText("Copy command", undefined, undefined, uiLocale)}
                           </TooltipPopup>
                         </Tooltip>
                       </div>
@@ -1277,7 +1434,7 @@ export function ProviderInstanceCard({
                 ) : (
                   <LogInIcon className="size-3.5" />
                 )}
-                Log in
+                {uiText("Log in", undefined, undefined, uiLocale)}
               </Button>
             ) : null}
             {/* Keep the optional reset alongside the existing controls. A
@@ -1300,7 +1457,12 @@ export function ProviderInstanceCard({
                       className="size-7 rounded-sm p-0 text-muted-foreground hover:text-foreground"
                       disabled={isRestartingRuntime}
                       onClick={onRestartRuntime}
-                      aria-label={`Restart ${displayName} runtime`}
+                      aria-label={uiText(
+                        "Restart {value0} runtime",
+                        { value0: displayName },
+                        undefined,
+                        uiLocale,
+                      )}
                     >
                       {isRestartingRuntime ? (
                         <Spinner aria-hidden="true" className="size-3.5" />
@@ -1310,7 +1472,9 @@ export function ProviderInstanceCard({
                     </Button>
                   }
                 />
-                <TooltipPopup side="top">Restart provider</TooltipPopup>
+                <TooltipPopup side="top">
+                  {uiText("Restart provider", undefined, undefined, uiLocale)}
+                </TooltipPopup>
               </Tooltip>
             ) : null}
             {isDefaultProvider ? (
@@ -1321,15 +1485,27 @@ export function ProviderInstanceCard({
                       type="button"
                       className="focus-ring inline-flex h-7 shrink-0 cursor-pointer items-center gap-1 rounded-md bg-primary/10 px-1.5 text-2xs font-medium text-primary transition-colors duration-(--duration-fast) hover:bg-primary/15"
                       onClick={() => onSetDefaultProvider(false)}
-                      aria-label={`Clear ${displayName} as default provider`}
+                      aria-label={uiText(
+                        "Clear {value0} as default provider",
+                        {
+                          value0: displayName,
+                        },
+                        undefined,
+                        uiLocale,
+                      )}
                     >
                       <PinIcon className="size-3" aria-hidden />
-                      Default
+                      {uiText("Default", undefined, undefined, uiLocale)}
                     </button>
                   }
                 />
                 <TooltipPopup side="top">
-                  New chats start on this provider. Click to clear.
+                  {uiText(
+                    "New chats start on this provider. Click to clear.",
+                    undefined,
+                    undefined,
+                    uiLocale,
+                  )}
                 </TooltipPopup>
               </Tooltip>
             ) : enabled ? (
@@ -1342,13 +1518,22 @@ export function ProviderInstanceCard({
                       variant="ghost"
                       className="size-7 rounded-sm p-0 text-muted-foreground hover:text-foreground"
                       onClick={() => onSetDefaultProvider(true)}
-                      aria-label={`Set ${displayName} as default provider`}
+                      aria-label={uiText(
+                        "Set {value0} as default provider",
+                        {
+                          value0: displayName,
+                        },
+                        undefined,
+                        uiLocale,
+                      )}
                     >
                       <PinIcon className="size-3.5" />
                     </Button>
                   }
                 />
-                <TooltipPopup side="top">Use for new chats by default</TooltipPopup>
+                <TooltipPopup side="top">
+                  {uiText("Use for new chats by default", undefined, undefined, uiLocale)}
+                </TooltipPopup>
               </Tooltip>
             ) : null}
             <Tooltip>
@@ -1360,18 +1545,25 @@ export function ProviderInstanceCard({
                     variant="ghost"
                     className="size-7 rounded-sm p-0 text-muted-foreground hover:text-foreground"
                     onClick={() => onSettingsOpenChange(true)}
-                    aria-label={`Open ${displayName} settings`}
+                    aria-label={uiText(
+                      "Open {value0} settings",
+                      { value0: displayName },
+                      undefined,
+                      uiLocale,
+                    )}
                   >
                     <Settings2Icon className="size-3.5" />
                   </Button>
                 }
               />
-              <TooltipPopup side="top">Settings</TooltipPopup>
+              <TooltipPopup side="top">
+                {uiText("Settings", undefined, undefined, uiLocale)}
+              </TooltipPopup>
             </Tooltip>
             <Switch
               checked={enabled}
               onCheckedChange={(checked) => updateEnabled(Boolean(checked))}
-              aria-label={`Enable ${displayName}`}
+              aria-label={uiText("Enable {value0}", { value0: displayName }, undefined, uiLocale)}
             />
           </div>
         </div>
@@ -1407,7 +1599,9 @@ export function ProviderInstanceCard({
           <DialogHeader>
             <DialogTitle className="flex items-center gap-2 text-base">
               {titleIconNode}
-              <span className="truncate">{displayName} settings</span>
+              <span className="truncate">
+                <UiMessage message={"<slot0></slot0> settings"} slots={{ slot0: displayName }} />
+              </span>
             </DialogTitle>
             {String(instanceId) !== String(instance.driver) ? (
               <p className="truncate font-mono text-2xs text-subtle-foreground">{instanceId}</p>
@@ -1422,18 +1616,21 @@ export function ProviderInstanceCard({
                       htmlFor={`provider-instance-${instanceId}-display-name`}
                       className="text-xs font-medium text-foreground"
                     >
-                      Display name
+                      {uiText("Display name", undefined, undefined, uiLocale)}
                     </label>
                     <DraftInput
                       id={`provider-instance-${instanceId}-display-name`}
                       value={instance.displayName ?? ""}
                       onCommit={updateDisplayName}
-                      placeholder={driverOption?.label ?? "Instance label"}
+                      placeholder={
+                        driverOption?.label ??
+                        uiText("Instance label", undefined, undefined, uiLocale)
+                      }
                       spellCheck={false}
                     />
                   </div>
                   <ProviderAccentColorPicker
-                    label="Accent color"
+                    label={uiText("Accent color", undefined, undefined, uiLocale)}
                     customColorLabel={`Custom accent color for ${displayName}`}
                     value={accentColor}
                     onCommit={updateAccentColor}
@@ -1480,10 +1677,14 @@ export function ProviderInstanceCard({
               ) : (
                 <div className={DIALOG_SECTION_CLASS_NAME}>
                   <p className="text-xs text-muted-foreground">
-                    This provider (
-                    <code className="text-foreground">{String(instance.driver)}</code>) isn&apos;t
-                    in this version of Cafe Code. Its settings are kept but can&apos;t be edited
-                    here.
+                    <UiMessage
+                      message={
+                        "This provider (<slot1></slot1>) isn''t in this version of Cafe Code. Its settings are kept but can''t be edited here."
+                      }
+                      slots={{
+                        slot1: <code className="text-foreground">{String(instance.driver)}</code>,
+                      }}
+                    />
                   </p>
                 </div>
               )}
@@ -1527,3 +1728,11 @@ export function ProviderInstanceCard({
     </div>
   );
 }
+
+// Finite source-owned labels/helpers only; no received or user data.
+const UI_PRESENTATION_SOURCES = {
+  deriveProviderSettingsFields,
+  formatCodexRateLimitPresentation,
+  getProviderSummary,
+  getProviderVersionAdvisoryPresentation,
+};

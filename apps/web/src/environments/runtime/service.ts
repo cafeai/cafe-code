@@ -1,3 +1,4 @@
+import { uiText } from "@cafecode/shared/i18n";
 import {
   type AuthSessionRole,
   type EnvironmentId,
@@ -121,7 +122,11 @@ type ThreadDetailSubscriptionEntry = {
 const environmentConnections = new Map<EnvironmentId, EnvironmentConnection>();
 class SavedEnvironmentConnectionCancelledError extends Error {
   constructor(environmentId: EnvironmentId) {
-    super(`Saved environment ${environmentId} connection was cancelled.`);
+    super(
+      uiText("Saved environment {environmentId} connection was cancelled.", {
+        environmentId: environmentId,
+      }),
+    );
     this.name = "SavedEnvironmentConnectionCancelledError";
   }
 }
@@ -978,8 +983,8 @@ function getRuntimeErrorFields(error: unknown) {
       /credential.*(?:expired|missing)|missing.*credential/iu.test(error.message));
   return {
     lastError: isAuthError
-      ? "Saved environment credential is missing or expired. Add it again to sign in."
-      : "Saved environment connection failed.",
+      ? uiText("Saved environment credential is missing or expired. Add it again to sign in.")
+      : uiText("Saved environment connection failed."),
     lastErrorAt: new Date().toISOString(),
   } as const;
 }
@@ -1314,7 +1319,9 @@ function createPrimaryEnvironmentClient(
   const wsBaseUrl = getKnownEnvironmentWsBaseUrl(knownEnvironment);
   if (!wsBaseUrl) {
     throw new Error(
-      `Unable to resolve websocket URL for ${knownEnvironment?.label ?? "primary environment"}.`,
+      uiText("Unable to resolve websocket URL for {value1}.", {
+        value1: knownEnvironment?.label ?? "primary environment",
+      }),
     );
   }
   const connectionLabel = knownEnvironment?.label ?? null;
@@ -1339,7 +1346,11 @@ function createSavedEnvironmentClient(
       async () => {
         const record = getSavedEnvironmentRecord(environmentId);
         if (!record) {
-          throw new Error(`Saved environment ${environmentId} not found.`);
+          throw new Error(
+            uiText("Saved environment {environmentId} not found.", {
+              environmentId: environmentId,
+            }),
+          );
         }
         return await resolveRemoteWebSocketConnectionUrl({
           wsBaseUrl: record.wsBaseUrl,
@@ -1385,7 +1396,7 @@ function createSavedEnvironmentClient(
           );
           recordRuntimeTransportFailure(
             environmentId,
-            appendVersionMismatchHint("Saved environment connection failed.", mismatch),
+            appendVersionMismatchHint(uiText("Saved environment connection failed."), mismatch),
           );
         },
         onClose: (
@@ -1398,7 +1409,7 @@ function createSavedEnvironmentClient(
           recordRuntimeTransportFailure(
             environmentId,
             appendVersionMismatchHint(
-              "Saved environment connection closed unexpectedly.",
+              uiText("Saved environment connection closed unexpectedly."),
               resolveServerConfigVersionMismatch(
                 useSavedEnvironmentRuntimeStore.getState().byId[environmentId]?.serverConfig,
               ),
@@ -1409,7 +1420,7 @@ function createSavedEnvironmentClient(
           recordRuntimeTransportFailure(
             environmentId,
             appendVersionMismatchHint(
-              "Saved environment connection heartbeat timed out.",
+              uiText("Saved environment connection heartbeat timed out."),
               resolveServerConfigVersionMismatch(
                 useSavedEnvironmentRuntimeStore.getState().byId[environmentId]?.serverConfig,
               ),
@@ -1430,7 +1441,9 @@ async function refreshSavedEnvironmentMetadata(
 ): Promise<void> {
   const record = getSavedEnvironmentRecord(environmentId);
   if (!record) {
-    throw new Error(`Saved environment ${environmentId} not found.`);
+    throw new Error(
+      uiText("Saved environment {environmentId} not found.", { environmentId: environmentId }),
+    );
   }
 
   const [serverConfig, sessionState] = await Promise.all([
@@ -1481,7 +1494,7 @@ async function removeConnection(environmentId: EnvironmentId): Promise<boolean> 
 function createPrimaryEnvironmentConnection(): EnvironmentConnection {
   const knownEnvironment = getPrimaryKnownEnvironment();
   if (!knownEnvironment?.environmentId) {
-    throw new Error("Unable to resolve the primary environment.");
+    throw new Error(uiText("Unable to resolve the primary environment."));
   }
 
   const existing = environmentConnections.get(knownEnvironment.environmentId);
@@ -1536,6 +1549,8 @@ async function ensureSavedEnvironmentConnection(
         });
         setRuntimeError(
           record.environmentId,
+          // This legacy error text is a canonical classifier input above.
+          // getRuntimeErrorFields translates the safe outward explanation.
           new Error("Saved environment is missing its saved credential."),
         );
         throw new Error("Saved environment is missing its saved credential.");
@@ -1742,7 +1757,11 @@ export function readEnvironmentConnection(
 export function requireEnvironmentConnection(environmentId: EnvironmentId): EnvironmentConnection {
   const connection = readEnvironmentConnection(environmentId);
   if (!connection) {
-    throw new Error(`No websocket client registered for environment ${environmentId}.`);
+    throw new Error(
+      uiText("No websocket client registered for environment {environmentId}.", {
+        environmentId: environmentId,
+      }),
+    );
   }
   return connection;
 }
@@ -1768,7 +1787,7 @@ export async function disconnectSavedEnvironment(environmentId: EnvironmentId): 
 export async function reconnectSavedEnvironment(environmentId: EnvironmentId): Promise<void> {
   const record = getSavedEnvironmentRecord(environmentId);
   if (!record) {
-    throw new Error("Saved environment not found.");
+    throw new Error(uiText("Saved environment not found."));
   }
 
   const connection = environmentConnections.get(environmentId);
@@ -1813,13 +1832,13 @@ export async function addSavedEnvironment(input: {
 }): Promise<SavedEnvironmentRecord> {
   const password = input.password?.trim();
   if (password !== undefined && !password) {
-    throw new Error("Enter the server admin password.");
+    throw new Error(uiText("Enter the server admin password."));
   }
   if (
     password !== undefined &&
     (input.pairingUrl !== undefined || input.pairingCode !== undefined)
   ) {
-    throw new Error("Choose one remote sign-in method.");
+    throw new Error(uiText("Choose one remote sign-in method."));
   }
   const pairingTarget =
     password === undefined
@@ -1866,7 +1885,7 @@ export async function addSavedEnvironment(input: {
   );
   if (!didPersistBearerToken) {
     await persistSavedEnvironmentRegistryRollback(registrySnapshot);
-    throw new Error("Unable to persist saved environment credentials.");
+    throw new Error(uiText("Unable to persist saved environment credentials."));
   }
   useSavedEnvironmentRegistryStore.getState().upsert(record);
   await removeConnection(environmentId).catch(() => false);

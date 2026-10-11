@@ -1,3 +1,5 @@
+import { useUiLocale } from "~/i18n";
+import { uiText } from "@cafecode/shared/i18n";
 import { useId, useState } from "react";
 import { ChevronRightIcon, ImageIcon } from "lucide-react";
 import {
@@ -24,6 +26,8 @@ function ObservationImage({
   threadId: ThreadId;
   observation: NonNullable<WorkLogEntry["desktopObservation"]>;
 }) {
+  const uiLocale = useUiLocale();
+
   const [attempt, setAttempt] = useState(0);
   const [fullSize, setFullSize] = useState(false);
   const [actualPixels, setActualPixels] = useState(false);
@@ -36,22 +40,42 @@ function ObservationImage({
     attempt,
   );
   const unavailable = observation.pending
-    ? "Taking screenshot…"
+    ? uiText("Taking screenshot…", undefined, undefined, uiLocale)
     : !reference
-      ? "This call did not save a screenshot. Older calls cannot be restored."
+      ? uiText(
+          "This call did not save a screenshot. Older calls cannot be restored.",
+          undefined,
+          undefined,
+          uiLocale,
+        )
       : reference.storage === "disabled"
-        ? "Saving screenshots was disabled for this call."
+        ? uiText("Saving screenshots was disabled for this call.", undefined, undefined, uiLocale)
         : reference.storage === "failed"
-          ? "The desktop was observed, but its screenshot could not be saved."
+          ? uiText(
+              "The desktop was observed, but its screenshot could not be saved.",
+              undefined,
+              undefined,
+              uiLocale,
+            )
           : null;
   const message =
     unavailable ??
     (error === "unavailable"
-      ? "This screenshot is no longer retained."
+      ? uiText("This screenshot is no longer retained.", undefined, undefined, uiLocale)
       : error === "owner-access"
-        ? "Owner access is required to view saved screenshots."
+        ? uiText(
+            "Owner access is required to view saved screenshots.",
+            undefined,
+            undefined,
+            uiLocale,
+          )
         : error
-          ? "Could not load this screenshot. Reconnect to this environment and try again."
+          ? uiText(
+              "Could not load this screenshot. Reconnect to this environment and try again.",
+              undefined,
+              undefined,
+              uiLocale,
+            )
           : null);
   if (message)
     return (
@@ -61,7 +85,7 @@ function ObservationImage({
         </p>
         {error && error !== "unavailable" && error !== "owner-access" && (
           <Button size="xs" variant="outline" onClick={() => setAttempt((v) => v + 1)}>
-            Retry
+            {uiText("Retry", undefined, undefined, uiLocale)}
           </Button>
         )}
       </div>
@@ -81,7 +105,7 @@ function ObservationImage({
       <div role="status" className={frameClassName} style={frameStyle}>
         <Skeleton aria-hidden="true" className="absolute inset-0 rounded-none" />
         <span className="absolute inset-0 flex items-center justify-center text-2xs text-muted-foreground">
-          Loading screenshot…
+          {uiText("Loading screenshot…", undefined, undefined, uiLocale)}
         </span>
       </div>
     );
@@ -89,7 +113,7 @@ function ObservationImage({
     <>
       <button
         type="button"
-        aria-label="View full resolution screenshot"
+        aria-label={uiText("View full resolution screenshot", undefined, undefined, uiLocale)}
         className={cn(
           frameClassName,
           "cursor-zoom-in focus-visible:outline-2 focus-visible:outline-ring",
@@ -99,7 +123,7 @@ function ObservationImage({
       >
         <img
           src={src}
-          alt="Desktop screenshot observed by the model"
+          alt={uiText("Desktop screenshot observed by the model", undefined, undefined, uiLocale)}
           onError={onError}
           draggable={false}
           className="size-full object-contain animate-enter-fade"
@@ -108,9 +132,19 @@ function ObservationImage({
       <Dialog open={fullSize} onOpenChange={setFullSize}>
         <DialogPopup className="max-w-[min(94vw,1600px)]" bottomStickOnMobile={false}>
           <DialogHeader>
-            <DialogTitle>Desktop screenshot</DialogTitle>
+            <DialogTitle>
+              {uiText("Desktop screenshot", undefined, undefined, uiLocale)}
+            </DialogTitle>
             <DialogDescription>
-              {reference?.width} × {reference?.height} · Original screenshot
+              {uiText(
+                "{width} × {height} · Original screenshot",
+                {
+                  width: reference?.width,
+                  height: reference?.height,
+                },
+                undefined,
+                uiLocale,
+              )}
             </DialogDescription>
             <Button
               variant="ghost"
@@ -118,13 +152,15 @@ function ObservationImage({
               className="w-fit"
               onClick={() => setActualPixels((v) => !v)}
             >
-              {actualPixels ? "Fit to window" : "Actual size"}
+              {actualPixels
+                ? uiText("Fit to window", undefined, undefined, uiLocale)
+                : uiText("Actual size", undefined, undefined, uiLocale)}
             </Button>
           </DialogHeader>
           <div className="max-h-[75vh] overflow-auto px-4 pb-4">
             <img
               src={src}
-              alt="Full resolution desktop screenshot"
+              alt={uiText("Full resolution desktop screenshot", undefined, undefined, uiLocale)}
               draggable={false}
               className={
                 actualPixels ? "max-w-none" : "mx-auto max-h-[70vh] max-w-full object-contain"
@@ -147,6 +183,8 @@ export function DesktopObservation({
   threadId: ThreadId;
   timestampFormat: TimestampFormat;
 }) {
+  const uiLocale = useUiLocale();
+
   const [open, setOpen] = useState(false);
   const panelId = useId();
   const observation = entry.desktopObservation;
@@ -157,7 +195,7 @@ export function DesktopObservation({
       <button
         type="button"
         className="flex w-full items-center gap-2 rounded-lg px-1 py-1 text-left text-2xs leading-5 transition-colors duration-(--duration-fast) hover:bg-accent focus-visible:outline-2 focus-visible:outline-ring"
-        aria-label="View desktop screenshot"
+        aria-label={uiText("View desktop screenshot", undefined, undefined, uiLocale)}
         aria-expanded={open}
         aria-controls={panelId}
         onClick={() => setOpen((v) => !v)}
@@ -166,16 +204,18 @@ export function DesktopObservation({
           <ImageIcon className="size-3" />
         </span>
         <span className="min-w-0 flex-1 truncate text-foreground">
-          {observation.pending ? "Viewing desktop" : "Viewed desktop"}
+          {observation.pending
+            ? uiText("Viewing desktop", undefined, undefined, uiLocale)
+            : uiText("Viewed desktop", undefined, undefined, uiLocale)}
         </span>
         <span className="text-muted-foreground">
           {open
-            ? "Hide screenshot"
+            ? uiText("Hide screenshot", undefined, undefined, uiLocale)
             : observation.pending
-              ? "In progress"
+              ? uiText("In progress", undefined, undefined, uiLocale)
               : !reference || reference.storage !== "saved"
-                ? "Screenshot not saved"
-                : "View screenshot"}
+                ? uiText("Screenshot not saved", undefined, undefined, uiLocale)
+                : uiText("View screenshot", undefined, undefined, uiLocale)}
         </span>
         <ChevronRightIcon
           className={cn(
@@ -195,10 +235,21 @@ export function DesktopObservation({
           <div className="text-2xs text-subtle-foreground">
             {formatTimestamp(reference?.capturedAt ?? entry.createdAt, timestampFormat)}
             <details className="mt-1">
-              <summary className="cursor-pointer">Details</summary>Desktop screenshot
+              <summary className="cursor-pointer">
+                {uiText("Details", undefined, undefined, uiLocale)}
+              </summary>
               {reference
-                ? ` · ${reference.width} × ${reference.height} · Frame ${reference.frame}`
-                : ""}
+                ? uiText(
+                    "Desktop screenshot · {width} × {height} · Frame {frame}",
+                    {
+                      width: reference.width,
+                      height: reference.height,
+                      frame: reference.frame,
+                    },
+                    undefined,
+                    uiLocale,
+                  )
+                : uiText("Desktop screenshot", undefined, undefined, uiLocale)}
             </details>
           </div>
         </div>

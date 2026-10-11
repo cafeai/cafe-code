@@ -1,3 +1,5 @@
+import { useUiLocale } from "~/i18n";
+import { uiText } from "@cafecode/shared/i18n";
 import type { EnvironmentId, ScopedThreadRef } from "@cafecode/contracts";
 import { autoAnimate } from "@formkit/auto-animate";
 import { PencilIcon, XIcon } from "lucide-react";
@@ -49,6 +51,8 @@ const DeskSidebarRow = memo(function DeskSidebarRow({
   deskSnapshot: DeskState;
   menuOwnership: SidebarMenuOwnership;
 }) {
+  const uiLocale = useUiLocale();
+
   const metadata = useDeskTabMetadata(target);
   const [editing, setEditing] = useState(false);
   const [title, setTitle] = useState("");
@@ -141,7 +145,14 @@ const DeskSidebarRow = memo(function DeskSidebarRow({
       if (renameRef.current === edit) {
         // Do not render raw transport errors; retain the draft for an explicit
         // retry without exposing backend diagnostic details in the sidebar.
-        setError("Could not rename this chat. Check the connection and press Enter to retry.");
+        setError(
+          uiText(
+            "Could not rename this chat. Check the connection and press Enter to retry.",
+            undefined,
+            undefined,
+            uiLocale,
+          ),
+        );
       }
     } finally {
       savingRef.current = false;
@@ -154,9 +165,11 @@ const DeskSidebarRow = memo(function DeskSidebarRow({
     rowMenuOwner.current = owner;
     const action = await readLocalApi()?.contextMenu.show(
       [
-        ...(metadata.threadRef && metadata.exists ? [{ id: "rename", label: "Rename chat…" }] : []),
+        ...(metadata.threadRef && metadata.exists
+          ? [{ id: "rename", label: uiText("Rename chat…", undefined, undefined, uiLocale) }]
+          : []),
         ...chatActions.items(target),
-        { id: "close", label: "Close tab" },
+        { id: "close", label: uiText("Close tab", undefined, undefined, uiLocale) },
       ],
       position,
     );
@@ -225,7 +238,7 @@ const DeskSidebarRow = memo(function DeskSidebarRow({
           {editing ? (
             <input
               ref={inputRef}
-              aria-label="Chat title"
+              aria-label={uiText("Chat title", undefined, undefined, uiLocale)}
               aria-invalid={error !== null}
               aria-busy={saving}
               className="min-w-0 flex-1 truncate rounded-sm border border-ring bg-transparent px-0.5 text-base outline-none sm:text-ui"
@@ -290,7 +303,12 @@ const DeskSidebarRow = memo(function DeskSidebarRow({
                 render={
                   <button
                     type="button"
-                    aria-label={`Rename ${metadata.title}`}
+                    aria-label={uiText(
+                      "Rename {value0}",
+                      { value0: metadata.title },
+                      undefined,
+                      uiLocale,
+                    )}
                     className={DESK_ROW_ACTION_CLASS_NAME}
                     onClick={beginRename}
                   >
@@ -298,7 +316,9 @@ const DeskSidebarRow = memo(function DeskSidebarRow({
                   </button>
                 }
               />
-              <TooltipPopup side="top">Rename (F2)</TooltipPopup>
+              <TooltipPopup side="top">
+                {uiText("Rename (F2)", undefined, undefined, uiLocale)}
+              </TooltipPopup>
             </Tooltip>
           ) : null}
           <Tooltip>
@@ -306,7 +326,12 @@ const DeskSidebarRow = memo(function DeskSidebarRow({
               render={
                 <button
                   type="button"
-                  aria-label={`Close tab ${metadata.title}`}
+                  aria-label={uiText(
+                    "Close tab {value0}",
+                    { value0: metadata.title },
+                    undefined,
+                    uiLocale,
+                  )}
                   className={DESK_ROW_ACTION_CLASS_NAME}
                   onClick={onClose}
                 >
@@ -314,7 +339,9 @@ const DeskSidebarRow = memo(function DeskSidebarRow({
                 </button>
               }
             />
-            <TooltipPopup side="top">Close tab (chat keeps running)</TooltipPopup>
+            <TooltipPopup side="top">
+              {uiText("Close tab (chat keeps running)", undefined, undefined, uiLocale)}
+            </TooltipPopup>
           </Tooltip>
         </div>
       ) : null}
@@ -344,6 +371,8 @@ const DeskSidebarGroupHeading = memo(function DeskSidebarGroupHeading({
   onActivate: () => void;
   onRename: (name: string) => void;
 }) {
+  const uiLocale = useUiLocale();
+
   const name = group.name;
   const [editing, setEditing] = useState(false);
   const [value, setValue] = useState("");
@@ -409,7 +438,7 @@ const DeskSidebarGroupHeading = memo(function DeskSidebarGroupHeading({
         <div className="flex h-7 w-full items-center px-2 pr-9">
           <input
             ref={inputRef}
-            aria-label="Group name"
+            aria-label={uiText("Group name", undefined, undefined, uiLocale)}
             className="min-w-0 flex-1 truncate rounded-sm border border-ring bg-transparent px-0.5 text-base outline-none sm:text-xs"
             maxLength={DESK_LIMITS.nameLength}
             value={value}
@@ -433,7 +462,7 @@ const DeskSidebarGroupHeading = memo(function DeskSidebarGroupHeading({
           <button
             ref={buttonRef}
             type="button"
-            aria-label={`Activate group ${name}`}
+            aria-label={uiText("Activate group {value0}", { value0: name }, undefined, uiLocale)}
             aria-pressed={selected}
             className="flex h-7 w-full items-center gap-2 rounded-lg px-2 text-left text-xs font-medium text-muted-foreground transition-colors duration-(--duration-fast) group-hover/desk-group:text-foreground focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-ring aria-pressed:text-foreground"
             onClick={onActivate}
@@ -460,7 +489,12 @@ const DeskSidebarGroupHeading = memo(function DeskSidebarGroupHeading({
               render={
                 <button
                   type="button"
-                  aria-label={`Rename group ${name}`}
+                  aria-label={uiText(
+                    "Rename group {value0}",
+                    { value0: name },
+                    undefined,
+                    uiLocale,
+                  )}
                   className="pointer-events-none absolute top-1/2 right-1.5 inline-flex size-5 -translate-y-1/2 items-center justify-center rounded-sm text-subtle-foreground opacity-0 transition-[opacity,color] duration-(--duration-fast) hover:text-foreground focus-visible:ring-1 focus-visible:ring-ring max-md:size-8 group-hover/desk-group:pointer-events-auto group-hover/desk-group:opacity-100 group-has-focus-visible/desk-group:pointer-events-auto group-has-focus-visible/desk-group:opacity-100 [@media(hover:none)_and_(pointer:coarse)]:pointer-events-auto [@media(hover:none)_and_(pointer:coarse)]:opacity-100"
                   onClick={beginRename}
                 >
@@ -468,7 +502,9 @@ const DeskSidebarGroupHeading = memo(function DeskSidebarGroupHeading({
                 </button>
               }
             />
-            <TooltipPopup side="top">Rename group (F2)</TooltipPopup>
+            <TooltipPopup side="top">
+              {uiText("Rename group (F2)", undefined, undefined, uiLocale)}
+            </TooltipPopup>
           </Tooltip>
         </>
       )}
@@ -480,6 +516,8 @@ const DeskSidebarGroupHeading = memo(function DeskSidebarGroupHeading({
  * continue through existing APIs; closing a view only updates local layout.
  */
 export function DeskSidebar({ onNavigate }: { onNavigate: (target: ThreadRouteTarget) => void }) {
+  const uiLocale = useUiLocale();
+
   const desk = useDeskStore((state) => state.desk);
   const dispatch = useDeskStore((state) => state.dispatch);
   const chatActions = useDeskChatActions();
@@ -514,9 +552,14 @@ export function DeskSidebar({ onNavigate }: { onNavigate: (target: ThreadRouteTa
     animatedListsRef.current.add(node);
   }, []);
   return (
-    <section aria-label="Desk open chats" className="px-2 py-2">
+    <section
+      aria-label={uiText("Desk open chats", undefined, undefined, uiLocale)}
+      className="px-2 py-2"
+    >
       <div className="mb-1 flex items-center justify-between pl-2 pr-1.5">
-        <span className="label-overline">Open chats</span>
+        <span className="label-overline">
+          {uiText("Open chats", undefined, undefined, uiLocale)}
+        </span>
       </div>
       {deskGroupIds(desk.layout).map((groupId) => {
         const group = desk.groups[groupId];
@@ -526,7 +569,7 @@ export function DeskSidebar({ onNavigate }: { onNavigate: (target: ThreadRouteTa
             // Group IDs repeat across local environment layouts. Remount the
             // editor on a namespace change instead of carrying its draft over.
             key={JSON.stringify([desk.environmentId, groupId])}
-            aria-label={`${group.name} tab group`}
+            aria-label={uiText("{value0} tab group", { value0: group.name }, undefined, uiLocale)}
             className="mb-2"
           >
             <DeskSidebarGroupHeading
@@ -573,7 +616,9 @@ export function DeskSidebar({ onNavigate }: { onNavigate: (target: ThreadRouteTa
               })}
             </SidebarMenuSub>
             {group.tabs.length === 0 ? (
-              <p className="px-3 py-1 text-xs text-subtle-foreground">No open chats</p>
+              <p className="px-3 py-1 text-xs text-subtle-foreground">
+                {uiText("No open chats", undefined, undefined, uiLocale)}
+              </p>
             ) : null}
           </section>
         );
@@ -581,3 +626,5 @@ export function DeskSidebar({ onNavigate }: { onNavigate: (target: ThreadRouteTa
     </section>
   );
 }
+
+// Finite source-owned labels/helpers only; no received or user data.

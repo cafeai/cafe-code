@@ -1,3 +1,4 @@
+import { uiText } from "@cafecode/shared/i18n";
 import { EDITORS, EditorId, LocalApi } from "@cafecode/contracts";
 import {
   getLocalStorageItemWithLegacy,
@@ -77,7 +78,9 @@ function validateSystemAssociationPath(path: string): void {
       return code < 0x20 || (code >= 0x7f && code <= 0x9f);
     })
   ) {
-    throw new Error("The system default cannot open an empty path or a path containing controls.");
+    throw new Error(
+      uiText("The system default cannot open an empty path or a path containing controls."),
+    );
   }
 
   const normalized = path.replaceAll("\\", "/");
@@ -85,14 +88,14 @@ function validateSystemAssociationPath(path: string): void {
   // ordinary file association. Reject them instead of presenting a misleading
   // filename or letting native path normalization reinterpret the destination.
   if (/^(?:\/\/[?.]\/|\/\?\?\/)/u.test(normalized)) {
-    throw new Error("The system default cannot open a Windows device path.");
+    throw new Error(uiText("The system default cannot open a Windows device path."));
   }
   const isDrivePath = /^[A-Za-z]:/u.test(normalized);
   if (
     (isDrivePath && normalized.slice(2).includes(":")) ||
     (normalized.startsWith("//") && normalized.includes(":"))
   ) {
-    throw new Error("The system default cannot open a Windows alternate-stream path.");
+    throw new Error(uiText("The system default cannot open a Windows alternate-stream path."));
   }
 }
 
@@ -161,7 +164,10 @@ export async function openInPreferredEditor(
     validateSystemAssociationPath(path);
     if (requiresSystemAssociationConsent(path)) {
       const confirmed = await api.dialogs.confirm(
-        `The system default may run code or launch an application for this path:\n\n${path}\n\nOpen with the system default?`,
+        uiText(
+          "The system default may run code or launch an application for this path:\n\n{path}\n\nOpen with the system default?",
+          { path: path },
+        ),
       );
       // Declining is a completed user decision. Never retry through an editor
       // or another association, and never treat cancellation as an open error.
@@ -179,7 +185,7 @@ export async function openInPreferredEditor(
   }
 
   const editor = resolveAndPersistPreferredEditor(availableEditors);
-  if (!editor) throw new Error("No available editors found.");
+  if (!editor) throw new Error(uiText("No available editors found."));
   await api.shell.openInEditor(targetPath, editor);
   return editor;
 }

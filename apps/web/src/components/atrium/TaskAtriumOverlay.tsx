@@ -1,3 +1,5 @@
+import { useUiLocale } from "~/i18n";
+import { uiText } from "@cafecode/shared/i18n";
 import { Dialog as DialogPrimitive } from "@base-ui/react/dialog";
 import { X } from "lucide-react";
 import { useEffect } from "react";
@@ -28,6 +30,8 @@ import { useWorkspaceEnvironmentId } from "../../environments/workspace";
  * being stacked above this modal.
  */
 export function TaskAtriumOverlay() {
+  const uiLocale = useUiLocale();
+
   const environmentId = useWorkspaceEnvironmentId();
   const enabled = useSettings((settings) => settings.ambianceAtriumEnabled);
   const open = useTaskAtriumStore((state) => state.open);
@@ -59,7 +63,7 @@ export function TaskAtriumOverlay() {
             reserveNativeTitlebar &&
               "wco:[--cafe-atrium-titlebar-inset:calc(env(titlebar-area-y,0px)+env(titlebar-area-height,40px))] pt-[var(--cafe-atrium-titlebar-inset,0px)]",
           )}
-          aria-label="Task Atrium"
+          aria-label={uiText("Task Atrium", undefined, undefined, uiLocale)}
           aria-modal="true"
           data-cafe-task-atrium-overlay="true"
           // The dialog overlaps Cafe's frameless draggable titlebar. Electron
@@ -71,7 +75,7 @@ export function TaskAtriumOverlay() {
           finalFocus={false}
         >
           <DialogPrimitive.Close
-            aria-label="Close Task Atrium"
+            aria-label={uiText("Close Task Atrium", undefined, undefined, uiLocale)}
             className="focus-ring absolute right-4 top-[calc(var(--cafe-atrium-titlebar-inset,0px)+1rem)] z-30 flex size-8 items-center justify-center rounded-full border border-border bg-card/60 text-muted-foreground backdrop-blur-md transition-colors duration-(--duration-fast) hover:bg-card hover:text-foreground"
           >
             <X className="size-4" />

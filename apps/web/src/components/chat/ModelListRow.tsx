@@ -1,3 +1,5 @@
+import { useUiLocale } from "~/i18n";
+import { uiText } from "@cafecode/shared/i18n";
 import { type ProviderDriverKind, type ProviderInstanceId } from "@cafecode/contracts";
 import { memo } from "react";
 import { StarIcon } from "lucide-react";
@@ -34,6 +36,8 @@ export const ModelListRow = memo(function ModelListRow(props: {
   jumpLabel?: string | null;
   onToggleFavorite: () => void;
 }) {
+  const uiLocale = useUiLocale();
+
   const ProviderIcon = PROVIDER_ICON_BY_PROVIDER[props.driverKind] ?? null;
   const providerLabel = props.model.subProvider
     ? `${props.providerDisplayName} · ${props.model.subProvider}`
@@ -63,14 +67,20 @@ export const ModelListRow = memo(function ModelListRow(props: {
                 event.stopPropagation();
               }}
               type="button"
-              aria-label={props.isFavorite ? "Remove from favorites" : "Add to favorites"}
+              aria-label={
+                props.isFavorite
+                  ? uiText("Remove from favorites", undefined, undefined, uiLocale)
+                  : uiText("Add to favorites", undefined, undefined, uiLocale)
+              }
             >
               <StarIcon className={cn("size-4", props.isFavorite && "fill-current text-warning")} />
             </button>
           }
         />
         <TooltipPopup side="top" align="center">
-          {props.isFavorite ? "Remove from favorites" : "Add to favorites"}
+          {props.isFavorite
+            ? uiText("Remove from favorites", undefined, undefined, uiLocale)
+            : uiText("Add to favorites", undefined, undefined, uiLocale)}
         </TooltipPopup>
       </Tooltip>
 
@@ -88,9 +98,9 @@ export const ModelListRow = memo(function ModelListRow(props: {
             {props.showNewBadge ? (
               <span
                 className="shrink-0 rounded-sm border border-warning/30 bg-warning/12 px-1 py-px text-2xs font-medium leading-none text-warning-foreground"
-                aria-label="New model"
+                aria-label={uiText("New model", undefined, undefined, uiLocale)}
               >
-                New
+                {uiText("New", undefined, undefined, uiLocale)}
               </span>
             ) : null}
           </div>

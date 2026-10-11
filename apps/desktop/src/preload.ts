@@ -2,6 +2,11 @@ import type { DesktopBridge } from "@cafecode/contracts";
 import { contextBridge, ipcRenderer } from "electron";
 
 import * as IpcChannels from "./ipc/channels.ts";
+import {
+  DESKTOP_UI_LOCALE_CHANGED_CHANNEL,
+  isDesktopUiLocale,
+  readDesktopUiLocaleArguments,
+} from "./settings/DesktopUiLocaleBridge.ts";
 
 // Untrusted rendering helpers (including the opaque-origin Mermaid iframe)
 // must never receive native capabilities. The BrowserWindow disables subframe
@@ -10,6 +15,14 @@ import * as IpcChannels from "./ipc/channels.ts";
 // cannot accidentally publish the bridge into an embedded document.
 if (process.isMainFrame === true) {
   contextBridge.exposeInMainWorld("desktopBridge", {
+    ...readDesktopUiLocaleArguments(process.argv),
+    onUiLocaleChanged: (listener: (locale: "en" | "ja" | "ko") => void) => {
+      const wrapped = (_event: Electron.IpcRendererEvent, value: unknown) => {
+        if (isDesktopUiLocale(value)) listener(value);
+      };
+      ipcRenderer.on(DESKTOP_UI_LOCALE_CHANGED_CHANNEL, wrapped);
+      return () => ipcRenderer.removeListener(DESKTOP_UI_LOCALE_CHANGED_CHANNEL, wrapped);
+    },
     getAppBranding: () => {
       const result = ipcRenderer.sendSync(IpcChannels.GET_APP_BRANDING_CHANNEL);
       if (typeof result !== "object" || result === null) {
@@ -61,6 +74,13 @@ if (process.isMainFrame === true) {
     onGlobalDictationEvent: (listener) => {
       const wrappedListener = (_event: Electron.IpcRendererEvent, payload: unknown) => {
         if (typeof payload !== "object" || payload === null) return;
+        const guidance = (payload as { readonly guidance?: unknown }).guidance;
+        if (
+          guidance !== undefined &&
+          guidance !== "accessibility_permission_required" &&
+          guidance !== "target_unavailable"
+        )
+          return;
         listener(payload as Parameters<typeof listener>[0]);
       };
 

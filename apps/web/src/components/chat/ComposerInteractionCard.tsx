@@ -1,3 +1,6 @@
+import { useUiLocale, useUiPresentation } from "~/i18n";
+import { uiText } from "@cafecode/shared/i18n";
+import { UiMessage } from "~/i18n";
 import { useId, useState } from "react";
 import type {
   ApprovalRequestId,
@@ -13,8 +16,12 @@ import { InfoTip } from "../ui/info-tip";
 import { Select, SelectItem, SelectPopup, SelectTrigger, SelectValue } from "../ui/select";
 
 const PERMISSION_SCOPE_LABELS = {
-  turn: "This turn only",
-  session: "This provider session",
+  get turn() {
+    return uiText("This turn only");
+  },
+  get session() {
+    return uiText("This provider session");
+  },
 } as const;
 
 export interface ComposerInteractionCallbacks {
@@ -39,6 +46,9 @@ export function ComposerInteractionCard({
   requestId: ApprovalRequestId;
   interaction: ProviderInteraction;
 }) {
+  const uiLocale = useUiLocale();
+  const uiPresentation = useUiPresentation(UI_PRESENTATION_SOURCES);
+
   const formId = useId();
   const [values, setValues] = useState<Record<string, string | string[]>>({});
   const [grantIds, setGrantIds] = useState<string[]>([]);
@@ -73,7 +83,14 @@ export function ComposerInteractionCard({
     }
     const validated = validateInteractionResponse(interaction, { __cafeInteraction: response });
     if (!validated) {
-      setError("Complete the required fields using the requested values and limits.");
+      setError(
+        uiText(
+          "Complete the required fields using the requested values and limits.",
+          undefined,
+          undefined,
+          uiLocale,
+        ),
+      );
       return;
     }
     setBusy(true);
@@ -82,7 +99,12 @@ export function ComposerInteractionCard({
       await onRespondToInteraction(requestId, validated);
     } catch {
       setError(
-        "The response was not confirmed. You can retry the same response while this request is active.",
+        uiText(
+          "The response was not confirmed. You can retry the same response while this request is active.",
+          undefined,
+          undefined,
+          uiLocale,
+        ),
       );
     } finally {
       setBusy(false);
@@ -107,7 +129,14 @@ export function ComposerInteractionCard({
       // exists only in this mounted live card and is never shown as text.
       setUrl(resolved);
     } catch {
-      setError("The authorization link is unavailable. It may have expired or been cancelled.");
+      setError(
+        uiText(
+          "The authorization link is unavailable. It may have expired or been cancelled.",
+          undefined,
+          undefined,
+          uiLocale,
+        ),
+      );
     } finally {
       setBusy(false);
     }
@@ -117,7 +146,7 @@ export function ComposerInteractionCard({
   return (
     <section
       className="space-y-3 px-4 py-3 sm:px-5"
-      aria-label="Provider interaction"
+      aria-label={uiText("Provider interaction", undefined, undefined, uiLocale)}
       onKeyDown={(event) => {
         event.stopPropagation();
         if (event.key === "Enter" && event.target instanceof HTMLInputElement)
@@ -126,19 +155,31 @@ export function ComposerInteractionCard({
     >
       <h3 className="text-sm font-medium text-foreground">
         {interaction.kind === "permissions"
-          ? "Additional permissions requested"
-          : `MCP server: ${interaction.serverName}`}
+          ? uiText("Additional permissions requested", undefined, undefined, uiLocale)
+          : uiText("MCP server: {value0}", { value0: interaction.serverName }, undefined, uiLocale)}
       </h3>
       <p className="whitespace-pre-wrap break-words text-sm">{interaction.message}</p>
       {interaction.kind === "permissions" ? (
         <>
           <p className="break-all text-xs text-muted-foreground">
-            Working directory: <span className="font-mono">{interaction.cwd}</span>
-            {interaction.environment ? ` · Environment: ${interaction.environment}` : ""}
+            <UiMessage
+              message={"Working directory: <slot1></slot1><slot3></slot3>"}
+              slots={{
+                slot1: <span className="font-mono">{interaction.cwd}</span>,
+                slot3: interaction.environment
+                  ? uiText(
+                      " · Environment: {value0}",
+                      { value0: interaction.environment },
+                      undefined,
+                      uiLocale,
+                    )
+                  : "",
+              }}
+            />
           </p>
           <fieldset disabled={busy} className="space-y-2">
             <legend className="mb-1 text-xs text-muted-foreground">
-              Choose the permissions to grant
+              {uiText("Choose the permissions to grant", undefined, undefined, uiLocale)}
             </legend>
             {interaction.grants.map((grant) => (
               <label key={grant.id} className="flex items-start gap-2 break-all text-sm">
@@ -157,21 +198,25 @@ export function ComposerInteractionCard({
               </label>
             ))}
             <div className="space-y-1 text-sm">
-              <span aria-hidden="true">Permission duration</span>
+              <span aria-hidden="true">
+                {uiText("Permission duration", undefined, undefined, uiLocale)}
+              </span>
               <Select
                 value={scope}
                 disabled={busy}
                 onValueChange={(next) => setScope(next === "session" ? "session" : "turn")}
               >
-                <SelectTrigger aria-label="Permission duration">
-                  <SelectValue>{PERMISSION_SCOPE_LABELS[scope]}</SelectValue>
+                <SelectTrigger
+                  aria-label={uiText("Permission duration", undefined, undefined, uiLocale)}
+                >
+                  <SelectValue>{uiPresentation.PERMISSION_SCOPE_LABELS[scope]}</SelectValue>
                 </SelectTrigger>
                 <SelectPopup alignItemWithTrigger={false}>
                   <SelectItem hideIndicator value="turn">
-                    {PERMISSION_SCOPE_LABELS.turn}
+                    {uiPresentation.PERMISSION_SCOPE_LABELS.turn}
                   </SelectItem>
                   <SelectItem hideIndicator value="session">
-                    {PERMISSION_SCOPE_LABELS.session}
+                    {uiPresentation.PERMISSION_SCOPE_LABELS.session}
                   </SelectItem>
                 </SelectPopup>
               </Select>
@@ -181,8 +226,12 @@ export function ComposerInteractionCard({
       ) : interaction.mode === "url" ? (
         <div className="space-y-2">
           <p className="break-all text-sm">
-            External destination: <strong>{interaction.urlOrigin}</strong>. Open only if you trust
-            this server and destination.
+            <UiMessage
+              message={
+                "External destination: <slot1></slot1>. Open only if you trust this server and destination."
+              }
+              slots={{ slot1: <strong>{interaction.urlOrigin}</strong> }}
+            />
           </p>
           {url ? (
             <a
@@ -192,7 +241,7 @@ export function ComposerInteractionCard({
               rel="noopener noreferrer"
               referrerPolicy="no-referrer"
             >
-              Open authorization page
+              {uiText("Open authorization page", undefined, undefined, uiLocale)}
             </a>
           ) : (
             <Button
@@ -201,14 +250,27 @@ export function ComposerInteractionCard({
               disabled={busy || !onResolveInteractionUrl}
               onClick={() => void resolveUrl()}
             >
-              Get authorization link
+              {uiText("Get authorization link", undefined, undefined, uiLocale)}
             </Button>
           )}
           <p className="flex items-center gap-1.5 text-xs text-muted-foreground">
-            After completing the external step, confirm below.
-            <InfoTip label="About the external step">
-              Cafe doesn’t load or verify this page.
-            </InfoTip>
+            <UiMessage
+              message={"After completing the external step, confirm below.<slot1></slot1>"}
+              slots={{
+                slot1: (
+                  <InfoTip
+                    label={uiText("About the external step", undefined, undefined, uiLocale)}
+                  >
+                    {uiText(
+                      "Cafe doesn’t load or verify this page.",
+                      undefined,
+                      undefined,
+                      uiLocale,
+                    )}
+                  </InfoTip>
+                ),
+              }}
+            />
           </p>
         </div>
       ) : (
@@ -222,7 +284,9 @@ export function ComposerInteractionCard({
               <div key={field.id} className="space-y-1">
                 <label htmlFor={id} className="text-sm font-medium">
                   {field.title}
-                  {field.required ? " (required)" : " (optional)"}
+                  {field.required
+                    ? uiText(" (required)", undefined, undefined, uiLocale)
+                    : uiText(" (optional)", undefined, undefined, uiLocale)}
                 </label>
                 {field.description ? (
                   <p className="text-xs text-muted-foreground">{field.description}</p>
@@ -254,8 +318,8 @@ export function ComposerInteractionCard({
                     // arbitrary provider strings never become DOM identifiers.
                     const choices = (
                       field.options ?? [
-                        { value: "true", label: "Yes" },
-                        { value: "false", label: "No" },
+                        { value: "true", label: uiText("Yes", undefined, undefined, uiLocale) },
+                        { value: "false", label: uiText("No", undefined, undefined, uiLocale) },
                       ]
                     ).map((option, index) => ({
                       key: field.options ? String(index) : option.value,
@@ -289,13 +353,17 @@ export function ComposerInteractionCard({
                         <SelectTrigger id={id}>
                           <SelectValue>
                             {choices.find((choice) => choice.key === selectedKey)?.label ?? (
-                              <span className="text-muted-foreground">Choose a value</span>
+                              <span className="text-muted-foreground">
+                                {uiText("Choose a value", undefined, undefined, uiLocale)}
+                              </span>
                             )}
                           </SelectValue>
                         </SelectTrigger>
                         <SelectPopup alignItemWithTrigger={false}>
                           <SelectItem hideIndicator value="">
-                            <span className="text-muted-foreground">Choose a value</span>
+                            <span className="text-muted-foreground">
+                              {uiText("Choose a value", undefined, undefined, uiLocale)}
+                            </span>
                           </SelectItem>
                           {choices.map((choice) => (
                             <SelectItem hideIndicator key={choice.key} value={choice.key}>
@@ -323,17 +391,29 @@ export function ComposerInteractionCard({
                 )}
                 {field.minimum !== undefined || field.maximum !== undefined ? (
                   <p className="text-xs text-muted-foreground">
-                    Allowed range: {field.minimum ?? "unbounded"} to {field.maximum ?? "unbounded"}
+                    <UiMessage
+                      message={"Allowed range: <slot1></slot1> to <slot3></slot3>"}
+                      slots={{
+                        slot1: field.minimum ?? uiText("unbounded", undefined, undefined, uiLocale),
+                        slot3: field.maximum ?? uiText("unbounded", undefined, undefined, uiLocale),
+                      }}
+                    />
                   </p>
                 ) : null}
                 {field.minLength !== undefined || field.maxLength !== undefined ? (
                   <p className="text-xs text-muted-foreground">
-                    Length: {field.minLength ?? 0}–{field.maxLength ?? 8192} characters
+                    <UiMessage
+                      message={"Length: <slot1></slot1>–<slot3></slot3> characters"}
+                      slots={{ slot1: field.minLength ?? 0, slot3: field.maxLength ?? 8192 }}
+                    />
                   </p>
                 ) : null}
                 {field.minItems !== undefined || field.maxItems !== undefined ? (
                   <p className="text-xs text-muted-foreground">
-                    Choose {field.minItems ?? 0}–{field.maxItems ?? 64} values
+                    <UiMessage
+                      message={"Choose <slot1></slot1>–<slot3></slot3> values"}
+                      slots={{ slot1: field.minItems ?? 0, slot3: field.maxItems ?? 64 }}
+                    />
                   </p>
                 ) : null}
               </div>
@@ -343,8 +423,12 @@ export function ComposerInteractionCard({
       )}
       {!onRespondToInteraction ? (
         <p role="alert" className="text-sm">
-          This environment does not support private interaction responses. Reconnect to an updated
-          backend.
+          {uiText(
+            "This environment does not support private interaction responses. Reconnect to an updated backend.",
+            undefined,
+            undefined,
+            uiLocale,
+          )}
         </p>
       ) : null}
       {error ? (
@@ -359,7 +443,7 @@ export function ComposerInteractionCard({
           disabled={busy || !onRespondToInteraction}
           onClick={() => void submit("cancel")}
         >
-          Cancel request
+          {uiText("Cancel request", undefined, undefined, uiLocale)}
         </Button>
         <Button
           type="button"
@@ -367,7 +451,7 @@ export function ComposerInteractionCard({
           disabled={busy || !onRespondToInteraction}
           onClick={() => void submit("decline")}
         >
-          Decline
+          {uiText("Decline", undefined, undefined, uiLocale)}
         </Button>
         <Button
           type="button"
@@ -375,12 +459,15 @@ export function ComposerInteractionCard({
           onClick={() => void submit("accept")}
         >
           {interaction.kind === "permissions"
-            ? "Grant selected permissions"
+            ? uiText("Grant selected permissions", undefined, undefined, uiLocale)
             : interaction.mode === "url"
-              ? "I completed the external step"
-              : "Submit response"}
+              ? uiText("I completed the external step", undefined, undefined, uiLocale)
+              : uiText("Submit response", undefined, undefined, uiLocale)}
         </Button>
       </div>
     </section>
   );
 }
+
+// Finite source-owned labels/helpers only; no received or user data.
+const UI_PRESENTATION_SOURCES = { PERMISSION_SCOPE_LABELS };

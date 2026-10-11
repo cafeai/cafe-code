@@ -1,5 +1,5 @@
 import DOMPurify from "dompurify";
-import { MAX_MERMAID_SVG_BYTES, MERMAID_FAILURE } from "./policy";
+import { MAX_MERMAID_SVG_BYTES, getMERMAID_FAILURE } from "./policy";
 
 export interface MermaidResult {
   readonly svg: string;
@@ -144,7 +144,7 @@ export function sanitizeMermaidSvg(input: unknown): MermaidResult {
     new TextEncoder().encode(input).byteLength > MAX_MERMAID_SVG_BYTES ||
     /<!DOCTYPE|<!ENTITY/i.test(input)
   )
-    throw new Error(MERMAID_FAILURE);
+    throw new Error(getMERMAID_FAILURE());
 
   const purified = DOMPurify.sanitize(input, {
     ALLOWED_TAGS: TAGS,
@@ -159,12 +159,12 @@ export function sanitizeMermaidSvg(input: unknown): MermaidResult {
   const document = new DOMParser().parseFromString(purified, "image/svg+xml");
   const root = document.documentElement;
   if (root.localName !== "svg" || document.querySelector("parsererror")) {
-    throw new Error(MERMAID_FAILURE);
+    throw new Error(getMERMAID_FAILURE());
   }
   for (const element of [root, ...root.querySelectorAll("*")]) {
     if (element.localName === "style") {
       const css = element.textContent ?? "";
-      if (!safeStyle(css, true)) throw new Error(MERMAID_FAILURE);
+      if (!safeStyle(css, true)) throw new Error(getMERMAID_FAILURE());
       // Mermaid includes keyframes even for static graphs. Parse CSS only after
       // rejecting resource-bearing syntax; a constructed sheet is never attached
       // to the page. Retain ordinary rules, remove animation definitions and
@@ -184,7 +184,7 @@ export function sanitizeMermaidSvg(input: unknown): MermaidResult {
       element.textContent = rules.join("\n");
     }
     for (const attribute of element.attributes) {
-      if (!safeStyle(attribute.value)) throw new Error(MERMAID_FAILURE);
+      if (!safeStyle(attribute.value)) throw new Error(getMERMAID_FAILURE());
       if (attribute.name === "style") {
         const style = document.createElementNS(
           "http://www.w3.org/1999/xhtml",
@@ -212,7 +212,7 @@ export function sanitizeMermaidSvg(input: unknown): MermaidResult {
     width > 100_000 ||
     height > 100_000
   )
-    throw new Error(MERMAID_FAILURE);
+    throw new Error(getMERMAID_FAILURE());
   root.setAttribute("xmlns", "http://www.w3.org/2000/svg");
   root.setAttribute("width", String(width));
   root.setAttribute("height", String(height));
@@ -224,7 +224,7 @@ export function sanitizeMermaidSvg(input: unknown): MermaidResult {
       .slice(0, 1024) || "Mermaid diagram";
   const svg = new XMLSerializer().serializeToString(root);
   if (new TextEncoder().encode(svg).byteLength > MAX_MERMAID_SVG_BYTES) {
-    throw new Error(MERMAID_FAILURE);
+    throw new Error(getMERMAID_FAILURE());
   }
   return Object.freeze({ svg, width, height, title });
 }

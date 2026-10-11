@@ -1,3 +1,6 @@
+import { useUiLocale } from "~/i18n";
+import { uiText } from "@cafecode/shared/i18n";
+import { UiMessage } from "~/i18n";
 import { useEffect, useRef, useState } from "react";
 import type { MessageId } from "@cafecode/contracts";
 import { Button } from "../ui/button";
@@ -31,6 +34,8 @@ export function MessageForkDialog({
   onClose,
   onFork,
 }: MessageForkDialogProps) {
+  const uiLocale = useUiLocale();
+
   const pendingRef = useRef(false);
   const mounted = useRef(true);
   useEffect(() => {
@@ -52,27 +57,41 @@ export function MessageForkDialog({
         override the owner's navigation while this request is pending. */}
       <DialogPopup className="no-drag max-w-lg" finalFocus={false}>
         <DialogHeader>
-          <DialogTitle>Fork from this message?</DialogTitle>
+          <DialogTitle>
+            {uiText("Fork from this message?", undefined, undefined, uiLocale)}
+          </DialogTitle>
           <DialogDescription>
-            Create a separate Claude chat with {accountLabel}, including this message and everything
-            before it.
+            <UiMessage
+              message={
+                "Create a separate Claude chat with <slot1></slot1>, including this message and everything before it."
+              }
+              slots={{ slot1: accountLabel }}
+            />
           </DialogDescription>
         </DialogHeader>
         <DialogPanel className="space-y-4">
           <p className="text-sm text-muted-foreground">
-            Original stays unchanged; workspace files are shared, not rewound.
+            {uiText(
+              "Original stays unchanged; workspace files are shared, not rewound.",
+              undefined,
+              undefined,
+              uiLocale,
+            )}
           </p>
           {/* Why a fork can be refused only matters once it has been. */}
           {failed ? (
             <p role="alert" className="text-sm text-destructive-foreground">
-              The fork could not be confirmed. Older, very large or compacted histories may be
-              unavailable, and the chat and its background work must be idle. Check the chat and
-              connection, then try again; nothing was resent.
+              {uiText(
+                "The fork could not be confirmed. Older, very large or compacted histories may be unavailable, and the chat and its background work must be idle. Check the chat and connection, then try again; nothing was resent.",
+                undefined,
+                undefined,
+                uiLocale,
+              )}
             </p>
           ) : null}
           <div className="flex justify-end gap-2">
             <Button variant="outline" disabled={pending || busy} onClick={onClose}>
-              Cancel
+              {uiText("Cancel", undefined, undefined, uiLocale)}
             </Button>
             <Button
               className="min-w-32"
@@ -96,7 +115,7 @@ export function MessageForkDialog({
             >
               {/* Keep the label and width while working. */}
               {pending || busy ? <Spinner aria-hidden="true" /> : null}
-              Create fork
+              {uiText("Create fork", undefined, undefined, uiLocale)}
             </Button>
           </div>
         </DialogPanel>

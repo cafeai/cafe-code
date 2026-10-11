@@ -1,3 +1,5 @@
+import { useUiLocale } from "~/i18n";
+import { uiText } from "@cafecode/shared/i18n";
 import { type ApprovalRequestId, type ProviderApprovalDecision } from "@cafecode/contracts";
 import { memo, useEffect, useRef } from "react";
 import { Button } from "../ui/button";
@@ -24,6 +26,8 @@ export const ComposerPendingApprovalActions = memo(function ComposerPendingAppro
   networkApproval = false,
   onRespondToApproval,
 }: ComposerPendingApprovalActionsProps) {
+  const uiLocale = useUiLocale();
+
   const declineRef = useRef<HTMLButtonElement>(null);
   useEffect(() => {
     // Sensitive asks must not land on an approval button after a stray Enter.
@@ -38,7 +42,7 @@ export const ComposerPendingApprovalActions = memo(function ComposerPendingAppro
         disabled={isResponding}
         onClick={() => void onRespondToApproval(requestId, "cancel")}
       >
-        Cancel turn
+        {uiText("Cancel turn", undefined, undefined, uiLocale)}
       </Button>
       <Button
         ref={declineRef}
@@ -47,7 +51,7 @@ export const ComposerPendingApprovalActions = memo(function ComposerPendingAppro
         disabled={isResponding}
         onClick={() => void onRespondToApproval(requestId, "decline")}
       >
-        Decline
+        {uiText("Decline", undefined, undefined, uiLocale)}
       </Button>
       {!suppressAlwaysAllowRule && (
         <span className="inline-flex items-center gap-1">
@@ -57,12 +61,22 @@ export const ComposerPendingApprovalActions = memo(function ComposerPendingAppro
             disabled={isResponding}
             onClick={() => void onRespondToApproval(requestId, "acceptForSession")}
           >
-            Always allow this session
+            {uiText("Always allow this session", undefined, undefined, uiLocale)}
           </Button>
-          <InfoTip label="About session approval">
+          <InfoTip label={uiText("About session approval", undefined, undefined, uiLocale)}>
             {networkApproval
-              ? "Allows this network destination until the provider session ends."
-              : "Allows matching requests until the provider session ends."}
+              ? uiText(
+                  "Allows this network destination until the provider session ends.",
+                  undefined,
+                  undefined,
+                  uiLocale,
+                )
+              : uiText(
+                  "Allows matching requests until the provider session ends.",
+                  undefined,
+                  undefined,
+                  uiLocale,
+                )}
           </InfoTip>
         </span>
       )}
@@ -72,7 +86,7 @@ export const ComposerPendingApprovalActions = memo(function ComposerPendingAppro
         disabled={isResponding}
         onClick={() => void onRespondToApproval(requestId, "accept")}
       >
-        Approve once
+        {uiText("Approve once", undefined, undefined, uiLocale)}
       </Button>
     </>
   );

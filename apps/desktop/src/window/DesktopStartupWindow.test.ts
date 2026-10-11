@@ -7,6 +7,7 @@ import * as Effect from "effect/Effect";
 import * as Ref from "effect/Ref";
 import * as TestClock from "effect/testing/TestClock";
 import { vi } from "vitest";
+import { setUiLocale, uiText } from "@cafecode/shared/i18n";
 
 const { getAllWindowsMock, getFocusedWindowMock } = vi.hoisted(() => ({
   getAllWindowsMock: vi.fn(),
@@ -82,6 +83,44 @@ describe("DesktopStartupDocument", () => {
 });
 
 describe("DesktopStartupWindow", () => {
+  it.effect(
+    "refreshes only the inert document on a presentation switch and retires its listener",
+    () =>
+      Effect.gen(function* () {
+        const fixture = fakeWindow();
+        const quitting = yield* Ref.make(false);
+        setUiLocale("en");
+        yield* Effect.scoped(
+          Effect.gen(function* () {
+            const status = yield* makeDesktopStartupWindow({
+              create: () => Effect.succeed(fixture.window),
+              appearance: Effect.succeed({ dark: true, scalePercent: 100 }),
+              onThemeUpdated: () => Effect.void,
+              requestQuit: Effect.die("language cannot request quit"),
+              quitting,
+            });
+            yield* status.begin;
+            yield* TestClock.adjust(Duration.millis(250));
+            for (const locale of ["ja", "ko"] as const) {
+              setUiLocale(locale);
+              const document = decodeURIComponent(
+                fixture.target.loadURL.mock.calls.at(-1)![0].split(",")[1]!,
+              );
+              assert.include(document, `lang="${locale}"`);
+              assert.include(document, uiText("Starting…", undefined, undefined, locale));
+              assert.include(document, "script-src 'none'");
+              assert.include(document, "connect-src 'none'");
+              assert.notInclude(document, "<script");
+            }
+            assert.equal(fixture.target.loadURL.mock.calls.length, 3);
+          }),
+        );
+        const loads = fixture.target.loadURL.mock.calls.length;
+        setUiLocale("en");
+        assert.equal(fixture.target.loadURL.mock.calls.length, loads);
+        assert.equal(fixture.target.destroy.mock.calls.length, 1);
+      }).pipe(Effect.ensuring(Effect.sync(() => setUiLocale("en")))),
+  );
   it.effect("does not flash a window for a startup completed inside the delay", () =>
     Effect.scoped(
       Effect.gen(function* () {

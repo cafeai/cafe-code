@@ -1,3 +1,4 @@
+import { uiText } from "@cafecode/shared/i18n";
 /**
  * Local dictation styles are intentionally mechanical. Realtime transcription
  * hints are not exact formatting controls, while a text-model rewrite crosses
@@ -15,12 +16,24 @@ export type LocalWritingStyle =
 export type WritingStyle = LocalWritingStyle | "formal" | "custom";
 
 export const writingStyleLabels: Readonly<Record<WritingStyle, string>> = {
-  "as-transcribed": "As transcribed",
-  lowercase: "lowercase",
-  "no-punctuation": "no punctuation",
-  "lowercase-no-punctuation": "lowercase + no punctuation",
-  formal: "Formal",
-  custom: "Custom",
+  get "as-transcribed"() {
+    return uiText("As transcribed");
+  },
+  get lowercase() {
+    return uiText("lowercase");
+  },
+  get "no-punctuation"() {
+    return uiText("no punctuation");
+  },
+  get "lowercase-no-punctuation"() {
+    return uiText("lowercase + no punctuation");
+  },
+  get formal() {
+    return uiText("Formal");
+  },
+  get custom() {
+    return uiText("Custom");
+  },
 };
 
 export function applyLocalWritingStyle(source: string, style: LocalWritingStyle): string {

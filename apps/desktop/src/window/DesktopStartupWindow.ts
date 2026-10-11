@@ -10,6 +10,7 @@ import * as Ref from "effect/Ref";
 import * as Scope from "effect/Scope";
 
 import type { ProviderDaemonStartupProgress } from "@cafecode/shared/backendStartupProgress";
+import { subscribeUiLocale } from "@cafecode/shared/i18n";
 import * as DesktopObservability from "../app/DesktopObservability.ts";
 import * as DesktopState from "../app/DesktopState.ts";
 import * as ElectronApp from "../electron/ElectronApp.ts";
@@ -86,6 +87,15 @@ export const makeDesktopStartupWindow = Effect.fn("desktop.startupWindow.make")(
     if (fiber) yield* Fiber.interrupt(fiber);
   });
   yield* Effect.addFinalizer(() => close);
+  yield* Effect.acquireRelease(
+    Effect.sync(() =>
+      subscribeUiLocale(() => {
+        const target = window;
+        if (target) render(target);
+      }),
+    ),
+    (unsubscribe) => Effect.sync(unsubscribe),
+  );
 
   yield* input.onThemeUpdated(() => {
     void runPromise(

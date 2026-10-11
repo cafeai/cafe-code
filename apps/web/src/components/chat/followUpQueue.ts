@@ -1,3 +1,4 @@
+import { uiText } from "@cafecode/shared/i18n";
 import type {
   ModelSelection,
   ProviderDeliveryPriority,
@@ -230,7 +231,10 @@ export function hasQueuedFollowUpDispatchBeenObserved(
   );
 }
 
-export function previewQueuedFollowUpText(text: string, fallback = "Image-only follow-up"): string {
+export function previewQueuedFollowUpText(
+  text: string,
+  fallback = uiText("Image-only follow-up"),
+): string {
   const normalized = text.trim().replace(/\s+/g, " ");
   return normalized.length > 0 ? normalized : fallback;
 }
@@ -271,11 +275,11 @@ export function decideQueuedFollowUpAction(input: QueuedFollowUpActionInput): Qu
 export function queuedFollowUpActionLabel(input: {
   readonly phase: SessionPhase;
   readonly liveSteerSupported: boolean;
-}): "Send" {
+}): string {
   if (input.phase !== "running") {
-    return "Send";
+    return uiText("Send");
   }
-  return "Send";
+  return uiText("Send");
 }
 
 export function queuedFollowUpActionTitle(input: {
@@ -283,9 +287,9 @@ export function queuedFollowUpActionTitle(input: {
   readonly liveSteerSupported: boolean;
 }): string {
   if (input.phase !== "running") {
-    return "Send this queued follow-up now.";
+    return uiText("Send this queued follow-up now.");
   }
-  return "Cafe Code will send this follow-up as soon as the active turn can accept it.";
+  return uiText("Cafe Code will send this follow-up as soon as the active turn can accept it.");
 }
 
 export interface RekeyQueuedFollowUpsInput<

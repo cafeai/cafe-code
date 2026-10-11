@@ -1,5 +1,8 @@
-"use client";
+import { useUiLocale } from "~/i18n";
+("use client");
 
+import { uiText } from "@cafecode/shared/i18n";
+import { UiMessage } from "~/i18n";
 import { useState } from "react";
 import type { ProviderInstanceConfig, ServerProvider } from "@cafecode/contracts";
 
@@ -45,6 +48,8 @@ export function GrokSandboxSettings({
   sandbox,
   onUpdate,
 }: GrokSandboxSettingsProps) {
+  const uiLocale = useUiLocale();
+
   const [confirmation, setConfirmation] = useState<"unprotected" | "protected" | null>(null);
   const allowUnsandboxedProbe = readProviderConfigBoolean(instance.config, "allowUnsandboxedProbe");
   const needsAttention = sandbox?.status === "unavailable" || allowUnsandboxedProbe;
@@ -70,14 +75,24 @@ export function GrokSandboxSettings({
   };
 
   const sandboxDetail = allowUnsandboxedProbe
-    ? "Checks run outside the OS sandbox, so sandbox support isn't checked."
+    ? uiText(
+        "Checks run outside the OS sandbox, so sandbox support isn''t checked.",
+        undefined,
+        undefined,
+        uiLocale,
+      )
     : sandbox?.status === "unavailable"
       ? sandbox.reason === "container-socket-symlink"
-        ? "Grok's sandbox cannot start with a symlinked container-runtime socket."
-        : "Grok's sandbox could not start on this machine."
+        ? uiText(
+            "Grok''s sandbox cannot start with a symlinked container-runtime socket.",
+            undefined,
+            undefined,
+            uiLocale,
+          )
+        : uiText("Grok''s sandbox could not start on this machine.", undefined, undefined, uiLocale)
       : sandbox?.status === "available"
-        ? "The last check verified that the sandbox starts."
-        : "Sandbox support hasn't been checked yet.";
+        ? uiText("The last check verified that the sandbox starts.", undefined, undefined, uiLocale)
+        : uiText("Sandbox support hasn''t been checked yet.", undefined, undefined, uiLocale);
 
   return (
     <div
@@ -89,15 +104,19 @@ export function GrokSandboxSettings({
         <div className="grid min-w-0 gap-0.5">
           <p className="text-xs font-medium text-foreground">
             {allowUnsandboxedProbe
-              ? "Unsandboxed connection checks enabled"
-              : "Protected connection checks"}
+              ? uiText("Unsandboxed connection checks enabled", undefined, undefined, uiLocale)
+              : uiText("Protected connection checks", undefined, undefined, uiLocale)}
           </p>
           <div className="flex min-w-0 items-center gap-1">
             <p className="text-xs text-muted-foreground">{sandboxDetail}</p>
             {allowUnsandboxedProbe ? (
-              <InfoTip label="About unsandboxed checks">
-                To chat without a sandbox, select Full access; it also bypasses approval prompts.
-                Plan and protected modes may still fail.
+              <InfoTip label={uiText("About unsandboxed checks", undefined, undefined, uiLocale)}>
+                {uiText(
+                  "To chat without a sandbox, select Full access; it also bypasses approval prompts. Plan and protected modes may still fail.",
+                  undefined,
+                  undefined,
+                  uiLocale,
+                )}
               </InfoTip>
             ) : null}
           </div>
@@ -109,7 +128,9 @@ export function GrokSandboxSettings({
           className="shrink-0"
           onClick={() => setConfirmation(allowUnsandboxedProbe ? "protected" : "unprotected")}
         >
-          {allowUnsandboxedProbe ? "Use protected checks" : "Use without sandbox"}
+          {allowUnsandboxedProbe
+            ? uiText("Use protected checks", undefined, undefined, uiLocale)
+            : uiText("Use without sandbox", undefined, undefined, uiLocale)}
         </Button>
       </div>
 
@@ -123,35 +144,61 @@ export function GrokSandboxSettings({
           <DialogHeader>
             <DialogTitle>
               {confirmation === "protected"
-                ? "Restore protected connection checks?"
-                : "Use Grok without sandbox?"}
+                ? uiText("Restore protected connection checks?", undefined, undefined, uiLocale)
+                : uiText("Use Grok without sandbox?", undefined, undefined, uiLocale)}
             </DialogTitle>
             <DialogDescription>
               {/* The missing OS boundary must be disclosed here, and approval
                   prompts must not be presented as a substitute for it
                   (docs/decisions/grok-explicit-full-access-qualification.md). */}
               {confirmation === "protected"
-                ? `${displayName} will require sandboxed connection checks again. Chat access modes don't change.`
-                : `${displayName} will run connection checks outside the OS sandbox. They use Ask permissions, which don't replace a sandbox, and send no chat prompt.`}
+                ? uiText(
+                    "{value0} will require sandboxed connection checks again. Chat access modes don''t change.",
+                    { value0: displayName },
+                    undefined,
+                    uiLocale,
+                  )
+                : uiText(
+                    "{value0} will run connection checks outside the OS sandbox. They use Ask permissions, which don''t replace a sandbox, and send no chat prompt.",
+                    { value0: displayName },
+                    undefined,
+                    uiLocale,
+                  )}
             </DialogDescription>
           </DialogHeader>
           <DialogPanel className="space-y-2 text-sm text-muted-foreground">
             <p>
               {confirmation === "protected"
-                ? "If the sandbox can't start on this machine, connection checks will fail again."
-                : "Chat access modes don't change. To chat without a sandbox, select Full access; it also bypasses approval prompts. Plan and protected modes may still fail."}
+                ? uiText(
+                    "If the sandbox can''t start on this machine, connection checks will fail again.",
+                    undefined,
+                    undefined,
+                    uiLocale,
+                  )
+                : uiText(
+                    "Chat access modes don''t change. To chat without a sandbox, select Full access; it also bypasses approval prompts. Plan and protected modes may still fail.",
+                    undefined,
+                    undefined,
+                    uiLocale,
+                  )}
             </p>
             <p>
-              Saving reloads {displayName} and may interrupt active chats. Change it between
-              sessions.
+              <UiMessage
+                message={
+                  "Saving reloads <slot1></slot1> and may interrupt active chats. Change it between sessions."
+                }
+                slots={{ slot1: displayName }}
+              />
             </p>
           </DialogPanel>
           <DialogFooter>
             <Button type="button" variant="outline" onClick={() => setConfirmation(null)}>
-              Cancel
+              {uiText("Cancel", undefined, undefined, uiLocale)}
             </Button>
             <Button type="button" onClick={confirmChange}>
-              {confirmation === "protected" ? "Use protected checks" : "Use without sandbox"}
+              {confirmation === "protected"
+                ? uiText("Use protected checks", undefined, undefined, uiLocale)
+                : uiText("Use without sandbox", undefined, undefined, uiLocale)}
             </Button>
           </DialogFooter>
         </DialogPopup>

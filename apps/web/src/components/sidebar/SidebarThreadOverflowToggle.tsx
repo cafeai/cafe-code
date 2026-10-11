@@ -1,3 +1,5 @@
+import { useUiLocale } from "~/i18n";
+import { uiText } from "@cafecode/shared/i18n";
 import { ChevronDownIcon } from "lucide-react";
 import { useMemo } from "react";
 import type { HiddenThreadStatusSummary } from "../Sidebar.logic";
@@ -31,14 +33,25 @@ export function SidebarThreadOverflowToggle({
   hiddenSummary: HiddenThreadStatusSummary | null;
   onToggle: () => void;
 }) {
+  const uiLocale = useUiLocale();
+
   const buttonRender = useMemo(() => <button type="button" />, []);
   const summary = expanded ? null : hiddenSummary;
-  const label = expanded ? "Show fewer" : `${hiddenCount} more`;
+  const label = expanded
+    ? uiText("Show fewer", undefined, undefined, uiLocale)
+    : uiText("{count} more", { count: hiddenCount }, undefined, uiLocale);
   const accessibleLabel = expanded
-    ? "Show fewer chats"
-    : `Show ${hiddenCount} more ${hiddenCount === 1 ? "chat" : "chats"}${
-        summary ? `, ${summary.text}` : ""
-      }`;
+    ? uiText("Show fewer chats", undefined, undefined, uiLocale)
+    : uiText(
+        "Show {count, plural, one {{count} more chat} other {{count} more chats}}{hasSummary, select, yes {, {summary}} other {}}",
+        {
+          count: hiddenCount,
+          hasSummary: summary ? "yes" : "no",
+          summary: summary?.text ?? "",
+        },
+        undefined,
+        uiLocale,
+      );
 
   return (
     <SidebarMenuSubItem className="w-full">

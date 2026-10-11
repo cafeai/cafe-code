@@ -1,3 +1,6 @@
+import { useUiLocale, useUiPresentation } from "~/i18n";
+import { uiText } from "@cafecode/shared/i18n";
+import { UiMessage } from "~/i18n";
 import { ChevronDownIcon, GitPullRequestIcon, RefreshCwIcon } from "lucide-react";
 import * as Duration from "effect/Duration";
 import * as Option from "effect/Option";
@@ -98,12 +101,12 @@ function authPresentation(auth: SourceControlProviderAuth): {
   readonly badge: "warning" | null;
 } {
   if (auth.status === "authenticated") {
-    return { label: "Authenticated", badge: null };
+    return { label: uiText("Authenticated"), badge: null };
   }
   if (auth.status === "unauthenticated") {
-    return { label: "Not authenticated", badge: "warning" };
+    return { label: uiText("Not authenticated"), badge: "warning" };
   }
-  return { label: "Status unknown", badge: null };
+  return { label: uiText("Status unknown"), badge: null };
 }
 
 function RedactedAccount(props: { readonly account: string | null }) {
@@ -161,17 +164,24 @@ function itemSummary({
   readonly authAccount: string | null;
 }) {
   if (item.status !== "available") {
-    return <span>Not available on this server: {item.installHint}</span>;
+    return (
+      <span>
+        <UiMessage
+          message={"Not available on this server: <slot1></slot1>"}
+          slots={{ slot1: item.installHint }}
+        />
+      </span>
+    );
   }
 
   if (auth) {
     if (auth.status === "authenticated") {
       return (
         <>
-          <span>Authenticated</span>
+          <span>{uiText("Authenticated")}</span>
           {authAccount ? (
             <>
-              <span aria-hidden>as</span>
+              <span aria-hidden>{uiText("as")}</span>
               <RedactedAccount account={authAccount} />
             </>
           ) : null}
@@ -186,20 +196,31 @@ function itemSummary({
     if (auth.status === "unauthenticated") {
       return (
         <span>
-          Sign in with{" "}
-          <code className="rounded-sm bg-muted px-1 py-px text-2xs">{item.executable}</code> on the
-          server to enable pull requests.
+          <UiMessage
+            message={
+              "Sign in with<slot1></slot1><slot3></slot3> on the server to enable pull requests."
+            }
+            slots={{
+              slot1: " ",
+              slot3: (
+                <code className="rounded-sm bg-muted px-1 py-px text-2xs">{item.executable}</code>
+              ),
+            }}
+          />
         </span>
       );
     }
     return (
       <span>
-        Could not verify {item.label}. {item.installHint}
+        <UiMessage
+          message={"Could not verify <slot1></slot1>. <slot3></slot3>"}
+          slots={{ slot1: item.label, slot3: item.installHint }}
+        />
       </span>
     );
   }
 
-  return <span>Available</span>;
+  return <span>{uiText("Available")}</span>;
 }
 
 function DiscoveryItemRow({
@@ -209,10 +230,13 @@ function DiscoveryItemRow({
   readonly item: VcsDiscoveryItem | SourceControlProviderDiscoveryItem;
   readonly children?: ReactNode;
 }) {
+  const uiLocale = useUiLocale();
+  const uiPresentation = useUiPresentation(UI_PRESENTATION_SOURCES);
+
   const version = optionLabel(item.version);
   const enabled = item.status === "available";
   const auth = isProviderDiscoveryItem(item) ? item.auth : null;
-  const authStatus = auth ? authPresentation(auth) : null;
+  const authStatus = auth ? uiPresentation.authPresentation(auth) : null;
   const authAccount = auth ? optionLabel(auth.account) : null;
   const [isExpanded, setIsExpanded] = useState(false);
   const hasDetails = children !== undefined;
@@ -233,7 +257,7 @@ function DiscoveryItemRow({
               ) : null}
             </div>
             <p className="flex min-w-0 flex-wrap items-center gap-x-1 text-xs text-muted-foreground">
-              {itemSummary({ item, auth, authAccount })}
+              {uiPresentation.itemSummary({ item, auth, authAccount })}
             </p>
           </div>
           <div className="flex w-full shrink-0 items-center gap-2 sm:w-auto sm:justify-end">
@@ -244,7 +268,12 @@ function DiscoveryItemRow({
                 className="h-7 px-2 text-xs text-muted-foreground hover:text-foreground"
                 onClick={() => setIsExpanded((open) => !open)}
                 aria-expanded={isExpanded}
-                aria-label={`Toggle ${item.label} details`}
+                aria-label={uiText(
+                  "Toggle {value0} details",
+                  { value0: item.label },
+                  undefined,
+                  uiLocale,
+                )}
               >
                 <ChevronDownIcon
                   className={cn(
@@ -254,7 +283,16 @@ function DiscoveryItemRow({
                 />
               </Button>
             ) : null}
-            <Switch checked={enabled} disabled aria-label={`${item.label} availability`} />
+            <Switch
+              checked={enabled}
+              disabled
+              aria-label={uiText(
+                "{value0} availability",
+                { value0: item.label },
+                undefined,
+                uiLocale,
+              )}
+            />
           </div>
         </div>
       </div>
@@ -273,6 +311,8 @@ function DiscoveryItemRow({
 }
 
 function GitFetchIntervalSettings() {
+  const uiLocale = useUiLocale();
+
   const automaticGitFetchInterval = useSettings((settings) => settings.automaticGitFetchInterval);
   const { updateSettings } = useUpdateSettings();
   const automaticGitFetchIntervalSeconds = durationToSeconds(automaticGitFetchInterval);
@@ -287,7 +327,9 @@ function GitFetchIntervalSettings() {
       <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
         <div className="min-w-0 space-y-1">
           <div className="flex min-w-0 items-center gap-1">
-            <span className="text-xs font-medium text-foreground">Fetch interval</span>
+            <span className="text-xs font-medium text-foreground">
+              {uiText("Fetch interval", undefined, undefined, uiLocale)}
+            </span>
             <span
               className={cn(
                 "inline-flex size-5 shrink-0 items-center justify-center transition-opacity",
@@ -297,7 +339,7 @@ function GitFetchIntervalSettings() {
             >
               {canResetFetchInterval ? (
                 <SettingResetButton
-                  label="fetch interval"
+                  label={uiText("fetch interval", undefined, undefined, uiLocale)}
                   onClick={() =>
                     updateSettings({
                       automaticGitFetchInterval: DEFAULT_UNIFIED_SETTINGS.automaticGitFetchInterval,
@@ -308,11 +350,23 @@ function GitFetchIntervalSettings() {
             </span>
           </div>
           <p className="flex items-center gap-1.5 text-xs text-muted-foreground">
-            Checks remote branches in the background. 0 turns it off.
-            <InfoTip label="About the fetch interval">
-              Use 0 if Git credentials or security keys should only prompt during Git actions you
-              start.
-            </InfoTip>
+            <UiMessage
+              message={"Checks remote branches in the background. 0 turns it off.<slot1></slot1>"}
+              slots={{
+                slot1: (
+                  <InfoTip
+                    label={uiText("About the fetch interval", undefined, undefined, uiLocale)}
+                  >
+                    {uiText(
+                      "Use 0 if Git credentials or security keys should only prompt during Git actions you start.",
+                      undefined,
+                      undefined,
+                      uiLocale,
+                    )}
+                  </InfoTip>
+                ),
+              }}
+            />
           </p>
         </div>
         <div className="flex shrink-0 items-center gap-2">
@@ -329,12 +383,25 @@ function GitFetchIntervalSettings() {
             }
           >
             <NumberFieldGroup>
-              <NumberFieldDecrement aria-label="Decrease fetch interval" />
-              <NumberFieldInput aria-label="Automatic Git fetch interval in seconds" />
-              <NumberFieldIncrement aria-label="Increase fetch interval" />
+              <NumberFieldDecrement
+                aria-label={uiText("Decrease fetch interval", undefined, undefined, uiLocale)}
+              />
+              <NumberFieldInput
+                aria-label={uiText(
+                  "Automatic Git fetch interval in seconds",
+                  undefined,
+                  undefined,
+                  uiLocale,
+                )}
+              />
+              <NumberFieldIncrement
+                aria-label={uiText("Increase fetch interval", undefined, undefined, uiLocale)}
+              />
             </NumberFieldGroup>
           </NumberField>
-          <span className="text-xs text-muted-foreground">seconds</span>
+          <span className="text-xs text-muted-foreground">
+            {uiText("seconds", undefined, undefined, uiLocale)}
+          </span>
         </div>
       </div>
     </div>
@@ -390,20 +457,26 @@ function EmptySourceControlDiscovery({
   readonly isPending: boolean;
   readonly onScan: () => void;
 }) {
+  const uiLocale = useUiLocale();
+
   const hasError = error !== null;
 
   return (
-    <SettingsSection title="Server environment">
+    <SettingsSection title={uiText("Server environment", undefined, undefined, uiLocale)}>
       <Empty className="min-h-88">
         <EmptyMedia variant="icon">
           <GitPullRequestIcon />
         </EmptyMedia>
         <EmptyHeader>
           <EmptyTitle>
-            {hasError ? "Could not scan the server environment" : "Nothing detected yet"}
+            {hasError
+              ? uiText("Could not scan the server environment", undefined, undefined, uiLocale)
+              : uiText("Nothing detected yet", undefined, undefined, uiLocale)}
           </EmptyTitle>
           <EmptyDescription>
-            {hasError ? error : "Install Git on the server, then rescan."}
+            {hasError
+              ? error
+              : uiText("Install Git on the server, then rescan.", undefined, undefined, uiLocale)}
           </EmptyDescription>
         </EmptyHeader>
         <EmptyContent>
@@ -415,7 +488,7 @@ function EmptySourceControlDiscovery({
             disabled={isPending}
           >
             <RefreshCwIcon className={cn("size-3.5", isPending && "animate-spin")} />
-            Scan
+            {uiText("Scan", undefined, undefined, uiLocale)}
           </Button>
         </EmptyContent>
       </Empty>
@@ -424,6 +497,8 @@ function EmptySourceControlDiscovery({
 }
 
 export function SourceControlSettingsPanel() {
+  const uiLocale = useUiLocale();
+
   const discovery = useSourceControlDiscovery();
   const result = discovery.data ?? EMPTY_DISCOVERY_RESULT;
   const hasDiscoveryItems =
@@ -444,33 +519,43 @@ export function SourceControlSettingsPanel() {
             className="size-5 rounded-sm p-0 text-muted-foreground hover:text-foreground"
             onClick={handleScan}
             disabled={discovery.isPending}
-            aria-label="Rescan server environment"
+            aria-label={uiText("Rescan server environment", undefined, undefined, uiLocale)}
           >
             <RefreshCwIcon className={cn("size-3", discovery.isPending && "animate-spin")} />
           </Button>
         }
       />
-      <TooltipPopup side="top">Rescan Git and hosting integrations</TooltipPopup>
+      <TooltipPopup side="top">
+        {uiText("Rescan Git and hosting integrations", undefined, undefined, uiLocale)}
+      </TooltipPopup>
     </Tooltip>
   );
 
   return (
-    <SettingsPageContainer title="Source control">
-      <SettingsSection title="Generated text">
+    <SettingsPageContainer title={uiText("Source control", undefined, undefined, uiLocale)}>
+      <SettingsSection title={uiText("Generated text", undefined, undefined, uiLocale)}>
         <TextGenerationModelSettingsRow />
       </SettingsSection>
 
       {isInitialScanPending || showInitialScanSkeleton ? (
         showInitialScanSkeleton ? (
           <>
-            <SourceControlSectionSkeleton title="Version control" headerAction={scanButton} />
-            <SourceControlSectionSkeleton title="Source control providers" />
+            <SourceControlSectionSkeleton
+              title={uiText("Version control", undefined, undefined, uiLocale)}
+              headerAction={scanButton}
+            />
+            <SourceControlSectionSkeleton
+              title={uiText("Source control providers", undefined, undefined, uiLocale)}
+            />
           </>
         ) : null
       ) : hasDiscoveryItems ? (
         <>
           {result.versionControlSystems.length > 0 ? (
-            <SettingsSection title="Version control" headerAction={scanButton}>
+            <SettingsSection
+              title={uiText("Version control", undefined, undefined, uiLocale)}
+              headerAction={scanButton}
+            >
               {result.versionControlSystems.map((item) => (
                 <DiscoveryItemRow key={`vcs:${item.kind}`} item={item}>
                   {item.kind === "git" ? <GitFetchIntervalSettings /> : undefined}
@@ -481,7 +566,7 @@ export function SourceControlSettingsPanel() {
 
           {result.sourceControlProviders.length > 0 ? (
             <SettingsSection
-              title="Source control providers"
+              title={uiText("Source control providers", undefined, undefined, uiLocale)}
               headerAction={result.versionControlSystems.length === 0 ? scanButton : null}
             >
               {result.sourceControlProviders.map((item) => (
@@ -500,3 +585,6 @@ export function SourceControlSettingsPanel() {
     </SettingsPageContainer>
   );
 }
+
+// Finite source-owned labels/helpers only; no received or user data.
+const UI_PRESENTATION_SOURCES = { authPresentation, itemSummary };

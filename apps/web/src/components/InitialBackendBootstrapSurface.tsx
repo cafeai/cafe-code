@@ -1,3 +1,5 @@
+import { useUiLocale, useUiPresentation } from "~/i18n";
+import { uiText } from "@cafecode/shared/i18n";
 import * as Schema from "effect/Schema";
 import {
   createContext,
@@ -54,12 +56,21 @@ function describeBootstrapStatus(input: { readonly problem: "offline" | "error" 
   readonly title: string;
 } {
   if (input.problem === "offline") {
-    return { detail: "Waiting for a network connection.", title: "Connecting to workspace" };
+    return {
+      detail: uiText("Waiting for a network connection."),
+      title: uiText("Connecting to workspace"),
+    };
   }
   if (input.problem === "error") {
-    return { detail: "Waiting for the workspace to respond.", title: "Connecting to workspace" };
+    return {
+      detail: uiText("Waiting for the workspace to respond."),
+      title: uiText("Connecting to workspace"),
+    };
   }
-  return { detail: "Loading projects and chats.", title: "Connecting to workspace" };
+  return {
+    detail: uiText("Loading projects and chats."),
+    title: uiText("Connecting to workspace"),
+  };
 }
 
 /**
@@ -141,9 +152,11 @@ export function StartupSkeleton({
   readonly problem?: "offline" | "error" | null;
   readonly animateIn?: boolean;
 }) {
+  const uiPresentation = useUiPresentation(UI_PRESENTATION_SOURCES);
+
   const showStatus = useDelayedFlag(true, { delayMs: STARTUP_STATUS_DELAY_MS });
   const showProblem = useDelayedFlag(problem !== null, { delayMs: STARTUP_PROBLEM_DELAY_MS });
-  const copy = describeBootstrapStatus({ problem: showProblem ? problem : null });
+  const copy = uiPresentation.describeBootstrapStatus({ problem: showProblem ? problem : null });
 
   return (
     <div
@@ -246,3 +259,6 @@ export function InitialBackendBootstrapSurface({ children }: { readonly children
     <StartupSkeleton problem={uiState === "offline" || uiState === "error" ? uiState : null} />
   );
 }
+
+// Finite source-owned labels/helpers only; no received or user data.
+const UI_PRESENTATION_SOURCES = { describeBootstrapStatus };

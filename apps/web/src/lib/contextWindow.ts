@@ -1,4 +1,5 @@
 import type { OrchestrationThreadActivity, ThreadTokenUsageSnapshot } from "@cafecode/contracts";
+import { uiText } from "@cafecode/shared/i18n";
 
 function asRecord(value: unknown): Record<string, unknown> | null {
   return value && typeof value === "object" ? (value as Record<string, unknown>) : null;
@@ -85,10 +86,14 @@ export function formatContextWindowTokens(value: number | null): string {
     return `${Math.round(value)}`;
   }
   if (value < 10_000) {
-    return `${(value / 1_000).toFixed(1).replace(/\.0$/, "")}k`;
+    return uiText("{value}k", { value: (value / 1_000).toFixed(1).replace(/\.0$/, "") });
   }
   if (value < 1_000_000) {
-    return `${Math.round(value / 1_000)}k`;
+    return uiText("{value}k", { value: Math.round(value / 1_000) });
   }
-  return `${(value / 1_000_000).toFixed(1).replace(/\.0$/, "")}m`;
+  return uiText(
+    "{value}m",
+    { value: (value / 1_000_000).toFixed(1).replace(/\.0$/, "") },
+    "compact-token-count",
+  );
 }

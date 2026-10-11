@@ -1,3 +1,4 @@
+import { uiText } from "@cafecode/shared/i18n";
 import {
   ChatFileAttachment,
   EnvironmentId,
@@ -60,7 +61,9 @@ export function hydrateComposerFile(value: unknown): ComposerFileAttachment | nu
     environmentId: value.environmentId as EnvironmentId,
     targetThreadId: value.targetThreadId as ThreadId,
     status: ready ? "ready" : "failed",
-    ...(ready ? {} : { error: "Upload not completed. Remove this file and select it again." }),
+    ...(ready
+      ? {}
+      : { error: uiText("Upload not completed. Remove this file and select it again.") }),
   };
 }
 
@@ -94,7 +97,9 @@ export function readyComposerFiles(
       file.targetThreadId !== targetThreadId
     ) {
       throw new Error(
-        "Finish or remove every file upload before sending. Files must belong to the selected environment.",
+        uiText(
+          "Finish or remove every file upload before sending. Files must belong to the selected environment.",
+        ),
       );
     }
     return file.attachment;

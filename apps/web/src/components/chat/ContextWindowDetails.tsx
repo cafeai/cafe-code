@@ -1,3 +1,6 @@
+import { useUiLocale, useUiPresentation } from "~/i18n";
+import { uiText } from "@cafecode/shared/i18n";
+import { UiMessage } from "~/i18n";
 import type { ReactNode } from "react";
 import type { ServerProviderAccountRateLimits } from "@cafecode/contracts";
 
@@ -22,6 +25,12 @@ function formatPercentage(value: number | null): string | null {
   return `${Math.round(value)}%`;
 }
 
+/** Keep the capacity phrase's existing span while the complete context summary
+ * remains reorderable. This pure, code-owned wrapper has no action authority. */
+function renderContextCapacity(parts: (string | ReactNode)[]): ReactNode {
+  return <span>{parts}</span>;
+}
+
 export function ContextWindowDetails(props: {
   readonly usage: ContextWindowSnapshot | null | undefined;
   readonly rateLimits?: ServerProviderAccountRateLimits | null | undefined;
@@ -31,9 +40,12 @@ export function ContextWindowDetails(props: {
   readonly usageResetAction?: ReactNode;
   readonly subagentConcurrency?: SubagentConcurrencyPresentation | null | undefined;
 }) {
+  const uiLocale = useUiLocale();
+  const uiPresentation = useUiPresentation(UI_PRESENTATION_SOURCES);
+
   const usage = props.usage ?? null;
   const layout = props.layout ?? "popover";
-  const quota = formatCodexRateLimitPresentation(props.rateLimits);
+  const quota = uiPresentation.formatCodexRateLimitPresentation(props.rateLimits);
   const usedPercentage = usage ? formatPercentage(usage.usedPercentage) : null;
   const normalizedPercentage = Math.max(0, Math.min(100, usage?.usedPercentage ?? 0));
   const hasUsage = usage !== null;
@@ -42,7 +54,11 @@ export function ContextWindowDetails(props: {
   const hasSubagentLimit = formatSubagentConcurrencyLimit(props.subagentConcurrency) !== null;
 
   if (!hasUsage && !hasRateLimits && !hasSubagentLimit && !hasSessionQuota) {
-    return <p className="text-ui text-subtle-foreground">Waiting for usage from this chat.</p>;
+    return (
+      <p className="text-ui text-subtle-foreground">
+        {uiText("Waiting for usage from this chat.", undefined, undefined, uiLocale)}
+      </p>
+    );
   }
 
   return (
@@ -54,11 +70,15 @@ export function ContextWindowDetails(props: {
     >
       {layout === "popover" && (hasUsage || !hasSessionQuota) ? (
         <div className="flex items-center justify-between gap-2">
-          <div className="label-overline">Context window</div>
+          <div className="label-overline">
+            {uiText("Context window", undefined, undefined, uiLocale)}
+          </div>
           {props.headerAction}
         </div>
       ) : hasUsage || !hasSessionQuota ? (
-        <div className="label-overline">Context window</div>
+        <div className="label-overline">
+          {uiText("Context window", undefined, undefined, uiLocale)}
+        </div>
       ) : null}
 
       {hasUsage && layout === "panel" ? (
@@ -74,11 +94,21 @@ export function ContextWindowDetails(props: {
               : "whitespace-nowrap text-xs font-medium tabular-nums",
           )}
         >
-          <span>{usedPercentage}</span>
-          <span className="mx-1">⋅</span>
-          <span>{formatContextWindowTokens(usage.usedTokens)}</span>
-          <span>/</span>
-          <span>{formatContextWindowTokens(usage.maxTokens ?? null)} context used</span>
+          <UiMessage
+            message={
+              "<percentage></percentage><separator></separator><used></used><divider></divider><capacity>{maximum} context used</capacity>"
+            }
+            values={{
+              maximum: formatContextWindowTokens(usage.maxTokens ?? null),
+              capacity: renderContextCapacity,
+            }}
+            slots={{
+              percentage: <span>{usedPercentage}</span>,
+              separator: <span className="mx-1">⋅</span>,
+              used: <span>{formatContextWindowTokens(usage.usedTokens)}</span>,
+              divider: <span>/</span>,
+            }}
+          />
         </div>
       ) : hasUsage ? (
         <div
@@ -86,7 +116,14 @@ export function ContextWindowDetails(props: {
             layout === "panel" ? "text-ui text-foreground tabular-nums" : "text-sm text-foreground"
           }
         >
-          {formatContextWindowTokens(usage.usedTokens)} tokens used so far
+          {uiText(
+            "{tokens} tokens used so far",
+            {
+              tokens: formatContextWindowTokens(usage.usedTokens),
+            },
+            undefined,
+            uiLocale,
+          )}
         </div>
       ) : null}
 
@@ -94,17 +131,34 @@ export function ContextWindowDetails(props: {
       (usage.totalProcessedTokens ?? null) !== null &&
       (usage.totalProcessedTokens ?? 0) > usage.usedTokens ? (
         <div className="text-xs text-muted-foreground">
-          Total processed: {formatContextWindowTokens(usage.totalProcessedTokens ?? null)} tokens
+          {uiText(
+            "Total processed: {tokens} tokens",
+            {
+              tokens: formatContextWindowTokens(usage.totalProcessedTokens ?? null),
+            },
+            undefined,
+            uiLocale,
+          )}
         </div>
       ) : null}
 
       {hasUsage && usage.compactsAutomatically ? (
         <div className="text-xs text-muted-foreground">
           {usage.autoCompactTokenLimit
-            ? `Automatically compacts around ${formatContextWindowTokens(
-                usage.autoCompactTokenLimit,
-              )} tokens.`
-            : "Automatically compacts its context when needed."}
+            ? uiText(
+                "Automatically compacts around {value0} tokens.",
+                {
+                  value0: formatContextWindowTokens(usage.autoCompactTokenLimit),
+                },
+                undefined,
+                uiLocale,
+              )
+            : uiText(
+                "Automatically compacts its context when needed.",
+                undefined,
+                undefined,
+                uiLocale,
+              )}
         </div>
       ) : null}
 
@@ -133,3 +187,6 @@ export function ContextWindowDetails(props: {
     </div>
   );
 }
+
+// Finite source-owned labels/helpers only; no received or user data.
+const UI_PRESENTATION_SOURCES = { formatCodexRateLimitPresentation };

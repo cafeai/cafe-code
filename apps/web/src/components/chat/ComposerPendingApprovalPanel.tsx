@@ -1,3 +1,6 @@
+import { useUiLocale, useUiPresentation } from "~/i18n";
+import { uiText } from "@cafecode/shared/i18n";
+import { UiMessage } from "~/i18n";
 import { memo } from "react";
 import { type PendingApproval } from "../../session-logic";
 
@@ -7,16 +10,16 @@ interface ComposerPendingApprovalPanelProps {
 }
 
 function approvalTitle(approval: PendingApproval): string {
-  if (approval.networkApproval) return "Network access needs approval";
+  if (approval.networkApproval) return uiText("Network access needs approval");
   switch (approval.requestKind) {
     case "command":
-      return "Command needs approval";
+      return uiText("Command needs approval");
     case "terminal-input":
-      return "Terminal input needs approval";
+      return uiText("Terminal input needs approval");
     case "file-read":
-      return "File read needs approval";
+      return uiText("File read needs approval");
     case "file-change":
-      return "File change needs approval";
+      return uiText("File change needs approval");
   }
 }
 
@@ -30,22 +33,33 @@ export const ComposerPendingApprovalPanel = memo(function ComposerPendingApprova
   approval,
   pendingCount,
 }: ComposerPendingApprovalPanelProps) {
+  const uiLocale = useUiLocale();
+  const uiPresentation = useUiPresentation(UI_PRESENTATION_SOURCES);
+
   return (
     <div className="px-4 py-3 sm:px-5">
       <div className="flex flex-wrap items-baseline gap-x-2 gap-y-1">
-        <span className="text-sm font-medium text-foreground">{approvalTitle(approval)}</span>
+        <span className="text-sm font-medium text-foreground">
+          {uiPresentation.approvalTitle(approval)}
+        </span>
         {pendingCount > 1 ? (
-          <span className="text-2xs tabular-nums text-subtle-foreground">1 of {pendingCount}</span>
+          <span className="text-2xs tabular-nums text-subtle-foreground">
+            <UiMessage message={"1 of <slot1></slot1>"} slots={{ slot1: pendingCount }} />
+          </span>
         ) : null}
       </div>
       {approval.networkApproval ? (
         <dl
           className="mt-2 grid grid-cols-[auto_minmax(0,1fr)] gap-x-3 gap-y-0.5 text-ui"
-          aria-label="Network destination"
+          aria-label={uiText("Network destination", undefined, undefined, uiLocale)}
         >
-          <dt className="text-muted-foreground">Host</dt>
+          <dt className="text-muted-foreground">
+            {uiText("Host", undefined, undefined, uiLocale)}
+          </dt>
           <dd className="break-all font-mono text-foreground">{approval.networkApproval.host}</dd>
-          <dt className="text-muted-foreground">Protocol</dt>
+          <dt className="text-muted-foreground">
+            {uiText("Protocol", undefined, undefined, uiLocale)}
+          </dt>
           <dd className="break-all font-mono text-foreground">
             {approval.networkApproval.protocol}
           </dd>
@@ -62,3 +76,6 @@ export const ComposerPendingApprovalPanel = memo(function ComposerPendingApprova
     </div>
   );
 });
+
+// Finite source-owned labels/helpers only; no received or user data.
+const UI_PRESENTATION_SOURCES = { approvalTitle };

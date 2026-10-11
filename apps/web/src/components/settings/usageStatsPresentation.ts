@@ -1,6 +1,9 @@
 import type { ProviderDriverKind } from "@cafecode/contracts";
+import { uiFormatDateTime, uiFormatNumber, uiText } from "@cafecode/shared/i18n";
 
-const tokenIntegerFormat = new Intl.NumberFormat("en-US");
+// Preserve the established English token grouping, independently of the
+// viewer-native clock locale used for recorded coverage dates.
+const formatTokenInteger = (value: number) => uiFormatNumber(value, undefined, "en-US");
 const padDurationUnit = (value: number) => String(value).padStart(2, "0");
 
 /**
@@ -18,11 +21,22 @@ export function formatGeneratingTime(generatingMs: number): string {
   const minutes = Math.floor((totalSeconds % 3_600) / 60);
   const seconds = totalSeconds % 60;
   if (days > 0) {
-    return `${tokenIntegerFormat.format(days)}d ${padDurationUnit(hours)}h ${padDurationUnit(minutes)}m ${padDurationUnit(seconds)}s`;
+    return uiText("{days}d {hours}h {minutes}m {seconds}s", {
+      days: formatTokenInteger(days),
+      hours: padDurationUnit(hours),
+      minutes: padDurationUnit(minutes),
+      seconds: padDurationUnit(seconds),
+    });
   }
-  if (hours > 0) return `${hours}h ${padDurationUnit(minutes)}m ${padDurationUnit(seconds)}s`;
-  if (minutes > 0) return `${minutes}m ${padDurationUnit(seconds)}s`;
-  return `${seconds}s`;
+  if (hours > 0)
+    return uiText("{hours}h {minutes}m {seconds}s", {
+      hours,
+      minutes: padDurationUnit(minutes),
+      seconds: padDurationUnit(seconds),
+    });
+  if (minutes > 0)
+    return uiText("{minutes}m {seconds}s", { minutes, seconds: padDurationUnit(seconds) });
+  return uiText("{seconds}s", { seconds });
 }
 
 /** Local display date for the explicitly recorded coverage boundary. */
@@ -32,7 +46,7 @@ export function formatUsageRecordingDate(startedAt: string): string | undefined 
   if (startedAt.length > 64) return undefined;
   const date = new Date(startedAt);
   if (!Number.isFinite(date.getTime())) return undefined;
-  return date.toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" });
+  return uiFormatDateTime(date, { year: "numeric", month: "short", day: "numeric" });
 }
 
 /**
@@ -46,7 +60,7 @@ function normalizedTokenCount(value: number): number {
 
 /** Primary comma-separated token count; paired with the smaller compact readout. */
 export function formatFullTokenCount(value: number): string {
-  return tokenIntegerFormat.format(Math.round(normalizedTokenCount(value)));
+  return formatTokenInteger(Math.round(normalizedTokenCount(value)));
 }
 
 /** Compact token readout shown on usage surfaces, such as `3.54B`, `3.00M`, or `9.5K`. */
@@ -62,7 +76,13 @@ export function formatCompactTokenCount(value: number): string {
     const initialPrecision = scaled < 10 ? precisionBelowTen : precisionAtLeastTen;
     const rounded = Number(scaled.toFixed(initialPrecision));
     const stablePrecision = rounded < 10 ? precisionBelowTen : precisionAtLeastTen;
-    return { rounded, text: `${rounded.toFixed(stablePrecision)}${suffix}` };
+    return {
+      rounded,
+      text: uiText("{value}{unit, select, billion {B} million {M} other {K}}", {
+        value: rounded.toFixed(stablePrecision),
+        unit: suffix === "B" ? "billion" : suffix === "M" ? "million" : "thousand",
+      }),
+    };
   };
 
   if (normalized >= 1_000_000_000) {
@@ -80,7 +100,7 @@ export function formatCompactTokenCount(value: number): string {
     const thousands = formatMagnitude(1_000, "K", 1, 0);
     return thousands.rounded >= 1_000 ? formatMagnitude(1_000_000, "M", 2, 0).text : thousands.text;
   }
-  return tokenIntegerFormat.format(Math.round(normalized));
+  return formatTokenInteger(Math.round(normalized));
 }
 
 export function formatUsageProviderLabel(provider: ProviderDriverKind): string {
@@ -101,7 +121,7 @@ export function formatUsageProviderLabel(provider: ProviderDriverKind): string {
 }
 
 export function formatUsageModelLabel(model: string): string {
-  return model === "unknown" ? "Model not reported" : model;
+  return model === "unknown" ? uiText("Model not reported") : model;
 }
 
 /**
@@ -112,6 +132,8 @@ export function formatUsageModelLabel(model: string): string {
  */
 export function getUsageModelExplanation(model: string): string | undefined {
   return model === "unknown"
-    ? "The provider didn't report which model served these tokens. They're counted but not priced."
+    ? uiText(
+        "The provider didn't report which model served these tokens. They're counted but not priced.",
+      )
     : undefined;
 }

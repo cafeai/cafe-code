@@ -1,3 +1,6 @@
+import { useUiLocale } from "~/i18n";
+import { uiText } from "@cafecode/shared/i18n";
+import { UiMessage } from "~/i18n";
 import { useEffect, useState, type ReactNode } from "react";
 
 import type { CodexRateLimitPresentation } from "../lib/codexRateLimits";
@@ -31,6 +34,8 @@ export function ProviderAccountQuotaDetails(props: {
   readonly layout?: "compact" | "popover" | "panel" | "settings";
   readonly action?: ReactNode;
 }) {
+  const uiLocale = useUiLocale();
+
   const presentation = props.presentation;
   const layout = props.layout ?? "compact";
   const report = props.sessionQuota?.report;
@@ -75,32 +80,61 @@ export function ProviderAccountQuotaDetails(props: {
       {props.sessionQuota ? (
         <section
           className="flex min-h-0 min-w-0 flex-col gap-1.5"
-          aria-label="Account usage"
+          aria-label={uiText("Account usage", undefined, undefined, uiLocale)}
           data-claude-session-quota
         >
-          <div className="label-overline">Account usage</div>
-          <p>Session-reported · not account-verified</p>
+          <div className="label-overline">
+            {uiText("Account usage", undefined, undefined, uiLocale)}
+          </div>
+          <p>{uiText("Session-reported · not account-verified", undefined, undefined, uiLocale)}</p>
           {session ? (
             <>
               <p>
-                {session.observed} · local time{session.stale ? " · Stale reading" : ""}
+                {uiText(
+                  "{observed} · local time{stale, select, yes { · Stale reading} other {}}",
+                  {
+                    observed: session.observed,
+                    stale: session.stale ? "yes" : "no",
+                  },
+                  undefined,
+                  uiLocale,
+                )}
               </p>
               <div
                 className="focus-ring min-h-0 min-w-0 max-h-[40vh] space-y-2.5 overflow-y-auto rounded-sm"
                 data-account-quota-scroll
                 tabIndex={0}
                 role="region"
-                aria-label="Claude reported quota meters and extra usage"
+                aria-label={uiText(
+                  "Claude reported quota meters and extra usage",
+                  undefined,
+                  undefined,
+                  uiLocale,
+                )}
               >
                 {session.meters === null ? (
-                  <p>Quota meters unavailable in this report.</p>
+                  <p>
+                    {uiText(
+                      "Quota meters unavailable in this report.",
+                      undefined,
+                      undefined,
+                      uiLocale,
+                    )}
+                  </p>
                 ) : session.meters.length === 0 ? (
-                  <p>Claude reported no quota meters.</p>
+                  <p>
+                    {uiText("Claude reported no quota meters.", undefined, undefined, uiLocale)}
+                  </p>
                 ) : (
                   session.meters.map((meter, index) => (
                     <section
                       key={meter.id}
-                      aria-label={`${meter.label} quota`}
+                      aria-label={uiText(
+                        "{value0} quota",
+                        { value0: meter.label },
+                        undefined,
+                        uiLocale,
+                      )}
                       className="min-w-0 space-y-1.5"
                       data-claude-quota-meter={meter.id}
                     >
@@ -120,19 +154,28 @@ export function ProviderAccountQuotaDetails(props: {
                       {meter.reset ? <p>{meter.reset}</p> : null}
                       <p>
                         {meter.severity}
-                        {meter.isActive ? " · Provider headline" : ""}
-                        {meter.stale ? " · Stale; request a new report" : ""}
+                        {meter.isActive
+                          ? uiText(" · Provider headline", undefined, undefined, uiLocale)
+                          : ""}
+                        {meter.stale
+                          ? uiText(" · Stale; request a new report", undefined, undefined, uiLocale)
+                          : ""}
                       </p>
                     </section>
                   ))
                 )}
                 {session.extraUsage ? (
                   <section
-                    aria-label="Extra usage"
+                    aria-label={uiText("Extra usage", undefined, undefined, uiLocale)}
                     className="min-w-0 space-y-1.5 border-t border-border-subtle pt-2"
                   >
                     <div className="font-medium text-foreground">
-                      Extra usage (separate from plan quota)
+                      {uiText(
+                        "Extra usage (separate from plan quota)",
+                        undefined,
+                        undefined,
+                        uiLocale,
+                      )}
                     </div>
                     {session.extraUsage.map((line) => (
                       <p key={line}>{line}</p>
@@ -144,13 +187,25 @@ export function ProviderAccountQuotaDetails(props: {
           ) : (
             <p>
               {props.sessionQuota.status === "loading"
-                ? "Loading session report…"
+                ? uiText("Loading session report…", undefined, undefined, uiLocale)
                 : props.sessionQuota.status === "offline"
-                  ? "Session report unavailable while disconnected."
-                  : "No session quota report available."}
+                  ? uiText(
+                      "Session report unavailable while disconnected.",
+                      undefined,
+                      undefined,
+                      uiLocale,
+                    )
+                  : uiText("No session quota report available.", undefined, undefined, uiLocale)}
             </p>
           )}
-          <p>Request /usage in Claude to update. Opening this view does not refresh it.</p>
+          <p>
+            {uiText(
+              "Request /usage in Claude to update. Opening this view does not refresh it.",
+              undefined,
+              undefined,
+              uiLocale,
+            )}
+          </p>
         </section>
       ) : null}
       {legacy?.buckets.length ? (
@@ -161,7 +216,7 @@ export function ProviderAccountQuotaDetails(props: {
           {legacy.buckets.map((bucket) => (
             <section
               key={bucket.id}
-              aria-label={`${bucket.label} quota`}
+              aria-label={uiText("{value0} quota", { value0: bucket.label }, undefined, uiLocale)}
               data-account-quota-bucket={bucket.id}
               className="min-w-0 space-y-1.5"
             >

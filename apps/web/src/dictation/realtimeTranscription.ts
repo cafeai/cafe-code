@@ -1,3 +1,4 @@
+import { getUiLocale, uiText, type UiLocale } from "@cafecode/shared/i18n";
 import {
   DICTATION_FALLBACK_TRANSCRIPTION_MODEL,
   DICTATION_PROVIDER_ERROR_CODES,
@@ -15,7 +16,7 @@ import {
   type DictationDiagnosticStage,
   type DictationDiagnosticUpdate,
 } from "./diagnostics";
-import { DICTATION_RPC_ERROR_MESSAGES, readDictationRpcErrorCode } from "./errors";
+import { formatDictationRpcErrorCode, readDictationRpcErrorCode } from "./errors";
 
 export const OPENAI_REALTIME_CALLS_URL = "https://api.openai.com/v1/realtime/calls";
 
@@ -61,6 +62,129 @@ export type RealtimeTranscriptionErrorCode =
   | "transcript_conflict"
   | "unsupported";
 
+type RealtimeFixedFeedbackCode =
+  | "cancelled"
+  | "connection"
+  | "setup"
+  | "access-rejected"
+  | "configuration-rejected"
+  | "invalid-event"
+  | "transcript-length"
+  | "microphone-denied"
+  | "microphone-unavailable"
+  | "transcript-conflict"
+  | "expired"
+  | "finalization-timeout";
+
+/** Only Cafe-owned finite provenance and public HTTP numbers may be retained. */
+export type RealtimeTranscriptionFeedback =
+  | { readonly kind: "rpc"; readonly code: DictationErrorCode }
+  | { readonly kind: "fixed"; readonly code: RealtimeFixedFeedbackCode }
+  | { readonly kind: "http"; readonly code: "temporary" | "both-models"; readonly status: number };
+
+// The private association proves which errors were minted by this module's
+// sanitized factories. Neither an externally constructed legacy Error nor a
+// received object's code/message/presentation fields grant this provenance.
+const realtimeFeedbackByError = new WeakMap<
+  RealtimeTranscriptionError,
+  RealtimeTranscriptionFeedback
+>();
+
+export function formatRealtimeTranscriptionFeedback(
+  feedback: RealtimeTranscriptionFeedback,
+  locale: UiLocale = getUiLocale(),
+): string {
+  if (feedback.kind === "rpc") return formatDictationRpcErrorCode(feedback.code, locale);
+  if (feedback.kind === "http") {
+    if (!Number.isInteger(feedback.status) || feedback.status < 100 || feedback.status > 599)
+      return uiText(
+        "Cafe could not connect the microphone to OpenAI.",
+        undefined,
+        undefined,
+        locale,
+      );
+    return feedback.code === "both-models"
+      ? uiText(
+          "OpenAI could not start either supported Realtime dictation model (HTTP {status}). Check this API project's credits, billing, and Realtime transcription access, then retry.",
+          { status: feedback.status },
+          undefined,
+          locale,
+        )
+      : uiText(
+          "OpenAI returned a temporary HTTP {status} error while starting dictation. Please try again shortly.",
+          { status: feedback.status },
+          undefined,
+          locale,
+        );
+  }
+  switch (feedback.code) {
+    case "cancelled":
+      return uiText("Dictation was cancelled.", undefined, undefined, locale);
+    case "connection":
+      return uiText(
+        "Cafe could not connect the microphone to OpenAI.",
+        undefined,
+        undefined,
+        locale,
+      );
+    case "setup":
+      return uiText("Cafe could not start dictation.", undefined, undefined, locale);
+    case "access-rejected":
+      return uiText(
+        "OpenAI rejected the Realtime dictation session. Check this API project's model access.",
+        undefined,
+        undefined,
+        locale,
+      );
+    case "configuration-rejected":
+      return uiText(
+        "OpenAI rejected Cafe's Realtime dictation session configuration.",
+        undefined,
+        undefined,
+        locale,
+      );
+    case "invalid-event":
+      return uiText("OpenAI returned an invalid dictation event.", undefined, undefined, locale);
+    case "transcript-length":
+      return uiText(
+        "Dictation exceeded the maximum transcript length.",
+        undefined,
+        undefined,
+        locale,
+      );
+    case "microphone-denied":
+      return uiText(
+        "Microphone access was denied. Allow microphone access to use dictation.",
+        undefined,
+        undefined,
+        locale,
+      );
+    case "microphone-unavailable":
+      return uiText("No usable microphone is available.", undefined, undefined, locale);
+    case "transcript-conflict":
+      return uiText(
+        "Dictation stopped because the composer changed unexpectedly.",
+        undefined,
+        undefined,
+        locale,
+      );
+    case "expired":
+      return uiText(
+        "The dictation session expired before it could start. Please try again.",
+        undefined,
+        undefined,
+        locale,
+      );
+    case "finalization-timeout":
+      return uiText(
+        "Dictation stopped before OpenAI returned the final transcript.",
+        undefined,
+        undefined,
+        locale,
+      );
+  }
+}
+
 /**
  * Every public message is fixed and sanitized. In particular, never attach a
  * fetch Response, SDP body, server event, or client secret as a serializable
@@ -69,6 +193,10 @@ export type RealtimeTranscriptionErrorCode =
 export class RealtimeTranscriptionError extends Error {
   readonly code: RealtimeTranscriptionErrorCode;
 
+  get presentation(): RealtimeTranscriptionFeedback | undefined {
+    return realtimeFeedbackByError.get(this);
+  }
+
   constructor(code: RealtimeTranscriptionErrorCode, message: string) {
     super(message);
     this.name = "RealtimeTranscriptionError";
@@ -76,17 +204,32 @@ export class RealtimeTranscriptionError extends Error {
   }
 }
 
-const cancelledError = () =>
-  new RealtimeTranscriptionError("cancelled", "Dictation was cancelled.");
+/** Read only exact locally minted provenance, never reverse-match error text. */
+export function readRealtimeTranscriptionFeedback(
+  error: unknown,
+): RealtimeTranscriptionFeedback | null {
+  return error instanceof RealtimeTranscriptionError
+    ? (realtimeFeedbackByError.get(error) ?? null)
+    : null;
+}
+
+function sourceError(
+  code: RealtimeTranscriptionErrorCode,
+  feedback: RealtimeTranscriptionFeedback,
+): RealtimeTranscriptionError {
+  const snapshot = Object.freeze({ ...feedback });
+  const error = new RealtimeTranscriptionError(code, formatRealtimeTranscriptionFeedback(snapshot));
+  realtimeFeedbackByError.set(error, snapshot);
+  return error;
+}
+
+const cancelledError = () => sourceError("cancelled", { kind: "fixed", code: "cancelled" });
 
 const connectionError = () =>
-  new RealtimeTranscriptionError(
-    "connection_failed",
-    "Cafe could not connect the microphone to OpenAI.",
-  );
+  sourceError("connection_failed", { kind: "fixed", code: "connection" });
 
 const sessionSetupError = () =>
-  new RealtimeTranscriptionError("session_setup_failed", "Cafe could not start dictation.");
+  sourceError("session_setup_failed", { kind: "fixed", code: "setup" });
 
 /**
  * The client-secret RPC returns a typed, sanitized DictationError. Rebuild the
@@ -99,9 +242,7 @@ function normalizeClientSecretError(
 ): RealtimeTranscriptionError {
   if (externallyCancelled) return cancelledError();
   const code = readDictationRpcErrorCode(error);
-  return code === null
-    ? sessionSetupError()
-    : new RealtimeTranscriptionError(code, DICTATION_RPC_ERROR_MESSAGES[code]);
+  return code === null ? sessionSetupError() : sourceError(code, { kind: "rpc", code });
 }
 
 /**
@@ -113,46 +254,28 @@ function realtimeCallResponseError(
   attemptedModel: DictationTranscriptionModel,
 ): RealtimeTranscriptionError {
   if (status === 402) {
-    return new RealtimeTranscriptionError(
-      "upstream_quota_exhausted",
-      DICTATION_RPC_ERROR_MESSAGES.upstream_quota_exhausted,
-    );
+    return sourceError("upstream_quota_exhausted", {
+      kind: "rpc",
+      code: "upstream_quota_exhausted",
+    });
   }
   if (status === 401 || status === 403) {
-    return new RealtimeTranscriptionError(
-      "session_rejected",
-      "OpenAI rejected the Realtime dictation session. Check this API project's model access.",
-    );
+    return sourceError("session_rejected", { kind: "fixed", code: "access-rejected" });
   }
   if (status === 429) {
-    return new RealtimeTranscriptionError(
-      "upstream_rate_limited",
-      DICTATION_RPC_ERROR_MESSAGES.upstream_rate_limited,
-    );
+    return sourceError("upstream_rate_limited", { kind: "rpc", code: "upstream_rate_limited" });
   }
   if (status === 400 || status === 404 || status === 422) {
-    return new RealtimeTranscriptionError(
-      "session_rejected",
-      "OpenAI rejected Cafe's Realtime dictation session configuration.",
-    );
+    return sourceError("session_rejected", { kind: "fixed", code: "configuration-rejected" });
   }
   if (status >= 500 && status <= 599) {
     if (attemptedModel === DICTATION_FALLBACK_TRANSCRIPTION_MODEL) {
-      return new RealtimeTranscriptionError(
-        "upstream_unavailable",
-        `OpenAI could not start either supported Realtime dictation model (HTTP ${status}). Check this API project's credits, billing, and Realtime transcription access, then retry.`,
-      );
+      return sourceError("upstream_unavailable", { kind: "http", code: "both-models", status });
     }
-    return new RealtimeTranscriptionError(
-      "upstream_unavailable",
-      `OpenAI returned a temporary HTTP ${status} error while starting dictation. Please try again shortly.`,
-    );
+    return sourceError("upstream_unavailable", { kind: "http", code: "temporary", status });
   }
   if (status === 408 || status === 409) {
-    return new RealtimeTranscriptionError(
-      "upstream_unavailable",
-      `OpenAI returned a temporary HTTP ${status} error while starting dictation. Please try again shortly.`,
-    );
+    return sourceError("upstream_unavailable", { kind: "http", code: "temporary", status });
   }
   return connectionError();
 }
@@ -177,8 +300,7 @@ function isQuotaExhaustedResponse(
   );
 }
 
-const protocolError = () =>
-  new RealtimeTranscriptionError("protocol_error", "OpenAI returned an invalid dictation event.");
+const protocolError = () => sourceError("protocol_error", { kind: "fixed", code: "invalid-event" });
 
 export interface DictationBrowserCapability {
   readonly supported: boolean;
@@ -340,10 +462,7 @@ export function reduceRealtimeTranscript(
   const displayedCharacterCount =
     state.displayedCharacterCount - previousDisplayed.length + nextDisplayed.length;
   if (displayedCharacterCount > MAX_TRANSCRIPT_CHARS) {
-    throw new RealtimeTranscriptionError(
-      "protocol_error",
-      "Dictation exceeded the maximum transcript length.",
-    );
+    throw sourceError("protocol_error", { kind: "fixed", code: "transcript-length" });
   }
 
   const items = new Map(state.items);
@@ -405,12 +524,12 @@ interface RealtimeTranscriptionDependencies {
 }
 
 function waitForBrowserRetry(delayMs: number, signal: AbortSignal): Promise<void> {
-  if (signal.aborted) return Promise.reject(new Error("Dictation setup was aborted."));
+  if (signal.aborted) return Promise.reject(new Error(uiText("Dictation setup was aborted.")));
   return new Promise<void>((resolve, reject) => {
     let timerId: number | null = null;
     const handleAbort = () => {
       if (timerId !== null) window.clearTimeout(timerId);
-      reject(new Error("Dictation setup was aborted."));
+      reject(new Error(uiText("Dictation setup was aborted.")));
     };
     timerId = window.setTimeout(() => {
       signal.removeEventListener("abort", handleAbort);
@@ -494,16 +613,10 @@ function normalizeSetupError(
   if (externallyCancelled) return cancelledError();
   const name = isRecord(error) && typeof error.name === "string" ? error.name : null;
   if (name === "NotAllowedError" || name === "SecurityError") {
-    return new RealtimeTranscriptionError(
-      "microphone_denied",
-      "Microphone access was denied. Allow microphone access to use dictation.",
-    );
+    return sourceError("microphone_denied", { kind: "fixed", code: "microphone-denied" });
   }
   if (name === "NotFoundError" || name === "OverconstrainedError") {
-    return new RealtimeTranscriptionError(
-      "microphone_unavailable",
-      "No usable microphone is available.",
-    );
+    return sourceError("microphone_unavailable", { kind: "fixed", code: "microphone-unavailable" });
   }
   return connectionError();
 }
@@ -1106,10 +1219,7 @@ export async function startRealtimeTranscription(
       });
       if (accepted === false) {
         failTransport(
-          new RealtimeTranscriptionError(
-            "transcript_conflict",
-            "Dictation stopped because the composer changed unexpectedly.",
-          ),
+          sourceError("transcript_conflict", { kind: "fixed", code: "transcript-conflict" }),
         );
         return;
       }
@@ -1178,10 +1288,7 @@ export async function startRealtimeTranscription(
       throw normalizeClientSecretError(error, input.signal?.aborted === true);
     }
     if (clientSecret.expiresAt * 1_000 <= dependencies.now() + MIN_CLIENT_SECRET_LIFETIME_MS) {
-      throw new RealtimeTranscriptionError(
-        "session_expired",
-        "The dictation session expired before it could start. Please try again.",
-      );
+      throw sourceError("session_expired", { kind: "fixed", code: "expired" });
     }
     diagnosticDetails = {
       ...diagnosticDetails,
@@ -1249,10 +1356,10 @@ export async function startRealtimeTranscription(
 
     const audioTrack = mediaStream.getAudioTracks()[0];
     if (!audioTrack) {
-      throw new RealtimeTranscriptionError(
-        "microphone_unavailable",
-        "No usable microphone is available.",
-      );
+      throw sourceError("microphone_unavailable", {
+        kind: "fixed",
+        code: "microphone-unavailable",
+      });
     }
 
     assertSetupLive();
@@ -1279,10 +1386,7 @@ export async function startRealtimeTranscription(
           assertSetupLive();
         }
         if (clientSecret.expiresAt * 1_000 <= dependencies.now() + MIN_CLIENT_SECRET_LIFETIME_MS) {
-          throw new RealtimeTranscriptionError(
-            "session_expired",
-            "The dictation session expired before it could start. Please try again.",
-          );
+          throw sourceError("session_expired", { kind: "fixed", code: "expired" });
         }
 
         resetPerAttemptDiagnostics();
@@ -1413,10 +1517,10 @@ export async function startRealtimeTranscription(
           assertSetupLive();
           diagnosticDetails = { ...diagnosticDetails, ...errorMetadata };
           if (isQuotaExhaustedResponse(response.status, errorMetadata)) {
-            throw new RealtimeTranscriptionError(
-              "upstream_quota_exhausted",
-              DICTATION_RPC_ERROR_MESSAGES.upstream_quota_exhausted,
-            );
+            throw sourceError("upstream_quota_exhausted", {
+              kind: "rpc",
+              code: "upstream_quota_exhausted",
+            });
           }
           if (setupDeadlineElapsedAfterErrorHeaders) {
             // The global setup deadline elapsed only after Cafe had received a
@@ -1537,10 +1641,7 @@ export async function startRealtimeTranscription(
             dependencies,
             onTimeout: () => undefined,
             timeoutError: () =>
-              new RealtimeTranscriptionError(
-                "finalization_timeout",
-                "Dictation stopped before OpenAI returned the final transcript.",
-              ),
+              sourceError("finalization_timeout", { kind: "fixed", code: "finalization-timeout" }),
           });
           recordTerminalDiagnostic("completed");
         } catch (error) {

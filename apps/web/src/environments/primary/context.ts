@@ -1,3 +1,4 @@
+import { uiText } from "@cafecode/shared/i18n";
 import {
   attachEnvironmentDescriptor,
   createKnownEnvironment,
@@ -56,14 +57,16 @@ async function fetchPrimaryEnvironmentDescriptor(): Promise<ExecutionEnvironment
       }
       if (pathname === ENVIRONMENT_ENDPOINT_PATHS.at(-1)) {
         throw new BootstrapHttpError({
-          message: `Failed to load server environment descriptor (${response.status}).`,
+          message: uiText("Failed to load server environment descriptor ({status}).", {
+            status: response.status,
+          }),
           status: response.status,
         });
       }
     }
 
     throw new BootstrapHttpError({
-      message: "Failed to load server environment descriptor.",
+      message: uiText("Failed to load server environment descriptor."),
       status: 0,
     });
   });

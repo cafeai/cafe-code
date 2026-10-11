@@ -8,6 +8,7 @@ import {
 } from "@cafecode/contracts";
 import * as DateTime from "effect/DateTime";
 import * as Schema from "effect/Schema";
+import { uiFormatDateTime, uiText } from "@cafecode/shared/i18n";
 
 const isScheduleTimeZone = Schema.is(ScheduledFollowupTimeZone);
 const isScheduleTimestamp = Schema.is(ScheduledFollowupTimestamp);
@@ -31,21 +32,24 @@ export function scheduleRunIssuePresentation(
     // Completed/live runs must not inherit obsolete error classifications.
     return null;
   }
-  const action = "Check this chat and run history, then review and enable the schedule when ready.";
+  const action = uiText(
+    "Check this chat and run history, then review and enable the schedule when ready.",
+  );
   const fallback = {
     reason:
       run.state === "interrupted"
-        ? "This run was interrupted."
+        ? uiText("This run was interrupted.")
         : run.state === "skipped"
-          ? "This run was skipped."
-          : "This run failed.",
+          ? uiText("This run was skipped.")
+          : uiText("This run failed."),
     action,
   };
   if (run.state === "unknown") {
     return {
-      reason: "Cafe could not confirm whether the provider accepted this run.",
-      action:
+      reason: uiText("Cafe could not confirm whether the provider accepted this run."),
+      action: uiText(
         "Wait for Cafe to reconcile this run. Check this chat for existing work; do not repeat an unconfirmed run.",
+      ),
     };
   }
   switch (run.errorCode) {
@@ -56,41 +60,48 @@ export function scheduleRunIssuePresentation(
       return {
         // This exact code is minted before admission or the immutable attempt
         // fence. Unlike a failed/unknown native turn, it proves no submission.
-        reason:
+        reason: uiText(
           "The saved provider account or selected model was unavailable. This run was not submitted.",
-        action:
+        ),
+        action: uiText(
           "Check the saved account and model in Settings, then review the schedule before enabling it again.",
+        ),
       };
     case "chat-unavailable":
-      return { reason: "This chat was unavailable when the run was due.", action };
+      return { reason: uiText("This chat was unavailable when the run was due."), action };
     case "settings-changed":
       return {
-        reason: "The chat's account or permission settings changed and need renewed review.",
+        reason: uiText(
+          "The chat's account or permission settings changed and need renewed review.",
+        ),
         action,
       };
     case "admission-rejected":
-      return { reason: "This run could not be admitted to the chat.", action };
+      return { reason: uiText("This run could not be admitted to the chat."), action };
     case "preparation-failed":
-      return { reason: "This run could not prepare its saved input or provider.", action };
+      return { reason: uiText("This run could not prepare its saved input or provider."), action };
     case "turn-failed":
-      return { reason: "The provider reported that this run failed.", action };
+      return { reason: uiText("The provider reported that this run failed."), action };
     case "turn-interrupted":
-      return { reason: "The provider reported that this run was interrupted.", action };
+      return { reason: uiText("The provider reported that this run was interrupted."), action };
     case "limit-reached":
       return {
-        reason: "This run was skipped because the schedule reached its end or run limit.",
+        reason: uiText("This run was skipped because the schedule reached its end or run limit."),
         action,
       };
     case "schedule-changed":
       return {
-        reason: "This run was skipped because the schedule changed before it started.",
+        reason: uiText("This run was skipped because the schedule changed before it started."),
         action,
       };
     case "user-control":
     case "admission-revoked":
-      return { reason: "This run was cancelled before starting.", action };
+      return { reason: uiText("This run was cancelled before starting."), action };
     case "runtime-busy":
-      return { reason: "This run was skipped because the chat was already working.", action };
+      return {
+        reason: uiText("This run was skipped because the chat was already working."),
+        action,
+      };
     default:
       // A future backend or corrupt legacy row cannot disclose arbitrary text
       // or make a more specific delivery claim through the generic fallback.
@@ -102,16 +113,30 @@ export function scheduleRunIssuePresentation(
  * are presentation only; the backend's named-zone recurrence owns execution. */
 export function scheduleRecurrenceLabel(record: ScheduledFollowupRecord): string {
   const recurrence = record.recurrence;
-  if (recurrence.kind === "once") return "One-time follow-up";
-  if (recurrence.kind === "interval") return `Every ${recurrence.everyMinutes} minutes`;
+  if (recurrence.kind === "once") return uiText("One-time follow-up");
+  if (recurrence.kind === "interval")
+    return uiText("Every {minutes, plural, one {# minute} other {# minutes}}", {
+      minutes: recurrence.everyMinutes,
+    });
   // Calendar clock fields belong to the schedule's selected timezone. Display
   // actual occurrence instants separately in computer-local time with a zone
   // label, rather than putting an unqualified nonlocal clock into this summary.
-  if (recurrence.monthDays || recurrence.months) return "Custom calendar";
-  if (!recurrence.weekdays) return "Daily";
-  if (recurrence.weekdays.toSorted().join(",") === "1,2,3,4,5") return "Weekdays";
+  if (recurrence.monthDays || recurrence.months) return uiText("Custom calendar");
+  if (!recurrence.weekdays) return uiText("Daily");
+  if (recurrence.weekdays.toSorted().join(",") === "1,2,3,4,5") return uiText("Weekdays");
   return recurrence.weekdays
-    .map((day) => ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"][day])
+    .map(
+      (day) =>
+        [
+          uiText("Sun"),
+          uiText("Mon"),
+          uiText("Tue"),
+          uiText("Wed"),
+          uiText("Thu"),
+          uiText("Fri"),
+          uiText("Sat"),
+        ][day],
+    )
     .join(", ");
 }
 
@@ -131,8 +156,15 @@ export function scheduleAccountLabel(
 export function scheduleModelLabel(selection: ModelSelection): string {
   const options = (selection.options ?? []).map(({ id, value }) => {
     const label =
-      id === "reasoningEffort" || id === "effort" ? "Effort" : id === "fastMode" ? "Fast" : id;
-    return `${label}: ${typeof value === "boolean" ? (value ? "on" : "off") : value}`;
+      id === "reasoningEffort" || id === "effort"
+        ? uiText("Effort")
+        : id === "fastMode"
+          ? uiText("Fast")
+          : id;
+    return uiText("{label}: {value}", {
+      label,
+      value: typeof value === "boolean" ? (value ? uiText("on") : uiText("off")) : value,
+    });
   });
   return [selection.model, ...options].join(" · ");
 }
@@ -142,8 +174,8 @@ export function scheduleModelLabel(selection: ModelSelection): string {
  * short label (or native GMT offset) so DST changes remain visible. */
 export function formatScheduleTime(instant: string): string {
   try {
-    if (!isScheduleTimestamp(instant)) return "Time unavailable";
-    return new Intl.DateTimeFormat(undefined, {
+    if (!isScheduleTimestamp(instant)) return uiText("Time unavailable");
+    const formatted = uiFormatDateTime(new Date(instant), {
       year: "numeric",
       month: "short",
       day: "numeric",
@@ -151,11 +183,12 @@ export function formatScheduleTime(instant: string): string {
       minute: "2-digit",
       timeZoneName: "short",
       timeZone: browserScheduleTimeZone(),
-    }).format(new Date(instant));
+    });
+    return formatted === "—" ? uiText("Time unavailable") : formatted;
   } catch {
     // Persisted records should already be validated. Never turn one unknown
     // timezone or corrupt legacy timestamp into a broken Tasks surface.
-    return "Time unavailable";
+    return uiText("Time unavailable");
   }
 }
 
@@ -217,11 +250,13 @@ export function parseScheduleNumbers(
   if (!value.trim()) return undefined;
   const parts = value.split(",").map((part) => part.trim());
   if (parts.length > maximum - minimum + 1 || parts.some((part) => !/^\d{1,2}$/.test(part))) {
-    throw new Error(`Use comma-separated numbers from ${minimum} to ${maximum}.`);
+    throw new Error(
+      uiText("Use comma-separated numbers from {minimum} to {maximum}.", { minimum, maximum }),
+    );
   }
   const values = parts.map(Number);
   if (values.some((item) => item < minimum || item > maximum)) {
-    throw new Error(`Use numbers from ${minimum} to ${maximum}.`);
+    throw new Error(uiText("Use numbers from {minimum} to {maximum}.", { minimum, maximum }));
   }
   return [...new Set(values)].toSorted((left, right) => left - right);
 }

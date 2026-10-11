@@ -1,3 +1,7 @@
+import { useUiLocale, useUiPresentation } from "~/i18n";
+import { uiText } from "@cafecode/shared/i18n";
+import { threadStatusDisplayLabel } from "../Sidebar.logic";
+import { UiMessage } from "~/i18n";
 import {
   memo,
   useCallback,
@@ -126,7 +130,24 @@ const ATRIUM_HOLDING_FALLBACK_STATUS = getThreadStatusPill("Awaiting Input");
 
 /** "Pending Approval" → "Pending approval": sentence case for visible text. */
 function statusText(status: ThreadStatusPill): string {
-  return status.label.charAt(0) + status.label.slice(1).toLowerCase();
+  switch (status.label) {
+    case "Working":
+      return uiText("Working");
+    case "Connecting":
+      return uiText("Connecting");
+    case "Pending Approval":
+      return uiText("Pending approval");
+    case "Awaiting Input":
+      return uiText("Awaiting input");
+    case "Plan Ready":
+      return uiText("Plan ready");
+    case "Completed":
+      return uiText("Completed");
+    case "Failed":
+      return uiText("Failed");
+    default:
+      return threadStatusDisplayLabel(status.label);
+  }
 }
 
 type AtriumCardPresentation = {
@@ -231,7 +252,7 @@ function providerLabel(provider: string): string {
     case "opencode":
       return "OpenCode";
     default:
-      return provider.length > 0 ? provider : "Provider";
+      return provider.length > 0 ? provider : uiText("Provider");
   }
 }
 
@@ -385,8 +406,10 @@ function Stat({
   );
 }
 
-function pluralizedCount(count: number, singular: string, plural = `${singular}s`): string {
-  return `${count} ${count === 1 ? singular : plural}`;
+function pluralizedCount(count: number, singular: "chat" | "subagent"): string {
+  return singular === "chat"
+    ? uiText("{count, plural, one {# chat} other {# chats}}", { count })
+    : uiText("{count, plural, one {# subagent} other {# subagents}}", { count });
 }
 
 function formatCachedShare(value: number | null): string {
@@ -432,10 +455,16 @@ const TaskAtriumCardView = memo(function TaskAtriumCardView({
   onOpenSubagent,
   onCardElement,
 }: TaskAtriumCardViewProps) {
+  const uiLocale = useUiLocale();
+  const uiPresentation = useUiPresentation(UI_PRESENTATION_SOURCES);
+
   const elapsed = formatAtriumCardElapsed(card, now);
   const configuration = useMemo(
-    () => (card.turnConfiguration ? presentTurnConfiguration(card.turnConfiguration) : null),
-    [card.turnConfiguration],
+    () =>
+      card.turnConfiguration
+        ? uiPresentation.presentTurnConfiguration(card.turnConfiguration)
+        : null,
+    [card.turnConfiguration, uiPresentation],
   );
   const titleId = useId();
   const configurationId = useId();
@@ -489,7 +518,7 @@ const TaskAtriumCardView = memo(function TaskAtriumCardView({
       <button
         type="button"
         onClick={() => onOpen(card)}
-        aria-label={`Open ${card.title}`}
+        aria-label={uiText("Open {value0}", { value0: card.title }, undefined, uiLocale)}
         aria-describedby={configurationId}
         title={configuration?.sourceDescription}
         className="absolute inset-0 z-10 rounded-2xl outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring"
@@ -498,7 +527,7 @@ const TaskAtriumCardView = memo(function TaskAtriumCardView({
       <div className="flex items-center gap-2 text-2xs">
         <span className="flex min-w-0 items-center gap-1.5 font-medium text-muted-foreground">
           <ProviderMark provider={card.provider} />
-          <span className="truncate">{providerLabel(card.provider)}</span>
+          <span className="truncate">{uiPresentation.providerLabel(card.provider)}</span>
         </span>
         <span
           className={cn("ml-auto flex shrink-0 items-center gap-1 font-medium", status.colorClass)}
@@ -509,7 +538,7 @@ const TaskAtriumCardView = memo(function TaskAtriumCardView({
           <span aria-hidden="true" className="inline-flex">
             <ThreadStatusLabel status={status} />
           </span>
-          {statusText(status)}
+          {uiPresentation.statusText(status)}
         </span>
       </div>
 
@@ -532,7 +561,9 @@ const TaskAtriumCardView = memo(function TaskAtriumCardView({
         ) : (
           // Missing or not-yet-hydrated records must read as unavailable
           // rather than borrowing today's composer defaults.
-          <div className="text-subtle-foreground">Settings unavailable</div>
+          <div className="text-subtle-foreground">
+            {uiText("Settings unavailable", undefined, undefined, uiLocale)}
+          </div>
         )}
       </div>
 
@@ -571,7 +602,12 @@ const TaskAtriumCardView = memo(function TaskAtriumCardView({
         >
           <div
             role="group"
-            aria-label={`Subagent view for ${card.title}`}
+            aria-label={uiText(
+              "Subagent view for {value0}",
+              { value0: card.title },
+              undefined,
+              uiLocale,
+            )}
             className="relative z-20 mb-2 grid grid-cols-2 gap-1 rounded-lg bg-muted p-1"
           >
             {/* One indicator slides between the two equal columns. */}
@@ -604,13 +640,21 @@ const TaskAtriumCardView = memo(function TaskAtriumCardView({
                   }
                 }}
               >
-                {view === "active" ? "Active" : "History"} ({subagentGroups[view].length})
+                {view === "active"
+                  ? uiText("Active", undefined, undefined, uiLocale)
+                  : uiText("History", undefined, undefined, uiLocale)}{" "}
+                ({subagentGroups[view].length})
               </button>
             ))}
           </div>
           <ul
             id={subagentListId}
-            aria-label={`Subagents for ${card.title}`}
+            aria-label={uiText(
+              "Subagents for {value0}",
+              { value0: card.title },
+              undefined,
+              uiLocale,
+            )}
             className="flex flex-col gap-1"
             data-cafe-atrium-subagent-list="true"
           >
@@ -623,7 +667,12 @@ const TaskAtriumCardView = memo(function TaskAtriumCardView({
                 <button
                   type="button"
                   onClick={() => onOpenSubagent(card, subagent.rowKey)}
-                  aria-label={`View ${subagent.label} activity`}
+                  aria-label={uiText(
+                    "View {value0} activity",
+                    { value0: subagent.label },
+                    undefined,
+                    uiLocale,
+                  )}
                   className="focus-ring relative z-20 grid w-full min-w-0 grid-cols-[auto_minmax(0,1fr)_auto] items-start gap-2.5 rounded-lg px-0.5 py-1.5 text-left transition-colors duration-(--duration-fast) hover:bg-accent"
                 >
                   <SubagentAvatar seed={subagent.id} className="size-7" />
@@ -642,16 +691,16 @@ const TaskAtriumCardView = memo(function TaskAtriumCardView({
                   <span className="w-[5.5rem] min-w-0 shrink-0 pt-0.5 text-right break-words">
                     <span className={cn("block font-medium", subagentStatusClass(subagent.status))}>
                       {subagent.status === "waiting"
-                        ? "Waiting"
+                        ? uiText("Waiting", undefined, undefined, uiLocale)
                         : subagent.status === "active"
-                          ? "Working"
+                          ? uiText("Working", undefined, undefined, uiLocale)
                           : subagent.status === "failed"
-                            ? "Failed"
+                            ? uiText("Failed", undefined, undefined, uiLocale)
                             : subagent.status === "stopped"
-                              ? "Stopped"
+                              ? uiText("Stopped", undefined, undefined, uiLocale)
                               : subagent.status === "unknown"
-                                ? "Status unavailable"
-                                : "Done"}
+                                ? uiText("Status unavailable", undefined, undefined, uiLocale)
+                                : uiText("Done", undefined, undefined, uiLocale)}
                     </span>
                     {subagent.status !== "unknown" &&
                     subagent.startedAt !== null &&
@@ -670,12 +719,19 @@ const TaskAtriumCardView = memo(function TaskAtriumCardView({
           </ul>
           {subagentPage.total === 0 ? (
             <p className="px-1 py-3 text-center text-2xs text-muted-foreground">
-              {subagentSelection.view === "active" ? "No active subagents" : "No subagent history"}
+              {subagentSelection.view === "active"
+                ? uiText("No active subagents", undefined, undefined, uiLocale)
+                : uiText("No subagent history", undefined, undefined, uiLocale)}
             </p>
           ) : subagentPage.pageCount > 1 ? (
             <div
               role="group"
-              aria-label={`Subagent pages for ${card.title}`}
+              aria-label={uiText(
+                "Subagent pages for {value0}",
+                { value0: card.title },
+                undefined,
+                uiLocale,
+              )}
               className="relative z-20 mt-2 border-t border-border-subtle pt-2"
             >
               <p
@@ -683,8 +739,19 @@ const TaskAtriumCardView = memo(function TaskAtriumCardView({
                 className="text-center text-2xs text-subtle-foreground tabular-nums"
                 data-cafe-atrium-subagent-page-status="true"
               >
-                {subagentPage.start}–{subagentPage.end} of {subagentPage.total} · Page{" "}
-                {subagentPage.pageIndex + 1} of {subagentPage.pageCount}
+                <UiMessage
+                  message={
+                    "<slot1></slot1>–<slot3></slot3> of <slot5></slot5> · Page<slot7></slot7><slot9></slot9> of <slot11></slot11>"
+                  }
+                  slots={{
+                    slot1: subagentPage.start,
+                    slot3: subagentPage.end,
+                    slot5: subagentPage.total,
+                    slot7: " ",
+                    slot9: subagentPage.pageIndex + 1,
+                    slot11: subagentPage.pageCount,
+                  }}
+                />
               </p>
               <div className="mt-1 grid grid-cols-2 gap-2">
                 {(["previous", "next"] as const).map((direction) => (
@@ -693,7 +760,9 @@ const TaskAtriumCardView = memo(function TaskAtriumCardView({
                     type="button"
                     aria-controls={subagentListId}
                     aria-label={
-                      direction === "previous" ? "Previous subagents page" : "Next subagents page"
+                      direction === "previous"
+                        ? uiText("Previous subagents page", undefined, undefined, uiLocale)
+                        : uiText("Next subagents page", undefined, undefined, uiLocale)
                     }
                     disabled={
                       direction === "previous"
@@ -709,7 +778,9 @@ const TaskAtriumCardView = memo(function TaskAtriumCardView({
                       });
                     }}
                   >
-                    {direction === "previous" ? "Previous" : "Next"}
+                    {direction === "previous"
+                      ? uiText("Previous", undefined, undefined, uiLocale)
+                      : uiText("Next", undefined, undefined, uiLocale)}
                   </button>
                 ))}
               </div>
@@ -775,6 +846,9 @@ function areAtriumCardPropsEqual(
 }
 
 export function TaskAtriumBoard() {
+  const uiLocale = useUiLocale();
+  const uiPresentation = useUiPresentation(UI_PRESENTATION_SOURCES);
+
   const environmentId = useWorkspaceEnvironmentId();
   const tint = useAtriumTint();
   const overviewTitleId = useId();
@@ -839,7 +913,7 @@ export function TaskAtriumBoard() {
     const tick = () => {
       const timestamp = Date.now();
       const state = useStore.getState();
-      const nextSnapshot = selectAtriumSnapshot(
+      const nextSnapshot = uiPresentation.selectAtriumSnapshot(
         state,
         timestamp,
         dismissedTaskAtriumErrors,
@@ -1033,19 +1107,36 @@ export function TaskAtriumBoard() {
   const overviewStatus =
     filteredMetrics.holdingCount > 0
       ? filteredMetrics.holdingCount === 1
-        ? "one needs you."
-        : `${filteredMetrics.holdingCount} need you.`
+        ? uiText("one needs you.", undefined, undefined, uiLocale)
+        : uiText("{count} need you.", { count: filteredMetrics.holdingCount }, undefined, uiLocale)
       : filteredMetrics.runningCount > 0
-        ? "all working."
+        ? uiText("all working.", undefined, undefined, uiLocale)
         : filteredMetrics.errorCount > 0
-          ? "stopped."
-          : "all done.";
+          ? uiText("stopped.", undefined, undefined, uiLocale)
+          : uiText("all done.", undefined, undefined, uiLocale);
   const overviewDescription =
     filteredMetrics.holdingCount > 0
-      ? `${filteredMetrics.holdingCount} waiting on you. Everything else is moving on its own.`
+      ? uiText(
+          "{value0} waiting on you. Everything else is moving on its own.",
+          {
+            value0: filteredMetrics.holdingCount,
+          },
+          undefined,
+          uiLocale,
+        )
       : filteredMetrics.errorCount > 0 && filteredMetrics.runningCount === 0
-        ? `${pluralizedCount(filteredMetrics.errorCount, "chat")} stopped on an error. Open one to see why.`
-        : "Nothing here asks for you. The garden keeps its own hours.";
+        ? uiText(
+            "{count, plural, one {# chat stopped on an error. Open one to see why.} other {# chats stopped on an error. Open one to see why.}}",
+            { count: filteredMetrics.errorCount },
+            undefined,
+            uiLocale,
+          )
+        : uiText(
+            "Nothing here asks for you. The garden keeps its own hours.",
+            undefined,
+            undefined,
+            uiLocale,
+          );
 
   const clearErrors = useCallback(() => {
     const currentErrors = snapshot.cards.flatMap((card) =>
@@ -1097,7 +1188,7 @@ export function TaskAtriumBoard() {
         className="relative z-10 min-h-0 flex-1 overflow-y-auto overscroll-contain [scrollbar-gutter:stable]"
         data-cafe-atrium-pane-scroll="true"
         data-cafe-atrium-task-scroll="true"
-        aria-label="Task Atrium content"
+        aria-label={uiText("Task Atrium content", undefined, undefined, uiLocale)}
         tabIndex={0}
       >
         <div className="sticky top-0 z-30 flex min-w-0 justify-center bg-gradient-to-b from-background/65 via-background/25 to-transparent py-4 pr-14 pl-3 sm:pl-4">
@@ -1105,7 +1196,7 @@ export function TaskAtriumBoard() {
             <div
               ref={providerTrackRef}
               role="group"
-              aria-label="Filter by provider"
+              aria-label={uiText("Filter by provider", undefined, undefined, uiLocale)}
               className={cn(
                 "relative flex min-w-0 max-w-full items-center gap-1 overflow-x-auto overscroll-x-contain rounded-full border p-1 backdrop-blur-md [scrollbar-width:none] [&::-webkit-scrollbar]:hidden",
                 glass,
@@ -1139,7 +1230,8 @@ export function TaskAtriumBoard() {
                     : "text-muted-foreground hover:text-foreground",
                 )}
               >
-                All work {total}
+                {uiText("All work ", undefined, undefined, uiLocale)}
+                {total}
               </button>
               {providerCounts.map(([provider, count]) => {
                 const active = providerFilter === provider;
@@ -1155,7 +1247,7 @@ export function TaskAtriumBoard() {
                       active ? "text-background" : "text-muted-foreground hover:text-foreground",
                     )}
                   >
-                    {providerLabel(provider)}
+                    {uiPresentation.providerLabel(provider)}
                     <span
                       className={cn(
                         "tabular-nums",
@@ -1176,7 +1268,12 @@ export function TaskAtriumBoard() {
                     <button
                       type="button"
                       onClick={clearErrors}
-                      aria-label="Clear Task Atrium errors"
+                      aria-label={uiText(
+                        "Clear Task Atrium errors",
+                        undefined,
+                        undefined,
+                        uiLocale,
+                      )}
                       className={cn(
                         "focus-ring flex size-8 items-center justify-center rounded-full border backdrop-blur-md",
                         "transition-colors duration-(--duration-fast) hover:bg-card",
@@ -1188,7 +1285,17 @@ export function TaskAtriumBoard() {
                   <CircleCheckIcon className="size-4" />
                 </TooltipTrigger>
                 <TooltipPopup side="bottom">
-                  Clear {snapshot.errorCount} {snapshot.errorCount === 1 ? "error" : "errors"}
+                  {uiText(
+                    "{count, plural, one {Clear {displayCount} error} other {Clear {displayCount} errors}}",
+                    {
+                      count: snapshot.errorCount,
+                      // Preserve the existing raw-count presentation while the
+                      // complete message owns singular/plural grammar.
+                      displayCount: String(snapshot.errorCount),
+                    },
+                    undefined,
+                    uiLocale,
+                  )}
                 </TooltipPopup>
               </Tooltip>
             ) : null}
@@ -1205,12 +1312,26 @@ export function TaskAtriumBoard() {
               data-cafe-atrium-empty-state="true"
             >
               <p className="text-2xl font-light tracking-tight text-foreground">
-                {providerFilter === null ? "The garden is quiet" : "Nothing from this provider"}
+                {providerFilter === null
+                  ? uiText("The garden is quiet", undefined, undefined, uiLocale)
+                  : uiText("Nothing from this provider", undefined, undefined, uiLocale)}
               </p>
               <p className="max-w-sm text-sm text-muted-foreground">
                 {providerFilter === null
-                  ? "Working chats and their subagents appear here."
-                  : `No ${providerLabel(providerFilter)} chats are running.`}
+                  ? uiText(
+                      "Working chats and their subagents appear here.",
+                      undefined,
+                      undefined,
+                      uiLocale,
+                    )
+                  : uiText(
+                      "No {value0} chats are running.",
+                      {
+                        value0: uiPresentation.providerLabel(providerFilter),
+                      },
+                      undefined,
+                      uiLocale,
+                    )}
               </p>
             </section>
           ) : (
@@ -1226,9 +1347,11 @@ export function TaskAtriumBoard() {
                     className="max-w-[13ch] text-[clamp(2.5rem,10vw,5.25rem)] leading-[0.9] font-light tracking-[-0.055em] text-foreground"
                     data-cafe-atrium-overview-headline="true"
                   >
-                    <span className="block">{pluralizedCount(filtered.length, "chat")},</span>
+                    <span className="block">
+                      {uiPresentation.pluralizedCount(filtered.length, "chat")},
+                    </span>
                     <span className="block font-semibold" style={{ color: tint }}>
-                      {pluralizedCount(filteredMetrics.subagentCount, "subagent")},
+                      {uiPresentation.pluralizedCount(filteredMetrics.subagentCount, "subagent")},
                     </span>
                     <span className="block">{overviewStatus}</span>
                   </h2>
@@ -1243,18 +1366,24 @@ export function TaskAtriumBoard() {
                   className="grid min-w-0 grid-cols-2 gap-x-5 gap-y-5 rounded-xl bg-background/60 p-4 backdrop-blur-sm sm:grid-cols-4 sm:gap-x-6 lg:mb-1 lg:grid-cols-2 2xl:grid-cols-4"
                   data-cafe-atrium-overview-metrics="true"
                 >
-                  <Stat label="Running" value={String(filteredMetrics.runningCount)} />
-                  <Stat label="Cache hits" value={formatCachedShare(usage.cachedShare)} />
                   <Stat
-                    label="Cache saved (USD)"
+                    label={uiText("Running", undefined, undefined, uiLocale)}
+                    value={String(filteredMetrics.runningCount)}
+                  />
+                  <Stat
+                    label={uiText("Cache hits", undefined, undefined, uiLocale)}
+                    value={formatCachedShare(usage.cachedShare)}
+                  />
+                  <Stat
+                    label={uiText("Cache saved (USD)", undefined, undefined, uiLocale)}
                     value={formatCacheSavings(usage.cacheSavings, usage.loaded)}
                   />
                   <Stat
-                    label="Output"
+                    label={uiText("Output", undefined, undefined, uiLocale)}
                     value={usage.loaded ? formatFullTokenCount(usage.outputTokens) : "—"}
                     detail={
                       usage.loaded && usage.outputTokens > 0
-                        ? formatCompactTokenCount(usage.outputTokens)
+                        ? uiPresentation.formatCompactTokenCount(usage.outputTokens)
                         : undefined
                     }
                     detailAriaHidden
@@ -1301,7 +1430,9 @@ export function TaskAtriumBoard() {
               data-cafe-atrium-usage-panel="true"
             >
               <div className="flex items-center gap-3 px-4 pt-3 sm:px-5">
-                <span className="label-overline">Usage · all chats</span>
+                <span className="label-overline">
+                  {uiText("Usage · all chats", undefined, undefined, uiLocale)}
+                </span>
               </div>
               <MemoizedUsageCostContent usage={usage.raw} />
             </section>
@@ -1311,11 +1442,13 @@ export function TaskAtriumBoard() {
             <section
               className={cn("rounded-2xl border backdrop-blur-md", glass)}
               data-cafe-atrium-usage-loading="true"
-              aria-label="Loading usage summary"
+              aria-label={uiText("Loading usage summary", undefined, undefined, uiLocale)}
               aria-busy="true"
             >
               <div className="flex items-center gap-3 px-4 pt-3 sm:px-5">
-                <span className="label-overline">Usage · all chats</span>
+                <span className="label-overline">
+                  {uiText("Usage · all chats", undefined, undefined, uiLocale)}
+                </span>
               </div>
               <div className="@container/usage-cost min-w-0" aria-hidden="true">
                 <div className="flex justify-end gap-3 px-4 pt-3 sm:px-5">
@@ -1356,7 +1489,7 @@ export function TaskAtriumBoard() {
         <DialogPrimitive.Portal>
           <DialogPrimitive.Backdrop className="fixed inset-0 z-[70] bg-black/35 backdrop-blur-sm transition-opacity duration-(--duration-slow) ease-out data-ending-style:opacity-0 data-ending-style:duration-(--duration-fast) data-ending-style:ease-in data-starting-style:opacity-0" />
           <DialogPrimitive.Popup
-            aria-label="Subagent activity"
+            aria-label={uiText("Subagent activity", undefined, undefined, uiLocale)}
             data-cafe-atrium-subagent-popup="true"
             data-cafe-window-no-drag="true"
             className={cn(
@@ -1391,7 +1524,7 @@ export function TaskAtriumBoard() {
                     threadId: selectedCard.threadId,
                     rowId: selectedSubagent.rowKey,
                     turnId: selectedSubagent.activity.turnId,
-                    workEntry: subagentToWorkLogEntry(selectedSubagent.activity),
+                    workEntry: uiPresentation.subagentToWorkLogEntry(selectedSubagent.activity),
                   }}
                   environmentId={selectedCard.environmentId}
                   threadId={selectedCard.threadId}
@@ -1410,3 +1543,14 @@ export function TaskAtriumBoard() {
     </div>
   );
 }
+
+// Finite source-owned labels/helpers only; no received or user data.
+const UI_PRESENTATION_SOURCES = {
+  formatCompactTokenCount,
+  pluralizedCount,
+  presentTurnConfiguration,
+  providerLabel,
+  selectAtriumSnapshot,
+  statusText,
+  subagentToWorkLogEntry,
+};

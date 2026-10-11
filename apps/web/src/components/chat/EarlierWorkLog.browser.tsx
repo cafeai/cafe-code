@@ -18,6 +18,7 @@ import {
   type OrchestrationThreadTurnActivityPageInput,
   type OrchestrationThreadTurnWorkLogPresenceInput,
 } from "@cafecode/contracts";
+import { getUiLocale, setUiLocale, uiText } from "@cafecode/shared/i18n";
 import type { LegendListRef } from "@legendapp/list/react";
 import { createRef, type ComponentProps } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -747,6 +748,8 @@ describe("Earlier work in a retained current turn", () => {
   });
 
   it("does not manufacture terminal outcomes when hydrating a turn with unknown latest metadata", async () => {
+    const previousLocale = getUiLocale();
+    setUiLocale("en");
     const data = fixture("codex");
     const api = installApi(data);
     const thread = { ...data.readThread(), latestTurn: null, session: null };
@@ -809,6 +812,33 @@ describe("Earlier work in a retained current turn", () => {
       expect(page.getByText("Context compacted", { exact: true }).elements()).toHaveLength(0);
       expect(page.getByText("Completed", { exact: true }).elements()).toHaveLength(0);
       expect(page.getByText("Done", { exact: true }).elements()).toHaveLength(0);
+      const compactionNode = page.getByText("Compacting context", { exact: true }).element();
+      const childNode = child.element();
+      // Locale changes are presentation-only: retain the hydrated rows, the
+      // unknown child outcome and the exact owner-scoped history reads.
+      for (const locale of ["ja", "ko", "en"] as const) {
+        setUiLocale(locale);
+        await expect
+          .element(
+            page.getByText(uiText("Compacting context", {}, undefined, locale), { exact: true }),
+          )
+          .toBeVisible();
+        expect(
+          page
+            .getByText(uiText("Compacting context", {}, undefined, locale), { exact: true })
+            .element(),
+        ).toBe(compactionNode);
+        expect(childNode.isConnected).toBe(true);
+        await expect
+          .poll(() => childNode.querySelector("[data-subagent-status]")?.textContent)
+          .toBe(uiText("Status unavailable", {}, undefined, locale));
+        expect(childNode.querySelector("[data-subagent-terminal-elapsed]")).toBeNull();
+        for (const outcome of ["Context compacted", "Completed", "Done"] as const) {
+          expect(
+            page.getByText(uiText(outcome, {}, undefined, locale), { exact: true }).elements(),
+          ).toHaveLength(0);
+        }
+      }
       expect(api.getThreadTurnActivityPage).toHaveBeenCalledTimes(2);
       expect(
         api.getThreadTurnActivityPage.mock.calls.every(
@@ -820,6 +850,7 @@ describe("Earlier work in a retained current turn", () => {
       ).toBe(true);
     } finally {
       await screen.unmount();
+      setUiLocale(previousLocale);
     }
   });
 

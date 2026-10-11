@@ -1,3 +1,5 @@
+import { useUiLocale } from "~/i18n";
+import { uiText } from "@cafecode/shared/i18n";
 import { scopedProjectKey, scopeProjectRef, scopeThreadRef } from "@cafecode/client-runtime";
 import { DEFAULT_RUNTIME_MODE, type ScopedProjectRef } from "@cafecode/contracts";
 import { useParams, useRouter } from "@tanstack/react-router";
@@ -35,6 +37,8 @@ import { isChatSendInFlight } from "../chatPaneContext";
  * No active project or route can confer a workspace/defaults on this draft.
  */
 function useNewStandaloneChatHandler() {
+  const uiLocale = useUiLocale();
+
   const router = useRouter();
   const newChatDefaults = useSettings(deriveNewChatComposerDefaults);
   return useCallback(async () => {
@@ -42,8 +46,18 @@ function useNewStandaloneChatHandler() {
     if (!descriptor?.capabilities.standaloneChats) {
       toastManager.add({
         type: "error",
-        title: "Update the server to create a standalone chat",
-        description: "This server does not support standalone chats yet.",
+        title: uiText(
+          "Update the server to create a standalone chat",
+          undefined,
+          undefined,
+          uiLocale,
+        ),
+        description: uiText(
+          "This server does not support standalone chats yet.",
+          undefined,
+          undefined,
+          uiLocale,
+        ),
       });
       return;
     }
@@ -80,7 +94,7 @@ function useNewStandaloneChatHandler() {
     // mode and existing saved tabs until the first send materializes a thread.
     deskStore.showDraftEditor(draftId, groupId);
     await router.navigate({ to: "/draft/$draftId", params: { draftId } });
-  }, [newChatDefaults, router]);
+  }, [newChatDefaults, router, uiLocale]);
 }
 
 function useNewThreadState() {

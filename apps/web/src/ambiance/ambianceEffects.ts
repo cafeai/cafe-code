@@ -1,3 +1,4 @@
+import { uiText } from "@cafecode/shared/i18n";
 import type { AmbianceEffect } from "@cafecode/contracts";
 
 /**
@@ -29,56 +30,72 @@ export const AMBIANCE_EFFECTS: ReadonlyArray<AmbianceEffectMeta> = [
   // ── canvas 2D ────────────────────────────────────────────────────
   {
     effect: "stars",
-    label: "Stars",
+    get label() {
+      return uiText("Stars");
+    },
     backend: "2d",
     cost: "light",
     previewClass: "cafe-ambiance-preview-stars",
   },
   {
     effect: "rain",
-    label: "Rain",
+    get label() {
+      return uiText("Rain");
+    },
     backend: "2d",
     cost: "light",
     previewClass: "cafe-ambiance-preview-rain",
   },
   {
     effect: "snow",
-    label: "Snow",
+    get label() {
+      return uiText("Snow");
+    },
     backend: "2d",
     cost: "light",
     previewClass: "cafe-ambiance-preview-snow",
   },
   {
     effect: "matrix",
-    label: "Matrix",
+    get label() {
+      return uiText("Matrix");
+    },
     backend: "2d",
     cost: "light",
     previewClass: "cafe-ambiance-preview-matrix",
   },
   {
     effect: "fire",
-    label: "Fire",
+    get label() {
+      return uiText("Fire");
+    },
     backend: "2d",
     cost: "light",
     previewClass: "cafe-ambiance-preview-fire",
   },
   {
     effect: "glass",
-    label: "Glass",
+    get label() {
+      return uiText("Glass");
+    },
     backend: "2d",
     cost: "light",
     previewClass: "cafe-ambiance-preview-glass",
   },
   {
     effect: "lattice",
-    label: "Lattice",
+    get label() {
+      return uiText("Lattice");
+    },
     backend: "2d",
     cost: "light",
     previewClass: "cafe-ambiance-preview-lattice",
   },
   {
     effect: "blossom",
-    label: "Blossom",
+    get label() {
+      return uiText("Blossom");
+    },
     backend: "2d",
     cost: "light",
     previewClass: "cafe-ambiance-preview-blossom",
@@ -86,56 +103,72 @@ export const AMBIANCE_EFFECTS: ReadonlyArray<AmbianceEffectMeta> = [
   // ── WebGL fullscreen quad ────────────────────────────────────────
   {
     effect: "aurora",
-    label: "Aurora",
+    get label() {
+      return uiText("Aurora");
+    },
     backend: "webgl",
     cost: "light",
     previewClass: "cafe-ambiance-preview-aurora",
   },
   {
     effect: "grid",
-    label: "Grid",
+    get label() {
+      return uiText("Grid");
+    },
     backend: "webgl",
     cost: "light",
     previewClass: "cafe-ambiance-preview-grid",
   },
   {
     effect: "horizon",
-    label: "Horizon",
+    get label() {
+      return uiText("Horizon");
+    },
     backend: "webgl",
     cost: "light",
     previewClass: "cafe-ambiance-preview-horizon",
   },
   {
     effect: "resonance",
-    label: "Resonance",
+    get label() {
+      return uiText("Resonance");
+    },
     backend: "webgl",
     cost: "medium",
     previewClass: "cafe-ambiance-preview-resonance",
   },
   {
     effect: "converge",
-    label: "Converge",
+    get label() {
+      return uiText("Converge");
+    },
     backend: "webgl",
     cost: "medium",
     previewClass: "cafe-ambiance-preview-converge",
   },
   {
     effect: "beam",
-    label: "Beam",
+    get label() {
+      return uiText("Beam");
+    },
     backend: "webgl",
     cost: "medium",
     previewClass: "cafe-ambiance-preview-beam",
   },
   {
     effect: "terminal",
-    label: "Terminal",
+    get label() {
+      return uiText("Terminal");
+    },
     backend: "webgl",
     cost: "medium",
     previewClass: "cafe-ambiance-preview-terminal",
   },
   {
     effect: "core",
-    label: "Core",
+    get label() {
+      return uiText("Core");
+    },
     backend: "webgl",
     cost: "heavy",
     previewClass: "cafe-ambiance-preview-core",
@@ -157,7 +190,13 @@ export function ambianceBackend(effect: AmbianceEffect): AmbianceBackend {
 }
 
 export const AMBIANCE_COST_LABEL: Record<AmbianceCost, string> = {
-  light: "Light",
-  medium: "Medium",
-  heavy: "Heavy",
+  get light() {
+    return uiText("Light", undefined, "ambiance-cost");
+  },
+  get medium() {
+    return uiText("Medium");
+  },
+  get heavy() {
+    return uiText("Heavy");
+  },
 };

@@ -4,6 +4,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { render } from "vitest-browser-react";
 import { EventId, type OrchestrationThreadActivity } from "@cafecode/contracts";
 import { ComposerAsyncQuestionsPanel } from "./ComposerAsyncQuestionsPanel";
+import { getUiLocale, setUiLocale, uiText } from "@cafecode/shared/i18n";
 import {
   ASYNC_QUESTION_HANDLED_STORAGE_KEY,
   deriveAsyncQuestions,
@@ -41,6 +42,51 @@ const multipleActivities: OrchestrationThreadActivity[] = [
 
 describe("inline async questions", () => {
   beforeEach(() => localStorage.removeItem(ASYNC_QUESTION_HANDLED_STORAGE_KEY));
+
+  it("retranslates failed answer feedback without resending or replacing the retained draft", async () => {
+    const locale = getUiLocale();
+    setUiLocale("en");
+    const onAnswer = vi.fn(async () => false);
+    const onResolve = vi.fn(async () => true);
+    const screen = await render(
+      <ComposerAsyncQuestionsPanel
+        environmentId="local"
+        threadId="thread"
+        activities={activities}
+        deliveryDisabled={false}
+        onAnswer={onAnswer}
+        onResolve={onResolve}
+      />,
+    );
+    try {
+      await page.getByText("1 question from Codex").click();
+      await page.getByRole("button", { name: "Suggested route" }).click();
+      await page.getByRole("button", { name: "Send answer" }).click();
+      await expect
+        .element(page.getByRole("alert"))
+        .toHaveTextContent("The answer was not queued. Your draft is still here; try again.");
+      setUiLocale("ko");
+      await expect
+        .element(page.getByRole("alert"))
+        .toHaveTextContent(
+          "답변이 대기열에 추가되지 않았습니다. 초안은 여기에 남아 있습니다. 다시 시도하세요.",
+        );
+      await expect
+        .element(
+          page.getByRole("textbox", {
+            name: uiText("Your answer", undefined, undefined, "ko"),
+          }),
+        )
+        .toHaveValue("Suggested route");
+      await expect.element(page.getByText("Which route?", { exact: true })).toBeVisible();
+      expect(onAnswer).toHaveBeenCalledTimes(1);
+      expect(onResolve).not.toHaveBeenCalled();
+      expect(localStorage.getItem(ASYNC_QUESTION_HANDLED_STORAGE_KEY)).toBeNull();
+    } finally {
+      await screen.unmount();
+      setUiLocale(locale);
+    }
+  });
 
   it("waits for server acknowledgement before hiding skips and reads them in a fresh client", async () => {
     const onResolve = vi.fn().mockResolvedValueOnce(false).mockResolvedValueOnce(true);

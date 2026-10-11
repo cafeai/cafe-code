@@ -1,3 +1,5 @@
+import { useUiLocale, useUiPresentation } from "~/i18n";
+import { uiText } from "@cafecode/shared/i18n";
 import { ChevronRightIcon, Clock3Icon } from "lucide-react";
 import { useCallback, useEffect, useId, useState } from "react";
 import type { ChatActivityPresentation } from "./chatActivity";
@@ -14,6 +16,9 @@ export function ComposerActivityStatus({
   turnStartedAt?: string | null | undefined;
   onOpenTasks: () => void;
 }) {
+  const uiLocale = useUiLocale();
+  const uiPresentation = useUiPresentation(UI_PRESENTATION_SOURCES);
+
   const [hovered, setHovered] = useState(false);
   const [focused, setFocused] = useState(false);
   const elapsedId = useId();
@@ -38,7 +43,9 @@ export function ComposerActivityStatus({
   useEffect(() => {
     if (!revealed || !elapsedElement) return;
     const update = () => {
-      elapsedElement.textContent = formatDuration(Math.max(0, Date.now() - startedMs));
+      elapsedElement.textContent = uiPresentation.formatDuration(
+        Math.max(0, Date.now() - startedMs),
+      );
     };
     // Update only this text node, not the streaming composer React subtree.
     // Hover/focus exit, hidden documents, a new turn and unmount all retire the
@@ -85,16 +92,18 @@ export function ComposerActivityStatus({
             <span className="min-w-0 overflow-hidden">
               <span
                 role="timer"
-                aria-label="Elapsed turn time"
+                aria-label={uiText("Elapsed turn time", undefined, undefined, uiLocale)}
                 aria-live="off"
                 className="block whitespace-nowrap pl-2 text-subtle-foreground tabular-nums"
               >
                 <span aria-hidden="true">· </span>
                 <span id={elapsedId}>
-                  <span className="sr-only">Elapsed turn time: </span>
+                  <span className="sr-only">
+                    {uiText("Elapsed turn time: ", undefined, undefined, uiLocale)}
+                  </span>
                   {/* The hidden initial node is deterministic; the reveal
                       effect publishes the current elapsed value immediately. */}
-                  <span ref={setElapsedElement}>{formatDuration(0)}</span>
+                  <span ref={setElapsedElement}>{uiPresentation.formatDuration(0)}</span>
                 </span>
               </span>
             </span>
@@ -129,7 +138,12 @@ export function ComposerActivityStatus({
           type="button"
           onClick={onOpenTasks}
           className={cn(className, "hover:text-foreground")}
-          aria-label={`${activity.label}. Show tasks`}
+          aria-label={uiText(
+            "{value0}. Show tasks",
+            { value0: activity.label },
+            undefined,
+            uiLocale,
+          )}
         >
           {content}
         </button>
@@ -149,3 +163,6 @@ export function ComposerActivityStatus({
     </div>
   );
 }
+
+// Finite source-owned labels/helpers only; no received or user data.
+const UI_PRESENTATION_SOURCES = { formatDuration };

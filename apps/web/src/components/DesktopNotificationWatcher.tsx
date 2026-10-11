@@ -1,4 +1,5 @@
 import { useEffect, useRef } from "react";
+import { getUiLocale, uiText } from "@cafecode/shared/i18n";
 import { useParams, useRouter } from "@tanstack/react-router";
 import { scopedThreadKey, scopeThreadRef } from "@cafecode/client-runtime";
 import type { TurnId } from "@cafecode/contracts";
@@ -91,7 +92,10 @@ export function DesktopNotificationWatcher() {
         if (!notify || !notificationsEnabledRef.current) return;
         if (key === activeThreadKeyRef.current && document.hasFocus()) return;
         const notification = new Notification(thread.title, {
-          body: "Finished running",
+          // Language is presentation at delivery, not part of the exact-turn
+          // notification candidate. A delayed read must not freeze old copy
+          // or restart the admission watcher when the preference changes.
+          body: uiText("Finished running", undefined, undefined, getUiLocale()),
           tag: `cafe-code-thread-${thread.environmentId}-${thread.id}`,
         });
         notification.addEventListener("click", () => {

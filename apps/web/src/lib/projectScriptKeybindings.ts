@@ -1,3 +1,4 @@
+import { uiText } from "@cafecode/shared/i18n";
 import {
   KeybindingRule as KeybindingRuleSchema,
   type KeybindingCommand,
@@ -7,6 +8,9 @@ import {
 import * as Schema from "effect/Schema";
 
 export const PROJECT_SCRIPT_KEYBINDING_INVALID_MESSAGE = "Invalid keybinding.";
+export function getPROJECT_SCRIPT_KEYBINDING_INVALID_MESSAGE() {
+  return uiText("Invalid keybinding.");
+}
 
 const decodeKeybindingRule = Schema.decodeUnknownOption(KeybindingRuleSchema);
 
@@ -29,7 +33,7 @@ export function decodeProjectScriptKeybindingRule(input: {
     command: input.command,
   });
   if (decoded._tag === "None") {
-    throw new Error(PROJECT_SCRIPT_KEYBINDING_INVALID_MESSAGE);
+    throw new Error(getPROJECT_SCRIPT_KEYBINDING_INVALID_MESSAGE());
   }
   return decoded.value;
 }

@@ -7,7 +7,6 @@ import {
 import { ensureScheduledFollowupsApi } from "../../lib/scheduledFollowupsApi";
 
 const REFRESH_INTERVAL_MS = 15_000;
-const REFRESH_ERROR = "Schedules could not be refreshed. Reconnect or try again.";
 const EMPTY_SCHEDULES: readonly ScheduledFollowupRecord[] = Object.freeze([]);
 /** Chats whose last successful card summary survives the final unsubscribe. */
 const RETAINED_NOTICE_LIMIT = 32;
@@ -15,7 +14,9 @@ const RETAINED_NOTICE_LIMIT = 32;
 export interface ScheduledFollowupsSnapshot {
   readonly schedules: readonly ScheduledFollowupRecord[];
   readonly loading: boolean;
-  readonly error: string | null;
+  // A finite Cafe-owned classification, not translated output or received
+  // error data. Presentation resolves it without restarting this read owner.
+  readonly error: "refresh-unconfirmed" | null;
 }
 
 /** Stable empty snapshots also cover renders before React commits a subscriber.
@@ -124,7 +125,7 @@ function createResource(environmentId: EnvironmentId, threadId: ThreadId) {
       if (!disposed && generation === requestGeneration) {
         // An unsuccessful refresh is inconclusive. Retain the last successful
         // rows and expose fixed copy, never server error bodies or credentials.
-        publish({ ...resource.snapshot, loading: false, error: REFRESH_ERROR });
+        publish({ ...resource.snapshot, loading: false, error: "refresh-unconfirmed" });
       }
     } finally {
       inFlight = false;

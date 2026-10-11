@@ -1,3 +1,4 @@
+import { uiText } from "@cafecode/shared/i18n";
 import type { ScopedThreadRef } from "@cafecode/contracts";
 
 import { readEnvironmentApi } from "./environmentApi";
@@ -13,10 +14,10 @@ export async function renameThread(
   originalTitle: string,
 ): Promise<void> {
   const trimmed = title.trim();
-  if (!trimmed) throw new Error("Chat title can't be empty.");
+  if (!trimmed) throw new Error(uiText("Chat title can't be empty."));
   if (trimmed === originalTitle) return;
   const api = readEnvironmentApi(target.environmentId);
-  if (!api) throw new Error("Reconnect to this chat’s server to rename it.");
+  if (!api) throw new Error(uiText("Reconnect to this chat’s server to rename it."));
   await api.orchestration.dispatchCommand({
     type: "thread.meta.update",
     commandId: newCommandId(),

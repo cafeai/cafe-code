@@ -14,6 +14,7 @@ import {
   type ScheduledFollowupRun,
   type ServerProvider,
 } from "@cafecode/contracts";
+import { getUiLocale, setUiLocale, uiText } from "@cafecode/shared/i18n";
 import { page, userEvent } from "vitest/browser";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { render } from "vitest-browser-react";
@@ -167,6 +168,14 @@ function installApi(initial: readonly ScheduledFollowupRecord[] = []) {
   return api;
 }
 
+/** Language changes must not recreate the exact read owner or replay actions.
+ * Compare every synthetic service call, including passive list/history reads. */
+function scheduleCallCounts(api: ReturnType<typeof installApi>) {
+  return [api.list, api.save, api.setStatus, api.runNow, api.history, api.notification].map(
+    (method) => method.mock.calls.length,
+  );
+}
+
 /** Editor dropdowns are Select primitives: open by their field label, pick by name. */
 async function chooseOption(label: string, option: string) {
   await page.getByLabelText(label, { exact: true }).click();
@@ -221,6 +230,191 @@ describe("scheduled follow-ups Tasks UI", () => {
     vi.useRealTimers();
     document.body.innerHTML = "";
     document.documentElement.style.removeProperty("--primary");
+  });
+
+  it("retranslates a retained missing-review notice without reading or enabling another schedule", async () => {
+    const previousLocale = getUiLocale();
+    setUiLocale("en");
+    const api = installApi();
+    const screen = await render(
+      <ScheduledFollowups context={context} initialReviewScheduleId={makeSchedule().id} />,
+    );
+    const source = "This schedule is no longer available. No changes were made.";
+    try {
+      await expect.element(page.getByRole("status")).toHaveTextContent(source);
+      const noticeNode = page.getByRole("status").element();
+      const calls = scheduleCallCounts(api);
+      expect(api.list).toHaveBeenCalledExactlyOnceWith({ threadId });
+      for (const locale of ["ja", "ko", "en"] as const) {
+        setUiLocale(locale);
+        await expect
+          .element(page.getByRole("status"))
+          .toHaveTextContent(uiText(source, undefined, undefined, locale));
+        expect(page.getByRole("status").element()).toBe(noticeNode);
+        expect(scheduleCallCounts(api)).toEqual(calls);
+        expect(api.save).not.toHaveBeenCalled();
+        expect(api.setStatus).not.toHaveBeenCalled();
+        expect(api.runNow).not.toHaveBeenCalled();
+      }
+    } finally {
+      await screen.unmount();
+      setUiLocale(previousLocale);
+    }
+  });
+
+  it("retranslates retained run and pause confirmations without replaying revision-bound actions", async () => {
+    const previousLocale = getUiLocale();
+    setUiLocale("en");
+    const record = makeSchedule();
+    const api = installApi([record]);
+    const screen = await render(<ScheduledFollowups context={context} />);
+    try {
+      await page.getByRole("button", { name: "Run now", exact: true }).click();
+      const runSource = "Run requested. It will wait if this chat is busy.";
+      await expect.element(page.getByRole("status")).toHaveTextContent(runSource);
+      await expect
+        .element(page.getByRole("button", { name: "Run now", exact: true }))
+        .toBeEnabled();
+      expect(api.runNow).toHaveBeenCalledExactlyOnceWith({
+        threadId,
+        id: record.id,
+        expectedRevision: 3,
+      });
+      const noticeNode = page.getByRole("status").element();
+      const runCalls = scheduleCallCounts(api);
+      for (const [locale, expected] of [
+        ["ja", "実行をリクエストしました。このチャットが実行中の場合は待機します。"],
+        ["ko", "실행을 요청했습니다. 이 채팅이 실행 중이면 대기합니다."],
+        ["en", runSource],
+      ] as const) {
+        setUiLocale(locale);
+        await expect.element(page.getByRole("status")).toHaveTextContent(expected);
+        expect(page.getByRole("status").element()).toBe(noticeNode);
+        expect(scheduleCallCounts(api)).toEqual(runCalls);
+        expect(document.body.textContent).toContain(record.name);
+      }
+      await page.getByRole("button", { name: "Pause", exact: true }).click();
+      const pausedSource = "Schedule paused. An already running turn is not interrupted.";
+      await expect.element(page.getByRole("status")).toHaveTextContent(pausedSource);
+      await expect.element(page.getByRole("button", { name: "Resume", exact: true })).toBeEnabled();
+      expect(api.setStatus).toHaveBeenCalledExactlyOnceWith({
+        threadId,
+        expectedInstanceId: instanceId,
+        id: record.id,
+        expectedRevision: 3,
+        state: "paused",
+      });
+      const pausedCalls = scheduleCallCounts(api);
+      for (const locale of ["ja", "ko", "en"] as const) {
+        setUiLocale(locale);
+        await expect
+          .element(page.getByRole("status"))
+          .toHaveTextContent(uiText(pausedSource, undefined, undefined, locale));
+        expect(scheduleCallCounts(api)).toEqual(pausedCalls);
+      }
+    } finally {
+      await screen.unmount();
+      setUiLocale(previousLocale);
+    }
+  });
+
+  it("uses the current language after an ambiguous pending write and retains the same editable draft", async () => {
+    const previousLocale = getUiLocale();
+    setUiLocale("en");
+    const record = makeSchedule();
+    const api = installApi([record]);
+    let rejectWrite!: (reason: Error) => void;
+    api.save.mockImplementationOnce(
+      () =>
+        new Promise((_resolve, reject) => {
+          rejectWrite = reject;
+        }),
+    );
+    const screen = await render(<ScheduledFollowups context={context} />);
+    const source =
+      "The change was not confirmed. Refresh and review the saved schedule before trying again; no automatic retry was sent.";
+    try {
+      await page.getByRole("button", { name: "Edit", exact: true }).click();
+      const nameNode = page.getByLabelText("Name", { exact: true }).element();
+      await page.getByLabelText("Name", { exact: true }).fill("Received unchanged draft");
+      await page.getByRole("button", { name: "Save changes", exact: true }).click();
+      await vi.waitFor(() => expect(api.save).toHaveBeenCalledTimes(1));
+      expect(api.save.mock.calls[0]?.[0]).toMatchObject({
+        threadId,
+        id: record.id,
+        expectedRevision: 3,
+        expectedInstanceId: instanceId,
+      });
+      const pendingCalls = scheduleCallCounts(api);
+      setUiLocale("ja");
+      await expect
+        .element(page.getByLabelText(uiText("Name", undefined, undefined, "ja"), { exact: true }))
+        .toHaveValue("Received unchanged draft");
+      expect(scheduleCallCounts(api)).toEqual(pendingCalls);
+      rejectWrite(new Error("private_received_error_not_ui_copy"));
+      await expect
+        .element(page.getByRole("alert"))
+        .toHaveTextContent(uiText(source, undefined, undefined, "ja"));
+      await expect
+        .element(
+          page.getByRole("button", {
+            name: uiText("Save changes", undefined, undefined, "ja"),
+            exact: true,
+          }),
+        )
+        .toBeEnabled();
+      const settledCalls = scheduleCallCounts(api);
+      for (const locale of ["ko", "en", "ja"] as const) {
+        setUiLocale(locale);
+        await expect
+          .element(page.getByRole("alert"))
+          .toHaveTextContent(uiText(source, undefined, undefined, locale));
+        const name = page.getByLabelText(uiText("Name", undefined, undefined, locale), {
+          exact: true,
+        });
+        await expect.element(name).toHaveValue("Received unchanged draft");
+        expect(name.element()).toBe(nameNode);
+        expect(scheduleCallCounts(api)).toEqual(settledCalls);
+        expect(document.body.textContent).not.toContain("private_received_error_not_ui_copy");
+        expect(api.save).toHaveBeenCalledTimes(1);
+        expect(api.setStatus).not.toHaveBeenCalled();
+        expect(api.runNow).not.toHaveBeenCalled();
+      }
+    } finally {
+      await screen.unmount();
+      setUiLocale(previousLocale);
+    }
+  });
+
+  it("retranslates an unconfirmed read without renewing its owner or exposing received errors", async () => {
+    const previousLocale = getUiLocale();
+    setUiLocale("en");
+    const api = installApi();
+    api.list.mockRejectedValue(new Error("private_received_list_failure"));
+    const screen = await render(<ScheduledFollowups context={context} />);
+    const source = "Schedules could not be refreshed. Reconnect or try again.";
+    try {
+      await expect
+        .element(page.getByRole("status"))
+        .toHaveTextContent(`${source} Refresh schedules`);
+      const noticeNode = page.getByRole("status").element();
+      const calls = scheduleCallCounts(api);
+      expect(api.list).toHaveBeenCalledExactlyOnceWith({ threadId });
+      for (const locale of ["ja", "ko", "en"] as const) {
+        setUiLocale(locale);
+        await expect
+          .element(page.getByRole("status"))
+          .toHaveTextContent(
+            `${uiText(source, undefined, undefined, locale)} ${uiText("Refresh schedules", undefined, undefined, locale)}`,
+          );
+        expect(page.getByRole("status").element()).toBe(noticeNode);
+        expect(scheduleCallCounts(api)).toEqual(calls);
+        expect(document.body.textContent).not.toContain("private_received_list_failure");
+      }
+    } finally {
+      await screen.unmount();
+      setUiLocale(previousLocale);
+    }
   });
 
   it.each(["provider-unavailable", "private_fixture_token", "constructor"])(

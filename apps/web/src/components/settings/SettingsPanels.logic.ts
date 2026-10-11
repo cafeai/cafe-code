@@ -1,3 +1,4 @@
+import { uiText } from "@cafecode/shared/i18n";
 import type {
   EnvironmentId,
   ProviderDriverKind,
@@ -36,26 +37,32 @@ export function formatDiagnosticsDescription(input: {
   readonly otlpMetricsEnabled: boolean;
   readonly otlpMetricsUrl?: string | undefined;
 }): string {
-  const mode = input.localTracingEnabled ? "Local trace file" : "Terminal logs only";
+  const mode = input.localTracingEnabled
+    ? uiText("Local trace file")
+    : uiText("Terminal logs only");
   const tracesUrl = input.otlpTracesEnabled ? input.otlpTracesUrl : undefined;
   const metricsUrl = input.otlpMetricsEnabled ? input.otlpMetricsUrl : undefined;
 
   if (tracesUrl && metricsUrl) {
     const collapsedUrl = collapseOtelSignalsUrl({ tracesUrl, metricsUrl });
     return collapsedUrl
-      ? `${mode}. Exporting OTEL to ${collapsedUrl}.`
-      : `${mode}. Exporting OTEL traces to ${tracesUrl} and metrics to ${metricsUrl}.`;
+      ? uiText("{mode}. Exporting OTEL to {url}.", { mode, url: collapsedUrl })
+      : uiText("{mode}. Exporting OTEL traces to {tracesUrl} and metrics to {metricsUrl}.", {
+          mode,
+          tracesUrl,
+          metricsUrl,
+        });
   }
 
   if (tracesUrl) {
-    return `${mode}. Exporting OTEL traces to ${tracesUrl}.`;
+    return uiText("{mode}. Exporting OTEL traces to {url}.", { mode, url: tracesUrl });
   }
 
   if (metricsUrl) {
-    return `${mode}. Exporting OTEL metrics to ${metricsUrl}.`;
+    return uiText("{mode}. Exporting OTEL metrics to {url}.", { mode, url: metricsUrl });
   }
 
-  return `${mode}.`;
+  return uiText("{mode}.", { mode });
 }
 
 export function buildProviderInstanceUpdatePatch(input: {
@@ -122,6 +129,8 @@ export function buildEmptyRecycleBinConfirmationMessage(threadCount: number): st
   const chatLabel = threadCount === 1 ? "chat" : "chats";
   return [
     `Delete ${threadCount} ${chatLabel} forever?`,
-    "Their history, activity, attachments and checkpoints are removed. This cannot be undone.",
+    uiText(
+      "Their history, activity, attachments and checkpoints are removed. This cannot be undone.",
+    ),
   ].join("\n");
 }

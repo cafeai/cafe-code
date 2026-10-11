@@ -47,6 +47,9 @@ export const AdvertisedEndpoint = Schema.Struct({
   source: AdvertisedEndpointSource,
   status: AdvertisedEndpointStatus,
   isDefault: Schema.optional(Schema.Boolean),
+  // Stable local selection metadata, never an authorization or endpoint lookup
+  // token. Legacy received endpoints may continue using their opaque labels.
+  defaultPreferenceKey: Schema.optional(TrimmedNonEmptyString),
   description: Schema.optional(TrimmedNonEmptyString),
 });
 export type AdvertisedEndpoint = typeof AdvertisedEndpoint.Type;

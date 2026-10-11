@@ -95,3 +95,5 @@ export function useProviderSkills(
     status: input === null ? "unavailable" : result?.status,
   };
 }
+
+// Finite source-owned labels/helpers only; no received or user data.

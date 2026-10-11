@@ -1,3 +1,5 @@
+import { useUiLocale, useUiPresentation } from "~/i18n";
+import { uiFormatList, uiText } from "@cafecode/shared/i18n";
 import {
   useWorkspaceEnvironmentId,
   useIsSavedRemoteEnvironment,
@@ -150,15 +152,21 @@ import { ColorWheelPicker } from "./ColorWheelPicker";
 const THEME_OPTIONS = [
   {
     value: "system",
-    label: "System",
+    get label() {
+      return uiText("System");
+    },
   },
   {
     value: "light",
-    label: "Light",
+    get label() {
+      return uiText("Light");
+    },
   },
   {
     value: "dark",
-    label: "Dark",
+    get label() {
+      return uiText("Dark");
+    },
   },
 ] as const;
 
@@ -178,22 +186,38 @@ function clampSidebarStarSpeed(value: number | null): number {
 }
 
 const TIMESTAMP_FORMAT_LABELS = {
-  locale: "System default",
-  "12-hour": "12-hour",
-  "24-hour": "24-hour",
+  get locale() {
+    return uiText("System default");
+  },
+  get "12-hour"() {
+    return uiText("12-hour");
+  },
+  get "24-hour"() {
+    return uiText("24-hour");
+  },
 } as const;
 
 const CHAT_COPY_FORMAT_LABELS = {
-  markdown: "Markdown",
-  plainText: "Plain text",
+  get markdown() {
+    return uiText("Markdown");
+  },
+  get plainText() {
+    return uiText("Plain text");
+  },
 } as const satisfies Record<ChatCopyFormat, string>;
 
 const DEFAULT_EDITOR_SYSTEM_VALUE = "system-default" satisfies DefaultEditorSelection;
 
 const POWER_SAVE_BLOCKER_LABELS = {
-  off: "Off",
-  "during-chats": "During chats",
-  always: "Always",
+  get off() {
+    return uiText("Off");
+  },
+  get "during-chats"() {
+    return uiText("During chats");
+  },
+  get always() {
+    return uiText("Always");
+  },
 } as const satisfies Record<PowerSaveBlockerMode, string>;
 
 const DEFAULT_DRIVER_KIND = ProviderDriverKind.make("codex");
@@ -242,8 +266,13 @@ const PROVIDER_SETTINGS = DRIVER_OPTIONS.map((definition) => ({
 }));
 
 function ProviderLastChecked({ lastCheckedAt }: { lastCheckedAt: string | null }) {
+  const uiLocale = useUiLocale();
+  const uiPresentation = useUiPresentation(UI_PRESENTATION_SOURCES);
+
   useRelativeTimeTick();
-  const lastCheckedRelative = lastCheckedAt ? formatRelativeTime(lastCheckedAt) : null;
+  const lastCheckedRelative = lastCheckedAt
+    ? uiPresentation.formatRelativeTime(lastCheckedAt)
+    : null;
 
   if (!lastCheckedRelative) {
     return null;
@@ -253,11 +282,15 @@ function ProviderLastChecked({ lastCheckedAt }: { lastCheckedAt: string | null }
     <span className="text-2xs text-subtle-foreground">
       {lastCheckedRelative.suffix ? (
         <>
-          Checked <span className="font-mono tabular-nums">{lastCheckedRelative.value}</span>{" "}
+          {uiText("Checked ", undefined, undefined, uiLocale)}
+          <span className="font-mono tabular-nums">{lastCheckedRelative.value}</span>{" "}
           {lastCheckedRelative.suffix}
         </>
       ) : (
-        <>Checked {lastCheckedRelative.value}</>
+        <>
+          {uiText("Checked ", undefined, undefined, uiLocale)}
+          {lastCheckedRelative.value}
+        </>
       )}
     </span>
   );
@@ -265,16 +298,16 @@ function ProviderLastChecked({ lastCheckedAt }: { lastCheckedAt: string | null }
 
 function getSourceUpdateBranchLabel(state: DesktopSourceUpdateState | null) {
   if (state?.trackedBranch) {
-    return `${state.trackedBranch} branch`;
+    return uiText("{branch} branch", { branch: state.trackedBranch });
   }
   if (state?.status === "ignored") {
-    return "ignored - not main or dev";
+    return uiText("ignored - not main or dev");
   }
-  return "source unavailable";
+  return uiText("source unavailable");
 }
 
 function formatSourceHash(hash: string | null) {
-  return hash ? hash.slice(0, 12) : "unknown";
+  return hash ? hash.slice(0, 12) : uiText("unknown");
 }
 
 function sourceUpdateRequiresRebuild(state: DesktopSourceUpdateState | null) {
@@ -290,25 +323,25 @@ function sourceUpdateRequiresRebuild(state: DesktopSourceUpdateState | null) {
 /** One short status line for the Version row; hashes live in its info tooltip. */
 function getSourceUpdateStatus(state: DesktopSourceUpdateState | null, hasDesktopBridge: boolean) {
   if (!hasDesktopBridge) {
-    return "Update checks need the desktop app.";
+    return uiText("Update checks need the desktop app.");
   }
   if (!state || state.status === "idle") {
-    return "Not checked yet.";
+    return uiText("Not checked yet.");
   }
   if (state.status === "checking") {
-    return "Checking…";
+    return uiText("Checking…");
   }
   if (!state.trackedBranch) {
-    return state.message ?? "Only main and dev are tracked.";
+    return state.message ?? uiText("Only main and dev are tracked.");
   }
   if (sourceUpdateRequiresRebuild(state)) {
-    return `Rebuild to apply (${state.trackedBranch})`;
+    return uiText("Rebuild to apply ({branch})", { branch: state.trackedBranch });
   }
   if (state.status === "behind") {
-    return `Newer ${state.trackedBranch} commit available`;
+    return uiText("Newer {branch} commit available", { branch: state.trackedBranch });
   }
   if (state.status === "current") {
-    return "Up to date.";
+    return uiText("Up to date.");
   }
   return state.message;
 }
@@ -318,28 +351,47 @@ function getSourceUpdateHashLines(state: DesktopSourceUpdateState | null): strin
   if (!state || state.status === "idle" || state.status === "checking") {
     return null;
   }
-  const dirtyLabel = state.dirty === null ? "dirty state unknown" : state.dirty ? "dirty" : "clean";
+  const dirtyLabel =
+    state.dirty === null
+      ? uiText("dirty state unknown")
+      : state.dirty
+        ? uiText("dirty")
+        : uiText("clean");
   return [
-    `Current: ${formatSourceHash(state.localHash)} (${dirtyLabel})`,
-    `Running build: ${formatSourceHash(state.runtimeHash)}`,
+    uiText("Current: {hash} ({dirty})", {
+      hash: formatSourceHash(state.localHash),
+      dirty: dirtyLabel,
+    }),
+    uiText("Running build: {hash}", { hash: formatSourceHash(state.runtimeHash) }),
     ...(state.trackedBranch
-      ? [`Latest origin/${state.trackedBranch}: ${formatSourceHash(state.remoteHash)}`]
+      ? [
+          uiText("Latest origin/{branch}: {hash}", {
+            branch: state.trackedBranch,
+            hash: formatSourceHash(state.remoteHash),
+          }),
+        ]
       : []),
   ];
 }
 
 function AboutVersionTitle({ state }: { readonly state: DesktopSourceUpdateState | null }) {
+  const uiLocale = useUiLocale();
+  const uiPresentation = useUiPresentation(UI_PRESENTATION_SOURCES);
+
   return (
     <span className="inline-flex items-center gap-2">
-      <span>Version</span>
+      <span>{uiText("Version", undefined, undefined, uiLocale)}</span>
       <code className="text-2xs font-medium text-muted-foreground">
-        {APP_VERSION} ({getSourceUpdateBranchLabel(state)})
+        {APP_VERSION} ({uiPresentation.getSourceUpdateBranchLabel(state)})
       </code>
     </span>
   );
 }
 
 function AboutVersionSection() {
+  const uiLocale = useUiLocale();
+  const uiPresentation = useUiPresentation(UI_PRESENTATION_SOURCES);
+
   const queryClient = useQueryClient();
   const sourceUpdateStateQuery = useDesktopSourceUpdateState();
 
@@ -361,8 +413,8 @@ function AboutVersionSection() {
 
   const isChecking = sourceUpdateState?.status === "checking";
   const buttonDisabled = !hasDesktopBridge || isChecking;
-  const status = getSourceUpdateStatus(sourceUpdateState, hasDesktopBridge);
-  const hashLines = getSourceUpdateHashLines(sourceUpdateState);
+  const status = uiPresentation.getSourceUpdateStatus(sourceUpdateState, hasDesktopBridge);
+  const hashLines = uiPresentation.getSourceUpdateHashLines(sourceUpdateState);
 
   return (
     <SettingsRow
@@ -371,7 +423,7 @@ function AboutVersionSection() {
         <span className="inline-flex items-center gap-1.5">
           <span>{status}</span>
           {hashLines ? (
-            <InfoTip label="Version details">
+            <InfoTip label={uiText("Version details", undefined, undefined, uiLocale)}>
               <span className="block font-mono whitespace-pre-line">{hashLines.join("\n")}</span>
             </InfoTip>
           ) : null}
@@ -388,12 +440,14 @@ function AboutVersionSection() {
                 onClick={handleButtonClick}
               >
                 {isChecking ? <Spinner aria-hidden="true" className="size-3.5" /> : null}
-                Check for updates
+                {uiText("Check for updates", undefined, undefined, uiLocale)}
               </Button>
             }
           />
           {!hasDesktopBridge ? (
-            <TooltipPopup>Update checks need the desktop app.</TooltipPopup>
+            <TooltipPopup>
+              {uiText("Update checks need the desktop app.", undefined, undefined, uiLocale)}
+            </TooltipPopup>
           ) : null}
         </Tooltip>
       }
@@ -402,9 +456,15 @@ function AboutVersionSection() {
 }
 
 export function useSettingsRestore(onRestored?: () => void) {
+  const uiLocale = useUiLocale();
+
   const { theme, setTheme } = useTheme();
   const settings = useSettings();
   const { updateSettings } = useUpdateSettings();
+  const languagePreference = useSettings((current) => current.languagePreference, {
+    environmentId: null,
+  });
+  const { updateSettings: updateLanguageSettings } = useUpdateSettings({ environmentId: null });
 
   const isGitWritingModelDirty = !Equal.equals(
     settings.textGenerationModelSelection ?? null,
@@ -413,31 +473,34 @@ export function useSettingsRestore(onRestored?: () => void) {
 
   const changedSettingLabels = useMemo(
     () => [
-      ...(theme !== "system" ? ["Theme"] : []),
+      ...(theme !== "system" ? [uiText("Theme", undefined, undefined, uiLocale)] : []),
+      ...(languagePreference !== "system"
+        ? [uiText("Language", undefined, undefined, uiLocale)]
+        : []),
       ...(settings.interfaceScalePercent !== DEFAULT_UNIFIED_SETTINGS.interfaceScalePercent
-        ? ["Interface size"]
+        ? [uiText("Interface size", undefined, undefined, uiLocale)]
         : []),
       ...(settings.continueBackgroundAnimations !==
       DEFAULT_UNIFIED_SETTINGS.continueBackgroundAnimations
-        ? ["Background animations"]
+        ? [uiText("Background animations", undefined, undefined, uiLocale)]
         : []),
       ...(settings.showSidebarMascot !== DEFAULT_UNIFIED_SETTINGS.showSidebarMascot
-        ? ["Show sidebar image"]
+        ? [uiText("Show sidebar image", undefined, undefined, uiLocale)]
         : []),
       ...(settings.showSidebarSearch !== DEFAULT_UNIFIED_SETTINGS.showSidebarSearch
-        ? ["Sidebar search"]
+        ? [uiText("Sidebar search", undefined, undefined, uiLocale)]
         : []),
       ...(settings.showSidebarAttribution !== DEFAULT_UNIFIED_SETTINGS.showSidebarAttribution
-        ? ["Sidebar attribution"]
+        ? [uiText("Sidebar attribution", undefined, undefined, uiLocale)]
         : []),
       ...(settings.brandWordmarkPrefix !== DEFAULT_UNIFIED_SETTINGS.brandWordmarkPrefix
-        ? ["Branding prefix"]
+        ? [uiText("Branding prefix", undefined, undefined, uiLocale)]
         : []),
       ...(settings.sidebarBrandImage !== DEFAULT_UNIFIED_SETTINGS.sidebarBrandImage
-        ? ["Sidebar image"]
+        ? [uiText("Sidebar image", undefined, undefined, uiLocale)]
         : []),
       ...(settings.sidebarStarSpeed !== DEFAULT_UNIFIED_SETTINGS.sidebarStarSpeed
-        ? ["Sidebar star speed"]
+        ? [uiText("Sidebar star speed", undefined, undefined, uiLocale)]
         : []),
       ...(settings.ambianceEnabled !== DEFAULT_UNIFIED_SETTINGS.ambianceEnabled ||
       settings.ambianceEffect !== DEFAULT_UNIFIED_SETTINGS.ambianceEffect ||
@@ -447,49 +510,51 @@ export function useSettingsRestore(onRestored?: () => void) {
       settings.ambianceSurfaceThread !== DEFAULT_UNIFIED_SETTINGS.ambianceSurfaceThread ||
       settings.ambianceSurfaceComposer !== DEFAULT_UNIFIED_SETTINGS.ambianceSurfaceComposer ||
       settings.ambianceColor !== DEFAULT_UNIFIED_SETTINGS.ambianceColor
-        ? ["Ambiance"]
+        ? [uiText("Ambiance", undefined, undefined, uiLocale)]
         : []),
       ...(settings.appAccentColor !== DEFAULT_UNIFIED_SETTINGS.appAccentColor
-        ? ["Accent color"]
+        ? [uiText("Accent color", undefined, undefined, uiLocale)]
         : []),
       ...(settings.themeAccentColor !== DEFAULT_UNIFIED_SETTINGS.themeAccentColor
-        ? ["Sidebar color"]
+        ? [uiText("Sidebar color", undefined, undefined, uiLocale)]
         : []),
       ...(settings.timestampFormat !== DEFAULT_UNIFIED_SETTINGS.timestampFormat
-        ? ["Time format"]
+        ? [uiText("Time format", undefined, undefined, uiLocale)]
         : []),
       ...(settings.defaultEditor !== DEFAULT_UNIFIED_SETTINGS.defaultEditor
-        ? ["Default editor"]
+        ? [uiText("Default editor", undefined, undefined, uiLocale)]
         : []),
       ...(settings.sidebarThreadPreviewCount !== DEFAULT_UNIFIED_SETTINGS.sidebarThreadPreviewCount
-        ? ["Visible chats"]
+        ? [uiText("Visible chats", undefined, undefined, uiLocale)]
         : []),
       ...(settings.autoOpenPlanSidebar !== DEFAULT_UNIFIED_SETTINGS.autoOpenPlanSidebar
-        ? ["Auto-open plan panel"]
+        ? [uiText("Auto-open plan panel", undefined, undefined, uiLocale)]
         : []),
       ...(settings.enableAssistantStreaming !== DEFAULT_UNIFIED_SETTINGS.enableAssistantStreaming
-        ? ["Assistant output"]
+        ? [uiText("Assistant output", undefined, undefined, uiLocale)]
         : []),
       ...(Duration.toMillis(settings.automaticGitFetchInterval) !==
       Duration.toMillis(DEFAULT_UNIFIED_SETTINGS.automaticGitFetchInterval)
-        ? ["Automatic Git fetch interval"]
+        ? [uiText("Automatic Git fetch interval", undefined, undefined, uiLocale)]
         : []),
       ...(settings.defaultThreadEnvMode !== DEFAULT_UNIFIED_SETTINGS.defaultThreadEnvMode
-        ? ["New chat workspace"]
+        ? [uiText("New chat workspace", undefined, undefined, uiLocale)]
         : []),
       ...(settings.chatClickBehavior !== DEFAULT_UNIFIED_SETTINGS.chatClickBehavior
-        ? ["Single-click behavior"]
+        ? [uiText("Single-click behavior", undefined, undefined, uiLocale)]
         : []),
       ...(settings.addProjectBaseDirectory !== DEFAULT_UNIFIED_SETTINGS.addProjectBaseDirectory
-        ? ["Add project starts in"]
+        ? [uiText("Add project starts in", undefined, undefined, uiLocale)]
         : []),
       ...(settings.confirmThreadArchive !== DEFAULT_UNIFIED_SETTINGS.confirmThreadArchive
-        ? ["Archive confirmation"]
+        ? [uiText("Archive confirmation", undefined, undefined, uiLocale)]
         : []),
       ...(settings.confirmThreadDelete !== DEFAULT_UNIFIED_SETTINGS.confirmThreadDelete
-        ? ["Delete confirmation"]
+        ? [uiText("Delete confirmation", undefined, undefined, uiLocale)]
         : []),
-      ...(isGitWritingModelDirty ? ["Text generation model"] : []),
+      ...(isGitWritingModelDirty
+        ? [uiText("Text generation model", undefined, undefined, uiLocale)]
+        : []),
     ],
     [
       isGitWritingModelDirty,
@@ -520,9 +585,11 @@ export function useSettingsRestore(onRestored?: () => void) {
       settings.automaticGitFetchInterval,
       settings.enableAssistantStreaming,
       settings.interfaceScalePercent,
+      languagePreference,
       settings.sidebarThreadPreviewCount,
       settings.timestampFormat,
       theme,
+      uiLocale,
     ],
   );
 
@@ -530,13 +597,19 @@ export function useSettingsRestore(onRestored?: () => void) {
     if (changedSettingLabels.length === 0) return;
     const api = readWorkspaceApi();
     const confirmed = await (api ?? ensureWorkspaceApi()).dialogs.confirm(
-      ["Restore default settings?", `This will reset: ${changedSettingLabels.join(", ")}.`].join(
-        "\n",
+      uiText(
+        "Restore default settings?\nThis will reset: {settings}.",
+        {
+          settings: uiFormatList(changedSettingLabels, { style: "long", type: "unit" }),
+        },
+        undefined,
+        uiLocale,
       ),
     );
     if (!confirmed) return;
 
     setTheme("system");
+    updateLanguageSettings({ languagePreference: DEFAULT_UNIFIED_SETTINGS.languagePreference });
     updateSettings({
       timestampFormat: DEFAULT_UNIFIED_SETTINGS.timestampFormat,
       interfaceScalePercent: DEFAULT_UNIFIED_SETTINGS.interfaceScalePercent,
@@ -571,7 +644,14 @@ export function useSettingsRestore(onRestored?: () => void) {
       textGenerationModelSelection: DEFAULT_UNIFIED_SETTINGS.textGenerationModelSelection,
     });
     onRestored?.();
-  }, [changedSettingLabels, onRestored, setTheme, updateSettings]);
+  }, [
+    changedSettingLabels,
+    onRestored,
+    setTheme,
+    updateSettings,
+    updateLanguageSettings,
+    uiLocale,
+  ]);
 
   return {
     changedSettingLabels,
@@ -580,10 +660,16 @@ export function useSettingsRestore(onRestored?: () => void) {
 }
 
 export function TextGenerationModelSettingsRow() {
+  const uiLocale = useUiLocale();
+  const uiPresentation = useUiPresentation(UI_PRESENTATION_SOURCES);
+
   const settings = useSettings();
   const { updateSettings } = useUpdateSettings();
   const serverProviders = useServerProviders();
-  const textGenerationModelSelection = resolveAppModelSelectionState(settings, serverProviders);
+  const textGenerationModelSelection = uiPresentation.resolveAppModelSelectionState(
+    settings,
+    serverProviders,
+  );
   const textGenInstanceId = textGenerationModelSelection.instanceId;
   const textGenModel = textGenerationModelSelection.model;
   const textGenModelOptions = textGenerationModelSelection.options;
@@ -608,12 +694,12 @@ export function TextGenerationModelSettingsRow() {
 
   return (
     <SettingsRow
-      title="Text generation model"
-      description="Writes chat titles and branch names."
+      title={uiText("Text generation model", undefined, undefined, uiLocale)}
+      description={uiText("Writes chat titles and branch names.", undefined, undefined, uiLocale)}
       resetAction={
         isGitWritingModelDirty ? (
           <SettingResetButton
-            label="text generation model"
+            label={uiText("text generation model", undefined, undefined, uiLocale)}
             onClick={() =>
               updateSettings({
                 textGenerationModelSelection: DEFAULT_UNIFIED_SETTINGS.textGenerationModelSelection,
@@ -634,7 +720,7 @@ export function TextGenerationModelSettingsRow() {
             triggerClassName="min-w-0 max-w-none shrink-0 text-foreground"
             onInstanceModelChange={(instanceId, model) => {
               updateSettings({
-                textGenerationModelSelection: resolveAppModelSelectionState(
+                textGenerationModelSelection: uiPresentation.resolveAppModelSelectionState(
                   {
                     ...settings,
                     textGenerationModelSelection: createModelSelection(instanceId, model),
@@ -672,7 +758,7 @@ export function TextGenerationModelSettingsRow() {
             triggerClassName="min-w-0 max-w-none shrink-0 text-foreground"
             onModelOptionsChange={(nextOptions) => {
               updateSettings({
-                textGenerationModelSelection: resolveAppModelSelectionState(
+                textGenerationModelSelection: uiPresentation.resolveAppModelSelectionState(
                   {
                     ...settings,
                     textGenerationModelSelection: createModelSelection(
@@ -696,7 +782,73 @@ export function GeneralSettingsPanel() {
   return <AppearanceSettingsPanel />;
 }
 
+/** Interface language belongs to the current client, even while a remote
+ * workspace is selected. Native/server persistence retains the exact enum;
+ * choosing English is never normalized to System default. */
+export function LanguageSettingsRow() {
+  const uiLocale = useUiLocale();
+  const settings = useSettings((current) => ({ languagePreference: current.languagePreference }), {
+    environmentId: null,
+  });
+  const { updateSettings } = useUpdateSettings({ environmentId: null });
+  return (
+    <SettingsRow
+      title={uiText("Language", undefined, undefined, uiLocale)}
+      resetAction={
+        settings.languagePreference !== "system" ? (
+          <SettingResetButton
+            label={uiText("language", undefined, undefined, uiLocale)}
+            onClick={() => updateSettings({ languagePreference: "system" })}
+          />
+        ) : null
+      }
+      control={
+        <Select
+          value={settings.languagePreference}
+          onValueChange={(value) => {
+            if (value === "system" || value === "en" || value === "ja" || value === "ko") {
+              updateSettings({ languagePreference: value });
+            }
+          }}
+        >
+          <SelectTrigger
+            className="w-full sm:w-40"
+            aria-label={uiText("Interface language", undefined, undefined, uiLocale)}
+          >
+            <SelectValue>
+              {settings.languagePreference === "system"
+                ? uiText("System default", undefined, undefined, uiLocale)
+                : settings.languagePreference === "ja"
+                  ? uiText("日本語", undefined, "language-self-name", uiLocale)
+                  : settings.languagePreference === "ko"
+                    ? uiText("한국어", undefined, "language-self-name", uiLocale)
+                    : uiText("English", undefined, "language-self-name", uiLocale)}
+            </SelectValue>
+          </SelectTrigger>
+          <SelectPopup align="end" alignItemWithTrigger={false}>
+            <SelectItem hideIndicator value="system">
+              {uiText("System default", undefined, undefined, uiLocale)}
+            </SelectItem>
+            <SelectItem hideIndicator value="en">
+              {uiText("English", undefined, "language-self-name", uiLocale)}
+            </SelectItem>
+            <SelectItem hideIndicator value="ja">
+              {uiText("日本語", undefined, "language-self-name", uiLocale)}
+            </SelectItem>
+            <SelectItem hideIndicator value="ko">
+              {uiText("한국어", undefined, "language-self-name", uiLocale)}
+            </SelectItem>
+          </SelectPopup>
+        </Select>
+      }
+    />
+  );
+}
+
 export function AppearanceSettingsPanel() {
+  const uiLocale = useUiLocale();
+  const uiPresentation = useUiPresentation(UI_PRESENTATION_SOURCES);
+
   const environmentId = useWorkspaceEnvironmentId();
   const { theme, setTheme } = useTheme();
   const settings = useSettings();
@@ -748,12 +900,14 @@ export function AppearanceSettingsPanel() {
       }
 
       if (!SIDEBAR_IMAGE_MIME_TYPES.has(file.type)) {
-        setSidebarImageError("Choose a PNG, JPEG, GIF, or WebP image.");
+        setSidebarImageError(
+          uiText("Choose a PNG, JPEG, GIF, or WebP image.", undefined, undefined, uiLocale),
+        );
         return;
       }
 
       if (file.size > MAX_SIDEBAR_BRAND_IMAGE_FILE_BYTES) {
-        setSidebarImageError("Choose an image under 1 MB.");
+        setSidebarImageError(uiText("Choose an image under 1 MB.", undefined, undefined, uiLocale));
         return;
       }
 
@@ -767,7 +921,9 @@ export function AppearanceSettingsPanel() {
       } catch (error) {
         clearSidebarImagePreviewUrl();
         setSidebarImageError(
-          error instanceof Error ? error.message : "Could not upload that image.",
+          error instanceof Error
+            ? error.message
+            : uiText("Could not upload that image.", undefined, undefined, uiLocale),
         );
       } finally {
         setSidebarImageUploading(false);
@@ -778,17 +934,22 @@ export function AppearanceSettingsPanel() {
       environmentId,
       setTemporarySidebarImagePreviewUrl,
       updateSettings,
+      uiLocale,
     ],
   );
 
   return (
-    <SettingsPageContainer title="Appearance">
+    <SettingsPageContainer title={uiText("Appearance", undefined, undefined, uiLocale)}>
       <SettingsSection>
+        <LanguageSettingsRow />
         <SettingsRow
-          title="Theme"
+          title={uiText("Theme", undefined, undefined, uiLocale)}
           resetAction={
             theme !== "system" ? (
-              <SettingResetButton label="theme" onClick={() => setTheme("system")} />
+              <SettingResetButton
+                label={uiText("theme", undefined, undefined, uiLocale)}
+                onClick={() => setTheme("system")}
+              />
             ) : null
           }
           control={
@@ -800,13 +961,17 @@ export function AppearanceSettingsPanel() {
                 }
               }}
             >
-              <SelectTrigger className="w-full sm:w-40" aria-label="Theme preference">
+              <SelectTrigger
+                className="w-full sm:w-40"
+                aria-label={uiText("Theme preference", undefined, undefined, uiLocale)}
+              >
                 <SelectValue>
-                  {THEME_OPTIONS.find((option) => option.value === theme)?.label ?? "System"}
+                  {uiPresentation.THEME_OPTIONS.find((option) => option.value === theme)?.label ??
+                    uiText("System", undefined, undefined, uiLocale)}
                 </SelectValue>
               </SelectTrigger>
               <SelectPopup align="end" alignItemWithTrigger={false}>
-                {THEME_OPTIONS.map((option) => (
+                {uiPresentation.THEME_OPTIONS.map((option) => (
                   <SelectItem hideIndicator key={option.value} value={option.value}>
                     {option.label}
                   </SelectItem>
@@ -817,11 +982,11 @@ export function AppearanceSettingsPanel() {
         />
 
         <SettingsRow
-          title="Interface size"
+          title={uiText("Interface size", undefined, undefined, uiLocale)}
           resetAction={
             settings.interfaceScalePercent !== DEFAULT_INTERFACE_SCALE_PERCENT ? (
               <SettingResetButton
-                label="interface size"
+                label={uiText("interface size", undefined, undefined, uiLocale)}
                 onClick={() =>
                   updateSettings({ interfaceScalePercent: DEFAULT_INTERFACE_SCALE_PERCENT })
                 }
@@ -835,7 +1000,7 @@ export function AppearanceSettingsPanel() {
                 min={MIN_INTERFACE_SCALE_PERCENT}
                 max={MAX_INTERFACE_SCALE_PERCENT}
                 step={5}
-                aria-label="Interface size"
+                aria-label={uiText("Interface size", undefined, undefined, uiLocale)}
                 onValueChange={(value) =>
                   updateSettings({ interfaceScalePercent: snapInterfaceScalePercent(value) })
                 }
@@ -848,12 +1013,12 @@ export function AppearanceSettingsPanel() {
         />
 
         <SettingsRow
-          title="Branding prefix"
-          description="Replaces 'Cafe' in the wordmark."
+          title={uiText("Branding prefix", undefined, undefined, uiLocale)}
+          description={uiText("Replaces ''Cafe'' in the wordmark.", undefined, undefined, uiLocale)}
           resetAction={
             settings.brandWordmarkPrefix !== DEFAULT_UNIFIED_SETTINGS.brandWordmarkPrefix ? (
               <SettingResetButton
-                label="branding prefix"
+                label={uiText("branding prefix", undefined, undefined, uiLocale)}
                 onClick={() =>
                   updateSettings({ brandWordmarkPrefix: DEFAULT_BRAND_WORDMARK_PREFIX })
                 }
@@ -862,7 +1027,7 @@ export function AppearanceSettingsPanel() {
           }
           control={
             <DraftInput
-              aria-label="Branding prefix"
+              aria-label={uiText("Branding prefix", undefined, undefined, uiLocale)}
               className="w-full sm:w-48"
               maxLength={MAX_BRAND_WORDMARK_PREFIX_LENGTH}
               placeholder={DEFAULT_BRAND_WORDMARK_PREFIX}
@@ -877,12 +1042,17 @@ export function AppearanceSettingsPanel() {
         />
 
         <SettingsRow
-          title="Accent color"
-          description="Used for buttons, selection and focus."
+          title={uiText("Accent color", undefined, undefined, uiLocale)}
+          description={uiText(
+            "Used for buttons, selection and focus.",
+            undefined,
+            undefined,
+            uiLocale,
+          )}
           resetAction={
             settings.appAccentColor !== DEFAULT_UNIFIED_SETTINGS.appAccentColor ? (
               <SettingResetButton
-                label="accent color"
+                label={uiText("accent color", undefined, undefined, uiLocale)}
                 onClick={() => updateSettings({ appAccentColor: DEFAULT_APP_ACCENT_COLOR })}
               />
             ) : null
@@ -899,12 +1069,12 @@ export function AppearanceSettingsPanel() {
         />
 
         <SettingsRow
-          title="Sidebar color"
-          description="Colors the sidebar stars and glow."
+          title={uiText("Sidebar color", undefined, undefined, uiLocale)}
+          description={uiText("Colors the sidebar stars and glow.", undefined, undefined, uiLocale)}
           resetAction={
             settings.themeAccentColor !== DEFAULT_UNIFIED_SETTINGS.themeAccentColor ? (
               <SettingResetButton
-                label="sidebar color"
+                label={uiText("sidebar color", undefined, undefined, uiLocale)}
                 onClick={() => updateSettings({ themeAccentColor: DEFAULT_THEME_ACCENT_COLOR })}
               />
             ) : null
@@ -921,12 +1091,17 @@ export function AppearanceSettingsPanel() {
         />
 
         <SettingsRow
-          title="Sidebar image"
-          description="PNG, JPEG, GIF or WebP, under 1 MB."
+          title={uiText("Sidebar image", undefined, undefined, uiLocale)}
+          description={uiText(
+            "PNG, JPEG, GIF or WebP, under 1 MB.",
+            undefined,
+            undefined,
+            uiLocale,
+          )}
           resetAction={
             settings.sidebarBrandImage !== DEFAULT_UNIFIED_SETTINGS.sidebarBrandImage ? (
               <SettingResetButton
-                label="sidebar image"
+                label={uiText("sidebar image", undefined, undefined, uiLocale)}
                 onClick={() => {
                   setSidebarImageError(null);
                   clearSidebarImagePreviewUrl();
@@ -965,7 +1140,7 @@ export function AppearanceSettingsPanel() {
                     {sidebarImageUploading ? (
                       <Spinner aria-hidden="true" className="size-3.5" />
                     ) : null}
-                    Choose image
+                    {uiText("Choose image", undefined, undefined, uiLocale)}
                   </Button>
                   {settings.sidebarBrandImage ? (
                     <Button
@@ -981,7 +1156,7 @@ export function AppearanceSettingsPanel() {
                         });
                       }}
                     >
-                      Use default
+                      {uiText("Use default", undefined, undefined, uiLocale)}
                     </Button>
                   ) : null}
                 </div>
@@ -990,7 +1165,7 @@ export function AppearanceSettingsPanel() {
                 ref={sidebarImageInputRef}
                 type="file"
                 accept={SIDEBAR_IMAGE_ACCEPT}
-                aria-label="Sidebar image file"
+                aria-label={uiText("Sidebar image file", undefined, undefined, uiLocale)}
                 className="sr-only"
                 tabIndex={-1}
                 onChange={(event) => void handleSidebarImageChange(event)}
@@ -1000,11 +1175,11 @@ export function AppearanceSettingsPanel() {
         />
 
         <SettingsRow
-          title="Sidebar search"
+          title={uiText("Sidebar search", undefined, undefined, uiLocale)}
           resetAction={
             settings.showSidebarSearch !== DEFAULT_UNIFIED_SETTINGS.showSidebarSearch ? (
               <SettingResetButton
-                label="sidebar search"
+                label={uiText("sidebar search", undefined, undefined, uiLocale)}
                 onClick={() => updateSettings({ showSidebarSearch: DEFAULT_SHOW_SIDEBAR_SEARCH })}
               />
             ) : null
@@ -1013,17 +1188,17 @@ export function AppearanceSettingsPanel() {
             <Switch
               checked={settings.showSidebarSearch}
               onCheckedChange={(checked) => updateSettings({ showSidebarSearch: Boolean(checked) })}
-              aria-label="Show sidebar search"
+              aria-label={uiText("Show sidebar search", undefined, undefined, uiLocale)}
             />
           }
         />
 
         <SettingsRow
-          title="Show sidebar image"
+          title={uiText("Show sidebar image", undefined, undefined, uiLocale)}
           resetAction={
             settings.showSidebarMascot !== DEFAULT_UNIFIED_SETTINGS.showSidebarMascot ? (
               <SettingResetButton
-                label="show sidebar image"
+                label={uiText("show sidebar image", undefined, undefined, uiLocale)}
                 onClick={() => updateSettings({ showSidebarMascot: DEFAULT_SHOW_SIDEBAR_MASCOT })}
               />
             ) : null
@@ -1032,17 +1207,17 @@ export function AppearanceSettingsPanel() {
             <Switch
               checked={settings.showSidebarMascot}
               onCheckedChange={(checked) => updateSettings({ showSidebarMascot: Boolean(checked) })}
-              aria-label="Show sidebar image"
+              aria-label={uiText("Show sidebar image", undefined, undefined, uiLocale)}
             />
           }
         />
 
         <SettingsRow
-          title="Sidebar attribution"
+          title={uiText("Sidebar attribution", undefined, undefined, uiLocale)}
           resetAction={
             settings.showSidebarAttribution !== DEFAULT_UNIFIED_SETTINGS.showSidebarAttribution ? (
               <SettingResetButton
-                label="sidebar attribution"
+                label={uiText("sidebar attribution", undefined, undefined, uiLocale)}
                 onClick={() =>
                   updateSettings({ showSidebarAttribution: DEFAULT_SHOW_SIDEBAR_ATTRIBUTION })
                 }
@@ -1055,19 +1230,24 @@ export function AppearanceSettingsPanel() {
               onCheckedChange={(checked) =>
                 updateSettings({ showSidebarAttribution: Boolean(checked) })
               }
-              aria-label="Show sidebar attribution"
+              aria-label={uiText("Show sidebar attribution", undefined, undefined, uiLocale)}
             />
           }
         />
 
         <SettingsRow
-          title="Background animations"
-          description="Keep decorations moving while Cafe is hidden or unfocused."
+          title={uiText("Background animations", undefined, undefined, uiLocale)}
+          description={uiText(
+            "Keep decorations moving while Cafe is hidden or unfocused.",
+            undefined,
+            undefined,
+            uiLocale,
+          )}
           resetAction={
             settings.continueBackgroundAnimations !==
             DEFAULT_UNIFIED_SETTINGS.continueBackgroundAnimations ? (
               <SettingResetButton
-                label="background animations"
+                label={uiText("background animations", undefined, undefined, uiLocale)}
                 onClick={() =>
                   updateSettings({
                     continueBackgroundAnimations: DEFAULT_CONTINUE_BACKGROUND_ANIMATIONS,
@@ -1082,17 +1262,22 @@ export function AppearanceSettingsPanel() {
               onCheckedChange={(checked) =>
                 updateSettings({ continueBackgroundAnimations: Boolean(checked) })
               }
-              aria-label="Keep animations running in background"
+              aria-label={uiText(
+                "Keep animations running in background",
+                undefined,
+                undefined,
+                uiLocale,
+              )}
             />
           }
         />
 
         <SettingsRow
-          title="Sidebar star speed"
+          title={uiText("Sidebar star speed", undefined, undefined, uiLocale)}
           resetAction={
             settings.sidebarStarSpeed !== DEFAULT_UNIFIED_SETTINGS.sidebarStarSpeed ? (
               <SettingResetButton
-                label="sidebar star speed"
+                label={uiText("sidebar star speed", undefined, undefined, uiLocale)}
                 onClick={() => updateSettings({ sidebarStarSpeed: DEFAULT_SIDEBAR_STAR_SPEED })}
               />
             ) : null
@@ -1111,22 +1296,45 @@ export function AppearanceSettingsPanel() {
                 }
               >
                 <NumberFieldGroup>
-                  <NumberFieldDecrement aria-label="Decrease sidebar star speed" />
-                  <NumberFieldInput aria-label="Sidebar star speed multiplier" />
-                  <NumberFieldIncrement aria-label="Increase sidebar star speed" />
+                  <NumberFieldDecrement
+                    aria-label={uiText(
+                      "Decrease sidebar star speed",
+                      undefined,
+                      undefined,
+                      uiLocale,
+                    )}
+                  />
+                  <NumberFieldInput
+                    aria-label={uiText(
+                      "Sidebar star speed multiplier",
+                      undefined,
+                      undefined,
+                      uiLocale,
+                    )}
+                  />
+                  <NumberFieldIncrement
+                    aria-label={uiText(
+                      "Increase sidebar star speed",
+                      undefined,
+                      undefined,
+                      uiLocale,
+                    )}
+                  />
                 </NumberFieldGroup>
               </NumberField>
-              <span className="text-xs text-muted-foreground">x</span>
+              <span className="text-xs text-muted-foreground">
+                {uiText("x", undefined, undefined, uiLocale)}
+              </span>
             </div>
           }
         />
 
         <SettingsRow
-          title="Time format"
+          title={uiText("Time format", undefined, undefined, uiLocale)}
           resetAction={
             settings.timestampFormat !== DEFAULT_UNIFIED_SETTINGS.timestampFormat ? (
               <SettingResetButton
-                label="time format"
+                label={uiText("time format", undefined, undefined, uiLocale)}
                 onClick={() =>
                   updateSettings({ timestampFormat: DEFAULT_UNIFIED_SETTINGS.timestampFormat })
                 }
@@ -1142,18 +1350,23 @@ export function AppearanceSettingsPanel() {
                 }
               }}
             >
-              <SelectTrigger className="w-full sm:w-40" aria-label="Timestamp format">
-                <SelectValue>{TIMESTAMP_FORMAT_LABELS[settings.timestampFormat]}</SelectValue>
+              <SelectTrigger
+                className="w-full sm:w-40"
+                aria-label={uiText("Timestamp format", undefined, undefined, uiLocale)}
+              >
+                <SelectValue>
+                  {uiPresentation.TIMESTAMP_FORMAT_LABELS[settings.timestampFormat]}
+                </SelectValue>
               </SelectTrigger>
               <SelectPopup align="end" alignItemWithTrigger={false}>
                 <SelectItem hideIndicator value="locale">
-                  {TIMESTAMP_FORMAT_LABELS.locale}
+                  {uiPresentation.TIMESTAMP_FORMAT_LABELS.locale}
                 </SelectItem>
                 <SelectItem hideIndicator value="12-hour">
-                  {TIMESTAMP_FORMAT_LABELS["12-hour"]}
+                  {uiPresentation.TIMESTAMP_FORMAT_LABELS["12-hour"]}
                 </SelectItem>
                 <SelectItem hideIndicator value="24-hour">
-                  {TIMESTAMP_FORMAT_LABELS["24-hour"]}
+                  {uiPresentation.TIMESTAMP_FORMAT_LABELS["24-hour"]}
                 </SelectItem>
               </SelectPopup>
             </Select>
@@ -1165,6 +1378,9 @@ export function AppearanceSettingsPanel() {
 }
 
 export function ChatSettingsPanel() {
+  const uiLocale = useUiLocale();
+  const uiPresentation = useUiPresentation(UI_PRESENTATION_SOURCES);
+
   const settings = useSettings();
   const { updateSettings } = useUpdateSettings();
   const [isOpeningSystemPromptFile, setIsOpeningSystemPromptFile] = useState(false);
@@ -1180,7 +1396,7 @@ export function ChatSettingsPanel() {
           if (!canOpenLocalEditor) {
             await copyTextToClipboard(path);
             toastManager.add({
-              title: "Path copied",
+              title: uiText("Path copied", undefined, undefined, uiLocale),
               description: path,
               type: "success",
             });
@@ -1192,32 +1408,37 @@ export function ChatSettingsPanel() {
       .catch((error: unknown) => {
         toastManager.add({
           title: canOpenLocalEditor
-            ? "Unable to open system prompt file"
-            : "Unable to copy system prompt path",
+            ? uiText("Unable to open system prompt file", undefined, undefined, uiLocale)
+            : uiText("Unable to copy system prompt path", undefined, undefined, uiLocale),
           description:
             error instanceof Error
               ? error.message
               : canOpenLocalEditor
-                ? "The system prompt file was not opened."
-                : "The system prompt path was not copied.",
+                ? uiText("The system prompt file was not opened.", undefined, undefined, uiLocale)
+                : uiText("The system prompt path was not copied.", undefined, undefined, uiLocale),
           type: "error",
         });
       })
       .finally(() => {
         setIsOpeningSystemPromptFile(false);
       });
-  }, [canOpenLocalEditor]);
+  }, [canOpenLocalEditor, uiLocale]);
 
   return (
-    <SettingsPageContainer title="Chats">
+    <SettingsPageContainer title={uiText("Chats", undefined, undefined, uiLocale)}>
       <SettingsSection>
         <SettingsRow
-          title="Single-click behavior"
-          description="Preview temporarily, or keep each chat open as a tab."
+          title={uiText("Single-click behavior", undefined, undefined, uiLocale)}
+          description={uiText(
+            "Preview temporarily, or keep each chat open as a tab.",
+            undefined,
+            undefined,
+            uiLocale,
+          )}
           resetAction={
             settings.chatClickBehavior !== DEFAULT_UNIFIED_SETTINGS.chatClickBehavior ? (
               <SettingResetButton
-                label="single-click behavior"
+                label={uiText("single-click behavior", undefined, undefined, uiLocale)}
                 onClick={() =>
                   updateSettings({ chatClickBehavior: DEFAULT_UNIFIED_SETTINGS.chatClickBehavior })
                 }
@@ -1232,17 +1453,22 @@ export function ChatSettingsPanel() {
                   updateSettings({ chatClickBehavior: value });
               }}
             >
-              <SelectTrigger className="w-full sm:w-44" aria-label="Chat click behavior">
+              <SelectTrigger
+                className="w-full sm:w-44"
+                aria-label={uiText("Chat click behavior", undefined, undefined, uiLocale)}
+              >
                 <SelectValue>
-                  {settings.chatClickBehavior === "open" ? "Open" : "Preview"}
+                  {settings.chatClickBehavior === "open"
+                    ? uiText("Open", undefined, undefined, uiLocale)
+                    : uiText("Preview", undefined, undefined, uiLocale)}
                 </SelectValue>
               </SelectTrigger>
               <SelectPopup align="end" alignItemWithTrigger={false}>
                 <SelectItem hideIndicator value="preview">
-                  Preview
+                  {uiText("Preview", undefined, undefined, uiLocale)}
                 </SelectItem>
                 <SelectItem hideIndicator value="open">
-                  Open
+                  {uiText("Open", undefined, undefined, uiLocale)}
                 </SelectItem>
               </SelectPopup>
             </Select>
@@ -1250,13 +1476,18 @@ export function ChatSettingsPanel() {
         />
 
         <SettingsRow
-          title="Assistant output"
-          description="Show replies while they are being written."
+          title={uiText("Assistant output", undefined, undefined, uiLocale)}
+          description={uiText(
+            "Show replies while they are being written.",
+            undefined,
+            undefined,
+            uiLocale,
+          )}
           resetAction={
             settings.enableAssistantStreaming !==
             DEFAULT_UNIFIED_SETTINGS.enableAssistantStreaming ? (
               <SettingResetButton
-                label="assistant output"
+                label={uiText("assistant output", undefined, undefined, uiLocale)}
                 onClick={() =>
                   updateSettings({
                     enableAssistantStreaming: DEFAULT_UNIFIED_SETTINGS.enableAssistantStreaming,
@@ -1271,18 +1502,23 @@ export function ChatSettingsPanel() {
               onCheckedChange={(checked) =>
                 updateSettings({ enableAssistantStreaming: Boolean(checked) })
               }
-              aria-label="Stream assistant messages"
+              aria-label={uiText("Stream assistant messages", undefined, undefined, uiLocale)}
             />
           }
         />
 
         <SettingsRow
-          title="Auto-open plan panel"
-          description="Open the side panel when a provider finishes a plan."
+          title={uiText("Auto-open plan panel", undefined, undefined, uiLocale)}
+          description={uiText(
+            "Open the side panel when a provider finishes a plan.",
+            undefined,
+            undefined,
+            uiLocale,
+          )}
           resetAction={
             settings.autoOpenPlanSidebar !== DEFAULT_UNIFIED_SETTINGS.autoOpenPlanSidebar ? (
               <SettingResetButton
-                label="auto-open plan panel"
+                label={uiText("auto-open plan panel", undefined, undefined, uiLocale)}
                 onClick={() =>
                   updateSettings({
                     autoOpenPlanSidebar: DEFAULT_UNIFIED_SETTINGS.autoOpenPlanSidebar,
@@ -1297,18 +1533,28 @@ export function ChatSettingsPanel() {
               onCheckedChange={(checked) =>
                 updateSettings({ autoOpenPlanSidebar: Boolean(checked) })
               }
-              aria-label="Open the plan panel automatically"
+              aria-label={uiText(
+                "Open the plan panel automatically",
+                undefined,
+                undefined,
+                uiLocale,
+              )}
             />
           }
         />
 
         <SettingsRow
-          title="Chat selection copy"
-          description="What Copy puts on the clipboard for selected message text."
+          title={uiText("Chat selection copy", undefined, undefined, uiLocale)}
+          description={uiText(
+            "What Copy puts on the clipboard for selected message text.",
+            undefined,
+            undefined,
+            uiLocale,
+          )}
           resetAction={
             settings.chatCopyFormat !== DEFAULT_UNIFIED_SETTINGS.chatCopyFormat ? (
               <SettingResetButton
-                label="chat selection copy"
+                label={uiText("chat selection copy", undefined, undefined, uiLocale)}
                 onClick={() =>
                   updateSettings({
                     chatCopyFormat: DEFAULT_UNIFIED_SETTINGS.chatCopyFormat,
@@ -1326,15 +1572,20 @@ export function ChatSettingsPanel() {
                 }
               }}
             >
-              <SelectTrigger className="w-full sm:w-44" aria-label="Chat selection copy format">
-                <SelectValue>{CHAT_COPY_FORMAT_LABELS[settings.chatCopyFormat]}</SelectValue>
+              <SelectTrigger
+                className="w-full sm:w-44"
+                aria-label={uiText("Chat selection copy format", undefined, undefined, uiLocale)}
+              >
+                <SelectValue>
+                  {uiPresentation.CHAT_COPY_FORMAT_LABELS[settings.chatCopyFormat]}
+                </SelectValue>
               </SelectTrigger>
               <SelectPopup align="end" alignItemWithTrigger={false}>
                 <SelectItem hideIndicator value="markdown">
-                  Markdown
+                  {uiText("Markdown", undefined, undefined, uiLocale)}
                 </SelectItem>
                 <SelectItem hideIndicator value="plainText">
-                  Plain text
+                  {uiText("Plain text", undefined, undefined, uiLocale)}
                 </SelectItem>
               </SelectPopup>
             </Select>
@@ -1342,12 +1593,12 @@ export function ChatSettingsPanel() {
         />
 
         <SettingsRow
-          title="New chats"
-          description="Default workspace for new chats."
+          title={uiText("New chats", undefined, undefined, uiLocale)}
+          description={uiText("Default workspace for new chats.", undefined, undefined, uiLocale)}
           resetAction={
             settings.defaultThreadEnvMode !== DEFAULT_UNIFIED_SETTINGS.defaultThreadEnvMode ? (
               <SettingResetButton
-                label="new chats"
+                label={uiText("new chats", undefined, undefined, uiLocale)}
                 onClick={() =>
                   updateSettings({
                     defaultThreadEnvMode: DEFAULT_UNIFIED_SETTINGS.defaultThreadEnvMode,
@@ -1365,17 +1616,22 @@ export function ChatSettingsPanel() {
                 }
               }}
             >
-              <SelectTrigger className="w-full sm:w-44" aria-label="Default chat workspace">
+              <SelectTrigger
+                className="w-full sm:w-44"
+                aria-label={uiText("Default chat workspace", undefined, undefined, uiLocale)}
+              >
                 <SelectValue>
-                  {settings.defaultThreadEnvMode === "worktree" ? "New worktree" : "Local"}
+                  {settings.defaultThreadEnvMode === "worktree"
+                    ? uiText("New worktree", undefined, undefined, uiLocale)
+                    : uiText("Local", undefined, undefined, uiLocale)}
                 </SelectValue>
               </SelectTrigger>
               <SelectPopup align="end" alignItemWithTrigger={false}>
                 <SelectItem hideIndicator value="local">
-                  Local
+                  {uiText("Local", undefined, undefined, uiLocale)}
                 </SelectItem>
                 <SelectItem hideIndicator value="worktree">
-                  New worktree
+                  {uiText("New worktree", undefined, undefined, uiLocale)}
                 </SelectItem>
               </SelectPopup>
             </Select>
@@ -1383,8 +1639,13 @@ export function ChatSettingsPanel() {
         />
 
         <SettingsRow
-          title="System prompt"
-          description="Added before the first message of each new chat."
+          title={uiText("System prompt", undefined, undefined, uiLocale)}
+          description={uiText(
+            "Added before the first message of each new chat.",
+            undefined,
+            undefined,
+            uiLocale,
+          )}
           control={
             <Button
               type="button"
@@ -1400,18 +1661,20 @@ export function ChatSettingsPanel() {
               ) : (
                 <CopyIcon className="size-4" aria-hidden />
               )}
-              {canOpenLocalEditor ? "Open file" : "Copy path"}
+              {canOpenLocalEditor
+                ? uiText("Open file", undefined, undefined, uiLocale)
+                : uiText("Copy path", undefined, undefined, uiLocale)}
             </Button>
           }
         />
 
         <SettingsRow
-          title="Archive confirmation"
-          description="Click archive twice to confirm."
+          title={uiText("Archive confirmation", undefined, undefined, uiLocale)}
+          description={uiText("Click archive twice to confirm.", undefined, undefined, uiLocale)}
           resetAction={
             settings.confirmThreadArchive !== DEFAULT_UNIFIED_SETTINGS.confirmThreadArchive ? (
               <SettingResetButton
-                label="archive confirmation"
+                label={uiText("archive confirmation", undefined, undefined, uiLocale)}
                 onClick={() =>
                   updateSettings({
                     confirmThreadArchive: DEFAULT_UNIFIED_SETTINGS.confirmThreadArchive,
@@ -1426,17 +1689,17 @@ export function ChatSettingsPanel() {
               onCheckedChange={(checked) =>
                 updateSettings({ confirmThreadArchive: Boolean(checked) })
               }
-              aria-label="Confirm chat archiving"
+              aria-label={uiText("Confirm chat archiving", undefined, undefined, uiLocale)}
             />
           }
         />
 
         <SettingsRow
-          title="Delete confirmation"
+          title={uiText("Delete confirmation", undefined, undefined, uiLocale)}
           resetAction={
             settings.confirmThreadDelete !== DEFAULT_UNIFIED_SETTINGS.confirmThreadDelete ? (
               <SettingResetButton
-                label="delete confirmation"
+                label={uiText("delete confirmation", undefined, undefined, uiLocale)}
                 onClick={() =>
                   updateSettings({
                     confirmThreadDelete: DEFAULT_UNIFIED_SETTINGS.confirmThreadDelete,
@@ -1451,7 +1714,7 @@ export function ChatSettingsPanel() {
               onCheckedChange={(checked) =>
                 updateSettings({ confirmThreadDelete: Boolean(checked) })
               }
-              aria-label="Confirm chat deletion"
+              aria-label={uiText("Confirm chat deletion", undefined, undefined, uiLocale)}
             />
           }
         />
@@ -1461,12 +1724,15 @@ export function ChatSettingsPanel() {
 }
 
 export function FilesSettingsPanel() {
+  const uiLocale = useUiLocale();
+  const uiPresentation = useUiPresentation(UI_PRESENTATION_SOURCES);
+
   const settings = useSettings();
   const { updateSettings } = useUpdateSettings();
   const availableEditors = useServerAvailableEditors();
   const editorOptions = useMemo(
-    () => resolveEditorOpenOptions(navigator.platform, availableEditors),
-    [availableEditors],
+    () => uiPresentation.resolveEditorOpenOptions(navigator.platform, availableEditors),
+    [availableEditors, uiPresentation],
   );
   const defaultEditorOption =
     settings.defaultEditor === DEFAULT_EDITOR_SYSTEM_VALUE
@@ -1474,19 +1740,19 @@ export function FilesSettingsPanel() {
       : (editorOptions.find((option) => option.value === settings.defaultEditor) ?? null);
   const defaultEditorLabel =
     settings.defaultEditor === DEFAULT_EDITOR_SYSTEM_VALUE
-      ? "System default"
-      : (defaultEditorOption?.label ?? "System default");
+      ? uiText("System default", undefined, undefined, uiLocale)
+      : (defaultEditorOption?.label ?? uiText("System default", undefined, undefined, uiLocale));
 
   return (
-    <SettingsPageContainer title="Files">
+    <SettingsPageContainer title={uiText("Files", undefined, undefined, uiLocale)}>
       <SettingsSection>
         <SettingsRow
-          title="Default editor"
-          description="Opens file links from chats."
+          title={uiText("Default editor", undefined, undefined, uiLocale)}
+          description={uiText("Opens file links from chats.", undefined, undefined, uiLocale)}
           resetAction={
             settings.defaultEditor !== DEFAULT_UNIFIED_SETTINGS.defaultEditor ? (
               <SettingResetButton
-                label="default editor"
+                label={uiText("default editor", undefined, undefined, uiLocale)}
                 onClick={() =>
                   updateSettings({ defaultEditor: DEFAULT_UNIFIED_SETTINGS.defaultEditor })
                 }
@@ -1505,7 +1771,10 @@ export function FilesSettingsPanel() {
                 }
               }}
             >
-              <SelectTrigger className="w-full sm:w-48" aria-label="Default editor">
+              <SelectTrigger
+                className="w-full sm:w-48"
+                aria-label={uiText("Default editor", undefined, undefined, uiLocale)}
+              >
                 <SelectValue>
                   <DefaultEditorOptionLabel
                     Icon={defaultEditorOption?.Icon}
@@ -1517,7 +1786,7 @@ export function FilesSettingsPanel() {
               <SelectPopup align="end" alignItemWithTrigger={false}>
                 <SelectItem hideIndicator value={DEFAULT_EDITOR_SYSTEM_VALUE}>
                   <DefaultEditorOptionLabel
-                    label="System default"
+                    label={uiText("System default", undefined, undefined, uiLocale)}
                     testId="default-editor-option-system-default"
                   />
                 </SelectItem>
@@ -1536,12 +1805,12 @@ export function FilesSettingsPanel() {
         />
 
         <SettingsRow
-          title="Add project starts in"
+          title={uiText("Add project starts in", undefined, undefined, uiLocale)}
           resetAction={
             settings.addProjectBaseDirectory !==
             DEFAULT_UNIFIED_SETTINGS.addProjectBaseDirectory ? (
               <SettingResetButton
-                label="add project base directory"
+                label={uiText("add project base directory", undefined, undefined, uiLocale)}
                 onClick={() =>
                   updateSettings({
                     addProjectBaseDirectory: DEFAULT_UNIFIED_SETTINGS.addProjectBaseDirectory,
@@ -1557,7 +1826,7 @@ export function FilesSettingsPanel() {
               onCommit={(next) => updateSettings({ addProjectBaseDirectory: next })}
               placeholder="~/"
               spellCheck={false}
-              aria-label="Add project base directory"
+              aria-label={uiText("Add project base directory", undefined, undefined, uiLocale)}
             />
           }
         />
@@ -1567,10 +1836,13 @@ export function FilesSettingsPanel() {
 }
 
 export function SystemSettingsPanel() {
+  const uiLocale = useUiLocale();
+  const uiPresentation = useUiPresentation(UI_PRESENTATION_SOURCES);
+
   const settings = useSettings();
   const { updateSettings } = useUpdateSettings();
   const observability = useServerObservability();
-  const diagnosticsDescription = formatDiagnosticsDescription({
+  const diagnosticsDescription = uiPresentation.formatDiagnosticsDescription({
     localTracingEnabled: observability?.localTracingEnabled ?? false,
     otlpTracesEnabled: observability?.otlpTracesEnabled ?? false,
     otlpTracesUrl: observability?.otlpTracesUrl,
@@ -1579,15 +1851,20 @@ export function SystemSettingsPanel() {
   });
 
   return (
-    <SettingsPageContainer title="System">
+    <SettingsPageContainer title={uiText("System", undefined, undefined, uiLocale)}>
       <SettingsSection>
         <SettingsRow
-          title="Keep awake"
-          description="Stop your computer and screen sleeping while Cafe works."
+          title={uiText("Keep awake", undefined, undefined, uiLocale)}
+          description={uiText(
+            "Stop your computer and screen sleeping while Cafe works.",
+            undefined,
+            undefined,
+            uiLocale,
+          )}
           resetAction={
             settings.powerSaveBlockerMode !== DEFAULT_UNIFIED_SETTINGS.powerSaveBlockerMode ? (
               <SettingResetButton
-                label="keep awake"
+                label={uiText("keep awake", undefined, undefined, uiLocale)}
                 onClick={() =>
                   updateSettings({
                     powerSaveBlockerMode: DEFAULT_UNIFIED_SETTINGS.powerSaveBlockerMode,
@@ -1605,20 +1882,23 @@ export function SystemSettingsPanel() {
                 }
               }}
             >
-              <SelectTrigger className="w-full sm:w-44" aria-label="Keep awake">
+              <SelectTrigger
+                className="w-full sm:w-44"
+                aria-label={uiText("Keep awake", undefined, undefined, uiLocale)}
+              >
                 <SelectValue>
-                  {POWER_SAVE_BLOCKER_LABELS[settings.powerSaveBlockerMode]}
+                  {uiPresentation.POWER_SAVE_BLOCKER_LABELS[settings.powerSaveBlockerMode]}
                 </SelectValue>
               </SelectTrigger>
               <SelectPopup align="end" alignItemWithTrigger={false}>
                 <SelectItem hideIndicator value="off">
-                  {POWER_SAVE_BLOCKER_LABELS.off}
+                  {uiPresentation.POWER_SAVE_BLOCKER_LABELS.off}
                 </SelectItem>
                 <SelectItem hideIndicator value="during-chats">
-                  {POWER_SAVE_BLOCKER_LABELS["during-chats"]}
+                  {uiPresentation.POWER_SAVE_BLOCKER_LABELS["during-chats"]}
                 </SelectItem>
                 <SelectItem hideIndicator value="always">
-                  {POWER_SAVE_BLOCKER_LABELS.always}
+                  {uiPresentation.POWER_SAVE_BLOCKER_LABELS.always}
                 </SelectItem>
               </SelectPopup>
             </Select>
@@ -1626,14 +1906,14 @@ export function SystemSettingsPanel() {
         />
       </SettingsSection>
 
-      <SettingsSection title="About">
+      <SettingsSection title={uiText("About", undefined, undefined, uiLocale)}>
         <AboutVersionSection />
         <SettingsRow
-          title="Diagnostics"
+          title={uiText("Diagnostics", undefined, undefined, uiLocale)}
           description={diagnosticsDescription}
           control={
             <Button render={<Link to="/settings/diagnostics" />} size="xs" variant="outline">
-              View diagnostics
+              {uiText("View diagnostics", undefined, undefined, uiLocale)}
             </Button>
           }
         />
@@ -1643,6 +1923,9 @@ export function SystemSettingsPanel() {
 }
 
 export function ProviderSettingsPanel() {
+  const uiLocale = useUiLocale();
+  const uiPresentation = useUiPresentation(UI_PRESENTATION_SOURCES);
+
   const environmentId = useWorkspaceEnvironmentId();
   const primaryEnvironmentId = usePrimaryEnvironmentId();
   const quotaConnectionStatus = useWsConnectionStatus();
@@ -1676,7 +1959,10 @@ export function ProviderSettingsPanel() {
     [providerUpdateCandidates],
   );
   const visibleProviderSettings = PROVIDER_SETTINGS;
-  const textGenerationModelSelection = resolveAppModelSelectionState(settings, serverProviders);
+  const textGenerationModelSelection = uiPresentation.resolveAppModelSelectionState(
+    settings,
+    serverProviders,
+  );
   const textGenInstanceId = textGenerationModelSelection.instanceId;
   const lastCheckedAt =
     serverProviders.length > 0
@@ -1701,48 +1987,63 @@ export function ProviderSettingsPanel() {
       });
   }, []);
 
-  const runProviderUpdate = useCallback(async (candidate: ProviderUpdateCandidate) => {
-    let started = false;
-    setUpdatingProviderDrivers((previous) => {
-      if (previous.has(candidate.driver)) {
-        return previous;
-      }
-      started = true;
-      const next = new Set(previous);
-      next.add(candidate.driver);
-      return next;
-    });
-    if (!started) {
-      return;
-    }
-
-    try {
-      await ensureWorkspaceApi().server.updateProvider({
-        provider: candidate.driver,
-        instanceId: candidate.instanceId,
-      });
-    } catch (error) {
-      toastManager.add(
-        stackedThreadToast({
-          type: "error",
-          title: `Could not update ${PROVIDER_DISPLAY_NAMES[candidate.driver] ?? candidate.driver}`,
-          description:
-            error instanceof Error
-              ? error.message
-              : "The provider update command could not be started.",
-        }),
-      );
-    } finally {
+  const runProviderUpdate = useCallback(
+    async (candidate: ProviderUpdateCandidate) => {
+      let started = false;
       setUpdatingProviderDrivers((previous) => {
-        if (!previous.has(candidate.driver)) {
+        if (previous.has(candidate.driver)) {
           return previous;
         }
+        started = true;
         const next = new Set(previous);
-        next.delete(candidate.driver);
+        next.add(candidate.driver);
         return next;
       });
-    }
-  }, []);
+      if (!started) {
+        return;
+      }
+
+      try {
+        await ensureWorkspaceApi().server.updateProvider({
+          provider: candidate.driver,
+          instanceId: candidate.instanceId,
+        });
+      } catch (error) {
+        toastManager.add(
+          stackedThreadToast({
+            type: "error",
+            title: uiText(
+              "Could not update {value0}",
+              {
+                value0: PROVIDER_DISPLAY_NAMES[candidate.driver] ?? candidate.driver,
+              },
+              undefined,
+              uiLocale,
+            ),
+            description:
+              error instanceof Error
+                ? error.message
+                : uiText(
+                    "The provider update command could not be started.",
+                    undefined,
+                    undefined,
+                    uiLocale,
+                  ),
+          }),
+        );
+      } finally {
+        setUpdatingProviderDrivers((previous) => {
+          if (!previous.has(candidate.driver)) {
+            return previous;
+          }
+          const next = new Set(previous);
+          next.delete(candidate.driver);
+          return next;
+        });
+      }
+    },
+    [uiLocale],
+  );
 
   const restartProviderRuntime = useCallback(
     async (input: { readonly instanceId: ProviderInstanceId; readonly displayName: string }) => {
@@ -1763,7 +2064,14 @@ export function ProviderSettingsPanel() {
       try {
         const api = ensureWorkspaceApi();
         const confirmed = await api.dialogs.confirm(
-          `Restart ${input.displayName}? Running turns may be interrupted.`,
+          uiText(
+            "Restart {value0}? Running turns may be interrupted.",
+            {
+              value0: input.displayName,
+            },
+            undefined,
+            uiLocale,
+          ),
         );
         if (!confirmed) {
           return;
@@ -1774,21 +2082,33 @@ export function ProviderSettingsPanel() {
         });
         toastManager.add({
           type: "success",
-          title: `${input.displayName} restarted`,
-          description:
-            result.stoppedSessionCount === 1
-              ? "Stopped 1 active session."
-              : `Stopped ${result.stoppedSessionCount} active sessions.`,
+          title: uiText("{value0} restarted", { value0: input.displayName }, undefined, uiLocale),
+          description: uiText(
+            "Stopped {count} active {count, plural, one {session} other {sessions}}.",
+            { count: result.stoppedSessionCount },
+            undefined,
+            uiLocale,
+          ),
         });
       } catch (error) {
         toastManager.add(
           stackedThreadToast({
             type: "error",
-            title: `Could not restart ${input.displayName}`,
+            title: uiText(
+              "Could not restart {value0}",
+              { value0: input.displayName },
+              undefined,
+              uiLocale,
+            ),
             description:
               error instanceof Error
                 ? error.message
-                : "The provider runtime restart could not be started.",
+                : uiText(
+                    "The provider runtime restart could not be started.",
+                    undefined,
+                    undefined,
+                    uiLocale,
+                  ),
           }),
         );
       } finally {
@@ -1802,7 +2122,7 @@ export function ProviderSettingsPanel() {
         });
       }
     },
-    [],
+    [uiLocale],
   );
 
   const logInProvider = useCallback(
@@ -1827,20 +2147,45 @@ export function ProviderSettingsPanel() {
         });
         toastManager.add({
           type: "success",
-          title: `${input.displayName} login opened`,
+          title: uiText(
+            "{value0} login opened",
+            { value0: input.displayName },
+            undefined,
+            uiLocale,
+          ),
           description: remote
-            ? "Complete provider sign-in in the PowerShell window on the server PC, then refresh status."
-            : "Complete the provider login in the PowerShell window, then refresh status.",
+            ? uiText(
+                "Complete provider sign-in in the PowerShell window on the server PC, then refresh status.",
+                undefined,
+                undefined,
+                uiLocale,
+              )
+            : uiText(
+                "Complete the provider login in the PowerShell window, then refresh status.",
+                undefined,
+                undefined,
+                uiLocale,
+              ),
         });
       } catch (error) {
         toastManager.add(
           stackedThreadToast({
             type: "error",
-            title: `Could not open ${input.displayName} login`,
+            title: uiText(
+              "Could not open {value0} login",
+              { value0: input.displayName },
+              undefined,
+              uiLocale,
+            ),
             description:
               error instanceof Error
                 ? error.message
-                : "The provider login command could not be started.",
+                : uiText(
+                    "The provider login command could not be started.",
+                    undefined,
+                    undefined,
+                    uiLocale,
+                  ),
           }),
         );
       } finally {
@@ -1854,7 +2199,7 @@ export function ProviderSettingsPanel() {
         });
       }
     },
-    [remote],
+    [remote, uiLocale],
   );
 
   interface InstanceRow {
@@ -2026,7 +2371,7 @@ export function ProviderSettingsPanel() {
   };
 
   return (
-    <SettingsPageContainer title="Providers">
+    <SettingsPageContainer title={uiText("Providers", undefined, undefined, uiLocale)}>
       <SettingsSection
         headerAction={
           <div className="flex items-center gap-1.5">
@@ -2039,13 +2384,15 @@ export function ProviderSettingsPanel() {
                     variant="ghost"
                     className="size-5 rounded-sm p-0 text-muted-foreground hover:text-foreground"
                     onClick={() => setIsAddInstanceDialogOpen(true)}
-                    aria-label="Add provider instance"
+                    aria-label={uiText("Add provider instance", undefined, undefined, uiLocale)}
                   >
                     <PlusIcon className="size-3" />
                   </Button>
                 }
               />
-              <TooltipPopup side="top">Add provider instance</TooltipPopup>
+              <TooltipPopup side="top">
+                {uiText("Add provider instance", undefined, undefined, uiLocale)}
+              </TooltipPopup>
             </Tooltip>
             <Tooltip>
               <TooltipTrigger
@@ -2056,7 +2403,7 @@ export function ProviderSettingsPanel() {
                     className="size-5 rounded-sm p-0 text-muted-foreground hover:text-foreground"
                     disabled={isRefreshingProviders}
                     onClick={() => void refreshProviders()}
-                    aria-label="Refresh provider status"
+                    aria-label={uiText("Refresh provider status", undefined, undefined, uiLocale)}
                   >
                     {isRefreshingProviders ? (
                       <Spinner aria-hidden="true" className="size-3" />
@@ -2066,13 +2413,15 @@ export function ProviderSettingsPanel() {
                   </Button>
                 }
               />
-              <TooltipPopup side="top">Refresh provider status</TooltipPopup>
+              <TooltipPopup side="top">
+                {uiText("Refresh provider status", undefined, undefined, uiLocale)}
+              </TooltipPopup>
             </Tooltip>
           </div>
         }
       >
         {rows.map((row) => {
-          const driverOption = getDriverOption(row.driver);
+          const driverOption = uiPresentation.getDriverOption(row.driver);
           const liveProvider = serverProviders.find(
             (candidate) => candidate.instanceId === row.instanceId,
           );
@@ -2111,7 +2460,12 @@ export function ProviderSettingsPanel() {
           const headerAction =
             row.isDefault && row.isDirty ? (
               <SettingResetButton
-                label={`${resetLabel} provider settings`}
+                label={uiText(
+                  "{value0} provider settings",
+                  { value0: resetLabel },
+                  undefined,
+                  uiLocale,
+                )}
                 onClick={() => resetDefaultInstance(row.driver)}
               />
             ) : null;
@@ -2236,8 +2590,13 @@ function useThreadHistoryEnvironmentIds() {
 
 /** Layout-matching first-load placeholder for the Archive and Recycle Bin lists. */
 function ThreadHistorySkeleton() {
+  const uiLocale = useUiLocale();
+
   return (
-    <SettingsSection aria-busy="true" aria-label="Loading chats">
+    <SettingsSection
+      aria-busy="true"
+      aria-label={uiText("Loading chats", undefined, undefined, uiLocale)}
+    >
       {[0, 1, 2].map((index) => (
         <div
           key={index}
@@ -2280,6 +2639,9 @@ function ThreadHistoryEmpty({
 }
 
 export function ArchivedThreadsPanel() {
+  const uiLocale = useUiLocale();
+  const uiPresentation = useUiPresentation(UI_PRESENTATION_SOURCES);
+
   const environmentIds = useThreadHistoryEnvironmentIds();
   const { unarchiveThread, confirmAndDeleteThread } = useThreadActions();
   const {
@@ -2301,8 +2663,12 @@ export function ArchivedThreadsPanel() {
       if (!api) return;
       const clicked = await api.contextMenu.show(
         [
-          { id: "unarchive", label: "Unarchive" },
-          { id: "delete", label: "Move to Recycle Bin", destructive: true },
+          { id: "unarchive", label: uiText("Unarchive", undefined, undefined, uiLocale) },
+          {
+            id: "delete",
+            label: uiText("Move to Recycle Bin", undefined, undefined, uiLocale),
+            destructive: true,
+          },
         ],
         position,
       );
@@ -2315,8 +2681,11 @@ export function ArchivedThreadsPanel() {
           toastManager.add(
             stackedThreadToast({
               type: "error",
-              title: "Could not unarchive chat",
-              description: error instanceof Error ? error.message : "An error occurred.",
+              title: uiText("Could not unarchive chat", undefined, undefined, uiLocale),
+              description:
+                error instanceof Error
+                  ? error.message
+                  : uiText("An error occurred.", undefined, undefined, uiLocale),
             }),
           );
         }
@@ -2328,11 +2697,11 @@ export function ArchivedThreadsPanel() {
         refreshArchivedThreads();
       }
     },
-    [confirmAndDeleteThread, refreshArchivedThreads, unarchiveThread],
+    [confirmAndDeleteThread, refreshArchivedThreads, unarchiveThread, uiLocale],
   );
 
   return (
-    <SettingsPageContainer title="Archive">
+    <SettingsPageContainer title={uiText("Archive", undefined, undefined, uiLocale)}>
       {archivedGroups.length === 0 ? (
         isLoadingArchive || showArchiveSkeleton ? (
           showArchiveSkeleton ? (
@@ -2341,7 +2710,11 @@ export function ArchivedThreadsPanel() {
         ) : (
           <ThreadHistoryEmpty
             icon={<ArchiveIcon />}
-            title={archiveError ? "Could not load archived chats" : "No archived chats"}
+            title={
+              archiveError
+                ? uiText("Could not load archived chats", undefined, undefined, uiLocale)
+                : uiText("No archived chats", undefined, undefined, uiLocale)
+            }
             description={archiveError}
           />
         )
@@ -2349,7 +2722,7 @@ export function ArchivedThreadsPanel() {
         archivedGroups.map(({ groupKey, project, threads: projectThreads }) => (
           <SettingsSection
             key={groupKey}
-            title={project?.name ?? "Chats"}
+            title={project?.name ?? uiText("Chats", undefined, undefined, uiLocale)}
             icon={
               project ? (
                 <ProjectFavicon environmentId={project.environmentId} cwd={project.cwd} />
@@ -2372,13 +2745,17 @@ export function ArchivedThreadsPanel() {
                   );
                 }}
                 title={thread.title}
-                description={
-                  <>
-                    Archived {formatRelativeTimeLabel(thread.archivedAt ?? thread.createdAt)}
-                    {" \u00b7 Created "}
-                    {formatRelativeTimeLabel(thread.createdAt)}
-                  </>
-                }
+                description={uiText(
+                  "Archived {archived} · Created {created}",
+                  {
+                    archived: uiPresentation.formatRelativeTimeLabel(
+                      thread.archivedAt ?? thread.createdAt,
+                    ),
+                    created: uiPresentation.formatRelativeTimeLabel(thread.createdAt),
+                  },
+                  undefined,
+                  uiLocale,
+                )}
                 control={
                   <Button
                     type="button"
@@ -2392,16 +2769,23 @@ export function ArchivedThreadsPanel() {
                           toastManager.add(
                             stackedThreadToast({
                               type: "error",
-                              title: "Could not unarchive chat",
+                              title: uiText(
+                                "Could not unarchive chat",
+                                undefined,
+                                undefined,
+                                uiLocale,
+                              ),
                               description:
-                                error instanceof Error ? error.message : "An error occurred.",
+                                error instanceof Error
+                                  ? error.message
+                                  : uiText("An error occurred.", undefined, undefined, uiLocale),
                             }),
                           );
                         })
                     }
                   >
                     <ArchiveX className="size-3.5" />
-                    <span>Unarchive</span>
+                    <span>{uiText("Unarchive", undefined, undefined, uiLocale)}</span>
                   </Button>
                 }
               />
@@ -2414,6 +2798,9 @@ export function ArchivedThreadsPanel() {
 }
 
 export function RecentlyDeletedThreadsPanel() {
+  const uiLocale = useUiLocale();
+  const uiPresentation = useUiPresentation(UI_PRESENTATION_SOURCES);
+
   const environmentIds = useThreadHistoryEnvironmentIds();
   const { restoreThread, hardDeleteThread } = useThreadActions();
   const [isEmptyingRecycleBin, setIsEmptyingRecycleBin] = useState(false);
@@ -2440,8 +2827,12 @@ export function RecentlyDeletedThreadsPanel() {
       if (!api) return;
       const clicked = await api.contextMenu.show(
         [
-          { id: "restore", label: "Restore" },
-          { id: "delete-forever", label: "Delete forever", destructive: true },
+          { id: "restore", label: uiText("Restore", undefined, undefined, uiLocale) },
+          {
+            id: "delete-forever",
+            label: uiText("Delete forever", undefined, undefined, uiLocale),
+            destructive: true,
+          },
         ],
         position,
       );
@@ -2454,8 +2845,11 @@ export function RecentlyDeletedThreadsPanel() {
           toastManager.add(
             stackedThreadToast({
               type: "error",
-              title: "Could not restore chat",
-              description: error instanceof Error ? error.message : "An error occurred.",
+              title: uiText("Could not restore chat", undefined, undefined, uiLocale),
+              description:
+                error instanceof Error
+                  ? error.message
+                  : uiText("An error occurred.", undefined, undefined, uiLocale),
             }),
           );
         }
@@ -2470,14 +2864,17 @@ export function RecentlyDeletedThreadsPanel() {
           toastManager.add(
             stackedThreadToast({
               type: "error",
-              title: "Could not delete chat",
-              description: error instanceof Error ? error.message : "An error occurred.",
+              title: uiText("Could not delete chat", undefined, undefined, uiLocale),
+              description:
+                error instanceof Error
+                  ? error.message
+                  : uiText("An error occurred.", undefined, undefined, uiLocale),
             }),
           );
         }
       }
     },
-    [hardDeleteThread, refreshDeletedThreads, restoreThread],
+    [hardDeleteThread, refreshDeletedThreads, restoreThread, uiLocale],
   );
   const handleEmptyRecycleBin = useCallback(async () => {
     if (deletedThreadRefs.length === 0 || isEmptyingRecycleBin) {
@@ -2488,7 +2885,7 @@ export function RecentlyDeletedThreadsPanel() {
     if (!api) return;
 
     const confirmed = await api.dialogs.confirm(
-      buildEmptyRecycleBinConfirmationMessage(deletedThreadRefs.length),
+      uiPresentation.buildEmptyRecycleBinConfirmationMessage(deletedThreadRefs.length),
     );
     if (!confirmed) {
       return;
@@ -2503,7 +2900,11 @@ export function RecentlyDeletedThreadsPanel() {
           await hardDeleteThread(threadRef, { confirm: false, refresh: false });
           deletedCount += 1;
         } catch (error) {
-          failures.push(error instanceof Error ? error.message : "Unknown deletion error.");
+          failures.push(
+            error instanceof Error
+              ? error.message
+              : uiText("Unknown deletion error.", undefined, undefined, uiLocale),
+          );
         }
       }
       refreshDeletedThreads();
@@ -2511,8 +2912,17 @@ export function RecentlyDeletedThreadsPanel() {
         toastManager.add(
           stackedThreadToast({
             type: "error",
-            title: "Could not empty Recycle Bin",
-            description: `Deleted ${deletedCount} of ${deletedThreadRefs.length} chats. ${failures[0]}`,
+            title: uiText("Could not empty Recycle Bin", undefined, undefined, uiLocale),
+            description: uiText(
+              "Deleted {deleted} of {count} {count, plural, one {chat} other {chats}}. {detail}",
+              {
+                deleted: deletedCount,
+                count: deletedThreadRefs.length,
+                detail: failures[0],
+              },
+              undefined,
+              uiLocale,
+            ),
           }),
         );
         return;
@@ -2520,17 +2930,28 @@ export function RecentlyDeletedThreadsPanel() {
       toastManager.add(
         stackedThreadToast({
           type: "success",
-          title: "Recycle Bin emptied",
-          description:
-            deletedCount === 1
-              ? "Deleted 1 chat forever."
-              : `Deleted ${deletedCount} chats forever.`,
+          title: uiText("Recycle Bin emptied", undefined, undefined, uiLocale),
+          description: uiText(
+            "Deleted {count} {count, plural, one {chat} other {chats}} forever.",
+            {
+              count: deletedCount,
+            },
+            undefined,
+            uiLocale,
+          ),
         }),
       );
     } finally {
       setIsEmptyingRecycleBin(false);
     }
-  }, [deletedThreadRefs, hardDeleteThread, isEmptyingRecycleBin, refreshDeletedThreads]);
+  }, [
+    deletedThreadRefs,
+    hardDeleteThread,
+    isEmptyingRecycleBin,
+    refreshDeletedThreads,
+    uiLocale,
+    uiPresentation,
+  ]);
   const emptyRecycleBinAction =
     deletedThreadRefs.length > 0 ? (
       <Button
@@ -2546,12 +2967,12 @@ export function RecentlyDeletedThreadsPanel() {
         ) : (
           <Trash2Icon className="size-3.5" />
         )}
-        <span>Empty Recycle Bin</span>
+        <span>{uiText("Empty Recycle Bin", undefined, undefined, uiLocale)}</span>
       </Button>
     ) : null;
 
   return (
-    <SettingsPageContainer title="Recently deleted">
+    <SettingsPageContainer title={uiText("Recently deleted", undefined, undefined, uiLocale)}>
       {deletedGroups.length === 0 ? (
         isLoadingDeleted || showDeletedSkeleton ? (
           showDeletedSkeleton ? (
@@ -2560,7 +2981,11 @@ export function RecentlyDeletedThreadsPanel() {
         ) : (
           <ThreadHistoryEmpty
             icon={<Trash2Icon />}
-            title={deletedError ? "Could not load deleted chats" : "Recycle Bin is empty"}
+            title={
+              deletedError
+                ? uiText("Could not load deleted chats", undefined, undefined, uiLocale)
+                : uiText("Recycle Bin is empty", undefined, undefined, uiLocale)
+            }
             description={deletedError}
           />
         )
@@ -2568,7 +2993,7 @@ export function RecentlyDeletedThreadsPanel() {
         deletedGroups.map(({ groupKey, project, threads: projectThreads }, index) => (
           <SettingsSection
             key={groupKey}
-            title={project?.name ?? "Chats"}
+            title={project?.name ?? uiText("Chats", undefined, undefined, uiLocale)}
             icon={
               project ? (
                 <ProjectFavicon environmentId={project.environmentId} cwd={project.cwd} />
@@ -2594,10 +3019,10 @@ export function RecentlyDeletedThreadsPanel() {
                 title={thread.title}
                 description={
                   <>
-                    Moved to Recycle Bin{" "}
-                    {formatRelativeTimeLabel(thread.deletedAt ?? thread.updatedAt)}
-                    {" \u00b7 Created "}
-                    {formatRelativeTimeLabel(thread.createdAt)}
+                    {uiText("Moved to Recycle Bin", undefined, undefined, uiLocale)}{" "}
+                    {uiPresentation.formatRelativeTimeLabel(thread.deletedAt ?? thread.updatedAt)}
+                    {uiText(" · Created ", undefined, undefined, uiLocale)}
+                    {uiPresentation.formatRelativeTimeLabel(thread.createdAt)}
                   </>
                 }
               />
@@ -2608,3 +3033,21 @@ export function RecentlyDeletedThreadsPanel() {
     </SettingsPageContainer>
   );
 }
+
+// Finite source-owned labels/helpers only; no received or user data.
+const UI_PRESENTATION_SOURCES = {
+  CHAT_COPY_FORMAT_LABELS,
+  POWER_SAVE_BLOCKER_LABELS,
+  THEME_OPTIONS,
+  TIMESTAMP_FORMAT_LABELS,
+  buildEmptyRecycleBinConfirmationMessage,
+  formatDiagnosticsDescription,
+  formatRelativeTime,
+  formatRelativeTimeLabel,
+  getDriverOption,
+  getSourceUpdateBranchLabel,
+  getSourceUpdateHashLines,
+  getSourceUpdateStatus,
+  resolveAppModelSelectionState,
+  resolveEditorOpenOptions,
+};

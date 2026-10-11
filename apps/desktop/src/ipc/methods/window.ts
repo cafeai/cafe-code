@@ -1,3 +1,4 @@
+import { uiText } from "@cafecode/shared/i18n";
 import {
   ContextMenuItemSchema,
   DesktopAppBrandingSchema,
@@ -53,7 +54,7 @@ export const getLocalEnvironmentBootstrap = makeSyncIpcMethod({
     return Option.match(config, {
       onNone: () => null,
       onSome: ({ bootstrap, httpBaseUrl }) => ({
-        label: "Local environment",
+        label: uiText("Local environment"),
         httpBaseUrl: httpBaseUrl.href,
         wsBaseUrl: toWebSocketBaseUrl(httpBaseUrl),
         ...(bootstrap.desktopBootstrapToken

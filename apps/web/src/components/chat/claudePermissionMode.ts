@@ -1,3 +1,4 @@
+import { uiText } from "@cafecode/shared/i18n";
 import type { ProviderInteractionMode, RuntimeMode } from "@cafecode/contracts";
 
 /**
@@ -22,8 +23,12 @@ export interface ClaudePermissionModeState {
 
 const CLAUDE_MANUAL_PERMISSION_MODE_OPTION = {
   id: "default",
-  label: "Ask permissions",
-  description: "Ask before edits and commands.",
+  get label() {
+    return uiText("Ask permissions");
+  },
+  get description() {
+    return uiText("Ask before edits and commands.");
+  },
 } as const;
 
 export const CLAUDE_PERMISSION_MODE_OPTIONS: ReadonlyArray<{
@@ -34,23 +39,39 @@ export const CLAUDE_PERMISSION_MODE_OPTIONS: ReadonlyArray<{
   CLAUDE_MANUAL_PERMISSION_MODE_OPTION,
   {
     id: "acceptEdits",
-    label: "Accept edits",
-    description: "Apply edits automatically and ask before other actions.",
+    get label() {
+      return uiText("Accept edits");
+    },
+    get description() {
+      return uiText("Apply edits automatically and ask before other actions.");
+    },
   },
   {
     id: "plan",
-    label: "Plan",
-    description: "Research and propose changes without editing files.",
+    get label() {
+      return uiText("Plan");
+    },
+    get description() {
+      return uiText("Research and propose changes without editing files.");
+    },
   },
   {
     id: "auto",
-    label: "Auto",
-    description: "Run autonomously with Claude's background safety classifier.",
+    get label() {
+      return uiText("Auto");
+    },
+    get description() {
+      return uiText("Run autonomously with Claude's background safety classifier.");
+    },
   },
   {
     id: "bypassPermissions",
-    label: "Bypass permissions",
-    description: "Run without permission checks. Use only in an isolated environment.",
+    get label() {
+      return uiText("Bypass permissions");
+    },
+    get description() {
+      return uiText("Run without permission checks. Use only in an isolated environment.");
+    },
   },
 ];
 
@@ -61,23 +82,39 @@ export const GROK_PERMISSION_MODE_OPTIONS: typeof CLAUDE_PERMISSION_MODE_OPTIONS
   CLAUDE_MANUAL_PERMISSION_MODE_OPTION,
   {
     id: "acceptEdits",
-    label: "Accept edits",
-    description: "Apply edits automatically and ask before other actions.",
+    get label() {
+      return uiText("Accept edits");
+    },
+    get description() {
+      return uiText("Apply edits automatically and ask before other actions.");
+    },
   },
   {
     id: "plan",
-    label: "Plan",
-    description: "Research and propose changes without editing files.",
+    get label() {
+      return uiText("Plan");
+    },
+    get description() {
+      return uiText("Research and propose changes without editing files.");
+    },
   },
   {
     id: "auto",
-    label: "Auto",
-    description: "Run autonomously with Grok's Auto permission mode.",
+    get label() {
+      return uiText("Auto");
+    },
+    get description() {
+      return uiText("Run autonomously with Grok's Auto permission mode.");
+    },
   },
   {
     id: "bypassPermissions",
-    label: "Bypass permissions",
-    description: "Run without permission checks. Use only in an isolated environment.",
+    get label() {
+      return uiText("Bypass permissions");
+    },
+    get description() {
+      return uiText("Run without permission checks. Use only in an isolated environment.");
+    },
   },
 ];
 

@@ -1,3 +1,6 @@
+import { useUiLocale, useUiPresentation } from "~/i18n";
+import { uiText } from "@cafecode/shared/i18n";
+import { UiMessage } from "~/i18n";
 import { providerSkillsScopeRevision, useProviderSkills } from "./useProviderSkills";
 import { useProviderCommands } from "./useProviderCommands";
 import type { ProviderQuotaContext } from "./useProviderQuota";
@@ -169,10 +172,16 @@ import {
   getNextClaudePermissionMode,
 } from "./claudePermissionMode";
 
-const IMAGE_SIZE_LIMIT_LABEL = `${Math.round(PROVIDER_SEND_TURN_MAX_IMAGE_BYTES / (1024 * 1024))}MB`;
+function getIMAGE_SIZE_LIMIT_LABEL() {
+  return uiText("{value0}MB", {
+    value0: Math.round(PROVIDER_SEND_TURN_MAX_IMAGE_BYTES / (1024 * 1024)),
+  });
+}
 
 const COMPOSER_PATH_QUERY_DEBOUNCE_MS = 120;
-const PENDING_ANSWER_PLACEHOLDER = "Type an answer, or leave blank to use the selection";
+function getPENDING_ANSWER_PLACEHOLDER() {
+  return uiText("Type an answer, or leave blank to use the selection");
+}
 /** Add/remove motion for composer-owned lists (queued messages, attachments).
  * Matches --duration-base with the style guide's ease-out curve; auto-animate
  * already honours prefers-reduced-motion. */
@@ -391,26 +400,42 @@ export interface SteeringFollowUpViewItem {
 
 const STEERING_DELIVERY_PRESENTATION = {
   sending: {
-    label: "Sending",
-    description: "Sending your message. Waiting for Codex to confirm receipt.",
+    get label() {
+      return uiText("Sending");
+    },
+    get description() {
+      return uiText("Sending your message. Waiting for Codex to confirm receipt.");
+    },
   },
   received: {
-    label: "Received",
-    description: "Codex received your message. Waiting for it to pick it up.",
+    get label() {
+      return uiText("Received");
+    },
+    get description() {
+      return uiText("Codex received your message. Waiting for it to pick it up.");
+    },
   },
   waiting: {
-    label: "Waiting",
-    description: "Codex received your message and hasn't picked it up yet.",
+    get label() {
+      return uiText("Waiting");
+    },
+    get description() {
+      return uiText("Codex received your message and hasn''t picked it up yet.");
+    },
   },
   steering: {
-    label: "Steering",
-    description: "Waiting for the provider to pick up your message.",
+    get label() {
+      return uiText("Steering");
+    },
+    get description() {
+      return uiText("Waiting for the provider to pick up your message.");
+    },
   },
 } as const;
 
 function queuedMessageCountLabel(count: number): string | null {
   if (count <= 0) return null;
-  return count === 1 ? "1 message queued" : `${count} messages queued`;
+  return uiText("{count, plural, one {# message queued} other {# messages queued}}", { count });
 }
 
 function queuedAutomaticSteerCountLabel(items: readonly FollowUpQueueViewItem[]): string | null {
@@ -420,21 +445,23 @@ function queuedAutomaticSteerCountLabel(items: readonly FollowUpQueueViewItem[])
   }
 
   if (automaticSteerItems.length === 1) {
-    if (automaticSteerItems[0]?.blockedReason) return "1 steer needs attention";
+    if (automaticSteerItems[0]?.blockedReason) return uiText("1 steer needs attention");
     const kind = automaticSteerItems[0]?.automaticSteerRetry?.nonSteerableTurnKind;
     return kind === "compact"
-      ? "1 steer waiting for compact"
+      ? uiText("1 steer waiting for compact")
       : kind === "review"
-        ? "1 steer waiting for review"
-        : "1 follow-up requeued";
+        ? uiText("1 steer waiting for review")
+        : uiText("1 follow-up requeued");
   }
 
-  return `${automaticSteerItems.length} steers waiting`;
+  return uiText("{count, plural, one {# steer waiting} other {# steers waiting}}", {
+    count: automaticSteerItems.length,
+  });
 }
 
 function steeringCountLabel(count: number): string | null {
   if (count <= 0) return null;
-  return count === 1 ? "1 message steering" : `${count} messages steering`;
+  return uiText("{count, plural, one {# message steering} other {# messages steering}}", { count });
 }
 
 function automaticSteerRetryStatus(item: FollowUpQueueViewItem): {
@@ -444,19 +471,21 @@ function automaticSteerRetryStatus(item: FollowUpQueueViewItem): {
 } | null {
   if (item.automaticSteerRetry && item.blockedReason !== null) {
     return {
-      ariaLabel: "Steer delivery paused",
-      label: "Delivery paused",
-      title:
+      ariaLabel: uiText("Steer delivery paused"),
+      label: uiText("Delivery paused"),
+      title: uiText(
         "Your message and attachments are preserved. Review the delivery error before retrying.",
+      ),
     };
   }
   const kind = item.automaticSteerRetry?.nonSteerableTurnKind ?? null;
   if (kind === null && item.automaticSteerRetry != null) {
     return {
-      ariaLabel: "Follow-up requeued after provider steer rejection",
-      label: "Requeued",
-      title:
+      ariaLabel: uiText("Follow-up requeued after provider steer rejection"),
+      label: uiText("Requeued"),
+      title: uiText(
         "The provider did not accept this live steer. Cafe Code preserved it and will send it automatically when the active turn is ready.",
+      ),
     };
   }
   if (kind === null) {
@@ -465,18 +494,20 @@ function automaticSteerRetryStatus(item: FollowUpQueueViewItem): {
 
   if (kind === "compact") {
     return {
-      ariaLabel: "Queued steer waiting for Codex context compaction",
-      label: "Waiting for compact",
-      title:
+      ariaLabel: uiText("Queued steer waiting for Codex context compaction"),
+      label: uiText("Waiting for compact"),
+      title: uiText(
         "Codex is compacting the active turn; Cafe Code will retry this steer automatically when compaction finishes.",
+      ),
     };
   }
 
   return {
-    ariaLabel: "Queued steer waiting for Codex review",
-    label: "Waiting for review",
-    title:
+    ariaLabel: uiText("Queued steer waiting for Codex review"),
+    label: uiText("Waiting for review"),
+    title: uiText(
       "Codex is reviewing the active turn; Cafe Code will send this follow-up automatically when the active turn is ready.",
+    ),
   };
 }
 
@@ -493,6 +524,9 @@ export function FollowUpQueueShelf(props: {
   onClear: () => void;
   onExpandImage: (preview: ExpandedImagePreview) => void;
 }) {
+  const uiLocale = useUiLocale();
+  const uiPresentation = useUiPresentation(UI_PRESENTATION_SOURCES);
+
   const steeringItems = props.steeringItems ?? [];
   const [rowsRef] = useAutoAnimate<HTMLDivElement>(COMPOSER_LIST_ANIMATION);
   if (props.items.length === 0 && steeringItems.length === 0) {
@@ -500,9 +534,9 @@ export function FollowUpQueueShelf(props: {
   }
   const automaticSteerCount = props.items.filter((item) => item.automaticSteerRetry != null).length;
   const shelfLabel = [
-    queuedMessageCountLabel(props.items.length - automaticSteerCount),
-    queuedAutomaticSteerCountLabel(props.items),
-    steeringCountLabel(steeringItems.length),
+    uiPresentation.queuedMessageCountLabel(props.items.length - automaticSteerCount),
+    uiPresentation.queuedAutomaticSteerCountLabel(props.items),
+    uiPresentation.steeringCountLabel(steeringItems.length),
   ]
     .filter((label): label is string => label !== null)
     .join(", ");
@@ -525,19 +559,25 @@ export function FollowUpQueueShelf(props: {
             className="h-7 shrink-0 px-2 text-muted-foreground hover:text-foreground"
             onClick={props.onClear}
           >
-            Clear
+            {uiText("Clear", undefined, undefined, uiLocale)}
           </Button>
         ) : null}
       </div>
       <div ref={rowsRef} className="relative z-10 mt-1.5 grid gap-1">
         {steeringItems.map((item) => {
-          const status = STEERING_DELIVERY_PRESENTATION[item.deliveryStatus ?? "steering"];
+          const status =
+            uiPresentation.STEERING_DELIVERY_PRESENTATION[item.deliveryStatus ?? "steering"];
           return (
             <div
               key={item.id}
               className="rounded-xl border border-border-subtle bg-muted/20 p-2"
               data-cafe-followup-steering="true"
-              aria-label="Follow-up steering into active turn"
+              aria-label={uiText(
+                "Follow-up steering into active turn",
+                undefined,
+                undefined,
+                uiLocale,
+              )}
             >
               <div className="grid min-w-0 grid-cols-[auto_minmax(0,1fr)_auto] items-center gap-2">
                 <span
@@ -576,7 +616,7 @@ export function FollowUpQueueShelf(props: {
           );
         })}
         {props.items.map((item) => {
-          const retryStatus = automaticSteerRetryStatus(item);
+          const retryStatus = uiPresentation.automaticSteerRetryStatus(item);
           return (
             <div
               key={item.id}
@@ -587,7 +627,11 @@ export function FollowUpQueueShelf(props: {
                   <button
                     type="button"
                     className="focus-ring inline-flex size-6 shrink-0 items-center justify-center rounded-md text-muted-foreground transition-colors duration-(--duration-fast) hover:bg-accent hover:text-foreground"
-                    aria-label={item.expanded ? "Collapse queued message" : "Expand queued message"}
+                    aria-label={
+                      item.expanded
+                        ? uiText("Collapse queued message", undefined, undefined, uiLocale)
+                        : uiText("Expand queued message", undefined, undefined, uiLocale)
+                    }
                     aria-expanded={item.expanded}
                     onClick={() => props.onToggleExpanded(item.id)}
                   >
@@ -621,11 +665,16 @@ export function FollowUpQueueShelf(props: {
                     variant="ghost"
                     size="sm"
                     className="h-7 shrink-0 px-2"
-                    title="Retry delivery of this exact message and its attachments."
+                    title={uiText(
+                      "Retry delivery of this exact message and its attachments.",
+                      undefined,
+                      undefined,
+                      uiLocale,
+                    )}
                     disabled={item.canRetryDelivery !== true}
                     onClick={() => props.onAction(item.id)}
                   >
-                    Retry delivery
+                    {uiText("Retry delivery", undefined, undefined, uiLocale)}
                   </Button>
                 ) : retryStatus ? (
                   <span
@@ -654,7 +703,7 @@ export function FollowUpQueueShelf(props: {
                     variant="ghost"
                     size="icon-sm"
                     className="size-7 shrink-0"
-                    aria-label="Edit queued message"
+                    aria-label={uiText("Edit queued message", undefined, undefined, uiLocale)}
                     onClick={() => props.onEdit?.(item.id)}
                   >
                     <PencilIcon className="size-3.5" />
@@ -667,7 +716,7 @@ export function FollowUpQueueShelf(props: {
                   variant="ghost"
                   size="icon-sm"
                   className="size-7 shrink-0 text-muted-foreground hover:text-destructive-foreground"
-                  aria-label="Remove queued message"
+                  aria-label={uiText("Remove queued message", undefined, undefined, uiLocale)}
                   onClick={() => props.onRemove(item.id)}
                 >
                   <Trash2Icon className="size-4" />
@@ -697,7 +746,14 @@ export function FollowUpQueueShelf(props: {
                             <button
                               type="button"
                               className="block h-full w-full cursor-zoom-in"
-                              aria-label={`Preview queued image ${image.name}`}
+                              aria-label={uiText(
+                                "Preview queued image {value0}",
+                                {
+                                  value0: image.name,
+                                },
+                                undefined,
+                                uiLocale,
+                              )}
                               onClick={() => {
                                 const preview = buildExpandedImagePreview(item.images, image.id);
                                 if (!preview) return;
@@ -721,7 +777,7 @@ export function FollowUpQueueShelf(props: {
                   ) : null}
                   <textarea
                     readOnly
-                    aria-label="Queued message prompt"
+                    aria-label={uiText("Queued message prompt", undefined, undefined, uiLocale)}
                     value={item.promptText.trim().length > 0 ? item.promptText : item.preview}
                     className="max-h-36 min-h-20 w-full resize-none overflow-y-auto rounded-md border border-border-subtle bg-background/40 p-2 text-muted-foreground text-xs leading-5 outline-none [overflow-wrap:anywhere]"
                     onChange={() => undefined}
@@ -890,6 +946,9 @@ export interface ChatComposerProps extends ComposerInteractionCallbacks {
 // --------------------------------------------------------------------------
 
 export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps) {
+  const uiLocale = useUiLocale();
+  const uiPresentation = useUiPresentation(UI_PRESENTATION_SOURCES);
+
   const {
     onStartCodeReview,
     codeReviewDisabled,
@@ -1195,17 +1254,37 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
   const nativeReviewControlDisabled = !nativeReviewAvailable || nativeReviewDisabled;
   const nativeReviewDisabledReason =
     environmentUnavailable !== null || isConnecting
-      ? "Reconnect to this server before starting a review."
+      ? uiText("Reconnect to this server before starting a review.", undefined, undefined, uiLocale)
       : !isServerThread
-        ? "Send a message to start a Codex session before reviewing code."
+        ? uiText(
+            "Send a message to start a Codex session before reviewing code.",
+            undefined,
+            undefined,
+            uiLocale,
+          )
         : onStartCodeReview === undefined
-          ? "Code review is unavailable in this view."
+          ? uiText("Code review is unavailable in this view.", undefined, undefined, uiLocale)
           : !selectedProviderStatus
-            ? "Waiting for the selected Codex account’s provider information."
+            ? uiText(
+                "Waiting for the selected Codex account’s provider information.",
+                undefined,
+                undefined,
+                uiLocale,
+              )
             : !nativeReviewAvailable
-              ? "Start a Codex session with the selected account before reviewing code."
+              ? uiText(
+                  "Start a Codex session with the selected account before reviewing code.",
+                  undefined,
+                  undefined,
+                  uiLocale,
+                )
               : nativeReviewDisabled
-                ? "Wait for the current work to finish and the Codex session to be ready."
+                ? uiText(
+                    "Wait for the current work to finish and the Codex session to be ready.",
+                    undefined,
+                    undefined,
+                    uiLocale,
+                  )
                 : undefined;
   const providerActions =
     nativeReviewAvailable && !nativeReviewDisabled ? (
@@ -1215,7 +1294,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
         onClick={() => setNativeReviewState({ key: nativeReviewKey, open: true })}
       >
         <FileSearchIcon aria-hidden="true" className="size-4 shrink-0" />
-        Codex review
+        {uiText("Codex review", undefined, undefined, uiLocale)}
       </MenuItem>
     ) : deliveryPriorityAvailable ? (
       <ClaudeDeliveryPriorityPicker
@@ -1436,12 +1515,18 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
       }
       title={
         !concurrencySupported
-          ? "This provider runtime cannot apply a numeric subagent limit. An existing chat override can still be reset."
+          ? uiText(
+              "This provider runtime cannot apply a numeric subagent limit. An existing chat override can still be reset.",
+              undefined,
+              undefined,
+              uiLocale,
+            )
           : undefined
       }
       onClick={() => setConcurrencyEditorOpen(true)}
     >
-      Subagent limit…{concurrencyPresentation?.pending ? " (pending)" : ""}
+      {uiText("Subagent limit…", undefined, undefined, uiLocale)}
+      {concurrencyPresentation?.pending ? uiText(" (pending)", undefined, undefined, uiLocale) : ""}
     </MenuItem>
   ) : null;
 
@@ -1681,11 +1766,16 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     selectedProviderStatus?.displayName?.trim() ||
     String(selectedProviderStatus?.instanceId ?? selectedProvider);
   const composerPendingStatusLabel = isPreparingWorktree
-    ? "Preparing worktree..."
+    ? uiText("Preparing worktree...", undefined, undefined, uiLocale)
     : isSendBusy
-      ? "Submitting prompt..."
+      ? uiText("Submitting prompt...", undefined, undefined, uiLocale)
       : isConnecting
-        ? `Starting ${selectedProviderDisplayName}...`
+        ? uiText(
+            "Starting {value0}...",
+            { value0: selectedProviderDisplayName },
+            undefined,
+            uiLocale,
+          )
         : null;
 
   // ------------------------------------------------------------------
@@ -1835,22 +1925,22 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
           id: "slash:model",
           type: "slash-command",
           command: "model",
-          label: "/model",
-          description: "Switch the model for this chat",
+          label: uiText("/model", undefined, undefined, uiLocale),
+          description: uiText("Switch the model for this chat", undefined, undefined, uiLocale),
         },
         {
           id: "slash:plan",
           type: "slash-command",
           command: "plan",
-          label: "/plan",
-          description: "Switch to Plan",
+          label: uiText("/plan", undefined, undefined, uiLocale),
+          description: uiText("Switch to Plan", undefined, undefined, uiLocale),
         },
         {
           id: "slash:default",
           type: "slash-command",
           command: "default",
-          label: "/default",
-          description: "Switch back to Build",
+          label: uiText("/default", undefined, undefined, uiLocale),
+          description: uiText("Switch back to Build", undefined, undefined, uiLocale),
         },
         ...(selectedProvider === "codex" || selectedProvider === "opencode"
           ? [
@@ -1858,8 +1948,13 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                 id: "slash:compact",
                 type: "slash-command" as const,
                 command: "compact" as const,
-                label: "/compact",
-                description: "Compact conversation context (between turns)",
+                label: uiText("/compact", undefined, undefined, uiLocale),
+                description: uiText(
+                  "Compact conversation context (between turns)",
+                  undefined,
+                  undefined,
+                  uiLocale,
+                ),
               },
             ]
           : []),
@@ -1869,8 +1964,13 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                 id: "slash:goal",
                 type: "slash-command" as const,
                 command: "goal" as const,
-                label: "/goal",
-                description: "View or update the Codex goal",
+                label: uiText("/goal", undefined, undefined, uiLocale),
+                description: uiText(
+                  "View or update the Codex goal",
+                  undefined,
+                  undefined,
+                  uiLocale,
+                ),
               },
             ]
           : []),
@@ -1889,7 +1989,10 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
           provider: selectedProvider,
           command,
           label: `/${command.name}`,
-          description: command.description ?? command.input?.hint ?? "Run provider command",
+          description:
+            command.description ??
+            command.input?.hint ??
+            uiText("Run provider command", undefined, undefined, uiLocale),
         }));
       const query = composerTrigger.query.trim().toLowerCase();
       const slashCommandItems = [...builtInSlashCommandItems, ...providerSlashCommandItems];
@@ -1908,7 +2011,9 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
         description:
           skill.shortDescription ??
           skill.description ??
-          (skill.scope ? `${skill.scope} skill` : "Run provider skill"),
+          (skill.scope
+            ? uiText("{value0} skill", { value0: skill.scope }, undefined, uiLocale)
+            : uiText("Run provider skill", undefined, undefined, uiLocale)),
       }));
     }
     return [];
@@ -1920,6 +2025,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     selectedProviderCommands,
     selectedProviderSkills,
     workspaceEntries,
+    uiLocale,
   ]);
 
   const composerMenuOpen = Boolean(composerTrigger);
@@ -2015,17 +2121,37 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
   const composerMenuEmptyState = useMemo(() => {
     if (composerTriggerKind === "skill") {
       if (selectedProvider === "codex" && skillsInput === null)
-        return "Skills are available once this chat's workspace has been created.";
+        return uiText(
+          "Skills are available once this chat's workspace has been created.",
+          undefined,
+          undefined,
+          uiLocale,
+        );
       if (selectedProvider === "codex" && discoveredSkills.status === "unavailable")
-        return "Skills unavailable. Close and reopen the picker to retry.";
+        return uiText(
+          "Skills unavailable. Close and reopen the picker to retry.",
+          undefined,
+          undefined,
+          uiLocale,
+        );
       if (selectedProvider === "codex" && discoveredSkills.status === "disabled")
-        return "Enable and sign in to this Codex account to discover skills.";
-      return "No skills found. Try / to browse provider commands.";
+        return uiText(
+          "Enable and sign in to this Codex account to discover skills.",
+          undefined,
+          undefined,
+          uiLocale,
+        );
+      return uiText(
+        "No skills found. Try / to browse provider commands.",
+        undefined,
+        undefined,
+        uiLocale,
+      );
     }
     return composerTriggerKind === "path"
-      ? "No matching files or folders."
-      : "No matching command.";
-  }, [composerTriggerKind, selectedProvider, discoveredSkills.status, skillsInput]);
+      ? uiText("No matching files or folders.", undefined, undefined, uiLocale)
+      : uiText("No matching command.", undefined, undefined, uiLocale);
+  }, [composerTriggerKind, selectedProvider, discoveredSkills.status, skillsInput, uiLocale]);
 
   // ------------------------------------------------------------------
   // Provider traits UI
@@ -2046,7 +2172,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     [composerDraftTarget, promptRef, scheduleComposerFocus, setComposerDraftPrompt],
   );
 
-  const providerTraitsMenuContent = renderProviderTraitsMenuContent({
+  const providerTraitsMenuContent = uiPresentation.renderProviderTraitsMenuContent({
     provider: selectedProvider,
     providerInstanceId: selectedInstanceId,
     ...(routeKind === "server" ? { threadRef: routeThreadRef } : {}),
@@ -2965,7 +3091,12 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
       } catch {
         update({
           status: "failed",
-          error: "Upload failed. Retry, or remove this file before sending.",
+          error: uiText(
+            "Upload failed. Retry, or remove this file before sending.",
+            undefined,
+            undefined,
+            uiLocale,
+          ),
         });
       }
     });
@@ -2976,14 +3107,24 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     if (isSendBusy) {
       toastManager.add({
         type: "error",
-        title: "Wait for the current submission before adding more files.",
+        title: uiText(
+          "Wait for the current submission before adding more files.",
+          undefined,
+          undefined,
+          uiLocale,
+        ),
       });
       return;
     }
     if (pendingUserInputs.length > 0) {
       toastManager.add({
         type: "error",
-        title: "Attach files after answering plan questions.",
+        title: uiText(
+          "Attach files after answering plan questions.",
+          undefined,
+          undefined,
+          uiLocale,
+        ),
       });
       return;
     }
@@ -3002,15 +3143,35 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
         ? PROVIDER_SEND_TURN_MAX_IMAGE_BYTES
         : PROVIDER_SEND_TURN_MAX_FILE_BYTES;
       if (file.size > limit) {
-        error = `'${file.name}' exceeds the ${isImage ? IMAGE_SIZE_LIMIT_LABEL : "25MB"} attachment limit.`;
+        error = uiText(
+          "''{name}'' exceeds the {limit} attachment limit.",
+          {
+            name: file.name,
+            limit: isImage ? uiPresentation.getIMAGE_SIZE_LIMIT_LABEL() : "25MB",
+          },
+          undefined,
+          uiLocale,
+        );
         continue;
       }
       if (nextImageCount >= PROVIDER_SEND_TURN_MAX_ATTACHMENTS) {
-        error = `You can attach up to ${PROVIDER_SEND_TURN_MAX_ATTACHMENTS} files or images per message.`;
+        error = uiText(
+          "You can attach up to {limit} files or images per message.",
+          {
+            limit: PROVIDER_SEND_TURN_MAX_ATTACHMENTS,
+          },
+          undefined,
+          uiLocale,
+        );
         break;
       }
       if (totalBytes + file.size > PROVIDER_SEND_TURN_MAX_TOTAL_ATTACHMENT_BYTES) {
-        error = "Combined attachments exceed the 80MB limit.";
+        error = uiText(
+          "Combined attachments exceed the 80MB limit.",
+          undefined,
+          undefined,
+          uiLocale,
+        );
         continue;
       }
       totalBytes += file.size;
@@ -3340,7 +3501,9 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
             className="absolute inset-x-6 bottom-full -z-10 -mb-1 flex justify-end"
           >
             <ComposerTab
-              label="Composer tools"
+              label={uiText("Composer tools", undefined, undefined, uiLocale)}
+              expandLabel={uiText("Expand composer tools", undefined, undefined, uiLocale)}
+              minimizeLabel={uiText("Minimize composer tools", undefined, undefined, uiLocale)}
               collapsed={composerTabCollapsed}
               active={nativeReviewOpen}
               onCollapsedChange={useUiStateStore.getState().setComposerTabCollapsed}
@@ -3364,19 +3527,26 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                     }
                   >
                     <FileSearchIcon aria-hidden="true" className="size-3.5 shrink-0" />
-                    <span className="truncate">Code review</span>
+                    <span className="truncate">
+                      {uiText("Code review", undefined, undefined, uiLocale)}
+                    </span>
                   </TooltipTrigger>
                   <TooltipPopup
                     role="tooltip"
                     side="top"
                     className="no-drag pointer-events-none max-w-64 leading-relaxed"
                   >
-                    Review code with Codex
-                    {nativeReviewControlDisabled && nativeReviewDisabledReason ? (
-                      <span className="block text-muted-foreground">
-                        {nativeReviewDisabledReason}
-                      </span>
-                    ) : null}
+                    <UiMessage
+                      message={"Review code with Codex<slot1></slot1>"}
+                      slots={{
+                        slot1:
+                          nativeReviewControlDisabled && nativeReviewDisabledReason ? (
+                            <span className="block text-muted-foreground">
+                              {nativeReviewDisabledReason}
+                            </span>
+                          ) : null,
+                      }}
+                    />
                   </TooltipPopup>
                 </Tooltip>
               ) : null}
@@ -3558,9 +3728,10 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                     )}
                     onPointerDown={(event) => event.preventDefault()}
                     onClick={expandMobileComposer}
-                    aria-label="Write custom answer"
+                    aria-label={uiText("Write custom answer", undefined, undefined, uiLocale)}
                   >
-                    {activePendingProgress?.customAnswer || "Write custom answer"}
+                    {activePendingProgress?.customAnswer ||
+                      uiText("Write custom answer", undefined, undefined, uiLocale)}
                   </button>
                   {activePendingProgress?.activeQuestion?.multiSelect ? (
                     <ComposerPrimaryActions
@@ -3605,11 +3776,12 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                 )}
                 onPointerDown={(event) => event.preventDefault()}
                 onClick={expandMobileComposer}
-                aria-label="Expand composer"
+                aria-label={uiText("Expand composer", undefined, undefined, uiLocale)}
               >
                 {activePendingProgress
-                  ? activePendingProgress.customAnswer || PENDING_ANSWER_PLACEHOLDER
-                  : prompt.trim() || "Ask anything…"}
+                  ? activePendingProgress.customAnswer ||
+                    uiPresentation.getPENDING_ANSWER_PLACEHOLDER()
+                  : prompt.trim() || uiText("Ask anything…", undefined, undefined, uiLocale)}
               </button>
               {composerImages.length + composerFiles.length > 0 ? (
                 // The image preview strip is hidden while collapsed, so surface
@@ -3620,17 +3792,24 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                   className="inline-flex shrink-0 items-center gap-1 rounded-full bg-muted px-2 py-0.5 text-xs font-medium text-muted-foreground focus:outline-none"
                   onPointerDown={(event) => event.preventDefault()}
                   onClick={expandMobileComposer}
-                  aria-label={`${composerImages.length + composerFiles.length} ${
-                    composerImages.length + composerFiles.length === 1
-                      ? "attachment"
-                      : "attachments"
-                  } attached — expand composer`}
+                  aria-label={uiText(
+                    "{count, plural, one {# attachment} other {# attachments}} attached — expand composer",
+                    {
+                      count: composerImages.length + composerFiles.length,
+                    },
+                    undefined,
+                    uiLocale,
+                  )}
                 >
                   <ImageIcon aria-hidden="true" className="size-3" />
-                  {composerImages.length + composerFiles.length}{" "}
-                  {composerImages.length + composerFiles.length === 1
-                    ? "attachment"
-                    : "attachments"}
+                  {uiText(
+                    "{count, plural, one {# attachment} other {# attachments}}",
+                    {
+                      count: composerImages.length + composerFiles.length,
+                    },
+                    undefined,
+                    uiLocale,
+                  )}
                 </button>
               ) : null}
             </div>
@@ -3658,11 +3837,21 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                   statusText={
                     composerTriggerKind === "slash-command" && selectedProvider === "claudeAgent"
                       ? commandsInput === null
-                        ? "Claude commands load once this chat connects."
+                        ? uiText(
+                            "Claude commands load once this chat connects.",
+                            undefined,
+                            undefined,
+                            uiLocale,
+                          )
                         : discoveredCommands.status === "loading"
-                          ? "Refreshing Claude commands…"
+                          ? uiText("Refreshing Claude commands…", undefined, undefined, uiLocale)
                           : discoveredCommands.status === "unavailable"
-                            ? "Claude commands unavailable. Reopen to retry, or type one."
+                            ? uiText(
+                                "Claude commands unavailable. Reopen to retry, or type one.",
+                                undefined,
+                                undefined,
+                                uiLocale,
+                              )
                             : undefined
                       : undefined
                   }
@@ -3675,7 +3864,14 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
 
             {props.queueEditing ? (
               <div className="mb-2 flex animate-enter-rise flex-wrap items-center gap-2 rounded-lg border border-border p-2 text-xs">
-                <span className="grow">Editing queued message. Your draft is saved.</span>
+                <span className="grow">
+                  {uiText(
+                    "Editing queued message. Your draft is saved.",
+                    undefined,
+                    undefined,
+                    uiLocale,
+                  )}
+                </span>
                 <Button
                   type="button"
                   size="sm"
@@ -3684,7 +3880,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                   }
                   onClick={props.onSaveQueueEdit}
                 >
-                  Save to queue
+                  {uiText("Save to queue", undefined, undefined, uiLocale)}
                 </Button>
                 <Button
                   type="button"
@@ -3693,7 +3889,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                   disabled={isSendBusy}
                   onClick={props.onCancelQueueEdit}
                 >
-                  Cancel editing
+                  {uiText("Cancel editing", undefined, undefined, uiLocale)}
                 </Button>
               </div>
             ) : null}
@@ -3701,7 +3897,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
               <div
                 ref={composerFilesListRef}
                 className="mb-3 flex flex-wrap gap-2"
-                aria-label="Uploaded file copies"
+                aria-label={uiText("Uploaded file copies", undefined, undefined, uiLocale)}
               >
                 {composerFiles.map((file) => {
                   const sameDestination =
@@ -3721,7 +3917,12 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                       status={!sameDestination ? "failed" : file.status}
                       error={
                         !sameDestination
-                          ? "Uploaded to another destination. Remove and select again."
+                          ? uiText(
+                              "Uploaded to another destination. Remove and select again.",
+                              undefined,
+                              undefined,
+                              uiLocale,
+                            )
                           : file.error
                       }
                       onRetry={
@@ -3735,8 +3936,12 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                 })}
                 {fileDraftPersistenceFailed ? (
                   <span role="alert" className="basis-full text-xs text-destructive-foreground">
-                    These file handles could not be saved in browser storage. Keep this page open
-                    and free storage before reloading.
+                    {uiText(
+                      "These file handles could not be saved in browser storage. Keep this page open and free storage before reloading.",
+                      undefined,
+                      undefined,
+                      uiLocale,
+                    )}
                   </span>
                 ) : null}
               </div>
@@ -3755,7 +3960,12 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                         <button
                           type="button"
                           className="h-full w-full cursor-zoom-in"
-                          aria-label={`Preview ${image.name}`}
+                          aria-label={uiText(
+                            "Preview {value0}",
+                            { value0: image.name },
+                            undefined,
+                            uiLocale,
+                          )}
                           onClick={() => {
                             const preview = buildExpandedImagePreview(composerImages, image.id);
                             if (!preview) return;
@@ -3779,7 +3989,12 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                             render={
                               <span
                                 role="img"
-                                aria-label="Draft attachment may not persist"
+                                aria-label={uiText(
+                                  "Draft attachment may not persist",
+                                  undefined,
+                                  undefined,
+                                  uiLocale,
+                                )}
                                 className="absolute left-1 top-1 inline-flex items-center justify-center rounded-sm bg-background/85 p-0.5 text-warning-foreground"
                               >
                                 <CircleAlertIcon className="size-3" />
@@ -3790,8 +4005,12 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                             side="top"
                             className="max-w-64 whitespace-normal leading-tight"
                           >
-                            Draft attachment could not be saved locally and may be lost on
-                            navigation.
+                            {uiText(
+                              "Draft attachment could not be saved locally and may be lost on navigation.",
+                              undefined,
+                              undefined,
+                              uiLocale,
+                            )}
                           </TooltipPopup>
                         </Tooltip>
                       )}
@@ -3800,7 +4019,12 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                         size="icon-xs"
                         className="absolute right-1 top-1 bg-background/80 hover:bg-background/90"
                         onClick={() => removeComposerImage(image.id)}
-                        aria-label={`Remove ${image.name}`}
+                        aria-label={uiText(
+                          "Remove {value0}",
+                          { value0: image.name },
+                          undefined,
+                          uiLocale,
+                        )}
                       >
                         <XIcon />
                       </Button>
@@ -3828,22 +4052,44 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                 onPaste={onComposerPaste}
                 placeholder={
                   isComposerApprovalState
-                    ? "Approve or decline to continue"
+                    ? uiText("Approve or decline to continue", undefined, undefined, uiLocale)
                     : activePendingProgress
-                      ? PENDING_ANSWER_PLACEHOLDER
+                      ? uiPresentation.getPENDING_ANSWER_PLACEHOLDER()
                       : showPlanFollowUpPrompt && activeProposedPlan
-                        ? "Add feedback, or leave blank to implement"
+                        ? uiText(
+                            "Add feedback, or leave blank to implement",
+                            undefined,
+                            undefined,
+                            uiLocale,
+                          )
                         : environmentUnavailable
-                          ? `${environmentUnavailable.label} is ${
-                              environmentUnavailable.connectionState === "connecting"
-                                ? "connecting"
-                                : "disconnected"
-                            }`
+                          ? uiText(
+                              "{state, select, connecting {{environment} is connecting} other {{environment} is disconnected}}",
+                              {
+                                environment: environmentUnavailable.label,
+                                state:
+                                  environmentUnavailable.connectionState === "connecting"
+                                    ? "connecting"
+                                    : "disconnected",
+                              },
+                              undefined,
+                              uiLocale,
+                            )
                           : phase === "disconnected" && (activeThread?.messages.length ?? 0) > 0
-                            ? "Ask for follow-up changes…"
+                            ? uiText("Ask for follow-up changes…", undefined, undefined, uiLocale)
                             : composerSkillsSupported
-                              ? "Ask anything · @ files · $ skills · / commands"
-                              : "Ask anything · @ files · / commands"
+                              ? uiText(
+                                  "Ask anything · @ files · $ skills · / commands",
+                                  undefined,
+                                  undefined,
+                                  uiLocale,
+                                )
+                              : uiText(
+                                  "Ask anything · @ files · / commands",
+                                  undefined,
+                                  undefined,
+                                  uiLocale,
+                                )
                 }
                 disabled={composerEditorDisabled}
               />
@@ -4080,7 +4326,10 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
               current.key === nativeReviewKey ? { key: nativeReviewKey, open } : current,
             )
           }
-          accountLabel={selectedProviderStatus?.displayName ?? "this Codex account"}
+          accountLabel={
+            selectedProviderStatus?.displayName ??
+            uiText("this Codex account", undefined, undefined, uiLocale)
+          }
           runtimeMode={activeThread.runtimeMode}
           disabled={nativeReviewDisabled}
           onStart={onStartCodeReview}
@@ -4102,3 +4351,15 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     </form>
   );
 });
+
+// Finite source-owned labels/helpers only; no received or user data.
+const UI_PRESENTATION_SOURCES = {
+  STEERING_DELIVERY_PRESENTATION,
+  automaticSteerRetryStatus,
+  getIMAGE_SIZE_LIMIT_LABEL,
+  getPENDING_ANSWER_PLACEHOLDER,
+  queuedAutomaticSteerCountLabel,
+  queuedMessageCountLabel,
+  renderProviderTraitsMenuContent,
+  steeringCountLabel,
+};

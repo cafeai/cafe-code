@@ -1,3 +1,5 @@
+import { useUiLocale, useUiPresentation } from "~/i18n";
+import { uiText } from "@cafecode/shared/i18n";
 import { type ResolvedKeybindingsConfig } from "@cafecode/contracts";
 import { ChevronRightIcon } from "lucide-react";
 import { shortcutLabelForCommand } from "../keybindings";
@@ -32,6 +34,8 @@ interface CommandPaletteResultsProps {
 }
 
 export function CommandPaletteResults(props: CommandPaletteResultsProps) {
+  const uiLocale = useUiLocale();
+
   const isEmpty = props.groups.length === 0;
   // A spinner appears only for a noticeable wait (docs/style-guide.md §9).
   const showLoadingIndicator = useDelayedFlag(isEmpty && props.isLoading === true);
@@ -50,10 +54,10 @@ export function CommandPaletteResults(props: CommandPaletteResultsProps) {
       <div className="animate-enter-fade py-10 text-center text-sm text-muted-foreground">
         {props.emptyStateMessage ??
           (props.isActionsOnly
-            ? "No matching actions."
+            ? uiText("No matching actions.", undefined, undefined, uiLocale)
             : props.isBrowsing
-              ? "No matching folders."
-              : "No matching commands, projects or chats.")}
+              ? uiText("No matching folders.", undefined, undefined, uiLocale)
+              : uiText("No matching commands, projects or chats.", undefined, undefined, uiLocale))}
       </div>
     );
   }
@@ -115,8 +119,10 @@ function CommandPaletteResultRow(props: {
   keybindings: ResolvedKeybindingsConfig;
   onExecuteItem: (item: CommandPaletteActionItem | CommandPaletteSubmenuItem) => void;
 }) {
+  const uiPresentation = useUiPresentation(UI_PRESENTATION_SOURCES);
+
   const shortcutLabel = props.item.shortcutCommand
-    ? shortcutLabelForCommand(props.keybindings, props.item.shortcutCommand)
+    ? uiPresentation.shortcutLabelForCommand(props.keybindings, props.item.shortcutCommand)
     : null;
 
   return (
@@ -175,3 +181,6 @@ function CommandPaletteResultRow(props: {
     </CommandItem>
   );
 }
+
+// Finite source-owned labels/helpers only; no received or user data.
+const UI_PRESENTATION_SOURCES = { shortcutLabelForCommand };

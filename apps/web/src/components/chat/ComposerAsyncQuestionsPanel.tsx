@@ -1,3 +1,6 @@
+import { useUiLocale } from "~/i18n";
+import { uiText, type UiLocale } from "@cafecode/shared/i18n";
+import { UiMessage } from "~/i18n";
 import { ChevronRightIcon } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
@@ -31,6 +34,61 @@ export interface ComposerAsyncQuestionsPanelProps {
   readonly onResolve: (questions: readonly AsyncQuestion[]) => Promise<boolean>;
 }
 
+type AsyncQuestionFeedbackCode =
+  | "prepare-failed"
+  | "draft-limit"
+  | "state-save-failed"
+  | "not-queued"
+  | "skip-save-failed"
+  | "skip-all-failed"
+  | "skip-failed";
+
+// Only presentation provenance is retained. Question/answer text and durable
+// receipt identity stay untouched; translating feedback never retries delivery.
+function formatAsyncQuestionFeedback(code: AsyncQuestionFeedbackCode, locale: UiLocale): string {
+  switch (code) {
+    case "prepare-failed":
+      return uiText(
+        "Could not prepare these questions. Reload to try again.",
+        undefined,
+        undefined,
+        locale,
+      );
+    case "draft-limit":
+      return uiText(
+        "The answer draft limit is reached. Send or skip an existing answer before adding more.",
+        undefined,
+        undefined,
+        locale,
+      );
+    case "state-save-failed":
+      return uiText(
+        "Your answer was accepted, but its question state could not be saved. Try again.",
+        undefined,
+        undefined,
+        locale,
+      );
+    case "not-queued":
+      return uiText(
+        "The answer was not queued. Your draft is still here; try again.",
+        undefined,
+        undefined,
+        locale,
+      );
+    case "skip-save-failed":
+      return uiText(
+        "Could not save the skipped questions. Try again.",
+        undefined,
+        undefined,
+        locale,
+      );
+    case "skip-all-failed":
+      return uiText("Could not skip these questions. Try again.", undefined, undefined, locale);
+    case "skip-failed":
+      return uiText("Could not skip this question. Try again.", undefined, undefined, locale);
+  }
+}
+
 /**
  * Codex 0.154's inline questions accompany completed assistant items while the
  * turn may keep running. A separate editor preserves the main composer and its
@@ -52,13 +110,15 @@ function ScopedAsyncQuestionsPanel({
   onAnswer,
   onResolve,
 }: ComposerAsyncQuestionsPanelProps) {
+  const uiLocale = useUiLocale();
+
   const [questions, setQuestions] = useState<readonly AsyncQuestion[]>([]);
   const [handled, setHandled] = useState(() => readHandledAsyncQuestions(asyncQuestionStorage));
   const [drafts, setDrafts] = useState<Record<string, AsyncQuestionDraft>>({});
   const draftsRef = useRef(drafts);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const [errorCode, setErrorCode] = useState<AsyncQuestionFeedbackCode | null>(null);
   // React may not paint disabled controls before a second click. Admission is
   // synchronous and remains tied to the original question through async save.
   const inFlight = useRef(false);
@@ -95,7 +155,7 @@ function ScopedAsyncQuestionsPanel({
         }
       },
       () => {
-        if (current) setError("Could not prepare these questions. Reload to try again.");
+        if (current) setErrorCode("prepare-failed");
       },
     );
     return () => {
@@ -146,15 +206,13 @@ function ScopedAsyncQuestionsPanel({
   const editAnswer = (question: AsyncQuestion, text: string) => {
     const next = updateAsyncQuestionDraft(draftsRef.current, question, text);
     if (next === null) {
-      setError(
-        "The answer draft limit is reached. Send or skip an existing answer before adding more.",
-      );
+      setErrorCode("draft-limit");
       return;
     }
     draftsRef.current = next;
     setDrafts(next);
     setSelectedId(question.id);
-    setError(null);
+    setErrorCode(null);
   };
 
   const complete = (ids: readonly string[]) => {
@@ -187,7 +245,7 @@ function ScopedAsyncQuestionsPanel({
     const id = question.id;
     inFlight.current = true;
     setSubmitting(true);
-    setError(null);
+    setErrorCode(null);
     try {
       // Re-read immediately before admission in case another tab handled it.
       await withAsyncQuestionLock(async () => {
@@ -199,21 +257,14 @@ function ScopedAsyncQuestionsPanel({
         } else if (acceptedAnswers.current.get(id) === text || (await onAnswer(text, id))) {
           acceptedAnswers.current.set(id, text);
           if (await onResolve([question])) complete([id]);
-          else if (mounted.current)
-            setError(
-              "Your answer was accepted, but its question state could not be saved. Try again.",
-            );
+          else if (mounted.current) setErrorCode("state-save-failed");
         } else if (mounted.current) {
-          setError("The answer was not queued. Your draft is still here; try again.");
+          setErrorCode("not-queued");
         }
       });
     } catch {
       if (mounted.current)
-        setError(
-          acceptedAnswers.current.get(id) === text
-            ? "Your answer was accepted, but its question state could not be saved. Try again."
-            : "The answer was not queued. Your draft is still here; try again.",
-        );
+        setErrorCode(acceptedAnswers.current.get(id) === text ? "state-save-failed" : "not-queued");
     } finally {
       inFlight.current = false;
       if (mounted.current) setSubmitting(false);
@@ -228,19 +279,14 @@ function ScopedAsyncQuestionsPanel({
     const ids = selection.map((entry) => entry.id);
     inFlight.current = true;
     setSubmitting(true);
-    setError(null);
+    setErrorCode(null);
     try {
       await withAsyncQuestionLock(async () => {
         if (await onResolve(selection)) complete(ids);
-        else if (mounted.current) setError("Could not save the skipped questions. Try again.");
+        else if (mounted.current) setErrorCode("skip-save-failed");
       });
     } catch {
-      if (mounted.current)
-        setError(
-          all
-            ? "Could not skip these questions. Try again."
-            : "Could not skip this question. Try again.",
-        );
+      if (mounted.current) setErrorCode(all ? "skip-all-failed" : "skip-failed");
     } finally {
       inFlight.current = false;
       if (mounted.current) setSubmitting(false);
@@ -248,12 +294,12 @@ function ScopedAsyncQuestionsPanel({
   };
 
   if (!question)
-    return error ? (
+    return errorCode ? (
       <p
         role="status"
         className="mx-auto mb-2 w-full min-w-0 max-w-208 text-xs text-muted-foreground"
       >
-        {error}
+        {formatAsyncQuestionFeedback(errorCode, uiLocale)}
       </p>
     ) : null;
 
@@ -264,35 +310,62 @@ function ScopedAsyncQuestionsPanel({
           aria-hidden="true"
           className="size-3.5 shrink-0 transition-transform duration-(--duration-fast) ease-out group-open/async-questions:rotate-90"
         />
-        {pending.length} {pending.length === 1 ? "question" : "questions"} from Codex
+        {uiText(
+          "{count, plural, one {{count} question from Codex} other {{count} questions from Codex}}",
+          { count: pending.length },
+          undefined,
+          uiLocale,
+        )}
       </summary>
       <div className="max-h-[40vh] animate-enter-rise space-y-3 overflow-y-auto overscroll-contain px-3 pb-3">
         {handledElsewhere && (
           <p role="status" className="text-xs text-muted-foreground">
-            Handled in another view. Your draft is kept here; copy it or Skip to dismiss.
+            {uiText(
+              "Handled in another view. Your draft is kept here; copy it or Skip to dismiss.",
+              undefined,
+              undefined,
+              uiLocale,
+            )}
           </p>
         )}
         {pending.length > 1 && (
           <div className="flex items-center gap-2 text-xs text-muted-foreground">
-            <span aria-hidden="true">Question</span>
+            <span aria-hidden="true">{uiText("Question", undefined, undefined, uiLocale)}</span>
             <Select
               value={question.id}
               disabled={submitting}
               onValueChange={(next) => {
                 if (typeof next !== "string") return;
                 setSelectedId(next);
-                setError(null);
+                setErrorCode(null);
               }}
             >
-              <SelectTrigger size="xs" className="w-auto min-w-24" aria-label="Choose question">
+              <SelectTrigger
+                size="xs"
+                className="w-auto min-w-24"
+                aria-label={uiText("Choose question", undefined, undefined, uiLocale)}
+              >
                 <SelectValue>
-                  {pending.findIndex((entry) => entry.id === question.id) + 1} of {pending.length}
+                  {uiText(
+                    "{index} of {total}",
+                    {
+                      index: pending.findIndex((entry) => entry.id === question.id) + 1,
+                      total: pending.length,
+                    },
+                    undefined,
+                    uiLocale,
+                  )}
                 </SelectValue>
               </SelectTrigger>
               <SelectPopup alignItemWithTrigger={false}>
                 {pending.map((entry, index) => (
                   <SelectItem hideIndicator key={entry.id} value={entry.id}>
-                    {index + 1} of {pending.length}
+                    {uiText(
+                      "{index} of {total}",
+                      { index: index + 1, total: pending.length },
+                      undefined,
+                      uiLocale,
+                    )}
                   </SelectItem>
                 ))}
               </SelectPopup>
@@ -301,7 +374,11 @@ function ScopedAsyncQuestionsPanel({
         )}
         <p className="whitespace-pre-wrap break-words font-medium">{question.title}</p>
         {question.options.length > 0 && (
-          <div role="group" aria-label="Suggested answers" className="space-y-1.5">
+          <div
+            role="group"
+            aria-label={uiText("Suggested answers", undefined, undefined, uiLocale)}
+            className="space-y-1.5"
+          >
             {question.options.map((option) => (
               <button
                 type="button"
@@ -317,20 +394,26 @@ function ScopedAsyncQuestionsPanel({
           </div>
         )}
         <label className="block space-y-1 text-xs text-muted-foreground">
-          Your answer
-          <textarea
-            aria-label="Your answer"
-            value={answer}
-            disabled={submitting}
-            maxLength={PROVIDER_SEND_TURN_MAX_INPUT_CHARS}
-            onChange={(event) => editAnswer(question, event.target.value)}
-            rows={3}
-            className="focus-ring block w-full resize-y rounded-lg border border-input bg-background px-2.5 py-1.5 text-sm text-foreground"
+          <UiMessage
+            message={"Your answer<slot1></slot1>"}
+            slots={{
+              slot1: (
+                <textarea
+                  aria-label={uiText("Your answer", undefined, undefined, uiLocale)}
+                  value={answer}
+                  disabled={submitting}
+                  maxLength={PROVIDER_SEND_TURN_MAX_INPUT_CHARS}
+                  onChange={(event) => editAnswer(question, event.target.value)}
+                  rows={3}
+                  className="focus-ring block w-full resize-y rounded-lg border border-input bg-background px-2.5 py-1.5 text-sm text-foreground"
+                />
+              ),
+            }}
           />
         </label>
-        {error && (
+        {errorCode && (
           <p role="alert" className="text-xs text-destructive-foreground">
-            {error}
+            {formatAsyncQuestionFeedback(errorCode, uiLocale)}
           </p>
         )}
         <div className="flex flex-wrap items-center gap-2">
@@ -346,7 +429,9 @@ function ScopedAsyncQuestionsPanel({
               void submit();
             }}
           >
-            {submitting ? "Sending…" : "Send answer"}
+            {submitting
+              ? uiText("Sending…", undefined, undefined, uiLocale)
+              : uiText("Send answer", undefined, undefined, uiLocale)}
           </Button>
           <Button
             size="xs"
@@ -357,7 +442,7 @@ function ScopedAsyncQuestionsPanel({
               void skip();
             }}
           >
-            Skip
+            {uiText("Skip", undefined, undefined, uiLocale)}
           </Button>
           {pending.length > 1 && (
             <Button
@@ -369,7 +454,7 @@ function ScopedAsyncQuestionsPanel({
                 void skip(true);
               }}
             >
-              Skip all
+              {uiText("Skip all", undefined, undefined, uiLocale)}
             </Button>
           )}
         </div>

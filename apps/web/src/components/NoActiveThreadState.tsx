@@ -1,3 +1,5 @@
+import { useUiLocale } from "~/i18n";
+import { uiText } from "@cafecode/shared/i18n";
 import { SquarePenIcon } from "lucide-react";
 import type { ReactNode } from "react";
 
@@ -21,6 +23,8 @@ export function NoActiveThreadState({
 }: {
   readonly secondaryActions?: ReactNode;
 } = {}) {
+  const uiLocale = useUiLocale();
+
   const isMacDesktopTitlebar = useMacDesktopTitlebar();
   const { handleNewStandaloneChat } = useNewThreadHandler();
   const startNewChat = () => {
@@ -29,8 +33,13 @@ export function NoActiveThreadState({
       toastManager.add(
         stackedThreadToast({
           type: "error",
-          title: "Could not create chat",
-          description: "Reconnect to Cafe Code and try again.",
+          title: uiText("Could not create chat", undefined, undefined, uiLocale),
+          description: uiText(
+            "Reconnect to Cafe Code and try again.",
+            undefined,
+            undefined,
+            uiLocale,
+          ),
         }),
       );
     });
@@ -56,12 +65,14 @@ export function NoActiveThreadState({
 
         <Empty className="flex-1 animate-enter-fade">
           <EmptyHeader>
-            <EmptyTitle className="text-lg text-foreground">No chat selected</EmptyTitle>
+            <EmptyTitle className="text-lg text-foreground">
+              {uiText("No chat selected", undefined, undefined, uiLocale)}
+            </EmptyTitle>
           </EmptyHeader>
           <EmptyContent className="flex-row flex-wrap justify-center gap-2">
             <Button onClick={startNewChat}>
               <SquarePenIcon />
-              New chat
+              {uiText("New chat", undefined, undefined, uiLocale)}
             </Button>
             {secondaryActions}
           </EmptyContent>

@@ -1,3 +1,5 @@
+import { useUiLocale, useUiPresentation } from "~/i18n";
+import { uiText } from "@cafecode/shared/i18n";
 import type { ProviderDeliveryPriority } from "@cafecode/contracts";
 import { MenuRadioGroup, MenuRadioItem } from "../ui/menu";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
@@ -5,23 +7,39 @@ import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 const DELIVERY_OPTIONS = [
   {
     value: "default",
-    label: "Automatic",
-    description: "Use Cafe’s normal queue and Claude’s default priority.",
+    get label() {
+      return uiText("Automatic");
+    },
+    get description() {
+      return uiText("Use Cafe’s normal queue and Claude’s default priority.");
+    },
   },
   {
     value: "now",
-    label: "Now",
-    description: "Join the active turn; supported work may move to the background.",
+    get label() {
+      return uiText("Now");
+    },
+    get description() {
+      return uiText("Join the active turn; supported work may move to the background.");
+    },
   },
   {
     value: "next",
-    label: "Next",
-    description: "Ask Claude to take this at its next available boundary.",
+    get label() {
+      return uiText("Next");
+    },
+    get description() {
+      return uiText("Ask Claude to take this at its next available boundary.");
+    },
   },
   {
     value: "later",
-    label: "Later",
-    description: "Let Claude defer this behind more urgent messages—not a scheduled time.",
+    get label() {
+      return uiText("Later");
+    },
+    get description() {
+      return uiText("Let Claude defer this behind more urgent messages—not a scheduled time.");
+    },
   },
 ] as const;
 
@@ -32,18 +50,23 @@ interface DeliveryPriorityProps {
 }
 
 export function ClaudeDeliveryPriorityPicker({ value, onChange, disabled }: DeliveryPriorityProps) {
+  const uiLocale = useUiLocale();
+  const uiPresentation = useUiPresentation(UI_PRESENTATION_SOURCES);
+
   return (
     <>
-      <div className="px-2 py-1.5 font-medium text-muted-foreground text-xs">Message delivery</div>
+      <div className="px-2 py-1.5 font-medium text-muted-foreground text-xs">
+        {uiText("Message delivery", undefined, undefined, uiLocale)}
+      </div>
       <MenuRadioGroup
-        aria-label="Claude message delivery priority"
+        aria-label={uiText("Claude message delivery priority", undefined, undefined, uiLocale)}
         value={value ?? "default"}
         onValueChange={(next) => {
           if (disabled) return;
           onChange(next === "now" || next === "next" || next === "later" ? next : undefined);
         }}
       >
-        {DELIVERY_OPTIONS.map((option) => (
+        {uiPresentation.DELIVERY_OPTIONS.map((option) => (
           <Tooltip key={option.value}>
             <TooltipTrigger
               delay={250}
@@ -71,3 +94,6 @@ export function ClaudeDeliveryPriorityPicker({ value, onChange, disabled }: Deli
     </>
   );
 }
+
+// Finite source-owned labels/helpers only; no received or user data.
+const UI_PRESENTATION_SOURCES = { DELIVERY_OPTIONS };

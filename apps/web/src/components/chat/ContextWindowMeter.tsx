@@ -1,3 +1,5 @@
+import { useUiLocale } from "~/i18n";
+import { uiText } from "@cafecode/shared/i18n";
 import type { ServerProviderAccountRateLimits } from "@cafecode/contracts";
 import { useState } from "react";
 
@@ -26,6 +28,8 @@ export function ContextWindowMeter(props: {
   onShowOnSide?: () => void;
   subagentConcurrency?: SubagentConcurrencyPresentation | null | undefined;
 }) {
+  const uiLocale = useUiLocale();
+
   const { usage } = props;
   const [open, setOpen] = useState(false);
   const sessionQuota = useProviderQuota(props.quotaContext, open);
@@ -47,8 +51,20 @@ export function ContextWindowMeter(props: {
             className="focus-ring group inline-flex items-center justify-center rounded-full transition-opacity duration-(--duration-fast) hover:opacity-85"
             aria-label={
               usage.maxTokens !== null && usedPercentage
-                ? `Context window ${usedPercentage} used`
-                : `Context window ${formatContextWindowTokens(usage.usedTokens)} tokens used`
+                ? uiText(
+                    "Context window {value0} used",
+                    { value0: usedPercentage },
+                    undefined,
+                    uiLocale,
+                  )
+                : uiText(
+                    "Context window {value0} tokens used",
+                    {
+                      value0: formatContextWindowTokens(usage.usedTokens),
+                    },
+                    undefined,
+                    uiLocale,
+                  )
             }
           >
             <span className="relative flex h-6 w-6 items-center justify-center">

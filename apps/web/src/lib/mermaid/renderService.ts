@@ -1,4 +1,5 @@
-import { admitMermaidSource, MERMAID_FAILURE, MERMAID_POLICY } from "./policy";
+import { uiText } from "@cafecode/shared/i18n";
+import { admitMermaidSource, getMERMAID_FAILURE, MERMAID_POLICY } from "./policy";
 import { sanitizeMermaidSvg, type MermaidResult } from "./sanitizeSvg";
 
 export type { MermaidResult } from "./sanitizeSvg";
@@ -32,7 +33,7 @@ export async function renderInMermaidSandbox(
     frame.setAttribute("sandbox", "allow-scripts");
     frame.setAttribute("aria-hidden", "true");
     frame.tabIndex = -1;
-    frame.title = "Isolated diagram renderer";
+    frame.title = uiText("Isolated diagram renderer");
     frame.style.cssText =
       "position:fixed;left:-10000px;top:0;width:1024px;height:768px;visibility:hidden;pointer-events:none";
     frame.referrerPolicy = "no-referrer";
@@ -45,7 +46,7 @@ export async function renderInMermaidSandbox(
       channel.port2.close();
       frame.remove();
       if (result) resolve(result);
-      else reject(new Error(MERMAID_FAILURE));
+      else reject(new Error(getMERMAID_FAILURE()));
     };
     // This bounds stalled asynchronous jobs, NOT synchronous CPU execution in
     // a shared browser thread. Source and parsed-graph admission precede layout.
@@ -96,7 +97,7 @@ export function createMermaidRenderService(renderer: Renderer): MermaidRenderSer
     try {
       admitMermaidSource(source);
     } catch {
-      return Promise.reject(new Error(MERMAID_FAILURE));
+      return Promise.reject(new Error(getMERMAID_FAILURE()));
     }
     // Full source is the key, not a truncated/noncryptographic digest. Distinct
     // private diagrams can never alias to another user's image through collision.
@@ -107,11 +108,11 @@ export function createMermaidRenderService(renderer: Renderer): MermaidRenderSer
       cache.set(key, cached);
       return cached.value
         ? Promise.resolve(cached.value)
-        : Promise.reject(new Error(MERMAID_FAILURE));
+        : Promise.reject(new Error(getMERMAID_FAILURE()));
     }
     const pending = inFlight.get(key);
     if (pending) return pending;
-    if (inFlight.size >= 64) return Promise.reject(new Error(MERMAID_FAILURE));
+    if (inFlight.size >= 64) return Promise.reject(new Error(getMERMAID_FAILURE()));
     const remember = (value: MermaidResult | null) => {
       const size = key.length * 2 + (value?.svg.length ?? 0) * 2 + 2048;
       if (size > 16 * 1024 * 1024) return;
@@ -133,7 +134,7 @@ export function createMermaidRenderService(renderer: Renderer): MermaidRenderSer
         },
         () => {
           remember(null);
-          throw new Error(MERMAID_FAILURE);
+          throw new Error(getMERMAID_FAILURE());
         },
       )
       .finally(() => {

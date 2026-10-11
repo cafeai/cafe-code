@@ -1,3 +1,4 @@
+import { uiText } from "@cafecode/shared/i18n";
 import type { DesktopUpdateActionResult, DesktopUpdateState } from "@cafecode/contracts";
 
 export type DesktopUpdateButtonAction = "download" | "install" | "manual" | "none";
@@ -49,51 +50,71 @@ export function isDesktopUpdateButtonDisabled(state: DesktopUpdateState | null):
 
 export function getArm64IntelBuildWarningDescription(state: DesktopUpdateState): string {
   if (!shouldShowArm64IntelBuildWarning(state)) {
-    return "This install is using the correct architecture.";
+    return uiText("This install is using the correct architecture.");
   }
 
   const action = resolveDesktopUpdateButtonAction(state);
   if (action === "download") {
-    return "This Mac has Apple Silicon, but Cafe Code is still running the Intel build under Rosetta. Download the available update to switch to the native Apple Silicon build.";
+    return uiText(
+      "This Mac has Apple Silicon, but Cafe Code is still running the Intel build under Rosetta. Download the available update to switch to the native Apple Silicon build.",
+    );
   }
   if (action === "install") {
-    return "This Mac has Apple Silicon, but Cafe Code is still running the Intel build under Rosetta. Restart to install the downloaded Apple Silicon build.";
+    return uiText(
+      "This Mac has Apple Silicon, but Cafe Code is still running the Intel build under Rosetta. Restart to install the downloaded Apple Silicon build.",
+    );
   }
-  return "This Mac has Apple Silicon, but Cafe Code is still running the Intel build under Rosetta. The next app update will replace it with the native Apple Silicon build.";
+  return uiText(
+    "This Mac has Apple Silicon, but Cafe Code is still running the Intel build under Rosetta. The next app update will replace it with the native Apple Silicon build.",
+  );
 }
 
 export function getDesktopUpdateButtonTooltip(state: DesktopUpdateState): string {
   if (state.status === "available") {
     if (state.installMode === "manual") {
-      return `Update ${state.availableVersion ?? "available"} can be installed from its GitHub release`;
+      return uiText("Update {version} can be installed from its GitHub release", {
+        version: state.availableVersion ?? uiText("available"),
+      });
     }
-    return `Update ${state.availableVersion ?? "available"} ready to download`;
+    return uiText("Update {version} ready to download", {
+      version: state.availableVersion ?? uiText("available"),
+    });
   }
   if (state.status === "downloading") {
-    const progress =
-      typeof state.downloadPercent === "number" ? ` (${Math.floor(state.downloadPercent)}%)` : "";
-    return `Downloading update${progress}`;
+    return uiText("Downloading update{known, select, yes { ({percent}%)} other {}}", {
+      known: typeof state.downloadPercent === "number" ? "yes" : "no",
+      percent: typeof state.downloadPercent === "number" ? Math.floor(state.downloadPercent) : 0,
+    });
   }
   if (state.status === "downloaded") {
-    return `Update ${state.downloadedVersion ?? state.availableVersion ?? "ready"} downloaded. Click to restart and install.`;
+    return uiText("Update {version} downloaded. Click to restart and install.", {
+      version: state.downloadedVersion ?? state.availableVersion ?? uiText("ready"),
+    });
   }
   if (state.status === "error") {
     if (state.errorContext === "download" && state.availableVersion) {
-      return `Download failed for ${state.availableVersion}. Click to retry.`;
+      return uiText("Download failed for {availableVersion}. Click to retry.", {
+        availableVersion: state.availableVersion,
+      });
     }
     if (state.errorContext === "install" && state.downloadedVersion) {
-      return `Install failed for ${state.downloadedVersion}. Click to retry.`;
+      return uiText("Install failed for {downloadedVersion}. Click to retry.", {
+        downloadedVersion: state.downloadedVersion,
+      });
     }
-    return state.message ?? "Update failed";
+    return state.message ?? uiText("Update failed");
   }
-  return "Up to date";
+  return uiText("Up to date");
 }
 
 export function getDesktopUpdateInstallConfirmationMessage(
   state: Pick<DesktopUpdateState, "availableVersion" | "downloadedVersion">,
 ): string {
   const version = state.downloadedVersion ?? state.availableVersion;
-  return `Install update${version ? ` ${version}` : ""} and restart Cafe Code?\n\nAny running tasks will be interrupted. Make sure you're ready before continuing.`;
+  return uiText(
+    "Install update{known, select, yes { {version}} other {}} and restart Cafe Code?\n\nAny running tasks will be interrupted. Make sure you're ready before continuing.",
+    { known: version ? "yes" : "no", version: version ?? "" },
+  );
 }
 
 export function getDesktopUpdateActionError(result: DesktopUpdateActionResult): string | null {

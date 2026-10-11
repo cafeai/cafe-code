@@ -1,5 +1,7 @@
-"use client";
+import { useUiLocale } from "~/i18n";
+("use client");
 
+import { uiText } from "@cafecode/shared/i18n";
 import { Dialog as DialogPrimitive } from "@base-ui/react/dialog";
 import { XIcon } from "lucide-react";
 import { cn } from "~/lib/utils";
@@ -59,6 +61,8 @@ function DialogPopup({
   showCloseButton?: boolean;
   bottomStickOnMobile?: boolean;
 }) {
+  const uiLocale = useUiLocale();
+
   return (
     <DialogPortal>
       {/* Nested dialogs keep their own scrim layer, as the viewport scrim did. */}
@@ -83,7 +87,7 @@ function DialogPopup({
           {children}
           {showCloseButton && (
             <DialogPrimitive.Close
-              aria-label="Close"
+              aria-label={uiText("Close", undefined, undefined, uiLocale)}
               className="absolute end-2 top-2"
               render={<Button size="icon" variant="ghost" />}
             >

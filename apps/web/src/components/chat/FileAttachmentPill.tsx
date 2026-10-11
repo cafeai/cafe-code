@@ -1,3 +1,6 @@
+import { useUiLocale, useUiPresentation } from "~/i18n";
+import { uiText, type UiLocale } from "@cafecode/shared/i18n";
+import { UiMessage } from "~/i18n";
 import type { ChatFileAttachment, EnvironmentId } from "@cafecode/contracts";
 import { useState } from "react";
 import { CircleAlertIcon, DownloadIcon, FileIcon, LoaderCircleIcon, XIcon } from "lucide-react";
@@ -5,7 +8,11 @@ import {
   downloadFileAttachment,
   getFileAttachmentPreview,
 } from "../../attachments/fileAttachments";
-import { getFileAttachmentErrorMessage } from "../../attachments/fileAttachmentErrors";
+import {
+  formatFileAttachmentErrorCode,
+  readFileAttachmentErrorCode,
+  type FileAttachmentErrorCode,
+} from "../../attachments/fileAttachmentErrors";
 import { Button } from "../ui/button";
 import { cn } from "~/lib/utils";
 
@@ -14,7 +21,29 @@ const FILE_PILL_CLASS_NAME =
   "inline-flex max-w-full items-center gap-1 rounded-lg border border-border bg-background/60 px-2 py-0.5 text-xs";
 
 function formatAttachmentSize(sizeBytes: number): string {
-  return sizeBytes < 1024 ? `${sizeBytes} B` : `${Math.ceil(sizeBytes / 1024)} KB`;
+  return sizeBytes < 1024
+    ? uiText("{bytes} B", { bytes: sizeBytes })
+    : uiText("{kilobytes} KB", { kilobytes: Math.ceil(sizeBytes / 1024) });
+}
+
+type AttachmentFeedbackCode = FileAttachmentErrorCode | "no-preview" | "download-failed";
+
+function formatAttachmentFeedback(code: AttachmentFeedbackCode, locale: UiLocale): string {
+  if (code === "no-preview")
+    return uiText(
+      "No text preview for this format. Download the file to inspect it.",
+      undefined,
+      undefined,
+      locale,
+    );
+  if (code === "download-failed")
+    return uiText(
+      "This file could not be downloaded. Please try again.",
+      undefined,
+      undefined,
+      locale,
+    );
+  return formatFileAttachmentErrorCode(code, locale);
 }
 
 /**
@@ -37,6 +66,9 @@ export function FileAttachmentPendingPill({
   onRetry?: (() => void) | undefined;
   onRemove: () => void;
 }) {
+  const uiLocale = useUiLocale();
+  const uiPresentation = useUiPresentation(UI_PRESENTATION_SOURCES);
+
   const uploading = status === "uploading";
   return (
     <span
@@ -57,26 +89,30 @@ export function FileAttachmentPendingPill({
       </span>
       {uploading ? (
         <>
-          <span className="shrink-0 text-muted-foreground">{formatAttachmentSize(sizeBytes)}</span>
-          <span className="sr-only">Uploading copy…</span>
+          <span className="shrink-0 text-muted-foreground">
+            {uiPresentation.formatAttachmentSize(sizeBytes)}
+          </span>
+          <span className="sr-only">
+            {uiText("Uploading copy…", undefined, undefined, uiLocale)}
+          </span>
           {/* Holds the download button's slot so the ready pill matches this width. */}
           <span aria-hidden="true" className="size-7 shrink-0 sm:size-6" />
         </>
       ) : (
         <span className="min-w-0 truncate text-destructive-foreground" title={error}>
-          {error ?? "Upload failed."}
+          {error ?? uiText("Upload failed.", undefined, undefined, uiLocale)}
         </span>
       )}
       {onRetry ? (
         <Button type="button" size="xs" variant="ghost" onClick={onRetry}>
-          Retry upload
+          {uiText("Retry upload", undefined, undefined, uiLocale)}
         </Button>
       ) : null}
       <Button
         type="button"
         size="icon-xs"
         variant="ghost"
-        aria-label={`Remove ${name}`}
+        aria-label={uiText("Remove {value0}", { value0: name }, undefined, uiLocale)}
         onClick={onRemove}
       >
         <XIcon className="size-3" />
@@ -95,30 +131,34 @@ export function FileAttachmentPill({
   environmentId: EnvironmentId;
   onRemove?: () => void;
 }) {
+  const uiLocale = useUiLocale();
+  const uiPresentation = useUiPresentation(UI_PRESENTATION_SOURCES);
+
   const [busy, setBusy] = useState(false);
   const [preview, setPreview] = useState<{ text: string; truncated: boolean } | null>(null);
-  const [error, setError] = useState<string | null>(null);
+  // Retain only finite Cafe-owned feedback, never an exception, response body
+  // or old-locale message. Language switches repaint without replaying IO.
+  const [feedbackCode, setFeedbackCode] = useState<AttachmentFeedbackCode | null>(null);
+  const error = feedbackCode === null ? null : formatAttachmentFeedback(feedbackCode, uiLocale);
   const run = async (action: "preview" | "download") => {
     if (busy) return;
     setBusy(true);
-    setError(null);
+    setFeedbackCode(null);
     try {
       if (action === "download") await downloadFileAttachment({ environmentId, attachment });
       else {
         const result = await getFileAttachmentPreview({ environmentId, attachment });
         if (result) setPreview(result);
-        else setError("No text preview for this format. Download the file to inspect it.");
+        else setFeedbackCode("no-preview");
       }
     } catch (cause) {
       // Transport failures carry locally owned, allowlisted categories. Do not
       // display arbitrary exception text here: it may contain a remote server's
       // response, credentials, or private paths. A failed preview also does not
       // prove the upload/download failed or that this environment disconnected.
-      setError(
-        getFileAttachmentErrorMessage(cause) ??
-          (action === "preview"
-            ? "This file could not be previewed. You can still download it."
-            : "This file could not be downloaded. Please try again."),
+      setFeedbackCode(
+        readFileAttachmentErrorCode(cause) ??
+          (action === "preview" ? "invalid-preview" : "download-failed"),
       );
     } finally {
       setBusy(false);
@@ -136,7 +176,16 @@ export function FileAttachmentPill({
           type="button"
           disabled={busy}
           className="focus-ring min-w-0 truncate rounded-sm text-left hover:underline"
-          title={`${attachment.name} · ${attachment.mimeType} · ${attachment.sizeBytes.toLocaleString()} bytes · Uploaded copy`}
+          title={uiText(
+            "{value0} · {value1} · {value2} bytes · Uploaded copy",
+            {
+              value0: attachment.name,
+              value1: attachment.mimeType,
+              value2: attachment.sizeBytes.toLocaleString(),
+            },
+            undefined,
+            uiLocale,
+          )}
           onClick={() => {
             void run("preview");
           }}
@@ -144,14 +193,14 @@ export function FileAttachmentPill({
           {attachment.name}
         </button>
         <span className="shrink-0 text-muted-foreground">
-          {formatAttachmentSize(attachment.sizeBytes)}
+          {uiPresentation.formatAttachmentSize(attachment.sizeBytes)}
         </span>
         <Button
           type="button"
           size="icon-xs"
           variant="ghost"
           disabled={busy}
-          aria-label={`Download ${attachment.name}`}
+          aria-label={uiText("Download {value0}", { value0: attachment.name }, undefined, uiLocale)}
           onClick={() => {
             void run("download");
           }}
@@ -163,7 +212,7 @@ export function FileAttachmentPill({
             type="button"
             size="icon-xs"
             variant="ghost"
-            aria-label={`Remove ${attachment.name}`}
+            aria-label={uiText("Remove {value0}", { value0: attachment.name }, undefined, uiLocale)}
             onClick={onRemove}
           >
             <XIcon className="size-3" />
@@ -178,16 +227,25 @@ export function FileAttachmentPill({
       {preview ? (
         <span className="max-w-full animate-enter-rise rounded-lg border border-border bg-background p-2">
           <span className="flex items-center justify-between gap-2 text-xs text-muted-foreground">
-            Plain-text preview{preview.truncated ? " (truncated)" : ""}
-            <Button
-              type="button"
-              size="icon-xs"
-              variant="ghost"
-              aria-label="Close file preview"
-              onClick={() => setPreview(null)}
-            >
-              <XIcon />
-            </Button>
+            <UiMessage
+              message={
+                "Plain-text preview{truncated, select, yes { (truncated)} other {}}<close></close>"
+              }
+              values={{ truncated: preview.truncated ? "yes" : "no" }}
+              slots={{
+                close: (
+                  <Button
+                    type="button"
+                    size="icon-xs"
+                    variant="ghost"
+                    aria-label={uiText("Close file preview", undefined, undefined, uiLocale)}
+                    onClick={() => setPreview(null)}
+                  >
+                    <XIcon />
+                  </Button>
+                ),
+              }}
+            />
           </span>
           <pre className="max-h-64 max-w-full overflow-auto whitespace-pre-wrap break-all text-xs">
             {preview.text}
@@ -197,3 +255,6 @@ export function FileAttachmentPill({
     </span>
   );
 }
+
+// Finite source-owned labels/helpers only; no received or user data.
+const UI_PRESENTATION_SOURCES = { formatAttachmentSize };

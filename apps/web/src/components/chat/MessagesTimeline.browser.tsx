@@ -114,6 +114,7 @@ vi.mock("@legendapp/list/react", async () => {
 import { MessagesTimeline } from "./MessagesTimeline";
 import { SubagentDetailView, type SubagentDetailSelection } from "./SubagentDetailView";
 import { deriveTimelineEntries, deriveWorkLogEntries } from "../../session-logic";
+import { getUiLocale, setUiLocale } from "@cafecode/shared/i18n";
 
 const MESSAGE_CREATED_AT = "2026-04-13T12:00:00.000Z";
 
@@ -362,6 +363,52 @@ it("replays historical Claude operation rows through the existing bounded work-l
   } finally {
     await screen.unmount();
     __resetEnvironmentApiOverridesForTests();
+  }
+});
+
+it("retranslates a retained historical page error without restarting the bounded owner query", async () => {
+  const locale = getUiLocale();
+  setUiLocale("en");
+  const threadId = ThreadId.make("locale-history-thread");
+  const turnId = TurnId.make("locale-history-turn");
+  const getThreadTurnActivityPage = vi.fn(async () => {
+    throw new Error("private fixture page detail");
+  });
+  __setEnvironmentApiOverrideForTests(EnvironmentId.make("environment-local"), {
+    orchestration: { getThreadTurnActivityPage },
+  } as unknown as EnvironmentApi);
+  const screen = await render(
+    <MessagesTimeline
+      {...buildProps()}
+      activeThreadId={threadId}
+      timelineEntries={[buildAssistantTimelineEntry({ turnId, text: "Received final answer." })]}
+      historicalWorkLogSummariesByTurnId={
+        new Map([[turnId, { turnId, previewEntries: [], snapshotEntryCount: 2 }]])
+      }
+    />,
+  );
+  try {
+    await page.getByRole("button", { name: /Work log/ }).click();
+    await expect
+      .element(page.getByText("Couldn’t load the work log.", { exact: true }))
+      .toBeVisible();
+    setUiLocale("ko");
+    await expect
+      .element(page.getByText("작업 기록을 불러오지 못했습니다.", { exact: true }))
+      .toBeVisible();
+    expect(getThreadTurnActivityPage).toHaveBeenCalledTimes(1);
+    expect(getThreadTurnActivityPage).toHaveBeenCalledWith({
+      threadId,
+      turnId,
+      offset: 0,
+      limit: 1,
+    });
+    expect(document.body.textContent).not.toContain("private fixture page detail");
+    await expect.element(page.getByText("Received final answer.", { exact: true })).toBeVisible();
+  } finally {
+    await screen.unmount();
+    __resetEnvironmentApiOverridesForTests();
+    setUiLocale(locale);
   }
 });
 

@@ -1,3 +1,6 @@
+import { useUiLocale } from "~/i18n";
+import { uiText } from "@cafecode/shared/i18n";
+import { UiMessage } from "~/i18n";
 import type {
   ProjectScript,
   ProjectScriptIcon,
@@ -55,12 +58,42 @@ import { Switch } from "./ui/switch";
 import { Textarea } from "./ui/textarea";
 
 const SCRIPT_ICONS: Array<{ id: ProjectScriptIcon; label: string }> = [
-  { id: "play", label: "Play" },
-  { id: "test", label: "Test" },
-  { id: "lint", label: "Lint" },
-  { id: "configure", label: "Configure" },
-  { id: "build", label: "Build" },
-  { id: "debug", label: "Debug" },
+  {
+    id: "play",
+    get label() {
+      return uiText("Play");
+    },
+  },
+  {
+    id: "test",
+    get label() {
+      return uiText("Test");
+    },
+  },
+  {
+    id: "lint",
+    get label() {
+      return uiText("Lint");
+    },
+  },
+  {
+    id: "configure",
+    get label() {
+      return uiText("Configure");
+    },
+  },
+  {
+    id: "build",
+    get label() {
+      return uiText("Build", undefined, "project-script-action");
+    },
+  },
+  {
+    id: "debug",
+    get label() {
+      return uiText("Debug");
+    },
+  },
 ];
 
 function ScriptIcon({
@@ -105,6 +138,8 @@ export default function ProjectScriptsControl({
   onUpdateScript,
   onDeleteScript,
 }: ProjectScriptsControlProps) {
+  const uiLocale = useUiLocale();
+
   const addScriptFormId = React.useId();
   const [editingScriptId, setEditingScriptId] = useState<string | null>(null);
   const [dialogOpen, setDialogOpen] = useState(false);
@@ -145,11 +180,11 @@ export default function ProjectScriptsControl({
     const trimmedName = name.trim();
     const trimmedCommand = command.trim();
     if (trimmedName.length === 0) {
-      setValidationError("Name is required.");
+      setValidationError(uiText("Name is required.", undefined, undefined, uiLocale));
       return;
     }
     if (trimmedCommand.length === 0) {
-      setValidationError("Command is required.");
+      setValidationError(uiText("Command is required.", undefined, undefined, uiLocale));
       return;
     }
 
@@ -180,7 +215,11 @@ export default function ProjectScriptsControl({
       setDialogOpen(false);
       setIconPickerOpen(false);
     } catch (error) {
-      setValidationError(error instanceof Error ? error.message : "Failed to save action.");
+      setValidationError(
+        error instanceof Error
+          ? error.message
+          : uiText("Failed to save action.", undefined, undefined, uiLocale),
+      );
     }
   };
 
@@ -218,12 +257,12 @@ export default function ProjectScriptsControl({
   return (
     <>
       {primaryScript ? (
-        <Group aria-label="Project scripts">
+        <Group aria-label={uiText("Project scripts", undefined, undefined, uiLocale)}>
           <Button
             size="xs"
             variant="outline"
             onClick={() => onRunScript(primaryScript)}
-            title={`Run ${primaryScript.name}`}
+            title={uiText("Run {value0}", { value0: primaryScript.name }, undefined, uiLocale)}
           >
             <ScriptIcon icon={primaryScript.icon} />
             <span className="sr-only @3xl/header-actions:not-sr-only @3xl/header-actions:ml-0.5">
@@ -233,7 +272,13 @@ export default function ProjectScriptsControl({
           <GroupSeparator className="hidden @3xl/header-actions:block" />
           <Menu highlightItemOnHover={false}>
             <MenuTrigger
-              render={<Button size="icon-xs" variant="outline" aria-label="Script actions" />}
+              render={
+                <Button
+                  size="icon-xs"
+                  variant="outline"
+                  aria-label={uiText("Script actions", undefined, undefined, uiLocale)}
+                />
+              }
             >
               <ChevronDownIcon className="size-4" />
             </MenuTrigger>
@@ -251,7 +296,9 @@ export default function ProjectScriptsControl({
                   >
                     <ScriptIcon icon={script.icon} className="size-4" />
                     <span className="truncate">
-                      {script.runOnWorktreeCreate ? `${script.name} (setup)` : script.name}
+                      {script.runOnWorktreeCreate
+                        ? uiText("{value0} (setup)", { value0: script.name }, undefined, uiLocale)
+                        : script.name}
                     </span>
                     <span className="relative ms-auto flex h-6 min-w-6 items-center justify-end">
                       {shortcutLabel && (
@@ -264,7 +311,12 @@ export default function ProjectScriptsControl({
                         variant="ghost"
                         size="icon-xs"
                         className="absolute right-0 top-1/2 size-6 -translate-y-1/2 opacity-0 pointer-events-none transition-opacity group-hover:opacity-100 group-hover:pointer-events-auto group-focus-visible:opacity-100 group-focus-visible:pointer-events-auto"
-                        aria-label={`Edit ${script.name}`}
+                        aria-label={uiText(
+                          "Edit {value0}",
+                          { value0: script.name },
+                          undefined,
+                          uiLocale,
+                        )}
                         onPointerDown={(event) => {
                           event.preventDefault();
                           event.stopPropagation();
@@ -283,16 +335,21 @@ export default function ProjectScriptsControl({
               })}
               <MenuItem className={dropdownItemClassName} onClick={openAddDialog}>
                 <PlusIcon className="size-4" />
-                Add action
+                {uiText("Add action", undefined, undefined, uiLocale)}
               </MenuItem>
             </MenuPopup>
           </Menu>
         </Group>
       ) : (
-        <Button size="xs" variant="outline" onClick={openAddDialog} title="Add action">
+        <Button
+          size="xs"
+          variant="outline"
+          onClick={openAddDialog}
+          title={uiText("Add action", undefined, undefined, uiLocale)}
+        >
           <PlusIcon className="size-3.5" />
           <span className="sr-only @3xl/header-actions:not-sr-only @3xl/header-actions:ml-0.5">
-            Add action
+            {uiText("Add action", undefined, undefined, uiLocale)}
           </span>
         </Button>
       )}
@@ -318,15 +375,26 @@ export default function ProjectScriptsControl({
       >
         <DialogPopup>
           <DialogHeader>
-            <DialogTitle>{isEditing ? "Edit Action" : "Add Action"}</DialogTitle>
+            <DialogTitle>
+              {isEditing
+                ? uiText("Edit Action", undefined, undefined, uiLocale)
+                : uiText("Add Action", undefined, undefined, uiLocale)}
+            </DialogTitle>
             <DialogDescription>
-              Actions are project-scoped commands you can run from the top bar or keybindings.
+              {uiText(
+                "Actions are project-scoped commands you can run from the top bar or keybindings.",
+                undefined,
+                undefined,
+                uiLocale,
+              )}
             </DialogDescription>
           </DialogHeader>
           <DialogPanel>
             <form id={addScriptFormId} className="space-y-4" onSubmit={submitAddScript}>
               <div className="space-y-1.5">
-                <Label htmlFor="script-name">Name</Label>
+                <Label htmlFor="script-name">
+                  {uiText("Name", undefined, undefined, uiLocale)}
+                </Label>
                 <div className="flex items-center gap-2">
                   <Popover onOpenChange={setIconPickerOpen} open={iconPickerOpen}>
                     <PopoverTrigger
@@ -335,7 +403,7 @@ export default function ProjectScriptsControl({
                           type="button"
                           variant="outline"
                           className="size-9 shrink-0 hover:bg-popover active:bg-popover data-pressed:bg-popover data-pressed:shadow-xs/5 data-pressed:before:shadow-[0_1px_--theme(--color-black/4%)] dark:data-pressed:before:shadow-[0_-1px_--theme(--color-white/6%)]"
-                          aria-label="Choose icon"
+                          aria-label={uiText("Choose icon", undefined, undefined, uiLocale)}
                         />
                       }
                     >
@@ -370,36 +438,47 @@ export default function ProjectScriptsControl({
                   <Input
                     id="script-name"
                     autoFocus
-                    placeholder="Test"
+                    placeholder={uiText("Test", undefined, undefined, uiLocale)}
                     value={name}
                     onChange={(event) => setName(event.target.value)}
                   />
                 </div>
               </div>
               <div className="space-y-1.5">
-                <Label htmlFor="script-keybinding">Keybinding</Label>
+                <Label htmlFor="script-keybinding">
+                  {uiText("Keybinding", undefined, undefined, uiLocale)}
+                </Label>
                 <Input
                   id="script-keybinding"
-                  placeholder="Press shortcut"
+                  placeholder={uiText("Press shortcut", undefined, undefined, uiLocale)}
                   value={keybinding}
                   readOnly
                   onKeyDown={captureKeybinding}
                 />
                 <p className="text-xs text-muted-foreground">
-                  Press a shortcut. Use <code>Backspace</code> to clear.
+                  <UiMessage
+                    message={"Press a shortcut. Use <slot1></slot1> to clear."}
+                    slots={{
+                      slot1: <code>{uiText("Backspace", undefined, undefined, uiLocale)}</code>,
+                    }}
+                  />
                 </p>
               </div>
               <div className="space-y-1.5">
-                <Label htmlFor="script-command">Command</Label>
+                <Label htmlFor="script-command">
+                  {uiText("Command", undefined, undefined, uiLocale)}
+                </Label>
                 <Textarea
                   id="script-command"
-                  placeholder="yarn test"
+                  placeholder={uiText("yarn test", undefined, undefined, uiLocale)}
                   value={command}
                   onChange={(event) => setCommand(event.target.value)}
                 />
               </div>
               <label className="flex items-center justify-between gap-3 rounded-lg border border-border px-3 py-2 text-sm">
-                <span>Run automatically on worktree creation</span>
+                <span>
+                  {uiText("Run automatically on worktree creation", undefined, undefined, uiLocale)}
+                </span>
                 <Switch
                   checked={runOnWorktreeCreate}
                   onCheckedChange={(checked) => setRunOnWorktreeCreate(Boolean(checked))}
@@ -416,7 +495,7 @@ export default function ProjectScriptsControl({
                 className="mr-auto"
                 onClick={() => setDeleteConfirmOpen(true)}
               >
-                Delete
+                {uiText("Delete", undefined, undefined, uiLocale)}
               </Button>
             )}
             <Button
@@ -426,10 +505,12 @@ export default function ProjectScriptsControl({
                 setDialogOpen(false);
               }}
             >
-              Cancel
+              {uiText("Cancel", undefined, undefined, uiLocale)}
             </Button>
             <Button form={addScriptFormId} type="submit">
-              {isEditing ? "Save changes" : "Save action"}
+              {isEditing
+                ? uiText("Save changes", undefined, undefined, uiLocale)
+                : uiText("Save action", undefined, undefined, uiLocale)}
             </Button>
           </DialogFooter>
         </DialogPopup>
@@ -438,13 +519,19 @@ export default function ProjectScriptsControl({
       <AlertDialog open={deleteConfirmOpen} onOpenChange={setDeleteConfirmOpen}>
         <AlertDialogPopup>
           <AlertDialogHeader>
-            <AlertDialogTitle>Delete action "{name}"?</AlertDialogTitle>
-            <AlertDialogDescription>This action cannot be undone.</AlertDialogDescription>
+            <AlertDialogTitle>
+              {uiText('Delete action "{name}"?', { name }, undefined, uiLocale)}
+            </AlertDialogTitle>
+            <AlertDialogDescription>
+              {uiText("This action cannot be undone.", undefined, undefined, uiLocale)}
+            </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
-            <AlertDialogClose render={<Button variant="outline" />}>Cancel</AlertDialogClose>
+            <AlertDialogClose render={<Button variant="outline" />}>
+              {uiText("Cancel", undefined, undefined, uiLocale)}
+            </AlertDialogClose>
             <Button variant="destructive" onClick={confirmDeleteScript}>
-              Delete action
+              {uiText("Delete action", undefined, undefined, uiLocale)}
             </Button>
           </AlertDialogFooter>
         </AlertDialogPopup>
@@ -452,3 +539,5 @@ export default function ProjectScriptsControl({
     </>
   );
 }
+
+// Finite source-owned labels/helpers only; no received or user data.

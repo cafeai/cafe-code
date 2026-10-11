@@ -1,3 +1,4 @@
+import { uiFormatList, uiText } from "@cafecode/shared/i18n";
 import {
   defaultInstanceIdForDriver,
   PROVIDER_DISPLAY_NAMES,
@@ -92,14 +93,18 @@ function dedupeProvidersByInstanceId<T extends ServerProvider>(providers: Readon
 function getProviderUpdatedTitle(provider: Pick<ServerProvider, "driver" | "version">): string {
   const providerName = PROVIDER_DISPLAY_NAMES[provider.driver] ?? provider.driver;
   return provider.version
-    ? `${providerName} updated: ${formatVersion(provider.version)}`
-    : `${providerName} updated`;
+    ? uiText("{provider} updated: {version}", {
+        provider: providerName,
+        version: formatVersion(provider.version),
+      })
+    : uiText("{provider} updated", { provider: providerName });
 }
 
 function getProviderUpdatedDescription(providerCount: number): string {
-  return providerCount === 1
-    ? "New sessions will use the updated provider."
-    : "New sessions will use the updated providers.";
+  return uiText(
+    "New sessions will use the updated {count, plural, one {provider} other {providers}}.",
+    { count: providerCount },
+  );
 }
 
 function getProviderFailedUpdateTitle(
@@ -108,8 +113,11 @@ function getProviderFailedUpdateTitle(
   const providerName = PROVIDER_DISPLAY_NAMES[provider.driver] ?? provider.driver;
   const attemptedVersion = provider.versionAdvisory?.latestVersion;
   return attemptedVersion
-    ? `${providerName} ${formatVersion(attemptedVersion)} update failed`
-    : `${providerName} update failed`;
+    ? uiText("{provider} {version} update failed", {
+        provider: providerName,
+        version: formatVersion(attemptedVersion),
+      })
+    : uiText("{provider} update failed", { provider: providerName });
 }
 
 export function isProviderUpdateCandidate(
@@ -193,10 +201,7 @@ export function formatProviderList(providers: ReadonlyArray<Pick<ServerProvider,
   const names = providers.map(
     (provider) => PROVIDER_DISPLAY_NAMES[provider.driver] ?? provider.driver,
   );
-  if (names.length <= 2) {
-    return names.join(" and ");
-  }
-  return `${names.slice(0, -1).join(", ")}, and ${names[names.length - 1]}`;
+  return uiFormatList(names);
 }
 
 export function getProviderUpdateInitialToastView(input: {
@@ -209,8 +214,10 @@ export function getProviderUpdateInitialToastView(input: {
     title: getProviderUpdateInitialToastTitle(input.updateProviders),
     description:
       input.oneClickProviders.length > 0
-        ? "Install the update now or review provider settings."
-        : `${formatProviderList(input.updateProviders)} can be updated from provider settings.`,
+        ? uiText("Install the update now or review provider settings.")
+        : uiText("{providers} can be updated from provider settings.", {
+            providers: formatProviderList(input.updateProviders),
+          }),
   };
 }
 
@@ -218,8 +225,10 @@ export function getProviderUpdateRunningToastView(providerCount: number): Provid
   return {
     phase: "running",
     type: "loading",
-    title: providerCount === 1 ? "Updating provider" : "Updating providers",
-    description: "Running provider update command.",
+    title: uiText("Updating {count, plural, one {provider} other {providers}}", {
+      count: providerCount,
+    }),
+    description: uiText("Running provider update command."),
   };
 }
 
@@ -230,7 +239,9 @@ export function getProviderUpdateRejectedToastView(
   return {
     phase: "failed",
     type: "error",
-    title: providerCount === 1 ? "Provider update failed" : "Provider updates failed",
+    title: uiText("Provider {count, plural, one {update} other {updates}} failed", {
+      count: providerCount,
+    }),
     description: message,
   };
 }
@@ -245,7 +256,9 @@ export function getProviderUpdateProgressToastView(input: {
     return {
       phase: "failed",
       type: "error",
-      title: failedProviders.length === 1 ? "Provider update failed" : "Provider updates failed",
+      title: uiText("Provider {count, plural, one {update} other {updates}} failed", {
+        count: failedProviders.length,
+      }),
       description: getFailedProviderUpdateDescription(failedProviders),
     };
   }
@@ -257,13 +270,14 @@ export function getProviderUpdateProgressToastView(input: {
     return {
       phase: "unchanged",
       type: "warning",
-      title:
-        unchangedProviders.length === 1
-          ? "Provider still needs an update"
-          : "Providers still need updates",
-      description: `${formatProviderList(unchangedProviders)} ${
-        unchangedProviders.length === 1 ? "still appears" : "still appear"
-      } outdated. Check provider settings for details.`,
+      title: uiText(
+        "{count, plural, one {Provider still needs an update} other {Providers still need updates}}",
+        { count: unchangedProviders.length },
+      ),
+      description: uiText(
+        "{providers} {count, plural, one {still appears} other {still appear}} outdated. Check provider settings for details.",
+        { providers: formatProviderList(unchangedProviders), count: unchangedProviders.length },
+      ),
     };
   }
 
@@ -282,7 +296,9 @@ export function getProviderUpdateProgressToastView(input: {
     return {
       phase: "succeeded",
       type: "success",
-      title: input.providerCount === 1 ? "Provider updated" : "Provider updates finished",
+      title: uiText("{count, plural, one {Provider updated} other {Provider updates finished}}", {
+        count: input.providerCount,
+      }),
       description: getProviderUpdatedDescription(input.providerCount),
       dismissAfterVisibleMs: PROVIDER_UPDATE_SUCCESS_VISIBLE_MS,
     };
@@ -304,7 +320,7 @@ export function getSingleProviderUpdateProgressToastView(
     case "running":
       return {
         ...view,
-        title: `Updating ${providerName}`,
+        title: uiText("Updating {provider}", { provider: providerName }),
       };
     case "failed":
       return {
@@ -314,7 +330,7 @@ export function getSingleProviderUpdateProgressToastView(
     case "unchanged":
       return {
         ...view,
-        title: `${providerName} still needs an update`,
+        title: uiText("{provider} still needs an update", { provider: providerName }),
       };
     case "succeeded":
       return {
@@ -355,7 +371,9 @@ export function firstRejectedProviderUpdateMessage(
   if (!rejected) {
     return null;
   }
-  return rejected.reason instanceof Error ? rejected.reason.message : "Provider update failed.";
+  return rejected.reason instanceof Error
+    ? rejected.reason.message
+    : uiText("Provider update failed.");
 }
 
 function getUpdateFinishedAt(provider: ServerProvider): string | null {
@@ -405,12 +423,12 @@ export function getProviderUpdateSidebarPillView(
       tone: "loading",
       title:
         activeProviders.length === 1
-          ? `Updating ${activeProviderName}`
-          : `Updating ${activeProviders.length} providers`,
-      description:
-        activeProviders.length === 1
-          ? `${formatProviderList(activeProviders)} update in progress.`
-          : `${formatProviderList(activeProviders)} updates are in progress.`,
+          ? uiText("Updating {provider}", { provider: activeProviderName })
+          : uiText("Updating {count} providers", { count: activeProviders.length }),
+      description: uiText(
+        "{providers} {count, plural, one {update in progress.} other {updates are in progress.}}",
+        { providers: formatProviderList(activeProviders), count: activeProviders.length },
+      ),
     };
   }
 
@@ -436,7 +454,7 @@ export function getProviderUpdateSidebarPillView(
       title:
         failedProviders.length === 1
           ? getProviderFailedUpdateTitle(failedProvider)
-          : `${failedProviders.length} provider updates failed`,
+          : uiText("{count} provider updates failed", { count: failedProviders.length }),
       description: getFailedProviderUpdateDescription(failedProviders),
       dismissible: true,
     });
@@ -460,11 +478,12 @@ export function getProviderUpdateSidebarPillView(
       tone: "warning",
       title:
         unchangedProviders.length === 1
-          ? `${unchangedProviderName} still needs an update`
-          : `${unchangedProviders.length} providers still need updates`,
-      description: `${formatProviderList(unchangedProviders)} ${
-        unchangedProviders.length === 1 ? "still appears" : "still appear"
-      } outdated. Review provider settings for details.`,
+          ? uiText("{provider} still needs an update", { provider: unchangedProviderName })
+          : uiText("{count} providers still need updates", { count: unchangedProviders.length }),
+      description: uiText(
+        "{providers} {count, plural, one {still appears} other {still appear}} outdated. Review provider settings for details.",
+        { providers: formatProviderList(unchangedProviders), count: unchangedProviders.length },
+      ),
       dismissible: true,
     });
   }
@@ -486,7 +505,7 @@ export function getProviderUpdateSidebarPillView(
       title:
         succeededProviders.length === 1
           ? getProviderUpdatedTitle(succeededProvider)
-          : `${succeededProviders.length} providers updated`,
+          : uiText("{count} providers updated", { count: succeededProviders.length }),
       description: getProviderUpdatedDescription(succeededProviders.length),
       dismissAfterVisibleMs: PROVIDER_UPDATE_SUCCESS_VISIBLE_MS,
     });
@@ -521,9 +540,12 @@ function getProviderUpdateInitialToastTitle(
   if (providers.length === 1) {
     const provider = providers[0]!;
     const providerName = PROVIDER_DISPLAY_NAMES[provider.driver] ?? provider.driver;
-    return `Update available: ${providerName} ${formatVersion(provider.versionAdvisory.latestVersion)}`;
+    return uiText("Update available: {provider} {version}", {
+      provider: providerName,
+      version: formatVersion(provider.versionAdvisory.latestVersion),
+    });
   }
-  return `Updates available: ${providers.length} providers`;
+  return uiText("Updates available: {count} providers", { count: providers.length });
 }
 
 function getFailedProviderUpdateDescription(providers: ReadonlyArray<ServerProvider>): string {
@@ -533,5 +555,7 @@ function getFailedProviderUpdateDescription(providers: ReadonlyArray<ServerProvi
       return provider.updateState.message;
     }
   }
-  return `${formatProviderList(providers)} failed to update. Check provider settings for details.`;
+  return uiText("{providers} failed to update. Check provider settings for details.", {
+    providers: formatProviderList(providers),
+  });
 }

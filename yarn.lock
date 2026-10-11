@@ -705,9 +705,12 @@ __metadata:
     "@effect/language-service": "catalog:"
     "@effect/platform-node": "catalog:"
     "@effect/vitest": "catalog:"
+    "@formatjs/icu-messageformat-parser": "npm:3.5.21"
     "@modelcontextprotocol/sdk": "npm:^1.29.0"
     "@napi-rs/canvas": "npm:1.0.8"
     effect: "catalog:"
+    micromark-util-decode-string: "npm:^2.0.1"
+    oxfmt: "npm:^0.70.0"
     typescript: "catalog:"
     vite: "catalog:"
     vitest: "catalog:"
@@ -726,6 +729,7 @@ __metadata:
     "@effect/vitest": "catalog:"
     "@types/node": "catalog:"
     effect: "catalog:"
+    intl-messageformat: "npm:12.1.3"
     typescript: "catalog:"
     vite: "catalog:"
     vitest: "catalog:"
@@ -1153,6 +1157,29 @@ __metadata:
   version: 5.3.0
   resolution: "@fontsource-variable/dm-sans@npm:5.3.0"
   checksum: 10c0/95c74b19fff2b4b1d669e61d481ede2186e28b92d7e1950748db94b9c3b2598aa38ff852e45ffd9955ea0a51386acdc90a8c4267783d45dd5f05e2430b24ad4e
+  languageName: node
+  linkType: hard
+
+"@formatjs/fast-memoize@npm:3.1.7":
+  version: 3.1.7
+  resolution: "@formatjs/fast-memoize@npm:3.1.7"
+  checksum: 10c0/dee801f82eda1f6fdc166b0c907e8750c15e409e20b2006c215d9247fe0db720d84d53fcb2fb7559cec21a24932b69dda326c81ee2885aad2cde31bc25449fd0
+  languageName: node
+  linkType: hard
+
+"@formatjs/icu-messageformat-parser@npm:3.5.21":
+  version: 3.5.21
+  resolution: "@formatjs/icu-messageformat-parser@npm:3.5.21"
+  dependencies:
+    "@formatjs/icu-skeleton-parser": "npm:2.1.12"
+  checksum: 10c0/4f94c09df9495fbf4d79eb458a85d8abbb10d288cdd8443f089b2c1748be74495f0bf2da154af81ced1a44896bc414421dbb5ebf1fdabd9f8175d23bcd3bffbc
+  languageName: node
+  linkType: hard
+
+"@formatjs/icu-skeleton-parser@npm:2.1.12":
+  version: 2.1.12
+  resolution: "@formatjs/icu-skeleton-parser@npm:2.1.12"
+  checksum: 10c0/56507b7b5e3e38f964e80efbece91ce80f2d33cbeb0533a66efd9bda55b9d17e3aa2e933a8ad56d8368840c80d4777cc200e83ef6c8e2d4f2e24563ac2c404fa
   languageName: node
   linkType: hard
 
@@ -5648,6 +5675,16 @@ __metadata:
   version: 0.2.7
   resolution: "inline-style-parser@npm:0.2.7"
   checksum: 10c0/d884d76f84959517430ae6c22f0bda59bb3f58f539f99aac75a8d786199ec594ed648c6ab4640531f9fc244b0ed5cd8c458078e592d016ef06de793beb1debff
+  languageName: node
+  linkType: hard
+
+"intl-messageformat@npm:12.1.3":
+  version: 12.1.3
+  resolution: "intl-messageformat@npm:12.1.3"
+  dependencies:
+    "@formatjs/fast-memoize": "npm:3.1.7"
+    "@formatjs/icu-messageformat-parser": "npm:3.5.21"
+  checksum: 10c0/39e29ac1102cab336e9d1e78b1530fa6d32156f30dcaae4e8bb441bc68e49c797b4477a73ce68a16846d23495d98ec760c8165bf0d450589faa8b9a7e9763e01
   languageName: node
   linkType: hard
 

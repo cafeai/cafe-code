@@ -1,3 +1,6 @@
+import { useUiLocale, useUiPresentation } from "~/i18n";
+import { uiText, uiFormatList } from "@cafecode/shared/i18n";
+import { UiMessage } from "~/i18n";
 import { useWorkspaceEnvironmentId } from "../../environments/workspace";
 import {
   ChevronDownIcon,
@@ -68,6 +71,8 @@ import { BusyButtonLabel, SettingsPageContainer, SettingsSection } from "./setti
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 
 function KeybindingPill({ value }: { value: string }) {
+  const uiLocale = useUiLocale();
+
   const parts = value.split("+");
   return (
     <KbdGroup className="bg-transparent p-0 shadow-none">
@@ -75,16 +80,16 @@ function KeybindingPill({ value }: { value: string }) {
         <Kbd key={part} className="min-w-6 justify-center px-1.5">
           {part === "mod"
             ? navigator.platform.toLowerCase().includes("mac")
-              ? "⌘"
-              : "Ctrl"
+              ? uiText("⌘", undefined, undefined, uiLocale)
+              : uiText("Ctrl", undefined, undefined, uiLocale)
             : part === "shift"
-              ? "⇧"
+              ? uiText("⇧", undefined, undefined, uiLocale)
               : part === "alt"
                 ? navigator.platform.toLowerCase().includes("mac")
-                  ? "⌥"
-                  : "Alt"
+                  ? uiText("⌥", undefined, undefined, uiLocale)
+                  : uiText("Alt", undefined, undefined, uiLocale)
                 : part === "ctrl"
-                  ? "⌃"
+                  ? uiText("⌃", undefined, undefined, uiLocale)
                   : part.length === 1
                     ? part.toUpperCase()
                     : part}
@@ -109,6 +114,8 @@ function ExpandableHeaderSearch({
   inputRef?: RefObject<HTMLInputElement | null>;
   collapsedAccessory?: ReactNode;
 }) {
+  const uiLocale = useUiLocale();
+
   if (!isOpen) {
     return (
       <>
@@ -122,13 +129,15 @@ function ExpandableHeaderSearch({
                 variant="ghost"
                 className="size-5 rounded-sm p-0 text-muted-foreground hover:text-foreground"
                 onClick={() => onOpenChange(true)}
-                aria-label="Search keybindings"
+                aria-label={uiText("Search keybindings", undefined, undefined, uiLocale)}
               >
                 <SearchIcon className="size-3" />
               </Button>
             }
           />
-          <TooltipPopup side="top">Search keybindings</TooltipPopup>
+          <TooltipPopup side="top">
+            {uiText("Search keybindings", undefined, undefined, uiLocale)}
+          </TooltipPopup>
         </Tooltip>
       </>
     );
@@ -153,8 +162,8 @@ function ExpandableHeaderSearch({
             onOpenChange(false);
           }
         }}
-        placeholder="Search keybindings"
-        aria-label="Search keybindings"
+        placeholder={uiText("Search keybindings", undefined, undefined, uiLocale)}
+        aria-label={uiText("Search keybindings", undefined, undefined, uiLocale)}
         className="h-6 w-44 rounded-md border border-input bg-background pl-7 pr-2 text-2xs text-foreground outline-none placeholder:text-subtle-foreground focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/24"
       />
     </div>
@@ -231,11 +240,20 @@ function UnknownWhenVariableWarning({
   identifiers: ReadonlyArray<string>;
   focusable?: boolean;
 }) {
+  const uiLocale = useUiLocale();
+
   if (identifiers.length === 0) return null;
   const label =
     identifiers.length === 1
-      ? `Unknown condition: ${identifiers[0]}`
-      : `Unknown conditions: ${identifiers.join(", ")}`;
+      ? uiText("Unknown condition: {condition}", { condition: identifiers[0] }, undefined, uiLocale)
+      : uiText(
+          "Unknown conditions: {conditions}",
+          {
+            conditions: uiFormatList(identifiers, { type: "unit" }),
+          },
+          undefined,
+          uiLocale,
+        );
 
   return (
     <Tooltip>
@@ -251,19 +269,39 @@ function UnknownWhenVariableWarning({
         }
       />
       <TooltipPopup side="top" className="max-w-72 whitespace-normal leading-relaxed">
-        Cafe Code doesn&apos;t know this condition. You can save it, but it only matches if
-        something provides it.
+        {uiText(
+          "Cafe Code doesn''t know this condition. You can save it, but it only matches if something provides it.",
+          undefined,
+          undefined,
+          uiLocale,
+        )}
       </TooltipPopup>
     </Tooltip>
   );
 }
 
 function KeybindingConflictWarning({ labels }: { labels: ReadonlyArray<string> }) {
+  const uiLocale = useUiLocale();
+
   if (labels.length === 0) return null;
   const description =
     labels.length === 1
-      ? `Conflicts with ${labels[0]}.`
-      : `Conflicts with ${labels.slice(0, 3).join(", ")}${labels.length > 3 ? ", and more" : ""}.`;
+      ? uiText("Conflicts with {label}.", { label: labels[0] }, undefined, uiLocale)
+      : labels.length > 3
+        ? uiText(
+            "Conflicts with {labels}, and more.",
+            {
+              labels: uiFormatList(labels.slice(0, 3), { type: "unit" }),
+            },
+            undefined,
+            uiLocale,
+          )
+        : uiText(
+            "Conflicts with {labels}.",
+            { labels: uiFormatList(labels, { type: "unit" }) },
+            undefined,
+            uiLocale,
+          );
 
   return (
     <Tooltip>
@@ -279,7 +317,12 @@ function KeybindingConflictWarning({ labels }: { labels: ReadonlyArray<string> }
         }
       />
       <TooltipPopup side="top" className="max-w-72 whitespace-normal leading-relaxed">
-        {description} The most recent matching binding wins when both conditions can apply.
+        <UiMessage
+          message={
+            "<slot1></slot1> The most recent matching binding wins when both conditions can apply."
+          }
+          slots={{ slot1: description }}
+        />
       </TooltipPopup>
     </Tooltip>
   );
@@ -296,6 +339,8 @@ function WhenVariableSelect({
   unknownIdentifiers?: ReadonlyArray<string>;
   onChange: (value: string) => void;
 }) {
+  const uiLocale = useUiLocale();
+
   const selected = variables.find((option) => option === value);
   const options =
     selected || variables.some((option) => option === value) ? variables : [value, ...variables];
@@ -306,7 +351,10 @@ function WhenVariableSelect({
         size="xs"
         className="h-7 min-h-7 min-w-0 flex-1 rounded-md font-mono text-xs sm:h-7"
       >
-        <SelectValue placeholder="Condition" className="leading-7" />
+        <SelectValue
+          placeholder={uiText("Condition", undefined, undefined, uiLocale)}
+          className="leading-7"
+        />
         {unknownIdentifiers && unknownIdentifiers.length > 0 ? (
           <UnknownWhenVariableWarning identifiers={unknownIdentifiers} focusable={false} />
         ) : null}
@@ -340,6 +388,8 @@ function WhenExpressionNodeEditor({
   onChange: (node: KeybindingWhenNode) => void;
   onRemove?: () => void;
 }) {
+  const uiLocale = useUiLocale();
+
   const condition = conditionParts(node);
 
   if (condition) {
@@ -352,12 +402,17 @@ function WhenExpressionNodeEditor({
         <Toggle
           pressed={condition.negated}
           onPressedChange={(pressed) => onChange(setConditionNegated(node, pressed))}
-          aria-label={`Negate ${condition.identifier}`}
+          aria-label={uiText(
+            "Negate {value0}",
+            { value0: condition.identifier },
+            undefined,
+            uiLocale,
+          )}
           variant="outline"
           size="xs"
           className="h-7 min-w-10 px-2 text-2xs sm:h-7"
         >
-          Not
+          {uiText("Not", undefined, undefined, uiLocale)}
         </Toggle>
         <WhenVariableSelect
           value={condition.identifier}
@@ -371,7 +426,7 @@ function WhenExpressionNodeEditor({
             variant="ghost"
             size="icon-sm"
             className="size-7 sm:size-7"
-            aria-label="Remove condition"
+            aria-label={uiText("Remove condition", undefined, undefined, uiLocale)}
             onClick={onRemove}
           >
             <MinusIcon className="size-3.5" />
@@ -393,12 +448,12 @@ function WhenExpressionNodeEditor({
           <Toggle
             pressed
             onPressedChange={(pressed) => onChange(pressed ? node : node.node)}
-            aria-label="Negate group"
+            aria-label={uiText("Negate group", undefined, undefined, uiLocale)}
             variant="outline"
             size="xs"
             className="h-7 min-w-10 px-2 text-2xs sm:h-7"
           >
-            Not
+            {uiText("Not", undefined, undefined, uiLocale)}
           </Toggle>
           {onRemove ? (
             <Button
@@ -406,7 +461,7 @@ function WhenExpressionNodeEditor({
               variant="ghost"
               size="icon-sm"
               className="ml-auto size-7 sm:size-7"
-              aria-label="Remove negated group"
+              aria-label={uiText("Remove negated group", undefined, undefined, uiLocale)}
               onClick={onRemove}
             >
               <MinusIcon className="size-3.5" />
@@ -508,10 +563,10 @@ function WhenExpressionNodeEditor({
             className="w-fit min-w-24"
           >
             <SelectItem value="and" className="min-h-7 py-1 font-mono text-xs">
-              and
+              {uiText("and", undefined, undefined, uiLocale)}
             </SelectItem>
             <SelectItem value="or" className="min-h-7 py-1 font-mono text-xs">
-              or
+              {uiText("or", undefined, undefined, uiLocale)}
             </SelectItem>
           </SelectContent>
         </Select>
@@ -523,11 +578,11 @@ function WhenExpressionNodeEditor({
           onClick={addCondition}
         >
           <PlusIcon className="size-3.5" />
-          Condition
+          {uiText("Condition", undefined, undefined, uiLocale)}
         </Button>
         <Button type="button" variant="outline" size="xs" className="h-7 sm:h-7" onClick={addGroup}>
           <PlusIcon className="size-3.5" />
-          Group
+          {uiText("Group", undefined, undefined, uiLocale)}
         </Button>
         {onRemove ? (
           <Button
@@ -535,7 +590,7 @@ function WhenExpressionNodeEditor({
             variant="ghost"
             size="icon-sm"
             className="ml-auto size-7 sm:size-7"
-            aria-label="Remove group"
+            aria-label={uiText("Remove group", undefined, undefined, uiLocale)}
             onClick={onRemove}
           >
             <MinusIcon className="size-3.5" />
@@ -584,15 +639,21 @@ function WhenExpressionBuilder({
   onChange: (value: KeybindingWhenNode | undefined) => void;
   onValidityChange?: (valid: boolean) => void;
 }) {
+  const uiLocale = useUiLocale();
+  const uiPresentation = useUiPresentation(UI_PRESENTATION_SOURCES);
+
   const expression = whenAstToExpression(value);
   const [expressionDraft, setExpressionDraft] = useState(expression);
-  const parseResult = useMemo(() => parseWhenExpressionDraft(expressionDraft), [expressionDraft]);
+  const parseResult = useMemo(
+    () => uiPresentation.parseWhenExpressionDraft(expressionDraft),
+    [expressionDraft, uiPresentation],
+  );
   const parseError = parseResult.ok ? null : parseResult.message;
   const unknownIdentifiers = parseResult.ok ? unknownWhenVariables(parseResult.value) : [];
 
   const updateExpressionDraft = (nextExpression: string) => {
     setExpressionDraft(nextExpression);
-    const nextResult = parseWhenExpressionDraft(nextExpression);
+    const nextResult = uiPresentation.parseWhenExpressionDraft(nextExpression);
     onValidityChange?.(nextResult.ok);
     if (nextResult.ok) {
       onChange(nextResult.value);
@@ -626,7 +687,9 @@ function WhenExpressionBuilder({
     <div className="w-[min(34rem,calc(100vw-2rem))] space-y-3">
       <div className="flex items-start justify-between gap-3">
         <div className="min-w-0">
-          <div className="text-sm font-medium text-foreground">When</div>
+          <div className="text-sm font-medium text-foreground">
+            {uiText("When", undefined, undefined, uiLocale)}
+          </div>
         </div>
         <div className="flex shrink-0 items-center gap-2">
           <Button
@@ -637,7 +700,7 @@ function WhenExpressionBuilder({
             onClick={addRootCondition}
           >
             <PlusIcon className="size-3.5" />
-            Condition
+            {uiText("Condition", undefined, undefined, uiLocale)}
           </Button>
           <Button
             type="button"
@@ -647,7 +710,7 @@ function WhenExpressionBuilder({
             onClick={addRootGroup}
           >
             <PlusIcon className="size-3.5" />
-            Group
+            {uiText("Group", undefined, undefined, uiLocale)}
           </Button>
         </div>
       </div>
@@ -657,9 +720,9 @@ function WhenExpressionBuilder({
           <Input
             value={expressionDraft}
             onChange={(event) => updateExpressionDraft(event.currentTarget.value)}
-            placeholder="Always"
+            placeholder={uiText("Always", undefined, undefined, uiLocale)}
             aria-invalid={Boolean(parseError)}
-            aria-label="When expression"
+            aria-label={uiText("When expression", undefined, undefined, uiLocale)}
             className={cn(
               "h-7 rounded-md font-mono text-xs leading-7 sm:h-7 sm:leading-7",
               unknownIdentifiers.length > 0 && "pr-9",
@@ -693,7 +756,7 @@ function WhenExpressionBuilder({
             <div className="flex flex-wrap gap-2">
               <Button type="button" size="xs" className="h-7 sm:h-7" onClick={addRootCondition}>
                 <PlusIcon className="size-3.5" />
-                Condition
+                {uiText("Condition", undefined, undefined, uiLocale)}
               </Button>
               <Button
                 type="button"
@@ -703,14 +766,19 @@ function WhenExpressionBuilder({
                 onClick={addRootGroup}
               >
                 <PlusIcon className="size-3.5" />
-                Group
+                {uiText("Group", undefined, undefined, uiLocale)}
               </Button>
             </div>
           </div>
         )}
         {parseError ? (
           <div className="pointer-events-none absolute inset-0 flex items-center justify-center rounded-lg border border-destructive bg-background/75 p-4 text-center text-xs text-destructive-foreground backdrop-blur-[1px]">
-            Fix the expression above to continue editing visually.
+            {uiText(
+              "Fix the expression above to continue editing visually.",
+              undefined,
+              undefined,
+              uiLocale,
+            )}
           </div>
         ) : null}
       </div>
@@ -766,16 +834,19 @@ function KeybindingTableRow({
   onReset: (row: KeybindingRow) => void;
   onRemove: (row: KeybindingRow) => void;
 }) {
+  const uiLocale = useUiLocale();
+  const uiPresentation = useUiPresentation(UI_PRESENTATION_SOURCES);
+
   const [draft, setDraft] = useReducer(keybindingRowDraftReducer, row, createKeybindingRowDraft);
   const { keyDraft, whenDraft, isRecording, isWhenDraftValid } = draft;
   const whenDraftExpression = whenAstToExpression(whenDraft);
   const isDirty = keyDraft !== row.key || whenDraftExpression !== row.when;
-  const displayShortcut = formatShortcutLabel(row.binding.shortcut);
+  const displayShortcut = uiPresentation.formatShortcutLabel(row.binding.shortcut);
   const canReset = row.source === "Custom" && row.defaultKey !== null;
   const canRemove = row.source !== "Default";
   const hasRowActions = canReset || canRemove;
   const showPill = !isRecording && keyDraft === row.key && row.key.length > 0 && !isDirty;
-  const conflictLabels = keybindingConflictLabels(allRows, {
+  const conflictLabels = uiPresentation.keybindingConflictLabels(allRows, {
     rowId: row.id,
     key: keyDraft,
     when: whenDraftExpression,
@@ -811,7 +882,7 @@ function KeybindingTableRow({
               delay={500}
               render={<div className="truncate text-ui font-medium text-foreground" />}
             >
-              {commandLabel(row.command)}
+              {uiPresentation.commandLabel(row.command)}
             </TooltipTrigger>
             <TooltipPopup side="top" className="font-mono">
               {row.command}
@@ -824,20 +895,34 @@ function KeybindingTableRow({
           <button
             type="button"
             onClick={() => setDraft({ isRecording: true })}
-            aria-label={`Edit shortcut for ${commandLabel(row.command)}`}
+            aria-label={uiText(
+              "Edit shortcut for {value0}",
+              { value0: uiPresentation.commandLabel(row.command) },
+              undefined,
+              uiLocale,
+            )}
             className="group inline-flex h-7 items-center gap-1.5 rounded-md border border-transparent px-1.5 outline-none transition-colors hover:border-border hover:bg-background focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/24"
           >
             <KeybindingPill value={row.key} />
             <span className="text-2xs text-transparent transition-colors duration-(--duration-fast) group-hover:text-subtle-foreground group-focus-visible:text-subtle-foreground">
-              Edit
+              {uiText("Edit", undefined, undefined, uiLocale)}
             </span>
           </button>
         ) : (
           <Input
             autoFocus={isRecording}
-            aria-label={`Keybinding for ${commandLabel(row.command)}`}
+            aria-label={uiText(
+              "Keybinding for {value0}",
+              { value0: uiPresentation.commandLabel(row.command) },
+              undefined,
+              uiLocale,
+            )}
             value={isRecording ? "" : keyDraft}
-            placeholder={isRecording ? "Press shortcut" : "Unassigned"}
+            placeholder={
+              isRecording
+                ? uiText("Press shortcut", undefined, undefined, uiLocale)
+                : uiText("Unassigned", undefined, undefined, uiLocale)
+            }
             className={cn(
               "h-7 w-44 rounded-md font-mono text-xs sm:h-7",
               isRecording && "border-primary bg-primary/5",
@@ -857,7 +942,7 @@ function KeybindingTableRow({
             onClick={save}
           >
             <BusyButtonLabel busy={isSaving} spinnerClassName="size-3.5">
-              Save
+              {uiText("Save", undefined, undefined, uiLocale)}
             </BusyButtonLabel>
           </Button>
         ) : null}
@@ -869,9 +954,18 @@ function KeybindingTableRow({
               "inline-flex h-7 w-full items-center justify-between gap-2 rounded-md border border-input bg-background px-2.5 text-left font-mono text-xs text-foreground shadow-xs/5 outline-none transition-colors hover:bg-accent focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/24",
               !whenDraftExpression && "text-muted-foreground",
             )}
-            aria-label={`Edit when clause for ${commandLabel(row.command)}`}
+            aria-label={uiText(
+              "Edit when clause for {value0}",
+              {
+                value0: uiPresentation.commandLabel(row.command),
+              },
+              undefined,
+              uiLocale,
+            )}
           >
-            <span className="truncate">{whenDraftExpression || "Always"}</span>
+            <span className="truncate">
+              {whenDraftExpression || uiText("Always", undefined, undefined, uiLocale)}
+            </span>
             <ChevronDownIcon className="size-3.5 shrink-0 opacity-60" />
           </PopoverTrigger>
           <PopoverContent align="start" sideOffset={6}>
@@ -896,7 +990,12 @@ function KeybindingTableRow({
                   size="icon-sm"
                   className="size-7 text-muted-foreground hover:text-foreground sm:size-7"
                   disabled={isSaving}
-                  aria-label={`Actions for ${commandLabel(row.command)}`}
+                  aria-label={uiText(
+                    "Actions for {value0}",
+                    { value0: uiPresentation.commandLabel(row.command) },
+                    undefined,
+                    uiLocale,
+                  )}
                 />
               }
             >
@@ -905,12 +1004,12 @@ function KeybindingTableRow({
             <MenuPopup align="end" className="min-w-36">
               {canReset ? (
                 <MenuItem disabled={isSaving} onClick={() => onReset(row)}>
-                  Reset to default
+                  {uiText("Reset to default", undefined, undefined, uiLocale)}
                 </MenuItem>
               ) : null}
               {canRemove ? (
                 <MenuItem variant="destructive" disabled={isSaving} onClick={() => onRemove(row)}>
-                  Remove
+                  {uiText("Remove", undefined, undefined, uiLocale)}
                 </MenuItem>
               ) : null}
             </MenuPopup>
@@ -937,6 +1036,9 @@ function NewKeybindingTableRow({
   onSave: (input: ServerUpsertKeybindingInput) => void;
   onCancel: () => void;
 }) {
+  const uiLocale = useUiLocale();
+  const uiPresentation = useUiPresentation(UI_PRESENTATION_SOURCES);
+
   const [commandDraft, setCommandDraft] = useState<KeybindingCommand | "">("");
   const [draft, setDraft] = useReducer(keybindingRowDraftReducer, {
     keyDraft: "",
@@ -946,12 +1048,14 @@ function NewKeybindingTableRow({
   });
   const { keyDraft, whenDraft, isRecording, isWhenDraftValid } = draft;
   const whenDraftExpression = whenAstToExpression(whenDraft);
-  const conflictLabels = keybindingConflictLabels(allRows, {
+  const conflictLabels = uiPresentation.keybindingConflictLabels(allRows, {
     rowId: "new",
     key: keyDraft,
     when: whenDraftExpression,
   });
-  const commandLabelText = commandDraft ? commandLabel(commandDraft) : "new keybinding";
+  const commandLabelText = commandDraft
+    ? uiPresentation.commandLabel(commandDraft)
+    : "new keybinding";
 
   const save = () => {
     if (!commandDraft) return;
@@ -985,7 +1089,7 @@ function NewKeybindingTableRow({
             size="xs"
             className="h-7 min-h-7 w-full max-w-60 rounded-md text-xs sm:h-7"
           >
-            <SelectValue placeholder="Command" />
+            <SelectValue placeholder={uiText("Command", undefined, undefined, uiLocale)} />
           </SelectTrigger>
           <SelectContent
             alignItemWithTrigger={false}
@@ -994,7 +1098,7 @@ function NewKeybindingTableRow({
           >
             {commandOptions.map((command) => (
               <SelectItem key={command} value={command} className="min-h-7 w-full py-1 text-xs">
-                <span className="truncate">{commandLabel(command)}</span>
+                <span className="truncate">{uiPresentation.commandLabel(command)}</span>
               </SelectItem>
             ))}
           </SelectContent>
@@ -1002,9 +1106,18 @@ function NewKeybindingTableRow({
       </div>
       <div className="flex min-w-0 items-center gap-2 pr-4">
         <Input
-          aria-label={`Keybinding for ${commandLabelText}`}
+          aria-label={uiText(
+            "Keybinding for {value0}",
+            { value0: commandLabelText },
+            undefined,
+            uiLocale,
+          )}
           value={isRecording ? "" : keyDraft}
-          placeholder={isRecording ? "Press shortcut" : "Unassigned"}
+          placeholder={
+            isRecording
+              ? uiText("Press shortcut", undefined, undefined, uiLocale)
+              : uiText("Unassigned", undefined, undefined, uiLocale)
+          }
           className={cn(
             "h-7 w-44 rounded-md font-mono text-xs sm:h-7",
             isRecording && "border-primary bg-primary/5",
@@ -1022,7 +1135,7 @@ function NewKeybindingTableRow({
           onClick={save}
         >
           <BusyButtonLabel busy={isSaving} spinnerClassName="size-3.5">
-            Save
+            {uiText("Save", undefined, undefined, uiLocale)}
           </BusyButtonLabel>
         </Button>
       </div>
@@ -1033,9 +1146,16 @@ function NewKeybindingTableRow({
               "inline-flex h-7 w-full items-center justify-between gap-2 rounded-md border border-input bg-background px-2.5 text-left font-mono text-xs text-foreground shadow-xs/5 outline-none transition-colors hover:bg-accent focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/24",
               !whenDraftExpression && "text-muted-foreground",
             )}
-            aria-label={`Edit when clause for ${commandLabelText}`}
+            aria-label={uiText(
+              "Edit when clause for {value0}",
+              { value0: commandLabelText },
+              undefined,
+              uiLocale,
+            )}
           >
-            <span className="truncate">{whenDraftExpression || "Always"}</span>
+            <span className="truncate">
+              {whenDraftExpression || uiText("Always", undefined, undefined, uiLocale)}
+            </span>
             <ChevronDownIcon className="size-3.5 shrink-0 opacity-60" />
           </PopoverTrigger>
           <PopoverContent align="start" sideOffset={6}>
@@ -1059,14 +1179,14 @@ function NewKeybindingTableRow({
                 size="icon-sm"
                 className="size-7 text-muted-foreground hover:text-foreground sm:size-7"
                 disabled={isSaving}
-                aria-label="Cancel new keybinding"
+                aria-label={uiText("Cancel new keybinding", undefined, undefined, uiLocale)}
                 onClick={onCancel}
               />
             }
           >
             <XIcon className="size-3.5" />
           </TooltipTrigger>
-          <TooltipPopup side="top">Cancel</TooltipPopup>
+          <TooltipPopup side="top">{uiText("Cancel", undefined, undefined, uiLocale)}</TooltipPopup>
         </Tooltip>
       </div>
     </div>
@@ -1074,6 +1194,9 @@ function NewKeybindingTableRow({
 }
 
 export function KeybindingsSettingsPanel() {
+  const uiLocale = useUiLocale();
+  const uiPresentation = useUiPresentation(UI_PRESENTATION_SOURCES);
+
   const keybindings = useServerKeybindings();
   const keybindingsConfigPath = useServerKeybindingsConfigPath();
   const nativeEnvironmentId = useWorkspaceEnvironmentId();
@@ -1083,8 +1206,14 @@ export function KeybindingsSettingsPanel() {
   const searchInputRef = useRef<HTMLInputElement>(null);
   const [savingCommand, setSavingCommand] = useState<KeybindingCommand | null>(null);
   const [isAddingBinding, setIsAddingBinding] = useState(false);
-  const rows = useMemo(() => buildKeybindingRows(keybindings, query), [keybindings, query]);
-  const commandOptions = useMemo(() => buildKeybindingCommandOptions(keybindings), [keybindings]);
+  const rows = useMemo(
+    () => uiPresentation.buildKeybindingRows(keybindings, query),
+    [keybindings, query, uiPresentation],
+  );
+  const commandOptions = useMemo(
+    () => uiPresentation.buildKeybindingCommandOptions(keybindings),
+    [keybindings, uiPresentation],
+  );
   const whenVariables = useMemo(() => buildWhenVariableOptions(), []);
 
   useEffect(() => {
@@ -1120,16 +1249,18 @@ export function KeybindingsSettingsPanel() {
         .then(
           () => {
             toastManager.add({
-              title: "Path copied",
+              title: uiText("Path copied", undefined, undefined, uiLocale),
               description: keybindingsConfigPath,
               type: "success",
             });
           },
           (error: unknown) => {
             toastManager.add({
-              title: "Unable to copy keybindings path",
+              title: uiText("Unable to copy keybindings path", undefined, undefined, uiLocale),
               description:
-                error instanceof Error ? error.message : "The keybindings path was not copied.",
+                error instanceof Error
+                  ? error.message
+                  : uiText("The keybindings path was not copied.", undefined, undefined, uiLocale),
               type: "error",
             });
           },
@@ -1139,55 +1270,69 @@ export function KeybindingsSettingsPanel() {
     void openInPreferredEditor(ensureWorkspaceApi(), keybindingsConfigPath).catch(
       (error: unknown) => {
         toastManager.add({
-          title: "Unable to open keybindings file",
+          title: uiText("Unable to open keybindings file", undefined, undefined, uiLocale),
           description:
-            error instanceof Error ? error.message : "The keybindings file was not opened.",
+            error instanceof Error
+              ? error.message
+              : uiText("The keybindings file was not opened.", undefined, undefined, uiLocale),
           type: "error",
         });
       },
     );
-  }, [canOpenLocalEditor, keybindingsConfigPath]);
+  }, [canOpenLocalEditor, keybindingsConfigPath, uiLocale]);
 
-  const saveKeybinding = useCallback((input: ServerUpsertKeybindingInput) => {
-    setSavingCommand(input.command);
-    const payload: ServerUpsertKeybindingInput = {
-      command: input.command,
-      key: input.key.trim(),
-      ...(input.when?.trim() ? { when: input.when.trim() } : {}),
-      ...(input.replace ? { replace: input.replace } : {}),
-    };
-    void ensureWorkspaceApi()
-      .server.upsertKeybinding(payload)
-      .then(() => {
-        setIsAddingBinding(false);
-      })
-      .catch((error: unknown) => {
-        toastManager.add({
-          title: "Unable to save keybinding",
-          description: error instanceof Error ? error.message : "The keybinding was not saved.",
-          type: "error",
+  const saveKeybinding = useCallback(
+    (input: ServerUpsertKeybindingInput) => {
+      setSavingCommand(input.command);
+      const payload: ServerUpsertKeybindingInput = {
+        command: input.command,
+        key: input.key.trim(),
+        ...(input.when?.trim() ? { when: input.when.trim() } : {}),
+        ...(input.replace ? { replace: input.replace } : {}),
+      };
+      void ensureWorkspaceApi()
+        .server.upsertKeybinding(payload)
+        .then(() => {
+          setIsAddingBinding(false);
+        })
+        .catch((error: unknown) => {
+          toastManager.add({
+            title: uiText("Unable to save keybinding", undefined, undefined, uiLocale),
+            description:
+              error instanceof Error
+                ? error.message
+                : uiText("The keybinding was not saved.", undefined, undefined, uiLocale),
+            type: "error",
+          });
+        })
+        .finally(() => {
+          setSavingCommand(null);
         });
-      })
-      .finally(() => {
-        setSavingCommand(null);
-      });
-  }, []);
+    },
+    [uiLocale],
+  );
 
-  const removeKeybinding = useCallback((row: KeybindingRow) => {
-    setSavingCommand(row.command);
-    void ensureWorkspaceApi()
-      .server.removeKeybinding(rowKeybindingTarget(row))
-      .catch((error: unknown) => {
-        toastManager.add({
-          title: "Unable to remove keybinding",
-          description: error instanceof Error ? error.message : "The keybinding was not removed.",
-          type: "error",
+  const removeKeybinding = useCallback(
+    (row: KeybindingRow) => {
+      setSavingCommand(row.command);
+      void ensureWorkspaceApi()
+        .server.removeKeybinding(rowKeybindingTarget(row))
+        .catch((error: unknown) => {
+          toastManager.add({
+            title: uiText("Unable to remove keybinding", undefined, undefined, uiLocale),
+            description:
+              error instanceof Error
+                ? error.message
+                : uiText("The keybinding was not removed.", undefined, undefined, uiLocale),
+            type: "error",
+          });
+        })
+        .finally(() => {
+          setSavingCommand(null);
         });
-      })
-      .finally(() => {
-        setSavingCommand(null);
-      });
-  }, []);
+    },
+    [uiLocale],
+  );
 
   const resetKeybinding = useCallback(
     (row: KeybindingRow) => {
@@ -1209,12 +1354,17 @@ export function KeybindingsSettingsPanel() {
   const bindingsCount = (
     <span className="text-2xs text-muted-foreground">
       {rows.length + (isAddingBinding ? 1 : 0)}{" "}
-      {rows.length + (isAddingBinding ? 1 : 0) === 1 ? "binding" : "bindings"}
+      {rows.length + (isAddingBinding ? 1 : 0) === 1
+        ? uiText("binding", undefined, undefined, uiLocale)
+        : uiText("bindings", undefined, undefined, uiLocale)}
     </span>
   );
 
   return (
-    <SettingsPageContainer title="Keybindings" width="wide">
+    <SettingsPageContainer
+      title={uiText("Keybindings", undefined, undefined, uiLocale)}
+      width="wide"
+    >
       <SettingsSection
         headerAction={
           <div className="flex items-center gap-1.5">
@@ -1235,13 +1385,15 @@ export function KeybindingsSettingsPanel() {
                     variant="ghost"
                     className="size-5 rounded-sm p-0 text-muted-foreground hover:text-foreground"
                     onClick={() => setIsAddingBinding(true)}
-                    aria-label="Add keybinding"
+                    aria-label={uiText("Add keybinding", undefined, undefined, uiLocale)}
                   >
                     <PlusIcon className="size-3" />
                   </Button>
                 }
               />
-              <TooltipPopup side="top">Add keybinding</TooltipPopup>
+              <TooltipPopup side="top">
+                {uiText("Add keybinding", undefined, undefined, uiLocale)}
+              </TooltipPopup>
             </Tooltip>
             <Tooltip>
               <TooltipTrigger
@@ -1254,7 +1406,9 @@ export function KeybindingsSettingsPanel() {
                     disabled={!keybindingsConfigPath}
                     onClick={openKeybindingsFile}
                     aria-label={
-                      canOpenLocalEditor ? "Open keybindings.json" : "Copy keybindings.json path"
+                      canOpenLocalEditor
+                        ? uiText("Open keybindings.json", undefined, undefined, uiLocale)
+                        : uiText("Copy keybindings.json path", undefined, undefined, uiLocale)
                     }
                   >
                     {canOpenLocalEditor ? (
@@ -1266,7 +1420,9 @@ export function KeybindingsSettingsPanel() {
                 }
               />
               <TooltipPopup side="top">
-                {canOpenLocalEditor ? "Open keybindings.json" : "Copy keybindings.json path"}
+                {canOpenLocalEditor
+                  ? uiText("Open keybindings.json", undefined, undefined, uiLocale)
+                  : uiText("Copy keybindings.json path", undefined, undefined, uiLocale)}
               </TooltipPopup>
             </Tooltip>
           </div>
@@ -1275,7 +1431,14 @@ export function KeybindingsSettingsPanel() {
         {!isElectron ? (
           <div className="flex items-start gap-2 border-b border-border-subtle bg-warning/5 px-4 py-2 text-xs text-muted-foreground">
             <InfoIcon className="mt-0.5 size-3.5 shrink-0 text-warning-foreground" />
-            <p>The browser may take some shortcuts first; the desktop app handles more of them.</p>
+            <p>
+              {uiText(
+                "The browser may take some shortcuts first; the desktop app handles more of them.",
+                undefined,
+                undefined,
+                uiLocale,
+              )}
+            </p>
           </div>
         ) : null}
 
@@ -1286,10 +1449,10 @@ export function KeybindingsSettingsPanel() {
           className="w-full max-w-full rounded-none"
         >
           <div className="grid min-w-[680px] grid-cols-[minmax(190px,1.1fr)_minmax(220px,0.85fr)_minmax(210px,1fr)_60px] border-b border-border-subtle bg-muted/25 px-4 py-2 text-2xs font-medium text-muted-foreground">
-            <div>Command</div>
-            <div>Keybinding</div>
-            <div>When</div>
-            <div>Status</div>
+            <div>{uiText("Command", undefined, undefined, uiLocale)}</div>
+            <div>{uiText("Keybinding", undefined, undefined, uiLocale)}</div>
+            <div>{uiText("When", undefined, undefined, uiLocale)}</div>
+            <div>{uiText("Status", undefined, undefined, uiLocale)}</div>
           </div>
           <div className="min-w-[680px] divide-y divide-border-subtle">
             {isAddingBinding ? (
@@ -1318,8 +1481,8 @@ export function KeybindingsSettingsPanel() {
               <Empty className="md:p-10">
                 <EmptyDescription>
                   {query.trim().length > 0
-                    ? "No keybindings match your search."
-                    : "No keybindings."}
+                    ? uiText("No keybindings match your search.", undefined, undefined, uiLocale)
+                    : uiText("No keybindings.", undefined, undefined, uiLocale)}
                 </EmptyDescription>
               </Empty>
             ) : null}
@@ -1329,3 +1492,13 @@ export function KeybindingsSettingsPanel() {
     </SettingsPageContainer>
   );
 }
+
+// Finite source-owned labels/helpers only; no received or user data.
+const UI_PRESENTATION_SOURCES = {
+  buildKeybindingCommandOptions,
+  buildKeybindingRows,
+  commandLabel,
+  formatShortcutLabel,
+  keybindingConflictLabels,
+  parseWhenExpressionDraft,
+};

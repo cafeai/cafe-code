@@ -1,3 +1,5 @@
+import { useUiLocale } from "~/i18n";
+import { uiText } from "@cafecode/shared/i18n";
 import { useId, useMemo, useState, type CSSProperties } from "react";
 
 import { cn } from "../../lib/utils";
@@ -68,6 +70,8 @@ export function UsageAreaChart({
   height = 190,
   displayHeight = height,
 }: UsageAreaChartProps) {
+  const uiLocale = useUiLocale();
+
   const gradientId = useId();
   const [hover, setHover] = useState<number | null>(null);
   const width = 1000; // viewBox units; the SVG scales to its container.
@@ -101,7 +105,7 @@ export function UsageAreaChart({
         className={cn("flex items-center justify-center text-xs text-muted-foreground", className)}
         style={{ height: displayHeight }}
       >
-        No usage in this period
+        {uiText("No usage in this period", undefined, undefined, uiLocale)}
       </div>
     );
   }
@@ -116,7 +120,14 @@ export function UsageAreaChart({
         className="block w-full"
         style={{ height: displayHeight }}
         role="img"
-        aria-label={`Daily usage: ${series.map((entry) => entry.label).join(", ")}`}
+        aria-label={uiText(
+          "Daily usage: {value0}",
+          {
+            value0: series.map((entry) => entry.label).join(", "),
+          },
+          undefined,
+          uiLocale,
+        )}
         onPointerLeave={() => setHover(null)}
         onPointerMove={(event) => {
           const rect = event.currentTarget.getBoundingClientRect();

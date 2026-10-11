@@ -3230,6 +3230,13 @@ const make = Effect.gen(function* () {
                   desiredModelSelection.model ? ` using ${desiredModelSelection.model}` : ""
                 }.`,
                 payload: {
+                  // Display provenance only: the renderer can translate our
+                  // fixed wrapper without parsing custom account names out of
+                  // the canonical summary. Driver/account/model ownership
+                  // below remains the sole operational metadata; older rows
+                  // without these optional names stay opaque and unchanged.
+                  fromDisplayName: previousLabel,
+                  toDisplayName: desiredLabel,
                   fromProvider: previousProvider,
                   fromProviderInstanceId: previousProviderInstanceId,
                   ...(runtimeActiveSession?.model !== undefined

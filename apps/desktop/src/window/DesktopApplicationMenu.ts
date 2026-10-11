@@ -5,12 +5,14 @@ import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 
 import type * as Electron from "electron";
+import { subscribeUiLocale, uiText } from "@cafecode/shared/i18n";
 
 import * as DesktopObservability from "../app/DesktopObservability.ts";
 import * as ElectronDialog from "../electron/ElectronDialog.ts";
 import * as ElectronMenu from "../electron/ElectronMenu.ts";
 import * as DesktopEnvironment from "../app/DesktopEnvironment.ts";
 import * as DesktopUpdates from "../updates/DesktopUpdates.ts";
+import { autoUpdateDisabledReasonForUi } from "../updates/updateEligibility.ts";
 import * as DesktopWindow from "./DesktopWindow.ts";
 
 export interface DesktopApplicationMenuShape {
@@ -51,17 +53,19 @@ const checkForUpdatesFromMenu: Effect.Effect<
   if (updateState.status === "up-to-date") {
     yield* electronDialog.showMessageBox({
       type: "info",
-      title: "You're up to date!",
-      message: `Cafe Code ${updateState.currentVersion} is currently the newest version available.`,
-      buttons: ["OK"],
+      title: uiText("You''re up to date!"),
+      message: uiText("Cafe Code {version} is currently the newest version available.", {
+        version: updateState.currentVersion,
+      }),
+      buttons: [uiText("OK")],
     });
   } else if (updateState.status === "error") {
     yield* electronDialog.showMessageBox({
       type: "warning",
-      title: "Update check failed",
-      message: "Could not check for updates.",
-      detail: updateState.message ?? "An unknown error occurred. Please try again later.",
-      buttons: ["OK"],
+      title: uiText("Update check failed"),
+      message: uiText("Could not check for updates."),
+      detail: updateState.message ?? uiText("An unknown error occurred. Please try again later."),
+      buttons: [uiText("OK")],
     });
   }
 }).pipe(Effect.withSpan("desktop.menu.checkForUpdates"));
@@ -80,10 +84,10 @@ const handleCheckForUpdatesMenuClick: Effect.Effect<
     });
     yield* electronDialog.showMessageBox({
       type: "info",
-      title: "Updates unavailable",
-      message: "Automatic updates are not available right now.",
-      detail: disabledReason.value,
-      buttons: ["OK"],
+      title: uiText("Updates unavailable"),
+      message: uiText("Automatic updates are not available right now."),
+      detail: autoUpdateDisabledReasonForUi(disabledReason.value),
+      buttons: [uiText("OK")],
     });
     return;
   }
@@ -101,6 +105,7 @@ const make = Effect.gen(function* () {
   const updatesMenuEnabled = Option.isNone(updatesDisabledReason);
   const context = yield* Effect.context<DesktopApplicationMenuRuntimeServices>();
   const runPromise = Effect.runPromiseWith(context);
+  let configured = false;
 
   const runMenuEffect = <E>(
     action: string,
@@ -133,69 +138,83 @@ const make = Effect.gen(function* () {
       template.push({
         label: environment.branding.baseName,
         submenu: [
-          { role: "about" },
+          { role: "about", label: uiText("About {app}", { app: environment.branding.baseName }) },
           {
-            label: "Check for Updates...",
+            label: uiText("Check for Updates..."),
             enabled: updatesMenuEnabled,
             click: checkForUpdatesClick,
           },
           { type: "separator" },
           {
-            label: "Settings...",
+            label: uiText("Settings..."),
             accelerator: "CmdOrCtrl+,",
             click: settingsClick,
           },
           { type: "separator" },
-          { role: "services" },
+          { role: "services", label: uiText("Services") },
           { type: "separator" },
-          { role: "hide" },
-          { role: "hideOthers" },
-          { role: "unhide" },
+          { role: "hide", label: uiText("Hide {app}", { app: environment.branding.baseName }) },
+          { role: "hideOthers", label: uiText("Hide Others") },
+          { role: "unhide", label: uiText("Show All") },
           { type: "separator" },
-          { role: "quit" },
+          { role: "quit", label: uiText("Quit {app}", { app: environment.branding.baseName }) },
         ],
       });
     }
 
     template.push(
       {
-        label: "File",
+        label: uiText("File"),
         submenu: [
           ...(environment.platform === "darwin"
             ? []
             : [
                 {
-                  label: "Settings...",
+                  label: uiText("Settings..."),
                   accelerator: "CmdOrCtrl+,",
                   click: settingsClick,
                 },
                 { type: "separator" as const },
               ]),
-          { role: environment.platform === "darwin" ? "close" : "quit" },
+          {
+            role: environment.platform === "darwin" ? "close" : "quit",
+            label:
+              environment.platform === "darwin"
+                ? uiText("Close Window")
+                : environment.platform === "win32"
+                  ? uiText("Exit")
+                  : uiText("Quit"),
+          },
         ],
       },
-      { role: "editMenu" },
+      { role: "editMenu", label: uiText("Edit") },
       {
-        label: "View",
+        label: uiText("View"),
         submenu: [
-          { role: "reload" },
-          { role: "forceReload" },
-          { role: "toggleDevTools" },
+          { role: "reload", label: uiText("Reload") },
+          { role: "forceReload", label: uiText("Force Reload") },
+          { role: "toggleDevTools", label: uiText("Toggle Developer Tools") },
           { type: "separator" },
-          { role: "resetZoom" },
-          { role: "zoomIn", accelerator: "CmdOrCtrl+=" },
-          { role: "zoomIn", accelerator: "CmdOrCtrl+Plus", visible: false },
-          { role: "zoomOut" },
+          { role: "resetZoom", label: uiText("Actual Size") },
+          { role: "zoomIn", label: uiText("Zoom In"), accelerator: "CmdOrCtrl+=" },
+          {
+            role: "zoomIn",
+            label: uiText("Zoom In"),
+            accelerator: "CmdOrCtrl+Plus",
+            visible: false,
+          },
+          { role: "zoomOut", label: uiText("Zoom Out") },
           { type: "separator" },
-          { role: "togglefullscreen" },
+          { role: "togglefullscreen", label: uiText("Toggle Full Screen") },
         ],
       },
-      { role: "windowMenu" },
+      { role: "windowMenu", label: uiText("Window") },
       {
         role: "help",
+        label: uiText("Help"),
         submenu: [
           {
-            label: "Check for Updates...",
+            label: uiText("Check for Updates..."),
             enabled: updatesMenuEnabled,
             click: checkForUpdatesClick,
           },
@@ -204,7 +223,19 @@ const make = Effect.gen(function* () {
     );
 
     yield* electronMenu.setApplicationMenu(template);
+    configured = true;
   }).pipe(Effect.withSpan("desktop.menu.configure"));
+
+  // Locale changes rebuild labels only. Existing role/accelerator/action
+  // identities stay canonical, and no menu appears before startup admission.
+  yield* Effect.acquireRelease(
+    Effect.sync(() =>
+      subscribeUiLocale(() => {
+        if (configured) void runPromise(configure);
+      }),
+    ),
+    (unsubscribe) => Effect.sync(unsubscribe),
+  );
 
   return DesktopApplicationMenu.of({
     configure,

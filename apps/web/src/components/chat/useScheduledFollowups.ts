@@ -1,5 +1,7 @@
 import type { EnvironmentId, ThreadId } from "@cafecode/contracts";
+import { uiText } from "@cafecode/shared/i18n";
 import { useCallback, useSyncExternalStore } from "react";
+import { useUiLocale } from "~/i18n";
 
 import {
   EMPTY_SCHEDULED_FOLLOWUPS,
@@ -22,6 +24,7 @@ export function useScheduledFollowups(
   threadId: ThreadId,
   enabled = true,
 ) {
+  const uiLocale = useUiLocale();
   const subscribe = useCallback(
     (listener: () => void) =>
       enabled ? subscribeScheduledFollowups(environmentId, threadId, listener) : NOOP,
@@ -36,5 +39,21 @@ export function useScheduledFollowups(
     if (enabled) refreshScheduledFollowups(environmentId, threadId);
   }, [enabled, environmentId, threadId]);
   const snapshot = useSyncExternalStore(subscribe, getSnapshot, getSnapshot);
-  return { ...snapshot, refresh };
+  return {
+    ...snapshot,
+    // Locale is presentation only: it cannot enter any subscription, refresh,
+    // generation or request dependency above. Received failures remain opaque.
+    error:
+      snapshot.error === "refresh-unconfirmed"
+        ? uiText(
+            "Schedules could not be refreshed. Reconnect or try again.",
+            undefined,
+            undefined,
+            uiLocale,
+          )
+        : null,
+    refresh,
+  };
 }
+
+// Finite source-owned labels/helpers only; no received or user data.

@@ -1,3 +1,4 @@
+import { uiText } from "@cafecode/shared/i18n";
 import { MAX_PNG_BYTES, MAX_PNG_DIMENSION, MAX_PNG_PIXELS } from "@cafecode/contracts";
 
 import type { MermaidResult } from "./mermaid/renderService";
@@ -7,7 +8,9 @@ const SVG_NAMESPACE = "http://www.w3.org/2000/svg";
 const HTML_NAMESPACE = "http://www.w3.org/1999/xhtml";
 const MAX_EXPORT_SOURCE_BYTES = 8 * 1024 * 1024;
 const DECODE_TIMEOUT_MS = 15_000;
-const EXPORT_FAILURE = "This image could not be exported.";
+function getEXPORT_FAILURE() {
+  return uiText("This image could not be exported.");
+}
 const SVG_ELEMENTS = new Set([
   "svg",
   "g",
@@ -74,7 +77,7 @@ function admitCss(value: string): void {
     .replace(/url\("data:(?:font\/woff2|application\/octet-stream);base64,[A-Za-z0-9+/=]+"\)/g, "")
     .replace(/@font-face\b/g, "");
   if (/[\\@]|\/\*|url\s*\(|image\s*\(|image-set\s*\(|expression\s*\(/i.test(local))
-    throw new Error(EXPORT_FAILURE);
+    throw new Error(getEXPORT_FAILURE());
 }
 
 /** General rasterization is still an inert-image boundary, not an arbitrary
@@ -82,20 +85,20 @@ function admitCss(value: string): void {
  * table HTML is rebuilt by tableImageExport before this independent check. */
 function admitImageDocument(svg: string): Document {
   if (svg.length > MAX_EXPORT_SOURCE_BYTES || /<!DOCTYPE|<!ENTITY/i.test(svg))
-    throw new Error(EXPORT_FAILURE);
+    throw new Error(getEXPORT_FAILURE());
   if (new TextEncoder().encode(svg).byteLength > MAX_EXPORT_SOURCE_BYTES)
-    throw new Error(EXPORT_FAILURE);
+    throw new Error(getEXPORT_FAILURE());
   const document = new DOMParser().parseFromString(svg, "image/svg+xml");
   if (
     document.querySelector("parsererror") ||
     document.documentElement.localName !== "svg" ||
     document.documentElement.namespaceURI !== SVG_NAMESPACE
   )
-    throw new Error(EXPORT_FAILURE);
+    throw new Error(getEXPORT_FAILURE());
   if (document.createTreeWalker(document, NodeFilter.SHOW_PROCESSING_INSTRUCTION).nextNode())
-    throw new Error(EXPORT_FAILURE);
+    throw new Error(getEXPORT_FAILURE());
   const nodes = document.querySelectorAll("*");
-  if (nodes.length > 20_010) throw new Error(EXPORT_FAILURE);
+  if (nodes.length > 20_010) throw new Error(getEXPORT_FAILURE());
   for (const node of nodes) {
     const tags =
       node.namespaceURI === SVG_NAMESPACE
@@ -103,7 +106,7 @@ function admitImageDocument(svg: string): Document {
         : node.namespaceURI === HTML_NAMESPACE
           ? HTML_ELEMENTS
           : null;
-    if (!tags?.has(node.localName)) throw new Error(EXPORT_FAILURE);
+    if (!tags?.has(node.localName)) throw new Error(getEXPORT_FAILURE());
     if (node.localName === "style") admitCss(node.textContent ?? "");
     for (const attribute of node.attributes) {
       const name = attribute.localName.toLowerCase();
@@ -111,16 +114,16 @@ function admitImageDocument(svg: string): Document {
         name.startsWith("on") ||
         ["srcdoc", "formaction", "action", "poster", "srcset", "base"].includes(name)
       )
-        throw new Error(EXPORT_FAILURE);
+        throw new Error(getEXPORT_FAILURE());
       if (name === "src") {
         if (
           node.namespaceURI !== HTML_NAMESPACE ||
           node.localName !== "img" ||
           !/^data:image\/png;base64,[A-Za-z0-9+/=]+$/.test(attribute.value)
         )
-          throw new Error(EXPORT_FAILURE);
+          throw new Error(getEXPORT_FAILURE());
       } else if (name === "href") {
-        if (!/^#[\w-]+$/.test(attribute.value)) throw new Error(EXPORT_FAILURE);
+        if (!/^#[\w-]+$/.test(attribute.value)) throw new Error(getEXPORT_FAILURE());
       } else if (name !== "xmlns") admitCss(attribute.value);
     }
   }
@@ -147,7 +150,7 @@ export async function rasterizeSvgToPng({
 }: SvgPngInput): Promise<Blob> {
   signal.throwIfAborted();
   if (![width, height].every((value) => Number.isFinite(value) && value >= 1 && value <= 100_016))
-    throw new Error(EXPORT_FAILURE);
+    throw new Error(getEXPORT_FAILURE());
   const imageDocument = admitImageDocument(svg);
   const scale = Math.min(
     1,
@@ -179,7 +182,7 @@ export async function rasterizeSvgToPng({
       const finish = (failed: boolean) => {
         clearTimeout(timeout);
         signal.removeEventListener("abort", abort);
-        if (failed) reject(new Error(EXPORT_FAILURE));
+        if (failed) reject(new Error(getEXPORT_FAILURE()));
         else resolve();
       };
       const abort = () => finish(true);
@@ -194,7 +197,7 @@ export async function rasterizeSvgToPng({
     canvas.width = targetWidth;
     canvas.height = targetHeight;
     const context = canvas.getContext("2d");
-    if (!context || !CSS.supports("color", background)) throw new Error(EXPORT_FAILURE);
+    if (!context || !CSS.supports("color", background)) throw new Error(getEXPORT_FAILURE());
     // Explicit opaque themed background makes pasted images readable outside
     // Cafe without changing the chart's admitted colors or custom node fills.
     context.fillStyle = background;
@@ -203,13 +206,13 @@ export async function rasterizeSvgToPng({
     signal.throwIfAborted();
     const png = await new Promise<Blob>((resolve, reject) => {
       canvas.toBlob(
-        (blob) => (blob ? resolve(blob) : reject(new Error(EXPORT_FAILURE))),
+        (blob) => (blob ? resolve(blob) : reject(new Error(getEXPORT_FAILURE()))),
         "image/png",
       );
     });
     signal.throwIfAborted();
     if (png.type !== "image/png" || png.size < 1 || png.size > MAX_PNG_BYTES)
-      throw new Error(EXPORT_FAILURE);
+      throw new Error(getEXPORT_FAILURE());
     return png;
   } finally {
     image.removeAttribute("src");
@@ -242,7 +245,7 @@ async function pngBytes(png: Promise<Blob>, signal: AbortSignal): Promise<Uint8A
   const blob = await png;
   signal.throwIfAborted();
   if (blob.type !== "image/png" || blob.size < 1 || blob.size > MAX_PNG_BYTES)
-    throw new Error(EXPORT_FAILURE);
+    throw new Error(getEXPORT_FAILURE());
   const bytes = new Uint8Array(await blob.arrayBuffer());
   signal.throwIfAborted();
   return bytes;
@@ -262,13 +265,13 @@ export async function copyPngToClipboard(png: Promise<Blob>, signal: AbortSignal
   void png.catch(() => undefined);
   signal.throwIfAborted();
   if (!navigator.clipboard?.write || typeof ClipboardItem === "undefined")
-    throw new Error("Image clipboard unavailable.");
+    throw new Error(uiText("Image clipboard unavailable."));
   await navigator.clipboard.write([
     new ClipboardItem({
       "image/png": png.then((blob) => {
         signal.throwIfAborted();
         if (blob.type !== "image/png" || blob.size < 1 || blob.size > MAX_PNG_BYTES)
-          throw new Error(EXPORT_FAILURE);
+          throw new Error(getEXPORT_FAILURE());
         return blob;
       }),
     }),
@@ -281,7 +284,7 @@ export async function savePngToDisk(
   signal: AbortSignal,
 ): Promise<"saved" | "cancelled"> {
   if (!/^[A-Za-z0-9][A-Za-z0-9_-]{0,119}\.png$/.test(suggestedName))
-    throw new Error(EXPORT_FAILURE);
+    throw new Error(getEXPORT_FAILURE());
   if (window.desktopBridge) {
     const bytes = await pngBytes(png, signal);
     signal.throwIfAborted();
@@ -289,13 +292,13 @@ export async function savePngToDisk(
       png: bytes,
       suggestedName,
     });
-    if (result === "failed") throw new Error(EXPORT_FAILURE);
+    if (result === "failed") throw new Error(getEXPORT_FAILURE());
     return result;
   }
   const blob = await png;
   signal.throwIfAborted();
   if (blob.type !== "image/png" || blob.size < 1 || blob.size > MAX_PNG_BYTES)
-    throw new Error(EXPORT_FAILURE);
+    throw new Error(getEXPORT_FAILURE());
   const url = URL.createObjectURL(blob);
   const link = document.createElement("a");
   try {

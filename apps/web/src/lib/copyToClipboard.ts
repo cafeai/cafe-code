@@ -1,3 +1,4 @@
+import { uiText } from "@cafecode/shared/i18n";
 function legacyCopyText(value: string): boolean {
   if (typeof document.execCommand !== "function") {
     return false;
@@ -49,7 +50,7 @@ function legacyCopyText(value: string): boolean {
 /** Copy text through the native desktop shell, modern browser API, or legacy browser fallback. */
 export async function copyTextToClipboard(value: string): Promise<void> {
   if (typeof window === "undefined" || typeof document === "undefined") {
-    throw new Error("Clipboard is unavailable outside a browser window.");
+    throw new Error(uiText("Clipboard is unavailable outside a browser window."));
   }
 
   if (window.desktopBridge?.copyText) {
@@ -68,6 +69,6 @@ export async function copyTextToClipboard(value: string): Promise<void> {
   }
 
   if (!legacyCopyText(value)) {
-    throw new Error("Clipboard access was denied by this browser.");
+    throw new Error(uiText("Clipboard access was denied by this browser."));
   }
 }

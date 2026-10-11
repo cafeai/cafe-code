@@ -1,3 +1,5 @@
+import { useUiLocale } from "~/i18n";
+import { uiText } from "@cafecode/shared/i18n";
 import { RotateCcwIcon } from "lucide-react";
 import { Outlet, createFileRoute, redirect, useLocation } from "@tanstack/react-router";
 import { useEffect, useState } from "react";
@@ -12,6 +14,8 @@ import { useMacDesktopTitlebar } from "../hooks/useMacDesktopTitlebar";
 import { useWorkspaceEnvironmentId } from "../environments/workspace";
 
 function RestoreDefaultsButton({ onRestored }: { onRestored: () => void }) {
+  const uiLocale = useUiLocale();
+
   const { changedSettingLabels, restoreDefaults } = useSettingsRestore(onRestored);
 
   return (
@@ -22,12 +26,14 @@ function RestoreDefaultsButton({ onRestored }: { onRestored: () => void }) {
       onClick={() => void restoreDefaults()}
     >
       <RotateCcwIcon className="size-3.5" />
-      Restore defaults
+      {uiText("Restore defaults", undefined, undefined, uiLocale)}
     </Button>
   );
 }
 
 function SettingsContentLayout() {
+  const uiLocale = useUiLocale();
+
   const isMacDesktopTitlebar = useMacDesktopTitlebar();
   const environmentId = useWorkspaceEnvironmentId();
   const location = useLocation();
@@ -58,7 +64,9 @@ function SettingsContentLayout() {
           <header className="border-b border-border px-3 py-2 sm:px-5">
             <div className="flex min-h-7 items-center gap-2 sm:min-h-6">
               <ContentSidebarTriggerWithUnreadDot />
-              <span className="text-sm font-medium text-foreground">Settings</span>
+              <span className="text-sm font-medium text-foreground">
+                {uiText("Settings", undefined, undefined, uiLocale)}
+              </span>
               {showRestoreDefaults ? (
                 <div className="ms-auto flex items-center gap-2">
                   <RestoreDefaultsButton onRestored={handleRestored} />
@@ -75,7 +83,7 @@ function SettingsContentLayout() {
           >
             <ContentSidebarTriggerWithUnreadDot className="mr-2" />
             <span className="text-xs font-medium tracking-wide text-subtle-foreground">
-              Settings
+              {uiText("Settings", undefined, undefined, uiLocale)}
             </span>
             {showRestoreDefaults ? (
               <div className="ms-auto flex items-center gap-2">

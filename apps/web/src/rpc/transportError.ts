@@ -1,3 +1,4 @@
+import { uiText } from "@cafecode/shared/i18n";
 const TRANSPORT_ERROR_PATTERNS = [
   /\bSocketCloseError\b/i,
   /\bSocketOpenError\b/i,
@@ -17,8 +18,11 @@ const CONNECTION_INTERRUPTED_PATTERNS = [
   /\bwebsocket\b/i,
 ] as const;
 
-const CONNECTION_SEND_FAILURE_MESSAGE =
-  "Couldn't reach the server — the connection dropped. Check your connection and try again.";
+function getCONNECTION_SEND_FAILURE_MESSAGE() {
+  return uiText(
+    "Couldn't reach the server — the connection dropped. Check your connection and try again.",
+  );
+}
 
 const RECOVERABLE_PROVIDER_ERROR_PATTERNS = [
   // Claude SDK execution diagnostics can arrive as `lastError` even when the
@@ -105,7 +109,7 @@ export function describeSendFailureMessage(error: unknown, fallback: string): st
   const message = error instanceof Error ? error.message : typeof error === "string" ? error : "";
   const normalized = message.trim();
   if (isIndeterminateTransportError(error)) {
-    return CONNECTION_SEND_FAILURE_MESSAGE;
+    return getCONNECTION_SEND_FAILURE_MESSAGE();
   }
   return normalized.length > 0 ? normalized : fallback;
 }

@@ -1,3 +1,4 @@
+import { uiText } from "@cafecode/shared/i18n";
 import type { EnvironmentId } from "@cafecode/contracts";
 import { queryOptions } from "@tanstack/react-query";
 
@@ -22,7 +23,7 @@ export function dictationStatusQueryOptions(environmentId: EnvironmentId | null)
     queryKey: dictationQueryKeys.status(environmentId),
     queryFn: () => {
       if (environmentId === null) {
-        throw new Error("Dictation status requires an environment.");
+        throw new Error(uiText("Dictation status requires an environment."));
       }
       return requireEnvironmentConnection(environmentId).client.dictation.getStatus();
     },

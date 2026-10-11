@@ -15,6 +15,7 @@ export interface CreateAdvertisedEndpointInput {
   readonly source: AdvertisedEndpointSource;
   readonly status?: AdvertisedEndpointStatus;
   readonly isDefault?: boolean;
+  readonly defaultPreferenceKey?: string;
   readonly description?: string;
 }
 
@@ -54,6 +55,9 @@ export function createAdvertisedEndpoint(input: CreateAdvertisedEndpointInput): 
     source: input.source,
     status: input.status ?? "available",
     ...(input.isDefault === undefined ? {} : { isDefault: input.isDefault }),
+    ...(input.defaultPreferenceKey === undefined
+      ? {}
+      : { defaultPreferenceKey: input.defaultPreferenceKey }),
     ...(input.description === undefined ? {} : { description: input.description }),
   };
 }

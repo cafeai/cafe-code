@@ -1,3 +1,6 @@
+import { useUiLocale, useUiPresentation } from "~/i18n";
+import { uiText, type UiLocale } from "@cafecode/shared/i18n";
+import { UiMessage } from "~/i18n";
 import type {
   EnvironmentId,
   ModelSelection,
@@ -35,28 +38,102 @@ export interface ScheduledFollowupsContext {
 
 const PAGE_SIZE = 5;
 const HISTORY_PAGE_SIZE = 10;
+type ScheduleNotice =
+  | "unavailable"
+  | "saved"
+  | "created"
+  | "paused"
+  | "deleted"
+  | "resumed"
+  | "run-requested";
+
+/** Store only Cafe-owned presentation keys, never translated output or received
+ * errors. Resolving the copy during render also covers a language change while
+ * a single admitted request is awaiting its response, without repeating I/O. */
+function scheduleNoticeText(notice: ScheduleNotice, locale: UiLocale): string {
+  switch (notice) {
+    case "unavailable":
+      return uiText(
+        "This schedule is no longer available. No changes were made.",
+        undefined,
+        undefined,
+        locale,
+      );
+    case "saved":
+      return uiText("Follow-up saved.", undefined, undefined, locale);
+    case "created":
+      return uiText("Follow-up created.", undefined, undefined, locale);
+    case "paused":
+      return uiText(
+        "Schedule paused. An already running turn is not interrupted.",
+        undefined,
+        undefined,
+        locale,
+      );
+    case "deleted":
+      return uiText("Schedule deleted.", undefined, undefined, locale);
+    case "resumed":
+      return uiText("Schedule resumed.", undefined, undefined, locale);
+    case "run-requested":
+      return uiText(
+        "Run requested. It will wait if this chat is busy.",
+        undefined,
+        undefined,
+        locale,
+      );
+  }
+}
+
 const STATE_LABELS: Record<ScheduledFollowupRecord["state"], string> = {
-  active: "Scheduled",
-  paused: "Paused",
-  completed: "Finished",
-  needs_attention: "Needs attention",
-  pending_confirmation: "Needs your approval",
-  deleted: "Deleted",
+  get active() {
+    return uiText("Scheduled");
+  },
+  get paused() {
+    return uiText("Paused");
+  },
+  get completed() {
+    return uiText("Finished");
+  },
+  get needs_attention() {
+    return uiText("Needs attention");
+  },
+  get pending_confirmation() {
+    return uiText("Needs your approval");
+  },
+  get deleted() {
+    return uiText("Deleted");
+  },
 };
 const RUN_LABELS: Record<ScheduledFollowupRun["state"], string> = {
-  waiting: "Waiting for this chat",
-  dispatching: "Starting",
-  running: "Running",
-  completed: "Completed",
-  failed: "Failed",
-  interrupted: "Interrupted",
-  unknown: "Status unconfirmed",
-  skipped: "Skipped",
+  get waiting() {
+    return uiText("Waiting for this chat");
+  },
+  get dispatching() {
+    return uiText("Starting");
+  },
+  get running() {
+    return uiText("Running");
+  },
+  get completed() {
+    return uiText("Completed");
+  },
+  get failed() {
+    return uiText("Failed");
+  },
+  get interrupted() {
+    return uiText("Interrupted");
+  },
+  get unknown() {
+    return uiText("Status unconfirmed");
+  },
+  get skipped() {
+    return uiText("Skipped");
+  },
 };
 
 function runLabel(run: ScheduledFollowupRun): string {
   return run.state === "completed" && run.result === "no-change"
-    ? "No changes"
+    ? uiText("No changes")
     : RUN_LABELS[run.state];
 }
 
@@ -66,6 +143,9 @@ function ScheduleHistory(props: {
   context: ScheduledFollowupsContext;
   record: ScheduledFollowupRecord;
 }) {
+  const uiLocale = useUiLocale();
+  const uiPresentation = useUiPresentation(UI_PRESENTATION_SOURCES);
+
   const { context, record } = props;
   const [cursors, setCursors] = useState<Array<string | undefined>>([undefined]);
   const [snapshot, setSnapshot] = useState<{
@@ -115,31 +195,33 @@ function ScheduleHistory(props: {
   return (
     <div
       className="mt-2 animate-enter-rise space-y-2 border-t border-border-subtle pt-2"
-      aria-label={`Run history for ${record.name}`}
+      aria-label={uiText("Run history for {value0}", { value0: record.name }, undefined, uiLocale)}
     >
       {error ? (
         <div role="alert" className="text-xs text-muted-foreground">
-          History could not be loaded.{" "}
+          {uiText("History could not be loaded.", undefined, undefined, uiLocale)}{" "}
           <Button size="xs" variant="ghost" onClick={() => setRetry((value) => value + 1)}>
-            Retry history
+            {uiText("Retry history", undefined, undefined, uiLocale)}
           </Button>
         </div>
       ) : null}
       {loading ? (
-        <p className="text-xs text-muted-foreground">Loading runs…</p>
+        <p className="text-xs text-muted-foreground">
+          {uiText("Loading runs…", undefined, undefined, uiLocale)}
+        </p>
       ) : page?.runs.length ? (
         <ol className="space-y-2">
           {page.runs.map((run) => {
-            const issue = scheduleRunIssuePresentation(run);
+            const issue = uiPresentation.scheduleRunIssuePresentation(run);
             return (
               <li key={run.id} className="min-w-0 text-xs">
                 <div className="flex flex-wrap items-baseline justify-between gap-1">
-                  <span className="font-medium">{runLabel(run)}</span>
+                  <span className="font-medium">{uiPresentation.runLabel(run)}</span>
                   <time
                     dateTime={run.createdAt}
                     className="text-2xs tabular-nums text-subtle-foreground"
                   >
-                    {formatScheduleTime(run.createdAt)}
+                    {uiPresentation.formatScheduleTime(run.createdAt)}
                   </time>
                 </div>
                 {issue ? (
@@ -162,7 +244,9 @@ function ScheduleHistory(props: {
           })}
         </ol>
       ) : !error ? (
-        <p className="text-xs text-muted-foreground">No runs yet.</p>
+        <p className="text-xs text-muted-foreground">
+          {uiText("No runs yet.", undefined, undefined, uiLocale)}
+        </p>
       ) : null}
       {cursors.length > 1 || page?.nextCursor ? (
         <div className="flex items-center justify-between gap-2">
@@ -172,9 +256,11 @@ function ScheduleHistory(props: {
             disabled={loading || cursors.length === 1}
             onClick={() => setCursors((prior) => prior.slice(0, -1))}
           >
-            Newer runs
+            {uiText("Newer runs", undefined, undefined, uiLocale)}
           </Button>
-          <span className="text-2xs tabular-nums text-muted-foreground">Page {cursors.length}</span>
+          <span className="text-2xs tabular-nums text-muted-foreground">
+            <UiMessage message={"Page <slot1></slot1>"} slots={{ slot1: cursors.length }} />
+          </span>
           <Button
             size="xs"
             variant="ghost"
@@ -183,7 +269,7 @@ function ScheduleHistory(props: {
               if (page?.nextCursor) setCursors((prior) => [...prior, page.nextCursor!]);
             }}
           >
-            Older runs
+            {uiText("Older runs", undefined, undefined, uiLocale)}
           </Button>
         </div>
       ) : null}
@@ -200,14 +286,19 @@ function ScheduleCard(props: {
   onStatus: (state: "active" | "paused" | "deleted") => void;
   onRun: () => void;
 }) {
+  const uiLocale = useUiLocale();
+  const uiPresentation = useUiPresentation(UI_PRESENTATION_SOURCES);
+
   const { record, context } = props;
   const [historyOpen, setHistoryOpen] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
   const lastRun = record.lastRun;
-  const issue = scheduleRunIssuePresentation(lastRun);
+  const issue = uiPresentation.scheduleRunIssuePresentation(lastRun);
   const liveRun = lastRun && ["waiting", "dispatching", "running"].includes(lastRun.state);
   const label =
-    record.state === "active" && liveRun ? runLabel(lastRun) : STATE_LABELS[record.state];
+    record.state === "active" && liveRun
+      ? uiPresentation.runLabel(lastRun)
+      : uiPresentation.STATE_LABELS[record.state];
   const selection = record.modelSelection ?? context.modelSelection;
   const accountMatches = record.authorizedInstanceId === context.modelSelection.instanceId;
   const disabled = props.pending || context.unavailable || props.readUnavailable;
@@ -215,7 +306,12 @@ function ScheduleCard(props: {
   return (
     <article
       className="min-w-0 rounded-xl border border-border-subtle bg-muted/20 p-3"
-      aria-label={`Scheduled follow-up: ${record.name}`}
+      aria-label={uiText(
+        "Scheduled follow-up: {value0}",
+        { value0: record.name },
+        undefined,
+        uiLocale,
+      )}
     >
       <div className="flex min-w-0 flex-wrap items-start justify-between gap-x-2 gap-y-1">
         <h4 className="min-w-0 flex-1 break-words text-sm font-medium [overflow-wrap:anywhere]">
@@ -225,31 +321,56 @@ function ScheduleCard(props: {
       </div>
       {record.nextRunAt && record.state === "active" ? (
         <p className="mt-1 break-words text-xs text-primary">
-          Next: {formatScheduleTime(record.nextRunAt)}
+          <UiMessage
+            message={"Next: <slot1></slot1>"}
+            slots={{ slot1: uiPresentation.formatScheduleTime(record.nextRunAt) }}
+          />
         </p>
       ) : null}
       <p className="mt-1 break-words text-2xs text-muted-foreground [overflow-wrap:anywhere]">
-        {scheduleRecurrenceLabel(record)} · Schedule timezone: {record.recurrence.timeZone}
+        <UiMessage
+          message={"<slot1></slot1> · Schedule timezone: <slot3></slot3>"}
+          slots={{
+            slot1: uiPresentation.scheduleRecurrenceLabel(record),
+            slot3: record.recurrence.timeZone,
+          }}
+        />
       </p>
       <p className="mt-2 break-words text-2xs text-muted-foreground [overflow-wrap:anywhere]">
         {record.modelSelection
-          ? scheduleModelLabel(selection)
-          : `Uses chat settings · ${scheduleModelLabel(selection)}`}
+          ? uiPresentation.scheduleModelLabel(selection)
+          : uiText(
+              "Uses chat settings · {value0}",
+              { value0: uiPresentation.scheduleModelLabel(selection) },
+              undefined,
+              uiLocale,
+            )}
       </p>
       <p className="break-words text-2xs text-muted-foreground [overflow-wrap:anywhere]">
-        Account:{" "}
-        {scheduleAccountLabel(
-          { ...selection, instanceId: record.authorizedInstanceId },
-          context.provider,
+        {uiText(
+          "Account: {account}{changed, select, yes { · Account changed; review before enabling} other {}}",
+          {
+            account: scheduleAccountLabel(
+              { ...selection, instanceId: record.authorizedInstanceId },
+              context.provider,
+            ),
+            changed: !accountMatches ? "yes" : "no",
+          },
+          undefined,
+          uiLocale,
         )}
-        {!accountMatches ? " · Account changed; review before enabling" : ""}
       </p>
       {lastRun ? (
-        <p className="mt-2 text-2xs text-muted-foreground">Last run: {runLabel(lastRun)}</p>
+        <p className="mt-2 text-2xs text-muted-foreground">
+          <UiMessage
+            message={"Last run: <slot1></slot1>"}
+            slots={{ slot1: uiPresentation.runLabel(lastRun) }}
+          />
+        </p>
       ) : null}
       {record.state === "pending_confirmation" ? (
         <p className="mt-2 text-xs text-muted-foreground">
-          Proposed by an agent — review before enabling.
+          {uiText("Proposed by an agent — review before enabling.", undefined, undefined, uiLocale)}
         </p>
       ) : null}
       {record.state === "needs_attention" ? (
@@ -257,7 +378,12 @@ function ScheduleCard(props: {
           {issue ? <p>{issue.reason}</p> : null}
           <p>
             {issue?.action ??
-              "Check this chat and run history, then review and enable the schedule when ready."}
+              uiText(
+                "Check this chat and run history, then review and enable the schedule when ready.",
+                undefined,
+                undefined,
+                uiLocale,
+              )}
           </p>
         </div>
       ) : null}
@@ -269,7 +395,7 @@ function ScheduleCard(props: {
             disabled={disabled || !accountMatches || Boolean(liveRun)}
             onClick={props.onRun}
           >
-            Run now
+            {uiText("Run now", undefined, undefined, uiLocale)}
           </Button>
         ) : null}
         {record.state === "active" ? (
@@ -279,7 +405,7 @@ function ScheduleCard(props: {
             disabled={disabled}
             onClick={() => props.onStatus("paused")}
           >
-            Pause
+            {uiText("Pause", undefined, undefined, uiLocale)}
           </Button>
         ) : record.state === "paused" && accountMatches ? (
           <Button
@@ -288,14 +414,14 @@ function ScheduleCard(props: {
             disabled={disabled}
             onClick={() => props.onStatus("active")}
           >
-            Resume
+            {uiText("Resume", undefined, undefined, uiLocale)}
           </Button>
         ) : null}
         {record.state !== "deleted" ? (
           <Button size="xs" variant="ghost" disabled={disabled} onClick={props.onEdit}>
             {record.state === "pending_confirmation" || record.state === "needs_attention"
-              ? "Review & enable"
-              : "Edit"}
+              ? uiText("Review & enable", undefined, undefined, uiLocale)
+              : uiText("Edit", undefined, undefined, uiLocale)}
           </Button>
         ) : null}
         <Button
@@ -304,7 +430,9 @@ function ScheduleCard(props: {
           aria-expanded={historyOpen}
           onClick={() => setHistoryOpen((value) => !value)}
         >
-          {historyOpen ? "Hide runs" : "Run history"}
+          {historyOpen
+            ? uiText("Hide runs", undefined, undefined, uiLocale)
+            : uiText("Run history", undefined, undefined, uiLocale)}
         </Button>
         {record.state !== "deleted" ? (
           <Button
@@ -313,14 +441,19 @@ function ScheduleCard(props: {
             disabled={disabled}
             onClick={() => setConfirmDelete((value) => !value)}
           >
-            Delete
+            {uiText("Delete", undefined, undefined, uiLocale)}
           </Button>
         ) : null}
       </div>
       {confirmDelete ? (
         <div className="mt-2 animate-enter-rise rounded-lg border border-border p-2 text-xs">
           <p>
-            Delete this schedule? Future runs will stop. An already running turn is not interrupted.
+            {uiText(
+              "Delete this schedule? Future runs will stop. An already running turn is not interrupted.",
+              undefined,
+              undefined,
+              uiLocale,
+            )}
           </p>
           <div className="mt-2 flex flex-wrap gap-1">
             <Button
@@ -329,10 +462,10 @@ function ScheduleCard(props: {
               disabled={disabled}
               onClick={() => props.onStatus("deleted")}
             >
-              Delete schedule
+              {uiText("Delete schedule", undefined, undefined, uiLocale)}
             </Button>
             <Button size="xs" variant="ghost" onClick={() => setConfirmDelete(false)}>
-              Keep schedule
+              {uiText("Keep schedule", undefined, undefined, uiLocale)}
             </Button>
           </div>
         </div>
@@ -357,6 +490,8 @@ export const ScheduledFollowups = memo(function ScheduledFollowups({
    * list. Never take a model-authored definition or enable it on mount. */
   initialReviewScheduleId?: ScheduledFollowupId;
 }) {
+  const uiLocale = useUiLocale();
+
   const { schedules, loading, error, refresh } = useScheduledFollowups(
     context.environmentId,
     context.threadId,
@@ -364,8 +499,19 @@ export const ScheduledFollowups = memo(function ScheduledFollowups({
   const [editor, setEditor] = useState<{ record: ScheduledFollowupRecord | null } | null>(null);
   const [pending, setPending] = useState(false);
   const pendingRef = useRef(false);
-  const [mutationError, setMutationError] = useState<string | null>(null);
-  const [notice, setNotice] = useState<string | null>(null);
+  // Neither locale changes nor display messages are schedule authority. Retain
+  // only the fixed result classification and render it in the current language;
+  // the revision-bound single-attempt mutation and review guards stay unchanged.
+  const [mutationFailed, setMutationFailed] = useState(false);
+  const [notice, setNotice] = useState<ScheduleNotice | null>(null);
+  const mutationError = mutationFailed
+    ? uiText(
+        "The change was not confirmed. Refresh and review the saved schedule before trying again; no automatic retry was sent.",
+        undefined,
+        undefined,
+        uiLocale,
+      )
+    : null;
   const [showHistory, setShowHistory] = useState(false);
   const [page, setPage] = useState(0);
   const headingRef = useRef<HTMLHeadingElement>(null);
@@ -389,7 +535,7 @@ export const ScheduledFollowups = memo(function ScheduledFollowups({
       // backend revision fence, not silently replace a form under the owner.
       setEditor({ record });
     } else {
-      setNotice("This schedule is no longer available. No changes were made.");
+      setNotice("unavailable");
     }
   }, [context.threadId, error, initialReviewScheduleId, loading, schedules]);
   const current = schedules.filter(
@@ -402,11 +548,11 @@ export const ScheduledFollowups = memo(function ScheduledFollowups({
   const pageCount = Math.max(1, Math.ceil(rows.length / PAGE_SIZE));
   const safePage = Math.min(page, pageCount - 1);
 
-  const mutate = async (action: () => Promise<unknown>, success: string) => {
+  const mutate = async (action: () => Promise<unknown>, success: ScheduleNotice) => {
     if (pendingRef.current || context.unavailable) return;
     pendingRef.current = true;
     setPending(true);
-    setMutationError(null);
+    setMutationFailed(false);
     setNotice(null);
     try {
       await action();
@@ -414,9 +560,7 @@ export const ScheduledFollowups = memo(function ScheduledFollowups({
       setEditor(null);
       window.requestAnimationFrame(() => headingRef.current?.focus());
     } catch {
-      setMutationError(
-        "The change was not confirmed. Refresh and review the saved schedule before trying again; no automatic retry was sent.",
-      );
+      setMutationFailed(true);
     } finally {
       pendingRef.current = false;
       setPending(false);
@@ -434,13 +578,13 @@ export const ScheduledFollowups = memo(function ScheduledFollowups({
           ...draft,
           ...(record ? { id: record.id, expectedRevision: record.revision } : {}),
         }),
-      record ? "Follow-up saved." : "Follow-up created.",
+      record ? "saved" : "created",
     );
   };
 
   return (
     <section
-      aria-label="Scheduled follow-ups"
+      aria-label={uiText("Scheduled follow-ups", undefined, undefined, uiLocale)}
       className="mt-4 min-w-0 border-t border-border-subtle pt-3"
       data-scheduled-followups="true"
     >
@@ -451,12 +595,23 @@ export const ScheduledFollowups = memo(function ScheduledFollowups({
             tabIndex={-1}
             className="flex items-center gap-1.5 text-xs font-medium text-muted-foreground outline-none"
           >
-            <Clock3Icon className="size-3.5" />
-            Scheduled <span className="tabular-nums text-subtle-foreground">{current.length}</span>
+            <UiMessage
+              message={"<slot1></slot1>Scheduled <slot3></slot3>"}
+              slots={{
+                slot1: <Clock3Icon className="size-3.5" />,
+                slot3: (
+                  <span className="tabular-nums text-subtle-foreground">{current.length}</span>
+                ),
+              }}
+            />
           </h3>
-          <InfoTip label="About scheduled follow-ups">
-            Saved across restarts. Runs while this chat’s Cafe server is online and awake. Existing
-            account permissions apply.
+          <InfoTip label={uiText("About scheduled follow-ups", undefined, undefined, uiLocale)}>
+            {uiText(
+              "Saved across restarts. Runs while this chat’s Cafe server is online and awake. Existing account permissions apply.",
+              undefined,
+              undefined,
+              uiLocale,
+            )}
           </InfoTip>
         </div>
         {!editor ? (
@@ -466,13 +621,13 @@ export const ScheduledFollowups = memo(function ScheduledFollowups({
             variant="ghost"
             disabled={pending || context.unavailable || reviewReadUnavailable}
             onClick={() => {
-              setMutationError(null);
+              setMutationFailed(false);
               setNotice(null);
               setEditor({ record: null });
             }}
           >
             <PlusIcon className="size-3" />
-            New follow-up
+            {uiText("New follow-up", undefined, undefined, uiLocale)}
           </Button>
         ) : null}
       </div>
@@ -486,7 +641,7 @@ export const ScheduledFollowups = memo(function ScheduledFollowups({
           onSave={save}
           onCancel={() => {
             setEditor(null);
-            setMutationError(null);
+            setMutationFailed(false);
             window.requestAnimationFrame(() => createRef.current?.focus());
           }}
         />
@@ -497,13 +652,18 @@ export const ScheduledFollowups = memo(function ScheduledFollowups({
               {error}{" "}
               <Button variant="ghost" size="xs" onClick={refresh}>
                 <RefreshCwIcon className="size-3" />
-                Refresh schedules
+                {uiText("Refresh schedules", undefined, undefined, uiLocale)}
               </Button>
             </div>
           ) : null}
           {context.unavailable ? (
             <p className="mb-2 text-xs text-muted-foreground">
-              This server is disconnected. Schedule controls return when it reconnects.
+              {uiText(
+                "This server is disconnected. Schedule controls return when it reconnects.",
+                undefined,
+                undefined,
+                uiLocale,
+              )}
             </p>
           ) : null}
           {mutationError ? (
@@ -513,16 +673,23 @@ export const ScheduledFollowups = memo(function ScheduledFollowups({
           ) : null}
           {notice ? (
             <p role="status" className="mb-2 text-xs text-muted-foreground">
-              {notice}
+              {scheduleNoticeText(notice, uiLocale)}
             </p>
           ) : null}
           {loading ? (
-            <p className="text-xs text-muted-foreground">Loading schedules…</p>
+            <p className="text-xs text-muted-foreground">
+              {uiText("Loading schedules…", undefined, undefined, uiLocale)}
+            </p>
           ) : rows.length === 0 ? (
             <p className="text-xs text-muted-foreground">
               {showHistory
-                ? "No finished schedules."
-                : "Schedule a check-in or a repeating task for this chat."}
+                ? uiText("No finished schedules.", undefined, undefined, uiLocale)
+                : uiText(
+                    "Schedule a check-in or a repeating task for this chat.",
+                    undefined,
+                    undefined,
+                    uiLocale,
+                  )}
             </p>
           ) : (
             <div className="space-y-2">
@@ -534,7 +701,7 @@ export const ScheduledFollowups = memo(function ScheduledFollowups({
                   pending={pending}
                   readUnavailable={reviewReadUnavailable}
                   onEdit={() => {
-                    setMutationError(null);
+                    setMutationFailed(false);
                     setNotice(null);
                     setEditor({ record });
                   }}
@@ -548,11 +715,7 @@ export const ScheduledFollowups = memo(function ScheduledFollowups({
                           expectedRevision: record.revision,
                           state,
                         }),
-                      state === "paused"
-                        ? "Schedule paused. An already running turn is not interrupted."
-                        : state === "deleted"
-                          ? "Schedule deleted."
-                          : "Schedule resumed.",
+                      state === "paused" ? "paused" : state === "deleted" ? "deleted" : "resumed",
                     );
                   }}
                   onRun={() => {
@@ -563,7 +726,7 @@ export const ScheduledFollowups = memo(function ScheduledFollowups({
                           id: record.id,
                           expectedRevision: record.revision,
                         }),
-                      "Run requested. It will wait if this chat is busy.",
+                      "run-requested",
                     );
                   }}
                 />
@@ -578,7 +741,7 @@ export const ScheduledFollowups = memo(function ScheduledFollowups({
                 disabled={safePage === 0}
                 onClick={() => setPage(safePage - 1)}
               >
-                Previous schedules
+                {uiText("Previous schedules", undefined, undefined, uiLocale)}
               </Button>
               <span className="text-2xs tabular-nums text-muted-foreground">
                 {safePage + 1} / {pageCount}
@@ -589,7 +752,7 @@ export const ScheduledFollowups = memo(function ScheduledFollowups({
                 disabled={safePage + 1 === pageCount}
                 onClick={() => setPage(safePage + 1)}
               >
-                Next schedules
+                {uiText("Next schedules", undefined, undefined, uiLocale)}
               </Button>
             </div>
           ) : null}
@@ -604,7 +767,14 @@ export const ScheduledFollowups = memo(function ScheduledFollowups({
                 setPage(0);
               }}
             >
-              {showHistory ? "Show current schedules" : `Finished schedules (${historical.length})`}
+              {showHistory
+                ? uiText("Show current schedules", undefined, undefined, uiLocale)
+                : uiText(
+                    "Finished schedules ({value0})",
+                    { value0: historical.length },
+                    undefined,
+                    uiLocale,
+                  )}
             </Button>
           ) : null}
         </>
@@ -612,3 +782,13 @@ export const ScheduledFollowups = memo(function ScheduledFollowups({
     </section>
   );
 });
+
+// Finite source-owned labels/helpers only; no received or user data.
+const UI_PRESENTATION_SOURCES = {
+  STATE_LABELS,
+  formatScheduleTime,
+  runLabel,
+  scheduleModelLabel,
+  scheduleRecurrenceLabel,
+  scheduleRunIssuePresentation,
+};

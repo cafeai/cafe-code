@@ -7,12 +7,18 @@ import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
  * caret spacing. Reserved height keeps the editor and pointer target steady. */
 export function ComposerTab({
   label,
+  expandLabel,
+  minimizeLabel,
   collapsed,
   onCollapsedChange,
   active = false,
   children,
 }: {
   label: string;
+  /** Caller-authored complete actions keep grammar/casing independent of the
+   * visible group title. Never derive action copy from a translated label. */
+  expandLabel: string;
+  minimizeLabel: string;
   collapsed: boolean;
   onCollapsedChange: (collapsed: boolean) => void;
   active?: boolean;
@@ -40,7 +46,7 @@ export function ComposerTab({
     observer.observe(items);
     return () => observer.disconnect();
   }, []);
-  const toggleLabel = `${collapsed ? "Expand" : "Minimize"} ${label.toLowerCase()}`;
+  const toggleLabel = collapsed ? expandLabel : minimizeLabel;
   return (
     <div className="no-drag cafe-composer-tab-entry inline-flex max-w-full">
       <div

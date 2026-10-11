@@ -1,3 +1,5 @@
+import { useUiLocale, useUiPresentation } from "~/i18n";
+import { uiText } from "@cafecode/shared/i18n";
 import { type ProviderInstanceId } from "@cafecode/contracts";
 import { memo, useMemo } from "react";
 import { SparklesIcon, StarIcon } from "lucide-react";
@@ -19,14 +21,16 @@ function describeUnavailableInstance(entry: ProviderInstanceEntry): string {
   }
   const kind =
     entry.status === "error"
-      ? "Unavailable"
+      ? uiText("Unavailable")
       : entry.status === "warning"
-        ? "Limited"
+        ? uiText("Limited")
         : entry.status === "disabled"
-          ? "Disabled in settings"
-          : "Not ready";
+          ? uiText("Disabled in settings")
+          : uiText("Not ready");
   const msg = entry.snapshot.message?.trim();
-  return msg ? `${label} — ${kind}. ${msg}` : `${label} — ${kind}.`;
+  return msg
+    ? uiText("{label} — {condition}. {detail}", { label, condition: kind, detail: msg })
+    : uiText("{label} — {condition}.", { label, condition: kind });
 }
 
 const SELECTED_BUTTON_CLASS = "bg-background text-foreground shadow-sm";
@@ -59,6 +63,9 @@ export const ModelPickerSidebar = memo(function ModelPickerSidebar(props: {
    */
   newBadgeInstanceIds?: ReadonlySet<ProviderInstanceId>;
 }) {
+  const uiLocale = useUiLocale();
+  const uiPresentation = useUiPresentation(UI_PRESENTATION_SOURCES);
+
   const handleSelect = (instanceId: ProviderInstanceId | "favorites") => {
     props.onSelectInstance(instanceId);
   };
@@ -102,7 +109,7 @@ export const ModelPickerSidebar = memo(function ModelPickerSidebar(props: {
                       onClick={() => handleSelect("favorites")}
                       type="button"
                       data-model-picker-provider="favorites"
-                      aria-label="Favorites"
+                      aria-label={uiText("Favorites", undefined, undefined, uiLocale)}
                     >
                       <StarIcon className="size-5 fill-current shrink-0" aria-hidden />
                     </button>
@@ -113,7 +120,7 @@ export const ModelPickerSidebar = memo(function ModelPickerSidebar(props: {
                   align="center"
                   className={PICKER_TOOLTIP_CLASS}
                 >
-                  Favorites
+                  {uiText("Favorites", undefined, undefined, uiLocale)}
                 </TooltipPopup>
               </Tooltip>
             </div>
@@ -129,9 +136,9 @@ export const ModelPickerSidebar = memo(function ModelPickerSidebar(props: {
             Boolean(entry.accentColor) || (duplicateDriverCounts.get(entry.driverKind) ?? 0) > 1;
 
           const tooltip = isDisabled
-            ? describeUnavailableInstance(entry)
+            ? uiPresentation.describeUnavailableInstance(entry)
             : showNewBadge
-              ? `${entry.displayName} — New`
+              ? uiText("{name} — New", { name: entry.displayName }, undefined, uiLocale)
               : entry.displayName;
 
           const button = (
@@ -150,7 +157,7 @@ export const ModelPickerSidebar = memo(function ModelPickerSidebar(props: {
                 isDisabled
                   ? tooltip
                   : showNewBadge
-                    ? `${entry.displayName}, new`
+                    ? uiText("{value0}, new", { value0: entry.displayName }, undefined, uiLocale)
                     : entry.displayName
               }
             >
@@ -196,3 +203,6 @@ export const ModelPickerSidebar = memo(function ModelPickerSidebar(props: {
     </ScrollArea>
   );
 });
+
+// Finite source-owned labels/helpers only; no received or user data.
+const UI_PRESENTATION_SOURCES = { describeUnavailableInstance };

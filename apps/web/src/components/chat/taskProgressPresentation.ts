@@ -1,3 +1,4 @@
+import { uiText } from "@cafecode/shared/i18n";
 export type ComposerTaskProgressStepStatus = "pending" | "inProgress" | "completed";
 
 /**
@@ -27,9 +28,15 @@ export interface TaskProgressDisplayStep {
 }
 
 export const TASK_PROGRESS_STATUS_LABELS: Record<TaskProgressDisplayStatus, string> = {
-  completed: "Completed",
-  current: "Current",
-  pending: "Pending",
+  get completed() {
+    return uiText("Completed");
+  },
+  get current() {
+    return uiText("Current");
+  },
+  get pending() {
+    return uiText("Pending");
+  },
 };
 
 // Provider-authored plan text is rendered as ordinary React text, so markup is

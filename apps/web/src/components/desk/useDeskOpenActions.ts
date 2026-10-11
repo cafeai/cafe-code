@@ -1,3 +1,5 @@
+import { useUiLocale } from "~/i18n";
+import { uiText } from "@cafecode/shared/i18n";
 import type { ContextMenuItem } from "@cafecode/contracts";
 import { usePrimaryEnvironmentId } from "../../environments/primary";
 import { usePreferredEditor } from "../../editorPreferences";
@@ -9,6 +11,8 @@ import { openProjectInEditor, openProjectInTerminal } from "../chat/OpenInPicker
 import { readDeskTabOpenContext } from "./useDeskTabMetadata";
 
 export function useDeskOpenActions() {
+  const uiLocale = useUiLocale();
+
   const primaryEnvironmentId = usePrimaryEnvironmentId();
   const availableEditors = useServerAvailableEditors();
   const terminal = useServerTerminal();
@@ -27,7 +31,7 @@ export function useDeskOpenActions() {
       ? [
           {
             id: "open-project",
-            label: "Open",
+            label: uiText("Open", undefined, undefined, uiLocale),
             children: [
               ...options.map(({ value, label }) => ({ id: `open-editor:${value}`, label })),
               ...(options.length
@@ -35,13 +39,13 @@ export function useDeskOpenActions() {
                 : [
                     {
                       id: "open-editor-unavailable",
-                      label: "No installed editors found",
+                      label: uiText("No installed editors found", undefined, undefined, uiLocale),
                       disabled: true,
                     },
                   ]),
               {
                 id: "open-terminal",
-                label: `Open ${terminal.label} here`,
+                label: uiText("Open {label} here", { label: terminal.label }, undefined, uiLocale),
                 disabled: !terminal.available || !capabilities.canOpenLocalTerminal,
               },
             ],
@@ -73,3 +77,5 @@ export function useDeskOpenActions() {
     return { items, run };
   };
 }
+
+// Finite source-owned labels/helpers only; no received or user data.

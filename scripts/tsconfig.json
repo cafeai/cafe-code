@@ -5,5 +5,10 @@
     "types": ["node"],
     "lib": ["ESNext", "esnext.disposable"]
   },
-  "include": ["**/*.ts", "../packages/shared/src/nativeRuntime.ts"]
+  "include": [
+    "**/*.ts",
+    "../packages/shared/src/nativeRuntime.ts",
+    "../packages/shared/src/i18n.ts",
+    "../packages/shared/src/browserUiCopy.ts"
+  ]
 }

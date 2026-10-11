@@ -1,3 +1,4 @@
+import { uiText } from "@cafecode/shared/i18n";
 import type { RemoteCertificatePreparation } from "@cafecode/contracts";
 import type * as Electron from "electron";
 import * as Context from "effect/Context";
@@ -96,12 +97,19 @@ export const layer = Layer.effect(
             const previousPin = pins.has(origin);
             const result = yield* dialog.showMessageBox({
               type: "warning",
-              title: "Trust remote Cafe Code server",
+              title: uiText("Trust remote Cafe Code server"),
               message: previousPin
-                ? "This server’s certificate has changed."
-                : "This server uses a self-signed HTTPS certificate.",
-              detail: `${origin}\n\nApprove only if this is your server. Compare this SHA-256 fingerprint with the certificate on the server:\n\n${certificate.fingerprint256}\n\nValid until ${certificate.validToDate.toISOString()}. Approval is saved only in Cafe Code for this address, port, and certificate. No sign-in credential has been sent.`,
-              buttons: ["Cancel", "Trust server"],
+                ? uiText("This server’s certificate has changed.")
+                : uiText("This server uses a self-signed HTTPS certificate."),
+              detail: uiText(
+                "{origin}\n\nApprove only if this is your server. Compare this SHA-256 fingerprint with the certificate on the server:\n\n{fingerprint}\n\nValid until {validUntil}. Approval is saved only in Cafe Code for this address, port, and certificate. No sign-in credential has been sent.",
+                {
+                  origin,
+                  fingerprint: certificate.fingerprint256,
+                  validUntil: certificate.validToDate.toISOString(),
+                },
+              ),
+              buttons: [uiText("Cancel"), uiText("Trust server")],
               defaultId: 0,
               cancelId: 0,
               noLink: true,

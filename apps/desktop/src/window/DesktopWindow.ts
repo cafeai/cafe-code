@@ -1,3 +1,4 @@
+import { getUiLocale, subscribeUiLocale, uiText } from "@cafecode/shared/i18n";
 import * as Context from "effect/Context";
 import * as Data from "effect/Data";
 import * as Effect from "effect/Effect";
@@ -21,6 +22,11 @@ import * as DesktopIpc from "../ipc/DesktopIpc.ts";
 import * as DesktopServerExposure from "../backend/DesktopServerExposure.ts";
 import { trustAudioWebContents } from "./TrustedAudioPermissionPolicy.ts";
 import * as DesktopStartupWindow from "./DesktopStartupWindow.ts";
+import * as DesktopUiLocale from "../settings/DesktopUiLocale.ts";
+import {
+  DESKTOP_UI_LOCALE_CHANGED_CHANNEL,
+  desktopUiLocaleArguments,
+} from "../settings/DesktopUiLocaleBridge.ts";
 
 const TITLEBAR_HEIGHT = 40;
 const TITLEBAR_COLOR = "#01000000"; // #00000000 does not work correctly on Linux
@@ -165,8 +171,16 @@ const make = Effect.gen(function* () {
   const serverExposure = yield* DesktopServerExposure.DesktopServerExposure;
   const state = yield* DesktopState.DesktopState;
   const startupWindow = yield* Effect.serviceOption(DesktopStartupWindow.DesktopStartupWindow);
+  const locale = yield* Effect.serviceOption(DesktopUiLocale.DesktopUiLocale);
   const context = yield* Effect.context<DesktopWindowRuntimeServices>();
   const runPromise = Effect.runPromiseWith(context);
+  const localeSubscriptions = new Set<() => void>();
+  yield* Effect.addFinalizer(() =>
+    Effect.sync(() => {
+      for (const unsubscribe of localeSubscriptions) unsubscribe();
+      localeSubscriptions.clear();
+    }),
+  );
 
   const createWindow = Effect.fn("desktop.window.createWindow")(function* (
     backendHttpUrl: URL,
@@ -174,6 +188,7 @@ const make = Effect.gen(function* () {
     const iconPaths = yield* assets.iconPaths;
     const iconOption = getIconOption(iconPaths);
     const shouldUseDarkColors = yield* electronTheme.shouldUseDarkColors;
+    const systemLocale = Option.isSome(locale) ? yield* locale.value.systemLocale : "en";
     const window = yield* electronWindow.create({
       width: 1100,
       height: 780,
@@ -186,6 +201,7 @@ const make = Effect.gen(function* () {
       title: environment.displayName,
       ...getWindowTitleBarOptions(shouldUseDarkColors),
       webPreferences: {
+        additionalArguments: desktopUiLocaleArguments(systemLocale, getUiLocale()),
         preload: environment.preloadPath,
         contextIsolation: true,
         nodeIntegration: false,
@@ -196,6 +212,16 @@ const make = Effect.gen(function* () {
       },
     });
     yield* desktopIpc.trustWebContents(window.webContents);
+    const unsubscribeLocale = subscribeUiLocale(() => {
+      if (!window.isDestroyed()) {
+        window.webContents.send(DESKTOP_UI_LOCALE_CHANGED_CHANNEL, getUiLocale());
+      }
+    });
+    localeSubscriptions.add(unsubscribeLocale);
+    window.once("closed", () => {
+      unsubscribeLocale();
+      localeSubscriptions.delete(unsubscribeLocale);
+    });
 
     const rendererUrl = environment.isDevelopment
       ? new URL(yield* resolveDesktopDevServerUrl(environment))
@@ -215,7 +241,7 @@ const make = Effect.gen(function* () {
           });
         }
         if (params.dictionarySuggestions.length === 0) {
-          menuTemplate.push({ label: "No suggestions", enabled: false });
+          menuTemplate.push({ label: uiText("No suggestions"), enabled: false });
         }
         menuTemplate.push({ type: "separator" });
       }
@@ -223,7 +249,7 @@ const make = Effect.gen(function* () {
       if (Option.isSome(ElectronShell.parseSafeExternalUrl(params.linkURL))) {
         menuTemplate.push(
           {
-            label: "Copy Link",
+            label: uiText("Copy Link"),
             click: () => {
               void runPromise(electronShell.copyText(params.linkURL));
             },
@@ -234,17 +260,17 @@ const make = Effect.gen(function* () {
 
       if (params.mediaType === "image") {
         menuTemplate.push({
-          label: "Copy Image",
+          label: uiText("Copy Image"),
           click: () => window.webContents.copyImageAt(params.x, params.y),
         });
         menuTemplate.push({ type: "separator" });
       }
 
       menuTemplate.push(
-        { role: "cut", enabled: params.editFlags.canCut },
-        { role: "copy", enabled: params.editFlags.canCopy },
-        { role: "paste", enabled: params.editFlags.canPaste },
-        { role: "selectAll", enabled: params.editFlags.canSelectAll },
+        { role: "cut", label: uiText("Cut"), enabled: params.editFlags.canCut },
+        { role: "copy", label: uiText("Copy"), enabled: params.editFlags.canCopy },
+        { role: "paste", label: uiText("Paste"), enabled: params.editFlags.canPaste },
+        { role: "selectAll", label: uiText("Select All"), enabled: params.editFlags.canSelectAll },
       );
 
       void runPromise(electronMenu.popupTemplate({ window, template: menuTemplate }));
@@ -263,6 +289,11 @@ const make = Effect.gen(function* () {
     });
     window.webContents.on("did-finish-load", () => {
       window.setTitle(environment.displayName);
+      // Initial scalar arguments precede asynchronous trust/navigation. A
+      // presentation-only change in that interval is reconciled after the
+      // preload's listener exists, with no new renderer request or authority.
+      if (!window.isDestroyed())
+        window.webContents.send(DESKTOP_UI_LOCALE_CHANGED_CHANNEL, getUiLocale());
     });
     window.webContents.on(
       "did-fail-load",

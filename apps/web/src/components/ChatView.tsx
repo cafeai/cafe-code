@@ -1,3 +1,5 @@
+import { useUiLocale, useUiPresentation } from "~/i18n";
+import { uiText } from "@cafecode/shared/i18n";
 import {
   type ApprovalRequestId,
   type CodexReviewTarget,
@@ -195,6 +197,10 @@ import {
   createFollowUpQueuePersistence,
   type FollowUpQueueClaim,
 } from "./chat/followUpQueuePersistence";
+import {
+  createQueuedFollowUpFeedback,
+  formatQueuedFollowUpFeedback,
+} from "./chat/queuedFollowUpFeedback";
 import {
   canAutoStartQueuedFollowUpTurn,
   canDispatchRunningQueuedFollowUp,
@@ -587,6 +593,8 @@ interface FollowUpQueueItem extends ComposerSendSnapshot {
   queuedAt: string;
   expanded: boolean;
   blockedReason: string | null;
+  /** Volatile source-owned display provenance; persistence omits this token. */
+  blockedFeedback?: object | undefined;
   dispatchState?: "pending" | "claimed";
   claimedDispatch?: { readonly commandId: CommandId; readonly messageId: MessageId };
   automaticSteerRetry?: {
@@ -933,6 +941,9 @@ function useLocalDispatchState(input: {
 }
 
 export default function ChatView(props: ChatViewProps) {
+  const uiLocale = useUiLocale();
+  const uiPresentation = useUiPresentation(UI_PRESENTATION_SOURCES);
+
   const { environmentId, threadId, routeKind } = props;
   const pane = useChatPane();
   const currentPaneRef = useRef(pane);
@@ -1363,7 +1374,7 @@ export default function ChatView(props: ChatViewProps) {
     if (initialQueueLoadErrorRef.current)
       toastManager.add({
         type: "error",
-        title: "Queue could not be restored",
+        title: uiText("Queue could not be restored", undefined, undefined, uiLocale),
         description: initialQueueLoadErrorRef.current,
       });
   }, []);
@@ -1427,7 +1438,7 @@ export default function ChatView(props: ChatViewProps) {
     if (!loaded.ok) {
       toastManager.add({
         type: "error",
-        title: "Queue could not be restored",
+        title: uiText("Queue could not be restored", undefined, undefined, uiLocale),
         description: loaded.error,
       });
       return;
@@ -1699,10 +1710,12 @@ export default function ChatView(props: ChatViewProps) {
             threadId: pending?.threadId ?? activeThread.id,
             queuedAt: candidate.failedAt,
             expanded: false,
-            blockedReason:
-              restored.unavailableCount > 0
-                ? `${restored.unavailableCount} attachment${restored.unavailableCount === 1 ? "" : "s"} could not be restored after reconnecting. Remove this retry and resend the missing attachment${restored.unavailableCount === 1 ? "" : "s"}.`
-                : null,
+            ...(restored.unavailableCount > 0
+              ? createQueuedFollowUpFeedback({
+                  code: "missing-attachments",
+                  count: restored.unavailableCount,
+                })
+              : { blockedReason: null }),
             automaticSteerRetry: {
               nonSteerableTurnKind: candidate.failure.turnKind,
               sourceMessageId: candidate.failure.messageId,
@@ -1966,7 +1979,7 @@ export default function ChatView(props: ChatViewProps) {
   const activeEnvironmentUnavailable =
     environmentId !== primaryEnvironmentId && savedRuntime?.connectionState !== "connected";
   const activeEnvironmentUnavailableLabel = activeEnvironmentUnavailable
-    ? (savedRuntime?.descriptor?.label ?? "remote server")
+    ? (savedRuntime?.descriptor?.label ?? uiText("remote server", undefined, undefined, uiLocale))
     : null;
   const activeEnvironmentUnavailableState: EnvironmentUnavailableState | null =
     activeEnvironmentUnavailable
@@ -1999,7 +2012,7 @@ export default function ChatView(props: ChatViewProps) {
       if (seen.has(p.environmentId)) continue;
       seen.add(p.environmentId);
       const isPrimary = p.environmentId === primaryEnvironmentId;
-      const label = resolveEnvironmentOptionLabel({
+      const label = uiPresentation.resolveEnvironmentOptionLabel({
         isPrimary,
         environmentId: p.environmentId,
         runtimeLabel: isPrimary ? primaryEnvironmentLabel : null,
@@ -2023,6 +2036,7 @@ export default function ChatView(props: ChatViewProps) {
     projectGroupingSettings,
     primaryEnvironmentId,
     primaryEnvironmentLabel,
+    uiPresentation,
   ]);
   const hasMultipleEnvironments = logicalProjectEnvironments.length > 1;
 
@@ -2177,7 +2191,7 @@ export default function ChatView(props: ChatViewProps) {
   });
   const primaryServerConfig = useServerConfig(environmentId);
   const serverConfig = primaryServerConfig;
-  const versionMismatch = resolveServerConfigVersionMismatch(serverConfig);
+  const versionMismatch = uiPresentation.resolveServerConfigVersionMismatch(serverConfig);
   const versionMismatchDismissKey =
     versionMismatch && activeThread
       ? buildVersionMismatchDismissalKey(activeThread.environmentId, versionMismatch)
@@ -2190,7 +2204,7 @@ export default function ChatView(props: ChatViewProps) {
     isVersionMismatchDismissed(versionMismatchDismissKey);
   const showVersionMismatchBanner =
     versionMismatch !== null && versionMismatchDismissKey !== null && !versionMismatchDismissed;
-  const versionMismatchServerLabel = "server";
+  const versionMismatchServerLabel = uiText("server", undefined, undefined, uiLocale);
   const composerBannerItems = useMemo<ComposerBannerStackItem[]>(() => {
     const items: ComposerBannerStackItem[] = [];
     if (showVersionMismatchBanner && versionMismatch && versionMismatchDismissKey) {
@@ -2198,14 +2212,17 @@ export default function ChatView(props: ChatViewProps) {
         id: `version-mismatch:${versionMismatchDismissKey}`,
         variant: "warning",
         icon: <TriangleAlertIcon />,
-        title: "Client and server versions differ",
+        title: uiText("Client and server versions differ", undefined, undefined, uiLocale),
         description: (
           <>
-            Client {versionMismatch.clientVersion} is connected to {versionMismatchServerLabel}{" "}
-            {versionMismatch.serverVersion}. Sync them if RPC calls or reconnects fail.
+            {uiText("Client ", undefined, undefined, uiLocale)}
+            {versionMismatch.clientVersion}
+            {uiText(" is connected to ", undefined, undefined, uiLocale)}
+            {versionMismatchServerLabel} {versionMismatch.serverVersion}
+            {uiText(". Sync them if RPC calls or reconnects fail.", undefined, undefined, uiLocale)}
           </>
         ),
-        dismissLabel: "Dismiss version mismatch warning",
+        dismissLabel: uiText("Dismiss version mismatch warning", undefined, undefined, uiLocale),
         onDismiss: () => {
           dismissVersionMismatch(versionMismatchDismissKey);
           setDismissedVersionMismatchKey(versionMismatchDismissKey);
@@ -2218,6 +2235,7 @@ export default function ChatView(props: ChatViewProps) {
     versionMismatch,
     versionMismatchDismissKey,
     versionMismatchServerLabel,
+    uiLocale,
   ]);
   const providerStatuses = serverConfig?.providers ?? EMPTY_PROVIDERS;
   const unlockedSelectedProvider = resolveSelectableProvider(
@@ -2246,23 +2264,31 @@ export default function ChatView(props: ChatViewProps) {
   );
   const workLogEntries = useMemo(() => {
     const turnId = activeLatestTurn?.turnId;
-    return deriveWorkLogEntries(threadActivities, turnId, { includeUnscopedCompaction: true });
-  }, [activeLatestTurn?.turnId, threadActivities]);
+    return uiPresentation.deriveWorkLogEntries(threadActivities, turnId, {
+      includeUnscopedCompaction: true,
+    });
+  }, [activeLatestTurn?.turnId, threadActivities, uiPresentation]);
   const subagentEntries = useMemo(() => {
     const turnId = activeLatestTurn?.turnId;
-    return deriveSubagentWorkEntries(threadActivities, turnId, {
+    return uiPresentation.deriveSubagentWorkEntries(threadActivities, turnId, {
       runtimeSession: subagentRuntimeSession,
       ...(turnId && activeLatestTurn?.state !== "running"
         ? { terminalTurnIds: new Set([turnId]) }
         : {}),
     });
-  }, [activeLatestTurn?.state, activeLatestTurn?.turnId, threadActivities, subagentRuntimeSession]);
+  }, [
+    activeLatestTurn?.state,
+    activeLatestTurn?.turnId,
+    threadActivities,
+    subagentRuntimeSession,
+    uiPresentation,
+  ]);
   const activeSubagentEntries = useMemo(
     () =>
       isLiveWorkRuntimeCurrent(liveWork?.runtimeId, subagentRuntimeSession) &&
       liveWork?.agentCount === 0
         ? []
-        : deriveActiveSubagentWorkEntries(
+        : uiPresentation.deriveActiveSubagentWorkEntries(
             threadActivities,
             activeLatestTurn?.state === "running" ? activeLatestTurn.turnId : null,
             { runtimeSession: subagentRuntimeSession },
@@ -2273,6 +2299,7 @@ export default function ChatView(props: ChatViewProps) {
       threadActivities,
       subagentRuntimeSession,
       liveWork,
+      uiPresentation,
     ],
   );
   const codexRecovery = useMemo(
@@ -2375,7 +2402,7 @@ export default function ChatView(props: ChatViewProps) {
     pendingUserInputs.length === 0
       ? activePlan
       : null;
-  const planSidebarLabel = "Plan";
+  const planSidebarLabel = uiText("Plan", undefined, undefined, uiLocale);
   const showPlanFollowUpPrompt =
     pendingUserInputs.length === 0 &&
     interactionMode === "plan" &&
@@ -2631,13 +2658,19 @@ export default function ChatView(props: ChatViewProps) {
   }, [serverMessages, attachmentPreviewHandoffByMessageId, optimisticUserMessages, routeThreadKey]);
   const historicalWorkLogSummariesByTurnId = useMemo(
     () =>
-      deriveHistoricalWorkLogSummaries({
+      uiPresentation.deriveHistoricalWorkLogSummaries({
         messages: timelineMessages,
         activities: threadActivities,
         latestTurnId: activeLatestTurn?.turnId ?? null,
         runtimeSession: subagentRuntimeSession,
       }),
-    [activeLatestTurn?.turnId, threadActivities, timelineMessages, subagentRuntimeSession],
+    [
+      activeLatestTurn?.turnId,
+      threadActivities,
+      timelineMessages,
+      subagentRuntimeSession,
+      uiPresentation,
+    ],
   );
   const timelineEntries = useMemo(
     () =>
@@ -2699,8 +2732,8 @@ export default function ChatView(props: ChatViewProps) {
   ]);
 
   const completionSummary = useMemo(
-    () => deriveTurnCompletionSummary({ thread: activeThread, liveWork }),
-    [activeThread, liveWork],
+    () => uiPresentation.deriveTurnCompletionSummary({ thread: activeThread, liveWork }),
+    [activeThread, liveWork, uiPresentation],
   );
   const completionDividerAfterEntryId = useMemo(() => {
     if (!latestTurnSettled) return null;
@@ -2997,7 +3030,7 @@ export default function ChatView(props: ChatViewProps) {
     void dispatchGateRevision;
     return activeFollowUpQueue.map((item) => ({
       id: item.id,
-      preview: previewQueuedFollowUpText(item.promptText),
+      preview: uiPresentation.previewQueuedFollowUpText(item.promptText),
       promptText: item.promptText,
       images: item.images,
       files: item.files,
@@ -3012,10 +3045,14 @@ export default function ChatView(props: ChatViewProps) {
       queuedAt: item.queuedAt,
       expanded: item.expanded,
       canExpand:
-        canExpandQueuedFollowUpText(item.promptText) ||
+        uiPresentation.canExpandQueuedFollowUpText(item.promptText) ||
         item.images.length > 0 ||
         item.files.length > 0,
-      blockedReason: item.blockedReason,
+      blockedReason: formatQueuedFollowUpFeedback(
+        item.blockedReason,
+        item.blockedFeedback,
+        uiLocale,
+      ),
       automaticSteerRetry: item.automaticSteerRetry === undefined ? null : item.automaticSteerRetry,
     }));
   }, [
@@ -3025,6 +3062,8 @@ export default function ChatView(props: ChatViewProps) {
     dispatchGateRevision,
     queueDispatchInFlightRef,
     sendInFlightRef,
+    uiPresentation,
+    uiLocale,
   ]);
   const steeringProvider = activeThread?.session?.provider;
   const steeringFollowUpViewItems = useMemo<readonly SteeringFollowUpViewItem[]>(
@@ -3034,7 +3073,7 @@ export default function ChatView(props: ChatViewProps) {
         .toSorted((left, right) => left.dispatchedAt.localeCompare(right.dispatchedAt))
         .map((pending) => ({
           id: pending.messageId,
-          preview: previewQueuedFollowUpText(pending.snapshot.promptText),
+          preview: uiPresentation.previewQueuedFollowUpText(pending.snapshot.promptText),
           promptText: pending.snapshot.promptText,
           dispatchedAt: pending.dispatchedAt,
           files: pending.snapshot.files,
@@ -3048,7 +3087,13 @@ export default function ChatView(props: ChatViewProps) {
             previousStatus: pending.deliveryStatus,
           }),
         })),
-    [activeThreadId, pendingSteerDispatchByMessageId, threadActivities, steeringProvider],
+    [
+      activeThreadId,
+      pendingSteerDispatchByMessageId,
+      threadActivities,
+      steeringProvider,
+      uiPresentation,
+    ],
   );
   const canActivateRunningFollowUpQueueAction = canDispatchRunningQueuedFollowUp({
     phase: followUpQueuePhase,
@@ -3068,11 +3113,11 @@ export default function ChatView(props: ChatViewProps) {
   const canSteerFollowUpQueue =
     canActivateRunningFollowUpQueueAction && activeProviderLiveSteerAvailable;
   const activeSteeringFollowUpInFlight = steeringFollowUpViewItems.length > 0;
-  const followUpQueueActionLabel = queuedFollowUpActionLabel({
+  const followUpQueueActionLabel = uiPresentation.queuedFollowUpActionLabel({
     phase: followUpQueuePhase,
     liveSteerSupported: activeProviderLiveSteerAvailable,
   });
-  const followUpQueueActionTitle = queuedFollowUpActionTitle({
+  const followUpQueueActionTitle = uiPresentation.queuedFollowUpActionTitle({
     phase: followUpQueuePhase,
     liveSteerSupported: activeProviderLiveSteerAvailable,
   });
@@ -3128,7 +3173,7 @@ export default function ChatView(props: ChatViewProps) {
     const capturedAt = new Date(capturedAtMs).toISOString();
     const localApi = readLocalApi();
     const wsConnectionDiagnostics = getWsConnectionDiagnostics();
-    const usageDetailDiagnostics = getUsageStatsDetailDiagnostics();
+    const usageDetailDiagnostics = uiPresentation.getUsageStatsDetailDiagnostics();
     const composerDebugState = readComposerHandle(composerRef)?.readDebugState() ?? null;
     const firstItem = firstActiveFollowUpQueueItem;
     const activePendingSteerInterruptRecovery =
@@ -3572,7 +3617,7 @@ export default function ChatView(props: ChatViewProps) {
               length: items.length,
               itemIds: items.map((item) => item.id),
               promptPreviews: items.map((item) =>
-                previewQueuedFollowUpText(item.promptText).slice(0, 240),
+                uiPresentation.previewQueuedFollowUpText(item.promptText).slice(0, 240),
               ),
             },
           ]),
@@ -3592,7 +3637,9 @@ export default function ChatView(props: ChatViewProps) {
                 queuedAt: item.queuedAt,
                 blockedReason: item.blockedReason,
                 promptLength: item.promptText.length,
-                promptPreview: previewQueuedFollowUpText(item.promptText).slice(0, 240),
+                promptPreview: uiPresentation
+                  .previewQueuedFollowUpText(item.promptText)
+                  .slice(0, 240),
                 imageCount: item.images.length,
                 provider: item.provider,
                 model: item.model,
@@ -3628,7 +3675,9 @@ export default function ChatView(props: ChatViewProps) {
               turnId: pending.turnId,
               dispatchedAt: pending.dispatchedAt,
               promptLength: pending.snapshot.promptText.length,
-              promptPreview: previewQueuedFollowUpText(pending.snapshot.promptText).slice(0, 240),
+              promptPreview: uiPresentation
+                .previewQueuedFollowUpText(pending.snapshot.promptText)
+                .slice(0, 240),
               imageCount: pending.snapshot.images.length,
               provider: pending.snapshot.provider,
               model: pending.snapshot.model,
@@ -3645,7 +3694,7 @@ export default function ChatView(props: ChatViewProps) {
           blockedReason: item.blockedReason,
           expanded: item.expanded,
           promptLength: item.promptText.length,
-          promptPreview: previewQueuedFollowUpText(item.promptText).slice(0, 240),
+          promptPreview: uiPresentation.previewQueuedFollowUpText(item.promptText).slice(0, 240),
           imageCount: item.images.length,
           provider: item.provider,
           model: item.model,
@@ -4495,20 +4544,36 @@ export default function ChatView(props: ChatViewProps) {
       if (activeEnvironmentUnavailable && activeEnvironmentUnavailableLabel) {
         setThreadError(
           activeThread.id,
-          `Reconnect ${activeEnvironmentUnavailableLabel} before reverting checkpoints.`,
+          uiText(
+            "Reconnect {environment} before reverting checkpoints.",
+            {
+              environment: activeEnvironmentUnavailableLabel,
+            },
+            undefined,
+            uiLocale,
+          ),
         );
         return;
       }
       if (phase === "running" || isSendBusy || isComposerConnecting) {
-        setThreadError(activeThread.id, "Interrupt the current turn before reverting checkpoints.");
+        setThreadError(
+          activeThread.id,
+          uiText(
+            "Interrupt the current turn before reverting checkpoints.",
+            undefined,
+            undefined,
+            uiLocale,
+          ),
+        );
         return;
       }
       const confirmed = await localApi.dialogs.confirm(
-        [
-          `Revert this thread to checkpoint ${turnCount}?`,
-          "This will discard newer messages and turn diffs in this thread.",
-          "This action cannot be undone.",
-        ].join("\n"),
+        uiText(
+          "Revert this thread to checkpoint {checkpoint}?\nThis will discard newer messages and turn diffs in this thread.\nThis action cannot be undone.",
+          { checkpoint: turnCount },
+          undefined,
+          uiLocale,
+        ),
       );
       if (!confirmed) {
         return;
@@ -4527,7 +4592,9 @@ export default function ChatView(props: ChatViewProps) {
       } catch (err) {
         setThreadError(
           activeThread.id,
-          err instanceof Error ? err.message : "Failed to revert thread state.",
+          err instanceof Error
+            ? err.message
+            : uiText("Failed to revert thread state.", undefined, undefined, uiLocale),
         );
       }
       setIsRevertingCheckpoint(false);
@@ -4542,6 +4609,7 @@ export default function ChatView(props: ChatViewProps) {
       isSendBusy,
       phase,
       setThreadError,
+      uiLocale,
     ],
   );
 
@@ -4551,7 +4619,7 @@ export default function ChatView(props: ChatViewProps) {
     subagentLimits?: SubagentLimits | undefined;
   }): boolean => {
     if (!activeThread) return false;
-    const concurrencyIssue = readSubagentConcurrencyAdmissionError({
+    const concurrencyIssue = uiPresentation.readSubagentConcurrencyAdmissionError({
       environmentId,
       modelSelection: input.modelSelection,
       provider: input.provider,
@@ -4598,7 +4666,12 @@ export default function ChatView(props: ChatViewProps) {
     } catch {
       setThreadError(
         activeThread.id,
-        "Finish or remove every file upload before sending. Files must belong to this thread and environment.",
+        uiText(
+          "Finish or remove every file upload before sending. Files must belong to this thread and environment.",
+          undefined,
+          undefined,
+          uiLocale,
+        ),
       );
       return null;
     }
@@ -4700,7 +4773,12 @@ export default function ChatView(props: ChatViewProps) {
     if (parseComposerCompactionCommand(snapshot.provider, snapshot.promptText) !== null) {
       setThreadError(
         activeThread.id,
-        "Run /compact directly after the current turn finishes; compaction commands cannot be queued.",
+        uiText(
+          "Run /compact directly after the current turn finishes; compaction commands cannot be queued.",
+          undefined,
+          undefined,
+          uiLocale,
+        ),
       );
       return false;
     }
@@ -4773,7 +4851,7 @@ export default function ChatView(props: ChatViewProps) {
     if (stoppedDuringPersistence) {
       acceptedItem = {
         ...acceptedItem,
-        blockedReason: "Stopped before sending. Select this queued message to send it.",
+        ...createQueuedFollowUpFeedback({ code: "stopped-before-send" }),
       };
       const parked = await queuePersistence.replacePending(item, acceptedItem);
       if (!parked.ok) {
@@ -4937,16 +5015,28 @@ export default function ChatView(props: ChatViewProps) {
       return;
     const queuedThread = resolveQueuedFollowUpThread(item);
     if (!queuedThread) {
-      blockFollowUpQueueItem(item.threadId, item.id, "Thread is not loaded yet.");
+      blockFollowUpQueueItem(
+        item.threadId,
+        item.id,
+        uiText("Thread is not loaded yet.", undefined, undefined, uiLocale),
+      );
       return;
     }
     const api = readEnvironmentApi(queuedThread.environmentId);
     if (!api) {
-      blockFollowUpQueueItem(item.threadId, item.id, "Cafe Code is not connected.");
+      blockFollowUpQueueItem(
+        item.threadId,
+        item.id,
+        uiText("Cafe Code is not connected.", undefined, undefined, uiLocale),
+      );
       return;
     }
     if (isThreadEnvironmentUnavailable(queuedThread)) {
-      blockFollowUpQueueItem(item.threadId, item.id, "Cafe Code is not connected.");
+      blockFollowUpQueueItem(
+        item.threadId,
+        item.id,
+        uiText("Cafe Code is not connected.", undefined, undefined, uiLocale),
+      );
       return;
     }
     const queuedProject = resolveProjectForThread(queuedThread);
@@ -4954,15 +5044,24 @@ export default function ChatView(props: ChatViewProps) {
       blockFollowUpQueueItem(
         item.threadId,
         item.id,
-        "Update the server to send messages in standalone chats.",
+        uiText(
+          "Update the server to send messages in standalone chats.",
+          undefined,
+          undefined,
+          uiLocale,
+        ),
       );
       return;
     }
     if (queuedThread.projectId !== null && !queuedProject) {
-      blockFollowUpQueueItem(item.threadId, item.id, "Project metadata is not loaded yet.");
+      blockFollowUpQueueItem(
+        item.threadId,
+        item.id,
+        uiText("Project metadata is not loaded yet.", undefined, undefined, uiLocale),
+      );
       return;
     }
-    const concurrencyIssue = readSubagentConcurrencyAdmissionError({
+    const concurrencyIssue = uiPresentation.readSubagentConcurrencyAdmissionError({
       environmentId: queuedThread.environmentId,
       modelSelection: item.modelSelection,
       provider: item.provider,
@@ -5016,7 +5115,12 @@ export default function ChatView(props: ChatViewProps) {
       if (!parked.ok)
         toastManager.add({
           type: "error",
-          title: "Queued message was not sent, but its paused state could not be saved",
+          title: uiText(
+            "Queued message was not sent, but its paused state could not be saved",
+            undefined,
+            undefined,
+            uiLocale,
+          ),
           description: parked.error,
         });
     };
@@ -5035,8 +5139,14 @@ export default function ChatView(props: ChatViewProps) {
         return;
       }
       if (wasStoppedDuringPreparation()) {
-        await parkUnattemptedItem(stoppedBeforeSubmissionMessage);
-        blockFollowUpQueueItem(item.threadId, item.id, stoppedBeforeSubmissionMessage);
+        const stoppedDisplayMessage = uiText(
+          "Stopped before sending. Select this queued message to send it.",
+          undefined,
+          undefined,
+          uiLocale,
+        );
+        await parkUnattemptedItem(stoppedDisplayMessage);
+        blockFollowUpQueueItem(item.threadId, item.id, stoppedDisplayMessage);
         setQueueDispatchInFlight(false);
         if (isVisibleThread) {
           setSendInFlight(false);
@@ -5100,7 +5210,7 @@ export default function ChatView(props: ChatViewProps) {
       // the delivery boundary. Queue snapshots intentionally carry no policy
       // replacement, so a captured map must not bypass a later account edit
       // or overwrite a chat edit made during asynchronous preparation.
-      const finalConcurrencyIssue = readSubagentConcurrencyAdmissionError({
+      const finalConcurrencyIssue = uiPresentation.readSubagentConcurrencyAdmissionError({
         environmentId: item.environmentId,
         modelSelection: item.modelSelection,
         provider: item.provider,
@@ -5149,7 +5259,12 @@ export default function ChatView(props: ChatViewProps) {
         if (!settled.ok)
           toastManager.add({
             type: "error",
-            title: "Message accepted, but queue cleanup failed",
+            title: uiText(
+              "Message accepted, but queue cleanup failed",
+              undefined,
+              undefined,
+              uiLocale,
+            ),
             description: settled.error,
           });
       }
@@ -5164,20 +5279,29 @@ export default function ChatView(props: ChatViewProps) {
           return existing.filter((message) => message.id !== messageIdForSend);
         });
       }
-      const queuedFollowUpError = describeSendFailureMessage(
-        err,
-        "Failed to send queued follow-up.",
-      );
+      // Preserve the canonical thrown error for delivery normalization while
+      // localizing this Cafe-owned Stop explanation only at its display sink.
+      const stoppedFeedback = stoppedBeforeSubmission
+        ? createQueuedFollowUpFeedback({ code: "stopped-before-send" })
+        : null;
+      const queuedFollowUpError = stoppedFeedback
+        ? stoppedFeedback.blockedReason
+        : uiPresentation.describeSendFailureMessage(
+            err,
+            uiText("Failed to send queued follow-up.", undefined, undefined, uiLocale),
+          );
       if (!providerSubmissionAttempted) await parkUnattemptedItem(queuedFollowUpError);
       setFollowUpQueueByThreadId((existing) => ({
         ...existing,
         [item.threadId]: [
           {
             ...item,
-            blockedReason:
-              item.automaticSteerRetry && isIndeterminateTransportError(err)
-                ? "Delivery status is unknown. Inspect the timeline before removing this queued message."
-                : queuedFollowUpError,
+            ...(item.automaticSteerRetry && isIndeterminateTransportError(err)
+              ? createQueuedFollowUpFeedback({ code: "delivery-unknown" })
+              : (stoppedFeedback ?? {
+                  blockedReason: queuedFollowUpError,
+                  blockedFeedback: undefined,
+                })),
             ...(item.automaticSteerRetry
               ? isIndeterminateTransportError(err)
                 ? {
@@ -5300,7 +5424,10 @@ export default function ChatView(props: ChatViewProps) {
     try {
       turnAttachments = await buildAttachmentsForSnapshot(snapshot);
     } catch (error) {
-      const message = describeSendFailureMessage(error, "Failed to prepare the message.");
+      const message = uiPresentation.describeSendFailureMessage(
+        error,
+        uiText("Failed to prepare the message.", undefined, undefined, uiLocale),
+      );
       if (options?.queuedItem) {
         blockFollowUpQueueItem(options.queuedItem.threadId, options.queuedItem.id, message);
       } else {
@@ -5368,7 +5495,7 @@ export default function ChatView(props: ChatViewProps) {
       scopeThreadRef(activeThread.environmentId, activeThread.id),
     );
     const currentSteerSession = currentSteerThread?.session;
-    const finalSteerConcurrencyIssue = readSubagentConcurrencyAdmissionError({
+    const finalSteerConcurrencyIssue = uiPresentation.readSubagentConcurrencyAdmissionError({
       environmentId: activeThread.environmentId,
       modelSelection: {
         ...snapshot.modelSelection,
@@ -5481,7 +5608,12 @@ export default function ChatView(props: ChatViewProps) {
         if (!settled.ok)
           toastManager.add({
             type: "error",
-            title: "Message accepted, but queue cleanup failed",
+            title: uiText(
+              "Message accepted, but queue cleanup failed",
+              undefined,
+              undefined,
+              uiLocale,
+            ),
             description: settled.error,
           });
       }
@@ -5523,12 +5655,10 @@ export default function ChatView(props: ChatViewProps) {
                   ? {
                       dispatchState: "claimed" as const,
                       claimedDispatch: { commandId: commandIdForSend, messageId: messageIdForSend },
-                      blockedReason:
-                        "Delivery status is unknown. Inspect the timeline before removing this queued message.",
+                      ...createQueuedFollowUpFeedback({ code: "delivery-unknown" }),
                     }
                   : {
-                      blockedReason:
-                        "Delivery paused. Your message and attachments are preserved. You can retry delivery.",
+                      ...createQueuedFollowUpFeedback({ code: "delivery-paused" }),
                       automaticSteerRetry: {
                         ...options.queuedItem!.automaticSteerRetry,
                         dispatchFailed: true as const,
@@ -5539,8 +5669,7 @@ export default function ChatView(props: ChatViewProps) {
                 ? {
                     dispatchState: "claimed" as const,
                     claimedDispatch: { commandId: claim.commandId, messageId: claim.messageId },
-                    blockedReason:
-                      "Delivery status is unknown. Inspect the timeline before removing this queued message.",
+                    ...createQueuedFollowUpFeedback({ code: "delivery-unknown" }),
                   }
                 : {}),
             },
@@ -5562,7 +5691,13 @@ export default function ChatView(props: ChatViewProps) {
       } else if (promptRef.current.length === 0 && composerImagesRef.current.length === 0) {
         restoreComposerSnapshotForRetry(snapshot);
       }
-      setThreadError(activeThread.id, describeSendFailureMessage(err, "Failed to steer turn."));
+      setThreadError(
+        activeThread.id,
+        uiPresentation.describeSendFailureMessage(
+          err,
+          uiText("Failed to steer turn.", undefined, undefined, uiLocale),
+        ),
+      );
     } finally {
       setSendInFlight(false);
     }
@@ -5662,16 +5797,36 @@ export default function ChatView(props: ChatViewProps) {
     if (compactionCommand !== null) {
       const issue =
         compactionCommand === "invalid-arguments"
-          ? "Use /compact on its own, without additional instructions."
+          ? uiText(
+              "Use /compact on its own, without additional instructions.",
+              undefined,
+              undefined,
+              uiLocale,
+            )
           : composerImages.length || snapshot.files.length
-            ? "Remove attachments before running /compact."
+            ? uiText("Remove attachments before running /compact.", undefined, undefined, uiLocale)
             : followUpQueuePhase === "running" || followUpQueuePhase === "connecting"
-              ? "Wait for the current turn to finish before compacting."
+              ? uiText(
+                  "Wait for the current turn to finish before compacting.",
+                  undefined,
+                  undefined,
+                  uiLocale,
+                )
               : followUpQueuePhase === "disconnected"
-                ? "Resume this conversation before running /compact."
+                ? uiText(
+                    "Resume this conversation before running /compact.",
+                    undefined,
+                    undefined,
+                    uiLocale,
+                  )
                 : !activeThread.session ||
                     activeThread.session.providerInstanceId !== ctxSelectedModelSelection.instanceId
-                  ? "Start a conversation with the selected provider before compacting."
+                  ? uiText(
+                      "Start a conversation with the selected provider before compacting.",
+                      undefined,
+                      undefined,
+                      uiLocale,
+                    )
                   : null;
       if (issue) {
         setThreadError(activeThread.id, issue);
@@ -5703,7 +5858,9 @@ export default function ChatView(props: ChatViewProps) {
       } catch (cause) {
         setThreadError(
           activeThread.id,
-          cause instanceof Error ? cause.message : "Compaction could not be requested.",
+          cause instanceof Error
+            ? cause.message
+            : uiText("Compaction could not be requested.", undefined, undefined, uiLocale),
         );
       } finally {
         sendInFlightRef.current = false;
@@ -5770,7 +5927,9 @@ export default function ChatView(props: ChatViewProps) {
       } catch (cause) {
         setThreadError(
           activeThread.id,
-          cause instanceof Error ? cause.message : "The goal command could not be queued.",
+          cause instanceof Error
+            ? cause.message
+            : uiText("The goal command could not be queued.", undefined, undefined, uiLocale),
         );
         return;
       }
@@ -5838,7 +5997,15 @@ export default function ChatView(props: ChatViewProps) {
     if (!hasSendableContent) return;
     if (activeThread.projectId !== null && !activeProject) return;
     if (activeThread.projectId === null && !supportsStandaloneChats(activeThread.environmentId)) {
-      setThreadError(activeThread.id, "Update the server to send messages in standalone chats.");
+      setThreadError(
+        activeThread.id,
+        uiText(
+          "Update the server to send messages in standalone chats.",
+          undefined,
+          undefined,
+          uiLocale,
+        ),
+      );
       return;
     }
     const threadIdForSend = activeThread.id;
@@ -5865,7 +6032,15 @@ export default function ChatView(props: ChatViewProps) {
       sendEnvMode === "worktree" &&
       !activeThread.worktreePath;
     if (shouldCreateWorktree && !activeThreadBranch) {
-      setThreadError(threadIdForSend, "Select a base branch before sending in New worktree mode.");
+      setThreadError(
+        threadIdForSend,
+        uiText(
+          "Select a base branch before sending in New worktree mode.",
+          undefined,
+          undefined,
+          uiLocale,
+        ),
+      );
       return;
     }
 
@@ -5930,11 +6105,16 @@ export default function ChatView(props: ChatViewProps) {
       let titleSeed = trimmed;
       if (!titleSeed) {
         if (firstComposerImageName) {
-          titleSeed = `Image: ${firstComposerImageName}`;
+          titleSeed = uiText(
+            "Image: {name}",
+            { name: firstComposerImageName },
+            undefined,
+            uiLocale,
+          );
         } else if (snapshot.files[0]) {
-          titleSeed = `File: ${snapshot.files[0].name}`;
+          titleSeed = uiText("File: {name}", { name: snapshot.files[0].name }, undefined, uiLocale);
         } else {
-          titleSeed = "New chat";
+          titleSeed = uiText("New chat", undefined, undefined, uiLocale);
         }
       }
       const title = truncate(titleSeed);
@@ -6002,7 +6182,7 @@ export default function ChatView(props: ChatViewProps) {
       // A send's explicit map (including Reset's empty map) remains its
       // replacement intent. With no replacement, mirror the server's latest
       // durable chat policy rather than the earlier renderer snapshot.
-      const finalConcurrencyIssue = readSubagentConcurrencyAdmissionError({
+      const finalConcurrencyIssue = uiPresentation.readSubagentConcurrencyAdmissionError({
         environmentId: sendAttemptThreadRef.environmentId,
         modelSelection: ctxSelectedModelSelection,
         provider: ctxSelectedProvider,
@@ -6099,7 +6279,10 @@ export default function ChatView(props: ChatViewProps) {
         });
         scheduleComposerFocus();
       }
-      const sendFailureMessage = describeSendFailureMessage(err, "Failed to send message.");
+      const sendFailureMessage = uiPresentation.describeSendFailureMessage(
+        err,
+        uiText("Failed to send message.", undefined, undefined, uiLocale),
+      );
       setThreadError(threadIdForSend, sendFailureMessage, sendAttemptThreadRef);
 
       // ThreadErrorBanner deliberately remembers an exact dismissed provider
@@ -6123,7 +6306,7 @@ export default function ChatView(props: ChatViewProps) {
       failureToastId = toastManager.add(
         stackedThreadToast({
           type: "error",
-          title: "Message was not sent",
+          title: uiText("Message was not sent", undefined, undefined, uiLocale),
           description: sendFailureMessage,
           data: {
             // Use the route-owned canonical ref rather than rebuilding scope
@@ -6210,7 +6393,7 @@ export default function ChatView(props: ChatViewProps) {
           continue;
         }
         if (
-          !canExpandQueuedFollowUpText(item.promptText) &&
+          !uiPresentation.canExpandQueuedFollowUpText(item.promptText) &&
           item.images.length === 0 &&
           item.files.length === 0
         ) {
@@ -6270,8 +6453,8 @@ export default function ChatView(props: ChatViewProps) {
       });
       toastManager.add({
         type: "error",
-        title: "Could not interrupt turn",
-        description: "Cafe Code is not connected.",
+        title: uiText("Could not interrupt turn", undefined, undefined, uiLocale),
+        description: uiText("Cafe Code is not connected.", undefined, undefined, uiLocale),
       });
       return;
     }
@@ -6309,7 +6492,10 @@ export default function ChatView(props: ChatViewProps) {
         delete next[item.threadId];
         return next;
       });
-      const message = error instanceof Error ? error.message : "Failed to interrupt active turn.";
+      const message =
+        error instanceof Error
+          ? error.message
+          : uiText("Failed to interrupt active turn.", undefined, undefined, uiLocale);
       recordFollowUpQueueDebugAttempt("manual-interrupt", "interrupt-failed", {
         threadId: item.threadId,
         itemId: item.id,
@@ -6317,7 +6503,7 @@ export default function ChatView(props: ChatViewProps) {
       setThreadError(item.threadId, message);
       toastManager.add({
         type: "error",
-        title: "Could not interrupt turn",
+        title: uiText("Could not interrupt turn", undefined, undefined, uiLocale),
         description: message,
       });
     }
@@ -6461,7 +6647,12 @@ export default function ChatView(props: ChatViewProps) {
     ) {
       setThreadError(
         activeThread.id,
-        "This queued message is no longer safely editable. Reload to check its delivery status.",
+        uiText(
+          "This queued message is no longer safely editable. Reload to check its delivery status.",
+          undefined,
+          undefined,
+          uiLocale,
+        ),
       );
       return;
     }
@@ -6488,7 +6679,12 @@ export default function ChatView(props: ChatViewProps) {
     } catch {
       setThreadError(
         activeThread.id,
-        "The current draft could not be saved. Keep it open and retry editing the queue after freeing browser storage.",
+        uiText(
+          "The current draft could not be saved. Keep it open and retry editing the queue after freeing browser storage.",
+          undefined,
+          undefined,
+          uiLocale,
+        ),
       );
       return;
     } finally {
@@ -6512,7 +6708,12 @@ export default function ChatView(props: ChatViewProps) {
       store.finishQueueEdit(composerDraftTarget);
       setThreadError(
         activeThread.id,
-        "The current draft could not be saved. Queue editing was cancelled; your draft is still here.",
+        uiText(
+          "The current draft could not be saved. Queue editing was cancelled; your draft is still here.",
+          undefined,
+          undefined,
+          uiLocale,
+        ),
       );
       return;
     }
@@ -6530,8 +6731,13 @@ export default function ChatView(props: ChatViewProps) {
     if (!flushComposerDraftPersistence())
       toastManager.add({
         type: "error",
-        title: "Your restored draft could not be saved",
-        description: "Keep this page open and free browser storage before reloading.",
+        title: uiText("Your restored draft could not be saved", undefined, undefined, uiLocale),
+        description: uiText(
+          "Keep this page open and free browser storage before reloading.",
+          undefined,
+          undefined,
+          uiLocale,
+        ),
       });
     if (currentRouteThreadKeyRef.current !== routeThreadKey) return;
     const restored = store.getComposerDraft(composerDraftTarget);
@@ -6558,7 +6764,12 @@ export default function ChatView(props: ChatViewProps) {
     if (parseComposerCompactionCommand(snapshot.provider, snapshot.promptText) !== null) {
       setThreadError(
         activeThread.id,
-        "Run /compact directly after the current turn finishes; compaction commands cannot be queued.",
+        uiText(
+          "Run /compact directly after the current turn finishes; compaction commands cannot be queued.",
+          undefined,
+          undefined,
+          uiLocale,
+        ),
       );
       return;
     }
@@ -6574,7 +6785,12 @@ export default function ChatView(props: ChatViewProps) {
     ) {
       setThreadError(
         activeThread.id,
-        "This queued message is no longer pending. Cancel editing to restore your previous draft.",
+        uiText(
+          "This queued message is no longer pending. Cancel editing to restore your previous draft.",
+          undefined,
+          undefined,
+          uiLocale,
+        ),
       );
       return;
     }
@@ -6729,14 +6945,18 @@ export default function ChatView(props: ChatViewProps) {
       deriveCodexRecoveryPresentation({
         thread: currentThread,
         activities: currentThread.activities,
-        activeSubagents: deriveActiveSubagentWorkEntries(currentThread.activities, null, {
-          runtimeSession: currentThread.session
-            ? {
-                subagentRuntimeId: currentThread.session.subagentRuntimeId,
-                orchestrationStatus: currentThread.session.orchestrationStatus,
-              }
-            : null,
-        }),
+        activeSubagents: uiPresentation.deriveActiveSubagentWorkEntries(
+          currentThread.activities,
+          null,
+          {
+            runtimeSession: currentThread.session
+              ? {
+                  subagentRuntimeId: currentThread.session.subagentRuntimeId,
+                  orchestrationStatus: currentThread.session.orchestrationStatus,
+                }
+              : null,
+          },
+        ),
       }) !== null;
     const turnId = currentThread.session?.activeTurnId ?? undefined;
     updateManualStopBarrier(activeThread.id, {
@@ -6773,7 +6993,9 @@ export default function ChatView(props: ChatViewProps) {
       });
       setThreadError(
         activeThread.id,
-        error instanceof Error ? error.message : "Failed to interrupt active turn.",
+        error instanceof Error
+          ? error.message
+          : uiText("Failed to interrupt active turn.", undefined, undefined, uiLocale),
       );
     }
   };
@@ -6798,12 +7020,14 @@ export default function ChatView(props: ChatViewProps) {
         .catch((err: unknown) => {
           setThreadError(
             activeThreadId,
-            err instanceof Error ? err.message : "Failed to submit approval decision.",
+            err instanceof Error
+              ? err.message
+              : uiText("Failed to submit approval decision.", undefined, undefined, uiLocale),
           );
         });
       setRespondingRequestIds((existing) => existing.filter((id) => id !== requestId));
     },
-    [activeThreadId, environmentId, setThreadError],
+    [activeThreadId, environmentId, setThreadError, uiLocale],
   );
 
   const onRespondToUserInput = useCallback(
@@ -6826,12 +7050,14 @@ export default function ChatView(props: ChatViewProps) {
         .catch((err: unknown) => {
           setThreadError(
             activeThreadId,
-            err instanceof Error ? err.message : "Failed to submit user input.",
+            err instanceof Error
+              ? err.message
+              : uiText("Failed to submit user input.", undefined, undefined, uiLocale),
           );
         });
       setRespondingUserInputRequestIds((existing) => existing.filter((id) => id !== requestId));
     },
-    [activeThreadId, environmentId, setThreadError],
+    [activeThreadId, environmentId, setThreadError, uiLocale],
   );
 
   // MCP answers can contain credentials. Send only through the authenticated
@@ -7045,7 +7271,7 @@ export default function ChatView(props: ChatViewProps) {
         selectedModelSelection: ctxSelectedModelSelection,
       } = sendCtx;
 
-      const concurrencyIssue = readSubagentConcurrencyAdmissionError({
+      const concurrencyIssue = uiPresentation.readSubagentConcurrencyAdmissionError({
         environmentId,
         modelSelection: ctxSelectedModelSelection,
         provider: ctxSelectedProvider,
@@ -7098,7 +7324,7 @@ export default function ChatView(props: ChatViewProps) {
 
         // Settings can change while metadata persistence is awaited. Re-read
         // the owning server's account preference/capability before dispatch.
-        const changedConcurrencyIssue = readSubagentConcurrencyAdmissionError({
+        const changedConcurrencyIssue = uiPresentation.readSubagentConcurrencyAdmissionError({
           environmentId,
           modelSelection: ctxSelectedModelSelection,
           provider: ctxSelectedProvider,
@@ -7151,7 +7377,10 @@ export default function ChatView(props: ChatViewProps) {
         );
         setThreadError(
           threadIdForSend,
-          describeSendFailureMessage(err, "Failed to send plan follow-up."),
+          uiPresentation.describeSendFailureMessage(
+            err,
+            uiText("Failed to send plan follow-up.", undefined, undefined, uiLocale),
+          ),
         );
         setSendInFlight(false);
         resetLocalDispatch();
@@ -7175,6 +7404,8 @@ export default function ChatView(props: ChatViewProps) {
       composerRef,
       environmentId,
       sendInFlightRef,
+      uiLocale,
+      uiPresentation,
     ],
   );
 
@@ -7210,7 +7441,7 @@ export default function ChatView(props: ChatViewProps) {
     // The plan implementation button bypasses the ordinary composer send path.
     // Check its exact owning runtime before creating a thread, so an older
     // server cannot silently discard a remembered numeric execution policy.
-    const concurrencyIssue = readSubagentConcurrencyAdmissionError({
+    const concurrencyIssue = uiPresentation.readSubagentConcurrencyAdmissionError({
       environmentId,
       modelSelection: ctxSelectedModelSelection,
       provider: ctxSelectedProvider,
@@ -7262,7 +7493,7 @@ export default function ChatView(props: ChatViewProps) {
         // Thread creation is awaited. A capability/account edit during that
         // wait must refuse the provider turn before submission; the existing
         // failure path removes the unused synthetic thread and retains the plan.
-        const finalConcurrencyIssue = readSubagentConcurrencyAdmissionError({
+        const finalConcurrencyIssue = uiPresentation.readSubagentConcurrencyAdmissionError({
           environmentId,
           modelSelection: ctxSelectedModelSelection,
           provider: ctxSelectedProvider,
@@ -7319,11 +7550,16 @@ export default function ChatView(props: ChatViewProps) {
         toastManager.add(
           stackedThreadToast({
             type: "error",
-            title: "Could not start implementation thread",
+            title: uiText("Could not start implementation thread", undefined, undefined, uiLocale),
             description:
               err instanceof Error
                 ? err.message
-                : "An error occurred while creating the new thread.",
+                : uiText(
+                    "An error occurred while creating the new thread.",
+                    undefined,
+                    undefined,
+                    uiLocale,
+                  ),
           }),
         );
       })
@@ -7346,6 +7582,8 @@ export default function ChatView(props: ChatViewProps) {
     composerRef,
     environmentId,
     sendInFlightRef,
+    uiLocale,
+    uiPresentation,
   ]);
 
   const onProviderModelSelect = useCallback(
@@ -7585,7 +7823,7 @@ export default function ChatView(props: ChatViewProps) {
           sourceThreadId: selection.threadId,
           sourceMessageId: messageId,
           targetThreadId,
-          title: truncate(`${source.title} (fork)`),
+          title: truncate(uiText("{title} (fork)", { title: source.title }, undefined, uiLocale)),
           createdAt: new Date().toISOString(),
         });
         // A slow response must not navigate a different pane/chat the owner opened
@@ -7610,7 +7848,7 @@ export default function ChatView(props: ChatViewProps) {
         release();
       }
     },
-    [messageForkSelection, navigate],
+    [messageForkSelection, navigate, uiLocale],
   );
   useEffect(() => {
     setMessageForkSelection(null);
@@ -7679,7 +7917,7 @@ export default function ChatView(props: ChatViewProps) {
 
   const chatActivity = useMemo(
     () =>
-      deriveChatActivityPresentation({
+      uiPresentation.deriveChatActivityPresentation({
         activities: threadActivities,
         runtimeSession: subagentRuntimeSession,
         liveWork,
@@ -7707,6 +7945,7 @@ export default function ChatView(props: ChatViewProps) {
       timelineMessages,
       pendingApprovals.length,
       pendingUserInputs,
+      uiPresentation,
     ],
   );
 
@@ -7751,7 +7990,7 @@ export default function ChatView(props: ChatViewProps) {
       }
       const api = readEnvironmentApi(currentThread.environmentId);
       if (!api) throw new Error("The chat is disconnected.");
-      const concurrencyIssue = readSubagentConcurrencyAdmissionError({
+      const concurrencyIssue = uiPresentation.readSubagentConcurrencyAdmissionError({
         environmentId: currentThread.environmentId,
         modelSelection: currentThread.modelSelection,
         provider: ProviderDriverKind.make("codex"),
@@ -7788,7 +8027,15 @@ export default function ChatView(props: ChatViewProps) {
         createdAt: new Date().toISOString(),
       });
     },
-    [activeThread, composerRef, isServerThread, reviewDisabled, routeThreadKey, setThreadError],
+    [
+      activeThread,
+      composerRef,
+      isServerThread,
+      reviewDisabled,
+      routeThreadKey,
+      setThreadError,
+      uiPresentation,
+    ],
   );
 
   if (!activeThread) {
@@ -8055,7 +8302,7 @@ export default function ChatView(props: ChatViewProps) {
                   className="pointer-events-auto flex items-center gap-1.5 rounded-full border border-border bg-raised px-3 py-1 text-muted-foreground text-xs shadow-sm transition-colors duration-(--duration-fast) hover:border-border-strong hover:text-foreground hover:cursor-pointer animate-enter-rise"
                 >
                   <ChevronDownIcon className="size-3.5" />
-                  Scroll to bottom
+                  {uiText("Scroll to bottom", undefined, undefined, uiLocale)}
                 </button>
               </div>
             )}
@@ -8348,3 +8595,22 @@ export default function ChatView(props: ChatViewProps) {
     </div>
   );
 }
+
+// Finite source-owned labels/helpers only; no received or user data.
+const UI_PRESENTATION_SOURCES = {
+  canExpandQueuedFollowUpText,
+  deriveActiveSubagentWorkEntries,
+  deriveChatActivityPresentation,
+  deriveHistoricalWorkLogSummaries,
+  deriveSubagentWorkEntries,
+  deriveTurnCompletionSummary,
+  deriveWorkLogEntries,
+  describeSendFailureMessage,
+  getUsageStatsDetailDiagnostics,
+  previewQueuedFollowUpText,
+  queuedFollowUpActionLabel,
+  queuedFollowUpActionTitle,
+  readSubagentConcurrencyAdmissionError,
+  resolveEnvironmentOptionLabel,
+  resolveServerConfigVersionMismatch,
+};

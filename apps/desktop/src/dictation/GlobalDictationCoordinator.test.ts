@@ -393,7 +393,17 @@ describe("GlobalDictationCoordinator IPC admission", () => {
               );
               const action = handler(IpcChannels.GLOBAL_DICTATION_ACTION_CHANNEL);
               await action(sender, { action: "ready", sessionId });
-              assert.deepInclude(panel.webContents.send.mock.calls[0]![1], {
+              const startEvent = panel.webContents.send.mock.calls.find(
+                ([channel, payload]) =>
+                  channel === IpcChannels.GLOBAL_DICTATION_EVENT_CHANNEL &&
+                  payload.type === "start",
+              );
+              assert.isDefined(startEvent);
+              assert.deepEqual(panel.webContents.send.mock.calls[0], [
+                "cafe:ui-locale-changed",
+                "en",
+              ]);
+              assert.deepInclude(startEvent![1], {
                 type: "start",
                 insertionMethod: scenario === "success" ? "paste" : "accessibility",
               });

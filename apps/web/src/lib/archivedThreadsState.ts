@@ -1,3 +1,5 @@
+import { useUiLocale, useUiPresentation } from "~/i18n";
+import { uiText } from "@cafecode/shared/i18n";
 import { useAtomValue } from "@effect/atom-react";
 import { EnvironmentId, type OrchestrationShellSnapshot } from "@cafecode/contracts";
 import { AsyncResult, Atom } from "effect/unstable/reactivity";
@@ -69,7 +71,7 @@ function readArchivedThreadsError(
   }
 
   const error = Cause.squash(result.cause);
-  return error instanceof Error ? error.message : "Couldn't load archived chats.";
+  return error instanceof Error ? error.message : uiText("Couldn't load archived chats.");
 }
 
 export function refreshArchivedThreadsForEnvironment(environmentId: EnvironmentId): void {
@@ -86,6 +88,8 @@ export function useArchivedThreadSnapshots(environmentIds: ReadonlyArray<Environ
   readonly isLoading: boolean;
   readonly refresh: () => void;
 } {
+  const uiPresentation = useUiPresentation(UI_PRESENTATION_SOURCES);
+
   const environmentKey = useMemo(
     () => makeArchivedThreadsEnvironmentKey(environmentIds),
     [environmentIds],
@@ -99,8 +103,11 @@ export function useArchivedThreadSnapshots(environmentIds: ReadonlyArray<Environ
 
   return {
     snapshots,
-    error: readArchivedThreadsError(result),
+    error: uiPresentation.readArchivedThreadsError(result),
     isLoading: result.waiting,
     refresh,
   };
 }
+
+// Finite source-owned labels/helpers only; no received or user data.
+const UI_PRESENTATION_SOURCES = { readArchivedThreadsError };

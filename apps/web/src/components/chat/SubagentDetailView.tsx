@@ -1,3 +1,6 @@
+import { useUiLocale, useUiPresentation } from "~/i18n";
+import { uiText } from "@cafecode/shared/i18n";
+import { UiMessage } from "~/i18n";
 import {
   type EnvironmentId,
   type EnvironmentApi,
@@ -28,7 +31,7 @@ import { readEnvironmentApi } from "../../environmentApi";
 import { formatElapsed, type WorkLogEntry } from "../../session-logic";
 import ChatMarkdown from "../ChatMarkdown";
 import { SubagentAvatar } from "../subagents/SubagentAvatar";
-import { SUBAGENT_STATUS_UNAVAILABLE_DETAIL } from "../subagents/SubagentRosterRow";
+import { getSUBAGENT_STATUS_UNAVAILABLE_DETAIL } from "../subagents/SubagentRosterRow";
 import { cn } from "~/lib/utils";
 import { useChatPane } from "../../chatPaneContext";
 import { useDelayedFlag } from "../../hooks/useDelayedFlag";
@@ -70,11 +73,36 @@ const EMPTY_SUBAGENT_DETAIL_MESSAGES: LoadedSubagentDetail["messages"] = [];
 const EMPTY_SUBAGENT_DETAIL_GAPS: LoadedSubagentDetail["gaps"] = [];
 const EMPTY_SUBAGENT_DETAIL_ACTIVITIES: NonNullable<LoadedSubagentDetail["activities"]> = [];
 const SUBAGENT_ACTIVITY_PRESENTATION = {
-  command: { label: "Command", icon: TerminalIcon },
-  file_read: { label: "File read", icon: FileSearchIcon },
-  file_edit: { label: "File edit", icon: FilePenLineIcon },
-  agent_message: { label: "Agent message", icon: MessageSquareIcon },
-  tool: { label: "Tool use", icon: WrenchIcon },
+  command: {
+    get label() {
+      return uiText("Command");
+    },
+    icon: TerminalIcon,
+  },
+  file_read: {
+    get label() {
+      return uiText("File read");
+    },
+    icon: FileSearchIcon,
+  },
+  file_edit: {
+    get label() {
+      return uiText("File edit");
+    },
+    icon: FilePenLineIcon,
+  },
+  agent_message: {
+    get label() {
+      return uiText("Agent message");
+    },
+    icon: MessageSquareIcon,
+  },
+  tool: {
+    get label() {
+      return uiText("Tool use");
+    },
+    icon: WrenchIcon,
+  },
 } as const;
 
 type DetailLoadState =
@@ -103,17 +131,17 @@ function isLiveStatus(status: SubagentWorkEntry["subagent"]["status"]): boolean 
 function statusLabel(status: SubagentWorkEntry["subagent"]["status"]): string {
   switch (status) {
     case "waiting":
-      return "Waiting";
+      return uiText("Waiting");
     case "active":
-      return "Working";
+      return uiText("Working");
     case "completed":
-      return "Completed";
+      return uiText("Completed");
     case "failed":
-      return "Failed";
+      return uiText("Failed");
     case "stopped":
-      return "Stopped";
+      return uiText("Stopped");
     case "unknown":
-      return "Status unavailable";
+      return uiText("Status unavailable");
   }
 }
 
@@ -199,6 +227,9 @@ function BoundSubagentDetailView({
   backButtonRef,
   onBack,
 }: SubagentDetailViewProps) {
+  const uiLocale = useUiLocale();
+  const uiPresentation = useUiPresentation(UI_PRESENTATION_SOURCES);
+
   const pane = useChatPane();
   const { subagent } = selection.workEntry;
   const live = isLiveStatus(subagent.status);
@@ -401,7 +432,7 @@ function BoundSubagentDetailView({
       ? null
       : formatElapsed(subagent.startedAt, live ? now : subagent.completedAt);
   const primaryDescription =
-    subagent.description ?? subagent.objective ?? statusLabel(subagent.status);
+    subagent.description ?? subagent.objective ?? uiPresentation.statusLabel(subagent.status);
   const messages =
     loadState.status === "loaded" ? loadState.detail.messages : EMPTY_SUBAGENT_DETAIL_MESSAGES;
   const activities =
@@ -464,7 +495,12 @@ function BoundSubagentDetailView({
   return (
     <section
       className="absolute inset-0 z-40 flex min-h-0 min-w-0 flex-col overflow-hidden bg-background animate-enter-from-end"
-      aria-label={`Subagent detail: ${subagent.label}`}
+      aria-label={uiText(
+        "Subagent detail: {value0}",
+        { value0: subagent.label },
+        undefined,
+        uiLocale,
+      )}
       data-subagent-detail-view="true"
     >
       <header className="shrink-0 border-b border-border-subtle bg-background/95 px-3 py-2.5 backdrop-blur sm:px-5 sm:py-3">
@@ -473,7 +509,7 @@ function BoundSubagentDetailView({
             ref={backButtonRef}
             type="button"
             className="-ml-1 inline-flex size-11 shrink-0 items-center justify-center rounded-full text-muted-foreground transition-colors duration-(--duration-fast) hover:bg-accent hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none"
-            aria-label="Back to conversation"
+            aria-label={uiText("Back to conversation", undefined, undefined, uiLocale)}
             onClick={onBack}
           >
             <ArrowLeftIcon className="size-5" />
@@ -494,10 +530,13 @@ function BoundSubagentDetailView({
               )}
               data-subagent-detail-status="true"
             >
-              {statusLabel(subagent.status)}
+              {uiPresentation.statusLabel(subagent.status)}
               {subagent.status === "unknown" ? (
-                <InfoTip label="About this status" side="bottom">
-                  {SUBAGENT_STATUS_UNAVAILABLE_DETAIL}
+                <InfoTip
+                  label={uiText("About this status", undefined, undefined, uiLocale)}
+                  side="bottom"
+                >
+                  {uiPresentation.getSUBAGENT_STATUS_UNAVAILABLE_DETAIL()}
                 </InfoTip>
               ) : null}
             </p>
@@ -529,7 +568,9 @@ function BoundSubagentDetailView({
       >
         <div className="mx-auto w-full min-w-0 max-w-3xl space-y-5 pb-[calc(env(safe-area-inset-bottom)+1rem)]">
           <section className="min-w-0 rounded-xl border border-border-subtle bg-card p-3 sm:p-4">
-            <p className="label-overline">Current work</p>
+            <p className="label-overline">
+              {uiText("Current work", undefined, undefined, uiLocale)}
+            </p>
             <p className="mt-1.5 text-sm leading-5 text-foreground break-words">
               {primaryDescription}
             </p>
@@ -543,14 +584,21 @@ function BoundSubagentDetailView({
                 className="mt-3 border-t border-border-subtle pt-2 font-mono text-2xs text-subtle-foreground tabular-nums"
                 data-subagent-detail-elapsed="true"
               >
-                {live ? "Working" : "Worked"} for {elapsed}
+                {uiText(
+                  "{state, select, active {Working for {elapsed}} other {Worked for {elapsed}}}",
+                  { state: live ? "active" : "finished", elapsed },
+                  undefined,
+                  uiLocale,
+                )}
               </p>
             ) : null}
           </section>
 
           {loadState.status === "loading" ? (
             <div role="status" data-subagent-detail-loading="true">
-              <span className="sr-only">Loading subagent history…</span>
+              <span className="sr-only">
+                {uiText("Loading subagent history…", undefined, undefined, uiLocale)}
+              </span>
               {showLoadingSkeleton ? (
                 <div aria-hidden="true" className="space-y-5 animate-enter-fade">
                   <Skeleton className="h-16 rounded-xl" />
@@ -575,14 +623,14 @@ function BoundSubagentDetailView({
               !live && message.role === "assistant" && index === lastAssistantIndex;
             const messageLabel =
               message.role === "user"
-                ? "Assignment"
+                ? uiText("Assignment", undefined, undefined, uiLocale)
                 : message.phase === "final_answer"
-                  ? "Final reply"
+                  ? uiText("Final reply", undefined, undefined, uiLocale)
                   : message.phase === "commentary"
-                    ? "Update"
+                    ? uiText("Update", undefined, undefined, uiLocale)
                     : isFinalResult
-                      ? "Result"
-                      : "Update";
+                      ? uiText("Result", undefined, undefined, uiLocale)
+                      : uiText("Update", undefined, undefined, uiLocale);
             const followingGap = transcriptGapByAnchor.get(message.key);
             return (
               <Fragment key={key}>
@@ -623,8 +671,12 @@ function BoundSubagentDetailView({
                           role="note"
                           data-subagent-detail-content-omission="true"
                         >
-                          {message.omission.omittedUtf8Bytes.toLocaleString()} bytes omitted from
-                          the middle of this update.
+                          <UiMessage
+                            message={
+                              "<slot1></slot1> bytes omitted from the middle of this update."
+                            }
+                            slots={{ slot1: message.omission.omittedUtf8Bytes.toLocaleString() }}
+                          />
                         </p>
                         {/* The tail is a separate Markdown document so a cut
                             code fence or link in the head cannot change how the
@@ -650,18 +702,24 @@ function BoundSubagentDetailView({
           {loadState.status === "loaded" &&
           (activities.length > 0 || loadState.detail.activityHistoryIncomplete === true) ? (
             <section
-              aria-label="Subagent activity"
+              aria-label={uiText("Subagent activity", undefined, undefined, uiLocale)}
               className="min-w-0 border-t border-border-subtle pt-4"
             >
-              <h3 className="mb-2 text-2xs font-medium text-subtle-foreground">Activity</h3>
+              <h3 className="mb-2 text-2xs font-medium text-subtle-foreground">
+                {uiText("Activity", undefined, undefined, uiLocale)}
+              </h3>
               {/* Provider times can be absent. Keep this bounded activity tail
                   in its supplied order instead of inventing chronology among
                   the separately retained public messages above. The optional
                   detail is a separately bounded, sanitized display projection,
                   never a raw tool payload or authority to open/run anything. */}
-              <ol className="space-y-1" aria-label="Recorded activity">
+              <ol
+                className="space-y-1"
+                aria-label={uiText("Recorded activity", undefined, undefined, uiLocale)}
+              >
                 {activities.map((activity) => {
-                  const { label, icon: Icon } = SUBAGENT_ACTIVITY_PRESENTATION[activity.kind];
+                  const { label, icon: Icon } =
+                    uiPresentation.SUBAGENT_ACTIVITY_PRESENTATION[activity.kind];
                   return (
                     <li
                       key={activity.key}
@@ -708,7 +766,7 @@ function BoundSubagentDetailView({
                   data-subagent-detail-activity-incomplete="true"
                   className="mt-2 text-2xs leading-5 text-subtle-foreground"
                 >
-                  Some activity couldn’t be loaded.
+                  {uiText("Some activity couldn’t be loaded.", undefined, undefined, uiLocale)}
                 </p>
               ) : null}
             </section>
@@ -720,7 +778,7 @@ function BoundSubagentDetailView({
               role="status"
               data-subagent-detail-unavailable="true"
             >
-              <p>Transcript unavailable.</p>
+              <p>{uiText("Transcript unavailable.", undefined, undefined, uiLocale)}</p>
               <Button
                 type="button"
                 size="xs"
@@ -737,7 +795,7 @@ function BoundSubagentDetailView({
                   }
                 }}
               >
-                Retry
+                {uiText("Retry", undefined, undefined, uiLocale)}
               </Button>
             </div>
           ) : null}
@@ -748,11 +806,22 @@ function BoundSubagentDetailView({
               role="status"
               data-subagent-detail-refresh-unavailable="true"
             >
-              <p>Couldn’t refresh. Showing the last loaded transcript.</p>
+              <p>
+                {uiText(
+                  "Couldn’t refresh. Showing the last loaded transcript.",
+                  undefined,
+                  undefined,
+                  uiLocale,
+                )}
+              </p>
               {loadState.refreshStatus === "retrying" ? (
                 <span className="inline-flex items-center gap-1.5 text-foreground">
-                  <Spinner aria-hidden="true" role={undefined} className="size-3.5" />
-                  Retrying…
+                  <UiMessage
+                    message={"<slot1></slot1>Retrying…"}
+                    slots={{
+                      slot1: <Spinner aria-hidden="true" role={undefined} className="size-3.5" />,
+                    }}
+                  />
                 </span>
               ) : (
                 <Button
@@ -775,7 +844,7 @@ function BoundSubagentDetailView({
                     refreshDetailRef.current({ immediate: true });
                   }}
                 >
-                  Retry
+                  {uiText("Retry", undefined, undefined, uiLocale)}
                 </Button>
               )}
             </div>
@@ -783,7 +852,7 @@ function BoundSubagentDetailView({
 
           {loadState.status === "loaded" && messages.length === 0 && activities.length === 0 ? (
             <p className="text-xs leading-5 text-muted-foreground" role="status">
-              No messages yet.
+              {uiText("No messages yet.", undefined, undefined, uiLocale)}
             </p>
           ) : null}
 
@@ -793,7 +862,7 @@ function BoundSubagentDetailView({
               role="note"
               data-subagent-detail-history-incomplete="true"
             >
-              Some messages couldn’t be loaded.
+              {uiText("Some messages couldn’t be loaded.", undefined, undefined, uiLocale)}
             </p>
           ) : null}
 
@@ -803,7 +872,7 @@ function BoundSubagentDetailView({
           loadState.detail.gaps.length === 0 &&
           !messages.some((message) => message.omission) ? (
             <p className="text-2xs leading-5 text-subtle-foreground" role="note">
-              Older messages hidden.
+              {uiText("Older messages hidden.", undefined, undefined, uiLocale)}
             </p>
           ) : null}
         </div>
@@ -820,7 +889,12 @@ function BoundSubagentDetailView({
             setNewUpdateCount(0);
           }}
         >
-          {newUpdateCount} new {newUpdateCount === 1 ? "update" : "updates"} · Jump to latest
+          {uiText(
+            "{count, plural, one {# new update · Jump to latest} other {# new updates · Jump to latest}}",
+            { count: newUpdateCount },
+            undefined,
+            uiLocale,
+          )}
         </button>
       ) : null}
     </section>
@@ -828,17 +902,32 @@ function BoundSubagentDetailView({
 }
 
 function TranscriptGap(props: { readonly gap: LoadedSubagentDetail["gaps"][number] }) {
+  const uiLocale = useUiLocale();
+
   return (
     <p
       className="rounded-lg border border-dashed border-border-subtle px-3 py-2 text-center text-2xs leading-5 text-subtle-foreground"
       role="note"
       data-subagent-detail-gap="true"
     >
-      {props.gap.omittedMessages.toLocaleString()} intermediate{" "}
-      {props.gap.omittedMessages === 1 ? "update" : "updates"} omitted
-      {props.gap.omittedUtf8Bytes > 0
-        ? ` (${props.gap.omittedUtf8Bytes.toLocaleString()} bytes)`
-        : ""}
+      {uiText(
+        "{count, plural, one {{formattedCount} intermediate update omitted} other {{formattedCount} intermediate updates omitted}}{hasBytes, select, yes { ({formattedBytes} bytes)} other {}}",
+        {
+          count: props.gap.omittedMessages,
+          formattedCount: props.gap.omittedMessages.toLocaleString(),
+          hasBytes: props.gap.omittedUtf8Bytes > 0 ? "yes" : "no",
+          formattedBytes: props.gap.omittedUtf8Bytes.toLocaleString(),
+        },
+        undefined,
+        uiLocale,
+      )}
     </p>
   );
 }
+
+// Finite source-owned labels/helpers only; no received or user data.
+const UI_PRESENTATION_SOURCES = {
+  SUBAGENT_ACTIVITY_PRESENTATION,
+  getSUBAGENT_STATUS_UNAVAILABLE_DETAIL,
+  statusLabel,
+};

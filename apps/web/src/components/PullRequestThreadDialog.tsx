@@ -1,3 +1,6 @@
+import { useUiLocale } from "~/i18n";
+import { uiText } from "@cafecode/shared/i18n";
+import { UiMessage } from "~/i18n";
 import type { EnvironmentId, GitResolvePullRequestResult, ThreadId } from "@cafecode/contracts";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useDebouncedValue } from "@tanstack/react-pacer";
@@ -43,6 +46,8 @@ export function PullRequestThreadDialog({
   onOpenChange,
   onPrepared,
 }: PullRequestThreadDialogProps) {
+  const uiLocale = useUiLocale();
+
   const queryClient = useQueryClient();
   const referenceInputRef = useRef<HTMLInputElement>(null);
   const [reference, setReference] = useState(initialReference ?? "");
@@ -170,20 +175,44 @@ export function PullRequestThreadDialog({
   const validationMessage = !referenceDirty
     ? null
     : reference.trim().length === 0
-      ? `Paste a ${terminology.singular} URL, checkout command, or enter 123 / #123.`
+      ? uiText(
+          "Paste a {request} URL, checkout command, or enter 123 / #123.",
+          {
+            request: terminology.singular,
+          },
+          undefined,
+          uiLocale,
+        )
       : parsedReference === null
-        ? `Use a ${terminology.singular} URL, checkout command, 123, or #123.`
+        ? uiText(
+            "Use a {request} URL, checkout command, 123, or #123.",
+            {
+              request: terminology.singular,
+            },
+            undefined,
+            uiLocale,
+          )
         : null;
   const errorMessage =
     validationMessage ??
     (resolvedPullRequest === null && resolvePullRequestQuery.isError
       ? resolvePullRequestQuery.error instanceof Error
         ? resolvePullRequestQuery.error.message
-        : `Failed to resolve ${terminology.singular}.`
+        : uiText(
+            "Failed to resolve {request}.",
+            { request: terminology.singular },
+            undefined,
+            uiLocale,
+          )
       : preparePullRequestThreadMutation.error instanceof Error
         ? preparePullRequestThreadMutation.error.message
         : preparePullRequestThreadMutation.error
-          ? `Couldn't prepare a chat for this ${terminology.singular}. Check the repository, then try again.`
+          ? uiText(
+              "Couldn't prepare a chat for this {request}. Check the repository, then try again.",
+              { request: terminology.singular },
+              undefined,
+              uiLocale,
+            )
           : null);
 
   return (
@@ -199,11 +228,15 @@ export function PullRequestThreadDialog({
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2">
             <SourceControlIcon className="size-4" />
-            Checkout {terminology.singular}
+            {uiText("Checkout {request}", { request: terminology.singular }, undefined, uiLocale)}
           </DialogTitle>
           <DialogDescription>
-            Open a {sourceControlPresentation.providerName} {terminology.singular} in a new chat, in
-            the main repo or a worktree.
+            <UiMessage
+              message={
+                "Open a <slot1></slot1> <slot3></slot3> in a new chat, in the main repo or a worktree."
+              }
+              slots={{ slot1: sourceControlPresentation.providerName, slot3: terminology.singular }}
+            />
           </DialogDescription>
         </DialogHeader>
         <DialogPanel className="space-y-4">
@@ -213,7 +246,14 @@ export function PullRequestThreadDialog({
             </span>
             <Input
               ref={referenceInputRef}
-              placeholder={`${terminology.shortLabel} URL, checkout command, or #42`}
+              placeholder={uiText(
+                "{value0} URL, checkout command, or #42",
+                {
+                  value0: terminology.shortLabel,
+                },
+                undefined,
+                uiLocale,
+              )}
               value={reference}
               onChange={(event) => {
                 setReferenceDirty(true);
@@ -237,8 +277,17 @@ export function PullRequestThreadDialog({
                 <div className="min-w-0">
                   <p className="truncate font-medium text-sm">{resolvedPullRequest.title}</p>
                   <p className="truncate text-muted-foreground text-xs">
-                    #{resolvedPullRequest.number} · {resolvedPullRequest.headBranch} to{" "}
-                    {resolvedPullRequest.baseBranch}
+                    <UiMessage
+                      message={
+                        "#<slot1></slot1> · <slot3></slot3> to<slot5></slot5><slot7></slot7>"
+                      }
+                      slots={{
+                        slot1: resolvedPullRequest.number,
+                        slot3: resolvedPullRequest.headBranch,
+                        slot5: " ",
+                        slot7: resolvedPullRequest.baseBranch,
+                      }}
+                    />
                   </p>
                 </div>
                 <span className={cn("shrink-0 text-xs capitalize", statusTone)}>
@@ -251,7 +300,12 @@ export function PullRequestThreadDialog({
           {isResolving ? (
             <div className="flex items-center gap-2 text-muted-foreground text-xs">
               <Spinner aria-hidden="true" className="size-3.5" />
-              Resolving {terminology.singular}…
+              {uiText(
+                "Resolving {request}…",
+                { request: terminology.singular },
+                undefined,
+                uiLocale,
+              )}
             </div>
           ) : null}
 
@@ -267,7 +321,7 @@ export function PullRequestThreadDialog({
             onClick={() => onOpenChange(false)}
             disabled={preparePullRequestThreadMutation.isPending}
           >
-            Cancel
+            {uiText("Cancel", undefined, undefined, uiLocale)}
           </Button>
           <Button
             type="button"
@@ -286,7 +340,7 @@ export function PullRequestThreadDialog({
           >
             {/* Labels and widths stay put while preparing. */}
             {preparingMode === "local" ? <Spinner aria-hidden="true" className="size-3.5" /> : null}
-            Local
+            {uiText("Local", undefined, undefined, uiLocale)}
           </Button>
           <Button
             type="button"
@@ -305,7 +359,7 @@ export function PullRequestThreadDialog({
             {preparingMode === "worktree" ? (
               <Spinner aria-hidden="true" className="size-3.5" />
             ) : null}
-            Worktree
+            {uiText("Worktree", undefined, undefined, uiLocale)}
           </Button>
         </DialogFooter>
       </DialogPopup>

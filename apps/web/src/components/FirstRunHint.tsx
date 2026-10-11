@@ -1,3 +1,5 @@
+import { useUiLocale } from "~/i18n";
+import { uiText } from "@cafecode/shared/i18n";
 import { type RefObject } from "react";
 import { XIcon } from "lucide-react";
 
@@ -23,6 +25,8 @@ interface FirstRunHintProps {
  * settings so a dismissed hint never returns.
  */
 export function FirstRunHint({ open, onDismiss, anchor, message, testId }: FirstRunHintProps) {
+  const uiLocale = useUiLocale();
+
   return (
     <Popover
       open={open}
@@ -51,7 +55,7 @@ export function FirstRunHint({ open, onDismiss, anchor, message, testId }: First
             {message}
           </PopoverDescription>
           <PopoverClose
-            aria-label="Dismiss"
+            aria-label={uiText("Dismiss", undefined, undefined, uiLocale)}
             className={cn(
               "-mr-1 grid size-5 shrink-0 cursor-pointer place-items-center rounded-md text-muted-foreground",
               "transition-colors hover:bg-accent hover:text-foreground focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-ring",

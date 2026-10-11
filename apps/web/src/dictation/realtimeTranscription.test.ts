@@ -10,8 +10,10 @@ import {
   createRealtimeTranscriptState,
   decodeRealtimeServerEvent,
   formatComposerDictationInsertion,
+  formatRealtimeTranscriptionFeedback,
   OPENAI_REALTIME_CALLS_URL,
   RealtimeTranscriptionError,
+  readRealtimeTranscriptionFeedback,
   reduceRealtimeTranscript,
   selectRealtimeTranscript,
   startRealtimeTranscription,
@@ -190,6 +192,84 @@ const validClientSecret = {
 
 afterEach(() => {
   __dictationDiagnosticsTestApi.reset();
+});
+
+describe("Realtime feedback provenance", () => {
+  it("retains only a frozen Cafe-owned protocol descriptor and formats it independently", () => {
+    let error: unknown;
+    try {
+      decodeRealtimeServerEvent("{not valid JSON}");
+    } catch (caught) {
+      error = caught;
+    }
+    expect(error).toBeInstanceOf(RealtimeTranscriptionError);
+    const feedback = readRealtimeTranscriptionFeedback(error);
+    expect(feedback).toEqual({ kind: "fixed", code: "invalid-event" });
+    expect(Object.isFrozen(feedback)).toBe(true);
+    expect((error as RealtimeTranscriptionError).presentation).toBe(feedback);
+    expect(formatRealtimeTranscriptionFeedback(feedback!, "en")).toBe(
+      "OpenAI returned an invalid dictation event.",
+    );
+    expect(formatRealtimeTranscriptionFeedback(feedback!, "ko")).toBe(
+      "OpenAI가 잘못된 받아쓰기 이벤트를 반환했습니다.",
+    );
+    expect((error as Error).message).toBe("OpenAI returned an invalid dictation event.");
+    expect(JSON.stringify(feedback)).not.toContain("not valid JSON");
+  });
+
+  it("keeps legacy messages opaque and refuses received or prototype-forged descriptors", () => {
+    const legacy = new RealtimeTranscriptionError("connection_failed", "opaque legacy message");
+    const forged = Object.create(
+      RealtimeTranscriptionError.prototype,
+    ) as RealtimeTranscriptionError;
+    Object.defineProperty(forged, "presentation", {
+      value: { kind: "fixed", code: "connection" },
+    });
+    expect(readRealtimeTranscriptionFeedback(legacy)).toBeNull();
+    expect(legacy.presentation).toBeUndefined();
+    expect(legacy.message).toBe("opaque legacy message");
+    expect(readRealtimeTranscriptionFeedback(forged)).toBeNull();
+    expect(
+      readRealtimeTranscriptionFeedback({
+        code: "connection_failed",
+        message: "Cafe could not connect the microphone to OpenAI.",
+        presentation: { kind: "fixed", code: "connection" },
+      }),
+    ).toBeNull();
+  });
+
+  it.each([Number.NaN, Number.POSITIVE_INFINITY, 99, 600, 503.5])(
+    "does not render an invalid public HTTP number %s",
+    (status) => {
+      expect(
+        formatRealtimeTranscriptionFeedback({ kind: "http", code: "temporary", status }, "en"),
+      ).toBe("Cafe could not connect the microphone to OpenAI.");
+    },
+  );
+
+  it("retains an allowlisted RPC code without credentials or received error details", async () => {
+    const fixture = makeDependencies();
+    const leakedDetail = "opaque credential test detail";
+    const getClientSecret = vi.fn(async () => {
+      throw { code: "upstream_auth_failed", message: leakedDetail, cause: leakedDetail };
+    });
+    const error: unknown = await startRealtimeTranscription(
+      { getClientSecret, onTranscript: () => undefined },
+      fixture.dependencies,
+    ).catch((caught: unknown) => caught);
+    expect(error).toMatchObject({ code: "upstream_auth_failed" });
+    const feedback = readRealtimeTranscriptionFeedback(error);
+    expect(feedback).toEqual({ kind: "rpc", code: "upstream_auth_failed" });
+    expect(Object.isFrozen(feedback)).toBe(true);
+    expect(formatRealtimeTranscriptionFeedback(feedback!, "ko")).toBe(
+      "OpenAI가 저장된 받아쓰기 인증 정보 또는 Realtime 전사 접근 권한을 거부했습니다.",
+    );
+    expect(JSON.stringify(feedback)).not.toContain(leakedDetail);
+    expect(getClientSecret).toHaveBeenCalledOnce();
+    expect(fixture.getUserMedia).not.toHaveBeenCalled();
+    expect(fixture.fetchMock).not.toHaveBeenCalled();
+    expect(fixture.waitForRetry).not.toHaveBeenCalled();
+  });
 });
 
 describe("Realtime transcript reconciliation", () => {
@@ -1276,18 +1356,25 @@ describe("startRealtimeTranscription", () => {
       };
     });
 
-    const rejected = expect(
-      startRealtimeTranscription(
-        { getClientSecret, onTranscript: () => undefined },
-        fixture.dependencies,
-      ),
-    ).rejects;
+    const failed = startRealtimeTranscription(
+      { getClientSecret, onTranscript: () => undefined },
+      fixture.dependencies,
+    );
+    const rejected = expect(failed).rejects;
     await rejected.toMatchObject({
       code: "upstream_unavailable",
       message:
         "OpenAI could not start either supported Realtime dictation model (HTTP 503). Check this API project's credits, billing, and Realtime transcription access, then retry.",
     });
     await rejected.not.toMatchObject({ message: leakedDetail });
+    const error: unknown = await failed.catch((caught: unknown) => caught);
+    const feedback = readRealtimeTranscriptionFeedback(error);
+    expect(feedback).toEqual({ kind: "http", code: "both-models", status: 503 });
+    expect(Object.isFrozen(feedback)).toBe(true);
+    expect(formatRealtimeTranscriptionFeedback(feedback!, "ko")).toBe(
+      "OpenAI가 지원되는 두 Realtime 받아쓰기 모델을 모두 시작하지 못했습니다(HTTP 503). 이 API 프로젝트의 크레딧, 결제 및 Realtime 전사 접근 권한을 확인한 후 다시 시도하세요.",
+    );
+    expect(JSON.stringify(feedback)).not.toContain(leakedDetail);
     expect(getClientSecret).toHaveBeenCalledTimes(3);
     expect(getClientSecret.mock.calls).toEqual([
       ["gpt-live-transcribe"],

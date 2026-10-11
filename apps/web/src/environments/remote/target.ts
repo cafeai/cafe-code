@@ -1,3 +1,4 @@
+import { uiText } from "@cafecode/shared/i18n";
 import { getPairingTokenFromUrl } from "../../pairingUrl";
 
 export interface ResolvedRemotePairingTarget {
@@ -18,13 +19,13 @@ const REMOTE_PROTOCOLS = new Set(["http:", "https:", "ws:", "wss:"]);
 
 function validateRemoteBaseUrl(url: URL): URL {
   if (!REMOTE_PROTOCOLS.has(url.protocol)) {
-    throw new Error("Remote servers must use HTTP or HTTPS.");
+    throw new Error(uiText("Remote servers must use HTTP or HTTPS."));
   }
   if (!url.hostname) {
-    throw new Error("Enter a valid backend URL.");
+    throw new Error(uiText("Enter a valid backend URL."));
   }
   if (url.username || url.password) {
-    throw new Error("Remote server URLs cannot contain embedded credentials.");
+    throw new Error(uiText("Remote server URLs cannot contain embedded credentials."));
   }
   return url;
 }
@@ -32,7 +33,7 @@ function validateRemoteBaseUrl(url: URL): URL {
 function normalizeRemoteBaseUrl(rawValue: string): URL {
   const trimmed = rawValue.trim();
   if (!trimmed) {
-    throw new Error("Enter a backend URL.");
+    throw new Error(uiText("Enter a backend URL."));
   }
 
   const normalizedInput =
@@ -82,7 +83,7 @@ export function resolveRemotePairingTarget(input: {
     const url = validateRemoteBaseUrl(new URL(pairingUrl, window.location.origin));
     const credential = getPairingTokenFromUrl(url) ?? "";
     if (!credential) {
-      throw new Error("Pairing URL is missing its token.");
+      throw new Error(uiText("Pairing URL is missing its token."));
     }
     return {
       credential,
@@ -94,10 +95,10 @@ export function resolveRemotePairingTarget(input: {
   const host = input.host?.trim() ?? "";
   const pairingCode = input.pairingCode?.trim() ?? "";
   if (!host) {
-    throw new Error("Enter a backend URL.");
+    throw new Error(uiText("Enter a backend URL."));
   }
   if (!pairingCode) {
-    throw new Error("Enter a pairing code.");
+    throw new Error(uiText("Enter a pairing code."));
   }
 
   return {

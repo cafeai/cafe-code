@@ -4,6 +4,7 @@ import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 
 import * as Electron from "electron";
+import { uiText } from "@cafecode/shared/i18n";
 
 const CONFIRM_BUTTON_INDEX = 1;
 
@@ -62,7 +63,7 @@ const make = ElectronDialog.of({
 
     const options = {
       type: "question" as const,
-      buttons: ["No", "Yes"],
+      buttons: [uiText("No"), uiText("Yes")],
       defaultId: 0,
       cancelId: 0,
       noLink: true,
