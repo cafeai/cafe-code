@@ -16,13 +16,36 @@ flowchart TD
 
 Supported families are flowcharts (`flowchart`/`graph`), sequence diagrams,
 class diagrams, state diagrams, entity-relationship diagrams, XY charts
-(`xychart`/`xychart-beta`, bar and line plots), and pie charts (`pie`, including
-`showData`). Ordinary code
+(`xychart`/`xychart-beta`, bar and line plots), pie charts (`pie`, including
+`showData`), and bounded ordinary Gantt schedules (`gantt`). Ordinary code
 blocks are unchanged. Untagged diagrams, unsupported families, incomplete fences,
 invalid syntax, and diagrams exceeding resource limits remain copyable source.
 XY charts support category or numeric X axes, named plots, optional point labels
 and horizontal orientation. Pie charts retain small entries in the legend even
 when the pinned renderer omits their slices below 1% from the drawing.
+
+Gantt schedules support section headings, status tags (`active`, `done`, `crit`),
+explicit or sequential task IDs, and multiple earlier `after` dependencies.
+Use `dateFormat YYYY-MM-DD` for calendar dates and an optional `axisFormat`, such
+as `%b %d`. Positive integer durations use `w`, `d`, `h`, `m`, `s` or `ms`.
+Explicit end dates require that date format; `inclusiveEndDates` and earlier
+`until` references retain the native engine's semantics. Without `dateFormat`,
+the pinned engine interprets ISO start dates in UTC, rather than the local
+calendar used with an explicit format. Cafe does not rewrite either spelling.
+
+````markdown
+```mermaid
+gantt
+    title Parallel engineering schedule
+    dateFormat YYYY-MM-DD
+    axisFormat %b %d
+    section Transfer
+    Source closure :src, 2026-10-12, 4d
+    Native joins   :nat, 2026-10-12, 5d
+    Full verifier  :ver, after src, 3d
+    Integration    :join, after ver nat, 2d
+```
+````
 
 ## Controls and streaming
 
@@ -86,6 +109,24 @@ pending identities, and an in-memory 128-entry / 16 MiB cache. Cache entries bin
 the complete source, theme, library version and policy. Nothing is persisted in
 local storage or transmitted to a provider.
 
+Gantt counts tasks, section headings and bounded calendar-axis ticks together
+against the 250-item limit, and counts all predecessor references separately
+against the 250-connection limit. Authored dates must be real Gregorian dates in years
+1000–9999, task durations must be positive, and both individual durations and
+the whole schedule must fit within 3,660 elapsed days. Custom `tickInterval`
+values use a positive integer no greater than 250 and a supported native unit;
+admission conservatively counts base calendar intervals, including intervals
+whose fields reset each month or year. Dense axes therefore remain source even
+when a large interval multiplier appears to reduce their ticks.
+
+Gantt exclusions/includes, forward or missing dependencies, duplicate/reserved
+identities, ambiguous numeric section headings, repeated tags, unsupported date formats, `topAxis`, and custom
+`todayMarker` styles remain copyable source. `todayMarker off` is supported.
+Milestones also remain source: the pinned engine requires CSS transforms that
+Cafe deliberately strips, so rendering them as ordinary squares would be
+misleading. These are conservative fidelity and resource limits, not changes to
+the stored chart or an expansion of the SVG security policy.
+
 An asynchronous 15-second deadline releases stalled jobs. It is not a hard CPU
 deadline: a sandboxed iframe is not guaranteed a separate browser thread, and a
 timer cannot preempt synchronous layout. Source and parsed-graph bounds therefore
@@ -95,6 +136,9 @@ for trust-boundary details and the verification limitations. The
 pinned parsed contracts and numeric/resource defenses. Flowchart IDs such as
 `LINK` are ordinary nodes, not sequence/class link directives; multiline quoted
 labels using `<br/>` remain supported with HTML labels disabled.
+The [Gantt admission decision](decisions/mermaid-gantt-admission.md) records raw
+task validation before the native engine's resolving accessor, calendar bounds
+and the intentional source-only subset.
 
 ## Verification and dependency updates
 
@@ -115,7 +159,7 @@ forced desktop build still gate publication.
 
 When updating Mermaid Tiny, review its bundled dependencies as well as its API:
 it is a self-contained script, not a dependency tree resolved at runtime. Verify
-all seven database admission adapters, numeric chart limits, CSP/offline behavior, actual SVG label
+all eight database admission adapters, numeric/calendar chart limits, CSP/offline behavior, actual SVG label
 rendering, hostile inputs, and the source/theme/cache lifecycle. Update the
 renderer identity in `apps/web/src/lib/mermaid/policy.ts` with policy changes.
 The independent output sanitizer is separately pinned. Renovate updates remain

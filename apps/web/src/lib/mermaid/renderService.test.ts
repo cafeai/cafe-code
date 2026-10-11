@@ -5,7 +5,7 @@ import { admitMermaidSource } from "./policy";
 const result = { svg: "<svg/>", width: 10, height: 10, title: "Diagram" };
 
 describe("Mermaid admission and bounded scheduler", () => {
-  it("allows seven families but rejects configuration, unsupported syntax and byte overflow", () => {
+  it("allows eight families but rejects configuration, unsupported syntax and byte overflow", () => {
     for (const source of [
       "graph TD\nA-->B",
       "sequenceDiagram",
@@ -15,13 +15,14 @@ describe("Mermaid admission and bounded scheduler", () => {
       "xychart-beta\nbar [1,2]",
       "xychart\nbar [1,2]",
       'pie showData\n"One": 1',
+      "gantt\ndateFormat YYYY-MM-DD\nCompile :build, 2026-10-12, 4d",
     ]) {
       expect(() => admitMermaidSource(source)).not.toThrow();
     }
     for (const source of [
       "---\nconfig: {}\n---\ngraph TD",
       "%%{init: {}}%%\ngraph TD",
-      "gantt\ntitle Work",
+      "journey\ntitle Work",
       `graph TD\n${"字".repeat(11_000)}`,
     ]) {
       expect(() => admitMermaidSource(source)).toThrow("Diagram unavailable");
@@ -39,6 +40,8 @@ describe("Mermaid admission and bounded scheduler", () => {
       "sequenceDiagram\nparticipant A\nLINK A: Guide @ https://example.invalid",
       'sequenceDiagram\nparticipant A\nlinks A: {"Guide": "https://example.invalid"}',
       'classDiagram\nclass A\nlink A "https://example.invalid"',
+      'gantt\nCompile :build, 2026-10-12, 4d\nclick build href "https://example.invalid"',
+      "gantt\nCompile :build, 2026-10-12, 4d\nclick build call callback()",
     ])
       expect(() => admitMermaidSource(source)).toThrow("Diagram unavailable");
   });

@@ -1,6 +1,6 @@
 import { uiText } from "@cafecode/shared/i18n";
 /** Version the policy with the renderer pin: cached images must never cross a policy upgrade. */
-export const MERMAID_POLICY = "tiny-12.0.0/cafe-2";
+export const MERMAID_POLICY = "tiny-12.0.0/cafe-3";
 export const MAX_MERMAID_SOURCE_BYTES = 32 * 1024;
 export const MAX_MERMAID_GRAPH_ITEMS = 250;
 export const MAX_MERMAID_SVG_BYTES = 2 * 1024 * 1024;
@@ -18,7 +18,7 @@ export function admitMermaidSource(source: string): void {
     throw new Error(getMERMAID_FAILURE());
   }
   const family =
-    /^(?:\s|%%[^\r\n]*(?:\r?\n|$))*(flowchart|graph|sequenceDiagram|classDiagram|stateDiagram(?:-v2)?|erDiagram|xychart(?:-beta)?|pie)\b/.exec(
+    /^(?:\s|%%[^\r\n]*(?:\r?\n|$))*(flowchart|graph|sequenceDiagram|classDiagram|stateDiagram(?:-v2)?|erDiagram|xychart(?:-beta)?|pie|gantt)\b/.exec(
       source,
     )?.[1];
   // Source remains inert text. The runtime separately binds these checks to
