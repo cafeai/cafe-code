@@ -40,6 +40,20 @@ export function isRemoteEnvironmentAuthHttpError(
   return error instanceof RemoteEnvironmentAuthHttpError;
 }
 
+/**
+ * Reconnecting may mint a fresh, short-lived socket token with the already
+ * saved bearer. It must never replay enrollment, replace a rejected credential
+ * or treat a malformed target/response as an ordinary outage. Keep admission
+ * structural: raw network exception strings may contain credentials or URLs.
+ */
+export function isRetryableRemoteWebSocketUrlError(error: unknown): boolean {
+  if (error instanceof RemoteEnvironmentNetworkError) return true;
+  return (
+    isRemoteEnvironmentAuthHttpError(error) &&
+    (error.status === 408 || error.status === 429 || (error.status >= 500 && error.status <= 599))
+  );
+}
+
 function remoteEndpointUrl(httpBaseUrl: string, pathname: string): string {
   const url = new URL(httpBaseUrl);
   url.pathname = pathname;
@@ -211,6 +225,14 @@ export async function resolveRemoteWebSocketConnectionUrl(input: {
     httpBaseUrl: input.httpBaseUrl,
     bearerToken: input.bearerToken,
   });
+  // JSON decoding alone does not establish a usable capability. A malformed
+  // successful response must fail before opening a socket, not turn into an
+  // endlessly retried `wsToken=undefined` authentication failure.
+  if (!issued || typeof issued.token !== "string" || issued.token.trim().length === 0) {
+    throw new RemoteEnvironmentConnectionError(
+      "The remote server returned an invalid socket token.",
+    );
+  }
   url.searchParams.set("wsToken", issued.token);
   return url.toString();
 }

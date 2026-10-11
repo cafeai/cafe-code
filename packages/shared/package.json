@@ -4,6 +4,10 @@
   "license": "AGPL-3.0-or-later",
   "type": "module",
   "exports": {
+    "./backendStartupProgress": {
+      "types": "./src/backendStartupProgress.ts",
+      "import": "./src/backendStartupProgress.ts"
+    },
     "./liveWork": {
       "types": "./src/liveWork.ts",
       "import": "./src/liveWork.ts"

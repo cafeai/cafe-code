@@ -4549,7 +4549,7 @@ __metadata:
 
 "effect@patch:effect@npm%3A4.0.0-beta.59#./.yarn/patches/effect.patch::locator=%40cafecode%2Fmonorepo%40workspace%3A.":
   version: 4.0.0-beta.59
-  resolution: "effect@patch:effect@npm%3A4.0.0-beta.59#./.yarn/patches/effect.patch::version=4.0.0-beta.59&hash=3dbd03&locator=%40cafecode%2Fmonorepo%40workspace%3A."
+  resolution: "effect@patch:effect@npm%3A4.0.0-beta.59#./.yarn/patches/effect.patch::version=4.0.0-beta.59&hash=4a1e07&locator=%40cafecode%2Fmonorepo%40workspace%3A."
   dependencies:
     "@standard-schema/spec": "npm:^1.1.0"
     fast-check: "npm:^4.6.0"
@@ -4561,7 +4561,7 @@ __metadata:
     toml: "npm:^4.1.1"
     uuid: "npm:^13.0.0"
     yaml: "npm:^2.8.3"
-  checksum: 10c0/a8ac23bdedd427b338a449317603b2f3bd04fc1635be921a433226ce6ccea6256a77bd4eb8632f0adb43e83c1d6b098a1d71d10662a86b1ffdb19889fc8e234e
+  checksum: 10c0/55e50c47534e60ca96dab3d998b9d1ed8b7001aa2410a64da77cf03a187393cd2ae5a1582ba5c7d66e8f56aa71ff348978462670cfb5b3717fb244bcdad23599
   languageName: node
   linkType: hard
 

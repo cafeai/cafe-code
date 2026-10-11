@@ -39,6 +39,7 @@ import {
   fetchRemoteEnvironmentDescriptor,
   fetchRemoteSessionState,
   isRemoteEnvironmentAuthHttpError,
+  isRetryableRemoteWebSocketUrlError,
   resolveRemoteWebSocketConnectionUrl,
 } from "../remote/api";
 import { resolveRemotePairingTarget, resolveRemoteServerTarget } from "../remote/target";
@@ -68,6 +69,7 @@ import { useUiStateStore } from "~/uiStateStore";
 import type { WsProtocolCloseContext } from "../../rpc/protocol";
 import { getServerConfig } from "../../rpc/serverState";
 import { WsTransport } from "../../rpc/wsTransport";
+import { getWsConnectionStatus } from "../../rpc/wsConnectionState";
 import { createWsRpcClient, type WsRpcClient } from "../../rpc/wsRpcClient";
 import { appendVersionMismatchHint, resolveServerConfigVersionMismatch } from "../../versionSkew";
 import {
@@ -86,6 +88,7 @@ import {
   recordSavedEnvironmentConnectionAttempt,
   recordSavedEnvironmentConnectionOpened,
   recordSavedEnvironmentManualDisconnect,
+  recordSavedEnvironmentRetryScheduled,
   recordSavedEnvironmentTerminalError,
   recordSavedEnvironmentTransportFailure,
   type SavedEnvironmentConnectionLifecyclePatch,
@@ -1362,6 +1365,17 @@ function createSavedEnvironmentClient(
         onAttempt: () => {
           recordRuntimeConnectionAttempt(environmentId);
         },
+        // Only transient token issuance is replayable. The saved bearer is
+        // authoritative; enrollment and credential rejection need user action.
+        shouldRetryUrlError: isRetryableRemoteWebSocketUrlError,
+        onTerminalError: (message) => {
+          setRuntimeError(environmentId, new Error(message));
+        },
+        onRetryScheduled: (info) => {
+          useSavedEnvironmentRuntimeStore
+            .getState()
+            .patch(environmentId, recordSavedEnvironmentRetryScheduled(info));
+        },
         onOpen: () => {
           setRuntimeConnected(environmentId);
         },
@@ -1655,6 +1669,14 @@ function reconnectEnvironmentConnectionsAfterBrowserResume(reason: string): void
   }
 
   for (const connection of environmentConnections.values()) {
+    const reconnectPhase =
+      connection.kind === "primary"
+        ? getWsConnectionStatus().reconnectPhase
+        : useSavedEnvironmentRuntimeStore.getState().byId?.[connection.environmentId]
+            ?.reconnectPhase;
+    // Waiting/attempting protocols own their backoff; focus cannot reset it.
+    // Definitive admission/protocol rejection also requires explicit Retry.
+    if (reconnectPhase !== undefined && reconnectPhase !== "idle") continue;
     if (connection.client.isHeartbeatFresh()) {
       continue;
     }

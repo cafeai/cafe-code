@@ -156,7 +156,10 @@ const makeLargeRendererSnapshot = (index: number) => ({
     online: true,
     attemptCount: 4,
     reconnectAttemptCount: 2,
-    reconnectMaxAttempts: 8,
+    reconnectMaxAttempts: null,
+    retryDelayMs: 2_000,
+    heartbeatTimeoutCount: 3,
+    lastHeartbeatTimeoutAt: "2026-05-26T00:00:00.000Z",
     closeCode: 1006,
     socketUrl: "wss://secret.example.test/ws?token=secret",
     closeReason: "private provider response",
@@ -590,6 +593,15 @@ describe("DesktopDebugServer compact snapshots", () => {
     assert.equal(compactJson.includes("private provider response"), false);
     assert.equal(compactJson.includes("bearer secret"), false);
     assert.equal(compactJson.includes("recent event secret"), false);
+    assert.deepInclude(
+      (compact.renderer as Record<string, unknown>).connection as Record<string, unknown>,
+      {
+        reconnectMaxAttempts: null,
+        retryDelayMs: 2_000,
+        heartbeatTimeoutCount: 3,
+        lastHeartbeatTimeoutAt: "2026-05-26T00:00:00.000Z",
+      },
+    );
     assert.equal(compactJson.includes("usage payload secret"), false);
     assert.equal(compactJson.includes("dictation-transcript-secret"), false);
     assert.equal(compactJson.includes("dictation-audio-secret"), false);

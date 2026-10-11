@@ -13,7 +13,6 @@ import * as Stream from "effect/Stream";
 
 import { dispatchIdempotentCommandWithTransportRetry } from "./idempotentDispatch";
 import { type WsRpcProtocolClient } from "./protocol";
-import { resetWsReconnectBackoff } from "./wsConnectionState";
 import { WsTransport, type WsTransportOpenEvent } from "./wsTransport";
 
 type RpcTag = keyof WsRpcProtocolClient & string;
@@ -205,7 +204,7 @@ export function createWsRpcClient(transport: WsTransport): WsRpcClient {
   return {
     dispose: () => transport.dispose(),
     reconnect: async () => {
-      resetWsReconnectBackoff();
+      transport.resetReconnectBackoff();
       await transport.reconnect();
     },
     isHeartbeatFresh: () => transport.isHeartbeatFresh(),

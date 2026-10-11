@@ -11,6 +11,9 @@ export const DesktopBackendBootstrap = Schema.Struct({
   cafeCodeHome: Schema.String,
   host: Schema.String,
   desktopBootstrapToken: Schema.String,
+  // The desktop alone opts into its exact child's private progress pipe.
+  // Never infer this descriptor from ambient process state or an environment.
+  startupProgressFd: Schema.optional(Schema.Literal(4)),
   otlpTracesUrl: Schema.optional(Schema.String),
   otlpMetricsUrl: Schema.optional(Schema.String),
   providerDaemon: Schema.optional(ProviderDaemonClientConfig),

@@ -15,9 +15,12 @@ import {
 import {
   getWsConnectionStatus,
   getWsConnectionUiState,
+  getWsReconnectDelayMsForRetry,
+  recordWsConnectionTerminalError,
   resetWsConnectionStateForTests,
 } from "../rpc/wsConnectionState";
 import { computeNonTransportSubscriptionRetryDelayMs, WsTransport } from "./wsTransport";
+import { createWsRpcClient } from "./wsRpcClient";
 
 const encodeServerSettings = Schema.encodeSync(ServerSettings);
 
@@ -217,6 +220,240 @@ describe("WsTransport", () => {
     await transport.dispose();
   });
 
+  it("retries rejected URL acquisition without exposing its credential-bearing error", async () => {
+    vi.useFakeTimers();
+    const provider = vi
+      .fn<() => Promise<string>>()
+      .mockRejectedValueOnce(new Error("Rejected https://private.test/?token=secret-auth-value"))
+      .mockResolvedValue("wss://remote.example.test/?wsToken=fresh-token");
+    const onAttempt = vi.fn();
+    const onError = vi.fn();
+    const transport = createTransport(provider, { onAttempt, onError });
+
+    await waitFor(() => expect(onError).toHaveBeenCalledOnce());
+    expect(provider).toHaveBeenCalledOnce();
+    expect(sockets).toHaveLength(0);
+    expect(onAttempt).toHaveBeenCalledOnce();
+    expect(getWsConnectionStatus()).toMatchObject({
+      attemptCount: 1,
+      reconnectAttemptCount: 1,
+      reconnectPhase: "waiting",
+    });
+    expect(JSON.stringify(onError.mock.calls)).not.toContain("secret-auth-value");
+    expect(JSON.stringify(getWsConnectionStatus())).not.toContain("private.test");
+
+    await vi.advanceTimersByTimeAsync(999);
+    expect(provider).toHaveBeenCalledOnce();
+    await vi.advanceTimersByTimeAsync(1);
+    await waitFor(() => expect(sockets).toHaveLength(1));
+    expect(provider).toHaveBeenCalledTimes(2);
+    expect(onAttempt).toHaveBeenCalledTimes(2);
+    expect(getSocket().url).toBe("wss://remote.example.test/ws?wsToken=fresh-token");
+    getSocket().open();
+    await waitFor(() => expect(getWsConnectionStatus().phase).toBe("connected"));
+    await transport.dispose();
+  });
+
+  it("keeps transient URL failures retrying at the capped delay until token acquisition recovers", async () => {
+    vi.useFakeTimers();
+    const provider = vi.fn<() => Promise<string>>().mockRejectedValue(new Error("secret-token"));
+    const onAttempt = vi.fn();
+    const onError = vi.fn();
+    const transport = createTransport(provider, { onAttempt, onError });
+
+    for (let attempt = 1; attempt <= 10; attempt += 1) {
+      await waitFor(() => expect(onError).toHaveBeenCalledTimes(attempt));
+      expect(provider).toHaveBeenCalledTimes(attempt);
+      expect(onAttempt).toHaveBeenCalledTimes(attempt);
+      expect(onError).toHaveBeenCalledTimes(attempt);
+      expect(getWsConnectionStatus()).toMatchObject({
+        reconnectAttemptCount: attempt,
+        reconnectPhase: "waiting",
+      });
+      const delay = getWsReconnectDelayMsForRetry(attempt - 1);
+      if (delay !== null) {
+        await vi.advanceTimersByTimeAsync(delay - 1);
+        expect(provider).toHaveBeenCalledTimes(attempt);
+        await vi.advanceTimersByTimeAsync(1);
+      }
+    }
+
+    provider.mockResolvedValue("wss://remote.example.test/?wsToken=recovered-token");
+    await vi.advanceTimersByTimeAsync(64_000);
+    await waitFor(() => expect(sockets).toHaveLength(1));
+    expect(provider).toHaveBeenCalledTimes(12);
+    getSocket().open();
+    await waitFor(() => expect(getWsConnectionStatus().phase).toBe("connected"));
+    expect(JSON.stringify(onError.mock.calls)).not.toContain("secret-token");
+    await transport.dispose();
+  });
+
+  it("fails an initially queued request on transient token failure without replaying it after recovery", async () => {
+    vi.useFakeTimers();
+    const provider = vi
+      .fn<() => Promise<string>>()
+      .mockRejectedValueOnce(new Error("private transient rejection: token=secret-value"))
+      .mockResolvedValue("wss://remote.example.test/?wsToken=recovered-token");
+    const onError = vi.fn();
+    const onRequestStart = vi.fn();
+    const transport = createTransport(provider, { onError, onRequestStart });
+    const requestSettled = vi.fn();
+    const pendingRequest = transport
+      .request((client) =>
+        client[WS_METHODS.serverUpsertKeybinding]({
+          command: "commandPalette.toggle",
+          key: "ctrl+k",
+        }),
+      )
+      .catch((error: unknown) => error)
+      .then((result: unknown) => {
+        requestSettled();
+        return result;
+      });
+    await waitFor(() => expect(onError).toHaveBeenCalledOnce());
+    await vi.advanceTimersByTimeAsync(10);
+    expect(onRequestStart).toHaveBeenCalledOnce();
+    expect(requestSettled).toHaveBeenCalledOnce();
+    expect(await pendingRequest).toBeInstanceOf(Error);
+
+    await vi.advanceTimersByTimeAsync(990);
+    await waitFor(() => expect(sockets).toHaveLength(1));
+    getSocket().open();
+    await waitFor(() => expect(getWsConnectionStatus().phase).toBe("connected"));
+    expect(getSocket().sent).toHaveLength(0);
+    expect(JSON.stringify(onError.mock.calls)).not.toContain("secret-value");
+    await transport.dispose();
+  });
+
+  it("stops explicitly rejected URL authority and only tries again after a manual reconnect", async () => {
+    vi.useFakeTimers();
+    const sensitiveFailure = new Error("https://private.test/?bearer=secret-token");
+    const provider = vi.fn<() => Promise<string>>().mockRejectedValue(sensitiveFailure);
+    const shouldRetryUrlError = vi.fn(() => false);
+    const onTerminalError = vi.fn();
+    const onError = vi.fn();
+    const onRequestStart = vi.fn();
+    const transport = createTransport(provider, {
+      shouldRetryUrlError,
+      onTerminalError,
+      onError,
+      onRequestStart,
+    });
+    const requestSettled = vi.fn();
+    const pendingRequest = transport
+      .request((client) =>
+        client[WS_METHODS.serverUpsertKeybinding]({
+          command: "commandPalette.toggle",
+          key: "ctrl+k",
+        }),
+      )
+      .catch((error: unknown) => error)
+      .then((result: unknown) => {
+        requestSettled();
+        return result;
+      });
+
+    await waitFor(() => expect(onTerminalError).toHaveBeenCalledOnce());
+    await vi.advanceTimersByTimeAsync(10);
+    expect({
+      starts: onRequestStart.mock.calls.length,
+      settles: requestSettled.mock.calls.length,
+    }).toEqual({ starts: 1, settles: 1 });
+    expect(await pendingRequest).toBeInstanceOf(Error);
+    expect(shouldRetryUrlError).toHaveBeenCalledWith(sensitiveFailure);
+    expect(onError).not.toHaveBeenCalled();
+    expect(getWsConnectionStatus()).toMatchObject({
+      attemptCount: 1,
+      reconnectPhase: "exhausted",
+      nextRetryAt: null,
+    });
+    expect(JSON.stringify(onTerminalError.mock.calls)).not.toContain("secret-token");
+    expect(JSON.stringify(getWsConnectionStatus())).not.toContain("private.test");
+    await vi.advanceTimersByTimeAsync(256_000);
+    expect(provider).toHaveBeenCalledOnce();
+    expect(sockets).toHaveLength(0);
+
+    provider.mockResolvedValue("wss://remote.example.test/?wsToken=explicit-retry-token");
+    await transport.reconnect();
+    await waitFor(() => expect(sockets).toHaveLength(1));
+    getSocket().open();
+    await waitFor(() => expect(getWsConnectionStatus().phase).toBe("connected"));
+    expect(provider).toHaveBeenCalledTimes(2);
+    await transport.dispose();
+  });
+
+  it("ignores rejected URL acquisition belonging to a replaced session", async () => {
+    let rejectFirst!: (error: Error) => void;
+    const firstUrl = new Promise<string>((_resolve, reject) => {
+      rejectFirst = reject;
+    });
+    const provider = vi
+      .fn<() => Promise<string>>()
+      .mockReturnValueOnce(firstUrl)
+      .mockResolvedValue("wss://remote.example.test/?wsToken=current-token");
+    const onError = vi.fn();
+    const transport = createTransport(provider, { onError });
+    await waitFor(() => expect(provider).toHaveBeenCalledOnce());
+    await transport.reconnect();
+    await waitFor(() => expect(sockets).toHaveLength(1));
+    getSocket().open();
+    await waitFor(() => expect(getWsConnectionStatus().phase).toBe("connected"));
+
+    rejectFirst(new Error("stale credential failure"));
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    expect(onError).not.toHaveBeenCalled();
+    expect(getWsConnectionStatus().phase).toBe("connected");
+    expect(provider).toHaveBeenCalledTimes(2);
+    await transport.dispose();
+  });
+
+  it.each(["invalid-url?token=secret-value", "https://private.test/?token=secret-value"])(
+    "treats an invalid asynchronously resolved URL as terminal without exposing it: %s",
+    async (invalidUrl) => {
+      vi.useFakeTimers();
+      const provider = vi.fn<() => Promise<string>>().mockResolvedValue(invalidUrl);
+      const onTerminalError = vi.fn();
+      const transport = createTransport(provider, { onTerminalError });
+      const pendingRequest = transport
+        .request((client) =>
+          client[WS_METHODS.serverUpsertKeybinding]({
+            command: "commandPalette.toggle",
+            key: "ctrl+k",
+          }),
+        )
+        .catch((error: unknown) => error);
+      await waitFor(() => expect(onTerminalError).toHaveBeenCalledOnce());
+      await vi.advanceTimersByTimeAsync(10);
+      expect(await pendingRequest).toBeInstanceOf(Error);
+      expect(getWsConnectionStatus().reconnectPhase).toBe("exhausted");
+      await vi.advanceTimersByTimeAsync(256_000);
+      expect(provider).toHaveBeenCalledOnce();
+      expect(sockets).toHaveLength(0);
+      expect(JSON.stringify(onTerminalError.mock.calls)).not.toContain("secret-value");
+      await transport.dispose();
+    },
+  );
+
+  it("stops a browser constructor policy rejection with a credential-free typed error", async () => {
+    vi.useFakeTimers();
+    const constructor = vi.fn(() => {
+      throw new Error("private constructor rejection: token=secret-value");
+    });
+    globalThis.WebSocket = constructor as unknown as typeof WebSocket;
+    const onTerminalError = vi.fn();
+    const transport = createTransport("wss://remote.example.test", { onTerminalError });
+    await waitFor(() => expect(onTerminalError).toHaveBeenCalledOnce());
+    expect(getWsConnectionStatus()).toMatchObject({
+      attemptCount: 1,
+      reconnectPhase: "exhausted",
+      retryDelayMs: null,
+    });
+    await vi.advanceTimersByTimeAsync(256_000);
+    expect(constructor).toHaveBeenCalledOnce();
+    expect(JSON.stringify(onTerminalError.mock.calls)).not.toContain("secret-value");
+    await transport.dispose();
+  });
+
   it("tracks initial connection failures for the app error state", async () => {
     const transport = createTransport("ws://localhost:3020");
 
@@ -248,6 +485,54 @@ describe("WsTransport", () => {
     await transport.dispose();
   });
 
+  it("enforces the socket-open deadline and rejects its queued request before retrying", async () => {
+    vi.useFakeTimers();
+    const onSessionStart = vi.fn();
+    const transport = createTransport("ws://localhost:3020", { onSessionStart });
+    const requestSettled = vi.fn();
+    const pendingRequest = transport
+      .request((client) =>
+        client[WS_METHODS.serverUpsertKeybinding]({
+          command: "commandPalette.toggle",
+          key: "ctrl+k",
+        }),
+      )
+      .catch((error: unknown) => error)
+      .then((result: unknown) => {
+        requestSettled();
+        return result;
+      });
+    await waitFor(() => expect(sockets).toHaveLength(1));
+    const unopenedSocket = getSocket();
+    await vi.advanceTimersByTimeAsync(9_999);
+    expect(requestSettled).not.toHaveBeenCalled();
+    expect(sockets).toHaveLength(1);
+    await vi.advanceTimersByTimeAsync(1);
+    await waitFor(() => expect(requestSettled).toHaveBeenCalledOnce());
+    expect(await pendingRequest).toBeInstanceOf(Error);
+    expect(unopenedSocket.sent).toHaveLength(0);
+    expect(unopenedSocket.readyState).toBe(MockWebSocket.CLOSED);
+    expect(getWsConnectionStatus()).toMatchObject({
+      heartbeatTimeoutCount: 0,
+      reconnectPhase: "waiting",
+      retryDelayMs: 1_000,
+    });
+
+    await vi.advanceTimersByTimeAsync(999);
+    expect(sockets).toHaveLength(1);
+    await vi.advanceTimersByTimeAsync(1);
+    await waitFor(() => expect(sockets).toHaveLength(2));
+    getSocket().open();
+    await waitFor(() => expect(getWsConnectionStatus().phase).toBe("connected"));
+    // The protocol may flush its own queued Ping when the writer opens; an
+    // application Request from the failed attempt must never accompany it.
+    expect(
+      getSocket().sent.filter((message) => JSON.parse(message)._tag === "Request"),
+    ).toHaveLength(0);
+    expect(onSessionStart).toHaveBeenCalledOnce();
+    await transport.dispose();
+  });
+
   it("surfaces reconnecting state after a live socket disconnects", async () => {
     const transport = createTransport("ws://localhost:3020");
 
@@ -275,6 +560,68 @@ describe("WsTransport", () => {
     });
     expect(getWsConnectionUiState(getWsConnectionStatus())).toBe("reconnecting");
 
+    await transport.dispose();
+  });
+
+  it("refreshes the real retry budget across more than eight healthy socket lifetimes", async () => {
+    vi.useFakeTimers();
+    const onHeartbeatPong = vi.fn();
+    const transport = createTransport("ws://localhost:3020", { onHeartbeatPong });
+    await waitFor(() => expect(sockets).toHaveLength(1));
+
+    for (let cycle = 0; cycle < 10; cycle += 1) {
+      const socket = getSocket();
+      socket.open();
+      await waitFor(() => expect(getWsConnectionStatus().phase).toBe("connected"));
+      socket.serverMessage(JSON.stringify({ _tag: "Pong" }));
+      await waitFor(() => expect(onHeartbeatPong).toHaveBeenCalledTimes(cycle + 1));
+      // These are completed socket lifetimes, not repeated failed opens. Each
+      // healthy connection restores the outage backoff and its first delay.
+      socket.close(1012, "synthetic restart");
+      await vi.advanceTimersByTimeAsync(999);
+      expect(sockets).toHaveLength(cycle + 1);
+      await vi.advanceTimersByTimeAsync(1);
+      await waitFor(() => expect(sockets).toHaveLength(cycle + 2));
+    }
+
+    getSocket().open();
+    await waitFor(() => expect(getWsConnectionStatus().phase).toBe("connected"));
+    await transport.dispose();
+  });
+
+  it("keeps the exact capped backoff alive beyond eight continuously failed sockets", async () => {
+    vi.useFakeTimers();
+    const transport = createTransport("ws://localhost:3020");
+    await waitFor(() => expect(sockets).toHaveLength(1));
+
+    for (let attempt = 1; attempt <= 10; attempt += 1) {
+      const socket = getSocket();
+      socket.error();
+      socket.close(1006, "synthetic unavailable");
+      await waitFor(() =>
+        expect(getWsConnectionStatus()).toMatchObject({
+          reconnectAttemptCount: attempt,
+          reconnectPhase: "waiting",
+        }),
+      );
+      const delay = getWsReconnectDelayMsForRetry(attempt - 1);
+      if (delay !== null) {
+        await vi.advanceTimersByTimeAsync(delay - 1);
+        expect(sockets).toHaveLength(attempt);
+        await vi.advanceTimersByTimeAsync(1);
+        await waitFor(() => expect(sockets).toHaveLength(attempt + 1));
+      }
+    }
+
+    expect(sockets).toHaveLength(11);
+    getSocket().open();
+    await waitFor(() => expect(getWsConnectionStatus().phase).toBe("connected"));
+    expect(getWsConnectionStatus()).toMatchObject({
+      reconnectAttemptCount: 1,
+      reconnectPhase: "idle",
+      reconnectMaxAttempts: null,
+    });
+    expect(getWsConnectionStatus().nextRetryAt).toBeNull();
     await transport.dispose();
   });
 
@@ -390,6 +737,23 @@ describe("WsTransport", () => {
 
     await auxiliary.dispose();
     await primary.dispose();
+  });
+
+  it("keeps primary terminal state intact when an actual saved-environment client retries", async () => {
+    const savedTransport = createTransport("wss://saved.example.test", {
+      trackGlobalConnectionStatus: false,
+    });
+    const savedClient = createWsRpcClient(savedTransport);
+    await waitFor(() => expect(sockets).toHaveLength(1));
+    recordWsConnectionTerminalError("Primary connection configuration was rejected.");
+    const primaryBeforeRetry = getWsConnectionStatus();
+    await savedClient.reconnect();
+    await waitFor(() => expect(sockets).toHaveLength(2));
+    expect(getWsConnectionStatus()).toEqual(primaryBeforeRetry);
+    getSocket().open();
+    await waitFor(() => expect(getSocket().readyState).toBe(MockWebSocket.OPEN));
+    expect(getWsConnectionStatus()).toEqual(primaryBeforeRetry);
+    await savedClient.dispose();
   });
 
   it("does not report an intentional dispose as a reconnectable disconnect", async () => {
@@ -514,48 +878,378 @@ describe("WsTransport", () => {
     expect(opened).toHaveBeenCalledTimes(2);
   });
 
-  it("recycles the websocket session when heartbeat recovery is requested", async () => {
+  it("recycles a missing-Pong socket and restores requests/subscriptions without replaying a lost mutation", async () => {
+    vi.useFakeTimers();
+    const onHeartbeatPing = vi.fn();
+    const onHeartbeatPong = vi.fn();
+    const onHeartbeatTimeout = vi.fn();
     const onSessionStart = vi.fn();
-    const transport = createTransport("ws://localhost:3020", { onSessionStart });
-    expect(onSessionStart).toHaveBeenCalledOnce();
-
-    await waitFor(() => {
-      expect(sockets).toHaveLength(1);
+    const transport = createTransport("ws://localhost:3020", {
+      onHeartbeatPing,
+      onHeartbeatPong,
+      onHeartbeatTimeout,
+      onSessionStart,
     });
-
+    const listener = vi.fn();
+    const onResubscribe = vi.fn();
+    const unsubscribe = transport.subscribe(
+      (client) => client[WS_METHODS.subscribeServerLifecycle]({}),
+      listener,
+      { onResubscribe },
+    );
+    await waitFor(() => expect(sockets).toHaveLength(1));
     const firstSocket = getSocket();
     firstSocket.open();
+    await waitFor(() => expect(firstSocket.sent).toHaveLength(1));
+    const firstRequest = JSON.parse(firstSocket.sent[0] ?? "{}") as { id: string };
+    const welcomeEvent = {
+      version: 1,
+      sequence: 1,
+      type: "welcome",
+      payload: {
+        environment: {
+          environmentId: "environment-local",
+          label: "Local environment",
+          platform: { os: "darwin", arch: "arm64" },
+          serverVersion: "0.0.0-test",
+          capabilities: { repositoryIdentity: true },
+        },
+        cwd: "/tmp/heartbeat-fixture",
+        projectName: "heartbeat-fixture",
+      },
+    };
+    firstSocket.serverMessage(
+      JSON.stringify({ _tag: "Chunk", requestId: firstRequest.id, values: [welcomeEvent] }),
+    );
+    await waitFor(() => expect(listener).toHaveBeenCalledOnce());
 
-    await waitFor(() => {
-      expect(getWsConnectionStatus()).toMatchObject({
-        hasConnected: true,
-        phase: "connected",
-      });
-    });
-
-    (
-      transport as unknown as {
-        scheduleHeartbeatRecovery: () => void;
-      }
-    ).scheduleHeartbeatRecovery();
-
-    await waitFor(() => {
-      expect(sockets).toHaveLength(2);
-    });
-    expect(onSessionStart).toHaveBeenCalledTimes(2);
-
-    const secondSocket = getSocket();
-    expect(secondSocket).not.toBe(firstSocket);
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(onHeartbeatPing).toHaveBeenCalledOnce();
+    expect(firstSocket.sent.some((message) => JSON.parse(message)._tag === "Ping")).toBe(true);
+    firstSocket.serverMessage(JSON.stringify({ _tag: "Pong" }));
+    await waitFor(() => expect(onHeartbeatPong).toHaveBeenCalledOnce());
+    expect(transport.isHeartbeatFresh()).toBe(true);
+    // Effect.forever yields between iterations, and the fake host scheduler
+    // can place that yield one millisecond after the first deadline.
+    await vi.advanceTimersByTimeAsync(5_010);
+    expect(onHeartbeatPing).toHaveBeenCalledTimes(2);
+    const lostMutationResult = transport
+      .request((client) =>
+        client[WS_METHODS.serverUpsertKeybinding]({
+          command: "commandPalette.toggle",
+          key: "ctrl+k",
+        }),
+      )
+      .catch((error: unknown) => error);
+    await waitFor(() =>
+      expect(
+        firstSocket.sent.filter((message) => JSON.parse(message)._tag === "Request"),
+      ).toHaveLength(2),
+    );
+    await vi.advanceTimersByTimeAsync(5_010);
+    await waitFor(() => expect(onHeartbeatTimeout).toHaveBeenCalledOnce());
+    await vi.advanceTimersByTimeAsync(1_000);
+    await waitFor(() => expect(sockets).toHaveLength(2));
+    expect(onHeartbeatTimeout).toHaveBeenCalledOnce();
+    expect(onSessionStart).toHaveBeenCalledOnce();
+    expect(getWsConnectionStatus()).toMatchObject({ heartbeatTimeoutCount: 1 });
+    expect(getWsConnectionStatus().lastHeartbeatTimeoutAt).not.toBeNull();
     expect(firstSocket.readyState).toBe(MockWebSocket.CLOSED);
+    expect(transport.isHeartbeatFresh()).toBe(false);
+    expect(await lostMutationResult).toBeInstanceOf(Error);
 
-    secondSocket.open();
-    await waitFor(() => {
-      expect(getWsConnectionStatus()).toMatchObject({
-        phase: "connected",
-      });
-    });
+    const replacement = getSocket();
+    replacement.open();
+    await vi.advanceTimersByTimeAsync(250);
+    await waitFor(() =>
+      expect(
+        replacement.sent.filter((message) => JSON.parse(message)._tag === "Request"),
+      ).toHaveLength(1),
+    );
+    // The hook fences a fresh snapshot when each subscription attempt starts,
+    // including fast failures while the protocol waits for its socket retry.
+    // Only one actual stream request reaches the replacement socket above.
+    expect(onResubscribe).toHaveBeenCalled();
+    const replacementRequest = replacement.sent
+      .map((message) => JSON.parse(message) as { _tag: string; id?: string })
+      .find((message) => message._tag === "Request");
+    replacement.serverMessage(
+      JSON.stringify({
+        _tag: "Chunk",
+        requestId: replacementRequest?.id,
+        values: [{ ...welcomeEvent, sequence: 2 }],
+      }),
+    );
+    await waitFor(() => expect(listener).toHaveBeenCalledTimes(2));
 
+    // Delayed events from the retired generation must not update freshness or
+    // connection truth after the new authenticated session has been selected.
+    firstSocket.serverMessage(JSON.stringify({ _tag: "Pong" }));
+    firstSocket.close(1006, "stale heartbeat close");
+    firstSocket.open();
+    firstSocket.error();
+    expect(onHeartbeatPong).toHaveBeenCalledOnce();
+    expect(transport.isHeartbeatFresh()).toBe(false);
+    expect(getWsConnectionStatus().phase).toBe("connected");
+    const freshMutation = transport.request((client) =>
+      client[WS_METHODS.serverUpsertKeybinding]({
+        command: "commandPalette.toggle",
+        key: "ctrl+j",
+      }),
+    );
+    await waitFor(() =>
+      expect(
+        replacement.sent.filter((message) => JSON.parse(message)._tag === "Request"),
+      ).toHaveLength(2),
+    );
+    const freshRequest = replacement.sent
+      .map((message) => JSON.parse(message) as { _tag: string; id?: string; tag?: string })
+      .find((message) => message.tag === WS_METHODS.serverUpsertKeybinding);
+    replacement.serverMessage(
+      JSON.stringify({
+        _tag: "Exit",
+        requestId: freshRequest?.id,
+        exit: { _tag: "Success", value: { keybindings: [], issues: [] } },
+      }),
+    );
+    await expect(freshMutation).resolves.toEqual({ keybindings: [], issues: [] });
+    unsubscribe();
     await transport.dispose();
+    await vi.advanceTimersByTimeAsync(128_000);
+    expect(sockets).toHaveLength(2);
+  });
+
+  it("keeps malformed JSON a live-peer failure rather than a local terminal handler defect", async () => {
+    const onTerminalError = vi.fn();
+    const onRetryScheduled = vi.fn();
+    const transport = createTransport("ws://localhost:3020", {
+      onTerminalError,
+      onRetryScheduled,
+    });
+    const failedRequest = transport
+      .request((client) =>
+        client[WS_METHODS.serverUpsertKeybinding]({
+          command: "commandPalette.toggle",
+          key: "ctrl+k",
+        }),
+      )
+      .catch((error: unknown) => error);
+    await waitFor(() => expect(sockets).toHaveLength(1));
+    const socket = getSocket();
+    socket.open();
+    await waitFor(() => expect(socket.sent).toHaveLength(1));
+    socket.serverMessage("{");
+    expect(await failedRequest).toBeInstanceOf(Error);
+    expect(onTerminalError).not.toHaveBeenCalled();
+    expect(onRetryScheduled).not.toHaveBeenCalled();
+    expect(getWsConnectionStatus().phase).toBe("connected");
+    const freshRequest = transport.request((client) =>
+      client[WS_METHODS.serverUpsertKeybinding]({
+        command: "commandPalette.toggle",
+        key: "ctrl+j",
+      }),
+    );
+    await waitFor(() => expect(socket.sent).toHaveLength(2));
+    const freshMessage = JSON.parse(socket.sent[1] ?? "{}") as { id: string };
+    socket.serverMessage(
+      JSON.stringify({
+        _tag: "Exit",
+        requestId: freshMessage.id,
+        exit: { _tag: "Success", value: { keybindings: [], issues: [] } },
+      }),
+    );
+    await expect(freshRequest).resolves.toEqual({ keybindings: [], issues: [] });
+    expect(sockets).toHaveLength(1);
+    await transport.dispose();
+  });
+
+  it("marks a real typed response defect terminal and recovers only through an explicit fresh session", async () => {
+    vi.useFakeTimers();
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const onTerminalError = vi.fn();
+    const onRetryScheduled = vi.fn();
+    const onSessionStart = vi.fn();
+    const transport = createTransport("ws://localhost:3020", {
+      onTerminalError,
+      onRetryScheduled,
+      onSessionStart,
+    });
+    const rpcClient = createWsRpcClient(transport);
+    const listener = vi.fn();
+    const unsubscribe = transport.subscribe(
+      (client) => client[WS_METHODS.subscribeServerLifecycle]({}),
+      listener,
+    );
+    await waitFor(() => expect(sockets).toHaveLength(1));
+    const firstSocket = getSocket();
+    firstSocket.open();
+    await waitFor(() => expect(firstSocket.sent).toHaveLength(1));
+    const firstRequest = JSON.parse(firstSocket.sent[0] ?? "{}") as { id: string };
+    const lostMutation = transport
+      .request((client) =>
+        client[WS_METHODS.serverUpsertKeybinding]({
+          command: "commandPalette.toggle",
+          key: "ctrl+k",
+        }),
+      )
+      .catch((error: unknown) => error);
+    await waitFor(() => expect(firstSocket.sent).toHaveLength(2));
+    // Valid JSON reaches the actual typed stream decoder. Its schema defect
+    // ends the handler generation, unlike malformed JSON's live-peer failure
+    // broadcast. No fake lifecycle callback substitutes for that distinction.
+    firstSocket.serverMessage(
+      JSON.stringify({
+        _tag: "Chunk",
+        requestId: firstRequest.id,
+        values: ["invalid-event?token=private-response"],
+      }),
+    );
+    await waitFor(() => expect(onTerminalError).toHaveBeenCalledOnce());
+    expect(await lostMutation).toBeInstanceOf(Error);
+    expect(getWsConnectionStatus()).toMatchObject({
+      reconnectPhase: "exhausted",
+      nextRetryAt: null,
+      retryDelayMs: null,
+    });
+    expect(JSON.stringify(onTerminalError.mock.calls)).not.toContain("private-response");
+    expect(JSON.stringify(getWsConnectionStatus())).not.toContain("private-response");
+    expect(warnSpy).toHaveBeenCalledWith("WebSocket RPC subscription failed", {
+      error: "The WebSocket RPC subscription failed.",
+      retrying: false,
+    });
+    expect(JSON.stringify(warnSpy.mock.calls)).not.toContain("private-response");
+    await vi.advanceTimersByTimeAsync(256_000);
+    expect(sockets).toHaveLength(1);
+    expect(onRetryScheduled).not.toHaveBeenCalled();
+
+    unsubscribe();
+    await rpcClient.reconnect();
+    await waitFor(() => expect(sockets).toHaveLength(2));
+    expect(onSessionStart).toHaveBeenCalledTimes(2);
+    const replacement = getSocket();
+    // A schema-invalid stream is deliberately not automatically replayed.
+    // Explicit retry restores a fresh protocol scope for a new subscription.
+    const unsubscribeReplacement = transport.subscribe(
+      (client) => client[WS_METHODS.subscribeServerLifecycle]({}),
+      listener,
+    );
+    replacement.open();
+    await vi.advanceTimersByTimeAsync(250);
+    await waitFor(() =>
+      expect(
+        replacement.sent.filter((message) => JSON.parse(message)._tag === "Request"),
+      ).toHaveLength(1),
+    );
+    const replacementRequest = replacement.sent
+      .map((message) => JSON.parse(message) as { _tag: string; id?: string; tag?: string })
+      .find((message) => message._tag === "Request");
+    expect(replacementRequest?.tag).toBe(WS_METHODS.subscribeServerLifecycle);
+    replacement.serverMessage(
+      JSON.stringify({
+        _tag: "Chunk",
+        requestId: replacementRequest?.id,
+        values: [
+          {
+            version: 1,
+            sequence: 1,
+            type: "welcome",
+            payload: {
+              environment: {
+                environmentId: "environment-local",
+                label: "Local environment",
+                platform: { os: "darwin", arch: "arm64" },
+                serverVersion: "0.0.0-test",
+                capabilities: { repositoryIdentity: true },
+              },
+              cwd: "/tmp/protocol-defect-fixture",
+              projectName: "protocol-defect-fixture",
+            },
+          },
+        ],
+      }),
+    );
+    await waitFor(() => expect(listener).toHaveBeenCalledOnce());
+    firstSocket.serverMessage(JSON.stringify({ _tag: "Pong" }));
+    firstSocket.close(1006, "obsolete generation");
+    expect(getWsConnectionStatus().phase).toBe("connected");
+    expect(onTerminalError).toHaveBeenCalledOnce();
+    // Only an explicitly submitted new mutation is allowed on this scope;
+    // recovery above has sent the critical stream, not the lost mutation.
+    const freshMutation = transport.request((client) =>
+      client[WS_METHODS.serverUpsertKeybinding]({
+        command: "commandPalette.toggle",
+        key: "ctrl+j",
+      }),
+    );
+    await waitFor(() =>
+      expect(
+        replacement.sent.filter((message) => JSON.parse(message)._tag === "Request"),
+      ).toHaveLength(2),
+    );
+    const freshRequest = replacement.sent
+      .map((message) => JSON.parse(message) as { id?: string; tag?: string })
+      .find((message) => message.tag === WS_METHODS.serverUpsertKeybinding);
+    replacement.serverMessage(
+      JSON.stringify({
+        _tag: "Exit",
+        requestId: freshRequest?.id,
+        exit: { _tag: "Success", value: { keybindings: [], issues: [] } },
+      }),
+    );
+    await expect(freshMutation).resolves.toEqual({ keybindings: [], issues: [] });
+    unsubscribeReplacement();
+    await rpcClient.dispose();
+    await vi.advanceTimersByTimeAsync(128_000);
+    expect(sockets).toHaveLength(2);
+  });
+
+  it("backs off repeated open-without-Pong sockets using the actual scheduled deadlines", async () => {
+    vi.useFakeTimers();
+    const onHeartbeatTimeout = vi.fn();
+    const onRetryScheduled = vi.fn();
+    const onSessionStart = vi.fn();
+    const transport = createTransport("ws://localhost:3020", {
+      onHeartbeatTimeout,
+      onRetryScheduled,
+      onSessionStart,
+    });
+    await waitFor(() => expect(sockets).toHaveLength(1));
+
+    for (let cycle = 0; cycle < 3; cycle += 1) {
+      getSocket().open();
+      await waitFor(() => expect(getWsConnectionStatus().phase).toBe("connected"));
+      // Drive the actual Effect pinger, socket cancellation and retry fibers.
+      // Timer order is left to the host scheduler; no private recovery method
+      // or forged lifecycle callback stands in for the protocol timeout.
+      for (let timer = 0; timer < 20 && onRetryScheduled.mock.calls.length <= cycle; timer += 1) {
+        await vi.advanceTimersToNextTimerAsync();
+      }
+      expect(onHeartbeatTimeout).toHaveBeenCalledTimes(cycle + 1);
+      expect(onRetryScheduled).toHaveBeenCalledTimes(cycle + 1);
+      const scheduled = onRetryScheduled.mock.calls[cycle]?.[0] as {
+        retryIndex: number;
+        delayMs: number;
+        nextRetryAt: string;
+      };
+      expect(scheduled).toMatchObject({ retryIndex: cycle, delayMs: 1_000 * 2 ** cycle });
+      expect(getWsConnectionStatus()).toMatchObject({
+        reconnectAttemptCount: cycle + 1,
+        nextRetryAt: scheduled.nextRetryAt,
+        reconnectPhase: "waiting",
+        retryDelayMs: scheduled.delayMs,
+      });
+      const remainingMs = Date.parse(scheduled.nextRetryAt) - Date.now();
+      expect(remainingMs).toBeGreaterThan(0);
+      await vi.advanceTimersByTimeAsync(remainingMs - 1);
+      expect(sockets).toHaveLength(cycle + 1);
+      await vi.advanceTimersByTimeAsync(1);
+      await waitFor(() => expect(sockets).toHaveLength(cycle + 2));
+    }
+
+    expect(onSessionStart).toHaveBeenCalledOnce();
+    await transport.dispose();
+    await vi.advanceTimersByTimeAsync(256_000);
+    expect(sockets).toHaveLength(4);
   });
 
   it("ignores stale socket lifecycle events after a reconnect starts a new session", async () => {
@@ -1154,7 +1848,7 @@ describe("WsTransport", () => {
 
     expect(attempts).toBe(1);
     expect(warnSpy).toHaveBeenCalledWith("WebSocket RPC subscription failed", {
-      error: "Git command failed in GitCore.statusDetails",
+      error: "The WebSocket RPC subscription failed.",
       retrying: false,
     });
     expect(warnSpy).not.toHaveBeenCalledWith(
@@ -1191,7 +1885,7 @@ describe("WsTransport", () => {
       expect(attempts).toBeGreaterThanOrEqual(2);
     });
     expect(warnSpy).toHaveBeenCalledWith("WebSocket RPC subscription failed", {
-      error: "Server stream projection failed",
+      error: "The WebSocket RPC subscription failed.",
       retrying: true,
     });
 

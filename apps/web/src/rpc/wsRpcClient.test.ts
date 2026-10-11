@@ -17,6 +17,7 @@ vi.mock("./wsTransport", () => ({
   WsTransport: class WsTransport {
     dispose = vi.fn(async () => undefined);
     reconnect = vi.fn(async () => undefined);
+    resetReconnectBackoff = vi.fn();
     request = vi.fn();
     requestStream = vi.fn();
     subscribe = vi.fn(() => () => undefined);
@@ -44,6 +45,18 @@ const baseRemoteStatus: VcsStatusRemoteResult = {
 };
 
 describe("wsRpcClient", () => {
+  it("delegates manual Retry backoff reset to the owning transport", async () => {
+    const resetReconnectBackoff = vi.fn();
+    const reconnect = vi.fn(async () => undefined);
+    const transport = { resetReconnectBackoff, reconnect } as unknown as WsTransport;
+    const client = createWsRpcClient(transport);
+    await client.reconnect();
+    expect(resetReconnectBackoff).toHaveBeenCalledOnce();
+    expect(reconnect).toHaveBeenCalledOnce();
+    expect(resetReconnectBackoff.mock.invocationCallOrder[0]).toBeLessThan(
+      reconnect.mock.invocationCallOrder[0]!,
+    );
+  });
   it("routes passive quota subscriptions with the exact binding and content-free method tag", () => {
     const input = {
       instanceId: ProviderInstanceId.make("claude-personal"),

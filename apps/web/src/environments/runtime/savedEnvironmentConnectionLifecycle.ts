@@ -42,7 +42,7 @@ export function beginSavedEnvironmentReconnect(
     lastErrorAt: null,
     nextRetryAt: null,
     // WsTransport.reconnect replaces the Effect protocol session, resetting
-    // its bounded retry schedule. The upcoming socket is therefore attempt one
+    // its retry schedule. The upcoming socket is therefore attempt one
     // even when it replaces a session that was already waiting or exhausted.
     reconnectAttemptCount: 1,
     reconnectPhase: "attempting",
@@ -64,7 +64,7 @@ export function recordSavedEnvironmentConnectionAttempt(
     lastError: null,
     lastErrorAt: null,
     nextRetryAt: null,
-    reconnectAttemptCount: current.reconnectAttemptCount + 1,
+    reconnectAttemptCount: Math.min(Number.MAX_SAFE_INTEGER, current.reconnectAttemptCount + 1),
     reconnectPhase: "attempting",
   };
 }
@@ -79,9 +79,9 @@ export function recordSavedEnvironmentConnectionOpened(
     lastError: null,
     lastErrorAt: null,
     nextRetryAt: null,
-    // Keep the live socket as attempt one of the current protocol cycle. If it
-    // later closes, Effect consumes the first retry delay before constructing
-    // attempt two, and the eighth failed socket is truly terminal.
+    // A successful handshake is connected, but not evidence that heartbeats
+    // work. The protocol's next actual schedule observation determines its
+    // delay/count if this connection fails before receiving a healthy Pong.
     reconnectAttemptCount: 1,
     reconnectPhase: "idle",
   };
@@ -113,6 +113,19 @@ export function recordSavedEnvironmentTransportFailure(
     lastErrorAt: disconnectedAt,
     nextRetryAt: exhausted ? null : new Date(input.nowMs + retryDelayMs).toISOString(),
     reconnectPhase: exhausted ? "exhausted" : "waiting",
+  };
+}
+
+/** Publish the enforcing schedule, not a guessed deadline from UI history. */
+export function recordSavedEnvironmentRetryScheduled(input: {
+  readonly retryIndex: number;
+  readonly nextRetryAt: string;
+}): SavedEnvironmentConnectionLifecyclePatch {
+  return {
+    connectionState: "disconnected",
+    nextRetryAt: input.nextRetryAt,
+    reconnectAttemptCount: Math.min(Number.MAX_SAFE_INTEGER, input.retryIndex + 1),
+    reconnectPhase: "waiting",
   };
 }
 

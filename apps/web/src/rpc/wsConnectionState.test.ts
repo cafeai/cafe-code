@@ -9,9 +9,11 @@ import {
   recordWsConnectionClosed,
   recordWsConnectionErrored,
   recordWsConnectionOpened,
+  recordWsConnectionTerminalError,
+  recordWsHeartbeatTimeout,
+  recordWsRetryScheduled,
   resetWsConnectionStateForTests,
   setBrowserOnlineStatus,
-  WS_RECONNECT_MAX_ATTEMPTS,
 } from "./wsConnectionState";
 
 describe("wsConnectionState", () => {
@@ -93,16 +95,115 @@ describe("wsConnectionState", () => {
     });
   });
 
-  it("marks the reconnect cycle as exhausted after the final attempt fails", () => {
-    for (let attempt = 0; attempt < WS_RECONNECT_MAX_ATTEMPTS; attempt += 1) {
+  it("keeps a long transient outage waiting at the capped delay", () => {
+    for (let attempt = 0; attempt < 12; attempt += 1) {
       recordWsConnectionAttempt("ws://localhost:3020/ws");
       recordWsConnectionErrored("Unable to connect to the Cafe Code server WebSocket.");
     }
 
     expect(getWsConnectionStatus()).toMatchObject({
+      nextRetryAt: new Date(Date.now() + 64_000).toISOString(),
+      reconnectAttemptCount: 12,
+      reconnectMaxAttempts: null,
+      reconnectPhase: "waiting",
+    });
+  });
+
+  it("reserves exhaustion for an explicit terminal rejection", () => {
+    recordWsConnectionAttempt(null);
+    recordWsConnectionTerminalError("Unable to connect to the Cafe Code server WebSocket.");
+
+    expect(getWsConnectionStatus()).toMatchObject({
       nextRetryAt: null,
-      reconnectAttemptCount: WS_RECONNECT_MAX_ATTEMPTS,
+      reconnectAttemptCount: 1,
       reconnectPhase: "exhausted",
+      socketUrl: null,
+    });
+  });
+
+  it("tracks the same post-open attempt and delay as the actual protocol", () => {
+    recordWsConnectionAttempt("ws://localhost:3020/ws");
+    recordWsConnectionOpened();
+    recordWsConnectionClosed({ code: 1012, reason: "synthetic restart" });
+    expect(getWsConnectionStatus()).toMatchObject({
+      reconnectAttemptCount: 1,
+      nextRetryAt: new Date(Date.now() + 1_000).toISOString(),
+    });
+    recordWsConnectionAttempt("ws://localhost:3020/ws");
+    recordWsConnectionErrored("Unable to connect to the Cafe Code server WebSocket.");
+    expect(getWsConnectionStatus()).toMatchObject({
+      reconnectAttemptCount: 2,
+      nextRetryAt: new Date(Date.now() + 2_000).toISOString(),
+    });
+  });
+
+  it("caps valid retry delays and rejects invalid retry indices", () => {
+    expect(
+      [0, 1, 2, 3, 4, 5, 6, 7, 100, Number.MAX_SAFE_INTEGER].map(getWsReconnectDelayMsForRetry),
+    ).toEqual([1_000, 2_000, 4_000, 8_000, 16_000, 32_000, 64_000, 64_000, 64_000, 64_000]);
+    expect(
+      [-1, 0.5, Number.NaN, Number.POSITIVE_INFINITY].map(getWsReconnectDelayMsForRetry),
+    ).toEqual([null, null, null, null]);
+  });
+
+  it("uses the enforcing schedule's deadline after a handshake without a healthy Pong", () => {
+    recordWsConnectionAttempt("ws://localhost:3020/ws");
+    recordWsConnectionOpened();
+    recordWsConnectionErrored("WebSocket heartbeat timed out.");
+    const nextRetryAt = new Date(Date.now() + 8_000).toISOString();
+    recordWsRetryScheduled({ retryIndex: 3, delayMs: 8_000, nextRetryAt });
+
+    expect(getWsConnectionStatus()).toMatchObject({
+      reconnectAttemptCount: 4,
+      nextRetryAt,
+      retryDelayMs: 8_000,
+      reconnectPhase: "waiting",
+      phase: "disconnected",
+    });
+  });
+
+  it("publishes bounded heartbeat and actual retry diagnostics without retained payloads", () => {
+    recordWsConnectionAttempt("wss://secret.example.test/ws?token=secret");
+    recordWsConnectionOpened();
+    recordWsHeartbeatTimeout();
+    vi.advanceTimersByTime(1_000);
+    recordWsHeartbeatTimeout();
+    const lastHeartbeatTimeoutAt = new Date().toISOString();
+    recordWsRetryScheduled({
+      retryIndex: 6,
+      delayMs: 64_000,
+      nextRetryAt: new Date(Date.now() + 64_000).toISOString(),
+    });
+    const diagnostics = getWsConnectionDiagnostics();
+    expect(diagnostics).toMatchObject({
+      heartbeatTimeoutCount: 2,
+      lastHeartbeatTimeoutAt,
+      retryDelayMs: 64_000,
+    });
+    expect(diagnostics.recentEvents.slice(-2).map((event) => event.kind)).toEqual([
+      "heartbeat-timeout",
+      "retry-scheduled",
+    ]);
+    expect(JSON.stringify(diagnostics)).not.toContain("secret");
+    recordWsConnectionAttempt(null);
+    expect(getWsConnectionDiagnostics()).toMatchObject({
+      retryDelayMs: null,
+      heartbeatTimeoutCount: 2,
+    });
+    recordWsConnectionOpened();
+    expect(getWsConnectionDiagnostics()).toMatchObject({
+      retryDelayMs: null,
+      heartbeatTimeoutCount: 2,
+    });
+    recordWsRetryScheduled({
+      retryIndex: 0,
+      delayMs: 1_000,
+      nextRetryAt: new Date().toISOString(),
+    });
+    recordWsConnectionTerminalError("Connection rejected.");
+    expect(getWsConnectionDiagnostics()).toMatchObject({
+      retryDelayMs: null,
+      heartbeatTimeoutCount: 2,
     });
   });
 

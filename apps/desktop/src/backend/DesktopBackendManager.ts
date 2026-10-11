@@ -1,4 +1,5 @@
 import * as Cause from "effect/Cause";
+import * as Clock from "effect/Clock";
 import * as Context from "effect/Context";
 import * as Data from "effect/Data";
 import * as Deferred from "effect/Deferred";
@@ -24,6 +25,11 @@ import {
   type DesktopBackendBootstrap as DesktopBackendBootstrapValue,
 } from "@cafecode/contracts";
 import { CAFE_CODE_ENVIRONMENT_ENDPOINT_PATH } from "@cafecode/shared/environmentEndpoint";
+import {
+  BACKEND_STARTUP_PROGRESS_FD,
+  makeBackendMigrationProgressDecoder,
+  makeBackendStartupDeadline,
+} from "@cafecode/shared/backendStartupProgress";
 
 import * as DesktopBackendConfiguration from "./DesktopBackendConfiguration.ts";
 import * as DesktopObservability from "../app/DesktopObservability.ts";
@@ -299,20 +305,32 @@ const checkHttpReadyOnce = Effect.fn("desktop.backendManager.checkHttpReadyOnce"
 
 const waitForHttpReady = Effect.fn("desktop.backendManager.waitForHttpReady")(function* (
   baseUrl: URL,
-  timeout: Duration.Duration,
+  deadline: ReturnType<typeof makeBackendStartupDeadline>,
+  elapsedMs: Effect.Effect<number>,
 ): Effect.fn.Return<void, BackendTimeoutError, HttpClient.HttpClient> {
   const readinessUrl = readinessUrlFor(baseUrl);
-  yield* Effect.gen(function* () {
-    while (true) {
-      if (yield* checkHttpReadyOnce(baseUrl)) {
-        return;
-      }
-      yield* Effect.sleep(DEFAULT_BACKEND_READINESS_INTERVAL);
+  while (true) {
+    const beforeProbeMs = yield* elapsedMs;
+    const remainingMs = Math.max(0, deadline.deadlineMs - beforeProbeMs);
+    const healthy = yield* checkHttpReadyOnce(
+      baseUrl,
+      Duration.min(DEFAULT_BACKEND_READINESS_REQUEST_TIMEOUT, Duration.millis(remainingMs)),
+    );
+    const afterProbeMs = yield* elapsedMs;
+    if (afterProbeMs >= deadline.deadlineMs) {
+      return yield* new BackendTimeoutError({ url: readinessUrl });
     }
-  }).pipe(
-    Effect.timeout(timeout),
-    Effect.mapError(() => new BackendTimeoutError({ url: readinessUrl })),
-  );
+    if (healthy) {
+      deadline.finish();
+      return;
+    }
+    yield* Effect.sleep(
+      Duration.min(
+        DEFAULT_BACKEND_READINESS_INTERVAL,
+        Duration.millis(deadline.deadlineMs - afterProbeMs),
+      ),
+    );
+  }
 });
 
 const monitorHttpHealth = Effect.fn("desktop.backendManager.monitorHttpHealth")(function* (
@@ -398,9 +416,10 @@ const runBackendProcess = Effect.fn("runBackendProcess")(function* (
 ): Effect.fn.Return<BackendProcessExit, BackendProcessError, BackendProcessRunRequirements> {
   const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
   const processScope = yield* Scope.Scope;
-  const bootstrapJson = yield* encodeBootstrapJson(options.bootstrap).pipe(
-    Effect.mapError((cause) => new BackendProcessBootstrapEncodeError({ cause })),
-  );
+  const bootstrapJson = yield* encodeBootstrapJson({
+    ...options.bootstrap,
+    startupProgressFd: BACKEND_STARTUP_PROGRESS_FD,
+  }).pipe(Effect.mapError((cause) => new BackendProcessBootstrapEncodeError({ cause })));
   const onOutput = options.onOutput ?? (() => Effect.void);
   const command = ChildProcess.make(
     options.executablePath,
@@ -421,15 +440,48 @@ const runBackendProcess = Effect.fn("runBackendProcess")(function* (
           type: "input",
           stream: Stream.encodeText(Stream.make(`${bootstrapJson}\n`)),
         },
+        // This private child-output pipe is always consumed, even when normal
+        // log capture is disabled. Provider stdout/stderr never grants a longer
+        // startup window, and unrelated/adopted processes cannot write here.
+        fd4: { type: "output" },
       },
     },
   );
 
+  const spawnedAtNanos = yield* Clock.currentTimeNanos;
+  const deadline = makeBackendStartupDeadline(
+    Duration.toMillis(options.readinessTimeout ?? DEFAULT_BACKEND_READINESS_TIMEOUT),
+  );
+  const elapsedMs = Clock.currentTimeNanos.pipe(
+    Effect.map((now) => Number(now - spawnedAtNanos) / 1_000_000),
+  );
+  yield* Effect.addFinalizer(() => Effect.sync(() => deadline.finish()));
   const handle = yield* spawner
     .spawn(command)
     .pipe(Effect.mapError((cause) => new BackendProcessSpawnError({ cause })));
 
   const terminate = handle.kill().pipe(Effect.ignore);
+  const progressDecoder = makeBackendMigrationProgressDecoder();
+  yield* handle.getOutputFd(BACKEND_STARTUP_PROGRESS_FD).pipe(
+    Stream.runForEach((bytes) =>
+      Effect.gen(function* () {
+        const decoded = progressDecoder.push(bytes);
+        if (decoded.invalid) {
+          deadline.invalidate();
+          return;
+        }
+        const observedAtMs = yield* elapsedMs;
+        for (const record of decoded.records) deadline.observe(record, observedAtMs);
+      }),
+    ),
+    Effect.catchCause(() => Effect.sync(() => deadline.invalidate())),
+    Effect.ensuring(
+      Effect.sync(() => {
+        if (progressDecoder.end()) deadline.invalidate();
+      }),
+    ),
+    Effect.forkIn(processScope),
+  );
   const terminalFailureExit = yield* Deferred.make<BackendProcessExit>();
   const terminateFailedRun = Effect.fn("desktop.backendManager.terminateFailedRun")(function* (
     reason: string,
@@ -457,10 +509,7 @@ const runBackendProcess = Effect.fn("runBackendProcess")(function* (
   const healthCheckInterval = options.healthCheckInterval ?? DEFAULT_BACKEND_HEALTH_CHECK_INTERVAL;
   const healthCheckRequestTimeout =
     options.healthCheckRequestTimeout ?? DEFAULT_BACKEND_HEALTH_REQUEST_TIMEOUT;
-  yield* waitForHttpReady(
-    options.httpBaseUrl,
-    options.readinessTimeout ?? DEFAULT_BACKEND_READINESS_TIMEOUT,
-  ).pipe(
+  yield* waitForHttpReady(options.httpBaseUrl, deadline, elapsedMs).pipe(
     Effect.tap(() => options.onReady?.() ?? Effect.void),
     Effect.tap(() =>
       monitorHttpHealth(

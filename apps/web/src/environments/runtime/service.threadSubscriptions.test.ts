@@ -50,6 +50,7 @@ vi.mock("../remote/api", () => ({
   fetchRemoteEnvironmentDescriptor: vi.fn(),
   fetchRemoteSessionState: mockFetchRemoteSessionState,
   isRemoteEnvironmentAuthHttpError: vi.fn(() => false),
+  isRetryableRemoteWebSocketUrlError: vi.fn(() => false),
   resolveRemoteWebSocketConnectionUrl: vi.fn(async () => "ws://remote.example.test/ws"),
 }));
 
@@ -694,56 +695,76 @@ describe("retainThreadDetailSubscription", () => {
     await resetEnvironmentServiceForTests();
   });
 
-  it("reconnects stale environment streams when the browser resumes from the background", async () => {
-    let visibilityState: DocumentVisibilityState = "visible";
-    const documentTarget = new EventTarget();
-    const windowTarget = new EventTarget();
-    vi.stubGlobal("document", {
-      addEventListener: documentTarget.addEventListener.bind(documentTarget),
-      removeEventListener: documentTarget.removeEventListener.bind(documentTarget),
-      get visibilityState() {
-        return visibilityState;
-      },
-    });
-    vi.stubGlobal("window", {
-      addEventListener: windowTarget.addEventListener.bind(windowTarget),
-      removeEventListener: windowTarget.removeEventListener.bind(windowTarget),
-    });
-    mockCreateWsRpcClient.mockReturnValue({
-      server: {
-        getConfig: vi.fn(async () => ({
-          environment: {
-            environmentId: EnvironmentId.make("env-remote"),
-            label: "Remote env",
-            platform: { os: "darwin", arch: "arm64" },
-            serverVersion: "0.0.0-test",
-            capabilities: { repositoryIdentity: true },
-          },
-        })),
-      },
-      isHeartbeatFresh: vi.fn(() => false),
-      orchestration: {
-        subscribeThread: mockSubscribeThread,
-      },
-    });
+  it.each(["transient", "terminal", "waiting", "attempting"] as const)(
+    "handles %s stale primary streams when the browser resumes",
+    async (failure) => {
+      let visibilityState: DocumentVisibilityState = "visible";
+      const documentTarget = new EventTarget();
+      const windowTarget = new EventTarget();
+      vi.stubGlobal("document", {
+        addEventListener: documentTarget.addEventListener.bind(documentTarget),
+        removeEventListener: documentTarget.removeEventListener.bind(documentTarget),
+        get visibilityState() {
+          return visibilityState;
+        },
+      });
+      vi.stubGlobal("window", {
+        addEventListener: windowTarget.addEventListener.bind(windowTarget),
+        removeEventListener: windowTarget.removeEventListener.bind(windowTarget),
+      });
+      mockCreateWsRpcClient.mockReturnValue({
+        server: {
+          getConfig: vi.fn(async () => ({
+            environment: {
+              environmentId: EnvironmentId.make("env-remote"),
+              label: "Remote env",
+              platform: { os: "darwin", arch: "arm64" },
+              serverVersion: "0.0.0-test",
+              capabilities: { repositoryIdentity: true },
+            },
+          })),
+        },
+        isHeartbeatFresh: vi.fn(() => false),
+        orchestration: {
+          subscribeThread: mockSubscribeThread,
+        },
+      });
 
-    const { resetEnvironmentServiceForTests, startEnvironmentConnectionService } =
-      await import("./service");
+      const { resetEnvironmentServiceForTests, startEnvironmentConnectionService } =
+        await import("./service");
 
-    const stop = startEnvironmentConnectionService(new QueryClient());
-    expect(mockConnectionReconnects).toHaveLength(1);
+      const stop = startEnvironmentConnectionService(new QueryClient());
+      expect(mockConnectionReconnects).toHaveLength(1);
 
-    visibilityState = "hidden";
-    documentTarget.dispatchEvent(new Event("visibilitychange"));
-    expect(mockConnectionReconnects[0]).not.toHaveBeenCalled();
+      const {
+        recordWsConnectionTerminalError,
+        recordWsRetryScheduled,
+        recordWsConnectionAttempt,
+        resetWsConnectionStateForTests,
+      } = await import("../../rpc/wsConnectionState");
+      resetWsConnectionStateForTests();
+      if (failure === "terminal") recordWsConnectionTerminalError("Connection admission rejected.");
+      if (failure === "waiting")
+        recordWsRetryScheduled({
+          retryIndex: 9,
+          delayMs: 64_000,
+          nextRetryAt: new Date(Date.now() + 64_000).toISOString(),
+        });
+      if (failure === "attempting") recordWsConnectionAttempt("ws://127.0.0.1:3000/ws");
 
-    visibilityState = "visible";
-    documentTarget.dispatchEvent(new Event("visibilitychange"));
-    expect(mockConnectionReconnects[0]).toHaveBeenCalledTimes(1);
+      visibilityState = "hidden";
+      documentTarget.dispatchEvent(new Event("visibilitychange"));
+      expect(mockConnectionReconnects[0]).not.toHaveBeenCalled();
 
-    stop();
-    await resetEnvironmentServiceForTests();
-  });
+      visibilityState = "visible";
+      documentTarget.dispatchEvent(new Event("visibilitychange"));
+      expect(mockConnectionReconnects[0]).toHaveBeenCalledTimes(failure === "transient" ? 1 : 0);
+
+      stop();
+      await resetEnvironmentServiceForTests();
+      resetWsConnectionStateForTests();
+    },
+  );
 
   it("allows a larger idle cache before capacity eviction starts", async () => {
     const {

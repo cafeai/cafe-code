@@ -70,11 +70,12 @@ const SQL_OPERATION_ALLOWLIST = new Set([
 /**
  * Build a stable, content-free identity for one prepared SQL statement.
  *
- * Debugging a synchronous `StatementSync.all()` stall requires recording the
- * statement *before* Node enters SQLite. Logging SQL text is unacceptable: a
- * future call site could accidentally interpolate a prompt, path, or secret
- * into an unprepared statement. The domain-separated digest lets maintainers
- * correlate starts with completed trace spans without retaining that text.
+ * Debugging a synchronous `StatementSync.all()` or `.run()` stall requires
+ * recording the statement *before* Node enters SQLite. Logging SQL text is
+ * unacceptable: a future call site could accidentally interpolate a prompt,
+ * path, or secret into an unprepared statement. The domain-separated digest
+ * lets maintainers correlate starts with completed trace spans without
+ * retaining that text.
  */
 function sqliteStatementFingerprint(sql: string): string {
   return createHash("sha256")
@@ -145,8 +146,9 @@ export function makeSqliteStatementDiagnosticReporter(
 function writeSqliteStatementDiagnostic(record: SqliteStatementDiagnosticRecord): void {
   try {
     // stderr is already captured by the desktop backend manager. Keep this a
-    // synchronous call immediately before StatementSync.all(); an Effect log
-    // span cannot finish while the main thread is blocked inside native SQLite.
+    // synchronous call immediately before StatementSync.all() or .run(); an
+    // Effect log span cannot finish while the main thread is blocked inside
+    // native SQLite.
     process.stderr.write(`[Cafe Code SQLite] ${JSON.stringify(record)}\n`);
   } catch {
     // Diagnostics must never make a database operation fail or expose the
@@ -361,7 +363,12 @@ const makeWithDatabase = Effect.fn("makeWithDatabase")(function* (
               ) as ReadonlyArray<any>,
             );
           }
-          const result = statement.run(...(params as any));
+          // Non-returning statements include schema/index migrations and can
+          // block in SQLite just as reads can. Publish the same redacted start
+          // record before the native call, preserving its raw result and error.
+          const result = runWithStatementDiagnostics(sql, params.length, () =>
+            statement.run(...(params as any)),
+          );
           return Effect.succeed(raw ? (result as unknown as ReadonlyArray<any>) : []);
         } catch (cause) {
           return Effect.fail(
@@ -391,7 +398,11 @@ const makeWithDatabase = Effect.fn("makeWithDatabase")(function* (
                   statement.all(...(params as any)),
                 ) as ReadonlyArray<ReadonlyArray<unknown>>;
               }
-              statement.run(...(params as any));
+              // `.values` still executes writes through the native run path;
+              // retain its empty-array contract while diagnosing that work.
+              runWithStatementDiagnostics(sql, params.length, () =>
+                statement.run(...(params as any)),
+              );
               return [];
             },
             catch: (cause) =>

@@ -22,8 +22,8 @@ import {
   type ConnectionIssue,
 } from "./ConnectionStatusIndicator.logic";
 
-// Mirror the precedence the toast surface used: offline (no network) wins over
-// an exhausted retry loop, which wins over an in-flight reconnect.
+// Offline (no network) wins over a terminal admission rejection, which wins
+// over an in-flight reconnect. Transient failures never exhaust their retry.
 function resolveConnectionIssue(status: WsConnectionStatus): ConnectionIssue | null {
   const uiState = getWsConnectionUiState(status);
   if (uiState === "offline" && status.disconnectedAt !== null) {
@@ -42,9 +42,9 @@ function getConnectionDisplayName(status: WsConnectionStatus): string {
   return status.connectionLabel?.trim() || "Cafe Code Server";
 }
 
-// A running total of attempts this outage rather than "N/8": the backoff cap is
-// not a real ceiling — focus/visibility/online events keep retrying past it, so
-// the count climbs until the socket actually reconnects.
+// Report the enforcing schedule's attempts rather than a fictitious "N/8".
+// The delay is capped, but the active protocol owns persistent retries; browser
+// resume events do not bypass its ramp. Only a healthy received Pong resets it.
 function formatAttemptCount(status: WsConnectionStatus): string | null {
   return formatAttemptCountValue(status.reconnectAttemptCount);
 }
@@ -219,13 +219,7 @@ export function ConnectionStatusIndicator({
             {displayIssue === "offline" ? (
               <div>Waiting for network.</div>
             ) : displayIssue === "exhausted" ? (
-              <div>
-                {attemptLabel
-                  ? isPrimaryEnvironment
-                    ? `Paused after ${attemptLabel}; retries when you're back.`
-                    : `Retries exhausted after ${attemptLabel}.`
-                  : "Retries exhausted trying to reconnect."}
-              </div>
+              <div>Automatic reconnect paused. Check the connection, then retry.</div>
             ) : displayIssue === "disconnected" ? (
               <div>This connection is inactive.</div>
             ) : (

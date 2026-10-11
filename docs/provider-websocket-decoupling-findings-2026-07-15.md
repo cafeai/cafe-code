@@ -22,6 +22,11 @@ The mitigation keeps WebSocket handling in the main backend process and removes 
 
 The original evidence below remains the before-state record. It should not be read as a description of the current source after commit of this mitigation.
 
+The subsequent [persistent connection recovery decision](decisions/persistent-websocket-recovery.md)
+addresses exhausted client retry schedules, saved-server URL acquisition and
+finite migration-specific startup allowance. It supplements, rather than replaces,
+the bounded in-process event-path mitigation and historical evidence below.
+
 ## Executive Conclusion
 
 The reported behavior is real and was observed in retained live-instance diagnostics. The backend became unavailable for multi-second periods, causing all WebSocket RPC subscriptions to be interrupted and recreated. Existing reconnect, snapshot, and replay behavior explains why the UI normally recovers.

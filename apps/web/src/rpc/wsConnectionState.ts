@@ -9,8 +9,6 @@ export type WsReconnectPhase = "attempting" | "exhausted" | "idle" | "waiting";
 export const WS_RECONNECT_INITIAL_DELAY_MS = 1_000;
 export const WS_RECONNECT_BACKOFF_FACTOR = 2;
 export const WS_RECONNECT_MAX_DELAY_MS = 64_000;
-export const WS_RECONNECT_MAX_RETRIES = 7;
-export const WS_RECONNECT_MAX_ATTEMPTS = WS_RECONNECT_MAX_RETRIES + 1;
 
 export interface WsConnectionStatus {
   readonly attemptCount: number;
@@ -20,20 +18,30 @@ export interface WsConnectionStatus {
   readonly connectedAt: string | null;
   readonly disconnectedAt: string | null;
   readonly hasConnected: boolean;
+  readonly heartbeatTimeoutCount: number;
+  readonly lastHeartbeatTimeoutAt: string | null;
   readonly lastError: string | null;
   readonly lastErrorAt: string | null;
   readonly nextRetryAt: string | null;
   readonly online: boolean;
   readonly phase: "idle" | "connecting" | "connected" | "disconnected";
   readonly reconnectAttemptCount: number;
-  readonly reconnectMaxAttempts: number;
+  readonly reconnectMaxAttempts: number | null;
   readonly reconnectPhase: WsReconnectPhase;
+  readonly retryDelayMs: number | null;
   readonly socketUrl: string | null;
 }
 
 export interface WsConnectionDiagnosticEvent {
   readonly at: string;
-  readonly kind: "attempt" | "closed" | "error" | "online-state" | "opened";
+  readonly kind:
+    | "attempt"
+    | "closed"
+    | "error"
+    | "heartbeat-timeout"
+    | "online-state"
+    | "opened"
+    | "retry-scheduled";
   readonly phase: WsConnectionStatus["phase"];
   readonly reconnectPhase: WsReconnectPhase;
   readonly attemptCount: number;
@@ -46,15 +54,18 @@ export interface WsConnectionDiagnostics {
   readonly phase: WsConnectionStatus["phase"];
   readonly reconnectPhase: WsReconnectPhase;
   readonly hasConnected: boolean;
+  readonly heartbeatTimeoutCount: number;
+  readonly lastHeartbeatTimeoutAt: string | null;
   readonly online: boolean;
   readonly attemptCount: number;
   readonly reconnectAttemptCount: number;
-  readonly reconnectMaxAttempts: number;
+  readonly reconnectMaxAttempts: number | null;
   readonly closeCode: number | null;
   readonly connectedAt: string | null;
   readonly disconnectedAt: string | null;
   readonly lastErrorAt: string | null;
   readonly nextRetryAt: string | null;
+  readonly retryDelayMs: number | null;
   readonly recentEvents: ReadonlyArray<WsConnectionDiagnosticEvent>;
 }
 
@@ -69,14 +80,19 @@ const INITIAL_WS_CONNECTION_STATUS = Object.freeze<WsConnectionStatus>({
   connectedAt: null,
   disconnectedAt: null,
   hasConnected: false,
+  heartbeatTimeoutCount: 0,
+  lastHeartbeatTimeoutAt: null,
   lastError: null,
   lastErrorAt: null,
   nextRetryAt: null,
   online: typeof navigator === "undefined" ? true : navigator.onLine !== false,
   phase: "idle",
   reconnectAttemptCount: 0,
-  reconnectMaxAttempts: WS_RECONNECT_MAX_ATTEMPTS,
+  // Transient outages retain one capped retry loop until the backend returns.
+  // A finite limit here would falsely advertise exhaustion after eight attempts.
+  reconnectMaxAttempts: null,
   reconnectPhase: "idle",
+  retryDelayMs: null,
   socketUrl: null,
 });
 
@@ -144,6 +160,8 @@ export function getWsConnectionDiagnostics(): WsConnectionDiagnostics {
     phase: status.phase,
     reconnectPhase: status.reconnectPhase,
     hasConnected: status.hasConnected,
+    heartbeatTimeoutCount: status.heartbeatTimeoutCount,
+    lastHeartbeatTimeoutAt: status.lastHeartbeatTimeoutAt,
     online: status.online,
     attemptCount: status.attemptCount,
     reconnectAttemptCount: status.reconnectAttemptCount,
@@ -153,6 +171,7 @@ export function getWsConnectionDiagnostics(): WsConnectionDiagnostics {
     disconnectedAt: status.disconnectedAt,
     lastErrorAt: status.lastErrorAt,
     nextRetryAt: status.nextRetryAt,
+    retryDelayMs: status.retryDelayMs,
     recentEvents: wsConnectionDiagnosticEvents.map((event) => ({ ...event })),
   };
 }
@@ -174,18 +193,22 @@ export function getWsConnectionUiState(status: WsConnectionStatus): WsConnection
 }
 
 export function recordWsConnectionAttempt(
-  socketUrl: string,
+  socketUrl: string | null,
   metadata?: WsConnectionMetadata,
 ): WsConnectionStatus {
   const connectionLabel = normalizeConnectionLabel(metadata?.connectionLabel);
   const status = updateWsConnectionStatus((current) => ({
     ...current,
-    attemptCount: current.attemptCount + 1,
+    attemptCount: Math.min(Number.MAX_SAFE_INTEGER, current.attemptCount + 1),
     connectionLabel: connectionLabel ?? current.connectionLabel,
     nextRetryAt: null,
     phase: "connecting",
-    reconnectAttemptCount: current.phase === "connected" ? 1 : current.reconnectAttemptCount + 1,
+    reconnectAttemptCount:
+      current.phase === "connected"
+        ? 1
+        : Math.min(Number.MAX_SAFE_INTEGER, current.reconnectAttemptCount + 1),
     reconnectPhase: "attempting",
+    retryDelayMs: null,
     socketUrl,
   }));
   recordDiagnosticEvent("attempt", status);
@@ -204,8 +227,15 @@ export function recordWsConnectionOpened(metadata?: WsConnectionMetadata): WsCon
     hasConnected: true,
     nextRetryAt: null,
     phase: "connected",
-    reconnectAttemptCount: 0,
+    // The live socket is attempt one of the protocol's outage backoff. Its
+    // eventual close consumes the first retry before replacement attempt two,
+    // matching the saved-environment lifecycle. A subsequent actual schedule
+    // observation may restore a retained failure ramp if this opened peer never
+    // sends a healthy Pong. Resetting this to zero would advertise an earlier
+    // retry and the wrong delay after a replacement fails to open.
+    reconnectAttemptCount: 1,
     reconnectPhase: "idle",
+    retryDelayMs: null,
   }));
   recordDiagnosticEvent("opened", status);
   return status;
@@ -260,6 +290,56 @@ export function recordWsConnectionClosed(
   return status;
 }
 
+export function recordWsConnectionTerminalError(
+  message: string,
+  metadata?: WsConnectionMetadata,
+): WsConnectionStatus {
+  const status = updateWsConnectionStatus((current) => ({
+    ...applyDisconnectState(current, {
+      lastError: appendHint(message, metadata?.versionMismatchHint),
+      lastErrorAt: isoNow(),
+    }),
+    nextRetryAt: null,
+    reconnectPhase: "exhausted",
+    retryDelayMs: null,
+  }));
+  recordDiagnosticEvent("error", status);
+  return status;
+}
+
+export function recordWsRetryScheduled(
+  info: { readonly retryIndex: number; readonly delayMs: number; readonly nextRetryAt: string },
+  metadata?: WsConnectionMetadata,
+): WsConnectionStatus {
+  const status = updateWsConnectionStatus((current) => ({
+    ...current,
+    connectionLabel: normalizeConnectionLabel(metadata?.connectionLabel) ?? current.connectionLabel,
+    disconnectedAt: current.disconnectedAt ?? isoNow(),
+    nextRetryAt: info.nextRetryAt,
+    phase: "disconnected",
+    // The socket that just failed is attempt retryIndex + 1. This observation
+    // comes from the enforcing protocol schedule, so an open without a healthy
+    // Pong cannot make the UI invent a shorter delay or a reset outage count.
+    reconnectAttemptCount: Math.min(Number.MAX_SAFE_INTEGER, info.retryIndex + 1),
+    reconnectPhase: "waiting",
+    retryDelayMs: info.delayMs,
+  }));
+  recordDiagnosticEvent("retry-scheduled", status);
+  return status;
+}
+
+export function recordWsHeartbeatTimeout(): WsConnectionStatus {
+  const status = updateWsConnectionStatus((current) => ({
+    ...current,
+    // These finite, content-free observations distinguish heartbeat starvation
+    // from unavailable opens without retaining remote payloads or credentials.
+    heartbeatTimeoutCount: Math.min(Number.MAX_SAFE_INTEGER, current.heartbeatTimeoutCount + 1),
+    lastHeartbeatTimeoutAt: isoNow(),
+  }));
+  recordDiagnosticEvent("heartbeat-timeout", status);
+  return status;
+}
+
 export function setBrowserOnlineStatus(online: boolean): WsConnectionStatus {
   const status = updateWsConnectionStatus((current) => ({
     ...current,
@@ -275,6 +355,7 @@ export function resetWsReconnectBackoff(): WsConnectionStatus {
     nextRetryAt: null,
     reconnectAttemptCount: 0,
     reconnectPhase: "idle",
+    retryDelayMs: null,
   }));
 }
 
@@ -288,12 +369,16 @@ export function useWsConnectionStatus(): WsConnectionStatus {
 }
 
 export function getWsReconnectDelayMsForRetry(retryIndex: number): number | null {
-  if (!Number.isInteger(retryIndex) || retryIndex < 0 || retryIndex >= WS_RECONNECT_MAX_RETRIES) {
+  if (!Number.isInteger(retryIndex) || retryIndex < 0) {
     return null;
   }
 
+  // Six doublings reach the 64-second cap. Clamp the exponent itself so an
+  // indefinitely retried outage cannot overflow before the outer delay clamp.
   return Math.min(
-    Math.round(WS_RECONNECT_INITIAL_DELAY_MS * WS_RECONNECT_BACKOFF_FACTOR ** retryIndex),
+    Math.round(
+      WS_RECONNECT_INITIAL_DELAY_MS * WS_RECONNECT_BACKOFF_FACTOR ** Math.min(6, retryIndex),
+    ),
     WS_RECONNECT_MAX_DELAY_MS,
   );
 }
