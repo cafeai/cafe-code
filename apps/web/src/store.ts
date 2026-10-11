@@ -26,6 +26,7 @@ import {
   MAX_RUNTIME_SUBAGENT_IDENTITIES_PER_TURN,
   ProviderDriverKind,
   RuntimeSubagentPresentation,
+  THREAD_DETAIL_ACTIVITY_WINDOW_LIMIT,
 } from "@cafecode/contracts";
 import type { ThreadId, TurnId } from "@cafecode/contracts";
 import * as Schema from "effect/Schema";
@@ -50,6 +51,7 @@ import { readWorkflowTaskPresentation } from "./workflowTaskActivity";
 import { subagentLimitsEqual } from "./subagentConcurrency";
 import { threadForkPrefix } from "./lib/threadForkPrefix";
 import { isCurrentCodexRecoveryMarker } from "./codexRecovery";
+import { compareActivityWindowOrder } from "./activityOrder";
 const isProviderDriverKindValue = Schema.is(ProviderDriverKind);
 const isRuntimeSubagentPresentation = Schema.is(RuntimeSubagentPresentation);
 
@@ -144,7 +146,7 @@ const initialState: AppState = {
 const MAX_THREAD_MESSAGES = 2_000;
 const MAX_THREAD_CHECKPOINTS = 500;
 const MAX_THREAD_PROPOSED_PLANS = 200;
-const MAX_THREAD_ACTIVITIES = 500;
+const MAX_THREAD_ACTIVITIES = THREAD_DETAIL_ACTIVITY_WINDOW_LIMIT;
 const EMPTY_MESSAGE_IDS: MessageId[] = [];
 const EMPTY_THREAD_IDS: ThreadId[] = [];
 
@@ -1209,17 +1211,10 @@ function compareActivities(
   left: Thread["activities"][number],
   right: Thread["activities"][number],
 ): number {
-  if (left.sequence !== undefined && right.sequence !== undefined) {
-    if (left.sequence !== right.sequence) {
-      return left.sequence - right.sequence;
-    }
-  } else if (left.sequence !== undefined) {
-    return 1;
-  } else if (right.sequence !== undefined) {
-    return -1;
-  }
-
-  return left.createdAt.localeCompare(right.createdAt) || left.id.localeCompare(right.id);
+  // The retention floor and DB-backed older-page cursor must share an order,
+  // including legacy null-sequence ties; locale-specific opaque-id ordering
+  // could otherwise strand an evicted row on the wrong side of the cursor.
+  return compareActivityWindowOrder(left, right);
 }
 
 function boundedSubagentIdentity(value: unknown): string | undefined {

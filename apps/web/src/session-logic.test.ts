@@ -756,6 +756,138 @@ describe("findSidebarProposedPlan", () => {
 });
 
 describe("deriveHistoricalWorkLogSummaries", () => {
+  it("keeps exact known turns discoverable when latest-turn metadata is missing", () => {
+    const turnId = TurnId.make("known-turn");
+    const summaries = deriveHistoricalWorkLogSummaries({
+      messages: [
+        {
+          id: MessageId.make("known-message"),
+          role: "user",
+          text: "known",
+          turnId,
+          createdAt: "2026-02-23T00:00:00.000Z",
+          streaming: false,
+        },
+      ],
+      activities: [],
+      latestTurnId: null,
+    });
+    expect([...summaries.keys()]).toEqual([turnId]);
+    expect(summaries.get(turnId)?.snapshotEntryCount).toBe(0);
+    expect(summaries.get(turnId)?.before).toBeUndefined();
+    expect(summaries.get(turnId)?.isHistoricalTurn).toBe(false);
+  });
+
+  it("does not fabricate legacy child or compaction completion with unknown latest identity", () => {
+    const turnId = TurnId.make("unknown-latest-turn");
+    const activities = [
+      makeActivity({
+        id: "legacy-start",
+        turnId,
+        kind: "tool.completed",
+        summary: "Subagent task",
+        payload: {
+          itemType: "collab_agent_tool_call",
+          itemId: "legacy-child",
+          detail: "Started /root/legacy-reader",
+        },
+      }),
+      makeActivity({
+        id: "compact-start",
+        turnId,
+        kind: "tool.started",
+        summary: "Context compaction started",
+        payload: { itemId: "compact", itemType: "context_compaction", title: "Context compaction" },
+      }),
+    ];
+    const summary = deriveHistoricalWorkLogSummaries({
+      messages: [],
+      activities,
+      latestTurnId: null,
+    }).get(turnId);
+    expect(summary?.isHistoricalTurn).toBe(false);
+    expect(summary?.previewEntries[0]?.toolTitle).toBe("Compacting context");
+    expect(summary?.subagentEntries).toHaveLength(1);
+    expect(summary?.subagentEntries?.[0]?.subagent?.status).not.toBe("completed");
+    const knownPrevious = deriveHistoricalWorkLogSummaries({
+      messages: [],
+      activities,
+      latestTurnId: TurnId.make("known-next-turn"),
+    }).get(turnId);
+    expect(knownPrevious?.isHistoricalTurn).toBe(true);
+    expect(knownPrevious?.subagentEntries?.[0]?.subagent?.status).toBe("completed");
+  });
+
+  it("uses the ordinary raw500 floor instead of older retention exceptions", () => {
+    const turnId = TurnId.make("latest");
+    const tail = Array.from({ length: 500 }, (_, index) =>
+      makeActivity({
+        id: `context-${index}`,
+        sequence: index + 100,
+        turnId,
+        kind: "context-window.updated",
+        createdAt: "2026-02-23T00:00:03.000Z",
+      }),
+    );
+    const summaries = deriveHistoricalWorkLogSummaries({
+      messages: [],
+      activities: [
+        makeActivity({ id: "retained-plan", sequence: 1, turnId: "prior", kind: "plan.updated" }),
+        ...tail,
+      ],
+      latestTurnId: turnId,
+    });
+    expect(summaries.get(turnId)?.before).toEqual({
+      sequence: 100,
+      createdAt: "2026-02-23T00:00:03.000Z",
+      activityId: "context-0",
+    });
+    expect(summaries.get(turnId)?.presenceRevision).toBe("empty");
+    expect(summaries.get(turnId)?.liveActivities).toHaveLength(500);
+    expect(summaries.get(turnId)?.previewEntries).toEqual([]);
+  });
+
+  it("changes the gap witness only when an ordinary operation leaves the window", () => {
+    const turnId = TurnId.make("latest");
+    const command = makeActivity({
+      id: "first-command",
+      sequence: 1,
+      turnId,
+      kind: "tool.completed",
+      summary: "Ran command",
+    });
+    const context = Array.from({ length: 500 }, (_, index) =>
+      makeActivity({
+        id: `context-${index}`,
+        sequence: index + 2,
+        turnId,
+        kind: "context-window.updated",
+      }),
+    );
+    const before = deriveHistoricalWorkLogSummaries({
+      messages: [],
+      activities: [command, ...context.slice(0, 499)],
+      latestTurnId: turnId,
+    }).get(turnId);
+    const after = deriveHistoricalWorkLogSummaries({
+      messages: [],
+      activities: context,
+      latestTurnId: turnId,
+    }).get(turnId);
+    const hiddenOnly = deriveHistoricalWorkLogSummaries({
+      messages: [],
+      activities: [
+        ...context.slice(1),
+        makeActivity({ id: "next-context", sequence: 502, turnId, kind: "context-window.updated" }),
+      ],
+      latestTurnId: turnId,
+    }).get(turnId);
+    expect(before?.presenceRevision).toBe("first-command");
+    expect(after?.presenceRevision).toBe("empty");
+    expect(hiddenOnly?.presenceRevision).toBe(after?.presenceRevision);
+    expect(hiddenOnly?.before).not.toEqual(after?.before);
+  });
+
   it("keeps previous turns summarized while excluding the latest turn", () => {
     const previousTurnId = TurnId.make("turn-previous");
     const latestTurnId = TurnId.make("turn-latest");

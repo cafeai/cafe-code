@@ -6,6 +6,8 @@ import {
   isToolLifecycleItemType,
   type OrchestrationLatestTurn,
   type OrchestrationThreadActivity,
+  type OrchestrationThreadActivityCursor,
+  THREAD_DETAIL_ACTIVITY_WINDOW_LIMIT,
   type ProviderTurnConfiguration,
   type OrchestrationProposedPlanId,
   ProviderDriverKind,
@@ -47,6 +49,7 @@ import type {
   ThreadSession,
   TurnDiffSummary,
 } from "./types";
+import { compareActivityWindowOrder } from "./activityOrder";
 
 export type ProviderPickerKind = ProviderDriverKind;
 const isProviderInteraction = Schema.is(ProviderInteraction);
@@ -87,6 +90,8 @@ export interface WorkLogEntry {
   /** Explicit bounded public presentation, never arbitrary native payloads. */
   publicSummary?: ClaudePublicSummary;
   commandInspection?: ClaudeCommandInspection;
+  /** Operation identity is for folding/deduplication, never task authority. */
+  toolCallId?: string;
   /** Frozen accepted-turn settings; never reconstructed from today's catalog. */
   turnConfiguration?: ProviderTurnConfiguration;
   subagent?: {
@@ -112,10 +117,18 @@ export interface WorkLogEntry {
 
 export interface HistoricalWorkLogSummary {
   turnId: TurnId;
+  /** Unknown latest identity permits reading, not inferred legacy completion. */
+  isHistoricalTurn?: boolean;
   previewEntries: ReadonlyArray<WorkLogEntry>;
   snapshotEntryCount: number;
   /** Subagents are conversation history, not command/tool Work Log rows. */
   subagentEntries?: ReadonlyArray<WorkLogEntry>;
+  /** Immutable exclusive range for the earlier part of the current turn. */
+  before?: OrchestrationThreadActivityCursor;
+  /** Current received snapshots win over separately fetched older versions. */
+  liveActivities?: ReadonlyArray<OrchestrationThreadActivity>;
+  /** Changes only when relevant work leaves the ordinary tail, not per token. */
+  presenceRevision?: string;
 }
 
 interface DerivedWorkLogEntry extends WorkLogEntry {
@@ -850,9 +863,6 @@ export function deriveHistoricalWorkLogSummaries(input: {
   runtimeSession?: DeriveSubagentActivityOptions["runtimeSession"];
 }): ReadonlyMap<TurnId, HistoricalWorkLogSummary> {
   const latestTurnId = input.latestTurnId ?? null;
-  if (latestTurnId === null) {
-    return new Map();
-  }
   const historicalTurnIds = new Set<TurnId>();
   for (const message of input.messages) {
     if (
@@ -869,13 +879,10 @@ export function deriveHistoricalWorkLogSummaries(input: {
     }
   }
 
-  if (historicalTurnIds.size === 0) {
-    return new Map();
-  }
-
   const entriesByTurnId = new Map<TurnId, WorkLogEntry[]>();
+  const knownHistoricalTurnIds = latestTurnId === null ? new Set<TurnId>() : historicalTurnIds;
   for (const entry of deriveWorkLogEntries(input.activities, undefined, {
-    terminalTurnIds: historicalTurnIds,
+    terminalTurnIds: knownHistoricalTurnIds,
   })) {
     if (
       entry.turnId === null ||
@@ -893,7 +900,7 @@ export function deriveHistoricalWorkLogSummaries(input: {
   }
   const subagentsByTurnId = new Map<TurnId, WorkLogEntry[]>();
   for (const entry of deriveSubagentWorkEntries(input.activities, undefined, {
-    terminalTurnIds: historicalTurnIds,
+    terminalTurnIds: knownHistoricalTurnIds,
     runtimeSession: input.runtimeSession,
   })) {
     if (
@@ -913,10 +920,39 @@ export function deriveHistoricalWorkLogSummaries(input: {
     const entries = entriesByTurnId.get(turnId) ?? [];
     summaries.set(turnId, {
       turnId,
+      isHistoricalTurn: latestTurnId !== null,
       previewEntries: entries.slice(-6),
       snapshotEntryCount: entries.length,
       subagentEntries: subagentsByTurnId.get(turnId) ?? [],
     });
+  }
+  if (latestTurnId !== null && input.activities.length >= THREAD_DETAIL_ACTIVITY_WINDOW_LIMIT) {
+    // Retention exceptions (configuration, plans and child lifecycle heads)
+    // can be much older than the actual live window. Use the canonical raw
+    // tail's floor, not the first exceptional record, or it would hide the
+    // very commands whose retained messages still need a history entry point.
+    const ordinaryTail = [...input.activities]
+      .toSorted(compareActivityWindowOrder)
+      .slice(-THREAD_DETAIL_ACTIVITY_WINDOW_LIMIT);
+    const floor = ordinaryTail[0];
+    if (floor) {
+      summaries.set(latestTurnId, {
+        turnId: latestTurnId,
+        isHistoricalTurn: false,
+        previewEntries: [],
+        snapshotEntryCount: 0,
+        before: {
+          sequence: floor.sequence ?? null,
+          createdAt: floor.createdAt,
+          activityId: floor.id,
+        },
+        liveActivities: input.activities.filter((activity) => activity.turnId === latestTurnId),
+        // An empty current window stays the same through arbitrarily many
+        // context-only updates. Losing its first ordinary operation, however,
+        // is new evidence that an earlier command might now be available.
+        presenceRevision: deriveWorkLogEntries(ordinaryTail, latestTurnId)[0]?.id ?? "empty",
+      });
+    }
   }
   return summaries;
 }

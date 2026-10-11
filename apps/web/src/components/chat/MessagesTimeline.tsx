@@ -7,6 +7,7 @@ import {
   type EditorId,
   type MessageId,
   type OrchestrationThreadActivity,
+  type OrchestrationThreadActivityCursor,
   type ProviderDriverKind,
   type ServerProviderSkill,
   type ThreadId,
@@ -116,6 +117,14 @@ import {
   type TimelineScrollDebugListState,
 } from "./timelineScrollDebug";
 import { useHistoricalWorkLogPresence } from "./useHistoricalWorkLogPresence";
+import {
+  activityCursor,
+  cursorKey,
+  deriveEarlierWorkLogEntries,
+  EARLIER_WORK_LOG_RETAINED_LIMIT,
+  mergeEarlierWorkLogPages,
+  validateEarlierWorkLogPage,
+} from "./EarlierWorkLog.logic";
 import { DesktopObservation } from "./DesktopObservation";
 import { SubagentRosterRow, type SubagentRosterEntry } from "../subagents/SubagentRosterRow";
 import { SubagentDetailView, type SubagentDetailSelection } from "./SubagentDetailView";
@@ -282,6 +291,8 @@ interface MessagesTimelineProps {
   historicalWorkLogSummariesByTurnId?: Parameters<
     typeof deriveMessagesTimelineRows
   >[0]["historicalWorkLogSummariesByTurnId"];
+  /** Invalidates empty saved-history evidence once per new turn, not per token. */
+  historyRevision?: string;
   completionDividerAfterEntryId: string | null;
   completionSummary: string | null;
   revertTurnCountByUserMessageId: Map<MessageId, number>;
@@ -326,6 +337,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
   listRef,
   timelineEntries,
   historicalWorkLogSummariesByTurnId,
+  historyRevision,
   completionDividerAfterEntryId,
   completionSummary,
   revertTurnCountByUserMessageId,
@@ -363,6 +375,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
     environmentId: activeThreadEnvironmentId,
     threadId: activeThreadId,
     summaries: historicalWorkLogSummariesByTurnId,
+    historyRevision,
   });
   const rawRows = useMemo(
     () =>
@@ -1356,7 +1369,13 @@ const TimelineRowContent = memo(function TimelineRowContent({ row }: { row: Time
       data-message-role={row.kind === "message" ? row.message.role : undefined}
     >
       {row.kind === "work" ? <WorkGroupSection groupedEntries={row.groupedEntries} /> : null}
-      {row.kind === "historical-work" ? <HistoricalWorkLogSection row={row} /> : null}
+      {row.kind === "historical-work" ? (
+        row.summary.before ? (
+          <EarlierWorkLogSection row={row} />
+        ) : (
+          <HistoricalWorkLogSection row={row} />
+        )
+      ) : null}
       {row.kind === "completion-divider" ? (
         <AssistantCompletionDivider completionSummary={row.completionSummary} />
       ) : null}
@@ -1915,6 +1934,259 @@ function compareHistoricalActivityRows(
   return left.id.localeCompare(right.id);
 }
 
+interface EarlierWorkLogState {
+  readonly owner: string;
+  readonly upper: OrchestrationThreadActivityCursor | null;
+  readonly next: OrchestrationThreadActivityCursor | null;
+  readonly activities: ReadonlyArray<OrchestrationThreadActivity>;
+  readonly loaded: boolean;
+  readonly hasOlder: boolean;
+  readonly truncated: boolean;
+  readonly loading: boolean;
+  readonly error: boolean;
+  readonly lastRequest: {
+    readonly before: OrchestrationThreadActivityCursor;
+    readonly older: boolean;
+  } | null;
+}
+
+function emptyEarlierWorkLog(owner: string): EarlierWorkLogState {
+  return {
+    owner,
+    upper: null,
+    next: null,
+    activities: [],
+    loaded: false,
+    hasOlder: false,
+    truncated: false,
+    loading: false,
+    error: false,
+    lastRequest: null,
+  };
+}
+
+/**
+ * An explicit reader for work evicted from the bounded current-turn window.
+ * Its immutable upper filter does not drift as tokens arrive. Every response
+ * is fenced to the requesting owner/generation and remains presentation data;
+ * it never enters the live store or confers provider/task control authority.
+ */
+const EarlierWorkLogSection = memo(function EarlierWorkLogSection({
+  row,
+}: {
+  row: Extract<MessagesTimelineRow, { kind: "historical-work" }>;
+}) {
+  const ctx = use(TimelineRowCtx);
+  const { onHistoricalWorkLogPresenceResolved } = ctx;
+  const owner = JSON.stringify([ctx.activeThreadEnvironmentId, ctx.activeThreadId, row.turnId]);
+  const ownerRef = useRef(owner);
+  const generationRef = useRef(0);
+  const pendingRef = useRef<string | null>(null);
+  const [expandedOwner, setExpandedOwner] = useState<string | null>(null);
+  const [state, setState] = useState(() => emptyEarlierWorkLog(owner));
+  const current = state.owner === owner ? state : emptyEarlierWorkLog(owner);
+  const isExpanded = expandedOwner === owner;
+
+  useLayoutEffect(() => {
+    ownerRef.current = owner;
+    return () => {
+      // Cleanup also fences a request when a virtualized row unmounts. Merely
+      // collapsing the disclosure is not provider cancellation or a new turn.
+      generationRef.current++;
+      pendingRef.current = null;
+    };
+  }, [owner]);
+
+  const loadPage = useCallback(
+    async (before: OrchestrationThreadActivityCursor, older: boolean) => {
+      if (pendingRef.current === owner) return;
+      const generation = ++generationRef.current;
+      const threadId = ctx.activeThreadId;
+      pendingRef.current = owner;
+      const stillOwned = () => ownerRef.current === owner && generationRef.current === generation;
+      const limit = older ? HISTORICAL_WORK_LOG_PAGE_SIZE : HISTORICAL_WORK_LOG_PREVIEW_LIMIT;
+      setState((previous) => ({
+        ...(older && previous.owner === owner ? previous : emptyEarlierWorkLog(owner)),
+        upper: older && previous.owner === owner ? previous.upper : before,
+        loading: true,
+        error: false,
+        lastRequest: { before, older },
+      }));
+      try {
+        const api = readEnvironmentApi(ctx.activeThreadEnvironmentId);
+        if (!api || threadId === null) throw new Error("History disconnected");
+        const page = await api.orchestration.getThreadTurnActivityPage({
+          threadId,
+          turnId: row.turnId,
+          offset: 0,
+          limit,
+          before,
+        });
+        if (!stillOwned()) return;
+        validateEarlierWorkLogPage({ page, threadId, turnId: row.turnId, before, limit });
+        setState((previous) => {
+          if (!stillOwned() || previous.owner !== owner) return previous;
+          return {
+            ...previous,
+            activities: older
+              ? mergeEarlierWorkLogPages(page.activities, previous.activities)
+              : page.activities,
+            next: page.activities[0] ? activityCursor(page.activities[0]) : null,
+            hasOlder: page.totalCount > page.activities.length,
+            truncated:
+              older &&
+              (previous.truncated ||
+                new Set([...page.activities, ...previous.activities].map((activity) => activity.id))
+                  .size > EARLIER_WORK_LOG_RETAINED_LIMIT),
+            loaded: true,
+            loading: false,
+            error: false,
+          };
+        });
+      } catch {
+        if (stillOwned())
+          setState((previous) =>
+            previous.owner === owner ? { ...previous, loading: false, error: true } : previous,
+          );
+      } finally {
+        if (stillOwned()) pendingRef.current = null;
+      }
+    },
+    [ctx.activeThreadEnvironmentId, ctx.activeThreadId, owner, row.turnId],
+  );
+
+  const visibleEntries = useMemo(
+    () =>
+      deriveEarlierWorkLogEntries({
+        activities: current.activities,
+        liveActivities: row.summary.liveActivities ?? [],
+        turnId: row.turnId,
+      }),
+    [current.activities, row.summary.liveActivities, row.turnId],
+  );
+  const showLoading = useDelayedFlag(isExpanded && current.loading && visibleEntries.length === 0);
+  const before = row.summary.before;
+  useEffect(() => {
+    // An exhausted *captured* range cannot prove a later, larger range empty.
+    // Only publish a negative when it still matches the current disclosure.
+    if (
+      current.loaded &&
+      !current.hasOlder &&
+      visibleEntries.length === 0 &&
+      before &&
+      current.upper &&
+      cursorKey(before) === cursorKey(current.upper)
+    ) {
+      onHistoricalWorkLogPresenceResolved(row.turnId, false);
+    }
+  }, [
+    before,
+    current.loaded,
+    current.hasOlder,
+    current.upper,
+    onHistoricalWorkLogPresenceResolved,
+    row.turnId,
+    visibleEntries.length,
+  ]);
+
+  return (
+    <div
+      className="rounded-xl border border-border-subtle bg-card"
+      data-historical-work-log-row={isExpanded ? "expanded" : "collapsed"}
+    >
+      <div className="flex min-w-0 items-center justify-between gap-2 pr-2">
+        <button
+          type="button"
+          aria-expanded={isExpanded}
+          className="focus-ring flex min-w-0 flex-1 items-center gap-1.5 rounded-xl px-2.5 py-1.5 text-left text-2xs text-subtle-foreground transition-colors duration-(--duration-fast) hover:text-foreground"
+          onClick={() => {
+            setExpandedOwner(isExpanded ? null : owner);
+            if (!isExpanded && !current.loaded && before) void loadPage(before, false);
+          }}
+        >
+          <ChevronRightIcon
+            aria-hidden="true"
+            className={cn(
+              "size-3 shrink-0 transition-transform duration-(--duration-fast) ease-out",
+              isExpanded && "rotate-90",
+            )}
+          />
+          <span className="truncate font-medium text-muted-foreground">
+            Earlier work
+            {current.loaded && visibleEntries.length > 0
+              ? ` (${visibleEntries.length}${current.hasOlder || current.truncated ? "+" : ""})`
+              : ""}
+          </span>
+        </button>
+        {isExpanded ? (
+          <div className="flex shrink-0 items-center gap-2">
+            <button
+              type="button"
+              disabled={current.loading}
+              className="focus-ring rounded-sm text-2xs text-subtle-foreground transition-colors duration-(--duration-fast) hover:text-foreground disabled:opacity-50"
+              onClick={() => {
+                if (before) void loadPage(before, false);
+              }}
+            >
+              Recent
+            </button>
+            {current.hasOlder && current.next ? (
+              <button
+                type="button"
+                disabled={current.loading}
+                className="focus-ring rounded-sm text-2xs text-subtle-foreground transition-colors duration-(--duration-fast) hover:text-foreground disabled:opacity-50"
+                onClick={() => {
+                  if (current.next) void loadPage(current.next, true);
+                }}
+              >
+                {current.loading ? "Loading…" : "Show older"}
+              </button>
+            ) : null}
+          </div>
+        ) : null}
+      </div>
+      {isExpanded ? (
+        <div className="px-2 pb-1.5 animate-enter-rise">
+          {visibleEntries.length > 0 ? (
+            <IntentAwareWorkLogList
+              entries={visibleEntries}
+              scrollable={visibleEntries.length > MAX_VISIBLE_WORK_LOG_ENTRIES}
+              workspaceRoot={ctx.workspaceRoot}
+            />
+          ) : showLoading ? (
+            <div role="status" aria-label="Loading earlier work" className="space-y-1.5 px-1 py-1">
+              <Skeleton className="h-3 w-3/5" />
+              <Skeleton className="h-3 w-2/5" />
+            </div>
+          ) : current.loaded && !current.error && !current.loading ? (
+            <p className="px-0.5 py-1 text-2xs text-subtle-foreground">
+              No earlier commands in this page.
+            </p>
+          ) : null}
+          {current.error ? (
+            <div
+              className="flex items-center gap-2 px-0.5 py-1 text-2xs text-subtle-foreground"
+              role="status"
+            >
+              <span>Couldn’t load earlier work.</span>
+              <button
+                type="button"
+                className="focus-ring rounded-sm font-medium text-muted-foreground hover:text-foreground"
+                onClick={() => {
+                  if (current.lastRequest)
+                    void loadPage(current.lastRequest.before, current.lastRequest.older);
+                }}
+              >
+                Retry
+              </button>
+            </div>
+          ) : null}
+        </div>
+      ) : null}
+    </div>
+  );
+});
+
 /** Owns its own expand/collapse state so toggling re-renders only this row.
  *  State resets on unmount which is fine — work groups start collapsed. */
 const HistoricalWorkLogSection = memo(function HistoricalWorkLogSection({
@@ -2006,14 +2278,14 @@ const HistoricalWorkLogSection = memo(function HistoricalWorkLogSection({
   const visibleEntries = useMemo(() => {
     if (activityRows.length > 0) {
       return deriveWorkLogEntries(activityRows, row.turnId, {
-        terminalTurnIds: new Set([row.turnId]),
+        terminalTurnIds: row.summary.isHistoricalTurn === false ? undefined : new Set([row.turnId]),
       });
     }
     return row.summary.previewEntries.slice(-HISTORICAL_WORK_LOG_PREVIEW_LIMIT);
-  }, [activityRows, row.summary.previewEntries, row.turnId]);
+  }, [activityRows, row.summary.previewEntries, row.summary.isHistoricalTurn, row.turnId]);
   const subagentEntries = useMemo(() => {
     const hydratedEntries = deriveSubagentWorkEntries(activityRows, row.turnId, {
-      terminalTurnIds: new Set([row.turnId]),
+      terminalTurnIds: row.summary.isHistoricalTurn === false ? undefined : new Set([row.turnId]),
       runtimeSession: ctx.subagentRuntimeSession,
     });
     return mergeHistoricalSubagentEntries(
@@ -2021,7 +2293,13 @@ const HistoricalWorkLogSection = memo(function HistoricalWorkLogSection({
       hydratedEntries,
       ctx.subagentRuntimeSession,
     ).map((entry) => reconcileSubagentWorkEntryRuntime(entry, ctx.subagentRuntimeSession));
-  }, [activityRows, row.summary.subagentEntries, row.turnId, ctx.subagentRuntimeSession]);
+  }, [
+    activityRows,
+    row.summary.subagentEntries,
+    row.summary.isHistoricalTurn,
+    row.turnId,
+    ctx.subagentRuntimeSession,
+  ]);
   const historicalWorkLogDisplayState = deriveHistoricalWorkLogDisplayState({
     snapshotEntryCount: row.summary.snapshotEntryCount,
     previewEntryCount: row.summary.previewEntries.length,

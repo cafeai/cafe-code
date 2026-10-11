@@ -563,7 +563,35 @@ export const OrchestrationThreadDetailSnapshotChunk = Schema.Struct({
 export type OrchestrationThreadDetailSnapshotChunk =
   typeof OrchestrationThreadDetailSnapshotChunk.Type;
 
+/** Shared bounded live activity tail; older work is read on explicit expansion. */
+export const THREAD_DETAIL_ACTIVITY_WINDOW_LIMIT = 500;
 export const THREAD_TURN_ACTIVITY_PAGE_MAX_LIMIT = 1_000;
+
+/**
+ * Captured projection ordering values, not an ownership or authorization token.
+ *
+ * A live Claude summary may be upserted under the same activity id at a later
+ * ledger sequence. Resolving that mutable id again would move an "earlier"
+ * boundary. Keep the caller's received tuple immutable instead, and always
+ * apply it inside the independently authenticated exact thread/turn range.
+ * These finite fields cannot authorize a provider read or reveal a sibling
+ * turn; they only narrow an already admitted local projection query.
+ */
+export const OrchestrationThreadActivityCursor = Schema.Struct({
+  sequence: Schema.NullOr(
+    NonNegativeInt.check(Schema.isLessThanOrEqualTo(Number.MAX_SAFE_INTEGER)),
+  ),
+  createdAt: IsoDateTime.check(
+    Schema.isNonEmpty(),
+    Schema.isMaxLength(128),
+    Schema.isPattern(/^[^\p{Cc}\p{Bidi_Control}]+$/u),
+  ),
+  activityId: EventId.check(
+    Schema.isMaxLength(4_096),
+    Schema.isPattern(/^[^\p{Cc}\p{Bidi_Control}]+$/u),
+  ),
+});
+export type OrchestrationThreadActivityCursor = typeof OrchestrationThreadActivityCursor.Type;
 
 export const OrchestrationThreadTurnActivityPageInput = Schema.Struct({
   threadId: ThreadId,
@@ -572,7 +600,8 @@ export const OrchestrationThreadTurnActivityPageInput = Schema.Struct({
   limit: PositiveInt.check(Schema.isLessThanOrEqualTo(THREAD_TURN_ACTIVITY_PAGE_MAX_LIMIT)).pipe(
     Schema.withDecodingDefault(Effect.succeed(50)),
   ),
-});
+  before: Schema.optional(OrchestrationThreadActivityCursor),
+}).check(Schema.makeFilter((input) => input.before === undefined || input.offset === 0));
 export type OrchestrationThreadTurnActivityPageInput =
   typeof OrchestrationThreadTurnActivityPageInput.Type;
 
@@ -583,6 +612,9 @@ export const OrchestrationThreadTurnActivityPage = Schema.Struct({
   limit: PositiveInt,
   totalCount: NonNegativeInt,
   activities: Schema.Array(OrchestrationThreadActivity),
+  // Echo the exact consumed bound so a newer renderer can detect a saved
+  // server which silently ignored its additive cursor field.
+  before: Schema.optional(OrchestrationThreadActivityCursor),
 });
 export type OrchestrationThreadTurnActivityPage = typeof OrchestrationThreadTurnActivityPage.Type;
 
@@ -906,7 +938,8 @@ export const OrchestrationThreadTurnWorkLogPresenceInput = Schema.Struct({
     Schema.isMinLength(1),
     Schema.isMaxLength(THREAD_TURN_WORK_LOG_PRESENCE_MAX_TURNS),
   ),
-});
+  before: Schema.optional(OrchestrationThreadActivityCursor),
+}).check(Schema.makeFilter((input) => input.before === undefined || input.turnIds.length === 1));
 export type OrchestrationThreadTurnWorkLogPresenceInput =
   typeof OrchestrationThreadTurnWorkLogPresenceInput.Type;
 

@@ -8005,6 +8005,7 @@ export default function ChatView(props: ChatViewProps) {
               listRef={legendListRef}
               timelineEntries={timelineEntries}
               historicalWorkLogSummariesByTurnId={historicalWorkLogSummariesByTurnId}
+              historyRevision={activeLatestTurn?.turnId ?? ""}
               completionDividerAfterEntryId={completionDividerAfterEntryId}
               completionSummary={completionSummary}
               activeThreadId={activeThread.id}

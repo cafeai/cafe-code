@@ -13,6 +13,8 @@ import {
   OrchestrationThread,
   OrchestrationThreadTurnActivityPageInput,
   OrchestrationThreadTurnSubagentDetailInput,
+  OrchestrationThreadActivityCursor,
+  THREAD_DETAIL_ACTIVITY_WINDOW_LIMIT,
   ProviderThreadGoal,
   ProjectScript,
   TurnId,
@@ -98,7 +100,7 @@ import {
 const decodeReadModel = Schema.decodeUnknownEffect(OrchestrationReadModel);
 const decodeShellSnapshot = Schema.decodeUnknownEffect(OrchestrationShellSnapshot);
 const decodeThread = Schema.decodeUnknownEffect(OrchestrationThread);
-export const THREAD_DETAIL_ACTIVITY_LIMIT = 500;
+export const THREAD_DETAIL_ACTIVITY_LIMIT = THREAD_DETAIL_ACTIVITY_WINDOW_LIMIT;
 export const THREAD_DETAIL_MESSAGE_LIMIT = 2_000;
 const ProjectionProjectDbRowSchema = ProjectionProject.mapFields(
   Struct.assign({
@@ -303,6 +305,7 @@ const ThreadTurnActivityPageLookupInput = OrchestrationThreadTurnActivityPageInp
 const ThreadTurnLookupInput = Schema.Struct({
   threadId: ThreadId,
   turnId: TurnId,
+  before: Schema.optional(OrchestrationThreadActivityCursor),
 });
 const ThreadTurnSubagentLookupInput = OrchestrationThreadTurnSubagentDetailInput;
 const CountRowSchema = Schema.Struct({
@@ -2836,15 +2839,35 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
       `,
   });
 
+  /**
+   * Match the same null-first total order used by both snapshots and pages.
+   * Never resolve the cursor id to a mutable row: Claude disclosed summaries
+   * deliberately replace their prior projection at a newer ledger sequence.
+   * The tuple is only a read filter, and every caller below still binds both
+   * exact thread and native turn before applying this predicate.
+   */
+  const activityBeforePredicate = (
+    before: typeof OrchestrationThreadActivityCursor.Encoded | undefined,
+  ) => {
+    if (before === undefined) return sql`1 = 1`;
+    const earlierTie = sql`(created_at < ${before.createdAt} OR
+      (created_at = ${before.createdAt} AND activity_id < ${before.activityId}))`;
+    return before.sequence === null
+      ? sql`sequence IS NULL AND ${earlierTie}`
+      : sql`(sequence IS NULL OR sequence < ${before.sequence} OR
+          (sequence = ${before.sequence} AND ${earlierTie}))`;
+  };
+
   const countThreadActivityRowsByTurn = SqlSchema.findOne({
     Request: ThreadTurnActivityPageLookupInput,
     Result: CountRowSchema,
-    execute: ({ threadId, turnId }) =>
+    execute: ({ threadId, turnId, before }) =>
       sql`
         SELECT COUNT(*) AS "count"
         FROM projection_thread_activities
         WHERE thread_id = ${threadId}
           AND turn_id = ${turnId}
+          AND ${activityBeforePredicate(before)}
           AND ${historicalWorkLogActivityPredicate}
       `,
   });
@@ -2852,13 +2875,14 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
   const findThreadTurnWorkLogPresence = SqlSchema.findOne({
     Request: ThreadTurnLookupInput,
     Result: WorkLogPresenceRowSchema,
-    execute: ({ threadId, turnId }) =>
+    execute: ({ threadId, turnId, before }) =>
       sql`
         SELECT EXISTS(
           SELECT 1
           FROM projection_thread_activities
           WHERE thread_id = ${threadId}
             AND turn_id = ${turnId}
+            AND ${activityBeforePredicate(before)}
             AND ${historicalWorkLogActivityPredicate}
           LIMIT 1
         ) AS "hasWorkLog"
@@ -2893,8 +2917,17 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
   const listThreadActivityRowsByTurnPage = SqlSchema.findAll({
     Request: ThreadTurnActivityPageLookupInput,
     Result: ProjectionThreadActivityDbRowSchema,
-    execute: ({ threadId, turnId, offset, limit }) =>
-      sql`
+    execute: ({ threadId, turnId, offset, limit, before }) => {
+      // Keyset mode reads the nearest older bounded page, then the service
+      // reverses those rows back to ordinary chronological display. Legacy
+      // historical readers keep their existing ascending offset behavior.
+      const order =
+        before === undefined
+          ? sql`CASE WHEN sequence IS NULL THEN 0 ELSE 1 END ASC,
+              sequence ASC, created_at ASC, activity_id ASC`
+          : sql`CASE WHEN sequence IS NULL THEN 0 ELSE 1 END DESC,
+              sequence DESC, created_at DESC, activity_id DESC`;
+      return sql`
         SELECT
           activity_id AS "activityId",
           thread_id AS "threadId",
@@ -2908,15 +2941,13 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
         FROM projection_thread_activities
         WHERE thread_id = ${threadId}
           AND turn_id = ${turnId}
+          AND ${activityBeforePredicate(before)}
           AND ${historicalWorkLogActivityPredicate}
-        ORDER BY
-          CASE WHEN sequence IS NULL THEN 0 ELSE 1 END ASC,
-          sequence ASC,
-          created_at ASC,
-          activity_id ASC
+        ORDER BY ${order}
         LIMIT ${limit}
         OFFSET ${offset}
-      `,
+      `;
+    },
   });
 
   const getThreadSessionRowByThread = SqlSchema.findOneOption({
@@ -4546,39 +4577,54 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
   const getThreadTurnActivityPage: ProjectionSnapshotQueryShape["getThreadTurnActivityPage"] = (
     input,
   ) =>
-    Effect.gen(function* () {
-      const [countRow, activityRows] = yield* Effect.all([
-        countThreadActivityRowsByTurn(input).pipe(
-          Effect.mapError(
-            toPersistenceSqlOrDecodeError(
-              "ProjectionSnapshotQuery.getThreadTurnActivityPage:countActivities:query",
-              "ProjectionSnapshotQuery.getThreadTurnActivityPage:countActivities:decodeRow",
+    sql
+      .withTransaction(
+        Effect.gen(function* () {
+          const [countRow, activityRows] = yield* Effect.all([
+            countThreadActivityRowsByTurn(input).pipe(
+              Effect.mapError(
+                toPersistenceSqlOrDecodeError(
+                  "ProjectionSnapshotQuery.getThreadTurnActivityPage:countActivities:query",
+                  "ProjectionSnapshotQuery.getThreadTurnActivityPage:countActivities:decodeRow",
+                ),
+              ),
             ),
-          ),
-        ),
-        listThreadActivityRowsByTurnPage(input).pipe(
-          Effect.mapError(
-            toPersistenceSqlOrDecodeError(
-              "ProjectionSnapshotQuery.getThreadTurnActivityPage:listActivities:query",
-              "ProjectionSnapshotQuery.getThreadTurnActivityPage:listActivities:decodeRows",
+            listThreadActivityRowsByTurnPage(input).pipe(
+              Effect.mapError(
+                toPersistenceSqlOrDecodeError(
+                  "ProjectionSnapshotQuery.getThreadTurnActivityPage:listActivities:query",
+                  "ProjectionSnapshotQuery.getThreadTurnActivityPage:listActivities:decodeRows",
+                ),
+              ),
             ),
-          ),
-        ),
-      ]);
+          ]);
 
-      // Keep historical work-log hydration bounded. The thread-detail snapshot
-      // already carries recent activity for live rendering; this query is the
-      // DB-backed page path for older turns and must not grow into a full
-      // thread-history read.
-      return {
-        threadId: input.threadId,
-        turnId: input.turnId,
-        offset: input.offset,
-        limit: input.limit,
-        totalCount: countRow.count,
-        activities: activityRows.map(mapActivityRow),
-      };
-    });
+          // Count and page describe one short SQLite read transaction. Across
+          // requests the live range can change (including summary replacement),
+          // so before-mode's count is remaining work before that captured cursor,
+          // not a claim of frozen history or historical versions. Older pages use
+          // another received tuple rather than offsets in that changing prefix.
+          const orderedRows = input.before === undefined ? activityRows : activityRows.toReversed();
+          return {
+            threadId: input.threadId,
+            turnId: input.turnId,
+            offset: input.offset,
+            limit: input.limit,
+            totalCount: countRow.count,
+            activities: orderedRows.map(mapActivityRow),
+            ...(input.before === undefined ? {} : { before: input.before }),
+          };
+        }),
+      )
+      .pipe(
+        Effect.mapError((cause) =>
+          isPersistenceError(cause)
+            ? cause
+            : toPersistenceSqlError(
+                "ProjectionSnapshotQuery.getThreadTurnActivityPage:transaction",
+              )(cause),
+        ),
+      );
 
   const getThreadTurnWorkLogPresence: ProjectionSnapshotQueryShape["getThreadTurnWorkLogPresence"] =
     (input) =>
@@ -4591,6 +4637,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
           findThreadTurnWorkLogPresence({
             threadId: input.threadId,
             turnId,
+            ...(input.before === undefined ? {} : { before: input.before }),
           }).pipe(
             Effect.mapError(
               toPersistenceSqlOrDecodeError(

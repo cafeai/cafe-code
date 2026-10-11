@@ -326,7 +326,7 @@ export function deriveMessagesTimelineRows(input: {
     insertedHistoricalWorkTurnIds.add(turnId);
     nextRows.push({
       kind: "historical-work",
-      id: `historical-work:${turnId}`,
+      id: `${summary.before ? "earlier-work" : "historical-work"}:${turnId}`,
       createdAt:
         summary.previewEntries.at(-1)?.createdAt ??
         summary.subagentEntries?.at(-1)?.createdAt ??
@@ -354,7 +354,9 @@ export function deriveMessagesTimelineRows(input: {
     .flatMap((summary) => {
       if (anchoredTurnIds.has(summary.turnId)) return [];
       const createdAt =
-        summary.previewEntries.at(-1)?.createdAt ?? summary.subagentEntries?.at(-1)?.createdAt;
+        summary.previewEntries.at(-1)?.createdAt ??
+        summary.subagentEntries?.at(-1)?.createdAt ??
+        summary.before?.createdAt;
       return createdAt ? [{ turnId: summary.turnId, createdAt }] : [];
     })
     .toSorted((left, right) => left.createdAt.localeCompare(right.createdAt));

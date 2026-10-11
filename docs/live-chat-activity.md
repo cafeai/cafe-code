@@ -1,6 +1,6 @@
 # Live chat activity
 
-Last updated: 2026-10-11 03:11:45 JST (UTC+0900)
+Last updated: 2026-10-11 13:14:45 JST (UTC+0900)
 
 The composer has one compact activity line above the editor. It shows Working,
 Running command, a computer action, or waiting for a tool, agent, answer or
@@ -37,6 +37,27 @@ change send/queue admission, grant task controls, or launch or probe a provider.
 Individual controls still require their existing exact account, runtime and
 generation binding. Read-only work remains visible when the composer selects
 another account.
+
+## Earlier Work logs
+
+Recent command/tool activity stays inline in a bounded 500-row live window.
+Eviction does not delete the saved log. A long current turn now has one compact
+Earlier work disclosure at its first retained message; previous turns retain
+their collapsed Work log rows, including when latest-turn metadata is absent.
+Availability checks read indexed presence only. Activity pages download after
+explicit expansion, not while scrolling or receiving message tokens.
+
+Earlier work loads the nearest six saved rows, then24 at a time through Show
+older. The opened range stays stable while live work arrives. Recent resets it
+to the latest earlier range; at most 1000 raw rows remain in this reader. A plus
+beside the visible count means more or omitted entries, not an exact lifetime
+total. Received live operation snapshots replace stale history and prevent an
+already-inline command from appearing twice. Subagents remain separate.
+
+Failures appear inline with Retry, never a toast or automatic history loop.
+Changing chats discards late responses. These reads cannot start, stop or
+reopen a turn, confer task control, or change provider retry behavior. See
+[the bounded history decision](decisions/bounded-work-log-history.md).
 
 ## Ordinary provider tasks
 
