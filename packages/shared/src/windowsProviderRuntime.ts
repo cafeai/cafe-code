@@ -15,6 +15,11 @@ import {
 } from "@cafecode/contracts";
 import { requestProviderDaemonJson } from "./providerDaemonHttp.ts";
 import {
+  BACKEND_STARTUP_PROGRESS_FD,
+  makeProviderDaemonStartupProgressTracker,
+  type ProviderDaemonStartupProgress,
+} from "./backendStartupProgress.ts";
+import {
   openWindowsOwnershipSession,
   windowsOwnershipCredentialPath,
   WindowsOwnershipError,
@@ -60,6 +65,13 @@ export interface WindowsRuntimeChild {
   readonly pid: number;
   /** An actual direct-child exit event, never a new PID lookup. */
   readonly hasExited: () => boolean;
+  /** Retire only the inherited progress read handle, never the child process. */
+  readonly closeStartupProgress?: () => void;
+}
+
+export interface WindowsRuntimeStartupProgress {
+  readonly tracker: ReturnType<typeof makeProviderDaemonStartupProgressTracker>;
+  readonly elapsedMs: () => number;
 }
 
 export interface WindowsProviderRuntimeResult {
@@ -95,7 +107,11 @@ export interface WindowsProviderRuntimeOptions {
     readonly encrypted: boolean;
   }>;
   readonly decodeCredential: (base64: string, encrypted: boolean) => Promise<string>;
-  readonly spawn: (bootstrap: ProviderDaemonBootstrap) => Promise<WindowsRuntimeChild>;
+  readonly spawn: (
+    bootstrap: ProviderDaemonBootstrap,
+    startupProgress?: WindowsRuntimeStartupProgress,
+  ) => Promise<WindowsRuntimeChild>;
+  readonly onStartupProgress?: (progress: ProviderDaemonStartupProgress) => void;
   readonly fetchHealth?: (endpoint: ProviderDaemonClientConfig) => Promise<ProviderDaemonHealth>;
   readonly issueLease?: (
     endpoint: ProviderDaemonClientConfig,
@@ -108,6 +124,7 @@ export interface WindowsProviderRuntimeOptions {
   }) => Promise<void>;
   /** Tests inject time; production deadlines remain bounded, without inference retries. */
   readonly now?: () => number;
+  readonly monotonicNow?: () => number;
   readonly sleep?: (milliseconds: number) => Promise<void>;
   readonly readinessTimeoutMs?: number;
 }
@@ -136,6 +153,7 @@ export async function spawnWindowsProviderRuntimeChild(options: {
   readonly cwd: string;
   readonly env: NodeJS.ProcessEnv;
   readonly bootstrap: ProviderDaemonBootstrap;
+  readonly startupProgress?: WindowsRuntimeStartupProgress;
   readonly spawnChild?: typeof spawn;
 }): Promise<WindowsRuntimeChild> {
   const child = (options.spawnChild ?? spawn)(
@@ -147,20 +165,49 @@ export async function spawnWindowsProviderRuntimeChild(options: {
       shell: false,
       detached: true,
       windowsHide: true,
-      stdio: ["ignore", "ignore", "ignore", "pipe"],
+      stdio: ["ignore", "ignore", "ignore", "pipe", "pipe"],
     } satisfies SpawnOptions,
   );
   let exited = false;
+  let progressClosed = false;
+  const progressPipe = child.stdio[4];
+  const closeStartupProgress = () => {
+    if (progressClosed) return;
+    progressClosed = true;
+    options.startupProgress?.tracker.end();
+    progressPipe?.destroy();
+  };
+  // Install flowing reads before awaiting spawn: a quick child can emit its
+  // migration start immediately. Keep draining even after decoder rejection,
+  // and keep detached stdout/stderr independent of the desktop lifetime.
+  progressPipe?.on("data", (bytes: Buffer) => {
+    if (!progressClosed)
+      options.startupProgress?.tracker.push(bytes, options.startupProgress.elapsedMs());
+  });
+  progressPipe?.on("end", () => options.startupProgress?.tracker.end());
+  // An I/O failure is not a clean EOF: revoke any uncompleted allowance even
+  // when the last accepted frame ended on a complete line boundary.
+  progressPipe?.on("error", () => options.startupProgress?.tracker.invalidate());
+  if (progressPipe && "unref" in progressPipe && typeof progressPipe.unref === "function")
+    progressPipe.unref();
   child.once("exit", () => {
     exited = true;
+    closeStartupProgress();
   });
   // Keep a listener after launch too: subsequent spawn/stdio errors contain
   // machine-specific data and cannot become unhandled diagnostic disclosures.
   child.on("error", () => {});
-  await new Promise<void>((resolve, reject) => {
-    child.once("spawn", resolve);
-    child.once("error", () => reject(new WindowsProviderRuntimeError("child-admission-uncertain")));
-  });
+  try {
+    await new Promise<void>((resolve, reject) => {
+      child.once("spawn", resolve);
+      child.once("error", () =>
+        reject(new WindowsProviderRuntimeError("child-admission-uncertain")),
+      );
+    });
+  } catch (error) {
+    closeStartupProgress();
+    throw error;
+  }
   const pipe = child.stdio[3];
   if (pipe && "write" in pipe) {
     pipe.on("error", () => {});
@@ -172,8 +219,11 @@ export async function spawnWindowsProviderRuntimeChild(options: {
     if ("unref" in pipe && typeof pipe.unref === "function") pipe.unref();
   }
   child.unref();
-  if (child.pid === undefined) throw new WindowsProviderRuntimeError("child-admission-uncertain");
-  return { pid: child.pid, hasExited: () => exited };
+  if (child.pid === undefined) {
+    closeStartupProgress();
+    throw new WindowsProviderRuntimeError("child-admission-uncertain");
+  }
+  return { pid: child.pid, hasExited: () => exited, closeStartupProgress };
 }
 
 const fail = (reason: WindowsProviderRuntimeFailure, nativeError?: unknown): never => {
@@ -236,6 +286,24 @@ class StopSupervisorBeforeMutation extends Error {
   }
 }
 
+/** Private continuation: long startup waits never retain a native guard helper. */
+class AwaitFreshChildOutsideGuard extends Error {
+  health: ProviderDaemonHealth | undefined;
+  readonly record: RecordSnapshot;
+  readonly child: WindowsRuntimeChild;
+  readonly progress: WindowsRuntimeStartupProgress;
+  constructor(
+    record: RecordSnapshot,
+    child: WindowsRuntimeChild,
+    progress: WindowsRuntimeStartupProgress,
+  ) {
+    super("Await the exact fresh child after releasing its ownership guard.");
+    this.record = record;
+    this.child = child;
+    this.progress = progress;
+  }
+}
+
 /**
  * Windows-only lifecycle policy shared by the desktop daemon and explicit
  * supervisor manager. Each helper session both owns the OS guard and performs
@@ -248,6 +316,7 @@ export function createWindowsProviderRuntime(
   const healthRequest = options.fetchHealth ?? readHealth;
   const leaseRequest = options.issueLease ?? defaultLease(options.role);
   const now = options.now ?? Date.now;
+  const monotonicNow = options.monotonicNow ?? options.now ?? performance.now.bind(performance);
   const sleep = options.sleep ?? ((ms) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
   const readinessTimeoutMs = Math.min(Math.max(options.readinessTimeoutMs ?? 30_000, 1), 45_000);
   let active: { readonly result: WindowsProviderRuntimeResult; readonly revision: string } | null =
@@ -268,11 +337,15 @@ export function createWindowsProviderRuntime(
   const sessionOperation = async <A>(
     operation: (session: WindowsOwnershipSession) => Promise<A>,
   ) => {
+    let freshAdmission: AwaitFreshChildOutsideGuard | undefined;
+    let freshAccepted = false;
     try {
       // At most one cross-role handoff per operation. Each marker revision is
       // rechecked after the other role completes; no pair of ownership guards
       // is held concurrently, and newer publications abort the old decision.
-      for (let transaction = 0; transaction < 2; transaction += 1) {
+      // One independent supervisor handoff plus one fresh-child continuation
+      // requires at most three guarded transactions; no retry renews startup.
+      for (let transaction = 0; transaction < 3; transaction += 1) {
         let session: WindowsOwnershipSession;
         try {
           session = await open({
@@ -284,15 +357,24 @@ export function createWindowsProviderRuntime(
           return fail("ownership-unavailable", error);
         }
         let requestedStop: StopSupervisorBeforeMutation | undefined;
+        let requestedWait: AwaitFreshChildOutsideGuard | undefined;
         let released = false;
         try {
           if (supervisorStopPermit) {
             const latest = await session.read();
             if (latest.revision !== supervisorStopPermit.revision) return fail("ownership-changed");
           }
+          if (freshAdmission) {
+            const result = await resumeFreshAdmission(session, freshAdmission);
+            freshAccepted = true;
+            // Only fresh ensure/recover can produce this private continuation;
+            // observation and stop never enter its result-bearing branch.
+            return result as A;
+          }
           return await operation(session);
         } catch (error) {
           if (error instanceof StopSupervisorBeforeMutation) requestedStop = error;
+          else if (error instanceof AwaitFreshChildOutsideGuard) requestedWait = error;
           else if (error instanceof WindowsProviderRuntimeError) throw error;
           else return fail("ownership-unavailable", error);
         } finally {
@@ -305,7 +387,18 @@ export function createWindowsProviderRuntime(
             /* Preserve original failure. */
           }
         }
-        if (!released || !requestedStop || !options.stopSupervisor || transaction !== 0) {
+        if (requestedWait) {
+          freshAdmission = requestedWait;
+          if (!released) return fail("ownership-unavailable");
+          // The handoff permit described the retired owner, not this newly
+          // published generation. Re-admission instead fences its exact record.
+          supervisorStopPermit = undefined;
+          // This is pure endpoint/direct-child observation outside the OS
+          // guard. A timeout keeps the prepared reservation and child intact.
+          freshAdmission.health = await waitForFreshAdmission(freshAdmission);
+          continue;
+        }
+        if (!released || !requestedStop || !options.stopSupervisor || supervisorStopPermit) {
           return fail("upstream-ownership-unknown");
         }
         try {
@@ -321,6 +414,8 @@ export function createWindowsProviderRuntime(
       return fail("upstream-ownership-unknown");
     } finally {
       supervisorStopPermit = undefined;
+      freshAdmission?.progress.tracker.finish(freshAccepted ? "ready" : "failed");
+      freshAdmission?.child.closeStartupProgress?.();
     }
   };
   const recordFrom = (snapshot: WindowsOwnershipSnapshot): RecordSnapshot | null => {
@@ -566,6 +661,7 @@ export function createWindowsProviderRuntime(
     initial: RecordSnapshot,
     child?: WindowsRuntimeChild,
     allowReplacement = true,
+    observedHealth?: ProviderDaemonHealth,
   ): Promise<WindowsProviderRuntimeResult | null> => {
     let record = initial;
     const marker = record.marker;
@@ -587,7 +683,7 @@ export function createWindowsProviderRuntime(
     const endpoint = await rootEndpoint(record);
     let health: ProviderDaemonHealth;
     try {
-      health = await observeHealth(endpoint);
+      health = observedHealth ?? (await observeHealth(endpoint));
     } catch {
       return fail(
         prepared
@@ -653,6 +749,50 @@ export function createWindowsProviderRuntime(
     return leaseAndAccept(session, record, endpoint, health, child === undefined);
   };
 
+  const waitForFreshAdmission = async (attempt: AwaitFreshChildOutsideGuard) => {
+    const endpoint = await rootEndpoint(attempt.record);
+    do {
+      if (attempt.child.hasExited()) return undefined;
+      if (attempt.progress.elapsedMs() >= attempt.progress.tracker.deadlineMs) break;
+      try {
+        const health = decodeHealth(await healthRequest(endpoint));
+        if (attempt.progress.elapsedMs() < attempt.progress.tracker.deadlineMs) return health;
+      } catch {
+        // Readiness transport failures grant no process/file authority. Only
+        // exact-child validated migration frames can adjust the finite budget.
+      }
+      const remaining = attempt.progress.tracker.deadlineMs - attempt.progress.elapsedMs();
+      if (remaining <= 0) break;
+      await sleep(Math.min(200, remaining));
+    } while (attempt.progress.elapsedMs() < attempt.progress.tracker.deadlineMs);
+    return fail("prepared-attempt-uncertain");
+  };
+  const resumeFreshAdmission = async (
+    session: WindowsOwnershipSession,
+    attempt: AwaitFreshChildOutsideGuard,
+  ) => {
+    const current = await read(session);
+    if (
+      !current ||
+      current.revision !== attempt.record.revision ||
+      fence(current) !== fence(attempt.record) ||
+      current.marker.pid !== attempt.child.pid ||
+      current.marker.windowsOwnershipState !== "prepared"
+    )
+      return fail("ownership-changed");
+    if (attempt.child.hasExited()) {
+      await staleConflictCheck(current);
+      await retire(session, current);
+      return fail("child-admission-uncertain");
+    }
+    if (attempt.progress.elapsedMs() >= attempt.progress.tracker.deadlineMs)
+      return fail("prepared-attempt-uncertain");
+    // The ordinary admission path authenticates generation and FILETIME,
+    // re-observes native identity, then publishes/leases under this fresh guard.
+    const result = await admit(session, current, attempt.child, true, attempt.health);
+    return result ?? fail("child-admission-uncertain");
+  };
+
   const spawnFresh = async (
     session: WindowsOwnershipSession,
   ): Promise<WindowsProviderRuntimeResult> => {
@@ -692,48 +832,59 @@ export function createWindowsProviderRuntime(
     // Prepared pid=0 is a durable reservation, NOT a dead process. A crash or
     // lost response from this publication cannot justify a second child.
     let record = await publish(session, null, marker, credential.base64);
-    let child: WindowsRuntimeChild;
+    const spawnedAtMs = monotonicNow();
+    const progress: WindowsRuntimeStartupProgress = {
+      tracker: makeProviderDaemonStartupProgressTracker(readinessTimeoutMs, (record) => {
+        try {
+          if (options.role === "provider-daemon") options.onStartupProgress?.(record);
+        } catch {
+          // UI observation cannot change native ownership or expose its cause.
+        }
+      }),
+      elapsedMs: () => Math.max(0, monotonicNow() - spawnedAtMs),
+    };
+    progress.tracker.start();
+    let child: WindowsRuntimeChild | undefined;
+    let handedOff = false;
     try {
-      child = await options.spawn({
-        ...options.bootstrap,
-        mode: options.role,
-        transport: "ipc",
-        socketPath: options.socketPath,
-        token,
-        ...(options.runtimeBuildId === undefined ? {} : { runtimeBuildId: options.runtimeBuildId }),
-        windowsOwnershipId: ownershipId,
-        ...(cafeMcpPort === undefined ? {} : { cafeMcpPort }),
-      });
-    } catch {
+      child = await options.spawn(
+        {
+          ...options.bootstrap,
+          mode: options.role,
+          transport: "ipc",
+          socketPath: options.socketPath,
+          token,
+          ...(options.runtimeBuildId === undefined
+            ? {}
+            : { runtimeBuildId: options.runtimeBuildId }),
+          windowsOwnershipId: ownershipId,
+          ...(options.role === "provider-daemon"
+            ? { startupProgressFd: BACKEND_STARTUP_PROGRESS_FD }
+            : {}),
+          ...(cafeMcpPort === undefined ? {} : { cafeMcpPort }),
+        },
+        // Only this role's exact newly owned daemon gets the migration grant.
+        // Supervisors retain ordinary readiness even when sharing this policy.
+        options.role === "provider-daemon" ? progress : undefined,
+      );
+      if (!Number.isInteger(child.pid) || child.pid <= 0 || child.pid > 0xffff_ffff)
+        return fail("child-admission-uncertain");
+      record = await publish(session, record, { ...record.marker, pid: child.pid });
+      handedOff = true;
+      throw new AwaitFreshChildOutsideGuard(record, child, progress);
+    } catch (error) {
+      if (
+        error instanceof AwaitFreshChildOutsideGuard ||
+        error instanceof WindowsProviderRuntimeError
+      )
+        throw error;
       return fail("child-admission-uncertain");
+    } finally {
+      if (!handedOff) {
+        progress.tracker.finish("failed");
+        child?.closeStartupProgress?.();
+      }
     }
-    if (!Number.isInteger(child.pid) || child.pid <= 0 || child.pid > 0xffff_ffff)
-      return fail("child-admission-uncertain");
-    record = await publish(session, record, { ...record.marker, pid: child.pid });
-    const deadline = now() + readinessTimeoutMs;
-    do {
-      if (child.hasExited()) {
-        await staleConflictCheck(record);
-        await retire(session, record);
-        return fail("child-admission-uncertain");
-      }
-      try {
-        const result = await admit(session, record, child);
-        if (result) return result;
-        return fail("child-admission-uncertain");
-      } catch (error) {
-        // Retry bounded infrastructure observations only. Never retry mutations
-        // or an uncertain lease/admission operation, and never replay a prompt.
-        if (
-          !(error instanceof WindowsProviderRuntimeError) ||
-          error.reason !== "prepared-attempt-uncertain"
-        )
-          throw error;
-      }
-      if (now() >= deadline) break;
-      await sleep(200);
-    } while (now() < deadline);
-    return fail("prepared-attempt-uncertain");
   };
   const ensureInSession = async (session: WindowsOwnershipSession) => {
     const record = await read(session);

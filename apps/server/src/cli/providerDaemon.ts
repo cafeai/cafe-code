@@ -27,7 +27,7 @@ class ProviderDaemonCliError extends Data.TaggedError("ProviderDaemonCliError")<
   readonly message: string;
 }> {}
 
-const resolveProviderDaemonServerConfig = (input: {
+export const resolveProviderDaemonServerConfig = (input: {
   readonly bootstrap: ProviderDaemonBootstrap;
   readonly logLevel: LogLevel.LogLevel;
   readonly runtimeRole: "provider-daemon" | "provider-supervisor";
@@ -77,6 +77,7 @@ const resolveProviderDaemonServerConfig = (input: {
       providerDaemon: undefined,
       providerSupervisor: input.providerSupervisor,
       cafeMcpPort: input.bootstrap.cafeMcpPort,
+      ...(input.bootstrap.startupProgressFd === 4 ? { startupProgressFd: 4 as const } : {}),
     } satisfies ServerConfigShape;
   });
 

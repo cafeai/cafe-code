@@ -214,8 +214,24 @@ export const ProviderSessionForkDiscardInput = Schema.Struct({
 });
 export type ProviderSessionForkDiscardInput = typeof ProviderSessionForkDiscardInput.Type;
 
+/**
+ * Cafe-owned admission for using an unchanged policy in one existing Codex
+ * process. This is not native version support, durable resume authority, or
+ * permission to apply a limit. Every coordinate must match fresh owner state.
+ */
+export const ProviderSubagentPolicySession = Schema.Struct({
+  threadId: ThreadId,
+  providerInstanceId: ProviderInstanceId,
+  subagentRuntimeId: SubagentRuntimeId,
+  maxConcurrentSubagents: MaxConcurrentSubagents,
+});
+export type ProviderSubagentPolicySession = typeof ProviderSubagentPolicySession.Type;
+
 export const ProviderSendTurnInput = Schema.Struct({
   threadId: ThreadId,
+  // Valid only with the owner's additive Cafe continuation-fence guarantee.
+  // Missing inventory must refuse, never recover or launch another process.
+  expectedSubagentPolicySession: Schema.optional(ProviderSubagentPolicySession),
   codexReview: Schema.optional(CodexReviewTarget),
   deliveryPriority: Schema.optional(ProviderDeliveryPriority),
   /** Trusted orchestration provenance; scheduled input must never gain human urgency. */
@@ -259,6 +275,7 @@ export type ProviderSendTurnInput = typeof ProviderSendTurnInput.Type;
 
 export const ProviderSteerTurnInput = Schema.Struct({
   threadId: ThreadId,
+  expectedSubagentPolicySession: Schema.optional(ProviderSubagentPolicySession),
   deliveryPriority: Schema.optional(ProviderDeliveryPriority),
   expectedPrioritySession: Schema.optional(ProviderPrioritySessionBinding),
   expectedTurnId: TurnId,

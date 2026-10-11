@@ -1,5 +1,6 @@
 import type { ProviderDaemonClientConfig, ProviderDaemonLiveness } from "@cafecode/contracts";
 import { assert, describe, it } from "@effect/vitest";
+import * as Cause from "effect/Cause";
 import * as Duration from "effect/Duration";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
@@ -14,9 +15,16 @@ import type {
   DesktopProviderDaemonSnapshot,
 } from "../backend/DesktopProviderDaemonManager.ts";
 import {
+  fatalStartupCause,
   runProviderDaemonHealthWatchdog,
+  runDesktopStartupUntilShutdown,
   startBackendAfterProviderDaemonReady,
 } from "./DesktopApp.ts";
+import * as DesktopLifecycle from "./DesktopLifecycle.ts";
+import * as DesktopState from "./DesktopState.ts";
+import * as ElectronApp from "../electron/ElectronApp.ts";
+import * as ElectronDialog from "../electron/ElectronDialog.ts";
+import * as DesktopStartupWindow from "../window/DesktopStartupWindow.ts";
 
 const endpoint: ProviderDaemonClientConfig = {
   httpBaseUrl: "http://provider-daemon.local",
@@ -140,6 +148,142 @@ function pendingWindowsRecoveryFixture(input?: {
 }
 
 describe("DesktopApp provider daemon bootstrap credentials", () => {
+  it.effect("delivers fatal Quit even after its shutdown request wakes startup cancellation", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const shutdown = yield* DesktopLifecycle.DesktopShutdown;
+        const quitting = yield* Ref.make(false);
+        const backendReady = yield* Ref.make(false);
+        const actions: string[] = [];
+        const unexpected = () => Effect.die("fatal startup must not invoke other app APIs");
+        const app: ElectronApp.ElectronAppShape = {
+          metadata: unexpected(),
+          name: unexpected(),
+          whenReady: unexpected(),
+          // Yield after the request so the competing branch actually wakes
+          // and interrupts the fatal handler before the Quit is delivered.
+          quit: Effect.yieldNow.pipe(
+            Effect.andThen(Effect.sync(() => actions.push("quit"))),
+            Effect.asVoid,
+          ),
+          exit: unexpected,
+          requestSingleInstanceLock: unexpected(),
+          relaunch: unexpected,
+          setPath: unexpected,
+          setName: unexpected,
+          setAboutPanelOptions: unexpected,
+          setAppUserModelId: unexpected,
+          setDesktopName: unexpected,
+          setDockIcon: unexpected,
+          appendCommandLineSwitch: unexpected,
+          on: unexpected,
+        };
+        const result = yield* runDesktopStartupUntilShutdown({
+          startup: fatalStartupCause(
+            "provider daemon",
+            Cause.die(new Error("synthetic readiness failure")),
+          ),
+          awaitShutdown: shutdown.awaitRequest.pipe(
+            Effect.tap(() => Effect.sync(() => actions.push("shutdown-observed"))),
+          ),
+        }).pipe(
+          Effect.provideService(DesktopState.DesktopState, { backendReady, quitting }),
+          Effect.provideService(ElectronApp.ElectronApp, app),
+          Effect.provideService(ElectronDialog.ElectronDialog, {
+            pickFolder: unexpected,
+            confirm: unexpected,
+            showMessageBox: unexpected,
+            showErrorBox: (title) =>
+              Effect.sync(() => {
+                assert.equal(title, "Cafe Code failed to start");
+                actions.push("fatal-dialog");
+              }),
+          }),
+          Effect.provideService(DesktopStartupWindow.DesktopStartupWindow, {
+            begin: unexpected(),
+            update: unexpected,
+            close: Effect.sync(() => {
+              actions.push("close-startup");
+            }),
+          }),
+        );
+        assert.equal(result, "shutdown");
+        assert.deepStrictEqual(actions, [
+          "close-startup",
+          "fatal-dialog",
+          "shutdown-observed",
+          "quit",
+        ]);
+        assert.equal(yield* Ref.get(quitting), true);
+      }),
+    ).pipe(Effect.provide(DesktopLifecycle.layerShutdown)),
+  );
+
+  it.effect("passes user cancellation through without fatal UI or a new Quit request", () =>
+    Effect.gen(function* () {
+      // Any access to these tripwire service fields becomes a defect, which
+      // the exact interruption-only assertion below must reject. Cancellation
+      // must not show fatal UI or deliver a second native Quit.
+      const unusedService = <A>(name: string): A =>
+        new Proxy(
+          {},
+          {
+            get: () => {
+              throw new Error(`Cancellation accessed ${name}`);
+            },
+          },
+        ) as A;
+      const result = yield* fatalStartupCause("provider daemon", Cause.interrupt(123)).pipe(
+        Effect.provideService(
+          DesktopState.DesktopState,
+          unusedService<DesktopState.DesktopStateShape>("state"),
+        ),
+        Effect.provideService(
+          ElectronApp.ElectronApp,
+          unusedService<ElectronApp.ElectronAppShape>("app"),
+        ),
+        Effect.provideService(
+          ElectronDialog.ElectronDialog,
+          unusedService<ElectronDialog.ElectronDialogShape>("dialog"),
+        ),
+        Effect.exit,
+      );
+      assert.equal(result._tag, "Failure");
+      if (result._tag === "Failure") assert.equal(Cause.hasInterruptsOnly(result.cause), true);
+    }).pipe(Effect.provide(DesktopLifecycle.layerShutdown)),
+  );
+
+  it.effect("cancels startup readiness on Quit without starting a backend", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const quitting = yield* Ref.make(false);
+        const shutdown = yield* Deferred.make<void>();
+        const ready = yield* Deferred.make<ProviderDaemonClientConfig>();
+        const cancelled = yield* Deferred.make<void>();
+        let starts = 0;
+        const run = yield* runDesktopStartupUntilShutdown({
+          startup: startBackendAfterProviderDaemonReady({
+            providerDaemonReady: Deferred.await(ready).pipe(
+              Effect.onInterrupt(() => Deferred.succeed(cancelled, undefined)),
+            ),
+            startBackend: Effect.sync(() => {
+              starts += 1;
+            }),
+            quitting,
+          }),
+          awaitShutdown: Deferred.await(shutdown),
+        }).pipe(Effect.forkChild);
+        yield* Effect.yieldNow;
+        yield* Ref.set(quitting, true);
+        yield* Deferred.succeed(shutdown, undefined);
+        assert.equal(yield* Fiber.join(run), "shutdown");
+        yield* Deferred.await(cancelled);
+        yield* Deferred.succeed(ready, endpoint);
+        assert.equal(starts, 0);
+      }),
+    ),
+  );
+
   it.effect(
     "starts the backend only with the final lease after a failed provisional daemon attempt",
     () =>

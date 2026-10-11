@@ -6,6 +6,7 @@ import * as Fiber from "effect/Fiber";
 import * as Option from "effect/Option";
 import * as Random from "effect/Random";
 import * as Ref from "effect/Ref";
+import * as Stream from "effect/Stream";
 
 import type { ProviderDaemonClientConfig } from "@cafecode/contracts";
 import * as NetService from "@cafecode/shared/Net";
@@ -31,6 +32,7 @@ import * as DesktopUpdates from "../updates/DesktopUpdates.ts";
 import * as DesktopSourceUpdates from "../updates/DesktopSourceUpdates.ts";
 import * as DesktopDebugServer from "../debug/DesktopDebugServer.ts";
 import { DesktopNativePermissions } from "../nativeControl/DesktopNativePermissions.ts";
+import * as DesktopStartupWindow from "../window/DesktopStartupWindow.ts";
 
 const DEFAULT_DESKTOP_BACKEND_PORT = 3773;
 const DEFAULT_DESKTOP_BACKEND_HTTPS_PORT = 3775;
@@ -175,6 +177,8 @@ const handleFatalStartupError = Effect.fn("desktop.startup.handleFatalStartupErr
   const state = yield* DesktopState.DesktopState;
   const electronApp = yield* ElectronApp.ElectronApp;
   const electronDialog = yield* ElectronDialog.ElectronDialog;
+  const startupWindow = yield* Effect.serviceOption(DesktopStartupWindow.DesktopStartupWindow);
+  if (Option.isSome(startupWindow)) yield* startupWindow.value.close;
   const message = error instanceof Error ? error.message : String(error);
   const detail =
     error instanceof Error && typeof error.stack === "string" ? `\n${error.stack}` : "";
@@ -192,10 +196,31 @@ const handleFatalStartupError = Effect.fn("desktop.startup.handleFatalStartupErr
   }
   yield* shutdown.request;
   yield* electronApp.quit;
-});
+}, Effect.uninterruptible);
 
-const fatalStartupCause = <E>(stage: string, cause: Cause.Cause<E>) =>
-  handleFatalStartupError(stage, Cause.pretty(cause)).pipe(Effect.andThen(Effect.failCause(cause)));
+/**
+ * Only the bounded fatal UI-to-Quit handoff is uninterruptible. Its shutdown
+ * request wakes the competing startup cancellation branch, which must not
+ * cancel this very handler before it delivers Electron's ordinary Quit.
+ * Daemon readiness remains interruptible, and user cancellation is not fatal.
+ */
+export const fatalStartupCause = <E>(stage: string, cause: Cause.Cause<E>) =>
+  Cause.hasInterruptsOnly(cause)
+    ? Effect.failCause(cause)
+    : handleFatalStartupError(stage, Cause.pretty(cause)).pipe(
+        Effect.andThen(Effect.failCause(cause)),
+      );
+
+/**
+ * A user quit must cancel pending readiness, rather than waiting for startup
+ * before the shutdown request can be observed. This changes only the desktop
+ * bootstrap fiber's lifetime: it neither signals an adopted provider nor
+ * substitutes a provisional endpoint for the final authenticated lease.
+ */
+export const runDesktopStartupUntilShutdown = <A, E, R>(input: {
+  readonly startup: Effect.Effect<A, E, R>;
+  readonly awaitShutdown: Effect.Effect<void>;
+}) => Effect.raceFirst(input.startup, input.awaitShutdown.pipe(Effect.as("shutdown" as const)));
 
 /**
  * Bootstrap credentials belong to the daemon attempt that actually became
@@ -401,6 +426,13 @@ const bootstrap = Effect.gen(function* () {
   const environment = yield* DesktopEnvironment.DesktopEnvironment;
   const desktopSettings = yield* DesktopAppSettings.DesktopAppSettings;
   const serverExposure = yield* DesktopServerExposure.DesktopServerExposure;
+  const startupWindow = yield* Effect.serviceOption(DesktopStartupWindow.DesktopStartupWindow);
+  if (Option.isSome(startupWindow) && providerDaemonManager.startupProgress) {
+    yield* Stream.runForEach(
+      providerDaemonManager.startupProgress,
+      startupWindow.value.update,
+    ).pipe(Effect.forkScoped);
+  }
   yield* logBootstrapInfo("bootstrap start");
   yield* DesktopDebugServer.start;
 
@@ -530,6 +562,8 @@ const startup = Effect.gen(function* () {
     Effect.catchCause((cause) => fatalStartupCause("whenReady", cause)),
   );
   yield* logStartupInfo("app ready");
+  const startupWindow = yield* Effect.serviceOption(DesktopStartupWindow.DesktopStartupWindow);
+  if (Option.isSome(startupWindow)) yield* startupWindow.value.begin;
   yield* appIdentity.configure;
   yield* applicationMenu.configure;
   yield* electronProtocol.registerDesktopFileProtocol;
@@ -554,7 +588,10 @@ const scopedProgram = Effect.scoped(
         .pipe(Effect.ensuring(shutdown.markComplete)),
     );
 
-    const startupRole = yield* startup;
+    const startupRole = yield* runDesktopStartupUntilShutdown({
+      startup,
+      awaitShutdown: shutdown.awaitRequest,
+    });
     if (startupRole === "secondary") {
       return;
     }

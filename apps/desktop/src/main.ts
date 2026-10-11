@@ -44,6 +44,7 @@ import * as DesktopNativePermissions from "./nativeControl/DesktopNativePermissi
 import * as DesktopUpdates from "./updates/DesktopUpdates.ts";
 import * as DesktopSourceUpdates from "./updates/DesktopSourceUpdates.ts";
 import * as DesktopWindow from "./window/DesktopWindow.ts";
+import * as DesktopStartupWindow from "./window/DesktopStartupWindow.ts";
 import { resolveLinuxSafeStoragePasswordStore } from "./app/LinuxSafeStorageCommandLine.ts";
 import {
   isDesktopRuntimeSelfTestEnabled,
@@ -116,7 +117,10 @@ const desktopServerExposureLayer = DesktopServerExposure.layer.pipe(
   Layer.provideMerge(desktopFoundationLayer),
 );
 
-const desktopWindowLayer = DesktopWindow.layer.pipe(Layer.provideMerge(desktopServerExposureLayer));
+const desktopStartupWindowLayer = DesktopStartupWindow.layer.pipe(
+  Layer.provideMerge(desktopServerExposureLayer),
+);
+const desktopWindowLayer = DesktopWindow.layer.pipe(Layer.provideMerge(desktopStartupWindowLayer));
 
 const desktopProviderDaemonLayer = DesktopProviderDaemonManager.layer.pipe(
   Layer.provideMerge(desktopFoundationLayer),

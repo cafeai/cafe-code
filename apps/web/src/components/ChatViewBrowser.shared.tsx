@@ -7931,6 +7931,332 @@ describe(`ChatView full app (${chatViewBrowserPart})`, () => {
           })),
         };
       }
+      function continuationSnapshot(running: boolean) {
+        const original = running
+          ? createSnapshotWithActiveSubagent()
+          : policySnapshot(undefined, 12);
+        return {
+          ...original,
+          threads: original.threads.map((thread) => ({
+            ...thread,
+            subagentLimits: {},
+            session: thread.session
+              ? {
+                  ...thread.session,
+                  providerInstanceId: account,
+                  maxConcurrentSubagents: 12,
+                  subagentRuntimeId: SUBAGENT_RUNTIME_ID,
+                }
+              : null,
+          })),
+        };
+      }
+      function configureExistingContinuation(next: TestFixture) {
+        configureLiveDefaults(next);
+        next.serverConfig = {
+          ...next.serverConfig,
+          keybindings: [
+            {
+              command: "composer.steer",
+              shortcut: {
+                key: "enter",
+                modKey: false,
+                ctrlKey: true,
+                metaKey: false,
+                altKey: false,
+                shiftKey: false,
+              },
+            },
+          ],
+          providers: next.serverConfig.providers.map((provider) =>
+            provider.instanceId === account
+              ? {
+                  ...provider,
+                  // Bind the fixture's exact saved model/options explicitly;
+                  // fallback catalogues evolve independently of this policy.
+                  models: [
+                    {
+                      slug: "gpt-5",
+                      name: "GPT-5",
+                      isCustom: false,
+                      capabilities: createModelCapabilities({ optionDescriptors: [] }),
+                    },
+                  ],
+                  runtimeCapabilities: {
+                    threadGoals: "unsupported",
+                    ...provider.runtimeCapabilities,
+                    liveSteer: "supported",
+                    subagentConcurrency: false,
+                    subagentPolicyContinuation: true,
+                  },
+                }
+              : provider,
+          ),
+        };
+      }
+      it.each(["send", "steer"] as const)(
+        "admits exact existing-process %s while the native version capability is unknown",
+        async (action) => {
+          const mounted = await mountChatView({
+            viewport: WIDE_FOOTER_VIEWPORT,
+            snapshot: continuationSnapshot(action === "steer"),
+            configureFixture: configureExistingContinuation,
+            resolveRpc: (body) =>
+              body._tag === ORCHESTRATION_WS_METHODS.dispatchCommand ? { sequence: 2 } : undefined,
+          });
+          const prompt = "Continue this exact owned process with its applied limit";
+          try {
+            await waitForServerConfigToApply();
+            expect(
+              getServerConfig()?.providers.find((provider) => provider.instanceId === account)
+                ?.runtimeCapabilities?.subagentConcurrency,
+            ).toBe(false);
+            useComposerDraftStore.getState().setPrompt(THREAD_REF, prompt);
+            await vi.waitFor(() =>
+              expect(document.querySelector('[contenteditable="true"]')?.textContent).toContain(
+                prompt,
+              ),
+            );
+            if (action === "steer") {
+              (await waitForComposerEditor()).focus();
+              await userEvent.keyboard("{Control>}{Enter}{/Control}");
+            } else (await waitForSendButton()).click();
+            await vi.waitFor(() =>
+              expect(
+                wsRequests.filter(
+                  (body) =>
+                    body.type === (action === "steer" ? "thread.turn.steer" : "thread.turn.start"),
+                ),
+              ).toHaveLength(1),
+            );
+            expect(wsRequests.some((body) => body.type === "thread.create")).toBe(false);
+            expect(
+              getServerConfig()?.providers.find((provider) => provider.instanceId === account)
+                ?.runtimeCapabilities?.subagentConcurrency,
+            ).toBe(false);
+          } finally {
+            await mounted.cleanup();
+          }
+        },
+      );
+      it("does not lend an applied numeric session limit without Cafe continuation availability", async () => {
+        const mounted = await mountChatView({
+          viewport: WIDE_FOOTER_VIEWPORT,
+          snapshot: continuationSnapshot(false),
+          configureFixture: (next) => {
+            configureExistingContinuation(next);
+            next.serverConfig = {
+              ...next.serverConfig,
+              providers: next.serverConfig.providers.map((provider) =>
+                provider.instanceId === account
+                  ? {
+                      ...provider,
+                      runtimeCapabilities: {
+                        liveSteer: "supported",
+                        threadGoals: "unsupported",
+                        subagentConcurrency: false,
+                      },
+                    }
+                  : provider,
+              ),
+            };
+          },
+        });
+        const prompt = "Do not consume this unsupported fresh-start policy";
+        try {
+          await waitForServerConfigToApply();
+          useComposerDraftStore.getState().setPrompt(THREAD_REF, prompt);
+          await vi.waitFor(() =>
+            expect(document.querySelector('[contenteditable="true"]')?.textContent).toContain(
+              prompt,
+            ),
+          );
+          (await waitForSendButton()).click();
+          await vi.waitFor(() =>
+            expect(document.body.textContent).toContain(
+              "This provider runtime does not support the account subagent limit.",
+            ),
+          );
+          expect(wsRequests.some((body) => body.type === "thread.turn.start")).toBe(false);
+          expect(useComposerDraftStore.getState().getComposerDraft(THREAD_REF)?.prompt).toBe(
+            prompt,
+          );
+        } finally {
+          await mounted.cleanup();
+        }
+      });
+      it("delivers a queued follow-up only through the exact existing-process continuation guarantee", async () => {
+        const queue = createFollowUpQueuePersistence();
+        const snapshot = continuationSnapshot(false);
+        const thread = snapshot.threads[0]!;
+        expect(
+          (
+            await queue.save(LOCAL_ENVIRONMENT_ID, [
+              {
+                id: "exact-continuation-queued",
+                environmentId: LOCAL_ENVIRONMENT_ID,
+                threadId: THREAD_ID,
+                promptText: "Continue the already-materialized exact queued process",
+                images: [],
+                files: [],
+                provider: ProviderDriverKind.make("codex"),
+                model: thread.modelSelection.model,
+                promptEffort: null,
+                modelSelection: thread.modelSelection,
+                runtimeMode: thread.runtimeMode,
+                interactionMode: "default",
+                queuedAt: isoAt(1000),
+                blockedReason: null,
+              },
+            ])
+          ).ok,
+        ).toBe(true);
+        const mounted = await mountChatView({
+          viewport: WIDE_FOOTER_VIEWPORT,
+          snapshot,
+          configureFixture: configureExistingContinuation,
+          resolveRpc: (body) =>
+            body._tag === ORCHESTRATION_WS_METHODS.dispatchCommand ? { sequence: 2 } : undefined,
+        });
+        try {
+          await waitForServerConfigToApply();
+          await vi.waitFor(() =>
+            expect(wsRequests.filter((body) => body.type === "thread.turn.start")).toHaveLength(1),
+          );
+          const submitted = wsRequests.find((body) => body.type === "thread.turn.start")!;
+          expect(submitted).toMatchObject({
+            threadId: THREAD_ID,
+            message: { text: "Continue the already-materialized exact queued process" },
+          });
+          expect(submitted).not.toHaveProperty("subagentLimits");
+          await vi.waitFor(() => {
+            const persisted = queue.load(LOCAL_ENVIRONMENT_ID);
+            expect(persisted.ok).toBe(true);
+            if (persisted.ok) {
+              expect(persisted.value.pending).toHaveLength(0);
+              expect(persisted.value.claimed).toHaveLength(0);
+            }
+          });
+          expect(
+            getServerConfig()?.providers.find((provider) => provider.instanceId === account)
+              ?.runtimeCapabilities?.subagentConcurrency,
+          ).toBe(false);
+        } finally {
+          await mounted.cleanup();
+        }
+      });
+      it.each(["send", "steer"] as const)(
+        "rechecks exact continuation authority after deferred %s attachment preparation",
+        async (action) => {
+          const mounted = await mountChatView({
+            viewport: WIDE_FOOTER_VIEWPORT,
+            snapshot: continuationSnapshot(action === "steer"),
+            configureFixture: configureExistingContinuation,
+          });
+          const prompt = "Preserve this exact continuation-race draft";
+          const originalRead = FileReader.prototype.readAsDataURL;
+          const prepared: { reader: FileReader; blob: Blob }[] = [];
+          let restoreReadSpy: (() => void) | undefined;
+          const releaseReaders = () => {
+            for (const { reader, blob } of prepared.splice(0)) originalRead.call(reader, blob);
+          };
+          try {
+            await waitForServerConfigToApply();
+            useComposerDraftStore.getState().setPrompt(THREAD_REF, prompt);
+            useComposerDraftStore.getState().addImages(THREAD_REF, [
+              {
+                id: "continuation-race-image",
+                type: "image",
+                name: "draft.png",
+                mimeType: "image/png",
+                sizeBytes: 1,
+                previewUrl: "data:image/png;base64,eA==",
+                file: new File(["x"], "draft.png", { type: "image/png" }),
+              },
+            ]);
+            await vi.waitFor(() =>
+              expect(
+                useComposerDraftStore
+                  .getState()
+                  .getComposerDraft(THREAD_REF)
+                  ?.persistedAttachments.map((image) => image.id),
+              ).toEqual(["continuation-race-image"]),
+            );
+            const readSpy = vi
+              .spyOn(FileReader.prototype, "readAsDataURL")
+              .mockImplementation(function (this: FileReader, blob: Blob) {
+                prepared.push({ reader: this, blob });
+              });
+            restoreReadSpy = () => readSpy.mockRestore();
+            await vi.waitFor(() =>
+              expect(document.querySelector('[contenteditable="true"]')?.textContent).toContain(
+                prompt,
+              ),
+            );
+            if (action === "steer") {
+              (await waitForComposerEditor()).focus();
+              await userEvent.keyboard("{Control>}{Enter}{/Control}");
+            } else (await waitForSendButton()).click();
+            await vi.waitFor(() => expect(prepared).toHaveLength(1));
+            // The fleet revokes Cafe continuation availability while bytes
+            // are being prepared. Numeric history is insufficient at this
+            // advisory boundary, even though the policy remains unchanged;
+            // actual owner qualification is additionally required server-side.
+            fixture.serverConfig = {
+              ...fixture.serverConfig,
+              providers: fixture.serverConfig.providers.map((provider) =>
+                provider.instanceId === account
+                  ? {
+                      ...provider,
+                      runtimeCapabilities: {
+                        ...provider.runtimeCapabilities!,
+                        subagentPolicyContinuation: false,
+                      },
+                    }
+                  : provider,
+              ),
+            };
+            rpcHarness.emitStreamValue(WS_METHODS.subscribeServerConfig, {
+              version: 1,
+              type: "snapshot",
+              config: encodeServerConfig(fixture.serverConfig),
+            });
+            await vi.waitFor(() =>
+              expect(
+                getServerConfig()?.providers.find((provider) => provider.instanceId === account)
+                  ?.runtimeCapabilities?.subagentPolicyContinuation,
+              ).toBe(false),
+            );
+            releaseReaders();
+            await vi.waitFor(() =>
+              expect(document.body.textContent).toContain(
+                "This provider runtime does not support the account subagent limit.",
+              ),
+            );
+            expect(
+              wsRequests.some(
+                (body) => body.type === "thread.turn.start" || body.type === "thread.turn.steer",
+              ),
+            ).toBe(false);
+            expect(useComposerDraftStore.getState().getComposerDraft(THREAD_REF)?.prompt).toBe(
+              prompt,
+            );
+            expect(
+              useComposerDraftStore
+                .getState()
+                .getComposerDraft(THREAD_REF)
+                ?.images.map((image) => image.id),
+            ).toEqual(["continuation-race-image"]);
+            const persisted = createFollowUpQueuePersistence().load(LOCAL_ENVIRONMENT_ID);
+            expect(persisted.ok).toBe(true);
+            if (persisted.ok) expect(persisted.value.claimed).toHaveLength(0);
+          } finally {
+            restoreReadSpy?.();
+            releaseReaders();
+            await mounted.cleanup();
+          }
+        },
+      );
       it.each(["plan follow-up", "native review"] as const)(
         "refuses unsupported inherited account policy in direct %s actions before dispatch or consuming work",
         async (action) => {

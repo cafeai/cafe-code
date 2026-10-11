@@ -11,16 +11,21 @@ import {
 } from "@cafecode/contracts";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, describe, it } from "@effect/vitest";
-import { vi } from "vitest";
+import { afterEach, beforeEach, vi } from "vitest";
 import type * as Context from "effect/Context";
 import * as Data from "effect/Data";
+import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
+import * as Duration from "effect/Duration";
+import * as Fiber from "effect/Fiber";
 import * as Exit from "effect/Exit";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as PlatformError from "effect/PlatformError";
 import * as Schema from "effect/Schema";
+import * as Sink from "effect/Sink";
+import * as Stream from "effect/Stream";
 import * as TestClock from "effect/testing/TestClock";
 import { ChildProcessSpawner } from "effect/unstable/process";
 
@@ -30,6 +35,7 @@ import * as DesktopEnvironment from "../app/DesktopEnvironment.ts";
 import * as DesktopObservability from "../app/DesktopObservability.ts";
 import * as DesktopDebugServer from "../debug/DesktopDebugServer.ts";
 import * as DesktopProviderDaemonManager from "./DesktopProviderDaemonManager.ts";
+import * as DesktopProcessReaper from "./DesktopProcessReaper.ts";
 
 const TEST_TOKEN = "provider-daemon-test-token-000000000000000000000000";
 const TEST_LEASE_TOKEN = "provider-daemon-lease-token-000000000000000000000000";
@@ -203,6 +209,194 @@ function makeManagerLayer(
 }
 
 describe("DesktopProviderDaemonManager", () => {
+  beforeEach(() => {
+    // These authenticated peers and owned-child handles are synthetic. A
+    // successful adoption still passes through the production stale-runtime
+    // hook, but this default fixture must neither enumerate host command lines
+    // nor gain authority to reap any ambient user process. Process policy has
+    // its separate DesktopProcessReaper.test.ts qualification boundary.
+    vi.spyOn(DesktopProcessReaper, "reapMatchingUnixProcesses").mockImplementation(() =>
+      Effect.succeed([]),
+    );
+  });
+  afterEach(() => vi.restoreAllMocks());
+
+  for (const phase of ["spawn", "publication"] as const) {
+    it.effect(
+      `finishes fresh-child recovery publication before honoring quit during ${phase}`,
+      () =>
+        Effect.gen(function* () {
+          const fileSystem = yield* FileSystem.FileSystem;
+          const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
+          const baseDir = yield* fileSystem.makeTempDirectoryScoped({
+            prefix: "cafe-daemon-quit-",
+          });
+          const markerPath = `${baseDir}/provider-daemon.json`;
+          const credentialPath = `${baseDir}/provider-daemon-token.bin`;
+          const backendEntryPath = `${baseDir}/backend.mjs`;
+          yield* fileSystem.writeFileString(backendEntryPath, "// inert quit fixture\n");
+          const entered = yield* Deferred.make<void>();
+          const release = yield* Deferred.make<void>();
+          const gated = Deferred.succeed(entered, undefined).pipe(
+            Effect.andThen(Deferred.await(release)),
+          );
+          let spawnCalls = 0;
+          let killCalls = 0;
+          const handle = ChildProcessSpawner.makeHandle({
+            pid: ChildProcessSpawner.ProcessId(1_234_568),
+            stdout: Stream.empty,
+            stderr: Stream.empty,
+            all: Stream.empty,
+            exitCode: Effect.never,
+            isRunning: Effect.succeed(true),
+            kill: () =>
+              Effect.sync(() => {
+                killCalls += 1;
+              }),
+            stdin: Sink.drain,
+            getInputFd: () => Sink.drain,
+            getOutputFd: () => Stream.fromEffect(Effect.never),
+            unref: Effect.succeed(Effect.void),
+          });
+          const guardedSpawner: TestProcessSpawner = {
+            ...spawner,
+            spawn: () =>
+              Effect.sync(() => {
+                spawnCalls += 1;
+              }).pipe(Effect.andThen(phase === "spawn" ? gated : Effect.void), Effect.as(handle)),
+          };
+          const safeStorage: ElectronSafeStorage.ElectronSafeStorageShape = {
+            isEncryptionAvailable: Effect.succeed(true),
+            encryptString: (value) =>
+              (phase === "publication" ? gated : Effect.void).pipe(
+                Effect.as(new TextEncoder().encode(value)),
+              ),
+            decryptString: (value) => Effect.succeed(new TextDecoder().decode(value)),
+          };
+          yield* Effect.gen(function* () {
+            const manager = yield* DesktopProviderDaemonManager.DesktopProviderDaemonManager;
+            const attempt = yield* manager.ensureRunning.pipe(Effect.forkScoped);
+            yield* Deferred.await(entered);
+            // The fixture requests only Effect cancellation; no native process
+            // exists. Pending quit must not cut this ownership publication short.
+            yield* Effect.sync(() => attempt.interruptUnsafe());
+            yield* Deferred.succeed(release, undefined);
+            const result = yield* Fiber.await(attempt);
+            assert.equal(result._tag, "Failure");
+            assert.isTrue(yield* fileSystem.exists(markerPath));
+            assert.isTrue(yield* fileSystem.exists(credentialPath));
+            assert.equal(spawnCalls, 1);
+            assert.equal(killCalls, 0);
+            const snapshot = yield* manager.snapshot;
+            assert.equal(Option.getOrNull(snapshot.pid), 1_234_568);
+            assert.equal((yield* manager.ensureRunning.pipe(Effect.exit))._tag, "Failure");
+            assert.equal(spawnCalls, 1);
+            assert.equal(killCalls, 0);
+          }).pipe(
+            Effect.provide(
+              makeManagerLayer(baseDir, markerPath, backendEntryPath, safeStorage, {
+                fileSystem,
+                spawner: guardedSpawner,
+              }),
+            ),
+          );
+        }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+    );
+  }
+
+  for (const phase of ["readiness", "publication"] as const) {
+    it.effect(
+      `preserves failed-child recovery files and refuses competing spawn after ${phase} when exit stays uncertain`,
+      () =>
+        Effect.gen(function* () {
+          const fileSystem = yield* FileSystem.FileSystem;
+          const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
+          const baseDir = yield* fileSystem.makeTempDirectoryScoped({
+            prefix: "cafe-daemon-exit-",
+          });
+          const markerPath = `${baseDir}/provider-daemon.json`;
+          const credentialPath = `${baseDir}/provider-daemon-token.bin`;
+          const backendEntryPath = `${baseDir}/backend.mjs`;
+          yield* fileSystem.writeFileString(backendEntryPath, "// inert owned-child fixture\n");
+          // An inert directory makes only the credential's atomic publication
+          // fail. No real profile, injected process or private token is observed.
+          if (phase === "publication") yield* fileSystem.makeDirectory(credentialPath);
+          let spawnCalls = 0;
+          const signals: string[] = [];
+          const guardedSpawner: TestProcessSpawner = {
+            ...spawner,
+            spawn: (command) =>
+              Effect.sync(() => {
+                spawnCalls += 1;
+                assert.equal(command._tag, "StandardCommand");
+                if (command._tag === "StandardCommand") {
+                  assert.equal(command.options.stdout, "ignore");
+                  assert.equal(command.options.stderr, "ignore");
+                  assert.deepEqual(command.options.additionalFds?.fd4, { type: "output" });
+                }
+                return ChildProcessSpawner.makeHandle({
+                  pid: ChildProcessSpawner.ProcessId(1_234_567),
+                  stdout: Stream.empty,
+                  stderr: Stream.empty,
+                  all: Stream.empty,
+                  exitCode: Effect.never,
+                  isRunning: Effect.succeed(true),
+                  kill: (options) => {
+                    signals.push(options?.killSignal ?? "SIGTERM");
+                    return Effect.never;
+                  },
+                  stdin: Sink.drain,
+                  getInputFd: () => Sink.drain,
+                  getOutputFd: () => Stream.fromEffect(Effect.never),
+                  unref: Effect.succeed(Effect.void),
+                });
+              }),
+          };
+          yield* Effect.gen(function* () {
+            const manager = yield* DesktopProviderDaemonManager.DesktopProviderDaemonManager;
+            const attempt = yield* manager.ensureRunning.pipe(Effect.exit, Effect.forkScoped);
+            // Real scoped filesystem setup settles before advancing virtual time.
+            // Otherwise the startup baseline could be captured after the jump.
+            if (phase === "readiness") {
+              yield* fileSystem
+                .exists(markerPath)
+                .pipe(Effect.repeat({ until: (exists) => exists }));
+              yield* TestClock.adjust(Duration.seconds(30));
+            }
+            yield* Effect.sync(() => signals.length).pipe(
+              Effect.repeat({ until: (count) => count > 0 }),
+            );
+            yield* TestClock.adjust(Duration.seconds(18));
+            const result = yield* Fiber.join(attempt);
+            assert.equal(result._tag, "Failure");
+            assert.equal(spawnCalls, 1);
+            assert.deepEqual(signals, ["SIGTERM", "SIGKILL"]);
+            assert.equal(yield* fileSystem.exists(markerPath), phase === "readiness");
+            assert.isTrue(yield* fileSystem.exists(credentialPath));
+            const snapshot = yield* manager.snapshot;
+            assert.equal(snapshot.status, "error");
+            assert.equal(Option.getOrNull(snapshot.pid), 1_234_567);
+            assert.equal(
+              Option.getOrNull(snapshot.lastError),
+              new DesktopProviderDaemonManager.ProviderDaemonTerminationUnconfirmedError().message,
+            );
+            const retry = yield* manager.ensureRunning.pipe(Effect.exit);
+            assert.equal(retry._tag, "Failure");
+            assert.equal(spawnCalls, 1);
+            assert.deepEqual(signals, ["SIGTERM", "SIGKILL"]);
+            assert.equal(yield* fileSystem.exists(markerPath), phase === "readiness");
+          }).pipe(
+            Effect.provide(
+              makeManagerLayer(baseDir, markerPath, backendEntryPath, undefined, {
+                fileSystem,
+                spawner: guardedSpawner,
+              }),
+            ),
+          );
+        }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+    );
+  }
+
   for (const phase of ["exists", "read", "json", "schema"] as const) {
     it.effect(`preserves the owner after inconclusive marker ${phase} inspection`, () =>
       Effect.gen(function* () {
@@ -496,6 +690,9 @@ describe("DesktopProviderDaemonManager", () => {
         assert.equal(Option.getOrUndefined(snapshot.pid), process.pid);
         assert.equal(Option.getOrUndefined(snapshot.lastHealth)?.activeSessionCount, 3);
         assert.equal(snapshot.runtimeBuildId, runtimeBuildId);
+        const reaperCalls = vi.mocked(DesktopProcessReaper.reapMatchingUnixProcesses).mock.calls;
+        assert.equal(reaperCalls.length, 1);
+        assert.isTrue(reaperCalls[0]?.[0].keepPids.has(process.pid));
         const adoptedHealthObservedAt = publishedSnapshot.lastHealthObservedAt;
         assert.isString(adoptedHealthObservedAt);
 

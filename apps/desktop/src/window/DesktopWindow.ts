@@ -20,6 +20,7 @@ import * as IpcChannels from "../ipc/channels.ts";
 import * as DesktopIpc from "../ipc/DesktopIpc.ts";
 import * as DesktopServerExposure from "../backend/DesktopServerExposure.ts";
 import { trustAudioWebContents } from "./TrustedAudioPermissionPolicy.ts";
+import * as DesktopStartupWindow from "./DesktopStartupWindow.ts";
 
 const TITLEBAR_HEIGHT = 40;
 const TITLEBAR_COLOR = "#01000000"; // #00000000 does not work correctly on Linux
@@ -163,6 +164,7 @@ const make = Effect.gen(function* () {
   const desktopIpc = yield* DesktopIpc.DesktopIpc;
   const serverExposure = yield* DesktopServerExposure.DesktopServerExposure;
   const state = yield* DesktopState.DesktopState;
+  const startupWindow = yield* Effect.serviceOption(DesktopStartupWindow.DesktopStartupWindow);
   const context = yield* Effect.context<DesktopWindowRuntimeServices>();
   const runPromise = Effect.runPromiseWith(context);
 
@@ -291,7 +293,13 @@ const make = Effect.gen(function* () {
       revealSubscribers.push((fire) => window.webContents.once("did-finish-load", fire));
     }
     bindFirstRevealTrigger(revealSubscribers, () => {
-      void runPromise(electronWindow.reveal(window));
+      void runPromise(
+        electronWindow
+          .reveal(window)
+          .pipe(
+            Effect.andThen(Option.isSome(startupWindow) ? startupWindow.value.close : Effect.void),
+          ),
+      );
       void stopStartupCpuProfiler("desktop-window-revealed");
     });
 

@@ -44,6 +44,8 @@ import {
   ThreadId,
   type TurnId,
   ProviderSendTurnInput,
+  type ProviderSteerTurnInput,
+  type ProviderSession,
   type ProviderSessionForkResult,
   RuntimeTaskId,
   type RuntimeSubagentPresentation,
@@ -63,6 +65,7 @@ import * as Queue from "effect/Queue";
 import * as Ref from "effect/Ref";
 import * as Schema from "effect/Schema";
 import * as Semaphore from "effect/Semaphore";
+import { matchesSubagentPolicySession } from "../subagentPolicyContinuation.ts";
 import * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
@@ -5729,6 +5732,25 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
     };
   });
 
+  const assertExistingSubagentPolicy = (
+    input: ProviderSendTurnInput | ProviderSteerTurnInput,
+    session: ProviderSession,
+  ) =>
+    input.expectedSubagentPolicySession === undefined ||
+    (input.threadId === input.expectedSubagentPolicySession.threadId &&
+      boundInstanceId === input.expectedSubagentPolicySession.providerInstanceId &&
+      matchesSubagentPolicySession(session, input.expectedSubagentPolicySession))
+      ? Effect.void
+      : Effect.fail(
+          new ProviderAdapterRequestError({
+            provider: PROVIDER,
+            method: "turn/continue",
+            remoteErrorTag: "subagent-policy-continuation-refused",
+            detail:
+              "The existing Codex process or its recorded subagent policy changed. The message was not delivered.",
+          }),
+        );
+
   const sendTurn: CodexAdapterShape["sendTurn"] = Effect.fn("sendTurn")(function* (input) {
     if (input.expectedFailedRoot !== undefined) {
       const current = yield* (yield* requireSession(input.threadId)).runtime.getSession;
@@ -5800,6 +5822,8 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
     const prompt = appendFileAttachmentPrompt(input.input, fileManifest);
 
     const session = yield* requireSession(input.threadId);
+    if (input.expectedSubagentPolicySession !== undefined)
+      yield* assertExistingSubagentPolicy(input, yield* session.runtime.getSession);
     const reasoningEffort =
       input.modelSelection?.instanceId === boundInstanceId
         ? getModelSelectionStringOptionValue(input.modelSelection, "reasoningEffort")
@@ -5807,6 +5831,9 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
     yield* Effect.promise(() => session.nativeControlBinding?.beginTurn() ?? Promise.resolve());
     return yield* session.runtime
       .sendTurn({
+        ...(input.expectedSubagentPolicySession !== undefined
+          ? { expectedSubagentPolicySession: input.expectedSubagentPolicySession }
+          : {}),
         ...(input.codexReview !== undefined
           ? { codexReview: input.codexReview, allowActiveTurnSteerFallback: false }
           : {}),
@@ -5929,6 +5956,8 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
     const prompt = appendFileAttachmentPrompt(input.input, fileManifest);
 
     const session = yield* requireSession(input.threadId);
+    if (input.expectedSubagentPolicySession !== undefined)
+      yield* assertExistingSubagentPolicy(input, yield* session.runtime.getSession);
     // MessageId is an open Cafe entity id and may be arbitrarily large or
     // contain control code points. Bind it to a deterministic fixed-size token
     // before entering CodexSessionRuntime so provider-owned pending state,
@@ -5940,6 +5969,9 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
     return yield* session.runtime
       .steerTurn({
         expectedTurnId: input.expectedTurnId,
+        ...(input.expectedSubagentPolicySession !== undefined
+          ? { expectedSubagentPolicySession: input.expectedSubagentPolicySession }
+          : {}),
         ...(clientCorrelationId !== undefined ? { clientCorrelationId } : {}),
         ...(prompt !== undefined ? { input: prompt } : {}),
         ...(codexAttachments.length > 0 ? { attachments: codexAttachments } : {}),
@@ -6349,6 +6381,7 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
       get subagentConcurrency() {
         return options?.getSubagentConcurrencySupport?.() ?? false;
       },
+      subagentPolicyContinuation: true,
       sessionModelSwitch: "in-session",
       liveSteer: "supported",
       manualCompaction: "supported",

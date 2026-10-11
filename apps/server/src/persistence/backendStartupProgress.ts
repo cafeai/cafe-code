@@ -18,12 +18,22 @@ import {
 export function makeBackendMigrationProgressReporter(
   fd: 4 | undefined,
   operations = { stat: fstatSync, write: writeSync },
+  platform: NodeJS.Platform = process.platform,
 ): (record: BackendMigrationProgress) => void {
   if (fd !== BACKEND_STARTUP_PROGRESS_FD) return () => undefined;
   let enabled = false;
   try {
     const stat = operations.stat(fd);
-    enabled = stat.isFIFO() || stat.isSocket();
+    // Node intentionally makes these convenience predicates false on Windows,
+    // although libuv still reports an inherited named pipe's native stat tuple.
+    // Admit that exact tuple only: accepting any non-file or character device
+    // would also write to an unrelated console or other inherited handle. The
+    // tuple comes from libuv's fs__fstat_handle (UV_NAMED_PIPE), not a path guess.
+    // POSIX keeps its original public FIFO/socket predicates unchanged.
+    enabled =
+      platform === "win32"
+        ? (stat.mode & 0o170000) === 0o010000 && stat.rdev === 0x11 << 16
+        : stat.isFIFO() || stat.isSocket();
   } catch {
     // Missing/closed progress pipes cannot affect durable database work.
   }

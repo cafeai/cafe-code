@@ -4,6 +4,9 @@ import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
+import * as Ref from "effect/Ref";
+import * as Fiber from "effect/Fiber";
+import * as Semaphore from "effect/Semaphore";
 import * as TestClock from "effect/testing/TestClock";
 
 import type * as Electron from "electron";
@@ -19,6 +22,10 @@ import * as DesktopLifecycle from "./DesktopLifecycle.ts";
 import * as DesktopState from "./DesktopState.ts";
 import * as DesktopWindow from "../window/DesktopWindow.ts";
 import * as IpcChannels from "../ipc/channels.ts";
+import {
+  runDesktopStartupUntilShutdown,
+  startBackendAfterProviderDaemonReady,
+} from "./DesktopApp.ts";
 
 type BeforeQuitListener = (event: Electron.Event) => void;
 type SecondInstanceListener = (
@@ -62,6 +69,8 @@ function makeProviderDaemonHealth(activeSessionCount: number): ProviderDaemonHea
 function makeLifecycleHarness(options?: {
   readonly activeProviderSessionCount?: number;
   readonly providerDaemonDialogResponse?: number;
+  readonly backendReady?: boolean;
+  readonly daemonHealthRead?: Effect.Effect<Option.Option<ProviderDaemonHealth>>;
 }) {
   let beforeQuitListener: BeforeQuitListener | undefined;
   let secondInstanceListener: SecondInstanceListener | undefined;
@@ -168,9 +177,11 @@ function makeLifecycleHarness(options?: {
         recover: () => Effect.die("unexpected recover"),
         currentConfig: Effect.succeed(Option.none()),
         probeLiveness: Effect.succeed(Option.none()),
-        refreshHealth: Effect.succeed(
-          Option.some(makeProviderDaemonHealth(options?.activeProviderSessionCount ?? 0)),
-        ),
+        refreshHealth:
+          options?.daemonHealthRead ??
+          Effect.succeed(
+            Option.some(makeProviderDaemonHealth(options?.activeProviderSessionCount ?? 0)),
+          ),
         snapshot: Effect.die("unexpected snapshot"),
         stop: Effect.sync(() => {
           providerDaemonStopCount += 1;
@@ -181,7 +192,13 @@ function makeLifecycleHarness(options?: {
     const layer = Layer.mergeAll(
       DesktopLifecycle.layer,
       DesktopLifecycle.layerShutdown,
-      DesktopState.layer,
+      Layer.effect(
+        DesktopState.DesktopState,
+        Effect.all({
+          backendReady: Ref.make(options?.backendReady ?? true),
+          quitting: Ref.make(false),
+        }),
+      ),
       desktopEnvironmentLayer,
       desktopWindowLayer,
       providerDaemonLayer,
@@ -207,6 +224,74 @@ function makeLifecycleHarness(options?: {
 }
 
 describe("DesktopLifecycle", () => {
+  it.effect("cancels pending readiness without deadlocking on a migration-owned health lock", () =>
+    Effect.gen(function* () {
+      let healthReads = 0;
+      let startupCancelled = false;
+      let backendStarts = 0;
+      const lifecycleMutex = yield* Semaphore.make(1);
+      const ownsStartupLock = yield* Deferred.make<void>();
+      const harness = yield* makeLifecycleHarness({
+        backendReady: false,
+        activeProviderSessionCount: 2,
+        daemonHealthRead: Effect.sync(() => {
+          healthReads += 1;
+        }).pipe(
+          Effect.andThen(
+            lifecycleMutex.withPermits(1)(Effect.succeed(Option.some(makeProviderDaemonHealth(2)))),
+          ),
+        ),
+      });
+      yield* Effect.scoped(
+        Effect.gen(function* () {
+          const lifecycle = yield* DesktopLifecycle.DesktopLifecycle;
+          const shutdown = yield* DesktopLifecycle.DesktopShutdown;
+          const state = yield* DesktopState.DesktopState;
+          yield* lifecycle.register;
+          const startup = yield* runDesktopStartupUntilShutdown({
+            startup: startBackendAfterProviderDaemonReady({
+              providerDaemonReady: lifecycleMutex.withPermits(1)(
+                Deferred.succeed(ownsStartupLock, undefined).pipe(
+                  Effect.andThen(Effect.never),
+                  Effect.onInterrupt(() =>
+                    Effect.sync(() => {
+                      startupCancelled = true;
+                    }),
+                  ),
+                ),
+              ),
+              startBackend: Effect.sync(() => {
+                backendStarts += 1;
+              }),
+              quitting: state.quitting,
+            }),
+            awaitShutdown: shutdown.awaitRequest,
+          }).pipe(Effect.ensuring(shutdown.markComplete), Effect.forkChild);
+          yield* Deferred.await(ownsStartupLock);
+          const beforeQuit = harness.getBeforeQuitListener();
+          assert.isDefined(beforeQuit);
+          const quitEvent = makeEvent();
+          beforeQuit!(quitEvent.event);
+          yield* shutdown.awaitRequest;
+          assert.equal(yield* Fiber.join(startup), "shutdown");
+          assert.equal(startupCancelled, true);
+          assert.equal(backendStarts, 0);
+          assert.equal(healthReads, 0, "Quit must not request the lock held by startup");
+          assert.equal(
+            (yield* lifecycleMutex.withPermitsIfAvailable(1)(Effect.void))._tag,
+            "Some",
+            "startup cancellation must release its exact lifecycle lock",
+          );
+          assert.equal(harness.getProviderDaemonDialogCount(), 0);
+          assert.equal(harness.getProviderDaemonStopCount(), 0);
+          yield* TestClock.adjust(DesktopLifecycle.DESKTOP_SHUTDOWN_OVERLAY_MINIMUM_DWELL);
+          yield* flushMicrotasks;
+          assert.equal(harness.getQuitCount(), 1);
+        }),
+      ).pipe(Effect.provide(harness.layer));
+    }),
+  );
+
   it.effect("keeps the shutdown overlay visible for the minimum dwell before quitting", () =>
     Effect.gen(function* () {
       const harness = yield* makeLifecycleHarness();

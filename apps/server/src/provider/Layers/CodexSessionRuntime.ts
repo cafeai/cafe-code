@@ -15,6 +15,7 @@ import {
   type ProviderRequestKind,
   type ProviderSession,
   type ProviderSendTurnInput,
+  type ProviderSubagentPolicySession,
   ProviderThreadGoal,
   type ProviderThreadGoalClearResult,
   type ProviderThreadGoalSetInput,
@@ -93,6 +94,7 @@ import * as CodexRpc from "effect-codex-app-server/rpc";
 import * as EffectCodexSchema from "effect-codex-app-server/schema";
 
 import { buildCodexInitializeParams } from "./CodexProvider.ts";
+import { matchesSubagentPolicySession } from "../subagentPolicyContinuation.ts";
 import { isCodexRootAgentPath } from "./CodexSubagentPath.ts";
 import { rewindCodexThreadWithClient } from "./CodexThreadRewind.ts";
 import { codexNativeReviewParams, decodeCodexNativeReviewResponse } from "./CodexNativeReview.ts";
@@ -493,6 +495,7 @@ export interface CodexSessionRuntimeOptions {
 }
 
 export interface CodexSessionRuntimeSendTurnInput {
+  readonly expectedSubagentPolicySession?: ProviderSubagentPolicySession | undefined;
   readonly cyberAccessProgram?: EffectCodexSchema.V2TurnStartParams__CyberAccessProgram | undefined;
   readonly codexReview?: import("@cafecode/contracts").CodexReviewTarget;
   /** Internal exact-root recovery guard; never forwarded as app-server params. */
@@ -514,6 +517,7 @@ export interface CodexSessionRuntimeSendTurnInput {
 }
 
 export interface CodexSessionRuntimeSteerTurnInput {
+  readonly expectedSubagentPolicySession?: ProviderSubagentPolicySession | undefined;
   readonly expectedTurnId: TurnId;
   /**
    * Fixed-size, content-free correlation derived by CodexAdapter before the
@@ -4213,6 +4217,33 @@ export const reconcileCodexSystemErrorThreadStatusLifecycleBoundary = Effect.fn(
 });
 
 /**
+ * Final unchanged-policy admission for steering uses the same native lifecycle
+ * permit as Stop/root transitions. It never resumes a transcript or creates a
+ * process. A closure after this check is still rejected by the transport's
+ * sticky termination fence rather than redirected into a replacement context.
+ */
+export const assertCodexSubagentPolicySessionBoundary = Effect.fn(
+  "assertCodexSubagentPolicySessionBoundary",
+)(function* (input: {
+  readonly semaphore: Semaphore.Semaphore;
+  readonly closedRef: Ref.Ref<boolean>;
+  readonly sessionRef: Ref.Ref<ProviderSession>;
+  readonly expected: ProviderSubagentPolicySession;
+}) {
+  yield* input.semaphore.withPermits(1)(
+    Effect.gen(function* () {
+      if (
+        (yield* Ref.get(input.closedRef)) ||
+        !matchesSubagentPolicySession(yield* Ref.get(input.sessionRef), input.expected)
+      )
+        return yield* CodexErrors.CodexAppServerRequestError.invalidRequest(
+          "The existing Codex process or its recorded subagent policy changed. The message was not delivered.",
+        );
+    }),
+  );
+});
+
+/**
  * Reserve one native root start without changing the visible aggregate or
  * retiring its children. The app-server contract has one primary active turn;
  * the sole running-session exception is an exact successfully completed root
@@ -4235,6 +4266,7 @@ export const admitCodexTurnStartLifecycleBoundary = Effect.fn(
   readonly serviceTierSnapshotRef?: Ref.Ref<CodexServiceTierSnapshot | undefined> | undefined;
   readonly expectedCompletedRootTurnId?: TurnId | undefined;
   readonly expectedFailedRoot?: ProviderSendTurnInput["expectedFailedRoot"];
+  readonly expectedSubagentPolicySession?: ProviderSubagentPolicySession | undefined;
   readonly latestRootTurnIdRef?: Ref.Ref<string | undefined>;
   readonly nativeContextAvailable?: Effect.Effect<boolean>;
   readonly allowActiveTurnSteerFallback?: boolean | undefined;
@@ -4251,6 +4283,13 @@ export const admitCodexTurnStartLifecycleBoundary = Effect.fn(
             "Cannot send a message after the Codex session has closed.",
           );
         }
+        if (
+          input.expectedSubagentPolicySession !== undefined &&
+          !matchesSubagentPolicySession(session, input.expectedSubagentPolicySession)
+        )
+          return yield* CodexErrors.CodexAppServerRequestError.invalidRequest(
+            "The existing Codex process or its recorded subagent policy changed. The message was not delivered.",
+          );
         if (nativeTurnStartPending || manualCompactionPending) {
           return yield* CodexErrors.CodexAppServerRequestError.invalidRequest(
             "Cannot send a message while another native Codex request is awaiting confirmation.",
@@ -9175,6 +9214,7 @@ export const makeCodexSessionRuntime = (
               ? undefined
               : input.expectedCompletedRootTurnId,
             expectedFailedRoot: input.expectedFailedRoot,
+            expectedSubagentPolicySession: input.expectedSubagentPolicySession,
             latestRootTurnIdRef: latestHistoryRootTurnRef,
             nativeContextAvailable,
             allowActiveTurnSteerFallback: reviewParams ? false : input.allowActiveTurnSteerFallback,
@@ -9622,6 +9662,13 @@ export const makeCodexSessionRuntime = (
                 ...(input.attachments ? { attachments: input.attachments } : {}),
               });
               yield* assertHistoryUsable(providerThreadId);
+              if (input.expectedSubagentPolicySession !== undefined)
+                yield* assertCodexSubagentPolicySessionBoundary({
+                  semaphore: aggregateLifecycleSemaphore,
+                  closedRef,
+                  sessionRef,
+                  expected: input.expectedSubagentPolicySession,
+                });
               return yield* client.raw.request("turn/steer", params);
             });
           const pendingSteerAdmission = yield* recordPendingSteerProcessing({

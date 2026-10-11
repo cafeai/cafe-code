@@ -48,6 +48,7 @@ import {
   ThreadTurnSubagentId,
   type ProviderRuntimeEvent,
   type ProviderSession,
+  type ProviderSubagentPolicySession,
 } from "@cafecode/contracts";
 import { createHmac, randomBytes, randomUUID } from "node:crypto";
 import { modelAcceptsImages, UNSUPPORTED_MODEL_IMAGES_MESSAGE } from "@cafecode/shared/model";
@@ -97,6 +98,7 @@ import {
   type ProviderRuntimeOwnerEvidence,
 } from "../providerRuntimeOwnerEvidence.ts";
 import { getCodexRootTurnCompletion } from "../codexRootTurnCompletion.ts";
+import { matchesSubagentPolicySession } from "../subagentPolicyContinuation.ts";
 import { normalizeClaudeSubagentHistoryRoot } from "../claudeSubagentHistoryRoot.ts";
 import {
   ProviderSessionDirectory,
@@ -2289,6 +2291,29 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
       }
     });
 
+  // Called under the service's thread lifecycle lock, using only fresh native
+  // inventory. Neither a durable binding nor a former CLI version may authorize
+  // this unchanged-policy exception. The native runtime checks it once more.
+  const assertSubagentPolicyContinuation = (input: {
+    readonly operation: string;
+    readonly threadId: ThreadId;
+    readonly instanceId: ProviderInstanceId;
+    readonly guaranteed: boolean | undefined;
+    readonly isActive: boolean;
+    readonly session: ProviderSession | undefined;
+    readonly expected: ProviderSubagentPolicySession;
+  }) =>
+    input.guaranteed === true &&
+    input.isActive &&
+    input.threadId === input.expected.threadId &&
+    input.instanceId === input.expected.providerInstanceId &&
+    matchesSubagentPolicySession(input.session, input.expected)
+      ? Effect.void
+      : toValidationError(
+          input.operation,
+          "The existing Codex process or its recorded subagent policy changed. The message was not delivered.",
+        );
+
   const sendTurn: ProviderServiceShape["sendTurn"] = Effect.fn("sendTurn")(function* (rawInput) {
     const parsed = yield* decodeInputOrValidationError({
       operation: "ProviderService.sendTurn",
@@ -2330,7 +2355,9 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
         // A transient-failure continuation is authorized only for the same
         // still-owned native context. Missing inventory cannot authorize a
         // replacement app-server (which could strand surviving children).
-        allowRecovery: input.expectedFailedRoot === undefined,
+        allowRecovery:
+          input.expectedFailedRoot === undefined &&
+          input.expectedSubagentPolicySession === undefined,
         ...(input.expectedFailedRoot !== undefined
           ? { requiredProvider: ProviderDriverKind.make("codex") }
           : {}),
@@ -2372,6 +2399,7 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
       const hasImages = input.attachments.some((attachment) => attachment.type === "image");
       const inspectLiveSession =
         hasImages ||
+        input.expectedSubagentPolicySession !== undefined ||
         routed.adapter.provider === "codex" ||
         (routed.adapter.capabilities.liveSteer === "supported" &&
           input.allowActiveTurnSteerFallback !== false);
@@ -2380,6 +2408,26 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
             (session) => session.threadId === input.threadId,
           )
         : undefined;
+      if (input.expectedSubagentPolicySession !== undefined) {
+        if (
+          input.codexReview !== undefined ||
+          (input.modelSelection !== undefined &&
+            input.modelSelection.instanceId !== routed.instanceId)
+        )
+          return yield* toValidationError(
+            "ProviderService.sendTurn",
+            "Existing subagent-policy continuation cannot change the owning Codex process.",
+          );
+        yield* assertSubagentPolicyContinuation({
+          operation: "ProviderService.sendTurn",
+          threadId: input.threadId,
+          instanceId: routed.instanceId,
+          guaranteed: routed.adapter.capabilities.subagentPolicyContinuation,
+          isActive: routed.isActive,
+          session: activeSession,
+          expected: input.expectedSubagentPolicySession,
+        });
+      }
       if (input.expectedFailedRoot !== undefined) {
         const expected = input.expectedFailedRoot;
         const failure = activeSession?.codexRootTurnFailure;
@@ -2438,6 +2486,9 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
             );
           const turn = yield* routed.adapter.steerTurn({
             threadId: input.threadId,
+            ...(input.expectedSubagentPolicySession !== undefined
+              ? { expectedSubagentPolicySession: input.expectedSubagentPolicySession }
+              : {}),
             ...(input.deliveryPriority !== undefined
               ? {
                   deliveryPriority: input.deliveryPriority,
@@ -2634,9 +2685,23 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
         operation: "ProviderService.steerTurn",
         // A bound priority targets an existing live query. Recovery would
         // create a different incarnation before discovering the mismatch.
-        allowRecovery: input.deliveryPriority === undefined,
+        allowRecovery:
+          input.deliveryPriority === undefined && input.expectedSubagentPolicySession === undefined,
       });
       metricProvider = routed.adapter.provider;
+      if (input.expectedSubagentPolicySession !== undefined) {
+        yield* assertSubagentPolicyContinuation({
+          operation: "ProviderService.steerTurn",
+          threadId: input.threadId,
+          instanceId: routed.instanceId,
+          guaranteed: routed.adapter.capabilities.subagentPolicyContinuation,
+          isActive: routed.isActive,
+          session: (yield* routed.adapter.listSessions()).find(
+            (session) => session.threadId === input.threadId,
+          ),
+          expected: input.expectedSubagentPolicySession,
+        });
+      }
       if (input.deliveryPriority !== undefined && routed.adapter.provider !== "claudeAgent") {
         return yield* toValidationError(
           "ProviderService.steerTurn",

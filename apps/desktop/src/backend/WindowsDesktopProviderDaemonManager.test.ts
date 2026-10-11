@@ -1,6 +1,9 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import * as Effect from "effect/Effect";
+import * as Exit from "effect/Exit";
 import * as Option from "effect/Option";
+import * as Scope from "effect/Scope";
+import * as Stream from "effect/Stream";
 import type {
   WindowsProviderRuntime,
   WindowsProviderRuntimeOptions,
@@ -82,6 +85,12 @@ const safeStorage = {
         .replace(/^encrypted:/, ""),
     ),
 };
+const fixtureScopes: Scope.Closeable[] = [];
+async function fixtureScope() {
+  const scope = await Effect.runPromise(Scope.make());
+  fixtureScopes.push(scope);
+  return scope;
+}
 function runtimeFixture() {
   let current: WindowsProviderRuntimeResult | null = null;
   return {
@@ -113,11 +122,16 @@ async function setup(runtime = runtimeFixture(), health = result.health) {
         return runtime;
       },
       requestJson,
-    }).pipe(Effect.provideService(ElectronSafeStorage.ElectronSafeStorage, safeStorage)),
+    }).pipe(
+      Effect.provideService(ElectronSafeStorage.ElectronSafeStorage, safeStorage),
+      Effect.provideService(Scope.Scope, await fixtureScope()),
+    ),
   );
   return { manager, runtime, options, requestJson };
 }
-afterEach(() => {
+afterEach(async () => {
+  for (const scope of fixtureScopes.splice(0))
+    await Effect.runPromise(Scope.close(scope, Exit.void));
   DesktopDebugServer.__desktopDebugServerTestApi.reset({ enabled: false });
 });
 
@@ -132,7 +146,10 @@ describe("Windows desktop daemon authority adapter", () => {
           configurations.push(input);
           return input.role === "provider-daemon" ? daemon : supervisor;
         },
-      }).pipe(Effect.provideService(ElectronSafeStorage.ElectronSafeStorage, safeStorage)),
+      }).pipe(
+        Effect.provideService(ElectronSafeStorage.ElectronSafeStorage, safeStorage),
+        Effect.provideService(Scope.Scope, await fixtureScope()),
+      ),
     );
     await configurations[0]!.stopSupervisor!({ ownershipId: generation, identity });
     expect(configurations.map((input) => input.role)).toEqual([
@@ -169,6 +186,26 @@ describe("Windows desktop daemon authority adapter", () => {
       result.endpoint,
     );
     expect((await Effect.runPromise(manager.snapshot)).status).toBe("running");
+  });
+
+  it("replays bounded sanitized migration progress and publishes terminal readiness", async () => {
+    const { manager, options } = await setup();
+    const latest = () => Effect.runPromise(Stream.runHead(manager.startupProgress!));
+    options.onStartupProgress?.({ phase: "migrating", migrationId: 92 });
+    expect(Option.getOrThrow(await latest())).toEqual({ phase: "migrating", migrationId: 92 });
+    await Effect.runPromise(manager.ensureRunning);
+    expect(Option.getOrThrow(await latest())).toEqual({ phase: "ready" });
+  });
+
+  it("publishes a fixed failure phase without exposing runtime error material", async () => {
+    const { manager, runtime } = await setup();
+    runtime.ensure.mockRejectedValueOnce(new Error("SECRET C:\\private\\auth.json"));
+    await expect(Effect.runPromise(manager.ensureRunning)).rejects.toThrow(
+      "ownership could not be verified",
+    );
+    expect(
+      Option.getOrThrow(await Effect.runPromise(Stream.runHead(manager.startupProgress!))),
+    ).toEqual({ phase: "failed" });
   });
 
   it("delegates observation and exact recovery/shutdown generation without exposing caller errors", async () => {

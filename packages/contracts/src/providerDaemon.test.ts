@@ -175,6 +175,61 @@ it("rejects malformed concurrency support without relaxing other required daemon
   }
 });
 
+it("keeps Cafe unchanged-policy continuation distinct from native support and binds its full tuple", () => {
+  const decodeCapabilities = Schema.decodeUnknownSync(ProviderDaemonAdapterCapabilities);
+  const capabilities = { sessionModelSwitch: "in-session", liveSteer: "supported" } as const;
+  assert.deepEqual(
+    decodeCapabilities({
+      ...capabilities,
+      subagentConcurrency: false,
+      subagentPolicyContinuation: true,
+    }),
+    { ...capabilities, subagentConcurrency: false, subagentPolicyContinuation: true },
+  );
+  assert.equal(decodeCapabilities(capabilities).subagentPolicyContinuation, undefined);
+  for (const invalid of [null, "true", 1, {}])
+    assert.throws(() =>
+      decodeCapabilities({ ...capabilities, subagentPolicyContinuation: invalid }),
+    );
+  const decodeRequest = Schema.decodeUnknownSync(ProviderDaemonRpcRequest);
+  const expectedSubagentPolicySession = {
+    threadId: "thread-1",
+    providerInstanceId: "codex",
+    subagentRuntimeId: OWNERSHIP_ID,
+    maxConcurrentSubagents: 16,
+  };
+  for (const method of ["sendTurn", "steerTurn"] as const) {
+    const payload = {
+      threadId: "thread-1",
+      input: "Synthetic continuation",
+      ...(method === "steerTurn" ? { expectedTurnId: "turn-1" } : {}),
+      expectedSubagentPolicySession,
+    };
+    assert.deepEqual(decodeRequest({ method, payload }), { method, payload });
+    for (const key of Object.keys(expectedSubagentPolicySession)) {
+      const invalid = Object.fromEntries(
+        Object.entries(expectedSubagentPolicySession).filter(([field]) => field !== key),
+      );
+      assert.throws(() =>
+        decodeRequest({ method, payload: { ...payload, expectedSubagentPolicySession: invalid } }),
+      );
+    }
+    for (const maxConcurrentSubagents of [null, 0, 65, 1.5, "16"])
+      assert.throws(() =>
+        decodeRequest({
+          method,
+          payload: {
+            ...payload,
+            expectedSubagentPolicySession: {
+              ...expectedSubagentPolicySession,
+              maxConcurrentSubagents,
+            },
+          },
+        }),
+      );
+  }
+});
+
 it("requires exact rewind identities, checkpoint boundaries and outcome values across daemon RPC", () => {
   const decode = Schema.decodeUnknownSync(ProviderDaemonRpcRequest);
   const identity = { threadId: "thread-1", operationId: OWNERSHIP_ID };
@@ -301,6 +356,23 @@ it("preserves legacy marker and POSIX payload shape while accepting Windows owne
 });
 
 const decodeProviderDaemonSubagentDetail = Schema.decodeUnknownEffect(ProviderDaemonSubagentDetail);
+
+it("admits only the explicit private startup-progress descriptor in daemon bootstrap", () => {
+  const bootstrap = {
+    mode: "provider-daemon",
+    cafeCodeHome: "/synthetic-profile",
+    token: "synthetic-bootstrap-capability-000000000000",
+  } as const;
+  const decode = Schema.decodeUnknownSync(ProviderDaemonBootstrap);
+  assert.deepEqual(decode(bootstrap), bootstrap);
+  const admitted = { ...bootstrap, startupProgressFd: 4 } as const;
+  assert.deepEqual(decode(admitted), admitted);
+  const json = Schema.fromJsonString(ProviderDaemonBootstrap);
+  assert.deepEqual(Schema.decodeUnknownSync(json)(Schema.encodeSync(json)(admitted)), admitted);
+  for (const startupProgressFd of [null, "4", 0, 3, 5, 4.1]) {
+    assert.throws(() => decode({ ...bootstrap, startupProgressFd }));
+  }
+});
 
 it("preserves byte-exact child/history authorization keys through daemon RPC", () => {
   const decode = Schema.decodeUnknownSync(ProviderDaemonRpcRequest);

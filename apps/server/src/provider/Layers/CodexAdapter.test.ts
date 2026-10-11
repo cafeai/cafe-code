@@ -23,6 +23,7 @@ import {
   type ProviderUserInputAnswers,
   type ServerProviderModel,
   ThreadId,
+  SubagentRuntimeId,
   THREAD_TURN_SUBAGENT_DETAIL_MAX_MESSAGE_BYTES,
   THREAD_TURN_SUBAGENT_DETAIL_MAX_MESSAGES,
   THREAD_TURN_SUBAGENT_DETAIL_MAX_TOTAL_BYTES,
@@ -2168,6 +2169,79 @@ sessionErrorLayer("CodexAdapterLive session errors", (it) => {
         ],
       );
     }),
+  );
+
+  it.effect(
+    "binds unchanged-policy send and steer to the exact native runtime and retains the final fence",
+    () =>
+      Effect.gen(function* () {
+        const adapter = yield* CodexAdapter;
+        const threadId = asThreadId("fenced-existing-policy");
+        yield* adapter.startSession({
+          threadId,
+          runtimeMode: "full-access",
+          maxConcurrentSubagents: 16,
+        });
+        const runtime = sessionRuntimeFactory.lastRuntime;
+        assert.ok(runtime);
+        const expected = {
+          threadId,
+          providerInstanceId: ProviderInstanceId.make("codex"),
+          subagentRuntimeId: SubagentRuntimeId.make("00000000-0000-4000-8000-000000000016"),
+          maxConcurrentSubagents: 16,
+        };
+        const snapshot = yield* runtime.getSession;
+        runtime.getSessionImpl.mockResolvedValue({ ...snapshot, ...expected, status: "ready" });
+        yield* adapter.sendTurn({
+          threadId,
+          input: "Synthetic next turn",
+          expectedSubagentPolicySession: expected,
+        });
+        yield* adapter.steerTurn({
+          threadId,
+          expectedTurnId: asTurnId("active-root"),
+          input: "Synthetic steer",
+          expectedSubagentPolicySession: expected,
+        });
+        assert.deepEqual(
+          runtime.sendTurnImpl.mock.calls[0]?.[0].expectedSubagentPolicySession,
+          expected,
+        );
+        assert.deepEqual(
+          runtime.steerTurnImpl.mock.calls[0]?.[0].expectedSubagentPolicySession,
+          expected,
+        );
+        runtime.getSessionImpl.mockResolvedValue({
+          ...snapshot,
+          ...expected,
+          status: "ready",
+          maxConcurrentSubagents: 17,
+        });
+        assert.equal(
+          (yield* adapter
+            .sendTurn({
+              threadId,
+              input: "Synthetic refused send",
+              expectedSubagentPolicySession: expected,
+            })
+            .pipe(Effect.result))._tag,
+          "Failure",
+        );
+        assert.equal(
+          (yield* adapter
+            .steerTurn({
+              threadId,
+              expectedTurnId: asTurnId("active-root"),
+              input: "Synthetic refused steer",
+              expectedSubagentPolicySession: expected,
+            })
+            .pipe(Effect.result))._tag,
+          "Failure",
+        );
+        assert.equal(runtime.sendTurnImpl.mock.calls.length, 1);
+        assert.equal(runtime.steerTurnImpl.mock.calls.length, 1);
+        assert.equal(runtime.closeImpl.mock.calls.length, 0);
+      }),
   );
 
   it.effect("routes live steering through Codex turn/steer without turn-start overrides", () =>

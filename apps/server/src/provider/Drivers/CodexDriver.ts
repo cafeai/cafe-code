@@ -137,6 +137,9 @@ const withInstanceIdentity =
       liveSteer: "supported",
       threadGoals: "supported",
       subagentConcurrency: supportsSubagentConcurrency("codex", snapshot.version),
+      // This Cafe owner supports a separately fenced unchanged-policy
+      // continuation. It must not upgrade the native version qualification.
+      subagentPolicyContinuation: true,
     },
   });
 

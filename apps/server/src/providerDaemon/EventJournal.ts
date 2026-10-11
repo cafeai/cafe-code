@@ -447,7 +447,7 @@ export const makePersistentProviderDaemonEventJournal = (options?: {
 
     const compactLargeProviderEventRows = Effect.fn(
       "ProviderDaemonPersistentEventJournal.compactLargeProviderEventRows",
-    )(function* (options?: { readonly afterCursor?: number }) {
+    )(function* (options?: { readonly afterCursor?: number; readonly throughCursor?: number }) {
       // This is intentionally a post-readiness bounded maintenance task, not a
       // migration. Older Cafe builds persisted repeated full Codex diffs and
       // arbitrarily large provider command payloads into the daemon journal.
@@ -462,6 +462,7 @@ export const makePersistentProviderDaemonEventJournal = (options?: {
       // chance to run. A one-row repair is slower, but it makes replay memory
       // bounded and preserves the complete event stream.
       const afterCursor = normalizeCursor(options?.afterCursor ?? 0);
+      const throughCursor = normalizeCursor(options?.throughCursor ?? Number.MAX_SAFE_INTEGER);
       let compactedCount = TURN_DIFF_JOURNAL_COMPACT_BATCH_SIZE;
       while (compactedCount >= TURN_DIFF_JOURNAL_COMPACT_BATCH_SIZE) {
         const rows = (yield* sql`
@@ -472,7 +473,11 @@ export const makePersistentProviderDaemonEventJournal = (options?: {
           FROM provider_daemon_events
           WHERE owner_key = ${ownerKey}
             AND cursor > ${afterCursor}
-            AND length(event_json) > ${PROVIDER_PIPELINE_POLICY.canonicalEventMaxBytes}
+            AND cursor <= ${throughCursor}
+            -- SQLite length(TEXT) counts characters, not encoded bytes. The
+            -- policy protects memory/wire bytes, including multibyte legacy
+            -- payloads; BLOB length observes the stored UTF-8 byte boundary.
+            AND length(CAST(event_json AS BLOB)) > ${PROVIDER_PIPELINE_POLICY.canonicalEventMaxBytes}
           ORDER BY cursor ASC
           LIMIT ${TURN_DIFF_JOURNAL_COMPACT_BATCH_SIZE}
         `.pipe(Effect.orDie)) as unknown as ReadonlyArray<PersistedEventRow>;
@@ -547,23 +552,55 @@ export const makePersistentProviderDaemonEventJournal = (options?: {
             ),
           ),
         );
-        // Reconnect replay is on the daemon request hot path. Do not decode
-        // inherited giant Codex diff rows here; compact them first in bounded
-        // one-row repairs so the replay remains complete without risking a
-        // multi-gigabyte JS heap spike.
-        yield* compactLargeProviderEventRows({ afterCursor: normalizedCursor });
-        const rows = (yield* sql`
-          SELECT
-            cursor,
-            emitted_at AS "emittedAt",
-            event_json AS "eventJson"
-          FROM provider_daemon_events
-          WHERE owner_key = ${ownerKey}
-            AND cursor > ${normalizedCursor}
-            AND cursor <= ${normalizedThroughCursor}
-          ORDER BY cursor ASC
-          LIMIT ${normalizedLimit}
-        `.pipe(Effect.orDie)) as unknown as ReadonlyArray<PersistedEventRow>;
+        // Probe only indexed cursor metadata before touching inherited bodies.
+        // Scanning/repairing the entire remaining suffix for each eight-record
+        // page makes catch-up quadratic, even when every event is already small.
+        // Bind repair and decoding to this exact finite page instead: count and
+        // byte limits, owner isolation and the subscription high-water mark are
+        // unchanged, and future retained/live events are neither read nor repaired.
+        let searchCursor = normalizedCursor;
+        let rows: ReadonlyArray<PersistedEventRow>;
+        while (true) {
+          const pageCursors = (yield* sql`
+            SELECT cursor
+            FROM provider_daemon_events
+            WHERE owner_key = ${ownerKey}
+              AND cursor > ${searchCursor}
+              AND cursor <= ${normalizedThroughCursor}
+            ORDER BY cursor ASC
+            LIMIT ${normalizedLimit}
+          `.pipe(Effect.orDie)) as unknown as ReadonlyArray<{ readonly cursor: number }>;
+          const pageEnd = normalizeSqlNullableNumber(pageCursors.at(-1)?.cursor);
+          if (pageEnd === null) {
+            return [];
+          }
+          // Giant legacy rows still receive the existing one-row compaction or
+          // metadata-only quarantine before decode; no memory bound is relaxed.
+          yield* compactLargeProviderEventRows({
+            afterCursor: searchCursor,
+            throughCursor: pageEnd,
+          });
+          rows = (yield* sql`
+            SELECT
+              cursor,
+              emitted_at AS "emittedAt",
+              event_json AS "eventJson"
+            FROM provider_daemon_events
+            WHERE owner_key = ${ownerKey}
+              AND cursor > ${searchCursor}
+              AND cursor <= ${pageEnd}
+            ORDER BY cursor ASC
+            LIMIT ${normalizedLimit}
+          `.pipe(Effect.orDie)) as unknown as ReadonlyArray<PersistedEventRow>;
+          if (rows.length > 0) {
+            break;
+          }
+          // Retention maintenance can prune the probed range while a one-row
+          // repair yields. An empty *page* is not proof that the bounded replay
+          // is exhausted. Continue past only that now-absent range, never past
+          // an unexamined retained event; the finite high-water mark bounds this.
+          searchCursor = pageEnd;
+        }
         const records: ProviderDaemonEventRecord[] = [];
         for (const row of rows) {
           const record = yield* Effect.option(

@@ -118,6 +118,9 @@ export const ProviderDaemonClientConfig = Schema.Struct({
 export type ProviderDaemonClientConfig = typeof ProviderDaemonClientConfig.Type;
 
 export const ProviderDaemonBootstrap = Schema.Struct({
+  // A fresh desktop-owned attempt may expose this private progress pipe. Other
+  // roles/launches must never infer descriptor ownership from ambient state.
+  startupProgressFd: Schema.optional(Schema.Literal(4)),
   mode: ProviderRuntimeProcessMode,
   transport: Schema.optional(ProviderDaemonTransport),
   port: Schema.optional(PortSchema),
@@ -448,6 +451,9 @@ export const ProviderDaemonAdapterCapabilities = Schema.Struct({
   // boundary. Legacy owners omit this field; absence remains unsupported and
   // must never be upgraded from a model name or a cached renderer snapshot.
   subagentConcurrency: Schema.optional(Schema.Boolean),
+  // Cafe's exact existing-process/no-recovery fence, not native CLI support.
+  // Older owners omit it and cannot admit this continuation exception.
+  subagentPolicyContinuation: Schema.optional(Schema.Boolean),
   sessionModelSwitch: Schema.Literals(["in-session", "restart-resume", "unsupported"]),
   liveSteer: Schema.Literals(["supported", "unsupported"]),
   // Optional on the wire so a newly built desktop can still interrogate an

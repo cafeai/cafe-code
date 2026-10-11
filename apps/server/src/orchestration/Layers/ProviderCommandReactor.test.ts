@@ -257,9 +257,12 @@ describe("ProviderCommandReactor", () => {
     readonly testClock?: TestClock.TestClock;
     readonly standalone?: boolean;
     readonly subagentConcurrency?: boolean | "unknown";
+    readonly subagentPolicyContinuation?: boolean;
+    readonly subagentRuntimeId?: ProviderSession["subagentRuntimeId"];
     readonly providerInstances?: ServerSettings["providerInstances"];
   }) {
     const now = "2026-01-01T00:00:00.000Z";
+    const configuredSubagentRuntimeId = input?.subagentRuntimeId;
     const baseDir = input?.baseDir ?? fs.mkdtempSync(path.join(os.tmpdir(), "t3code-reactor-"));
     createdBaseDirs.add(baseDir);
     const { stateDir, systemPromptPath } = deriveServerPathsSync(baseDir, undefined);
@@ -308,6 +311,9 @@ describe("ProviderCommandReactor", () => {
         provider,
         ...(providerInstanceId ? { providerInstanceId } : {}),
         status: "ready" as const,
+        ...(configuredSubagentRuntimeId !== undefined
+          ? { subagentRuntimeId: configuredSubagentRuntimeId }
+          : {}),
         runtimeMode:
           typeof input === "object" &&
           input !== null &&
@@ -340,8 +346,10 @@ describe("ProviderCommandReactor", () => {
           ? { maxConcurrentSubagents: input.maxConcurrentSubagents as number | null }
           : {}),
         resumeCursor: resumeCursor ?? { opaque: `resume-${sessionIndex}` },
-        createdAt: now,
-        updatedAt: now,
+        // Exact-generation fixtures represent a native materialization after
+        // its admitted first intent, not a stale pre-intent replay snapshot.
+        createdAt: configuredSubagentRuntimeId === undefined ? now : "2026-01-01T00:00:02.000Z",
+        updatedAt: configuredSubagentRuntimeId === undefined ? now : "2026-01-01T00:00:02.000Z",
       };
       const existingSessionIndex = runtimeSessions.findIndex(
         (candidate) => candidate.threadId === threadId,
@@ -487,6 +495,9 @@ describe("ProviderCommandReactor", () => {
         ...(input?.subagentConcurrency === "unknown"
           ? {}
           : { subagentConcurrency: input?.subagentConcurrency ?? true }),
+        ...(input?.subagentPolicyContinuation !== undefined
+          ? { subagentPolicyContinuation: input.subagentPolicyContinuation }
+          : {}),
       }),
     );
     const service: ProviderServiceShape = {
@@ -1351,6 +1362,242 @@ describe("ProviderCommandReactor", () => {
       );
       await harness.drain();
     }
+
+    it.each([false, "unknown"] as const)(
+      "continues identical numeric policy only in the exact existing Codex process with %s native support",
+      async (subagentConcurrency) => {
+        const runtimeId = SubagentRuntimeId.make("00000000-0000-4000-8000-000000000016");
+        const harness = await createHarness({
+          standalone: true,
+          subagentRuntimeId: runtimeId,
+          subagentPolicyContinuation: true,
+        });
+        await change(harness, "set-original-sixteen", { codex: 16 });
+        await send(harness, "qualified-original-sixteen");
+        await harness.markThreadReady(threadId, "2026-01-01T00:00:02.000Z");
+        harness.getCapabilities.mockImplementation(() =>
+          Effect.succeed({
+            sessionModelSwitch: "in-session",
+            liveSteer: "supported",
+            subagentPolicyContinuation: true,
+            ...(subagentConcurrency === "unknown" ? {} : { subagentConcurrency }),
+          }),
+        );
+        await send(harness, "same-process-follow-up");
+        expect(harness.startSession).toHaveBeenCalledTimes(1);
+        expect(harness.stopSession).not.toHaveBeenCalled();
+        expect(harness.sendTurn.mock.calls[1]?.[0].expectedSubagentPolicySession).toEqual({
+          threadId,
+          providerInstanceId: ProviderInstanceId.make("codex"),
+          subagentRuntimeId: runtimeId,
+          maxConcurrentSubagents: 16,
+        });
+      },
+    );
+
+    it.each([
+      "legacy owner",
+      "missing generation",
+      "changed generation",
+      "changed policy",
+      "cwd replacement",
+      "directories replacement",
+      "model replacement",
+      "runtime replacement",
+    ] as const)(
+      "refuses unchanged-policy exemption for %s with unknown native support",
+      async (reason) => {
+        const runtimeId = SubagentRuntimeId.make("00000000-0000-4000-8000-000000000016");
+        const harness = await createHarness({
+          standalone: true,
+          subagentRuntimeId: runtimeId,
+          subagentPolicyContinuation: true,
+        });
+        await change(harness, `sixteen-before-${reason}`, { codex: 16 });
+        await send(harness, `first-before-${reason}`);
+        await harness.markThreadReady(threadId, "2026-01-01T00:00:02.000Z");
+        harness.getCapabilities.mockImplementation(() =>
+          Effect.succeed({
+            sessionModelSwitch: reason === "model replacement" ? "unsupported" : "in-session",
+            liveSteer: "supported",
+            ...(reason === "legacy owner" ? {} : { subagentPolicyContinuation: true }),
+          }),
+        );
+        const session = harness.runtimeSessions[0]!;
+        if (reason === "missing generation")
+          harness.runtimeSessions[0] = { ...session, subagentRuntimeId: undefined };
+        if (reason === "changed generation")
+          harness.runtimeSessions[0] = {
+            ...session,
+            subagentRuntimeId: SubagentRuntimeId.make("00000000-0000-4000-8000-000000000017"),
+          };
+        if (reason === "changed policy")
+          await change(harness, "different-pending-seventeen", { codex: 17 });
+        if (reason === "cwd replacement")
+          harness.runtimeSessions[0] = {
+            ...session,
+            cwd: path.join(session.cwd!, "different-workspace"),
+          };
+        if (reason === "directories replacement")
+          harness.runtimeSessions[0] = {
+            ...session,
+            additionalDirectories: [path.join(session.cwd!, "different-additional-root")],
+          };
+        if (reason === "runtime replacement")
+          harness.runtimeSessions[0] = { ...session, runtimeMode: "full-access" };
+        await send(
+          harness,
+          `refused-follow-up-${reason}`,
+          true,
+          reason === "model replacement"
+            ? { instanceId: ProviderInstanceId.make("codex"), model: "changed-model" }
+            : undefined,
+        );
+        expect(harness.startSession).toHaveBeenCalledTimes(1);
+        expect(harness.sendTurn).toHaveBeenCalledTimes(1);
+        expect(harness.stopSession).not.toHaveBeenCalled();
+      },
+    );
+
+    it.each([
+      ["direct steer", "accepted"],
+      ["direct steer", "no active turn"],
+      ["direct steer", "legacy owner"],
+      ["direct steer", "changed generation"],
+      ["start routed to steer", "accepted"],
+      ["failed start fallback", "accepted"],
+      ["failed start fallback", "no active turn"],
+    ] as const)(
+      "retains the exact existing-process fence for %s (%s) without native recovery",
+      async (entrypoint, outcome) => {
+        const runtimeId = SubagentRuntimeId.make("00000000-0000-4000-8000-000000000016");
+        const harness = await createHarness({
+          standalone: true,
+          liveSteer: "supported",
+          subagentRuntimeId: runtimeId,
+          subagentPolicyContinuation: true,
+        });
+        await change(harness, "sixteen-before-steer", { codex: 16 });
+        await send(harness, "first-before-steer");
+        const activeTurnId = asTurnId("first-before-steer-native-turn");
+        const messageId = asMessageId("fenced-follow-up-steer");
+        const unknownCapabilities = () =>
+          Effect.succeed({
+            sessionModelSwitch: "in-session" as const,
+            liveSteer: "supported" as const,
+            ...(outcome === "legacy owner" ? {} : { subagentPolicyContinuation: true }),
+          });
+        const native = harness.runtimeSessions[0]!;
+        if (entrypoint !== "direct steer")
+          await harness.markThreadReady(threadId, "2026-01-01T00:00:02.000Z");
+        if (entrypoint === "failed start fallback") {
+          // Preparation initially has qualified native support. A real active
+          // turn race can be observed only by the attempted start, after which
+          // the independent version probe is unknown. Its steer fallback must
+          // gain the same exact-process fence instead of borrowing recovery.
+          harness.sendTurn.mockImplementationOnce(() =>
+            Effect.suspend(() => {
+              harness.getCapabilities.mockImplementation(unknownCapabilities);
+              harness.runtimeSessions[0] = { ...native, status: "running", activeTurnId };
+              return Effect.fail(
+                new ProviderAdapterRequestError({
+                  provider: "codex",
+                  method: "turn/start",
+                  detail: `Cannot start a new Codex turn while active turn '${activeTurnId}' is running.`,
+                }),
+              );
+            }),
+          );
+        } else {
+          harness.getCapabilities.mockImplementation(unknownCapabilities);
+          harness.runtimeSessions[0] = {
+            ...native,
+            status: "running",
+            activeTurnId,
+            ...(outcome === "changed generation"
+              ? {
+                  subagentRuntimeId: SubagentRuntimeId.make("00000000-0000-4000-8000-000000000017"),
+                }
+              : {}),
+          };
+        }
+        harness.steerTurn.mockImplementation((input) =>
+          outcome === "no active turn"
+            ? Effect.fail(
+                new ProviderAdapterRequestError({
+                  provider: "codex",
+                  method: "turn/steer",
+                  detail: "no active turn to steer",
+                }),
+              )
+            : Effect.succeed({ threadId, turnId: input.expectedTurnId }),
+        );
+        const commonCommand = {
+          commandId: CommandId.make(`fenced-${entrypoint}-${outcome}`),
+          threadId,
+          message: {
+            messageId,
+            role: "user" as const,
+            text: "Synthetic exact-process follow-up",
+            attachments: [],
+          },
+          createdAt: "2026-01-01T00:00:03.000Z",
+        };
+        await Effect.runPromise(
+          harness.engine.dispatch(
+            entrypoint === "direct steer"
+              ? { ...commonCommand, type: "thread.turn.steer" }
+              : {
+                  ...commonCommand,
+                  type: "thread.turn.start",
+                  runtimeMode: "approval-required",
+                  interactionMode: "default",
+                },
+          ),
+        );
+        const refused = outcome !== "accepted";
+        await waitFor(async () => {
+          const detail = await harness.readThreadDetail(threadId);
+          return (
+            detail?.activities.some((activity) =>
+              refused
+                ? activity.kind ===
+                  (entrypoint === "direct steer"
+                    ? "provider.turn.steer.failed"
+                    : "provider.turn.start.failed")
+                : activity.kind === "provider.turn.steer.accepted" &&
+                  (activity.payload as Readonly<Record<string, unknown>> | undefined)?.messageId ===
+                    messageId,
+            ) === true
+          );
+        });
+        await harness.drain();
+        expect(harness.startSession).toHaveBeenCalledTimes(1);
+        expect(harness.stopSession).not.toHaveBeenCalled();
+        expect(harness.sendTurn).toHaveBeenCalledTimes(
+          entrypoint === "failed start fallback" ? 2 : 1,
+        );
+        const reachedNative = outcome !== "legacy owner" && outcome !== "changed generation";
+        expect(harness.steerTurn).toHaveBeenCalledTimes(reachedNative ? 1 : 0);
+        if (reachedNative)
+          expect(harness.steerTurn.mock.calls[0]?.[0].expectedSubagentPolicySession).toEqual({
+            threadId,
+            providerInstanceId: ProviderInstanceId.make("codex"),
+            subagentRuntimeId: runtimeId,
+            maxConcurrentSubagents: 16,
+          });
+        const detail = await harness.readThreadDetail(threadId);
+        expect(detail?.messages.some((message) => message.id === messageId)).toBe(true);
+        expect(
+          detail?.activities.some(
+            (activity) =>
+              activity.kind === "runtime.warning" &&
+              (activity.payload as Readonly<Record<string, unknown>> | undefined)?.recovery ===
+                "turn-start-after-no-active-turn",
+          ),
+        ).toBe(false);
+      },
+    );
 
     it.each(["known inherited", "unknown legacy"] as const)(
       "inherits an edited account default for an existing chat with %s process evidence on its next idle send",

@@ -14,12 +14,14 @@ import {
   type OrchestrationThread,
   type ProviderInteractionMode,
   type ProviderSendTurnInput,
+  type ProviderSteerTurnInput,
   type ProviderTurnStartResult,
   type ProviderTurnConfiguration,
   ProviderInstanceId,
   SubagentRuntimeId,
   ThreadId,
   type ProviderSession,
+  type ProviderSubagentPolicySession,
   type RuntimeMode,
   TurnId,
   type ThreadTurnRuntimeRecovery,
@@ -56,6 +58,7 @@ import type { ProviderServiceError } from "../../provider/Errors.ts";
 import { hasLiveProviderRuntimeOwner } from "../../provider/providerRuntimeOwnerEvidence.ts";
 import { sessionLifecycleSnapshot, isSupersededSessionLifecycle } from "../sessionLifecycle.ts";
 import { getCodexRootTurnCompletion } from "../../provider/codexRootTurnCompletion.ts";
+import { matchesSubagentPolicySession } from "../../provider/subagentPolicyContinuation.ts";
 import { makeProviderSessionTitle } from "../../provider/providerSessionTitle.ts";
 import {
   resolveSubagentConcurrencyPolicy,
@@ -1569,6 +1572,8 @@ const make = Effect.gen(function* () {
       readonly interactionMode?: ProviderInteractionMode;
       /** Only an actual turn request may reconcile pending numeric execution policy. */
       readonly applySubagentPolicyForTurn?: boolean;
+      /** Ordinary follow-up only, never a copied-history bootstrap or native review. */
+      readonly allowSubagentPolicyContinuation?: boolean;
     },
   ) {
     const thread = options?.thread ?? (yield* resolveThread(threadId));
@@ -1663,16 +1668,17 @@ const make = Effect.gen(function* () {
         })
       : { requested: undefined, configured: null };
     const desiredCapabilities = yield* providerService.getCapabilities(desiredInstanceId);
-    if (
-      concurrencyPolicy.requested !== undefined &&
-      desiredCapabilities.subagentConcurrency !== true
-    ) {
-      return yield* new ProviderAdapterRequestError({
-        provider: providerErrorLabel(desiredDriverKind),
-        method: "thread.turn.start",
-        detail: "This provider runtime does not support configured subagent limits.",
-      });
-    }
+    const assertRequestedSubagentSupport = Effect.suspend(() =>
+      concurrencyPolicy.requested !== undefined && desiredCapabilities.subagentConcurrency !== true
+        ? Effect.fail(
+            new ProviderAdapterRequestError({
+              provider: providerErrorLabel(desiredDriverKind),
+              method: "thread.turn.start",
+              detail: "This provider runtime does not support configured subagent limits.",
+            }),
+          )
+        : Effect.void,
+    );
     // A materialized policy belongs to its exact native instance. Never carry
     // a former Codex process limit across an account/driver switch.
     const concurrencyChanged =
@@ -1747,30 +1753,36 @@ const make = Effect.gen(function* () {
       readonly resumeCursor?: unknown;
       readonly provider?: ProviderDriverKind;
     }) =>
-      providerService.startSession(threadId, {
-        threadId,
-        ...(preferredProvider ? { provider: preferredProvider } : {}),
-        providerInstanceId: desiredInstanceId,
-        ...(preferredProvider === "claudeAgent"
-          ? { title: makeProviderSessionTitle(thread.title) }
-          : {}),
-        ...(effectiveCwd ? { cwd: effectiveCwd } : {}),
-        // Empty is an explicit revocation, not omission: ProviderService may
-        // otherwise restore persisted former-project roots after a move.
-        additionalDirectories: effectiveAdditionalDirectories,
-        modelSelection: desiredModelSelection,
-        // Explicit null revokes a previous chat override without letting the
-        // service recover its old durable numeric value. Active work keeps its
-        // current configuration; only a later idle materialization may apply
-        // a pending request. Native final admission checks children as well.
-        ...(maxConcurrentSubagents !== undefined ? { maxConcurrentSubagents } : {}),
-        ...(concurrencyChanged && !concurrencyPending
-          ? { requireIdleForSubagentLimitChange: true }
-          : {}),
-        ...(input?.resumeCursor !== undefined ? { resumeCursor: input.resumeCursor } : {}),
-        interactionMode: desiredInteractionMode,
-        runtimeMode: desiredRuntimeMode,
-      });
+      assertRequestedSubagentSupport.pipe(
+        Effect.andThen(
+          Effect.suspend(() =>
+            providerService.startSession(threadId, {
+              threadId,
+              ...(preferredProvider ? { provider: preferredProvider } : {}),
+              providerInstanceId: desiredInstanceId,
+              ...(preferredProvider === "claudeAgent"
+                ? { title: makeProviderSessionTitle(thread.title) }
+                : {}),
+              ...(effectiveCwd ? { cwd: effectiveCwd } : {}),
+              // Empty is an explicit revocation, not omission: ProviderService may
+              // otherwise restore persisted former-project roots after a move.
+              additionalDirectories: effectiveAdditionalDirectories,
+              modelSelection: desiredModelSelection,
+              // Explicit null revokes a previous chat override without letting the
+              // service recover its old durable numeric value. Active work keeps its
+              // current configuration; only a later idle materialization may apply
+              // a pending request. Native final admission checks children as well.
+              ...(maxConcurrentSubagents !== undefined ? { maxConcurrentSubagents } : {}),
+              ...(concurrencyChanged && !concurrencyPending
+                ? { requireIdleForSubagentLimitChange: true }
+                : {}),
+              ...(input?.resumeCursor !== undefined ? { resumeCursor: input.resumeCursor } : {}),
+              interactionMode: desiredInteractionMode,
+              runtimeMode: desiredRuntimeMode,
+            }),
+          ),
+        ),
+      );
 
     const syncGoalAfterSessionMaterialization = (session: ProviderSession) =>
       Effect.gen(function* () {
@@ -1893,7 +1905,40 @@ const make = Effect.gen(function* () {
         !shouldRestartForModelSelectionChange &&
         (!concurrencyChanged || concurrencyPending)
       ) {
-        return activeSession;
+        if (
+          concurrencyPolicy.requested !== undefined &&
+          desiredCapabilities.subagentConcurrency !== true
+        ) {
+          const expected: ProviderSubagentPolicySession | undefined =
+            options?.allowSubagentPolicyContinuation === true &&
+            desiredCapabilities.subagentPolicyContinuation === true &&
+            desiredDriverKind === "codex" &&
+            !concurrencyChanged &&
+            // A just-admitted intent can update the projected mode before
+            // native reconciliation. Only fresh native evidence may qualify
+            // this no-replacement exception; projection equality is not proof.
+            activeSession.runtimeMode === desiredRuntimeMode &&
+            activeSession.subagentRuntimeId !== undefined &&
+            activeThreadSession?.providerInstanceId === desiredInstanceId &&
+            activeThreadSession.subagentRuntimeId === activeSession.subagentRuntimeId &&
+            concurrencyPolicy.configured === activeSession.maxConcurrentSubagents
+              ? {
+                  threadId,
+                  providerInstanceId: desiredInstanceId,
+                  subagentRuntimeId: activeSession.subagentRuntimeId,
+                  maxConcurrentSubagents: concurrencyPolicy.requested,
+                }
+              : undefined;
+          if (expected !== undefined && matchesSubagentPolicySession(activeSession, expected)) {
+            // This does not qualify an unknown binary. No startup/replacement
+            // occurs here, and delivery must retain this exact tuple through
+            // the authenticated owner and native lifecycle admission. Missing
+            // inventory refuses rather than resuming a replacement process.
+            return { session: activeSession, expectedSubagentPolicySession: expected };
+          }
+          yield* assertRequestedSubagentSupport;
+        }
+        return { session: activeSession, expectedSubagentPolicySession: undefined };
       }
 
       // Provider resume state is only meaningful inside the same provider
@@ -1955,7 +2000,7 @@ const make = Effect.gen(function* () {
           threadId,
           provider: activeSession.provider,
         });
-        return activeSession;
+        return { session: activeSession, expectedSubagentPolicySession: undefined };
       }
       yield* Effect.logInfo("provider command reactor restarted provider session", {
         threadId,
@@ -1967,12 +2012,12 @@ const make = Effect.gen(function* () {
         additionalDirectories: restartedSession.additionalDirectories,
       });
       yield* bindSessionToThread(restartedSession);
-      return restartedSession;
+      return { session: restartedSession, expectedSubagentPolicySession: undefined };
     }
 
     const startedSession = yield* startProviderSession(undefined);
     yield* bindSessionToThread(startedSession);
-    return startedSession;
+    return { session: startedSession, expectedSubagentPolicySession: undefined };
   });
 
   const shouldBootstrapProviderContinuationContext = Effect.fn(
@@ -2090,15 +2135,18 @@ const make = Effect.gen(function* () {
             activeSession,
           })
         : false);
-    const ensuredSession = yield* ensureSessionForThread(input.threadId, input.createdAt, {
-      ...(input.modelSelection !== undefined ? { modelSelection: input.modelSelection } : {}),
-      thread,
-      ...(input.project !== undefined ? { project: input.project } : {}),
-      activeSession,
-      activeSessionResolved: true,
-      applySubagentPolicyForTurn: true,
-      ...(input.interactionMode !== undefined ? { interactionMode: input.interactionMode } : {}),
-    });
+    const { session: ensuredSession, expectedSubagentPolicySession } =
+      yield* ensureSessionForThread(input.threadId, input.createdAt, {
+        ...(input.modelSelection !== undefined ? { modelSelection: input.modelSelection } : {}),
+        thread,
+        ...(input.project !== undefined ? { project: input.project } : {}),
+        activeSession,
+        activeSessionResolved: true,
+        applySubagentPolicyForTurn: true,
+        allowSubagentPolicyContinuation:
+          input.codexReview === undefined && !shouldBootstrapProviderContext,
+        ...(input.interactionMode !== undefined ? { interactionMode: input.interactionMode } : {}),
+      });
     if (input.modelSelection !== undefined && input.rememberModelSelection !== false) {
       threadModelSelections.set(input.threadId, input.modelSelection);
     }
@@ -2159,6 +2207,7 @@ const make = Effect.gen(function* () {
 
     const request: ProviderSendTurnInput = {
       threadId: input.threadId,
+      ...(expectedSubagentPolicySession !== undefined ? { expectedSubagentPolicySession } : {}),
       ...(input.deliveryPriority !== undefined ? { deliveryPriority: input.deliveryPriority } : {}),
       ...(input.inputOrigin !== undefined ? { inputOrigin: input.inputOrigin } : {}),
       ...(input.codexReview !== undefined
@@ -2204,8 +2253,86 @@ const make = Effect.gen(function* () {
     } satisfies PreparedProviderTurn;
   });
 
-  const sendPreparedProviderTurn = (prepared: PreparedProviderTurn) =>
-    providerService.sendTurn(prepared.request);
+  const fencedContinuationFailure = () =>
+    new ProviderAdapterRequestError({
+      provider: "Codex",
+      method: "turn/continue",
+      remoteErrorTag: "subagent-policy-continuation-refused",
+      detail:
+        "The unchanged-policy Codex continuation could not be confirmed. The saved message was retained.",
+    });
+  const sendPreparedProviderTurn = (prepared: PreparedProviderTurn) => {
+    const effect = providerService.sendTurn(prepared.request);
+    return prepared.request.expectedSubagentPolicySession === undefined
+      ? effect
+      : effect.pipe(Effect.mapError(fencedContinuationFailure));
+  };
+
+  /**
+   * Live-steer entrypoints do not materialize turn settings, but a numeric
+   * follow-up admitted through the new Cafe exception must still use its exact
+   * current process. Repeat owner/policy reads here rather than letting a
+   * direct or failed-start steer escape the prepared-send fence.
+   */
+  const steerProviderTurn = Effect.fn("steerProviderTurn")(function* (
+    input: ProviderSteerTurnInput,
+  ) {
+    let request = input;
+    if (request.expectedSubagentPolicySession === undefined) {
+      const thread = yield* resolveThread(input.threadId);
+      if (thread?.session?.providerName === "codex") {
+        const instanceId = thread.session.providerInstanceId ?? thread.modelSelection.instanceId;
+        const settings = yield* serverSettingsService.getSettings;
+        const instance = settings.providerInstances[instanceId];
+        const policy = resolveSubagentConcurrencyPolicy({
+          driver: "codex",
+          ...(thread.subagentLimits !== undefined ? { limits: thread.subagentLimits } : {}),
+          instanceDefaultMaxConcurrentSubagents:
+            instance?.driver === "codex" ? instance.defaultMaxConcurrentSubagents : undefined,
+          instanceConfig: instance?.driver === "codex" ? instance.config : undefined,
+        });
+        if (policy.requested !== undefined) {
+          const capabilities = yield* providerService.getCapabilities(instanceId);
+          if (capabilities.subagentConcurrency !== true) {
+            const live = yield* getProviderSessionForThread(input.threadId);
+            const expected =
+              live?.subagentRuntimeId === undefined
+                ? undefined
+                : {
+                    threadId: input.threadId,
+                    providerInstanceId: instanceId,
+                    subagentRuntimeId: live.subagentRuntimeId,
+                    maxConcurrentSubagents: policy.requested,
+                  };
+            if (
+              capabilities.subagentPolicyContinuation !== true ||
+              expected === undefined ||
+              !matchesSubagentPolicySession(live, expected) ||
+              thread.session.providerInstanceId !== instanceId ||
+              thread.session.subagentRuntimeId !== expected.subagentRuntimeId ||
+              thread.modelSelection.instanceId !== instanceId ||
+              thread.modelSelection.model !== live?.model ||
+              thread.runtimeMode !== live.runtimeMode ||
+              policy.configured !== live.maxConcurrentSubagents
+            )
+              return yield* new ProviderAdapterRequestError({
+                provider: "Codex",
+                method: "turn/steer",
+                detail: "This provider runtime does not support configured subagent limits.",
+              });
+            request = { ...request, expectedSubagentPolicySession: expected };
+          }
+        }
+      }
+    }
+    // A guarded failure may be ambiguous. Do not allow a no-active-turn or
+    // session-loss classifier to replay it through fresh-start recovery. The
+    // immutable message/receipt path retains it; no owner is replaced here.
+    const effect = providerService.steerTurn(request);
+    return yield* request.expectedSubagentPolicySession === undefined
+      ? effect
+      : effect.pipe(Effect.mapError(fencedContinuationFailure));
+  });
 
   const recordAcceptedTurnConfiguration = Effect.fn("recordAcceptedTurnConfiguration")(function* (
     prepared: PreparedProviderTurn,
@@ -3302,88 +3429,84 @@ const make = Effect.gen(function* () {
           },
         });
 
-        yield* providerService
-          .steerTurn({
-            threadId: event.payload.threadId,
-            expectedTurnId: activeTurnId,
-            messageId: event.payload.messageId,
-            ...(event.payload.deliveryPriority !== undefined
-              ? {
-                  deliveryPriority: event.payload.deliveryPriority,
-                  expectedPrioritySession: {
-                    providerInstanceId: runtimeActiveSession.providerInstanceId,
-                    subagentRuntimeId: runtimeActiveSession.subagentRuntimeId ?? null,
-                    activeTurnId,
-                  },
+        yield* steerProviderTurn({
+          threadId: event.payload.threadId,
+          expectedTurnId: activeTurnId,
+          messageId: event.payload.messageId,
+          ...(event.payload.deliveryPriority !== undefined
+            ? {
+                deliveryPriority: event.payload.deliveryPriority,
+                expectedPrioritySession: {
+                  providerInstanceId: runtimeActiveSession.providerInstanceId,
+                  subagentRuntimeId: runtimeActiveSession.subagentRuntimeId ?? null,
+                  activeTurnId,
+                },
+              }
+            : {}),
+          ...(normalizedInput ? { input: normalizedInput } : {}),
+          ...(normalizedAttachments.length > 0 ? { attachments: normalizedAttachments } : {}),
+        }).pipe(
+          Effect.matchCauseEffect({
+            onFailure: (cause) => {
+              if (isCodexNoActiveTurnToSteerFailure(cause)) {
+                return recoverNoActiveTurnSteerAsStart(cause);
+              }
+              const codexNonSteerableTurnKind = detectCodexNonSteerableTurnKind(cause);
+              const unsupportedLiveSteer = isUnsupportedLiveSteerFailure(cause);
+              const rejectedGrokInterject = isRejectedGrokInterjectFailure(cause);
+              const retryableFollowUp =
+                codexNonSteerableTurnKind !== undefined ||
+                unsupportedLiveSteer ||
+                rejectedGrokInterject;
+              if (retryableFollowUp) {
+                return appendProviderFailureActivity({
+                  threadId: event.payload.threadId,
+                  kind: "provider.turn.steer.failed",
+                  summary: "Provider steer queued",
+                  detail:
+                    codexNonSteerableTurnKind !== undefined
+                      ? codexNonSteerableDetail(codexNonSteerableTurnKind)
+                      : retryableFollowUpDetail(),
+                  turnId: activeTurnId,
+                  createdAt: event.payload.createdAt,
+                  messageId: event.payload.messageId,
+                  intentSequence: event.sequence,
+                  retryableFollowUp: true,
+                  retryAfter: "active-turn",
+                  ...(codexNonSteerableTurnKind !== undefined ? { codexNonSteerableTurnKind } : {}),
+                });
+              }
+              return recoverTurnStartFailure(cause);
+            },
+            onSuccess: (turn) =>
+              Effect.gen(function* () {
+                const updatedAt = DateTime.formatIso(yield* DateTime.now);
+                const steerAcceptance =
+                  runtimeActiveSession.provider === "codex"
+                    ? yield* recordAcceptedCodexSteer({
+                        threadId: event.payload.threadId,
+                        turnId: turn.turnId,
+                        messageId: event.payload.messageId,
+                        intentSequence: event.sequence,
+                        ...(turn.clientCorrelationId !== undefined
+                          ? { clientCorrelationId: turn.clientCorrelationId }
+                          : {}),
+                        intentCreatedAt: event.payload.createdAt,
+                        acceptedAt: updatedAt,
+                      })
+                    : ({ mayMarkAcceptedTurnRunning: true } as const);
+                if (!steerAcceptance.mayMarkAcceptedTurnRunning) {
+                  return;
                 }
-              : {}),
-            ...(normalizedInput ? { input: normalizedInput } : {}),
-            ...(normalizedAttachments.length > 0 ? { attachments: normalizedAttachments } : {}),
-          })
-          .pipe(
-            Effect.matchCauseEffect({
-              onFailure: (cause) => {
-                if (isCodexNoActiveTurnToSteerFailure(cause)) {
-                  return recoverNoActiveTurnSteerAsStart(cause);
-                }
-                const codexNonSteerableTurnKind = detectCodexNonSteerableTurnKind(cause);
-                const unsupportedLiveSteer = isUnsupportedLiveSteerFailure(cause);
-                const rejectedGrokInterject = isRejectedGrokInterjectFailure(cause);
-                const retryableFollowUp =
-                  codexNonSteerableTurnKind !== undefined ||
-                  unsupportedLiveSteer ||
-                  rejectedGrokInterject;
-                if (retryableFollowUp) {
-                  return appendProviderFailureActivity({
-                    threadId: event.payload.threadId,
-                    kind: "provider.turn.steer.failed",
-                    summary: "Provider steer queued",
-                    detail:
-                      codexNonSteerableTurnKind !== undefined
-                        ? codexNonSteerableDetail(codexNonSteerableTurnKind)
-                        : retryableFollowUpDetail(),
-                    turnId: activeTurnId,
-                    createdAt: event.payload.createdAt,
-                    messageId: event.payload.messageId,
-                    intentSequence: event.sequence,
-                    retryableFollowUp: true,
-                    retryAfter: "active-turn",
-                    ...(codexNonSteerableTurnKind !== undefined
-                      ? { codexNonSteerableTurnKind }
-                      : {}),
-                  });
-                }
-                return recoverTurnStartFailure(cause);
-              },
-              onSuccess: (turn) =>
-                Effect.gen(function* () {
-                  const updatedAt = DateTime.formatIso(yield* DateTime.now);
-                  const steerAcceptance =
-                    runtimeActiveSession.provider === "codex"
-                      ? yield* recordAcceptedCodexSteer({
-                          threadId: event.payload.threadId,
-                          turnId: turn.turnId,
-                          messageId: event.payload.messageId,
-                          intentSequence: event.sequence,
-                          ...(turn.clientCorrelationId !== undefined
-                            ? { clientCorrelationId: turn.clientCorrelationId }
-                            : {}),
-                          intentCreatedAt: event.payload.createdAt,
-                          acceptedAt: updatedAt,
-                        })
-                      : ({ mayMarkAcceptedTurnRunning: true } as const);
-                  if (!steerAcceptance.mayMarkAcceptedTurnRunning) {
-                    return;
-                  }
-                  yield* markThreadRunningFromSendTurnResult({
-                    threadId: event.payload.threadId,
-                    turnId: turn.turnId,
-                    createdAt: event.payload.createdAt,
-                  });
-                }),
-            }),
-            Effect.forkScoped,
-          );
+                yield* markThreadRunningFromSendTurnResult({
+                  threadId: event.payload.threadId,
+                  turnId: turn.turnId,
+                  createdAt: event.payload.createdAt,
+                });
+              }),
+          }),
+          Effect.forkScoped,
+        );
         return;
       }
 
@@ -3441,104 +3564,106 @@ const make = Effect.gen(function* () {
           return recoverTurnStartFailure(cause);
         }
 
-        return providerService
-          .steerTurn({
-            threadId: event.payload.threadId,
-            expectedTurnId: activeTurnId,
-            messageId: event.payload.messageId,
-            ...(event.payload.deliveryPriority !== undefined
-              ? { deliveryPriority: event.payload.deliveryPriority }
-              : {}),
-            ...(normalizedInput ? { input: normalizedInput } : {}),
-            ...(normalizedAttachments.length > 0 ? { attachments: normalizedAttachments } : {}),
-          })
-          .pipe(
-            Effect.matchCauseEffect({
-              onFailure: (steerCause) => {
-                if (isCodexNoActiveTurnToSteerFailure(steerCause)) {
-                  return recoverTurnStartFailure(cause);
-                }
-                const codexNonSteerableTurnKind = detectCodexNonSteerableTurnKind(steerCause);
-                const unsupportedLiveSteer = isUnsupportedLiveSteerFailure(steerCause);
-                const rejectedGrokInterject = isRejectedGrokInterjectFailure(steerCause);
-                const retryableFollowUp =
-                  codexNonSteerableTurnKind !== undefined ||
-                  unsupportedLiveSteer ||
-                  rejectedGrokInterject;
-                if (retryableFollowUp) {
-                  return appendProviderFailureActivity({
+        return steerProviderTurn({
+          threadId: event.payload.threadId,
+          ...(sendTurnRequest.value.request.expectedSubagentPolicySession !== undefined
+            ? {
+                expectedSubagentPolicySession:
+                  sendTurnRequest.value.request.expectedSubagentPolicySession,
+              }
+            : {}),
+          expectedTurnId: activeTurnId,
+          messageId: event.payload.messageId,
+          ...(event.payload.deliveryPriority !== undefined
+            ? { deliveryPriority: event.payload.deliveryPriority }
+            : {}),
+          ...(normalizedInput ? { input: normalizedInput } : {}),
+          ...(normalizedAttachments.length > 0 ? { attachments: normalizedAttachments } : {}),
+        }).pipe(
+          Effect.matchCauseEffect({
+            onFailure: (steerCause) => {
+              if (isCodexNoActiveTurnToSteerFailure(steerCause)) {
+                return recoverTurnStartFailure(cause);
+              }
+              const codexNonSteerableTurnKind = detectCodexNonSteerableTurnKind(steerCause);
+              const unsupportedLiveSteer = isUnsupportedLiveSteerFailure(steerCause);
+              const rejectedGrokInterject = isRejectedGrokInterjectFailure(steerCause);
+              const retryableFollowUp =
+                codexNonSteerableTurnKind !== undefined ||
+                unsupportedLiveSteer ||
+                rejectedGrokInterject;
+              if (retryableFollowUp) {
+                return appendProviderFailureActivity({
+                  threadId: event.payload.threadId,
+                  kind: "provider.turn.steer.failed",
+                  summary: "Provider steer queued",
+                  detail:
+                    codexNonSteerableTurnKind !== undefined
+                      ? codexNonSteerableDetail(codexNonSteerableTurnKind)
+                      : retryableFollowUpDetail(),
+                  turnId: activeTurnId,
+                  createdAt: event.payload.createdAt,
+                  messageId: event.payload.messageId,
+                  intentSequence: event.sequence,
+                  retryableFollowUp: true,
+                  retryAfter: "active-turn",
+                  ...(codexNonSteerableTurnKind !== undefined ? { codexNonSteerableTurnKind } : {}),
+                }).pipe(Effect.asVoid);
+              }
+              return recoverTurnStartFailure(steerCause);
+            },
+            onSuccess: (turn) =>
+              Effect.gen(function* () {
+                const observedAt = DateTime.formatIso(yield* DateTime.now);
+                const steerAcceptance = yield* recordAcceptedCodexSteer({
+                  threadId: event.payload.threadId,
+                  turnId: turn.turnId,
+                  messageId: event.payload.messageId,
+                  intentSequence: event.sequence,
+                  ...(turn.clientCorrelationId !== undefined
+                    ? { clientCorrelationId: turn.clientCorrelationId }
+                    : {}),
+                  intentCreatedAt: event.payload.createdAt,
+                  acceptedAt: observedAt,
+                });
+                if (steerAcceptance.mayMarkAcceptedTurnRunning) {
+                  yield* markThreadRunningFromSendTurnResult({
                     threadId: event.payload.threadId,
-                    kind: "provider.turn.steer.failed",
-                    summary: "Provider steer queued",
-                    detail:
-                      codexNonSteerableTurnKind !== undefined
-                        ? codexNonSteerableDetail(codexNonSteerableTurnKind)
-                        : retryableFollowUpDetail(),
-                    turnId: activeTurnId,
+                    turnId: turn.turnId,
                     createdAt: event.payload.createdAt,
-                    messageId: event.payload.messageId,
-                    intentSequence: event.sequence,
-                    retryableFollowUp: true,
-                    retryAfter: "active-turn",
-                    ...(codexNonSteerableTurnKind !== undefined
-                      ? { codexNonSteerableTurnKind }
-                      : {}),
-                  }).pipe(Effect.asVoid);
-                }
-                return recoverTurnStartFailure(steerCause);
-              },
-              onSuccess: (turn) =>
-                Effect.gen(function* () {
-                  const observedAt = DateTime.formatIso(yield* DateTime.now);
-                  const steerAcceptance = yield* recordAcceptedCodexSteer({
-                    threadId: event.payload.threadId,
-                    turnId: turn.turnId,
-                    messageId: event.payload.messageId,
-                    intentSequence: event.sequence,
-                    ...(turn.clientCorrelationId !== undefined
-                      ? { clientCorrelationId: turn.clientCorrelationId }
-                      : {}),
-                    intentCreatedAt: event.payload.createdAt,
-                    acceptedAt: observedAt,
                   });
-                  if (steerAcceptance.mayMarkAcceptedTurnRunning) {
-                    yield* markThreadRunningFromSendTurnResult({
-                      threadId: event.payload.threadId,
-                      turnId: turn.turnId,
-                      createdAt: event.payload.createdAt,
-                    });
-                  }
+                }
 
-                  yield* appendProviderDiagnosticActivity({
-                    threadId: event.payload.threadId,
-                    kind: "runtime.warning",
-                    summary: "Turn start retried as active steer",
-                    detail:
-                      "Codex rejected a new turn because the provider daemon still had an active turn. Cafe Code retried the same message through the active turn's steering path, matching upstream Codex CLI/TUI pending-input behavior.",
-                    turnId: turn.turnId,
-                    createdAt: observedAt,
-                    payload: {
-                      provider: "codex",
-                      method: "turn/start",
-                      recovery: "turn-start-validation-routed-to-active-steer",
-                      messageId: event.payload.messageId,
-                      activeTurnId,
-                    },
-                  }).pipe(
-                    Effect.catchCause((diagnosticCause) =>
-                      Effect.logWarning(
-                        "provider command reactor could not append active-steer recovery",
-                        {
-                          threadId: event.payload.threadId,
-                          activeTurnId,
-                          cause: Cause.pretty(diagnosticCause),
-                        },
-                      ),
+                yield* appendProviderDiagnosticActivity({
+                  threadId: event.payload.threadId,
+                  kind: "runtime.warning",
+                  summary: "Turn start retried as active steer",
+                  detail:
+                    "Codex rejected a new turn because the provider daemon still had an active turn. Cafe Code retried the same message through the active turn's steering path, matching upstream Codex CLI/TUI pending-input behavior.",
+                  turnId: turn.turnId,
+                  createdAt: observedAt,
+                  payload: {
+                    provider: "codex",
+                    method: "turn/start",
+                    recovery: "turn-start-validation-routed-to-active-steer",
+                    messageId: event.payload.messageId,
+                    activeTurnId,
+                  },
+                }).pipe(
+                  Effect.catchCause((diagnosticCause) =>
+                    Effect.logWarning(
+                      "provider command reactor could not append active-steer recovery",
+                      {
+                        threadId: event.payload.threadId,
+                        activeTurnId,
+                        cause: Cause.pretty(diagnosticCause),
+                      },
                     ),
-                  );
-                }),
-            }),
-          );
+                  ),
+                );
+              }),
+          }),
+        );
       };
 
       if (terminalSteerRecovery !== undefined) {
@@ -4737,86 +4862,82 @@ const make = Effect.gen(function* () {
         return;
       }
     }
-    yield* providerService
-      .steerTurn({
-        threadId: event.payload.threadId,
-        ...(event.payload.deliveryPriority !== undefined
-          ? {
-              deliveryPriority: event.payload.deliveryPriority,
-              ...(event.payload.expectedPrioritySession !== undefined
-                ? { expectedPrioritySession: event.payload.expectedPrioritySession }
-                : {}),
-            }
-          : {}),
-        expectedTurnId,
-        messageId: event.payload.messageId,
-        ...(normalizedInput ? { input: normalizedInput } : {}),
-        ...(normalizedAttachments.length > 0 ? { attachments: normalizedAttachments } : {}),
-      })
-      .pipe(
-        Effect.matchCauseEffect({
-          onFailure: (cause) => {
-            if (isCodexNoActiveTurnToSteerFailure(cause)) {
-              return recoverStaleCodexSteerAsTurnStart();
-            }
-            const codexNonSteerableTurnKind = detectCodexNonSteerableTurnKind(cause);
-            const unsupportedLiveSteer = isUnsupportedLiveSteerFailure(cause);
-            // Grok's own TUI puts every rejected interjection back into its
-            // follow-up queue. Match that lossless behavior through Cafe's
-            // existing queue surface; a private extension rejection must never
-            // strand a durably recorded user message in an error-only state.
-            const rejectedGrokInterject = isRejectedGrokInterjectFailure(cause);
-            const retryableFollowUp =
-              codexNonSteerableTurnKind !== undefined ||
-              unsupportedLiveSteer ||
-              rejectedGrokInterject;
-            return appendProviderFailureActivity({
+    yield* steerProviderTurn({
+      threadId: event.payload.threadId,
+      ...(event.payload.deliveryPriority !== undefined
+        ? {
+            deliveryPriority: event.payload.deliveryPriority,
+            ...(event.payload.expectedPrioritySession !== undefined
+              ? { expectedPrioritySession: event.payload.expectedPrioritySession }
+              : {}),
+          }
+        : {}),
+      expectedTurnId,
+      messageId: event.payload.messageId,
+      ...(normalizedInput ? { input: normalizedInput } : {}),
+      ...(normalizedAttachments.length > 0 ? { attachments: normalizedAttachments } : {}),
+    }).pipe(
+      Effect.matchCauseEffect({
+        onFailure: (cause) => {
+          if (isCodexNoActiveTurnToSteerFailure(cause)) {
+            return recoverStaleCodexSteerAsTurnStart();
+          }
+          const codexNonSteerableTurnKind = detectCodexNonSteerableTurnKind(cause);
+          const unsupportedLiveSteer = isUnsupportedLiveSteerFailure(cause);
+          // Grok's own TUI puts every rejected interjection back into its
+          // follow-up queue. Match that lossless behavior through Cafe's
+          // existing queue surface; a private extension rejection must never
+          // strand a durably recorded user message in an error-only state.
+          const rejectedGrokInterject = isRejectedGrokInterjectFailure(cause);
+          const retryableFollowUp =
+            codexNonSteerableTurnKind !== undefined ||
+            unsupportedLiveSteer ||
+            rejectedGrokInterject;
+          return appendProviderFailureActivity({
+            threadId: event.payload.threadId,
+            kind: "provider.turn.steer.failed",
+            summary: retryableFollowUp ? "Provider steer queued" : "Provider steer failed",
+            detail:
+              codexNonSteerableTurnKind !== undefined
+                ? codexNonSteerableDetail(codexNonSteerableTurnKind)
+                : unsupportedLiveSteer || rejectedGrokInterject
+                  ? retryableFollowUpDetail()
+                  : formatFailureDetail(cause),
+            turnId: thread.session?.activeTurnId ?? null,
+            createdAt: event.payload.createdAt,
+            messageId: event.payload.messageId,
+            intentSequence: event.sequence,
+            ...(retryableFollowUp
+              ? {
+                  retryableFollowUp: true,
+                  retryAfter: "active-turn" as const,
+                  ...(codexNonSteerableTurnKind !== undefined ? { codexNonSteerableTurnKind } : {}),
+                }
+              : {}),
+          });
+        },
+        onSuccess: (turn) => {
+          if (activeSession.providerName !== "codex") {
+            return Effect.void;
+          }
+          return Effect.gen(function* () {
+            const acceptedAt = DateTime.formatIso(yield* DateTime.now);
+            yield* recordAcceptedCodexSteer({
               threadId: event.payload.threadId,
-              kind: "provider.turn.steer.failed",
-              summary: retryableFollowUp ? "Provider steer queued" : "Provider steer failed",
-              detail:
-                codexNonSteerableTurnKind !== undefined
-                  ? codexNonSteerableDetail(codexNonSteerableTurnKind)
-                  : unsupportedLiveSteer || rejectedGrokInterject
-                    ? retryableFollowUpDetail()
-                    : formatFailureDetail(cause),
-              turnId: thread.session?.activeTurnId ?? null,
-              createdAt: event.payload.createdAt,
+              turnId: turn.turnId,
               messageId: event.payload.messageId,
               intentSequence: event.sequence,
-              ...(retryableFollowUp
-                ? {
-                    retryableFollowUp: true,
-                    retryAfter: "active-turn" as const,
-                    ...(codexNonSteerableTurnKind !== undefined
-                      ? { codexNonSteerableTurnKind }
-                      : {}),
-                  }
+              ...(turn.clientCorrelationId !== undefined
+                ? { clientCorrelationId: turn.clientCorrelationId }
                 : {}),
+              intentCreatedAt: event.payload.createdAt,
+              acceptedAt,
             });
-          },
-          onSuccess: (turn) => {
-            if (activeSession.providerName !== "codex") {
-              return Effect.void;
-            }
-            return Effect.gen(function* () {
-              const acceptedAt = DateTime.formatIso(yield* DateTime.now);
-              yield* recordAcceptedCodexSteer({
-                threadId: event.payload.threadId,
-                turnId: turn.turnId,
-                messageId: event.payload.messageId,
-                intentSequence: event.sequence,
-                ...(turn.clientCorrelationId !== undefined
-                  ? { clientCorrelationId: turn.clientCorrelationId }
-                  : {}),
-                intentCreatedAt: event.payload.createdAt,
-                acceptedAt,
-              });
-            });
-          },
-        }),
-        Effect.forkScoped,
-      );
+          });
+        },
+      }),
+      Effect.forkScoped,
+    );
   });
 
   const processApprovalResponseRequested = Effect.fn("processApprovalResponseRequested")(function* (

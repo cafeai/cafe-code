@@ -3,7 +3,10 @@
 Decision status: Accepted implementation choice within the user's startup-repair request.
 Implementation status: Implemented; release verification recorded separately.
 Created: 2026-10-04 16:30:50 JST (UTC+0900).
-Last updated: 2026-10-04 16:30:50 JST (UTC+0900).
+Last updated: 2026-10-11 10:54:53 JST (UTC+0900).
+Partially superseded by: [Operation-scoped admission](standalone-workspace-admission-lease.md)
+only the repeated native UUID lookup within one resolution. The accepted history
+below and all durable identity, legacy mismatch and permission rules are retained.
 Supersedes: Only the assumption in [standalone chats](standalone-chats.md) that a
 macOS device number is durable across restarts. All other workspace, fork,
 cleanup and permission boundaries remain in force.

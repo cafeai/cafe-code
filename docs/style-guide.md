@@ -32,6 +32,13 @@ Assistant chat prose uses `text-chat-foreground`, preserving its softer 80%
 foreground reading colour in both themes. Labels, controls and user messages
 keep their existing text tiers.
 
+The inert pre-backend startup document is a deliberate boot-only exception to
+React/CSS asset loading: its small semantic-token adapter mirrors the boot-shell
+light/dark surfaces, rem typography and shared stepped spinner without loading
+fonts, remote assets or privileged renderer code. Use native theme and the
+existing interface scale, fixed short phase labels and reduced-motion behavior;
+do not extend this exception to ordinary application UI.
+
 | Purpose  | Classes                                                                                          | Use                                                                                                                                                                                             |
 | -------- | ------------------------------------------------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | Surfaces | `bg-background`, `bg-sunken`, `bg-card`, `bg-raised` (= `bg-popover`)                            | Page content; sidebar and chrome; in-flow panels (work log, settings sections, composer); floating panels (menus, popovers, dialogs, toasts). Light mode is an off-white page with white cards. |

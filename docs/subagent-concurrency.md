@@ -10,8 +10,8 @@ without a saved override inherit this setting from their selected account. Editi
 the account default updates their saved-limit display immediately; native changes
 wait for the next safe idle send, never an account restart on save. An explicit
 per-chat override takes precedence. A numeric override or inherited account
-default requires the configured runtime to advertise support; unsupported or
-unknown runtimes reject it explicitly.
+default requires the configured runtime to advertise support before it is applied;
+unsupported or unknown runtimes reject new configuration explicitly.
 Reset remains available if a provider is downgraded or its version becomes
 unknown. Sends preserve the prompt and refuse an unsupported selected-driver
 numeric policy, including queued sends; they never silently discard it on an
@@ -73,6 +73,17 @@ The native version parser preserves prerelease identity. Malformed tokens and
 build-metadata spellings that the shared version comparison does not support
 remain unknown; it never strips a suffix or selects a later unrelated SDK version
 to grant support.
+
+A follow-up that keeps the identical already-recorded numeric policy on the same
+owned Codex process does not apply a new limit. An updated owner can advertise the
+separate Cafe `subagentPolicyContinuation` guarantee for that case. Cafe binds
+delivery to the exact thread, account, native runtime generation and configured
+number, rechecks them at native admission and forbids automatic process recovery
+on that path. If the process changed or disappeared, the operation refuses rather
+than starting an unqualified replacement. A saved number alone is insufficient;
+changed limits, account switches, unknown process evidence and replacement still
+require native support. Older owners without the guarantee remain fail-closed.
+See [the exact-process continuation decision](decisions/existing-runtime-subagent-policy-continuation.md).
 
 The authenticated provider-daemon capability response preserves the selected
 adapter's optional subagent-support boolean through remote result decoding.

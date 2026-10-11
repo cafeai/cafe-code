@@ -314,6 +314,7 @@ function makeFakeCodexAdapter(provider: ProviderDriverKind = CODEX_DRIVER) {
   const adapter: ProviderAdapterShape<ProviderAdapterError> = {
     provider,
     capabilities: {
+      subagentPolicyContinuation: provider === CODEX_DRIVER,
       sessionModelSwitch: "in-session",
       manualCompaction: provider === CODEX_DRIVER ? "supported" : "unsupported",
       liveSteer:
@@ -1324,6 +1325,177 @@ function makeProviderServiceLayer() {
 }
 
 const imageValidation = makeProviderServiceLayer();
+const policyContinuation = makeProviderServiceLayer();
+policyContinuation.layer("ProviderService exact existing subagent policy continuation", (it) => {
+  beforeEach(async () => {
+    await policyContinuation.reset();
+    Object.assign(policyContinuation.codex.adapter.capabilities, {
+      subagentPolicyContinuation: true,
+    });
+  });
+  const threadId = asThreadId("policy-continuation");
+  const expected = {
+    threadId,
+    providerInstanceId: codexInstanceId,
+    subagentRuntimeId: SubagentRuntimeId.make("00000000-0000-4000-8000-000000000016"),
+    maxConcurrentSubagents: 16,
+  };
+  const seed = Effect.gen(function* () {
+    const provider = yield* ProviderService;
+    yield* provider.startSession(threadId, {
+      threadId,
+      provider: CODEX_DRIVER,
+      providerInstanceId: codexInstanceId,
+      runtimeMode: "full-access",
+      maxConcurrentSubagents: 16,
+    });
+    policyContinuation.codex.updateSession(threadId, (session) => ({
+      ...session,
+      subagentRuntimeId: expected.subagentRuntimeId,
+    }));
+    return provider;
+  });
+  it.effect(
+    "keeps unchanged-policy send and active-turn fallback pinned to the same native process",
+    () =>
+      Effect.gen(function* () {
+        const provider = yield* seed;
+        yield* provider.sendTurn({
+          threadId,
+          input: "Synthetic next turn",
+          expectedSubagentPolicySession: expected,
+        });
+        assert.deepEqual(
+          policyContinuation.codex.sendTurn.mock.calls[0]?.[0].expectedSubagentPolicySession,
+          expected,
+        );
+        policyContinuation.codex.updateSession(threadId, (session) => ({
+          ...session,
+          status: "running",
+          activeTurnId: asTurnId("active-native-root"),
+        }));
+        yield* provider.sendTurn({
+          threadId,
+          input: "Synthetic active follow-up",
+          expectedSubagentPolicySession: expected,
+        });
+        assert.deepEqual(
+          policyContinuation.codex.steerTurn.mock.calls[0]?.[0].expectedSubagentPolicySession,
+          expected,
+        );
+        yield* provider.steerTurn({
+          threadId,
+          expectedTurnId: asTurnId("active-native-root"),
+          input: "Synthetic direct steer",
+          expectedSubagentPolicySession: expected,
+        });
+        assert.deepEqual(
+          policyContinuation.codex.steerTurn.mock.calls[1]?.[0].expectedSubagentPolicySession,
+          expected,
+        );
+        assert.equal(policyContinuation.codex.startSession.mock.calls.length, 1);
+        assert.equal(policyContinuation.codex.sendTurn.mock.calls.length, 1);
+        assert.equal(policyContinuation.codex.steerTurn.mock.calls.length, 2);
+      }),
+  );
+  it.effect(
+    "refuses missing native inventory without recovering its durable binding for send or steer",
+    () =>
+      Effect.gen(function* () {
+        const provider = yield* seed;
+        yield* policyContinuation.codex.stopAll();
+        for (const operation of [
+          provider.sendTurn({
+            threadId,
+            input: "Synthetic send",
+            expectedSubagentPolicySession: expected,
+          }),
+          provider.steerTurn({
+            threadId,
+            expectedTurnId: asTurnId("active-native-root"),
+            input: "Synthetic steer",
+            expectedSubagentPolicySession: expected,
+          }),
+        ])
+          assert.equal(Exit.isFailure(yield* Effect.exit(operation)), true);
+        assert.equal(policyContinuation.codex.startSession.mock.calls.length, 1);
+        assert.equal(policyContinuation.codex.sendTurn.mock.calls.length, 0);
+        assert.equal(policyContinuation.codex.steerTurn.mock.calls.length, 0);
+      }),
+  );
+  it.effect("refuses older owners and every changed tuple coordinate before delivery", () =>
+    Effect.gen(function* () {
+      const provider = yield* seed;
+      const invalidTuples = [
+        { ...expected, threadId: asThreadId("different-thread") },
+        { ...expected, providerInstanceId: ProviderInstanceId.make("different-account") },
+        {
+          ...expected,
+          subagentRuntimeId: SubagentRuntimeId.make("00000000-0000-4000-8000-000000000017"),
+        },
+        { ...expected, maxConcurrentSubagents: 17 },
+      ];
+      for (const expectedSubagentPolicySession of invalidTuples) {
+        assert.equal(
+          Exit.isFailure(
+            yield* Effect.exit(
+              provider.sendTurn({
+                threadId,
+                input: "Synthetic send",
+                expectedSubagentPolicySession,
+              }),
+            ),
+          ),
+          true,
+        );
+        assert.equal(
+          Exit.isFailure(
+            yield* Effect.exit(
+              provider.steerTurn({
+                threadId,
+                expectedTurnId: asTurnId("active-native-root"),
+                input: "Synthetic steer",
+                expectedSubagentPolicySession,
+              }),
+            ),
+          ),
+          true,
+        );
+      }
+      Object.assign(policyContinuation.codex.adapter.capabilities, {
+        subagentPolicyContinuation: undefined,
+      });
+      assert.equal(
+        Exit.isFailure(
+          yield* Effect.exit(
+            provider.sendTurn({
+              threadId,
+              input: "Synthetic legacy-owner send",
+              expectedSubagentPolicySession: expected,
+            }),
+          ),
+        ),
+        true,
+      );
+      assert.equal(
+        Exit.isFailure(
+          yield* Effect.exit(
+            provider.steerTurn({
+              threadId,
+              expectedTurnId: asTurnId("active-native-root"),
+              input: "Synthetic legacy-owner steer",
+              expectedSubagentPolicySession: expected,
+            }),
+          ),
+        ),
+        true,
+      );
+      assert.equal(policyContinuation.codex.startSession.mock.calls.length, 1);
+      assert.equal(policyContinuation.codex.sendTurn.mock.calls.length, 0);
+      assert.equal(policyContinuation.codex.steerTurn.mock.calls.length, 0);
+    }),
+  );
+});
 const taskControlValidation = makeProviderServiceLayer();
 taskControlValidation.layer("ProviderService durable task controls", (it) => {
   beforeEach(taskControlValidation.reset);

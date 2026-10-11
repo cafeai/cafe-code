@@ -20,6 +20,7 @@ import * as Stream from "effect/Stream";
 import * as TestClock from "effect/testing/TestClock";
 import { HttpClient, HttpClientRequest, HttpClientResponse } from "effect/unstable/http";
 import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process";
+import { vi } from "vitest";
 
 import * as DesktopBackendManager from "./DesktopBackendManager.ts";
 import * as DesktopBackendConfiguration from "./DesktopBackendConfiguration.ts";
@@ -27,6 +28,19 @@ import * as DesktopObservability from "../app/DesktopObservability.ts";
 import * as DesktopState from "../app/DesktopState.ts";
 import * as DesktopWindow from "../window/DesktopWindow.ts";
 import { encodeBackendMigrationProgress } from "@cafecode/shared/backendStartupProgress";
+
+vi.mock("./DesktopProcessReaper.ts", async (importOriginal) => {
+  const original = await importOriginal<typeof import("./DesktopProcessReaper.ts")>();
+  return {
+    ...original,
+    // These manager fixtures own only synthetic handles. Reading the host's
+    // process catalogue is unrelated to their readiness/restart/Stop assertions
+    // and can stall on a busy host or accidentally admit a real process with a
+    // fixture-shaped command. Keep that OS boundary inert; the separate reaper
+    // fixtures retain the actual process-selection policy tests.
+    reapMatchingUnixProcesses: () => Effect.succeed([]),
+  };
+});
 
 const decodeDesktopBackendBootstrap = Schema.decodeEffect(
   Schema.fromJsonString(DesktopBackendBootstrap),

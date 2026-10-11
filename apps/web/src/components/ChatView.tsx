@@ -546,6 +546,8 @@ function readSubagentConcurrencyAdmissionError(input: {
   readonly provider: ProviderDriverKind;
   readonly limits: SubagentLimits | undefined;
   readonly hasRecordedSessionOwner?: boolean;
+  /** Omitted for a new chat: a different thread never borrows live policy. */
+  readonly continuation?: { readonly threadId: ThreadId; readonly runtimeMode: RuntimeMode };
 }): string | null {
   const primary = getServerConfig();
   const configuration =
@@ -559,6 +561,20 @@ function readSubagentConcurrencyAdmissionError(input: {
     limits: input.limits,
     ...(input.hasRecordedSessionOwner !== undefined
       ? { hasRecordedSessionOwner: input.hasRecordedSessionOwner }
+      : {}),
+    ...(input.continuation
+      ? {
+          continuation: {
+            ...input.continuation,
+            modelSelection: input.modelSelection,
+            // Read exact current owner evidence at every admission boundary.
+            // The backend, not this projection, proves live process reuse.
+            thread: selectThreadByRef(
+              useStore.getState(),
+              scopeThreadRef(input.environmentId, input.continuation.threadId),
+            ),
+          },
+        }
       : {}),
     configuration,
   });
@@ -4540,6 +4556,7 @@ export default function ChatView(props: ChatViewProps) {
       modelSelection: input.modelSelection,
       provider: input.provider,
       limits: input.subagentLimits ?? activeThread.subagentLimits,
+      continuation: { threadId: activeThread.id, runtimeMode },
     });
     if (concurrencyIssue) {
       setThreadError(activeThread.id, concurrencyIssue);
@@ -4952,6 +4969,7 @@ export default function ChatView(props: ChatViewProps) {
       // Queued input intentionally does not replace durable policy with a
       // captured old preference. The current owning thread is authoritative.
       limits: queuedThread.subagentLimits,
+      continuation: { threadId: item.threadId, runtimeMode: item.runtimeMode },
     });
     if (concurrencyIssue) {
       blockFollowUpQueueItem(item.threadId, item.id, concurrencyIssue);
@@ -5090,6 +5108,7 @@ export default function ChatView(props: ChatViewProps) {
           useStore.getState(),
           scopeThreadRef(item.environmentId, item.threadId),
         )?.subagentLimits,
+        continuation: { threadId: item.threadId, runtimeMode: item.runtimeMode },
       });
       if (finalConcurrencyIssue) throw new Error(finalConcurrencyIssue);
       // Claim only at the actual delivery boundary, after all awaited setup.
@@ -5361,6 +5380,14 @@ export default function ChatView(props: ChatViewProps) {
       provider: currentSteerSession?.provider ?? snapshot.provider,
       limits: currentSteerThread?.subagentLimits,
       hasRecordedSessionOwner: currentSteerSession?.providerInstanceId !== undefined,
+      ...(currentSteerThread
+        ? {
+            continuation: {
+              threadId: currentSteerThread.id,
+              runtimeMode: currentSteerThread.runtimeMode,
+            },
+          }
+        : {}),
     });
     if (finalSteerConcurrencyIssue) {
       // Nothing has been claimed, removed, or sent. Preserve the queue row or
@@ -5982,6 +6009,7 @@ export default function ChatView(props: ChatViewProps) {
         limits:
           snapshot.subagentLimits ??
           selectThreadByRef(useStore.getState(), sendAttemptThreadRef)?.subagentLimits,
+        continuation: { threadId: threadIdForSend, runtimeMode },
       });
       if (finalConcurrencyIssue) throw new Error(finalConcurrencyIssue);
       beginLocalDispatch({ preparingWorktree: false });
@@ -7022,6 +7050,7 @@ export default function ChatView(props: ChatViewProps) {
         modelSelection: ctxSelectedModelSelection,
         provider: ctxSelectedProvider,
         limits: sendCtx.subagentLimits ?? activeThread.subagentLimits,
+        continuation: { threadId: activeThread.id, runtimeMode },
       });
       if (concurrencyIssue) {
         setThreadError(activeThread.id, concurrencyIssue);
@@ -7077,6 +7106,7 @@ export default function ChatView(props: ChatViewProps) {
             sendCtx.subagentLimits ??
             selectThreadByRef(useStore.getState(), scopeThreadRef(environmentId, threadIdForSend))
               ?.subagentLimits,
+          continuation: { threadId: threadIdForSend, runtimeMode },
         });
         if (changedConcurrencyIssue) throw new Error(changedConcurrencyIssue);
 

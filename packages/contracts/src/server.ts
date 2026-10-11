@@ -232,6 +232,8 @@ export type ServerProviderThreadGoalSupport = typeof ServerProviderThreadGoalSup
 export const ServerProviderRuntimeCapabilities = Schema.Struct({
   // Older emitters cannot promise a per-chat override; absence is unsupported.
   subagentConcurrency: Schema.optional(Schema.Boolean),
+  /** Advisory backend fence availability; actual daemon admission rechecks it. */
+  subagentPolicyContinuation: Schema.optional(Schema.Boolean),
   /** Explicit priority is qualified against the configured native CLI. */
   deliveryPriority: Schema.optional(Schema.Boolean),
   taskControls: Schema.optional(Schema.Boolean),

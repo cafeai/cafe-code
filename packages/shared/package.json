@@ -4,6 +4,10 @@
   "license": "AGPL-3.0-or-later",
   "type": "module",
   "exports": {
+    "./desktopStartupDocument": {
+      "types": "./src/desktopStartupDocument.ts",
+      "import": "./src/desktopStartupDocument.ts"
+    },
     "./backendStartupProgress": {
       "types": "./src/backendStartupProgress.ts",
       "import": "./src/backendStartupProgress.ts"

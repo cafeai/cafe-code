@@ -192,7 +192,16 @@ function handleBeforeQuit(
       const providerDaemon = yield* DesktopProviderDaemonManager.DesktopProviderDaemonManager;
       const state = yield* DesktopState.DesktopState;
       const electronWindow = yield* ElectronWindow.ElectronWindow;
-      const providerDaemonAction = yield* resolveProviderDaemonQuitAction();
+      // Before the first backend is ready, ensureRunning owns the daemon's
+      // lifecycle lock for readiness/migration observation. Waiting for rich
+      // health here would wait for that same lock before requesting shutdown,
+      // so the startup cancellation fiber could never interrupt the wait.
+      // Unready ownership is not permission to stop a provider: leave it
+      // running and let the startup owner retire only its exact fresh child.
+      // Once ready, preserve the existing Leave/Stop/Cancel session prompt.
+      const providerDaemonAction = (yield* Ref.get(state.backendReady))
+        ? yield* resolveProviderDaemonQuitAction()
+        : "leave-running";
       if (providerDaemonAction === "cancel") {
         yield* logLifecycleInfo("before-quit cancelled with active provider sessions");
         return false;

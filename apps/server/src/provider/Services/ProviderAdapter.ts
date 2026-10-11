@@ -41,6 +41,8 @@ export type ProviderSessionForkSupport = "supported" | "unsupported";
 export interface ProviderAdapterCapabilities {
   /** Supported only after the configured native CLI's version is qualified. */
   readonly subagentConcurrency?: boolean;
+  /** Cafe exact-process unchanged-policy delivery; never native CLI support. */
+  readonly subagentPolicyContinuation?: boolean;
   /**
    * Declares how changing a model or its provider-owned traits is applied.
    * `restart-resume` preserves the native conversation while atomically

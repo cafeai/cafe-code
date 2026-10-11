@@ -67,7 +67,7 @@ describe("backend startup progress publication", () => {
     const write = vi.fn(() => 0);
     const operations = {
       stat: stat as unknown as typeof fstatSync,
-      write: write as typeof writeSync,
+      write: write as unknown as typeof writeSync,
     };
     makeBackendMigrationProgressReporter(
       undefined,
@@ -79,27 +79,109 @@ describe("backend startup progress publication", () => {
     expect(write).not.toHaveBeenCalled();
   });
 
-  it("retires broken/partial writes without changing the migration outcome", () => {
-    const stat = vi.fn(() => ({ isFIFO: () => true, isSocket: () => false }));
-    const write = vi.fn(() => 1);
-    const report = makeBackendMigrationProgressReporter(4, {
+  it.each(["darwin", "linux", "win32"] as const)(
+    "retires broken/partial writes without changing the migration outcome on %s",
+    (platform) => {
+      const stat = vi.fn(() => ({
+        mode: 0o010000,
+        rdev: 0x11 << 16,
+        isFIFO: () => true,
+        isSocket: () => false,
+      }));
+      const write = vi.fn(() => 1);
+      const report = makeBackendMigrationProgressReporter(
+        4,
+        {
+          stat: stat as unknown as typeof fstatSync,
+          write: write as typeof writeSync,
+        },
+        platform,
+      );
+      report({ phase: "start", migrationId: 92 });
+      report({ phase: "complete", migrationId: 92 });
+      expect(write).toHaveBeenCalledTimes(1);
+      expect(write).toHaveBeenCalledWith(4, "cafe-migration:v1:start:92\n");
+      write.mockImplementation(() => {
+        throw new Error("PRIVATE_FILE_OR_CREDENTIAL");
+      });
+      const broken = makeBackendMigrationProgressReporter(
+        4,
+        {
+          stat: stat as unknown as typeof fstatSync,
+          write: write as typeof writeSync,
+        },
+        platform,
+      );
+      expect(() => broken({ phase: "start", migrationId: 92 })).not.toThrow();
+      broken({ phase: "failed", migrationId: 92 });
+      expect(write).toHaveBeenCalledTimes(2);
+    },
+  );
+
+  it("admits only the native Windows named-pipe tuple when Node's type predicates are false", () => {
+    const write = vi.fn((_: number, frame: string) => frame.length);
+    const stat = vi.fn(() => ({
+      mode: 0o010000,
+      rdev: 0x11 << 16,
+      isFIFO: () => false,
+      isSocket: () => false,
+    }));
+    const operations = {
       stat: stat as unknown as typeof fstatSync,
-      write: write as typeof writeSync,
+      write: write as unknown as typeof writeSync,
+    };
+    makeBackendMigrationProgressReporter(
+      undefined,
+      operations,
+      "win32",
+    )({
+      phase: "start",
+      migrationId: 92,
     });
-    report({ phase: "start", migrationId: 92 });
-    report({ phase: "complete", migrationId: 92 });
-    expect(write).toHaveBeenCalledTimes(1);
-    expect(write).toHaveBeenCalledWith(4, "cafe-migration:v1:start:92\n");
-    write.mockImplementation(() => {
-      throw new Error("PRIVATE_FILE_OR_CREDENTIAL");
+    expect(stat).not.toHaveBeenCalled();
+    makeBackendMigrationProgressReporter(
+      4,
+      operations,
+      "win32",
+    )({
+      phase: "start",
+      migrationId: 92,
     });
-    const broken = makeBackendMigrationProgressReporter(4, {
-      stat: stat as unknown as typeof fstatSync,
-      write: write as typeof writeSync,
+    expect(write).toHaveBeenCalledExactlyOnceWith(4, "cafe-migration:v1:start:92\n");
+    write.mockClear();
+    // A regular file, console, mismatched device or unidentified handle does
+    // not receive progress even with the correct opt-in descriptor number.
+    for (const rejected of [
+      { mode: 0o100000, rdev: 0 },
+      { mode: 0o020000, rdev: 0x50 << 16 },
+      { mode: 0o010000, rdev: 0 },
+      { mode: 0, rdev: 0x11 << 16 },
+    ]) {
+      stat.mockReturnValue({ ...rejected, isFIFO: () => false, isSocket: () => false });
+      makeBackendMigrationProgressReporter(
+        4,
+        operations,
+        "win32",
+      )({
+        phase: "start",
+        migrationId: 92,
+      });
+    }
+    expect(write).not.toHaveBeenCalled();
+    stat.mockImplementation(() => {
+      throw new Error("PRIVATE_DESCRIPTOR_ERROR");
     });
-    expect(() => broken({ phase: "start", migrationId: 92 })).not.toThrow();
-    broken({ phase: "failed", migrationId: 92 });
-    expect(write).toHaveBeenCalledTimes(2);
+    expect(() =>
+      makeBackendMigrationProgressReporter(
+        4,
+        operations,
+        "win32",
+      )({
+        phase: "start",
+        migrationId: 92,
+      }),
+    ).not.toThrow();
+    expect(write).not.toHaveBeenCalled();
   });
 
   it("delivers the actual reporter through Effect's native fd4 output pipe", async () => {
