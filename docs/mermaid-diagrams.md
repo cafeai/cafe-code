@@ -17,7 +17,20 @@ flowchart TD
 Supported families are flowcharts (`flowchart`/`graph`), sequence diagrams,
 class diagrams, state diagrams, entity-relationship diagrams, XY charts
 (`xychart`/`xychart-beta`, bar and line plots), pie charts (`pie`, including
-`showData`), and bounded ordinary Gantt schedules (`gantt`). Ordinary code
+`showData`), and bounded ordinary Gantt schedules (`gantt`). Additional native
+families include journey, quadrant charts, requirements, Git graphs, mind maps,
+timelines, Sankey, block/packet diagrams, Kanban, architecture, radar, treemap,
+swimlanes, use cases, event modeling, Venn, fishbone, Wardley and Cynefin diagrams.
+C4 context/container/component/dynamic/deployment views, tree views, agent flows
+and native/EBNF/ABNF/PEG railroad diagrams are also admitted within their bounds.
+Use the pinned library's declarations (`journey`, `quadrantChart`,
+`requirementDiagram`, `gitGraph`, `mindmap`, `timeline`, `sankey-beta`,
+`block-beta`, `packet`/`packet-beta`, `kanban`, `architecture-beta`, `radar-beta`,
+`treemap-beta`, `swimlane-beta`, `usecase-beta`, `eventmodeling`, `venn-beta`,
+`ishikawa`/`ishikawa-beta`, `wardley-beta`, `cynefin-beta`, `C4Context`,
+`C4Container`, `C4Component`, `C4Dynamic`, `C4Deployment`, `treeView-beta`,
+`agentflow-beta`, `railroad-beta`, `railroad-ebnf-beta`, `railroad-abnf-beta`,
+`railroad-peg-beta`). `info` renders the pinned version label. Ordinary code
 blocks are unchanged. Untagged diagrams, unsupported families, incomplete fences,
 invalid syntax, and diagrams exceeding resource limits remain copyable source.
 XY charts support category or numeric X axes, named plots, optional point labels
@@ -90,11 +103,46 @@ are involved. Old messages render when reopened.
 
 ## Deliberate limits
 
-Rendering uses a local, pinned Mermaid Tiny build. HTML labels, source-supplied
+Rendering uses the local, pinned full Mermaid12.0.0 single-script build, without
+lazy network-loaded engines. HTML labels, source-supplied
 configuration/frontmatter, click/link directives, and image nodes are not enabled.
 The source remains available when these constructs cannot be rendered. SVG is
 sanitized separately and displayed as an image; it cannot become active chat DOM.
 User-supplied animation, filters and layout CSS do not survive output admission.
+
+Every native family has explicit parsed-data admission. Packet bit offsets and
+block spacer/column spans are bounded before parsing because their grammars
+expand shorthand during parsing. Packet fields must be contiguous and positive;
+the first field may share the header line and receives the same preparse checks.
+Rows plus fragments must fit the250-item budget. Hierarchies must be finite,
+bounded and acyclic. Sankey networks must be acyclic with positive finite flows;
+links use native source-node solid colors rather than unsupported gradients.
+Radar domains/curves and treemap values must produce finite nondegenerate scales.
+Architecture admits only its bundled cloud/database/disk/internet/server/blank
+icons, counts layout hints and bounds the native queue walk before layout.
+External icon packs, architecture iconText, custom mind-map icons, C4 sprites,
+Kanban ticket links and use-case JSON table flattening remain source-only.
+Venn diagrams have at most eight circles, with bounded finite overlaps and
+synthesized pairwise work. Railroad finite repetition/separator constructs remain
+source because the pinned native renderer omits those authored semantics.
+Event modeling's native HTML-only labels use a narrow opaque-frame adapter:
+only the fixed native box/name/data structure becomes inert SVG text, retaining
+characters and breaks, with bounded font fitting (16px down to8px, at most2x
+horizontal compression). Unknown markup, overfull labels, multiline data blocks
+and native-unused note/given-when-then declarations remain source. Inline data
+uses braces with whitespace before the closing brace; other spellings remain
+source because the pinned engine can truncate the last payload character.
+Unknown/forward event dependencies remain source because the native one-pass
+resolver omits them. No HTML or foreignObject is enabled in the chat image policy.
+Wardley coordinates follow
+the native percentage contract, including the library's normalized source
+spelling; Cafe never rescales or rewrites stored source. New graph-layout families
+also cap aggregate minimum-rank spans to prevent dummy-node amplification.
+Recursive trees/grammar expressions have a64-level depth bound. These are
+conservative fidelity/resource limits, not transcript changes or replacement DSLs.
+The `info` renderer's exact version-label output receives its native fixed
+400×100 viewport because upstream omits the viewBox; arbitrary viewport synthesis
+and unknown output contracts are not enabled.
 
 Sources are limited to 32 KiB UTF-8, with at most 250 parsed nodes and 250 parsed
 connections/messages per graph (state/class auxiliary items count too). XY charts
@@ -146,7 +194,9 @@ Use the repository's pinned Node and Corepack Yarn. Focused checks:
 
 ```sh
 corepack yarn workspace @cafecode/web test src/lib/remarkMermaid.test.ts src/lib/chatMarkdownMermaid.test.ts src/lib/chatClipboard.test.ts src/lib/mermaid/renderService.test.ts
+corepack yarn workspace @cafecode/web test src/lib/mermaid/bundleIdentity.test.ts src/lib/mermaid/familyAdmission.test.ts src/lib/mermaid/extendedFamilyAdmission.test.ts src/lib/mermaid/eventModelingSvgLabels.test.ts
 corepack yarn workspace @cafecode/web test:browser src/components/ChatMarkdown.browser.tsx src/components/MermaidBlock.browser.tsx src/components/MermaidPreview.browser.tsx src/components/MermaidRendering.browser.tsx src/components/MermaidSecurity.browser.tsx
+corepack yarn workspace @cafecode/web test:browser src/components/MermaidFamilies.browser.tsx
 corepack yarn workspace @cafecode/desktop test src/preload.test.ts src/window/DesktopWindow.test.ts
 corepack yarn workspace @cafecode/web test:browser src/components/DiagramImageExport.browser.tsx src/components/MarkdownTableExport.browser.tsx src/components/ImageExportMenu.browser.tsx
 corepack yarn workspace @cafecode/desktop test src/imageExport/PngExport.test.ts src/ipc/methods/imageExport.test.ts
@@ -157,10 +207,13 @@ systems. These browser/preload tests do not replace native packaged-app smoke
 tests. Required repository formatting, lint, typecheck, full tests and the final
 forced desktop build still gate publication.
 
-When updating Mermaid Tiny, review its bundled dependencies as well as its API:
+When updating Mermaid, review its bundled dependencies as well as its API:
 it is a self-contained script, not a dependency tree resolved at runtime. Verify
-all eight database admission adapters, numeric/calendar chart limits, CSP/offline behavior, actual SVG label
+every database admission adapter and raw-expansion guard, numeric/calendar chart
+limits, CSP/offline behavior, actual SVG label
 rendering, hostile inputs, and the source/theme/cache lifecycle. Update the
 renderer identity in `apps/web/src/lib/mermaid/policy.ts` with policy changes.
+The [full-family admission decision](decisions/mermaid-family-admission.md)
+records the exact local bundle identity and additional native contracts.
 The independent output sanitizer is separately pinned. Renovate updates remain
 review-required; never weaken the sanitizer or sandbox to make an upgrade pass.

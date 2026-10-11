@@ -28,7 +28,7 @@
         )
           throw new Error();
 
-        // Tiny's Gantt getTasks() is not a passive accessor: it resolves dates
+        // Pinned12's Gantt getTasks() is not a passive accessor: it resolves dates
         // and can walk thousands of excluded calendar days per task. Recover
         // the bounded native raw-task keys before parsing, then bind those keys
         // to findTaskById below, before allowing that resolving accessor to run.
@@ -193,6 +193,10 @@
         const ganttSource = /^(?:\s|%%[^\r\n]*(?:\r?\n|$))*gantt\b/.test(data.source)
           ? prepareGantt(data.source)
           : null;
+        // Some native grammars expand packet bit offsets or block spacers
+        // while parsing. Refuse those numeric expansions before obtaining a
+        // parsed database; a post-parse graph budget would already be too late.
+        globalThis.cafeMermaidFamilyPreflight(data.source);
 
         // Reject source configuration entirely; strict is not sufficient if a
         // diagram can replace security/layout/theme settings via frontmatter.
@@ -205,10 +209,30 @@
           maxTextSize: 32768,
           maxEdges: 250,
           theme: data.theme === "dark" ? "dark" : "default",
+          // Pinned12's derived quadrant point fill contains a NaN lightness
+          // in both native themes. Use the corresponding native text contrast
+          // as a code-owned finite fill; never permit source theme overrides
+          // or silently pass an invalid paint through image admission.
+          themeVariables: {
+            quadrantPointFill: data.theme === "dark" ? "#cccccc" : "#333333",
+          },
           fontFamily: "Arial, sans-serif",
           htmlLabels: false,
           flowchart: { htmlLabels: false, defaultRenderer: "dagre-wrapper" },
           class: { htmlLabels: false },
+          // Native journey defaults to foreignObject text, which is excluded
+          // from inert image admission. Select its existing SVG text renderer
+          // rather than silently dropping labels or permitting active HTML.
+          journey: { textPlacement: "svg" },
+          // Full12 includes gradient links by default. The inert SVG contract
+          // intentionally excludes paint servers; source-node colors retain
+          // the actual Sankey geometry without widening that security policy.
+          sankey: { linkColor: "source" },
+          // Native default treemap cells truncate even the supplied short
+          // "Charts" category to "Ch...". Give its existing bounded layout
+          // modestly more room, retaining source/data and native clipping for
+          // labels that still cannot fit; never invent or rewrite chart text.
+          treemap: { nodeWidth: 160, nodeHeight: 60 },
           look: "classic",
           layout: "dagre",
           deterministicIds: true,
@@ -217,13 +241,15 @@
 
         const diagram = await mermaid.mermaidAPI.getDiagramFromText(data.source);
         const db = diagram.db;
-        // The pinned flowchart grammar has no standalone link/links directive;
-        // LINK is a valid node ID, unlike sequence/class link declarations.
+        // The pinned flowchart/swimlane/agentflow grammars have no standalone
+        // link/links directive; LINK is a node ID, unlike sequence/class links.
         // Bind this exception to the actual parsed type; preserve the existing
         // case-insensitive ban otherwise, before any layout or callback.
         if (
           diagram.type !== "flowchart" &&
           diagram.type !== "flowchart-v2" &&
+          diagram.type !== "swimlane" &&
+          diagram.type !== "agentflow" &&
           /(?:^|[;\r\n])\s*links?\s/i.test(data.source)
         ) {
           throw new Error();
@@ -803,17 +829,36 @@
           case "gantt":
             [nodes, edges] = ganttSize();
             break;
-          default:
-            throw new Error();
+          default: {
+            const familySize =
+              globalThis.cafeMermaidFamilySize(diagram.type, db, data.source) ??
+              globalThis.cafeMermaidExtendedFamilySize(diagram.type, db, data.source);
+            if (!familySize) throw new Error();
+            [nodes, edges] = familySize;
+          }
         }
         if (nodes > 250 || edges > 250) throw new Error();
-        const { svg } = await mermaid.render("cafe-diagram", data.source);
+        const { svg: renderedSvg } = await mermaid.render("cafe-diagram", data.source);
         if (
-          typeof svg !== "string" ||
-          svg.length > 2097152 ||
-          new TextEncoder().encode(svg).length > 2097152
+          typeof renderedSvg !== "string" ||
+          renderedSvg.length > 2097152 ||
+          new TextEncoder().encode(renderedSvg).length > 2097152
         )
           throw new Error();
+        // Pinned event modeling has no SVG-label option. Its exact native
+        // b/BR/code label structure is converted to bounded text/tspans solely
+        // in this opaque frame. Arbitrary HTML/attributes/geometry are refused;
+        // no foreignObject, styles or resource authority reach the app realm.
+        // This does not loosen the independent parent SVG sanitizer.
+        const imageSvg =
+          diagram.type === "eventmodeling"
+            ? globalThis.cafeMermaidEventModelingSvgLabels(renderedSvg)
+            : renderedSvg;
+        // The pinned native info renderer omits viewBox despite declaring a
+        // fixed 400x100 viewport. Qualify only its exact native version output;
+        // all other diagrams still require their own native viewBox unchanged.
+        const svg =
+          diagram.type === "info" ? globalThis.cafeMermaidInfoSvgViewport(imageSvg) : imageSvg;
         // No bindFunctions: callbacks and interactive links are not part of
         // Cafe's diagram contract. The parent validates and sanitizes again.
         port.postMessage({ id: data.id, svg });

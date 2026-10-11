@@ -4125,7 +4125,7 @@
   },
   "Diagram unavailable. View or copy the source instead.": {
     "message": "Diagram unavailable. View or copy the source instead.",
-    "locations": ["apps/web/src/lib/mermaid/policy.ts:9"]
+    "locations": ["apps/web/src/lib/mermaid/policy.ts:62"]
   },
   "Diagram zoom controls": {
     "message": "Diagram zoom controls",

@@ -1,4 +1,8 @@
-import library from "@mermaid-js/tiny/dist/mermaid.tiny.js?raw";
+import library from "mermaid/dist/mermaid.min.js?raw";
+import familyAdmission from "./familyAdmission.js?raw";
+import extendedFamilyAdmission from "./extendedFamilyAdmission.js?raw";
+import eventModelingSvgLabels from "./eventModelingSvgLabels.js?raw";
+import infoSvgViewport from "./infoSvgViewport.js?raw";
 import runtime from "./sandboxRuntime.js?raw";
 
 /** All scripts are local locked bytes; diagram source is never interpolated here. */
@@ -7,6 +11,10 @@ export function createMermaidSandboxDocument(nonce: string): string {
   // Mermaid contains direct console calls outside its configured logger. Keep
   // private DSL/parser excerpts out of DevTools and Electron diagnostics too.
   const silence = `for (const key of ["log","info","warn","error","debug","trace","dir","table"]) console[key] = () => {}; addEventListener("error", e => e.preventDefault()); addEventListener("unhandledrejection", e => e.preventDefault());`;
-  const scripts = `${silence}\n${library}\n${runtime}`.replace(/<\/script/gi, "<\\/script");
+  const scripts =
+    `${silence}\n${library}\n${familyAdmission}\n${extendedFamilyAdmission}\n${eventModelingSvgLabels}\n${infoSvgViewport}\n${runtime}`.replace(
+      /<\/script/gi,
+      "<\\/script",
+    );
   return `<!doctype html><html><head><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'nonce-${nonce}'; style-src 'unsafe-inline'; connect-src 'none'; img-src 'none'; font-src 'none'; object-src 'none'; frame-src 'none'; base-uri 'none'; form-action 'none'"></head><body><script nonce="${nonce}">${scripts}</script></body></html>`;
 }

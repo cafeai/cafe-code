@@ -461,7 +461,7 @@ describe("real isolated Mermaid rendering", () => {
   it("rejects malformed, unsupported and oversized graphs without poisoning the queue", async () => {
     for (const source of [
       "flowchart TD\nA[unterminated",
-      "journey\ntitle Unsupported journey\nsection Build\nCompile: 5: Team",
+      "notAMermaidFamily\ntitle Unsupported diagram\nsection Build\nCompile: 5: Team",
       "xychart-beta\nbar [1, broken]",
       'pie\n"a" nope',
       `flowchart TD\n${Array.from({ length: 251 }, (_, i) => `n${i}[Node]`).join("\n")}`,

@@ -39,3 +39,23 @@ the Twemoji contributors: https://github.com/jdecked/twemoji
 
 The graphic is licensed under Creative Commons Attribution 4.0 International:
 https://creativecommons.org/licenses/by/4.0/
+
+## Offline Mermaid Renderer
+
+Cafe bundles the unmodified published Mermaid 12.0.0 browser renderer.
+Its embedded third-party license comments are retained inside the local script
+text. Distribution identity and embedded-dependency review are recorded in
+`docs/decisions/mermaid-family-admission.md`.
+
+Mermaid is Copyright (c) 2014 - 2022 Knut Sveidqvist and is licensed under MIT.
+The MIT permission and disclaimer reproduced above apply to Mermaid separately
+from the T3 Code copyright notice.
+
+The full Mermaid distribution additionally includes elkjs 0.9.3 under the
+Eclipse Public License 2.0. The exact published package, including its full
+`LICENSE.md` agreement and compiled JavaScript, is available at
+https://registry.npmjs.org/elkjs/-/elkjs-0.9.3.tgz;
+the upstream build/source projects are https://github.com/kieler/elkjs and
+https://github.com/eclipse-elk/elk.
+Bundled Cytoscape and its included layout plugins retain their upstream MIT
+notices. These component licenses do not replace Cafe Code's own license.
