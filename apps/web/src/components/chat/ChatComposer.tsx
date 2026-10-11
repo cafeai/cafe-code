@@ -806,6 +806,7 @@ export interface ChatComposerProps extends ComposerInteractionCallbacks {
   scheduledFollowups?: ScheduledFollowupsContext | undefined;
   providerTasks?: ProviderTasksContext | undefined;
   activity?: ChatActivityPresentation | null | undefined;
+  activityStartedAt?: string | null | undefined;
   onFocusSessionRail?: (() => void) | undefined;
 
   // Mode
@@ -930,6 +931,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     scheduledFollowups,
     providerTasks,
     activity,
+    activityStartedAt,
     onFocusSessionRail,
     goalControlsSupported,
     runtimeMode,
@@ -3312,6 +3314,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
         <div className="min-w-0 mb-1">
           <ComposerActivityStatus
             activity={activity}
+            turnStartedAt={activityStartedAt}
             onOpenTasks={() => {
               if (sessionRailVisible) onFocusSessionRail?.();
               else setTaskPopoverOpen(true);

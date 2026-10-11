@@ -8100,6 +8100,13 @@ export default function ChatView(props: ChatViewProps) {
               <div className="relative z-10">
                 <ChatComposer
                   activity={chatActivity}
+                  activityStartedAt={
+                    // Background children and failed-root recovery are not a
+                    // running root interval. Preserve exact turn/dispatch timing
+                    // through command changes, without making elapsed time an
+                    // input to liveness or provider control admission.
+                    phase === "running" || isSendBusy ? activeWorkStartedAt : null
+                  }
                   onFocusSessionRail={() => sessionRailFocusRef.current?.focus()}
                   onStartCodeReview={startCodeReview}
                   codeReviewDisabled={reviewDisabled}

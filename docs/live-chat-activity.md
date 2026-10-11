@@ -1,12 +1,26 @@
 # Live chat activity
 
-Last updated: 2026-10-11 13:14:45 JST (UTC+0900)
+Last updated: 2026-10-11 16:48:49 JST (UTC+0900)
 
 The composer has one compact activity line above the editor. It shows Working,
 Running command, a computer action, or waiting for a tool, agent, answer or
 approval. Questions and approvals use the attention colour. When work is
 inspectable, the line opens the existing Tasks popover or focuses its docked
 rail. The Tasks control includes its active count.
+
+Hovering this line reveals the elapsed turn time beside the label with a small
+horizontal expansion; keyboard focus reveals the same information. It collapses
+on leaving the line or losing focus, and reduced motion removes the expansion.
+The counter uses the exact current root-turn start, or the local dispatch start
+while acceptance is pending. New commands, compaction and transport retries
+within that turn do not reset it. A new accepted turn uses its own start.
+
+Only the revealed counter ticks, without re-rendering the streaming composer or
+announcing every second. Hidden documents pause it and catch up on return.
+Completed roots, independently running background agents, recovery backoff,
+idle connection preparation and rewind have no running-root counter. A locally
+dispatched send includes its preparation/acceptance wait. Elapsed time
+never reopens a turn or changes its Stop, send, retry or task controls.
 
 The response-duration divider describes the main response. Independently active
 native tasks and agents can outlive that response; the activity line then says

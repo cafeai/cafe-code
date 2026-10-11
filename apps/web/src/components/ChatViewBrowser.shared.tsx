@@ -2294,6 +2294,40 @@ describe(`ChatView full app (${chatViewBrowserPart})`, () => {
       };
     };
 
+    it("reveals elapsed time from the exact running root through the real composer", async () => {
+      const base = createSnapshotWithActiveSubagent();
+      const startedAt = new Date(Date.now() - 125_000).toISOString();
+      const snapshot: OrchestrationReadModel = {
+        ...base,
+        threads: base.threads.map((thread) => ({
+          ...thread,
+          latestTurn: { ...thread.latestTurn!, startedAt },
+        })),
+      };
+      const mounted = await mountChatView({ viewport: WIDE_FOOTER_VIEWPORT, snapshot });
+      try {
+        await waitForComposerEditor();
+        const timer = await waitForElement(
+          () =>
+            document.querySelector<HTMLElement>('[role="timer"][aria-label="Elapsed turn time"]'),
+          "Running root elapsed timer missing",
+        );
+        const disclosure = timer.closest<HTMLElement>("[data-activity-elapsed-revealed]")!;
+        expect(disclosure.getAttribute("data-activity-elapsed-revealed")).toBe("false");
+        const status = timer.closest<HTMLButtonElement>("button")!;
+        await page
+          .getByRole("button", { name: status.getAttribute("aria-label")!, exact: true })
+          .hover();
+        await vi.waitFor(() => {
+          expect(disclosure.getAttribute("data-activity-elapsed-revealed")).toBe("true");
+          expect(timer.textContent).toMatch(/2m \d+s/);
+        });
+        expect(document.querySelector('button[aria-label="Stop generation"]')).not.toBeNull();
+      } finally {
+        await mounted.cleanup();
+      }
+    });
+
     it.each([
       ["retry", "Reconnecting · root 9s"],
       ["agents", "Agents running · root 9s"],
@@ -2312,6 +2346,11 @@ describe(`ChatView full app (${chatViewBrowserPart})`, () => {
         });
         try {
           await waitForComposerEditor();
+          // Independent agents and failed-root recovery are visible live work,
+          // but cannot borrow the finished root's start for a running counter.
+          expect(
+            document.querySelector('[role="timer"][aria-label="Elapsed turn time"]'),
+          ).toBeNull();
           await vi.waitFor(() =>
             expect(
               document.querySelector('[data-completion-divider="true"]')?.textContent,
