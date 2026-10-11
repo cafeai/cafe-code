@@ -147,6 +147,17 @@ function openRowMenu(element: Element) {
 }
 
 describe("Desk sidebar", () => {
+  it("observes native mouse capability in the desktop fixture context", () => {
+    // Pointer delivery alone does not qualify hover CSS: Chromium's native
+    // media state must also describe a mouse. Keep this as a separate oracle
+    // so a failure does not prevent the original hover/action cases executing.
+    expect(window.matchMedia("(hover: hover)").matches).toBe(true);
+    expect(window.matchMedia("(pointer: fine)").matches).toBe(true);
+    expect(window.matchMedia("(any-hover: hover)").matches).toBe(true);
+    expect(window.matchMedia("(pointer: coarse)").matches).toBe(false);
+    expect(navigator.maxTouchPoints).toBe(0);
+  });
+
   it("captures bounded synthetic failure state before the fixture unmounts", async () => {
     const { screen } = await setup();
     try {

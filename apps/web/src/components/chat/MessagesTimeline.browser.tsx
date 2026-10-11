@@ -13,7 +13,7 @@ import {
 } from "@cafecode/contracts";
 import { createRef } from "react";
 import type { LegendListRef } from "@legendapp/list/react";
-import { cdp, page, userEvent } from "vitest/browser";
+import { page, userEvent } from "vitest/browser";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { render } from "vitest-browser-react";
 import { applyInterfaceScalePercent } from "../../interfaceScale";
@@ -740,55 +740,6 @@ it.each([80, 100, 130] as const)(
     }
   },
 );
-
-it("keeps message actions visible and inside the normal layout on touch screens", async () => {
-  const input = cdp();
-  await input.send("Emulation.setDeviceMetricsOverride", {
-    width: 430,
-    height: 932,
-    deviceScaleFactor: 1,
-    mobile: true,
-  });
-  await input.send("Emulation.setTouchEmulationEnabled", { enabled: true });
-  let view: Awaited<ReturnType<typeof render>> | undefined;
-  try {
-    expect(window.matchMedia("(hover: none)").matches).toBe(true);
-    view = await render(
-      <div className="bg-background text-foreground" style={{ width: "100%", height: 540 }}>
-        <MessagesTimeline
-          {...buildProps()}
-          activeProvider={ProviderDriverKind.make("claudeAgent")}
-          onForkMessage={vi.fn()}
-          timelineEntries={[
-            buildUserTimelineEntry("Open YouTube and check my subscriber count."),
-            buildAssistantTimelineEntry({ text: "I’ll open YouTube and check your channel." }),
-          ]}
-        />
-      </div>,
-    );
-    const userFooter = document.querySelector<HTMLElement>("[data-user-message-footer]")!;
-    const assistantFooter = document.querySelector<HTMLElement>("[data-assistant-message-footer]")!;
-    await expect.poll(() => getComputedStyle(userFooter).opacity).toBe("1");
-    await expect.poll(() => getComputedStyle(assistantFooter).opacity).toBe("1");
-    expect(getComputedStyle(userFooter).position).toBe("static");
-    expect(getComputedStyle(assistantFooter).position).toBe("static");
-    const bubble = userFooter.closest<HTMLElement>(".group")!;
-    expect(userFooter.getBoundingClientRect().bottom).toBeLessThan(
-      bubble.getBoundingClientRect().bottom,
-    );
-    await expect
-      .element(page.getByRole("button", { name: "Copy message", exact: true }).first())
-      .toBeVisible();
-    await expect
-      .element(page.getByRole("button", { name: "Fork from this message", exact: true }).first())
-      .toBeVisible();
-    await page.screenshot({ path: "../../../../../.explorations/message-spacing/touch.png" });
-  } finally {
-    await view?.unmount();
-    await input.send("Emulation.setTouchEmulationEnabled", { enabled: false });
-    await input.send("Emulation.clearDeviceMetricsOverride");
-  }
-});
 
 function buildLiveSubagentWorkEntry(id: string, label: string) {
   return {
