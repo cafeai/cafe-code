@@ -22,6 +22,7 @@ import {
   TurnId,
   WS_METHODS,
   OrchestrationSessionStatus,
+  SourceControlRepositoryError,
   DEFAULT_SERVER_SETTINGS,
   ServerConfig as ServerConfigSchema,
 } from "@cafecode/contracts";
@@ -4810,7 +4811,7 @@ describe(`ChatView full app (${chatViewBrowserPart})`, () => {
             expect(useComposerDraftStore.getState().getComposerDraft(THREAD_REF)?.prompt).toBe(
               messageText,
             );
-            expect(document.body.textContent).toContain("Failed to send message.");
+            expect(document.body.textContent).toContain(repeatedFailure);
             expect(findSendFailureToastTitle()).not.toBeNull();
           },
           { timeout: 8_000, interval: 16 },
@@ -4869,7 +4870,7 @@ describe(`ChatView full app (${chatViewBrowserPart})`, () => {
             expect(dispatchedMessageTexts).toEqual([messageText, messageText, messageText]);
             expect(findSendFailureToastTitle()).toBeNull();
             expect(document.querySelector('button[aria-label="Dismiss error"]')).toBeNull();
-            expect(document.body.textContent).not.toContain("Failed to send message.");
+            expect(document.body.textContent).not.toContain(repeatedFailure);
           },
           // The toast manager's normal auto-dismiss is much longer than this
           // bound. Passing here therefore proves the successful dispatch
@@ -12013,129 +12014,206 @@ describe(`ChatView full app (${chatViewBrowserPart})`, () => {
       }
     });
 
-    it("shows clone destination controls after resolving an add project repository", async () => {
-      const mounted = await mountChatView({
-        viewport: DEFAULT_VIEWPORT,
-        snapshot: createSnapshotForTargetUser({
-          targetMessageId: "msg-user-command-palette-add-project-remote" as MessageId,
-          targetText: "command palette add project remote",
-        }),
-        configureFixture: (nextFixture) => {
-          nextFixture.serverConfig = {
-            ...nextFixture.serverConfig,
-            keybindings: [
-              {
-                command: "commandPalette.toggle",
-                shortcut: {
-                  key: "k",
-                  metaKey: false,
-                  ctrlKey: false,
-                  shiftKey: false,
-                  altKey: false,
-                  modKey: true,
+    it.each([
+      {
+        label: "a repository name over HTTPS",
+        repositoryInput: "t3-oss/t3-env",
+        source: "GitHub repository",
+        remoteUrl: "https://github.com/t3-oss/t3-env",
+        fails: false,
+      },
+      {
+        label: "an HTTPS repository URL over HTTPS",
+        repositoryInput: "https://github.com/t3-oss/t3-env.git",
+        source: "GitHub repository",
+        remoteUrl: "https://github.com/t3-oss/t3-env",
+        fails: false,
+      },
+      {
+        label: "an explicit SSH repository reference over SSH",
+        repositoryInput: "git@github.com:t3-oss/t3-env.git",
+        source: "GitHub repository",
+        remoteUrl: "git@github.com:t3-oss/t3-env.git",
+        fails: false,
+      },
+      {
+        label: "a direct SSH clone URL without rewriting it",
+        repositoryInput: "ssh://git@github.com/t3-oss/t3-env.git",
+        source: "Git URL",
+        remoteUrl: "ssh://git@github.com/t3-oss/t3-env.git",
+        fails: false,
+      },
+      {
+        label: "an SSH failure with a visible explanation",
+        repositoryInput: "git@github.com:t3-oss/t3-env.git",
+        source: "GitHub repository",
+        remoteUrl: "git@github.com:t3-oss/t3-env.git",
+        fails: true,
+      },
+    ])(
+      "clones $label through the add project flow",
+      async ({ repositoryInput, source, remoteUrl, fails }) => {
+        const failureDetail =
+          "SSH host key verification failed. Use an HTTPS clone URL, or verify the server's SSH host key in your terminal before retrying.";
+        const addToastSpy = vi.spyOn(toastManager, "add");
+        const mounted = await mountChatView({
+          viewport: DEFAULT_VIEWPORT,
+          snapshot: createSnapshotForTargetUser({
+            targetMessageId: "msg-user-command-palette-add-project-remote" as MessageId,
+            targetText: "command palette add project remote",
+          }),
+          configureFixture: (nextFixture) => {
+            nextFixture.serverConfig = {
+              ...nextFixture.serverConfig,
+              keybindings: [
+                {
+                  command: "commandPalette.toggle",
+                  shortcut: {
+                    key: "k",
+                    metaKey: false,
+                    ctrlKey: false,
+                    shiftKey: false,
+                    altKey: false,
+                    modKey: true,
+                  },
+                  whenAst: {
+                    type: "not",
+                    node: { type: "identifier", name: "modelPickerOpen" },
+                  },
                 },
-                whenAst: {
-                  type: "not",
-                  node: { type: "identifier", name: "modelPickerOpen" },
-                },
-              },
-            ],
-          };
-        },
-        resolveRpc: (body) => {
-          if (body._tag === WS_METHODS.filesystemBrowse) {
-            if (body.partialPath === "~/Development/") {
+              ],
+            };
+          },
+          resolveRpc: (body) => {
+            if (body._tag === WS_METHODS.filesystemBrowse) {
+              if (body.partialPath === "~/Development/") {
+                return {
+                  parentPath: "~/Development",
+                  entries: [],
+                };
+              }
+
               return {
-                parentPath: "~/Development",
-                entries: [],
+                parentPath: "~/",
+                entries: [{ name: "Development", fullPath: "~/Development" }],
               };
             }
 
-            return {
-              parentPath: "~/",
-              entries: [{ name: "Development", fullPath: "~/Development" }],
-            };
-          }
+            if (body._tag === WS_METHODS.sourceControlLookupRepository) {
+              return {
+                provider: "github",
+                nameWithOwner: "t3-oss/t3-env",
+                url: "https://github.com/t3-oss/t3-env",
+                sshUrl: "git@github.com:t3-oss/t3-env.git",
+              };
+            }
 
-          if (body._tag === WS_METHODS.sourceControlLookupRepository) {
-            return {
-              provider: "github",
-              nameWithOwner: "t3-oss/t3-env",
-              url: "https://github.com/t3-oss/t3-env",
-              sshUrl: "git@github.com:t3-oss/t3-env.git",
-            };
-          }
+            if (body._tag === WS_METHODS.sourceControlCloneRepository) {
+              if (fails) {
+                return failBrowserWsRpc(
+                  new SourceControlRepositoryError({
+                    provider: "github",
+                    operation: "cloneRepository",
+                    detail: failureDetail,
+                  }),
+                );
+              }
+              return {
+                cwd: body.destinationPath,
+                remoteUrl: body.remoteUrl,
+                repository: null,
+              };
+            }
 
-          if (body._tag === WS_METHODS.sourceControlCloneRepository) {
-            return {
-              cwd: body.destinationPath,
-              remoteUrl: body.remoteUrl,
-              repository: null,
-            };
-          }
+            if (body._tag === ORCHESTRATION_WS_METHODS.dispatchCommand) {
+              return {
+                sequence: fixture.snapshot.snapshotSequence + 1,
+              };
+            }
 
-          if (body._tag === ORCHESTRATION_WS_METHODS.dispatchCommand) {
-            return {
-              sequence: fixture.snapshot.snapshotSequence + 1,
-            };
-          }
+            return undefined;
+          },
+        });
 
-          return undefined;
-        },
-      });
+        try {
+          await Promise.all([waitForServerConfigToApply(), waitForCommandPaletteShortcutLabel()]);
+          const palette = page.getByTestId("command-palette");
+          await openCommandPaletteFromTrigger();
 
-      try {
-        await Promise.all([waitForServerConfigToApply(), waitForCommandPaletteShortcutLabel()]);
-        const palette = page.getByTestId("command-palette");
-        await openCommandPaletteFromTrigger();
+          await expect.element(palette).toBeInTheDocument();
+          await palette.getByText("Add project", { exact: true }).click();
+          await palette.getByText(source, { exact: true }).click();
 
-        await expect.element(palette).toBeInTheDocument();
-        await palette.getByText("Add project", { exact: true }).click();
-        await palette.getByText("GitHub repository", { exact: true }).click();
+          const placeholder =
+            source === "Git URL" ? "Enter Git clone URL" : "Enter GitHub repository (owner/repo)";
+          const repositoryInputElement = await waitForCommandPaletteInput(placeholder);
+          await page.getByPlaceholder(placeholder).fill(repositoryInput);
+          await dispatchInputKey(repositoryInputElement, { key: "Enter" });
 
-        const repositoryInput = await waitForCommandPaletteInput(
-          "Enter GitHub repository (owner/repo)",
-        );
-        await page.getByPlaceholder("Enter GitHub repository (owner/repo)").fill("t3-oss/t3-env");
-        await dispatchInputKey(repositoryInput, { key: "Enter" });
+          await vi.waitFor(
+            () => {
+              const clonePathInput = document.querySelector<HTMLInputElement>(
+                'input[placeholder="Enter path (e.g. ~/projects/my-app)"]',
+              );
+              expect(clonePathInput?.value).toBe("~/t3-env");
+              expect(document.body.textContent).toContain("Repository");
+              expect(document.body.textContent).toContain(
+                source === "Git URL" ? repositoryInput : "t3-oss/t3-env",
+              );
+              expect(document.body.textContent).toContain("Select parent folder");
+              expect(document.body.textContent).toContain("Clone");
+            },
+            { timeout: 8_000, interval: 16 },
+          );
 
-        await vi.waitFor(
-          () => {
-            const clonePathInput = document.querySelector<HTMLInputElement>(
-              'input[placeholder="Enter path (e.g. ~/projects/my-app)"]',
+          await page.getByPlaceholder("Enter path (e.g. ~/projects/my-app)").fill("~/Development/");
+          const clonePathInput = await waitForCommandPaletteInput(
+            "Enter path (e.g. ~/projects/my-app)",
+          );
+          await dispatchInputKey(clonePathInput, { key: "Enter" });
+
+          await vi.waitFor(
+            () => {
+              const cloneRequest = wsRequests.find(
+                (request) => request._tag === WS_METHODS.sourceControlCloneRepository,
+              ) as { destinationPath?: string; remoteUrl?: string; provider?: string } | undefined;
+              expect(cloneRequest).toMatchObject({
+                remoteUrl,
+                destinationPath: "~/Development/t3-env",
+              });
+              expect(cloneRequest?.provider).toBe(source === "Git URL" ? undefined : "github");
+              expect(
+                wsRequests.filter(
+                  (request) => request._tag === WS_METHODS.sourceControlCloneRepository,
+                ),
+              ).toHaveLength(1);
+            },
+            { timeout: 8_000, interval: 16 },
+          );
+          if (fails) {
+            await vi.waitFor(
+              () => {
+                expect(addToastSpy).toHaveBeenCalledWith(
+                  expect.objectContaining({
+                    title: "Clone failed",
+                    description: failureDetail,
+                  }),
+                );
+                expect(document.body.textContent).toContain(failureDetail);
+                expect(document.body.textContent).not.toContain(
+                  "Source control repository operation cloneRepository failed",
+                );
+              },
+              { timeout: 8_000, interval: 16 },
             );
-            expect(clonePathInput?.value).toBe("~/t3-env");
-            expect(document.body.textContent).toContain("Repository");
-            expect(document.body.textContent).toContain("t3-oss/t3-env");
-            expect(document.body.textContent).toContain("https://github.com/t3-oss/t3-env");
-            expect(document.body.textContent).toContain("Select parent folder");
-            expect(document.body.textContent).toContain("Clone");
-          },
-          { timeout: 8_000, interval: 16 },
-        );
-
-        await page.getByPlaceholder("Enter path (e.g. ~/projects/my-app)").fill("~/Development/");
-        const clonePathInput = await waitForCommandPaletteInput(
-          "Enter path (e.g. ~/projects/my-app)",
-        );
-        await dispatchInputKey(clonePathInput, { key: "Enter" });
-
-        await vi.waitFor(
-          () => {
-            const cloneRequest = wsRequests.find(
-              (request) => request._tag === WS_METHODS.sourceControlCloneRepository,
-            ) as { destinationPath?: string; remoteUrl?: string } | undefined;
-            expect(cloneRequest).toMatchObject({
-              remoteUrl: "git@github.com:t3-oss/t3-env.git",
-              destinationPath: "~/Development/t3-env",
-            });
-          },
-          { timeout: 8_000, interval: 16 },
-        );
-      } finally {
-        await mounted.cleanup();
-      }
-    });
+            await expect.element(palette).toBeInTheDocument();
+          }
+        } finally {
+          addToastSpy.mockRestore();
+          await mounted.cleanup();
+        }
+      },
+    );
 
     it("opens add project browse mode from the sidebar add button", async () => {
       const mounted = await mountChatView({

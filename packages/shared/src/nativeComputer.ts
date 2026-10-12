@@ -1,4 +1,5 @@
 import * as Schema from "effect/Schema";
+import { normalizeNativeComputerSchema } from "./nativeComputerSchema.ts";
 
 const strict = { parseOptions: { onExcessProperty: "error" as const } };
 const Id = Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(256));
@@ -11,6 +12,8 @@ const Pixel = Schema.Number.check(Schema.isFinite(), Schema.isGreaterThanOrEqual
 const Point = Schema.Struct({ x: Pixel, y: Pixel }).annotate(strict);
 const Element = Schema.optionalKey(Id);
 const View = Schema.Literals(["accessibility", "screenshot", "both"]);
+export const ComputerInputPolicy = Schema.Literals(["background-only", "foreground-allowed"]);
+export type ComputerInputPolicy = typeof ComputerInputPolicy.Type;
 const observation = {
   view: Schema.optionalKey(View),
   query: Schema.optionalKey(Query),
@@ -46,6 +49,7 @@ export const ComputerAction = Schema.Union([
     point: Schema.optionalKey(Point),
     button: Schema.optionalKey(Schema.Literals(["left", "right", "middle"])),
     count: Schema.optionalKey(Schema.Int.check(Schema.isBetween({ minimum: 1, maximum: 3 }))),
+    input_route: Schema.optionalKey(Schema.Literals(["auto", "accessibility", "pointer"])),
   }).annotate(strict),
   Schema.Struct({
     type: Schema.Literal("type"),
@@ -80,6 +84,7 @@ export type ComputerAction = typeof ComputerAction.Type;
 export const ComputerAct = Schema.Struct({
   target: Id,
   actions: Schema.Array(ComputerAction).check(Schema.isMinLength(1), Schema.isMaxLength(16)),
+  input_policy: Schema.optionalKey(ComputerInputPolicy),
   ...observation,
 }).annotate(strict);
 export type ComputerAct = typeof ComputerAct.Type;
@@ -92,6 +97,7 @@ export const ComputerAdvanced = Schema.Union([
     operation: Schema.Literal("call"),
     name: Id,
     arguments: Schema.optionalKey(Schema.Record(Schema.String, Schema.Unknown)),
+    input_policy: Schema.optionalKey(ComputerInputPolicy),
   }).annotate(strict),
 ]);
 export type ComputerAdvanced = typeof ComputerAdvanced.Type;
@@ -108,7 +114,7 @@ const descriptions = {
   computer_observe:
     "Read a bound target's accessibility state, screenshot, or both. State changes may be diffed; full:true returns every current element. Returned element handles are fresh. Accessibility-only reads clear pixel grounding; request both before coordinate input.",
   computer_act:
-    "Run up to 16 predictable actions on one bound target, then return fresh state. Use current element handles or screenshot points. The host routes input and stops at failures, partial/uncertain effects or revoked access; never replay uncertain input. Pixel actions require a fresh screenshot. Paste preserves plain-text clipboard only; unsupported formats refuse before writing. Set value does not prove a web app accepted an AX echo.",
+    'Run up to 16 predictable actions on one bound target, then return fresh state. Examples: {type:"click",element:"handle"}; {type:"click",point:{x:100,y:200},input_route:"pointer"}; {type:"type",element:"handle",text:"value",replace:true}; {type:"key",keys:["return"]}; {type:"scroll",point:{x:100,y:200},direction:"down",amount:3}. input_policy:"background-only" refuses foreground input and recovery; it cannot weaken host policy. Screenshot points default to pointer delivery. Never replay uncertain input. Paste preserves supported plain-text clipboard only. Set value does not prove web application acceptance.',
   computer_advanced:
     "Discover reviewed native operations with operation:list and an optional query; operation:call invokes one with its advertised arguments. Use for menus, bounded verification, browser setup and uncommon controls. Never bypasses computer-use admission. Afterwards observe the bound target again before using old elements or pixels.",
 };
@@ -126,7 +132,14 @@ export const COMPUTER_CONTROL_TOOLS: readonly {
 }[] = Object.entries(schemas).map(([name, schema]) => ({
   name,
   description: descriptions[name as keyof typeof descriptions],
-  inputSchema: { ...Schema.toJsonSchemaDocument(schema).schema, type: "object" },
+  inputSchema: (() => {
+    const document = Schema.toJsonSchemaDocument(schema);
+    return normalizeNativeComputerSchema({
+      ...document.schema,
+      ...(Object.keys(document.definitions).length ? { $defs: document.definitions } : {}),
+      type: "object",
+    }) as Record<string, unknown>;
+  })(),
   annotations: {
     readOnlyHint: name === "computer_observe",
     destructiveHint: name === "computer_advanced" || name === "computer_act",

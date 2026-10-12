@@ -1,5 +1,49 @@
 import { expect, it, vi } from "vitest";
+import { mkdtemp, access } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { NativeDaemon, nativeDaemonEnvironment } from "./NativeDaemon.ts";
+
+it("cleans private resources when startup fails before a child exists", async () => {
+  const root = await mkdtemp(join(tmpdir(), "cafe-daemon-start-fixture-"));
+  const channel = { close: vi.fn(async () => {}) };
+  const daemon = new NativeDaemon("unused-start-fixture", "com.cafe.fixture");
+  Reflect.set(daemon, "root", root);
+  Reflect.set(daemon, "endpoint", join(root, "driver.sock"));
+  Reflect.set(daemon, "activityChannel", channel);
+  await daemon.stop();
+  expect(channel.close).toHaveBeenCalledOnce();
+  await expect(access(root)).rejects.toThrow();
+  expect(Reflect.get(daemon, "root")).toBeUndefined();
+  expect(Reflect.get(daemon, "endpoint")).toBeUndefined();
+});
+
+it("force-stops only its owned child without waiting for an existing graceful shutdown", async () => {
+  const exited = Promise.withResolvers<void>();
+  const child = {
+    exitCode: null as number | null,
+    signalCode: null as string | null,
+    stdin: { end: vi.fn() },
+    kill: vi.fn((signal: string) => {
+      child.signalCode = signal;
+      exited.resolve();
+      return true;
+    }),
+  };
+  // Inject a process handle, never a PID or live native controller. The first
+  // stop deliberately remains pending until cancellation kills that handle.
+  const daemon = new NativeDaemon("unused-owned-child-fixture", "com.cafe.fixture");
+  Reflect.set(daemon, "child", child);
+  Reflect.set(daemon, "exited", exited.promise);
+  const graceful = daemon.stop();
+  expect(child.stdin.end).toHaveBeenCalledOnce();
+  expect(child.kill).not.toHaveBeenCalled();
+  await daemon.stop({ force: true });
+  await graceful;
+  expect(child.kill).toHaveBeenCalledExactlyOnceWith("SIGKILL");
+  await daemon.stop({ force: true });
+  expect(child.kill).toHaveBeenCalledOnce();
+});
 it("isolates Cua preferences and history and never inherits credentials or Node hooks", () => {
   const env = nativeDaemonEnvironment(
     {

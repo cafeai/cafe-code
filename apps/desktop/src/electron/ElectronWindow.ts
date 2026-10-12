@@ -48,7 +48,7 @@ export function markAuxiliaryWindow(window: Electron.BrowserWindow): void {
   auxiliaryWindows.add(window);
 }
 
-function isLiveMainCandidate(window: Electron.BrowserWindow): boolean {
+export function isLiveMainCandidate(window: Electron.BrowserWindow): boolean {
   return !window.isDestroyed() && !auxiliaryWindows.has(window);
 }
 

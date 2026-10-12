@@ -1632,6 +1632,27 @@ function AssistantTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "mess
     row.message.id,
     sourceMessageText,
   );
+  const imageContext = useMemo(
+    () =>
+      (ctx.activeProvider === "codex" || ctx.activeProvider === "claudeAgent") && ctx.activeThreadId
+        ? {
+            environmentId: ctx.activeThreadEnvironmentId,
+            threadId: ctx.activeThreadId,
+            messageId: row.message.id,
+            isStreaming: Boolean(row.message.streaming || isAnimating),
+            onImageExpand: ctx.onImageExpand,
+          }
+        : undefined,
+    [
+      ctx.activeProvider,
+      ctx.activeThreadEnvironmentId,
+      ctx.activeThreadId,
+      ctx.onImageExpand,
+      row.message.id,
+      row.message.streaming,
+      isAnimating,
+    ],
+  );
   // Native context-menu copies have no button to flip, so confirm inline in
   // the message's meta row instead of a toast.
   const [contextCopied, setContextCopied] = useState(false);
@@ -1692,6 +1713,7 @@ function AssistantTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "mess
       <div data-chat-copy-region="assistant" data-chat-copy-message-id={row.message.id}>
         <ChatMarkdown
           text={messageText}
+          imageContext={imageContext}
           cwd={ctx.markdownCwd}
           additionalWorkspaceRoots={ctx.additionalWorkspaceRoots}
           isStreaming={Boolean(row.message.streaming || isAnimating)}

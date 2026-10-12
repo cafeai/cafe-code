@@ -3,10 +3,18 @@ import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
 import * as PubSub from "effect/PubSub";
 import * as Scope from "effect/Scope";
+import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
 import { RpcMessage, RpcSerialization, RpcServer } from "effect/unstable/rpc";
 
 type RpcServerInstance = RpcServer.RpcServer<any>;
+
+// makeNoSerialization publishes in-memory Exit/Cause values. Encode them with
+// Effect's wire codec before JSON serialization, just as the real RPC server
+// does; Cause.toJSON() is a diagnostic representation, not the RPC format.
+const encodeExit = Schema.encodeSync(
+  Schema.toCodecJson(Schema.Exit(Schema.Unknown, Schema.Unknown, Schema.Defect)),
+);
 
 type BrowserWsClient = {
   send: (data: string) => void;
@@ -174,12 +182,14 @@ export class BrowserWsRpcHarness {
 
   private makeServerOptions() {
     return {
-      onFromServer: (response: unknown) =>
+      onFromServer: (response: RpcMessage.FromServer<any>) =>
         Effect.sync(() => {
           if (!this.client) {
             return;
           }
-          const encoded = this.parser.encode(response);
+          const encoded = this.parser.encode(
+            response._tag === "Exit" ? { ...response, exit: encodeExit(response.exit) } : response,
+          );
           if (typeof encoded === "string") {
             this.client.send(encoded);
           }

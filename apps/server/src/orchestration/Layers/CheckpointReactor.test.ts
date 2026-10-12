@@ -367,6 +367,7 @@ describe("CheckpointReactor", () => {
 
   async function createHarness(options?: {
     readonly hasSession?: boolean;
+    readonly initializeRepository?: boolean;
     readonly seedFilesystemCheckpoints?: boolean;
     readonly projectWorkspaceRoot?: string;
     readonly threadWorktreePath?: string | null;
@@ -379,7 +380,10 @@ describe("CheckpointReactor", () => {
     readonly ingestionDrain?: Effect.Effect<void>;
     readonly testClock?: Clock.Clock;
   }) {
-    const cwd = createGitRepository();
+    const cwd =
+      options?.initializeRepository === false
+        ? fs.mkdtempSync(path.join(os.tmpdir(), "cafe-code-checkpoint-handler-"))
+        : createGitRepository();
     tempDirs.push(cwd);
     const provider = createProviderServiceHarness(
       cwd,
@@ -1324,7 +1328,7 @@ describe("CheckpointReactor", () => {
     ).toBe(true);
   });
 
-  it("appends capture failure activity when turn diff summary cannot be derived", async () => {
+  it("keeps a saved checkpoint ready when its pre-turn snapshot is missing", async () => {
     const harness = await createHarness({ seedFilesystemCheckpoints: false });
     const createdAt = "2026-01-01T00:00:00.000Z";
 
@@ -1362,14 +1366,182 @@ describe("CheckpointReactor", () => {
       harness.readModel,
       (entry) =>
         entry.checkpoints.length === 1 &&
-        entry.activities.some((activity) => activity.kind === "checkpoint.capture.failed"),
+        entry.activities.some((activity) => activity.kind === "checkpoint.diff.unavailable"),
     );
 
-    expect(thread.checkpoints[0]?.checkpointTurnCount).toBe(1);
+    expect(thread.checkpoints[0]).toMatchObject({
+      checkpointTurnCount: 1,
+      status: "ready",
+      files: [],
+    });
+    expect(
+      thread.activities.find((activity) => activity.kind === "checkpoint.diff.unavailable"),
+    ).toMatchObject({
+      tone: "info",
+      summary: "Turn diff unavailable",
+      payload: {
+        reason: "missing-baseline",
+        detail: expect.stringContaining("pre-turn snapshot is missing"),
+      },
+    });
     expect(
       thread.activities.some((activity) => activity.kind === "checkpoint.capture.failed"),
+    ).toBe(false);
+    expect(
+      gitRefExists(harness.cwd, checkpointRefForThreadTurn(ThreadId.make("thread-1"), 1)),
     ).toBe(true);
+    expect(
+      gitRefExists(harness.cwd, checkpointRefForThreadTurn(ThreadId.make("thread-1"), 0)),
+    ).toBe(false);
   });
+
+  it("handles a repository cloned during a turn and derives the next turn's changes", async () => {
+    const harness = await createHarness({
+      initializeRepository: false,
+      seedFilesystemCheckpoints: false,
+    });
+    const threadId = ThreadId.make("thread-1");
+    const diff = vi.spyOn(harness.checkpointStore, "diffCheckpoints");
+    harness.provider.emit({
+      type: "turn.started",
+      eventId: EventId.make("evt-start-before-clone"),
+      provider: ProviderDriverKind.make("codex"),
+      threadId,
+      turnId: asTurnId("turn-with-clone"),
+      createdAt: "2026-01-01T00:00:00.000Z",
+    });
+    await harness.drain();
+    expect(fs.existsSync(path.join(harness.cwd, ".git"))).toBe(false);
+
+    const source = createGitRepository();
+    tempDirs.push(source);
+    runGit(harness.cwd, ["clone", "--", source, "."]);
+    fs.writeFileSync(path.join(harness.cwd, "README.md"), "v2\n", "utf8");
+    harness.provider.emit({
+      type: "turn.completed",
+      eventId: EventId.make("evt-complete-after-clone"),
+      provider: ProviderDriverKind.make("codex"),
+      threadId,
+      turnId: asTurnId("turn-with-clone"),
+      createdAt: "2026-01-01T00:01:00.000Z",
+      payload: { state: "completed" },
+    });
+    await harness.drain();
+    const firstTurn = await waitForThread(
+      harness.readModel,
+      (entry) => entry.checkpoints.length === 1,
+    );
+    expect(firstTurn.checkpoints[0]).toMatchObject({ status: "ready", files: [] });
+    expect(
+      firstTurn.activities.find((activity) => activity.kind === "checkpoint.diff.unavailable"),
+    ).toMatchObject({ tone: "info", payload: { reason: "missing-baseline" } });
+    expect(
+      firstTurn.activities.some((activity) => activity.kind === "checkpoint.capture.failed"),
+    ).toBe(false);
+    expect(diff).not.toHaveBeenCalled();
+    expect(gitRefExists(harness.cwd, checkpointRefForThreadTurn(threadId, 0))).toBe(false);
+    expect(
+      gitShowFileAtRef(harness.cwd, checkpointRefForThreadTurn(threadId, 1), "README.md"),
+    ).toBe("v2\n");
+
+    harness.provider.emit({
+      type: "turn.started",
+      eventId: EventId.make("evt-start-after-clone"),
+      provider: ProviderDriverKind.make("codex"),
+      threadId,
+      turnId: asTurnId("turn-after-clone"),
+      createdAt: "2026-01-01T00:02:00.000Z",
+    });
+    await harness.drain();
+    fs.writeFileSync(path.join(harness.cwd, "README.md"), "v3\n", "utf8");
+    harness.provider.emit({
+      type: "turn.completed",
+      eventId: EventId.make("evt-complete-after-clone-next-turn"),
+      provider: ProviderDriverKind.make("codex"),
+      threadId,
+      turnId: asTurnId("turn-after-clone"),
+      createdAt: "2026-01-01T00:03:00.000Z",
+      payload: { state: "completed" },
+    });
+    const nextTurn = await waitForThread(
+      harness.readModel,
+      (entry) => entry.checkpoints.length === 2,
+    );
+    expect(nextTurn.checkpoints[1]).toMatchObject({
+      status: "ready",
+      files: [{ path: "README.md", additions: 1, deletions: 1 }],
+    });
+    expect(diff).toHaveBeenCalledExactlyOnceWith({
+      cwd: harness.cwd,
+      fromCheckpointRef: checkpointRefForThreadTurn(threadId, 1),
+      toCheckpointRef: checkpointRefForThreadTurn(threadId, 2),
+      fallbackFromToHead: false,
+      ignoreWhitespace: false,
+    });
+    expect(
+      nextTurn.activities.filter((activity) => activity.kind === "checkpoint.diff.unavailable"),
+    ).toHaveLength(1);
+  });
+
+  it.each(["capture", "diff"] as const)(
+    "distinguishes a real %s failure from a missing pre-turn snapshot",
+    async (operation) => {
+      const harness = await createHarness({ seedFilesystemCheckpoints: false });
+      const threadId = ThreadId.make("thread-1");
+      await Effect.runPromise(
+        harness.checkpointStore.captureCheckpoint({
+          cwd: harness.cwd,
+          checkpointRef: checkpointRefForThreadTurn(threadId, 0),
+        }),
+      );
+      const error = new CheckpointInvariantError({
+        operation: "controlled test fixture",
+        detail: "Controlled checkpoint failure.",
+      });
+      if (operation === "capture") {
+        vi.spyOn(harness.checkpointStore, "captureCheckpoint").mockReturnValue(Effect.fail(error));
+      } else {
+        vi.spyOn(harness.checkpointStore, "diffCheckpoints").mockReturnValue(Effect.fail(error));
+      }
+      harness.provider.emit({
+        type: "turn.completed",
+        eventId: EventId.make(`evt-checkpoint-${operation}-failure`),
+        provider: ProviderDriverKind.make("codex"),
+        threadId,
+        turnId: asTurnId("turn-with-checkpoint-failure"),
+        createdAt: "2026-01-01T00:01:00.000Z",
+        payload: { state: "completed" },
+      });
+      const kind =
+        operation === "capture" ? "checkpoint.capture.failed" : "checkpoint.diff.unavailable";
+      const thread = await waitForThread(harness.readModel, (entry) =>
+        entry.activities.some((activity) => activity.kind === kind),
+      );
+      expect(thread.activities.find((activity) => activity.kind === kind)).toMatchObject({
+        tone: "error",
+        summary: operation === "capture" ? "Checkpoint capture failed" : "Turn diff unavailable",
+        payload: { detail: expect.stringContaining(error.message) },
+      });
+      if (operation === "diff") {
+        const saved = await waitForThread(
+          harness.readModel,
+          (entry) => entry.checkpoints.length === 1,
+        );
+        expect(saved.checkpoints[0]).toMatchObject({ status: "ready", files: [] });
+        expect(
+          saved.activities.some((activity) => activity.kind === "checkpoint.capture.failed"),
+        ).toBe(false);
+      } else {
+        expect(thread.checkpoints).toHaveLength(0);
+        expect(
+          thread.activities.some((activity) => activity.kind === "checkpoint.diff.unavailable"),
+        ).toBe(false);
+      }
+      expect(gitRefExists(harness.cwd, checkpointRefForThreadTurn(threadId, 1))).toBe(
+        operation === "diff",
+      );
+    },
+  );
 
   it("captures pre-turn baseline from project workspace root when thread worktree is unset", async () => {
     const harness = await createHarness({

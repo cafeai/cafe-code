@@ -1893,6 +1893,15 @@ describe("settings panels", () => {
       expect(openPath).not.toHaveBeenCalled();
       expect(confirm).not.toHaveBeenCalled();
     });
+
+    await page.getByRole("button", { name: "When custom instructions apply" }).click();
+    await expect
+      .element(
+        page.getByText(
+          /Claude may keep its recorded instructions until compaction or a new session/,
+        ),
+      )
+      .toBeVisible();
   });
 
   it.each([

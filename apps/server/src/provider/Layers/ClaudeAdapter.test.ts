@@ -390,7 +390,7 @@ function makeHarness(config?: {
       Layer.provideMerge(
         ServerConfig.layerTest(
           config?.cwd ?? "/tmp/claude-adapter-test",
-          config?.baseDir ?? "/tmp",
+          config?.baseDir ?? { prefix: "claude-adapter-test-" },
         ),
       ),
       Layer.provideMerge(ServerSettingsService.layerTest()),
@@ -716,6 +716,120 @@ describe("Claude project directory encoding", () => {
 });
 
 describe("ClaudeAdapterLive", () => {
+  it.effect(
+    "appends Cafe capabilities and selected-server custom instructions without altering user input",
+    () =>
+      Effect.gen(function* () {
+        const fileSystem = yield* FileSystem.FileSystem;
+        const directory = yield* fileSystem.makeTempDirectoryScoped({
+          prefix: "claude-instructions-",
+        });
+        const harness = makeHarness({
+          environment: {},
+          cwd: directory,
+          baseDir: directory,
+          claudeConfig: { homePath: directory },
+          newQueryPerSession: true,
+        });
+        yield* Effect.gen(function* () {
+          const { systemPromptPath } = yield* ServerConfig;
+          yield* fileSystem.writeFileString(systemPromptPath, "  Be concise.\nUse metric units.  ");
+          const adapter = yield* ClaudeAdapter;
+          const start = {
+            threadId: THREAD_ID,
+            cwd: directory,
+            additionalDirectories: [path.join(directory, "charts")],
+            runtimeMode: "approval-required" as const,
+          };
+          yield* adapter.startSession(start);
+          const first = harness.createInputs[0]!;
+          const prompt = first.options.systemPrompt;
+          if (typeof prompt !== "object" || Array.isArray(prompt) || prompt?.type !== "preset")
+            throw new Error("Expected Claude's native preset append");
+          assert.equal(prompt.preset, "claude_code");
+          assert.include(prompt.append!, "<app-context>");
+          assert.include(prompt.append!, JSON.stringify(directory));
+          assert.include(prompt.append!, JSON.stringify(path.join(directory, "charts")));
+          assert.include(prompt.append!, "authenticated remote viewers");
+          assert.include(
+            prompt.append!,
+            "<user-instructions>\nBe concise.\nUse metric units.\n</user-instructions>",
+          );
+          assert.equal(prompt.snapshot, undefined);
+          assert.deepEqual(first.options.settingSources, ["user", "project", "local"]);
+          assert.equal(first.options.permissionMode, "default");
+          assert.equal(first.options.allowDangerouslySkipPermissions, undefined);
+          yield* adapter.sendTurn({ threadId: THREAD_ID, input: "Show the chart." });
+          assert.equal(yield* Effect.promise(() => readFirstPromptText(first)), "Show the chart.");
+          yield* fileSystem.writeFileString(systemPromptPath, "Use short paragraphs.");
+          assert.notInclude(prompt.append!, "Use short paragraphs.");
+          yield* adapter.stopSession(THREAD_ID);
+          yield* adapter.startSession(start);
+          const next = harness.createInputs[1]!.options.systemPrompt;
+          if (typeof next !== "object" || Array.isArray(next) || next?.type !== "preset")
+            throw new Error("Expected Claude's native preset append");
+          assert.include(next.append!, "Use short paragraphs.");
+          assert.notInclude(next.append!, "Use metric units.");
+        }).pipe(Effect.provide(harness.layer));
+      }).pipe(Effect.provide(NodeServices.layer)),
+  );
+
+  it.effect("keeps Cafe image guidance when custom instructions are missing or blank", () =>
+    Effect.gen(function* () {
+      const fileSystem = yield* FileSystem.FileSystem;
+      const directory = yield* fileSystem.makeTempDirectoryScoped({
+        prefix: "claude-empty-instructions-",
+      });
+      const harness = makeHarness({
+        environment: {},
+        baseDir: directory,
+        cwd: directory,
+        newQueryPerSession: true,
+      });
+      yield* Effect.gen(function* () {
+        const adapter = yield* ClaudeAdapter;
+        const { systemPromptPath } = yield* ServerConfig;
+        for (const contents of [undefined, " \n\t "]) {
+          if (contents !== undefined) yield* fileSystem.writeFileString(systemPromptPath, contents);
+          yield* adapter.startSession({ threadId: THREAD_ID, runtimeMode: "approval-required" });
+          const prompt = harness.getLastCreateQueryInput()!.options.systemPrompt;
+          if (typeof prompt !== "object" || Array.isArray(prompt) || prompt?.type !== "preset")
+            throw new Error("Expected Claude's native preset append");
+          assert.include(prompt.append!, "![Description](/absolute/path/to/image.png)");
+          assert.notInclude(prompt.append!, "<user-instructions>");
+          yield* adapter.stopSession(THREAD_ID);
+        }
+      }).pipe(Effect.provide(harness.layer));
+    }).pipe(Effect.provide(NodeServices.layer)),
+  );
+
+  it.effect("preserves a healthy query and sanitizes unreadable custom-instruction failures", () =>
+    Effect.gen(function* () {
+      const fileSystem = yield* FileSystem.FileSystem;
+      const directory = yield* fileSystem.makeTempDirectoryScoped({
+        prefix: "claude-instruction-failure-",
+      });
+      const harness = makeHarness({ environment: {}, baseDir: directory, cwd: directory });
+      yield* Effect.gen(function* () {
+        const adapter = yield* ClaudeAdapter;
+        const { systemPromptPath } = yield* ServerConfig;
+        const start = { threadId: THREAD_ID, runtimeMode: "approval-required" as const };
+        yield* adapter.startSession(start);
+        // A directory is a conclusive read failure on every supported host,
+        // without changing real permissions or provider profiles.
+        yield* fileSystem.makeDirectory(systemPromptPath);
+        const failure = yield* adapter.startSession(start).pipe(Effect.flip);
+        assert.equal(failure._tag, "ProviderAdapterProcessError");
+        if (failure._tag === "ProviderAdapterProcessError")
+          assert.equal(failure.detail, "Could not read custom instructions.");
+        assert.notInclude(JSON.stringify(failure), directory);
+        assert.equal(harness.createInputs.length, 1);
+        assert.equal(harness.query.closeCalls, 0);
+        assert.equal((yield* adapter.listSessions()).length, 1);
+      }).pipe(Effect.provide(harness.layer));
+    }).pipe(Effect.provide(NodeServices.layer)),
+  );
+
   it.effect(
     "admits only established primary session quota and strips every report before logs/events",
     () =>
@@ -13138,6 +13252,12 @@ describe("ClaudeAdapterLive", () => {
       assert.equal(createInput?.options.resumeSessionAt, undefined);
       assert.equal(createInput?.options.permissionMode, "default");
       assert.equal(createInput?.options.allowDangerouslySkipPermissions, undefined);
+      const prompt = createInput?.options.systemPrompt;
+      if (typeof prompt !== "object" || Array.isArray(prompt) || prompt?.type !== "preset")
+        throw new Error("Expected native instructions on the resumed query");
+      assert.equal(prompt.preset, "claude_code");
+      assert.include(prompt.append!, "<app-context>");
+      assert.equal(prompt.snapshot, undefined);
     }).pipe(
       Effect.provideService(Random.Random, makeDeterministicRandomService()),
       Effect.provide(harness.layer),

@@ -8111,6 +8111,7 @@ describe("openCodexThread", () => {
             requestedModel: "gpt-6.1-sol",
             serviceTier: undefined,
             resumeThreadId: method === "thread/resume" ? "native-root" : undefined,
+            customInstructions: "Follow my custom coding conventions.",
           }),
         );
         assert.equal(opened.serviceTier, serviceTier);
@@ -8118,6 +8119,11 @@ describe("openCodexThread", () => {
         assert.equal(calls.length, 1);
         assert.equal(calls[0]?.method, method);
         assert.equal(Reflect.has(calls[0]!.payload as object, "serviceTier"), false);
+        const instructions = Reflect.get(calls[0]!.payload as object, "developerInstructions");
+        assert.equal(typeof instructions, "string");
+        assert.ok(instructions.includes("Follow my custom coding conventions."));
+        assert.ok(instructions.includes("Cafe displays images"));
+        assert.equal(Reflect.has(calls[0]!.payload as object, "input"), false);
       }
     },
   );

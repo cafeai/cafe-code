@@ -74,9 +74,16 @@ async function main(): Promise<void> {
   await run("git", ["init", "--quiet"], sourceRoot);
   await run("git", ["remote", "add", "origin", "https://github.com/trycua/cua.git"], sourceRoot);
   await run("git", ["config", "core.sparseCheckout", "true"], sourceRoot);
-  await fs.writeFile(join(sourceRoot, ".git/info/sparse-checkout"), "/libs/cua-driver/\n", {
-    flag: "wx",
-  });
+  // Cargo/libgit2 consults ancestor ignore rules for files introduced by the
+  // reviewed patch. Materialize the pinned root rules too: a blobless sparse
+  // clone otherwise fails its excludes-stack fingerprint before compilation.
+  await fs.writeFile(
+    join(sourceRoot, ".git/info/sparse-checkout"),
+    "/.gitignore\n/libs/cua-driver/\n",
+    {
+      flag: "wx",
+    },
+  );
   await run(
     "git",
     ["fetch", "--filter=blob:none", "--depth", "1", "origin", release.sourceCommit],

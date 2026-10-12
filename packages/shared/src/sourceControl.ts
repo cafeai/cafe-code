@@ -1,4 +1,28 @@
-import type { SourceControlProviderInfo, SourceControlProviderKind } from "@cafecode/contracts";
+import type {
+  SourceControlCloneProtocol,
+  SourceControlProviderInfo,
+  SourceControlProviderKind,
+  SourceControlRepositoryCloneUrls,
+} from "@cafecode/contracts";
+
+export function selectSourceControlCloneUrl(
+  urls: SourceControlRepositoryCloneUrls,
+  options: {
+    readonly protocol?: SourceControlCloneProtocol;
+    readonly repositoryInput?: string;
+  } = {},
+): string {
+  if (options.protocol === "ssh") return urls.sshUrl;
+  if (options.protocol === "https") return urls.url;
+
+  // A provider CLI login does not establish SSH keys or host trust. Default
+  // shorthand repository names to HTTPS, while respecting an explicit SSH
+  // reference in both the palette and provider-backed clone RPC.
+  const repositoryInput = options.repositoryInput?.trim() ?? "";
+  const requestedSsh =
+    /^ssh:\/\//iu.test(repositoryInput) || /^[^\s/@]+@[^\s/:]+:/u.test(repositoryInput);
+  return requestedSsh ? urls.sshUrl : urls.url;
+}
 
 export interface ChangeRequestPresentation {
   readonly icon: "github" | "gitlab" | "azure-devops" | "bitbucket" | "change-request";

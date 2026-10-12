@@ -34,6 +34,17 @@ const getStateSpy = vi.fn<
   }
 >(() => ({ isAtEnd: true }));
 const legendListPropsSpy = vi.fn();
+const imageTransport = vi.hoisted(() => ({
+  override: undefined as typeof import("../../attachments/fileAttachments").fileRequest | undefined,
+}));
+vi.mock("../../attachments/fileAttachments", async (importOriginal) => {
+  const original = await importOriginal<typeof import("../../attachments/fileAttachments")>();
+  return {
+    ...original,
+    fileRequest: (...args: Parameters<typeof original.fileRequest>) =>
+      (imageTransport.override ?? original.fileRequest)(...args),
+  };
+});
 
 // This suite qualifies the timeline's mount and scroll boundary. The real
 // schedule API/editor and real virtualizer each have separate browser coverage.
@@ -843,12 +854,76 @@ describe("MessagesTimeline", () => {
     scrollToIndexSpy.mockReset();
     getStateSpy.mockClear();
     legendListPropsSpy.mockReset();
+    imageTransport.override = undefined;
     vi.restoreAllMocks();
     __resetEnvironmentApiOverridesForTests();
     delete (window as typeof window & { nativeApi?: unknown }).nativeApi;
     await __resetLocalApiForTests();
     document.body.innerHTML = "";
   });
+
+  it.each([
+    ["codex", "environment-local"],
+    ["codex", "environment-remote"],
+    ["claudeAgent", "environment-local"],
+    ["claudeAgent", "environment-remote"],
+  ] as const)(
+    "renders saved %s image replies through the selected %s server",
+    async (provider, environment) => {
+      const canvas = document.createElement("canvas");
+      canvas.width = 320;
+      canvas.height = 160;
+      canvas.getContext("2d")!.fillRect(0, 0, 320, 160);
+      const bytes = Uint8Array.from(atob(canvas.toDataURL("image/png").split(",")[1]!), (c) =>
+        c.charCodeAt(0),
+      );
+      const request = vi.fn<typeof import("../../attachments/fileAttachments").fileRequest>(
+        async (_environment, _path, _init, query) =>
+          query?.source
+            ? new Response(new Uint8Array(bytes), { headers: { "content-type": "image/png" } })
+            : new Response(
+                JSON.stringify([
+                  {
+                    source: "/repo/chart.png",
+                    mimeType: "image/png",
+                    width: 320,
+                    height: 160,
+                    sizeBytes: bytes.length,
+                  },
+                ]),
+              ),
+      );
+      imageTransport.override = request;
+      const props = buildProps();
+      const threadId = ThreadId.make("inline-image-chat");
+      const entry = buildAssistantTimelineEntry({ text: "![Chart](/repo/chart.png)" });
+      const screen = await render(
+        <MessagesTimeline
+          {...props}
+          activeProvider={ProviderDriverKind.make(provider)}
+          activeThreadEnvironmentId={EnvironmentId.make(environment)}
+          activeThreadId={threadId}
+          timelineEntries={[entry]}
+        />,
+      );
+      try {
+        await expect.element(page.getByRole("img", { name: "Chart" })).toBeVisible();
+        expect(request).toHaveBeenCalledTimes(2);
+        for (const [selectedEnvironment, endpoint, , query] of request.mock.calls) {
+          expect(selectedEnvironment).toBe(environment);
+          expect(endpoint).toBe("/api/chat-images");
+          expect(query).toMatchObject({ threadId, messageId: entry.message.id });
+        }
+        await page.getByRole("button", { name: "Enlarge Chart" }).click();
+        expect(props.onImageExpand).toHaveBeenCalledWith({
+          images: [{ src: expect.stringMatching(/^blob:/), name: "Chart" }],
+          index: 0,
+        });
+      } finally {
+        await screen.unmount();
+      }
+    },
+  );
 
   it("mounts inline schedules beneath an empty conversation", async () => {
     const props = buildProps();

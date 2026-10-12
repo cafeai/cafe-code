@@ -398,6 +398,11 @@
             "description": "When true, x and y are in the last zoom image for this pid; driver translates back to full-window coordinates.",
             "type": "boolean"
           },
+          "input_route": {
+            "description": "Pointer preserves coordinates and bypasses semantic AX substitution. Accessibility requires an element target.",
+            "enum": ["auto", "accessibility", "pointer"],
+            "type": "string"
+          },
           "modifier": {
             "description": "Modifier keys: cmd, shift, option/alt, ctrl.",
             "items": {
@@ -1916,6 +1921,7 @@
                     },
                     "exists": {
                       "description": "Assert that at least one trusted element matches the selector.",
+                      "enum": [true],
                       "type": "boolean"
                     },
                     "selected": {

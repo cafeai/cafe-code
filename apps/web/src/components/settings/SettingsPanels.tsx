@@ -1383,8 +1383,17 @@ export function ChatSettingsPanel() {
         />
 
         <SettingsRow
-          title="System prompt"
-          description="Added before the first message of each new chat."
+          title={
+            <span className="inline-flex items-center gap-1.5">
+              Custom instructions
+              <InfoTip label="When custom instructions apply">
+                Codex applies edits at the next session start or resume. Claude may keep its
+                recorded instructions until compaction or a new session. Other providers add them
+                before the first message.
+              </InfoTip>
+            </span>
+          }
+          description="Applied as session instructions in Codex and Claude."
           control={
             <Button
               type="button"

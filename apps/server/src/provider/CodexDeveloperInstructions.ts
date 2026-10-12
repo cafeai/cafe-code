@@ -132,3 +132,6 @@ The \`request_user_input\` tool is unavailable in Default mode. If you call it w
 
 In Default mode, strongly prefer making reasonable assumptions and executing the user's request rather than stopping to ask questions. If you absolutely must ask a question because the answer cannot be discovered from local context and a reasonable assumption would be risky, ask the user directly with a concise plain-text question. Never write a multiple choice question as a textual assistant message.
 </collaboration_mode>`;
+/** Stable Cafe capabilities belong to thread/start and thread/resume, rather
+ * than a user turn or the separate Plan/Default collaboration-mode preset. */
+export { buildCafeInstructions as buildCafeCodexDeveloperInstructions } from "./CafeInstructions.ts";

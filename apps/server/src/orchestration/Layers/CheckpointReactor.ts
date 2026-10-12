@@ -216,6 +216,36 @@ const make = Effect.gen(function* () {
       createdAt: input.createdAt,
     });
 
+  const appendDiffUnavailableActivity = (input: {
+    readonly threadId: ThreadId;
+    readonly turnId: TurnId;
+    readonly reason: "missing-baseline" | "diff-failed";
+    readonly fromCheckpointRef: CheckpointRef;
+    readonly toCheckpointRef: CheckpointRef;
+    readonly detail: string;
+    readonly createdAt: string;
+  }) =>
+    orchestrationEngine.dispatch({
+      type: "thread.activity.append",
+      commandId: serverCommandId("checkpoint-diff-unavailable"),
+      threadId: input.threadId,
+      activity: {
+        id: EventId.make(crypto.randomUUID()),
+        tone: input.reason === "missing-baseline" ? "info" : "error",
+        kind: "checkpoint.diff.unavailable",
+        summary: "Turn diff unavailable",
+        payload: {
+          reason: input.reason,
+          fromCheckpointRef: input.fromCheckpointRef,
+          toCheckpointRef: input.toCheckpointRef,
+          detail: input.detail,
+        },
+        turnId: input.turnId,
+        createdAt: input.createdAt,
+      },
+      createdAt: input.createdAt,
+    });
+
   const resolveSessionRuntimeForThread = Effect.fn("resolveSessionRuntimeForThread")(function* (
     threadId: ThreadId,
   ): Effect.fn.Return<
@@ -415,6 +445,8 @@ const make = Effect.gen(function* () {
         threadId: input.threadId,
         turnId: input.turnId,
         fromTurnCount,
+        cwd: input.cwd,
+        fromCheckpointRef,
       });
     }
 
@@ -427,40 +459,58 @@ const make = Effect.gen(function* () {
     // reflects files created or deleted during this turn.
     yield* workspaceEntries.invalidate(input.cwd);
 
-    const files = yield* checkpointStore
-      .diffCheckpoints({
-        cwd: input.cwd,
-        fromCheckpointRef,
-        toCheckpointRef: targetCheckpointRef,
-        fallbackFromToHead: false,
-        ignoreWhitespace: false,
-      })
-      .pipe(
-        Effect.map((diff) =>
-          parseTurnDiffFilesFromUnifiedDiff(diff).map((file) => ({
-            path: file.path,
-            kind: "modified" as const,
-            additions: file.additions,
-            deletions: file.deletions,
-          })),
-        ),
-        Effect.tapError((error) =>
-          appendCaptureFailureActivity({
-            threadId: input.threadId,
-            turnId: input.turnId,
-            detail: `Checkpoint captured, but turn diff summary is unavailable: ${error.message}`,
-            createdAt: input.createdAt,
-          }),
-        ),
-        Effect.catch((error) =>
-          Effect.logWarning("failed to derive checkpoint file summary", {
-            threadId: input.threadId,
-            turnId: input.turnId,
-            turnCount: input.turnCount,
-            detail: error.message,
-          }).pipe(Effect.as([])),
-        ),
-      );
+    // A repository can be cloned or initialized during the turn. Its ending
+    // checkpoint is still valid, but HEAD/current files cannot reconstruct the
+    // missing starting state. Skip the unavailable comparison without reporting
+    // a synthetic Git process failure or relabeling the saved checkpoint as failed.
+    const files = fromCheckpointExists
+      ? yield* checkpointStore
+          .diffCheckpoints({
+            cwd: input.cwd,
+            fromCheckpointRef,
+            toCheckpointRef: targetCheckpointRef,
+            fallbackFromToHead: false,
+            ignoreWhitespace: false,
+          })
+          .pipe(
+            Effect.map((diff) =>
+              parseTurnDiffFilesFromUnifiedDiff(diff).map((file) => ({
+                path: file.path,
+                kind: "modified" as const,
+                additions: file.additions,
+                deletions: file.deletions,
+              })),
+            ),
+            Effect.tapError((error) =>
+              appendDiffUnavailableActivity({
+                threadId: input.threadId,
+                turnId: input.turnId,
+                reason: "diff-failed",
+                fromCheckpointRef,
+                toCheckpointRef: targetCheckpointRef,
+                detail: `Checkpoint saved, but turn changes could not be calculated: ${error.message}`,
+                createdAt: input.createdAt,
+              }),
+            ),
+            Effect.catch((error) =>
+              Effect.logWarning("failed to derive checkpoint file summary", {
+                threadId: input.threadId,
+                turnId: input.turnId,
+                turnCount: input.turnCount,
+                detail: error.message,
+              }).pipe(Effect.as([])),
+            ),
+          )
+      : yield* appendDiffUnavailableActivity({
+          threadId: input.threadId,
+          turnId: input.turnId,
+          reason: "missing-baseline",
+          fromCheckpointRef,
+          toCheckpointRef: targetCheckpointRef,
+          detail:
+            "Checkpoint saved, but turn changes are unavailable because the pre-turn snapshot is missing. This can happen when a repository is cloned or initialized during a turn.",
+          createdAt: input.createdAt,
+        }).pipe(Effect.as([]));
 
     const assistantMessageId =
       input.assistantMessageId ??

@@ -100,6 +100,7 @@ import {
 } from "../codexSteerCorrelation.ts";
 import { expandHomePath } from "../../pathExpansion.ts";
 import {
+  buildCafeCodexDeveloperInstructions,
   CODEX_DEFAULT_MODE_DEVELOPER_INSTRUCTIONS,
   CODEX_PLAN_MODE_DEVELOPER_INSTRUCTIONS,
 } from "../CodexDeveloperInstructions.ts";
@@ -462,6 +463,7 @@ export function buildCodexAppServerArgs(
 }
 
 export interface CodexSessionRuntimeOptions {
+  readonly customInstructions?: string | undefined;
   readonly nativeControlMcp?: Pick<SchedulingSessionBinding, "name" | "launch"> | undefined;
   /** Exact Cafe chat/account-bound durable guard; never a native history writer. */
   readonly historySafety?: CodexHistorySafetyCallbacks<CodexSessionRuntimeError>;
@@ -1588,6 +1590,7 @@ function buildLocalCodexTurnEnvironments(input: {
 }
 
 function buildThreadStartParams(input: {
+  readonly customInstructions?: string | undefined;
   readonly cwd: string;
   readonly runtimeMode: RuntimeMode;
   readonly model: string | undefined;
@@ -1622,6 +1625,7 @@ function buildThreadStartParams(input: {
     };
   }
   return {
+    developerInstructions: buildCafeCodexDeveloperInstructions(input),
     cwd: input.cwd,
     environments: buildLocalCodexTurnEnvironments({
       cwd: input.cwd,
@@ -2745,6 +2749,7 @@ const requestCodexThreadOpen = <M extends CodexThreadOpenMethod>(
   );
 
 export const openCodexThread = (input: {
+  readonly customInstructions?: string | undefined;
   readonly client: CodexThreadOpenClient;
   readonly threadId: ThreadId;
   readonly runtimeMode: RuntimeMode;
@@ -2763,6 +2768,7 @@ export const openCodexThread = (input: {
     serviceTier: input.serviceTier,
     additionalDirectories: input.additionalDirectories,
     autoCompactTokenLimit: input.autoCompactTokenLimit,
+    customInstructions: input.customInstructions,
   });
 
   if (resumeThreadId === undefined) {
@@ -8772,6 +8778,7 @@ export const makeCodexSessionRuntime = (
         additionalDirectories: options.additionalDirectories,
         resumeThreadId,
         autoCompactTokenLimit: options.autoCompactTokenLimit,
+        customInstructions: options.customInstructions,
       });
 
       const providerThreadId = opened.thread.id;

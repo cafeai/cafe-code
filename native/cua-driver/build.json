@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
   "sourceCommit": "b0968e1b12834e485dda68789541a3cc57664a9f",
-  "patchSha256": "3bf389c689603c33804890073419234f618142fe7ea4b28ebf1a6b3d559d528d",
+  "patchSha256": "b68f31fb3c412fe829cc335b6e281d3c0475ca0bebfc29398472b5ef32ea2623",
   "reviewedPlatforms": ["darwin"],
   "linuxBlocker": "RustSec XML advisories remain in runtime-reachable Linux AT-SPI dependencies",
   "sourceOnly": true,
@@ -15,6 +15,18 @@
   },
   "nativeFixes": [
     "macos-live-bundle-electron-detection",
-    "macos-exact-window-electron-foreground-unicode-hid"
+    "macos-exact-window-electron-foreground-unicode-hid",
+    "macos-coalesced-cursor-frames",
+    "macos-authoritative-cursor-retirement",
+    "macos-human-input-ownership-and-restoration",
+    "macos-pointer-route-intent",
+    "macos-typed-value-readback",
+    "macos-pid-scroll-diagnostics",
+    "supported-element-presence-schema",
+    "macos-private-capture-visibility-gate",
+    "macos-indicator-capture-exclusion",
+    "macos-nonblocking-agent-cursor",
+    "macos-private-cdp-capture-visibility-gate",
+    "macos-indicator-visible-window-classification"
   ]
 }

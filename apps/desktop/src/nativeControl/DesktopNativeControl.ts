@@ -4,6 +4,7 @@ import * as Layer from "effect/Layer";
 import { join } from "node:path";
 import * as DesktopEnvironment from "../app/DesktopEnvironment.ts";
 import { NativeControlHost } from "./NativeControlHost.ts";
+import { NativeControlIndicators } from "./NativeControlVisibility.ts";
 
 export class DesktopNativeControl extends Context.Service<
   DesktopNativeControl,
@@ -14,7 +15,16 @@ export const layer = Layer.effect(
   DesktopNativeControl,
   Effect.gen(function* () {
     const environment = yield* DesktopEnvironment.DesktopEnvironment;
-    const host = new NativeControlHost({
+    let host: NativeControlHost;
+    const visibility =
+      environment.platform === "darwin"
+        ? new NativeControlIndicators({
+            stop: (episode) => host.stopActivity(episode),
+            refresh: (episode) => host.refreshActivityTarget(episode),
+            inputPolicy: (policy) => host.setInputPolicy(policy),
+          })
+        : undefined;
+    host = new NativeControlHost({
       stateDirectory: environment.stateDir,
       runtimeRoot: environment.isPackaged
         ? join(environment.resourcesPath, "cua-driver")
@@ -28,6 +38,7 @@ export const layer = Layer.effect(
       // The source launcher and packaged app both use this actual macOS
       // CFBundleIdentifier; the development AppUserModelID differs.
       hostBundleId: "com.cafeai.cafecode",
+      ...(visibility ? { visibility } : {}),
     });
     yield* Effect.acquireRelease(
       Effect.promise(async () => {

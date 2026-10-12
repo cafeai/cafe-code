@@ -121,6 +121,21 @@ if (process.isMainFrame === true) {
     ...(process.platform === "darwin"
       ? {
           getNativeControlState: () => ipcRenderer.invoke(IpcChannels.NATIVE_CONTROL_STATE_CHANNEL),
+          getNativeControlActivity: () =>
+            ipcRenderer.invoke(IpcChannels.NATIVE_CONTROL_ACTIVITY_GET_CHANNEL),
+          stopNativeControlActivity: (episode) =>
+            ipcRenderer.invoke(IpcChannels.NATIVE_CONTROL_ACTIVITY_STOP_CHANNEL, episode),
+          setNativeControlInputPolicy: (policy) =>
+            ipcRenderer.invoke(IpcChannels.NATIVE_CONTROL_INPUT_POLICY_CHANNEL, policy),
+          onNativeControlActivity: (listener) => {
+            const wrapped = (
+              _event: Electron.IpcRendererEvent,
+              activity: Parameters<typeof listener>[0],
+            ) => listener(activity);
+            ipcRenderer.on(IpcChannels.NATIVE_CONTROL_ACTIVITY_CHANNEL, wrapped);
+            return () =>
+              ipcRenderer.removeListener(IpcChannels.NATIVE_CONTROL_ACTIVITY_CHANNEL, wrapped);
+          },
           setNativeControlEnabled: (enabled: boolean) =>
             ipcRenderer.invoke(IpcChannels.NATIVE_CONTROL_ENABLE_CHANNEL, enabled),
           getNativeControlDiagnostics: () =>

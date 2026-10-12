@@ -4,7 +4,44 @@ import {
   detectSourceControlProviderFromRemoteUrl,
   getChangeRequestTerminologyForKind,
   resolveChangeRequestPresentation,
+  selectSourceControlCloneUrl,
 } from "./sourceControl.ts";
+
+describe("selectSourceControlCloneUrl", () => {
+  const urls = {
+    nameWithOwner: "owner/repo",
+    url: "https://github.com/owner/repo",
+    sshUrl: "git@github.com:owner/repo.git",
+  };
+
+  it.each([undefined, "owner/repo", "https://github.com/owner/repo.git"])(
+    "defaults %s to HTTPS without assuming SSH setup",
+    (repositoryInput) => {
+      const options = repositoryInput === undefined ? {} : { repositoryInput };
+      expect(selectSourceControlCloneUrl(urls, options)).toBe(urls.url);
+      expect(selectSourceControlCloneUrl(urls, { ...options, protocol: "auto" })).toBe(urls.url);
+    },
+  );
+
+  it.each(["git@github.com:owner/repo.git", "ssh://git@github.com/owner/repo.git"])(
+    "respects explicit SSH reference %s",
+    (repositoryInput) => {
+      expect(selectSourceControlCloneUrl(urls, { repositoryInput })).toBe(urls.sshUrl);
+      expect(selectSourceControlCloneUrl(urls, { repositoryInput, protocol: "https" })).toBe(
+        urls.url,
+      );
+    },
+  );
+
+  it("gives an explicit protocol priority over the reference spelling", () => {
+    expect(
+      selectSourceControlCloneUrl(urls, {
+        repositoryInput: urls.url,
+        protocol: "ssh",
+      }),
+    ).toBe(urls.sshUrl);
+  });
+});
 
 describe("source control presentation", () => {
   it("uses merge request terminology for GitLab", () => {

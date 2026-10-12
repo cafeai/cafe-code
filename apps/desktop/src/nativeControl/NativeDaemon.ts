@@ -10,6 +10,7 @@ import {
   type NativeToolResult,
 } from "@cafecode/shared/nativeControl";
 import { verifyNativeRuntime } from "@cafecode/shared/nativeRuntime";
+import { NativeActivityChannel, type NativeActivityEvent } from "./NativeActivityChannel.ts";
 export { verifyNativeRuntime } from "@cafecode/shared/nativeRuntime";
 
 export interface NativeDaemonConnection {
@@ -157,54 +158,79 @@ export class NativeDaemon {
   private endpoint: string | undefined;
   private exited: Promise<void> | undefined;
   private stopping: Promise<void> | undefined;
-  constructor(runtimeRoot: string, hostBundleId: string) {
+  private activityChannel: NativeActivityChannel | undefined;
+  private readonly receiveActivity:
+    | ((event: NativeActivityEvent) => Promise<readonly number[] | void>)
+    | undefined;
+  constructor(
+    runtimeRoot: string,
+    hostBundleId: string,
+    receiveActivity?: (event: NativeActivityEvent) => Promise<readonly number[] | void>,
+  ) {
     this.runtimeRoot = runtimeRoot;
     this.hostBundleId = hostBundleId;
+    this.receiveActivity = receiveActivity;
   }
 
   async start(): Promise<void> {
     await this.stopping;
     if (this.child) return;
     const executable = await verifyNativeRuntime(this.runtimeRoot);
-    this.root = await fs.realpath(await fs.mkdtemp(join(tmpdir(), "cafe-cua-")));
-    this.endpoint =
-      process.platform === "win32"
-        ? `\\\\.\\pipe\\cafe-cua-${randomUUID()}`
-        : join(this.root, "driver.sock");
-    const child = spawn(
-      executable,
-      [
-        "serve",
-        "--embedded",
-        "--parent-liveness-stdio",
-        "--no-permissions-gate",
-        "--cursor-reduced-motion",
-        "auto",
-        "--socket",
-        this.endpoint,
-        "--host-bundle-id",
-        this.hostBundleId,
-        "--permission-mode",
-        "standard",
-        "--grant",
-        "existing-profile",
-      ],
-      {
-        env: nativeDaemonEnvironment(process.env, this.root),
-        shell: false,
-        windowsHide: true,
-        stdio: ["pipe", "ignore", "ignore"],
-      },
-    );
-    this.child = child;
-    child.stdin?.on("error", () => {
-      /* A dead owned child cannot accept further input. */
-    });
-    this.exited = new Promise((resolve) => {
-      child.once("exit", () => resolve());
-      child.once("error", () => resolve());
-    });
     try {
+      this.root = await fs.realpath(await fs.mkdtemp(join(tmpdir(), "cafe-cua-")));
+      this.endpoint =
+        process.platform === "win32"
+          ? `\\\\.\\pipe\\cafe-cua-${randomUUID()}`
+          : join(this.root, "driver.sock");
+      if (this.receiveActivity) {
+        this.activityChannel = new NativeActivityChannel(
+          join(this.root, "activity.sock"),
+          this.receiveActivity,
+        );
+        await this.activityChannel.listen();
+      }
+      const child = spawn(
+        executable,
+        [
+          "serve",
+          "--embedded",
+          "--parent-liveness-stdio",
+          "--no-permissions-gate",
+          "--cursor-reduced-motion",
+          "auto",
+          "--socket",
+          this.endpoint,
+          "--host-bundle-id",
+          this.hostBundleId,
+          "--permission-mode",
+          "standard",
+          "--grant",
+          "existing-profile",
+        ],
+        {
+          env: {
+            ...nativeDaemonEnvironment(process.env, this.root),
+            ...(this.activityChannel
+              ? {
+                  CUA_DRIVER_CAFE_ACTIVITY_SOCKET: this.activityChannel.path,
+                  CUA_DRIVER_CAFE_ACTIVITY_TOKEN: this.activityChannel.token,
+                  CUA_DRIVER_CAFE_ACTIVITY_REQUIRED: "1",
+                }
+              : {}),
+          },
+          shell: false,
+          windowsHide: true,
+          stdio: ["pipe", "ignore", "ignore"],
+        },
+      );
+      this.child = child;
+      child.stdin?.on("error", () => {
+        /* A dead owned child cannot accept further input. */
+      });
+      this.exited = new Promise((resolve) => {
+        child.once("exit", () => resolve());
+        child.once("error", () => resolve());
+      });
       const deadline = Date.now() + 15_000;
       while (Date.now() < deadline) {
         if (child.exitCode !== null || child.signalCode !== null || !child.pid)
@@ -281,7 +307,30 @@ export class NativeDaemon {
     }
   }
 
-  async stop(): Promise<void> {
+  async windowInfo(pid: number, windowId: number): Promise<Record<string, unknown>> {
+    if (
+      !this.endpoint ||
+      !this.child ||
+      this.child.exitCode !== null ||
+      this.child.signalCode !== null
+    )
+      throw new Error("Controller unavailable");
+    const connection = await connectNativeDaemon(this.endpoint, 1500);
+    try {
+      return await connection.request({
+        method: "cafe_window_info",
+        args: { pid, window_id: windowId },
+      });
+    } finally {
+      connection.close();
+    }
+  }
+
+  async stop(options?: { readonly force?: boolean }): Promise<void> {
+    // Cancellation must stop physical input immediately, including while an
+    // ordinary shutdown is already waiting for this exact owned child.
+    if (options?.force && this.child?.exitCode === null && this.child.signalCode === null)
+      this.child.kill("SIGKILL");
     if (this.stopping) return this.stopping;
     const stopping = this.stopOwnedChild();
     this.stopping = stopping;
@@ -294,12 +343,13 @@ export class NativeDaemon {
 
   private async stopOwnedChild(): Promise<void> {
     const child = this.child;
-    if (!child) return;
     const root = this.root;
-    child.stdin?.end();
-    const force = setTimeout(() => {
-      if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
-    }, 5000);
+    child?.stdin?.end();
+    const force = child
+      ? setTimeout(() => {
+          if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
+        }, 5000)
+      : undefined;
     try {
       await this.exited;
     } finally {
@@ -308,6 +358,8 @@ export class NativeDaemon {
       this.endpoint = undefined;
     }
     if (root) {
+      await this.activityChannel?.close();
+      this.activityChannel = undefined;
       await fs.rm(root, { recursive: true, force: true });
       if (this.root === root) this.root = undefined;
     }

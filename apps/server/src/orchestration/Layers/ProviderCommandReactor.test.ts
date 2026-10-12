@@ -4536,54 +4536,72 @@ describe("ProviderCommandReactor", () => {
     expect(thread?.session?.runtimeMode).toBe("approval-required");
   });
 
-  it("prepends the configured system prompt to the first provider turn only", async () => {
-    const harness = await createHarness();
-    const now = "2026-01-01T00:00:00.000Z";
-    const attachments = [
-      {
-        type: "image" as const,
-        id: "attachment-1",
-        name: "screenshot.png",
-        mimeType: "image/png",
-        sizeBytes: 128,
-      },
-    ] as unknown as ChatAttachment[];
-    fs.mkdirSync(path.dirname(harness.systemPromptPath), { recursive: true });
-    fs.writeFileSync(harness.systemPromptPath, "  Follow the repository rules.  \n", "utf8");
+  it.each(["codex", "claudeAgent", "grok"] as const)(
+    "uses native instructions for Codex/Claude and preserves %s input policy",
+    async (provider) => {
+      const harness = await createHarness({
+        threadModelSelection: {
+          instanceId: ProviderInstanceId.make(provider),
+          model:
+            provider === "codex"
+              ? "gpt-5-codex"
+              : provider === "claudeAgent"
+                ? "claude-sonnet-4"
+                : "grok-code-fast-1",
+        },
+      });
+      const now = "2026-01-01T00:00:00.000Z";
+      const attachments = [
+        {
+          type: "image" as const,
+          id: "attachment-1",
+          name: "screenshot.png",
+          mimeType: "image/png",
+          sizeBytes: 128,
+        },
+      ] as unknown as ChatAttachment[];
+      fs.mkdirSync(path.dirname(harness.systemPromptPath), { recursive: true });
+      fs.writeFileSync(harness.systemPromptPath, "  Follow the repository rules.  \n", "utf8");
 
-    await Effect.runPromise(
-      harness.engine.dispatch({
-        type: "thread.turn.start",
-        commandId: CommandId.make("cmd-turn-start-system-prompt"),
+      await Effect.runPromise(
+        harness.engine.dispatch({
+          type: "thread.turn.start",
+          commandId: CommandId.make("cmd-turn-start-system-prompt"),
+          threadId: ThreadId.make("thread-1"),
+          message: {
+            messageId: asMessageId("user-message-system-prompt"),
+            role: "user",
+            text: "implement the feature",
+            attachments,
+          },
+          interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+          runtimeMode: "approval-required",
+          createdAt: now,
+        }),
+      );
+
+      await waitFor(() => harness.sendTurn.mock.calls.length === 1);
+      expect(harness.sendTurn.mock.calls[0]?.[0]).toMatchObject({
         threadId: ThreadId.make("thread-1"),
-        message: {
-          messageId: asMessageId("user-message-system-prompt"),
+        input:
+          provider !== "grok"
+            ? "implement the feature"
+            : "System prompt:\nFollow the repository rules.\n\nUser request:\nimplement the feature",
+        attachments,
+      });
+
+      const readModel = await harness.readModel();
+      const thread = readModel.threads.find((entry) => entry.id === ThreadId.make("thread-1"));
+      expect(
+        thread?.messages.find((message) => message.id === "user-message-system-prompt"),
+      ).toEqual(
+        expect.objectContaining({
           role: "user",
           text: "implement the feature",
-          attachments,
-        },
-        interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
-        runtimeMode: "approval-required",
-        createdAt: now,
-      }),
-    );
-
-    await waitFor(() => harness.sendTurn.mock.calls.length === 1);
-    expect(harness.sendTurn.mock.calls[0]?.[0]).toMatchObject({
-      threadId: ThreadId.make("thread-1"),
-      input: "System prompt:\nFollow the repository rules.\n\nUser request:\nimplement the feature",
-      attachments,
-    });
-
-    const readModel = await harness.readModel();
-    const thread = readModel.threads.find((entry) => entry.id === ThreadId.make("thread-1"));
-    expect(thread?.messages.find((message) => message.id === "user-message-system-prompt")).toEqual(
-      expect.objectContaining({
-        role: "user",
-        text: "implement the feature",
-      }),
-    );
-  });
+        }),
+      );
+    },
+  );
 
   it("does not prepend a blank system prompt or apply the prompt to later provider turns", async () => {
     const harness = await createHarness();

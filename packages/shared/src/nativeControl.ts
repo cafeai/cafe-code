@@ -13,6 +13,7 @@ export {
   type ComputerObserve,
   type ComputerAct,
   type ComputerAction,
+  type ComputerInputPolicy,
 } from "./nativeComputer.ts";
 
 export const NATIVE_CONTROL_HOST_FILE = "native-control-host.json";
@@ -27,6 +28,11 @@ export const NATIVE_CONTROL_ENVIRONMENT = Object.freeze({
   DO_NOT_TRACK: "1",
   CUA_DRIVER_RS_UPDATE_CHECK: "false",
   CUA_DRIVER_DISABLE_UNRESTRICTED: "1",
+  // The bound interface owns post-input observation. Keep the native global
+  // window-change diagnostic bounded rather than paying a second full second.
+  CUA_DRIVER_WINDOW_CHANGE_TIMEOUT_MS: "100",
+  CUA_DRIVER_WINDOW_CHANGE_POLL_MS: "25",
+  CUA_DRIVER_CAFE_CURSOR_NONBLOCKING: "1",
 });
 
 export const NATIVE_CONTROL_INSTRUCTIONS =
@@ -85,6 +91,60 @@ export const nativeControlError = (message: string): NativeToolResult => ({
   isError: true,
   content: [{ type: "text", text: message }],
 });
+
+/** Decoder messages may contain private input values. Return only an allowlisted
+ * structural path and fixed guidance, never the raw diagnostic or payload. */
+export function nativeControlValidationError(error: unknown): NativeToolResult {
+  const message = error instanceof Error ? error.message : "";
+  const match = /at ((?:\[(?:"[a-z_]+"|\d+)\])+)$/u.exec(message);
+  const candidate = match?.[1]?.slice(0, 256);
+  const allowed = new Set([
+    "actions",
+    "target",
+    "type",
+    "text",
+    "keys",
+    "point",
+    "x",
+    "y",
+    "element",
+    "button",
+    "count",
+    "value",
+    "from",
+    "to",
+    "files",
+    "url",
+    "replace",
+    "input_route",
+    "input_policy",
+    "view",
+    "query",
+    "full",
+    "operation",
+    "name",
+    "arguments",
+    "pid",
+    "window_id",
+  ]);
+  const path =
+    candidate && [...candidate.matchAll(/"([a-z_]+)"/gu)].every((entry) => allowed.has(entry[1]!))
+      ? candidate
+      : undefined;
+  const expected =
+    "Use published action shapes: type/text, key/keys, and click or scroll with point:{x,y}. Transport identity and file-output arguments are reserved.";
+  return {
+    ...nativeControlError(
+      `Invalid computer-use arguments${path ? ` at ${path}` : ""}. ${expected}`,
+    ),
+    structuredContent: {
+      code: "invalid_arguments",
+      effect: "refused",
+      ...(path ? { path } : {}),
+      expected,
+    },
+  };
+}
 
 // Cafe owns these conveniences. Generate upstream schemas without modifying
 // them, then apply the same overrides at publication after every Cua upgrade.

@@ -12,6 +12,9 @@ import * as SqlClient from "effect/unstable/sql/SqlClient";
 
 import { ServerConfig } from "./config.ts";
 import { fileAttachmentRouteLayer } from "./fileAttachmentHttp.ts";
+import { ChatImagesLive } from "./chatImages/service.ts";
+import { ChatImagePublicationLive } from "./chatImages/reactor.ts";
+import { chatImageRouteLayer } from "./chatImages/http.ts";
 import { desktopObservationRouteLayer } from "./desktopObservations/observationHttp.ts";
 import {
   attachmentsRouteLayer,
@@ -143,6 +146,7 @@ const HttpServerLive = Layer.unwrap(
 const PlatformServicesLive = NodeServices.layer;
 
 const ReactorLayerLive = Layer.empty.pipe(
+  Layer.provideMerge(ChatImagePublicationLive),
   Layer.provideMerge(OrchestrationReactorLive),
   Layer.provideMerge(CheckpointReactorLive),
   Layer.provideMerge(ProviderRuntimeIngestionLive),
@@ -282,7 +286,7 @@ const ServerClientSettingsLayerLive = ServerClientSettingsLive.pipe(
 
 const RuntimeCoreDependenciesLive = ReactorLayerLive.pipe(
   // Core Services
-  Layer.provideMerge(ThreadDetailSubscriptionRegistryLive),
+  Layer.provideMerge(Layer.mergeAll(ChatImagesLive, ThreadDetailSubscriptionRegistryLive)),
   Layer.provideMerge(CheckpointingLayerLive),
   Layer.provideMerge(SourceControlProviderRegistryLayerLive),
   Layer.provideMerge(GitLayerLive),
@@ -357,6 +361,7 @@ export const makeRoutesLayer = Layer.mergeAll(
   authWebSocketTokenRouteLayer,
   attachmentsRouteLayer,
   fileAttachmentRouteLayer,
+  chatImageRouteLayer,
   desktopObservationRouteLayer,
   brandingSidebarImageServeRouteLayer,
   brandingSidebarImageUploadRouteLayer,

@@ -2,7 +2,9 @@ import {
   nativeControlError,
   nativeToolArguments,
   type NativeToolResult,
+  type ComputerInputPolicy,
 } from "@cafecode/shared/nativeControl";
+import { nativeInputPolicyRefusal } from "./NativeInputPolicy.ts";
 
 type Fields = Record<string, unknown>;
 export type NativeInvoke = (name: string, args: Fields) => Promise<NativeToolResult>;
@@ -207,11 +209,15 @@ function sameDestination(actual: string, requested: string): boolean {
  * invoke callback rechecks chat/turn authority before EVERY native subcall. */
 class NativeControlActions {
   private readonly invoke: NativeInvoke;
-  constructor(invoke: NativeInvoke) {
+  private readonly inputPolicy: ComputerInputPolicy;
+  constructor(invoke: NativeInvoke, inputPolicy: ComputerInputPolicy = "foreground-allowed") {
     this.invoke = invoke;
+    this.inputPolicy = inputPolicy;
   }
 
   private native(name: string, args: Fields): Promise<NativeToolResult> {
+    const refusal = nativeInputPolicyRefusal(this.inputPolicy, name, args);
+    if (refusal) return Promise.resolve(refusal);
     const nativeArgs = Object.fromEntries(
       Object.entries(args).filter(
         ([key]) => !cafeArguments.has(key) && !(name === "list_windows" && key === "query"),
@@ -255,6 +261,7 @@ class NativeControlActions {
     // Only these BEFORE-DISPATCH targeting refusals qualify. A successful post,
     // partial text delivery, AX echo or lost response can never trigger replay.
     if (
+      this.inputPolicy !== "background-only" &&
       args.auto_foreground !== false &&
       args.delivery_mode !== "foreground" &&
       response.isError === true &&
@@ -654,6 +661,9 @@ export function executeNativeControlTool(
   name: string,
   args: Fields,
   invoke: NativeInvoke,
+  inputPolicy: ComputerInputPolicy = "foreground-allowed",
 ): Promise<NativeToolResult> {
-  return new NativeControlActions(invoke).call(name, args);
+  const refusal = nativeInputPolicyRefusal(inputPolicy, name, args);
+  if (refusal) return Promise.resolve(refusal);
+  return new NativeControlActions(invoke, inputPolicy).call(name, args);
 }

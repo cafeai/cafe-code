@@ -1,6 +1,7 @@
 import { EnvironmentId, ThreadId, PROVIDER_SEND_TURN_MAX_FILE_BYTES } from "@cafecode/contracts";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
+  fileRequest,
   uploadFileAttachment,
   getFileAttachmentPreview,
   downloadFileAttachment,
@@ -43,6 +44,26 @@ afterEach(() => {
 });
 
 describe("environment-scoped file attachment transport", () => {
+  it.each(["primary", "remote"])(
+    "authenticates chat-image manifests and bytes on %s without credentials in URLs",
+    async (environment) => {
+      mocks.bearer.mockResolvedValue("private-test-bearer");
+      const fetcher = vi.fn().mockResolvedValue(new Response("image"));
+      vi.stubGlobal("fetch", fetcher);
+      const query = { threadId: "chat", messageId: "assistant-a", source: "/repo/chart%20one.png" };
+      await fileRequest(EnvironmentId.make(environment), "/api/chat-images", {}, query);
+      const [target, init] = fetcher.mock.calls[0]!;
+      const url = new URL(target);
+      expect(url.pathname).toBe("/api/chat-images");
+      expect(Object.fromEntries(url.searchParams)).toEqual(query);
+      expect(init.credentials).toBe(environment === "primary" ? "include" : "omit");
+      expect(init.headers.get("authorization")).toBe(
+        environment === "primary" ? null : "Bearer private-test-bearer",
+      );
+      expect(url.href).not.toContain("bearer");
+      expect(init.redirect).toBe("error");
+    },
+  );
   it.each(["primary", "remote"])(
     "keeps the preview query separate from the attachment ID on %s",
     async (environment) => {

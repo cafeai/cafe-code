@@ -1,5 +1,6 @@
 import {
   NativeControlChatStateSchema,
+  NativeControlActivitySchema,
   NativeControlPermissionsStateSchema,
   NativeControlResultSchema,
   NativeControlStateSchema,
@@ -55,6 +56,34 @@ export const getNativeControlState = makeIpcMethod({
   handler: Effect.fn("desktop.nativeControl.state")(function* () {
     const host = yield* DesktopNativeControl;
     return yield* Effect.promise(() => host.state());
+  }),
+});
+export const getNativeControlActivity = makeIpcMethod({
+  channel: IpcChannels.NATIVE_CONTROL_ACTIVITY_GET_CHANNEL,
+  payload: Schema.Void,
+  result: NativeControlActivitySchema,
+  handler: Effect.fn("desktop.nativeControl.activity")(function* () {
+    return (yield* DesktopNativeControl).activity();
+  }),
+});
+export const stopNativeControlActivity = makeIpcMethod({
+  channel: IpcChannels.NATIVE_CONTROL_ACTIVITY_STOP_CHANNEL,
+  payload: Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(128)),
+  result: Schema.Void,
+  handler: Effect.fn("desktop.nativeControl.stopActivity")(function* (episode) {
+    const host = yield* DesktopNativeControl;
+    yield* Effect.promise(() => host.stopActivity(episode));
+    yield* notifyNativeControlChanged;
+  }),
+});
+export const setNativeControlInputPolicy = makeIpcMethod({
+  channel: IpcChannels.NATIVE_CONTROL_INPUT_POLICY_CHANNEL,
+  payload: Schema.Literals(["background-only", "foreground-allowed"]),
+  result: Schema.Void,
+  handler: Effect.fn("desktop.nativeControl.inputPolicy")(function* (policy) {
+    const host = yield* DesktopNativeControl;
+    yield* Effect.promise(() => host.setInputPolicy(policy));
+    yield* notifyNativeControlChanged;
   }),
 });
 export const setNativeControlEnabled = makeIpcMethod({

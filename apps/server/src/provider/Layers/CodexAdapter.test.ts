@@ -35,6 +35,7 @@ import { it, vi } from "@effect/vitest";
 import * as Context from "effect/Context";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
+import * as FileSystem from "effect/FileSystem";
 import * as Exit from "effect/Exit";
 import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
@@ -694,6 +695,36 @@ function makeRuntimeFactory() {
 }
 
 it.effect(
+  "reads server custom instructions when materializing each Codex session without changing user turns",
+  () => {
+    const factory = makeRuntimeFactory();
+    return Effect.gen(function* () {
+      const config = yield* ServerConfig;
+      const files = yield* FileSystem.FileSystem;
+      yield* files.writeFileString(config.systemPromptPath, "  Be concise.  ");
+      const adapter = yield* makeCodexAdapter(decodeCodexSettings({}), {
+        makeRuntime: factory.factory,
+      });
+      const threadId = asThreadId("custom-instructions-chat");
+      yield* adapter.startSession({ threadId, runtimeMode: "full-access" });
+      assert.equal(factory.lastRuntime?.options.customInstructions, "Be concise.");
+      yield* adapter.stopSession(threadId);
+      yield* files.writeFileString(config.systemPromptPath, "Use metric units.");
+      yield* adapter.startSession({ threadId, runtimeMode: "full-access" });
+      assert.equal(factory.lastRuntime?.options.customInstructions, "Use metric units.");
+    }).pipe(
+      Effect.provide(SqlitePersistenceMemory),
+      Effect.provide(
+        ServerConfig.layerTest(process.cwd(), { prefix: "cafe-custom-instructions-" }),
+      ),
+      Effect.provide(ServerSettingsService.layerTest()),
+      Effect.provide(providerSessionDirectoryTestLayer),
+      Effect.provide(NodeServices.layer),
+    );
+  },
+);
+
+it.effect(
   "binds durable history safety callbacks to the exact Cafe chat and configured account",
   () => {
     const factory = makeRuntimeFactory();
@@ -1186,6 +1217,7 @@ validationLayer("CodexAdapterLive validation", (it) => {
       assert.equal(typeof options?.historySafety?.isBlocked, "function");
       assert.equal(typeof options?.historySafety?.markBlocked, "function");
       assert.deepStrictEqual(options, {
+        customInstructions: undefined,
         historySafety: options?.historySafety,
         appServerCwd: path.join(process.cwd(), "userdata"),
         binaryPath: "codex",

@@ -43,7 +43,7 @@ describe("092_LiveWork", () => {
     Effect.gen(function* () {
       const sql = yield* SqlClient.SqlClient;
       yield* runMigrations({ toMigrationInclusive: 91 });
-      const ran = yield* runMigrations();
+      const ran = yield* runMigrations({ toMigrationInclusive: 92 });
       assert.deepEqual(ran, [[92, "LiveWork"]]);
       assert.deepEqual(
         yield* sql<{ name: string }>`
@@ -58,7 +58,7 @@ describe("092_LiveWork", () => {
       );
       assert.deepEqual(yield* sql`SELECT * FROM projection_live_work`, []);
       yield* assertWorkflowRetention(sql);
-      assert.deepEqual(yield* runMigrations(), []);
+      assert.deepEqual(yield* runMigrations({ toMigrationInclusive: 92 }), []);
     }).pipe(Effect.provide(TestSqliteClient.layerMemory())),
   );
 
@@ -78,7 +78,7 @@ describe("092_LiveWork", () => {
           42, ${at}, 'local-terminal')
       `;
       const before = yield* sql`SELECT * FROM projection_live_work`;
-      assert.deepEqual(yield* runMigrations(), [
+      assert.deepEqual(yield* runMigrations({ toMigrationInclusive: 92 }), [
         [91, "CodexTransientRecoveryIntents"],
         [92, "LiveWork"],
       ]);
@@ -90,7 +90,7 @@ describe("092_LiveWork", () => {
         [{ name: "LiveWork" }],
       );
       yield* assertWorkflowRetention(sql);
-      assert.deepEqual(yield* runMigrations(), []);
+      assert.deepEqual(yield* runMigrations({ toMigrationInclusive: 92 }), []);
       assert.deepEqual(yield* sql`SELECT * FROM projection_live_work`, before);
     }).pipe(Effect.provide(TestSqliteClient.layerMemory())),
   );

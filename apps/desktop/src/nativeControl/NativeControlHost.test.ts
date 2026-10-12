@@ -2,8 +2,14 @@ import { describe, expect, it, vi } from "vitest";
 import * as fs from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { NativeControlHost, type NativeController } from "./NativeControlHost.ts";
+import {
+  NativeControlHost,
+  NATIVE_CONTROL_OPERATION_TIMEOUT_MS,
+  type NativeController,
+  type NativeControlVisibility,
+} from "./NativeControlHost.ts";
 import type { ThreadId } from "@cafecode/contracts";
+import { NativeComputerSession } from "./NativeComputerSession.ts";
 import {
   NATIVE_CONTROL_HOST_FILE,
   readNativeControlHost,
@@ -11,7 +17,14 @@ import {
   type NativeToolResult,
 } from "@cafecode/shared/nativeControl";
 
-async function fixture(fault?: "action" | "cleanup") {
+async function fixture(
+  fault?: "action" | "cleanup",
+  options?: {
+    operationTimeoutMs?: number;
+    visibility?: NativeControlVisibility;
+    inputPolicy?: "background-only" | "foreground-allowed";
+  },
+) {
   const request = vi.fn(async (body: Record<string, unknown>) => {
     if (body.method === "trusted_session_end")
       return fault === "cleanup"
@@ -32,6 +45,7 @@ async function fixture(fault?: "action" | "cleanup") {
     hostBundleId: "com.cafe.fixture",
     controller,
     platform: "darwin",
+    ...options,
   });
   const connection = await host.listen(false);
   await host.setEnabled(true);
@@ -71,6 +85,448 @@ async function fixture(fault?: "action" | "cleanup") {
 }
 
 describe("Electron-owned native control authority", () => {
+  it("restores the trusted policy after a request temporarily tightens it", async () => {
+    const f = await fixture();
+    try {
+      const b = await f.bind();
+      await b.update("activate");
+      await b.update("begin-turn");
+      await b.call("computer_advanced", {
+        operation: "call",
+        input_policy: "background-only",
+        name: "get_window_state",
+        arguments: { pid: 1, window_id: 2 },
+      });
+      expect(f.host.activity()).toMatchObject({
+        phase: "idle",
+        inputPolicy: "foreground-allowed",
+      });
+    } finally {
+      await f.host.close();
+    }
+  });
+
+  it("does not let an older geometry reply overwrite a newer target position", async () => {
+    const target = {
+      scope: "window",
+      pid: 1,
+      windowId: 2,
+      app: "Fixture",
+      title: "Canvas",
+      visible: true,
+      bounds: { x: 0, y: 0, width: 200, height: 100 },
+    };
+    const info = vi.fn(async () => target);
+    const f = await fixture();
+    Reflect.set(f.controller, "windowInfo", info);
+    try {
+      const b = await f.bind();
+      await b.update("activate");
+      await b.update("begin-turn");
+      await b.call("get_window_state", { pid: 1, window_id: 2 });
+      const older = Promise.withResolvers<typeof target>();
+      const newer = Promise.withResolvers<typeof target>();
+      info.mockImplementationOnce(() => older.promise).mockImplementationOnce(() => newer.promise);
+      const episode = f.host.activity().episode!;
+      const oldRead = f.host.refreshActivityTarget(episode);
+      const newRead = f.host.refreshActivityTarget(episode);
+      const moved = { ...target, bounds: { ...target.bounds, x: 500 } };
+      newer.resolve(moved);
+      await newRead;
+      older.resolve(target);
+      await oldRead;
+      expect(f.host.activity().target?.bounds?.x).toBe(500);
+    } finally {
+      await f.host.close();
+    }
+  });
+
+  it("announces a native real-pointer fallback before dispatch without claiming a capture", async () => {
+    let duringDispatch: unknown;
+    const f = await fixture();
+    f.request.mockImplementationOnce(async () => {
+      await Reflect.get(f.host, "receiveNativeActivity").call(f.host, {
+        kind: "using-pointer",
+        target: {
+          scope: "window",
+          pid: 1,
+          windowId: 2,
+          app: "Fixture",
+          title: "Canvas",
+          visible: true,
+          bounds: { x: 0, y: 0, width: 200, height: 100 },
+        },
+      });
+      duringDispatch = f.host.activity();
+      return {
+        content: [{ type: "text", text: "native pointer receipt" }],
+        structuredContent: { path: "cgevent_fg", effect: "unverifiable" },
+      };
+    });
+    try {
+      const b = await f.bind();
+      await b.update("activate");
+      await b.update("begin-turn");
+      await b.call("click", {
+        pid: 1,
+        window_id: 2,
+        x: 10,
+        y: 20,
+        delivery_mode: "foreground",
+        observe_after: false,
+      });
+      expect(duringDispatch).toMatchObject({
+        phase: "controlling",
+        inputRoute: "hid",
+        usingSystemPointer: true,
+        lastCaptureAt: null,
+      });
+      expect(f.host.activity()).toMatchObject({ phase: "idle", usingSystemPointer: false });
+    } finally {
+      await f.host.close();
+    }
+  });
+
+  it("initializes visible activity before native dispatch and retains it across idle gaps", async () => {
+    const shown = Promise.withResolvers<void>();
+    const entered = Promise.withResolvers<void>();
+    const visibility = {
+      update: vi.fn(async (a) => {
+        if (a.phase === "idle" && a.sequence === 1) {
+          entered.resolve();
+          await shown.promise;
+        }
+      }),
+      close: vi.fn(async () => {}),
+    } satisfies NativeControlVisibility;
+    const f = await fixture(undefined, { visibility });
+    try {
+      const b = await f.bind();
+      await b.update("activate");
+      await b.update("begin-turn");
+      const call = b.call("press_key", { key: "return", observe_after: false });
+      await entered.promise;
+      expect(f.controller.session).not.toHaveBeenCalled();
+      expect(f.request).not.toHaveBeenCalled();
+      shown.resolve();
+      await call;
+      expect(f.host.activity()).toMatchObject({
+        phase: "idle",
+        provider: "codex",
+        providerInstanceId: "fixture-account",
+        threadId: "fixture-thread",
+      });
+      const episode = f.host.activity().episode!;
+      await f.host.stopActivity("stale-episode");
+      expect(f.host.activity().episode).toBe(episode);
+      await f.host.stopActivity(episode);
+      expect(f.host.activity()).toMatchObject({
+        phase: "inactive",
+        episode: null,
+        target: null,
+        lastCaptureAt: null,
+      });
+      expect((await b.call("press_key", { key: "return" })).result.isError).toBe(true);
+      expect(visibility.update.mock.calls.map(([a]) => a.phase)).toContain("stopping");
+    } finally {
+      shown.resolve();
+      await f.host.close();
+    }
+  });
+  it("fails closed when the required visibility surface cannot initialize", async () => {
+    const f = await fixture(undefined, {
+      visibility: {
+        update: async (a) => {
+          if (a.phase !== "inactive" && a.phase !== "stopping")
+            throw new Error("fixture indicator unavailable");
+        },
+        close: async () => {},
+      },
+    });
+    try {
+      const b = await f.bind();
+      await b.update("activate");
+      await b.update("begin-turn");
+      expect((await b.call("press_key", { key: "return" })).result.isError).toBe(true);
+      expect(f.controller.session).not.toHaveBeenCalled();
+      expect(f.request).not.toHaveBeenCalled();
+      expect(f.controller.stop).toHaveBeenCalledWith({ force: true });
+      expect(f.host.activity().phase).toBe("inactive");
+    } finally {
+      await f.host.close();
+    }
+  });
+  it("does not let a model loosen the user input policy through advanced calls", async () => {
+    const f = await fixture(undefined, { inputPolicy: "background-only" });
+    try {
+      const b = await f.bind();
+      await b.update("activate");
+      await b.update("begin-turn");
+      const result = await b.call("computer_advanced", {
+        operation: "call",
+        input_policy: "foreground-allowed",
+        name: "press_key",
+        arguments: { pid: 1, window_id: 2, key: "return", delivery_mode: "foreground" },
+      });
+      expect(result.result.structuredContent).toMatchObject({ code: "input_policy_refused" });
+      expect(f.request).not.toHaveBeenCalled();
+      expect(f.host.activity().inputPolicy).toBe("background-only");
+    } finally {
+      await f.host.close();
+    }
+  });
+  it("stops an outstanding native action before acknowledging end-turn and never resumes its batch", async () => {
+    const f = await fixture();
+    const entered = Promise.withResolvers<void>();
+    const action = Promise.withResolvers<void>();
+    const stopped = Promise.withResolvers<void>();
+    const computerCall = vi.spyOn(NativeComputerSession.prototype, "call");
+    vi.mocked(f.controller.stop).mockImplementation(() => stopped.promise);
+    try {
+      const b = await f.bind();
+      await b.update("activate");
+      await b.update("begin-turn");
+      f.request.mockImplementation(async (body) => {
+        if (body.name === "press_key") {
+          entered.resolve();
+          await action.promise;
+          return { content: [], structuredContent: { effect: "unverifiable" } };
+        }
+        return {
+          content: [],
+          structuredContent: { pid: 1, window_id: 2, snapshot_id: "s00000001", elements: [] },
+        };
+      });
+      const selected = await b.call("computer_select", { pid: 1, window_id: 2 });
+      const target = JSON.parse(String(selected.result.content[0]!.text)).target as string;
+      const pending = b.call("computer_act", {
+        target,
+        actions: [
+          { type: "key", keys: ["return"] },
+          { type: "key", keys: ["escape"] },
+        ],
+      });
+      await entered.promise;
+      // Concurrent physical requests are refused, rather than scheduled later.
+      expect((await b.call("click", { x: 10, y: 20 })).result.isError).toBe(true);
+      let acknowledged = false;
+      const ending = b.update("end-turn").then(() => {
+        acknowledged = true;
+      });
+      await vi.waitFor(() => expect(f.controller.stop).toHaveBeenCalledWith({ force: true }));
+      expect(acknowledged).toBe(false);
+      expect((await f.host.state()).enabled).toBe(false);
+      stopped.resolve();
+      await ending;
+      expect((await pending).result.isError).toBe(true);
+      expect(await f.host.state()).toMatchObject({
+        diagnostics: { activeOperationCount: 0, interruptedOperationCount: 1 },
+      });
+      action.resolve();
+      // Let the original operation settle after the cancelled response. It
+      // must still observe revoked authority before any subsequent subcall.
+      await computerCall.mock.results.at(-1)!.value;
+      expect(f.request.mock.calls.filter(([body]) => body.name === "press_key")).toHaveLength(1);
+      expect(f.request.mock.calls.some(([body]) => body.name === "click")).toBe(false);
+      expect((await b.call("get_screen_size")).result.isError).toBe(true);
+    } finally {
+      action.resolve();
+      stopped.resolve();
+      computerCall.mockRestore();
+      await f.host.close();
+    }
+  });
+
+  it("discards a session acquired after cancellation even if a new controller generation is enabled", async () => {
+    const f = await fixture();
+    const acquired = Promise.withResolvers<{
+      request: typeof f.request;
+      close: () => void;
+    }>();
+    const entered = Promise.withResolvers<void>();
+    const closed = vi.fn();
+    vi.mocked(f.controller.session).mockImplementationOnce(async () => {
+      entered.resolve();
+      return acquired.promise;
+    });
+    try {
+      const b = await f.bind();
+      await b.update("activate");
+      await b.update("begin-turn");
+      const pending = b.call("get_screen_size");
+      await entered.promise;
+      await b.update("end-turn");
+      expect((await pending).result.isError).toBe(true);
+      expect(f.request).not.toHaveBeenCalled();
+      await f.host.setEnabled(true);
+      await b.update("begin-turn");
+      expect((await b.call("get_screen_size")).result.isError).not.toBe(true);
+      acquired.resolve({ request: f.request, close: closed });
+      await vi.waitFor(() => expect(closed).toHaveBeenCalledOnce());
+      expect(
+        f.request.mock.calls.filter(([body]) => body.method === "trusted_session_call"),
+      ).toHaveLength(1);
+      expect((await b.call("get_screen_size")).result.isError).not.toBe(true);
+      expect(f.controller.session).toHaveBeenCalledTimes(2);
+    } finally {
+      acquired.resolve({ request: f.request, close: closed });
+      await f.host.close();
+    }
+  });
+
+  it("bounds the entire operation, stops timed-out input, and permits only explicit recovery", async () => {
+    const f = await fixture(undefined, { operationTimeoutMs: 200 });
+    const entered = Promise.withResolvers<void>();
+    const action = Promise.withResolvers<void>();
+    const original = f.request.getMockImplementation()!;
+    f.request.mockImplementationOnce(async () => {
+      entered.resolve();
+      await action.promise;
+      return { content: [] };
+    });
+    try {
+      const b = await f.bind();
+      await b.update("activate");
+      await b.update("begin-turn");
+      const pending = b.call("click", { x: 10, y: 20 });
+      await entered.promise;
+      expect((await pending).result.isError).toBe(true);
+      await vi.waitFor(async () =>
+        expect(await f.host.state()).toMatchObject({
+          enabled: false,
+          diagnostics: {
+            operationTimeoutMs: 200,
+            activeOperationCount: 0,
+            timedOutOperationCount: 1,
+            interruptedOperationCount: 0,
+          },
+        }),
+      );
+      expect(f.controller.stop).toHaveBeenCalledWith({ force: true });
+      expect((await b.call("get_screen_size")).result.isError).toBe(true);
+      await f.host.setEnabled(true);
+      await b.update("begin-turn");
+      f.request.mockImplementation(original);
+      expect((await b.call("get_screen_size")).result.isError).not.toBe(true);
+      expect(f.controller.session).toHaveBeenCalledTimes(2);
+      const labels = vi.mocked(f.controller.session).mock.calls.map(([label]) => label);
+      expect(new Set(labels).size).toBe(2);
+      expect(f.request.mock.calls.filter(([body]) => body.name === "click")).toHaveLength(1);
+    } finally {
+      action.resolve();
+      await f.host.close();
+    }
+  });
+
+  it("does not allow an injected budget to extend the production operation deadline", async () => {
+    const f = await fixture(undefined, { operationTimeoutMs: 60_000 });
+    try {
+      expect(await f.host.state()).toMatchObject({
+        diagnostics: { operationTimeoutMs: NATIVE_CONTROL_OPERATION_TIMEOUT_MS },
+      });
+    } finally {
+      await f.host.close();
+    }
+  });
+
+  it("uses one deadline across batch steps instead of granting each step another full budget", async () => {
+    const f = await fixture(undefined, { operationTimeoutMs: 2000 });
+    const firstEntered = Promise.withResolvers<void>();
+    const secondEntered = Promise.withResolvers<void>();
+    const first = Promise.withResolvers<void>();
+    const second = Promise.withResolvers<void>();
+    try {
+      const b = await f.bind();
+      await b.update("activate");
+      await b.update("begin-turn");
+      f.request.mockImplementation(async () => ({
+        content: [],
+        structuredContent: { pid: 1, window_id: 2, snapshot_id: "s00000001", elements: [] },
+      }));
+      const selected = await b.call("computer_select", { pid: 1, window_id: 2 });
+      const target = JSON.parse(String(selected.result.content[0]!.text)).target as string;
+      let steps = 0;
+      f.request.mockImplementation(async (body) => {
+        expect(body.name).toBe("press_key");
+        if (++steps === 1) {
+          firstEntered.resolve();
+          await first.promise;
+        } else {
+          secondEntered.resolve();
+          await second.promise;
+        }
+        return { content: [], structuredContent: { effect: "unverifiable" } };
+      });
+      vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+      const pending = b.call("computer_act", {
+        target,
+        actions: [
+          { type: "key", keys: ["return"] },
+          { type: "key", keys: ["escape"] },
+          { type: "key", keys: ["tab"] },
+        ],
+      });
+      await firstEntered.promise;
+      await vi.advanceTimersByTimeAsync(1000);
+      first.resolve();
+      await secondEntered.promise;
+      await vi.advanceTimersByTimeAsync(1000);
+      expect((await pending).result.isError).toBe(true);
+      expect(f.controller.stop).toHaveBeenCalledWith({ force: true });
+      expect(steps).toBe(2);
+      expect(await f.host.state()).toMatchObject({ diagnostics: { timedOutOperationCount: 1 } });
+    } finally {
+      vi.useRealTimers();
+      first.resolve();
+      second.resolve();
+      await f.host.close();
+    }
+  });
+
+  it("retires a disconnected caller's controller generation before explicit recovery", async () => {
+    const f = await fixture();
+    const entered = Promise.withResolvers<void>();
+    const action = Promise.withResolvers<void>();
+    f.request.mockImplementationOnce(async () => {
+      entered.resolve();
+      await action.promise;
+      return { content: [] };
+    });
+    try {
+      const b = await f.bind();
+      await b.update("activate");
+      await b.update("begin-turn");
+      const controller = new AbortController();
+      const pending = fetch(b.url, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${b.token}` },
+        body: JSON.stringify({
+          jsonrpc: "2.0",
+          id: 1,
+          method: "tools/call",
+          params: { name: "click", arguments: { x: 10, y: 20 } },
+        }),
+        signal: controller.signal,
+      }).catch(() => undefined);
+      await entered.promise;
+      controller.abort();
+      await pending;
+      await vi.waitFor(() => expect(f.controller.stop).toHaveBeenCalledWith({ force: true }));
+      expect(await f.host.state()).toMatchObject({
+        enabled: false,
+        diagnostics: { activeOperationCount: 0 },
+      });
+      await f.host.setEnabled(true);
+      await b.update("begin-turn");
+      expect((await b.call("get_screen_size")).result.isError).not.toBe(true);
+      expect(f.controller.session).toHaveBeenCalledTimes(2);
+      expect(f.request.mock.calls.filter(([body]) => body.name === "click")).toHaveLength(1);
+    } finally {
+      action.resolve();
+      await f.host.close();
+    }
+  });
+
   it("reacquires within the same active turn after release and rejects previous target handles", async () => {
     const f = await fixture();
     try {
@@ -142,7 +598,7 @@ describe("Electron-owned native control authority", () => {
       expect(response.result.isError).toBe(true);
       await disabling;
       expect(f.request.mock.calls.filter(([body]) => body.name === "press_key")).toHaveLength(1);
-      expect(f.request).toHaveBeenCalledWith({ method: "trusted_session_end" });
+      expect(f.controller.stop).toHaveBeenCalledWith({ force: true });
     } finally {
       await f.host.close();
     }

@@ -1,9 +1,5 @@
-import { spawn } from "node:child_process";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
-import { createRequire } from "node:module";
-import { tmpdir } from "node:os";
+import { mkdir, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
-import { createInterface } from "node:readline";
 import { fileURLToPath } from "node:url";
 import { expect, it } from "vitest";
 import { ThreadId } from "@cafecode/contracts";
@@ -11,80 +7,8 @@ import { requestNativeControlHost, type NativeToolResult } from "@cafecode/share
 import { NativeControlHost } from "./NativeControlHost.ts";
 import { NativeDaemon } from "./NativeDaemon.ts";
 
-const require = createRequire(import.meta.url);
+import { fieldFixture } from "./__fixtures__/electronFixture.ts";
 type Fields = Record<string, unknown>;
-
-async function fieldFixture() {
-  const profile = await mkdtemp(join(tmpdir(), "cafe-cua-input-"));
-  const env = { ...process.env };
-  delete env.ELECTRON_RUN_AS_NODE;
-  delete env.NODE_OPTIONS;
-  const child = spawn(
-    require("electron") as string,
-    [fileURLToPath(new URL("./__fixtures__/electron-field.cjs", import.meta.url)), profile],
-    { env, shell: false, stdio: ["pipe", "pipe", "pipe"] },
-  );
-  const lines = createInterface({ input: child.stdout });
-  const replies = new Map<number, (value: Fields) => void>();
-  let nextId = 0;
-  let ready: (value: Fields) => void;
-  const readiness = new Promise<Fields>((resolve, reject) => {
-    ready = resolve;
-    child.once("error", reject);
-    child.once("exit", () =>
-      reject(new Error("The owned Electron fixture exited before readiness.")),
-    );
-  });
-  lines.on("line", (line) => {
-    const value = JSON.parse(line) as Fields;
-    if (value.ready) ready(value);
-    else replies.get(Number(value.id))?.(value);
-  });
-  // Consume logs without treating Chromium diagnostics as protocol replies.
-  child.stderr.resume();
-  const exited = new Promise<void>((resolve) => child.once("close", () => resolve()));
-  const close = async () => {
-    child.stdin.end();
-    const deadline = setTimeout(() => child.kill("SIGTERM"), 5000);
-    try {
-      await exited;
-    } finally {
-      clearTimeout(deadline);
-      lines.close();
-      await rm(profile, { recursive: true, force: true });
-    }
-  };
-  try {
-    const deadline = setTimeout(() => child.kill("SIGTERM"), 20_000);
-    let info: Fields;
-    try {
-      info = await readiness;
-    } finally {
-      clearTimeout(deadline);
-    }
-    return {
-      pid: Number(info.pid),
-      state: () =>
-        new Promise<Fields>((resolve, reject) => {
-          const id = ++nextId;
-          const timeout = setTimeout(() => {
-            replies.delete(id);
-            reject(new Error("The Electron input-state reply timed out."));
-          }, 5000);
-          replies.set(id, (value) => {
-            clearTimeout(timeout);
-            replies.delete(id);
-            resolve(value);
-          });
-          child.stdin.write(JSON.stringify({ id, operation: "state" }) + "\n");
-        }),
-      close,
-    };
-  } catch (error) {
-    await close();
-    throw error;
-  }
-}
 
 // Opt-in GUI qualification uses the actual pinned Cua runtime and exact owned
 // Electron process. It types only into this disposable field, never a user app.
@@ -245,6 +169,52 @@ it.runIf(process.env.CAFE_CODE_CUA_INPUT_E2E === "1" && process.platform === "da
         (event) => event.type === "click" && event.target === "field",
       ).length;
       expect(clicks).toBe(2);
+      const wheelState = await call("computer_select", { pid: field.pid, view: "both" });
+      expect(wheelState.isError).not.toBe(true);
+      const wheelObservation = wheelState.data!.state as Fields;
+      const wheel = (wheelObservation.elements as Fields[]).find(
+        (e) => e.label === "Cafe fixture color wheel",
+      );
+      expect(wheel).toBeDefined();
+      const frame = wheel!.screenshot_frame as { x: number; y: number; w: number; h: number };
+      expect(frame).toBeDefined();
+      const pointerBefore = (await field.state()).pointer;
+      const wheelClick = await call("computer_advanced", {
+        operation: "call",
+        name: "click",
+        arguments: {
+          pid: field.pid,
+          window_id: wheelObservation.window_id,
+          capture_id: wheelObservation.capture_id,
+          input_route: "pointer",
+          delivery_mode: "foreground",
+          x: frame.x + frame.w * 0.1,
+          y: frame.y + frame.h / 2,
+          observe_after: false,
+        },
+      });
+      expect(wheelClick.isError, JSON.stringify(wheelClick)).not.toBe(true);
+      const wheelReceived = await field.state();
+      expect(wheelReceived.wheelClicks).toEqual([
+        expect.objectContaining({ x: expect.any(Number) }),
+      ]);
+      expect((wheelReceived.wheelClicks as Fields[])[0]!.x).toBeGreaterThan(20);
+      expect((wheelReceived.wheelClicks as Fields[])[0]!.x).toBeLessThan(45);
+      expect(wheelReceived.pointer).toEqual(pointerBefore);
+      const refusedForeground = await call("computer_advanced", {
+        operation: "call",
+        input_policy: "background-only",
+        name: "click",
+        arguments: {
+          pid: field.pid,
+          window_id: wheelObservation.window_id,
+          delivery_mode: "foreground",
+          x: 10,
+          y: 10,
+        },
+      });
+      expect(refusedForeground.isError).toBe(true);
+      expect((await field.state()).wheelClicks).toEqual(wheelReceived.wheelClicks);
       const evidence = join(
         dirname(fileURLToPath(import.meta.url)),
         "../../../..",

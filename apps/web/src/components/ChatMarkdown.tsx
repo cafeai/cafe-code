@@ -53,6 +53,7 @@ import { remarkMermaid } from "../lib/remarkMermaid";
 import { normalizeCodexCitationMarkers } from "../lib/codexCitations";
 import { MermaidBlock } from "./MermaidBlock";
 import { MarkdownTable } from "./MarkdownTableViewer";
+import { MarkdownImage, type MarkdownImageContext } from "./chat/MarkdownImage";
 
 class CodeHighlightErrorBoundary extends React.Component<
   { fallback: ReactNode; children: ReactNode },
@@ -76,6 +77,7 @@ class CodeHighlightErrorBoundary extends React.Component<
 }
 
 interface ChatMarkdownProps {
+  imageContext?: MarkdownImageContext | undefined;
   text: string;
   cwd: string | undefined;
   additionalWorkspaceRoots?: ReadonlyArray<string>;
@@ -713,6 +715,7 @@ function areMarkdownFileLinkPropsEqual(
 }
 
 function ChatMarkdown({
+  imageContext,
   text,
   cwd,
   additionalWorkspaceRoots = EMPTY_ADDITIONAL_WORKSPACE_ROOTS,
@@ -757,7 +760,11 @@ function ChatMarkdown({
     return buildFileLinkParentSuffixByPath(filePaths);
   }, [markdownFileLinkMetaByHref]);
   const markdownUrlTransform = useCallback(
-    (href: string) => {
+    (href: string, key: string) => {
+      // Image paths are transported by the authenticated chat-image service;
+      // they must never become direct browser filesystem requests.
+      if (key === "src" && imageContext && (href.startsWith("/") || /^[A-Za-z]:[\\/]/u.test(href)))
+        return href;
       // Native paths deliberately pass through the same recognition policy
       // before becoming actionable. Restoration occurs in the parsed AST;
       // a rejected/sanitized href can never be recovered from raw source here.
@@ -766,7 +773,7 @@ function ChatMarkdown({
         (resolveMarkdownFileLinkTarget(href, cwd) ? href : defaultUrlTransform(href))
       );
     },
-    [cwd],
+    [cwd, imageContext],
   );
   const markdownComponents = useMemo<Components>(
     () => ({
@@ -774,6 +781,14 @@ function ChatMarkdown({
         return <p {...props}>{renderSkillInlineMarkdownChildren(children, skills)}</p>;
       },
       li: MarkdownListItem,
+      img({ node: _node, src, alt, ...props }) {
+        const source = typeof src === "string" ? src : "";
+        return imageContext && (source.startsWith("/") || /^[A-Za-z]:[\\/]/u.test(source)) ? (
+          <MarkdownImage source={source} alt={alt ?? ""} context={imageContext} />
+        ) : (
+          <img {...props} src={src} alt={alt ?? ""} loading="lazy" />
+        );
+      },
       a({ node: _node, href, ...props }) {
         const fileLinkMeta = href
           ? resolveMarkdownFileLinkMeta(href, cwd, additionalWorkspaceRoots)
@@ -815,7 +830,14 @@ function ChatMarkdown({
       pre: MarkdownPre,
       table: MarkdownTable,
     }),
-    [additionalWorkspaceRoots, cwd, fileLinkParentSuffixByPath, resolvedTheme, skills],
+    [
+      additionalWorkspaceRoots,
+      cwd,
+      fileLinkParentSuffixByPath,
+      imageContext,
+      resolvedTheme,
+      skills,
+    ],
   );
 
   return (

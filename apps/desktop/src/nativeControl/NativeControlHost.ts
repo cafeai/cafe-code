@@ -8,6 +8,8 @@ import {
   NATIVE_CONTROL_DEFAULT_TOOLS,
   NATIVE_CONTROL_VERSION,
   nativeControlError,
+  nativeControlValidationError,
+  type ComputerInputPolicy,
   nativeControlTokenDigest,
   validateNativeToolCall,
   compactNativeToolResult,
@@ -15,15 +17,27 @@ import {
   type NativeToolResult,
   type NativeControlHostConnection,
 } from "@cafecode/shared/nativeControl";
-import type { NativeControlChatState, NativeControlState, ThreadId } from "@cafecode/contracts";
+import type {
+  NativeControlChatState,
+  NativeControlState,
+  NativeControlActivity,
+  ThreadId,
+} from "@cafecode/contracts";
+import { decodeNativeActivity, type NativeActivityEvent } from "./NativeActivityChannel.ts";
 import { NativeDaemon, verifyNativeRuntime, type NativeDaemonConnection } from "./NativeDaemon.ts";
 import { NativeComputerSession } from "./NativeComputerSession.ts";
 
 export interface NativeController {
   start: () => Promise<void>;
-  stop: () => Promise<void>;
+  stop: (options?: { readonly force?: boolean }) => Promise<void>;
   session: (label: string) => Promise<NativeDaemonConnection>;
   health: () => Promise<NativeToolResult>;
+  windowInfo?: (pid: number, windowId: number) => Promise<Record<string, unknown>>;
+}
+export interface NativeControlVisibility {
+  update: (activity: NativeControlActivity) => Promise<void>;
+  close: () => Promise<void>;
+  windowIds?: () => readonly number[];
 }
 interface Session {
   readonly previousGeneration: string | undefined;
@@ -38,8 +52,11 @@ interface Session {
   connection?: NativeDaemonConnection | undefined;
   computer?: NativeComputerSession | undefined;
   inFlight?: Promise<NativeToolResult> | undefined;
+  cancelOperation?: ((detail?: string) => void) | undefined;
   releasing?: Promise<void> | undefined;
 }
+
+export const NATIVE_CONTROL_OPERATION_TIMEOUT_MS = 15_000;
 
 async function requestBody(request: IncomingMessage): Promise<Record<string, unknown>> {
   const chunks: Buffer[] = [];
@@ -65,6 +82,9 @@ export class NativeControlHost {
     hostBundleId: string;
     controller?: NativeController;
     platform?: NodeJS.Platform;
+    operationTimeoutMs?: number;
+    inputPolicy?: ComputerInputPolicy;
+    visibility?: NativeControlVisibility;
   };
   private readonly generation = randomUUID();
   private readonly token = randomBytes(32).toString("hex");
@@ -88,6 +108,30 @@ export class NativeControlHost {
   private url = "";
   private detail = "Enable local desktop control to connect Codex and Claude.";
   private closed = false;
+  private controllerEpoch = 0;
+  private halted: Promise<void> | undefined;
+  private interruptedOperationCount = 0;
+  private timedOutOperationCount = 0;
+  private lastOperationDurationMs = 0;
+  private inputPolicy: ComputerInputPolicy;
+  private activityValue: NativeControlActivity = {
+    version: 1,
+    generation: this.generation,
+    sequence: 0,
+    episode: null,
+    threadId: null,
+    provider: null,
+    providerInstanceId: null,
+    phase: "inactive",
+    target: null,
+    inputPolicy: "foreground-allowed",
+    inputRoute: "unknown",
+    usingSystemPointer: false,
+    lastCaptureAt: null,
+  };
+  private readonly activityListeners = new Set<(activity: NativeControlActivity) => void>();
+  private nativePhase: "controlling" | "reading-controls" = "reading-controls";
+  private geometryRevision = 0;
 
   constructor(options: {
     stateDirectory: string;
@@ -95,10 +139,181 @@ export class NativeControlHost {
     hostBundleId: string;
     controller?: NativeController;
     platform?: NodeJS.Platform;
+    operationTimeoutMs?: number;
+    inputPolicy?: ComputerInputPolicy;
+    visibility?: NativeControlVisibility;
   }) {
+    if (
+      (options.platform ?? process.platform) === "darwin" &&
+      !options.controller &&
+      !options.visibility
+    )
+      throw new Error("Native control requires visible activity surfaces.");
     this.options = options;
+    this.inputPolicy = options.inputPolicy ?? "foreground-allowed";
     this.controller =
-      options.controller ?? new NativeDaemon(options.runtimeRoot, options.hostBundleId);
+      options.controller ??
+      new NativeDaemon(options.runtimeRoot, options.hostBundleId, (event) =>
+        this.receiveNativeActivity(event),
+      );
+  }
+
+  activity(): NativeControlActivity {
+    return this.activityValue;
+  }
+  subscribeActivity(listener: (activity: NativeControlActivity) => void): () => void {
+    this.activityListeners.add(listener);
+    return () => this.activityListeners.delete(listener);
+  }
+  async setInputPolicy(policy: ComputerInputPolicy): Promise<void> {
+    // A trusted user restriction cancels outstanding input before taking effect.
+    this.inputPolicy = policy;
+    if (this.owner?.inFlight) await this.release(this.owner, false);
+    await this.publishActivity({ inputPolicy: policy });
+  }
+  async stopActivity(episode: string): Promise<void> {
+    const owner = this.owner;
+    if (!owner || this.activityValue.episode !== episode) return;
+    if (owner.provider !== "human") this.enabledThreads.delete(owner.threadId);
+    this.policyRevision++;
+    await this.release(owner, false);
+  }
+  async refreshActivityTarget(episode: string): Promise<void> {
+    const t = this.activityValue.target;
+    if (
+      !this.owner ||
+      episode !== this.activityValue.episode ||
+      !t?.pid ||
+      !t.windowId ||
+      !this.controller.windowInfo
+    )
+      return;
+    const revision = ++this.geometryRevision;
+    const value = await this.controller.windowInfo(t.pid, t.windowId);
+    if (
+      revision !== this.geometryRevision ||
+      this.activityValue.target !== t ||
+      episode !== this.activityValue.episode ||
+      this.activityValue.phase === "stopping"
+    )
+      return;
+    if (value.closed === true) {
+      await this.publishActivity({ target: { ...t, visible: false } });
+      return;
+    }
+    const target = decodeNativeActivity({
+      kind: "reading-controls",
+      target: { ...value, scope: t.scope },
+    }).target;
+    if (this.activityValue.target?.windowId !== t.windowId) return;
+    if (JSON.stringify(target) !== JSON.stringify(this.activityValue.target))
+      await this.publishActivity({ target });
+  }
+  private async publishActivity(update: Partial<NativeControlActivity>): Promise<void> {
+    const next = { ...this.activityValue, ...update, sequence: this.activityValue.sequence + 1 };
+    this.activityValue = next;
+    await this.options.visibility?.update(next);
+    if (this.activityValue.sequence === next.sequence)
+      for (const listener of this.activityListeners) listener(next);
+  }
+  private async retireActivity(session?: Session): Promise<void> {
+    if (session && this.owner && this.owner !== session) return;
+    if (session && this.activityValue.threadId !== session.threadId) return;
+    await this.publishActivity({
+      episode: null,
+      threadId: null,
+      provider: null,
+      providerInstanceId: null,
+      phase: "inactive",
+      target: null,
+      inputRoute: "unknown",
+      usingSystemPointer: false,
+      lastCaptureAt: null,
+    });
+  }
+  private async receiveNativeActivity(event: NativeActivityEvent): Promise<readonly number[]> {
+    const owner = this.owner;
+    const epoch = this.controllerEpoch;
+    if (
+      !owner?.inFlight ||
+      !this.enabled ||
+      !owner.turnActive ||
+      owner.revoked ||
+      this.activityValue.phase === "stopping"
+    )
+      throw new Error("Activity authority revoked");
+    await this.publishActivity({
+      target: event.target,
+      phase:
+        event.kind === "captured"
+          ? this.nativePhase
+          : event.kind === "using-pointer"
+            ? "controlling"
+            : event.kind,
+      ...(event.kind === "using-pointer"
+        ? { inputRoute: "hid" as const, usingSystemPointer: true }
+        : {}),
+      ...(event.kind === "captured" ? { lastCaptureAt: Date.now() } : {}),
+    });
+    if (
+      epoch !== this.controllerEpoch ||
+      this.owner !== owner ||
+      !owner.turnActive ||
+      !this.enabled ||
+      (owner.provider !== "human" && !this.enabledThreads.has(owner.threadId))
+    )
+      throw new Error("Activity authority revoked");
+    return this.options.visibility?.windowIds?.() ?? [];
+  }
+  private async beforeNativeCall(
+    session: Session,
+    name: string,
+    args: Record<string, unknown>,
+  ): Promise<void> {
+    const read =
+      name.startsWith("get_") ||
+      name.startsWith("list_") ||
+      name === "clipboard_read" ||
+      name === "verify_state";
+    this.nativePhase = read ? "reading-controls" : "controlling";
+    const context = session.computer?.activityTarget;
+    const pid = Number(args.pid ?? context?.pid);
+    const wid = Number(args.window_id ?? context?.window_id);
+    let target = this.activityValue.target;
+    if (Number.isSafeInteger(pid) && pid > 0 && Number.isSafeInteger(wid) && wid > 0) {
+      if (this.controller.windowInfo && (target?.pid !== pid || target.windowId !== wid)) {
+        const value = await this.controller.windowInfo(pid, wid);
+        if (value.closed === true) throw new Error("Target closed before dispatch");
+        target = decodeNativeActivity({ kind: "reading-controls", target: value }).target;
+      } else if (target?.pid !== pid || target.windowId !== wid)
+        target = { scope: "window", pid, windowId: wid, app: `App ${pid}`, title: `Window ${wid}` };
+    } else if (args.scope === "desktop" || name === "get_desktop_state")
+      target = { scope: "display", app: "Main display", title: "Whole main display" };
+    else if (args.tab_id)
+      target = { scope: "browser", app: "Connected browser", title: "Selected tab" };
+    const route: NativeControlActivity["inputRoute"] = read
+      ? this.activityValue.inputRoute
+      : name.startsWith("browser_")
+        ? "browser"
+        : name === "scroll"
+          ? "pid"
+          : args.element_token || name === "set_value" || name === "invoke_menu"
+            ? "accessibility"
+            : args.delivery_mode === "foreground" || args.scope === "desktop"
+              ? "hid"
+              : "pid";
+    const pointer =
+      route === "hid" &&
+      ["click", "right_click", "double_click", "drag", "move_cursor"].includes(name);
+    await this.publishActivity({
+      phase:
+        name === "get_browser_state" && args.include_screenshot === true
+          ? "capturing"
+          : this.nativePhase,
+      target,
+      inputRoute: route,
+      usingSystemPointer: pointer,
+    });
   }
 
   async listen(publish = true): Promise<NativeControlHostConnection> {
@@ -170,6 +385,13 @@ export class NativeControlHost {
       driverVersion: NATIVE_CONTROL_VERSION,
       runtimeAvailable,
       detail: this.detail,
+      diagnostics: {
+        operationTimeoutMs: this.operationTimeoutMs,
+        activeOperationCount: this.owner?.inFlight ? 1 : 0,
+        interruptedOperationCount: this.interruptedOperationCount,
+        timedOutOperationCount: this.timedOutOperationCount,
+        lastOperationDurationMs: this.lastOperationDurationMs,
+      },
     };
   }
 
@@ -188,6 +410,8 @@ export class NativeControlHost {
       if (enabled) {
         this.phase = "starting";
         try {
+          await this.halted;
+          if (this.closed || !this.desiredEnabled) return;
           await this.controller.start();
           if (this.closed || !this.desiredEnabled) {
             await this.controller.stop();
@@ -254,8 +478,8 @@ export class NativeControlHost {
         throw new Error("Too many local computer-use choices. Restart Cafe before changing more.");
       this.enabledThreads.add(threadId);
     } else {
-      // Revoke admission before any asynchronous cleanup. An in-flight action
-      // may already have executed; wait for it, never cancel/replay its input.
+      // Revoke admission before cleanup. Input already delivered is never
+      // replayed; an in-flight native action requires retiring its helper.
       // Preserve the real provider turn's activity so re-enabling can work in
       // that same turn, while an independent end-turn still wins immediately.
       this.enabledThreads.delete(threadId);
@@ -309,18 +533,30 @@ export class NativeControlHost {
     if (endTurn) session.turnActive = false;
     if (session.releasing) return session.releasing;
     const cleanup = async () => {
-      await session.inFlight?.catch(() => undefined);
+      if (this.owner === session)
+        void this.publishActivity({ phase: "stopping", usingSystemPointer: false }).catch(
+          () => undefined,
+        );
+      if (session.inFlight) {
+        this.interruptedOperationCount = Math.min(
+          Number.MAX_SAFE_INTEGER,
+          this.interruptedOperationCount + 1,
+        );
+        await this.haltController(
+          "Desktop control stopped during a native action. Enable it again when ready; interrupted input was not replayed.",
+        );
+      }
       const connection = session.connection;
       if (connection) {
         try {
-          const ended = await connection.request({ method: "trusted_session_end" });
-          if (ended.closed !== true) throw new Error("Native cleanup is still pending.");
+          if (this.enabled) {
+            const ended = await connection.request({ method: "trusted_session_end" });
+            if (ended.closed !== true) throw new Error("Native cleanup is still pending.");
+          }
         } catch {
-          this.enabled = false;
-          this.phase = "error";
-          this.detail =
-            "Native cleanup could not be acknowledged. The controller was stopped; no input was replayed.";
-          await this.controller.stop();
+          await this.haltController(
+            "Native cleanup could not be acknowledged. The controller was stopped; no input was replayed.",
+          );
         } finally {
           connection.close();
           session.connection = undefined;
@@ -329,6 +565,7 @@ export class NativeControlHost {
       session.computer?.clear();
       session.computer = undefined;
       if (this.owner === session) this.owner = undefined;
+      await this.retireActivity(session);
     };
     const releasing = cleanup();
     session.releasing = releasing;
@@ -339,12 +576,55 @@ export class NativeControlHost {
     }
   }
 
+  private get operationTimeoutMs(): number {
+    return Math.min(
+      NATIVE_CONTROL_OPERATION_TIMEOUT_MS,
+      Math.max(1, this.options.operationTimeoutMs ?? NATIVE_CONTROL_OPERATION_TIMEOUT_MS),
+    );
+  }
+
+  private haltController(detail: string): Promise<void> {
+    this.enabled = false;
+    this.desiredEnabled = false;
+    this.phase = "error";
+    this.detail = detail;
+    if (this.halted) return this.halted;
+    void this.publishActivity({ phase: "stopping", usingSystemPointer: false }).catch(
+      () => undefined,
+    );
+    this.controllerEpoch++;
+    const sessions = new Set(this.sessions.values());
+    if (this.owner) sessions.add(this.owner);
+    for (const session of sessions) session.turnActive = false;
+    const halted = this.controller.stop({ force: true }).then(async () => {
+      // Owned-child exit acknowledges termination of physical input. Discard
+      // the retired generation before permitting explicit re-enable; every
+      // failure path, including a disconnected caller, needs this cleanup.
+      for (const session of sessions) {
+        session.connection?.close();
+        session.connection = undefined;
+        session.computer?.clear();
+        session.computer = undefined;
+        session.cancelOperation?.(detail);
+      }
+      this.owner = undefined;
+      await this.retireActivity();
+    });
+    this.halted = halted;
+    void halted
+      .finally(() => {
+        if (this.halted === halted) this.halted = undefined;
+      })
+      .catch(() => undefined);
+    return halted;
+  }
+
   private call(session: Session, name: string, input: unknown): Promise<NativeToolResult> {
     let args: Record<string, unknown>;
     try {
       args = validateNativeToolCall(name, input);
-    } catch {
-      return Promise.resolve(nativeControlError("Unsupported desktop tool or reserved arguments."));
+    } catch (error) {
+      return Promise.resolve(nativeControlValidationError(error));
     }
     if (!this.enabled || this.phase !== "ready")
       return Promise.resolve(
@@ -374,64 +654,176 @@ export class NativeControlHost {
       }));
     if (name === "health") return this.diagnostics();
     this.owner = session;
+    const epoch = this.controllerEpoch;
+    const startedAt = Date.now();
+    const interrupted = Promise.withResolvers<NativeToolResult>();
+    session.cancelOperation = (detail = "Desktop action interrupted. No input was replayed.") =>
+      interrupted.resolve(nativeControlError(detail));
     const operation = async (): Promise<NativeToolResult> => {
       try {
+        if (
+          !this.enabled ||
+          epoch !== this.controllerEpoch ||
+          !session.turnActive ||
+          session.revoked
+        )
+          return nativeControlError("Desktop access was revoked before the action started.");
         // A short readable label identifies the provider and this specific
         // binding on Cua's native cursor. The SDK injects it into native calls;
         // no model-supplied label can substitute another session's identity.
-        session.connection ??= await this.controller.session(
-          // Cua tombstones ended public labels within a daemon generation.
-          // A new control episode must never revive the previous lifecycle.
-          `${session.provider === "claudeAgent" ? "Claude" : session.provider === "codex" ? "Codex" : "Cafe"} · ${session.id.slice(0, 8)} · ${randomUUID()}`,
-        );
+        if (!this.activityValue.episode)
+          await this.publishActivity({
+            episode: randomUUID(),
+            threadId: session.threadId as ThreadId,
+            provider: session.provider,
+            providerInstanceId: session.providerInstanceId,
+            phase: "idle",
+            target: { scope: "selection", app: "Selecting target", title: "Computer use" },
+            inputPolicy: this.inputPolicy,
+            lastCaptureAt: null,
+          });
+        if (
+          epoch !== this.controllerEpoch ||
+          !this.enabled ||
+          !session.turnActive ||
+          session.revoked
+        )
+          return nativeControlError("Desktop access revoked during indicator initialization.");
+        await this.publishActivity({
+          inputPolicy:
+            args.input_policy === "background-only" ? "background-only" : this.inputPolicy,
+        });
+        const connection =
+          session.connection ??
+          (await this.controller.session(
+            // Cua tombstones ended public labels within a daemon generation.
+            // A new control episode must never revive the previous lifecycle.
+            `${session.provider === "claudeAgent" ? "Claude" : session.provider === "codex" ? "Codex" : "Cafe"} · ${session.id.slice(0, 8)} · ${randomUUID()}`,
+          ));
         if (
           !this.enabled ||
+          epoch !== this.controllerEpoch ||
           !session.turnActive ||
           session.revoked ||
           (session.provider !== "human" && !this.enabledThreads.has(session.threadId))
-        )
+        ) {
+          connection.close();
           return nativeControlError("Desktop access was revoked before the action started.");
-        const connection = session.connection;
-        session.computer ??= new NativeComputerSession(async (nativeName, nativeArgs) => {
-          // Composite navigation and automatic fallback retain the same owner
-          // and must observe disable/end-turn between native subcalls.
-          if (
-            !this.enabled ||
-            this.phase !== "ready" ||
-            !session.active ||
-            !session.turnActive ||
-            session.revoked ||
-            session.expires < Date.now() ||
-            this.owner !== session ||
-            session.connection !== connection ||
-            (session.provider !== "human" && !this.enabledThreads.has(session.threadId))
-          )
-            return nativeControlError("Desktop access was revoked before the action started.");
-          return (await connection.request({
-            method: "trusted_session_call",
-            name: nativeName,
-            args: nativeArgs,
-          })) as unknown as NativeToolResult;
-        });
+        }
+        session.connection = connection;
+        session.computer ??= new NativeComputerSession(
+          async (nativeName, nativeArgs) => {
+            // Composite navigation and automatic fallback retain the same owner
+            // and must observe disable/end-turn between native subcalls.
+            if (
+              !this.enabled ||
+              epoch !== this.controllerEpoch ||
+              this.phase !== "ready" ||
+              !session.active ||
+              !session.turnActive ||
+              session.revoked ||
+              session.expires < Date.now() ||
+              this.owner !== session ||
+              session.connection !== connection ||
+              (session.provider !== "human" && !this.enabledThreads.has(session.threadId))
+            )
+              return nativeControlError("Desktop access was revoked before the action started.");
+            await this.beforeNativeCall(session, nativeName, nativeArgs);
+            if (
+              epoch !== this.controllerEpoch ||
+              !this.enabled ||
+              !session.turnActive ||
+              session.revoked ||
+              this.owner !== session ||
+              session.connection !== connection ||
+              (session.provider !== "human" && !this.enabledThreads.has(session.threadId))
+            )
+              return nativeControlError("Desktop access was revoked before dispatch.");
+            const response = (await connection.request({
+              method: "trusted_session_call",
+              name: nativeName,
+              args: nativeArgs,
+            })) as unknown as NativeToolResult;
+            const path = response.structuredContent?.path;
+            const actualRoute: NativeControlActivity["inputRoute"] =
+              path === "ax" || path === "ax_fg"
+                ? "accessibility"
+                : path === "cgevent_pid" || path === "key_events"
+                  ? "pid"
+                  : path === "hid" ||
+                      path === "cgevent_hid" ||
+                      path === "cgevent_fg" ||
+                      path === "key_events_fg"
+                    ? "hid"
+                    : path === "cgevent"
+                      ? nativeArgs.delivery_mode === "foreground"
+                        ? "hid"
+                        : "pid"
+                      : "unknown";
+            if (
+              actualRoute !== "unknown" &&
+              epoch === this.controllerEpoch &&
+              this.enabled &&
+              this.owner === session &&
+              session.turnActive &&
+              !session.revoked &&
+              this.activityValue.phase !== "stopping"
+            )
+              await this.publishActivity({ inputRoute: actualRoute });
+            return response;
+          },
+          { inputPolicy: () => this.inputPolicy },
+        );
         const result = await session.computer.call(name, args);
         return compactNativeToolResult(result);
       } catch {
-        this.enabled = false;
-        this.phase = "error";
-        this.detail =
+        if (epoch !== this.controllerEpoch || !session.turnActive || session.revoked)
+          return nativeControlError("Desktop action interrupted. No input was replayed.");
+        const detail =
           "The native action's completion is uncertain. The controller was stopped; inspect the desktop before retrying.";
-        await this.controller.stop();
-        session.connection?.close();
-        session.connection = undefined;
-        session.computer?.clear();
-        session.computer = undefined;
-        return nativeControlError(this.detail);
+        await this.haltController(detail);
+        return nativeControlError(detail);
       }
     };
-    const result = operation();
+    const timer = setTimeout(() => {
+      if (epoch !== this.controllerEpoch) {
+        session.cancelOperation?.();
+        return;
+      }
+      this.timedOutOperationCount = Math.min(
+        Number.MAX_SAFE_INTEGER,
+        this.timedOutOperationCount + 1,
+      );
+      void this.haltController(
+        "Desktop action exceeded its time limit. The controller was stopped; inspect the desktop before retrying.",
+      ).catch(() =>
+        interrupted.resolve(nativeControlError("Native controller cleanup remains incomplete.")),
+      );
+    }, this.operationTimeoutMs);
+    // Register ownership before executing native code, including callbacks
+    // from an already acquired connection that can synchronously revoke it.
+    const result = Promise.race([Promise.resolve().then(operation), interrupted.promise]);
     session.inFlight = result;
-    return result.finally(() => {
+    return result.finally(async () => {
+      clearTimeout(timer);
       session.inFlight = undefined;
+      session.cancelOperation = undefined;
+      this.lastOperationDurationMs = Math.max(0, Date.now() - startedAt);
+      if (
+        epoch === this.controllerEpoch &&
+        this.owner === session &&
+        this.activityValue.phase !== "stopping"
+      ) {
+        try {
+          await this.publishActivity({
+            phase: "idle",
+            usingSystemPointer: false,
+            inputPolicy: this.inputPolicy,
+          });
+        } catch {
+          await this.haltController("Computer-use visibility failed. The controller was stopped.");
+        }
+      }
     });
   }
 
@@ -493,7 +885,7 @@ export class NativeControlHost {
               this.phase = "error";
               this.detail =
                 "Desktop input lost its response. The controller was stopped; inspect the desktop before retrying.";
-              void this.controller.stop().catch(() => undefined);
+              void this.haltController(this.detail).catch(() => undefined);
             }
           });
           result = await this.call(session, params.name, params.arguments ?? {});
@@ -608,6 +1000,7 @@ export class NativeControlHost {
     if (this.transition) await this.transition;
     if (this.owner) await this.release(this.owner);
     await this.controller.stop();
+    await this.options.visibility?.close();
     this.sessions.clear();
     this.enabledThreads.clear();
     this.server.closeAllConnections();

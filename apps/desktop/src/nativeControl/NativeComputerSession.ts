@@ -12,6 +12,7 @@ import {
   type ComputerObserve,
   type ComputerSelect,
   type NativeToolResult,
+  type ComputerInputPolicy,
 } from "@cafecode/shared/nativeControl";
 import {
   executeNativeControlTool,
@@ -133,9 +134,19 @@ export class NativeComputerSession {
   private readonly bindings = new Map<string, Binding>();
   private readonly invoke: NativeInvoke;
   private readonly sleep: (ms: number) => Promise<void>;
-  constructor(invoke: NativeInvoke, options?: { sleep?: (ms: number) => Promise<void> }) {
+  private requestedPolicy: ComputerInputPolicy = "foreground-allowed";
+  private activeTarget: Fields | undefined;
+  get activityTarget(): Fields | undefined {
+    return this.activeTarget;
+  }
+  private readonly hostPolicy: () => ComputerInputPolicy;
+  constructor(
+    invoke: NativeInvoke,
+    options?: { sleep?: (ms: number) => Promise<void>; inputPolicy?: () => ComputerInputPolicy },
+  ) {
     this.invoke = invoke;
     this.sleep = options?.sleep ?? pause;
+    this.hostPolicy = options?.inputPolicy ?? (() => "foreground-allowed");
   }
 
   clear(): void {
@@ -143,10 +154,29 @@ export class NativeComputerSession {
   }
 
   private callNative(name: string, args: Fields): Promise<NativeToolResult> {
-    return executeNativeControlTool(name, args, this.invoke);
+    return executeNativeControlTool(name, args, this.invoke, this.effectivePolicy);
+  }
+
+  private get effectivePolicy(): ComputerInputPolicy {
+    return this.hostPolicy() === "background-only" || this.requestedPolicy === "background-only"
+      ? "background-only"
+      : "foreground-allowed";
   }
 
   async call(name: string, args: Fields): Promise<NativeToolResult> {
+    this.activeTarget = undefined;
+    // The native host admits one operation at a time. Keep the tightened policy
+    // for the entire composite and restore it even when validation/input fails.
+    this.requestedPolicy =
+      args.input_policy === "background-only" ? "background-only" : "foreground-allowed";
+    try {
+      return await this.callWithPolicy(name, args);
+    } finally {
+      this.requestedPolicy = "foreground-allowed";
+    }
+  }
+
+  private async callWithPolicy(name: string, args: Fields): Promise<NativeToolResult> {
     if (name === "computer_select") return this.select(decodeComputerSelect(args));
     if (name === "computer_observe") {
       const input = decodeComputerObserve(args);
@@ -311,6 +341,7 @@ export class NativeComputerSession {
   }
 
   private async read(binding: Binding, options: ComputerObserve): Promise<NativeToolResult> {
+    this.activeTarget = binding.native ?? binding.browser;
     const visual = options.view === "screenshot" || options.view === "both";
     const observed = await this.callNative(
       binding.browser ? "get_browser_state" : "get_window_state",
@@ -332,6 +363,8 @@ export class NativeComputerSession {
   }
 
   private async observe(binding: Binding, options: ComputerObserve): Promise<NativeToolResult> {
+    const observationStarted = Date.now();
+    let samples = 0;
     // Internal text verification can mint snapshots the model has never seen.
     // Diff against the last published state, never those internal reads.
     const previous = binding.reportedState;
@@ -342,11 +375,13 @@ export class NativeComputerSession {
     if (binding.dirty && options.view !== "screenshot") {
       await this.sleep(150);
       observation = await this.read(binding, { ...options, view: "accessibility" });
+      samples++;
       const deadline = Date.now() + 1500;
       for (let sample = 0; !observation.isError && sample < 3 && Date.now() < deadline; sample++) {
         const old = observation.structuredContent ?? {};
         await this.sleep(150);
         observation = await this.read(binding, { ...options, view: "accessibility" });
+        samples++;
         if (
           !observation.isError &&
           fingerprint(binding, old) === fingerprint(binding, observation.structuredContent ?? {}) &&
@@ -364,6 +399,7 @@ export class NativeComputerSession {
       if (!observation.isError && options.view === "both") {
         const stableState = observation.structuredContent ?? {};
         observation = await this.read(binding, options);
+        samples++;
         if (
           !observation.isError &&
           fingerprint(binding, stableState) !==
@@ -371,7 +407,10 @@ export class NativeComputerSession {
         )
           settled = false;
       }
-    } else observation = await this.read(binding, options);
+    } else {
+      observation = await this.read(binding, options);
+      samples++;
+    }
     this.invalidate(binding);
     if (observation.isError || !observation.structuredContent) {
       binding.state = undefined;
@@ -385,7 +424,10 @@ export class NativeComputerSession {
     binding.state = observation.structuredContent;
     binding.reportedState = binding.state;
     binding.dirty = false;
-    const state: Fields = { ...binding.state };
+    const state: Fields = {
+      ...binding.state,
+      observation_timing: { duration_ms: Math.max(0, Date.now() - observationStarted), samples },
+    };
     // Diff only native accessibility records; browser semantic outlines and
     // content refs retain their complete native versioned representation.
     if (
@@ -473,6 +515,20 @@ export class NativeComputerSession {
   private preflight(binding: Binding, actions: readonly ComputerAction[]): void {
     if (!binding.state) throw new Error("Observe the target again before acting.");
     for (const action of actions) {
+      if (
+        this.effectivePolicy === "background-only" &&
+        !binding.browser &&
+        (action.type === "drag" ||
+          action.type === "paste" ||
+          (action.type === "type" &&
+            (action.replace === true ||
+              (action.element &&
+                this.element(binding, action.element)?.in_web_content === true))) ||
+          (action.type === "key" && elements(binding).some((e) => e.in_web_content === true)))
+      )
+        throw new Error(
+          "Background-only policy refused an action requiring foreground input; no input was sent.",
+        );
       if ("element" in action && action.element && !this.element(binding, action.element))
         throw new Error(
           "An element handle is stale or belongs to another target. Observe and rebuild the batch.",
@@ -480,6 +536,12 @@ export class NativeComputerSession {
       if ("point" in action && action.point) this.point(binding, action.point);
       if (action.type === "click" && !action.element === !action.point)
         throw new Error("A click requires exactly one element or screenshot point.");
+      if (action.type === "click" && action.input_route === "pointer" && action.element)
+        throw new Error(
+          "Pointer clicks require a point from a fresh screenshot. Use an element for accessibility input.",
+        );
+      if (action.type === "click" && action.input_route === "accessibility" && action.point)
+        throw new Error("Accessibility clicks require an element handle.");
       if (
         action.type === "click" &&
         (action.count ?? 1) > 1 &&
@@ -586,6 +648,7 @@ export class NativeComputerSession {
     return output(
       {
         target: binding.handle,
+        input_policy: this.effectivePolicy,
         batch: stopped === undefined ? "completed" : "stopped",
         attempted_steps: attempted,
         ...(stopped === undefined ? {} : { stopped_at: stopped }),
@@ -599,6 +662,7 @@ export class NativeComputerSession {
   }
 
   private async action(binding: Binding, action: ComputerAction): Promise<NativeToolResult> {
+    this.activeTarget = binding.native ?? binding.browser;
     const target = { ...(binding.browser ?? binding.native), observe_after: false };
     const entry =
       "element" in action && action.element ? this.element(binding, action.element) : undefined;
@@ -734,6 +798,7 @@ export class NativeComputerSession {
           : {
               button: action.button ?? "left",
               count: action.count ?? 1,
+              input_route: action.input_route ?? (entry ? "auto" : "pointer"),
               ...(entry ? {} : { capture_id: binding.state?.capture_id }),
             }),
       });

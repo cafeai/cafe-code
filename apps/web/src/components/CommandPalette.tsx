@@ -7,10 +7,12 @@ import {
   type FilesystemBrowseResult,
   type ProjectId,
   ProviderInstanceId,
+  SourceControlRepositoryError,
   type SourceControlDiscoveryResult,
   type SourceControlProviderKind,
   type SourceControlRepositoryInfo,
 } from "@cafecode/contracts";
+import { selectSourceControlCloneUrl } from "@cafecode/shared/sourceControl";
 import { keepPreviousData, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useNavigate } from "@tanstack/react-router";
 import * as Option from "effect/Option";
@@ -313,6 +315,9 @@ function buildAddProjectRemoteSourceReadiness(
  * the toast title stands alone.
  */
 function errorDescription(error: unknown): { description?: string } {
+  if (error instanceof SourceControlRepositoryError && error.detail.trim().length > 0) {
+    return { description: error.detail };
+  }
   if (error instanceof Error && error.message.trim().length > 0) {
     return { description: error.message };
   }
@@ -1165,10 +1170,13 @@ function OpenCommandPaletteDialog() {
           provider,
           repository: rawRepository,
         });
+        const remoteUrl = selectSourceControlCloneUrl(repository, {
+          repositoryInput: rawRepository,
+        });
         const cloneDirectoryName = inferCloneDirectoryName({
           repositoryInput: rawRepository,
           repository,
-          remoteUrl: repository.sshUrl,
+          remoteUrl,
         });
         const destinationPath = getDefaultCloneDestinationPath(
           addProjectCloneFlow.environmentId,
@@ -1180,7 +1188,7 @@ function OpenCommandPaletteDialog() {
           source: addProjectCloneFlow.source,
           repositoryInput: rawRepository,
           repository,
-          remoteUrl: repository.sshUrl,
+          remoteUrl,
           cloneDirectoryName,
         });
         setHighlightedItemValue(null);
@@ -1242,6 +1250,9 @@ function OpenCommandPaletteDialog() {
     setIsRemoteProjectCloning(true);
     try {
       const result = await api.sourceControl.cloneRepository({
+        ...(addProjectCloneFlow.repository
+          ? { provider: addProjectCloneFlow.repository.provider }
+          : {}),
         remoteUrl: addProjectCloneFlow.remoteUrl,
         destinationPath,
       });

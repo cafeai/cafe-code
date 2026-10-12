@@ -49,6 +49,32 @@ focus restoration. Background input, other native apps and Screen Sharing
 retain their existing routes. This is selected before input, never a retry of
 partial or uncertain delivery. The patch hash in `build.json` binds this change.
 
+The reviewed Mac cursor patch also bounds AppKit frame delivery to one pending
+frame. A busy main thread consumes the newest frame, including an empty cleanup
+frame, rather than replaying accumulated cursor animation. Retiring a cursor
+updates render state synchronously, so a full ordinary command channel cannot
+drop its removal. These changes affect the visual overlay; it ignores mouse
+events and does not itself deliver physical clicks.
+
+Cafe refuses concurrent desktop actions instead of queueing them and limits an
+entire operation, including composite subcalls, to 15 seconds. End-turn, chat
+disable, or transport cancellation during an operation immediately force-stops
+the exact helper child owned by Electron and waits for its exit before
+acknowledging cleanup. It never waits for the outstanding native action to finish
+first, or replays input whose completion is uncertain. Recovery requires explicit
+app-wide re-enable and a fresh active turn; idle chat disable/re-enable retains
+the existing active-turn behavior. Late session acquisition cannot restore
+authority across a stopped helper generation. State diagnostics expose only
+operation counts, duration and the deadline, never desktop arguments or images.
+
+The cursor's three `latest_frame_tests` are pure Rust tests: they exercise frame
+coalescing, immediate disposal of replaced payloads, and callback rescheduling
+without opening AppKit windows or generating input. Run them in the prepared
+pinned source's `libs/cua-driver/rust` directory with
+`cargo test --locked -p platform-macos --lib latest_frame_tests`. Host/daemon
+regression tests use injected controllers and owned-child handles. These checks
+do not qualify real macOS input, permissions or live cursor placement.
+
 The runtime lives in ignored `runtime/darwin-<arch>` with source/patch/binary
 hash provenance. Artifact packaging stages only matching verified bytes and
 notices at `resources/cua-driver`, outside ASAR. No runtime is admitted on other
@@ -112,7 +138,10 @@ and refusal details without duplicating the AX Markdown tree.
 
 Cafe automatically retries a definite before-dispatch background targeting
 refusal in foreground mode for the same window. This is enabled by default and
-can briefly change focus. Set `auto_foreground:false` for background-only actions.
+can briefly change focus when permitted. Use `input_policy:"background-only"` on
+bound/advanced calls or the trusted menu-bar setting to forbid activation across
+composites and fallback. `auto_foreground:false` disables only automatic recovery
+on that legacy action; it does not constrain explicit foreground composites.
 The eligible native refusal codes are `same_pid_keyboard_ambiguity`,
 `minimized_or_hidden_window` and `off_space_or_ax_unresolved`, with
 `effect:refused`. Partial/unverifiable input, other errors and lost replies are
@@ -335,3 +364,67 @@ The audit evidence and downloaded source/artifacts remain in ignored
 `.explorations/cua-audit-0.34.0/`. The production manifest and notices are small,
 reviewable text files; neither proprietary desktop-app code nor Cua SaaS packages
 are incorporated into Cafe.
+
+## Reliability and activity visibility (October 12)
+
+The cumulative patch includes per-helper input ownership and exact foreground
+target guards, pointer restoration for owned window clicks/drags, explicit point/AX
+route intent, typed numeric/boolean value verification, truthful PID wheel
+transport and unattributed global window observations. It retains the pinned
+source, telemetry removal and existing Electron Unicode/cursor fixes. Cafe uses
+a 100 ms native observation window and nonblocking virtual-cursor animation;
+bound observations still settle AX state and produce fresh grounding.
+
+Electron owns a persistent episode menu-bar item and sandboxed, nonactivating,
+click-through target panel. Native read/capture hooks and central CDP tab capture
+wait for a private metadata-only visible-status acknowledgment. Socket/home are
+private, tokens are per helper, frames are bounded, and indicator IDs are checked
+against the owning Electron process. Full-display captures exclude exact IDs and
+the virtual cursor; an unsafe shell fallback is refused. The ephemeral activity
+feed contains target/provider/policy/phase metadata and last successful capture
+time, with no capture bytes or persistent history. Stop is fenced to the episode
+and awaits exact owned-child cleanup.
+See [the interface decision](../../docs/decisions/computer-use-interface.md) and
+[the saved checklist](../../docs/computer-use-reliability-and-visibility-plan.md).
+
+Source preparation materializes the pinned root .gitignore in its sparse
+checkout alongside libs/cua-driver. Cargo's git fingerprint can otherwise fail
+while hashing newly patched source files with an excludes-stack error. This is a
+checkout fix; it does not change the upstream pin or bypass patch/runtime hashes.
+
+Explicit native indicator qualification uses:
+
+```sh
+CAFE_CODE_CUA_VISIBILITY_E2E=1 corepack yarn workspace @cafecode/desktop exec vitest run --config ../../vitest.config.ts src/nativeControl/NativeControlVisibility.e2e.test.ts
+```
+
+The fixture owns both Electron processes and a private-profile native helper,
+with no provider calls or user application input. It requires an unlocked
+desktop and existing Accessibility/Screen Recording grants. A locked desktop can
+return AX metadata and healthy TCC checks while refusing screenshots. GUI evidence must be reported separately from unit/mock/browser checks.
+
+The final October 12 unlocked qualification passed both native fixtures. Input
+verified exact Unicode insertion/replacement and renderer submission, off-center
+canvas coordinates, pointer restoration, background-only refusal and fresh
+handles: 23 native calls in 10.122 s. The indicator fixture verified capture and
+provider labeling, real-pointer visibility, resize tracking, hiding/restoring the
+border during occlusion, its actual WindowServer presence in fullscreen, and
+exact Stop. Its tray-only host also qualifies visibility without a Cafe main
+window; fixture lifetime is owned by the parent pipe even after Stop removes the
+last panel.
+
+Geometry uses the current on-screen stack, fences stale replies, and excludes
+known untitled AX-less fullscreen accessories. It recognizes only exact
+main-display cursor surfaces of Cua helpers in the same current or atomically
+retired runtime location, without adopting or terminating those helpers.
+Unknown windows remain potential occluders. Mouse-up uses the current cursor
+position so releasing an interrupted pair cannot move the pointer back. Idle
+status restores the trusted input policy after a request temporarily tightens it.
+
+This host has one physical display. Physical concurrent human input, arbitrary
+Space switching, multiple displays, live browser DOM acceptance and native
+menu-popup capture exclusion still require separate qualification. Capture-ID
+exclusion and central CDP ordering/failure are covered by native source and
+isolated tests; the GUI fixture does not assert pixel-level full-display
+exclusion. No live provider, user application input or clipboard edits were
+needed for these checks.

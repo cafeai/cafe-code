@@ -102,6 +102,7 @@ import {
   prepareFileAttachmentPrompt,
 } from "../fileAttachmentPrompt.ts";
 import { ServerConfig } from "../../config.ts";
+import { readSystemPromptFileForInjection } from "../../systemPromptFile.ts";
 import {
   CodexResumeCursorSchema,
   CodexSessionRuntimeThreadIdMissingError,
@@ -4931,6 +4932,19 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
           : undefined;
         const currentTransportPolicy = toRuntimeTransportPolicy(yield* Ref.get(transportPolicyRef));
         const runtimeInput: CodexSessionRuntimeOptions = {
+          customInstructions: yield* readSystemPromptFileForInjection(
+            serverConfig.systemPromptPath,
+          ).pipe(
+            Effect.provideService(FileSystem.FileSystem, fileSystem),
+            Effect.mapError(
+              () =>
+                new ProviderAdapterProcessError({
+                  provider: PROVIDER,
+                  threadId: input.threadId,
+                  detail: "Could not read custom instructions.",
+                }),
+            ),
+          ),
           ...(nativeControlBinding ? { nativeControlMcp: nativeControlBinding } : {}),
           historySafety: {
             isBlocked: (nativeThreadId) =>

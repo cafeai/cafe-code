@@ -1,5 +1,6 @@
 import { type ServerLifecycleWelcomePayload } from "@cafecode/contracts";
 import { scopedProjectKey, scopeProjectRef } from "@cafecode/client-runtime";
+import { usePrimaryEnvironmentId } from "../environments/primary";
 import {
   Outlet,
   createRootRouteWithContext,
@@ -119,6 +120,8 @@ function RootRouteWithTooltipGroup() {
 }
 
 function RootRouteView() {
+  const navigate = useNavigate();
+  const primaryEnvironmentId = usePrimaryEnvironmentId();
   const pathname = useLocation({ select: (location) => location.pathname });
   const { authGateState } = Route.useRouteContext();
   const primaryEnvironmentAuthenticated = authGateState.status === "authenticated";
@@ -145,12 +148,20 @@ function RootRouteView() {
       if (action === "desktop-shutdown-started") {
         setShutdownOverlayVisible(true);
       }
+      if (action.startsWith("computer-use-chat:")) {
+        const threadId = action.slice("computer-use-chat:".length);
+        const environmentId = window.desktopBridge?.getLocalEnvironmentBootstrap()
+          ? primaryEnvironmentId
+          : null;
+        if (environmentId && threadId && threadId.length <= 256)
+          void navigate({ to: "/$environmentId/$threadId", params: { environmentId, threadId } });
+      }
     });
 
     return () => {
       unsubscribe?.();
     };
-  }, []);
+  }, [navigate, primaryEnvironmentId]);
 
   const shutdownOverlay = shutdownOverlayVisible ? <DesktopShutdownOverlay /> : null;
 

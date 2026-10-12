@@ -3,6 +3,9 @@ import * as Effect from "effect/Effect";
 import * as DesktopIpc from "./DesktopIpc.ts";
 import {
   getNativeControlState,
+  getNativeControlActivity,
+  stopNativeControlActivity,
+  setNativeControlInputPolicy,
   setNativeControlEnabled,
   getNativeControlDiagnostics,
   captureNativeControlPreview,
@@ -58,6 +61,9 @@ export const installDesktopIpcHandlers = Effect.gen(function* () {
 
   yield* ipc.handle(getDebugEndpointState);
   yield* ipc.handle(getNativeControlState);
+  yield* ipc.handle(getNativeControlActivity);
+  yield* ipc.handle(stopNativeControlActivity);
+  yield* ipc.handle(setNativeControlInputPolicy);
   yield* ipc.handle(setNativeControlEnabled);
   yield* ipc.handle(getNativeControlDiagnostics);
   yield* ipc.handle(captureNativeControlPreview);

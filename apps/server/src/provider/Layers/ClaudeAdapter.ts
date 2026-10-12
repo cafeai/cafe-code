@@ -138,6 +138,8 @@ import * as Stream from "effect/Stream";
 
 import { resolveAttachmentPath } from "../../attachmentStore.ts";
 import { ServerConfig } from "../../config.ts";
+import { readSystemPromptFileForInjection } from "../../systemPromptFile.ts";
+import { buildCafeInstructions } from "../CafeInstructions.ts";
 import {
   readSchedulingSessionBroker,
   type SchedulingSessionBinding,
@@ -8749,6 +8751,25 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
           detail: "Subagent concurrency is unavailable for this configured provider runtime.",
         });
       }
+      // Read before retiring an existing query: an unavailable instruction
+      // file must not close healthy provider work or acquire new tool bindings.
+      const cafeInstructions = buildCafeInstructions({
+        cwd: input.cwd ?? serverConfig.cwd,
+        additionalDirectories: input.additionalDirectories,
+        customInstructions: yield* readSystemPromptFileForInjection(
+          serverConfig.systemPromptPath,
+        ).pipe(
+          Effect.provideService(FileSystem.FileSystem, fileSystem),
+          Effect.mapError(
+            () =>
+              new ProviderAdapterProcessError({
+                provider: PROVIDER,
+                threadId: input.threadId,
+                detail: "Could not read custom instructions.",
+              }),
+          ),
+        ),
+      });
       const sessionEnvironment = yield* makeClaudeEnvironment(
         {
           homePath: claudeSettings.homePath,
@@ -9413,7 +9434,12 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         ...(input.cwd ? { cwd: input.cwd } : {}),
         ...(apiModelId ? { model: apiModelId } : {}),
         pathToClaudeCodeExecutable: claudeBinaryPath,
-        systemPrompt: { type: "preset", preset: "claude_code" },
+        // Public SDK preset append keeps native guidance and settings intact.
+        // Leave recording provider-owned: on current runtimes a resume can
+        // keep its original prompt until compaction. Do not disable snapshots,
+        // replay input or force compaction to make a changed append effective.
+        // https://code.claude.com/docs/en/agent-sdk/modifying-system-prompts
+        systemPrompt: { type: "preset", preset: "claude_code", append: cafeInstructions },
         settingSources: [...CLAUDE_SETTING_SOURCES],
         // SDK 0.3.288 supports per-query stdio MCP configuration. Leave
         // strictMcpConfig and permission allowlists unset: user/project MCP

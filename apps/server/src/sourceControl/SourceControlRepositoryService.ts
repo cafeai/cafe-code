@@ -10,12 +10,12 @@ import {
   SourceControlRepositoryError,
   type SourceControlCloneRepositoryInput,
   type SourceControlCloneRepositoryResult,
-  type SourceControlCloneProtocol,
   type SourceControlProviderKind,
   type SourceControlRepositoryCloneUrls,
   type SourceControlRepositoryInfo,
   type SourceControlRepositoryLookupInput,
 } from "@cafecode/contracts";
+import { selectSourceControlCloneUrl } from "@cafecode/shared/sourceControl";
 
 import { ServerConfig } from "../config.ts";
 import * as GitVcsDriver from "../vcs/GitVcsDriver.ts";
@@ -86,19 +86,6 @@ function toRepositoryInfo(
     url: urls.url,
     sshUrl: urls.sshUrl,
   };
-}
-
-function selectRemoteUrl(
-  urls: SourceControlRepositoryCloneUrls,
-  protocol: SourceControlCloneProtocol | undefined,
-): string {
-  switch (protocol ?? "auto") {
-    case "https":
-      return urls.url;
-    case "ssh":
-    case "auto":
-      return urls.sshUrl;
-  }
 }
 
 function expandHomePath(input: string, path: Path.Path): string {
@@ -214,7 +201,10 @@ export const make = Effect.fn("makeSourceControlRepositoryService")(function* ()
         repository: input.repository,
         cwd: preparedDestination.parentPath,
       });
-      remoteUrl = selectRemoteUrl(repository, input.protocol);
+      remoteUrl = selectSourceControlCloneUrl(repository, {
+        ...(input.protocol === undefined ? {} : { protocol: input.protocol }),
+        repositoryInput: input.repository,
+      });
       provider = input.provider;
     }
 
@@ -226,13 +216,32 @@ export const make = Effect.fn("makeSourceControlRepositoryService")(function* ()
       });
     }
 
-    yield* git.execute({
-      operation: "SourceControlRepositoryService.cloneRepository",
-      cwd: preparedDestination.parentPath,
-      args: ["clone", remoteUrl, preparedDestination.directoryName],
-      timeoutMs: 120_000,
-      maxOutputBytes: 256 * 1024,
-    });
+    yield* git
+      .execute({
+        operation: "SourceControlRepositoryService.cloneRepository",
+        cwd: preparedDestination.parentPath,
+        args: ["clone", remoteUrl, preparedDestination.directoryName],
+        timeoutMs: 120_000,
+        maxOutputBytes: 256 * 1024,
+      })
+      .pipe(
+        Effect.mapError((cause) => {
+          // Lead the toast with the failure, keeping the original typed Git
+          // error for diagnostics. Never retry a clone or modify SSH trust on
+          // the user's behalf; authentication and host admission belong to Git.
+          const commandPrefix = `${cause.command} failed: `;
+          return repositoryError({
+            operation: "cloneRepository",
+            provider,
+            detail: /Host key verification failed/iu.test(cause.detail)
+              ? "SSH host key verification failed. Use an HTTPS clone URL, or verify the server's SSH host key in your terminal before retrying."
+              : cause.detail.startsWith(commandPrefix)
+                ? cause.detail.slice(commandPrefix.length)
+                : cause.detail,
+            cause,
+          });
+        }),
+      );
 
     return {
       cwd: preparedDestination.destinationPath,

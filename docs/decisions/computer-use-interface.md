@@ -19,6 +19,17 @@ equivalent model training. No new unrestricted JavaScript runtime is required.
 - Recognize the pinned driver's precise before-input Electron text refusal for
   same-window foreground fallback. Never replay partial, uncertain, or lost
   input, and recheck authority before each native subcall.
+- When trusted end-turn or chat disable arrives during a native operation,
+  immediately force-stop Electron's exact owned helper and await its exit before
+  acknowledging cleanup. Do not wait for the native response first. Whole
+  operations have a 15-second deadline, concurrent requests are refused, and
+  late acquisitions/subcalls cannot cross the helper generation. Recovery after
+  interrupted input requires explicit app-wide re-enable and fresh turn
+  admission; ordinary idle chat disable/re-enable preserves turn activity.
+- Coalesce the native cursor's AppKit delivery to the latest pending frame and
+  make render-state retirement independent of ordinary command-channel capacity.
+  The overlay is visual and ignores mouse events. Delayed animation is separate
+  from physical input, which requires the active host-owned turn.
 - Include `set_value` and file-input changes in the action/observation adapter.
 - Observe uncertain action errors when an exact target is known, while keeping
   the original failure and stopping subsequent input.
@@ -228,3 +239,99 @@ its advertised `arguments`. These calls do not accept Cafe's own facade names,
 session identity, cursor identity, or capture-file output paths. Observe a
 bound target again afterwards. Existing native tool names stay callable for
 older provider sessions.
+
+## October 12 reliability and visible activity
+
+The implementation checklist is saved in
+[the reliability and visibility plan](../computer-use-reliability-and-visibility-plan.md).
+The existing lifecycle, exclusive turn ownership and macOS-only admission remain
+the control boundary.
+
+Bound actions and advanced calls accept `input_policy`:
+`foreground-allowed` (compatibility default) or `background-only`.
+The effective policy is the stricter of the trusted host setting and the request.
+It is checked for the whole batch and before every native subcall, including
+foreground recovery, browser setup, menu actions, native URL navigation, web
+replacement/paste/keys and native drags. Model arguments cannot relax the trusted
+menu-bar setting. Unsupported background operations refuse before input.
+
+Screenshot-point clicks use the pointer route, preserving an off-center position
+inside custom controls. Element clicks retain semantic AX selection by default;
+`input_route` permits an explicit compatible preference. An element with a pointer
+route, or a point with an accessibility route, is refused before input. Numeric
+and boolean AX values use typed readback, with before/requested/observed/changed
+receipts. AX acknowledgment/readback remain separate from application acceptance;
+partial or uncertain input never authorizes replay.
+
+A passive native HID monitor retains only availability and an ownership epoch,
+not keys, text or positions. Controller events use a per-helper marker. External
+input or an unexpected process/window focus change revokes restoration and
+remaining foreground characters/gesture samples. Completed down/up pairs are
+released. Exact-window foreground clicks/drags restore the saved pointer only
+while ownership is retained; explicit desktop gestures keep intended movement.
+Global window observation no longer installs wildcard activation suppression.
+Launch/menu guards also respect intervening human input. Foreground wheel
+transport is reported as PID-routed independently of target activation.
+
+Published schemas fold compatible bound-only intersections into direct
+constraints, preserve action unions and definitions, and retain runtime
+validation. Diagnostics expose only a fixed code, allowlisted decoder path and
+expected shapes. Element presence supports only true, matching the engine;
+window existence retains boolean semantics. Cafe configures native change
+detection to 100 ms with 25 ms polling and makes cursor animation nonblocking.
+Bound observations retain fresh image grounding and bounded AX settling and
+report duration/sample counts; stable observed state does not prove completion.
+
+Electron main owns a versioned, ephemeral activity snapshot: exact chat/provider
+binding, episode, sequence, input policy, target metadata, activity phase, route
+and last successful capture time. One cached IPC subscription supplies all Cafe
+consumers. It contains no screenshots, input values, clipboard contents or capture
+history. Provider labeling comes from the admitted owner.
+
+An active episode has a persistent Cafe menu-bar item, including idle gaps, and
+a sandboxed click-through, nonactivating target border with a provider/activity
+badge. The native menu offers exact-episode Stop, a background-only setting and
+return to the owning chat. Bounds refresh through a separate read-only native
+connection. The border hides for off-screen/occluded windows and identifies
+whole-display or narrower connected-tab capture. Auxiliary panels cannot be
+selected as Cafe's main window. No continuous capture stream is opened just to
+obtain Apple's recording indicator.
+
+Native AX/window/display capture and central CDP tab capture use a private,
+authenticated metadata-only acknowledgment socket. Visible status initializes
+before the read/capture proceeds. The acknowledgment supplies bounded indicator
+CGWindowIDs; full-display ScreenCaptureKit excludes them and the virtual cursor.
+Cafe refuses a fallback that would include indicators. Single-window and CDP-tab
+capture restrict pixels to their target. Last-capture time advances after capture
+succeeds (and a CDP PNG validates). Real-pointer dispatch, including an internal AX pixel fallback, also waits for
+visible status and rechecks ownership before the warp. Native receipts refine
+transport labels. Missing visibility, helper failure and Stop fail closed. Stop revokes admission immediately, displays stopping until the
+owned helper exits, and cannot revoke a later episode through a stale callback.
+This indicates local activity and the selected provider destination; it does not
+assert cloud delivery acknowledgment.
+
+The final October 12 unlocked qualification passed both native fixtures. Input
+verified exact Unicode insertion/replacement and renderer submission, off-center
+canvas coordinates, pointer restoration, background-only refusal and fresh
+handles: 23 native calls in 10.122 s. The indicator fixture verified capture and
+provider labeling, real-pointer visibility, resize tracking, hiding/restoring the
+border during occlusion, its actual WindowServer presence in fullscreen, and
+exact Stop. Its tray-only host also qualifies visibility without a Cafe main
+window; fixture lifetime is owned by the parent pipe even after Stop removes the
+last panel.
+
+Geometry uses the current on-screen stack, fences stale replies, and excludes
+known untitled AX-less fullscreen accessories. It recognizes only exact
+main-display cursor surfaces of Cua helpers in the same current or atomically
+retired runtime location, without adopting or terminating those helpers.
+Unknown windows remain potential occluders. Mouse-up uses the current cursor
+position so releasing an interrupted pair cannot move the pointer back. Idle
+status restores the trusted input policy after a request temporarily tightens it.
+
+This host has one physical display. Physical concurrent human input, arbitrary
+Space switching, multiple displays, live browser DOM acceptance and native
+menu-popup capture exclusion still require separate qualification. Capture-ID
+exclusion and central CDP ordering/failure are covered by native source and
+isolated tests; the GUI fixture does not assert pixel-level full-display
+exclusion. No live provider, user application input or clipboard edits were
+needed for these checks.

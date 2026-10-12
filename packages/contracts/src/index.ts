@@ -1,3 +1,4 @@
+export * from "./chatImages.ts";
 export * from "./baseSchemas.ts";
 export * from "./auth.ts";
 export * from "./environment.ts";

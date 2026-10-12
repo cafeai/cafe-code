@@ -10,6 +10,10 @@ export const NATIVE_CONTROL_PERMISSIONS_CHANNEL = "desktop:native-control-permis
 export const NATIVE_CONTROL_REQUEST_PERMISSIONS_CHANNEL =
   "desktop:native-control-request-permissions";
 export const CONFIRM_CHANNEL = "desktop:confirm";
+export const NATIVE_CONTROL_ACTIVITY_CHANNEL = "desktop:native-control-activity";
+export const NATIVE_CONTROL_ACTIVITY_GET_CHANNEL = "desktop:native-control-activity-get";
+export const NATIVE_CONTROL_ACTIVITY_STOP_CHANNEL = "desktop:native-control-activity-stop";
+export const NATIVE_CONTROL_INPUT_POLICY_CHANNEL = "desktop:native-control-input-policy";
 export const SET_THEME_CHANNEL = "desktop:set-theme";
 export const CONTEXT_MENU_CHANNEL = "desktop:context-menu";
 export const OPEN_EXTERNAL_CHANNEL = "desktop:open-external";

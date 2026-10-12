@@ -2106,9 +2106,14 @@ const make = Effect.gen(function* () {
       input.messageId !== undefined &&
       thread.messages.filter((entry) => entry.role === "user" && entry.id !== input.messageId)
         .length === 0;
-    const systemPrompt = isFirstUserMessageTurn
-      ? yield* readSystemPromptFileForInjection(serverConfig.systemPromptPath)
-      : undefined;
+    // Codex and Claude receive custom instructions through native session
+    // options. Retain the legacy first-turn behavior for remaining providers.
+    const systemPrompt =
+      isFirstUserMessageTurn &&
+      ensuredSession.provider !== "codex" &&
+      ensuredSession.provider !== "claudeAgent"
+        ? yield* readSystemPromptFileForInjection(serverConfig.systemPromptPath)
+        : undefined;
     const providerInput = shouldBootstrapProviderContext
       ? yield* resolveThread(input.threadId).pipe(
           Effect.flatMap((latestThread) =>

@@ -644,6 +644,13 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
         ON CONFLICT (thread_id, message_id) DO NOTHING
       `;
 
+      // Image ownership follows copied message identity; bytes are shared by
+      // digest, so deleting/rewinding the source cannot revoke its fork's copy.
+      yield* sql`INSERT INTO chat_message_images (thread_id, message_id, source, digest)
+        SELECT ${input.targetThreadId}, ${copyPrefix} || message_id, source, digest
+        FROM chat_message_images WHERE thread_id = ${input.sourceThreadId}
+        ON CONFLICT(thread_id, message_id, source) DO NOTHING`;
+
       yield* sql`
         INSERT INTO projection_thread_proposed_plans (
           plan_id,
