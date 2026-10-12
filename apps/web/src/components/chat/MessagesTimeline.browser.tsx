@@ -118,6 +118,148 @@ import { getUiLocale, setUiLocale } from "@cafecode/shared/i18n";
 
 const MESSAGE_CREATED_AT = "2026-04-13T12:00:00.000Z";
 
+it("keeps a retained provider failure discoverable while historical work and private diagnostics are collapsed", async () => {
+  const threadId = ThreadId.make("diagnostic-historical-chat");
+  const turnId = TurnId.make("diagnostic-historical-turn");
+  const activity = {
+    id: EventId.make("diagnostic-historical-error"),
+    turnId,
+    createdAt: "2026-04-13T12:00:01.000Z",
+    sequence: 1,
+    kind: "runtime.error",
+    summary: "private original provider message",
+    tone: "error" as const,
+    payload: {
+      message: "private original provider message",
+      providerDiagnostic: { version: 1, status: "error", subject: { kind: "root" } },
+    },
+  };
+  const getThreadTurnActivityPage = vi.fn(async (input: { offset: number; limit: number }) => ({
+    threadId,
+    turnId,
+    offset: input.offset,
+    limit: input.limit,
+    totalCount: 1,
+    activities: [activity],
+  }));
+  const getThreadActivityDiagnostic = vi.fn(async (input: object) => ({
+    ...input,
+    diagnostic: {
+      version: 1,
+      observedAt: activity.createdAt,
+      source: "codex.error",
+      native: { threadId: "private-native-diagnostic-thread" },
+      message: "Private recorded failure details",
+      json: '{"error":"private expanded JSON"}',
+      redacted: false,
+      truncated: false,
+      omittedFields: false,
+    },
+  }));
+  __setEnvironmentApiOverrideForTests(EnvironmentId.make("environment-local"), {
+    orchestration: { getThreadTurnActivityPage, getThreadActivityDiagnostic },
+  } as unknown as EnvironmentApi);
+  const screen = await render(
+    <MessagesTimeline
+      {...buildProps()}
+      activeThreadId={threadId}
+      timelineEntries={[buildAssistantTimelineEntry({ turnId })]}
+      historicalWorkLogSummariesByTurnId={
+        new Map([
+          [
+            turnId,
+            {
+              turnId,
+              previewEntries: deriveWorkLogEntries([activity], turnId),
+              snapshotEntryCount: 1,
+            },
+          ],
+        ])
+      }
+    />,
+  );
+  try {
+    const outer = page.getByRole("button", { name: /Work log/ });
+    await expect.element(outer).toHaveAttribute("aria-expanded", "false");
+    await expect.element(page.getByText("Provider error · 1", { exact: true })).toBeVisible();
+    expect(document.body.textContent).not.toContain("private");
+    expect(getThreadTurnActivityPage).not.toHaveBeenCalled();
+    expect(getThreadActivityDiagnostic).not.toHaveBeenCalled();
+    await outer.click();
+    const inner = page.getByRole("button", {
+      name: "Inspect provider diagnostic: Root · Provider error",
+      exact: true,
+    });
+    await expect.element(inner).toHaveAttribute("aria-expanded", "false");
+    expect(getThreadActivityDiagnostic).not.toHaveBeenCalled();
+    await inner.click();
+    await expect
+      .element(page.getByText("Private recorded failure details", { exact: true }))
+      .toBeVisible();
+    expect(getThreadActivityDiagnostic).toHaveBeenCalledExactlyOnceWith({
+      threadId,
+      turnId,
+      activityId: activity.id,
+    });
+    await outer.click();
+    await expect.element(outer).toHaveAttribute("aria-expanded", "false");
+    await expect.element(page.getByText("Provider error · 1", { exact: true })).toBeVisible();
+    expect(document.querySelector("[data-provider-diagnostic-json]")).toBeNull();
+    expect(document.body.textContent).not.toContain("private expanded JSON");
+    expect(document.body.textContent).not.toContain("private-native-diagnostic-thread");
+  } finally {
+    await screen.unmount();
+    __resetEnvironmentApiOverridesForTests();
+  }
+});
+
+it("marks a provider error hidden behind current Work Log overflow without reading private details", async () => {
+  const turnId = TurnId.make("diagnostic-current-turn");
+  const activities = Array.from({ length: 9 }, (_, index) => ({
+    id: EventId.make(`diagnostic-current-${index}`),
+    turnId,
+    createdAt: `2026-04-13T12:00:${String(index + 1).padStart(2, "0")}.000Z`,
+    sequence: index + 1,
+    kind: index === 0 ? "runtime.error" : "tool.completed",
+    tone: index === 0 ? ("error" as const) : ("tool" as const),
+    summary: index === 0 ? "private original error" : `Command ${index}`,
+    payload:
+      index === 0
+        ? { providerDiagnostic: { version: 1, status: "error", subject: { kind: "root" } } }
+        : {},
+  }));
+  const screen = await render(
+    <MessagesTimeline
+      {...buildProps()}
+      activeThreadId={ThreadId.make("diagnostic-current-chat")}
+      timelineEntries={deriveTimelineEntries([], [], deriveWorkLogEntries(activities, turnId))}
+    />,
+  );
+  try {
+    await expect.element(page.getByText("Provider error · 1", { exact: true })).toBeVisible();
+    await expect
+      .element(
+        page.getByRole("button", {
+          name: "Inspect provider diagnostic: Root · Provider error",
+          exact: true,
+        }),
+      )
+      .not.toBeInTheDocument();
+    expect(document.body.textContent).not.toContain("private original error");
+    await page.getByRole("button", { name: /Show .* more/ }).click();
+    await expect
+      .element(
+        page.getByRole("button", {
+          name: "Inspect provider diagnostic: Root · Provider error",
+          exact: true,
+        }),
+      )
+      .toHaveAttribute("aria-expanded", "false");
+  } finally {
+    await screen.unmount();
+  }
+});
+
 it("renders public summaries and inspectable command work separately from ordinary assistant prose", async () => {
   const turnId = TurnId.make("operation-turn");
   const activities = [

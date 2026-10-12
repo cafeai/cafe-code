@@ -1687,6 +1687,23 @@ function findSessionRail(): HTMLElement | null {
   return document.querySelector<HTMLElement>('[data-session-rail="true"]');
 }
 
+function expectEmptyScheduledSessionRailTasks(): void {
+  // A server chat keeps Scheduled available when its current work retires.
+  // Scope this assertion to the task container so unrelated rail usage text
+  // cannot satisfy it, and prove no stale active rows or extra placeholder stay.
+  const tasks = findSessionRail()?.querySelector<HTMLElement>('[data-session-rail-tasks="true"]');
+  const scheduled = tasks?.querySelector<HTMLElement>('[data-scheduled-followups="true"]');
+  expect(tasks).toBeTruthy();
+  expect(scheduled).toBeTruthy();
+  expect(tasks?.children).toHaveLength(1);
+  expect(tasks?.firstElementChild).toBe(scheduled);
+  expect(scheduled?.querySelector("h3")?.textContent).toBe("Scheduled 0");
+  expect(scheduled?.textContent).toContain(
+    "Schedule a check-in or a repeating task for this chat.",
+  );
+  expect(tasks?.textContent).not.toContain("No tasks yet.");
+}
+
 function findComposerProviderModelPicker(): HTMLButtonElement | null {
   return document.querySelector<HTMLButtonElement>('[data-chat-provider-model-picker="true"]');
 }
@@ -2297,6 +2314,131 @@ describe(`ChatView full app (${chatViewBrowserPart})`, () => {
       };
     };
 
+    it("keeps a persisted provider failure discoverable in the Work Log without clearing canonical error state", async () => {
+      const base = snapshotWithTerminalRoot("agents");
+      const source = base.threads[0]!;
+      const failure = source.session!.lastError!;
+      const hash = async (value: string) =>
+        Array.from(
+          new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(value))),
+          (byte) => byte.toString(16).padStart(2, "0"),
+        ).join("");
+      const providerErrorHash = await hash(failure);
+      const providerErrorOwnerHash = await hash(
+        JSON.stringify([
+          source.id,
+          source.latestTurn!.turnId,
+          source.session!.providerInstanceId,
+          source.session!.subagentRuntimeId,
+        ]),
+      );
+      const activityId = EventId.make("persisted-provider-error-exact-occurrence");
+      const privateMessage = "Private synthetic received error details";
+      const privateJson = JSON.stringify({
+        error: { message: privateMessage, code: "synthetic_503" },
+      });
+      const snapshot: OrchestrationReadModel = {
+        ...base,
+        threads: [
+          {
+            ...source,
+            activities: [
+              ...source.activities,
+              {
+                id: activityId,
+                kind: "runtime.error",
+                tone: "error",
+                summary: "Provider error",
+                turnId: source.latestTurn!.turnId,
+                sequence: 3,
+                createdAt: source.session!.updatedAt,
+                payload: {
+                  providerDiagnostic: { version: 1, status: "error", subject: { kind: "root" } },
+                  providerErrorHash,
+                  providerErrorOwnerHash,
+                },
+              },
+            ],
+          },
+        ],
+      };
+      const detailRequests: NormalizedWsRpcRequestBody[] = [];
+      const toastSpy = vi.spyOn(toastManager, "add");
+      const mounted = await mountChatView({
+        viewport: WIDE_FOOTER_VIEWPORT,
+        snapshot,
+        resolveRpc: (body) => {
+          if (body._tag !== ORCHESTRATION_WS_METHODS.getThreadActivityDiagnostic) return undefined;
+          detailRequests.push(body);
+          return {
+            threadId: body.threadId,
+            turnId: body.turnId,
+            activityId: body.activityId,
+            diagnostic: {
+              version: 1,
+              observedAt: source.session!.updatedAt,
+              source: "codex.error",
+              native: { eventId: "synthetic-private-receipt" },
+              message: privateMessage,
+              json: privateJson,
+              redacted: false,
+              truncated: false,
+              omittedFields: false,
+            },
+          };
+        },
+      });
+      const errorBanner = () =>
+        Array.from(document.querySelectorAll<HTMLElement>('[data-slot="alert"]')).find((element) =>
+          element.textContent?.includes(failure),
+        ) ?? null;
+      try {
+        await waitForComposerEditor();
+        await vi.waitFor(() => {
+          expect(errorBanner()).toBeNull();
+          expect(
+            document.querySelector('[data-work-log-provider-errors="true"]')?.textContent,
+          ).toBe("Provider error · 1");
+        });
+        expect(detailRequests).toHaveLength(0);
+        expect(document.body.textContent).not.toContain(privateMessage);
+        expect(document.querySelector("[data-provider-diagnostic-json]")).toBeNull();
+        expect(toastSpy.mock.calls.some(([options]) => options.description === failure)).toBe(
+          false,
+        );
+        expect(selectThreadByRef(useStore.getState(), THREAD_REF)?.error).toBe(failure);
+        expect(selectThreadByRef(useStore.getState(), THREAD_REF)?.latestTurn).toEqual(
+          source.latestTurn,
+        );
+        const inspect = page.getByRole("button", {
+          name: "Inspect provider diagnostic: Root · Provider error",
+          exact: true,
+        });
+        await expect.element(inspect).toHaveAttribute("aria-expanded", "false");
+        await inspect.click();
+        await expect.element(page.getByText(privateMessage, { exact: true })).toBeVisible();
+        expect(detailRequests).toHaveLength(1);
+        expect(detailRequests[0]).toMatchObject({
+          threadId: THREAD_ID,
+          turnId: source.latestTurn!.turnId,
+          activityId,
+        });
+        expect(document.querySelector("[data-provider-diagnostic-json]")?.textContent).toBe(
+          privateJson,
+        );
+        await inspect.click();
+        expect(document.querySelector("[data-provider-diagnostic-json]")).toBeNull();
+        expect(document.body.textContent).not.toContain(privateMessage);
+        expect(selectThreadByRef(useStore.getState(), THREAD_REF)?.error).toBe(failure);
+        expect(selectThreadByRef(useStore.getState(), THREAD_REF)?.latestTurn).toEqual(
+          source.latestTurn,
+        );
+      } finally {
+        await mounted.cleanup();
+        toastSpy.mockRestore();
+      }
+    });
+
     it("reveals elapsed time from the exact running root through the real composer", async () => {
       const base = createSnapshotWithActiveSubagent();
       const startedAt = new Date(Date.now() - 125_000).toISOString();
@@ -2573,7 +2715,7 @@ describe(`ChatView full app (${chatViewBrowserPart})`, () => {
               [...document.querySelectorAll("[data-work-log]")]
                 .map((node) => node.textContent)
                 .join(" "),
-            ).toContain("Runtime error");
+            ).toContain("Provider error");
           });
           expect(toastSpy.mock.calls.some(([options]) => options.description === failure)).toBe(
             false,
@@ -3618,7 +3760,7 @@ describe(`ChatView full app (${chatViewBrowserPart})`, () => {
 
         await vi.waitFor(() => {
           expect(findSessionRail()?.textContent).not.toContain("Cross-turn roster audit");
-          expect(findSessionRail()?.textContent).toContain("No tasks yet.");
+          expectEmptyScheduledSessionRailTasks();
           expect(selectThreadByRef(useStore.getState(), THREAD_REF)?.latestTurn?.turnId).toBe(
             "turn-after-cross-turn-subagent-spawn",
           );
@@ -3694,7 +3836,7 @@ describe(`ChatView full app (${chatViewBrowserPart})`, () => {
           expect(thread?.session?.subagentRuntimeId).toBeNull();
           expect(thread?.session?.orchestrationStatus).toBe("running");
           expect(findSessionRail()?.textContent).not.toContain("Cross-turn roster audit");
-          expect(findSessionRail()?.textContent).toContain("No tasks yet.");
+          expectEmptyScheduledSessionRailTasks();
           expect(findSessionRail()?.textContent).not.toContain("1 active");
         });
         await page.getByRole("button", { name: "Show in composer" }).click();
@@ -4034,7 +4176,7 @@ describe(`ChatView full app (${chatViewBrowserPart})`, () => {
           expect(findSessionRail()).not.toBeNull();
         });
         expect(document.querySelector('[data-chat-right-column="true"]')).not.toBeNull();
-        expect(findSessionRail()?.textContent).toContain("No tasks yet.");
+        await vi.waitFor(expectEmptyScheduledSessionRailTasks);
       } finally {
         await mounted.cleanup();
       }

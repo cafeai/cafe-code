@@ -1,5 +1,5 @@
 import { type TimestampFormat } from "@cafecode/contracts/settings";
-import { uiFormatDateTime, uiText } from "@cafecode/shared/i18n";
+import { uiFormatDateTime, uiText, type UiLocale } from "@cafecode/shared/i18n";
 
 export function getTimestampFormatOptions(
   timestampFormat: TimestampFormat,
@@ -29,6 +29,32 @@ export function formatTimestamp(isoDate: string, timestampFormat: TimestampForma
 
 export function formatShortTimestamp(isoDate: string, timestampFormat: TimestampFormat): string {
   return uiFormatDateTime(new Date(isoDate), getTimestampFormatOptions(timestampFormat, false));
+}
+
+/** Recorded diagnostic instants use the viewer's native date/zone, never now. */
+export function getDiagnosticTimestampFormatOptions(
+  timestampFormat: TimestampFormat,
+): Intl.DateTimeFormatOptions {
+  return {
+    year: "numeric",
+    month: "numeric",
+    day: "numeric",
+    ...getTimestampFormatOptions(timestampFormat, true),
+    timeZoneName: "short",
+  };
+}
+
+export function formatDiagnosticTimestamp(
+  isoDate: string,
+  timestampFormat: TimestampFormat,
+  locale?: UiLocale,
+): string {
+  const date = new Date(isoDate);
+  // Legacy malformed timestamps do not crash the work log or acquire a
+  // current timestamp which would falsely imply another retry observation.
+  return Number.isFinite(date.getTime())
+    ? uiFormatDateTime(date, getDiagnosticTimestampFormatOptions(timestampFormat))
+    : uiText("Time not recorded", undefined, undefined, locale);
 }
 
 /** Compact display units are catalog messages, never persisted duration ids. */

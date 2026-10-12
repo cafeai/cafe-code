@@ -140,6 +140,44 @@ describe("ProviderRuntimeEvent", () => {
     ).toBe(true);
     const { nativeRetry: _retry, ...legacy } = payload;
     expect(isCodexNativeRetryWarningPayload(legacy)).toBe(true);
+    const diagnosticSummary = {
+      version: 1,
+      status: "retry",
+      subject: { kind: "subagent", id: "child-id", label: "Reviewer" },
+      observedRetryCount: 12,
+    };
+    expect(
+      isCodexNativeRetryWarningPayload({ ...payload, providerDiagnostic: diagnosticSummary }),
+    ).toBe(true);
+    expect(
+      isCodexNativeRetryWarningPayload({
+        ...payload,
+        nativeRetry: { observedCount: 1_008, timing: "unknown", countLimited: true },
+        providerDiagnostic: {
+          ...diagnosticSummary,
+          observedRetryCount: 1_008,
+          countLimited: true,
+        },
+      }),
+    ).toBe(true);
+    for (const providerDiagnostic of [
+      { ...diagnosticSummary, version: 2 },
+      { ...diagnosticSummary, status: "error" },
+      { ...diagnosticSummary, snapshot: { json: "private" } },
+      { ...diagnosticSummary, observedRetryCount: 1_025 },
+      { version: 1, status: "retry", subject: { kind: "root" }, countLimited: true },
+      { ...diagnosticSummary, subject: { kind: "root", id: "forged" } },
+      { ...diagnosticSummary, subject: { kind: "subagent", id: "x".repeat(513) } },
+      {
+        ...diagnosticSummary,
+        subject: Object.defineProperty({}, "kind", {
+          get() {
+            throw new Error("Do not invoke");
+          },
+        }),
+      },
+    ])
+      expect(isCodexNativeRetryWarningPayload({ ...payload, providerDiagnostic })).toBe(false);
     for (const malformed of [
       { ...payload, retrying: false },
       { ...payload, message: "Other warning" },

@@ -76,6 +76,10 @@ import * as EffectCodexSchema from "effect-codex-app-server/schema";
 
 import { getModelSelectionStringOptionValue } from "@cafecode/shared/model";
 import { summarizeToolArguments } from "@cafecode/shared/toolActivity";
+import {
+  makeProviderDiagnostic,
+  readProviderDiagnosticSummary,
+} from "@cafecode/shared/providerDiagnostic";
 import { resolveCodexServiceTier } from "../codexServiceTier.ts";
 import { resolveCodexDaybreak } from "../codexDaybreak.ts";
 import {
@@ -1836,6 +1840,9 @@ function codexAuthRecoveryRuntimeEventBase(
 ): Omit<ProviderRuntimeEvent, "type" | "payload"> {
   const { providerRefs: _providerRefs, ...base } = runtimeEventBase(event, canonicalThreadId, {
     rawPayload: diagnostic,
+    // Auth-recovery lifecycle is intentionally content-free. The separately
+    // mapped owning turn/error captures its own diagnostic, never this helper.
+    skipDiagnostic: true,
   });
   // Provider refs are optional diagnostics. The owning canonical turn remains
   // on the event for correct task projection, but duplicating the opaque native
@@ -2268,9 +2275,10 @@ function providerRefsFromEvent(
 function runtimeEventBase(
   event: ProviderEvent,
   canonicalThreadId: ThreadId,
-  options?: { readonly rawPayload?: unknown },
+  options?: { readonly rawPayload?: unknown; readonly skipDiagnostic?: boolean },
 ): Omit<ProviderRuntimeEvent, "type" | "payload"> {
   const refs = providerRefsFromEvent(event);
+  const diagnostic = options?.skipDiagnostic ? undefined : codexErrorDiagnostic(event);
   return {
     eventId: event.id,
     provider: event.provider,
@@ -2281,6 +2289,7 @@ function runtimeEventBase(
     ...(event.itemId ? { itemId: asRuntimeItemId(event.itemId) } : {}),
     ...(event.requestId ? { requestId: asRuntimeRequestId(event.requestId) } : {}),
     ...(refs ? { providerRefs: refs } : {}),
+    ...(diagnostic ? { diagnostic } : {}),
     raw: {
       source: eventRawSource(event),
       method: event.method,
@@ -2290,6 +2299,102 @@ function runtimeEventBase(
         {},
     },
   };
+}
+
+/**
+ * Diagnostic capture is intentionally separate from lifecycle classification.
+ * Current official app-server docs describe failed turn.error, while our
+ * qualified pinned V2ErrorNotification additionally carries willRetry and the
+ * exact native target/turn. Capture only those error-envelope fields: turn.items
+ * may contain prompts, tool arguments and full output and must never be copied.
+ * https://learn.chatgpt.com/docs/app-server#turn-events
+ */
+function codexErrorDiagnostic(event: ProviderEvent): ProviderRuntimeEvent["diagnostic"] {
+  const child =
+    event.method === "codex.subagent/error" || event.method === "codex.subagent/turnCompleted";
+  const notification = event.method === "error" || event.method === "codex.subagent/error";
+  const terminal =
+    event.method === "turn/completed" || event.method === "codex.subagent/turnCompleted";
+  if (!notification && !terminal) return undefined;
+  const targetId = nativeRetryIdentity(ownNativeRetryField(event.payload, "threadId"));
+  const turn = terminal ? ownNativeRetryField(event.payload, "turn") : undefined;
+  const items = terminal ? ownNativeRetryField(turn, "items") : undefined;
+  const emptyItems =
+    Array.isArray(items) &&
+    Object.getPrototypeOf(items) === Array.prototype &&
+    Object.getOwnPropertyDescriptor(items, "length")?.value === 0;
+  const error = ownNativeRetryField(terminal ? turn : event.payload, "error");
+  const turnStatus = terminal ? ownNativeRetryField(turn, "status") : undefined;
+  if (terminal && turnStatus !== "failed") return undefined;
+  const nativeTurnId = nativeRetryIdentity(
+    ownNativeRetryField(terminal ? turn : event.payload, terminal ? "id" : "turnId"),
+  );
+  const willRetry = notification && ownNativeRetryField(event.payload, "willRetry") === true;
+  const message = ownNativeRetryField(error, "message");
+  if (typeof message === "string" && isCodexHistoryRecoveryRequiredError(message)) {
+    // This exact normalized history-safety sentinel already discarded native
+    // tool-call material upstream. A debugging disclosure must not revive that
+    // rejected body or its private target identifiers through a new channel.
+    return makeProviderDiagnostic({
+      observedAt: event.createdAt,
+      source: eventRawSource(event),
+      method: event.method,
+      status: "error",
+      subject: { kind: "unknown" },
+      message,
+      payload: { error: { message }, reason: "codex_history_tool_arguments_too_large" },
+      omittedFields: true,
+    });
+  }
+  return makeProviderDiagnostic({
+    observedAt: event.createdAt,
+    source: eventRawSource(event),
+    method: event.method,
+    status: willRetry ? "retry" : "error",
+    subject: child
+      ? targetId
+        ? { kind: "subagent", id: targetId }
+        : { kind: "unknown" }
+      : { kind: "root" },
+    native: {
+      eventId: event.id,
+      ...(targetId ? { threadId: targetId } : {}),
+      ...(nativeTurnId ? { turnId: nativeTurnId } : {}),
+      ...(event.subagentRuntimeId ? { subagentRuntimeId: event.subagentRuntimeId } : {}),
+      ...(event.requestId ? { requestId: event.requestId } : {}),
+    },
+    ...(typeof message === "string" ? { message } : {}),
+    payload: terminal
+      ? {
+          ...(targetId ? { threadId: targetId } : {}),
+          turn: {
+            ...(nativeTurnId ? { id: nativeTurnId } : {}),
+            status: turnStatus,
+            error: error ?? null,
+          },
+        }
+      : {
+          ...(targetId ? { threadId: targetId } : {}),
+          ...(nativeTurnId ? { turnId: nativeTurnId } : {}),
+          willRetry,
+          error: error ?? null,
+        },
+    // A normal terminal envelope has empty items plus the known error tuple.
+    // Real item content or unknown outer metadata remains deliberately absent
+    // and explicitly marked. Empty structural items alone do not make the
+    // received error body incomplete, allowing exact terminal-echo folding.
+    omittedFields: terminal
+      ? !emptyItems ||
+        Object.keys(readRecordValue(turn) ?? {}).some(
+          (key) => !["id", "status", "error", "items"].includes(key),
+        ) ||
+        Object.keys(readRecordValue(event.payload) ?? {}).some(
+          (key) => !["threadId", "turn"].includes(key),
+        )
+      : Object.keys(readRecordValue(event.payload) ?? {}).some(
+          (key) => !["threadId", "turnId", "willRetry", "error"].includes(key),
+        ),
+  });
 }
 
 /**
@@ -2342,7 +2447,13 @@ function subagentRuntimeEventBase(
     32,
   );
   return {
-    ...runtimeEventBase(event, canonicalThreadId, { rawPayload }),
+    ...runtimeEventBase(event, canonicalThreadId, {
+      rawPayload,
+      // Retrying children already publish an exact warning row. Retain only
+      // one private capture per observation; terminal child lifecycle rows
+      // still carry diagnostics for ingestion's display-only error activity.
+      skipDiagnostic: lifecycle === "child-error-retrying",
+    }),
     eventId: EventId.make(`${String(event.id)}:subagent:${childDigest}`),
   };
 }
@@ -2449,7 +2560,7 @@ function enrichCodexSubagentPresentations(
     sourceEvent.method === "codex.subagent/threadStarted"
       ? readPayload(EffectCodexSchema.V2ThreadStartedNotification, sourceEvent.payload)?.thread
       : undefined;
-  return events.map((event) => {
+  const enriched = events.map((event) => {
     if (
       event.type !== "task.started" &&
       event.type !== "task.progress" &&
@@ -2694,6 +2805,33 @@ function enrichCodexSubagentPresentations(
           : {}),
       },
     } as ProviderRuntimeEvent;
+  });
+  return enriched.map((event) => {
+    const diagnostic = event.diagnostic;
+    if (!diagnostic || diagnostic.summary.subject.kind !== "subagent") return event;
+    const subject = diagnostic.summary.subject;
+    const owner = subject.id ? presentationByThreadId.get(subject.id) : undefined;
+    // The public child name/avatar remains the same qualified descriptor as
+    // the roster. A foreign bridge's metadata cannot rename this occurrence.
+    const label = owner?.presentation.label;
+    const generationMatches =
+      bridgeRuntimeId !== undefined && bridgeRuntimeId === event.subagentRuntimeId;
+    const summary =
+      label && generationMatches
+        ? readProviderDiagnosticSummary({
+            ...diagnostic.summary,
+            subject: { ...subject, label },
+          })
+        : undefined;
+    return summary
+      ? {
+          ...event,
+          diagnostic: {
+            ...diagnostic,
+            summary,
+          },
+        }
+      : event;
   });
 }
 
@@ -5469,11 +5607,12 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
                 );
 
                 const runtimeEvents = yield* Effect.sync(() => {
+                  const nativeRetry = observeNativeRetry(event, rootProviderThreadId);
                   const mapped = mapToRuntimeEvents(
                     event,
                     event.threadId,
                     codexConfig.autoCompactTokenLimit,
-                    observeNativeRetry(event, rootProviderThreadId),
+                    nativeRetry,
                   );
                   const authRecoveryTerminals = reconcileCodexAuthRecoveryLifecycle(
                     event,
@@ -5485,7 +5624,43 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
                     subagentPresentationsByThreadId,
                     event,
                     subagentTitleRuntimeId,
-                  );
+                  ).map((entry) => {
+                    const diagnostic = entry.diagnostic;
+                    if (!diagnostic) return entry;
+                    const targetId = diagnostic.snapshot.native.threadId;
+                    const exactRoot =
+                      rootProviderThreadId !== undefined && targetId === rootProviderThreadId;
+                    const exactGeneration =
+                      subagentTitleRuntimeId === undefined ||
+                      subagentTitleRuntimeId === event.subagentRuntimeId;
+                    // Routing already distinguishes root from child events.
+                    // Classification below is display-only and requires that
+                    // same exact target/generation, never a canonical parent
+                    // turn or provider-authored message as proof of origin.
+                    const subject =
+                      exactGeneration &&
+                      (diagnostic.summary.subject.kind === "subagent" ? !exactRoot : exactRoot)
+                        ? diagnostic.summary.subject
+                        : { kind: "unknown" as const };
+                    return {
+                      ...entry,
+                      diagnostic: {
+                        ...diagnostic,
+                        summary: {
+                          ...diagnostic.summary,
+                          subject,
+                          ...(diagnostic.summary.status === "retry" && nativeRetry
+                            ? {
+                                observedRetryCount: nativeRetry.observedCount,
+                                ...(nativeRetry.countLimited
+                                  ? { countLimited: true as const }
+                                  : {}),
+                              }
+                            : {}),
+                        },
+                      },
+                    };
+                  });
                 }).pipe(
                   Effect.catchCause((cause) =>
                     Effect.logWarning("codex.runtime.bridge.map-failed", {

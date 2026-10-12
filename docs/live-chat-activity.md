@@ -1,6 +1,6 @@
 # Live chat activity
 
-Last updated: 2026-10-12 14:06:03 JST (UTC+0900)
+Last updated: 2026-10-12 15:11:00 JST (UTC+0900)
 
 The composer has one compact activity line above the editor. It shows Working,
 Running command, a computer action, or waiting for a tool, agent, answer or
@@ -74,6 +74,26 @@ reopen a turn, confer task control, or change provider retry behavior. See
 [the bounded history decision](decisions/bounded-work-log-history.md).
 
 ## Ordinary provider tasks
+
+Provider retries and errors use the command row's expandable details style.
+The closed row shows the saved agent identity/avatar (or Root/Agent not
+recorded), a fixed retry/error label and native local date/time. Only explicit
+expansion loads its private retained diagnostic JSON, origin and correlation
+information. Known secrets are filtered before storage, and omissions or
+truncation are stated; this is not untouched original wire JSON. Copy JSON and
+Copy details are explicit actions. Legacy observations say details were not
+recorded. No diagnostic read starts a provider or changes retry policy.
+The private reader revalidates the exact owner session before lookup and before
+returning bytes, so a retained socket cannot bypass session revocation or expiry.
+
+Known provider errors remain indicated in collapsed Work log headers. A matching
+durably represented root failure replaces the large duplicate error banner,
+without clearing canonical errors or removing actionable recovery/authentication
+feedback. See [the private diagnostic decision](decisions/private-provider-error-diagnostics.md).
+
+Schedule refresh/disconnection messages and Refresh schedules appear only in
+Tasks, not the main conversation. Saved follow-up notices remain in chat with
+last-known state and their existing stale-action gates.
 
 In both the Tasks popover and docked rail, ordinary Provider tasks appear last,
 below Scheduled work. Workflows, active subagents and the checklist retain their

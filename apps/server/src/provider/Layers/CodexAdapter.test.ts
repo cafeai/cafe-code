@@ -8,6 +8,7 @@ import {
   ApprovalRequestId,
   CodexSettings,
   EventId,
+  isCodexNativeRetryWarningPayload,
   MessageId,
   ProviderDriverKind,
   ProviderInstanceId,
@@ -30,6 +31,10 @@ import {
   TurnId,
 } from "@cafecode/contracts";
 import { createModelSelection } from "@cafecode/shared/model";
+import {
+  makeProviderDiagnostic,
+  readProviderDiagnosticSummary,
+} from "@cafecode/shared/providerDiagnostic";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { it, vi } from "@effect/vitest";
 
@@ -359,6 +364,34 @@ it("bounds total retry fingerprint memory without recycling an unavailable count
             ? { observedCount: index, timing: "unknown" }
             : { observedCount: 1_008, timing: "unknown", countLimited: true },
         );
+      if (target === 15 && index === 1_024) {
+        assert.ok(result);
+        const diagnostic = makeProviderDiagnostic({
+          observedAt: "2026-01-01T00:00:00.000Z",
+          source: "codex.app-server.notification",
+          status: "retry",
+          subject: { kind: "subagent", id: "child-15" },
+          observedRetryCount: result.observedCount,
+          ...(result.countLimited === true ? { countLimited: true } : {}),
+          payload: { error: { message: "Provider reconnecting" }, willRetry: true },
+        });
+        // Tracking all admitted targets can exhaust the global budget before
+        // this target's counter saturates. The summary must remain finite
+        // native retry evidence for downstream immutable clock classification.
+        assert.equal(diagnostic.summary.observedRetryCount, 1_008);
+        assert.equal(diagnostic.summary.countLimited, true);
+        assert.deepEqual(readProviderDiagnosticSummary(diagnostic.summary), diagnostic.summary);
+        assert.equal(
+          isCodexNativeRetryWarningPayload({
+            message: "Provider reconnecting",
+            retrying: true,
+            detail: { willRetry: true },
+            nativeRetry: result,
+            providerDiagnostic: diagnostic.summary,
+          }),
+          true,
+        );
+      }
     }
   }
   assert.equal(
@@ -2805,7 +2838,22 @@ lifecycleLayer("CodexAdapterLive lifecycle", (it) => {
           }
         }
         const events = Array.from(yield* Fiber.join(eventsFiber));
-        assert.doesNotMatch(JSON.stringify(events), /private-error-(?:inner|outer)-sentinel/);
+        // Unknown error extension data is now available ONLY through the new
+        // explicitly owned private diagnostic. The original canonical fields
+        // retain the same content-free policy and never acquire recovery proof.
+        assert.doesNotMatch(
+          JSON.stringify(events.map(({ diagnostic: _private, ...ordinary }) => ordinary)),
+          /private-error-(?:inner|outer)-sentinel/,
+        );
+        assert.doesNotMatch(
+          JSON.stringify(events.map((event) => event.diagnostic?.summary)),
+          /private-error-(?:inner|outer)-sentinel/,
+        );
+        assert.match(events[2]!.diagnostic!.snapshot.json, /private-error-inner-sentinel/);
+        assert.match(
+          events[events.length - 1]!.diagnostic!.snapshot.json,
+          /private-error-outer-sentinel/,
+        );
         for (const [index, event] of events.entries()) {
           assert.equal(event.type, index % 2 === 0 ? "runtime.error" : "turn.completed");
           if (event.type === "turn.completed")
@@ -5788,6 +5836,18 @@ lifecycleLayer("CodexAdapterLive lifecycle", (it) => {
         nativeRetry: { observedCount: 1, timing: "unknown" },
       });
       assert.match(JSON.stringify(firstEvent.value.raw), /Reconnecting\.\.\. 2\/5/);
+      assert.deepEqual(firstEvent.value.diagnostic?.summary, {
+        version: 1,
+        status: "retry",
+        subject: { kind: "root" },
+        observedRetryCount: 1,
+      });
+      assert.equal(firstEvent.value.diagnostic?.snapshot.native.threadId, "provider-thread-1");
+      assert.equal(firstEvent.value.diagnostic?.snapshot.native.turnId, "turn-1");
+      assert.equal(
+        JSON.parse(firstEvent.value.diagnostic!.snapshot.json).error.message,
+        "Reconnecting... 2/5",
+      );
     }),
   );
 
@@ -5896,6 +5956,11 @@ lifecycleLayer("CodexAdapterLive lifecycle", (it) => {
         );
         assert.equal(tasks[1]?.payload.subagent?.label, "Named child");
         assert.equal(tasks[4]?.payload.subagent?.status, "failed");
+        const warnings = events.filter((event) => event.type === "runtime.warning");
+        assert.equal(warnings[1]?.diagnostic?.summary.subject.kind, "subagent");
+        assert.equal(warnings[1]?.diagnostic?.summary.subject.label, "Named child");
+        assert.equal(warnings[1]?.diagnostic?.summary.observedRetryCount, 2);
+        assert.equal(tasks[1]?.diagnostic, undefined);
         assert.equal(runtime.sendTurnImpl.mock.calls.length, 0);
         assert.equal(runtime.steerTurnImpl.mock.calls.length, 0);
       }),
@@ -5939,6 +6004,120 @@ lifecycleLayer("CodexAdapterLive lifecycle", (it) => {
         assert.equal(firstEvent.value.turnId, "turn-1");
         assert.equal(firstEvent.value.payload.class, "provider_error");
         assert.equal(firstEvent.value.payload.message, "Flex capacity is temporarily unavailable");
+      }),
+  );
+
+  it.effect("retains a complete native error tuple in a minimal failed terminal echo", () =>
+    Effect.gen(function* () {
+      const { adapter, runtime } = yield* startLifecycleRuntime(retryTestRuntimeId);
+      const eventsFiber = yield* Stream.take(adapter.streamEvents, 2).pipe(
+        Stream.runCollect,
+        Effect.forkChild,
+      );
+      const error = {
+        message: "Response stream interrupted",
+        codexErrorInfo: { responseStreamDisconnected: { httpStatusCode: 503 } },
+        additionalDetails: null,
+      };
+      const frame = {
+        kind: "notification" as const,
+        provider: ProviderDriverKind.make("codex"),
+        threadId: asThreadId("thread-1"),
+        subagentRuntimeId: retryTestRuntimeId,
+        createdAt: "2026-10-12T00:00:00.000Z",
+        turnId: asTurnId("turn-1"),
+      };
+      yield* runtime.emit({
+        ...frame,
+        id: asEventId("complete-error-tuple"),
+        method: "error",
+        payload: { threadId: "provider-thread-1", turnId: "turn-1", error, willRetry: false },
+      });
+      yield* runtime.emit({
+        ...frame,
+        id: asEventId("complete-terminal-echo"),
+        method: "turn/completed",
+        payload: {
+          threadId: "provider-thread-1",
+          turn: { id: "turn-1", status: "failed", error, items: [] },
+        },
+      });
+      const events = yield* Fiber.join(eventsFiber);
+      assert.deepEqual(
+        events.map((event) => event.type),
+        ["runtime.error", "turn.completed"],
+      );
+      const notification = events[0]!.diagnostic!.snapshot;
+      const terminal = events[1]!.diagnostic!.snapshot;
+      for (const snapshot of [notification, terminal]) {
+        assert.equal(snapshot.redacted, false);
+        assert.equal(snapshot.truncated, false);
+        // Empty native item history removes no actual item bytes. This exact
+        // envelope is complete enough for the private store's terminal echo
+        // comparison; nonempty/unknown payload omissions remain ineligible.
+        assert.equal(snapshot.omittedFields, false);
+        assert.equal(snapshot.native.threadId, "provider-thread-1");
+        assert.equal(snapshot.native.turnId, "turn-1");
+        assert.equal(snapshot.native.subagentRuntimeId, retryTestRuntimeId);
+      }
+      assert.deepEqual(JSON.parse(notification.json).error, error);
+      assert.deepEqual(JSON.parse(terminal.json).turn.error, error);
+      assert.equal(runtime.sendTurnImpl.mock.calls.length, 0);
+      assert.equal(runtime.steerTurnImpl.mock.calls.length, 0);
+    }),
+  );
+
+  it.effect(
+    "captures terminal-only failed-root diagnostics without copying turn items or credentials",
+    () =>
+      Effect.gen(function* () {
+        const { adapter, runtime } = yield* startLifecycleRuntime();
+        const eventFiber = yield* Stream.runHead(adapter.streamEvents).pipe(Effect.forkChild);
+        yield* runtime.emit({
+          id: asEventId("terminal-only-diagnostic"),
+          kind: "notification",
+          provider: ProviderDriverKind.make("codex"),
+          threadId: asThreadId("thread-1"),
+          createdAt: "2026-10-12T00:00:00.000Z",
+          method: "turn/completed",
+          turnId: asTurnId("turn-1"),
+          payload: {
+            threadId: "provider-thread-1",
+            turn: {
+              id: "turn-1",
+              status: "failed",
+              items: [],
+              error: {
+                message: "Request interrupted; request ID debug-request-123",
+                codexErrorInfo: { responseStreamDisconnected: { httpStatusCode: 503 } },
+                additionalDetails: "Cookie: first=private; second=private",
+                extension: { api_key: "private", auth: { token: "private" }, code: "E_STREAM" },
+              },
+              prompt: "unrelated-private-prompt",
+            },
+          },
+        });
+        const event = yield* Fiber.join(eventFiber);
+        assert.equal(event._tag, "Some");
+        if (event._tag !== "Some") return;
+        assert.equal(event.value.type, "turn.completed");
+        if (event.value.type !== "turn.completed") return;
+        assert.equal(event.value.payload.state, "failed");
+        assert.deepEqual(event.value.diagnostic?.summary, {
+          version: 1,
+          status: "error",
+          subject: { kind: "root" },
+        });
+        const snapshot = event.value.diagnostic!.snapshot;
+        assert.equal(snapshot.native.turnId, "turn-1");
+        assert.equal(snapshot.redacted, true);
+        assert.equal(snapshot.omittedFields, true);
+        assert.equal(snapshot.json.includes("private"), false);
+        assert.equal(snapshot.json.includes("items"), false);
+        assert.equal(snapshot.json.includes("debug-request-123"), true);
+        assert.equal(snapshot.json.includes("E_STREAM"), true);
+        assert.equal(runtime.sendTurnImpl.mock.calls.length, 0);
+        assert.equal(runtime.steerTurnImpl.mock.calls.length, 0);
       }),
   );
 
@@ -6054,6 +6233,13 @@ lifecycleLayer("CodexAdapterLive lifecycle", (it) => {
             .update("provider-child-thread")
             .digest("hex"),
         });
+        assert.deepEqual(child.diagnostic?.summary, {
+          version: 1,
+          status: "error",
+          subject: { kind: "subagent", id: "provider-child-thread" },
+        });
+        assert.equal(child.diagnostic?.snapshot.native.turnId, "provider-child-turn");
+        assert.equal(child.diagnostic?.snapshot.native.threadId, "provider-child-thread");
         const boundary = events[1];
         assert.equal(boundary?.eventId, "terminal-child-boundary");
         assert.equal(boundary?.type, "runtime.warning");
@@ -6089,6 +6275,7 @@ lifecycleLayer("CodexAdapterLive lifecycle", (it) => {
         assert.equal(event.value.turnId, "parent-turn");
         assert.equal(event.value.payload.message, "Unqualified child failure");
         assert.equal(event.value.payload.nativeRetry, undefined);
+        assert.deepEqual(event.value.diagnostic?.summary.subject, { kind: "unknown" });
         assert.deepEqual(event.value.raw?.payload, {
           source: "codex.child.error",
           willRetry: false,

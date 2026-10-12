@@ -2646,6 +2646,24 @@ it.effect("ProviderServiceLive writes canonical events to the emitting thread se
         payload: {
           state: "completed",
         },
+        diagnostic: {
+          summary: { version: 1, status: "error", subject: { kind: "root" } },
+          snapshot: {
+            version: 1,
+            observedAt: "2026-01-01T00:00:00.000Z",
+            source: "codex.app-server.notification",
+            method: "turn/completed",
+            native: {
+              threadId: "private-native-diagnostic-thread",
+              turnId: "private-native-diagnostic-turn",
+            },
+            message: "Private received error detail",
+            json: '{"error":"private-diagnostic-sentinel"}',
+            redacted: false,
+            truncated: false,
+            omittedFields: false,
+          },
+        },
       });
       yield* advanceTestClock(20);
     }).pipe(Effect.provide(providerLayer));
@@ -2653,6 +2671,11 @@ it.effect("ProviderServiceLive writes canonical events to the emitting thread se
     assert.equal(canonicalEvents.length, 1);
     assert.equal(canonicalEvents[0]?.threadId, "thread-canonical-thread-segment");
     assert.deepEqual(canonicalThreadIds, ["thread-canonical-thread-segment"]);
+    assert.equal(canonicalEvents[0]?.diagnostic, undefined);
+    assert.notMatch(
+      JSON.stringify(canonicalEvents),
+      /private-native-diagnostic|private-diagnostic-sentinel|Private received error detail/,
+    );
   }).pipe(Effect.provide(NodeServices.layer)),
 );
 

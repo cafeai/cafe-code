@@ -449,6 +449,42 @@ export const makeSessionCredentialService = Effect.gen(function* () {
       ),
     );
 
+  const validateActiveSession: SessionCredentialServiceShape["validateActiveSession"] = (
+    identity,
+  ) =>
+    Effect.gen(function* () {
+      // The upgrade snapshot is not continuing authority: a retained socket
+      // must not outlive revocation, expiry, or replacement of its parent row.
+      // Check the clock after the read so database latency cannot admit a row
+      // that has already expired. No cached list or connection counter is proof.
+      const row = yield* authSessions.getById({ sessionId: identity.sessionId });
+      const now = yield* Clock.currentTimeMillis;
+      if (
+        Option.isNone(row) ||
+        row.value.sessionId !== identity.sessionId ||
+        row.value.revokedAt !== null ||
+        row.value.expiresAt.epochMilliseconds <= now ||
+        row.value.subject !== identity.subject ||
+        row.value.method !== identity.method ||
+        row.value.role !== identity.role ||
+        identity.expiresAt === undefined ||
+        row.value.expiresAt.epochMilliseconds !== identity.expiresAt.epochMilliseconds
+      ) {
+        return yield* new SessionCredentialError({
+          message: "The authenticated session is no longer active.",
+        });
+      }
+    }).pipe(
+      // SQL failures can contain private stored values. This admission method
+      // deliberately exposes neither the row nor an underlying error cause.
+      Effect.mapError(
+        () =>
+          new SessionCredentialError({
+            message: "The authenticated session is no longer active.",
+          }),
+      ),
+    );
+
   const listActive: SessionCredentialServiceShape["listActive"] = () =>
     Effect.gen(function* () {
       const now = yield* DateTime.now;
@@ -522,6 +558,7 @@ export const makeSessionCredentialService = Effect.gen(function* () {
     verify,
     issueWebSocketToken,
     verifyWebSocketToken,
+    validateActiveSession,
     listActive,
     get streamChanges() {
       return Stream.fromPubSub(changesPubSub);

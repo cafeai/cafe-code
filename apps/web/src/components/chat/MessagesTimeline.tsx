@@ -5,6 +5,7 @@ import { FileAttachmentPill } from "./FileAttachmentPill";
 import { TurnConfigurationWorkEntry } from "./TurnConfigurationWorkEntry";
 import { ComputerUseIcon } from "./ComputerUseIcon";
 import { ClaudeCommandWorkEntry, ClaudeSummaryWorkEntry } from "./ProviderOperationWorkEntry";
+import { ProviderDiagnosticWorkEntry } from "./ProviderDiagnosticWorkEntry";
 import {
   type EnvironmentId,
   type EditorId,
@@ -2161,6 +2162,7 @@ const EarlierWorkLogSection = memo(function EarlierWorkLogSection({
               }}
             />
           </span>
+          <ProviderWorkLogErrorIndicator entries={visibleEntries} />
         </button>
         {isExpanded ? (
           <div className="flex shrink-0 items-center gap-2">
@@ -2509,6 +2511,9 @@ const HistoricalWorkLogSection = memo(function HistoricalWorkLogSection({
             <span className="shrink-0 font-medium text-muted-foreground">
               <UiMessage message={"Work log<slot1></slot1>"} slots={{ slot1: countLabel }} />
             </span>
+            <ProviderWorkLogErrorIndicator
+              entries={[...row.summary.previewEntries, ...visibleEntries]}
+            />
             {!isExpanded && compactSummary ? (
               <span className="truncate">{compactSummary}</span>
             ) : null}
@@ -2739,7 +2744,10 @@ const WorkGroupSection = memo(function WorkGroupSection({
           {showHeader ? (
             // The count is shown only where rows are hidden ("Show N more").
             <div className="mb-1.5 flex items-center justify-between gap-2 px-0.5">
-              <p className="text-2xs font-medium text-subtle-foreground">{groupLabel}</p>
+              <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1">
+                <p className="text-2xs font-medium text-subtle-foreground">{groupLabel}</p>
+                <ProviderWorkLogErrorIndicator entries={ordinaryEntries} />
+              </div>
               {hasOverflow ? (
                 <button
                   type="button"
@@ -2778,6 +2786,33 @@ const WorkGroupSection = memo(function WorkGroupSection({
 // ---------------------------------------------------------------------------
 // Leaf components
 // ---------------------------------------------------------------------------
+
+/** Counts only retained/hydrated observations, never unseen history. This
+ * content-free marker keeps a terminal failure discoverable while its outer
+ * Work Log is collapsed without bringing private provider prose into chrome. */
+const ProviderWorkLogErrorIndicator = memo(function ProviderWorkLogErrorIndicator(props: {
+  readonly entries: ReadonlyArray<WorkLogEntry>;
+}) {
+  const uiLocale = useUiLocale();
+  const count = new Set(
+    props.entries
+      .filter((entry) => entry.providerDiagnostic?.summary.status === "error")
+      .map((entry) => entry.id),
+  ).size;
+  return count > 0 ? (
+    <span
+      className="shrink-0 text-2xs text-destructive-foreground"
+      data-work-log-provider-errors="true"
+    >
+      {uiText(
+        "{count, plural, one {Provider error} other {Provider errors}} · {count}",
+        { count },
+        undefined,
+        uiLocale,
+      )}
+    </span>
+  ) : null;
+});
 
 const MAX_COLLAPSED_USER_MESSAGE_LINES = 8;
 const MAX_COLLAPSED_USER_MESSAGE_LENGTH = 600;
@@ -3083,6 +3118,18 @@ const OrdinaryWorkEntryRow = memo(function OrdinaryWorkEntryRow(props: {
   workspaceRoot: string | undefined;
 }) {
   const { activeThreadEnvironmentId, activeThreadId, timestampFormat } = use(TimelineRowCtx);
+  if (props.workEntry.providerDiagnostic)
+    return (
+      <ProviderDiagnosticWorkEntry
+        diagnostic={props.workEntry.providerDiagnostic}
+        environmentId={activeThreadEnvironmentId}
+        threadId={activeThreadId}
+        turnId={props.workEntry.turnId ?? null}
+        activityId={props.workEntry.id}
+        createdAt={props.workEntry.createdAt}
+        timestampFormat={timestampFormat}
+      />
+    );
   if (props.workEntry.turnConfiguration)
     return <TurnConfigurationWorkEntry configuration={props.workEntry.turnConfiguration} />;
   if (props.workEntry.publicSummary)

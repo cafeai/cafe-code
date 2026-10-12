@@ -44,6 +44,7 @@ export function createEnvironmentApi(rpcClient: WsRpcClient): EnvironmentApi {
       getArchivedShellSnapshot: rpcClient.orchestration.getArchivedShellSnapshot,
       getDeletedShellSnapshot: rpcClient.orchestration.getDeletedShellSnapshot,
       getThreadTurnActivityPage: rpcClient.orchestration.getThreadTurnActivityPage,
+      getThreadActivityDiagnostic: rpcClient.orchestration.getThreadActivityDiagnostic,
       getThreadTurnSubagentDetail: rpcClient.orchestration.getThreadTurnSubagentDetail,
       controlTask: rpcClient.orchestration.controlTask,
       getThreadTurnWorkLogPresence: rpcClient.orchestration.getThreadTurnWorkLogPresence,

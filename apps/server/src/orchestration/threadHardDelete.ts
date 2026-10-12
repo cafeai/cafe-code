@@ -186,6 +186,10 @@ export const purgeHardDeletedThreadPersistence = Effect.fn("purgeHardDeletedThre
         WHERE thread_id = ${input.threadId}
       `;
         yield* sql`
+        DELETE FROM provider_activity_diagnostics
+        WHERE thread_id = ${input.threadId}
+      `;
+        yield* sql`
         DELETE FROM projection_thread_messages
         WHERE thread_id = ${input.threadId}
       `;

@@ -1960,6 +1960,7 @@ describe("OrchestrationEngine", () => {
           getUnsettledCodexSteerIntentEvents: () => Effect.succeed([]),
           getCodexSteerIntentRecoveryBarriers: () => Effect.die("unused"),
           getThreadTurnActivityPage: () => Effect.die("unused"),
+          getThreadActivityDiagnostic: () => Effect.die("unused"),
           getThreadTurnWorkLogPresence: () => Effect.die("unused"),
           hasThreadTurnSubagentActivity: () => Effect.die("unused"),
           getThreadDetailById: () => Effect.succeed(Option.none()),

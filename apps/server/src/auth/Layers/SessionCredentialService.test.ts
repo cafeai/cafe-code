@@ -1,9 +1,12 @@
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { expect, it } from "@effect/vitest";
+import { AuthSessionId } from "@cafecode/contracts/auth";
+import * as DateTime from "effect/DateTime";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as TestClock from "effect/testing/TestClock";
+import * as SqlClient from "effect/unstable/sql/SqlClient";
 
 import type { ServerConfigShape } from "../../config.ts";
 import { ServerConfig } from "../../config.ts";
@@ -34,7 +37,9 @@ const makeSessionCredentialLayer = (
   >,
 ) =>
   SessionCredentialServiceLive.pipe(
-    Layer.provide(SqlitePersistenceMemory),
+    // Expose this same isolated in-memory database to the identity-change and
+    // unreadable-row fixtures below; never connect to a profile database.
+    Layer.provideMerge(SqlitePersistenceMemory),
     Layer.provide(ServerSecretStoreLive),
     Layer.provide(makeServerConfigLayer(overrides)),
   );
@@ -119,6 +124,133 @@ it.layer(NodeServices.layer)("SessionCredentialServiceLive", (it) => {
       const error = yield* Effect.flip(sessions.verifyWebSocketToken(websocket.token));
       expect(error.message).toContain("expired");
     }).pipe(Effect.provide(Layer.merge(makeSessionCredentialLayer(), TestClock.layer()))),
+  );
+
+  it.effect("validates only the exact still-active persisted upgrade identity", () =>
+    Effect.gen(function* () {
+      const sessions = yield* SessionCredentialService;
+      const issued = yield* sessions.issue({ subject: "diagnostic-owner", role: "owner" });
+      const captured = yield* sessions.verify(issued.token);
+      expect(yield* sessions.validateActiveSession(captured)).toBeUndefined();
+
+      const { expiresAt: _expiry, ...withoutExpiry } = captured;
+      for (const changed of [
+        { ...captured, sessionId: AuthSessionId.make(crypto.randomUUID()) },
+        { ...captured, subject: "foreign-diagnostic-owner" },
+        { ...captured, method: "bearer-session-token" as const },
+        { ...captured, role: "client" as const },
+        withoutExpiry,
+        { ...captured, expiresAt: DateTime.add(issued.expiresAt, { milliseconds: 1 }) },
+      ]) {
+        const error = yield* Effect.flip(sessions.validateActiveSession(changed));
+        expect(error._tag).toBe("SessionCredentialError");
+        expect(error.message).toBe("The authenticated session is no longer active.");
+        expect(error.cause).toBeUndefined();
+        expect(JSON.stringify(error)).not.toContain(issued.token);
+      }
+      // Rejected alternative claims cannot change the real session or revoke
+      // its valid identity; the original captured owner remains admitted.
+      expect(yield* sessions.validateActiveSession(captured)).toBeUndefined();
+    }).pipe(Effect.provide(makeSessionCredentialLayer())),
+  );
+
+  it.effect("refuses a revoked owner even when its upgrade identity is retained", () =>
+    Effect.gen(function* () {
+      const sessions = yield* SessionCredentialService;
+      const issued = yield* sessions.issue({ subject: "revoked-diagnostic-owner", role: "owner" });
+      const captured = yield* sessions.verify(issued.token);
+      yield* sessions.validateActiveSession(captured);
+      expect(yield* sessions.revoke(issued.sessionId)).toBe(true);
+      const error = yield* Effect.flip(sessions.validateActiveSession(captured));
+      expect(error.message).toBe("The authenticated session is no longer active.");
+      expect(error.cause).toBeUndefined();
+    }).pipe(Effect.provide(makeSessionCredentialLayer())),
+  );
+
+  it.effect("refuses the captured owner at its exact persisted expiry boundary", () =>
+    Effect.gen(function* () {
+      const sessions = yield* SessionCredentialService;
+      const issued = yield* sessions.issue({
+        subject: "expired-diagnostic-owner",
+        role: "owner",
+        ttl: Duration.seconds(1),
+      });
+      const captured = yield* sessions.verify(issued.token);
+      yield* sessions.validateActiveSession(captured);
+      // The production fence uses <=, so equality must already be expired.
+      // Advancing the isolated clock does not wait or alter a native clock.
+      yield* TestClock.adjust(Duration.seconds(1));
+      const error = yield* Effect.flip(sessions.validateActiveSession(captured));
+      expect(error.message).toBe("The authenticated session is no longer active.");
+      expect(error.cause).toBeUndefined();
+    }).pipe(Effect.provide(Layer.merge(makeSessionCredentialLayer(), TestClock.layer()))),
+  );
+
+  it.effect("keeps active parent-session admission independent of the expired upgrade token", () =>
+    Effect.gen(function* () {
+      const sessions = yield* SessionCredentialService;
+      const parent = yield* sessions.issue({
+        subject: "diagnostic-parent-owner",
+        role: "owner",
+        ttl: Duration.hours(1),
+      });
+      const upgrade = yield* sessions.issueWebSocketToken(parent.sessionId, {
+        ttl: Duration.seconds(1),
+      });
+      const captured = yield* sessions.verifyWebSocketToken(upgrade.token);
+      expect(captured.expiresAt?.epochMilliseconds).toBe(parent.expiresAt.epochMilliseconds);
+      yield* TestClock.adjust(Duration.seconds(2));
+      const expiredUpgrade = yield* Effect.flip(sessions.verifyWebSocketToken(upgrade.token));
+      expect(expiredUpgrade.message).toContain("expired");
+      // Upgrade credentials are checked when admitting the connection. Subsequent private reads
+      // must validate its still-active exact parent, not replay that credential.
+      expect(yield* sessions.validateActiveSession(captured)).toBeUndefined();
+    }).pipe(Effect.provide(Layer.merge(makeSessionCredentialLayer(), TestClock.layer()))),
+  );
+
+  it.effect("rejects persisted identity replacement and hides unreadable row or SQL causes", () =>
+    Effect.gen(function* () {
+      const sessions = yield* SessionCredentialService;
+      const sql = yield* SqlClient.SqlClient;
+      const issued = yield* sessions.issue({ subject: "original-diagnostic-owner", role: "owner" });
+      const captured = yield* sessions.verify(issued.token);
+      yield* sessions.validateActiveSession(captured);
+      const expectRefusal = Effect.gen(function* () {
+        const error = yield* Effect.flip(sessions.validateActiveSession(captured));
+        expect(error._tag).toBe("SessionCredentialError");
+        expect(error.message).toBe("The authenticated session is no longer active.");
+        expect(error.cause).toBeUndefined();
+        expect(JSON.stringify(error)).not.toMatch(
+          /synthetic-private-row-sentinel|original-diagnostic-owner|auth_sessions|no such table/u,
+        );
+      });
+
+      // Mutate only the freshly minted fixture row to prove admission observes
+      // current durable evidence rather than caching the earlier upgrade.
+      yield* sql`UPDATE auth_sessions SET subject = 'synthetic-private-row-sentinel'
+        WHERE session_id = ${issued.sessionId}`;
+      yield* expectRefusal;
+      yield* sql`UPDATE auth_sessions SET subject = ${captured.subject}, role = 'client'
+        WHERE session_id = ${issued.sessionId}`;
+      yield* expectRefusal;
+      yield* sql`UPDATE auth_sessions SET role = 'owner', method = 'bearer-session-token'
+        WHERE session_id = ${issued.sessionId}`;
+      yield* expectRefusal;
+      yield* sql`UPDATE auth_sessions SET method = ${captured.method}, expires_at = ${DateTime.formatIso(DateTime.add(issued.expiresAt, { milliseconds: 1 }))}
+        WHERE session_id = ${issued.sessionId}`;
+      yield* expectRefusal;
+      yield* sql`UPDATE auth_sessions SET expires_at = ${DateTime.formatIso(issued.expiresAt)}, role = 'synthetic-private-row-sentinel'
+        WHERE session_id = ${issued.sessionId}`;
+      // The invalid role exercises the real repository's schema/decode error,
+      // whose detailed cause can contain the received private stored value.
+      yield* expectRefusal;
+      yield* sql`UPDATE auth_sessions SET role = 'owner' WHERE session_id = ${issued.sessionId}`;
+      yield* sessions.validateActiveSession(captured);
+      // This table exists solely in the test-owned memory database. Removing
+      // it forces an actual driver failure, with no user data or OS changes.
+      yield* sql`DROP TABLE auth_sessions`;
+      yield* expectRefusal;
+    }).pipe(Effect.provide(makeSessionCredentialLayer())),
   );
 
   it.effect("lists active sessions, tracks connectivity, and revokes other sessions", () =>

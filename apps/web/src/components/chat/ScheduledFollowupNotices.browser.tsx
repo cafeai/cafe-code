@@ -348,43 +348,39 @@ describe("inline scheduled follow-up notices", () => {
     }
   });
 
-  it("labels stale and disconnected snapshots without claiming execution stopped or exposing raw errors", async () => {
+  it("keeps saved notices honest and non-reviewable without duplicating Tasks connection/refresh UI", async () => {
     const record = makeSchedule();
     const onReview = vi.fn();
-    const onRefresh = vi.fn();
     const screen = await render(
       <ScheduledFollowupNotices
         context={context}
         schedules={[record]}
         error="sensitive transport fixture detail"
         onReview={onReview}
-        onRefresh={onRefresh}
       />,
     );
     try {
       await expect.element(page.getByText("Last known: Scheduled", { exact: true })).toBeVisible();
-      expect(document.body.textContent).toContain(
-        "Couldn’t refresh. Schedule status may be out of date.",
-      );
+      expect(document.body.textContent).not.toContain("Couldn’t refresh.");
       expect(document.body.textContent).toContain("Last reported next run:");
       expect(document.body.textContent).not.toContain("sensitive transport fixture detail");
       await expect
         .element(page.getByRole("button", { name: `Review schedule: ${record.name}` }))
         .toBeDisabled();
-      await page.getByRole("button", { name: "Refresh schedules" }).click();
-      expect(onRefresh).toHaveBeenCalledOnce();
+      await expect
+        .element(page.getByRole("button", { name: "Refresh schedules" }))
+        .not.toBeInTheDocument();
       await screen.rerender(
         <ScheduledFollowupNotices
           context={{ ...context, unavailable: true }}
           schedules={[record]}
           onReview={onReview}
-          onRefresh={onRefresh}
         />,
       );
-      expect(document.body.textContent).toContain(
-        "Disconnected. Schedule status may be out of date.",
-      );
-      await expect.element(page.getByRole("button", { name: "Refresh schedules" })).toBeDisabled();
+      expect(document.body.textContent).not.toContain("Disconnected.");
+      await expect
+        .element(page.getByRole("button", { name: "Refresh schedules" }))
+        .not.toBeInTheDocument();
       await expect.element(page.getByText("Last known: Scheduled", { exact: true })).toBeVisible();
       expect(onReview).not.toHaveBeenCalled();
     } finally {
@@ -429,7 +425,7 @@ describe("inline scheduled follow-up notices", () => {
     }
   });
 
-  it("keeps an empty conversation quiet during its first load but exposes read failures", async () => {
+  it("keeps an empty conversation quiet during loading, read failure and disconnection", async () => {
     const onReview = vi.fn();
     const screen = await render(
       <ScheduledFollowupNotices context={context} schedules={[]} loading onReview={onReview} />,
@@ -448,13 +444,47 @@ describe("inline scheduled follow-up notices", () => {
           onReview={onReview}
         />,
       );
-      expect(document.body.textContent).toContain("Couldn’t refresh.");
+      expect(document.body.textContent).not.toContain("Couldn’t refresh.");
+      await expect
+        .element(page.getByRole("region", { name: "Scheduled follow-up notices" }))
+        .not.toBeInTheDocument();
+      await screen.rerender(
+        <ScheduledFollowupNotices
+          context={{ ...context, unavailable: true }}
+          schedules={[]}
+          onReview={onReview}
+        />,
+      );
+      expect(document.body.textContent).not.toContain("Disconnected.");
       await screen.rerender(
         <ScheduledFollowupNotices context={context} schedules={[]} onReview={onReview} />,
       );
       await expect
         .element(page.getByRole("region", { name: "Scheduled follow-up notices" }))
         .not.toBeInTheDocument();
+    } finally {
+      await screen.unmount();
+    }
+  });
+
+  it("does not add a chat refresh spinner while saved schedule cards update", async () => {
+    const screen = await render(
+      <ScheduledFollowupNotices
+        context={context}
+        schedules={[makeSchedule()]}
+        loading
+        onReview={vi.fn()}
+      />,
+    );
+    try {
+      await expect
+        .element(page.getByRole("region", { name: "Scheduled follow-up notices" }))
+        .toHaveAttribute("aria-busy", "true");
+      await expect
+        .element(page.getByRole("heading", { name: "Scheduled follow-ups" }))
+        .toBeVisible();
+      expect(document.body.textContent).not.toContain("Refreshing schedules");
+      expect(document.querySelector('[aria-label="Refreshing schedules"]')).toBeNull();
     } finally {
       await screen.unmount();
     }

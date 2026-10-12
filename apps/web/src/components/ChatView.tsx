@@ -154,6 +154,7 @@ import {
   deriveCodexRecoveryPresentation,
   shouldSuppressCodexRecoveryErrorNotification,
 } from "../codexRecovery";
+import { isProviderErrorRepresentedInWorkLog } from "../providerErrorPresentation";
 import { ComposerAsyncQuestionsPanel } from "./chat/ComposerAsyncQuestionsPanel";
 import { persistExactAsyncQuestionAnswer, type AsyncQuestion } from "./chat/asyncQuestions";
 import { ChevronDownIcon, TriangleAlertIcon } from "lucide-react";
@@ -8244,10 +8245,14 @@ export default function ChatView(props: ChatViewProps) {
       <ThreadErrorBanner
         error={
           !activeEnvironmentUnavailable &&
-          shouldSuppressCodexRecoveryErrorNotification({
+          (shouldSuppressCodexRecoveryErrorNotification({
             thread: activeThread,
             activities: threadActivities,
-          })
+          }) ||
+            isProviderErrorRepresentedInWorkLog({
+              thread: activeThread,
+              activities: threadActivities,
+            }))
             ? null
             : activeThread.error
         }

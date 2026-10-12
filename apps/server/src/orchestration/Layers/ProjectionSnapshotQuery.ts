@@ -61,6 +61,7 @@ import { ProjectionCheckpoint } from "../../persistence/Services/ProjectionCheck
 import { ProjectionProject } from "../../persistence/Services/ProjectionProjects.ts";
 import { ProjectionState } from "../../persistence/Services/ProjectionState.ts";
 import { ProjectionThreadActivity } from "../../persistence/Services/ProjectionThreadActivities.ts";
+import { makeProviderActivityDiagnosticStore } from "../../persistence/Layers/ProviderActivityDiagnostics.ts";
 import { ProjectionThreadMessage } from "../../persistence/Services/ProjectionThreadMessages.ts";
 import { ProjectionThreadProposedPlan } from "../../persistence/Services/ProjectionThreadProposedPlans.ts";
 import { ProjectionThreadSessionSqlRow } from "../../persistence/Services/ProjectionThreadSessions.ts";
@@ -606,6 +607,7 @@ function toPersistenceSqlOrDecodeError(sqlOperation: string, decodeOperation: st
 
 const makeProjectionSnapshotQuery = Effect.gen(function* () {
   const sql = yield* SqlClient.SqlClient;
+  const diagnosticStore = makeProviderActivityDiagnosticStore(sql);
   const listLiveWorkRows = SqlSchema.findAll({
     Request: Schema.NullOr(ThreadId),
     Result: Schema.Struct({
@@ -5033,6 +5035,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
     getUnsettledCodexSteerIntentEvents,
     getCodexSteerIntentRecoveryBarriers,
     getThreadTurnActivityPage,
+    getThreadActivityDiagnostic: diagnosticStore.read,
     getThreadTurnWorkLogPresence,
     hasThreadTurnSubagentActivity,
     getThreadDetailById,

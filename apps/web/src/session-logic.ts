@@ -21,6 +21,11 @@ import {
 } from "@cafecode/contracts";
 import { summarizeToolArguments } from "@cafecode/shared/toolActivity";
 import { codexRecoveryWorkLogLabel, nativeRetryWorkLogLabel } from "./codexRecovery";
+import {
+  deriveProviderDiagnosticWorkLogRecord,
+  providerDiagnosticWorkLogLabel,
+  type ProviderDiagnosticWorkLogRecord,
+} from "./providerDiagnostic";
 import { readDesktopObservationItem } from "@cafecode/shared/desktopObservation";
 import { isRoutineProviderWorkLogActivity } from "@cafecode/shared/providerWorkLog";
 import { readComputerUsePresentation } from "./components/chat/computerUsePresentation";
@@ -97,6 +102,8 @@ export interface WorkLogEntry {
   /** Explicit bounded public presentation, never arbitrary native payloads. */
   publicSummary?: ClaudePublicSummary;
   commandInspection?: ClaudeCommandInspection;
+  /** Public occurrence metadata only; private JSON is read after expansion. */
+  providerDiagnostic?: ProviderDiagnosticWorkLogRecord;
   /** Operation identity is for folding/deduplication, never task authority. */
   toolCallId?: string;
   /** Frozen accepted-turn settings; never reconstructed from today's catalog. */
@@ -1033,6 +1040,21 @@ function toDerivedWorkLogEntry(
   activity: OrchestrationThreadActivity,
   turnConfiguration?: ProviderTurnConfiguration,
 ): DerivedWorkLogEntry {
+  const providerDiagnostic = deriveProviderDiagnosticWorkLogRecord(activity);
+  if (providerDiagnostic) {
+    // Diagnostic rows are not roster lifecycle rows. Keep only bounded public
+    // identity/status here: raw provider messages/JSON must not enter ordinary
+    // preview, tooltip, path extraction, or renderer debug snapshot surfaces.
+    return {
+      id: activity.id,
+      turnId: activity.turnId,
+      createdAt: activity.createdAt,
+      label: providerDiagnosticWorkLogLabel(providerDiagnostic.summary),
+      tone: providerDiagnostic.summary.status === "error" ? "error" : "info",
+      activityKind: activity.kind,
+      providerDiagnostic,
+    };
+  }
   const retryLabel =
     activity.kind === "runtime.warning"
       ? (codexRecoveryWorkLogLabel(activity) ?? nativeRetryWorkLogLabel(activity.payload))

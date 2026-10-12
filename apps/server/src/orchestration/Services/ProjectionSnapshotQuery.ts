@@ -18,6 +18,8 @@ import type {
   OrchestrationThreadDetailSnapshot,
   OrchestrationThreadTurnActivityPage,
   OrchestrationThreadTurnActivityPageInput,
+  OrchestrationThreadActivityDiagnosticInput,
+  OrchestrationThreadActivityDiagnosticResult,
   OrchestrationThreadTurnSubagentDetailInput,
   OrchestrationThreadTurnWorkLogPresenceInput,
   OrchestrationThreadTurnWorkLogPresenceResult,
@@ -395,6 +397,11 @@ export interface ProjectionSnapshotQueryShape {
   readonly getThreadTurnActivityPage: (
     input: OrchestrationThreadTurnActivityPageInput,
   ) => Effect.Effect<OrchestrationThreadTurnActivityPage, ProjectionRepositoryError>;
+
+  /** Private inert diagnostics; transport separately checks owner and secure access. */
+  readonly getThreadActivityDiagnostic: (
+    input: OrchestrationThreadActivityDiagnosticInput,
+  ) => Effect.Effect<OrchestrationThreadActivityDiagnosticResult, ProjectionRepositoryError>;
 
   /**
    * Test whether bounded historical/current turns contain displayable work-log rows.

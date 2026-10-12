@@ -7,6 +7,7 @@ import viteConfig from "./vite.config.ts";
 const srcPath = fileURLToPath(new URL("./src", import.meta.url));
 const touchTimelineFile = "src/components/chat/MessagesTimeline.touch.browser.tsx";
 const contextMotionFile = "src/components/chat/CodexContextWindowControl.motion.browser.tsx";
+const diagnosticMotionFile = "src/components/chat/ProviderDiagnosticWorkEntry.motion.browser.tsx";
 const touchViewport = { width: 430, height: 932 };
 const browserOptions = {
   enabled: true,
@@ -35,6 +36,35 @@ export default mergeConfig(
         "react/jsx-runtime",
         "react/jsx-dev-runtime",
         "effect/Cron",
+        // The private diagnostic reader also runs in the separate native
+        // reduced-motion context. Prebundle its observed transitive graph
+        // before collection: late discovery reloads that test iframe and is
+        // not an assertion or browser-input policy failure.
+        "@base-ui/react/collapsible",
+        "@base-ui/react/toast",
+        "@effect/atom-react",
+        "@tanstack/react-query",
+        "@tanstack/react-router",
+        "effect/Cause",
+        "effect/Data",
+        "effect/Exit",
+        "effect/Latch",
+        "effect/Layer",
+        "effect/ManagedRuntime",
+        "effect/Option",
+        "effect/Predicate",
+        "effect/Result",
+        "effect/Schedule",
+        "effect/SchemaGetter",
+        "effect/SchemaIssue",
+        "effect/Scope",
+        "effect/Stream",
+        "effect/Struct",
+        "effect/Tracer",
+        "effect/unstable/http",
+        "effect/unstable/observability",
+        "effect/unstable/rpc",
+        "effect/unstable/socket/Socket",
       ],
     },
     resolve: {
@@ -71,7 +101,12 @@ export default mergeConfig(
           test: {
             name: "desktop",
             include: ["src/components/**/*.browser.tsx"],
-            exclude: [...configDefaults.exclude, touchTimelineFile, contextMotionFile],
+            exclude: [
+              ...configDefaults.exclude,
+              touchTimelineFile,
+              contextMotionFile,
+              diagnosticMotionFile,
+            ],
             sequence: { groupOrder: 0 },
             browser: {
               ...browserOptions,
@@ -113,7 +148,7 @@ export default mergeConfig(
           extends: true,
           test: {
             name: "context-reduced-motion",
-            include: [contextMotionFile],
+            include: [contextMotionFile, diagnosticMotionFile],
             // Qualify the inherited dialog's real reduced-motion behavior in
             // its own native context, after both existing project groups.
             // Original worker caps and test/hook deadlines remain inherited.

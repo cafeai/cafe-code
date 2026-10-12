@@ -68,6 +68,14 @@ export interface SessionCredentialServiceShape {
   readonly verifyWebSocketToken: (
     token: string,
   ) => Effect.Effect<VerifiedSession, SessionCredentialError>;
+  /**
+   * Revalidate an already authenticated connection against its exact persisted
+   * session. Upgrade credentials can expire separately, so sensitive reads use
+   * the parent identity rather than replaying a short-lived WebSocket token.
+   */
+  readonly validateActiveSession: (
+    identity: Pick<VerifiedSession, "sessionId" | "subject" | "method" | "role" | "expiresAt">,
+  ) => Effect.Effect<void, SessionCredentialError>;
   readonly listActive: () => Effect.Effect<
     ReadonlyArray<AuthContracts.AuthClientSession>,
     SessionCredentialError

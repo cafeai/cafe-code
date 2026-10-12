@@ -759,19 +759,26 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
     Effect.succeed(event).pipe(
       Effect.tap((canonicalEvent) =>
         canonicalEventLogger
-          ? canonicalEventLogger.write(canonicalEvent, canonicalEvent.threadId).pipe(
-              Effect.catchCause((cause) =>
-                Effect.logWarning("provider.runtime.canonical-log-write-failed", {
-                  provider: canonicalEvent.provider,
-                  providerInstanceId: canonicalEvent.providerInstanceId,
-                  threadId: canonicalEvent.threadId,
-                  turnId: canonicalEvent.turnId,
-                  eventId: canonicalEvent.eventId,
-                  eventType: canonicalEvent.type,
-                  cause: Cause.pretty(cause),
-                }),
-              ),
-            )
+          ? canonicalEventLogger
+              .write(
+                // The private diagnostic copy has its own durable owner reader.
+                // Do not broaden optional ordinary NDJSON observability logs.
+                { ...canonicalEvent, diagnostic: undefined },
+                canonicalEvent.threadId,
+              )
+              .pipe(
+                Effect.catchCause((cause) =>
+                  Effect.logWarning("provider.runtime.canonical-log-write-failed", {
+                    provider: canonicalEvent.provider,
+                    providerInstanceId: canonicalEvent.providerInstanceId,
+                    threadId: canonicalEvent.threadId,
+                    turnId: canonicalEvent.turnId,
+                    eventId: canonicalEvent.eventId,
+                    eventType: canonicalEvent.type,
+                    cause: Cause.pretty(cause),
+                  }),
+                ),
+              )
           : Effect.void,
       ),
       Effect.flatMap((canonicalEvent) => PubSub.publish(runtimeEventPubSub, canonicalEvent)),

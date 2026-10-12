@@ -2,13 +2,11 @@ import { useUiLocale, useUiPresentation } from "~/i18n";
 import { uiText } from "@cafecode/shared/i18n";
 import { UiMessage } from "~/i18n";
 import type { ScheduledFollowupRecord } from "@cafecode/contracts";
-import { ChevronRightIcon, Clock3Icon, RefreshCwIcon } from "lucide-react";
+import { ChevronRightIcon, Clock3Icon } from "lucide-react";
 import { memo, useId, useMemo, useState } from "react";
 
 import { cn } from "~/lib/utils";
-import { useDelayedFlag } from "../../hooks/useDelayedFlag";
 import { Button } from "../ui/button";
-import { Spinner } from "../ui/spinner";
 import type { ScheduledFollowupsContext } from "./ScheduledFollowups";
 import {
   formatScheduleTime,
@@ -25,7 +23,6 @@ export interface ScheduledFollowupNoticesProps {
   readonly error?: string | null;
   /** Opens the existing owner review surface; this is never execution consent. */
   readonly onReview: (record: ScheduledFollowupRecord) => void;
-  readonly onRefresh?: () => void;
 }
 
 // Keep the conversation tail small even when a chat owns the maximum number of
@@ -65,7 +62,6 @@ export const ScheduledFollowupNotices = memo(function ScheduledFollowupNotices({
   loading = false,
   error = null,
   onReview,
-  onRefresh,
 }: ScheduledFollowupNoticesProps) {
   const uiLocale = useUiLocale();
 
@@ -99,12 +95,12 @@ export const ScheduledFollowupNotices = memo(function ScheduledFollowupNotices({
   // but only a failed read or a disconnect labels them "last known".
   const lastKnown = context.unavailable || Boolean(error);
   const stale = lastKnown || loading;
-  const showRefreshSpinner = useDelayedFlag(loading && records.length > 0);
 
   // An empty chat keeps its ordinary layout, including while its first read is
   // in flight: no "Loading…" line that appears and disappears on every chat
-  // open. Failed reads remain discoverable and retryable.
-  if (records.length === 0 && !error) return null;
+  // open. Connection/read health and manual Refresh live in Tasks only; the
+  // conversation retains real saved notices without duplicating transport UI.
+  if (records.length === 0) return null;
 
   return (
     <section
@@ -119,12 +115,7 @@ export const ScheduledFollowupNotices = memo(function ScheduledFollowupNotices({
             message={"<slot1></slot1>Scheduled follow-ups<slot3></slot3>"}
             slots={{
               slot1: <Clock3Icon aria-hidden="true" className="size-3.5" />,
-              slot3: showRefreshSpinner ? (
-                <Spinner
-                  aria-label={uiText("Refreshing schedules", undefined, undefined, uiLocale)}
-                  className="size-3 text-subtle-foreground"
-                />
-              ) : null,
+              slot3: null,
             }}
           />
         </h3>
@@ -144,39 +135,6 @@ export const ScheduledFollowupNotices = memo(function ScheduledFollowupNotices({
           </Button>
         ) : null}
       </div>
-      {lastKnown ? (
-        <div
-          role="status"
-          className="flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-muted-foreground"
-        >
-          <p>
-            {context.unavailable
-              ? uiText(
-                  "Disconnected. Schedule status may be out of date.",
-                  undefined,
-                  undefined,
-                  uiLocale,
-                )
-              : uiText(
-                  "Couldn’t refresh. Schedule status may be out of date.",
-                  undefined,
-                  undefined,
-                  uiLocale,
-                )}
-          </p>
-          {onRefresh ? (
-            <Button
-              variant="ghost"
-              size="xs"
-              disabled={context.unavailable || loading}
-              onClick={onRefresh}
-            >
-              <RefreshCwIcon aria-hidden="true" className="size-3" />
-              {uiText("Refresh schedules", undefined, undefined, uiLocale)}
-            </Button>
-          ) : null}
-        </div>
-      ) : null}
       <div className="space-y-2">
         {records.slice(currentPage * PAGE_SIZE, (currentPage + 1) * PAGE_SIZE).map((record) => (
           <ScheduledFollowupNoticeCard

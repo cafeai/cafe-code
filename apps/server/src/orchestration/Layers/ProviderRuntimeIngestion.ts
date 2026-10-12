@@ -39,6 +39,8 @@ import * as Ref from "effect/Ref";
 import * as Stream from "effect/Stream";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
 import { makeConversationRewindStore } from "../../persistence/Layers/ConversationRewinds.ts";
+import { makeProviderActivityDiagnosticStore } from "../../persistence/Layers/ProviderActivityDiagnostics.ts";
+import { makeProviderDiagnostic } from "@cafecode/shared/providerDiagnostic";
 import { makeDrainableWorker } from "@cafecode/shared/DrainableWorker";
 
 import { ProviderService } from "../../provider/Services/ProviderService.ts";
@@ -1307,6 +1309,7 @@ interface EnrichedCodexSteerProcessingActivities {
 const make = Effect.gen(function* () {
   const sql = yield* SqlClient.SqlClient;
   const conversationRewinds = makeConversationRewindStore(sql);
+  const diagnosticStore = makeProviderActivityDiagnosticStore(sql);
   const orchestrationEngine = yield* OrchestrationEngineService;
   const dispatchObservedSession = (
     command: Extract<OrchestrationCommand, { readonly type: "thread.session.set" }>,
@@ -3840,31 +3843,182 @@ const make = Effect.gen(function* () {
         isSubagentLifecycle &&
         currentRuntimeId != null &&
         (!runtimeGenerationVerified || incomingRuntimeId !== currentRuntimeId);
-      const enrichedActivities = yield* enrichCodexSteerProcessingActivities(
-        event,
-        obsoleteSubagentLifecycle ? [] : runtimeEventToActivities(event),
-      );
-      yield* Effect.forEach(enrichedActivities.activities, (activity) =>
-        orchestrationEngine
-          .dispatch({
-            type: "thread.activity.append",
-            commandId:
-              activity.kind === "provider.async-questions"
-                ? CommandId.make(`provider-async-questions:${activity.id}`)
-                : providerCommandId(event, "thread-activity-append", activity.id),
-            threadId: thread.id,
-            ...(isSubagentLifecycle
-              ? {
-                  expectedSubagentRuntimeId:
-                    runtimeGenerationVerified && incomingRuntimeId !== undefined
-                      ? incomingRuntimeId
-                      : (currentRuntimeId ?? null),
-                }
-              : {}),
-            activity,
-            createdAt: activity.createdAt,
-          })
-          .pipe(Effect.catchIf(isSupersededSessionLifecycle, () => Effect.void)),
+      const capturedDiagnostic =
+        event.diagnostic ??
+        (event.type === "runtime.error"
+          ? makeProviderDiagnostic({
+              status: "error",
+              subject: { kind: "unknown" },
+              observedAt: event.createdAt,
+              source: event.provider,
+              ...(event.raw?.method ? { method: event.raw.method } : {}),
+              native: {
+                eventId: event.eventId,
+                turnId: event.turnId,
+                subagentRuntimeId: event.subagentRuntimeId,
+              },
+              payload: { error: { message: event.payload.message, detail: event.payload.detail } },
+              message: event.payload.message,
+            })
+          : event.type === "turn.completed" &&
+              normalizeRuntimeTurnState(event.payload.state) === "failed" &&
+              typeof event.payload.errorMessage === "string"
+            ? makeProviderDiagnostic({
+                status: "error",
+                subject: { kind: "unknown" },
+                observedAt: event.createdAt,
+                source: event.provider,
+                ...(event.raw?.method ? { method: event.raw.method } : {}),
+                native: {
+                  eventId: event.eventId,
+                  turnId: event.turnId,
+                  subagentRuntimeId: event.subagentRuntimeId,
+                },
+                payload: { error: { message: event.payload.errorMessage } },
+                message: event.payload.errorMessage,
+              })
+            : undefined);
+      const diagnosticTurnId = toTurnId(event.turnId) ?? null;
+      const diagnosticIdentity = {
+        threadId: thread.id,
+        turnId: diagnosticTurnId,
+        activityId: event.eventId,
+      };
+      const terminalDiagnostic =
+        capturedDiagnostic?.summary.status === "error" &&
+        (event.type === "turn.completed" || event.type === "task.completed");
+      // Terminal-only errors need an ordinary historical work-log occurrence,
+      // not a child roster edge. Exact fully captured native echoes may reuse
+      // the preceding durable runtime.error; uncertain bodies stay distinct.
+      const terminalEcho =
+        terminalDiagnostic && capturedDiagnostic
+          ? yield* diagnosticStore.hasTerminalEcho(diagnosticIdentity, capturedDiagnostic).pipe(
+              // Optional inspection failure is not a reason to lose canonical
+              // failure/lifecycle projection or advance past an unrecorded
+              // event. Uncertainty keeps a distinct unrecorded occurrence.
+              Effect.catch(() =>
+                Effect.logWarning("provider diagnostic echo lookup unavailable").pipe(
+                  Effect.as(false),
+                ),
+              ),
+            )
+          : false;
+      const diagnosticActivity: OrchestrationThreadActivity | undefined =
+        terminalDiagnostic && !terminalEcho
+          ? {
+              id: event.eventId,
+              createdAt: event.createdAt,
+              tone: "error",
+              kind: "runtime.error",
+              summary: "Provider error",
+              payload: {},
+              turnId: diagnosticTurnId,
+            }
+          : undefined;
+      const activities = obsoleteSubagentLifecycle ? [] : runtimeEventToActivities(event);
+      // A terminal child roster event already uses its own activity id. Give
+      // its separate inspection row a deterministic canonical id, never a
+      // provider control target, so neither projection overwrites the other.
+      const inspectionActivity =
+        diagnosticActivity && event.type === "task.completed"
+          ? { ...diagnosticActivity, id: EventId.make(`${event.eventId}:diagnostic`) }
+          : diagnosticActivity;
+      const enrichedActivities = yield* enrichCodexSteerProcessingActivities(event, [
+        ...activities,
+        ...(inspectionActivity && !obsoleteSubagentLifecycle ? [inspectionActivity] : []),
+      ]);
+      yield* Effect.forEach(enrichedActivities.activities, (originalActivity) =>
+        Effect.gen(function* () {
+          let activity = originalActivity;
+          // Failed private capture never falls back to copying provider prose
+          // into eager activity summaries. Canonical error/recovery controls
+          // remain intact, and an unrecorded row truthfully says unavailable.
+          if (activity.kind === "runtime.error") activity = { ...activity, payload: {} };
+          if (
+            capturedDiagnostic &&
+            (activity.kind === "runtime.error" || activity.kind === "runtime.warning") &&
+            !terminalEcho
+          ) {
+            const durable = yield* diagnosticStore
+              .persist({ ...diagnosticIdentity, activityId: activity.id }, capturedDiagnostic)
+              .pipe(
+                // Preserve the canonical error and an honest unrecorded row
+                // when only optional private storage fails. Never publish its
+                // durable marker, log private SQL causes or retry provider I/O.
+                Effect.catch(() =>
+                  Effect.logWarning("provider diagnostic capture unavailable").pipe(
+                    Effect.as(false),
+                  ),
+                ),
+              );
+            if (durable) {
+              const payload =
+                activity.kind === "runtime.warning" &&
+                typeof activity.payload === "object" &&
+                activity.payload !== null
+                  ? (activity.payload as Record<string, unknown>)
+                  : {};
+              const message =
+                event.type === "runtime.error"
+                  ? event.payload.message
+                  : event.type === "turn.completed"
+                    ? event.payload.errorMessage
+                    : undefined;
+              activity = {
+                ...activity,
+                payload: {
+                  ...payload,
+                  providerDiagnostic: capturedDiagnostic.summary,
+                  ...(capturedDiagnostic.summary.status === "error" &&
+                  capturedDiagnostic.summary.subject.kind === "root" &&
+                  typeof message === "string" &&
+                  runtimeGenerationVerified &&
+                  incomingRuntimeId !== undefined &&
+                  event.providerInstanceId !== undefined
+                    ? {
+                        providerErrorHash: Crypto.createHash("sha256")
+                          .update(message, "utf8")
+                          .digest("hex"),
+                        // Content-free occurrence witness, not native IDs/private
+                        // diagnostics or any permission/retry/lifecycle authority.
+                        providerErrorOwnerHash: Crypto.createHash("sha256")
+                          .update(
+                            JSON.stringify([
+                              thread.id,
+                              diagnosticTurnId,
+                              event.providerInstanceId,
+                              incomingRuntimeId,
+                            ]),
+                            "utf8",
+                          )
+                          .digest("hex"),
+                      }
+                    : {}),
+                },
+              };
+            }
+          }
+          yield* orchestrationEngine
+            .dispatch({
+              type: "thread.activity.append",
+              commandId:
+                activity.kind === "provider.async-questions"
+                  ? CommandId.make(`provider-async-questions:${activity.id}`)
+                  : providerCommandId(event, "thread-activity-append", activity.id),
+              threadId: thread.id,
+              ...(isSubagentLifecycle
+                ? {
+                    expectedSubagentRuntimeId:
+                      runtimeGenerationVerified && incomingRuntimeId !== undefined
+                        ? incomingRuntimeId
+                        : (currentRuntimeId ?? null),
+                  }
+                : {}),
+              activity,
+              createdAt: activity.createdAt,
+            })
+            .pipe(Effect.catchIf(isSupersededSessionLifecycle, () => Effect.void));
+        }),
       ).pipe(Effect.asVoid);
 
       const settlement = enrichedActivities.settlement;

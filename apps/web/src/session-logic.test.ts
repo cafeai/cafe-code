@@ -2013,6 +2013,62 @@ describe("deriveWorkLogEntries", () => {
     expect(retry({ message: "Reconnecting... 3/5" }).label).toBe("Provider transport retrying");
   });
 
+  it("keeps retry/error diagnostics out of previews and roster lifecycle folding", () => {
+    const entries = deriveWorkLogEntries(
+      [
+        makeActivity({
+          id: "child-retry",
+          kind: "runtime.warning",
+          payload: {
+            providerDiagnostic: {
+              version: 1,
+              status: "retry",
+              subject: { kind: "subagent", id: "exact-child", label: "Layout reviewer" },
+              observedRetryCount: 12,
+            },
+            message: "private native error",
+            detail: { error: "private payload" },
+          },
+        }),
+        makeActivity({
+          id: "root-error",
+          kind: "runtime.error",
+          tone: "error",
+          summary: "private full error",
+          payload: {
+            providerDiagnostic: { version: 1, status: "error", subject: { kind: "root" } },
+            message: "private native error",
+            command: "must not extract paths",
+            json: "never stringify",
+          },
+        }),
+      ],
+      undefined,
+    );
+    expect(entries).toHaveLength(2);
+    expect(entries[0]).toMatchObject({
+      id: "child-retry",
+      label: "Provider retry · 12",
+      providerDiagnostic: {
+        recorded: true,
+        summary: { subject: { kind: "subagent", id: "exact-child", label: "Layout reviewer" } },
+      },
+    });
+    expect(entries[1]).toMatchObject({
+      id: "root-error",
+      label: "Provider error",
+      tone: "error",
+      providerDiagnostic: { recorded: true, summary: { subject: { kind: "root" } } },
+    });
+    for (const entry of entries) {
+      expect(entry).not.toHaveProperty("subagent");
+      expect(entry).not.toHaveProperty("detail");
+      expect(entry).not.toHaveProperty("command");
+      expect(JSON.stringify(entry)).not.toContain("private");
+      expect(JSON.stringify(entry)).not.toContain("never stringify");
+    }
+  });
+
   it("keeps saved Cafe waits static and distinguishes their continuation count from native retry cycles", () => {
     const wait = makeActivity({
       id: "cafe-wait",

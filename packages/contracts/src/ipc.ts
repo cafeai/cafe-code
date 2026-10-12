@@ -66,6 +66,8 @@ import type {
   OrchestrationShellStreamItem,
   OrchestrationThreadTurnActivityPage,
   OrchestrationThreadTurnActivityPageInput,
+  OrchestrationThreadActivityDiagnosticInput,
+  OrchestrationThreadActivityDiagnosticResult,
   OrchestrationThreadTurnSubagentDetail,
   OrchestrationThreadTurnSubagentDetailInput,
   OrchestrationThreadTurnWorkLogPresenceInput,
@@ -677,6 +679,9 @@ export interface EnvironmentApi {
     getThreadTurnActivityPage: (
       input: OrchestrationThreadTurnActivityPageInput,
     ) => Promise<OrchestrationThreadTurnActivityPage>;
+    getThreadActivityDiagnostic: (
+      input: OrchestrationThreadActivityDiagnosticInput,
+    ) => Promise<OrchestrationThreadActivityDiagnosticResult>;
     getThreadTurnSubagentDetail: (
       input: OrchestrationThreadTurnSubagentDetailInput,
     ) => Promise<OrchestrationThreadTurnSubagentDetail>;

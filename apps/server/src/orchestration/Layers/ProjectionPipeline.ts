@@ -1815,6 +1815,17 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
           yield* Effect.forEach(keptRows, projectionThreadActivityRepository.upsert, {
             concurrency: 1,
           }).pipe(Effect.asVoid);
+          // Revert temporarily replaces every activity, including retained
+          // rows. Prune only after reinsertion so their private copies survive.
+          yield* sql`DELETE FROM provider_activity_diagnostics
+            WHERE thread_id = ${event.payload.threadId} AND NOT EXISTS (
+              SELECT 1 FROM projection_thread_activities AS retained
+              WHERE retained.activity_id = provider_activity_diagnostics.activity_id
+                AND retained.thread_id = provider_activity_diagnostics.thread_id
+                AND retained.turn_id IS provider_activity_diagnostics.turn_id
+            )`.pipe(
+            Effect.mapError(toPersistenceSqlError("ProjectionPipeline.pruneRevertedDiagnostics")),
+          );
           return;
         }
 

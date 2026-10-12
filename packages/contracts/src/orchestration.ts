@@ -10,6 +10,7 @@ import {
 } from "./providerTaskControls.ts";
 import { MaxConcurrentSubagents, SubagentLimits } from "./subagentLimits.ts";
 import { CodexContextWindowOverride } from "./codexContextWindow.ts";
+import { ProviderDiagnosticSnapshot } from "./providerDiagnostic.ts";
 import { RepositoryIdentity } from "./environment.ts";
 import { CodexReviewTarget } from "./codexReview.ts";
 import {
@@ -43,6 +44,7 @@ export const ORCHESTRATION_WS_METHODS = {
   getDeletedShellSnapshot: "orchestration.getDeletedShellSnapshot",
   getThreadTurnWorkLogPresence: "orchestration.getThreadTurnWorkLogPresence",
   getThreadTurnActivityPage: "orchestration.getThreadTurnActivityPage",
+  getThreadActivityDiagnostic: "orchestration.getThreadActivityDiagnostic",
   getThreadTurnSubagentDetail: "orchestration.getThreadTurnSubagentDetail",
   controlTask: "orchestration.controlTask",
   hardDeleteThread: "orchestration.hardDeleteThread",
@@ -938,6 +940,23 @@ export type OrchestrationThreadTurnSubagentDetail =
   typeof OrchestrationThreadTurnSubagentDetail.Type;
 
 export const THREAD_TURN_WORK_LOG_PRESENCE_MAX_TURNS = 256;
+
+/** Private diagnostics are read only after an explicit disclosure action. */
+export const OrchestrationThreadActivityDiagnosticInput = Schema.Struct({
+  threadId: ThreadId,
+  turnId: Schema.NullOr(TurnId),
+  activityId: EventId,
+});
+export type OrchestrationThreadActivityDiagnosticInput =
+  typeof OrchestrationThreadActivityDiagnosticInput.Type;
+export const OrchestrationThreadActivityDiagnosticResult = Schema.Struct({
+  threadId: ThreadId,
+  turnId: Schema.NullOr(TurnId),
+  activityId: EventId,
+  diagnostic: Schema.NullOr(ProviderDiagnosticSnapshot),
+});
+export type OrchestrationThreadActivityDiagnosticResult =
+  typeof OrchestrationThreadActivityDiagnosticResult.Type;
 
 export const OrchestrationThreadTurnWorkLogPresenceInput = Schema.Struct({
   threadId: ThreadId,
@@ -2295,6 +2314,10 @@ export const OrchestrationRpcSchemas = {
   getThreadTurnActivityPage: {
     input: OrchestrationThreadTurnActivityPageInput,
     output: OrchestrationThreadTurnActivityPage,
+  },
+  getThreadActivityDiagnostic: {
+    input: OrchestrationThreadActivityDiagnosticInput,
+    output: OrchestrationThreadActivityDiagnosticResult,
   },
   getThreadTurnWorkLogPresence: {
     input: OrchestrationThreadTurnWorkLogPresenceInput,

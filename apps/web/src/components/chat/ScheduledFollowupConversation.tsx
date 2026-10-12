@@ -73,7 +73,6 @@ function ConversationSchedules({ context }: { context: ScheduledFollowupsContext
         loading={loading}
         error={error}
         onReview={review}
-        onRefresh={refresh}
       />
       <Dialog
         open={reviewId !== null}

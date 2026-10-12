@@ -14,6 +14,7 @@ export * from "./providerTaskControls.ts";
 export * from "./providerGoal.ts";
 export * from "./providerInstance.ts";
 export * from "./providerRuntime.ts";
+export * from "./providerDiagnostic.ts";
 export * from "./providerTurnConfiguration.ts";
 export * from "./subagentLimits.ts";
 export * from "./codexContextWindow.ts";

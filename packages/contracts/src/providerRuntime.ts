@@ -17,6 +17,7 @@ import {
 import { ProviderThreadGoal } from "./providerGoal.ts";
 import { ProviderInteraction, ProviderNetworkApproval } from "./providerInteraction.ts";
 import { ProviderInstanceId, ProviderDriverKind } from "./providerInstance.ts";
+import { ProviderDiagnostic } from "./providerDiagnostic.ts";
 import {
   ProviderIndividualTaskControl,
   ProviderTaskControlCapability,
@@ -289,6 +290,9 @@ const ProviderRuntimeEventBase = Schema.Struct({
   providerRefs: Schema.optional(ProviderRefs),
   raw: Schema.optional(RuntimeEventRaw),
   compaction: Schema.optional(ProviderRuntimeEventCompaction),
+  // Kept outside payload so finite retry-warning admission and terminal clocks
+  // remain unchanged. Ingestion separates private snapshots before publication.
+  diagnostic: Schema.optional(ProviderDiagnostic),
 });
 export type ProviderRuntimeEventBase = typeof ProviderRuntimeEventBase.Type;
 
@@ -690,10 +694,54 @@ export function isCodexNativeRetryWarningPayload(value: unknown): boolean {
       return null;
     }
   };
-  const payload = own(value, ["message", "detail", "retrying", "nativeRetry"]);
+  const payload = own(value, [
+    "message",
+    "detail",
+    "retrying",
+    "nativeRetry",
+    "providerDiagnostic",
+  ]);
   if (payload?.message !== "Provider reconnecting" || payload.retrying !== true) return false;
   const detail = own(payload.detail, ["willRetry"]);
   if (detail?.willRetry !== true) return false;
+  if (Object.hasOwn(payload, "providerDiagnostic")) {
+    const summary = own(payload.providerDiagnostic, [
+      "version",
+      "status",
+      "subject",
+      "observedRetryCount",
+      "countLimited",
+    ]);
+    const subject = summary ? own(summary.subject, ["kind", "id", "label"]) : null;
+    const boundedText = (candidate: unknown, limit: number) =>
+      typeof candidate === "string" &&
+      candidate.length > 0 &&
+      candidate.length <= limit &&
+      !/[\u0000-\u001f\u007f]/u.test(candidate);
+    if (!summary || summary.version !== 1 || summary.status !== "retry" || !subject) return false;
+    if (subject.kind !== "root" && subject.kind !== "subagent" && subject.kind !== "unknown")
+      return false;
+    if (subject.kind === "subagent") {
+      if (
+        !boundedText(subject.id, 512) ||
+        (Object.hasOwn(subject, "label") && !boundedText(subject.label, 160))
+      )
+        return false;
+    } else if (Object.hasOwn(subject, "id") || Object.hasOwn(subject, "label")) return false;
+    if (
+      Object.hasOwn(summary, "observedRetryCount") &&
+      (typeof summary.observedRetryCount !== "number" ||
+        !Number.isSafeInteger(summary.observedRetryCount) ||
+        summary.observedRetryCount < 1 ||
+        summary.observedRetryCount > 1_024)
+    )
+      return false;
+    if (
+      Object.hasOwn(summary, "countLimited") &&
+      (summary.countLimited !== true || !Object.hasOwn(summary, "observedRetryCount"))
+    )
+      return false;
+  }
   if (!Object.hasOwn(payload, "nativeRetry")) return true;
   const native = own(payload.nativeRetry, ["observedCount", "timing", "countLimited"]);
   return (
