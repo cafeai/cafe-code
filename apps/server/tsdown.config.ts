@@ -30,6 +30,7 @@ export default defineConfig([
   ...Object.entries({
     "mcp-bridge": "src/mcp/localBridgeEntry.ts",
     "scheduling-mcp-bridge": "src/mcp/schedulingBridgeEntry.ts",
+    "visualization-mcp-bridge": "src/mcp/visualizationBridgeEntry.ts",
   }).map(([name, entry]) => ({
     entry: { [name]: entry },
     outDir: "dist",

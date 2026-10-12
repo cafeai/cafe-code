@@ -8,6 +8,7 @@ import {
 import { type ChatMessage, type ProposedPlan } from "../../types";
 import { type MessageId, type TurnId } from "@cafecode/contracts";
 import type { SubagentRuntimeContext } from "../../subagent-activity";
+import type { VisualizationTimelineEntry } from "@cafecode/contracts/visualizationApi";
 
 export const MAX_VISIBLE_WORK_LOG_ENTRIES = 6;
 
@@ -19,6 +20,12 @@ export interface TimelineDurationMessage {
 }
 
 export type MessagesTimelineRow =
+  | {
+      kind: "visualization";
+      id: string;
+      createdAt: string;
+      visualization: VisualizationTimelineEntry;
+    }
   | {
       kind: "work";
       id: string;
@@ -434,6 +441,22 @@ export function deriveMessagesTimelineRows(input: {
       continue;
     }
 
+    if (timelineEntry.kind === "visualization") {
+      nextRows.push({
+        kind: "visualization",
+        id: timelineEntry.id,
+        createdAt: timelineEntry.createdAt,
+        visualization: timelineEntry.visualization,
+      });
+      if (input.completionDividerAfterEntryId === timelineEntry.id)
+        nextRows.push({
+          kind: "completion-divider",
+          id: `completion-divider:${timelineEntry.id}`,
+          createdAt: timelineEntry.createdAt,
+          completionSummary: input.completionSummary ?? null,
+        });
+      continue;
+    }
     const message = timelineEntry.message;
     if (message.role !== "user") {
       pushHistoricalWorkRow(message.turnId, message.createdAt);
@@ -509,6 +532,8 @@ function isRowUnchanged(a: MessagesTimelineRow, b: MessagesTimelineRow): boolean
   if (a.kind !== b.kind || a.id !== b.id) return false;
 
   switch (a.kind) {
+    case "visualization":
+      return a.visualization === (b as typeof a).visualization;
     case "working":
       return a.createdAt === (b as typeof a).createdAt;
 

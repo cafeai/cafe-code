@@ -28,4 +28,11 @@ export default defineConfig([
     ...shared,
     entry: ["src/globalDictationPreload.ts"],
   },
+  {
+    ...shared,
+    // A private document host receives this data-only relay, never the normal
+    // desktop management bridge. Keep the sandbox preload self-contained.
+    entry: ["src/visualizationPreload.ts"],
+    deps: { alwaysBundle: (id) => id.startsWith("@cafecode/") },
+  },
 ]);

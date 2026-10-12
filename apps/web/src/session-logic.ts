@@ -1,6 +1,7 @@
 import * as Option from "effect/Option";
 import * as Arr from "effect/Array";
 import * as Schema from "effect/Schema";
+import type { VisualizationTimelineEntry } from "@cafecode/contracts/visualizationApi";
 import { uiFormatNumber, uiText } from "@cafecode/shared/i18n";
 import {
   ApprovalRequestId,
@@ -27,6 +28,7 @@ import {
   type ProviderDiagnosticWorkLogRecord,
 } from "./providerDiagnostic";
 import { isRoutineProviderWorkLogActivity } from "@cafecode/shared/providerWorkLog";
+import { visualizationEntryIdentity } from "./components/visualizations/visualizationEntryIdentity";
 import { readTurnConfiguration, presentTurnConfiguration } from "./turnConfiguration";
 import {
   readClaudeCommandInspection,
@@ -204,6 +206,12 @@ export interface LatestProposedPlanState {
 }
 
 export type TimelineEntry =
+  | {
+      id: string;
+      kind: "visualization";
+      createdAt: string;
+      visualization: VisualizationTimelineEntry;
+    }
   | {
       id: string;
       kind: "message";
@@ -1982,6 +1990,7 @@ export function deriveTimelineEntries(
   messages: ChatMessage[],
   proposedPlans: ProposedPlan[],
   workEntries: WorkLogEntry[],
+  visualizations: readonly VisualizationTimelineEntry[] = [],
 ): TimelineEntry[] {
   const messageRows: TimelineEntry[] = messages.map((message) => ({
     id: message.id,
@@ -2001,7 +2010,13 @@ export function deriveTimelineEntries(
     createdAt: entry.createdAt,
     entry,
   }));
-  return [...messageRows, ...proposedPlanRows, ...workRows].toSorted((a, b) =>
+  const visualizationRows: TimelineEntry[] = visualizations.map((visualization) => ({
+    id: `visualization:${visualizationEntryIdentity(visualization)}`,
+    kind: "visualization",
+    createdAt: visualization.occurredAt,
+    visualization,
+  }));
+  return [...messageRows, ...proposedPlanRows, ...workRows, ...visualizationRows].toSorted((a, b) =>
     a.createdAt.localeCompare(b.createdAt),
   );
 }
@@ -2069,6 +2084,8 @@ export function deriveCompletionDividerAfterEntryId(
     if (
       (timelineEntry.kind === "message" && timelineEntry.message.turnId === latestTurn.turnId) ||
       (timelineEntry.kind === "work" && timelineEntry.entry.turnId === latestTurn.turnId) ||
+      (timelineEntry.kind === "visualization" &&
+        timelineEntry.visualization.turnId === latestTurn.turnId) ||
       (timelineEntry.kind === "proposed-plan" &&
         timelineEntry.proposedPlan.turnId === latestTurn.turnId)
     ) {

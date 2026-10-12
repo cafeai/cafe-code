@@ -8,6 +8,8 @@ const environmentApiOverridesForTests = new Map<EnvironmentId, EnvironmentApi>()
 
 export function createEnvironmentApi(rpcClient: WsRpcClient): EnvironmentApi {
   return {
+    mcpApps: rpcClient.mcpApps,
+    visualizations: rpcClient.visualizations,
     providerInteractions: {
       respond: rpcClient.server.respondToInteraction,
       resolveUrl: rpcClient.server.resolveInteractionUrl,

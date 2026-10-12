@@ -1,3 +1,7 @@
+import { installVisualizationSessionRuntime } from "../../visualizations/sessionRuntime.ts";
+import { GENERATED_VISUALIZATION_INSTRUCTIONS } from "../../visualizations/mcp.ts";
+import { buildCafeInstructions } from "../CafeInstructions.ts";
+import { VisualizationGenerationId } from "@cafecode/contracts/visualizations";
 // @effect-diagnostics nodeBuiltinImport:off
 import {
   existsSync,
@@ -2213,6 +2217,157 @@ describe("ClaudeAdapterLive", () => {
         }).pipe(Effect.provide(harness.layer));
       },
     );
+  }
+
+  for (const available of [false, true]) {
+    for (const configuredInstance of [
+      undefined,
+      ProviderInstanceId.make("claude-visual-account"),
+    ]) {
+      it.effect(
+        `preserves Claude prompt and session policy with visualization ${available ? "available" : "unavailable"} for ${configuredInstance ?? "the default account"}`,
+        () =>
+          Effect.gen(function* () {
+            // All account/config paths and the query are fixture-owned. No SDK
+            // process, provider credentials or persisted MCP profile is involved.
+            const fileSystem = yield* FileSystem.FileSystem;
+            const directory = yield* fileSystem.makeTempDirectoryScoped({
+              prefix: "claude-visual-instructions-",
+            });
+            const harness = makeHarness({
+              environment: {},
+              cwd: directory,
+              baseDir: directory,
+              claudeConfig: { homePath: directory },
+              ...(configuredInstance ? { instanceId: configuredInstance } : {}),
+            });
+            yield* Effect.gen(function* () {
+              const instance = configuredInstance ?? ProviderInstanceId.make("claudeAgent");
+              const name = `cafe-visualizations-${"a".repeat(22)}`;
+              const visualLaunch = {
+                command: process.execPath,
+                args: [path.join(directory, "synthetic-visualization-bridge.mjs")],
+                env: { ELECTRON_RUN_AS_NODE: "1" },
+              };
+              const schedulingLaunch = {
+                command: process.execPath,
+                args: [path.join(directory, "synthetic-scheduling-bridge.mjs")],
+                env: {
+                  CAFE_CODE_SCHEDULING_CONNECTION_FILE: path.join(
+                    directory,
+                    "private-connection.json",
+                  ),
+                },
+              };
+              const lifecycle: string[] = [];
+              const releaseScheduling = installSchedulingSessionBroker({
+                bind: async () => ({
+                  name: "cafe-scheduling",
+                  launch: schedulingLaunch,
+                  activate: async () => {
+                    lifecycle.push("scheduling-active");
+                  },
+                  dispose: async () => {
+                    lifecycle.push("scheduling-disposed");
+                  },
+                }),
+              });
+              yield* Effect.addFinalizer(() => Effect.sync(releaseScheduling));
+              const releaseVisualization = installVisualizationSessionRuntime({
+                bind: async (binding) => {
+                  assert.deepEqual(binding, {
+                    threadId: THREAD_ID,
+                    providerInstanceId: instance,
+                    provider: "claudeAgent",
+                  });
+                  lifecycle.push("visualization-bound");
+                  if (!available) return undefined;
+                  return {
+                    name,
+                    launch: visualLaunch,
+                    authority: {
+                      threadId: THREAD_ID,
+                      providerInstanceId: instance,
+                      sessionGeneration: VisualizationGenerationId.make(
+                        "00000000-0000-4000-8000-000000000001",
+                      ),
+                      runtimeGeneration: VisualizationGenerationId.make(
+                        "00000000-0000-4000-8000-000000000002",
+                      ),
+                      tokenDigest: "0".repeat(64),
+                      serverName: name,
+                    },
+                    activate: async () => {
+                      lifecycle.push("visualization-active");
+                    },
+                    dispose: async () => {
+                      lifecycle.push("visualization-disposed");
+                    },
+                    claimNativeCompletion: async () => {
+                      throw new Error("No native completion exists in this request fixture.");
+                    },
+                  };
+                },
+                authorize: async () => {
+                  throw new Error("No HTTP authority exists in this request fixture.");
+                },
+                close: async () => {
+                  throw new Error("The fixture owns only its installed broker lifetime.");
+                },
+              });
+              yield* Effect.addFinalizer(() => Effect.sync(releaseVisualization));
+              const adapter = yield* ClaudeAdapter;
+              const { systemPromptPath } = yield* ServerConfig;
+              yield* fileSystem.writeFileString(
+                systemPromptPath,
+                "Preserve fixture custom instructions.",
+              );
+              yield* adapter.startSession({
+                threadId: THREAD_ID,
+                runtimeMode: "approval-required",
+                interactionMode: "plan",
+              });
+              assert.equal(harness.createInputs.length, 1);
+              const options = harness.createInputs[0]!.options;
+              assert.deepEqual(options.systemPrompt, {
+                type: "preset",
+                preset: "claude_code",
+                append:
+                  buildCafeInstructions({
+                    cwd: directory,
+                    customInstructions: "Preserve fixture custom instructions.",
+                  }) + (available ? `\n\n${GENERATED_VISUALIZATION_INSTRUCTIONS}` : ""),
+              });
+              assert.deepEqual(options.mcpServers, {
+                "cafe-scheduling": { type: "stdio", ...schedulingLaunch, alwaysLoad: true },
+                ...(available
+                  ? { [name]: { type: "stdio", ...visualLaunch, alwaysLoad: true } }
+                  : {}),
+              });
+              assert.deepEqual(options.settingSources, ["user", "project", "local"]);
+              assert.equal(options.env?.CLAUDE_CONFIG_DIR, path.join(directory, ".claude"));
+              assert.equal(options.strictMcpConfig, undefined);
+              assert.equal(options.allowedTools, undefined);
+              assert.equal(options.permissionMode, "plan");
+              assert.equal(options.allowDangerouslySkipPermissions, undefined);
+              if (!available)
+                assert.equal(JSON.stringify(options).includes("preview_visualization"), false);
+              assert.deepEqual(lifecycle, [
+                "scheduling-active",
+                "visualization-bound",
+                ...(available ? ["visualization-active"] : []),
+              ]);
+              yield* adapter.stopSession(THREAD_ID);
+              yield* adapter.stopAll();
+              assert.equal(
+                lifecycle.filter((entry) => entry === "visualization-disposed").length,
+                available ? 1 : 0,
+              );
+              assert.equal(lifecycle.filter((entry) => entry === "scheduling-disposed").length, 1);
+            }).pipe(Effect.scoped, Effect.provide(harness.layer));
+          }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+      );
+    }
   }
 
   it.effect("revokes scheduling when Claude query creation fails", () => {

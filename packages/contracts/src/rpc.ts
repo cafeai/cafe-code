@@ -1,4 +1,21 @@
 import * as Schema from "effect/Schema";
+import {
+  VisualizationApiError,
+  VisualizationListInput,
+  VisualizationListResult,
+  VisualizationDetailsInput,
+  VisualizationDetailsResult,
+  VisualizationViewerInput,
+  VisualizationViewerTicketResult,
+  VisualizationExportHtmlResult,
+} from "./visualizationApi.ts";
+import {
+  McpAppPrepareInput,
+  McpAppPrepareResult,
+  McpAppResolveInput,
+  McpAppReply,
+  McpAppConsentDetailsInput,
+} from "./mcpApps.ts";
 import { ProviderSkillsInput, ProviderSkillsResult } from "./providerSkills.ts";
 import { ProviderCommandCatalog, ProviderCommandsInput } from "./providerCommands.ts";
 import { ProviderSessionQuotaInput, ProviderSessionQuotaResult } from "./providerQuota.ts";
@@ -135,6 +152,13 @@ import { UsageStatsGetResult, UsageStatsSnapshot } from "./usageStats.ts";
 import { VcsError } from "./vcs.ts";
 
 export const WS_METHODS = {
+  visualizationsList: "visualizations.list",
+  visualizationsDetails: "visualizations.details",
+  visualizationsViewerTicket: "visualizations.viewerTicket",
+  visualizationsExportHtml: "visualizations.exportHtml",
+  mcpAppsPrepare: "mcpApps.prepare",
+  mcpAppsResolve: "mcpApps.resolve",
+  mcpAppsDetails: "mcpApps.details",
   providerRespondToInteraction: "provider.respondToInteraction",
   providerResolveInteractionUrl: "provider.resolveInteractionUrl",
   // Project registry methods
@@ -681,6 +705,41 @@ export const WsSubscribeUsageStatsRpc = Rpc.make(WS_METHODS.subscribeUsageStats,
 });
 
 export const WsRpcGroup = RpcGroup.make(
+  Rpc.make(WS_METHODS.visualizationsList, {
+    payload: VisualizationListInput,
+    success: VisualizationListResult,
+    error: VisualizationApiError,
+  }),
+  Rpc.make(WS_METHODS.visualizationsDetails, {
+    payload: VisualizationDetailsInput,
+    success: VisualizationDetailsResult,
+    error: VisualizationApiError,
+  }),
+  Rpc.make(WS_METHODS.visualizationsViewerTicket, {
+    payload: VisualizationViewerInput,
+    success: VisualizationViewerTicketResult,
+    error: VisualizationApiError,
+  }),
+  Rpc.make(WS_METHODS.visualizationsExportHtml, {
+    payload: VisualizationDetailsInput,
+    success: VisualizationExportHtmlResult,
+    error: VisualizationApiError,
+  }),
+  Rpc.make(WS_METHODS.mcpAppsPrepare, {
+    payload: McpAppPrepareInput,
+    success: McpAppPrepareResult,
+    error: VisualizationApiError,
+  }),
+  Rpc.make(WS_METHODS.mcpAppsResolve, {
+    payload: McpAppResolveInput,
+    success: McpAppReply,
+    error: VisualizationApiError,
+  }),
+  Rpc.make(WS_METHODS.mcpAppsDetails, {
+    payload: McpAppConsentDetailsInput,
+    success: McpAppReply,
+    error: VisualizationApiError,
+  }),
   Rpc.make(WS_METHODS.scheduledFollowupsList, {
     payload: ScheduledFollowupListInput,
     success: ScheduledFollowupListResult,

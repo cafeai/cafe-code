@@ -1,0 +1,382 @@
+import { assert, it } from "@effect/vitest";
+import { vi } from "vitest";
+import { ThreadId, type OrchestrationCommand } from "@cafecode/contracts";
+import type { ProviderDaemonJsonRequestOptions } from "@cafecode/shared/providerDaemonHttp";
+import {
+  MCP_APP_JSON_MAX_BYTES,
+  MCP_APP_JSON_MAX_TRANSPORT_BYTES,
+} from "@cafecode/shared/mcpAppJson";
+import {
+  VisualizationArtifactId,
+  VisualizationRevisionId,
+} from "@cafecode/contracts/visualizations";
+import type { McpAppPrepareInput } from "@cafecode/contracts/mcpApps";
+import * as Effect from "effect/Effect";
+import * as SqlClient from "effect/unstable/sql/SqlClient";
+import { ServerConfig, type ServerConfigShape } from "../config.ts";
+import { OrchestrationEngineService } from "../orchestration/Services/OrchestrationEngine.ts";
+import { VisualizationArtifacts } from "../visualizations/service.ts";
+import * as TestSqliteClient from "../persistence/TestSqliteClient.ts";
+import { makeMcpAppsService } from "./service.ts";
+
+// Controlled native observations qualify broker decisions, not real Electron
+// process ownership. Real native qualification is a separate opt-in fixture.
+const peer = vi.hoisted(() => ({
+  generation: "00000000-0000-4000-8000-000000000003",
+  documentGeneration: "00000000-0000-4000-8000-000000000004",
+  leaseId: "00000000-0000-4000-8000-000000000005",
+  expiresAtMs: 0,
+  active: true,
+  toolCalls: 0,
+  contextCalls: 0,
+  catalogueHook: undefined as (() => void) | undefined,
+  visibility: ["app"],
+  result: "{}",
+  textSchema: false,
+  httpBodies: [] as string[],
+  httpResponseCaps: [] as number[],
+}));
+vi.mock("@cafecode/shared/providerDaemonHttp", () => ({
+  requestProviderDaemonJson: async (
+    _endpoint: unknown,
+    path: string,
+    options: ProviderDaemonJsonRequestOptions,
+  ) => {
+    if (path !== "/visualizations/apps/owner" || !options.body)
+      throw new Error("Unexpected synthetic App route.");
+    peer.httpBodies.push(options.body);
+    peer.httpResponseCaps.push(options.maxResponseBytes ?? 0);
+    const { dispatchMcpAppOwnerOperation } = await import("./owner.ts");
+    const json = await dispatchMcpAppOwnerOperation(JSON.parse(options.body));
+    return { statusCode: 200, body: JSON.stringify({ json }) };
+  },
+}));
+vi.mock("@cafecode/shared/visualizationHostClient", () => ({
+  readVisualizationHost: async () => ({ generation: peer.generation }),
+  requestVisualizationHost: async () => ({
+    documentGeneration: peer.documentGeneration,
+    leaseId: peer.leaseId,
+    expiresAtMs: peer.expiresAtMs,
+    state: peer.active ? "active" : "suspended",
+  }),
+}));
+vi.mock("./owner.ts", () => ({
+  MCP_APP_OWNER_PATH: "/visualizations/apps/owner",
+  dispatchMcpAppOwnerOperation: async (input: { method: string }) => {
+    if (input.method === "catalog") {
+      peer.catalogueHook?.();
+      return JSON.stringify({
+        data: [
+          {
+            name: "fixture-server",
+            tools: {
+              act: {
+                inputSchema: {
+                  type: "object",
+                  properties: {
+                    count: { type: "integer", minimum: 1 },
+                    ...(peer.textSchema ? { text: { type: "string", maxLength: 60_000 } } : {}),
+                  },
+                  required: ["count"],
+                  additionalProperties: false,
+                },
+                _meta: { ui: { visibility: peer.visibility } },
+              },
+            },
+            resources: [{ uri: "ui://owned" }],
+          },
+        ],
+      });
+    }
+    if (input.method === "context") {
+      peer.contextCalls += 1;
+      return "{}";
+    }
+    if (input.method === "tool") peer.toolCalls += 1;
+    return peer.result;
+  },
+}));
+
+const base = {
+  threadId: ThreadId.make("app-fixture"),
+  artifactId: VisualizationArtifactId.make("00000000-0000-4000-8000-000000000001"),
+  revisionId: VisualizationRevisionId.make("00000000-0000-4000-8000-000000000002"),
+  leaseId: "00000000-0000-4000-8000-000000000005",
+  ticket: "a".repeat(64),
+};
+const request = (method: string, params: unknown, id: number | null = 1): McpAppPrepareInput => ({
+  ...base,
+  requestJson: JSON.stringify({ jsonrpc: "2.0", method, ...(id === null ? {} : { id }), params }),
+});
+const makeFixture = (useDaemon = false) =>
+  Effect.gen(function* () {
+    peer.generation = "00000000-0000-4000-8000-000000000003";
+    peer.documentGeneration = "00000000-0000-4000-8000-000000000004";
+    peer.leaseId = base.leaseId;
+    peer.expiresAtMs = Date.now() + 60_000;
+    peer.active = true;
+    peer.toolCalls = 0;
+    peer.contextCalls = 0;
+    peer.catalogueHook = undefined;
+    peer.visibility = ["app"];
+    peer.result = "{}";
+    peer.textSchema = false;
+    peer.httpBodies = [];
+    peer.httpResponseCaps = [];
+    const dispatched: OrchestrationCommand[] = [];
+    // Only these two owner-read methods are exercised. All other artifact APIs
+    // remain absent, so an accidental unrelated operation fails the fixture.
+    const artifacts = {
+      readViewerTicket: () =>
+        Effect.succeed({ hostGeneration: "00000000-0000-4000-8000-000000000003" }),
+      readMcpAppSnapshot: () =>
+        Effect.succeed({
+          kind: "mcp-app",
+          privateJson: JSON.stringify({
+            input: {
+              originalInputJson: '{"count":1}',
+              originalResultJson: '{"content":[]}',
+              serverName: "fixture-server",
+              originCallId: "call",
+            },
+            witness: {
+              provider: "codex",
+              threadId: base.threadId,
+              providerInstanceId: "codex_fixture",
+              sessionGeneration: "00000000-0000-4000-8000-000000000006",
+              nativeThreadId: "native",
+            },
+          }),
+        }),
+    } as unknown as VisualizationArtifacts["Service"];
+    const engine = {
+      dispatch: (command: OrchestrationCommand) =>
+        Effect.sync(() => {
+          dispatched.push(command);
+          return { sequence: 1 };
+        }),
+    } as unknown as OrchestrationEngineService["Service"];
+    const config = {
+      stateDir: "fixture-not-read",
+      providerDaemon: useDaemon
+        ? {
+            httpBaseUrl: "http://127.0.0.1:1",
+            token: "synthetic-not-sent".repeat(4),
+          }
+        : undefined,
+      providerSupervisor: undefined,
+    } as ServerConfigShape;
+    const service = yield* makeMcpAppsService.pipe(
+      Effect.provideService(VisualizationArtifacts, artifacts),
+      Effect.provideService(OrchestrationEngineService, engine),
+      Effect.provideService(ServerConfig, config),
+    );
+    const initialize = () =>
+      Effect.gen(function* () {
+        const reply = yield* service.prepare(
+          request("ui/initialize", {
+            protocolVersion: "2026-01-26",
+            appInfo: { name: "fixture", version: "1" },
+            appCapabilities: { availableDisplayModes: ["inline", "fullscreen"] },
+          }),
+        );
+        assert.equal(reply.kind, "reply");
+        return yield* service.prepare(request("ui/notifications/initialized", {}, null));
+      });
+    return { service, initialize, dispatched, sql: yield* SqlClient.SqlClient };
+  });
+const fixture = makeFixture();
+
+it.layer(TestSqliteClient.layerMemory())("exact MCP App consent broker", (it) => {
+  it.effect(
+    "preserves bounded quote-heavy requests and results across the escaped private daemon envelope",
+    () =>
+      Effect.gen(function* () {
+        const { service, initialize } = yield* makeFixture(true);
+        yield* initialize();
+        peer.textSchema = true;
+        const text = '"'.repeat(50_000);
+        peer.result = JSON.stringify({ content: [{ type: "text", text }] });
+        const consent = yield* service.prepare(
+          request("tools/call", {
+            name: "act",
+            arguments: { count: 1, text },
+          }),
+        );
+        if (consent.kind !== "consent") throw new Error("Expected fixture consent.");
+        const reply = yield* service.resolve({ ...consent, decision: "approve" });
+        assert.equal(JSON.parse(reply.json).result.content[0].text, text);
+        assert.equal(peer.toolCalls, 1);
+        assert.ok(
+          peer.httpBodies.some(
+            (body) => new TextEncoder().encode(body).byteLength > MCP_APP_JSON_MAX_BYTES,
+          ),
+        );
+        assert.ok(
+          peer.httpBodies.every(
+            (body) => new TextEncoder().encode(body).byteLength <= MCP_APP_JSON_MAX_TRANSPORT_BYTES,
+          ),
+        );
+        assert.ok(peer.httpResponseCaps.every((cap) => cap === MCP_APP_JSON_MAX_TRANSPORT_BYTES));
+      }),
+  );
+  it.effect("orders original input/result once and refuses premature operations", () =>
+    Effect.gen(function* () {
+      const { service, initialize } = yield* fixture;
+      assert.match(
+        JSON.stringify(
+          yield* service.prepare(request("tools/call", { name: "act", arguments: { count: 1 } })),
+        ),
+        /Operation unavailable/,
+      );
+      const original = yield* initialize();
+      assert.equal(original.kind, "reply");
+      if (original.kind !== "reply") return;
+      assert.equal(JSON.parse(original.json).method, "ui/notifications/tool-input");
+      assert.equal(JSON.parse(original.messages![0]!).method, "ui/notifications/tool-result");
+      const duplicate = yield* service.prepare(request("ui/notifications/initialized", {}, null));
+      assert.deepStrictEqual(duplicate, { kind: "reply", json: "" });
+      assert.equal(peer.toolCalls, 0);
+    }),
+  );
+  it.effect("refuses mismatched actual leases and host generations", () =>
+    Effect.gen(function* () {
+      const { service } = yield* fixture;
+      peer.leaseId = "00000000-0000-4000-8000-000000000007";
+      assert.equal((yield* Effect.exit(service.prepare(request("ping", {}))))._tag, "Failure");
+      peer.leaseId = base.leaseId;
+      peer.generation = "00000000-0000-4000-8000-000000000008";
+      assert.equal((yield* Effect.exit(service.prepare(request("ping", {}))))._tag, "Failure");
+    }),
+  );
+  it.effect("requires app visibility and exact schema before one-use consent", () =>
+    Effect.gen(function* () {
+      const { service, initialize } = yield* fixture;
+      yield* initialize();
+      for (const args of [{}, { count: 0 }, { count: 2, extra: true }])
+        assert.match(
+          JSON.stringify(
+            yield* service.prepare(request("tools/call", { name: "act", arguments: args })),
+          ),
+          /Operation unavailable/,
+        );
+      peer.visibility = ["model"];
+      assert.match(
+        JSON.stringify(
+          yield* service.prepare(request("tools/call", { name: "act", arguments: { count: 1 } })),
+        ),
+        /Operation unavailable/,
+      );
+      peer.visibility = ["app"];
+      const consent = yield* service.prepare(
+        request("tools/call", { name: "act", arguments: { count: 1 } }),
+      );
+      assert.equal(consent.kind, "consent");
+      if (consent.kind !== "consent") return;
+      const detail = yield* service.details(consent);
+      assert.match(detail.json, /"count":1/);
+      const reply = yield* service.resolve({ ...consent, decision: "approve" });
+      assert.equal(JSON.parse(reply.json).id, 1);
+      assert.equal(peer.toolCalls, 1);
+      assert.equal(
+        (yield* Effect.exit(service.resolve({ ...consent, decision: "approve" })))._tag,
+        "Failure",
+      );
+      assert.equal(peer.toolCalls, 1);
+    }),
+  );
+  it.effect("rechecks the document after approval catalogue I/O, before dispatch", () =>
+    Effect.gen(function* () {
+      const { service, initialize } = yield* fixture;
+      yield* initialize();
+      const consent = yield* service.prepare(
+        request("tools/call", { name: "act", arguments: { count: 1 } }),
+      );
+      if (consent.kind !== "consent") throw new Error("Expected fixture consent.");
+      peer.catalogueHook = () => {
+        peer.documentGeneration = "00000000-0000-4000-8000-000000000009";
+      };
+      assert.equal(
+        (yield* Effect.exit(service.resolve({ ...consent, decision: "approve" })))._tag,
+        "Failure",
+      );
+      assert.equal(peer.toolCalls, 0);
+      assert.equal(
+        (yield* Effect.exit(service.resolve({ ...consent, decision: "approve" })))._tag,
+        "Failure",
+      );
+    }),
+  );
+  it.effect("denies without side effects; context replacement never starts inference", () =>
+    Effect.gen(function* () {
+      const { service, initialize, dispatched } = yield* fixture;
+      yield* initialize();
+      const consent = yield* service.prepare(
+        request("tools/call", { name: "act", arguments: { count: 1 } }),
+      );
+      if (consent.kind !== "consent") throw new Error("Expected fixture consent.");
+      yield* service.resolve({ ...consent, decision: "deny" });
+      assert.equal(peer.toolCalls, 0);
+      yield* service.prepare(
+        request("ui/update-model-context", {
+          content: [{ type: "text", text: "Untrusted fixture context" }],
+        }),
+      );
+      assert.equal(peer.contextCalls, 1);
+      assert.deepStrictEqual(dispatched, []);
+    }),
+  );
+  it.effect("never approves revoked visibility, foreign resources or expired documents", () =>
+    Effect.gen(function* () {
+      const { service, initialize } = yield* fixture;
+      yield* initialize();
+      assert.match(
+        JSON.stringify(yield* service.prepare(request("resources/read", { uri: "ui://foreign" }))),
+        /Operation unavailable/,
+      );
+      const consent = yield* service.prepare(
+        request("tools/call", { name: "act", arguments: { count: 1 } }),
+      );
+      if (consent.kind !== "consent") throw new Error("Expected fixture consent.");
+      peer.visibility = [];
+      assert.equal(
+        (yield* Effect.exit(service.resolve({ ...consent, decision: "approve" })))._tag,
+        "Failure",
+      );
+      assert.equal(peer.toolCalls, 0);
+      peer.expiresAtMs = Date.now() - 1;
+      assert.equal((yield* Effect.exit(service.prepare(request("ping", {}))))._tag, "Failure");
+    }),
+  );
+  it.effect("binds an explicit user message to the observed current account and modes", () =>
+    Effect.gen(function* () {
+      const { service, initialize, dispatched, sql } = yield* fixture;
+      yield* initialize();
+      // A scoped SQLite projection fixture, not the user's database or providers.
+      yield* sql`CREATE TABLE IF NOT EXISTS projection_threads(thread_id TEXT PRIMARY KEY,runtime_mode TEXT,interaction_mode TEXT,model_selection_json TEXT,deleted_at TEXT)`;
+      yield* sql`DELETE FROM projection_threads`;
+      yield* sql`INSERT INTO projection_threads VALUES(${base.threadId},'full-access','default',${JSON.stringify({ instanceId: "foreign", model: "fixture" })},NULL)`;
+      const message = request("ui/message", {
+        role: "user",
+        content: [{ type: "text", text: "Explicit approved fixture message" }],
+      });
+      const foreign = yield* service.prepare(message);
+      if (foreign.kind !== "consent") throw new Error("Expected fixture consent.");
+      assert.equal(
+        (yield* Effect.exit(service.resolve({ ...foreign, decision: "approve" })))._tag,
+        "Failure",
+      );
+      assert.equal(dispatched.length, 0);
+      yield* sql`UPDATE projection_threads SET model_selection_json=${JSON.stringify({ instanceId: "codex_fixture", model: "fixture" })}`;
+      const current = yield* service.prepare({
+        ...message,
+        requestJson: message.requestJson.replace('"id":1', '"id":2'),
+      });
+      if (current.kind !== "consent") throw new Error("Expected fixture consent.");
+      yield* service.resolve({ ...current, decision: "approve" });
+      assert.equal(dispatched.length, 1);
+      assert.deepStrictEqual(dispatched[0]!.type, "thread.turn.start");
+      assert.match(JSON.stringify(dispatched[0]), /codex_fixture/);
+    }),
+  );
+});

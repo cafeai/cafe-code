@@ -24,6 +24,22 @@
       "types": "./src/codexContextWindow.ts",
       "import": "./src/codexContextWindow.ts"
     },
+    "./mcpApps": {
+      "types": "./src/mcpApps.ts",
+      "import": "./src/mcpApps.ts"
+    },
+    "./visualizationApi": {
+      "types": "./src/visualizationApi.ts",
+      "import": "./src/visualizationApi.ts"
+    },
+    "./visualizationHost": {
+      "types": "./src/visualizationHost.ts",
+      "import": "./src/visualizationHost.ts"
+    },
+    "./visualizations": {
+      "types": "./src/visualizations.ts",
+      "import": "./src/visualizations.ts"
+    },
     "./providerSupervisor": {
       "types": "./src/providerSupervisor.ts",
       "import": "./src/providerSupervisor.ts"

@@ -87,6 +87,9 @@ import { ServerLifecycleEvents } from "./serverLifecycleEvents.ts";
 import { UsageStatsService } from "./usageStats/Services/UsageStatsService.ts";
 import { ScheduledFollowups } from "./scheduledFollowups/service.ts";
 import { ScheduledFollowupError } from "@cafecode/contracts";
+import { VisualizationApiError } from "@cafecode/contracts/visualizationApi";
+import { VisualizationArtifacts } from "./visualizations/service.ts";
+import { makeMcpAppsService } from "./mcpApps/service.ts";
 import { ProviderUsageResetError } from "@cafecode/contracts";
 import { ServerRuntimeStartup } from "./serverRuntimeStartup.ts";
 import { redactServerSettingsForClient, ServerSettingsService } from "./serverSettings.ts";
@@ -219,6 +222,7 @@ const makeWsRpcLayer = (
   orchestrationSubscriptionHub: OrchestrationSubscriptionHubShape,
   providerMaintenanceRunner: ProviderMaintenanceRunner.ProviderMaintenanceRunnerShape,
   mcpManagement: McpManagementShape,
+  sameMachineVisualizationTransport = false,
 ) =>
   WsRpcGroup.toLayer(
     Effect.gen(function* () {
@@ -278,6 +282,71 @@ const makeWsRpcLayer = (
       const sourceControlRepositories = yield* SourceControlRepositoryService;
       const bootstrapCredentials = yield* BootstrapCredentialService;
       const sessions = yield* SessionCredentialService;
+      // Ordinary server seams need not construct a renderer host/store. Missing
+      // capability refuses only these methods; production provides the actual
+      // single shared private artifact service, never a successful substitute.
+      const visualizations = yield* Effect.serviceOption(VisualizationArtifacts);
+      const mcpApps = Option.isSome(visualizations)
+        ? yield* makeMcpAppsService.pipe(
+            Effect.provideService(VisualizationArtifacts, visualizations.value),
+          )
+        : undefined;
+      const withVisualizations = <A>(
+        operation: (service: VisualizationArtifacts["Service"]) => Effect.Effect<A, unknown>,
+      ) =>
+        Option.isSome(visualizations)
+          ? operation(visualizations.value)
+          : Effect.fail(
+              new VisualizationApiError({ message: "Visualization capability is unavailable." }),
+            );
+      const withMcpApps = <A>(
+        operation: (service: NonNullable<typeof mcpApps>) => Effect.Effect<A, unknown>,
+      ) =>
+        mcpApps
+          ? operation(mcpApps)
+          : Effect.fail(
+              new VisualizationApiError({ message: "Visualization capability is unavailable." }),
+            );
+      const privateVisualizationRead = <A>(
+        operation: Effect.Effect<A, unknown>,
+        nativeViewer = false,
+      ) =>
+        Effect.gen(function* () {
+          if (
+            currentSession.role !== "owner" ||
+            !secureSecretTransport ||
+            (nativeViewer && (!sameMachineVisualizationTransport || config.mode !== "desktop"))
+          )
+            return yield* new VisualizationApiError({
+              message:
+                "Visualization details require a current owner connection. Native viewers require the same machine.",
+            });
+          yield* sessions
+            .validateActiveSession(currentSession)
+            .pipe(
+              Effect.mapError(
+                () =>
+                  new VisualizationApiError({ message: "Visualization owner session expired." }),
+              ),
+            );
+          const result = yield* operation.pipe(
+            Effect.mapError(
+              () =>
+                new VisualizationApiError({
+                  message: "Visualization is unavailable for this exact revision.",
+                }),
+            ),
+          );
+          yield* sessions
+            .validateActiveSession(currentSession)
+            .pipe(
+              Effect.mapError(
+                () =>
+                  new VisualizationApiError({ message: "Visualization owner session expired." }),
+              ),
+            );
+          return result;
+        });
       const processDiagnostics = yield* ProcessDiagnostics.ProcessDiagnostics;
       const processResourceMonitor = yield* ProcessResourceMonitor.ProcessResourceMonitor;
       const runtimeLayerDiagnostics = yield* RuntimeLayerDiagnostics.RuntimeLayerDiagnostics;
@@ -741,6 +810,32 @@ const makeWsRpcLayer = (
           .pipe(Effect.ignoreCause({ log: true }), Effect.forkDetach, Effect.asVoid);
 
       return WsRpcGroup.of({
+        [WS_METHODS.visualizationsList]: (input) =>
+          privateVisualizationRead(withVisualizations((service) => service.list(input))),
+        [WS_METHODS.visualizationsDetails]: (input) =>
+          privateVisualizationRead(withVisualizations((service) => service.details(input))),
+        [WS_METHODS.visualizationsViewerTicket]: (input) =>
+          privateVisualizationRead(
+            withVisualizations((service) => service.viewerTicket(input)),
+            true,
+          ),
+        [WS_METHODS.visualizationsExportHtml]: (input) =>
+          privateVisualizationRead(withVisualizations((service) => service.exportHtml(input))),
+        [WS_METHODS.mcpAppsPrepare]: (input) =>
+          privateVisualizationRead(
+            withMcpApps((service) => service.prepare(input)),
+            true,
+          ),
+        [WS_METHODS.mcpAppsResolve]: (input) =>
+          privateVisualizationRead(
+            withMcpApps((service) => service.resolve(input)),
+            true,
+          ),
+        [WS_METHODS.mcpAppsDetails]: (input) =>
+          privateVisualizationRead(
+            withMcpApps((service) => service.details(input)),
+            true,
+          ),
         [ORCHESTRATION_WS_METHODS.dispatchCommand]: (command) =>
           observeRpcEffect(
             ORCHESTRATION_WS_METHODS.dispatchCommand,
@@ -2082,6 +2177,7 @@ export const websocketRpcRouteLayer = Layer.unwrap(
               orchestrationSubscriptionHub,
               providerMaintenanceRunner,
               mcpManagement,
+              secureSecretTransport && !request.headers["x-cafe-code-https-proxy"],
             ).pipe(
               Layer.provideMerge(RpcSerialization.layerJson),
               Layer.provide(ProviderJournalMessageRepairLive),

@@ -78,6 +78,9 @@ import { deskTabKey } from "../deskModel";
 import { useDeskStore } from "../deskStore";
 import { getWorkspaceServerConfig } from "../environments/workspaceApi";
 import { MessageForkDialog } from "./chat/MessageForkDialog";
+import { Button } from "./ui/button";
+import { useThreadVisualizations } from "./visualizations/useThreadVisualizations";
+import { useVisualizationScope } from "./visualizations/VisualizationViewerProvider";
 import { isElectron } from "../env";
 import { useMacDesktopTitlebar } from "../hooks/useMacDesktopTitlebar";
 import { readLocalApi } from "../localApi";
@@ -2678,13 +2681,32 @@ export default function ChatView(props: ChatViewProps) {
       uiPresentation,
     ],
   );
+  const visualizations = useThreadVisualizations(
+    environmentId,
+    routeKind === "server" ? threadId : null,
+    pane.active && pane.visible,
+    `${activeLatestTurn?.turnId ?? ""}:${threadActivities.at(-1)?.id ?? ""}`,
+  );
+  useVisualizationScope(
+    environmentId,
+    threadId,
+    pane.active && pane.visible && pendingApprovals.length === 0 && pendingUserInputs.length === 0,
+  );
   const timelineEntries = useMemo(
     () =>
-      deriveTimelineEntries(timelineMessages, activeThread?.proposedPlans ?? [], [
-        ...workLogEntries,
-        ...subagentEntries,
-      ]),
-    [activeThread?.proposedPlans, timelineMessages, workLogEntries, subagentEntries],
+      deriveTimelineEntries(
+        timelineMessages,
+        activeThread?.proposedPlans ?? [],
+        [...workLogEntries, ...subagentEntries],
+        visualizations.entries,
+      ),
+    [
+      activeThread?.proposedPlans,
+      timelineMessages,
+      workLogEntries,
+      subagentEntries,
+      visualizations.entries,
+    ],
   );
   const { turnDiffSummaries, inferredCheckpointTurnCountByTurnId } =
     useTurnDiffSummaries(activeThread);
@@ -8272,6 +8294,40 @@ export default function ChatView(props: ChatViewProps) {
         <div className="flex min-h-0 min-w-0 flex-1 flex-col">
           {/* Messages Wrapper */}
           <div className="relative flex min-h-0 flex-1 flex-col">
+            {visualizations.hasOlder || visualizations.failed || visualizations.reviewingOlder ? (
+              <div className="flex shrink-0 items-center justify-center gap-2 py-1 text-xs text-muted-foreground">
+                {visualizations.failed ? (
+                  <>
+                    <span role="status">
+                      {uiText(
+                        "Visualization history could not refresh.",
+                        undefined,
+                        undefined,
+                        uiLocale,
+                      )}
+                    </span>
+                    <Button size="sm" variant="ghost" onClick={visualizations.refresh}>
+                      {uiText("Refresh", undefined, undefined, uiLocale)}
+                    </Button>
+                  </>
+                ) : null}
+                {visualizations.hasOlder ? (
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    disabled={visualizations.loading}
+                    onClick={visualizations.loadOlder}
+                  >
+                    {uiText("Load older visualizations", undefined, undefined, uiLocale)}
+                  </Button>
+                ) : null}
+                {visualizations.reviewingOlder ? (
+                  <Button size="sm" variant="ghost" onClick={visualizations.returnToLatest}>
+                    {uiText("Return to latest", undefined, undefined, uiLocale)}
+                  </Button>
+                ) : null}
+              </div>
+            ) : null}
             {/* Messages — LegendList handles virtualization and scrolling internally */}
             <MessagesTimeline
               key={activeThread.id}

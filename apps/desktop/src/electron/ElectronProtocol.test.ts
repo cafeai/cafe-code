@@ -45,6 +45,13 @@ describe("ElectronProtocol", () => {
             assert.deepEqual(registerSchemesAsPrivilegedMock.mock.calls, [
               [
                 [
+                  // The private document scheme deliberately receives no fetch,
+                  // CORS or CSP-bypass privilege. Exact registration protects
+                  // that boundary independently of the ordinary Cafe scheme.
+                  {
+                    scheme: "cafe-visualization",
+                    privileges: { standard: true, secure: true },
+                  },
                   {
                     scheme: "cafecode",
                     privileges: {

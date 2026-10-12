@@ -34,6 +34,7 @@ import * as DesktopUpdates from "../updates/DesktopUpdates.ts";
 import * as DesktopSourceUpdates from "../updates/DesktopSourceUpdates.ts";
 import * as DesktopDebugServer from "../debug/DesktopDebugServer.ts";
 import * as DesktopStartupWindow from "../window/DesktopStartupWindow.ts";
+import { DesktopVisualizations } from "../visualizations/DesktopVisualizations.ts";
 
 const DEFAULT_DESKTOP_BACKEND_PORT = 3773;
 const DEFAULT_DESKTOP_BACKEND_HTTPS_PORT = 3775;
@@ -558,6 +559,12 @@ const startup = Effect.gen(function* () {
     Effect.catchCause((cause) => fatalStartupCause("whenReady", cause)),
   );
   yield* logStartupInfo("app ready");
+  const visualizationHost = yield* Effect.serviceOption(DesktopVisualizations);
+  if (Option.isSome(visualizationHost))
+    yield* Effect.promise(() => visualizationHost.value.listen()).pipe(
+      // Failure disables only this optional surface, never ordinary chat startup.
+      Effect.catchCause(() => Effect.logWarning("Visualization execution is unavailable.")),
+    );
   const startupWindow = yield* Effect.serviceOption(DesktopStartupWindow.DesktopStartupWindow);
   if (Option.isSome(startupWindow)) yield* startupWindow.value.begin;
   yield* appIdentity.configure;

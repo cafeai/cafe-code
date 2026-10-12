@@ -91,6 +91,7 @@ import {
   type TimestampFormat,
 } from "@cafecode/contracts/settings";
 import { formatTimestamp } from "../../timestampFormat";
+import { VisualizationCard } from "../visualizations/VisualizationCard";
 import { hasOnScreenKeyboard } from "../../hooks/useMediaQuery";
 import {
   isWholeMessageSelection,
@@ -1391,10 +1392,27 @@ const TimelineRowContent = memo(function TimelineRowContent({ row }: { row: Time
         <AssistantTimelineRow row={row} />
       ) : null}
       {row.kind === "proposed-plan" ? <ProposedPlanTimelineRow row={row} /> : null}
+      {row.kind === "visualization" ? <VisualizationTimelineRow row={row} /> : null}
       {row.kind === "working" ? <WorkingTimelineRow row={row} /> : null}
     </div>
   );
 });
+
+function VisualizationTimelineRow({
+  row,
+}: {
+  row: Extract<TimelineRow, { kind: "visualization" }>;
+}) {
+  const ctx = use(TimelineRowCtx);
+  return ctx.activeThreadId ? (
+    <VisualizationCard
+      environmentId={ctx.activeThreadEnvironmentId}
+      threadId={ctx.activeThreadId}
+      entry={row.visualization}
+      timestampFormat={ctx.timestampFormat}
+    />
+  ) : null;
+}
 
 function UserTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "message" }> }) {
   const uiLocale = useUiLocale();

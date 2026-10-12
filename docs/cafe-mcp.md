@@ -6,6 +6,19 @@ Scheduling inside Cafe does **not** use the installer below. Cafe automatically 
 
 These narrow tools are independent of the broad management toggle. Already-running old providers need normal rebuilt-runtime adoption and session restart/resume. See [scheduled follow-ups](scheduled-followups.md) and [session authority](decisions/session-scoped-scheduling-tools.md).
 
+## Built-in agent visualizations
+
+When a local desktop host is available, Cafe-owned Codex and Claude sessions also
+receive a **separate session-only** `visualization-mcp-bridge.mjs` connection for
+`preview_visualization` and `publish_visualization`. It is not the management
+installer or scheduling audience and does not edit provider profiles or approval
+policies. Exact active chat/account/native generation and completed native-call
+proofs govern publication; Grok is not enabled without equivalent provenance.
+Existing sessions require normal rebuilt-runtime adoption rather than a live
+retrofit. Posters/source remain inspectable on unsupported surfaces; active
+viewing and Codex external Apps have separate native/consent gates. See
+[agent visualizations and their current qualification limits](agent-visualizations.md).
+
 ## Optional management connection
 
 Open **Settings → MCP → Cafe Code MCP** to enable or disable Cafe's management server, registered as `cafe-code`. The existing authenticated endpoint stays on by default on upgrade. Turning it off rejects new Cafe management MCP requests, including from agents running inside Cafe. Work already started may finish.
@@ -32,7 +45,7 @@ Default tests cover configuration preservation/conflicts, private files, bridge 
 
 Codex 0.153.4, Claude Code 2.1.263, and the installed Grok CLI recognized generated configurations in isolated temporary homes. OpenCode configuration follows Cafe's pinned `@opencode-ai/sdk` contract; a native OpenCode binary was not available for this check. Sources: [Codex MCP](https://learn.chatgpt.com/docs/extend/mcp?surface=cli), [Claude MCP](https://code.claude.com/docs/en/mcp), [Grok MCP](https://docs.x.ai/build/features/mcp-servers), and the pinned SDK's `Config.mcp`/`McpLocalConfig` types. No provider auth files or model calls are needed for configuration checks.
 
-The standalone artifact test is deliberately opt-in because it launches a real Electron process. It copies each Cafe management and scheduling entrypoint alone into a private empty directory, then verifies initialization, discovery, text, and image results. This catches missing sibling chunks that running a bridge inside `dist` would hide. Linux CI runs this test after building. It uses a local fixture MCP server and temporary credentials, not a provider account:
+The standalone artifact test is deliberately opt-in because it launches a real Electron process. It copies all four Cafe management, scheduling, and visualization bridge entrypoints individually into private empty directories, then verifies initialization, discovery, text, and image results plus exact audience/endpoint refusal. This catches missing sibling chunks that running a bridge inside `dist` would hide. Each Windows, macOS, and Linux Quality job runs this test after building. It uses a local fixture MCP server and temporary credentials, not a provider account:
 
 ```sh
 corepack yarn workspace @cafeai/cafe-code build:bundle

@@ -1231,6 +1231,11 @@ function resolveWsRpc(body: NormalizedWsRpcRequestBody): unknown {
   if (tag === WS_METHODS.scheduledFollowupsList) {
     return { schedules: [], backendOnline: true };
   }
+  if (tag === WS_METHODS.visualizationsList) {
+    // Chat fixtures contain no admitted artifact publications. This exact
+    // empty namespace response does not fake a host, source or native proof.
+    return { entries: [] };
+  }
   if (tag === WS_METHODS.dictationGetStatus) {
     return { configured: false, canManage: true };
   }

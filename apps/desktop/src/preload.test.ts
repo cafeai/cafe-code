@@ -44,6 +44,32 @@ function setMainFrameIdentity(value: boolean | undefined): void {
 }
 
 describe("desktop preload capability boundary", () => {
+  it("delivers only bounded visualization host metadata and exact subscriptions", async () => {
+    setMainFrameIdentity(true);
+    await import("./preload.ts");
+    const [, bridge] = electron.exposeInMainWorld.mock.calls[0] as [string, DesktopBridge];
+    const listener = vi.fn();
+    const unsubscribe = bridge.onVisualizationHostEvent!(listener);
+    const [channel, wrapped] = electron.on.mock.calls.at(-1)!;
+    const value = {
+      leaseId: "12345678-1234-4123-8123-123456789abc",
+      state: "message",
+      json: '{"method":"ping"}',
+    };
+    wrapped({}, value);
+    for (const patch of [
+      { source: "private" },
+      { reason: "private exception" },
+      { state: "retired" },
+      { json: "日".repeat(50_000) },
+      { leaseId: "wrong" },
+    ])
+      wrapped({}, { ...value, ...patch });
+    expect(listener.mock.calls).toEqual([[value]]);
+    unsubscribe();
+    expect(electron.removeListener).toHaveBeenCalledWith(channel, wrapped);
+    expect(electron.invoke).not.toHaveBeenCalled();
+  });
   it("delivers only finite locale metadata and retires listeners without invoking IPC", async () => {
     setMainFrameIdentity(true);
     await import("./preload.ts");

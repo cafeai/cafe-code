@@ -1,4 +1,5 @@
 import recoveryPresentationIndex from "./093_RecoveryPresentationIndex.ts";
+import generatedVisualizations from "./096_GeneratedVisualizations.ts";
 import * as Effect from "effect/Effect";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
 
@@ -31,7 +32,16 @@ export const chatImageSchema = Effect.gen(function* () {
     BEGIN DELETE FROM chat_message_images WHERE thread_id = NEW.thread_id; END`;
 });
 
-// Local development recorded ChatImages at id 93 before upstream used that id.
-// Preserve its ledger and image ownership. Reconcile the missing idempotent
-// upstream index and image schema here for both database histories.
-export default recoveryPresentationIndex.pipe(Effect.andThen(chatImageSchema));
+// Local development recorded ChatImages at ids 93 and 96 before upstream used
+// those ids. Preserve the original ledger and image ownership. The migrator
+// transaction installs the skipped visualization schema only for the exact
+// legacy id-96 entry, then reconciles the idempotent index and image schema.
+export default Effect.gen(function* () {
+  const sql = yield* SqlClient.SqlClient;
+  const recorded = yield* sql<{ name: string }>`
+    SELECT name FROM effect_sql_migrations WHERE migration_id = 96
+  `;
+  if (recorded[0]?.name === "ChatImages") yield* generatedVisualizations;
+  yield* recoveryPresentationIndex;
+  yield* chatImageSchema;
+});
