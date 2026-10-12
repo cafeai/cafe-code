@@ -8,8 +8,8 @@ import * as Random from "effect/Random";
 import * as Schema from "effect/Schema";
 import * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
-import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process";
-import { codexCommandUsesShell } from "effect-codex-app-server/command";
+import { ChildProcessSpawner } from "effect/unstable/process";
+import { makeCodexCommand } from "effect-codex-app-server/command";
 
 import {
   DEFAULT_GIT_TEXT_GENERATION_REASONING_EFFORT,
@@ -211,7 +211,7 @@ export const makeCodexTextGeneration = Effect.fn("makeCodexTextGeneration")(func
         tierAuthority ? yield* tierAuthority.getModels() : undefined,
       );
       if (tier.error) return yield* new TextGenerationError({ operation, detail: tier.error });
-      const command = ChildProcess.make(
+      const command = makeCodexCommand(
         codexConfig.binaryPath || "codex",
         [
           "exec",
@@ -247,7 +247,6 @@ export const makeCodexTextGeneration = Effect.fn("makeCodexTextGeneration")(func
           // Metadata helpers must preserve the same literal file/config argv
           // as sessions and probes; the shared policy changes no paid-tier,
           // authentication, sandbox or stdin behavior.
-          shell: codexCommandUsesShell(codexConfig.binaryPath || "codex", process.platform),
           stdin: {
             stream: Stream.encodeText(Stream.make(prompt)),
           },

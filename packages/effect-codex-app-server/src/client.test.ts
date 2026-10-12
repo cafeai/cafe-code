@@ -21,7 +21,7 @@ import { assert, it } from "@effect/vitest";
 
 import * as CodexClient from "./client.ts";
 import * as CodexError from "./errors.ts";
-import { codexCommandUsesShell } from "./command.ts";
+import { codexCommandUsesShell, makeCodexCommand } from "./command.ts";
 import * as Ref from "effect/Ref";
 import * as CodexProtocol from "./protocol.ts";
 import { makeInMemoryStdio } from "./_internal/stdio.ts";
@@ -33,6 +33,9 @@ const encodeUnknownJsonString = Schema.encodeUnknownSync(Schema.UnknownFromJsonS
 const encoder = new TextEncoder();
 const encodeJsonl = (value: unknown) => encoder.encode(`${encodeUnknownJsonString(value)}\n`);
 const decodeJson = Schema.decodeUnknownSync(Schema.UnknownFromJsonString);
+const decodeFixtureArgv = Schema.decodeUnknownSync(
+  Schema.Struct({ argv: Schema.Array(Schema.String) }),
+);
 
 for (const loggerStage of ["raw", "decoded"] as const) {
   for (const shape of ["multiline", "multi-chunk"] as const) {
@@ -820,6 +823,7 @@ it.layer(NodeServices.layer)("effect-codex-app-server client", (it) => {
           command,
           args: literalCommandArgs,
           cwd,
+          env: { PATH: "" },
         }).pipe(
           Layer.provide(Layer.succeed(ChildProcessSpawner.ChildProcessSpawner, spawner)),
           Layer.build,
@@ -831,12 +835,105 @@ it.layer(NodeServices.layer)("effect-codex-app-server client", (it) => {
         if (observed?._tag !== "StandardCommand") {
           return assert.fail("Expected one standard command");
         }
-        assert.equal(observed.command, command);
-        assert.deepEqual(observed.args, literalCommandArgs);
+        const prepared = makeCodexCommand(command, literalCommandArgs, { cwd, env: { PATH: "" } });
+        assert.equal(observed.command, prepared.command);
+        assert.deepEqual(observed.args, prepared.args);
         assert.equal(observed.options.cwd, cwd);
         assert.equal(observed.options.shell, process.platform === "win32" && windowsShell);
       }),
   );
+
+  for (const kind of [
+    "absolute batch",
+    "absolute .bat",
+    "literal-percent batch path",
+    "PATH batch",
+    "PATH native",
+    "PATH custom PATHEXT",
+  ] as const) {
+    it.effect.skipIf(process.platform !== "win32")(
+      `preserves scheduling TOML and literal argv through a Windows ${kind} launcher`,
+      () =>
+        Effect.gen(function* () {
+          const fs = yield* FileSystem.FileSystem;
+          const path = yield* Path.Path;
+          const realSpawner = yield* ChildProcessSpawner.ChildProcessSpawner;
+          const { fixtureRoot, executable, peer, fixtureEnv } = yield* makeNativePeerFixture();
+          const shim = path.join(path.dirname(executable), "mock-batch.cmd");
+          const batchText = `@echo off\r\n"${executable}" "${peer}" %*\r\n`;
+          yield* fs.writeFileString(shim, batchText);
+          const bat = path.join(path.dirname(executable), "mock-batch.bat");
+          const percentPath = path.join(path.dirname(executable), "mock %CAFE_ARG% batch.cmd");
+          yield* fs.writeFileString(bat, batchText);
+          yield* fs.writeFileString(percentPath, batchText);
+          yield* fs.writeFileString(
+            path.join(path.dirname(executable), "mock codex.cmd"),
+            batchText,
+          );
+          fixtureEnv.PATHEXT =
+            kind === "PATH custom PATHEXT" ? ".CMD;.EXE;.BAT;.COM" : ".COM;.EXE;.BAT;.CMD";
+          const config =
+            'mcp_servers.cafe-fixture={command="C:\\\\tools & notes\\\\node.exe",args=["C:\\\\private\\\\bridge.mjs"],env={ELECTRON_RUN_AS_NODE="1"},required=true}';
+          const expected = ["app-server", "-c", config, ...literalCommandArgs];
+          const args = [...(kind === "PATH native" ? [peer] : []), "--echo-argv", ...expected];
+          const handles: Array<ChildProcessSpawner.ChildProcessHandle> = [];
+          const isolatedSpawner = ChildProcessSpawner.make((observed) => {
+            if (observed._tag !== "StandardCommand") {
+              return Effect.die("Unexpected fixture pipeline");
+            }
+            return realSpawner
+              .spawn(
+                ChildProcess.make(observed.command, observed.args, {
+                  ...observed.options,
+                  env: fixtureEnv,
+                  extendEnv: false,
+                }),
+              )
+              .pipe(Effect.tap((handle) => Effect.sync(() => handles.push(handle))));
+          });
+          const initialized = yield* Effect.scoped(
+            Effect.gen(function* () {
+              const context = yield* CodexClient.layerCommand({
+                command:
+                  kind === "absolute batch"
+                    ? shim
+                    : kind === "absolute .bat"
+                      ? bat
+                      : kind === "literal-percent batch path"
+                        ? percentPath
+                        : kind === "PATH batch"
+                          ? "mock-batch"
+                          : "mock codex",
+                args,
+                cwd: fixtureRoot,
+                env: fixtureEnv,
+              }).pipe(
+                Layer.provide(
+                  Layer.succeed(ChildProcessSpawner.ChildProcessSpawner, isolatedSpawner),
+                ),
+                Layer.build,
+              );
+              return yield* Effect.gen(function* () {
+                const client = yield* CodexClient.CodexAppServerClient;
+                return yield* client.request("initialize", {
+                  clientInfo: {
+                    name: "cafe-windows-shim-test",
+                    title: "Synthetic peer",
+                    version: "0.0.0",
+                  },
+                  capabilities: { experimentalApi: true, optOutNotificationMethods: null },
+                });
+              }).pipe(Effect.provide(context));
+            }),
+          );
+          assert.equal(handles.length, 1);
+          assert.equal(yield* handles[0]!.isRunning, false);
+          const echoed = decodeFixtureArgv(decodeJson(initialized.userAgent));
+          assert.deepEqual(echoed.argv, expected);
+        }),
+      20_000,
+    );
+  }
 
   it.effect.each([
     { name: "initializes a command-backed app-server client", echo: false, failDuringBuild: false },

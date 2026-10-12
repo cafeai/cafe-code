@@ -2,9 +2,12 @@
 
 The command-backed typed client, ordinary session startup, picker model discovery
 CLI health probes and one-shot text-generation helpers use
-`effect-codex-app-server/command`. This policy selects
-the command's shell option; it does not resolve an alternative executable, grant
-filesystem admission, change authentication or alter provider permissions. Platform
+`effect-codex-app-server/command`. Its `makeCodexCommand` builder preserves
+literal argv for native executables and escapes Windows batch arguments through
+both cmd.exe parsing and the shim's `%*` forwarding. Extensionless Windows commands
+are resolved against the child's cwd, PATH and PATHEXT to select the corresponding
+native or batch policy. Explicit executable paths remain authoritative. It does not
+grant filesystem admission, change authentication or alter provider permissions. Platform
 rules and compatibility boundaries live in **AGENTS.md → Windows-Specific Notes**.
 
 Keep each caller's existing structured arguments, environment, working directory
@@ -20,6 +23,12 @@ ownership must not replace the long-running session's existing cleanup policy.
   protocol peer into a scoped directory with spaces/metacharacters. They assert
   literal arguments, synthetic home/cwd/environment and retirement of the exact
   owned child, including a deliberate client construction failure.
+- Windows-only batch fixtures create a synthetic `%*` forwarding launcher and
+  initialize the real command-backed client. Absolute `.cmd`, PATH `.cmd`, and
+  PATH native `.exe` cases retain the exact scheduling TOML, spaces, embedded
+  quotes, percent/bang expressions, shell metacharacters, trailing backslashes,
+  and empty arguments. Test subprocesses receive only isolated synthetic homes
+  and environment values; every acquired process is retired before fixture cleanup.
 - The separate typed initialization/account/skills test launches the current
   pinned Node executable directly with a scoped synthetic peer and the same
   isolated home/environment. It exercises real subprocess protocol I/O without

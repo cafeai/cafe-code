@@ -366,6 +366,15 @@ type CapturedCodexCommand = {
   };
 };
 
+// This mock represents the native peer after cmd.exe and %* forwarding.
+// Real Windows client fixtures separately verify the transport round trip.
+function decodeBatchFixtureArgument(value: string): string {
+  const quoted = value.replace(/\^(.)/gu, "$1").replace(/\^(.)/gu, "$1");
+  return quoted
+    .slice(1, -1)
+    .replace(/(\\+)(?="|$)/gu, (slashes) => "\\".repeat(Math.floor(slashes.length / 2)));
+}
+
 function makeCodexHandle(input: { stdout?: string; stderr?: string; exitCode?: number }) {
   const encoder = new TextEncoder();
   return ChildProcessSpawner.makeHandle({
@@ -409,7 +418,15 @@ function withFakeCodexSpawner<A, E, R>(
     const config = decodeCodexSettings({ binaryPath, homePath: input.homePath ?? "" });
     const spawner = ChildProcessSpawner.make((unknownCommand) =>
       Effect.gen(function* () {
-        const command = unknownCommand as unknown as CapturedCodexCommand;
+        const transported = unknownCommand as unknown as CapturedCodexCommand;
+        const batch = process.platform === "win32" && /\.(?:cmd|bat)$/iu.test(binaryPath);
+        const command = batch
+          ? {
+              ...transported,
+              command: transported.command.replace(/\^(.)/gu, "$1"),
+              args: transported.args.map(decodeBatchFixtureArgument),
+            }
+          : transported;
         const prompt = command.options.stdin?.stream
           ? yield* command.options.stdin.stream.pipe(
               Stream.decodeText(),

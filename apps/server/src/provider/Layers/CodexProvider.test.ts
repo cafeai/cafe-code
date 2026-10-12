@@ -6,6 +6,7 @@ import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
 import { ChildProcess } from "effect/unstable/process";
 import type * as CodexClient from "effect-codex-app-server/client";
+import { makeCodexCommand } from "effect-codex-app-server/command";
 import type * as CodexSchema from "effect-codex-app-server/schema";
 import { describe, expect, it } from "vitest";
 
@@ -111,14 +112,16 @@ describe("Codex CLI health probe command", () => {
     });
 
     for (const command of [health, models]) {
-      expect(command.command).toBe(binaryPath);
+      expect(command.command).toBe(makeCodexCommand(binaryPath, [], { env: environment }).command);
       expect(command.options.shell).toBe(process.platform === "win32" && windowsShell);
       expect(command.options.env).toEqual({ ...environment, CODEX_HOME: homePath });
       expect(command.options.detached).toBe(process.platform !== "win32");
       expect(command.options.killSignal).toBe("SIGKILL");
     }
-    expect(health.args).toEqual(args);
-    expect(models.args).toEqual(["app-server"]);
+    expect(health.args).toEqual(makeCodexCommand(binaryPath, args, { env: environment }).args);
+    expect(models.args).toEqual(
+      makeCodexCommand(binaryPath, ["app-server"], { env: environment }).args,
+    );
     expect(models.options.cwd).toBe("backend-owned-cwd");
   });
 
