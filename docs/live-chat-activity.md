@@ -86,10 +86,13 @@ recorded. No diagnostic read starts a provider or changes retry policy.
 The private reader revalidates the exact owner session before lookup and before
 returning bytes, so a retained socket cannot bypass session revocation or expiry.
 
-Known provider errors remain indicated in collapsed Work log headers. A matching
-durably represented root failure replaces the large duplicate error banner,
-without clearing canonical errors or removing actionable recovery/authentication
-feedback. See [the private diagnostic decision](decisions/private-provider-error-diagnostics.md).
+Known provider errors remain indicated in collapsed Work log headers. Ordinary
+provider errors never appear in the generic chat banner, even before diagnostic
+rows load or when legacy details were not recorded. This does not clear canonical
+errors or acknowledge recovery. Explicit local validation/delivery feedback and
+dedicated history/response-limit actions remain; opaque received error prose is
+not copied into those local popups. See the [popup policy](decisions/provider-error-popup-policy.md)
+and [private diagnostic decision](decisions/private-provider-error-diagnostics.md).
 
 Schedule refresh/disconnection messages and Refresh schedules appear only in
 Tasks, not the main conversation. Saved follow-up notices remain in chat with

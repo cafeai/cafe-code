@@ -290,6 +290,7 @@ function mapProject(
 }
 
 function mapThread(thread: OrchestrationThread, environmentId: EnvironmentId): Thread {
+  const error = sanitizeThreadErrorMessage(thread.session?.lastError);
   return {
     id: thread.id,
     environmentId,
@@ -304,7 +305,8 @@ function mapThread(thread: OrchestrationThread, environmentId: EnvironmentId): T
     session: thread.session ? mapSession(thread.session) : null,
     messages: thread.messages.map((message) => mapMessage(environmentId, message)),
     proposedPlans: thread.proposedPlans.map(mapProposedPlan),
-    error: sanitizeThreadErrorMessage(thread.session?.lastError),
+    error,
+    errorOrigin: error === null ? undefined : "provider",
     createdAt: thread.createdAt,
     archivedAt: thread.archivedAt,
     updatedAt: thread.updatedAt,
@@ -327,6 +329,7 @@ function mapThreadShell(
   turnState: ThreadTurnState;
   summary: SidebarThreadSummary;
 } {
+  const error = sanitizeThreadErrorMessage(thread.session?.lastError);
   const shell: ThreadShell = {
     id: thread.id,
     environmentId,
@@ -338,7 +341,8 @@ function mapThreadShell(
     interactionMode: thread.interactionMode,
     subagentLimits: thread.subagentLimits,
     codexContextWindowOverride: thread.codexContextWindowOverride,
-    error: sanitizeThreadErrorMessage(thread.session?.lastError),
+    error,
+    errorOrigin: error === null ? undefined : "provider",
     createdAt: thread.createdAt,
     archivedAt: thread.archivedAt,
     updatedAt: thread.updatedAt,
@@ -390,6 +394,7 @@ function toThreadShell(thread: Thread): ThreadShell {
     subagentLimits: thread.subagentLimits,
     codexContextWindowOverride: thread.codexContextWindowOverride,
     error: thread.error,
+    errorOrigin: thread.errorOrigin,
     createdAt: thread.createdAt,
     archivedAt: thread.archivedAt,
     updatedAt: thread.updatedAt,
@@ -465,6 +470,7 @@ function cloneThreadContextForDuplicate(input: {
     pendingSourceProposedPlan: latestTurn?.sourceProposedPlan,
     session: null,
     error: null,
+    errorOrigin: undefined,
     // A duplicate carries visible conversation context into a fresh provider
     // session. Provider-owned goal continuation state must never cross that
     // new session boundary.
@@ -630,6 +636,7 @@ function threadShellsEqual(left: ThreadShell | undefined, right: ThreadShell): b
     subagentLimitsEqual(left.subagentLimits, right.subagentLimits) &&
     left.codexContextWindowOverride === right.codexContextWindowOverride &&
     left.error === right.error &&
+    left.errorOrigin === right.errorOrigin &&
     left.createdAt === right.createdAt &&
     left.archivedAt === right.archivedAt &&
     left.updatedAt === right.updatedAt &&
@@ -2464,6 +2471,11 @@ function applyEnvironmentOrchestrationEvent(
           ...thread,
           session: mergeSessionSnapshot(previousSession, incomingSession),
           error: sanitizeThreadErrorMessage(event.payload.session.lastError),
+          // Authoritative provider receipt replaces any renderer-local grant,
+          // including when the received error text happens to be unchanged.
+          errorOrigin: sanitizeThreadErrorMessage(event.payload.session.lastError)
+            ? "provider"
+            : undefined,
           latestTurn,
           updatedAt: event.occurredAt,
         };
@@ -2980,8 +2992,11 @@ export function setError(
     getStoredEnvironmentState(state, threadRef.environmentId),
     threadRef.threadId,
     (thread) => {
-      if (thread.error === error) return thread;
-      return { ...thread, error };
+      const errorOrigin = error === null ? undefined : ("local" as const);
+      if (thread.error === error && thread.errorOrigin === errorOrigin) return thread;
+      // This action represents an explicit local operation/validation result,
+      // not a provider-session acknowledgment or canonical error dismissal.
+      return { ...thread, error, errorOrigin };
     },
   );
   return commitEnvironmentState(state, threadRef.environmentId, nextEnvironmentState);

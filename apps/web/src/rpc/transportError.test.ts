@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   describeSendFailureMessage,
+  LocalChatActionError,
   isIndeterminateTransportError,
   isTransportConnectionErrorMessage,
   sanitizeThreadErrorMessage,
@@ -102,13 +103,32 @@ describe("transportError", () => {
       ).toBe(CONNECTION_MESSAGE);
     });
 
-    it("passes through actionable errors unchanged", () => {
+    it("preserves explicitly renderer-owned actionable validation", () => {
       expect(
         describeSendFailureMessage(
-          new Error("Select a base branch before sending."),
+          new LocalChatActionError("Select a base branch before sending."),
           "Failed to send message.",
         ),
       ).toBe("Select a base branch before sending.");
+    });
+
+    it("never promotes opaque provider prose or spoofed local tags into popup feedback", () => {
+      const privateMessage =
+        "stream disconnected before completion: synthetic request ID private-receipt";
+      const native = new Error(privateMessage);
+      expect(describeSendFailureMessage(native, "Failed to send message.")).toBe(
+        "Failed to send message.",
+      );
+      expect(native.message).toBe(privateMessage);
+      expect(describeSendFailureMessage(privateMessage, "Failed to interrupt active turn.")).toBe(
+        "Failed to interrupt active turn.",
+      );
+      expect(
+        describeSendFailureMessage(
+          { name: "LocalChatActionError", message: privateMessage },
+          "Failed to send message.",
+        ),
+      ).toBe("Failed to send message.");
     });
 
     it("falls back when the error carries no usable message", () => {

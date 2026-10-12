@@ -105,6 +105,7 @@ function seedFailure(
             runtimeMode: "approval-required",
             interactionMode: "default",
             error: diagnostic ?? null,
+            errorOrigin: "provider",
             createdAt: FIRST_FAILURE,
             archivedAt: null,
             branch: null,
@@ -120,10 +121,14 @@ function StoreThreadErrorBanner({ mountKey }: { mountKey: string }) {
   const error = useStore(
     (state) => state.environmentStateById[ENV]?.threadShellById[THREAD]?.error ?? null,
   );
+  const errorOrigin = useStore(
+    (state) => state.environmentStateById[ENV]?.threadShellById[THREAD]?.errorOrigin,
+  );
   return (
     <ThreadErrorBanner
       key={mountKey}
       error={error}
+      errorOrigin={errorOrigin}
       scopeKey={`${ENV}/${THREAD}`}
       environmentId={ENV}
       threadId={THREAD}
@@ -169,6 +174,72 @@ function seedClaudeResponseLimitFailure() {
 }
 
 describe("ThreadErrorBanner", () => {
+  it.each(["provider", "unknown"] as const)(
+    "keeps private provider prose out of the DOM through late hydration and remounts for %s origin",
+    async (origin) => {
+      const requestId = "synthetic-private-request-id-0d64c4e2";
+      const error =
+        "stream disconnected before completion: An error occurred while processing your request. " +
+        "You can retry your request, or contact us through our help center at help.openai.com " +
+        `if the error persists. Please include the request ID ${requestId} in your message.`;
+      const banner = (key: string, duplicateLocalCatch = false) => (
+        <ThreadErrorBanner
+          key={key}
+          error={error}
+          errorOrigin={
+            duplicateLocalCatch ? "local" : origin === "provider" ? "provider" : undefined
+          }
+          scopeKey={`${ENV}/${THREAD}`}
+          environmentId={ENV}
+          threadId={THREAD}
+        />
+      );
+      const screen = await render(banner("before-hydration"));
+      try {
+        await expect.element(page.getByText(error)).not.toBeInTheDocument();
+        await expect.element(page.getByRole("alert")).not.toBeInTheDocument();
+        expect(document.body.textContent).not.toContain(requestId);
+        expect(
+          [...document.querySelectorAll("[title]")].map((element) => element.getAttribute("title")),
+        ).not.toContain(error);
+        expect(getClientSettingsSnapshot().dismissedTaskAtriumErrors).toEqual([]);
+
+        // This fixture deliberately has no runtime id, latest turn or Work Log
+        // witness. Privacy cannot depend on those independently hydrated slices.
+        seedFailure(ENV, FIRST_FAILURE, undefined, THREAD, error);
+        await screen.rerender(banner("after-hydration"));
+        await expect.element(page.getByRole("alert")).not.toBeInTheDocument();
+        await expect.element(page.getByLabelText("Dismiss error")).not.toBeInTheDocument();
+        expect(document.body.textContent).not.toContain(requestId);
+        const environment = useStore.getState().environmentStateById[ENV]!;
+        expect(environment.threadShellById[THREAD]?.error).toBe(error);
+        expect(environment.threadSessionById[THREAD]?.lastError).toBe(error);
+        expect(environment.sidebarThreadSummaryById[THREAD]?.latestTurn).toBeNull();
+        expect(environment.threadSessionById[THREAD]?.subagentRuntimeId).toBeUndefined();
+        expect(
+          selectAtriumSnapshot(useStore.getState(), Date.parse(FIRST_FAILURE), [], ENV).errorCount,
+        ).toBe(1);
+
+        await screen.rerender(banner("duplicate-local-catch", true));
+        await expect.element(page.getByText(error)).not.toBeInTheDocument();
+        await expect.element(page.getByRole("alert")).not.toBeInTheDocument();
+        seedFailure(ENV, LATER_FAILURE, "later-native-turn" as TurnId, THREAD, error);
+        await screen.rerender(banner("later-failure-remount"));
+        await expect.element(page.getByText(error)).not.toBeInTheDocument();
+        await expect.element(page.getByRole("alert")).not.toBeInTheDocument();
+        expect(getClientSettingsSnapshot().dismissedTaskAtriumErrors).toEqual([]);
+        expect(
+          useStore.getState().environmentStateById[ENV]!.threadSessionById[THREAD]?.lastError,
+        ).toBe(error);
+        expect(
+          selectAtriumSnapshot(useStore.getState(), Date.parse(LATER_FAILURE), [], ENV).errorCount,
+        ).toBe(1);
+      } finally {
+        await screen.unmount();
+      }
+    },
+  );
+
   it("offers classified Claude draft preparation with explicit review guidance and no dismissal", async () => {
     seedClaudeResponseLimitFailure();
     const prepare = vi.fn();
@@ -232,12 +303,10 @@ describe("ThreadErrorBanner", () => {
       await screen.unmount();
     }
   });
-  it.each([
-    { error: "Codex App Server exited unexpectedly.", turnId: undefined },
-    { error: "Synthetic provider error", turnId: "turn-1" as TurnId },
-  ])(
-    "shows different local errors after remounting an acknowledged $error",
-    async ({ error, turnId }) => {
+  it.each([{ turnId: undefined }, { turnId: "turn-1" as TurnId }])(
+    "shows explicit local errors after remounting an acknowledged history failure on $turnId",
+    async ({ turnId }) => {
+      const error = CODEX_HISTORY_RECOVERY_REQUIRED_MESSAGE;
       seedFailure(ENV, FIRST_FAILURE, turnId, THREAD, error);
       const screen = await render(<StoreThreadErrorBanner mountKey="first" />);
       const threadRef = { environmentId: ENV, threadId: THREAD };
@@ -267,7 +336,7 @@ describe("ThreadErrorBanner", () => {
     },
   );
 
-  it("does not acknowledge a provider failure when dismissing a local command rejection", async () => {
+  it("does not acknowledge a hidden provider failure when dismissing a local command rejection", async () => {
     const providerError = "Synthetic provider error";
     const threadRef = { environmentId: ENV, threadId: THREAD };
     seedFailure(ENV, FIRST_FAILURE, "turn-1" as TurnId, THREAD, providerError);
@@ -277,17 +346,25 @@ describe("ThreadErrorBanner", () => {
       await page.getByLabelText("Dismiss error").click();
       expect(getClientSettingsSnapshot().dismissedTaskAtriumErrors).toEqual([]);
       useStore.getState().setError(threadRef, providerError);
-      await expect.element(page.getByText(providerError)).toBeVisible();
-      await page.getByLabelText("Dismiss error").click();
-      expect(getClientSettingsSnapshot().dismissedTaskAtriumErrors).toHaveLength(1);
+      // A duplicate local catch cannot publish native provider prose when the
+      // canonical session still identifies it as the provider's failure.
+      await expect.element(page.getByText(providerError)).not.toBeInTheDocument();
+      await expect.element(page.getByRole("alert")).not.toBeInTheDocument();
+      expect(getClientSettingsSnapshot().dismissedTaskAtriumErrors).toEqual([]);
       await screen.rerender(<StoreThreadErrorBanner mountKey="provider-remounted" />);
       await expect.element(page.getByText(providerError)).not.toBeInTheDocument();
+      expect(
+        selectAtriumSnapshot(useStore.getState(), Date.parse(FIRST_FAILURE), [], ENV).errorCount,
+      ).toBe(1);
+      expect(
+        useStore.getState().environmentStateById[ENV]!.threadSessionById[THREAD]?.lastError,
+      ).toBe(providerError);
     } finally {
       await screen.unmount();
     }
   });
 
-  it("dismisses all current copies of the Codex exit warning on this server and retains later failures", async () => {
+  it("never displays Codex exit warnings or acknowledges current, later or other-server failures", async () => {
     const error = "Codex App Server exited unexpectedly.";
     const peer = "thread-2" as ThreadId;
     const unrelated = "thread-unrelated" as ThreadId;
@@ -311,42 +388,36 @@ describe("ThreadErrorBanner", () => {
       </>,
     );
     try {
-      await expect.element(page.getByText(error).nth(0)).toBeVisible();
-      await expect.element(page.getByText(error).nth(1)).toBeVisible();
-      await page.getByLabelText("Dismiss error").nth(0).click();
       await expect.element(page.getByText(error)).not.toBeInTheDocument();
+      await expect.element(page.getByRole("alert")).not.toBeInTheDocument();
+      await expect.element(page.getByLabelText("Dismiss error")).not.toBeInTheDocument();
       const dismissed = getClientSettingsSnapshot().dismissedTaskAtriumErrors;
-      expect(dismissed).toHaveLength(2);
-      expect(dismissed).toEqual(
-        expect.arrayContaining([
-          { environmentId: ENV, threadId: THREAD, turnId: null, observedAt: FIRST_FAILURE },
-          {
-            environmentId: ENV,
-            threadId: peer,
-            turnId: null,
-            observedAt: "2026-10-06T12:00:00.500Z",
-          },
-        ]),
-      );
-      expect(JSON.stringify(dismissed)).not.toContain(error);
+      expect(dismissed).toEqual([]);
       expect(
         selectAtriumSnapshot(useStore.getState(), Date.parse(FIRST_FAILURE), dismissed, ENV)
           .errorCount,
-      ).toBe(1);
+      ).toBe(3);
       await screen.rerender(banner(peer, "peer-remounted"));
       await expect.element(page.getByText(error)).not.toBeInTheDocument();
       seedFailure(ENV, LATER_FAILURE, undefined, peer, error);
-      await expect.element(page.getByText(error)).toBeVisible();
+      await expect.element(page.getByText(error)).not.toBeInTheDocument();
       await screen.rerender(banner(THREAD, "remote", REMOTE));
-      await expect.element(page.getByText(error)).toBeVisible();
+      await expect.element(page.getByText(error)).not.toBeInTheDocument();
+      expect(
+        selectAtriumSnapshot(useStore.getState(), Date.parse(LATER_FAILURE), [], REMOTE).errorCount,
+      ).toBe(1);
       await screen.rerender(banner(THREAD, "local-return"));
       await expect.element(page.getByText(error)).not.toBeInTheDocument();
+      expect(getClientSettingsSnapshot().dismissedTaskAtriumErrors).toEqual([]);
+      expect(
+        selectAtriumSnapshot(useStore.getState(), Date.parse(LATER_FAILURE), [], ENV).errorCount,
+      ).toBe(3);
     } finally {
       await screen.unmount();
     }
   });
 
-  it("does not batch-dismiss ordinary diagnostic text shared by different chats", async () => {
+  it("retains ordinary failures shared by different chats without publishing or dismissing either", async () => {
     const error = "An ordinary provider failure";
     const peer = "thread-2" as ThreadId;
     seedFailure(ENV, FIRST_FAILURE, undefined, THREAD, error);
@@ -360,8 +431,9 @@ describe("ThreadErrorBanner", () => {
       />,
     );
     try {
-      await page.getByLabelText("Dismiss error").click();
-      expect(getClientSettingsSnapshot().dismissedTaskAtriumErrors).toHaveLength(1);
+      await expect.element(page.getByText(error)).not.toBeInTheDocument();
+      await expect.element(page.getByRole("alert")).not.toBeInTheDocument();
+      expect(getClientSettingsSnapshot().dismissedTaskAtriumErrors).toEqual([]);
       await screen.rerender(
         <ThreadErrorBanner
           key="peer"
@@ -371,13 +443,17 @@ describe("ThreadErrorBanner", () => {
           threadId={peer}
         />,
       );
-      await expect.element(page.getByText(error)).toBeVisible();
+      await expect.element(page.getByText(error)).not.toBeInTheDocument();
+      expect(getClientSettingsSnapshot().dismissedTaskAtriumErrors).toEqual([]);
+      expect(
+        selectAtriumSnapshot(useStore.getState(), Date.parse(FIRST_FAILURE), [], ENV).errorCount,
+      ).toBe(2);
     } finally {
       await screen.unmount();
     }
   });
   it("reads the saved dismissal after switching servers and remounting, without hiding another server's error", async () => {
-    const error = "Codex App Server exited unexpectedly.";
+    const error = CODEX_HISTORY_RECOVERY_REQUIRED_MESSAGE;
     seedFailure(ENV, FIRST_FAILURE, undefined, THREAD, error);
     seedFailure(REMOTE, FIRST_FAILURE, undefined, THREAD, error);
     const banner = (environmentId: EnvironmentId, key: string, diagnostic = error) => (
@@ -397,7 +473,7 @@ describe("ThreadErrorBanner", () => {
         { environmentId: ENV, threadId: THREAD, turnId: null, observedAt: FIRST_FAILURE },
       ]);
       await screen.rerender(banner(ENV, "local-first", "A different provider failure"));
-      await expect.element(page.getByText("A different provider failure")).toBeVisible();
+      await expect.element(page.getByText("A different provider failure")).not.toBeInTheDocument();
       await screen.rerender(banner(ENV, "local-first"));
       await expect.element(page.getByText(error)).not.toBeInTheDocument();
       await screen.rerender(banner(REMOTE, "remote"));
@@ -449,7 +525,7 @@ describe("ThreadErrorBanner", () => {
   });
 
   it("keeps a turn-bound dismissal stable through projection settling and shows the same error on a new turn", async () => {
-    const error = "Synthetic provider error";
+    const error = CODEX_HISTORY_RECOVERY_REQUIRED_MESSAGE;
     seedFailure(ENV, FIRST_FAILURE, "turn-1" as TurnId, THREAD, error);
     const banner = (key: string) => (
       <ThreadErrorBanner
@@ -513,11 +589,12 @@ describe("ThreadErrorBanner", () => {
     }
   });
 
-  it("keeps an exact thread error dismissed across snapshot-style rerenders", async () => {
-    const staleError = "Recovered provider failure request-id-1";
+  it("keeps an explicit local validation error dismissed across snapshot-style rerenders", async () => {
+    const staleError = "The requested attachment could not be added.";
     const screen = await render(
       <ThreadErrorBanner
         error={staleError}
+        errorOrigin="local"
         scopeKey="local/thread-1"
         environmentId={ENV}
         threadId={THREAD}
@@ -532,6 +609,7 @@ describe("ThreadErrorBanner", () => {
       await screen.rerender(
         <ThreadErrorBanner
           error={staleError}
+          errorOrigin="local"
           scopeKey="local/thread-1"
           environmentId={ENV}
           threadId={THREAD}
@@ -541,17 +619,19 @@ describe("ThreadErrorBanner", () => {
 
       await screen.rerender(
         <ThreadErrorBanner
-          error="A different provider failure"
+          error="Another local command was rejected."
+          errorOrigin="local"
           scopeKey="local/thread-1"
           environmentId={ENV}
           threadId={THREAD}
         />,
       );
-      await expect.element(page.getByText("A different provider failure")).toBeVisible();
+      await expect.element(page.getByText("Another local command was rejected.")).toBeVisible();
 
       await screen.rerender(
         <ThreadErrorBanner
           error={staleError}
+          errorOrigin="local"
           scopeKey="remote/thread-1"
           environmentId={ENV}
           threadId={THREAD}

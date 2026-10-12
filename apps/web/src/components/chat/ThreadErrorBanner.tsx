@@ -11,6 +11,7 @@ import { CircleAlertIcon, XIcon } from "lucide-react";
 import { useSettings, useUpdateSettings } from "../../hooks/useSettings";
 import { getClientSettingsSnapshot } from "../../hooks/clientSettingsState";
 import { useStore } from "../../store";
+import { shouldShowThreadErrorBanner } from "../../providerErrorPresentation";
 import {
   buildThreadErrorDismissal,
   collectCodexAppServerExitDismissals,
@@ -21,6 +22,7 @@ import {
 
 export const ThreadErrorBanner = memo(function ThreadErrorBanner({
   error,
+  errorOrigin,
   scopeKey,
   environmentId,
   threadId,
@@ -30,6 +32,8 @@ export const ThreadErrorBanner = memo(function ThreadErrorBanner({
   onPrepareShorterResponse,
 }: {
   error: string | null;
+  /** Only renderer-owned validation/operation feedback may use the generic banner. */
+  errorOrigin?: "local" | "provider" | undefined;
   /** Stable environment/thread identity for immediate local dismissal feedback. */
   scopeKey: string;
   environmentId: EnvironmentId;
@@ -154,7 +158,17 @@ export const ThreadErrorBanner = memo(function ThreadErrorBanner({
   // so a different local error stays visible even after remount. Persistence
   // contains identities/timestamps only, never
   // provider error text, and acknowledging it cannot mutate provider truth.
-  if (!error || dismissed) return null;
+  if (
+    !error ||
+    dismissed ||
+    !shouldShowThreadErrorBanner({
+      error,
+      errorOrigin,
+      providerError: session?.lastError,
+      isClaudeResponseLimitFailure,
+    })
+  )
+    return null;
   const recoveryForScope =
     recoveryState?.scopeKey === scopeKey && recoveryState.error === error ? recoveryState : null;
   return (

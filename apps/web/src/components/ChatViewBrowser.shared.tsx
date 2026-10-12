@@ -2703,6 +2703,7 @@ describe(`ChatView full app (${chatViewBrowserPart})`, () => {
             kind: "snapshot",
             snapshot: { snapshotSequence: sequence, thread },
           });
+          return `notification-${sequence}`;
         };
         try {
           await waitForComposerEditor();
@@ -2730,18 +2731,34 @@ describe(`ChatView full app (${chatViewBrowserPart})`, () => {
           await waitForLayout();
           expect(errorBanner()).toBeNull();
 
-          // Unknown acknowledgment and cancellation restore the actionable
-          // original error without acknowledging or deleting its history.
+          // Uncertain, cancelled and terminal recovery preserve the canonical
+          // failure, but never restore its private prose as a popup.
           for (const recovery of [
             "codex-transient-recovery-uncertain",
             "codex-transient-recovery-cancelled",
             "codex-transient-root-failed",
           ]) {
-            publish(recovery);
-            await vi.waitFor(() => expect(errorBanner()).not.toBeNull());
+            const markerId = publish(recovery);
+            await vi.waitFor(() => {
+              // Absence alone is immediate now. Bind each assertion to its
+              // actual received snapshot before advancing to the next one.
+              expect(
+                selectThreadByRef(useStore.getState(), THREAD_REF)?.activities.some(
+                  (activity) => activity.id === markerId,
+                ),
+              ).toBe(true);
+              expect(errorBanner()).toBeNull();
+            });
             expect(selectThreadByRef(useStore.getState(), THREAD_REF)?.error).toBe(failure);
-            publish("codex-transient-recovery-waiting");
-            await vi.waitFor(() => expect(errorBanner()).toBeNull());
+            const waitingMarkerId = publish("codex-transient-recovery-waiting");
+            await vi.waitFor(() => {
+              expect(
+                selectThreadByRef(useStore.getState(), THREAD_REF)?.activities.some(
+                  (activity) => activity.id === waitingMarkerId,
+                ),
+              ).toBe(true);
+              expect(errorBanner()).toBeNull();
+            });
           }
 
           // A rejected new manual send remains a separate, visible occurrence
@@ -2750,10 +2767,11 @@ describe(`ChatView full app (${chatViewBrowserPart})`, () => {
           (await waitForSendButton()).click();
           await vi.waitFor(() => {
             expect(findSendFailureToastTitle()).not.toBeNull();
-            expect(document.querySelector('button[aria-label="Dismiss error"]')).not.toBeNull();
             expect(selectThreadByRef(useStore.getState(), THREAD_REF)?.error).toBe(
               "Failed to send message.",
             );
+            expect(selectThreadByRef(useStore.getState(), THREAD_REF)?.errorOrigin).toBe("local");
+            expect(document.querySelector('button[aria-label="Dismiss error"]')).not.toBeNull();
           });
           expect(
             selectThreadByRef(useStore.getState(), THREAD_REF)?.activities.some(
@@ -5275,7 +5293,8 @@ describe(`ChatView full app (${chatViewBrowserPart})`, () => {
 
     it("restores rejected direct sends and reports every delivery attempt before a successful retry", async () => {
       const messageText = "Retry this exact direct message";
-      const repeatedFailure = "The message identity ledger is temporarily busy.";
+      const privateRequestId = "synthetic-private-provider-receipt";
+      const repeatedFailure = `stream disconnected before completion: request ID ${privateRequestId}`;
       let turnStartAttempts = 0;
       const dispatchedMessageTexts: string[] = [];
       const closeToastSpy = vi.spyOn(toastManager, "close");
@@ -5330,6 +5349,12 @@ describe(`ChatView full app (${chatViewBrowserPart})`, () => {
             );
             expect(document.body.textContent).toContain("Failed to send message.");
             expect(findSendFailureToastTitle()).not.toBeNull();
+            expect(document.body.textContent).not.toContain(privateRequestId);
+            expect(
+              [...document.querySelectorAll("[title]")].some((element) =>
+                element.getAttribute("title")?.includes(privateRequestId),
+              ),
+            ).toBe(false);
           },
           { timeout: 8_000, interval: 16 },
         );

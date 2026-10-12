@@ -15,6 +15,7 @@ import { type EnvironmentState, useStore } from "../store";
 import { type Thread } from "../types";
 
 import {
+  buildLocalDraftThread,
   canRetryLegacyCodexRootCompletion,
   createLocalDispatchSnapshot,
   deriveRetryableSteerReplayCandidates,
@@ -41,6 +42,41 @@ import {
 } from "./ChatView.logic";
 
 const localEnvironmentId = EnvironmentId.make("environment-local");
+
+describe("local draft error provenance", () => {
+  it.each([null, "Select a base branch before sending."])(
+    "keeps draft-only validation separate from provider errors: %s",
+    (error) => {
+      const threadId = ThreadId.make("local-validation-draft");
+      const draft = {
+        threadId,
+        environmentId: localEnvironmentId,
+        projectId: null,
+        logicalProjectKey: null,
+        createdAt: "2026-10-12T00:00:00.000Z",
+        runtimeMode: "approval-required" as const,
+        interactionMode: "default" as const,
+        branch: null,
+        worktreePath: null,
+        envMode: "local" as const,
+      };
+      const before = structuredClone(draft);
+      const thread = buildLocalDraftThread(
+        threadId,
+        draft,
+        {
+          instanceId: ProviderInstanceId.make("codex"),
+          model: "gpt-6.1-sol",
+        },
+        error,
+      );
+      expect(thread.error).toBe(error);
+      expect(thread.errorOrigin).toBe(error === null ? undefined : "local");
+      expect(thread.session).toBeNull();
+      expect(draft).toEqual(before);
+    },
+  );
+});
 
 describe("steering delivery presentation", () => {
   const accepted = {

@@ -4,6 +4,10 @@ Decision status: Accepted by the user's implementation authorization
 Implementation status: Implemented; verification boundary documented below
 Created: 2026-10-12 15:11:00 JST (UTC+0900)
 Last updated: 2026-10-12 16:35:22 JST (UTC+0900)
+Notification replacement partially superseded by:
+[Provider errors stay out of chat popups](provider-error-popup-policy.md).
+The original witness-based notification decision below is retained as history;
+capture, persistence, ownership and inspection decisions remain in force.
 
 ## Context and decision
 

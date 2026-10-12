@@ -1,4 +1,13 @@
 import { uiText } from "@cafecode/shared/i18n";
+import { isCodexHistoryRecoveryRequiredError } from "@cafecode/shared/codexHistorySafety";
+import { isClaudeResponseLimitError } from "@cafecode/shared/claudeResponseLimits";
+
+/**
+ * Explicit renderer-owned validation thrown across an awaited preparation.
+ * Never wrap received RPC/provider errors in this class: it grants presentation
+ * of Cafe-authored feedback only and carries no provider/control authority.
+ */
+export class LocalChatActionError extends Error {}
 const TRANSPORT_ERROR_PATTERNS = [
   /\bSocketCloseError\b/i,
   /\bSocketOpenError\b/i,
@@ -99,17 +108,19 @@ export function isIndeterminateTransportError(error: unknown): boolean {
 }
 
 /**
- * Turn a send/dispatch failure into a user-facing thread error. Connection
- * drops (including the interrupted-fiber messages Effect emits when the socket
- * closes mid-upload) become a clear, actionable message instead of leaking an
- * opaque runtime string; everything else passes through, falling back to
- * `fallback` when there is no usable message.
+ * Keep operation feedback separate from received private diagnostics. Explicit
+ * local validation and exact public recovery classifications retain their
+ * controls. Connection loss gets fixed actionable copy; every other opaque
+ * RPC/provider body uses the operation's fixed fallback, never native prose.
  */
 export function describeSendFailureMessage(error: unknown, fallback: string): string {
   const message = error instanceof Error ? error.message : typeof error === "string" ? error : "";
   const normalized = message.trim();
+  if (error instanceof LocalChatActionError) return normalized.length > 0 ? normalized : fallback;
+  if (isCodexHistoryRecoveryRequiredError(normalized) || isClaudeResponseLimitError(normalized))
+    return normalized;
   if (isIndeterminateTransportError(error)) {
     return getCONNECTION_SEND_FAILURE_MESSAGE();
   }
-  return normalized.length > 0 ? normalized : fallback;
+  return fallback;
 }

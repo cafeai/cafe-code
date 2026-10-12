@@ -150,11 +150,7 @@ import { deriveChatActivityPresentation } from "./chat/chatActivity";
 import { deriveTurnCompletionSummary } from "./chat/turnCompletion";
 import { isLiveWorkRuntimeCurrent } from "@cafecode/shared/liveWork";
 import { CodexRecoveryNotice, SessionRail } from "./chat/SessionRail";
-import {
-  deriveCodexRecoveryPresentation,
-  shouldSuppressCodexRecoveryErrorNotification,
-} from "../codexRecovery";
-import { isProviderErrorRepresentedInWorkLog } from "../providerErrorPresentation";
+import { deriveCodexRecoveryPresentation } from "../codexRecovery";
 import { ComposerAsyncQuestionsPanel } from "./chat/ComposerAsyncQuestionsPanel";
 import { persistExactAsyncQuestionAnswer, type AsyncQuestion } from "./chat/asyncQuestions";
 import { ChevronDownIcon, TriangleAlertIcon } from "lucide-react";
@@ -300,6 +296,7 @@ import {
 } from "~/rpc/serverState";
 import {
   describeSendFailureMessage,
+  LocalChatActionError,
   isIndeterminateTransportError,
   sanitizeThreadErrorMessage,
 } from "~/rpc/transportError";
@@ -2816,11 +2813,11 @@ export default function ChatView(props: ChatViewProps) {
   const setThreadGoal = useCallback(
     async (patch: ThreadGoalSetPatch) => {
       if (!activeThread || !goalControlsSupported) {
-        throw new Error("The current provider does not support thread goals.");
+        throw new LocalChatActionError("The current provider does not support thread goals.");
       }
       const api = readEnvironmentApi(activeThread.environmentId);
       if (!api) {
-        throw new Error("Cafe Code is not connected.");
+        throw new LocalChatActionError("Cafe Code is not connected.");
       }
       await api.orchestration.dispatchCommand({
         type: "thread.goal.set",
@@ -2839,11 +2836,11 @@ export default function ChatView(props: ChatViewProps) {
 
   const clearThreadGoal = useCallback(async () => {
     if (!activeThread || !goalControlsSupported) {
-      throw new Error("The current provider does not support thread goals.");
+      throw new LocalChatActionError("The current provider does not support thread goals.");
     }
     const api = readEnvironmentApi(activeThread.environmentId);
     if (!api) {
-      throw new Error("Cafe Code is not connected.");
+      throw new LocalChatActionError("Cafe Code is not connected.");
     }
     await api.orchestration.dispatchCommand({
       type: "thread.goal.clear",
@@ -4601,9 +4598,10 @@ export default function ChatView(props: ChatViewProps) {
       } catch (err) {
         setThreadError(
           activeThread.id,
-          err instanceof Error
-            ? err.message
-            : uiText("Failed to revert thread state.", undefined, undefined, uiLocale),
+          describeSendFailureMessage(
+            err,
+            uiText("Failed to revert thread state.", undefined, undefined, uiLocale),
+          ),
         );
       }
       setIsRevertingCheckpoint(false);
@@ -5216,7 +5214,7 @@ export default function ChatView(props: ChatViewProps) {
       ]);
       if (wasStoppedDuringPreparation()) {
         stoppedBeforeSubmission = true;
-        throw new Error(stoppedBeforeSubmissionMessage);
+        throw new LocalChatActionError(stoppedBeforeSubmissionMessage);
       }
       // Re-read both live account authority and the chat's durable policy at
       // the delivery boundary. Queue snapshots intentionally carry no policy
@@ -5232,7 +5230,7 @@ export default function ChatView(props: ChatViewProps) {
         )?.subagentLimits,
         continuation: { threadId: item.threadId, runtimeMode: item.runtimeMode },
       });
-      if (finalConcurrencyIssue) throw new Error(finalConcurrencyIssue);
+      if (finalConcurrencyIssue) throw new LocalChatActionError(finalConcurrencyIssue);
       // Claim only at the actual delivery boundary, after all awaited setup.
       // Stop during setup leaves a definitely unattempted durable pending item,
       // rather than manufacturing an ambiguous claim that cannot be retried.
@@ -5240,7 +5238,7 @@ export default function ChatView(props: ChatViewProps) {
       // no user Stop event can interleave between the final fence and I/O.
       if (!item.automaticSteerRetry) {
         const claimed = queuePersistence.claim(claim, item);
-        if (!claimed.ok) throw new Error(claimed.error);
+        if (!claimed.ok) throw new LocalChatActionError(claimed.error);
       }
       providerSubmissionAttempted = true;
       // Concurrency belongs to the chat, not the queued message. Omit the
@@ -5870,9 +5868,10 @@ export default function ChatView(props: ChatViewProps) {
       } catch (cause) {
         setThreadError(
           activeThread.id,
-          cause instanceof Error
-            ? cause.message
-            : uiText("Compaction could not be requested.", undefined, undefined, uiLocale),
+          describeSendFailureMessage(
+            cause,
+            uiText("Compaction could not be requested.", undefined, undefined, uiLocale),
+          ),
         );
       } finally {
         sendInFlightRef.current = false;
@@ -5939,9 +5938,10 @@ export default function ChatView(props: ChatViewProps) {
       } catch (cause) {
         setThreadError(
           activeThread.id,
-          cause instanceof Error
-            ? cause.message
-            : uiText("The goal command could not be queued.", undefined, undefined, uiLocale),
+          describeSendFailureMessage(
+            cause,
+            uiText("The goal command could not be queued.", undefined, undefined, uiLocale),
+          ),
         );
         return;
       }
@@ -6206,7 +6206,7 @@ export default function ChatView(props: ChatViewProps) {
           selectThreadByRef(useStore.getState(), sendAttemptThreadRef)?.subagentLimits,
         continuation: { threadId: threadIdForSend, runtimeMode },
       });
-      if (finalConcurrencyIssue) throw new Error(finalConcurrencyIssue);
+      if (finalConcurrencyIssue) throw new LocalChatActionError(finalConcurrencyIssue);
       beginLocalDispatch({ preparingWorktree: false });
       await api.orchestration.dispatchCommand({
         type: "thread.turn.start",
@@ -6306,9 +6306,8 @@ export default function ChatView(props: ChatViewProps) {
       );
       setThreadError(threadIdForSend, sendFailureMessage, sendAttemptThreadRef);
 
-      // ThreadErrorBanner deliberately remembers an exact dismissed provider
-      // error so an unchanged authoritative snapshot cannot nag the user on
-      // every poll. A local send rejection is different: every press is a new
+      // Provider prose never belongs in a banner or toast. The fixed operation
+      // feedback above is separate: every local send press is a new
       // delivery attempt, and silently restoring the draft can look exactly
       // like the button did nothing when the same failure repeats. Emit an
       // occurrence-based toast for each rejected turn/start while retaining
@@ -6513,10 +6512,10 @@ export default function ChatView(props: ChatViewProps) {
         delete next[item.threadId];
         return next;
       });
-      const message =
-        error instanceof Error
-          ? error.message
-          : uiText("Failed to interrupt active turn.", undefined, undefined, uiLocale);
+      const message = describeSendFailureMessage(
+        error,
+        uiText("Failed to interrupt active turn.", undefined, undefined, uiLocale),
+      );
       recordFollowUpQueueDebugAttempt("manual-interrupt", "interrupt-failed", {
         threadId: item.threadId,
         itemId: item.id,
@@ -7014,9 +7013,10 @@ export default function ChatView(props: ChatViewProps) {
       });
       setThreadError(
         activeThread.id,
-        error instanceof Error
-          ? error.message
-          : uiText("Failed to interrupt active turn.", undefined, undefined, uiLocale),
+        describeSendFailureMessage(
+          error,
+          uiText("Failed to interrupt active turn.", undefined, undefined, uiLocale),
+        ),
       );
     }
   };
@@ -7041,9 +7041,10 @@ export default function ChatView(props: ChatViewProps) {
         .catch((err: unknown) => {
           setThreadError(
             activeThreadId,
-            err instanceof Error
-              ? err.message
-              : uiText("Failed to submit approval decision.", undefined, undefined, uiLocale),
+            describeSendFailureMessage(
+              err,
+              uiText("Failed to submit approval decision.", undefined, undefined, uiLocale),
+            ),
           );
         });
       setRespondingRequestIds((existing) => existing.filter((id) => id !== requestId));
@@ -7071,9 +7072,10 @@ export default function ChatView(props: ChatViewProps) {
         .catch((err: unknown) => {
           setThreadError(
             activeThreadId,
-            err instanceof Error
-              ? err.message
-              : uiText("Failed to submit user input.", undefined, undefined, uiLocale),
+            describeSendFailureMessage(
+              err,
+              uiText("Failed to submit user input.", undefined, undefined, uiLocale),
+            ),
           );
         });
       setRespondingUserInputRequestIds((existing) => existing.filter((id) => id !== requestId));
@@ -7355,7 +7357,7 @@ export default function ChatView(props: ChatViewProps) {
               ?.subagentLimits,
           continuation: { threadId: threadIdForSend, runtimeMode },
         });
-        if (changedConcurrencyIssue) throw new Error(changedConcurrencyIssue);
+        if (changedConcurrencyIssue) throw new LocalChatActionError(changedConcurrencyIssue);
 
         // Keep the mode toggle and plan-follow-up banner in sync immediately
         // while the same-thread implementation turn is starting.
@@ -7523,7 +7525,7 @@ export default function ChatView(props: ChatViewProps) {
             selectThreadByRef(useStore.getState(), scopeThreadRef(environmentId, nextThreadId))
               ?.subagentLimits,
         });
-        if (finalConcurrencyIssue) throw new Error(finalConcurrencyIssue);
+        if (finalConcurrencyIssue) throw new LocalChatActionError(finalConcurrencyIssue);
         return api.orchestration.dispatchCommand({
           type: "thread.turn.start",
           commandId: newCommandId(),
@@ -7572,15 +7574,15 @@ export default function ChatView(props: ChatViewProps) {
           stackedThreadToast({
             type: "error",
             title: uiText("Could not start implementation thread", undefined, undefined, uiLocale),
-            description:
-              err instanceof Error
-                ? err.message
-                : uiText(
-                    "An error occurred while creating the new thread.",
-                    undefined,
-                    undefined,
-                    uiLocale,
-                  ),
+            description: describeSendFailureMessage(
+              err,
+              uiText(
+                "An error occurred while creating the new thread.",
+                undefined,
+                undefined,
+                uiLocale,
+              ),
+            ),
           }),
         );
       })
@@ -8243,19 +8245,8 @@ export default function ChatView(props: ChatViewProps) {
       {/* Error banner */}
       <ProviderStatusBanner status={activeProviderStatus} />
       <ThreadErrorBanner
-        error={
-          !activeEnvironmentUnavailable &&
-          (shouldSuppressCodexRecoveryErrorNotification({
-            thread: activeThread,
-            activities: threadActivities,
-          }) ||
-            isProviderErrorRepresentedInWorkLog({
-              thread: activeThread,
-              activities: threadActivities,
-            }))
-            ? null
-            : activeThread.error
-        }
+        error={activeThread.error}
+        errorOrigin={activeThread.errorOrigin}
         scopeKey={`${activeThread.environmentId}\u0000${activeThread.id}`}
         environmentId={activeThread.environmentId}
         threadId={activeThread.id}

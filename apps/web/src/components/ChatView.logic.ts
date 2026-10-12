@@ -43,6 +43,7 @@ export function buildLocalDraftThread(
     session: null,
     messages: [],
     error,
+    errorOrigin: error === null ? undefined : "local",
     createdAt: draftThread.createdAt,
     archivedAt: null,
     latestTurn: null,

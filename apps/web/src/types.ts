@@ -105,6 +105,8 @@ export interface Thread {
   messages: ChatMessage[];
   proposedPlans: ProposedPlan[];
   error: string | null;
+  /** Renderer-only provenance; absent legacy evidence never authorizes a native error popup. */
+  errorOrigin?: "local" | "provider" | undefined;
   createdAt: string;
   archivedAt: string | null;
   updatedAt?: string | undefined;
@@ -129,6 +131,8 @@ export interface ThreadShell {
   subagentLimits?: SubagentLimits | undefined;
   codexContextWindowOverride?: number | null | undefined;
   error: string | null;
+  /** Local validation is explicit; provider snapshots never inherit this presentation grant. */
+  errorOrigin?: "local" | "provider" | undefined;
   createdAt: string;
   archivedAt: string | null;
   updatedAt?: string | undefined;
