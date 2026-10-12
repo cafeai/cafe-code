@@ -187,14 +187,17 @@ export function ContextWindowDetails(props: {
           />
         </div>
       ) : null}
-      {hasSubagentLimit ? (
-        <div className="border-t border-border-subtle pt-2">
-          <SubagentConcurrencyDetails presentation={props.subagentConcurrency} />
-        </div>
-      ) : null}
-      {hasContextOverride ? (
-        <div className={hasSubagentLimit ? "pt-1" : "border-t border-border-subtle pt-2"}>
-          <CodexContextWindowDetails presentation={props.codexContextWindow} />
+      {hasSubagentLimit || hasContextOverride ? (
+        // These are adjacent policy summaries, not separate usage sections.
+        // One shared divider preserves the single-row boundary while keeping
+        // the outer usage/quota section gap out of the space between policies.
+        <div className="flex flex-col gap-1 border-t border-border-subtle pt-2">
+          {hasSubagentLimit ? (
+            <SubagentConcurrencyDetails presentation={props.subagentConcurrency} />
+          ) : null}
+          {hasContextOverride ? (
+            <CodexContextWindowDetails presentation={props.codexContextWindow} />
+          ) : null}
         </div>
       ) : null}
     </div>

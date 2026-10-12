@@ -1,7 +1,7 @@
 import "../../index.css";
 
 import type { ServerProviderAccountRateLimits } from "@cafecode/contracts";
-import { page } from "vitest/browser";
+import { page, userEvent } from "vitest/browser";
 import { afterEach, describe, expect, it } from "vitest";
 import { render } from "vitest-browser-react";
 
@@ -19,16 +19,86 @@ const rateLimits: ServerProviderAccountRateLimits = {
   rateLimitResetCredits: { availableCount: 0 },
 };
 
+async function settledRail() {
+  const rail = document.querySelector<HTMLElement>("[data-session-rail]")!;
+  // Retain the actual final layout rather than a partially faded entrance.
+  // This observes the existing finite animation; it changes no media policy,
+  // deadline or style and does not wait for unrelated application animations.
+  await Promise.all(rail.getAnimations().map((animation) => animation.finished));
+  expect(getComputedStyle(rail).opacity).toBe("1");
+  return rail;
+}
+
+function assertCompactPolicyRows() {
+  const subagent = document.querySelector<HTMLElement>("[data-subagent-concurrency-details]")!;
+  const context = document.querySelector<HTMLElement>("[data-codex-context-window-details]")!;
+  expect(subagent).not.toBeNull();
+  expect(context).not.toBeNull();
+  const section = subagent.parentElement!;
+  expect(context.parentElement).toBe(section);
+  expect(Array.from(section.children)).toEqual([subagent, context]);
+  const subagentRect = subagent.getBoundingClientRect();
+  const contextRect = context.getBoundingClientRect();
+  const sectionRect = section.getBoundingClientRect();
+  const rootRem = Number.parseFloat(getComputedStyle(document.documentElement).fontSize);
+  // Assert the rendered density, not merely the presence of gap-1. The
+  // old separate sections added their outer spacing to context padding.
+  const gap = contextRect.top - subagentRect.bottom;
+  expect(gap).toBeGreaterThanOrEqual(0);
+  expect(Math.abs(gap - rootRem * 0.25)).toBeLessThanOrEqual(0.75);
+  expect(Number.parseFloat(getComputedStyle(section).borderTopWidth)).toBeGreaterThan(0);
+  for (const row of [subagent, context]) {
+    const rect = row.getBoundingClientRect();
+    expect(rect.height).toBeGreaterThan(0);
+    expect(rect.left).toBeGreaterThanOrEqual(sectionRect.left - 1);
+    expect(rect.right).toBeLessThanOrEqual(sectionRect.right + 1);
+    expect(row.scrollWidth).toBeLessThanOrEqual(row.clientWidth + 1);
+  }
+  expect(sectionRect.right).toBeLessThanOrEqual(window.innerWidth);
+}
+
+function assertSinglePolicyRow(row: HTMLElement) {
+  const section = row.parentElement!;
+  expect(Array.from(section.children)).toEqual([row]);
+  const style = getComputedStyle(section);
+  const border = Number.parseFloat(style.borderTopWidth);
+  expect(border).toBeGreaterThan(0);
+  // A retained one-row section keeps its original separator but must
+  // not reserve the removed row's height, gap, margin or padding.
+  expect(
+    Math.abs(
+      section.getBoundingClientRect().height -
+        row.getBoundingClientRect().height -
+        border -
+        Number.parseFloat(style.paddingTop),
+    ),
+  ).toBeLessThanOrEqual(1);
+  return section;
+}
+
 describe("ContextWindowDetails reset availability", () => {
+  const originalViewport = { width: window.innerWidth, height: window.innerHeight };
+  const originalFontSize = document.documentElement.style.fontSize;
+  const originalDark = document.documentElement.classList.contains("dark");
   let mounted: Awaited<ReturnType<typeof render>> | undefined;
   afterEach(async () => {
     await mounted?.unmount();
     mounted = undefined;
+    document.documentElement.style.fontSize = originalFontSize;
+    document.documentElement.classList.toggle("dark", originalDark);
+    await page.viewport(originalViewport.width, originalViewport.height);
   });
 
-  it.each(["popover", "panel", "rail"] as const)(
-    "keeps the native reported capacity separate from saved context choices in %s",
-    async (layout) => {
+  it.each(
+    (["popover", "panel", "rail"] as const).flatMap((layout) =>
+      ["light", "dark"].flatMap((theme) => [80, 130].map((scale) => ({ layout, theme, scale }))),
+    ),
+  )(
+    "keeps adjacent policy rows compact and native capacity distinct in narrow $layout $theme $scale% layouts",
+    async ({ layout, theme, scale }) => {
+      await page.viewport(430, 680);
+      document.documentElement.classList.toggle("dark", theme === "dark");
+      document.documentElement.style.fontSize = `${scale}%`;
       const usage: ContextWindowSnapshot = {
         usedTokens: 95_000,
         maxTokens: 475_000,
@@ -64,6 +134,7 @@ describe("ContextWindowDetails reset availability", () => {
         requested: number | null | undefined,
         configured: number | null | undefined,
         inherited?: number,
+        showSubagent = true,
       ) => {
         const codexContextWindow = deriveCodexContextWindowPresentation({
           requested,
@@ -71,22 +142,24 @@ describe("ContextWindowDetails reset availability", () => {
           inherited,
         });
         return layout === "rail" ? (
-          <div style={{ width: 300, height: 600 }}>
+          <div style={{ width: 280, height: 600 }}>
             <SessionRail
               plan={null}
               usage={usage}
-              subagentConcurrency={subagentConcurrency}
+              subagentConcurrency={showSubagent ? subagentConcurrency : null}
               codexContextWindow={codexContextWindow}
               onShowInComposer={() => {}}
             />
           </div>
         ) : (
-          <ContextWindowDetails
-            usage={usage}
-            layout={layout}
-            subagentConcurrency={subagentConcurrency}
-            codexContextWindow={codexContextWindow}
-          />
+          <div style={{ width: 280 }}>
+            <ContextWindowDetails
+              usage={usage}
+              layout={layout}
+              subagentConcurrency={showSubagent ? subagentConcurrency : undefined}
+              codexContextWindow={codexContextWindow}
+            />
+          </div>
         );
       };
       mounted = await render(content(1_000_000, 500_000));
@@ -101,12 +174,34 @@ describe("ContextWindowDetails reset availability", () => {
           .compareDocumentPosition(document.querySelector("[data-codex-context-window-details]")!) &
           Node.DOCUMENT_POSITION_FOLLOWING,
       ).toBeTruthy();
+      assertCompactPolicyRows();
       await expect.element(page.getByText("475k context used", { exact: true })).toBeVisible();
       expect(document.body.textContent).toContain("20%");
+      if (layout === "rail") {
+        const screenshotDirectory = import.meta.env.VITE_CODEX_CONTEXT_SCREENSHOT_DIR;
+        if (typeof screenshotDirectory === "string" && screenshotDirectory.length > 0) {
+          await settledRail();
+          await page.screenshot({
+            path: `${screenshotDirectory}/context-tasks-rail-${theme}-${scale}.png`,
+          });
+        }
+      }
+      const subagentHelp = page.getByRole("button", { name: "About subagent limits", exact: true });
+      const contextHelp = page.getByRole("button", {
+        name: "About context-window overrides",
+        exact: true,
+      });
+      await expect.element(subagentHelp).toBeVisible();
+      await expect.element(contextHelp).toBeVisible();
+      subagentHelp.element().focus();
+      await expect.element(subagentHelp).toHaveFocus();
+      await userEvent.keyboard("{Tab}");
+      await expect.element(contextHelp).toHaveFocus();
       await mounted.rerender(content(null, 500_000, 700_000));
       await expect
         .element(page.getByText("Context override: 500K → 700K when idle", { exact: true }))
         .toBeVisible();
+      assertCompactPolicyRows();
       await mounted.rerender(content(null, 500_000));
       await expect
         .element(
@@ -120,18 +215,120 @@ describe("ContextWindowDetails reset availability", () => {
       await expect.element(page.getByText("475k context used", { exact: true })).toBeVisible();
       await mounted.rerender(content(null, null));
       expect(document.querySelector("[data-codex-context-window-details]")).toBeNull();
-      if (layout === "rail") {
-        const screenshotDirectory = import.meta.env.VITE_CODEX_CONTEXT_SCREENSHOT_DIR;
-        if (typeof screenshotDirectory === "string" && screenshotDirectory.length > 0) {
-          await mounted.rerender(content(1_000_000, 500_000));
-          await expect
-            .element(page.getByText("Context override: 500K → 1M when idle", { exact: true }))
-            .toBeVisible();
-          await page.screenshot({ path: `${screenshotDirectory}/context-tasks-rail.png` });
-        }
-      }
+      assertSinglePolicyRow(
+        document.querySelector<HTMLElement>("[data-subagent-concurrency-details]")!,
+      );
+      await mounted.rerender(content(700_000, 700_000, undefined, false));
+      expect(document.querySelector("[data-subagent-concurrency-details]")).toBeNull();
+      await expect.element(page.getByText("Context override: 700K", { exact: true })).toBeVisible();
+      const finalPolicySection = assertSinglePolicyRow(
+        document.querySelector<HTMLElement>("[data-codex-context-window-details]")!,
+      );
+      await mounted.rerender(content(null, null, undefined, false));
+      expect(document.querySelector("[data-codex-context-window-details]")).toBeNull();
+      expect(document.querySelector("[data-subagent-concurrency-details]")).toBeNull();
+      expect(finalPolicySection.isConnected).toBe(false);
+      await expect.element(page.getByText("475k context used", { exact: true })).toBeVisible();
     },
   );
+
+  it("keeps received quotas scrollable and both policy rows compact in a short scaled Tasks rail", async () => {
+    await page.viewport(430, 680);
+    document.documentElement.classList.add("dark");
+    document.documentElement.style.fontSize = "130%";
+    mounted = await render(
+      <div
+        style={{
+          display: "flex",
+          flexDirection: "column",
+          width: 280,
+          height: 320,
+          overflow: "hidden",
+        }}
+      >
+        <SessionRail
+          plan={{ steps: [{ step: "Still visible task", status: "inProgress" }] }}
+          usage={null}
+          rateLimits={{
+            checkedAt: "2026-10-12T00:00:00.000Z",
+            rateLimits: {},
+            rateLimitsByLimitId: Object.fromEntries(
+              Array.from({ length: 8 }, (_, index) => [
+                `quota-${index}`,
+                {
+                  limitName: `Quota ${index}`,
+                  primary: { usedPercent: index, windowDurationMins: 300, resetsAt: 1_788_278_880 },
+                  credits: { hasCredits: true, unlimited: false, balance: "25" },
+                },
+              ]),
+            ),
+            rateLimitResetCredits: { availableCount: 2 },
+          }}
+          subagentConcurrency={{
+            requested: 5,
+            configured: 5,
+            pending: false,
+            source: "Chat override",
+          }}
+          codexContextWindow={deriveCodexContextWindowPresentation({
+            requested: 1_000_000,
+            configured: 500_000,
+          })}
+          onShowInComposer={() => {}}
+        />
+      </div>,
+    );
+    await expect
+      .element(page.getByText("Context override: 500K → 1M when idle", { exact: true }))
+      .toBeVisible();
+    const rail = await settledRail();
+    const usage = rail.querySelector<HTMLElement>("[data-session-rail-usage]")!;
+    const quotaScroll = rail.querySelector<HTMLElement>("[data-account-quota-scroll]")!;
+    const resetCount = page.getByText("Usage limit resets available: 2", { exact: true });
+    await expect.element(resetCount).toBeVisible();
+    expect(quotaScroll.clientHeight).toBeGreaterThan(0);
+    expect(quotaScroll.scrollHeight).toBeGreaterThan(quotaScroll.clientHeight);
+    expect(getComputedStyle(quotaScroll).overflowY).toBe("auto");
+    expect(quotaScroll.contains(resetCount.element())).toBe(false);
+    expect(rail.querySelectorAll("[data-account-quota-bucket]")).toHaveLength(8);
+    const subagent = rail.querySelector<HTMLElement>("[data-subagent-concurrency-details]")!;
+    const context = rail.querySelector<HTMLElement>("[data-codex-context-window-details]")!;
+    const gap = context.getBoundingClientRect().top - subagent.getBoundingClientRect().bottom;
+    const rootRem = Number.parseFloat(getComputedStyle(document.documentElement).fontSize);
+    expect(gap).toBeGreaterThanOrEqual(0);
+    expect(Math.abs(gap - rootRem * 0.25)).toBeLessThanOrEqual(0.75);
+    expect(context.parentElement).toBe(subagent.parentElement);
+    expect(resetCount.element().getBoundingClientRect().bottom).toBeLessThanOrEqual(
+      subagent.parentElement!.getBoundingClientRect().top,
+    );
+    expect(context.getBoundingClientRect().bottom).toBeLessThanOrEqual(
+      rail.getBoundingClientRect().bottom + 1,
+    );
+    expect(usage.getBoundingClientRect().bottom).toBeLessThanOrEqual(
+      rail.getBoundingClientRect().bottom + 1,
+    );
+    const resetTop = resetCount.element().getBoundingClientRect().top;
+    const policyTop = subagent.getBoundingClientRect().top;
+    quotaScroll.scrollTop = quotaScroll.scrollHeight;
+    expect(quotaScroll.scrollTop).toBeGreaterThan(0);
+    expect(resetCount.element().getBoundingClientRect().top).toBe(resetTop);
+    expect(subagent.getBoundingClientRect().top).toBe(policyTop);
+    expect(rail.parentElement!.scrollHeight).toBeLessThanOrEqual(
+      rail.parentElement!.clientHeight + 1,
+    );
+    await expect
+      .element(page.getByRole("button", { name: "About subagent limits", exact: true }))
+      .toBeVisible();
+    await expect
+      .element(page.getByRole("button", { name: "About context-window overrides", exact: true }))
+      .toBeVisible();
+    const screenshotDirectory = import.meta.env.VITE_CODEX_CONTEXT_SCREENSHOT_DIR;
+    if (typeof screenshotDirectory === "string" && screenshotDirectory.length > 0) {
+      await page.screenshot({
+        path: `${screenshotDirectory}/context-tasks-rail-quotas-dark-130.png`,
+      });
+    }
+  });
 
   it.each(["popover", "panel"] as const)(
     "shows the saved limit immediately and omits unknown limits in %s layout",
