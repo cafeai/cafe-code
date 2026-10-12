@@ -13,7 +13,7 @@ import * as Scope from "effect/Scope";
 import * as Types from "effect/Types";
 import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process";
 import * as CodexClient from "effect-codex-app-server/client";
-import { codexCommandUsesShell } from "effect-codex-app-server/command";
+import { makeCodexCommand } from "effect-codex-app-server/command";
 import * as CodexSchema from "effect-codex-app-server/schema";
 import * as CodexErrors from "effect-codex-app-server/errors";
 
@@ -1150,13 +1150,12 @@ export function makeCodexModelListCommand(input: {
   readonly environment?: NodeJS.ProcessEnv;
 }): ChildProcess.StandardCommand {
   const resolvedHomePath = input.homePath ? expandHomePath(input.homePath) : undefined;
-  return ChildProcess.make(input.binaryPath, ["app-server"], {
+  return makeCodexCommand(input.binaryPath, ["app-server"], {
     cwd: input.cwd,
     env: {
       ...(input.environment ?? process.env),
       ...(resolvedHomePath ? { CODEX_HOME: resolvedHomePath } : {}),
     },
-    shell: codexCommandUsesShell(input.binaryPath, process.platform),
     // Match disposable CLI probe ownership: isolate the POSIX child tree and
     // leave an unconditional SIGKILL scope-finalizer backstop. The explicit
     // cleanup below still gives the provider one bounded graceful interval.
@@ -1358,12 +1357,11 @@ export function makeCodexHealthProbeCommand(
   environment: NodeJS.ProcessEnv = process.env,
 ): ChildProcess.StandardCommand {
   const resolvedHomePath = codexSettings.homePath ? expandHomePath(codexSettings.homePath) : "";
-  return ChildProcess.make(codexSettings.binaryPath, [...args], {
+  return makeCodexCommand(codexSettings.binaryPath, [...args], {
     env: {
       ...environment,
       ...(resolvedHomePath.length > 0 ? { CODEX_HOME: resolvedHomePath } : {}),
     },
-    shell: codexCommandUsesShell(codexSettings.binaryPath, process.platform),
     // POSIX probes use their own process group so cleanup reaches descendants;
     // Windows keeps the platform default and uses taskkill. The scoped
     // backstop is SIGKILL because runCodexCommand performs the graceful,

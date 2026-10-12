@@ -10,6 +10,7 @@ import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process";
 
 import { ThreadId } from "@cafecode/contracts";
 import { assert, it } from "@effect/vitest";
+import { makeCodexCommand } from "effect-codex-app-server/command";
 
 import { buildCodexAppServerArgs, makeCodexSessionRuntime } from "./CodexSessionRuntime.ts";
 
@@ -70,15 +71,17 @@ it.effect.each([
         if (command?._tag !== "StandardCommand") {
           throw new Error("Expected one structured session command");
         }
-        assert.equal(command.command, binaryPath);
-        assert.deepEqual(
-          command.args,
+        const prepared = makeCodexCommand(
+          binaryPath,
           buildCodexAppServerArgs({
             maxConcurrentSubagents: 3,
             schedulingMcp,
             transportPolicy: { responsesWebsockets: "disabled" },
           }),
+          { env: environment },
         );
+        assert.equal(command.command, prepared.command);
+        assert.deepEqual(command.args, prepared.args);
         assert.equal(command.options.shell, process.platform === "win32" && windowsShell);
         assert.equal(command.options.cwd, "backend-owned-cwd");
         assert.deepEqual(command.options.env, {

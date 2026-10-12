@@ -6,13 +6,13 @@ import * as Schema from "effect/Schema";
 import * as Scope from "effect/Scope";
 import * as Stdio from "effect/Stdio";
 import * as Stream from "effect/Stream";
-import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process";
+import { ChildProcessSpawner } from "effect/unstable/process";
 
 import * as CodexRpc from "./_generated/meta.gen.ts";
 import * as CodexError from "./errors.ts";
 import * as CodexProtocol from "./protocol.ts";
 import { normalizeCodexAccountPlanPayload } from "./compatibility.ts";
-import { codexCommandUsesShell } from "./command.ts";
+import { makeCodexCommand } from "./command.ts";
 import {
   decodeNotificationPayload,
   decodeOptionalPayload,
@@ -405,11 +405,10 @@ export const layerCommand = (
     CodexAppServerClient,
     Effect.gen(function* () {
       const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
-      const command = ChildProcess.make(options.command, [...(options.args ?? [])], {
+      const command = makeCodexCommand(options.command, [...(options.args ?? [])], {
         ...(options.cwd ? { cwd: options.cwd } : {}),
         ...(options.env ? { env: { ...process.env, ...options.env } } : {}),
         forceKillAfter: DEFAULT_APP_SERVER_FORCE_KILL_AFTER,
-        shell: codexCommandUsesShell(options.command, process.platform),
       });
       return yield* spawner.spawn(command).pipe(
         Effect.mapError(
