@@ -1,19 +1,6 @@
 import * as Effect from "effect/Effect";
 
 import * as DesktopIpc from "./DesktopIpc.ts";
-import {
-  getNativeControlState,
-  getNativeControlActivity,
-  stopNativeControlActivity,
-  setNativeControlInputPolicy,
-  setNativeControlEnabled,
-  getNativeControlDiagnostics,
-  captureNativeControlPreview,
-  getNativeControlChatState,
-  setNativeControlChatEnabled,
-  getNativeControlPermissions,
-  requestNativeControlPermissions,
-} from "./methods/nativeControl.ts";
 import { getClientSettings, setClientSettings } from "./methods/clientSettings.ts";
 import {
   getSavedEnvironmentRegistry,
@@ -60,17 +47,6 @@ export const installDesktopIpcHandlers = Effect.gen(function* () {
   yield* ipc.handleSync(getLocalEnvironmentBootstrap);
 
   yield* ipc.handle(getDebugEndpointState);
-  yield* ipc.handle(getNativeControlState);
-  yield* ipc.handle(getNativeControlActivity);
-  yield* ipc.handle(stopNativeControlActivity);
-  yield* ipc.handle(setNativeControlInputPolicy);
-  yield* ipc.handle(setNativeControlEnabled);
-  yield* ipc.handle(getNativeControlDiagnostics);
-  yield* ipc.handle(captureNativeControlPreview);
-  yield* ipc.handle(getNativeControlChatState);
-  yield* ipc.handle(setNativeControlChatEnabled);
-  yield* ipc.handle(getNativeControlPermissions);
-  yield* ipc.handle(requestNativeControlPermissions);
   yield* ipc.handle(publishDebugSnapshot);
 
   yield* ipc.handle(getClientSettings);

@@ -44,7 +44,7 @@ describe("provider task presentation", () => {
     expect(input).not.toHaveBeenCalled();
   });
 
-  it("preserves public descriptions and the existing computer-use override", () => {
+  it("preserves public descriptions and an explicit presentation override", () => {
     expect(
       readProviderTaskPresentation({
         payload: { detail: "Review exact account ownership", data: { toolName: "Agent" } },
@@ -54,9 +54,9 @@ describe("provider task presentation", () => {
     expect(
       readProviderTaskPresentation(
         { payload: { detail: "opaque bridge invocation" }, summary: "Tool activity" },
-        "Reading the app",
+        "Inspecting the project",
       ).title,
-    ).toBe("Reading the app");
+    ).toBe("Inspecting the project");
   });
 
   it("bounds every lane's text and removes hidden controls while retaining script joiners", () => {

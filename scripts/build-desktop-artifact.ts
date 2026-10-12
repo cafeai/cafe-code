@@ -17,7 +17,6 @@ export {
   MAC_MICROPHONE_USAGE_DESCRIPTION,
   renderMacPrivacyStrings,
 } from "./lib/mac-app-privacy.ts";
-import { stageNativeCuaRuntime } from "./lib/cua-runtime.ts";
 
 import { createHash } from "node:crypto";
 import * as NodeRuntime from "@effect/platform-node/NodeRuntime";
@@ -1199,12 +1198,6 @@ const buildDesktopArtifact = Effect.fn("buildDesktopArtifact")(function* (
   // the stage; failures and cancellation retire the same narrow temporary root.
   yield* stageWindowsManagedRuntime(options, repoRoot, stageResourcesDir).pipe(Effect.scoped);
 
-  const nativeCuaStaged = yield* Effect.tryPromise({
-    try: () => stageNativeCuaRuntime(repoRoot, stageResourcesDir, options.platform, options.arch),
-    catch: (cause) =>
-      new BuildScriptError({ message: "Prepared Cua runtime failed artifact admission.", cause }),
-  });
-
   const yarnCatalog = yield* Effect.try({
     try: () => readYarnCatalog(repoRoot),
     catch: (cause) =>
@@ -1240,24 +1233,6 @@ const buildDesktopArtifact = Effect.fn("buildDesktopArtifact")(function* (
     ),
   };
 
-  if (nativeCuaStaged) {
-    const existing = stagePackageJson.build.extraResources;
-    stagePackageJson.build.extraResources = [
-      ...(Array.isArray(existing) ? existing : []),
-      { from: "apps/desktop/resources/cua-driver", to: "cua-driver" },
-    ];
-    const signingHook = path.join(stageAppDir, "sign-cua-app.cjs");
-    yield* fs.copyFile(path.join(repoRoot, "apps/desktop/scripts/sign-cua-app.cjs"), signingHook);
-    yield* fs.copyFile(
-      path.join(repoRoot, "apps/desktop/scripts/finalize-cua-signing.cjs"),
-      path.join(stageAppDir, "finalize-cua-signing.cjs"),
-    );
-    const mac = stagePackageJson.build.mac;
-    stagePackageJson.build.mac = {
-      ...(mac && typeof mac === "object" && !Array.isArray(mac) ? mac : {}),
-      sign: signingHook,
-    };
-  }
   const stagePackageJsonString = yield* encodeJsonString(stagePackageJson);
   yield* fs.writeFileString(path.join(stageAppDir, "package.json"), `${stagePackageJsonString}\n`);
 

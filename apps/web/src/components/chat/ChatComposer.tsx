@@ -118,7 +118,6 @@ import {
   withSubagentLimit,
   type SubagentConcurrencyPresentation,
 } from "../../subagentConcurrency";
-import { ComputerUseButton } from "./ComputerUseButton";
 import { ComposerActivityStatus } from "./ComposerActivityStatus";
 import type { ChatActivityPresentation } from "./chatActivity";
 import { buildExpandedImagePreview, type ExpandedImagePreview } from "./ExpandedImagePreview";
@@ -4335,11 +4334,6 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                   onTogglePlanSidebar={togglePlanSidebar}
                   onRuntimeModeChange={handleRuntimeModeChange}
                   onOpenGoal={onOpenGoalDialog}
-                />
-                <ComputerUseButton
-                  threadId={activeThreadId}
-                  provider={selectedProvider}
-                  local={environmentId === primaryEnvironmentId}
                 />
               </div>
 

@@ -35,4 +35,3 @@ dist-electron/
 
 # Local-only design mockups and experimental feature explorations. Never publish.
 /.explorations/
-/native/cua-driver/runtime/

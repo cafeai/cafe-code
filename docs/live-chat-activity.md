@@ -116,20 +116,3 @@ Labels use bounded existing public text, with invisible terminal/bidi controls
 removed and markup rendered as inert text. Naming does not inspect additional
 raw inputs, infer completion, grant controls or retry an uncertain action.
 Workflow and subagent detail controls retain their existing footer placement.
-
-## Computer use
-
-The composer control shows Cua's rounded pointer silhouette and the visible
-label Computer use. Its existing local Mac, provider and per-chat opt-in
-requirements remain in effect.
-
-Known Cafe native bridge actions get readable work-log descriptions, such as
-Clicking / Clicked, Reading the window / Read the window, and Released computer
-control. This also formats saved bridge tool names without rewriting history.
-Unrelated MCP tools retain their normal presentation. Typed text, clipboard
-contents, URLs, arguments and private bridge identifiers stay out of these
-labels. An unfamiliar Cafe action uses Using the computer / Used the computer.
-
-The pointer follows the bundled Cua default cursor artwork in
-`libs/cua-driver/rust/crates/cursor-overlay/assets/cua.default.lottie`; Cafe's
-existing Cua source pin and notices apply.

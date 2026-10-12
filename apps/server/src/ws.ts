@@ -1632,11 +1632,7 @@ const makeWsRpcLayer = (
           observeRpcEffect(
             WS_METHODS.serverUpdateSettings,
             Effect.gen(function* () {
-              if (
-                (patch.mcpEnabled !== undefined ||
-                  patch.desktopObservationRetention !== undefined) &&
-                !mcpAccess.canManage
-              ) {
+              if (patch.mcpEnabled !== undefined && !mcpAccess.canManage) {
                 return yield* new ServerSettingsError({
                   settingsPath: "settings.json",
                   detail: "Only an owner connection can change Cafe MCP access.",

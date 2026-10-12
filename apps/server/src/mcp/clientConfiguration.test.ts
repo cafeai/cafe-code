@@ -64,12 +64,12 @@ describe("MCP user configuration", () => {
     ).toThrow("different cafe-code");
   });
 
-  it("leaves a separately configured Desktop Control MCP untouched", () => {
+  it("leaves an unrelated user-configured MCP untouched", () => {
     const client = mcpClientConfigurations("/test-user", {})[0]!;
     const contents =
-      "# Desktop Control is enabled per run, never by the Cafe installer.\n" +
-      '[mcp_servers.cafe-desktop]\ncommand = "desktop-bridge"\nenabled = false\n' +
-      'args = ["/private/desktop-session.json"]\n';
+      "# Unrelated tools belong to the user, never the Cafe installer.\n" +
+      '[mcp_servers.user-tools]\ncommand = "user-bridge"\nenabled = false\n' +
+      'args = ["/private/user-session.json"]\n';
     const original: unknown = Toml.parse(contents);
     const installed = editMcpClientConfiguration(client, contents, launch, "install");
     const withCafe: unknown = Toml.parse(installed);

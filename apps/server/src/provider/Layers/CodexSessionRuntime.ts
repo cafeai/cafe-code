@@ -348,7 +348,6 @@ export interface CodexTransportPolicy {
 }
 
 export interface CodexAppServerLaunchOptions {
-  readonly nativeControlMcp?: Pick<SchedulingSessionBinding, "name" | "launch"> | undefined;
   readonly schedulingMcp?: Pick<SchedulingSessionBinding, "name" | "launch"> | undefined;
   readonly maxConcurrentSubagents?: number | undefined;
   readonly transportPolicy?: CodexTransportPolicy | undefined;
@@ -438,7 +437,6 @@ export function buildCodexAppServerArgs(
     CODEX_UPDATE_PLAN_CONFIG_OVERRIDE,
     ...concurrencyArgs,
     ...(options.schedulingMcp ? ["-c", schedulingMcpOverride(options.schedulingMcp)] : []),
-    ...(options.nativeControlMcp ? ["-c", schedulingMcpOverride(options.nativeControlMcp)] : []),
   ] as const;
 
   if (options.transportPolicy?.responsesWebsockets !== "disabled") {
@@ -469,7 +467,6 @@ export function buildCodexAppServerArgs(
 
 export interface CodexSessionRuntimeOptions {
   readonly customInstructions?: string | undefined;
-  readonly nativeControlMcp?: Pick<SchedulingSessionBinding, "name" | "launch"> | undefined;
   /** Exact Cafe chat/account-bound durable guard; never a native history writer. */
   readonly historySafety?: CodexHistorySafetyCallbacks<CodexSessionRuntimeError>;
   readonly schedulingMcp?: Pick<SchedulingSessionBinding, "name" | "launch"> | undefined;
@@ -6232,7 +6229,6 @@ export const makeCodexSessionRuntime = (
       ...(resolvedHomePath ? { CODEX_HOME: resolvedHomePath } : {}),
     };
     const appServerArgs = buildCodexAppServerArgs({
-      nativeControlMcp: options.nativeControlMcp,
       schedulingMcp: options.schedulingMcp,
       maxConcurrentSubagents: options.maxConcurrentSubagents,
       transportPolicy: options.transportPolicy,

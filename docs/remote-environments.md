@@ -87,10 +87,9 @@ button or manage its saved login in WebUI settings.
 | File links and work-log file links                                                                                        | Local desktop files open in the configured external editor; remote file actions copy the path. Cafe has no in-app remote text viewer, editor or terminal.                                                                |
 | Finder/Explorer, native folder pickers, app installation/exposure/certificates and Mac global dictation                   | The machine running that native app. Remote paths never launch a Mac editor or Finder. Mac global dictation uses the Mac's local Cafe credential and native permissions, separately from remote chat dictation.          |
 
-The interim Linux virtual desktop viewer and its input HTTP routes have been
-removed. The Cua replacement starts with local native control; saved remote
-environments do not grant access to a computer's desktop. Historical conversation
-screenshots remain available through authenticated, private observation reads.
+Computer use and the earlier Linux virtual desktop viewer have been removed.
+Cafe exposes no desktop input or saved-observation HTTP routes. Saved remote
+environments do not grant access to a computer's desktop.
 
 Network reachability, DNS, tunnels, certificates, CORS and browser mixed-content
 policy still apply. Adding a connection does not install an SSH tunnel or alter
@@ -115,5 +114,4 @@ server or uses credentials. It requires a native graphical Electron runtime.
 
 The implementation was checked on macOS. A separate Linux PC, real remote provider
 authentication and production certificates still require native end-to-end
-qualification on that host. Native Cua desktop permissions, capture and input
-will need separate host qualification before that feature is enabled.
+qualification on that host.

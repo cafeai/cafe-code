@@ -1,5 +1,4 @@
 import { SchedulingSessionRuntimeLive } from "./scheduledFollowups/sessionRuntime.ts";
-import { NativeControlSessionRuntimeLive } from "./nativeControl/sessionRuntime.ts";
 import { schedulingMcpRouteLayer } from "./scheduledFollowups/http.ts";
 import { startSchedulingLoopbackServer } from "./scheduledFollowups/loopbackServer.ts";
 import * as NodeHttp from "node:http";
@@ -15,7 +14,6 @@ import { fileAttachmentRouteLayer } from "./fileAttachmentHttp.ts";
 import { ChatImagesLive } from "./chatImages/service.ts";
 import { ChatImagePublicationLive } from "./chatImages/reactor.ts";
 import { chatImageRouteLayer } from "./chatImages/http.ts";
-import { desktopObservationRouteLayer } from "./desktopObservations/observationHttp.ts";
 import {
   attachmentsRouteLayer,
   brandingSidebarImageServeRouteLayer,
@@ -293,7 +291,7 @@ const RuntimeCoreDependenciesLive = ReactorLayerLive.pipe(
   Layer.provideMerge(GitLayerLive),
   Layer.provideMerge(VcsLayerLive),
   Layer.provideMerge(ProviderRuntimeLayerLive),
-  Layer.provideMerge(Layer.mergeAll(SchedulingSessionRuntimeLive, NativeControlSessionRuntimeLive)),
+  Layer.provideMerge(SchedulingSessionRuntimeLive),
   Layer.provideMerge(PersistenceLayerLive),
   Layer.provideMerge(KeybindingsLive),
   Layer.provideMerge(ProviderRegistryLive),
@@ -363,7 +361,6 @@ export const makeRoutesLayer = Layer.mergeAll(
   attachmentsRouteLayer,
   fileAttachmentRouteLayer,
   chatImageRouteLayer,
-  desktopObservationRouteLayer,
   brandingSidebarImageServeRouteLayer,
   brandingSidebarImageUploadRouteLayer,
   clientDebugLogRouteLayer,

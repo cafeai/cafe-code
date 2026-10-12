@@ -6,7 +6,6 @@ import type {
 } from "@cafecode/contracts";
 import { deriveLiveWorkObservations, isLiveWorkRuntimeCurrent } from "@cafecode/shared/liveWork";
 import type { SubagentRuntimeContext } from "../../subagent-activity";
-import { readComputerUsePresentation } from "./computerUsePresentation";
 
 export interface ChatActivityPresentation {
   label: string;
@@ -82,17 +81,15 @@ export function deriveChatActivityPresentation(input: {
   if (input.running && input.streaming) return { ...base, label: uiText("Working…") };
   if (input.running && foreground.length) {
     const latest = foreground.at(-1)!;
-    const computer = readComputerUsePresentation(latest);
     const itemType = (latest.payload as Record<string, unknown> | null)?.itemType;
     return {
       ...base,
       label:
-        computer?.active ??
-        (itemType === "command_execution"
+        itemType === "command_execution"
           ? uiText("Running command…")
           : itemType === "context_compaction"
             ? uiText("Compacting context…")
-            : uiText("Waiting for a tool…")),
+            : uiText("Waiting for a tool…"),
     };
   }
   if (input.running && agentCount)

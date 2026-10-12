@@ -231,6 +231,12 @@ describe("MCP settings", () => {
     await expect
       .element(page.getByRole("switch", { name: "Enable desktop control" }))
       .not.toBeInTheDocument();
+    await expect
+      .element(page.getByRole("switch", { name: "Enable local desktop control" }))
+      .not.toBeInTheDocument();
+    await expect
+      .element(page.getByText("Local desktop control", { exact: true }))
+      .not.toBeInTheDocument();
   });
 
   it("keeps installation unavailable for primary browser sessions", async () => {

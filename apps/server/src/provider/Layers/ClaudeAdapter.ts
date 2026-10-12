@@ -9,12 +9,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import { constants as fsConstants, lstatSync, realpathSync, unlinkSync } from "node:fs";
 import { lstat, open, opendir } from "node:fs/promises";
-
-import { NativeDesktopPrivacy } from "@cafecode/shared/nativeControl";
-import {
-  readNativeControlSessionBroker,
-  type NativeControlSessionBinding,
-} from "../../nativeControl/sessionRuntime.ts";
 import {
   deleteSession,
   forkSession,
@@ -42,6 +36,7 @@ import {
   type SessionStoreEntry,
   type SessionMessage,
 } from "@anthropic-ai/claude-agent-sdk";
+import { ArchivedToolPayloadRedactor } from "../archivedToolPrivacy.ts";
 import { parseCliArgs } from "@cafecode/shared/cliArgs";
 import { CLAUDE_RESPONSE_LIMIT_MESSAGE } from "@cafecode/shared/claudeResponseLimits";
 import { sanitizeClaudeThinkingDiagnostics } from "../claudeThinkingDiagnostics.ts";
@@ -665,8 +660,7 @@ interface ClaudeSessionContext {
     | undefined;
   /** Exact query-owned scheduling authority; never shared with a resumed query. */
   readonly schedulingBinding: SchedulingSessionBinding | undefined;
-  readonly nativeControlBinding?: NativeControlSessionBinding | undefined;
-  readonly nativeDesktopPrivacy?: NativeDesktopPrivacy | undefined;
+  readonly archivedToolPrivacy?: ArchivedToolPayloadRedactor | undefined;
   readonly runFork: RuntimeFork;
   streamFiber: Fiber.Fiber<void, Error> | undefined;
   readonly startedAt: string;
@@ -5637,7 +5631,6 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     result?: SDKResultMessage,
     options?: { readonly segmentAlreadyFinalized?: boolean },
   ) {
-    yield* Effect.promise(() => context.nativeControlBinding?.endTurn() ?? Promise.resolve());
     const resultContextWindow = maxClaudeContextWindowFromModelUsage(result?.modelUsage);
     const totalReasoningOutputTokens = totalClaudeThinkingTokensFromModelUsage(result?.modelUsage);
     const effectiveContextWindow =
@@ -8567,7 +8560,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     // event and transcript projection. Even rejected/foreign/subagent reports
     // must not bypass privacy simply because they cannot update the metadata.
     const stripped = stripClaudeUsageReport(incomingMessage);
-    const message = context.nativeDesktopPrivacy?.redact(stripped.message) ?? stripped.message;
+    const message = context.archivedToolPrivacy?.redact(stripped.message) ?? stripped.message;
     const primaryPresentationAdmitted = isCurrentClaudePublicSummaryMessage(context, message);
     const publicSummaryAdmitted =
       primaryPresentationAdmitted && context.turnState?.publicSummaryFallbackDisabled !== true;
@@ -8945,9 +8938,6 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     yield* Effect.promise(() => context.schedulingBinding?.dispose() ?? Promise.resolve()).pipe(
       Effect.catchCause(() => Effect.logWarning("Claude scheduling cleanup remains pending.")),
     );
-    yield* Effect.promise(() => context.nativeControlBinding?.dispose() ?? Promise.resolve()).pipe(
-      Effect.catchCause(() => Effect.logWarning("Claude desktop cleanup remains pending.")),
-    );
     if (hadQuotaReport) {
       // The coalesced publisher is stopped-fenced; explicitly invalidate this
       // revoked level without waiting for provider close/exit acknowledgement.
@@ -9089,7 +9079,6 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
   };
 
   const startSession: ClaudeAdapterShape["startSession"] = Effect.fn("startSession")((input) => {
-    let nativeControlBinding: NativeControlSessionBinding | undefined;
     let schedulingBinding: SchedulingSessionBinding | undefined;
     let startedQuery: ClaudeQueryRuntime | undefined;
     let startedContext: ClaudeSessionContext | undefined;
@@ -9792,30 +9781,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
           }),
         );
       }
-
-      const nativeBroker = readNativeControlSessionBroker();
-      if (nativeBroker)
-        yield* Effect.uninterruptible(
-          Effect.tryPromise({
-            try: async () => {
-              nativeControlBinding = await nativeBroker.bind({
-                threadId,
-                providerInstanceId: boundInstanceId,
-                provider: "claudeAgent",
-              });
-              await nativeControlBinding?.activate();
-            },
-            catch: () =>
-              new ProviderAdapterProcessError({
-                provider: PROVIDER,
-                threadId,
-                detail: "Failed to prepare local desktop tools.",
-              }),
-          }),
-        );
-      const providerMcpBindings = [schedulingBinding, nativeControlBinding].filter(
-        (binding) => binding !== undefined,
-      );
+      const providerMcpBindings = [schedulingBinding].filter((binding) => binding !== undefined);
       const queryOptions: ClaudeQueryOptions = {
         ...(input.cwd ? { cwd: input.cwd } : {}),
         ...(apiModelId ? { model: apiModelId } : {}),
@@ -10050,8 +10016,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         quotaReportPublishPending: false,
         pendingCommandCatalog: undefined,
         schedulingBinding,
-        nativeControlBinding,
-        nativeDesktopPrivacy: new NativeDesktopPrivacy(),
+        archivedToolPrivacy: new ArchivedToolPayloadRedactor(),
         runFork,
         streamFiber: undefined,
         startedAt,
@@ -10202,9 +10167,6 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
             Effect.catchCause(() =>
               Effect.logWarning("Claude scheduling cleanup remains pending."),
             ),
-          );
-          yield* Effect.promise(() => nativeControlBinding?.dispose() ?? Promise.resolve()).pipe(
-            Effect.catchCause(() => Effect.logWarning("Claude desktop cleanup remains pending.")),
           );
           if (startedContext) {
             yield* stopSessionInternal(startedContext, { emitExitEvent: false });
@@ -10681,7 +10643,6 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     });
 
     context.promptLifecycleByUuid.set(turnId, "submitted");
-    yield* Effect.promise(() => context.nativeControlBinding?.beginTurn() ?? Promise.resolve());
     yield* Queue.offer(context.promptQueue, {
       type: "message",
       message,
@@ -10719,11 +10680,10 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
   const interruptTurn: ClaudeAdapterShape["interruptTurn"] = Effect.fn("interruptTurn")(
     function* (threadId, _turnId) {
       const context = yield* requireSession(threadId);
-      const desktopCleanup = context.nativeControlBinding?.endTurn().catch(() => undefined);
       const receipt = yield* Effect.tryPromise({
         try: () => context.query.interrupt(),
         catch: (cause) => toRequestError(threadId, "turn/interrupt", cause),
-      }).pipe(Effect.ensuring(Effect.promise(() => desktopCleanup ?? Promise.resolve())));
+      });
 
       // Claude Code 2.1.205+ returns UUIDs for queued inputs that survive an
       // interrupt. Cancel only UUIDs Cafe submitted: the receipt can include

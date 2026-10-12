@@ -26,9 +26,7 @@ import {
   providerDiagnosticWorkLogLabel,
   type ProviderDiagnosticWorkLogRecord,
 } from "./providerDiagnostic";
-import { readDesktopObservationItem } from "@cafecode/shared/desktopObservation";
 import { isRoutineProviderWorkLogActivity } from "@cafecode/shared/providerWorkLog";
-import { readComputerUsePresentation } from "./components/chat/computerUsePresentation";
 import { readTurnConfiguration, presentTurnConfiguration } from "./turnConfiguration";
 import {
   readClaudeCommandInspection,
@@ -97,8 +95,6 @@ export interface WorkLogEntry {
   displayToolTitle?: string;
   itemType?: ToolLifecycleItemType;
   requestKind?: PendingApproval["requestKind"];
-  desktopObservation?: NonNullable<ReturnType<typeof readDesktopObservationItem>>;
-  computerUse?: boolean;
   /** Explicit bounded public presentation, never arbitrary native payloads. */
   publicSummary?: ClaudePublicSummary;
   commandInspection?: ClaudeCommandInspection;
@@ -1076,10 +1072,7 @@ function toDerivedWorkLogEntry(
     activity.payload && typeof activity.payload === "object"
       ? (activity.payload as Record<string, unknown>)
       : null;
-  const computerUse = readComputerUsePresentation(activity);
-  const commandPreview = computerUse
-    ? { command: null, rawCommand: null }
-    : extractToolCommand(payload);
+  const commandPreview = extractToolCommand(payload);
   const changedFiles = extractChangedFiles(payload);
   const compaction = isContextCompactionActivity(activity);
   // Native titles are often identical at start and completion. The tool row
@@ -1102,8 +1095,7 @@ function toDerivedWorkLogEntry(
       ? payload.detail
       : null;
   const taskLabel = taskSummary || taskDetailAsLabel;
-  const displayLabel =
-    computerUse?.displayLabel ?? (!taskLabel ? cafeWorkLogDisplayLabel(activity) : undefined);
+  const displayLabel = !taskLabel ? cafeWorkLogDisplayLabel(activity) : undefined;
   const detail = isTaskActivity
     ? !taskDetailAsLabel &&
       payload &&
@@ -1119,7 +1111,7 @@ function toDerivedWorkLogEntry(
     id: activity.id,
     turnId: activity.turnId,
     createdAt: activity.createdAt,
-    label: computerUse?.label ?? taskLabel ?? activity.summary,
+    label: taskLabel ?? activity.summary,
     ...(displayLabel !== undefined ? { displayLabel } : {}),
     tone:
       activity.kind === "task.progress"
@@ -1172,9 +1164,7 @@ function toDerivedWorkLogEntry(
   }
   const itemType = extractWorkLogItemType(payload);
   const requestKind = extractWorkLogRequestKind(payload);
-  const observation = readDesktopObservationItem(asRecord(payload?.data)?.item);
-  if (observation) entry.desktopObservation = observation;
-  if (detail && !turnConfiguration && !computerUse && !publicSummary) {
+  if (detail && !turnConfiguration && !publicSummary) {
     entry.detail = detail;
   }
   if (commandPreview.command) {
@@ -1186,13 +1176,7 @@ function toDerivedWorkLogEntry(
   if (changedFiles.length > 0) {
     entry.changedFiles = changedFiles;
   }
-  if (computerUse) {
-    entry.computerUse = true;
-    entry.toolTitle = "Computer use";
-    entry.displayToolTitle = uiText("Computer use");
-  } else if (title) {
-    entry.toolTitle = title;
-  }
+  if (title) entry.toolTitle = title;
   if (itemType) {
     entry.itemType = itemType;
   }

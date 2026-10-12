@@ -83,7 +83,7 @@ import {
   canonicalizeCodexSubagentDetail,
   makeCodexAdapter,
   makeCodexNativeRetryTracker,
-  redactDesktopToolEvent,
+  redactArchivedToolEvent,
   type CodexAdapterLiveOptions,
 } from "./CodexAdapter.ts";
 import {
@@ -91,8 +91,6 @@ import {
   type SchedulingSessionBinding,
   type SchedulingSessionBroker,
 } from "../../scheduledFollowups/sessionRuntime.ts";
-import { installNativeControlSessionBroker } from "../../nativeControl/sessionRuntime.ts";
-import { CODEX_HISTORY_DIAGNOSIS_UNCERTAIN_MESSAGE } from "../codexHistorySafety.ts";
 const decodeCodexSettings = Schema.decodeSync(CodexSettings);
 const decodeMessageId = Schema.decodeUnknownSync(MessageId);
 const decodeNativeNotification = Schema.decodeUnknownSync(EffectCodexSchema.ServerNotification);
@@ -8980,180 +8978,11 @@ it.each(["cafe-desktop", "cafe-native-abcdefghijklmnopqrstuv"])(
         textDelta: "private text",
         message: "private message",
       };
-      const redacted = redactDesktopToolEvent(event);
+      const redacted = redactArchivedToolEvent(event);
       assert.doesNotMatch(JSON.stringify(redacted), /private/);
       assert.match(JSON.stringify(redacted), new RegExp(server));
-      if (server === "cafe-desktop")
-        assert.match(JSON.stringify(redacted), new RegExp(reference.id));
-      else assert.doesNotMatch(JSON.stringify(redacted), new RegExp(reference.id));
+      assert.doesNotMatch(JSON.stringify(redacted), new RegExp(reference.id));
       assert.equal(redacted.itemId, event.itemId);
     }
   },
-);
-
-it.effect(
-  "attaches native desktop authority beside scheduling and revokes it before interrupt retirement",
-  () =>
-    schedulingCase(({ createAdapter }) =>
-      Effect.gen(function* () {
-        const lifecycle: string[] = [];
-        const name = "cafe-native-abcdefghijklmnopqrstuv";
-        const launch = {
-          command: process.execPath,
-          args: ["synthetic native bridge.mjs", "synthetic private connection.json"],
-          env: { ELECTRON_RUN_AS_NODE: "1" },
-        };
-        let disposed = false;
-        const uninstall = installNativeControlSessionBroker({
-          bind: async (identity) => {
-            assert.equal(identity.provider, "codex");
-            lifecycle.push("bound");
-            return {
-              name,
-              launch,
-              activate: async () => {
-                lifecycle.push("active");
-              },
-              beginTurn: async () => {
-                lifecycle.push("begin");
-              },
-              endTurn: async () => {
-                lifecycle.push("end");
-              },
-              dispose: async () => {
-                if (!disposed) lifecycle.push("disposed");
-                disposed = true;
-              },
-            };
-          },
-        });
-        yield* Effect.addFinalizer(() => Effect.sync(uninstall));
-        const factory = makeRuntimeFactory();
-        const adapter = yield* createAdapter(ProviderInstanceId.make("codex"), factory.factory);
-        const threadId = asThreadId("native-control-fixture");
-        yield* adapter.startSession({ threadId, runtimeMode: "approval-required" });
-        const runtime = factory.lastRuntime!;
-        assert.deepEqual(runtime.options.nativeControlMcp?.launch, launch);
-        assert.ok(runtime.options.schedulingMcp);
-        assert.equal(runtime.options.runtimeMode, "approval-required");
-        assert.deepEqual(lifecycle, ["bound", "active"]);
-        yield* adapter.sendTurn({
-          threadId,
-          input: "Synthetic provider prompt; no live provider or desktop",
-        });
-        assert.ok(lifecycle.includes("begin"));
-        runtime.interruptTurnImpl.mockImplementation(async () => {
-          assert.equal(lifecycle.at(-1), "end");
-        });
-        runtime.closeImpl.mockImplementation(async () => {
-          assert.equal(disposed, true);
-        });
-        yield* adapter.interruptTurn(threadId);
-        assert.deepEqual(lifecycle, ["bound", "active", "begin", "end", "disposed"]);
-      }),
-    ),
-);
-
-it.effect(
-  "keeps accepted native-control turn authority through an uncertain history diagnosis warning",
-  () =>
-    schedulingCase(({ createAdapter }) =>
-      Effect.gen(function* () {
-        const lifecycle: string[] = [];
-        const threadId = asThreadId("native-control-history-diagnosis");
-        const instanceId = ProviderInstanceId.make("codex-history-diagnosis");
-        const uninstall = installNativeControlSessionBroker({
-          bind: async (identity) => {
-            assert.deepEqual(identity, {
-              threadId,
-              providerInstanceId: instanceId,
-              provider: "codex",
-            });
-            lifecycle.push("bound");
-            return {
-              name: "cafe-native-abcdefghijklmnopqrstuv",
-              launch: {
-                command: process.execPath,
-                args: ["synthetic native bridge.mjs", "synthetic private connection.json"],
-                env: { ELECTRON_RUN_AS_NODE: "1" },
-              },
-              activate: async () => {
-                lifecycle.push("active");
-              },
-              beginTurn: async () => {
-                lifecycle.push("begin");
-              },
-              endTurn: async () => {
-                lifecycle.push("end");
-              },
-              dispose: async () => {
-                lifecycle.push("disposed");
-              },
-            };
-          },
-        });
-        yield* Effect.addFinalizer(() => Effect.sync(uninstall));
-        const factory = makeRuntimeFactory();
-        const adapter = yield* createAdapter(instanceId, factory.factory);
-        yield* adapter.startSession({ threadId, runtimeMode: "approval-required" });
-        const runtime = factory.lastRuntime!;
-        const accepted = yield* adapter.sendTurn({
-          threadId,
-          input: "Synthetic owner-authorized prompt; no live provider or desktop",
-        });
-        assert.equal(accepted.turnId, asTurnId("turn-1"));
-        assert.deepEqual(lifecycle, ["bound", "active", "begin"]);
-
-        // The accepted native turn still owns its desktop lease while history
-        // diagnosis is uncertain. A warning is observable evidence, never an
-        // acknowledged end-turn or permission to replace the provider runtime.
-        const warningRead = yield* Stream.runHead(adapter.streamEvents).pipe(Effect.forkChild);
-        yield* runtime.emit({
-          id: asEventId("native-control-history-warning"),
-          kind: "notification",
-          provider: ProviderDriverKind.make("codex"),
-          threadId,
-          turnId: accepted.turnId,
-          createdAt: "2026-10-07T00:00:00.000Z",
-          method: "warning",
-          message: CODEX_HISTORY_DIAGNOSIS_UNCERTAIN_MESSAGE,
-          payload: { message: CODEX_HISTORY_DIAGNOSIS_UNCERTAIN_MESSAGE },
-        });
-        const warning = yield* Fiber.join(warningRead);
-        assert.ok(Option.isSome(warning));
-        assert.equal(warning.value.type, "runtime.warning");
-        assert.equal(warning.value.payload.message, CODEX_HISTORY_DIAGNOSIS_UNCERTAIN_MESSAGE);
-        assert.deepEqual(lifecycle, ["bound", "active", "begin"]);
-        assert.equal(factory.runtimes.length, 1);
-        assert.equal(runtime.sendTurnImpl.mock.calls.length, 1);
-        assert.equal(runtime.closeImpl.mock.calls.length, 0);
-
-        const completionRead = yield* Stream.runHead(adapter.streamEvents).pipe(Effect.forkChild);
-        yield* runtime.emit({
-          id: asEventId("native-control-history-definitive-completion"),
-          kind: "notification",
-          provider: ProviderDriverKind.make("codex"),
-          threadId,
-          turnId: accepted.turnId,
-          createdAt: "2026-10-07T00:00:01.000Z",
-          method: "turn/completed",
-          payload: {
-            threadId: "provider-thread-1",
-            turn: {
-              id: accepted.turnId,
-              items: [],
-              itemsView: "notLoaded",
-              status: "completed",
-              error: null,
-            },
-          },
-        });
-        const completion = yield* Fiber.join(completionRead);
-        assert.ok(Option.isSome(completion));
-        assert.equal(completion.value.type, "turn.completed");
-        assert.deepEqual(lifecycle, ["bound", "active", "begin", "end"]);
-        assert.equal(runtime.sendTurnImpl.mock.calls.length, 1);
-        assert.equal(runtime.closeImpl.mock.calls.length, 0);
-      }),
-    ),
 );

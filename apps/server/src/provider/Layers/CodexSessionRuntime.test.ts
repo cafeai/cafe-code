@@ -3115,42 +3115,6 @@ describe("Codex notification emission timestamps", () => {
 });
 
 describe("buildCodexAppServerArgs", () => {
-  it("adds the private native catalog alongside scheduling without changing provider permission policy", () => {
-    const launch = {
-      command: process.execPath,
-      args: ["/synthetic/bridge with spaces.mjs", "/synthetic/private connection.json"],
-      env: { ELECTRON_RUN_AS_NODE: "1" },
-    };
-    const name = "cafe-native-abcdefghijklmnopqrstuv";
-    const baseline = buildCodexAppServerArgs({
-      schedulingMcp: { name: "cafe-scheduling", launch },
-    });
-    const args = buildCodexAppServerArgs({
-      schedulingMcp: { name: "cafe-scheduling", launch },
-      nativeControlMcp: { name, launch },
-    });
-    const config = args.find((value) => value.startsWith(`mcp_servers.${name}=`));
-    assert.ok(config);
-    assert.equal(args[args.indexOf(config) - 1], "-c");
-    assert.deepEqual(JSON.parse(JSON.stringify(Toml.parse(config))), {
-      mcp_servers: {
-        [name]: {
-          ...launch,
-          enabled: true,
-          required: true,
-          startup_timeout_sec: 15,
-          tool_timeout_sec: 60,
-        },
-      },
-    });
-    assert.deepEqual(
-      args.filter(
-        (_, index) => index !== args.indexOf(config) && index !== args.indexOf(config) - 1,
-      ),
-      baseline,
-    );
-    assert.doesNotMatch(config, /approval|sandbox|bearer|token|threadId/u);
-  });
   it("attaches a required isolated scheduling catalog without changing permissions or other MCPs", () => {
     const schedulingMcp = {
       name: "cafe-fixture_generation",

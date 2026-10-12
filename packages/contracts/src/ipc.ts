@@ -59,7 +59,6 @@ import type {
 } from "./server.ts";
 import type { ServerRemoveKeybindingInput, ServerUpsertKeybindingInput } from "./server.ts";
 import * as Schema from "effect/Schema";
-import { ThreadId } from "./baseSchemas.ts";
 import type {
   ClientOrchestrationCommand,
   OrchestrationShellSnapshot,
@@ -411,113 +410,11 @@ export interface GlobalDictationActionResult {
   readonly reason?: string;
 }
 
-export const NativeControlActivitySchema = Schema.Struct({
-  version: Schema.Literal(1),
-  generation: Schema.String,
-  sequence: Schema.Number,
-  episode: Schema.NullOr(Schema.String),
-  threadId: Schema.NullOr(ThreadId),
-  provider: Schema.NullOr(Schema.Literals(["codex", "claudeAgent", "human"])),
-  providerInstanceId: Schema.NullOr(Schema.String),
-  phase: Schema.Literals([
-    "inactive",
-    "idle",
-    "reading-controls",
-    "capturing",
-    "controlling",
-    "stopping",
-  ]),
-  inputPolicy: Schema.Literals(["background-only", "foreground-allowed"]),
-  inputRoute: Schema.Literals(["unknown", "accessibility", "pid", "hid", "browser"]),
-  usingSystemPointer: Schema.Boolean,
-  target: Schema.NullOr(
-    Schema.Struct({
-      scope: Schema.Literals(["selection", "window", "display", "browser"]),
-      app: Schema.String,
-      title: Schema.String,
-      pid: Schema.optionalKey(Schema.Number),
-      windowId: Schema.optionalKey(Schema.Number),
-      visible: Schema.optionalKey(Schema.Boolean),
-      visibilityReason: Schema.optionalKey(Schema.Literals(["visible", "occluded", "off-screen"])),
-      bounds: Schema.optionalKey(
-        Schema.Struct({
-          x: Schema.Number,
-          y: Schema.Number,
-          width: Schema.Number,
-          height: Schema.Number,
-        }),
-      ),
-    }),
-  ),
-  lastCaptureAt: Schema.NullOr(Schema.Number),
-});
-export type NativeControlActivity = typeof NativeControlActivitySchema.Type;
-
-export const NativeControlStateSchema = Schema.Struct({
-  platform: Schema.String,
-  enabled: Schema.Boolean,
-  phase: Schema.Literals(["off", "starting", "ready", "stopping", "error"]),
-  driverVersion: Schema.String,
-  runtimeAvailable: Schema.Boolean,
-  detail: Schema.String,
-  diagnostics: Schema.optionalKey(
-    Schema.Struct({
-      operationTimeoutMs: Schema.Number,
-      activeOperationCount: Schema.Number,
-      interruptedOperationCount: Schema.Number,
-      timedOutOperationCount: Schema.Number,
-      lastOperationDurationMs: Schema.Number,
-    }),
-  ),
-});
-export type NativeControlState = typeof NativeControlStateSchema.Type;
-export const NativeControlChatStateSchema = Schema.Struct({
-  threadId: ThreadId,
-  enabled: Schema.Boolean,
-  revision: Schema.Number,
-  control: NativeControlStateSchema,
-});
-export type NativeControlChatState = typeof NativeControlChatStateSchema.Type;
-export const NativeControlPermissionsStateSchema = Schema.Struct({
-  platform: Schema.String,
-  accessibility: Schema.Literals(["granted", "missing", "unknown"]),
-  screenRecording: Schema.Literals([
-    "not-determined",
-    "granted",
-    "denied",
-    "restricted",
-    "unknown",
-  ]),
-});
-export type NativeControlPermissionsState = typeof NativeControlPermissionsStateSchema.Type;
-export const NativeControlResultSchema = Schema.Struct({
-  content: Schema.Array(Schema.Record(Schema.String, Schema.Unknown)),
-  isError: Schema.optionalKey(Schema.Boolean),
-  structuredContent: Schema.optionalKey(Schema.Record(Schema.String, Schema.Unknown)),
-});
-export type NativeControlResult = typeof NativeControlResultSchema.Type;
-
 export interface DesktopBridge {
-  getNativeControlActivity?: () => Promise<NativeControlActivity>;
-  onNativeControlActivity?: (listener: (activity: NativeControlActivity) => void) => () => void;
-  stopNativeControlActivity?: (episode: string) => Promise<void>;
-  setNativeControlInputPolicy?: (policy: "background-only" | "foreground-allowed") => Promise<void>;
   /** Main-owned finite presentation data, not a settings-write capability. */
   readonly systemUiLocale?: "en" | "ja" | "ko";
   readonly initialUiLocale?: "en" | "ja" | "ko";
   readonly onUiLocaleChanged?: (listener: (locale: "en" | "ja" | "ko") => void) => () => void;
-  getNativeControlState?: () => Promise<NativeControlState>;
-  setNativeControlEnabled?: (enabled: boolean) => Promise<NativeControlState>;
-  getNativeControlChatState?: (threadId: ThreadId) => Promise<NativeControlChatState>;
-  setNativeControlChatEnabled?: (input: {
-    threadId: ThreadId;
-    enabled: boolean;
-  }) => Promise<NativeControlChatState>;
-  onNativeControlChanged?: (listener: () => void) => () => void;
-  getNativeControlPermissions?: () => Promise<NativeControlPermissionsState>;
-  requestNativeControlPermissions?: () => Promise<NativeControlPermissionsState>;
-  getNativeControlDiagnostics?: () => Promise<NativeControlResult>;
-  captureNativeControlPreview?: () => Promise<NativeControlResult>;
   getAppBranding: () => DesktopAppBranding | null;
   getLocalEnvironmentBootstrap: () => DesktopEnvironmentBootstrap | null;
   getDebugEndpointState: () => Promise<DesktopDebugEndpointState>;

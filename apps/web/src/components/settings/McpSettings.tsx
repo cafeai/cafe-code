@@ -29,7 +29,6 @@ import { Spinner } from "../ui/spinner";
 import { Switch } from "../ui/switch";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 import { SettingsPageContainer, SettingsRow, SettingsSection } from "./settingsLayout";
-import { NativeControlSettings } from "./NativeControlSettings";
 
 type McpFeedbackCode =
   | "toggle-failed"
@@ -213,7 +212,6 @@ export function McpSettings() {
           }
         />
       </SettingsSection>
-      {local && !remote && window.desktopBridge?.getNativeControlState && <NativeControlSettings />}
       <SettingsSection
         title={uiText("Cafe Code MCP", undefined, undefined, uiLocale)}
         icon={<PlugIcon className="size-3.5" />}

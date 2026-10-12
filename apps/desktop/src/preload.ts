@@ -138,49 +138,6 @@ if (process.isMainFrame === true) {
       };
     },
     getSourceUpdateState: () => ipcRenderer.invoke(IpcChannels.SOURCE_UPDATE_GET_STATE_CHANNEL),
-    ...(process.platform === "darwin"
-      ? {
-          getNativeControlState: () => ipcRenderer.invoke(IpcChannels.NATIVE_CONTROL_STATE_CHANNEL),
-          getNativeControlActivity: () =>
-            ipcRenderer.invoke(IpcChannels.NATIVE_CONTROL_ACTIVITY_GET_CHANNEL),
-          stopNativeControlActivity: (episode) =>
-            ipcRenderer.invoke(IpcChannels.NATIVE_CONTROL_ACTIVITY_STOP_CHANNEL, episode),
-          setNativeControlInputPolicy: (policy) =>
-            ipcRenderer.invoke(IpcChannels.NATIVE_CONTROL_INPUT_POLICY_CHANNEL, policy),
-          onNativeControlActivity: (listener) => {
-            const wrapped = (
-              _event: Electron.IpcRendererEvent,
-              activity: Parameters<typeof listener>[0],
-            ) => listener(activity);
-            ipcRenderer.on(IpcChannels.NATIVE_CONTROL_ACTIVITY_CHANNEL, wrapped);
-            return () =>
-              ipcRenderer.removeListener(IpcChannels.NATIVE_CONTROL_ACTIVITY_CHANNEL, wrapped);
-          },
-          setNativeControlEnabled: (enabled: boolean) =>
-            ipcRenderer.invoke(IpcChannels.NATIVE_CONTROL_ENABLE_CHANNEL, enabled),
-          getNativeControlDiagnostics: () =>
-            ipcRenderer.invoke(IpcChannels.NATIVE_CONTROL_DIAGNOSTICS_CHANNEL),
-          captureNativeControlPreview: () =>
-            ipcRenderer.invoke(IpcChannels.NATIVE_CONTROL_PREVIEW_CHANNEL),
-          getNativeControlPermissions: () =>
-            ipcRenderer.invoke(IpcChannels.NATIVE_CONTROL_PERMISSIONS_CHANNEL),
-          requestNativeControlPermissions: () =>
-            ipcRenderer.invoke(IpcChannels.NATIVE_CONTROL_REQUEST_PERMISSIONS_CHANNEL),
-          getNativeControlChatState: (threadId) =>
-            ipcRenderer.invoke(IpcChannels.NATIVE_CONTROL_CHAT_STATE_CHANNEL, threadId),
-          setNativeControlChatEnabled: (input) =>
-            ipcRenderer.invoke(IpcChannels.NATIVE_CONTROL_CHAT_ENABLE_CHANNEL, input),
-          onNativeControlChanged: (listener) => {
-            const wrappedListener = () => listener();
-            ipcRenderer.on(IpcChannels.NATIVE_CONTROL_CHANGED_CHANNEL, wrappedListener);
-            return () =>
-              ipcRenderer.removeListener(
-                IpcChannels.NATIVE_CONTROL_CHANGED_CHANNEL,
-                wrappedListener,
-              );
-          },
-        }
-      : {}),
     checkSourceUpdate: () => ipcRenderer.invoke(IpcChannels.SOURCE_UPDATE_CHECK_CHANNEL),
     onSourceUpdateState: (listener) => {
       const wrappedListener = (_event: Electron.IpcRendererEvent, state: unknown) => {

@@ -18,10 +18,6 @@ import {
 import { ModelSelection } from "./orchestration.ts";
 import { ProviderInstanceConfig, ProviderInstanceId } from "./providerInstance.ts";
 import { EditorId } from "./editor.ts";
-import {
-  DesktopObservationRetention,
-  DEFAULT_DESKTOP_OBSERVATION_RETENTION,
-} from "./desktopObservation.ts";
 
 // ── Client Settings (local-only) ───────────────────────────────
 
@@ -929,9 +925,6 @@ export const DEFAULT_AUTOMATIC_GIT_FETCH_INTERVAL = Duration.minutes(5);
 export const ServerSettings = Schema.Struct({
   // Cafe management MCP only; preserve its existing endpoint on upgrade.
   mcpEnabled: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(true))),
-  desktopObservationRetention: DesktopObservationRetention.pipe(
-    Schema.withDecodingDefault(Effect.succeed(DEFAULT_DESKTOP_OBSERVATION_RETENTION)),
-  ),
   enableAssistantStreaming: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(true))),
   automaticGitFetchInterval: Schema.DurationFromMillis.pipe(
     Schema.withDecodingDefault(
@@ -1056,7 +1049,6 @@ const OpenCodeSettingsPatch = Schema.Struct({
 
 export const ServerSettingsPatch = Schema.Struct({
   mcpEnabled: Schema.optionalKey(Schema.Boolean),
-  desktopObservationRetention: Schema.optionalKey(DesktopObservationRetention),
   // Server settings
   enableAssistantStreaming: Schema.optionalKey(Schema.Boolean),
   automaticGitFetchInterval: Schema.optionalKey(Schema.DurationFromMillis),

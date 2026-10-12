@@ -19,7 +19,6 @@ import { Button } from "../ui/button";
 import { IndividualTaskControls } from "./SubagentTaskControls";
 import { deriveForegroundTools } from "./chatActivity";
 import { deriveWorkLogEntries } from "../../session-logic";
-import { readComputerUsePresentation } from "./computerUsePresentation";
 import { deriveLiveWorkObservations, isLiveWorkRuntimeCurrent } from "@cafecode/shared/liveWork";
 import { WorkflowTaskCard } from "./WorkflowTasks";
 import {
@@ -128,15 +127,11 @@ export function deriveActiveProviderTasks(context: ProviderTasksContext): Active
     const payload = activity.payload as Record<string, unknown>;
     const key = JSON.stringify(["tool", activity.turnId, payload.itemId]);
     if (current.has(key) || !activity.turnId) continue;
-    const computerUse = readComputerUsePresentation(activity);
     const entry = deriveWorkLogEntries([{ ...activity, kind: "tool.updated" }], activity.turnId)[0];
     current.set(key, {
       key,
       turnId: activity.turnId,
-      ...readProviderTaskPresentation(
-        activity,
-        computerUse?.active ?? entry?.command ?? entry?.detail ?? entry?.label,
-      ),
+      ...readProviderTaskPresentation(activity, entry?.command ?? entry?.detail ?? entry?.label),
     });
   }
   return [...current.values()];

@@ -1,19 +1,5 @@
 export const PICK_FOLDER_CHANNEL = "desktop:pick-folder";
-export const NATIVE_CONTROL_STATE_CHANNEL = "desktop:native-control-state";
-export const NATIVE_CONTROL_ENABLE_CHANNEL = "desktop:native-control-enable";
-export const NATIVE_CONTROL_DIAGNOSTICS_CHANNEL = "desktop:native-control-diagnostics";
-export const NATIVE_CONTROL_PREVIEW_CHANNEL = "desktop:native-control-preview";
-export const NATIVE_CONTROL_CHAT_STATE_CHANNEL = "desktop:native-control-chat-state";
-export const NATIVE_CONTROL_CHAT_ENABLE_CHANNEL = "desktop:native-control-chat-enable";
-export const NATIVE_CONTROL_CHANGED_CHANNEL = "desktop:native-control-changed";
-export const NATIVE_CONTROL_PERMISSIONS_CHANNEL = "desktop:native-control-permissions";
-export const NATIVE_CONTROL_REQUEST_PERMISSIONS_CHANNEL =
-  "desktop:native-control-request-permissions";
 export const CONFIRM_CHANNEL = "desktop:confirm";
-export const NATIVE_CONTROL_ACTIVITY_CHANNEL = "desktop:native-control-activity";
-export const NATIVE_CONTROL_ACTIVITY_GET_CHANNEL = "desktop:native-control-activity-get";
-export const NATIVE_CONTROL_ACTIVITY_STOP_CHANNEL = "desktop:native-control-activity-stop";
-export const NATIVE_CONTROL_INPUT_POLICY_CHANNEL = "desktop:native-control-input-policy";
 export const SET_THEME_CHANNEL = "desktop:set-theme";
 export const CONTEXT_MENU_CHANNEL = "desktop:context-menu";
 export const OPEN_EXTERNAL_CHANNEL = "desktop:open-external";

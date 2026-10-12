@@ -14,7 +14,7 @@ In the local desktop app, **Install** registers Cafe MCP for Codex, Claude Code,
 
 Cafe adds no per-tool management approval prompts and leaves each provider's permission settings intact. Registration provides Cafe's existing project, conversation, provider, and settings tools. Scheduled follow-up proposals still require owner approval in Tasks before execution.
 
-The interim Linux Desktop Control MCP has been removed. Native control is being rebuilt around the pinned, local Cua Driver; no desktop tools are currently registered. General Cafe installations continue to register only `cafe-code`. Saved observation references and private PNG reads from existing conversations are retained. This migration does not delete files, profiles, conversation history or saved screenshots.
+Cafe computer use has been removed, including desktop tools, native runtime, provider-session attachment, permission setup, UI controls and saved-observation HTTP routes. General Cafe installations continue to register only `cafe-code`; session-scoped scheduling remains independent. Historical database migrations and private tool-payload redaction remain for compatibility. Removal does not delete files, profiles, conversation history or saved screenshots.
 
 ## Configuration and credentials
 

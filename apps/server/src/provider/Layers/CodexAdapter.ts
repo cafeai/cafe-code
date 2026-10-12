@@ -1,13 +1,9 @@
-import { isNativeControlServer } from "@cafecode/shared/nativeControl";
-import {
-  readNativeControlSessionBroker,
-  type NativeControlSessionBinding,
-} from "../../nativeControl/sessionRuntime.ts";
+import { isArchivedPrivateToolServer } from "../archivedToolPrivacy.ts";
+
 import {
   readSchedulingSessionBroker,
   type SchedulingSessionBinding,
 } from "../../scheduledFollowups/sessionRuntime.ts";
-import { readDesktopObservationItem } from "@cafecode/shared/desktopObservation";
 // @effect-diagnostics nodeBuiltinImport:off
 /**
  * CodexAdapterLive - Scoped live implementation for the Codex provider adapter.
@@ -492,7 +488,6 @@ export interface CodexAdapterLiveOptions {
 }
 
 interface CodexAdapterSessionContext {
-  readonly nativeControlBinding?: NativeControlSessionBinding | undefined;
   readonly startInput: Parameters<CodexAdapterShape["startSession"]>[0];
   readonly schedulingBinding?: SchedulingSessionBinding | undefined;
   readonly threadId: ThreadId;
@@ -2029,20 +2024,20 @@ function reconcileCodexAuthRecoveryLifecycle(
   ];
 }
 
-export function redactDesktopToolPayload<T>(value: T, depth = 0): T {
-  if (depth > 32) return "[Desktop payload omitted]" as T;
+/** Preserve privacy when old provider history contains retired private MCP tools. */
+export function redactArchivedToolPayload<T>(value: T, depth = 0): T {
+  if (depth > 32) return "[Archived tool payload omitted]" as T;
   if (Array.isArray(value)) {
-    const copy = value.map((v) => redactDesktopToolPayload(v, depth + 1));
+    const copy = value.map((v) => redactArchivedToolPayload(v, depth + 1));
     return (copy.every((v, index) => v === value[index]) ? value : copy) as T;
   }
   const item = readRecordValue(value);
   if (!item) return value;
   if (
     item.type === "mcpToolCall" &&
-    (item.server === "cafe-desktop" ||
-      (typeof item.server === "string" && isNativeControlServer(item.server)))
+    typeof item.server === "string" &&
+    isArchivedPrivateToolServer(item.server)
   ) {
-    const observation = readDesktopObservationItem(item)?.reference;
     return {
       id: item.id,
       type: item.type,
@@ -2051,24 +2046,22 @@ export function redactDesktopToolPayload<T>(value: T, depth = 0): T {
       status: item.status,
       duration: item.duration,
       arguments: {},
-      result: observation
-        ? { content: [], structuredContent: { desktopObservation: observation } }
-        : null,
-      error: item.error ? { message: "Desktop operation failed." } : null,
+      result: null,
+      error: item.error ? { message: "Archived tool failed." } : null,
     } as T;
   }
   let changed = false;
   const copy = { ...item };
   for (const key of ["item", "items", "turn", "turns", "thread"])
     if (key in copy) {
-      copy[key] = redactDesktopToolPayload(copy[key], depth + 1);
+      copy[key] = redactArchivedToolPayload(copy[key], depth + 1);
       changed ||= copy[key] !== item[key];
     }
   return (changed ? copy : value) as T;
 }
 
-export function redactDesktopToolEvent(event: ProviderEvent): ProviderEvent {
-  const payload = redactDesktopToolPayload(event.payload);
+export function redactArchivedToolEvent(event: ProviderEvent): ProviderEvent {
+  const payload = redactArchivedToolPayload(event.payload);
   if (payload === event.payload) return event;
   const { message: _message, textDelta: _textDelta, ...safe } = event;
   return { ...safe, payload };
@@ -5268,11 +5261,6 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
     // Revoke this runtime's exact authority before retiring the native process.
     // A delayed bridge request must never inherit a replacement's generation.
     yield* disposeSchedulingSession(session.schedulingBinding);
-    yield* Effect.promise(() => session.nativeControlBinding?.dispose() ?? Promise.resolve()).pipe(
-      Effect.catchCause(() =>
-        Effect.logWarning("Codex desktop session cleanup remains incomplete."),
-      ),
-    );
     sessions.delete(threadId);
     manualCompactions.delete(threadId);
     yield* Effect.logWarning(diagnosticName, {
@@ -5416,31 +5404,6 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
               disposeSchedulingSession,
             ).pipe(Effect.provideService(Scope.Scope, sessionScope))
           : undefined;
-        const nativeBroker = readNativeControlSessionBroker();
-        const nativeControlBinding = nativeBroker
-          ? yield* Effect.acquireRelease(
-              Effect.tryPromise({
-                try: () =>
-                  nativeBroker.bind({
-                    threadId: input.threadId,
-                    providerInstanceId: boundInstanceId,
-                    provider: "codex",
-                  }),
-                catch: () =>
-                  new ProviderAdapterProcessError({
-                    provider: PROVIDER,
-                    threadId: input.threadId,
-                    detail: "Could not attach local desktop tools.",
-                  }),
-              }),
-              (binding) =>
-                Effect.promise(() => binding?.dispose() ?? Promise.resolve()).pipe(
-                  Effect.catchCause(() =>
-                    Effect.logWarning("Codex desktop session cleanup remains incomplete."),
-                  ),
-                ),
-            ).pipe(Effect.provideService(Scope.Scope, sessionScope))
-          : undefined;
         const currentTransportPolicy = toRuntimeTransportPolicy(yield* Ref.get(transportPolicyRef));
         const runtimeInput: CodexSessionRuntimeOptions = {
           customInstructions: yield* readSystemPromptFileForInjection(
@@ -5456,7 +5419,6 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
                 }),
             ),
           ),
-          ...(nativeControlBinding ? { nativeControlMcp: nativeControlBinding } : {}),
           historySafety: {
             isBlocked: (nativeThreadId) =>
               historySafety
@@ -5591,7 +5553,7 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
                 if (isCodexPrivateMetadataNotification(rawEvent.method)) {
                   return;
                 }
-                const event = redactDesktopToolEvent(rawEvent);
+                const event = redactArchivedToolEvent(rawEvent);
                 // This is an in-memory owner descriptor, not a native read or
                 // retry request. Root-target binding follows the current exact
                 // session cursor; replacement bridges own separate counters.
@@ -5688,28 +5650,12 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
 
                 if (
                   runtimeEvents.some(
-                    (v) => v.threadId === input.threadId && v.type === "turn.started",
-                  )
-                ) {
-                  yield* Effect.promise(
-                    () => nativeControlBinding?.beginTurn() ?? Promise.resolve(),
-                  );
-                }
-                if (
-                  runtimeEvents.some(
                     (v) =>
                       v.threadId === input.threadId &&
                       (v.type === "turn.completed" || v.type === "session.exited"),
                   )
                 ) {
                   manualCompactions.delete(input.threadId);
-                  yield* Effect.promise(
-                    () => nativeControlBinding?.endTurn() ?? Promise.resolve(),
-                  ).pipe(
-                    Effect.catchCause(() =>
-                      Effect.logWarning("Codex desktop turn cleanup remains incomplete."),
-                    ),
-                  );
                 }
                 if (runtimeEvents.length === 0) {
                   const context = bridgeEventLogContext(event, {
@@ -5835,17 +5781,6 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
                   }),
               });
 
-            if (nativeControlBinding)
-              yield* Effect.tryPromise({
-                try: () => nativeControlBinding.activate(),
-                catch: () =>
-                  new ProviderAdapterProcessError({
-                    provider: PROVIDER,
-                    threadId: input.threadId,
-                    detail: "Could not activate local desktop tools.",
-                  }),
-              });
-
             return { runtime, eventFiber, started, activeAuthRecoveryTasksById };
           },
         ).pipe(
@@ -5873,7 +5808,6 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
         );
 
         sessions.set(input.threadId, {
-          nativeControlBinding,
           startInput: input,
           schedulingBinding,
           threadId: input.threadId,
@@ -6045,7 +5979,6 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
       input.modelSelection?.instanceId === boundInstanceId
         ? getModelSelectionStringOptionValue(input.modelSelection, "reasoningEffort")
         : undefined;
-    yield* Effect.promise(() => session.nativeControlBinding?.beginTurn() ?? Promise.resolve());
     return yield* session.runtime
       .sendTurn({
         ...(input.expectedSubagentPolicySession !== undefined
@@ -6088,9 +6021,6 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
             input.codexReview ? "review/start" : "turn/start",
             cause,
           ),
-        ),
-        Effect.tapError(() =>
-          Effect.promise(() => session.nativeControlBinding?.endTurn() ?? Promise.resolve()),
         ),
       );
   });
@@ -6213,10 +6143,7 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
   const interruptTurn: CodexAdapterShape["interruptTurn"] = (threadId, turnId) =>
     Effect.gen(function* () {
       const session = yield* requireSession(threadId);
-      const desktopCleanup = session.nativeControlBinding?.endTurn().catch(() => undefined);
-      yield* session.runtime
-        .interruptTurn(turnId)
-        .pipe(Effect.ensuring(Effect.promise(() => desktopCleanup ?? Promise.resolve())));
+      yield* session.runtime.interruptTurn(turnId);
       // Codex app-server can remain superficially healthy after an interrupt:
       // it may still ACK a later `turn/start` while never delivering the
       // provider-side item stream for that new turn. Upstream Codex persists
@@ -6306,7 +6233,7 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
       ),
       Effect.map((snapshot) => ({
         threadId,
-        turns: redactDesktopToolPayload(snapshot.turns),
+        turns: redactArchivedToolPayload(snapshot.turns),
       })),
     );
 
@@ -6431,7 +6358,7 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
       ),
       Effect.map((snapshot) => ({
         threadId,
-        turns: redactDesktopToolPayload(snapshot.turns),
+        turns: redactArchivedToolPayload(snapshot.turns),
       })),
     );
   };
@@ -6549,11 +6476,6 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
     // not discard the resulting canonical task terminals.
     session.stopped = true;
     yield* disposeSchedulingSession(session.schedulingBinding);
-    yield* Effect.promise(() => session.nativeControlBinding?.dispose() ?? Promise.resolve()).pipe(
-      Effect.catchCause(() =>
-        Effect.logWarning("Codex desktop session cleanup remains incomplete."),
-      ),
-    );
     sessions.delete(session.threadId);
     manualCompactions.delete(session.threadId);
     yield* session.runtime.close.pipe(Effect.ignore);

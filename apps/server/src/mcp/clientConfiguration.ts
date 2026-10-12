@@ -13,8 +13,8 @@ import type { CafeMcpClientId } from "@cafecode/contracts";
 
 import { McpFileError } from "./privateFiles.ts";
 
-// This installer owns only Cafe's management connection. Desktop Control is a
-// separate, session-injected MCP; installing/removing Cafe must never edit it.
+// This installer owns only Cafe's management connection. Installing/removing
+// Cafe must preserve unrelated user-owned MCP registrations.
 export const CAFE_MCP_SERVER_NAME = "cafe-code";
 const BEGIN = "# BEGIN Cafe Code managed MCP";
 const END = "# END Cafe Code managed MCP";

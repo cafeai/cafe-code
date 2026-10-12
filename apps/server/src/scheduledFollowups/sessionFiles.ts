@@ -20,7 +20,6 @@ export async function makeSchedulingSessionFiles(input: {
   readonly bridgeSource: string;
   readonly port: number;
   readonly token: string;
-  readonly audience?: "cafe-scheduling" | "cafe-native-control";
 }): Promise<SchedulingSessionFiles> {
   if (!Number.isInteger(input.port) || input.port < 1 || input.port > 65535) throw unavailable();
   // Read the trusted bundled asset before allocating anything. Missing build
@@ -86,8 +85,8 @@ export async function makeSchedulingSessionFiles(input: {
     const connectionPath = await publish(
       "connection.json",
       JSON.stringify({
-        audience: input.audience ?? "cafe-scheduling",
-        url: `http://127.0.0.1:${input.port}${input.audience === "cafe-native-control" ? "/mcp/native-control" : "/mcp/scheduling"}`,
+        audience: "cafe-scheduling",
+        url: `http://127.0.0.1:${input.port}/mcp/scheduling`,
         token: input.token,
       }),
     );

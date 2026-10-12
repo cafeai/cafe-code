@@ -3,7 +3,6 @@ import { uiText, type UiLocale } from "@cafecode/shared/i18n";
 import { UiMessage } from "~/i18n";
 import { FileAttachmentPill } from "./FileAttachmentPill";
 import { TurnConfigurationWorkEntry } from "./TurnConfigurationWorkEntry";
-import { ComputerUseIcon } from "./ComputerUseIcon";
 import { ClaudeCommandWorkEntry, ClaudeSummaryWorkEntry } from "./ProviderOperationWorkEntry";
 import { ProviderDiagnosticWorkEntry } from "./ProviderDiagnosticWorkEntry";
 import {
@@ -131,7 +130,6 @@ import {
   mergeEarlierWorkLogPages,
   validateEarlierWorkLogPage,
 } from "./EarlierWorkLog.logic";
-import { DesktopObservation } from "./DesktopObservation";
 import { SubagentRosterRow, type SubagentRosterEntry } from "../subagents/SubagentRosterRow";
 import { SubagentDetailView, type SubagentDetailSelection } from "./SubagentDetailView";
 import { ScheduledFollowupConversation } from "./ScheduledFollowupConversation";
@@ -3048,8 +3046,7 @@ function workEntryRawCommand(
   return rawCommand === workEntry.command.trim() ? null : rawCommand;
 }
 
-function workEntryIcon(workEntry: TimelineWorkEntry): LucideIcon | typeof ComputerUseIcon {
-  if (workEntry.computerUse) return ComputerUseIcon;
+function workEntryIcon(workEntry: TimelineWorkEntry): LucideIcon {
   if (workEntry.requestKind === "command") return TerminalIcon;
   if (workEntry.requestKind === "terminal-input") return TerminalIcon;
   if (workEntry.requestKind === "file-read") return EyeIcon;
@@ -3120,7 +3117,7 @@ function toolWorkEntryHeading(workEntry: TimelineWorkEntry): string {
   if (workEntry.itemType === "context_compaction" && workEntry.toolTitle) {
     return workLogDisplayToolTitle(workEntry) ?? workEntry.toolTitle;
   }
-  if (workEntry.computerUse || workEntry.displayLabel) return workLogDisplayLabel(workEntry);
+  if (workEntry.displayLabel) return workLogDisplayLabel(workEntry);
   if (workEntry.displayToolTitle) return workLogDisplayToolTitle(workEntry) ?? "";
   if (!workEntry.toolTitle) {
     return capitalizePhrase(normalizeCompactToolLabel(workEntry.label));
@@ -3156,15 +3153,6 @@ const OrdinaryWorkEntryRow = memo(function OrdinaryWorkEntryRow(props: {
     return <TurnConfigurationWorkEntry configuration={props.workEntry.turnConfiguration} />;
   if (props.workEntry.publicSummary)
     return <ClaudeSummaryWorkEntry summary={props.workEntry.publicSummary} />;
-  if (props.workEntry.desktopObservation && activeThreadId)
-    return (
-      <DesktopObservation
-        entry={props.workEntry}
-        environmentId={activeThreadEnvironmentId}
-        threadId={activeThreadId}
-        timestampFormat={timestampFormat}
-      />
-    );
   return <OrdinaryWorkEntryContent {...props} />;
 });
 
