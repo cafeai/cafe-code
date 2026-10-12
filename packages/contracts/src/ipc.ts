@@ -28,6 +28,23 @@ import type {
 } from "./git.ts";
 import type { FilesystemBrowseInput, FilesystemBrowseResult } from "./filesystem.ts";
 import type { SavePngInput, SavePngResult } from "./imageExport.ts";
+import type { VisualizationDesktopBridge } from "./visualizationHost.ts";
+import type {
+  VisualizationListInput,
+  VisualizationListResult,
+  VisualizationDetailsInput,
+  VisualizationDetailsResult,
+  VisualizationViewerInput,
+  VisualizationViewerTicketResult,
+  VisualizationExportHtmlResult,
+} from "./visualizationApi.ts";
+import type {
+  McpAppPrepareInput,
+  McpAppPrepareResult,
+  McpAppResolveInput,
+  McpAppReply,
+  McpAppConsentDetailsInput,
+} from "./mcpApps.ts";
 import type {
   ProjectSearchEntriesInput,
   ProjectSearchEntriesResult,
@@ -446,7 +463,7 @@ export const NativeControlResultSchema = Schema.Struct({
 });
 export type NativeControlResult = typeof NativeControlResultSchema.Type;
 
-export interface DesktopBridge {
+export interface DesktopBridge extends VisualizationDesktopBridge {
   /** Main-owned finite presentation data, not a settings-write capability. */
   readonly systemUiLocale?: "en" | "ja" | "ko";
   readonly initialUiLocale?: "en" | "ja" | "ko";
@@ -607,6 +624,19 @@ export interface LocalApi {
  * `environmentId` rather than reaching through the local desktop bridge.
  */
 export interface EnvironmentApi {
+  /** App actions retain fresh one-operation consent, separate from provider approvals. */
+  mcpApps?: {
+    prepare: (input: McpAppPrepareInput) => Promise<McpAppPrepareResult>;
+    resolve: (input: McpAppResolveInput) => Promise<McpAppReply>;
+    details: (input: McpAppConsentDetailsInput) => Promise<McpAppReply>;
+  };
+  /** Older backends may omit artifact support; absence never enables HTML execution. */
+  visualizations?: {
+    list: (input: VisualizationListInput) => Promise<VisualizationListResult>;
+    details: (input: VisualizationDetailsInput) => Promise<VisualizationDetailsResult>;
+    viewerTicket: (input: VisualizationViewerInput) => Promise<VisualizationViewerTicketResult>;
+    exportHtml?: (input: VisualizationDetailsInput) => Promise<VisualizationExportHtmlResult>;
+  };
   /** Absent on older backends; never emulate a scheduler in the renderer. */
   scheduledFollowups?: {
     list: (

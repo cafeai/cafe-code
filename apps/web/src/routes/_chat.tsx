@@ -11,6 +11,7 @@ import { useSettings } from "~/hooks/useSettings";
 import { useServerKeybindings } from "~/rpc/serverState";
 import DeskWorkspace from "../components/desk/DeskWorkspace";
 import { ChatPaneRuntimeProvider } from "../chatPaneContext";
+import { VisualizationViewerProvider } from "../components/visualizations/VisualizationViewerProvider";
 
 function ChatRouteGlobalShortcuts() {
   const clearSelection = useThreadSelectionStore((state) => state.clearSelection);
@@ -86,9 +87,11 @@ function ChatRouteGlobalShortcuts() {
 function ChatRouteLayout() {
   return (
     <ChatPaneRuntimeProvider>
-      <ChatRouteGlobalShortcuts />
-      <Outlet />
-      <DeskWorkspace />
+      <VisualizationViewerProvider>
+        <ChatRouteGlobalShortcuts />
+        <Outlet />
+        <DeskWorkspace />
+      </VisualizationViewerProvider>
     </ChatPaneRuntimeProvider>
   );
 }

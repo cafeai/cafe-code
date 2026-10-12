@@ -3,6 +3,18 @@ import {
   SchedulingSessionAuthorizationRequest,
   dispatchSchedulingSessionAuthorization,
 } from "../scheduledFollowups/sessionRuntime.ts";
+import {
+  VISUALIZATION_SESSION_DAEMON_PATH,
+  VisualizationSessionAuthorizationRequest,
+  dispatchVisualizationSessionAuthorization,
+} from "../visualizations/sessionRuntime.ts";
+import {
+  MCP_APP_OWNER_PATH,
+  McpAppOwnerOperation,
+  dispatchMcpAppOwnerOperation,
+} from "../mcpApps/owner.ts";
+import { runPrivateVisualizationDaemonRequest } from "../visualizations/privateDaemonBody.ts";
+import { MCP_APP_JSON_MAX_TRANSPORT_BYTES } from "@cafecode/shared/mcpAppJson";
 // @effect-diagnostics nodeBuiltinImport:off
 import * as crypto from "node:crypto";
 import * as fs from "node:fs/promises";
@@ -93,6 +105,10 @@ import { purgeProviderDaemonThreadPersistence } from "./ProviderDaemonThreadPurg
 const decodeSchedulingSessionAuthorization = Schema.decodeUnknownSync(
   SchedulingSessionAuthorizationRequest,
 );
+const decodeVisualizationAuthorization = Schema.decodeUnknownSync(
+  VisualizationSessionAuthorizationRequest,
+);
+const decodeMcpAppOwnerOperation = Schema.decodeUnknownSync(McpAppOwnerOperation);
 const decodeWindowsOwnershipId = Schema.decodeUnknownSync(WindowsOwnershipId);
 const decodeWindowsProcessIdentity = Schema.decodeUnknownSync(WindowsProcessIdentity);
 const MAX_RPC_BODY_BYTES = 5 * 1024 * 1024;
@@ -807,13 +823,16 @@ function writeText(response: http.ServerResponse, statusCode: number, body: stri
   response.end(body);
 }
 
-function readJsonBody(request: http.IncomingMessage): Promise<unknown> {
+function readJsonBody(
+  request: http.IncomingMessage,
+  maxBytes = MAX_RPC_BODY_BYTES,
+): Promise<unknown> {
   return new Promise((resolve, reject) => {
     let receivedBytes = 0;
     const chunks: Buffer[] = [];
     request.on("data", (chunk: Buffer) => {
       receivedBytes += chunk.byteLength;
-      if (receivedBytes > MAX_RPC_BODY_BYTES) {
+      if (receivedBytes > maxBytes) {
         reject(new Error("provider daemon request body is too large"));
         request.destroy();
         return;
@@ -1563,6 +1582,63 @@ export const runProviderDaemonServer = (
       const method = request.method ?? "GET";
       const url = new URL(request.url ?? "/", `http://${host}:${port}`);
       void (async () => {
+        if (url.pathname === MCP_APP_OWNER_PATH && method === "POST") {
+          // Private native control traffic never enters RPC ledgers/diagnostics.
+          if (!hasCapability(request, "rpc")) {
+            writeJson(response, 401, { error: "unauthorized" });
+            return;
+          }
+          await runPrivateVisualizationDaemonRequest(
+            request,
+            response,
+            MCP_APP_JSON_MAX_TRANSPORT_BYTES,
+            async (body) => {
+              const input = decodeMcpAppOwnerOperation(body);
+              const json = await dispatchMcpAppOwnerOperation(input);
+              if (Buffer.byteLength(json, "utf8") > 128 * 1024)
+                throw new Error("Private response refused.");
+              writeJson(response, 200, { json });
+            },
+            (reason) => {
+              // Stop only this refused request after the fixed response is
+              // handed to the socket. Slow unread bodies never keep a lane.
+              response.setHeader("connection", "close");
+              response.once("finish", () => request.destroy());
+              writeJson(response, reason === "busy" ? 503 : 403, {
+                error: "MCP App operation is unavailable.",
+              });
+            },
+          );
+          return;
+        }
+        if (url.pathname === VISUALIZATION_SESSION_DAEMON_PATH && method === "POST") {
+          // This private control route bypasses diagnostic/command journals.
+          if (!hasCapability(request, "rpc")) {
+            writeJson(response, 401, { error: "unauthorized" });
+            return;
+          }
+          await runPrivateVisualizationDaemonRequest(
+            request,
+            response,
+            1024,
+            async (body) => {
+              const input = decodeVisualizationAuthorization(body);
+              writeJson(
+                response,
+                200,
+                await dispatchVisualizationSessionAuthorization(input.token),
+              );
+            },
+            (reason) => {
+              response.setHeader("connection", "close");
+              response.once("finish", () => request.destroy());
+              writeJson(response, reason === "busy" ? 503 : 403, {
+                error: "Visualization session is unavailable.",
+              });
+            },
+          );
+          return;
+        }
         if (url.pathname === SCHEDULING_SESSION_DAEMON_PATH && method === "POST") {
           // Capability verification is ephemeral control traffic. It must not
           // enter the command ledger, event journal, or request diagnostics.

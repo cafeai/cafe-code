@@ -1,4 +1,12 @@
 export const PICK_FOLDER_CHANNEL = "desktop:pick-folder";
+export const VISUALIZATION_CAPABILITIES_CHANNEL = "desktop:visualization-capabilities";
+export const VISUALIZATION_OPEN_CHANNEL = "desktop:visualization-open";
+export const VISUALIZATION_UPDATE_CHANNEL = "desktop:visualization-update";
+export const VISUALIZATION_RETIRE_CHANNEL = "desktop:visualization-retire";
+export const VISUALIZATION_CAPTURE_CHANNEL = "desktop:visualization-capture";
+export const VISUALIZATION_MESSAGE_CHANNEL = "desktop:visualization-message";
+export const VISUALIZATION_SUSPEND_CHANNEL = "desktop:visualization-suspend";
+export const VISUALIZATION_EVENT_CHANNEL = "desktop:visualization-event";
 export const NATIVE_CONTROL_STATE_CHANNEL = "desktop:native-control-state";
 export const NATIVE_CONTROL_ENABLE_CHANNEL = "desktop:native-control-enable";
 export const NATIVE_CONTROL_DIAGNOSTICS_CHANNEL = "desktop:native-control-diagnostics";

@@ -1,7 +1,7 @@
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 
-const PRELOAD_BUNDLES = ["preload.cjs", "globalDictationPreload.cjs"];
+const PRELOAD_BUNDLES = ["preload.cjs", "globalDictationPreload.cjs", "visualizationPreload.cjs"];
 const SANDBOXED_REQUIRE_MODULES = new Set([
   "electron",
   "events",

@@ -8,6 +8,7 @@ const srcPath = fileURLToPath(new URL("./src", import.meta.url));
 const touchTimelineFile = "src/components/chat/MessagesTimeline.touch.browser.tsx";
 const contextMotionFile = "src/components/chat/CodexContextWindowControl.motion.browser.tsx";
 const diagnosticMotionFile = "src/components/chat/ProviderDiagnosticWorkEntry.motion.browser.tsx";
+const visualizationMotionFile = "src/components/visualizations/Visualizations.motion.browser.tsx";
 const touchViewport = { width: 430, height: 932 };
 const browserOptions = {
   enabled: true,
@@ -35,6 +36,10 @@ export default mergeConfig(
         "react-dom/client",
         "react/jsx-runtime",
         "react/jsx-dev-runtime",
+        // Image-export validation is part of the passive artifact card graph.
+        // Prebundle before its isolated motion fixture is collected, not after
+        // a test starts; a late optimizer reload is not context isolation.
+        "dompurify",
         "effect/Cron",
         // The private diagnostic reader also runs in the separate native
         // reduced-motion context. Prebundle its observed transitive graph
@@ -106,6 +111,7 @@ export default mergeConfig(
               touchTimelineFile,
               contextMotionFile,
               diagnosticMotionFile,
+              visualizationMotionFile,
             ],
             sequence: { groupOrder: 0 },
             browser: {
@@ -148,7 +154,7 @@ export default mergeConfig(
           extends: true,
           test: {
             name: "context-reduced-motion",
-            include: [contextMotionFile, diagnosticMotionFile],
+            include: [contextMotionFile, diagnosticMotionFile, visualizationMotionFile],
             // Qualify the inherited dialog's real reduced-motion behavior in
             // its own native context, after both existing project groups.
             // Original worker caps and test/hook deadlines remain inherited.

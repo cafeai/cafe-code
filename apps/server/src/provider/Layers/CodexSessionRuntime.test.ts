@@ -41,6 +41,7 @@ import {
   CODEX_DEFAULT_MODE_DEVELOPER_INSTRUCTIONS,
   CODEX_PLAN_MODE_DEVELOPER_INSTRUCTIONS,
 } from "../CodexDeveloperInstructions.ts";
+import { GENERATED_VISUALIZATION_INSTRUCTIONS } from "../../visualizations/mcp.ts";
 import {
   CODEX_SUMMARY_HISTORY_MAX_PAGES,
   CODEX_SUMMARY_HISTORY_MAX_TURNS,
@@ -3115,6 +3116,51 @@ describe("Codex notification emission timestamps", () => {
 });
 
 describe("buildCodexAppServerArgs", () => {
+  it("adds only the admitted visualization catalog and leaves unavailable tools unadvertised", () => {
+    // Inspect the real structured launch builder without starting a provider or
+    // reading an account profile. The private connection path is inert data.
+    const launch = {
+      command: process.execPath,
+      args: ["synthetic-visualization-bridge.mjs", "synthetic-private-connection.json"],
+      env: { ELECTRON_RUN_AS_NODE: "1" },
+    };
+    const name = `cafe-visualizations-${"a".repeat(22)}`;
+    const options = {
+      schedulingMcp: { name: "cafe-scheduling", launch },
+      nativeControlMcp: { name: "cafe-native-abcdefghijklmnopqrstuv", launch },
+      maxConcurrentSubagents: 4,
+    };
+    const baseline = buildCodexAppServerArgs(options);
+    assert.equal(
+      baseline.some((argument) => argument.includes(name)),
+      false,
+    );
+    assert.deepEqual(
+      buildCodexAppServerArgs({ ...options, visualizationMcp: undefined }),
+      baseline,
+    );
+    const args = buildCodexAppServerArgs({ ...options, visualizationMcp: { name, launch } });
+    const config = args.find((argument) => argument.startsWith(`mcp_servers.${name}=`));
+    assert.ok(config);
+    const index = args.indexOf(config);
+    assert.equal(args[index - 1], "-c");
+    assert.deepEqual(JSON.parse(JSON.stringify(Toml.parse(config))), {
+      mcp_servers: {
+        [name]: {
+          ...launch,
+          enabled: true,
+          required: true,
+          startup_timeout_sec: 15,
+          tool_timeout_sec: 60,
+        },
+      },
+    });
+    assert.deepEqual(
+      args.filter((_, position) => position !== index && position !== index - 1),
+      baseline,
+    );
+    assert.doesNotMatch(config, /approval|sandbox|bearer|token|threadId/u);
+  });
   it("adds the private native catalog alongside scheduling without changing provider permission policy", () => {
     const launch = {
       command: process.execPath,
@@ -5770,6 +5816,48 @@ function makeThreadOpenResponse(
 }
 
 describe("buildTurnStartParams", () => {
+  it.each(["default", "plan"] as const)(
+    "appends conditional visualization guidance without replacing %s mode or turn authority",
+    (interactionMode) => {
+      const input = {
+        threadId: "synthetic-visualization-native-thread",
+        runtimeMode: "approval-required" as const,
+        prompt: "The exact user prompt remains user input.",
+        model: "gpt-6.1-sol",
+        serviceTier: "fast" as const,
+        effort: "high" as const,
+        interactionMode,
+      };
+      const baseline = Effect.runSync(buildTurnStartParams(input));
+      const modeInstructions =
+        interactionMode === "plan"
+          ? CODEX_PLAN_MODE_DEVELOPER_INSTRUCTIONS
+          : CODEX_DEFAULT_MODE_DEVELOPER_INSTRUCTIONS;
+      assert.equal(baseline.collaborationMode?.settings.developer_instructions, modeInstructions);
+      assert.equal(JSON.stringify(baseline).includes("preview_visualization"), false);
+      assert.deepEqual(
+        Effect.runSync(buildTurnStartParams({ ...input, visualizationInstructions: false })),
+        baseline,
+      );
+      const admitted = Effect.runSync(
+        buildTurnStartParams({ ...input, visualizationInstructions: true }),
+      );
+      assert.deepEqual(admitted, {
+        ...baseline,
+        collaborationMode: {
+          ...baseline.collaborationMode,
+          settings: {
+            ...baseline.collaborationMode!.settings,
+            developer_instructions: `${modeInstructions}\n\n${GENERATED_VISUALIZATION_INSTRUCTIONS}`,
+          },
+        },
+      });
+      // Guidance stays in the supported developer channel, never the user's
+      // prompt, model selection, native effort, approval or sandbox settings.
+      assert.deepEqual(admitted.input, baseline.input);
+      assert.equal(admitted.collaborationMode?.mode, interactionMode);
+    },
+  );
   it.each(["standard", "daybreakBlue", "daybreakRed"] as const)(
     "preserves explicit %s cyber treatment through experimental request decoding",
     (cyberAccessProgram) => {

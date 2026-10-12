@@ -12,6 +12,15 @@ import { lstat, open, opendir } from "node:fs/promises";
 
 import { NativeDesktopPrivacy } from "@cafecode/shared/nativeControl";
 import {
+  VisualizationNativePrivacy,
+  ClaudeVisualizationCompletionObserver,
+} from "../../visualizations/nativePrivacy.ts";
+import {
+  readVisualizationSessionBroker,
+  type VisualizationSessionBinding,
+} from "../../visualizations/sessionRuntime.ts";
+import { GENERATED_VISUALIZATION_INSTRUCTIONS } from "../../visualizations/mcp.ts";
+import {
   readNativeControlSessionBroker,
   type NativeControlSessionBinding,
 } from "../../nativeControl/sessionRuntime.ts";
@@ -663,8 +672,11 @@ interface ClaudeSessionContext {
     | undefined;
   /** Exact query-owned scheduling authority; never shared with a resumed query. */
   readonly schedulingBinding: SchedulingSessionBinding | undefined;
+  readonly visualizationBinding: VisualizationSessionBinding | undefined;
   readonly nativeControlBinding?: NativeControlSessionBinding | undefined;
   readonly nativeDesktopPrivacy?: NativeDesktopPrivacy | undefined;
+  readonly visualizationPrivacy?: VisualizationNativePrivacy | undefined;
+  readonly visualizationCompletion?: ClaudeVisualizationCompletionObserver | undefined;
   readonly runFork: RuntimeFork;
   streamFiber: Fiber.Fiber<void, Error> | undefined;
   readonly startedAt: string;
@@ -8565,7 +8577,69 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     // event and transcript projection. Even rejected/foreign/subagent reports
     // must not bypass privacy simply because they cannot update the metadata.
     const stripped = stripClaudeUsageReport(incomingMessage);
-    const message = context.nativeDesktopPrivacy?.redact(stripped.message) ?? stripped.message;
+    if (
+      context.visualizationBinding &&
+      context.visualizationCompletion &&
+      context.turnState &&
+      sessions.get(context.session.threadId) === context &&
+      hasCurrentClaudeTaskSession(context, incomingMessage)
+    ) {
+      const frame = incomingMessage as unknown as Record<string, unknown>;
+      const parentDescriptor = Object.getOwnPropertyDescriptor(frame, "parent_tool_use_id");
+      const parent =
+        parentDescriptor &&
+        "value" in parentDescriptor &&
+        typeof parentDescriptor.value === "string" &&
+        parentDescriptor.value.length > 0 &&
+        parentDescriptor.value.length <= 200 &&
+        parentDescriptor.value.trim() === parentDescriptor.value
+          ? parentDescriptor.value
+          : undefined;
+      const primary = hasExactPrimaryClaudeParent(incomingMessage);
+      const taskKey = parent ? canonicalClaudeToolUseBindingKey(parent) : undefined;
+      const task = taskKey ? context.taskBindingsByToolUseId.get(taskKey) : undefined;
+      const nativeThreadId = typeof frame.session_id === "string" ? frame.session_id : undefined;
+      const turnId = parent ? task?.turnId : context.turnState.turnId;
+      // A child must be the exact current non-provisional task incarnation.
+      // Unknown/retired parent identities never inherit root publication rights.
+      if (
+        nativeThreadId &&
+        nativeThreadId === context.resumeSessionId &&
+        turnId &&
+        (primary ||
+          (parent &&
+            task?.isSubagent &&
+            !task.provisionalTaskIdentity &&
+            !task.awaitingRunStart &&
+            !context.terminalTaskIds.has(String(task.taskId))))
+      ) {
+        yield* Effect.tryPromise({
+          try: () =>
+            context.visualizationCompletion!.observe(
+              context.visualizationBinding!,
+              incomingMessage,
+              {
+                provider: "claudeAgent",
+                threadId: context.session.threadId,
+                providerInstanceId: context.visualizationBinding!.authority.providerInstanceId,
+                nativeThreadId,
+                nativeTurnId: String(turnId),
+                turnId: asCanonicalTurnId(turnId),
+                occurredAt: new Date().toISOString(),
+                actor: parent ? { type: "child", id: String(task!.taskId) } : { type: "root" },
+              },
+            ),
+          catch: () => new Error("Private visualization completion could not be admitted."),
+        }).pipe(
+          Effect.catch(() =>
+            Effect.logWarning("Private visualization completion remains unavailable."),
+          ),
+        );
+      }
+    }
+    const privateMessage =
+      context.visualizationPrivacy?.redact(stripped.message) ?? stripped.message;
+    const message = context.nativeDesktopPrivacy?.redact(privateMessage) ?? privateMessage;
     const primaryPresentationAdmitted = isCurrentClaudePublicSummaryMessage(context, message);
     const publicSummaryAdmitted =
       primaryPresentationAdmitted && context.turnState?.publicSummaryFallbackDisabled !== true;
@@ -8943,6 +9017,11 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     yield* Effect.promise(() => context.schedulingBinding?.dispose() ?? Promise.resolve()).pipe(
       Effect.catchCause(() => Effect.logWarning("Claude scheduling cleanup remains pending.")),
     );
+    yield* Effect.promise(() => context.visualizationBinding?.dispose() ?? Promise.resolve()).pipe(
+      Effect.catch(() =>
+        Effect.logWarning("Private visualization session cleanup remains incomplete."),
+      ),
+    );
     yield* Effect.promise(() => context.nativeControlBinding?.dispose() ?? Promise.resolve()).pipe(
       Effect.catchCause(() => Effect.logWarning("Claude desktop cleanup remains pending.")),
     );
@@ -9089,6 +9168,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
   const startSession: ClaudeAdapterShape["startSession"] = Effect.fn("startSession")((input) => {
     let nativeControlBinding: NativeControlSessionBinding | undefined;
     let schedulingBinding: SchedulingSessionBinding | undefined;
+    let visualizationBinding: VisualizationSessionBinding | undefined;
     let startedQuery: ClaudeQueryRuntime | undefined;
     let startedContext: ClaudeSessionContext | undefined;
     let sessionTransferred = false;
@@ -9773,6 +9853,26 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       }
 
       const nativeBroker = readNativeControlSessionBroker();
+      const visualizationBroker = readVisualizationSessionBroker();
+      if (visualizationBroker)
+        yield* Effect.uninterruptible(
+          Effect.tryPromise({
+            try: async () => {
+              visualizationBinding = await visualizationBroker.bind({
+                threadId,
+                providerInstanceId: boundInstanceId,
+                provider: "claudeAgent",
+              });
+              await visualizationBinding?.activate();
+            },
+            catch: () =>
+              new ProviderAdapterProcessError({
+                provider: PROVIDER,
+                threadId,
+                detail: "Failed to prepare visualization tools.",
+              }),
+          }),
+        );
       if (nativeBroker)
         yield* Effect.uninterruptible(
           Effect.tryPromise({
@@ -9792,14 +9892,20 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
               }),
           }),
         );
-      const providerMcpBindings = [schedulingBinding, nativeControlBinding].filter(
-        (binding) => binding !== undefined,
-      );
+      const providerMcpBindings = [
+        schedulingBinding,
+        nativeControlBinding,
+        visualizationBinding,
+      ].filter((binding) => binding !== undefined);
       const queryOptions: ClaudeQueryOptions = {
         ...(input.cwd ? { cwd: input.cwd } : {}),
         ...(apiModelId ? { model: apiModelId } : {}),
         pathToClaudeCodeExecutable: claudeBinaryPath,
-        systemPrompt: { type: "preset", preset: "claude_code" },
+        systemPrompt: {
+          type: "preset",
+          preset: "claude_code",
+          ...(visualizationBinding ? { append: GENERATED_VISUALIZATION_INSTRUCTIONS } : {}),
+        },
         settingSources: [...CLAUDE_SETTING_SOURCES],
         // SDK 0.3.288 supports per-query stdio MCP configuration. Leave
         // strictMcpConfig and permission allowlists unset: user/project MCP
@@ -10024,8 +10130,11 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         quotaReportPublishPending: false,
         pendingCommandCatalog: undefined,
         schedulingBinding,
+        visualizationBinding,
         nativeControlBinding,
         nativeDesktopPrivacy: new NativeDesktopPrivacy(),
+        visualizationPrivacy: new VisualizationNativePrivacy(),
+        visualizationCompletion: new ClaudeVisualizationCompletionObserver(),
         runFork,
         streamFiber: undefined,
         startedAt,
@@ -10175,6 +10284,11 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
           yield* Effect.promise(() => schedulingBinding?.dispose() ?? Promise.resolve()).pipe(
             Effect.catchCause(() =>
               Effect.logWarning("Claude scheduling cleanup remains pending."),
+            ),
+          );
+          yield* Effect.promise(() => visualizationBinding?.dispose() ?? Promise.resolve()).pipe(
+            Effect.catch(() =>
+              Effect.logWarning("Private visualization session cleanup remains incomplete."),
             ),
           );
           yield* Effect.promise(() => nativeControlBinding?.dispose() ?? Promise.resolve()).pipe(

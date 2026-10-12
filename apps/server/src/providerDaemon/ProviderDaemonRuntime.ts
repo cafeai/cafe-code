@@ -1,5 +1,8 @@
 import { SchedulingSessionRuntimeLive } from "../scheduledFollowups/sessionRuntime.ts";
 import { NativeControlSessionRuntimeLive } from "../nativeControl/sessionRuntime.ts";
+import { VisualizationSessionRuntimeLive } from "../visualizations/sessionRuntime.ts";
+import { VisualizationArtifactsLive } from "../visualizations/service.ts";
+import { ServerEnvironmentLive } from "../environment/Layers/ServerEnvironment.ts";
 import { FetchHttpClient } from "effect/unstable/http";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
@@ -88,6 +91,9 @@ export const ProviderDaemonRuntimeLive = Layer.unwrap(
 ).pipe(
   Layer.provideMerge(SchedulingSessionRuntimeLive),
   Layer.provideMerge(NativeControlSessionRuntimeLive),
+  Layer.provideMerge(VisualizationSessionRuntimeLive),
+  Layer.provideMerge(VisualizationArtifactsLive),
+  Layer.provideMerge(ServerEnvironmentLive),
   Layer.provideMerge(PersistenceLayerLive),
   Layer.provideMerge(ServerSettingsLive),
   // Grok chat sessions need an owner bearer for Cafe's authenticated /mcp

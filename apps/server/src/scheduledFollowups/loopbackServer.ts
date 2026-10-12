@@ -5,6 +5,7 @@ import * as Data from "effect/Data";
 import * as Effect from "effect/Effect";
 import { HttpServer, HttpServerRequest, HttpServerResponse } from "effect/unstable/http";
 import { handleSchedulingMcpRequest } from "./http.ts";
+import { handleVisualizationMcpRequest } from "../visualizations/http.ts";
 
 /** A fixed error deliberately omits listener addresses, process errors and any
  * request context. A conflicting local listener must never make Cafe advertise
@@ -38,6 +39,8 @@ export function schedulingLoopbackListenPort(address: HttpServer.Address): numbe
  * management MCP/server APIs merely to support a custom LAN/Tailnet bind. */
 export const schedulingLoopbackApplication = Effect.gen(function* () {
   const request = yield* HttpServerRequest.HttpServerRequest;
+  if (request.method === "POST" && request.url === "/mcp/visualizations")
+    return yield* handleVisualizationMcpRequest;
   if (request.method !== "POST" || request.url !== "/mcp/scheduling")
     return HttpServerResponse.empty({ status: 404 });
   return yield* handleSchedulingMcpRequest;

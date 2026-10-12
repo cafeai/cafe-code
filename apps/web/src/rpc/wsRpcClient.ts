@@ -49,6 +49,17 @@ type RpcInputStreamMethod<TTag extends RpcTag> =
     : never;
 
 export interface WsRpcClient {
+  readonly mcpApps: {
+    readonly prepare: RpcUnaryMethod<typeof WS_METHODS.mcpAppsPrepare>;
+    readonly resolve: RpcUnaryMethod<typeof WS_METHODS.mcpAppsResolve>;
+    readonly details: RpcUnaryMethod<typeof WS_METHODS.mcpAppsDetails>;
+  };
+  readonly visualizations: {
+    readonly list: RpcUnaryMethod<typeof WS_METHODS.visualizationsList>;
+    readonly details: RpcUnaryMethod<typeof WS_METHODS.visualizationsDetails>;
+    readonly viewerTicket: RpcUnaryMethod<typeof WS_METHODS.visualizationsViewerTicket>;
+    readonly exportHtml: RpcUnaryMethod<typeof WS_METHODS.visualizationsExportHtml>;
+  };
   readonly dispose: () => Promise<void>;
   readonly reconnect: () => Promise<void>;
   readonly isHeartbeatFresh: () => boolean;
@@ -382,6 +393,20 @@ export function createWsRpcClient(transport: WsTransport): WsRpcClient {
           ...options,
           tag: WS_METHODS.subscribeUsageStats,
         }),
+    },
+    visualizations: {
+      list: (input) => transport.request((client) => client[WS_METHODS.visualizationsList](input)),
+      details: (input) =>
+        transport.request((client) => client[WS_METHODS.visualizationsDetails](input)),
+      viewerTicket: (input) =>
+        transport.request((client) => client[WS_METHODS.visualizationsViewerTicket](input)),
+      exportHtml: (input) =>
+        transport.request((client) => client[WS_METHODS.visualizationsExportHtml](input)),
+    },
+    mcpApps: {
+      prepare: (input) => transport.request((client) => client[WS_METHODS.mcpAppsPrepare](input)),
+      resolve: (input) => transport.request((client) => client[WS_METHODS.mcpAppsResolve](input)),
+      details: (input) => transport.request((client) => client[WS_METHODS.mcpAppsDetails](input)),
     },
     scheduledFollowups: {
       list: (input) =>

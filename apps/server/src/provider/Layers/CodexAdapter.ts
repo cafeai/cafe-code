@@ -1,5 +1,14 @@
 import { isNativeControlServer } from "@cafecode/shared/nativeControl";
 import {
+  readVisualizationSessionBroker,
+  type VisualizationSessionBinding,
+} from "../../visualizations/sessionRuntime.ts";
+import {
+  claimVisualizationNativeItem,
+  redactVisualizationNativePayload,
+} from "../../visualizations/nativePrivacy.ts";
+import { registerMcpAppOwner } from "../../mcpApps/owner.ts";
+import {
   readNativeControlSessionBroker,
   type NativeControlSessionBinding,
 } from "../../nativeControl/sessionRuntime.ts";
@@ -27,6 +36,7 @@ import {
   type CanonicalRequestType,
   type CodexSettings,
   EventId,
+  MessageId,
   ProviderDriverKind,
   type ProviderEvent,
   ProviderInstanceId,
@@ -43,7 +53,7 @@ import {
   ProviderInteraction,
   ProviderNetworkApproval,
   ThreadId,
-  type TurnId,
+  TurnId,
   ProviderSendTurnInput,
   type ProviderSteerTurnInput,
   type ProviderSession,
@@ -494,6 +504,7 @@ interface CodexAdapterSessionContext {
   readonly nativeControlBinding?: NativeControlSessionBinding | undefined;
   readonly startInput: Parameters<CodexAdapterShape["startSession"]>[0];
   readonly schedulingBinding?: SchedulingSessionBinding | undefined;
+  readonly visualizationBinding?: VisualizationSessionBinding | undefined;
   readonly threadId: ThreadId;
   readonly scope: Scope.Closeable;
   readonly runtime: CodexSessionRuntimeShape;
@@ -2029,6 +2040,9 @@ function reconcileCodexAuthRecoveryLifecycle(
 }
 
 export function redactDesktopToolPayload<T>(value: T, depth = 0): T {
+  // Preserve the separate native-desktop privacy rules while ensuring every
+  // historical/live UI-bearing MCP item is private before normal projection.
+  if (depth === 0) value = redactVisualizationNativePayload(value);
   if (depth > 32) return "[Desktop payload omitted]" as T;
   if (Array.isArray(value)) {
     const copy = value.map((v) => redactDesktopToolPayload(v, depth + 1));
@@ -2067,6 +2081,21 @@ export function redactDesktopToolPayload<T>(value: T, depth = 0): T {
 }
 
 export function redactDesktopToolEvent(event: ProviderEvent): ProviderEvent {
+  if (event.method === "item/mcpToolCall/progress") {
+    // Progress lacks the tool/server descriptor needed to classify private
+    // Apps reliably (and can precede completion). Keep identity, not raw text.
+    const native = readRecordValue(event.payload);
+    const { message: _message, textDelta: _textDelta, ...safe } = event;
+    return {
+      ...safe,
+      payload: {
+        threadId: native?.threadId,
+        turnId: native?.turnId,
+        itemId: native?.itemId,
+        message: "MCP operation is running.",
+      },
+    };
+  }
   const payload = redactDesktopToolPayload(event.payload);
   if (payload === event.payload) return event;
   const { message: _message, textDelta: _textDelta, ...safe } = event;
@@ -5267,6 +5296,11 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
     // Revoke this runtime's exact authority before retiring the native process.
     // A delayed bridge request must never inherit a replacement's generation.
     yield* disposeSchedulingSession(session.schedulingBinding);
+    yield* Effect.promise(() => session.visualizationBinding?.dispose() ?? Promise.resolve()).pipe(
+      Effect.catch(() =>
+        Effect.logWarning("Private visualization session cleanup remains incomplete."),
+      ),
+    );
     yield* Effect.promise(() => session.nativeControlBinding?.dispose() ?? Promise.resolve()).pipe(
       Effect.catchCause(() =>
         Effect.logWarning("Codex desktop session cleanup remains incomplete."),
@@ -5416,6 +5450,31 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
             ).pipe(Effect.provideService(Scope.Scope, sessionScope))
           : undefined;
         const nativeBroker = readNativeControlSessionBroker();
+        const visualizationBroker = readVisualizationSessionBroker();
+        const visualizationBinding = visualizationBroker
+          ? yield* Effect.acquireRelease(
+              Effect.tryPromise({
+                try: () =>
+                  visualizationBroker.bind({
+                    threadId: input.threadId,
+                    providerInstanceId: boundInstanceId,
+                    provider: "codex",
+                  }),
+                catch: () =>
+                  new ProviderAdapterProcessError({
+                    provider: PROVIDER,
+                    threadId: input.threadId,
+                    detail: "Could not attach visualization tools.",
+                  }),
+              }),
+              (binding) =>
+                Effect.promise(() => binding?.dispose() ?? Promise.resolve()).pipe(
+                  Effect.catch(() =>
+                    Effect.logWarning("Private visualization session cleanup remains incomplete."),
+                  ),
+                ),
+            ).pipe(Effect.provideService(Scope.Scope, sessionScope))
+          : undefined;
         const nativeControlBinding = nativeBroker
           ? yield* Effect.acquireRelease(
               Effect.tryPromise({
@@ -5488,6 +5547,14 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
           ...(schedulingBinding
             ? { schedulingMcp: { name: schedulingBinding.name, launch: schedulingBinding.launch } }
             : {}),
+          ...(visualizationBinding
+            ? {
+                visualizationMcp: {
+                  name: visualizationBinding.name,
+                  launch: visualizationBinding.launch,
+                },
+              }
+            : {}),
           threadId: input.threadId,
           providerInstanceId: boundInstanceId,
           cwd: input.cwd ?? process.cwd(),
@@ -5556,6 +5623,17 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
             // a provider RPC. Bind naming to the bridge's own generation before
             // consuming any event, including a delayed foreign first notification.
             const bridgeDescriptor = yield* runtime.getSession;
+            const appsOwner = visualizationBinding
+              ? registerMcpAppOwner(
+                  visualizationBinding,
+                  runtime,
+                  Effect.runPromiseWith(yield* Effect.context<never>()),
+                )
+              : undefined;
+            if (appsOwner)
+              yield* Effect.addFinalizer(() => Effect.sync(appsOwner.close)).pipe(
+                Effect.provideService(Scope.Scope, sessionScope),
+              );
             const subagentTitleRuntimeId = bridgeDescriptor.subagentRuntimeId;
             const observeNativeRetry = makeCodexNativeRetryTracker({
               threadId: input.threadId,
@@ -5576,6 +5654,62 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
                 // canonical mapping; they can contain paths, auth URLs or errors.
                 if (isCodexPrivateMetadataNotification(rawEvent.method)) {
                   return;
+                }
+                if (
+                  visualizationBinding &&
+                  subagentTitleRuntimeId &&
+                  (rawEvent.method === "item/completed" ||
+                    rawEvent.method === "codex.subagent/itemCompleted") &&
+                  rawEvent.subagentRuntimeId === subagentTitleRuntimeId
+                ) {
+                  const native = readRecordValue(rawEvent.payload);
+                  const item = readRecordValue(native?.item);
+                  const descriptor = yield* runtime.getSession;
+                  const rootId = nativeRetryIdentity(
+                    ownNativeRetryField(descriptor.resumeCursor, "threadId"),
+                  );
+                  const nativeThreadId = readStringValue(native?.threadId);
+                  const nativeTurnId = readStringValue(native?.turnId);
+                  const nativeItemId = readStringValue(item?.id);
+                  const child = rawEvent.method === "codex.subagent/itemCompleted";
+                  // Child events here are produced only by the runtime's exact
+                  // routed-child admission. Plain root envelopes cannot choose
+                  // an unrelated native thread, and generations never fall back.
+                  if (
+                    rootId &&
+                    nativeThreadId &&
+                    nativeTurnId &&
+                    nativeItemId &&
+                    rawEvent.turnId &&
+                    (child ? nativeThreadId !== rootId : nativeThreadId === rootId)
+                  ) {
+                    const witness = {
+                      provider: "codex" as const,
+                      threadId: input.threadId,
+                      providerInstanceId: boundInstanceId,
+                      nativeThreadId,
+                      nativeTurnId,
+                      nativeItemId,
+                      actor: child
+                        ? { type: "child" as const, id: nativeThreadId }
+                        : { type: "root" as const },
+                      messageId: MessageId.make(`visual-${Crypto.randomUUID()}`),
+                      turnId: TurnId.make(String(rawEvent.turnId)),
+                      occurredAt: rawEvent.createdAt,
+                    };
+                    yield* Effect.tryPromise({
+                      try: async () => {
+                        await claimVisualizationNativeItem(visualizationBinding, item, witness);
+                        appsOwner?.observe(item, witness);
+                      },
+                      catch: () =>
+                        new Error("Private visualization completion could not be admitted."),
+                    }).pipe(
+                      Effect.catch(() =>
+                        Effect.logWarning("Private visualization completion remains unavailable."),
+                      ),
+                    );
+                  }
                 }
                 const event = redactDesktopToolEvent(rawEvent);
                 // This is an in-memory owner descriptor, not a native read or
@@ -5832,6 +5966,17 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
                   }),
               });
 
+            if (visualizationBinding)
+              yield* Effect.tryPromise({
+                try: visualizationBinding.activate,
+                catch: () =>
+                  new ProviderAdapterProcessError({
+                    provider: PROVIDER,
+                    threadId: input.threadId,
+                    detail: "Could not activate visualization tools.",
+                  }),
+              });
+
             return { runtime, eventFiber, started, activeAuthRecoveryTasksById };
           },
         ).pipe(
@@ -5859,6 +6004,7 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
         );
 
         sessions.set(input.threadId, {
+          visualizationBinding,
           nativeControlBinding,
           startInput: input,
           schedulingBinding,
@@ -6535,6 +6681,11 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
     // not discard the resulting canonical task terminals.
     session.stopped = true;
     yield* disposeSchedulingSession(session.schedulingBinding);
+    yield* Effect.promise(() => session.visualizationBinding?.dispose() ?? Promise.resolve()).pipe(
+      Effect.catch(() =>
+        Effect.logWarning("Private visualization session cleanup remains incomplete."),
+      ),
+    );
     yield* Effect.promise(() => session.nativeControlBinding?.dispose() ?? Promise.resolve()).pipe(
       Effect.catchCause(() =>
         Effect.logWarning("Codex desktop session cleanup remains incomplete."),

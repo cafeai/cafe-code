@@ -72,6 +72,10 @@ export function normalizeDesktopProtocolPathname(rawPath: string): Option.Option
 const registerDesktopSchemePrivileges = Effect.sync(() => {
   Electron.protocol.registerSchemesAsPrivileged([
     {
+      scheme: "cafe-visualization",
+      privileges: { standard: true, secure: true },
+    },
+    {
       scheme: DESKTOP_SCHEME,
       privileges: {
         standard: true,

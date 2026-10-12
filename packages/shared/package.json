@@ -4,6 +4,30 @@
   "license": "AGPL-3.0-or-later",
   "type": "module",
   "exports": {
+    "./mcpAppJson": {
+      "types": "./src/mcpAppJson.ts",
+      "import": "./src/mcpAppJson.ts"
+    },
+    "./visualizationHostClient": {
+      "types": "./src/visualizationHostClient.ts",
+      "import": "./src/visualizationHostClient.ts"
+    },
+    "./mcpAppProtocol": {
+      "types": "./src/mcpAppProtocol.ts",
+      "import": "./src/mcpAppProtocol.ts"
+    },
+    "./mcpAppToolSchema": {
+      "types": "./src/mcpAppToolSchema.ts",
+      "import": "./src/mcpAppToolSchema.ts"
+    },
+    "./visualizationJson": {
+      "types": "./src/visualizationJson.ts",
+      "import": "./src/visualizationJson.ts"
+    },
+    "./visualizationExecutionLane": {
+      "types": "./src/visualizationExecutionLane.ts",
+      "import": "./src/visualizationExecutionLane.ts"
+    },
     "./providerDiagnostic": {
       "types": "./src/providerDiagnostic.ts",
       "import": "./src/providerDiagnostic.ts"

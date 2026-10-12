@@ -10,6 +10,10 @@ import {
   type TurnId,
 } from "@cafecode/contracts";
 import * as Effect from "effect/Effect";
+import {
+  copyVisualizationHistory,
+  reconcileVisualizationHistory,
+} from "../../visualizations/history.ts";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
@@ -851,6 +855,11 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
           WHERE thread_id = ${input.targetThreadId}
         `;
       }
+      yield* copyVisualizationHistory(sql, {
+        sourceThreadId: input.sourceThreadId,
+        targetThreadId: input.targetThreadId,
+        completeTurnsOnly: Boolean(input.messageCutoff),
+      });
     });
 
     const applyProjectsProjection: ProjectorDefinition["apply"] = Effect.fn(
@@ -2573,6 +2582,11 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
                   }),
             { concurrency: 1 },
           ).pipe(Effect.asVoid);
+          yield* reconcileVisualizationHistory(sql, event.payload.threadId).pipe(
+            Effect.mapError(
+              toPersistenceSqlError("ProjectionPipeline.visualizationHistory:reconcile"),
+            ),
+          );
           return;
         }
 

@@ -28,6 +28,7 @@ import * as TestClock from "effect/testing/TestClock";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
 import * as SqlError from "effect/unstable/sql/SqlError";
 import { EventEmitter } from "node:events";
+import * as http from "node:http";
 
 import { ProviderAdapterRegistry } from "../provider/Services/ProviderAdapterRegistry.ts";
 import {
@@ -59,6 +60,15 @@ import {
   installSchedulingSessionRuntime,
   type SchedulingSessionAuthority,
 } from "../scheduledFollowups/sessionRuntime.ts";
+import {
+  VISUALIZATION_SESSION_DAEMON_PATH,
+  installVisualizationSessionRuntime,
+  type VisualizationSessionAuthority,
+} from "../visualizations/sessionRuntime.ts";
+import { VisualizationGenerationId } from "@cafecode/contracts/visualizations";
+import * as McpAppOwner from "../mcpApps/owner.ts";
+import { privateVisualizationDaemonRequestCount } from "../visualizations/privateDaemonBody.ts";
+import { MCP_APP_JSON_MAX_TRANSPORT_BYTES } from "@cafecode/shared/mcpAppJson";
 
 const TEST_TOKEN = "provider-daemon-test-token-000000000000000000000000";
 
@@ -284,6 +294,228 @@ describe("ProviderDaemonServer", () => {
         assert.equal(ledger[0]?.count, 0);
       }).pipe(Effect.scoped, Effect.provide(makeProviderDaemonServerTestLayer(providerService)));
     },
+  );
+
+  it.effect(
+    "bounds the two private visualization lanes without changing scheduling or liveness",
+    () =>
+      Effect.gen(function* () {
+        const token = "ab".repeat(32);
+        const generation = VisualizationGenerationId.make("11111111-1111-4111-8111-111111111111");
+        const authority: VisualizationSessionAuthority = {
+          threadId: ThreadId.make("visualization-private-daemon-fixture"),
+          providerInstanceId: ProviderInstanceId.make("codex_work"),
+          sessionGeneration: generation,
+          runtimeGeneration: generation,
+          tokenDigest: "cd".repeat(32),
+          serverName: `cafe-visualizations-${"a".repeat(22)}`,
+        };
+        let calls = 0;
+        const uninstall = installVisualizationSessionRuntime({
+          bind: async () => undefined,
+          close: async () => {},
+          authorize: async (candidate) => {
+            calls++;
+            if (candidate !== token) throw new Error("PRIVATE AUTH ERROR");
+            return authority;
+          },
+        });
+        yield* Effect.addFinalizer(() => Effect.sync(uninstall));
+        const port = yield* startProviderDaemonServerOnEphemeralPort({
+          host: "127.0.0.1",
+          token: TEST_TOKEN,
+          version: "0.0.0-test",
+          protocolVersion: 1,
+        });
+        const request = (endpoint: string, body: Uint8Array | string) =>
+          Effect.promise(() =>
+            fetch(`http://127.0.0.1:${port}${endpoint}`, {
+              method: "POST",
+              headers: { authorization: `Bearer ${TEST_TOKEN}` },
+              body,
+            }),
+          );
+        for (const endpoint of [
+          VISUALIZATION_SESSION_DAEMON_PATH,
+          McpAppOwner.MCP_APP_OWNER_PATH,
+        ]) {
+          for (const body of [
+            Buffer.from([0xff]),
+            '{"source":"PRIVATE PARSER MARKER"',
+            "[".repeat(25) + "0" + "]".repeat(25),
+          ]) {
+            const rejected = yield* request(endpoint, body);
+            assert.equal(rejected.status, 403);
+            const error = yield* Effect.promise(() => rejected.text());
+            assert.equal(error.includes("PRIVATE"), false);
+            assert.equal(rejected.headers.get("connection"), "close");
+          }
+        }
+        const tooLarge = yield* request(VISUALIZATION_SESSION_DAEMON_PATH, "x".repeat(1025));
+        assert.equal(tooLarge.status, 403);
+        yield* Effect.promise(() => tooLarge.arrayBuffer());
+        assert.equal(calls, 0);
+        const held: http.ClientRequest[] = [];
+        yield* Effect.addFinalizer(() =>
+          Effect.sync(() => {
+            for (const pending of held) pending.destroy();
+          }),
+        );
+        for (const endpoint of [
+          McpAppOwner.MCP_APP_OWNER_PATH,
+          VISUALIZATION_SESSION_DAEMON_PATH,
+          McpAppOwner.MCP_APP_OWNER_PATH,
+          VISUALIZATION_SESSION_DAEMON_PATH,
+        ]) {
+          const pending = http.request(`http://127.0.0.1:${port}${endpoint}`, {
+            method: "POST",
+            headers: { authorization: `Bearer ${TEST_TOKEN}`, "transfer-encoding": "chunked" },
+          });
+          // Only a scoped synthetic body is held open; no provider or daemon
+          // process is started. Swallow client cancellation after our teardown.
+          pending.on("error", () => {});
+          held.push(pending);
+          pending.write("{");
+        }
+        yield* Effect.promise(() =>
+          vi.waitFor(() => assert.equal(privateVisualizationDaemonRequestCount(), 4)),
+        );
+        const busy = yield* Effect.promise(
+          () =>
+            new Promise<{ status: number | undefined; json: unknown }>((resolve, reject) => {
+              const pending = http.request(
+                `http://127.0.0.1:${port}${VISUALIZATION_SESSION_DAEMON_PATH}`,
+                {
+                  method: "POST",
+                  headers: {
+                    authorization: `Bearer ${TEST_TOKEN}`,
+                    "transfer-encoding": "chunked",
+                  },
+                },
+                (response) => {
+                  const chunks: Buffer[] = [];
+                  response.on("data", (chunk: Buffer) => chunks.push(chunk));
+                  response.once("error", reject);
+                  response.once("end", () => {
+                    try {
+                      resolve({
+                        status: response.statusCode,
+                        json: JSON.parse(Buffer.concat(chunks).toString("utf8")),
+                      });
+                    } catch (error) {
+                      reject(error);
+                    } finally {
+                      pending.destroy();
+                    }
+                  });
+                },
+              );
+              pending.once("error", reject);
+              held.push(pending);
+              // Deliberately do not end this body: a saturated lane must reply
+              // and close before reading/waiting on another slow producer.
+              pending.write("{");
+            }),
+        );
+        assert.equal(busy.status, 503);
+        assert.deepEqual(busy.json, {
+          error: "Visualization session is unavailable.",
+        });
+        assert.equal(calls, 0);
+        const liveness = yield* Effect.promise(() =>
+          fetch(`http://127.0.0.1:${port}${PROVIDER_DAEMON_LIVENESS_PATH}`, {
+            headers: { authorization: `Bearer ${TEST_TOKEN}` },
+          }),
+        );
+        assert.equal(liveness.status, 200);
+        yield* Effect.promise(() => liveness.arrayBuffer());
+        const scheduling = yield* request(SCHEDULING_SESSION_DAEMON_PATH, "{}");
+        assert.equal(scheduling.status, 403);
+        yield* Effect.promise(() => scheduling.arrayBuffer());
+        for (const pending of held) pending.destroy();
+        yield* Effect.promise(() =>
+          vi.waitFor(() => assert.equal(privateVisualizationDaemonRequestCount(), 0)),
+        );
+        const accepted = yield* request(
+          VISUALIZATION_SESSION_DAEMON_PATH,
+          JSON.stringify({ token }),
+        );
+        assert.equal(accepted.status, 200);
+        assert.deepEqual(yield* Effect.promise(() => accepted.json()), authority);
+        assert.equal(calls, 1);
+        const sql = yield* SqlClient.SqlClient;
+        const ledger = yield* sql<{
+          count: number;
+        }>`SELECT count(*) AS count FROM provider_daemon_commands`;
+        assert.equal(ledger[0]?.count, 0);
+      }).pipe(Effect.scoped, Effect.provide(providerDaemonServerTestLayer)),
+  );
+
+  it.effect(
+    "admits the separately bounded escaped App transport without enlarging native JSON",
+    () =>
+      Effect.gen(function* () {
+        const requestJson = JSON.stringify({
+          name: "quote-fixture",
+          arguments: { text: '"'.repeat(50_000) },
+        });
+        const resultJson = JSON.stringify({
+          content: [{ type: "text", text: '"'.repeat(50_000) }],
+        });
+        const input = {
+          threadId: "app-transport-fixture",
+          providerInstanceId: "codex_fixture",
+          sessionGeneration: "11111111-1111-4111-8111-111111111111",
+          nativeThreadId: "native-transport-fixture",
+          serverName: "fixture-server",
+          originCallId: "fixture-call",
+          method: "tool" as const,
+          requestJson,
+        };
+        // Mock only the authenticated native dispatch boundary. This proves
+        // real HTTP admission without any native provider/session/profile.
+        const dispatch = vi
+          .spyOn(McpAppOwner, "dispatchMcpAppOwnerOperation")
+          .mockImplementation(async (received) => {
+            assert.deepEqual(received, input);
+            return resultJson;
+          });
+        yield* Effect.addFinalizer(() => Effect.sync(() => dispatch.mockRestore()));
+        const port = yield* startProviderDaemonServerOnEphemeralPort({
+          host: "127.0.0.1",
+          token: TEST_TOKEN,
+          version: "0.0.0-test",
+          protocolVersion: 1,
+        });
+        const body = JSON.stringify(input);
+        assert.equal(Buffer.byteLength(requestJson, "utf8") < 128 * 1024, true);
+        assert.equal(Buffer.byteLength(resultJson, "utf8") < 128 * 1024, true);
+        assert.equal(Buffer.byteLength(body, "utf8") > 128 * 1024, true);
+        assert.equal(Buffer.byteLength(body, "utf8") < MCP_APP_JSON_MAX_TRANSPORT_BYTES, true);
+        const request = (text: string) =>
+          Effect.promise(() =>
+            fetch(`http://127.0.0.1:${port}${McpAppOwner.MCP_APP_OWNER_PATH}`, {
+              method: "POST",
+              headers: { authorization: `Bearer ${TEST_TOKEN}` },
+              body: text,
+            }),
+          );
+        const accepted = yield* request(body);
+        assert.equal(accepted.status, 200);
+        const result = yield* Effect.promise(() => accepted.text());
+        assert.equal(Buffer.byteLength(result, "utf8") > 128 * 1024, true);
+        assert.deepEqual(JSON.parse(result), { json: resultJson });
+        assert.equal(dispatch.mock.calls.length, 1);
+        const rejected = yield* request(" ".repeat(MCP_APP_JSON_MAX_TRANSPORT_BYTES + 1));
+        assert.equal(rejected.status, 403);
+        assert.deepEqual(yield* Effect.promise(() => rejected.json()), {
+          error: "MCP App operation is unavailable.",
+        });
+        assert.equal(dispatch.mock.calls.length, 1);
+        yield* Effect.promise(() =>
+          vi.waitFor(() => assert.equal(privateVisualizationDaemonRequestCount(), 0)),
+        );
+      }).pipe(Effect.scoped, Effect.provide(providerDaemonServerTestLayer)),
   );
 
   it.effect(

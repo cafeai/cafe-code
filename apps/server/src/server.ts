@@ -1,5 +1,11 @@
 import { SchedulingSessionRuntimeLive } from "./scheduledFollowups/sessionRuntime.ts";
 import { NativeControlSessionRuntimeLive } from "./nativeControl/sessionRuntime.ts";
+import { VisualizationSessionRuntimeLive } from "./visualizations/sessionRuntime.ts";
+import { VisualizationArtifactsLive } from "./visualizations/service.ts";
+import {
+  visualizationMcpRouteLayer,
+  visualizationPosterRouteLayer,
+} from "./visualizations/http.ts";
 import { schedulingMcpRouteLayer } from "./scheduledFollowups/http.ts";
 import { startSchedulingLoopbackServer } from "./scheduledFollowups/loopbackServer.ts";
 import * as NodeHttp from "node:http";
@@ -289,7 +295,13 @@ const RuntimeCoreDependenciesLive = ReactorLayerLive.pipe(
   Layer.provideMerge(GitLayerLive),
   Layer.provideMerge(VcsLayerLive),
   Layer.provideMerge(ProviderRuntimeLayerLive),
-  Layer.provideMerge(Layer.mergeAll(SchedulingSessionRuntimeLive, NativeControlSessionRuntimeLive)),
+  Layer.provideMerge(
+    Layer.mergeAll(
+      SchedulingSessionRuntimeLive,
+      NativeControlSessionRuntimeLive,
+      VisualizationSessionRuntimeLive,
+    ),
+  ),
   Layer.provideMerge(PersistenceLayerLive),
   Layer.provideMerge(KeybindingsLive),
   Layer.provideMerge(ProviderRegistryLive),
@@ -314,7 +326,7 @@ const RuntimeCoreDependenciesLive = ReactorLayerLive.pipe(
   Layer.provideMerge(WorkspaceLayerLive),
   Layer.provideMerge(ProjectFaviconResolverLive),
   Layer.provideMerge(RepositoryIdentityResolverLive),
-  Layer.provideMerge(ServerEnvironmentLive),
+  Layer.provideMerge(VisualizationArtifactsLive.pipe(Layer.provideMerge(ServerEnvironmentLive))),
 ).pipe(
   Layer.provideMerge(AuthLayerLive),
   // One scoped bridge is visible both while provider factories are built and
@@ -359,11 +371,13 @@ export const makeRoutesLayer = Layer.mergeAll(
   attachmentsRouteLayer,
   fileAttachmentRouteLayer,
   desktopObservationRouteLayer,
+  visualizationPosterRouteLayer,
   brandingSidebarImageServeRouteLayer,
   brandingSidebarImageUploadRouteLayer,
   clientDebugLogRouteLayer,
   cafeMcpRouteLayer,
   schedulingMcpRouteLayer,
+  visualizationMcpRouteLayer,
   orchestrationDispatchRouteLayer,
   orchestrationSnapshotRouteLayer,
   otlpTracesProxyRouteLayer,
