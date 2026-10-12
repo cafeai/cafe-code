@@ -19,7 +19,7 @@ import { createEmptyReadModel, projectEvent } from "./projector.ts";
 const now = "2026-10-03T00:00:00.000Z";
 const threadId = ThreadId.make("limits-source");
 const instanceId = ProviderInstanceId.make("codex");
-const create: OrchestrationCommand = {
+const create: Extract<OrchestrationCommand, { type: "thread.create" }> = {
   type: "thread.create",
   commandId: CommandId.make("limits-create"),
   threadId,
@@ -61,6 +61,7 @@ async function apply(command: OrchestrationCommand, readModel = createEmptyReadM
 }
 const update = (fields: {
   subagentLimits?: { codex?: number; claude?: number };
+  codexContextWindowOverride?: number | null;
   title?: string;
 }): OrchestrationCommand => ({
   type: "thread.meta.update",
@@ -68,7 +69,10 @@ const update = (fields: {
   threadId,
   ...fields,
 });
-const turn = (limits?: { codex?: number; claude?: number }): OrchestrationCommand => ({
+const turn = (limits?: {
+  codex?: number;
+  claude?: number;
+}): Extract<OrchestrationCommand, { type: "thread.turn.start" }> => ({
   type: "thread.turn.start",
   commandId: CommandId.make("limits-turn"),
   threadId,
@@ -85,6 +89,100 @@ const turn = (limits?: { codex?: number; claude?: number }): OrchestrationComman
 });
 
 describe("subagent policy orchestration", () => {
+  it("retains chat-local context intent, explicit Reset and omission without changing the reported materialized policy", async () => {
+    let { next } = await apply({ ...create, codexContextWindowOverride: 500_000 });
+    expect(next.threads[0]?.codexContextWindowOverride).toBe(500_000);
+    ({ next } = await apply(update({ title: "Renamed" }), next));
+    expect(next.threads[0]?.codexContextWindowOverride).toBe(500_000);
+    ({ next } = await apply(
+      {
+        type: "thread.session.set",
+        commandId: CommandId.make("context-running"),
+        threadId,
+        session: session({
+          status: "running",
+          activeTurnId: TurnId.make("context-root"),
+          codexContextWindowOverride: 500_000,
+        }),
+        createdAt: now,
+      },
+      next,
+    ));
+    ({ next } = await apply(update({ codexContextWindowOverride: null }), next));
+    expect(next.threads[0]?.codexContextWindowOverride).toBeNull();
+    expect(next.threads[0]?.session?.codexContextWindowOverride).toBe(500_000);
+    const steered = await apply({ ...turn(), codexContextWindowOverride: 750_000 }, next);
+    expect(steered.events.map((event) => event.type)).toEqual([
+      "thread.meta-updated",
+      "thread.message-sent",
+      "thread.turn-steer-requested",
+    ]);
+    expect(steered.next.threads[0]?.codexContextWindowOverride).toBe(750_000);
+    expect(steered.next.threads[0]?.session?.codexContextWindowOverride).toBe(500_000);
+    expect(steered.next.threads[0]?.session?.activeTurnId).toBe(TurnId.make("context-root"));
+  });
+
+  it("copies requested context into forks/duplicates without copying active runtime authority or account defaults", async () => {
+    const { next } = await apply({ ...create, codexContextWindowOverride: 500_000 });
+    for (const kind of ["duplicate", "fork"] as const) {
+      const targetThreadId = ThreadId.make(`context-${kind}`);
+      const command: OrchestrationCommand =
+        kind === "duplicate"
+          ? {
+              type: "thread.duplicate",
+              commandId: CommandId.make("context-duplicate"),
+              sourceThreadId: threadId,
+              targetThreadId,
+              title: "Duplicate",
+              createdAt: now,
+            }
+          : {
+              type: "thread.fork.commit",
+              sourceVersion: next.snapshotSequence,
+              commandId: CommandId.make("context-fork"),
+              sourceThreadId: threadId,
+              targetThreadId,
+              title: "Fork",
+              createdAt: now,
+              session: session({
+                threadId: targetThreadId,
+                status: "stopped",
+                codexContextWindowOverride: 400_000,
+              }),
+            };
+      const copied = (await apply(command, next)).next.threads.find(
+        (entry) => entry.id === targetThreadId,
+      );
+      expect(copied?.codexContextWindowOverride).toBe(500_000);
+      expect(copied?.session?.codexContextWindowOverride).toBe(
+        kind === "fork" ? 400_000 : undefined,
+      );
+      expect(copied?.modelSelection).not.toHaveProperty("options");
+    }
+  });
+
+  it("retains materialized context only under exact account binding and honors known null", async () => {
+    let { next } = await apply(create);
+    const set = (value: OrchestrationSession): OrchestrationCommand => ({
+      type: "thread.session.set",
+      commandId: CommandId.make("context-session"),
+      threadId,
+      session: value,
+      createdAt: now,
+    });
+    ({ next } = await apply(set(session({ codexContextWindowOverride: 500_000 })), next));
+    ({ next } = await apply(set(session()), next));
+    expect(next.threads[0]?.session?.codexContextWindowOverride).toBe(500_000);
+    ({ next } = await apply(set(session({ codexContextWindowOverride: null })), next));
+    expect(next.threads[0]?.session?.codexContextWindowOverride).toBeNull();
+    ({ next } = await apply(
+      set(session({ providerInstanceId: ProviderInstanceId.make("other-context-account") })),
+      next,
+    ));
+    expect(next.threads[0]?.session).not.toHaveProperty("codexContextWindowOverride");
+    expect(next.threads[0]).not.toHaveProperty("codexContextWindowOverride");
+  });
+
   it("replaces the entire desired policy, preserves omission, and retains an explicit reset", async () => {
     let { next } = await apply(create);
     expect(next.threads[0]?.subagentLimits).toEqual({ codex: 4, claude: 2 });

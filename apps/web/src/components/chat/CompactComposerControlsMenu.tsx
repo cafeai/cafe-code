@@ -147,6 +147,7 @@ export const CompactComposerControlsMenu = memo(function CompactComposerControls
   goalStatus?: ProviderThreadGoalStatus | null;
   traitsMenuContent?: ReactNode;
   subagentConcurrencyControl?: ReactNode;
+  codexContextWindowControl?: ReactNode;
   /** Provider-specific actions stay inside this menu in every footer layout. */
   providerActions?: ReactNode;
   traitsTriggerLabel?: string | null;
@@ -165,7 +166,9 @@ export const CompactComposerControlsMenu = memo(function CompactComposerControls
     ? uiPresentation.CLAUDE_PERMISSION_MODE_OPTIONS
     : uiPresentation.GROK_PERMISSION_MODE_OPTIONS;
   const hasTraits = props.traitsMenuContent !== null && props.traitsMenuContent !== undefined;
-  const hasSecondaryControls = Boolean(props.subagentConcurrencyControl || props.providerActions);
+  const hasSecondaryControls = Boolean(
+    props.subagentConcurrencyControl || props.codexContextWindowControl || props.providerActions,
+  );
   const showAccessControls = !usesNativePermissionModes;
   const claudePermissionMode = deriveClaudePermissionMode({
     interactionMode: props.interactionMode,
@@ -207,9 +210,17 @@ export const CompactComposerControlsMenu = memo(function CompactComposerControls
             {props.subagentConcurrencyControl}
           </>
         ) : null}
+        {props.codexContextWindowControl ? (
+          <>
+            {hasTraits && !props.subagentConcurrencyControl ? <MenuDivider /> : null}
+            {props.codexContextWindowControl}
+          </>
+        ) : null}
         {props.providerActions ? (
           <>
-            {hasTraits || props.subagentConcurrencyControl ? <MenuDivider /> : null}
+            {hasTraits || props.subagentConcurrencyControl || props.codexContextWindowControl ? (
+              <MenuDivider />
+            ) : null}
             {props.providerActions}
           </>
         ) : null}

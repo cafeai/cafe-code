@@ -65,6 +65,10 @@ import {
   hasSubagentConcurrencyChange,
   hasActiveSubagentSessionWork,
 } from "../../provider/subagentConcurrencyPolicy.ts";
+import {
+  resolveCodexContextWindowPolicy,
+  hasCodexContextWindowChange,
+} from "../../provider/codexContextWindowPolicy.ts";
 import { TextGeneration } from "../../textGeneration/TextGeneration.ts";
 import { ProviderService } from "../../provider/Services/ProviderService.ts";
 import { ProviderAdapterRegistry } from "../../provider/Services/ProviderAdapterRegistry.ts";
@@ -1249,11 +1253,13 @@ const make = Effect.gen(function* () {
         payload?.subagentRuntimeId === session.subagentRuntimeId &&
         hasLiveProviderRuntimeOwner(payload, observedRuntimeAt);
       if (liveSession || detachedOwner) continue;
+      const { codexContextWindowOverride: _retiredContext, ...retiredFields } = session;
+      const retiredSession = { ...retiredFields, subagentRuntimeId: null };
       const cleared = yield* setThreadSession({
         threadId: thread.id,
         expectedSessionLifecycle: sessionLifecycleSnapshot(session),
         expectedSubagentRuntimeId: session.subagentRuntimeId,
-        session: { ...session, subagentRuntimeId: null },
+        session: retiredSession,
         createdAt: session.updatedAt,
       }).pipe(
         Effect.map(() => true),
@@ -1262,7 +1268,7 @@ const make = Effect.gen(function* () {
       if (cleared)
         generationThreads.set(thread.id, {
           ...thread,
-          session: { ...session, subagentRuntimeId: null },
+          session: retiredSession,
         });
       if (++generationWrites % 32 === 0) yield* yieldGenerationWrites;
     }
@@ -1279,11 +1285,22 @@ const make = Effect.gen(function* () {
         thread.session.subagentRuntimeId === session.subagentRuntimeId
       )
         continue;
+      // Generation adoption is not permission to attach the former process's
+      // numeric configuration. Only this exact inventory observation can
+      // establish the current runtime's configured context; absence is unknown.
+      const { codexContextWindowOverride: _formerContext, ...priorSessionFields } = thread.session;
+      const adoptedSession = {
+        ...priorSessionFields,
+        subagentRuntimeId: session.subagentRuntimeId,
+        ...(session.codexContextWindowOverride !== undefined
+          ? { codexContextWindowOverride: session.codexContextWindowOverride }
+          : {}),
+      };
       const adopted = yield* setThreadSession({
         threadId: thread.id,
         expectedSubagentRuntimeId: thread.session.subagentRuntimeId ?? null,
         expectedSessionLifecycle: sessionLifecycleSnapshot(thread.session),
-        session: { ...thread.session, subagentRuntimeId: session.subagentRuntimeId },
+        session: adoptedSession,
         createdAt: session.updatedAt,
       }).pipe(
         Effect.map(() => true),
@@ -1292,10 +1309,7 @@ const make = Effect.gen(function* () {
       if (adopted)
         generationThreads.set(thread.id, {
           ...thread,
-          session: {
-            ...thread.session,
-            subagentRuntimeId: session.subagentRuntimeId,
-          },
+          session: adoptedSession,
         });
       if (++generationWrites % 32 === 0) yield* yieldGenerationWrites;
     }
@@ -1667,7 +1681,30 @@ const make = Effect.gen(function* () {
               : undefined,
         })
       : { requested: undefined, configured: null };
+    const contextWindowPolicy = applySubagentPolicyForTurn
+      ? resolveCodexContextWindowPolicy({
+          driver: desiredDriverKind,
+          chatOverride: thread.codexContextWindowOverride,
+          accountDefault:
+            concurrencyInstance?.driver === "codex" && concurrencyInstance.enabled !== false
+              ? concurrencyInstance.defaultCodexContextWindowOverride
+              : undefined,
+        })
+      : { requested: undefined, configured: null };
     const desiredCapabilities = yield* providerService.getCapabilities(desiredInstanceId);
+    const assertRequestedContextWindowSupport = Effect.suspend(() =>
+      (contextWindowPolicy.requested !== undefined ||
+        (contextWindowChanged && !sessionPolicyPending)) &&
+      desiredCapabilities.codexContextWindow !== true
+        ? Effect.fail(
+            new ProviderAdapterRequestError({
+              provider: providerErrorLabel(desiredDriverKind),
+              method: "thread.turn.start",
+              detail: "This Codex runtime does not support configured context-window overrides.",
+            }),
+          )
+        : Effect.void,
+    );
     const assertRequestedSubagentSupport = Effect.suspend(() =>
       concurrencyPolicy.requested !== undefined && desiredCapabilities.subagentConcurrency !== true
         ? Effect.fail(
@@ -1692,6 +1729,21 @@ const make = Effect.gen(function* () {
       activeSession !== undefined &&
       concurrencyChanged &&
       hasActiveSubagentSessionWork(activeSession);
+    const contextWindowChanged =
+      applySubagentPolicyForTurn &&
+      desiredDriverKind === "codex" &&
+      activeSession !== undefined &&
+      activeSession.providerInstanceId === desiredInstanceId &&
+      activeSession.provider === "codex" &&
+      hasCodexContextWindowChange(activeSession, contextWindowPolicy);
+    // This snapshot is advisory only. The same final native locked admission
+    // used by subagent-policy replacement checks root, children and ingress.
+    const contextWindowPending =
+      activeSession !== undefined &&
+      contextWindowChanged &&
+      hasActiveSubagentSessionWork(activeSession);
+    const sessionPolicyChanged = concurrencyChanged || contextWindowChanged;
+    const sessionPolicyPending = concurrencyPending || contextWindowPending;
     const requestedInstanceChange = desiredInstanceId !== currentInstanceId;
     const currentInfo = requestedInstanceChange
       ? activeSession === undefined
@@ -1744,16 +1796,37 @@ const make = Effect.gen(function* () {
           ? thread.session.maxConcurrentSubagents
           : null;
     const maxConcurrentSubagents = applySubagentPolicyForTurn
-      ? concurrencyPending
+      ? sessionPolicyPending
         ? (activeSession?.maxConcurrentSubagents ?? null)
         : concurrencyPolicy.configured
       : retainedControlSubagentPolicy;
+    const retainedControlContextWindowPolicy =
+      preferredProvider === "codex"
+        ? activeSession !== undefined
+          ? activeSession.providerInstanceId === desiredInstanceId &&
+            activeSession.provider === "codex"
+            ? activeSession.codexContextWindowOverride
+            : null
+          : thread.session?.providerInstanceId === desiredInstanceId &&
+              thread.session.providerName === "codex"
+            ? thread.session.codexContextWindowOverride
+            : null
+        : undefined;
+    const codexContextWindowOverride =
+      preferredProvider === "codex"
+        ? applySubagentPolicyForTurn
+          ? sessionPolicyPending
+            ? activeSession?.codexContextWindowOverride
+            : contextWindowPolicy.configured
+          : retainedControlContextWindowPolicy
+        : undefined;
 
     const startProviderSession = (input?: {
       readonly resumeCursor?: unknown;
       readonly provider?: ProviderDriverKind;
     }) =>
       assertRequestedSubagentSupport.pipe(
+        Effect.andThen(assertRequestedContextWindowSupport),
         Effect.andThen(
           Effect.suspend(() =>
             providerService.startSession(threadId, {
@@ -1773,8 +1846,12 @@ const make = Effect.gen(function* () {
               // current configuration; only a later idle materialization may apply
               // a pending request. Native final admission checks children as well.
               ...(maxConcurrentSubagents !== undefined ? { maxConcurrentSubagents } : {}),
-              ...(concurrencyChanged && !concurrencyPending
+              ...(codexContextWindowOverride !== undefined ? { codexContextWindowOverride } : {}),
+              ...(concurrencyChanged && !sessionPolicyPending
                 ? { requireIdleForSubagentLimitChange: true }
+                : {}),
+              ...(contextWindowChanged && !sessionPolicyPending
+                ? { requireIdleForCodexContextWindowChange: true }
                 : {}),
               ...(input?.resumeCursor !== undefined ? { resumeCursor: input.resumeCursor } : {}),
               interactionMode: desiredInteractionMode,
@@ -1842,6 +1919,9 @@ const make = Effect.gen(function* () {
             ...(session.maxConcurrentSubagents !== undefined
               ? { maxConcurrentSubagents: session.maxConcurrentSubagents }
               : {}),
+            ...(session.codexContextWindowOverride !== undefined
+              ? { codexContextWindowOverride: session.codexContextWindowOverride }
+              : {}),
             // Provider turn ids are not orchestration turn ids.
             activeTurnId: null,
             lastError: session.lastError ?? null,
@@ -1884,7 +1964,7 @@ const make = Effect.gen(function* () {
           !Equal.equals(previousModelSelection, requestedModelSelection));
 
       const concurrencyOnlyReplacement =
-        concurrencyChanged &&
+        sessionPolicyChanged &&
         !runtimeModeChanged &&
         !grokInteractionModeChanged &&
         !cwdChanged &&
@@ -1903,8 +1983,9 @@ const make = Effect.gen(function* () {
         !providerResumeIdentityChanged &&
         !shouldRestartForModelChange &&
         !shouldRestartForModelSelectionChange &&
-        (!concurrencyChanged || concurrencyPending)
+        (!sessionPolicyChanged || sessionPolicyPending)
       ) {
+        yield* assertRequestedContextWindowSupport;
         if (
           concurrencyPolicy.requested !== undefined &&
           desiredCapabilities.subagentConcurrency !== true
@@ -1986,7 +2067,8 @@ const make = Effect.gen(function* () {
         // convert arbitrary startup failures into success or replay a prompt.
         Effect.catch((error) =>
           isProviderAdapterRequestError(error) &&
-          error.remoteErrorTag === "subagent-concurrency-active" &&
+          (error.remoteErrorTag === "subagent-concurrency-active" ||
+            error.remoteErrorTag === "codex-context-window-active") &&
           concurrencyOnlyReplacement
             ? Effect.succeed(activeSession)
             : Effect.fail(error),
@@ -1996,10 +2078,15 @@ const make = Effect.gen(function* () {
         // The native whole-tree guard retained the original process. Do not
         // publish a replacement binding or claim a restart in diagnostics;
         // desired metadata remains pending without altering native ownership.
-        yield* Effect.logInfo("provider command reactor deferred subagent limit change", {
-          threadId,
-          provider: activeSession.provider,
-        });
+        yield* Effect.logInfo(
+          contextWindowChanged
+            ? "provider command reactor deferred native session configuration change"
+            : "provider command reactor deferred subagent limit change",
+          {
+            threadId,
+            provider: activeSession.provider,
+          },
+        );
         return { session: activeSession, expectedSubagentPolicySession: undefined };
       }
       yield* Effect.logInfo("provider command reactor restarted provider session", {
@@ -2284,6 +2371,23 @@ const make = Effect.gen(function* () {
         const instanceId = thread.session.providerInstanceId ?? thread.modelSelection.instanceId;
         const settings = yield* serverSettingsService.getSettings;
         const instance = settings.providerInstances[instanceId];
+        const contextPolicy = resolveCodexContextWindowPolicy({
+          driver: "codex",
+          chatOverride: thread.codexContextWindowOverride,
+          accountDefault:
+            instance?.driver === "codex" && instance.enabled !== false
+              ? instance.defaultCodexContextWindowOverride
+              : undefined,
+        });
+        if (contextPolicy.requested !== undefined) {
+          const capabilities = yield* providerService.getCapabilities(instanceId);
+          if (capabilities.codexContextWindow !== true)
+            return yield* new ProviderAdapterRequestError({
+              provider: "Codex",
+              method: "turn/steer",
+              detail: "This Codex runtime does not support configured context-window overrides.",
+            });
+        }
         const policy = resolveSubagentConcurrencyPolicy({
           driver: "codex",
           ...(thread.subagentLimits !== undefined ? { limits: thread.subagentLimits } : {}),

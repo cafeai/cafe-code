@@ -307,6 +307,7 @@ export const makeRuntimeRecoveryBarrierReader = Effect.gen(function* () {
                 AND json_extract(event.payload_json, '$.turnId') IS candidate.turn_id)
               OR (event.event_type = 'thread.meta-updated' AND candidate.turn_id IS NULL AND (
                 json_type(event.payload_json, '$.modelSelection') IS NOT NULL
+                OR json_type(event.payload_json, '$.codexContextWindowOverride') IS NOT NULL
                 OR json_type(event.payload_json, '$.projectId') IS NOT NULL
                 OR json_type(event.payload_json, '$.branch') IS NOT NULL
                 OR json_type(event.payload_json, '$.worktreePath') IS NOT NULL
@@ -344,6 +345,7 @@ export const makeRuntimeRecoveryBarrierReader = Effect.gen(function* () {
           SELECT sequence, event_type, actor_kind,
             CASE WHEN event_type = 'thread.meta-updated' THEN (
               json_type(payload_json, '$.modelSelection') IS NOT NULL
+              OR json_type(payload_json, '$.codexContextWindowOverride') IS NOT NULL
               OR json_type(payload_json, '$.projectId') IS NOT NULL
               OR json_type(payload_json, '$.branch') IS NOT NULL
               OR json_type(payload_json, '$.worktreePath') IS NOT NULL

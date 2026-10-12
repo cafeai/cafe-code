@@ -415,6 +415,9 @@ function mapSessionRow(
     ...(row.maxConcurrentSubagents !== undefined
       ? { maxConcurrentSubagents: row.maxConcurrentSubagents }
       : {}),
+    ...(row.codexContextWindowOverride !== undefined
+      ? { codexContextWindowOverride: row.codexContextWindowOverride }
+      : {}),
     activeTurnId: row.activeTurnId,
     lastError: row.lastError,
     updatedAt: row.updatedAt,
@@ -813,6 +816,8 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
           title,
           model_selection_json AS "modelSelection",
           subagent_limits_json AS "subagentLimits",
+          codex_context_window_override AS "codexContextWindowOverride",
+          codex_context_window_override_known AS "codexContextWindowOverrideKnown",
           runtime_mode AS "runtimeMode",
           interaction_mode AS "interactionMode",
           branch,
@@ -842,6 +847,8 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
           title,
           model_selection_json AS "modelSelection",
           subagent_limits_json AS "subagentLimits",
+          codex_context_window_override AS "codexContextWindowOverride",
+          codex_context_window_override_known AS "codexContextWindowOverrideKnown",
           runtime_mode AS "runtimeMode",
           interaction_mode AS "interactionMode",
           branch,
@@ -873,6 +880,8 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
           title,
           model_selection_json AS "modelSelection",
           subagent_limits_json AS "subagentLimits",
+          codex_context_window_override AS "codexContextWindowOverride",
+          codex_context_window_override_known AS "codexContextWindowOverrideKnown",
           runtime_mode AS "runtimeMode",
           interaction_mode AS "interactionMode",
           branch,
@@ -904,6 +913,8 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
           title,
           model_selection_json AS "modelSelection",
           subagent_limits_json AS "subagentLimits",
+          codex_context_window_override AS "codexContextWindowOverride",
+          codex_context_window_override_known AS "codexContextWindowOverrideKnown",
           runtime_mode AS "runtimeMode",
           interaction_mode AS "interactionMode",
           branch,
@@ -1002,6 +1013,8 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
           max_concurrent_subagents AS "maxConcurrentSubagents",
           subagent_runtime_id AS "subagentRuntimeId",
           max_concurrent_subagents_known AS "maxConcurrentSubagentsKnown",
+          codex_context_window_override AS "codexContextWindowOverride",
+          codex_context_window_override_known AS "codexContextWindowOverrideKnown",
           active_turn_id AS "activeTurnId",
           last_error AS "lastError",
           updated_at AS "updatedAt"
@@ -1045,6 +1058,8 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
           sessions.max_concurrent_subagents AS "maxConcurrentSubagents",
           sessions.subagent_runtime_id AS "subagentRuntimeId",
           sessions.max_concurrent_subagents_known AS "maxConcurrentSubagentsKnown",
+          sessions.codex_context_window_override AS "codexContextWindowOverride",
+          sessions.codex_context_window_override_known AS "codexContextWindowOverrideKnown",
           sessions.active_turn_id AS "activeTurnId",
           sessions.last_error AS "lastError",
           sessions.updated_at AS "updatedAt"
@@ -1073,6 +1088,8 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
           sessions.max_concurrent_subagents AS "maxConcurrentSubagents",
           sessions.subagent_runtime_id AS "subagentRuntimeId",
           sessions.max_concurrent_subagents_known AS "maxConcurrentSubagentsKnown",
+          sessions.codex_context_window_override AS "codexContextWindowOverride",
+          sessions.codex_context_window_override_known AS "codexContextWindowOverrideKnown",
           sessions.active_turn_id AS "activeTurnId",
           sessions.last_error AS "lastError",
           sessions.updated_at AS "updatedAt"
@@ -1101,6 +1118,8 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
           sessions.max_concurrent_subagents AS "maxConcurrentSubagents",
           sessions.subagent_runtime_id AS "subagentRuntimeId",
           sessions.max_concurrent_subagents_known AS "maxConcurrentSubagentsKnown",
+          sessions.codex_context_window_override AS "codexContextWindowOverride",
+          sessions.codex_context_window_override_known AS "codexContextWindowOverrideKnown",
           sessions.active_turn_id AS "activeTurnId",
           sessions.last_error AS "lastError",
           sessions.updated_at AS "updatedAt"
@@ -1366,6 +1385,8 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
           title,
           model_selection_json AS "modelSelection",
           subagent_limits_json AS "subagentLimits",
+          codex_context_window_override AS "codexContextWindowOverride",
+          codex_context_window_override_known AS "codexContextWindowOverrideKnown",
           runtime_mode AS "runtimeMode",
           interaction_mode AS "interactionMode",
           branch,
@@ -2964,6 +2985,8 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
           max_concurrent_subagents AS "maxConcurrentSubagents",
           subagent_runtime_id AS "subagentRuntimeId",
           max_concurrent_subagents_known AS "maxConcurrentSubagentsKnown",
+          codex_context_window_override AS "codexContextWindowOverride",
+          codex_context_window_override_known AS "codexContextWindowOverrideKnown",
           active_turn_id AS "activeTurnId",
           last_error AS "lastError",
           updated_at AS "updatedAt"
@@ -3302,6 +3325,9 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
                 title: row.title,
                 modelSelection: row.modelSelection,
                 ...(row.subagentLimits !== undefined ? { subagentLimits: row.subagentLimits } : {}),
+                ...(row.codexContextWindowOverride !== undefined
+                  ? { codexContextWindowOverride: row.codexContextWindowOverride }
+                  : {}),
                 runtimeMode: row.runtimeMode,
                 interactionMode: row.interactionMode,
                 branch: row.branch,
@@ -3533,6 +3559,9 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
                   ...(row.subagentLimits !== undefined
                     ? { subagentLimits: row.subagentLimits }
                     : {}),
+                  ...(row.codexContextWindowOverride !== undefined
+                    ? { codexContextWindowOverride: row.codexContextWindowOverride }
+                    : {}),
                   runtimeMode: row.runtimeMode,
                   interactionMode: row.interactionMode,
                   branch: row.branch,
@@ -3670,6 +3699,9 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
                   modelSelection: row.modelSelection,
                   ...(row.subagentLimits !== undefined
                     ? { subagentLimits: row.subagentLimits }
+                    : {}),
+                  ...(row.codexContextWindowOverride !== undefined
+                    ? { codexContextWindowOverride: row.codexContextWindowOverride }
                     : {}),
                   runtimeMode: row.runtimeMode,
                   interactionMode: row.interactionMode,
@@ -3812,6 +3844,9 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
                 title: row.title,
                 modelSelection: row.modelSelection,
                 ...(row.subagentLimits !== undefined ? { subagentLimits: row.subagentLimits } : {}),
+                ...(row.codexContextWindowOverride !== undefined
+                  ? { codexContextWindowOverride: row.codexContextWindowOverride }
+                  : {}),
                 runtimeMode: row.runtimeMode,
                 interactionMode: row.interactionMode,
                 branch: row.branch,
@@ -3959,6 +3994,9 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
                 title: row.title,
                 modelSelection: row.modelSelection,
                 ...(row.subagentLimits !== undefined ? { subagentLimits: row.subagentLimits } : {}),
+                ...(row.codexContextWindowOverride !== undefined
+                  ? { codexContextWindowOverride: row.codexContextWindowOverride }
+                  : {}),
                 runtimeMode: row.runtimeMode,
                 interactionMode: row.interactionMode,
                 branch: row.branch,
@@ -4194,6 +4232,9 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
         modelSelection: threadRow.value.modelSelection,
         ...(threadRow.value.subagentLimits !== undefined
           ? { subagentLimits: threadRow.value.subagentLimits }
+          : {}),
+        ...(threadRow.value.codexContextWindowOverride !== undefined
+          ? { codexContextWindowOverride: threadRow.value.codexContextWindowOverride }
           : {}),
         runtimeMode: threadRow.value.runtimeMode,
         interactionMode: threadRow.value.interactionMode,
@@ -4777,6 +4818,9 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
         modelSelection: threadRow.value.modelSelection,
         ...(threadRow.value.subagentLimits !== undefined
           ? { subagentLimits: threadRow.value.subagentLimits }
+          : {}),
+        ...(threadRow.value.codexContextWindowOverride !== undefined
+          ? { codexContextWindowOverride: threadRow.value.codexContextWindowOverride }
           : {}),
         runtimeMode: threadRow.value.runtimeMode,
         interactionMode: threadRow.value.interactionMode,

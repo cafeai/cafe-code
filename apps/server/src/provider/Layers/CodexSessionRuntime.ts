@@ -492,6 +492,8 @@ export interface CodexSessionRuntimeOptions {
   // `model_auto_compact_token_limit`. When absent, app-server owns threshold
   // resolution exactly as it does for the official Codex CUI.
   readonly autoCompactTokenLimit?: number | undefined;
+  /** Explicit Cafe chat override only; absent keeps native config/catalog policy. */
+  readonly codexContextWindowOverride?: number | undefined;
 }
 
 export interface CodexSessionRuntimeSendTurnInput {
@@ -1601,6 +1603,7 @@ function buildThreadStartParams(input: {
   readonly serviceTier: CodexServiceTier | undefined;
   readonly additionalDirectories?: ReadonlyArray<string> | undefined;
   readonly autoCompactTokenLimit?: number | undefined;
+  readonly codexContextWindowOverride?: number | undefined;
 }): CodexThreadStartParamsWithRuntimeWorkspaceRoots {
   const config = runtimeModeToThreadConfig(input.runtimeMode);
   const runtimeWorkspaceRoots = buildRuntimeWorkspaceRoots({
@@ -1618,6 +1621,13 @@ function buildThreadStartParams(input: {
   // and tool-output budgets provider-owned so resumed/forked sessions preserve
   // upstream's recorded truncation budgets without Cafe forcing extra compacts.
   const threadConfig: Record<string, unknown> = {};
+  if (input.codexContextWindowOverride !== undefined) {
+    // 0.162.1 config_manager.rs loads baseline config plus these overrides.
+    // Reset must omit the key in a fresh runtime: JSON null is converted into
+    // an empty TOML string by utils/json-to-toml, not a deletion operation.
+    // Native ModelInfo still owns capacity clamps, headroom and compaction.
+    threadConfig.model_context_window = input.codexContextWindowOverride;
+  }
   if (input.autoCompactTokenLimit !== undefined) {
     // This is an explicit user override. App-server still applies its upstream
     // context-window clamp and the user's upstream scope configuration.
@@ -2761,6 +2771,7 @@ export const openCodexThread = (input: {
   readonly resumeThreadId: string | undefined;
   readonly additionalDirectories?: ReadonlyArray<string> | undefined;
   readonly autoCompactTokenLimit?: number | undefined;
+  readonly codexContextWindowOverride?: number | undefined;
 }): Effect.Effect<CodexThreadOpenResponse, CodexErrors.CodexAppServerError> => {
   const resumeThreadId = input.resumeThreadId;
   const startParams = buildThreadStartParams({
@@ -2770,6 +2781,7 @@ export const openCodexThread = (input: {
     serviceTier: input.serviceTier,
     additionalDirectories: input.additionalDirectories,
     autoCompactTokenLimit: input.autoCompactTokenLimit,
+    codexContextWindowOverride: input.codexContextWindowOverride,
   });
 
   if (resumeThreadId === undefined) {
@@ -6325,6 +6337,7 @@ export const makeCodexSessionRuntime = (
       status: "connecting",
       runtimeMode: options.runtimeMode,
       maxConcurrentSubagents: options.maxConcurrentSubagents ?? null,
+      codexContextWindowOverride: options.codexContextWindowOverride ?? null,
       cwd: options.cwd,
       ...(options.additionalDirectories !== undefined
         ? { additionalDirectories: options.additionalDirectories }
@@ -8850,6 +8863,7 @@ export const makeCodexSessionRuntime = (
         additionalDirectories: options.additionalDirectories,
         resumeThreadId,
         autoCompactTokenLimit: options.autoCompactTokenLimit,
+        codexContextWindowOverride: options.codexContextWindowOverride,
       });
 
       const providerThreadId = opened.thread.id;

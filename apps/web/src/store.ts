@@ -83,6 +83,8 @@ export interface EnvironmentState {
    * this chat's policy. Optional for existing in-memory fixture/state shapes.
    */
   subagentPolicySequenceByThreadId?: Record<ThreadId, number>;
+  /** Independent watermark: unrelated subagent saves cannot certify context intent. */
+  codexContextPolicySequenceByThreadId?: Record<ThreadId, number>;
   threadSessionById: Record<ThreadId, ThreadSession | null>;
   threadTurnStateById: Record<ThreadId, ThreadTurnState>;
 
@@ -124,6 +126,7 @@ const initialEnvironmentState: EnvironmentState = {
   threadIdsByProjectId: {},
   threadShellById: {},
   subagentPolicySequenceByThreadId: {},
+  codexContextPolicySequenceByThreadId: {},
   threadSessionById: {},
   threadTurnStateById: {},
   messageIdsByThreadId: {},
@@ -203,6 +206,9 @@ function mapSession(session: OrchestrationSession): ThreadSession {
       : {}),
     ...(session.maxConcurrentSubagents !== undefined
       ? { maxConcurrentSubagents: session.maxConcurrentSubagents }
+      : {}),
+    ...(session.codexContextWindowOverride !== undefined
+      ? { codexContextWindowOverride: session.codexContextWindowOverride }
       : {}),
     ...(session.lastError ? { lastError: session.lastError } : {}),
   };
@@ -294,6 +300,7 @@ function mapThread(thread: OrchestrationThread, environmentId: EnvironmentId): T
     runtimeMode: thread.runtimeMode,
     interactionMode: thread.interactionMode,
     subagentLimits: thread.subagentLimits,
+    codexContextWindowOverride: thread.codexContextWindowOverride,
     session: thread.session ? mapSession(thread.session) : null,
     messages: thread.messages.map((message) => mapMessage(environmentId, message)),
     proposedPlans: thread.proposedPlans.map(mapProposedPlan),
@@ -330,6 +337,7 @@ function mapThreadShell(
     runtimeMode: thread.runtimeMode,
     interactionMode: thread.interactionMode,
     subagentLimits: thread.subagentLimits,
+    codexContextWindowOverride: thread.codexContextWindowOverride,
     error: sanitizeThreadErrorMessage(thread.session?.lastError),
     createdAt: thread.createdAt,
     archivedAt: thread.archivedAt,
@@ -380,6 +388,7 @@ function toThreadShell(thread: Thread): ThreadShell {
     runtimeMode: thread.runtimeMode,
     interactionMode: thread.interactionMode,
     subagentLimits: thread.subagentLimits,
+    codexContextWindowOverride: thread.codexContextWindowOverride,
     error: thread.error,
     createdAt: thread.createdAt,
     archivedAt: thread.archivedAt,
@@ -451,6 +460,7 @@ function cloneThreadContextForDuplicate(input: {
   return {
     ...targetThread,
     subagentLimits: sourceThread.subagentLimits ? { ...sourceThread.subagentLimits } : undefined,
+    codexContextWindowOverride: sourceThread.codexContextWindowOverride,
     latestTurn,
     pendingSourceProposedPlan: latestTurn?.sourceProposedPlan,
     session: null,
@@ -574,7 +584,8 @@ function threadSessionsEqual(
     left.updatedAt === right.updatedAt &&
     left.lastError === right.lastError &&
     left.subagentRuntimeId === right.subagentRuntimeId &&
-    left.maxConcurrentSubagents === right.maxConcurrentSubagents
+    left.maxConcurrentSubagents === right.maxConcurrentSubagents &&
+    left.codexContextWindowOverride === right.codexContextWindowOverride
   );
 }
 
@@ -617,6 +628,7 @@ function threadShellsEqual(left: ThreadShell | undefined, right: ThreadShell): b
     left.runtimeMode === right.runtimeMode &&
     left.interactionMode === right.interactionMode &&
     subagentLimitsEqual(left.subagentLimits, right.subagentLimits) &&
+    left.codexContextWindowOverride === right.codexContextWindowOverride &&
     left.error === right.error &&
     left.createdAt === right.createdAt &&
     left.archivedAt === right.archivedAt &&
@@ -793,19 +805,62 @@ function reconcileThreadSubagentPolicy(
 }
 
 /**
+ * Requested context has its own exact-chat watermark. A title/subagent update
+ * is not evidence that this independently acknowledged scalar has caught up.
+ */
+function reconcileThreadCodexContextPolicy(
+  state: EnvironmentState,
+  shell: ThreadShell,
+  sequence: number | undefined,
+): { state: EnvironmentState; shell: ThreadShell } {
+  const previousSequence = state.codexContextPolicySequenceByThreadId?.[shell.id];
+  if (previousSequence !== undefined && (sequence === undefined || sequence <= previousSequence)) {
+    const previous = state.threadShellById[shell.id]?.codexContextWindowOverride;
+    return {
+      state,
+      shell:
+        previous === shell.codexContextWindowOverride
+          ? shell
+          : { ...shell, codexContextWindowOverride: previous },
+    };
+  }
+  if (sequence === undefined) return { state, shell };
+  return {
+    shell,
+    state: {
+      ...state,
+      codexContextPolicySequenceByThreadId: {
+        ...state.codexContextPolicySequenceByThreadId,
+        [shell.id]: sequence,
+      },
+    },
+  };
+}
+
+/**
  * Detail-stream writer owns messages, activities, plans and diffs, but also
- * keeps the shared shell/session/turn current. The policy watermark travels
- * with its map atomically; sidebar summaries remain shell-stream-only.
+ * keeps the shared shell/session/turn current. Policy watermarks travel with
+ * their maps atomically; sidebar summaries remain shell-stream-only.
  */
 function writeThreadState(
   state: EnvironmentState,
   nextThread: Thread,
   previousThread?: Thread,
   policySequence?: number,
+  contextPolicySequence?: number,
 ): EnvironmentState {
   // Local lifecycle/error changes carry no policy witness. Qualified stream
   // snapshots/events alone may replace a previously sequenced policy.
-  const policy = reconcileThreadSubagentPolicy(state, toThreadShell(nextThread), policySequence);
+  const subagentPolicy = reconcileThreadSubagentPolicy(
+    state,
+    toThreadShell(nextThread),
+    policySequence,
+  );
+  const policy = reconcileThreadCodexContextPolicy(
+    subagentPolicy.state,
+    subagentPolicy.shell,
+    contextPolicySequence,
+  );
   const nextShell = policy.shell;
   const nextTurnState = toThreadTurnState(nextThread);
   const previousShell = state.threadShellById[nextThread.id];
@@ -932,7 +987,12 @@ function writeThreadShellState(
   },
   policySequence: number,
 ): EnvironmentState {
-  const policy = reconcileThreadSubagentPolicy(state, nextThread.shell, policySequence);
+  const subagentPolicy = reconcileThreadSubagentPolicy(state, nextThread.shell, policySequence);
+  const policy = reconcileThreadCodexContextPolicy(
+    subagentPolicy.state,
+    subagentPolicy.shell,
+    policySequence,
+  );
   nextThread = { ...nextThread, shell: policy.shell };
   const previousShell = state.threadShellById[nextThread.shell.id];
 
@@ -1034,6 +1094,8 @@ function removeThreadState(state: EnvironmentState, threadId: ThreadId): Environ
   const { [threadId]: _removedShell, ...threadShellById } = state.threadShellById;
   const { [threadId]: _removedPolicySequence, ...subagentPolicySequenceByThreadId } =
     state.subagentPolicySequenceByThreadId ?? {};
+  const { [threadId]: _removedContextPolicySequence, ...codexContextPolicySequenceByThreadId } =
+    state.codexContextPolicySequenceByThreadId ?? {};
   const { [threadId]: _removedSession, ...threadSessionById } = state.threadSessionById;
   const { [threadId]: _removedTurnState, ...threadTurnStateById } = state.threadTurnStateById;
   const { [threadId]: _removedMessageIds, ...messageIdsByThreadId } = state.messageIdsByThreadId;
@@ -1055,6 +1117,7 @@ function removeThreadState(state: EnvironmentState, threadId: ThreadId): Environ
     threadIdsByProjectId: nextThreadIdsByProjectId,
     threadShellById,
     subagentPolicySequenceByThreadId,
+    codexContextPolicySequenceByThreadId,
     threadSessionById,
     threadTurnStateById,
     messageIdsByThreadId,
@@ -1512,6 +1575,7 @@ function updateThreadState(
   threadId: ThreadId,
   updater: (thread: Thread) => Thread,
   policySequence?: number,
+  contextPolicySequence?: number,
 ): EnvironmentState {
   const currentThread = getThreadFromEnvironmentState(state, threadId);
   if (!currentThread) {
@@ -1521,7 +1585,7 @@ function updateThreadState(
   if (nextThread === currentThread) {
     return state;
   }
-  return writeThreadState(state, nextThread, currentThread, policySequence);
+  return writeThreadState(state, nextThread, currentThread, policySequence, contextPolicySequence);
 }
 
 function mergeThreadMessage(previous: ChatMessage, incoming: ChatMessage): ChatMessage {
@@ -1843,7 +1907,10 @@ function syncEnvironmentShellSnapshot(
       .filter(
         (thread) =>
           !nextThreadIds.has(thread.id) &&
-          (state.subagentPolicySequenceByThreadId?.[thread.id] ?? -1) > snapshot.snapshotSequence,
+          Math.max(
+            state.subagentPolicySequenceByThreadId?.[thread.id] ?? -1,
+            state.codexContextPolicySequenceByThreadId?.[thread.id] ?? -1,
+          ) > snapshot.snapshotSequence,
       )
       .map((thread) => thread.id),
   );
@@ -1858,6 +1925,10 @@ function syncEnvironmentShellSnapshot(
     threadShellById: retainThreadScopedRecord(state.threadShellById, nextThreadIds),
     subagentPolicySequenceByThreadId: retainThreadScopedRecord(
       state.subagentPolicySequenceByThreadId ?? {},
+      nextThreadIds,
+    ),
+    codexContextPolicySequenceByThreadId: retainThreadScopedRecord(
+      state.codexContextPolicySequenceByThreadId ?? {},
       nextThreadIds,
     ),
     threadSessionById: retainThreadScopedRecord(state.threadSessionById, newerOmittedIds),
@@ -1933,6 +2004,7 @@ export function syncServerThreadDetail(
       environmentState,
       mapThread(thread, environmentId),
       previousThread,
+      snapshotSequence,
       snapshotSequence,
     ),
   );
@@ -2055,6 +2127,7 @@ function applyEnvironmentOrchestrationEvent(
           runtimeMode: event.payload.runtimeMode,
           interactionMode: event.payload.interactionMode,
           subagentLimits: event.payload.subagentLimits,
+          codexContextWindowOverride: event.payload.codexContextWindowOverride,
           branch: event.payload.branch,
           worktreePath: event.payload.worktreePath,
           latestTurn: null,
@@ -2071,7 +2144,7 @@ function applyEnvironmentOrchestrationEvent(
         },
         environmentId,
       );
-      return writeThreadState(state, nextThread, previousThread, event.sequence);
+      return writeThreadState(state, nextThread, previousThread, event.sequence, event.sequence);
     }
 
     case "thread.duplicated": {
@@ -2086,6 +2159,8 @@ function applyEnvironmentOrchestrationEvent(
         targetThread,
         duplicatedAt: event.payload.duplicatedAt,
       });
+      // Created/copied target metadata already owns the scalar policy. A
+      // source's newer cross-stream metadata cannot retroactively rewrite it.
       const nextState = writeThreadState(state, nextThread, targetThread);
       return {
         ...nextState,
@@ -2153,8 +2228,10 @@ function applyEnvironmentOrchestrationEvent(
     }
 
     case "thread.deleted":
-      return (state.subagentPolicySequenceByThreadId?.[event.payload.threadId] ?? -1) >
-        event.sequence
+      return Math.max(
+        state.subagentPolicySequenceByThreadId?.[event.payload.threadId] ?? -1,
+        state.codexContextPolicySequenceByThreadId?.[event.payload.threadId] ?? -1,
+      ) > event.sequence
         ? state
         : removeThreadState(state, event.payload.threadId);
 
@@ -2186,6 +2263,9 @@ function applyEnvironmentOrchestrationEvent(
           ...(event.payload.subagentLimits !== undefined
             ? { subagentLimits: event.payload.subagentLimits }
             : {}),
+          ...(event.payload.codexContextWindowOverride !== undefined
+            ? { codexContextWindowOverride: event.payload.codexContextWindowOverride }
+            : {}),
           ...(event.payload.modelSelection !== undefined
             ? { modelSelection: normalizeModelSelection(event.payload.modelSelection) }
             : {}),
@@ -2196,6 +2276,7 @@ function applyEnvironmentOrchestrationEvent(
           updatedAt: event.payload.updatedAt,
         }),
         event.payload.subagentLimits !== undefined ? event.sequence : undefined,
+        event.payload.codexContextWindowOverride !== undefined ? event.sequence : undefined,
       );
       const currentSummary = nextState.sidebarThreadSummaryById[event.payload.threadId];
       if (!currentSummary) {
@@ -2264,6 +2345,9 @@ function applyEnvironmentOrchestrationEvent(
             ...(event.payload.subagentLimits !== undefined
               ? { subagentLimits: event.payload.subagentLimits }
               : {}),
+            ...(event.payload.codexContextWindowOverride !== undefined
+              ? { codexContextWindowOverride: event.payload.codexContextWindowOverride }
+              : {}),
             pendingSourceProposedPlan: event.payload.sourceProposedPlan,
             session: {
               ...(previousSession?.subagentRuntimeId !== undefined
@@ -2271,6 +2355,9 @@ function applyEnvironmentOrchestrationEvent(
                 : {}),
               ...(previousSession?.maxConcurrentSubagents !== undefined
                 ? { maxConcurrentSubagents: previousSession.maxConcurrentSubagents }
+                : {}),
+              ...(previousSession?.codexContextWindowOverride !== undefined
+                ? { codexContextWindowOverride: previousSession.codexContextWindowOverride }
                 : {}),
               provider: previousSession?.provider ?? ProviderDriverKind.make("codex"),
               ...(previousSession?.providerInstanceId !== undefined
@@ -2286,6 +2373,7 @@ function applyEnvironmentOrchestrationEvent(
           };
         },
         event.payload.subagentLimits !== undefined ? event.sequence : undefined,
+        event.payload.codexContextWindowOverride !== undefined ? event.sequence : undefined,
       );
 
     case "thread.turn-interrupt-requested": {
@@ -2650,7 +2738,10 @@ function applyEnvironmentShellEvent(
         event.sequence,
       );
     case "thread-removed":
-      return (state.subagentPolicySequenceByThreadId?.[event.threadId] ?? -1) > event.sequence
+      return Math.max(
+        state.subagentPolicySequenceByThreadId?.[event.threadId] ?? -1,
+        state.codexContextPolicySequenceByThreadId?.[event.threadId] ?? -1,
+      ) > event.sequence
         ? state
         : removeThreadState(state, event.threadId);
   }

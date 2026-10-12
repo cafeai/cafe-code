@@ -9,6 +9,7 @@ import { Popover, PopoverPopup, PopoverTrigger } from "../ui/popover";
 import { ContextWindowDetails } from "./ContextWindowDetails";
 import { SessionPlacementButton } from "./SessionRail";
 import type { SubagentConcurrencyPresentation } from "../../subagentConcurrency";
+import type { CodexContextWindowPresentation } from "../../codexContextWindow";
 import { useProviderQuota, type ProviderQuotaContext } from "./useProviderQuota";
 
 function formatPercentage(value: number | null): string | null {
@@ -27,6 +28,7 @@ export function ContextWindowMeter(props: {
   quotaContext?: ProviderQuotaContext | undefined;
   onShowOnSide?: () => void;
   subagentConcurrency?: SubagentConcurrencyPresentation | null | undefined;
+  codexContextWindow?: CodexContextWindowPresentation | null | undefined;
 }) {
   const uiLocale = useUiLocale();
 
@@ -118,6 +120,7 @@ export function ContextWindowMeter(props: {
           sessionQuota={sessionQuota}
           layout="popover"
           subagentConcurrency={props.subagentConcurrency}
+          codexContextWindow={props.codexContextWindow}
           {...(props.onShowOnSide
             ? {
                 headerAction: (

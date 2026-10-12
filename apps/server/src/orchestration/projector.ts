@@ -397,6 +397,9 @@ export function projectEvent(
             ...(payload.subagentLimits !== undefined
               ? { subagentLimits: payload.subagentLimits }
               : {}),
+            ...(payload.codexContextWindowOverride !== undefined
+              ? { codexContextWindowOverride: payload.codexContextWindowOverride }
+              : {}),
             runtimeMode: payload.runtimeMode,
             interactionMode: payload.interactionMode,
             branch: payload.branch,
@@ -535,6 +538,9 @@ export function projectEvent(
             ...(payload.subagentLimits !== undefined
               ? { subagentLimits: payload.subagentLimits }
               : {}),
+            ...(payload.codexContextWindowOverride !== undefined
+              ? { codexContextWindowOverride: payload.codexContextWindowOverride }
+              : {}),
             ...(payload.branch !== undefined ? { branch: payload.branch } : {}),
             ...(payload.worktreePath !== undefined ? { worktreePath: payload.worktreePath } : {}),
             updatedAt: payload.updatedAt,
@@ -590,6 +596,9 @@ export function projectEvent(
               ...(payload.subagentLimits !== undefined
                 ? { subagentLimits: payload.subagentLimits }
                 : {}),
+              ...(payload.codexContextWindowOverride !== undefined
+                ? { codexContextWindowOverride: payload.codexContextWindowOverride }
+                : {}),
               runtimeMode: payload.runtimeMode,
               interactionMode: payload.interactionMode,
               session:
@@ -604,6 +613,9 @@ export function projectEvent(
                         : {}),
                       ...(thread.session?.maxConcurrentSubagents !== undefined
                         ? { maxConcurrentSubagents: thread.session.maxConcurrentSubagents }
+                        : {}),
+                      ...(thread.session?.codexContextWindowOverride !== undefined
+                        ? { codexContextWindowOverride: thread.session.codexContextWindowOverride }
                         : {}),
                       runtimeMode: payload.runtimeMode,
                       ...(thread.session?.subagentRuntimeId !== undefined

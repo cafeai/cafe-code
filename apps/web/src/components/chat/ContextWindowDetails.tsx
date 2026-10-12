@@ -10,6 +10,11 @@ import { formatCodexRateLimitPresentation } from "~/lib/codexRateLimits";
 import { ProviderAccountQuotaDetails, UsageMeterBar } from "../ProviderAccountQuotaDetails";
 import type { ProviderQuotaState } from "./useProviderQuota";
 import { SubagentConcurrencyDetails } from "./SubagentConcurrencyControl";
+import { CodexContextWindowDetails } from "./CodexContextWindowControl";
+import {
+  formatCodexContextWindowOverride,
+  type CodexContextWindowPresentation,
+} from "../../codexContextWindow";
 import {
   formatSubagentConcurrencyLimit,
   type SubagentConcurrencyPresentation,
@@ -39,6 +44,7 @@ export function ContextWindowDetails(props: {
   readonly headerAction?: ReactNode;
   readonly usageResetAction?: ReactNode;
   readonly subagentConcurrency?: SubagentConcurrencyPresentation | null | undefined;
+  readonly codexContextWindow?: CodexContextWindowPresentation | null | undefined;
 }) {
   const uiLocale = useUiLocale();
   const uiPresentation = useUiPresentation(UI_PRESENTATION_SOURCES);
@@ -52,8 +58,10 @@ export function ContextWindowDetails(props: {
   const hasRateLimits = quota !== null;
   const hasSessionQuota = props.sessionQuota !== undefined;
   const hasSubagentLimit = formatSubagentConcurrencyLimit(props.subagentConcurrency) !== null;
+  const hasContextOverride =
+    formatCodexContextWindowOverride(props.codexContextWindow, uiLocale) !== null;
 
-  if (!hasUsage && !hasRateLimits && !hasSubagentLimit && !hasSessionQuota) {
+  if (!hasUsage && !hasRateLimits && !hasSubagentLimit && !hasContextOverride && !hasSessionQuota) {
     return (
       <p className="text-ui text-subtle-foreground">
         {uiText("Waiting for usage from this chat.", undefined, undefined, uiLocale)}
@@ -182,6 +190,11 @@ export function ContextWindowDetails(props: {
       {hasSubagentLimit ? (
         <div className="border-t border-border-subtle pt-2">
           <SubagentConcurrencyDetails presentation={props.subagentConcurrency} />
+        </div>
+      ) : null}
+      {hasContextOverride ? (
+        <div className={hasSubagentLimit ? "pt-1" : "border-t border-border-subtle pt-2"}>
+          <CodexContextWindowDetails presentation={props.codexContextWindow} />
         </div>
       ) : null}
     </div>

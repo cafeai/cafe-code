@@ -177,6 +177,7 @@ describe("ProviderDaemonServer", () => {
       const unsupported = ProviderInstanceId.make("claude-unsupported-account");
       const legacy = ProviderInstanceId.make("legacy-account");
       const malformed = ProviderInstanceId.make("malformed-account");
+      const malformedContext = ProviderInstanceId.make("malformed-context-account");
       const otherCapabilities = {
         sessionModelSwitch: "restart-resume",
         liveSteer: "unsupported",
@@ -190,15 +191,25 @@ describe("ProviderDaemonServer", () => {
           Effect.sync(() => {
             requestedInstances.push(instanceId);
             if (instanceId === supported)
-              return { ...otherCapabilities, subagentConcurrency: true };
+              return { ...otherCapabilities, subagentConcurrency: true, codexContextWindow: true };
             if (instanceId === unsupported)
-              return { ...otherCapabilities, subagentConcurrency: false };
+              return {
+                ...otherCapabilities,
+                subagentConcurrency: false,
+                codexContextWindow: false,
+              };
             if (instanceId === legacy) return otherCapabilities;
             if (instanceId === malformed) {
               // Deliberately malformed synthetic wire data must fail decoding,
               // never become truthy support or silently turn into omission.
               return { ...otherCapabilities, subagentConcurrency: "true" as unknown as boolean };
             }
+            if (instanceId === malformedContext)
+              return {
+                ...otherCapabilities,
+                subagentConcurrency: true,
+                codexContextWindow: "true" as unknown as boolean,
+              };
             throw new Error("Unexpected synthetic provider instance");
           }),
       };
@@ -237,20 +248,35 @@ describe("ProviderDaemonServer", () => {
         assert.deepEqual(yield* requestProviderDaemonCapabilities(endpoint, supported), {
           ...otherCapabilities,
           subagentConcurrency: true,
+          codexContextWindow: true,
         });
         assert.deepEqual(yield* requestProviderDaemonCapabilities(endpoint, unsupported), {
           ...otherCapabilities,
           subagentConcurrency: false,
+          codexContextWindow: false,
         });
         const oldCapabilities = yield* requestProviderDaemonCapabilities(endpoint, legacy);
         assert.deepEqual(oldCapabilities, otherCapabilities);
         assert.equal(oldCapabilities.subagentConcurrency, undefined);
+        assert.equal(oldCapabilities.codexContextWindow, undefined);
         const invalid = yield* requestProviderDaemonCapabilities(endpoint, malformed).pipe(
           Effect.flip,
         );
         assert.instanceOf(invalid, ProviderAdapterRequestError);
         assert.equal(invalid.method, "getCapabilities");
-        assert.deepEqual(requestedInstances, [supported, unsupported, legacy, malformed]);
+        const invalidContext = yield* requestProviderDaemonCapabilities(
+          endpoint,
+          malformedContext,
+        ).pipe(Effect.flip);
+        assert.instanceOf(invalidContext, ProviderAdapterRequestError);
+        assert.equal(invalidContext.method, "getCapabilities");
+        assert.deepEqual(requestedInstances, [
+          supported,
+          unsupported,
+          legacy,
+          malformed,
+          malformedContext,
+        ]);
         const sql = yield* SqlClient.SqlClient;
         const ledger = yield* sql<{
           count: number;

@@ -100,6 +100,7 @@ export interface Thread {
   runtimeMode: RuntimeMode;
   interactionMode: ProviderInteractionMode;
   subagentLimits?: SubagentLimits | undefined;
+  codexContextWindowOverride?: number | null | undefined;
   session: ThreadSession | null;
   messages: ChatMessage[];
   proposedPlans: ProposedPlan[];
@@ -126,6 +127,7 @@ export interface ThreadShell {
   runtimeMode: RuntimeMode;
   interactionMode: ProviderInteractionMode;
   subagentLimits?: SubagentLimits | undefined;
+  codexContextWindowOverride?: number | null | undefined;
   error: string | null;
   createdAt: string;
   archivedAt: string | null;
@@ -170,6 +172,8 @@ export interface ThreadSession {
   orchestrationStatus: OrchestrationSessionStatus;
   /** Materialized Cafe override only; absence is older/unknown evidence. */
   maxConcurrentSubagents?: number | null | undefined;
+  /** Independently materialized Codex setting; absent legacy evidence remains unknown. */
+  codexContextWindowOverride?: number | null | undefined;
   /** Opaque evidence identifying the currently observed native provider runtime. */
   subagentRuntimeId?: string | null | undefined;
 }

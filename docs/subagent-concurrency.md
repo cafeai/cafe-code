@@ -5,6 +5,10 @@ concurrent subagents, or Reset to remove its override. Cafe accepts whole number
 from 1 through 64. Codex and Claude have separate saved values: changing one does
 not erase the other. Model effort, including Ultra, does not select this limit.
 
+Codex's separate [context-window override](codex-context-window.md) uses the same
+chat-before-account inheritance and safe pending-change presentation. It does not
+change subagent limits or replace Codex's reported context meter.
+
 Provider settings also offer a **Default subagent limit**. New and existing chats
 without a saved override inherit this setting from their selected account. Editing
 the account default updates their saved-limit display immediately; native changes

@@ -234,6 +234,9 @@ export const ServerProviderRuntimeCapabilities = Schema.Struct({
   subagentConcurrency: Schema.optional(Schema.Boolean),
   /** Advisory backend fence availability; actual daemon admission rechecks it. */
   subagentPolicyContinuation: Schema.optional(Schema.Boolean),
+  // Fleet presentation is advisory; final authenticated native-owner
+  // capability admission still controls explicit context requests.
+  codexContextWindow: Schema.optional(Schema.Boolean),
   /** Explicit priority is qualified against the configured native CLI. */
   deliveryPriority: Schema.optional(Schema.Boolean),
   taskControls: Schema.optional(Schema.Boolean),

@@ -20,6 +20,7 @@ import {
 import { useEffect, useId, useMemo, useState, type ReactNode } from "react";
 import {
   isProviderDriverKind,
+  validCodexContextWindowOverride,
   type ProviderInstanceConfig,
   type ProviderInstanceDefaultOption,
   type ProviderInstanceEnvironmentVariable,
@@ -574,6 +575,8 @@ function ProviderInstanceDefaultsSection(props: {
   readonly defaultModelOptions: ReadonlyArray<ProviderInstanceDefaultOption>;
   readonly driver: ProviderDriverKind | null;
   readonly defaultMaxConcurrentSubagents: number | undefined;
+  readonly defaultCodexContextWindowOverride: number | undefined;
+  readonly onContextDefaultChange: (value: number | undefined) => void;
   readonly onConcurrencyDefaultChange: (limit: number | undefined) => void;
   readonly onChange: (next: {
     readonly defaultModel: string | undefined;
@@ -581,6 +584,7 @@ function ProviderInstanceDefaultsSection(props: {
   }) => void;
 }) {
   const uiLocale = useUiLocale();
+  const [contextDefaultInvalid, setContextDefaultInvalid] = useState(false);
 
   const selectableModels = props.models.filter(
     (model) => !props.hiddenModels.includes(model.slug) || model.slug === props.defaultModel,
@@ -721,6 +725,68 @@ function ProviderInstanceDefaultsSection(props: {
       </div>
     ) : null;
 
+  const accountContextControl =
+    props.driver === "codex" ? (
+      <div className="grid gap-1.5">
+        <div className="flex min-w-0 items-center gap-1">
+          <label
+            className="text-xs font-medium text-foreground"
+            htmlFor={`provider-instance-${props.instanceId}-default-context-window`}
+          >
+            {uiText("Default context window (tokens)", undefined, undefined, uiLocale)}
+          </label>
+          <InfoTip
+            label={uiText("About the default context window", undefined, undefined, uiLocale)}
+          >
+            {uiText(
+              "New and existing Codex chats inherit this unless they have a chat override. Changes wait for a safe idle turn and never interrupt active work. Codex controls supported capacity and compaction; the usage meter keeps its reported capacity.",
+              undefined,
+              undefined,
+              uiLocale,
+            )}
+          </InfoTip>
+        </div>
+        <DraftInput
+          id={`provider-instance-${props.instanceId}-default-context-window`}
+          type="number"
+          min={1}
+          max={Number.MAX_SAFE_INTEGER}
+          step={1}
+          aria-invalid={contextDefaultInvalid}
+          value={
+            props.defaultCodexContextWindowOverride === undefined
+              ? ""
+              : String(props.defaultCodexContextWindowOverride)
+          }
+          placeholder={uiText("Codex default", undefined, undefined, uiLocale)}
+          onCommit={(value) => {
+            const parsed = value.trim() === "" ? undefined : Number(value);
+            const valid = parsed === undefined || validCodexContextWindowOverride(parsed);
+            setContextDefaultInvalid(!valid);
+            if (valid) props.onContextDefaultChange(parsed);
+          }}
+        />
+        {contextDefaultInvalid ? (
+          <p role="alert" className="text-xs text-destructive-foreground">
+            {uiText(
+              "Enter a positive whole token count within the supported numeric range.",
+              undefined,
+              undefined,
+              uiLocale,
+            )}
+          </p>
+        ) : null}
+        <span className="text-xs text-muted-foreground">
+          {uiText(
+            "Blank follows your Codex settings and model defaults.",
+            undefined,
+            undefined,
+            uiLocale,
+          )}
+        </span>
+      </div>
+    ) : null;
+
   return (
     <div className="grid gap-3">
       <div className="grid gap-0.5">
@@ -845,6 +911,7 @@ function ProviderInstanceDefaultsSection(props: {
         );
       })}
       {accountSubagentControl}
+      {accountContextControl}
     </div>
   );
 }
@@ -1648,6 +1715,16 @@ export function ProviderInstanceCard({
                     defaultModelOptions={instance.defaultModelOptions ?? []}
                     driver={driverKind}
                     defaultMaxConcurrentSubagents={instance.defaultMaxConcurrentSubagents}
+                    defaultCodexContextWindowOverride={instance.defaultCodexContextWindowOverride}
+                    onContextDefaultChange={(value) => {
+                      const { defaultCodexContextWindowOverride: _previous, ...rest } = instance;
+                      onUpdate({
+                        ...rest,
+                        ...(value !== undefined
+                          ? { defaultCodexContextWindowOverride: value }
+                          : {}),
+                      });
+                    }}
                     onConcurrencyDefaultChange={(limit) => {
                       const { defaultMaxConcurrentSubagents: _previous, ...rest } = instance;
                       onUpdate({

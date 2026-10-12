@@ -13,6 +13,7 @@ import { ScrollArea } from "../ui/scroll-area";
 import { ContextWindowDetails } from "./ContextWindowDetails";
 import { useProviderQuota, type ProviderQuotaContext } from "./useProviderQuota";
 import type { SubagentConcurrencyPresentation } from "../../subagentConcurrency";
+import type { CodexContextWindowPresentation } from "../../codexContextWindow";
 import { codexRecoveryLabel, type CodexRecoveryPresentation } from "../../codexRecovery";
 import { TaskProgressDetails } from "./TaskProgressDetails";
 import { ScheduledFollowups, type ScheduledFollowupsContext } from "./ScheduledFollowups";
@@ -163,6 +164,7 @@ interface SessionRailProps {
   readonly quotaContext?: ProviderQuotaContext | undefined;
   readonly usageResetAction?: ReactNode;
   readonly subagentConcurrency?: SubagentConcurrencyPresentation | null;
+  readonly codexContextWindow?: CodexContextWindowPresentation | null;
   readonly onShowInComposer: () => void;
   readonly scheduledFollowups?: ScheduledFollowupsContext | undefined;
   readonly providerTasks?: ProviderTasksContext | undefined;
@@ -278,6 +280,7 @@ export const SessionRail = memo(
             usageResetAction={props.usageResetAction}
             layout="panel"
             subagentConcurrency={props.subagentConcurrency}
+            codexContextWindow={props.codexContextWindow}
           />
         </div>
       </div>

@@ -16,6 +16,7 @@ export * from "./providerInstance.ts";
 export * from "./providerRuntime.ts";
 export * from "./providerTurnConfiguration.ts";
 export * from "./subagentLimits.ts";
+export * from "./codexContextWindow.ts";
 export * from "./providerInteraction.ts";
 export * from "./providerUsageReset.ts";
 export * from "./providerPipelineDiagnostics.ts";

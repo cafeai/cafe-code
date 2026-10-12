@@ -467,6 +467,9 @@ function toShellThread(thread: OrchestrationReadModel["threads"][number]) {
     runtimeMode: thread.runtimeMode,
     interactionMode: thread.interactionMode,
     ...(thread.subagentLimits !== undefined ? { subagentLimits: thread.subagentLimits } : {}),
+    ...(thread.codexContextWindowOverride !== undefined
+      ? { codexContextWindowOverride: thread.codexContextWindowOverride }
+      : {}),
     branch: thread.branch,
     worktreePath: thread.worktreePath,
     latestTurn: thread.latestTurn,
@@ -8972,6 +8975,612 @@ describe(`ChatView full app (${chatViewBrowserPart})`, () => {
           await mounted.cleanup();
         }
       });
+    });
+
+    describe("Codex context-window ownership", () => {
+      const account = ProviderInstanceId.make("codex");
+      const peer = ProviderInstanceId.make("codex-context-peer");
+      function contextSnapshot(
+        requested: number | null = 500_000,
+        configured: number | null = 500_000,
+      ) {
+        const base = createSnapshotForTargetUser({
+          targetMessageId: MessageId.make("context-ownership"),
+          targetText: "Synthetic context history",
+        });
+        return {
+          ...base,
+          threads: base.threads.map((thread) => ({
+            ...thread,
+            codexContextWindowOverride: requested,
+            session: thread.session
+              ? {
+                  ...thread.session,
+                  providerInstanceId: account,
+                  codexContextWindowOverride: configured,
+                }
+              : null,
+          })),
+        };
+      }
+      function configureContext(next: TestFixture) {
+        const baseProvider = next.serverConfig.providers.find(
+          (provider) => provider.instanceId === account,
+        )!;
+        next.serverConfig = {
+          ...next.serverConfig,
+          providers: [
+            ...next.serverConfig.providers,
+            { ...baseProvider, instanceId: peer, displayName: "Context peer" },
+          ].map((provider) => ({
+            ...provider,
+            runtimeCapabilities: {
+              liveSteer: "unsupported",
+              threadGoals: "unsupported",
+              ...provider.runtimeCapabilities,
+              codexContextWindow: true,
+            },
+            models: [
+              {
+                slug: "gpt-5",
+                name: "Fixture GPT5",
+                isCustom: false,
+                capabilities: createModelCapabilities({ optionDescriptors: [] }),
+              },
+              {
+                slug: "gpt-5.6-sol",
+                name: "Fixture Sol",
+                isCustom: false,
+                capabilities: createModelCapabilities({ optionDescriptors: [] }),
+              },
+            ],
+          })),
+          settings: {
+            ...next.serverConfig.settings,
+            providerInstances: {
+              ...next.serverConfig.settings.providerInstances,
+              [account]: {
+                driver: ProviderDriverKind.make("codex"),
+                defaultModel: "gpt-5",
+                defaultCodexContextWindowOverride: 600_000,
+              },
+              [peer]: {
+                driver: ProviderDriverKind.make("codex"),
+                defaultModel: "gpt-5",
+                defaultCodexContextWindowOverride: 900_000,
+              },
+            },
+          },
+        };
+      }
+      function publishContext(
+        requested: number | null,
+        configured: number | null = 500_000,
+        sequence = fixture.snapshot.snapshotSequence + 1,
+      ) {
+        const thread = {
+          ...fixture.snapshot.threads[0]!,
+          codexContextWindowOverride: requested,
+          session: fixture.snapshot.threads[0]!.session
+            ? { ...fixture.snapshot.threads[0]!.session!, codexContextWindowOverride: configured }
+            : null,
+        };
+        fixture.snapshot = { ...fixture.snapshot, snapshotSequence: sequence, threads: [thread] };
+        rpcHarness.emitStreamValue(ORCHESTRATION_WS_METHODS.subscribeThread, {
+          kind: "snapshot",
+          snapshot: { snapshotSequence: sequence, thread },
+        });
+      }
+      async function openContextEditor() {
+        await page.getByRole("button", { name: "More composer controls", exact: true }).click();
+        await page.getByRole("menuitem", { name: "Context window…", exact: true }).click();
+        await expect
+          .element(page.getByRole("dialog", { name: "Context window", exact: true }))
+          .toBeVisible();
+      }
+      const contextInput = () =>
+        page.getByRole("spinbutton", { name: "Context window (tokens)", exact: true });
+      function updateContextDefault(value: number | undefined) {
+        const { defaultCodexContextWindowOverride: _previous, ...instance } =
+          fixture.serverConfig.settings.providerInstances[account]!;
+        fixture.serverConfig = {
+          ...fixture.serverConfig,
+          settings: {
+            ...fixture.serverConfig.settings,
+            providerInstances: {
+              ...fixture.serverConfig.settings.providerInstances,
+              [account]: {
+                ...instance,
+                ...(value === undefined ? {} : { defaultCodexContextWindowOverride: value }),
+              },
+            },
+          },
+        };
+        applySettingsUpdated(fixture.serverConfig.settings);
+      }
+
+      it("reflects live exact-account defaults, chat precedence, pending Reset and clear in Tasks without provider calls", async () => {
+        const mounted = await mountChatView({
+          viewport: WIDE_FOOTER_VIEWPORT,
+          snapshot: contextSnapshot(),
+          configureFixture: configureContext,
+        });
+        try {
+          await waitForServerConfigToApply();
+          useUiStateStore.getState().setSessionRailDocked(true);
+          await vi.waitFor(() =>
+            expect(findSessionRail()?.textContent).toContain("Context override: 500K"),
+          );
+          updateContextDefault(700_000);
+          await waitForLayout();
+          expect(findSessionRail()?.textContent).not.toContain("700K");
+          publishContext(null);
+          await vi.waitFor(() =>
+            expect(findSessionRail()?.textContent).toContain(
+              "Context override: 500K → 700K when idle",
+            ),
+          );
+          await openContextEditor();
+          await expect.element(contextInput()).toHaveValue(null);
+          await page
+            .getByRole("dialog")
+            .getByRole("button", { name: "Close", exact: true })
+            .click();
+          publishContext(null, 700_000);
+          await vi.waitFor(() =>
+            expect(findSessionRail()?.textContent).toContain("Context override: 700K"),
+          );
+          updateContextDefault(undefined);
+          await vi.waitFor(() =>
+            expect(findSessionRail()?.textContent).toContain(
+              "Context override: 700K → Codex default when idle",
+            ),
+          );
+          publishContext(null, null);
+          await vi.waitFor(() =>
+            expect(
+              findSessionRail()?.querySelector("[data-codex-context-window-details]"),
+            ).toBeNull(),
+          );
+          expect(
+            useComposerDraftStore.getState().getComposerDraft(THREAD_REF)
+              ?.codexContextWindowOverride,
+          ).toBeUndefined();
+          expect(
+            wsRequests.some(
+              (body) =>
+                body.type === "thread.turn.start" ||
+                body.type === "thread.meta.update" ||
+                body.type === "thread.session.stop",
+            ),
+          ).toBe(false);
+        } finally {
+          await mounted.cleanup();
+        }
+      });
+
+      it("binds metadata ACK to this context field, never another chat or omission, and leaves next sends canonical", async () => {
+        const mounted = await mountChatView({
+          viewport: WIDE_FOOTER_VIEWPORT,
+          snapshot: contextSnapshot(),
+          configureFixture: configureContext,
+          resolveRpc: (body) =>
+            body._tag === ORCHESTRATION_WS_METHODS.dispatchCommand ? { sequence: 3 } : undefined,
+        });
+        try {
+          await waitForServerConfigToApply();
+          useUiStateStore.getState().setSessionRailDocked(true);
+          await page.getByRole("button", { name: "More composer controls", exact: true }).click();
+          const labels = page.getByRole("menu").element().textContent!;
+          expect(labels.indexOf("Subagent limit…")).toBeLessThan(labels.indexOf("Context window…"));
+          expect(labels.indexOf("Context window…")).toBeLessThan(labels.indexOf("Mode"));
+          await page.getByRole("menuitem", { name: "Context window…", exact: true }).click();
+          await contextInput().fill("1000000");
+          await page.getByRole("button", { name: "Save", exact: true }).click();
+          await vi.waitFor(() =>
+            expect(
+              useComposerDraftStore.getState().getComposerDraft(THREAD_REF)
+                ?.codexContextWindowOverride,
+            ).toBe(1_000_000),
+          );
+          const saved = wsRequests.find((body) => body.type === "thread.meta.update")!;
+          expect(saved).toMatchObject({
+            threadId: THREAD_ID,
+            codexContextWindowOverride: 1_000_000,
+          });
+          expect(saved).not.toHaveProperty("subagentLimits");
+          rpcHarness.emitStreamValue(ORCHESTRATION_WS_METHODS.subscribeThread, {
+            kind: "event",
+            event: {
+              type: "thread.meta-updated",
+              sequence: 4,
+              eventId: EventId.make("context-omission"),
+              aggregateKind: "thread",
+              aggregateId: THREAD_ID,
+              occurredAt: NOW_ISO,
+              commandId: null,
+              causationEventId: null,
+              correlationId: null,
+              metadata: {},
+              payload: {
+                threadId: THREAD_ID,
+                title: "Context omission title",
+                updatedAt: NOW_ISO,
+                subagentLimits: { codex: 5 },
+              },
+            },
+          });
+          const unrelated = addThreadToSnapshot(
+            fixture.snapshot,
+            ThreadId.make("other-context-chat"),
+          ).threads[1]!;
+          rpcHarness.emitStreamValue(ORCHESTRATION_WS_METHODS.subscribeShell, {
+            kind: "thread-upserted",
+            sequence: 5,
+            thread: { ...toShellThread(unrelated), codexContextWindowOverride: 800_000 },
+          });
+          await vi.waitFor(() =>
+            expect(selectThreadByRef(useStore.getState(), THREAD_REF)?.title).toBe(
+              "Context omission title",
+            ),
+          );
+          expect(
+            useComposerDraftStore.getState().getComposerDraft(THREAD_REF)
+              ?.codexContextWindowOverride,
+          ).toBe(1_000_000);
+          expect(
+            useStore.getState().environmentStateById[LOCAL_ENVIRONMENT_ID]
+              ?.codexContextPolicySequenceByThreadId?.[THREAD_ID],
+          ).toBe(1);
+          publishContext(900_000, 500_000, 6);
+          await vi.waitFor(() =>
+            expect(
+              useComposerDraftStore.getState().getComposerDraft(THREAD_REF)
+                ?.codexContextWindowOverride,
+            ).toBeUndefined(),
+          );
+          useComposerDraftStore.getState().setPrompt(THREAD_REF, "Use durable context intent");
+          (await waitForSendButton()).click();
+          await vi.waitFor(() =>
+            expect(wsRequests.some((body) => body.type === "thread.turn.start")).toBe(true),
+          );
+          expect(wsRequests.find((body) => body.type === "thread.turn.start")).not.toHaveProperty(
+            "codexContextWindowOverride",
+          );
+          expect(
+            selectThreadByRef(useStore.getState(), THREAD_REF)?.codexContextWindowOverride,
+          ).toBe(900_000);
+          expect(wsRequests.some((body) => body.type === "thread.session.stop")).toBe(false);
+        } finally {
+          await mounted.cleanup();
+        }
+      });
+
+      it.each([
+        { before: true, reset: false },
+        { before: false, reset: false },
+        { before: true, reset: true },
+        { before: false, reset: true },
+      ])(
+        "does not resurrect obsolete ACK intent over newer canonical metadata (before=$before reset=$reset)",
+        async ({ before, reset }) => {
+          let release!: (value: { sequence: number }) => void;
+          const pending = new Promise<{ sequence: number }>((resolve) => {
+            release = resolve;
+          });
+          const mounted = await mountChatView({
+            viewport: DEFAULT_VIEWPORT,
+            snapshot: contextSnapshot(),
+            configureFixture: configureContext,
+            resolveRpc: (body) =>
+              body._tag === ORCHESTRATION_WS_METHODS.dispatchCommand ? pending : undefined,
+          });
+          try {
+            await openContextEditor();
+            if (!reset) await contextInput().fill("700000");
+            await page.getByRole("button", { name: reset ? "Reset" : "Save", exact: true }).click();
+            await vi.waitFor(() =>
+              expect(wsRequests.some((body) => body.type === "thread.meta.update")).toBe(true),
+            );
+            if (!before) {
+              release({ sequence: 2 });
+              await vi.waitFor(() =>
+                expect(
+                  useComposerDraftStore.getState().getComposerDraft(THREAD_REF)
+                    ?.codexContextWindowOverride,
+                ).toBe(reset ? null : 700_000),
+              );
+            }
+            publishContext(900_000, 500_000, 3);
+            await vi.waitFor(() =>
+              expect(
+                selectThreadByRef(useStore.getState(), THREAD_REF)?.codexContextWindowOverride,
+              ).toBe(900_000),
+            );
+            if (before) release({ sequence: 2 });
+            await vi.waitFor(() => {
+              expect(document.querySelector('[role="dialog"]')).toBeNull();
+              expect(
+                useComposerDraftStore.getState().getComposerDraft(THREAD_REF)
+                  ?.codexContextWindowOverride,
+              ).toBeUndefined();
+            });
+            await openContextEditor();
+            await expect.element(contextInput()).toHaveValue(900_000);
+          } finally {
+            release({ sequence: 2 });
+            await mounted.cleanup();
+          }
+        },
+      );
+
+      it.each(["account", "model"] as const)(
+        "fences a late ACK across %s away-and-back without closing the replacement editor",
+        async (transition) => {
+          let release!: (value: { sequence: number }) => void;
+          const pending = new Promise<{ sequence: number }>((resolve) => {
+            release = resolve;
+          });
+          const mounted = await mountChatView({
+            viewport: WIDE_FOOTER_VIEWPORT,
+            snapshot: contextSnapshot(),
+            configureFixture: configureContext,
+            resolveRpc: (body) =>
+              body._tag === ORCHESTRATION_WS_METHODS.dispatchCommand ? pending : undefined,
+          });
+          try {
+            await openContextEditor();
+            await contextInput().fill("700000");
+            await page.getByRole("button", { name: "Save", exact: true }).click();
+            await vi.waitFor(() =>
+              expect(wsRequests.some((body) => body.type === "thread.meta.update")).toBe(true),
+            );
+            useComposerDraftStore
+              .getState()
+              .setModelSelection(
+                THREAD_REF,
+                createModelSelection(
+                  transition === "account" ? peer : account,
+                  transition === "model" ? "gpt-5.6-sol" : "gpt-5",
+                ),
+              );
+            await vi.waitFor(() => expect(document.querySelector('[role="dialog"]')).toBeNull());
+            useUiStateStore.getState().setSessionRailDocked(true);
+            await vi.waitFor(() =>
+              expect(findSessionRail()?.textContent).toContain(
+                transition === "account"
+                  ? "Context override: 500K · saved"
+                  : "Context override: 500K",
+              ),
+            );
+            expect(findSessionRail()?.textContent).not.toContain("→");
+            useComposerDraftStore
+              .getState()
+              .setModelSelection(THREAD_REF, createModelSelection(account, "gpt-5"));
+            await openContextEditor();
+            await contextInput().fill("800000");
+            release({ sequence: 2 });
+            await waitForLayout();
+            await expect
+              .element(page.getByRole("dialog", { name: "Context window", exact: true }))
+              .toBeVisible();
+            await expect.element(contextInput()).toHaveValue(800_000);
+            expect(
+              useComposerDraftStore.getState().getComposerDraft(THREAD_REF)
+                ?.codexContextWindowOverride,
+            ).toBeUndefined();
+            expect(wsRequests.filter((body) => body.type === "thread.meta.update")).toHaveLength(1);
+          } finally {
+            release({ sequence: 2 });
+            await mounted.cleanup();
+          }
+        },
+      );
+
+      it("captures only a local chat's explicit context choice in first-send bootstrap without seeding account or future drafts", async () => {
+        const mounted = await mountChatView({
+          viewport: DEFAULT_VIEWPORT,
+          snapshot: createProjectlessSnapshot(),
+          initialPath: "/",
+          configureFixture: (next) => {
+            configureContext(next);
+            configureStandaloneShortcut(next);
+          },
+          resolveRpc: (body) =>
+            body._tag === ORCHESTRATION_WS_METHODS.dispatchCommand ? { sequence: 2 } : undefined,
+        });
+        try {
+          newChatShortcut();
+          await vi.waitFor(() =>
+            expect(mounted.router.state.location.pathname).toMatch(UUID_ROUTE_RE),
+          );
+          const draftId = draftIdFromPath(mounted.router.state.location.pathname);
+          expect(
+            useComposerDraftStore.getState().getComposerDraft(draftId)?.codexContextWindowOverride,
+          ).toBeUndefined();
+          await openContextEditor();
+          await expect.element(contextInput()).toHaveValue(null);
+          await contextInput().fill("1000000");
+          await page.getByRole("button", { name: "Save", exact: true }).click();
+          expect(wsRequests.some((body) => body.type === "thread.meta.update")).toBe(false);
+          expect(
+            useComposerDraftStore.getState().getComposerDraft(draftId)?.codexContextWindowOverride,
+          ).toBe(1_000_000);
+          useComposerDraftStore.getState().setPrompt(draftId, "First context-bound message");
+          await waitForStandaloneComposerText("First context-bound message");
+          (await waitForSendButton()).click();
+          await vi.waitFor(() =>
+            expect(wsRequests.find((body) => body.type === "thread.turn.start")).toMatchObject({
+              threadId: draftThreadIdFor(draftId),
+              codexContextWindowOverride: 1_000_000,
+              bootstrap: { createThread: { codexContextWindowOverride: 1_000_000 } },
+            }),
+          );
+          const submittedId = draftThreadIdFor(draftId);
+          fixture.snapshot = addThreadToSnapshot(fixture.snapshot, submittedId);
+          fixture.snapshot = {
+            ...fixture.snapshot,
+            threads: fixture.snapshot.threads.map((thread) =>
+              thread.id === submittedId
+                ? {
+                    ...thread,
+                    projectId: null,
+                    branch: null,
+                    session: null,
+                    codexContextWindowOverride: 1_000_000,
+                  }
+                : thread,
+            ),
+          };
+          // Match the established draft promotion boundary: received started
+          // session evidence, not a bare create shell or elapsed time, owns
+          // navigation from the editable draft to its canonical server chat.
+          await startPromotedServerThreadViaDomainEvent(submittedId);
+          await vi.waitFor(() =>
+            expect(mounted.router.state.location.pathname).toBe(serverThreadPath(submittedId)),
+          );
+          expect(
+            selectThreadByRef(
+              useStore.getState(),
+              scopeThreadRef(LOCAL_ENVIRONMENT_ID, submittedId),
+            )?.codexContextWindowOverride,
+          ).toBe(1_000_000);
+          newChatShortcut();
+          await vi.waitFor(() =>
+            expect(draftIdFromPath(mounted.router.state.location.pathname)).not.toBe(draftId),
+          );
+          const fresh = draftIdFromPath(mounted.router.state.location.pathname);
+          expect(
+            useComposerDraftStore.getState().getComposerDraft(fresh)?.codexContextWindowOverride,
+          ).toBeUndefined();
+          expect(
+            JSON.stringify(useComposerDraftStore.getState().stickyModelSelectionByProvider),
+          ).not.toContain("codexContextWindowOverride");
+        } finally {
+          await mounted.cleanup();
+        }
+      });
+
+      it.each([
+        { driver: "claudeAgent", model: "claude-opus-4-8", reset: false },
+        { driver: "claudeAgent", model: "claude-opus-4-8", reset: true },
+        { driver: "grok", model: "grok-4.6", reset: false },
+        { driver: "grok", model: "grok-4.6", reset: true },
+      ] as const)(
+        "preserves latent Codex chat metadata during first $driver bootstrap without a non-Codex turn override (reset=$reset)",
+        async ({ driver, model, reset }) => {
+          const otherAccount = ProviderInstanceId.make(`context-bootstrap-${driver}`);
+          const requested = reset ? null : 1_000_000;
+          const mounted = await mountChatView({
+            viewport: DEFAULT_VIEWPORT,
+            snapshot: createProjectlessSnapshot(),
+            initialPath: "/",
+            configureFixture: (next) => {
+              configureContext(next);
+              configureStandaloneShortcut(next);
+              next.serverConfig = {
+                ...next.serverConfig,
+                providers: [
+                  ...next.serverConfig.providers,
+                  {
+                    driver: ProviderDriverKind.make(driver),
+                    instanceId: otherAccount,
+                    enabled: true,
+                    installed: true,
+                    version: "synthetic-context-bootstrap",
+                    status: "ready",
+                    auth: { status: "authenticated" },
+                    checkedAt: NOW_ISO,
+                    models: [
+                      {
+                        slug: model,
+                        name: `Synthetic ${driver}`,
+                        isCustom: false,
+                        capabilities: createModelCapabilities({ optionDescriptors: [] }),
+                      },
+                    ],
+                    slashCommands: [],
+                    skills: [],
+                  },
+                ],
+                settings: {
+                  ...next.serverConfig.settings,
+                  providerInstances: {
+                    ...next.serverConfig.settings.providerInstances,
+                    [otherAccount]: {
+                      driver: ProviderDriverKind.make(driver),
+                      defaultModel: model,
+                    },
+                  },
+                },
+              };
+            },
+            resolveRpc: (body) =>
+              body._tag === ORCHESTRATION_WS_METHODS.dispatchCommand ? { sequence: 2 } : undefined,
+          });
+          try {
+            newChatShortcut();
+            await vi.waitFor(() =>
+              expect(mounted.router.state.location.pathname).toMatch(UUID_ROUTE_RE),
+            );
+            const draftId = draftIdFromPath(mounted.router.state.location.pathname);
+            expect(
+              useComposerDraftStore.getState().getComposerDraft(draftId)
+                ?.codexContextWindowOverride,
+            ).toBeUndefined();
+            await openContextEditor();
+            await expect.element(contextInput()).toHaveValue(null);
+            if (!reset) await contextInput().fill("1000000");
+            await page.getByRole("button", { name: reset ? "Reset" : "Save", exact: true }).click();
+            expect(
+              useComposerDraftStore.getState().getComposerDraft(draftId)
+                ?.codexContextWindowOverride,
+            ).toBe(requested);
+            useComposerDraftStore
+              .getState()
+              .setModelSelection(draftId, createModelSelection(otherAccount, model));
+            await page.getByRole("button", { name: "More composer controls", exact: true }).click();
+            await expect
+              .element(page.getByRole("menuitem", { name: "Context window…", exact: true }))
+              .not.toBeInTheDocument();
+            await userEvent.keyboard("{Escape}");
+            expect(
+              useComposerDraftStore.getState().getComposerDraft(draftId)
+                ?.codexContextWindowOverride,
+            ).toBe(requested);
+            useComposerDraftStore
+              .getState()
+              .setPrompt(draftId, "First message after changing the draft provider");
+            await waitForStandaloneComposerText("First message after changing the draft provider");
+            (await waitForSendButton()).click();
+            await vi.waitFor(() =>
+              expect(wsRequests.find((body) => body.type === "thread.turn.start")).toMatchObject({
+                threadId: draftThreadIdFor(draftId),
+                modelSelection: { instanceId: otherAccount, model },
+                bootstrap: {
+                  createThread: {
+                    modelSelection: { instanceId: otherAccount, model },
+                    codexContextWindowOverride: requested,
+                  },
+                },
+              }),
+            );
+            const sent = wsRequests.find((body) => body.type === "thread.turn.start")!;
+            expect(sent).not.toHaveProperty("codexContextWindowOverride");
+            expect(sent.modelSelection).not.toHaveProperty("options.codexContextWindowOverride");
+            expect(
+              JSON.stringify(useComposerDraftStore.getState().stickyModelSelectionByProvider),
+            ).not.toContain("codexContextWindowOverride");
+            expect(
+              wsRequests.some(
+                (body) => body.type === "thread.meta.update" || body.type === "thread.session.stop",
+              ),
+            ).toBe(false);
+          } finally {
+            await mounted.cleanup();
+          }
+        },
+      );
     });
 
     it("edits the exact standalone chat policy, preserves the other driver and sends its captured override", async () => {

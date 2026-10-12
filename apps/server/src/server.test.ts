@@ -6293,7 +6293,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
   );
 
   it.effect(
-    "bootstraps first-send worktree turns on the server before dispatching turn start",
+    "bootstraps first-send worktree turns and chat-local context policy before dispatching turn start",
     () =>
       Effect.gen(function* () {
         const dispatchedCommands: Array<OrchestrationCommand> = [];
@@ -6374,6 +6374,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
                 createThread: {
                   projectId: defaultProjectId,
                   title: "Bootstrap Thread",
+                  codexContextWindowOverride: 500_000,
                   modelSelection: defaultModelSelection,
                   runtimeMode: "full-access",
                   interactionMode: "default",
@@ -6413,6 +6414,11 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
         assert.deepEqual(refreshStatus.mock.calls[0]?.[0], "/tmp/bootstrap-worktree");
 
         const finalCommand = dispatchedCommands[2];
+        const createdCommand = dispatchedCommands[0];
+        assertTrue(createdCommand?.type === "thread.create");
+        if (createdCommand?.type === "thread.create") {
+          assert.equal(createdCommand.codexContextWindowOverride, 500_000);
+        }
         assertTrue(finalCommand?.type === "thread.turn.start");
         if (finalCommand?.type === "thread.turn.start") {
           assert.equal(finalCommand.bootstrap, undefined);

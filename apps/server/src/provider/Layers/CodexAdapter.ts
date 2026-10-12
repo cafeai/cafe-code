@@ -23,6 +23,7 @@ import * as NodeFs from "node:fs";
 
 import {
   type CanonicalItemType,
+  validCodexContextWindowOverride,
   type CanonicalRequestType,
   type CodexSettings,
   EventId,
@@ -465,6 +466,8 @@ export interface CodexAdapterLiveOptions {
   >;
   /** Cached owning-driver status only; this getter must never launch a probe. */
   readonly getSubagentConcurrencySupport?: () => boolean;
+  /** Version qualification of this exact owning CLI; no probe or model guess. */
+  readonly getCodexContextWindowSupport?: () => boolean;
   readonly instanceId?: ProviderInstanceId;
   readonly environment?: NodeJS.ProcessEnv;
   readonly prepareRuntimeHome?: Effect.Effect<void, CodexShadowHomeError>;
@@ -5189,6 +5192,20 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
             issue: tier.error,
           });
         const existing = sessions.get(input.threadId);
+        // Validate and qualify before any close/retirement. A null Reset is a
+        // Cafe control value only; native start/resume receives an omitted key.
+        const contextWindowOverride = input.codexContextWindowOverride ?? null;
+        if (
+          contextWindowOverride !== null &&
+          (!validCodexContextWindowOverride(contextWindowOverride) ||
+            !options?.getCodexContextWindowSupport?.())
+        ) {
+          return yield* new ProviderAdapterValidationError({
+            provider: PROVIDER,
+            operation: "startSession",
+            issue: "This Codex runtime does not support the requested context-window override.",
+          });
+        }
         const maxConcurrentSubagents = yield* Effect.try({
           try: () =>
             resolveConfiguredSubagentLimit(
@@ -5202,9 +5219,15 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
               issue: "Subagent concurrency must be an integer between 1 and 64.",
             }),
         });
-        if (input.requireIdleForSubagentLimitChange) {
+        if (
+          input.requireIdleForSubagentLimitChange ||
+          input.requireIdleForCodexContextWindowChange
+        ) {
           if (
-            !options?.getSubagentConcurrencySupport?.() ||
+            (input.requireIdleForSubagentLimitChange &&
+              !options?.getSubagentConcurrencySupport?.()) ||
+            (input.requireIdleForCodexContextWindowChange &&
+              !options?.getCodexContextWindowSupport?.()) ||
             (existing &&
               !existing.stopped &&
               (!existing.runtime.closeIfIdle || !(yield* existing.runtime.closeIfIdle)))
@@ -5212,9 +5235,11 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
             return yield* new ProviderAdapterRequestError({
               provider: PROVIDER,
               method: "session/reconfigure",
-              remoteErrorTag: "subagent-concurrency-active",
+              remoteErrorTag: input.requireIdleForCodexContextWindowChange
+                ? "codex-context-window-active"
+                : "subagent-concurrency-active",
               detail:
-                "Subagent concurrency cannot change while provider work is active or uncertain.",
+                "Provider configuration cannot change while provider work is active or uncertain.",
             });
           }
         }
@@ -5338,6 +5363,9 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
             : {}),
           binaryPath: codexConfig.binaryPath,
           ...(maxConcurrentSubagents !== null ? { maxConcurrentSubagents } : {}),
+          ...(contextWindowOverride !== null
+            ? { codexContextWindowOverride: contextWindowOverride }
+            : {}),
           ...(options?.environment ? { environment: options.environment } : {}),
           ...(codexConfig.homePath ? { homePath: codexConfig.homePath } : {}),
           ...(isCodexResumeCursorSchema(input.resumeCursor)
@@ -5907,6 +5935,9 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
         providerInstanceId: boundInstanceId,
         runtimeMode: sourceSession.runtimeMode,
         maxConcurrentSubagents: sourceSession.maxConcurrentSubagents ?? null,
+        ...(sourceSession.codexContextWindowOverride !== undefined
+          ? { codexContextWindowOverride: sourceSession.codexContextWindowOverride }
+          : {}),
         ...(sourceSession.interactionMode !== undefined
           ? { interactionMode: sourceSession.interactionMode }
           : {}),
@@ -6380,6 +6411,9 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
     capabilities: {
       get subagentConcurrency() {
         return options?.getSubagentConcurrencySupport?.() ?? false;
+      },
+      get codexContextWindow() {
+        return options?.getCodexContextWindowSupport?.() ?? false;
       },
       subagentPolicyContinuation: true,
       sessionModelSwitch: "in-session",

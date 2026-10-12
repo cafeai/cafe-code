@@ -272,6 +272,9 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
           ...(command.subagentLimits !== undefined
             ? { subagentLimits: command.subagentLimits }
             : {}),
+          ...(command.codexContextWindowOverride !== undefined
+            ? { codexContextWindowOverride: command.codexContextWindowOverride }
+            : {}),
           runtimeMode: command.runtimeMode,
           interactionMode: command.interactionMode,
           branch: command.branch,
@@ -317,6 +320,9 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
             modelSelection: sourceThread.modelSelection,
             ...(sourceThread.subagentLimits !== undefined
               ? { subagentLimits: sourceThread.subagentLimits }
+              : {}),
+            ...(sourceThread.codexContextWindowOverride !== undefined
+              ? { codexContextWindowOverride: sourceThread.codexContextWindowOverride }
               : {}),
             runtimeMode: sourceThread.runtimeMode,
             interactionMode: sourceThread.interactionMode,
@@ -433,6 +439,9 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
             runtimeMode: sourceThread.runtimeMode,
             ...(sourceThread.subagentLimits !== undefined
               ? { subagentLimits: sourceThread.subagentLimits }
+              : {}),
+            ...(sourceThread.codexContextWindowOverride !== undefined
+              ? { codexContextWindowOverride: sourceThread.codexContextWindowOverride }
               : {}),
             interactionMode: sourceThread.interactionMode,
             branch: sourceThread.branch,
@@ -631,6 +640,9 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
           ...(command.subagentLimits !== undefined
             ? { subagentLimits: command.subagentLimits }
             : {}),
+          ...(command.codexContextWindowOverride !== undefined
+            ? { codexContextWindowOverride: command.codexContextWindowOverride }
+            : {}),
           ...(associationChanged
             ? { branch: null }
             : command.branch !== undefined
@@ -721,7 +733,10 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
           (command.modelSelection !== undefined &&
             command.modelSelection.instanceId !== targetThread.modelSelection.instanceId) ||
           (command.subagentLimits !== undefined &&
-            !isDeepStrictEqual(command.subagentLimits, targetThread.subagentLimits ?? {}))
+            !isDeepStrictEqual(command.subagentLimits, targetThread.subagentLimits ?? {})) ||
+          (command.codexContextWindowOverride !== undefined &&
+            command.codexContextWindowOverride !==
+              (targetThread.codexContextWindowOverride ?? null))
         ) {
           return yield* new OrchestrationCommandInvariantError({
             commandType: command.type,
@@ -767,7 +782,10 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
           (command.modelSelection !== undefined &&
             !isDeepStrictEqual(command.modelSelection, targetThread.modelSelection)) ||
           (command.subagentLimits !== undefined &&
-            !isDeepStrictEqual(command.subagentLimits, targetThread.subagentLimits ?? {}))
+            !isDeepStrictEqual(command.subagentLimits, targetThread.subagentLimits ?? {})) ||
+          (command.codexContextWindowOverride !== undefined &&
+            command.codexContextWindowOverride !==
+              (targetThread.codexContextWindowOverride ?? null))
         ) {
           return yield* new OrchestrationCommandInvariantError({
             commandType: command.type,
@@ -888,7 +906,7 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
         // policy as pending metadata, but never turn that edit into authority
         // to replace the process that still owns the active root/children.
         const pendingLimits: ReadonlyArray<PlannedOrchestrationEvent> =
-          command.subagentLimits === undefined
+          command.subagentLimits === undefined && command.codexContextWindowOverride === undefined
             ? []
             : [
                 {
@@ -901,7 +919,12 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
                   type: "thread.meta-updated",
                   payload: {
                     threadId: command.threadId,
-                    subagentLimits: command.subagentLimits,
+                    ...(command.subagentLimits !== undefined
+                      ? { subagentLimits: command.subagentLimits }
+                      : {}),
+                    ...(command.codexContextWindowOverride !== undefined
+                      ? { codexContextWindowOverride: command.codexContextWindowOverride }
+                      : {}),
                     updatedAt: command.createdAt,
                   },
                 },
@@ -985,6 +1008,9 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
             : {}),
           ...(command.subagentLimits !== undefined
             ? { subagentLimits: command.subagentLimits }
+            : {}),
+          ...(command.codexContextWindowOverride !== undefined
+            ? { codexContextWindowOverride: command.codexContextWindowOverride }
             : {}),
           ...(command.titleSeed !== undefined ? { titleSeed: command.titleSeed } : {}),
           runtimeMode: targetThread.runtimeMode,

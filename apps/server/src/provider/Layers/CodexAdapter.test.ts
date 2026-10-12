@@ -921,6 +921,7 @@ class FakeCodexRuntime implements CodexSessionRuntimeShape {
       status,
       runtimeMode: this.options.runtimeMode,
       maxConcurrentSubagents: this.options.maxConcurrentSubagents ?? null,
+      codexContextWindowOverride: this.options.codexContextWindowOverride ?? null,
       threadId: this.options.threadId,
       cwd: this.options.cwd,
       ...(this.options.model ? { model: this.options.model } : {}),
@@ -1279,6 +1280,7 @@ it.effect(
 function makeConcurrencyTestLayer(
   factory: ReturnType<typeof makeRuntimeFactory>,
   instanceLimit?: number,
+  contextSupport: () => boolean = () => true,
 ) {
   return Layer.effect(
     CodexAdapter,
@@ -1286,7 +1288,11 @@ function makeConcurrencyTestLayer(
       decodeCodexSettings({
         ...(instanceLimit !== undefined ? { maxConcurrentSubagents: instanceLimit } : {}),
       }),
-      { makeRuntime: factory.factory, getSubagentConcurrencySupport: () => true },
+      {
+        makeRuntime: factory.factory,
+        getSubagentConcurrencySupport: () => true,
+        getCodexContextWindowSupport: contextSupport,
+      },
     ),
   ).pipe(
     Layer.provideMerge(ServerConfig.layerTest(process.cwd(), process.cwd())),
@@ -1396,6 +1402,102 @@ it.effect(
       assert.equal(factory.lastRuntime?.options.maxConcurrentSubagents, undefined);
       assert.deepEqual(factory.lastRuntime?.options.resumeCursor, session.resumeCursor);
     }).pipe(Effect.provide(makeConcurrencyTestLayer(factory)));
+  },
+);
+
+it.effect(
+  "applies combined chat context and subagent overrides through one final idle admission and omits native Reset",
+  () => {
+    const factory = makeRuntimeFactory();
+    return Effect.gen(function* () {
+      const adapter = yield* CodexAdapter;
+      const initial = yield* adapter.startSession({
+        threadId: asThreadId("context-guard"),
+        runtimeMode: "full-access",
+        codexContextWindowOverride: 500_000,
+        maxConcurrentSubagents: 3,
+      });
+      assert.equal(initial.codexContextWindowOverride, 500_000);
+      assert.equal(factory.lastRuntime?.options.codexContextWindowOverride, 500_000);
+      const original = factory.lastRuntime!;
+      original.closeIfIdleImpl.mockResolvedValue(false);
+      const denied = yield* adapter
+        .startSession({
+          threadId: initial.threadId,
+          runtimeMode: "full-access",
+          codexContextWindowOverride: 600_000,
+          maxConcurrentSubagents: 4,
+          requireIdleForCodexContextWindowChange: true,
+          requireIdleForSubagentLimitChange: true,
+        })
+        .pipe(Effect.result);
+      assert.equal(denied._tag, "Failure");
+      if (denied._tag === "Failure")
+        assert.equal(
+          "remoteErrorTag" in denied.failure ? denied.failure.remoteErrorTag : null,
+          "codex-context-window-active",
+        );
+      assert.equal(factory.runtimes.length, 1);
+      assert.equal(original.closeIfIdleImpl.mock.calls.length, 1);
+      assert.equal(original.closeImpl.mock.calls.length, 0);
+      for (const value of [0, -1, 1.5, NaN, Infinity, Number.MAX_SAFE_INTEGER + 1]) {
+        const invalid = yield* adapter
+          .startSession({
+            threadId: initial.threadId,
+            runtimeMode: "full-access",
+            codexContextWindowOverride: value,
+          })
+          .pipe(Effect.result);
+        assert.equal(invalid._tag, "Failure");
+      }
+      assert.equal(original.closeImpl.mock.calls.length, 0);
+      original.closeIfIdleImpl.mockResolvedValue(true);
+      const reset = yield* adapter.startSession({
+        threadId: initial.threadId,
+        runtimeMode: "full-access",
+        resumeCursor: initial.resumeCursor,
+        codexContextWindowOverride: null,
+        maxConcurrentSubagents: null,
+        requireIdleForCodexContextWindowChange: true,
+        requireIdleForSubagentLimitChange: true,
+      });
+      assert.equal(reset.codexContextWindowOverride, null);
+      assert.equal(factory.lastRuntime?.options.codexContextWindowOverride, undefined);
+      assert.deepEqual(factory.lastRuntime?.options.resumeCursor, initial.resumeCursor);
+      assert.equal(original.closeIfIdleImpl.mock.calls.length, 2);
+      assert.equal(factory.lastRuntime?.options.autoCompactTokenLimit, undefined);
+    }).pipe(Effect.provide(makeConcurrencyTestLayer(factory)));
+  },
+);
+
+it.effect(
+  "refuses unsupported context Reset before native retirement and preserves current configuration",
+  () => {
+    const factory = makeRuntimeFactory();
+    let supported = true;
+    return Effect.gen(function* () {
+      const adapter = yield* CodexAdapter;
+      const initial = yield* adapter.startSession({
+        threadId: asThreadId("context-reset-unsupported"),
+        runtimeMode: "full-access",
+        codexContextWindowOverride: 500_000,
+      });
+      const original = factory.lastRuntime!;
+      supported = false;
+      const result = yield* adapter
+        .startSession({
+          threadId: initial.threadId,
+          runtimeMode: "full-access",
+          codexContextWindowOverride: null,
+          requireIdleForCodexContextWindowChange: true,
+        })
+        .pipe(Effect.result);
+      assert.equal(result._tag, "Failure");
+      assert.equal(factory.runtimes.length, 1);
+      assert.equal(original.closeIfIdleImpl.mock.calls.length, 0);
+      assert.equal(original.closeImpl.mock.calls.length, 0);
+      assert.equal((yield* adapter.listSessions())[0]?.codexContextWindowOverride, 500_000);
+    }).pipe(Effect.provide(makeConcurrencyTestLayer(factory, undefined, () => supported)));
   },
 );
 

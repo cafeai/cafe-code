@@ -115,6 +115,7 @@ import Migration0090 from "./Migrations/090_WorkflowLifecycleRetention.ts";
 import Migration0091 from "./Migrations/091_CodexTransientRecoveryIntents.ts";
 import Migration0092 from "./Migrations/092_LiveWork.ts";
 import Migration0093 from "./Migrations/093_RecoveryPresentationIndex.ts";
+import Migration0094 from "./Migrations/094_CodexContextWindowOverride.ts";
 
 /**
  * Migration loader with all migrations defined inline.
@@ -224,6 +225,7 @@ export const migrationEntries = [
   [91, "CodexTransientRecoveryIntents", Migration0091],
   [92, "LiveWork", Migration0092],
   [93, "RecoveryPresentationIndex", Migration0093],
+  [94, "CodexContextWindowOverride", Migration0094],
 ] as const;
 
 export const makeMigrationLoader = (

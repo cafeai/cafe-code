@@ -36,6 +36,7 @@
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
 import { MaxConcurrentSubagents } from "./subagentLimits.ts";
+import { CodexContextWindowOverride } from "./codexContextWindow.ts";
 import { TrimmedNonEmptyString } from "./baseSchemas.ts";
 
 const PROVIDER_SLUG_MAX_CHARS = 64;
@@ -166,6 +167,9 @@ export const ProviderInstanceConfig = Schema.Struct({
   // Live fallback for chats without a driver-specific override. Saving this
   // remains lifecycle-neutral; materialization waits for a safe idle turn.
   defaultMaxConcurrentSubagents: Schema.optionalKey(MaxConcurrentSubagents),
+  // Lifecycle-neutral live Codex account fallback. Never copied into chat
+  // intent or runtime config; the exact selected account is resolved per send.
+  defaultCodexContextWindowOverride: Schema.optionalKey(CodexContextWindowOverride),
 });
 export type ProviderInstanceConfig = typeof ProviderInstanceConfig.Type;
 

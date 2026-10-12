@@ -554,6 +554,9 @@ export const makeScheduledFollowups = Effect.gen(function* () {
         message: { messageId: MessageId.make(run.message_id), role: "user", text, attachments: [] },
         modelSelection: draft.modelSelection ?? thread.modelSelection,
         ...(thread.subagentLimits ? { subagentLimits: thread.subagentLimits } : {}),
+        ...(thread.codexContextWindowOverride !== undefined
+          ? { codexContextWindowOverride: thread.codexContextWindowOverride }
+          : {}),
         runtimeMode: thread.runtimeMode,
         interactionMode: thread.interactionMode,
         createdAt: timestamp,

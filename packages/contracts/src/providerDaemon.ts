@@ -451,6 +451,9 @@ export const ProviderDaemonAdapterCapabilities = Schema.Struct({
   // boundary. Legacy owners omit this field; absence remains unsupported and
   // must never be upgraded from a model name or a cached renderer snapshot.
   subagentConcurrency: Schema.optional(Schema.Boolean),
+  // Exact authenticated owner qualification for Codex's chat-local native
+  // context override. Missing on older owners means unsupported, not inherited.
+  codexContextWindow: Schema.optional(Schema.Boolean),
   // Cafe's exact existing-process/no-recovery fence, not native CLI support.
   // Older owners omit it and cannot admit this continuation exception.
   subagentPolicyContinuation: Schema.optional(Schema.Boolean),

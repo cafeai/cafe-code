@@ -6,6 +6,9 @@ import { afterEach, describe, expect, it } from "vitest";
 import { render } from "vitest-browser-react";
 
 import { ContextWindowDetails } from "./ContextWindowDetails";
+import { SessionRail } from "./SessionRail";
+import { deriveCodexContextWindowPresentation } from "../../codexContextWindow";
+import type { ContextWindowSnapshot } from "../../lib/contextWindow";
 
 const rateLimits: ServerProviderAccountRateLimits = {
   checkedAt: "2026-09-24T00:00:00.000Z",
@@ -22,6 +25,113 @@ describe("ContextWindowDetails reset availability", () => {
     await mounted?.unmount();
     mounted = undefined;
   });
+
+  it.each(["popover", "panel", "rail"] as const)(
+    "keeps the native reported capacity separate from saved context choices in %s",
+    async (layout) => {
+      const usage: ContextWindowSnapshot = {
+        usedTokens: 95_000,
+        maxTokens: 475_000,
+        remainingTokens: 380_000,
+        usedPercentage: 20,
+        remainingPercentage: 80,
+        updatedAt: "2026-10-12T00:00:00.000Z",
+        totalProcessedTokens: null,
+        inputTokens: null,
+        cachedInputTokens: null,
+        cacheWriteInputTokens: null,
+        totalCacheWriteInputTokens: null,
+        outputTokens: null,
+        reasoningOutputTokens: null,
+        lastUsedTokens: null,
+        lastInputTokens: null,
+        lastCachedInputTokens: null,
+        lastCacheWriteInputTokens: null,
+        lastOutputTokens: null,
+        lastReasoningOutputTokens: null,
+        toolUses: null,
+        durationMs: null,
+        compactsAutomatically: false,
+        autoCompactTokenLimit: null,
+      };
+      const subagentConcurrency = {
+        requested: 5,
+        configured: 5,
+        pending: false,
+        source: "Chat override" as const,
+      };
+      const content = (
+        requested: number | null | undefined,
+        configured: number | null | undefined,
+        inherited?: number,
+      ) => {
+        const codexContextWindow = deriveCodexContextWindowPresentation({
+          requested,
+          configured,
+          inherited,
+        });
+        return layout === "rail" ? (
+          <div style={{ width: 300, height: 600 }}>
+            <SessionRail
+              plan={null}
+              usage={usage}
+              subagentConcurrency={subagentConcurrency}
+              codexContextWindow={codexContextWindow}
+              onShowInComposer={() => {}}
+            />
+          </div>
+        ) : (
+          <ContextWindowDetails
+            usage={usage}
+            layout={layout}
+            subagentConcurrency={subagentConcurrency}
+            codexContextWindow={codexContextWindow}
+          />
+        );
+      };
+      mounted = await render(content(1_000_000, 500_000));
+      await expect
+        .element(page.getByText("Context override: 500K → 1M when idle", { exact: true }))
+        .toBeVisible();
+      expect(document.querySelectorAll("[data-codex-context-window-details]")).toHaveLength(1);
+      expect(document.querySelectorAll("[data-subagent-concurrency-details]")).toHaveLength(1);
+      expect(
+        document
+          .querySelector("[data-subagent-concurrency-details]")!
+          .compareDocumentPosition(document.querySelector("[data-codex-context-window-details]")!) &
+          Node.DOCUMENT_POSITION_FOLLOWING,
+      ).toBeTruthy();
+      await expect.element(page.getByText("475k context used", { exact: true })).toBeVisible();
+      expect(document.body.textContent).toContain("20%");
+      await mounted.rerender(content(null, 500_000, 700_000));
+      await expect
+        .element(page.getByText("Context override: 500K → 700K when idle", { exact: true }))
+        .toBeVisible();
+      await mounted.rerender(content(null, 500_000));
+      await expect
+        .element(
+          page.getByText("Context override: 500K → Codex default when idle", { exact: true }),
+        )
+        .toBeVisible();
+      await mounted.rerender(content(null, undefined, 700_000));
+      await expect
+        .element(page.getByText("Context override: 700K · saved", { exact: true }))
+        .toBeVisible();
+      await expect.element(page.getByText("475k context used", { exact: true })).toBeVisible();
+      await mounted.rerender(content(null, null));
+      expect(document.querySelector("[data-codex-context-window-details]")).toBeNull();
+      if (layout === "rail") {
+        const screenshotDirectory = import.meta.env.VITE_CODEX_CONTEXT_SCREENSHOT_DIR;
+        if (typeof screenshotDirectory === "string" && screenshotDirectory.length > 0) {
+          await mounted.rerender(content(1_000_000, 500_000));
+          await expect
+            .element(page.getByText("Context override: 500K → 1M when idle", { exact: true }))
+            .toBeVisible();
+          await page.screenshot({ path: `${screenshotDirectory}/context-tasks-rail.png` });
+        }
+      }
+    },
+  );
 
   it.each(["popover", "panel"] as const)(
     "shows the saved limit immediately and omits unknown limits in %s layout",

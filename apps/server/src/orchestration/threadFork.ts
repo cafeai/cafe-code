@@ -188,6 +188,9 @@ export const dispatchProviderNativeThreadFork = Effect.fn("dispatchProviderNativ
         ...(fork.maxConcurrentSubagents !== undefined
           ? { maxConcurrentSubagents: fork.maxConcurrentSubagents }
           : {}),
+        ...(fork.codexContextWindowOverride !== undefined
+          ? { codexContextWindowOverride: fork.codexContextWindowOverride }
+          : {}),
         activeTurnId: null,
         lastError: null,
         updatedAt: input.command.createdAt,

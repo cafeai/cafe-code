@@ -9,6 +9,7 @@ import {
   ProviderTaskControlResult,
 } from "./providerTaskControls.ts";
 import { MaxConcurrentSubagents, SubagentLimits } from "./subagentLimits.ts";
+import { CodexContextWindowOverride } from "./codexContextWindow.ts";
 import { RepositoryIdentity } from "./environment.ts";
 import { CodexReviewTarget } from "./codexReview.ts";
 import {
@@ -327,6 +328,8 @@ export const OrchestrationSession = Schema.Struct({
   providerName: Schema.NullOr(TrimmedNonEmptyString),
   providerInstanceId: Schema.optional(ProviderInstanceId),
   maxConcurrentSubagents: Schema.optional(Schema.NullOr(MaxConcurrentSubagents)),
+  // Exact materialized Cafe configuration, not a reconstructed context meter.
+  codexContextWindowOverride: Schema.optional(Schema.NullOr(CodexContextWindowOverride)),
   runtimeMode: RuntimeMode.pipe(Schema.withDecodingDefault(Effect.succeed(DEFAULT_RUNTIME_MODE))),
   activeTurnId: Schema.NullOr(TurnId),
   lastError: Schema.NullOr(TrimmedNonEmptyString),
@@ -403,6 +406,9 @@ export const OrchestrationThread = Schema.Struct({
   title: TrimmedNonEmptyString,
   modelSelection: ModelSelection,
   subagentLimits: Schema.optional(SubagentLimits),
+  // Dedicated Codex chat intent: null Reset inherits the selected account's
+  // live preference, then native guidance. Never copied to sticky model options.
+  codexContextWindowOverride: Schema.optional(Schema.NullOr(CodexContextWindowOverride)),
   runtimeMode: RuntimeMode,
   interactionMode: ProviderInteractionMode.pipe(
     Schema.withDecodingDefault(Effect.succeed(DEFAULT_PROVIDER_INTERACTION_MODE)),
@@ -462,6 +468,7 @@ export const OrchestrationThreadShell = Schema.Struct({
   title: TrimmedNonEmptyString,
   modelSelection: ModelSelection,
   subagentLimits: Schema.optional(SubagentLimits),
+  codexContextWindowOverride: Schema.optional(Schema.NullOr(CodexContextWindowOverride)),
   runtimeMode: RuntimeMode,
   interactionMode: ProviderInteractionMode.pipe(
     Schema.withDecodingDefault(Effect.succeed(DEFAULT_PROVIDER_INTERACTION_MODE)),
@@ -990,6 +997,7 @@ const ThreadCreateCommand = Schema.Struct({
   title: TrimmedNonEmptyString,
   modelSelection: ModelSelection,
   subagentLimits: Schema.optional(SubagentLimits),
+  codexContextWindowOverride: Schema.optional(Schema.NullOr(CodexContextWindowOverride)),
   runtimeMode: RuntimeMode,
   interactionMode: ProviderInteractionMode.pipe(
     Schema.withDecodingDefault(Effect.succeed(DEFAULT_PROVIDER_INTERACTION_MODE)),
@@ -1061,6 +1069,7 @@ const ThreadMetaUpdateCommand = Schema.Struct({
   title: Schema.optional(TrimmedNonEmptyString),
   modelSelection: Schema.optional(ModelSelection),
   subagentLimits: Schema.optional(SubagentLimits),
+  codexContextWindowOverride: Schema.optional(Schema.NullOr(CodexContextWindowOverride)),
   branch: Schema.optional(Schema.NullOr(TrimmedNonEmptyString)),
   worktreePath: Schema.optional(Schema.NullOr(TrimmedNonEmptyString)),
 });
@@ -1086,6 +1095,7 @@ const ThreadTurnStartBootstrapCreateThread = Schema.Struct({
   title: TrimmedNonEmptyString,
   modelSelection: ModelSelection,
   subagentLimits: Schema.optional(SubagentLimits),
+  codexContextWindowOverride: Schema.optional(Schema.NullOr(CodexContextWindowOverride)),
   runtimeMode: RuntimeMode,
   interactionMode: ProviderInteractionMode,
   branch: Schema.NullOr(TrimmedNonEmptyString),
@@ -1170,6 +1180,7 @@ export const ThreadTurnStartCommand = Schema.Struct({
   }),
   modelSelection: Schema.optional(ModelSelection),
   subagentLimits: Schema.optional(SubagentLimits),
+  codexContextWindowOverride: Schema.optional(Schema.NullOr(CodexContextWindowOverride)),
   titleSeed: Schema.optional(TrimmedNonEmptyString),
   runtimeMode: RuntimeMode.pipe(Schema.withDecodingDefault(Effect.succeed(DEFAULT_RUNTIME_MODE))),
   interactionMode: ProviderInteractionMode.pipe(
@@ -1196,6 +1207,7 @@ const ClientThreadTurnStartCommand = Schema.Struct({
   }),
   modelSelection: Schema.optional(ModelSelection),
   subagentLimits: Schema.optional(SubagentLimits),
+  codexContextWindowOverride: Schema.optional(Schema.NullOr(CodexContextWindowOverride)),
   titleSeed: Schema.optional(TrimmedNonEmptyString),
   runtimeMode: RuntimeMode,
   interactionMode: ProviderInteractionMode,
@@ -1675,6 +1687,7 @@ export const ThreadCreatedPayload = Schema.Struct({
   title: TrimmedNonEmptyString,
   modelSelection: ModelSelection,
   subagentLimits: Schema.optional(SubagentLimits),
+  codexContextWindowOverride: Schema.optional(Schema.NullOr(CodexContextWindowOverride)),
   runtimeMode: RuntimeMode.pipe(Schema.withDecodingDefault(Effect.succeed(DEFAULT_RUNTIME_MODE))),
   interactionMode: ProviderInteractionMode.pipe(
     Schema.withDecodingDefault(Effect.succeed(DEFAULT_PROVIDER_INTERACTION_MODE)),
@@ -1726,6 +1739,7 @@ export const ThreadMetaUpdatedPayload = Schema.Struct({
   title: Schema.optional(TrimmedNonEmptyString),
   modelSelection: Schema.optional(ModelSelection),
   subagentLimits: Schema.optional(SubagentLimits),
+  codexContextWindowOverride: Schema.optional(Schema.NullOr(CodexContextWindowOverride)),
   branch: Schema.optional(Schema.NullOr(TrimmedNonEmptyString)),
   worktreePath: Schema.optional(Schema.NullOr(TrimmedNonEmptyString)),
   updatedAt: IsoDateTime,
@@ -1780,6 +1794,7 @@ export const ThreadTurnStartRequestedPayload = Schema.Struct({
   messageId: MessageId,
   modelSelection: Schema.optional(ModelSelection),
   subagentLimits: Schema.optional(SubagentLimits),
+  codexContextWindowOverride: Schema.optional(Schema.NullOr(CodexContextWindowOverride)),
   titleSeed: Schema.optional(TrimmedNonEmptyString),
   runtimeMode: RuntimeMode.pipe(Schema.withDecodingDefault(Effect.succeed(DEFAULT_RUNTIME_MODE))),
   interactionMode: ProviderInteractionMode.pipe(

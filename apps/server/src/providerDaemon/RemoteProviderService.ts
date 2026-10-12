@@ -15,6 +15,7 @@ import {
   type ProviderRuntimeEvent,
   type ProviderDaemonClientConfig,
   type ProviderCompactThreadInput,
+  type ProviderSessionStartInput,
 } from "@cafecode/contracts";
 import {
   ProviderDaemonHttpStatusError,
@@ -482,6 +483,42 @@ export const requestProviderDaemonCapabilities = (
     ),
   );
 
+/**
+ * A legacy daemon can decode an unknown field by discarding it. Consequently a
+ * numeric override, or an idle guard that clears a former override, must never
+ * reach startSession before this exact authenticated owner advertises support.
+ * Native inheritance without reconfiguration remains compatible with legacy
+ * hosts and does not cause a capability request. This read grants no retirement
+ * authority: the daemon must still perform the final locked native idle check.
+ */
+export const guardRemoteCodexContextWindowStart = <A, E, R, E2, R2>(input: {
+  readonly request: ProviderSessionStartInput;
+  readonly readCapabilities: (
+    instanceId: ProviderInstanceId,
+  ) => Effect.Effect<ProviderAdapterCapabilities, E, R>;
+  readonly effect: Effect.Effect<A, E2, R2>;
+}): Effect.Effect<A, E | E2 | ProviderValidationError, R | R2> =>
+  Effect.gen(function* () {
+    const requiresSupport =
+      typeof input.request.codexContextWindowOverride === "number" ||
+      input.request.requireIdleForCodexContextWindowChange === true;
+    if (!requiresSupport) return yield* input.effect;
+    if (input.request.provider !== "codex" || input.request.providerInstanceId === undefined) {
+      return yield* new ProviderValidationError({
+        operation: "ProviderDaemonRemoteProviderService.startSession",
+        issue: "A context-window reconfiguration requires an exact Codex provider instance.",
+      });
+    }
+    const capabilities = yield* input.readCapabilities(input.request.providerInstanceId);
+    if (capabilities.codexContextWindow !== true) {
+      return yield* new ProviderValidationError({
+        operation: "ProviderDaemonRemoteProviderService.startSession",
+        issue: "This Codex owner does not support context-window reconfiguration.",
+      });
+    }
+    return yield* input.effect;
+  });
+
 async function readEventStream(
   daemonConfig: ProviderDaemonClientConfig,
   afterCursor: number,
@@ -815,9 +852,17 @@ const makeRemoteProviderService = Effect.gen(function* () {
 
   const service: ProviderServiceShape = {
     startSession: (threadId, input) =>
-      guardedRpc({
-        method: "startSession",
-        payload: { ...input, threadId },
+      guardRemoteProviderThreadOperation({
+        retiredThreadIds: hardDeleteRetiredThreadIds,
+        operation: "ProviderDaemonRemoteProviderService.startSession",
+        threadIds: [threadId],
+        effect: guardRemoteCodexContextWindowStart({
+          request: input,
+          readCapabilities: (instanceId) =>
+            requestProviderDaemonCapabilities(daemonConfig, instanceId),
+          // Recheck retirement after the asynchronous capability read as well.
+          effect: guardedRpc({ method: "startSession", payload: { ...input, threadId } }),
+        }),
       }),
     forkSession: (input) => guardedRpc({ method: "forkSession", payload: input }),
     discardSessionFork: (input) => guardedRpc({ method: "discardSessionFork", payload: input }),

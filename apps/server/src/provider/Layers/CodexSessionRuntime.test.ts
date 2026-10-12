@@ -8647,6 +8647,44 @@ describe("openCodexThread", () => {
     }
   });
 
+  it("translates an explicit nominal context override on start/resume and omits it on inheritance", async () => {
+    const calls: Array<{ method: "thread/start" | "thread/resume"; payload: unknown }> = [];
+    const client = {
+      raw: {
+        request: (method: "thread/start" | "thread/resume", payload: unknown) => {
+          calls.push({ method, payload });
+          return Effect.succeed(makeThreadOpenResponse("context-thread"));
+        },
+      },
+    };
+    for (const resumeThreadId of [undefined, "existing-thread"]) {
+      for (const codexContextWindowOverride of [500_000, undefined]) {
+        await Effect.runPromise(
+          openCodexThread({
+            client,
+            threadId: ThreadId.make("context-thread"),
+            runtimeMode: "full-access",
+            cwd: process.cwd(),
+            requestedModel: "gpt-6.1-sol",
+            serviceTier: undefined,
+            resumeThreadId,
+            ...(codexContextWindowOverride !== undefined ? { codexContextWindowOverride } : {}),
+          }),
+        );
+        const config = (calls.at(-1)!.payload as { config: Record<string, unknown> }).config;
+        assert.deepEqual(
+          config,
+          codexContextWindowOverride === undefined ? {} : { model_context_window: 500_000 },
+        );
+        assert.equal("model_auto_compact_token_limit" in config, false);
+      }
+    }
+    assert.deepEqual(
+      calls.map((call) => call.method),
+      ["thread/start", "thread/start", "thread/resume", "thread/resume"],
+    );
+  });
+
   it("propagates non-recoverable resume failures", async () => {
     const client = {
       raw: {

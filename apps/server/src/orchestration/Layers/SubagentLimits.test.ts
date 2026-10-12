@@ -60,7 +60,7 @@ const instanceId = ProviderInstanceId.make("codex");
 const create = (
   id: ThreadId,
   limits?: { codex?: number; claude?: number },
-): OrchestrationCommand => ({
+): Extract<OrchestrationCommand, { type: "thread.create" }> => ({
   type: "thread.create",
   commandId: CommandId.make(`create-${id}`),
   threadId: id,
@@ -87,6 +87,146 @@ const session = (fields: Partial<OrchestrationSession> = {}): OrchestrationSessi
 });
 
 describe("durable subagent policy projections", () => {
+  it("round-trips context override/reset/unknown through all durable snapshots and isolated reload", async () => {
+    const baseDir = fs.mkdtempSync(path.join(os.tmpdir(), "cafe-context-policy-"));
+    const unknownId = ThreadId.make("unknown-context-policy");
+    const duplicateId = ThreadId.make("context-duplicate");
+    const forkId = ThreadId.make("context-fork");
+    try {
+      const system = await openSystem(baseDir);
+      try {
+        await system.dispatch({ ...create(threadId), codexContextWindowOverride: 500_000 });
+        await system.dispatch(create(unknownId));
+        let sequence = 0;
+        const set = (fields: Partial<OrchestrationSession>) =>
+          system.dispatch({
+            type: "thread.session.set",
+            commandId: CommandId.make(`context-session-${sequence++}`),
+            threadId,
+            session: session(fields),
+            createdAt: now,
+          });
+        await set({ codexContextWindowOverride: 500_000 });
+        await set({});
+        expect(
+          Option.getOrThrow(await system.read(system.query.getThreadDetailById(threadId))).session
+            ?.codexContextWindowOverride,
+        ).toBe(500_000);
+        await set({ providerInstanceId: ProviderInstanceId.make("other-context-account") });
+        expect(
+          Option.getOrThrow(await system.read(system.query.getThreadShellById(threadId))).session,
+        ).not.toHaveProperty("codexContextWindowOverride");
+        await set({ codexContextWindowOverride: null });
+        await system.dispatch({
+          type: "thread.duplicate",
+          commandId: CommandId.make("context-copy"),
+          sourceThreadId: threadId,
+          targetThreadId: duplicateId,
+          title: "Duplicate",
+          createdAt: now,
+        });
+        await system.dispatch({
+          type: "thread.fork.commit",
+          commandId: CommandId.make("context-fork"),
+          sourceThreadId: threadId,
+          sourceVersion: await system.read(system.query.getThreadForkSourceVersion(threadId)),
+          targetThreadId: forkId,
+          title: "Fork",
+          createdAt: now,
+          session: session({
+            threadId: forkId,
+            status: "stopped",
+            codexContextWindowOverride: 400_000,
+          }),
+        });
+        for (const id of [duplicateId, forkId])
+          expect(
+            Option.getOrThrow(await system.read(system.query.getThreadDetailById(id)))
+              .codexContextWindowOverride,
+          ).toBe(500_000);
+        expect(
+          Option.getOrThrow(await system.read(system.query.getThreadDetailById(duplicateId)))
+            .session,
+        ).toBeNull();
+        expect(
+          Option.getOrThrow(await system.read(system.query.getThreadDetailById(forkId))).session
+            ?.codexContextWindowOverride,
+        ).toBe(400_000);
+        await system.dispatch({
+          type: "thread.archive",
+          commandId: CommandId.make("archive-context"),
+          threadId: duplicateId,
+        });
+        await system.dispatch({
+          type: "thread.delete",
+          commandId: CommandId.make("delete-context"),
+          threadId: forkId,
+        });
+        const reset: OrchestrationCommand = {
+          type: "thread.meta.update",
+          commandId: CommandId.make("reset-context"),
+          threadId,
+          codexContextWindowOverride: null,
+        };
+        await system.dispatch(reset);
+        const beforeRepeat = await system.read(system.query.getSnapshotSequence());
+        await system.dispatch(reset);
+        expect(await system.read(system.query.getSnapshotSequence())).toEqual(beforeRepeat);
+        await system.dispatch({
+          type: "thread.meta.update",
+          commandId: CommandId.make("rename-context"),
+          threadId,
+          title: "Reset preserved",
+        });
+        expect(
+          (await system.read(system.query.getCommandReadModel())).threads.find(
+            (entry) => entry.id === threadId,
+          )?.codexContextWindowOverride,
+        ).toBeNull();
+      } finally {
+        await system.dispose();
+      }
+      const reopened = await openSystem(baseDir);
+      try {
+        for (const snapshot of [
+          await reopened.read(reopened.query.getSnapshot()),
+          await reopened.read(reopened.query.getShellSnapshot()),
+          await reopened.read(reopened.query.getCommandReadModel()),
+        ]) {
+          expect(
+            snapshot.threads.find((entry) => entry.id === threadId)?.codexContextWindowOverride,
+          ).toBeNull();
+          expect(snapshot.threads.find((entry) => entry.id === unknownId)).not.toHaveProperty(
+            "codexContextWindowOverride",
+          );
+        }
+        const detail = Option.getOrThrow(
+          await reopened.read(reopened.query.getThreadDetailById(threadId)),
+        );
+        const shell = Option.getOrThrow(
+          await reopened.read(reopened.query.getThreadShellById(threadId)),
+        );
+        for (const row of [detail, shell]) {
+          expect(row.codexContextWindowOverride).toBeNull();
+          expect(row.session?.codexContextWindowOverride).toBeNull();
+        }
+        expect(
+          (await reopened.read(reopened.query.getArchivedShellSnapshot())).threads[0]
+            ?.codexContextWindowOverride,
+        ).toBe(500_000);
+        expect(
+          (await reopened.read(reopened.query.getDeletedShellSnapshot())).threads[0]
+            ?.codexContextWindowOverride,
+        ).toBe(500_000);
+      } finally {
+        await reopened.dispose();
+      }
+    } finally {
+      // This exact fixture-owned path was minted by mkdtemp, never a user database.
+      fs.rmSync(baseDir, { recursive: true, force: true });
+    }
+  });
+
   it("round-trips exact policy, copies, lifecycle evidence, reset/dedup, and restart through every read shape", async () => {
     const baseDir = fs.mkdtempSync(path.join(os.tmpdir(), "cafe-subagent-policy-"));
     const duplicateId = ThreadId.make("durable-duplicate");

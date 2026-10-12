@@ -183,6 +183,32 @@ const setup = Effect.gen(function* () {
 
 effectIt.layer(TestSqliteClient.layerMemory())("transient chain durability", (it) => {
   it.effect(
+    "context numeric edits and explicit Reset revoke old automatic recovery without treating title/provider text as consent",
+    () =>
+      Effect.gen(function* () {
+        const s = yield* setup;
+        for (const value of [500_000, null]) {
+          yield* s.humanStart();
+          const source = yield* s.marker();
+          const input = { ...s.recovery(source), threadId };
+          assert.equal(yield* s.readBarrier(input), true);
+          yield* s.append("thread.meta-updated", { title: "Presentation only" }, "server");
+          yield* s.append("thread.meta-updated", { codexContextWindowOverride: value }, "provider");
+          assert.equal(yield* s.readBarrier(input), true);
+          yield* s.append("thread.meta-updated", { codexContextWindowOverride: value }, "client");
+          assert.equal(yield* s.readBarrier(input), false);
+          // A fresh failure after the configuration edit also cannot borrow the
+          // old human turn's consent through the bounded prior-control index.
+          const afterEdit = yield* s.marker();
+          assert.equal(yield* s.readBarrier({ ...s.recovery(afterEdit), threadId }), false);
+          yield* s.humanStart();
+          const afterHuman = yield* s.marker();
+          assert.equal(yield* s.readBarrier({ ...s.recovery(afterHuman), threadId }), true);
+        }
+      }),
+  );
+
+  it.effect(
     "requires exact server markers and retains intent barriers through long streamed output",
     () =>
       Effect.gen(function* () {

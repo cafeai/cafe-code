@@ -150,6 +150,9 @@ function makeFakeCodexAdapter(provider: ProviderDriverKind = CODEX_DRIVER) {
           ...(input.maxConcurrentSubagents !== undefined
             ? { maxConcurrentSubagents: input.maxConcurrentSubagents }
             : {}),
+          ...(input.codexContextWindowOverride !== undefined
+            ? { codexContextWindowOverride: input.codexContextWindowOverride }
+            : {}),
           createdAt: now,
           updatedAt: now,
         };
@@ -200,6 +203,9 @@ function makeFakeCodexAdapter(provider: ProviderDriverKind = CODEX_DRIVER) {
         runtimeMode: source.runtimeMode,
         ...(source.maxConcurrentSubagents !== undefined
           ? { maxConcurrentSubagents: source.maxConcurrentSubagents }
+          : {}),
+        ...(source.codexContextWindowOverride !== undefined
+          ? { codexContextWindowOverride: source.codexContextWindowOverride }
           : {}),
         ...(source.cwd !== undefined ? { cwd: source.cwd } : {}),
         resumeCursor: { opaque: `fork-${String(input.targetThreadId)}` },
@@ -4567,6 +4573,104 @@ routing.layer("ProviderServiceLive routing", (it) => {
         yield* provider.sendTurn({ threadId, input: "Resume once", attachments: [] });
         assert.equal(routing.codex.startSession.mock.calls.length, 1);
         assert.equal(routing.codex.startSession.mock.calls[0]?.[0].maxConcurrentSubagents, null);
+      }),
+  );
+
+  it.effect(
+    "persists context Reset and does not restore a former numeric override in recovery",
+    () =>
+      Effect.gen(function* () {
+        const provider = yield* ProviderService;
+        const directory = yield* ProviderSessionDirectory;
+        const threadId = asThreadId("reset-context-policy");
+        const request = {
+          provider: CODEX_DRIVER,
+          providerInstanceId: codexInstanceId,
+          threadId,
+          runtimeMode: "full-access" as const,
+        };
+        yield* provider.startSession(threadId, { ...request, codexContextWindowOverride: 500_000 });
+        yield* provider.startSession(threadId, { ...request, codexContextWindowOverride: null });
+        assert.equal(
+          (
+            Option.getOrThrow(yield* directory.getBinding(threadId)).runtimePayload as Record<
+              string,
+              unknown
+            >
+          ).codexContextWindowOverride,
+          null,
+        );
+        yield* routing.codex.stopAll();
+        routing.codex.startSession.mockClear();
+        yield* provider.sendTurn({ threadId, input: "Resume once", attachments: [] });
+        assert.equal(routing.codex.startSession.mock.calls.length, 1);
+        assert.equal(
+          routing.codex.startSession.mock.calls[0]?.[0].codexContextWindowOverride,
+          null,
+        );
+      }),
+  );
+
+  it.effect("rejects malformed or non-Codex context requests before adapter delivery", () =>
+    Effect.gen(function* () {
+      const provider = yield* ProviderService;
+      routing.codex.startSession.mockClear();
+      for (const value of [0, -1, 1.5, NaN, Infinity, Number.MAX_SAFE_INTEGER + 1]) {
+        const threadId = asThreadId(`invalid-context-${value}`);
+        const result = yield* provider
+          .startSession(threadId, {
+            provider: CODEX_DRIVER,
+            providerInstanceId: codexInstanceId,
+            threadId,
+            runtimeMode: "full-access",
+            codexContextWindowOverride: value,
+          })
+          .pipe(Effect.exit);
+        assert.isTrue(Exit.isFailure(result));
+      }
+      assert.equal(routing.codex.startSession.mock.calls.length, 0);
+      routing.claude.startSession.mockClear();
+      const foreign = yield* provider
+        .startSession(asThreadId("foreign-context"), {
+          provider: CLAUDE_AGENT_DRIVER,
+          providerInstanceId: claudeAgentInstanceId,
+          threadId: asThreadId("foreign-context"),
+          runtimeMode: "full-access",
+          codexContextWindowOverride: 500_000,
+        })
+        .pipe(Effect.exit);
+      assert.isTrue(Exit.isFailure(foreign));
+      assert.equal(routing.claude.startSession.mock.calls.length, 0);
+    }),
+  );
+
+  it.effect(
+    "does not borrow persisted context from a different driver's same account identifier",
+    () =>
+      Effect.gen(function* () {
+        const provider = yield* ProviderService;
+        const directory = yield* ProviderSessionDirectory;
+        const threadId = asThreadId("context-former-driver");
+        yield* directory.upsert({
+          threadId,
+          provider: CLAUDE_AGENT_DRIVER,
+          providerInstanceId: codexInstanceId,
+          runtimeMode: "full-access",
+          status: "stopped",
+          runtimePayload: { codexContextWindowOverride: 500_000 },
+        });
+        routing.codex.startSession.mockClear();
+        yield* provider.startSession(threadId, {
+          threadId,
+          provider: CODEX_DRIVER,
+          providerInstanceId: codexInstanceId,
+          runtimeMode: "full-access",
+        });
+        assert.equal(routing.codex.startSession.mock.calls.length, 1);
+        assert.equal(
+          routing.codex.startSession.mock.calls[0]?.[0].codexContextWindowOverride,
+          undefined,
+        );
       }),
   );
 

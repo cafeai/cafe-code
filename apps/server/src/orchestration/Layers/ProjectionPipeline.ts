@@ -971,6 +971,9 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
             ...(event.payload.subagentLimits !== undefined
               ? { subagentLimits: event.payload.subagentLimits }
               : {}),
+            ...(event.payload.codexContextWindowOverride !== undefined
+              ? { codexContextWindowOverride: event.payload.codexContextWindowOverride }
+              : {}),
             runtimeMode: event.payload.runtimeMode,
             interactionMode: event.payload.interactionMode,
             branch: event.payload.branch,
@@ -1110,6 +1113,9 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
             ...(event.payload.subagentLimits !== undefined
               ? { subagentLimits: event.payload.subagentLimits }
               : {}),
+            ...(event.payload.codexContextWindowOverride !== undefined
+              ? { codexContextWindowOverride: event.payload.codexContextWindowOverride }
+              : {}),
             ...(event.payload.branch !== undefined ? { branch: event.payload.branch } : {}),
             ...(event.payload.worktreePath !== undefined
               ? { worktreePath: event.payload.worktreePath }
@@ -1164,6 +1170,9 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
               : {}),
             ...(event.payload.subagentLimits !== undefined
               ? { subagentLimits: event.payload.subagentLimits }
+              : {}),
+            ...(event.payload.codexContextWindowOverride !== undefined
+              ? { codexContextWindowOverride: event.payload.codexContextWindowOverride }
               : {}),
             runtimeMode: event.payload.runtimeMode,
             interactionMode: event.payload.interactionMode,
@@ -1909,6 +1918,10 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
           ...(Option.isSome(existingSession) &&
           existingSession.value.maxConcurrentSubagents !== undefined
             ? { maxConcurrentSubagents: existingSession.value.maxConcurrentSubagents }
+            : {}),
+          ...(Option.isSome(existingSession) &&
+          existingSession.value.codexContextWindowOverride !== undefined
+            ? { codexContextWindowOverride: existingSession.value.codexContextWindowOverride }
             : {}),
           activeTurnId: null,
           lastError: null,

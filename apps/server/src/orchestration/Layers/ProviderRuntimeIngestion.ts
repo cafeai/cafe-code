@@ -3260,6 +3260,17 @@ const make = Effect.gen(function* () {
               thread.session.providerInstanceId === event.providerInstanceId
                 ? { maxConcurrentSubagents: thread.session.maxConcurrentSubagents }
                 : {}),
+              // An account identifier may be reused after changing drivers.
+              // Codex-only materialization also requires exact driver and
+              // generation binding; account equality alone is insufficient.
+              ...(thread.session?.codexContextWindowOverride !== undefined &&
+              thread.session.providerName === "codex" &&
+              event.provider === "codex" &&
+              thread.session.providerInstanceId === event.providerInstanceId &&
+              (incomingRuntimeId === undefined ||
+                incomingRuntimeId === thread.session.subagentRuntimeId)
+                ? { codexContextWindowOverride: thread.session.codexContextWindowOverride }
+                : {}),
               activeTurnId: nextActiveTurnId,
               lastError,
               updatedAt: now,
@@ -3437,13 +3448,17 @@ const make = Effect.gen(function* () {
         // Reconnecting child progress may prove its native context while the
         // parent's historical turn is deliberately terminal. Adopt only the
         // generation; do not reopen that parent or invent a new running turn.
+        // A generation witness is not a configuration observation. Explicitly
+        // spreading the old context setting would bypass the projection's
+        // omitted-field generation fence and bind it to a different runtime.
+        const { codexContextWindowOverride: _formerContext, ...retainedSession } = thread.session;
         yield* dispatchObservedSession(
           {
             type: "thread.session.set",
             commandId: providerCommandId(event, "subagent-runtime-observation"),
             threadId: thread.id,
             expectedSubagentRuntimeId: currentRuntimeId ?? null,
-            session: { ...thread.session, subagentRuntimeId: incomingRuntimeId },
+            session: { ...retainedSession, subagentRuntimeId: incomingRuntimeId },
             createdAt: now,
           },
           thread.session,

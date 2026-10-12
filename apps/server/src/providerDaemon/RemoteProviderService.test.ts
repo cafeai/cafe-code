@@ -2,8 +2,10 @@ import {
   CommandId,
   ProviderDaemonRpcRequest,
   ProviderInstanceId,
+  ProviderDriverKind,
   ThreadId,
   TurnId,
+  type ProviderSessionStartInput,
 } from "@cafecode/contracts";
 import { assert, describe, it } from "@effect/vitest";
 import { ProviderDaemonHttpStatusError } from "@cafecode/shared/providerDaemonHttp";
@@ -24,6 +26,7 @@ import {
   providerDaemonConversationRollbackRequest,
   requestProviderDaemonConversationRollback,
   guardRemoteProviderThreadOperation,
+  guardRemoteCodexContextWindowStart,
   isRetryableProviderDaemonControlError,
   isVoidProviderDaemonRpcMethod,
   ProviderDaemonRpcResponseError,
@@ -78,6 +81,85 @@ const rewindConfig = { httpBaseUrl: "http://127.0.0.1:3774", token: "synthetic-t
 const encodeRpcRequest = Schema.encodeSync(ProviderDaemonRpcRequest);
 
 describe("RemoteProviderService", () => {
+  it.effect(
+    "requires exact authenticated context support before numeric or Reset reconfiguration delivery",
+    () =>
+      Effect.gen(function* () {
+        const account = ProviderInstanceId.make("synthetic-context-owner");
+        const base: ProviderSessionStartInput = {
+          threadId: ThreadId.make("synthetic-context-thread"),
+          provider: ProviderDriverKind.make("codex"),
+          providerInstanceId: account,
+          runtimeMode: "full-access",
+        };
+        const observed: Array<ProviderInstanceId> = [];
+        let deliveries = 0;
+        const delivery = Effect.sync(() => ++deliveries);
+        for (const capability of [false, undefined, "true"] as const) {
+          for (const policy of [
+            { codexContextWindowOverride: 500_000 },
+            { codexContextWindowOverride: null, requireIdleForCodexContextWindowChange: true },
+          ] as const) {
+            const result = yield* guardRemoteCodexContextWindowStart({
+              request: { ...base, ...policy },
+              readCapabilities: (instanceId) =>
+                Effect.sync(() => {
+                  observed.push(instanceId);
+                  return {
+                    sessionModelSwitch: "in-session" as const,
+                    liveSteer: "unsupported" as const,
+                    ...(capability !== undefined
+                      ? { codexContextWindow: capability as boolean }
+                      : {}),
+                  };
+                }),
+              effect: delivery,
+            }).pipe(Effect.result);
+            assert.equal(result._tag, "Failure");
+            assert.equal(deliveries, 0);
+          }
+        }
+        assert.deepEqual(observed, Array(6).fill(account));
+        const qualified = yield* guardRemoteCodexContextWindowStart({
+          request: { ...base, codexContextWindowOverride: 500_000 },
+          readCapabilities: (instanceId) =>
+            Effect.sync(() => {
+              assert.equal(instanceId, account);
+              return {
+                sessionModelSwitch: "in-session" as const,
+                liveSteer: "unsupported" as const,
+                codexContextWindow: true,
+              };
+            }),
+          effect: delivery,
+        });
+        assert.equal(qualified, 1);
+        for (const request of [
+          { ...base, providerInstanceId: undefined, codexContextWindowOverride: 500_000 },
+          {
+            ...base,
+            provider: ProviderDriverKind.make("claudeAgent"),
+            codexContextWindowOverride: 500_000,
+          },
+        ]) {
+          const result = yield* guardRemoteCodexContextWindowStart({
+            request,
+            readCapabilities: () => Effect.die(new Error("Unbound policy must not read an owner.")),
+            effect: delivery,
+          }).pipe(Effect.result);
+          assert.equal(result._tag, "Failure");
+        }
+        assert.equal(deliveries, 1);
+        yield* guardRemoteCodexContextWindowStart({
+          request: { ...base, codexContextWindowOverride: null },
+          readCapabilities: () =>
+            Effect.die(new Error("Native inheritance must not probe a legacy owner.")),
+          effect: delivery,
+        });
+        assert.equal(deliveries, 2);
+      }),
+  );
+
   it("binds stable rewind command identities to their phase and finish outcome", () => {
     const ids = new Set<string>();
     for (const input of rewindRequests) {

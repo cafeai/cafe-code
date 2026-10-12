@@ -27,6 +27,7 @@ import {
 } from "./orchestration.ts";
 import { ProviderInstanceId, ProviderDriverKind } from "./providerInstance.ts";
 import { MaxConcurrentSubagents } from "./subagentLimits.ts";
+import { CodexContextWindowOverride } from "./codexContextWindow.ts";
 import { CodexReviewTarget } from "./codexReview.ts";
 import {
   ProviderDeliveryPriority,
@@ -77,6 +78,9 @@ export const ProviderSession = Schema.Struct({
   // Missing is legacy unknown; null means no explicit process override was
   // materialized. A number records configured policy, not universal enforcement.
   maxConcurrentSubagents: Schema.optional(Schema.NullOr(MaxConcurrentSubagents)),
+  // Recorded Cafe native override, never the provider's effective capacity.
+  // Absent is legacy unknown; null positively records no Cafe numeric key.
+  codexContextWindowOverride: Schema.optional(Schema.NullOr(CodexContextWindowOverride)),
   threadId: ThreadId,
   resumeCursor: Schema.optional(Schema.Unknown),
   // Server-owned read-only history coordinates, distinct from permission to
@@ -155,10 +159,15 @@ export const ProviderSessionStartInput = Schema.Struct({
   modelSelection: Schema.optional(ModelSelection),
   // Null/omitted delegates to the existing instance/native launch policy.
   maxConcurrentSubagents: Schema.optional(Schema.NullOr(MaxConcurrentSubagents)),
+  // Orchestration resolves the chat/account request first. Explicit null
+  // clears a previous Cafe runtime fallback; native JSON never receives null.
+  codexContextWindowOverride: Schema.optional(Schema.NullOr(CodexContextWindowOverride)),
   // Internal replacement admission: atomically prove the entire native tree
   // idle before retiring a process for this policy change. Never persist this
   // guard as runtime policy or interpret it as renderer-authored permission.
   requireIdleForSubagentLimitChange: Schema.optional(Schema.Boolean),
+  // Parallel internal guard; context changes require the same whole-tree idle proof.
+  requireIdleForCodexContextWindowChange: Schema.optional(Schema.Boolean),
   resumeCursor: Schema.optional(Schema.Unknown),
   approvalPolicy: Schema.optional(ProviderApprovalPolicy),
   sandboxMode: Schema.optional(ProviderSandboxMode),
@@ -205,6 +214,7 @@ export const ProviderSessionForkResult = Schema.Struct({
   model: Schema.optional(TrimmedNonEmptyString),
   modelSelection: Schema.optional(ModelSelection),
   maxConcurrentSubagents: Schema.optional(Schema.NullOr(MaxConcurrentSubagents)),
+  codexContextWindowOverride: Schema.optional(Schema.NullOr(CodexContextWindowOverride)),
   resumeCursor: Schema.Unknown,
 });
 export type ProviderSessionForkResult = typeof ProviderSessionForkResult.Type;

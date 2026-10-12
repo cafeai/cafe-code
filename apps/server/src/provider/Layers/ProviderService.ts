@@ -16,6 +16,7 @@ import {
   MessageId,
   ModelSelection,
   MaxConcurrentSubagents,
+  CodexContextWindowOverride,
   NonNegativeInt,
   ThreadId,
   ProviderInterruptTurnInput,
@@ -430,6 +431,9 @@ function toRuntimePayloadFromSession(
     ...(session.maxConcurrentSubagents !== undefined
       ? { maxConcurrentSubagents: session.maxConcurrentSubagents }
       : {}),
+    ...(session.codexContextWindowOverride !== undefined
+      ? { codexContextWindowOverride: session.codexContextWindowOverride }
+      : {}),
     ...(extra?.modelSelection !== undefined ? { modelSelection: extra.modelSelection } : {}),
     ...(extra?.lastRuntimeEvent !== undefined ? { lastRuntimeEvent: extra.lastRuntimeEvent } : {}),
     ...(extra?.lastRuntimeEventAt !== undefined
@@ -458,6 +462,19 @@ function readPersistedMaxConcurrentSubagents(
   const raw =
     "maxConcurrentSubagents" in runtimePayload ? runtimePayload.maxConcurrentSubagents : undefined;
   return raw === null || Schema.is(MaxConcurrentSubagents)(raw) ? raw : undefined;
+}
+
+/** Exact-owner saved configuration; never infer a legacy number from usage. */
+function readPersistedCodexContextWindowOverride(
+  runtimePayload: ProviderRuntimeBinding["runtimePayload"],
+): number | null | undefined {
+  if (!runtimePayload || typeof runtimePayload !== "object" || Array.isArray(runtimePayload))
+    return undefined;
+  const raw =
+    "codexContextWindowOverride" in runtimePayload
+      ? runtimePayload.codexContextWindowOverride
+      : undefined;
+  return raw === null || Schema.is(CodexContextWindowOverride)(raw) ? raw : undefined;
 }
 
 function readPersistedCwd(
@@ -1663,6 +1680,14 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
         ...(persistedMaxConcurrentSubagents !== undefined
           ? { maxConcurrentSubagents: persistedMaxConcurrentSubagents }
           : {}),
+        ...(input.binding.provider === "codex" &&
+        readPersistedCodexContextWindowOverride(input.binding.runtimePayload) !== undefined
+          ? {
+              codexContextWindowOverride: readPersistedCodexContextWindowOverride(
+                input.binding.runtimePayload,
+              ),
+            }
+          : {}),
         ...(hasResumeCursor ? { resumeCursor: input.binding.resumeCursor } : {}),
         runtimeMode: input.binding.runtimeMode ?? "full-access",
       } satisfies ProviderSessionStartInput;
@@ -1852,6 +1877,12 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
           threadId,
           provider: resolvedProvider,
         };
+        if (input.codexContextWindowOverride !== undefined && resolvedProvider !== "codex") {
+          return yield* toValidationError(
+            "ProviderService.startSession",
+            "Context-window overrides are supported only for Codex.",
+          );
+        }
         if (!instanceInfo.enabled) {
           return yield* toValidationError(
             "ProviderService.startSession",
@@ -1883,6 +1914,18 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
             : persistedBinding?.providerInstanceId === resolvedInstanceId
               ? readPersistedMaxConcurrentSubagents(persistedBinding.runtimePayload)
               : undefined;
+        // Explicit null defeats the old numeric durable binding. Native sees
+        // omission only after guarded retirement; absent control-only callers
+        // may recover configuration from this same authenticated account.
+        const effectiveContextWindowOverride =
+          resolvedProvider === "codex"
+            ? input.codexContextWindowOverride !== undefined
+              ? input.codexContextWindowOverride
+              : persistedBinding?.provider === "codex" &&
+                  persistedBinding.providerInstanceId === resolvedInstanceId
+                ? readPersistedCodexContextWindowOverride(persistedBinding.runtimePayload)
+                : undefined
+            : undefined;
         yield* Effect.annotateCurrentSpan({
           "provider.kind": resolvedProvider,
           "provider.resume_cursor.source":
@@ -1914,6 +1957,9 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
           ...(effectiveResumeCursor !== undefined ? { resumeCursor: effectiveResumeCursor } : {}),
           ...(effectiveMaxConcurrentSubagents !== undefined
             ? { maxConcurrentSubagents: effectiveMaxConcurrentSubagents }
+            : {}),
+          ...(effectiveContextWindowOverride !== undefined
+            ? { codexContextWindowOverride: effectiveContextWindowOverride }
             : {}),
         } satisfies ProviderSessionStartInput;
         const recoveredFromRejectedResumeCursor = yield* Ref.make(false);
@@ -2101,6 +2147,14 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
                 ),
               }
             : {}),
+          ...(existingTarget.provider === "codex" &&
+          readPersistedCodexContextWindowOverride(existingTarget.runtimePayload) !== undefined
+            ? {
+                codexContextWindowOverride: readPersistedCodexContextWindowOverride(
+                  existingTarget.runtimePayload,
+                ),
+              }
+            : {}),
           resumeCursor: existingTarget.resumeCursor,
         } satisfies ProviderSessionForkResult;
       }
@@ -2213,6 +2267,9 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
           interactionMode: fork.interactionMode ?? null,
           ...(fork.maxConcurrentSubagents !== undefined
             ? { maxConcurrentSubagents: fork.maxConcurrentSubagents }
+            : {}),
+          ...(fork.codexContextWindowOverride !== undefined
+            ? { codexContextWindowOverride: fork.codexContextWindowOverride }
             : {}),
           activeTurnId: null,
           lastError: null,

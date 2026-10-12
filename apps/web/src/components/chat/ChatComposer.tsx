@@ -102,6 +102,14 @@ import { searchSlashCommandItems } from "./composerSlashCommandSearch";
 import { getComposerProviderState, renderProviderTraitsMenuContent } from "./composerProviderState";
 import { ContextWindowMeter } from "./ContextWindowMeter";
 import { SubagentConcurrencyControl } from "./SubagentConcurrencyControl";
+import { CodexContextWindowControl } from "./CodexContextWindowControl";
+import { useCodexContextWindowOverride } from "./useCodexContextWindowOverride";
+import {
+  buildCodexContextWindowEditorKey,
+  deriveCodexContextWindowPresentation,
+  inheritedCodexContextWindowOverride,
+  type CodexContextWindowPresentation,
+} from "../../codexContextWindow";
 import {
   inheritedInstanceSubagentPolicy,
   deriveSubagentConcurrencyPresentation,
@@ -248,6 +256,7 @@ const ComposerFooterPrimaryActions = memo(function ComposerFooterPrimaryActions(
   quotaContext?: ProviderQuotaContext | undefined;
   usageResetAction: ReactNode;
   subagentConcurrency?: SubagentConcurrencyPresentation | null;
+  codexContextWindow?: CodexContextWindowPresentation | null;
   sessionRailVisible: boolean;
   onShowSessionRail?: () => void;
   isPreparingWorktree: boolean;
@@ -284,6 +293,7 @@ const ComposerFooterPrimaryActions = memo(function ComposerFooterPrimaryActions(
           codexRateLimits={props.codexRateLimits}
           quotaContext={props.quotaContext}
           subagentConcurrency={props.subagentConcurrency}
+          codexContextWindow={props.codexContextWindow}
           {...(props.onShowSessionRail ? { onShowOnSide: props.onShowSessionRail } : {})}
         />
       ) : null}
@@ -364,6 +374,7 @@ export interface ChatComposerHandle {
     selectedModel: string;
     selectedProviderModels: ReadonlyArray<ServerProvider["models"][number]>;
     subagentLimits?: SubagentLimits;
+    codexContextWindowOverride?: number | null;
     deliveryPriority?: ProviderDeliveryPriority;
   };
 }
@@ -1529,6 +1540,78 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
       {concurrencyPresentation?.pending ? uiText(" (pending)", undefined, undefined, uiLocale) : ""}
     </MenuItem>
   ) : null;
+
+  const contextEditorKey = buildCodexContextWindowEditorKey({
+    environmentId,
+    threadId: activeThreadId,
+    draftId,
+    instanceId: selectedInstanceId,
+    model: selectedModel,
+    isServerThread,
+  });
+  const [contextEditorState, setContextEditorState] = useState({
+    key: contextEditorKey,
+    open: false,
+  });
+  const contextEditorOwnerRef = useRef({ key: contextEditorKey });
+  if (contextEditorOwnerRef.current.key !== contextEditorKey)
+    contextEditorOwnerRef.current = { key: contextEditorKey };
+  const contextEditorOwner = contextEditorOwnerRef.current;
+  if (contextEditorState.key !== contextEditorKey)
+    setContextEditorState({ key: contextEditorKey, open: false });
+  const contextEditorOpen = contextEditorState.key === contextEditorKey && contextEditorState.open;
+  const setContextEditorOpen = (open: boolean) => {
+    // Identity, not just the tuple string, also fences an away-and-back late save.
+    if (contextEditorOwnerRef.current !== contextEditorOwner) return;
+    setContextEditorState({ key: contextEditorKey, open });
+  };
+  // Null is a deliberate inherited reset and must never fall through to older canonical numeric intent.
+  const desiredContextOverride =
+    composerDraft.codexContextWindowOverride !== undefined
+      ? composerDraft.codexContextWindowOverride
+      : activeThread?.codexContextWindowOverride;
+  const contextSupported =
+    selectedProvider === "codex" &&
+    selectedProviderStatus?.runtimeCapabilities?.codexContextWindow === true;
+  const contextPresentation =
+    selectedProvider === "codex"
+      ? deriveCodexContextWindowPresentation({
+          requested: desiredContextOverride,
+          inherited: inheritedCodexContextWindowOverride(
+            settings,
+            selectedInstanceId,
+            selectedProvider,
+          ),
+          configured:
+            activeThread?.session?.providerInstanceId === selectedInstanceId &&
+            activeThread.session.provider === "codex"
+              ? activeThread.session.codexContextWindowOverride
+              : undefined,
+        })
+      : null;
+  const saveContextOverride = useCodexContextWindowOverride({
+    key: contextEditorKey,
+    environmentId,
+    threadId: activeThreadId,
+    target: composerDraftTarget,
+    isServerThread,
+    supported: contextSupported,
+  });
+  const contextMenuItem =
+    selectedProvider === "codex" ? (
+      <MenuItem
+        inset
+        disabled={
+          !contextSupported &&
+          desiredContextOverride == null &&
+          contextPresentation?.configured == null &&
+          contextPresentation?.requested == null
+        }
+        onClick={() => setContextEditorOpen(true)}
+      >
+        {uiText("Context window…", undefined, undefined, uiLocale)}
+      </MenuItem>
+    ) : null;
 
   const composerProviderState = useMemo(
     () =>
@@ -3410,6 +3493,13 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
         selectedModel,
         selectedProviderModels,
         ...(desiredSubagentLimits !== undefined ? { subagentLimits: desiredSubagentLimits } : {}),
+        // Existing chats consume current durable intent on every send. Only a
+        // first local bootstrap carries the unsent draft's optional override.
+        // Preserve that chat metadata even if the draft switched drivers;
+        // dispatch separately gates its native turn policy to Codex alone.
+        ...(!isServerThread && desiredContextOverride !== undefined
+          ? { codexContextWindowOverride: desiredContextOverride }
+          : {}),
         ...(deliveryPriority !== undefined ? { deliveryPriority } : {}),
       }),
     }),
@@ -3436,6 +3526,8 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
       selectedProvider,
       selectedProviderModels,
       desiredSubagentLimits,
+      desiredContextOverride,
+      isServerThread,
       deliveryPriority,
     ],
   );
@@ -4233,6 +4325,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                   goalStatus={activeThread?.goal?.status ?? null}
                   traitsMenuContent={providerTraitsMenuContent}
                   subagentConcurrencyControl={concurrencyMenuItem}
+                  codexContextWindowControl={contextMenuItem}
                   providerActions={providerActions}
                   traitsTriggerLabel={
                     providerTraitsMenuContent ? composerProviderState.traitsTriggerLabel : null
@@ -4290,6 +4383,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                     />
                   }
                   subagentConcurrency={concurrencyPresentation}
+                  codexContextWindow={contextPresentation}
                   sessionRailVisible={sessionRailVisible}
                   {...(onShowSessionRail ? { onShowSessionRail } : {})}
                   pendingAction={pendingPrimaryAction}
@@ -4346,6 +4440,17 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
           presentation={concurrencyPresentation}
           isRunning={phase === "running"}
           onChange={saveSubagentLimit}
+        />
+      ) : null}
+      {selectedProvider === "codex" && contextPresentation ? (
+        <CodexContextWindowControl
+          key={contextEditorKey}
+          open={contextEditorOpen}
+          onOpenChange={setContextEditorOpen}
+          supported={contextSupported}
+          override={desiredContextOverride}
+          presentation={contextPresentation}
+          onChange={saveContextOverride}
         />
       ) : null}
     </form>

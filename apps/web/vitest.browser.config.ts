@@ -6,6 +6,7 @@ import viteConfig from "./vite.config.ts";
 
 const srcPath = fileURLToPath(new URL("./src", import.meta.url));
 const touchTimelineFile = "src/components/chat/MessagesTimeline.touch.browser.tsx";
+const contextMotionFile = "src/components/chat/CodexContextWindowControl.motion.browser.tsx";
 const touchViewport = { width: 430, height: 932 };
 const browserOptions = {
   enabled: true,
@@ -70,7 +71,7 @@ export default mergeConfig(
           test: {
             name: "desktop",
             include: ["src/components/**/*.browser.tsx"],
-            exclude: [...configDefaults.exclude, touchTimelineFile],
+            exclude: [...configDefaults.exclude, touchTimelineFile, contextMotionFile],
             sequence: { groupOrder: 0 },
             browser: {
               ...browserOptions,
@@ -105,6 +106,22 @@ export default mergeConfig(
               // Vitest/Playwright owns and closes this context at runner exit;
               // it is never reused by any desktop fixture or live application.
               instances: [{ browser: "chromium", name: "chromium-touch" }],
+            },
+          },
+        },
+        {
+          extends: true,
+          test: {
+            name: "context-reduced-motion",
+            include: [contextMotionFile],
+            // Qualify the inherited dialog's real reduced-motion behavior in
+            // its own native context, after both existing project groups.
+            // Original worker caps and test/hook deadlines remain inherited.
+            sequence: { groupOrder: 2 },
+            browser: {
+              ...browserOptions,
+              provider: playwright({ contextOptions: { reducedMotion: "reduce" } }),
+              instances: [{ browser: "chromium", name: "chromium-context-reduced-motion" }],
             },
           },
         },

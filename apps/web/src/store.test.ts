@@ -358,6 +358,75 @@ describe("selected native message fork projection", () => {
   );
 });
 
+describe("thread context override copying", () => {
+  it.each(["thread.duplicated", "thread.forked"] as const)(
+    "copies requested numeric/reset intent through %s, never materialized session evidence",
+    (kind) => {
+      for (const value of [500_000, null]) {
+        const source = makeThread({
+          codexContextWindowOverride: value,
+          session: {
+            provider: ProviderDriverKind.make("codex"),
+            providerInstanceId: ProviderInstanceId.make("codex"),
+            codexContextWindowOverride: 700_000,
+            status: "ready",
+            orchestrationStatus: "ready",
+            createdAt: "2026-02-13T00:00:00.000Z",
+            updatedAt: "2026-02-13T00:00:00.000Z",
+          },
+        });
+        const targetId = ThreadId.make("target-context-chat");
+        const target = {
+          ...source,
+          id: targetId,
+          title: "Copied chat",
+          session: null,
+          codexContextWindowOverride: value,
+          updatedAt: source.createdAt,
+          deletedAt: null,
+          latestUserMessageAt: null,
+          hasPendingApprovals: false,
+          hasPendingUserInput: false,
+          hasActionableProposedPlan: false,
+        };
+        const state = applyShellEvent(
+          makeState(source),
+          { kind: "thread-upserted", sequence: 1, thread: target },
+          localEnvironmentId,
+        );
+        const payload = { sourceThreadId: source.id, targetThreadId: targetId };
+        const event =
+          kind === "thread.duplicated"
+            ? makeEvent(kind, { ...payload, duplicatedAt: source.createdAt })
+            : makeEvent(kind, { ...payload, forkedAt: source.createdAt });
+        const copied = selectThreadByRef(
+          applyOrchestrationEvent(state, { ...event, sequence: 2 }, localEnvironmentId),
+          scopeThreadRef(localEnvironmentId, targetId),
+        );
+        expect(copied?.codexContextWindowOverride).toBe(value);
+        expect(copied?.session).toBeNull();
+        // A newer target choice is not undone by history-copy delivery, even
+        // when source history still carries the original context preference.
+        const newer = applyShellEvent(
+          state,
+          {
+            kind: "thread-upserted",
+            sequence: 3,
+            thread: { ...target, codexContextWindowOverride: 900_000 },
+          },
+          localEnvironmentId,
+        );
+        expect(
+          selectThreadByRef(
+            applyOrchestrationEvent(newer, { ...event, sequence: 2 }, localEnvironmentId),
+            scopeThreadRef(localEnvironmentId, targetId),
+          )?.codexContextWindowOverride,
+        ).toBe(900_000);
+      }
+    },
+  );
+});
+
 describe("thread concurrency projection", () => {
   it.each(["thread.duplicated", "thread.forked"] as const)(
     "copies both driver choices and explicit reset through %s without copying session evidence",

@@ -2243,6 +2243,185 @@ describe("ProviderRuntimeIngestion", () => {
     expect(thread.session?.subagentRuntimeId).toBe(newId);
   });
 
+  it.each([
+    { driver: "claudeAgent", formerContext: 500_000 },
+    { driver: "claudeAgent", formerContext: null },
+    { driver: "grok", formerContext: 500_000 },
+    { driver: "grok", formerContext: null },
+    { driver: "codex", formerContext: 500_000 },
+    { driver: "codex", formerContext: null },
+  ] as const)(
+    "binds recorded context ($formerContext) to the Codex driver during same-ID $driver lifecycle replacement",
+    async ({ driver, formerContext }) => {
+      const observedCommands: OrchestrationCommand[] = [];
+      const harness = await createHarness({
+        dispatchGate: (command, dispatch) => {
+          observedCommands.push(command);
+          return dispatch(command);
+        },
+      });
+      const threadId = asThreadId("thread-1");
+      const instanceId = ProviderInstanceId.make("same-id-driver-owner");
+      const at = "2026-01-01T00:00:01.000Z";
+      await Effect.runPromise(
+        harness.engine.dispatch({
+          type: "thread.session.set",
+          commandId: CommandId.make("context-before-driver-replacement"),
+          threadId,
+          session: {
+            threadId,
+            providerName: "codex",
+            providerInstanceId: instanceId,
+            subagentRuntimeId: null,
+            codexContextWindowOverride: formerContext,
+            status: "ready",
+            runtimeMode: "approval-required",
+            activeTurnId: null,
+            lastError: null,
+            updatedAt: at,
+          },
+          createdAt: at,
+        }),
+      );
+      harness.setProviderSession({
+        threadId,
+        provider: ProviderDriverKind.make(driver),
+        providerInstanceId: instanceId,
+        status: "ready",
+        runtimeMode: "approval-required",
+        createdAt: at,
+        updatedAt: at,
+      });
+      harness.emit({
+        type: "session.state.changed",
+        eventId: asEventId("same-id-driver-context-lifecycle"),
+        threadId,
+        provider: ProviderDriverKind.make(driver),
+        providerInstanceId: instanceId,
+        createdAt: "2026-01-01T00:00:02.000Z",
+        payload: { state: "ready" },
+      });
+      const thread = await waitForThread(
+        harness.readModel,
+        (entry) =>
+          entry.session?.providerName === driver &&
+          entry.session.updatedAt === "2026-01-01T00:00:02.000Z",
+      );
+      const lifecycle = observedCommands.find(
+        (command) =>
+          command.type === "thread.session.set" &&
+          String(command.commandId).includes(
+            ":same-id-driver-context-lifecycle:thread-session-set",
+          ),
+      );
+      expect(lifecycle?.type).toBe("thread.session.set");
+      if (driver === "codex") {
+        expect(thread.session?.codexContextWindowOverride).toBe(formerContext);
+        if (lifecycle?.type === "thread.session.set")
+          expect(lifecycle.session.codexContextWindowOverride).toBe(formerContext);
+      } else {
+        // Reusing an account identifier does not rebind a Codex-only setting
+        // to another native driver, even when legacy generation is unknown.
+        expect(thread.session).not.toHaveProperty("codexContextWindowOverride");
+        if (lifecycle?.type === "thread.session.set")
+          expect(lifecycle.session).not.toHaveProperty("codexContextWindowOverride");
+      }
+      expect(thread.session).toMatchObject({
+        providerInstanceId: instanceId,
+        status: "ready",
+        activeTurnId: null,
+        lastError: null,
+      });
+    },
+  );
+
+  it.each([500_000, null] as const)(
+    "does not rebind recorded context configuration (%s) during generation-only adoption",
+    async (formerContext) => {
+      const observedCommands: OrchestrationCommand[] = [];
+      const harness = await createHarness({
+        dispatchGate: (command, dispatch) => {
+          observedCommands.push(command);
+          return dispatch(command);
+        },
+      });
+      const threadId = asThreadId("thread-1");
+      const instanceId = ProviderInstanceId.make("codex");
+      const runtimeId = "00000000-0000-4000-8000-000000000003";
+      const at = "2026-01-01T00:00:01.000Z";
+      await Effect.runPromise(
+        harness.engine.dispatch({
+          type: "thread.session.set",
+          commandId: CommandId.make("recorded-context-before-adoption"),
+          threadId,
+          session: {
+            threadId,
+            providerName: "codex",
+            providerInstanceId: instanceId,
+            subagentRuntimeId: null,
+            codexContextWindowOverride: formerContext,
+            status: "ready",
+            runtimeMode: "approval-required",
+            activeTurnId: null,
+            lastError: "Recorded terminal diagnostic",
+            updatedAt: at,
+          },
+          createdAt: at,
+        }),
+      );
+      harness.setProviderSession({
+        provider: ProviderDriverKind.make("codex"),
+        providerInstanceId: instanceId,
+        threadId,
+        subagentRuntimeId: runtimeId,
+        codexContextWindowOverride: 700_000,
+        status: "running",
+        runtimeMode: "approval-required",
+        activeTurnId: asTurnId("separate-native-parent"),
+        createdAt: at,
+        updatedAt: at,
+      });
+      harness.emit({
+        type: "task.progress",
+        eventId: asEventId("new-generation-context-observation"),
+        provider: ProviderDriverKind.make("codex"),
+        providerInstanceId: instanceId,
+        threadId,
+        turnId: asTurnId("separate-native-parent"),
+        subagentRuntimeId: runtimeId,
+        createdAt: "2026-01-01T00:00:02.000Z",
+        payload: {
+          taskId: RuntimeTaskId.make("new-generation-context-child"),
+          summary: "Working",
+          subagent: { threadId: "new-generation-child", runtimeId, status: "active" },
+        },
+      });
+      const thread = await waitForThread(
+        harness.readModel,
+        (entry) =>
+          entry.session?.subagentRuntimeId === runtimeId &&
+          entry.activities.some((activity) => activity.id === "new-generation-context-observation"),
+      );
+      const adoption = observedCommands.find(
+        (command) =>
+          command.type === "thread.session.set" &&
+          String(command.commandId).includes(":subagent-runtime-observation"),
+      );
+      expect(adoption?.type).toBe("thread.session.set");
+      if (adoption?.type === "thread.session.set")
+        expect(adoption.session).not.toHaveProperty("codexContextWindowOverride");
+      // Inventory qualifies the generation only. It cannot copy a previous
+      // setting or invent a configuration observation for this separate path.
+      expect(thread.session?.codexContextWindowOverride).toBeUndefined();
+      expect(thread.session).toMatchObject({
+        status: "ready",
+        activeTurnId: null,
+        lastError: "Recorded terminal diagnostic",
+        updatedAt: at,
+      });
+    },
+  );
+
   it("reconfirms a disconnected child's progress from current inventory without a new turn", async () => {
     const harness = await createHarness();
     const threadId = asThreadId("thread-1");

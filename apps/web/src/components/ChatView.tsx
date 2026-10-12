@@ -62,6 +62,10 @@ import {
   inheritedInstanceSubagentPolicy,
   deriveSubagentConcurrencyPresentation,
 } from "../subagentConcurrency";
+import {
+  deriveCodexContextWindowPresentation,
+  inheritedCodexContextWindowOverride,
+} from "../codexContextWindow";
 import { useDesktopDebugEnabled } from "~/lib/desktopDebugState";
 import { useWorkspaceProjects, useWorkspaceThreads } from "../environments/workspaceData";
 import { readPrimaryEnvironmentDescriptor, usePrimaryEnvironmentId } from "../environments/primary";
@@ -533,6 +537,7 @@ type ChatViewProps = {
 interface ComposerSendSnapshot {
   readonly deliveryPriority?: import("@cafecode/contracts").ProviderDeliveryPriority;
   readonly subagentLimits?: SubagentLimits;
+  readonly codexContextWindowOverride?: number | null;
   promptText: string;
   images: ComposerImageAttachment[];
   files: import("@cafecode/contracts").ChatFileAttachment[];
@@ -1023,6 +1028,9 @@ export default function ChatView(props: ChatViewProps) {
   );
   const composerSubagentLimits = useComposerDraftStore(
     (store) => store.getComposerDraft(composerDraftTarget)?.subagentLimits,
+  );
+  const composerContextOverride = useComposerDraftStore(
+    (store) => store.getComposerDraft(composerDraftTarget)?.codexContextWindowOverride,
   );
   const composerActiveProvider = useComposerDraftStore(
     (store) => store.getComposerDraft(composerDraftTarget)?.activeProvider ?? null,
@@ -4690,6 +4698,9 @@ export default function ChatView(props: ChatViewProps) {
       ...(sendCtx.subagentLimits !== undefined
         ? { subagentLimits: { ...sendCtx.subagentLimits } }
         : {}),
+      ...(sendCtx.codexContextWindowOverride !== undefined
+        ? { codexContextWindowOverride: sendCtx.codexContextWindowOverride }
+        : {}),
       runtimeMode,
       interactionMode,
     };
@@ -6160,6 +6171,9 @@ export default function ChatView(props: ChatViewProps) {
                       ...(snapshot.subagentLimits !== undefined
                         ? { subagentLimits: snapshot.subagentLimits }
                         : {}),
+                      ...(snapshot.codexContextWindowOverride !== undefined
+                        ? { codexContextWindowOverride: snapshot.codexContextWindowOverride }
+                        : {}),
                       branch: activeThread.projectId === null ? null : activeThreadBranch,
                       worktreePath:
                         activeThread.projectId === null ? null : activeThread.worktreePath,
@@ -6210,6 +6224,12 @@ export default function ChatView(props: ChatViewProps) {
           : {}),
         ...(snapshot.subagentLimits !== undefined
           ? { subagentLimits: snapshot.subagentLimits }
+          : {}),
+        // A local draft can retain a latent Codex choice after switching
+        // drivers. Its bootstrap preserves that chat metadata, but a turn
+        // replacement must never send this Codex-only policy to another driver.
+        ...(snapshot.provider === "codex" && snapshot.codexContextWindowOverride !== undefined
+          ? { codexContextWindowOverride: snapshot.codexContextWindowOverride }
           : {}),
         runtimeMode,
         interactionMode,
@@ -8105,6 +8125,25 @@ export default function ChatView(props: ChatViewProps) {
         : undefined,
   });
   const sessionRailUsage = deriveLatestContextWindowSnapshot(threadActivities);
+  const sessionRailContextOverride =
+    subagentPolicyDriver === "codex"
+      ? deriveCodexContextWindowPresentation({
+          requested:
+            composerContextOverride !== undefined
+              ? composerContextOverride
+              : activeThread.codexContextWindowOverride,
+          inherited: inheritedCodexContextWindowOverride(
+            settings,
+            subagentPolicyInstanceId,
+            subagentPolicyDriver,
+          ),
+          configured:
+            activeThread.session?.providerInstanceId === subagentPolicyInstanceId &&
+            activeThread.session.provider === "codex"
+              ? activeThread.session.codexContextWindowOverride
+              : undefined,
+        })
+      : null;
   const sessionRailRateLimits = shouldSurfaceProviderAccountRateLimits(activeProviderStatus)
     ? (activeProviderStatus?.accountRateLimits ?? null)
     : null;
@@ -8538,6 +8577,7 @@ export default function ChatView(props: ChatViewProps) {
                 rateLimits={sessionRailRateLimits}
                 quotaContext={sessionRailQuotaContext}
                 subagentConcurrency={sessionRailSubagentConcurrency}
+                codexContextWindow={sessionRailContextOverride}
                 usageResetAction={
                   <ProviderUsageResetButton
                     key={`${environmentId}:${activeProviderStatus?.instanceId ?? ""}`}

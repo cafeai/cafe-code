@@ -614,6 +614,11 @@ const makeWsRpcLayer = (
                 ...(bootstrap.createThread.subagentLimits !== undefined
                   ? { subagentLimits: bootstrap.createThread.subagentLimits }
                   : {}),
+                ...(bootstrap.createThread.codexContextWindowOverride !== undefined
+                  ? {
+                      codexContextWindowOverride: bootstrap.createThread.codexContextWindowOverride,
+                    }
+                  : {}),
                 runtimeMode: bootstrap.createThread.runtimeMode,
                 interactionMode: bootstrap.createThread.interactionMode,
                 branch: bootstrap.createThread.branch,
