@@ -245,14 +245,16 @@ export const SessionRail = memo(
                 />
               </div>
             ) : null}
-            {props.providerTasks ? <ProviderTasks context={props.providerTasks} /> : null}
+            {props.providerTasks ? (
+              <ProviderTasks context={props.providerTasks} section="workflows" />
+            ) : null}
             {hasPlan || hasSubagents ? (
               <TaskProgressDetails
                 plan={plan}
                 subagents={subagents}
                 onOpenSubagentDetail={props.onOpenSubagentDetail}
               />
-            ) : !hasProviderTasks ? (
+            ) : !hasProviderTasks && !props.scheduledFollowups ? (
               <p className="text-ui text-subtle-foreground">
                 {uiText("No tasks yet.", undefined, undefined, uiLocale)}
               </p>
@@ -262,6 +264,11 @@ export const SessionRail = memo(
                 key={`${props.scheduledFollowups.environmentId}:${props.scheduledFollowups.threadId}:${props.scheduledFollowups.modelSelection.instanceId}`}
                 context={props.scheduledFollowups}
               />
+            ) : null}
+            {/* Short-lived task rows stay last so their arrival/retirement
+                cannot move the existing checklist or Scheduled section. */}
+            {props.providerTasks ? (
+              <ProviderTasks context={props.providerTasks} section="tasks" />
             ) : null}
           </div>
         </ScrollArea>

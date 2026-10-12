@@ -3,9 +3,95 @@ import "../../index.css";
 import { page, userEvent } from "vitest/browser";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { render } from "vitest-browser-react";
+import {
+  EnvironmentId,
+  EventId,
+  ProviderInstanceId,
+  SubagentRuntimeId,
+  ThreadId,
+  TurnId,
+  type EnvironmentApi,
+  type OrchestrationThreadActivity,
+} from "@cafecode/contracts";
 
 import type { WorkLogEntry } from "../../session-logic";
 import { ComposerTaskProgress, type ComposerTaskProgressPlan } from "./ComposerTaskProgress";
+import {
+  __resetEnvironmentApiOverridesForTests,
+  __setEnvironmentApiOverrideForTests,
+} from "../../environmentApi";
+import type { ProviderTasksContext } from "./ProviderTasks";
+import type { ScheduledFollowupsContext } from "./ScheduledFollowups";
+
+/** Exact synthetic owner metadata qualifies received rendering, not native
+ * provider capacity. No individual task capability or live API is installed. */
+function makeOrderedPopupFixture() {
+  const environmentId = EnvironmentId.make("ordered-popup-environment");
+  const threadId = ThreadId.make("ordered-popup-chat");
+  const providerInstanceId = ProviderInstanceId.make("ordered-popup-provider");
+  const turnId = TurnId.make("ordered-popup-turn");
+  const runtimeId = SubagentRuntimeId.make("40000000-0000-4000-8000-000000000004");
+  const workflow: OrchestrationThreadActivity = {
+    id: EventId.make("ordered-popup-workflow"),
+    sequence: 1,
+    kind: "task.started",
+    tone: "info",
+    summary: "Workflow started",
+    turnId,
+    createdAt: "2026-10-12T00:00:00.000Z",
+    payload: {
+      taskId: "ordered-popup-workflow",
+      workflow: { runtimeId, providerInstanceId, name: "Persistent workflow" },
+    },
+  };
+  const providerContext: ProviderTasksContext = {
+    environmentId,
+    threadId,
+    providerInstanceId,
+    runtimeSession: { orchestrationStatus: "running", subagentRuntimeId: runtimeId },
+    activeTurnId: turnId,
+    activeTurnRunning: true,
+    activities: [workflow],
+  };
+  const scheduledContext: ScheduledFollowupsContext = {
+    environmentId,
+    threadId,
+    modelSelection: { instanceId: providerInstanceId, model: "fixture-model" },
+    provider: null,
+    unavailable: false,
+  };
+  const api = {
+    list: vi.fn(async () => ({ schedules: [], backendOnline: true as const })),
+    save: vi.fn(async () => {
+      throw new Error("Unexpected synthetic schedule mutation");
+    }),
+    setStatus: vi.fn(async () => {
+      throw new Error("Unexpected synthetic schedule mutation");
+    }),
+    runNow: vi.fn(async () => {
+      throw new Error("Unexpected synthetic schedule mutation");
+    }),
+    history: vi.fn(async () => ({ runs: [], nextCursor: null })),
+    notification: vi.fn(async () => ({ notify: true })),
+  };
+  __setEnvironmentApiOverrideForTests(environmentId, {
+    scheduledFollowups: api,
+  } as unknown as EnvironmentApi);
+  const tool = (
+    sequence: number,
+    kind: "tool.started" | "tool.updated" | "tool.completed",
+  ): OrchestrationThreadActivity => ({
+    id: EventId.make(`ordered-popup-tool-${sequence}`),
+    sequence,
+    kind,
+    tone: "info",
+    summary: kind === "tool.updated" ? "Updated command" : "Command run",
+    turnId,
+    createdAt: "2026-10-12T00:00:01.000Z",
+    payload: { itemId: "short-lived-command", itemType: "command_execution" },
+  });
+  return { api, providerContext, scheduledContext, tool, workflow };
+}
 
 async function mountProgress(
   plan: ComposerTaskProgressPlan | null,
@@ -49,9 +135,267 @@ const progressTrigger = () =>
 const progressPopup = () =>
   document.querySelector<HTMLElement>('[data-composer-task-progress-popup="true"]');
 
+/** Bounding-box comparisons must start after the real finite scale entrance,
+ * not midway through its transform. Keep native motion and strict geometry. */
+async function settlePopupEntrance(popup: HTMLElement) {
+  await Promise.all(
+    popup
+      .getAnimations({ subtree: true })
+      .filter((animation) => animation.effect?.getComputedTiming().iterations !== Infinity)
+      .map((animation) => animation.finished),
+  );
+}
+
 describe("ComposerTaskProgress", () => {
   afterEach(() => {
+    __resetEnvironmentApiOverridesForTests();
+    document.documentElement.classList.remove("dark");
+    document.documentElement.style.removeProperty("font-size");
     document.body.innerHTML = "";
+  });
+
+  it.each([
+    ["light", 80],
+    ["light", 130],
+    ["dark", 80],
+    ["dark", 130],
+  ] as const)(
+    "retains popup section order and the focused schedule draft through task churn in %s at %i%%",
+    async (theme, scale) => {
+      if (import.meta.env.VITE_PROVIDER_TASK_EXPECT_REDUCED_MOTION === "true")
+        expect(window.matchMedia("(prefers-reduced-motion: reduce)").matches).toBe(true);
+      const previousViewport = { width: window.innerWidth, height: window.innerHeight };
+      await page.viewport(430, 932);
+      document.documentElement.classList.toggle("dark", theme === "dark");
+      document.documentElement.style.fontSize = `${scale}%`;
+      const { api, providerContext, scheduledContext, tool, workflow } = makeOrderedPopupFixture();
+      const onOpenSubagentDetail = vi.fn();
+      const onShowOnSide = vi.fn();
+      const plan: ComposerTaskProgressPlan = {
+        steps: [{ step: "Persistent checklist step", status: "inProgress" }],
+      };
+      const subagents: WorkLogEntry[] = [
+        {
+          id: "ordered-popup-child",
+          label: "Persistent worker",
+          tone: "thinking",
+          createdAt: "2026-10-12T00:00:00.000Z",
+          subagent: {
+            id: "ordered-popup-child",
+            label: "Persistent worker",
+            status: "active",
+            startedAt: "2026-10-12T00:00:00.000Z",
+            updatedAt: "2026-10-12T00:00:00.000Z",
+          },
+        },
+      ];
+      const renderPopup = (activities: readonly OrchestrationThreadActivity[]) => (
+        <div className="fixed bottom-2 left-2">
+          <ComposerTaskProgress
+            plan={plan}
+            subagents={subagents}
+            providerTasks={{ ...providerContext, activities }}
+            scheduledFollowups={scheduledContext}
+            onOpenSubagentDetail={onOpenSubagentDetail}
+            onShowOnSide={onShowOnSide}
+          />
+        </div>
+      );
+      const screen = await render(renderPopup([workflow]));
+      try {
+        await page.getByRole("button", { name: /Task progress/ }).click();
+        await vi.waitFor(() => expect(progressPopup()).not.toBeNull());
+        await expect
+          .element(page.getByRole("button", { name: "New follow-up", exact: true }))
+          .toBeEnabled();
+        const popup = progressPopup()!;
+        await settlePopupEntrance(popup);
+        const content = popup.querySelector<HTMLElement>("[data-task-list-scroll]")!;
+        const retained = [
+          page.getByRole("region", { name: "Workflows", exact: true }).element(),
+          popup.querySelector<HTMLElement>("[data-composer-subagent-list]")!,
+          popup.querySelector<HTMLElement>("[data-composer-task-progress-list]")!,
+          popup.querySelector<HTMLElement>("[data-scheduled-followups]")!,
+        ];
+        const relativeTops = retained.map(
+          (node) => node.getBoundingClientRect().top - content.getBoundingClientRect().top,
+        );
+        const newFollowup = page
+          .getByRole("button", { name: "New follow-up", exact: true })
+          .element();
+        newFollowup.focus();
+        const readCount = api.list.mock.calls.length;
+        const received = [
+          tool(2, "tool.started"),
+          tool(3, "tool.updated"),
+          tool(4, "tool.completed"),
+        ];
+        let taskRow: HTMLElement | null = null;
+        for (let index = 0; index < received.length; index += 1) {
+          await screen.rerender(renderPopup([workflow, ...received.slice(0, index + 1)]));
+          expect(progressPopup()).toBe(popup);
+          for (const [position, node] of retained.entries()) {
+            expect(node.isConnected).toBe(true);
+            expect(
+              node.getBoundingClientRect().top - content.getBoundingClientRect().top,
+            ).toBeCloseTo(relativeTops[position]!, 1);
+            if (position > 0)
+              expect(
+                retained[position - 1]!.compareDocumentPosition(node) &
+                  Node.DOCUMENT_POSITION_FOLLOWING,
+              ).toBeTruthy();
+          }
+          expect(document.activeElement).toBe(newFollowup);
+          if (index < 2) {
+            const ordinary = page
+              .getByRole("region", { name: "Active provider tasks", exact: true })
+              .element();
+            expect(
+              retained.at(-1)!.compareDocumentPosition(ordinary) & Node.DOCUMENT_POSITION_FOLLOWING,
+            ).toBeTruthy();
+            expect(content.lastElementChild).toBe(ordinary);
+            expect(ordinary.querySelectorAll("[data-provider-task-row]")).toHaveLength(1);
+            const currentRow = ordinary.querySelector<HTMLElement>("[data-provider-task-row]")!;
+            if (index === 0) taskRow = currentRow;
+            else expect(currentRow).toBe(taskRow);
+            expect(currentRow.querySelector("[data-provider-task-title]")?.textContent).toBe(
+              index === 0 ? "Command run" : "Updated command",
+            );
+            const screenshotDirectory = import.meta.env.VITE_PROVIDER_TASK_SCREENSHOT_DIR;
+            if (
+              index === 0 &&
+              typeof screenshotDirectory === "string" &&
+              screenshotDirectory.length > 0
+            ) {
+              await page.screenshot({
+                path: `${screenshotDirectory}/provider-tasks-popup-${theme}-${scale}.png`,
+              });
+              // Use the existing inner task scroll owner, never the animated
+              // outer popover. Restore it before the next lifecycle snapshot.
+              const scrollTop = content.scrollTop;
+              content.scrollTop = content.scrollHeight;
+              expect(ordinary.getBoundingClientRect().bottom).toBeLessThanOrEqual(
+                content.getBoundingClientRect().bottom + 1,
+              );
+              await page.screenshot({
+                path: `${screenshotDirectory}/provider-tasks-popup-${theme}-${scale}-bottom.png`,
+              });
+              content.scrollTop = scrollTop;
+            }
+          } else {
+            expect(content.querySelector('[aria-label="Active provider tasks"]')).toBeNull();
+          }
+        }
+        await page.getByRole("button", { name: "New follow-up", exact: true }).click();
+        const name = page.getByLabelText("Name", { exact: true });
+        await name.fill("Keep my local draft");
+        const nameNode = name.element();
+        nameNode.focus();
+        for (const activities of [[workflow, received[0]!], [workflow]] as const) {
+          await screen.rerender(renderPopup(activities));
+          expect(progressPopup()).toBe(popup);
+          expect(page.getByLabelText("Name", { exact: true }).element()).toBe(nameNode);
+          await expect.element(name).toHaveValue("Keep my local draft");
+          expect(document.activeElement).toBe(nameNode);
+        }
+        expect(api.list).toHaveBeenCalledTimes(readCount);
+        for (const action of [
+          api.save,
+          api.setStatus,
+          api.runNow,
+          api.history,
+          api.notification,
+          onOpenSubagentDetail,
+          onShowOnSide,
+        ])
+          expect(action).not.toHaveBeenCalled();
+        expect(content.scrollWidth).toBeLessThanOrEqual(content.clientWidth + 1);
+        const bounds = popup.getBoundingClientRect();
+        expect(bounds.left).toBeGreaterThanOrEqual(0);
+        expect(bounds.right).toBeLessThanOrEqual(window.innerWidth + 1);
+        expect(bounds.top).toBeGreaterThanOrEqual(0);
+        expect(bounds.bottom).toBeLessThanOrEqual(window.innerHeight + 1);
+        await expect
+          .element(page.getByRole("button", { name: "Stop task", exact: true }))
+          .not.toBeInTheDocument();
+      } finally {
+        await screen.unmount();
+        await page.viewport(previousViewport.width, previousViewport.height);
+      }
+    },
+  );
+
+  it("keeps Scheduled first and mounted when an otherwise empty popup gains and loses a task", async () => {
+    const { api, providerContext, scheduledContext, tool } = makeOrderedPopupFixture();
+    const renderPopup = (activities: readonly OrchestrationThreadActivity[]) => (
+      <ComposerTaskProgress
+        plan={null}
+        scheduledFollowups={scheduledContext}
+        providerTasks={{ ...providerContext, activities }}
+      />
+    );
+    const screen = await render(renderPopup([]));
+    try {
+      await page
+        .getByRole("button", {
+          name: "Tasks and scheduled follow-ups. Show task list",
+          exact: true,
+        })
+        .click();
+      await expect
+        .element(page.getByRole("button", { name: "New follow-up", exact: true }))
+        .toBeEnabled();
+      const popup = progressPopup()!;
+      await settlePopupEntrance(popup);
+      const content = popup.querySelector<HTMLElement>("[data-task-list-scroll]")!;
+      const scheduled = content.querySelector<HTMLElement>("[data-scheduled-followups]")!;
+      const top = scheduled.getBoundingClientRect().top - content.getBoundingClientRect().top;
+      const readCount = api.list.mock.calls.length;
+      for (const activities of [[tool(2, "tool.started")], []] as const) {
+        await screen.rerender(renderPopup(activities));
+        expect(progressPopup()).toBe(popup);
+        expect(content.firstElementChild).toBe(scheduled);
+        expect(scheduled.isConnected).toBe(true);
+        expect(
+          scheduled.getBoundingClientRect().top - content.getBoundingClientRect().top,
+        ).toBeCloseTo(top, 1);
+        expect(content.textContent).not.toContain("No tasks yet.");
+        if (activities.length)
+          expect(content.lastElementChild?.getAttribute("aria-label")).toBe(
+            "Active provider tasks",
+          );
+        else expect(content.children).toHaveLength(1);
+      }
+      expect(api.list).toHaveBeenCalledTimes(readCount);
+      for (const action of [api.save, api.setStatus, api.runNow])
+        expect(action).not.toHaveBeenCalled();
+    } finally {
+      await screen.unmount();
+    }
+  });
+
+  it("keeps ordinary provider-only work inspectable without introducing a Scheduled section", async () => {
+    const { providerContext, tool } = makeOrderedPopupFixture();
+    const screen = await render(
+      <ComposerTaskProgress
+        plan={null}
+        providerTasks={{ ...providerContext, activities: [tool(2, "tool.started")] }}
+      />,
+    );
+    try {
+      const trigger = page.getByRole("button", { name: /1 active task/ });
+      await expect.element(trigger).toBeVisible();
+      await trigger.click();
+      await expect
+        .element(page.getByRole("region", { name: "Active provider tasks", exact: true }))
+        .toBeVisible();
+      expect(progressPopup()?.querySelector("[data-scheduled-followups]")).toBeNull();
+      expect(progressPopup()?.querySelector("[data-composer-subagent-list]")).toBeNull();
+      expect(progressPopup()?.querySelector("[data-composer-task-progress-list]")).toBeNull();
+      expect(progressPopup()?.querySelector('[aria-label="Workflows"]')).toBeNull();
+    } finally {
+      await screen.unmount();
+    }
   });
 
   it("stays hidden when there is no task plan", async () => {

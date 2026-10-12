@@ -643,7 +643,14 @@ describe("scheduled follow-ups Tasks UI", () => {
     );
     try {
       await expect.element(page.getByRole("heading", { name: "Build check 1" })).toBeVisible();
-      expect(host.textContent).toContain("No tasks yet.");
+      // Scheduled work is already meaningful content. An empty-checklist
+      // placeholder above it would make this stable section jump whenever the
+      // last ordinary provider task retires, so Scheduled must remain first.
+      expect(host.textContent).not.toContain("No tasks yet.");
+      const taskContent = host.querySelector<HTMLElement>("[data-session-rail-tasks]")!;
+      expect(taskContent.firstElementChild).toBe(
+        taskContent.querySelector("[data-scheduled-followups]"),
+      );
       expect(host.textContent).toContain("Personal Codex");
       const card = page
         .getByRole("article", { name: "Scheduled follow-up: Build check 1" })

@@ -147,14 +147,24 @@ export function hasProviderTaskContent(context: ProviderTasksContext): boolean {
   return deriveWorkflowTasks(context).length > 0 || deriveActiveProviderTasks(context).length > 0;
 }
 
-export function ProviderTasks({ context }: { context: ProviderTasksContext }) {
+export function ProviderTasks({
+  context,
+  section,
+}: {
+  context: ProviderTasksContext;
+  section?: "workflows" | "tasks";
+}) {
   const uiLocale = useUiLocale();
   const uiPresentation = useUiPresentation(UI_PRESENTATION_SOURCES);
 
   const [page, setPage] = useState(0);
   const [workflowPage, setWorkflowPage] = useState(0);
-  const tasks = uiPresentation.deriveActiveProviderTasks(context);
-  const workflows = uiPresentation.deriveWorkflowTasks(context);
+  // Hosts keep workflow cards in their existing position and put short-lived
+  // ordinary tasks last. Derive only the selected section, retaining combined
+  // rendering for other consumers. This is layout selection, not a change to
+  // runtime evidence, liveness or control admission.
+  const tasks = section === "workflows" ? [] : uiPresentation.deriveActiveProviderTasks(context);
+  const workflows = section === "tasks" ? [] : uiPresentation.deriveWorkflowTasks(context);
   if (!tasks.length && !workflows.length) return null;
   const pages = Math.ceil(tasks.length / 5);
   const selectedPage = Math.max(0, Math.min(page, pages - 1));
@@ -224,7 +234,11 @@ export function ProviderTasks({ context }: { context: ProviderTasksContext }) {
       {tasks.length > 0 ? (
         <section
           aria-label={uiText("Active provider tasks", undefined, undefined, uiLocale)}
-          className="mb-3 border-b border-border-subtle pb-3"
+          className={
+            section === "tasks"
+              ? "mt-4 border-t border-border-subtle pt-3"
+              : "mb-3 border-b border-border-subtle pb-3"
+          }
         >
           <p className="mb-2 text-xs font-medium text-muted-foreground">
             <UiMessage

@@ -10,6 +10,7 @@ import {
   SubagentRuntimeId,
   ThreadId,
   TurnId,
+  type EnvironmentApi,
   type OrchestrationThreadActivity,
 } from "@cafecode/contracts";
 
@@ -18,6 +19,93 @@ import { deriveActiveSubagentWorkEntries, type WorkLogEntry } from "../../sessio
 import type { SubagentRuntimeContext } from "../../subagent-activity";
 import { CodexRecoveryNotice, SessionRail } from "./SessionRail";
 import type { ComposerTaskProgressPlan } from "./taskProgressPresentation";
+import {
+  __resetEnvironmentApiOverridesForTests,
+  __setEnvironmentApiOverrideForTests,
+} from "../../environmentApi";
+import type { ProviderTasksContext } from "./ProviderTasks";
+import type { ScheduledFollowupsContext } from "./ScheduledFollowups";
+
+/** This fixture is received renderer data only. No task capability is minted,
+ * so layout churn cannot gain Stop/background authority or contact a provider. */
+function makeOrderedRailFixture() {
+  const environmentId = EnvironmentId.make("ordered-rail-environment");
+  const threadId = ThreadId.make("ordered-rail-chat");
+  const providerInstanceId = ProviderInstanceId.make("ordered-rail-provider");
+  const turnId = TurnId.make("ordered-rail-turn");
+  const runtimeId = SubagentRuntimeId.make("30000000-0000-4000-8000-000000000003");
+  const workflow: OrchestrationThreadActivity = {
+    id: EventId.make("ordered-rail-workflow"),
+    sequence: 1,
+    kind: "task.started",
+    tone: "info",
+    summary: "Workflow started",
+    turnId,
+    createdAt: "2026-10-12T00:00:00.000Z",
+    payload: {
+      taskId: "ordered-rail-workflow",
+      workflow: { runtimeId, providerInstanceId, name: "Persistent workflow" },
+    },
+  };
+  const providerContext: ProviderTasksContext = {
+    environmentId,
+    threadId,
+    providerInstanceId,
+    runtimeSession: { orchestrationStatus: "running", subagentRuntimeId: runtimeId },
+    activeTurnId: turnId,
+    activeTurnRunning: true,
+    activities: [workflow],
+  };
+  const scheduledContext: ScheduledFollowupsContext = {
+    environmentId,
+    threadId,
+    modelSelection: { instanceId: providerInstanceId, model: "fixture-model" },
+    provider: null,
+    unavailable: false,
+  };
+  const api = {
+    list: vi.fn(async () => ({ schedules: [], backendOnline: true as const })),
+    save: vi.fn(async () => {
+      throw new Error("Unexpected synthetic schedule mutation");
+    }),
+    setStatus: vi.fn(async () => {
+      throw new Error("Unexpected synthetic schedule mutation");
+    }),
+    runNow: vi.fn(async () => {
+      throw new Error("Unexpected synthetic schedule mutation");
+    }),
+    history: vi.fn(async () => ({ runs: [], nextCursor: null })),
+    notification: vi.fn(async () => ({ notify: true })),
+  };
+  __setEnvironmentApiOverrideForTests(environmentId, {
+    scheduledFollowups: api,
+  } as unknown as EnvironmentApi);
+  const tool = (
+    sequence: number,
+    kind: "tool.started" | "tool.updated" | "tool.completed",
+  ): OrchestrationThreadActivity => ({
+    id: EventId.make(`ordered-rail-tool-${sequence}`),
+    sequence,
+    kind,
+    tone: "info",
+    summary: kind === "tool.updated" ? "Updated command" : "Command run",
+    turnId,
+    createdAt: "2026-10-12T00:00:01.000Z",
+    payload: { itemId: "short-lived-command", itemType: "command_execution" },
+  });
+  return { api, providerContext, scheduledContext, tool, workflow };
+}
+
+/** Finish only the real finite entrance animation before comparing geometry.
+ * Looping status indicators are not disabled or awaited. */
+async function settleRailEntrance(rail: HTMLElement) {
+  await Promise.all(
+    rail
+      .getAnimations({ subtree: true })
+      .filter((animation) => animation.effect?.getComputedTiming().iterations !== Infinity)
+      .map((animation) => animation.finished),
+  );
+}
 
 function makeUsage() {
   return deriveLatestContextWindowSnapshot([
@@ -40,8 +128,231 @@ function makeUsage() {
 
 describe("SessionRail", () => {
   afterEach(() => {
+    __resetEnvironmentApiOverridesForTests();
     document.documentElement.classList.remove("dark");
+    document.documentElement.style.removeProperty("font-size");
     document.body.innerHTML = "";
+  });
+
+  it.each([
+    ["light", 80],
+    ["light", 130],
+    ["dark", 80],
+    ["dark", 130],
+  ] as const)(
+    "keeps every retained section stationary above transient provider tasks in %s at %i%%",
+    async (theme, scale) => {
+      if (import.meta.env.VITE_PROVIDER_TASK_EXPECT_REDUCED_MOTION === "true")
+        expect(window.matchMedia("(prefers-reduced-motion: reduce)").matches).toBe(true);
+      const previousViewport = { width: window.innerWidth, height: window.innerHeight };
+      await page.viewport(430, 932);
+      document.documentElement.classList.toggle("dark", theme === "dark");
+      document.documentElement.style.fontSize = `${scale}%`;
+      const { api, providerContext, scheduledContext, tool, workflow } = makeOrderedRailFixture();
+      const onOpenSubagentDetail = vi.fn();
+      const onStopRecovery = vi.fn();
+      const onShowInComposer = vi.fn();
+      const subagents: WorkLogEntry[] = [
+        {
+          id: "ordered-rail-child",
+          label: "Persistent worker",
+          tone: "thinking",
+          createdAt: "2026-10-12T00:00:00.000Z",
+          subagent: {
+            id: "ordered-rail-child",
+            label: "Persistent worker",
+            status: "active",
+            startedAt: "2026-10-12T00:00:00.000Z",
+            updatedAt: "2026-10-12T00:00:00.000Z",
+          },
+        },
+      ];
+      const plan: ComposerTaskProgressPlan = {
+        steps: [{ step: "Persistent checklist step", status: "inProgress" }],
+      };
+      const renderRail = (activities: readonly OrchestrationThreadActivity[]) => (
+        <div style={{ display: "flex", width: 280, height: 820 }}>
+          <SessionRail
+            plan={plan}
+            subagents={subagents}
+            usage={null}
+            providerTasks={{ ...providerContext, activities }}
+            scheduledFollowups={scheduledContext}
+            codexRecovery={{ activeAgentCount: 1, stage: "uncertain", retryAtMs: null }}
+            onStopCodexRecovery={onStopRecovery}
+            onOpenSubagentDetail={onOpenSubagentDetail}
+            onShowInComposer={onShowInComposer}
+          />
+        </div>
+      );
+      const screen = await render(renderRail([workflow]));
+      try {
+        await expect
+          .element(page.getByRole("button", { name: "New follow-up", exact: true }))
+          .toBeEnabled();
+        const rail = document.querySelector<HTMLElement>("[data-session-rail]")!;
+        await settleRailEntrance(rail);
+        const content = rail.querySelector<HTMLElement>("[data-session-rail-tasks]")!;
+        const retained = [
+          rail.querySelector<HTMLElement>("[data-codex-recovery-notice]")!,
+          page.getByRole("region", { name: "Workflows", exact: true }).element(),
+          rail.querySelector<HTMLElement>("[data-composer-subagent-list]")!,
+          rail.querySelector<HTMLElement>("[data-composer-task-progress-list]")!,
+          rail.querySelector<HTMLElement>("[data-scheduled-followups]")!,
+        ];
+        const relativeTops = retained.map(
+          (node) => node.getBoundingClientRect().top - content.getBoundingClientRect().top,
+        );
+        const newFollowup = page
+          .getByRole("button", { name: "New follow-up", exact: true })
+          .element();
+        newFollowup.focus();
+        const readCount = api.list.mock.calls.length;
+        const received = [
+          tool(2, "tool.started"),
+          tool(3, "tool.updated"),
+          tool(4, "tool.completed"),
+        ];
+        let taskRow: HTMLElement | null = null;
+        for (let index = 0; index < received.length; index += 1) {
+          await screen.rerender(renderRail([workflow, ...received.slice(0, index + 1)]));
+          for (const [position, node] of retained.entries()) {
+            expect(node.isConnected).toBe(true);
+            expect(
+              node.getBoundingClientRect().top - content.getBoundingClientRect().top,
+            ).toBeCloseTo(relativeTops[position]!, 1);
+            if (position > 0)
+              expect(
+                retained[position - 1]!.compareDocumentPosition(node) &
+                  Node.DOCUMENT_POSITION_FOLLOWING,
+              ).toBeTruthy();
+          }
+          expect(document.activeElement).toBe(newFollowup);
+          if (index < 2) {
+            const ordinary = page
+              .getByRole("region", { name: "Active provider tasks", exact: true })
+              .element();
+            expect(
+              retained.at(-1)!.compareDocumentPosition(ordinary) & Node.DOCUMENT_POSITION_FOLLOWING,
+            ).toBeTruthy();
+            expect(content.lastElementChild).toBe(ordinary);
+            expect(ordinary.querySelectorAll("[data-provider-task-row]")).toHaveLength(1);
+            const currentRow = ordinary.querySelector<HTMLElement>("[data-provider-task-row]")!;
+            if (index === 0) taskRow = currentRow;
+            else expect(currentRow).toBe(taskRow);
+            expect(currentRow.querySelector("[data-provider-task-title]")?.textContent).toBe(
+              index === 0 ? "Command run" : "Updated command",
+            );
+            const screenshotDirectory = import.meta.env.VITE_PROVIDER_TASK_SCREENSHOT_DIR;
+            if (
+              index === 0 &&
+              typeof screenshotDirectory === "string" &&
+              screenshotDirectory.length > 0
+            ) {
+              await page.screenshot({
+                path: `${screenshotDirectory}/provider-tasks-rail-${theme}-${scale}.png`,
+              });
+              // This deliberately narrow rail can need its real task scroll
+              // owner at large interface size. Capture the bottom separately,
+              // then restore review position before the next received update.
+              const scrollOwner = content.closest<HTMLElement>(
+                '[data-slot="scroll-area-viewport"]',
+              )!;
+              const scrollTop = scrollOwner.scrollTop;
+              scrollOwner.scrollTop = scrollOwner.scrollHeight;
+              expect(ordinary.getBoundingClientRect().bottom).toBeLessThanOrEqual(
+                scrollOwner.getBoundingClientRect().bottom + 1,
+              );
+              await page.screenshot({
+                path: `${screenshotDirectory}/provider-tasks-rail-${theme}-${scale}-bottom.png`,
+              });
+              scrollOwner.scrollTop = scrollTop;
+            }
+          } else {
+            expect(content.querySelector('[aria-label="Active provider tasks"]')).toBeNull();
+          }
+        }
+        // A schedule editor is local state. Short-lived native rows must not
+        // remount it, erase the draft, steal focus or dispatch a schedule action.
+        await page.getByRole("button", { name: "New follow-up", exact: true }).click();
+        const name = page.getByLabelText("Name", { exact: true });
+        await name.fill("Keep my local draft");
+        const nameNode = name.element();
+        nameNode.focus();
+        for (const activities of [[workflow, received[0]!], [workflow]] as const) {
+          await screen.rerender(renderRail(activities));
+          expect(page.getByLabelText("Name", { exact: true }).element()).toBe(nameNode);
+          await expect.element(name).toHaveValue("Keep my local draft");
+          expect(document.activeElement).toBe(nameNode);
+        }
+        expect(api.list).toHaveBeenCalledTimes(readCount);
+        for (const action of [
+          api.save,
+          api.setStatus,
+          api.runNow,
+          api.history,
+          api.notification,
+          onOpenSubagentDetail,
+          onStopRecovery,
+          onShowInComposer,
+        ])
+          expect(action).not.toHaveBeenCalled();
+        expect(content.scrollWidth).toBeLessThanOrEqual(content.clientWidth + 1);
+        expect(rail.querySelector("[data-session-rail-usage]")).not.toBeNull();
+        await expect
+          .element(page.getByRole("button", { name: "Stop task", exact: true }))
+          .not.toBeInTheDocument();
+      } finally {
+        await screen.unmount();
+        await page.viewport(previousViewport.width, previousViewport.height);
+      }
+    },
+  );
+
+  it("keeps Scheduled first and stationary when an otherwise empty rail gains and loses a task", async () => {
+    const { api, providerContext, scheduledContext, tool } = makeOrderedRailFixture();
+    const renderRail = (activities: readonly OrchestrationThreadActivity[]) => (
+      <div style={{ display: "flex", width: 280, height: 700 }}>
+        <SessionRail
+          plan={null}
+          usage={null}
+          onShowInComposer={vi.fn()}
+          scheduledFollowups={scheduledContext}
+          providerTasks={{ ...providerContext, activities }}
+        />
+      </div>
+    );
+    const screen = await render(renderRail([]));
+    try {
+      await expect
+        .element(page.getByRole("button", { name: "New follow-up", exact: true }))
+        .toBeEnabled();
+      const rail = document.querySelector<HTMLElement>("[data-session-rail]")!;
+      await settleRailEntrance(rail);
+      const content = rail.querySelector<HTMLElement>("[data-session-rail-tasks]")!;
+      const scheduled = content.querySelector<HTMLElement>("[data-scheduled-followups]")!;
+      const top = scheduled.getBoundingClientRect().top - content.getBoundingClientRect().top;
+      const readCount = api.list.mock.calls.length;
+      for (const activities of [[tool(2, "tool.started")], []] as const) {
+        await screen.rerender(renderRail(activities));
+        expect(content.firstElementChild).toBe(scheduled);
+        expect(scheduled.isConnected).toBe(true);
+        expect(
+          scheduled.getBoundingClientRect().top - content.getBoundingClientRect().top,
+        ).toBeCloseTo(top, 1);
+        expect(content.textContent).not.toContain("No tasks yet.");
+        if (activities.length)
+          expect(content.lastElementChild?.getAttribute("aria-label")).toBe(
+            "Active provider tasks",
+          );
+        else expect(content.children).toHaveLength(1);
+      }
+      expect(api.list).toHaveBeenCalledTimes(readCount);
+      for (const action of [api.save, api.setStatus, api.runNow])
+        expect(action).not.toHaveBeenCalled();
+    } finally {
+      await screen.unmount();
+    }
   });
 
   it.each(["light", "dark"])(
@@ -176,6 +487,32 @@ describe("SessionRail", () => {
       await expect
         .element(page.getByRole("button", { name: "Stop task", exact: true }))
         .not.toBeInTheDocument();
+    } finally {
+      await screen.unmount();
+    }
+  });
+
+  it("keeps ordinary provider-only work below the empty checklist without inventing schedules", async () => {
+    const { providerContext, tool } = makeOrderedRailFixture();
+    const screen = await render(
+      <SessionRail
+        plan={null}
+        usage={null}
+        onShowInComposer={vi.fn()}
+        providerTasks={{ ...providerContext, activities: [tool(2, "tool.started")] }}
+      />,
+    );
+    try {
+      await expect
+        .element(page.getByRole("region", { name: "Active provider tasks", exact: true }))
+        .toBeVisible();
+      const content = document.querySelector<HTMLElement>("[data-session-rail-tasks]")!;
+      expect(content.querySelector("[data-scheduled-followups]")).toBeNull();
+      expect(content.querySelector("[data-composer-subagent-list]")).toBeNull();
+      expect(content.querySelector("[data-composer-task-progress-list]")).toBeNull();
+      expect(content.querySelector('[aria-label="Workflows"]')).toBeNull();
+      expect(content.textContent).not.toContain("No tasks yet.");
+      expect(content.children).toHaveLength(1);
     } finally {
       await screen.unmount();
     }

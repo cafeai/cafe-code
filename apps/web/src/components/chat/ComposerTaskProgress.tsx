@@ -316,7 +316,9 @@ export const ComposerTaskProgress = memo(function ComposerTaskProgress(props: {
             role="region"
             tabIndex={0}
           >
-            {props.providerTasks ? <ProviderTasks context={props.providerTasks} /> : null}
+            {props.providerTasks ? (
+              <ProviderTasks context={props.providerTasks} section="workflows" />
+            ) : null}
             <TaskProgressDetails
               plan={plan}
               subagents={subagents}
@@ -331,6 +333,11 @@ export const ComposerTaskProgress = memo(function ComposerTaskProgress(props: {
                 key={`${props.scheduledFollowups.environmentId}:${props.scheduledFollowups.threadId}:${props.scheduledFollowups.modelSelection.instanceId}`}
                 context={props.scheduledFollowups}
               />
+            ) : null}
+            {/* Keep transient ordinary tasks below stable task sections;
+                workflow cards retain their original position above the plan. */}
+            {props.providerTasks ? (
+              <ProviderTasks context={props.providerTasks} section="tasks" />
             ) : null}
           </div>
         </div>

@@ -1,6 +1,6 @@
 # Live chat activity
 
-Last updated: 2026-10-11 16:48:49 JST (UTC+0900)
+Last updated: 2026-10-12 14:06:03 JST (UTC+0900)
 
 The composer has one compact activity line above the editor. It shows Working,
 Running command, a computer action, or waiting for a tool, agent, answer or
@@ -74,6 +74,13 @@ reopen a turn, confer task control, or change provider retry behavior. See
 [the bounded history decision](decisions/bounded-work-log-history.md).
 
 ## Ordinary provider tasks
+
+In both the Tasks popover and docked rail, ordinary Provider tasks appear last,
+below Scheduled work. Workflows, active subagents and the checklist retain their
+existing relative order above Scheduled work. Short-lived ordinary tasks can
+appear and retire without moving those earlier sections or resetting the
+schedule editor. A rail with Scheduled work does not insert a separate empty
+task placeholder when an ordinary task retires.
 
 Ordinary tasks use compact icon/title rows with their available individual
 actions inline. While Claude is still streaming tool arguments, the exact empty

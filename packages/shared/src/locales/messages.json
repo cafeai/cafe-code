@@ -547,7 +547,7 @@
   },
   "Active provider tasks": {
     "message": "Active provider tasks",
-    "locations": ["apps/web/src/components/chat/ProviderTasks.tsx:226"]
+    "locations": ["apps/web/src/components/chat/ProviderTasks.tsx:236"]
   },
   "Active steer retried as next turn": {
     "message": "Active steer retried as next turn",
@@ -7206,8 +7206,8 @@
       "apps/web/src/components/atrium/TaskAtrium.tsx:783",
       "apps/web/src/components/chat/ClaudeDeliveryPriorityPicker.tsx:29",
       "apps/web/src/components/chat/ComposerPrimaryActions.tsx:49",
-      "apps/web/src/components/chat/ProviderTasks.tsx:218",
-      "apps/web/src/components/chat/ProviderTasks.tsx:300",
+      "apps/web/src/components/chat/ProviderTasks.tsx:228",
+      "apps/web/src/components/chat/ProviderTasks.tsx:314",
       "apps/web/src/components/settings/AddProviderInstanceDialog.tsx:432"
     ]
   },
@@ -7241,7 +7241,7 @@
   },
   "Next workflow page": {
     "message": "Next workflow page",
-    "locations": ["apps/web/src/components/chat/ProviderTasks.tsx:214"]
+    "locations": ["apps/web/src/components/chat/ProviderTasks.tsx:224"]
   },
   "Next: <slot1></slot1>": {
     "message": "Next: <slot1></slot1>",
@@ -7537,7 +7537,7 @@
   },
   "No tasks yet.": {
     "message": "No tasks yet.",
-    "locations": ["apps/web/src/components/chat/SessionRail.tsx:257"]
+    "locations": ["apps/web/src/components/chat/SessionRail.tsx:259"]
   },
   "No text preview for this format. Download the file to inspect it.": {
     "message": "No text preview for this format. Download the file to inspect it.",
@@ -8497,8 +8497,8 @@
     "locations": [
       "apps/web/src/components/atrium/TaskAtrium.tsx:782",
       "apps/web/src/components/chat/ComposerPrimaryActions.tsx:125",
-      "apps/web/src/components/chat/ProviderTasks.tsx:206",
-      "apps/web/src/components/chat/ProviderTasks.tsx:289",
+      "apps/web/src/components/chat/ProviderTasks.tsx:216",
+      "apps/web/src/components/chat/ProviderTasks.tsx:303",
       "apps/web/src/components/chat/ScheduledFollowupNotices.tsx:203"
     ]
   },
@@ -8524,7 +8524,7 @@
   },
   "Previous workflow page": {
     "message": "Previous workflow page",
-    "locations": ["apps/web/src/components/chat/ProviderTasks.tsx:202"]
+    "locations": ["apps/web/src/components/chat/ProviderTasks.tsx:212"]
   },
   "Priced": {
     "message": "Priced",
@@ -8771,11 +8771,11 @@
   },
   "Provider task pages": {
     "message": "Provider task pages",
-    "locations": ["apps/web/src/components/chat/ProviderTasks.tsx:280"]
+    "locations": ["apps/web/src/components/chat/ProviderTasks.tsx:294"]
   },
   "Provider tasks · <slot1></slot1> active": {
     "message": "Provider tasks · <slot1></slot1> active",
-    "locations": ["apps/web/src/components/chat/ProviderTasks.tsx:230"]
+    "locations": ["apps/web/src/components/chat/ProviderTasks.tsx:244"]
   },
   "Provider transport retrying": {
     "message": "Provider transport retrying",
@@ -13573,7 +13573,7 @@
   },
   "Workflow pages": {
     "message": "Workflow pages",
-    "locations": ["apps/web/src/components/chat/ProviderTasks.tsx:196"]
+    "locations": ["apps/web/src/components/chat/ProviderTasks.tsx:206"]
   },
   "Workflow: {value0}": {
     "message": "Workflow: {value0}",
@@ -13582,8 +13582,8 @@
   "Workflows": {
     "message": "Workflows",
     "locations": [
-      "apps/web/src/components/chat/ProviderTasks.tsx:167",
-      "apps/web/src/components/chat/ProviderTasks.tsx:171"
+      "apps/web/src/components/chat/ProviderTasks.tsx:177",
+      "apps/web/src/components/chat/ProviderTasks.tsx:181"
     ]
   },
   "Working": {
