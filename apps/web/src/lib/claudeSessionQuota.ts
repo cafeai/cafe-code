@@ -1,3 +1,4 @@
+import { uiFormatDateTime, uiFormatNumber, uiText } from "@cafecode/shared/i18n";
 import {
   ProviderDriverKind,
   type ProviderInstanceId,
@@ -65,15 +66,19 @@ function localTime(instant: string, options: FormatOptions): string | null {
   const value = Date.parse(instant);
   if (!Number.isFinite(value)) return null;
   try {
-    return new Intl.DateTimeFormat(options.locale, {
-      year: "numeric",
-      month: "short",
-      day: "numeric",
-      hour: "numeric",
-      minute: "2-digit",
-      timeZoneName: "short",
-      ...(options.timeZone ? { timeZone: options.timeZone } : {}),
-    }).format(new Date(value));
+    return uiFormatDateTime(
+      new Date(value),
+      {
+        year: "numeric",
+        month: "short",
+        day: "numeric",
+        hour: "numeric",
+        minute: "2-digit",
+        timeZoneName: "short",
+        ...(options.timeZone ? { timeZone: options.timeZone } : {}),
+      },
+      options.locale,
+    );
   } catch {
     return null;
   }
@@ -81,7 +86,7 @@ function localTime(instant: string, options: FormatOptions): string | null {
 
 function percent(value: number, locale?: string): string {
   // Do not round the provider's meaningful precision to a whole percentage.
-  return new Intl.NumberFormat(locale, { maximumFractionDigits: 12 }).format(value);
+  return uiFormatNumber(value, { maximumFractionDigits: 12 }, locale);
 }
 
 /** Currency metadata is not permission to assume dollars. Construct the amount
@@ -93,7 +98,14 @@ function minorAmount(amount: number, currency: string | null | undefined, locale
     /^[A-Z]{3}$/u.test(code) &&
     Intl.supportedValuesOf("currency").includes(code);
   if (!supported)
-    return `${new Intl.NumberFormat(locale).format(amount)} minor units (${currency ? `currency: ${currency}; conversion unavailable` : "currency unavailable"})`;
+    return uiText(
+      "{amount} minor units ({currencyKnown, select, yes {currency: {currency}; conversion unavailable} other {currency unavailable}})",
+      {
+        amount: uiFormatNumber(amount, undefined, locale),
+        currencyKnown: currency ? "yes" : "no",
+        currency: currency ?? "",
+      },
+    );
   const formatter = new Intl.NumberFormat(locale, {
     style: "currency",
     currency: code,
@@ -128,7 +140,9 @@ export function formatClaudeSessionQuota(
   const stale =
     !Number.isFinite(received) || now < received || now - received >= CLAUDE_QUOTA_STALE_AFTER_MS;
   return {
-    observed: `Received: ${localTime(report.observedAt, options) ?? "time unavailable"}`,
+    observed: uiText("Received: {time}", {
+      time: localTime(report.observedAt, options) ?? uiText("time unavailable"),
+    }),
     stale,
     meters:
       report.meters?.map((meter, index) => {
@@ -139,27 +153,33 @@ export function formatClaudeSessionQuota(
           id: `meter-${index}`,
           group:
             meter.group === "session"
-              ? "Session"
+              ? uiText("Session")
               : meter.group === "weekly"
-                ? "Weekly"
+                ? uiText("Weekly")
                 : meter.group,
           label: [
             meter.kind === "session"
-              ? "Session window"
+              ? uiText("Session window")
               : meter.kind === "weekly_all"
-                ? "Weekly (all models)"
+                ? uiText("Weekly (all models)")
                 : meter.kind === "weekly_scoped"
-                  ? "Weekly"
+                  ? uiText("Weekly")
                   : meter.kind,
             meter.modelLabel,
             meter.surfaceLabel,
           ]
             .filter(Boolean)
             .join(" · "),
-          value: `${rowStale ? "Last reported: " : ""}${percent(remaining, options.locale)}% left`,
+          value: uiText("{stale, select, yes {Last reported: } other {}}{percent}% left", {
+            stale: rowStale ? "yes" : "no",
+            percent: percent(remaining, options.locale),
+          }),
           remainingPercent: remaining,
           reset: meter.resetsAt
-            ? `${expired ? "Reset passed" : "Resets"}: ${localTime(meter.resetsAt, options) ?? "time unavailable"}`
+            ? uiText("{expired, select, yes {Reset passed} other {Resets}}: {time}", {
+                expired: expired ? "yes" : "no",
+                time: localTime(meter.resetsAt, options) ?? uiText("time unavailable"),
+              })
             : null,
           stale: rowStale,
           severity: meter.severity,
@@ -168,20 +188,36 @@ export function formatClaudeSessionQuota(
       }) ?? null,
     extraUsage:
       report.extraUsage === undefined
-        ? ["Extra usage not reported."]
+        ? [uiText("Extra usage not reported.")]
         : report.extraUsage === null
-          ? ["Extra usage unavailable."]
+          ? [uiText("Extra usage unavailable.")]
           : [
-              `Extra usage: ${report.extraUsage.enabled ? "Enabled" : "Disabled"}`,
+              uiText("Extra usage: {enabled, select, yes {Enabled} other {Disabled}}", {
+                enabled: report.extraUsage.enabled ? "yes" : "no",
+              }),
               report.extraUsage.usedPercent !== null
-                ? `${percent(report.extraUsage.usedPercent, options.locale)}% of extra-usage limit used`
-                : "Extra-usage utilization: Unavailable",
+                ? uiText("{percent}% of extra-usage limit used", {
+                    percent: percent(report.extraUsage.usedPercent, options.locale),
+                  })
+                : uiText("Extra-usage utilization: Unavailable"),
               report.extraUsage.usedCredits !== null
-                ? `Used: ${minorAmount(report.extraUsage.usedCredits, report.extraUsage.currency, options.locale)}`
-                : "Used: Unavailable",
+                ? uiText("Used: {amount}", {
+                    amount: minorAmount(
+                      report.extraUsage.usedCredits,
+                      report.extraUsage.currency,
+                      options.locale,
+                    ),
+                  })
+                : uiText("Used: Unavailable"),
               report.extraUsage.monthlyLimit !== null
-                ? `Monthly limit: ${minorAmount(report.extraUsage.monthlyLimit, report.extraUsage.currency, options.locale)}`
-                : "Monthly limit: Unavailable",
+                ? uiText("Monthly limit: {amount}", {
+                    amount: minorAmount(
+                      report.extraUsage.monthlyLimit,
+                      report.extraUsage.currency,
+                      options.locale,
+                    ),
+                  })
+                : uiText("Monthly limit: Unavailable"),
             ],
   };
 }

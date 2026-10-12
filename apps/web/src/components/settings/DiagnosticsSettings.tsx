@@ -1,3 +1,6 @@
+import { useUiLocale, useUiPresentation } from "~/i18n";
+import { uiFormatNumber, uiText } from "@cafecode/shared/i18n";
+import { UiMessage } from "~/i18n";
 import {
   AlertTriangleIcon,
   ChevronDownIcon,
@@ -25,7 +28,7 @@ import { getLocalShellCapabilities } from "../../localCapabilities";
 import { cn } from "../../lib/utils";
 import { copyTextToClipboard } from "../../lib/copyToClipboard";
 import { resolveAndPersistPreferredEditor } from "../../editorPreferences";
-import { formatRelativeTime } from "../../timestampFormat";
+import { formatRelativeTime, formatRelativeTimeLabel } from "../../timestampFormat";
 import { useServerAvailableEditors, useServerObservability } from "../../rpc/serverState";
 import {
   useProcessDiagnostics,
@@ -53,19 +56,17 @@ import {
   visibleRuntimeErrors,
 } from "./diagnosticsRuntimeViewModel";
 
-const NUMBER_FORMAT = new Intl.NumberFormat();
-
 function formatCount(value: number): string {
-  return NUMBER_FORMAT.format(value);
+  return uiFormatNumber(value);
 }
 
 function formatDuration(value: number): string {
-  if (value < 1_000) return `${Math.round(value)} ms`;
-  return `${(value / 1_000).toFixed(value >= 10_000 ? 1 : 2)} s`;
+  if (value < 1_000) return uiText("{value} ms", { value: Math.round(value) });
+  return uiText("{value} s", { value: (value / 1_000).toFixed(value >= 10_000 ? 1 : 2) });
 }
 
 function formatBytes(value: number): string {
-  if (value < 1024) return `${value} B`;
+  if (value < 1024) return uiText("{value} B", { value });
   const units = ["KB", "MB", "GB"] as const;
   let unitIndex = -1;
   let next = value;
@@ -73,13 +74,15 @@ function formatBytes(value: number): string {
     next /= 1024;
     unitIndex += 1;
   } while (next >= 1024 && unitIndex < units.length - 1);
-  return `${next.toFixed(next >= 10 ? 1 : 2)} ${units[unitIndex]}`;
+  return uiText("{value} {unit, select, KB {KB} MB {MB} other {GB}}", {
+    value: next.toFixed(next >= 10 ? 1 : 2),
+    unit: units[unitIndex],
+  });
 }
 
 function formatRelative(value: DateTime.Utc | null): string {
   if (!value) return "—";
-  const relative = formatRelativeTime(DateTime.formatIso(value));
-  return relative.suffix ? `${relative.value} ${relative.suffix}` : relative.value;
+  return formatRelativeTimeLabel(DateTime.formatIso(value));
 }
 
 function formatRelativeNoWrap(value: DateTime.Utc | null): string {
@@ -88,8 +91,7 @@ function formatRelativeNoWrap(value: DateTime.Utc | null): string {
 
 function formatRelativeIso(value: string | null): string {
   if (!value) return "—";
-  const relative = formatRelativeTime(value);
-  return relative.suffix ? `${relative.value} ${relative.suffix}` : relative.value;
+  return formatRelativeTimeLabel(value);
 }
 
 function formatRelativeIsoNoWrap(value: string | null): string {
@@ -113,6 +115,8 @@ function isStaleProcessSignalMessage(message: string | undefined): boolean {
  * would never resolve.
  */
 function useStatPlaceholder(isInitialLoading: boolean): ReactNode {
+  const uiLocale = useUiLocale();
+
   const showSkeleton = useDelayedFlag(isInitialLoading);
   if (showSkeleton) return <Skeleton className="my-1 h-5 w-16" />;
   if (isInitialLoading)
@@ -121,7 +125,9 @@ function useStatPlaceholder(isInitialLoading: boolean): ReactNode {
         0
       </span>
     );
-  return <span className="text-subtle-foreground">—</span>;
+  return (
+    <span className="text-subtle-foreground">{uiText("—", undefined, undefined, uiLocale)}</span>
+  );
 }
 
 /** Layout-matching skeleton lines for a table or list whose first read is still pending. */
@@ -146,6 +152,8 @@ function StatBlock({
   tooltip?: ReactNode;
   tone?: "default" | "warning" | "danger";
 }) {
+  const uiLocale = useUiLocale();
+
   return (
     <div className="min-w-0 px-4 py-3 sm:px-5">
       <div className="flex min-w-0 items-center gap-1 text-xs text-muted-foreground">
@@ -153,7 +161,10 @@ function StatBlock({
           {label}
         </span>
         {tooltip ? (
-          <InfoTip label={`${label} details`} popupClassName="text-left">
+          <InfoTip
+            label={uiText("{value0} details", { value0: label }, undefined, uiLocale)}
+            popupClassName="text-left"
+          >
             {tooltip}
           </InfoTip>
         ) : null}
@@ -216,13 +227,15 @@ function ExpandableText({
   text,
   className,
   collapsedClassName = "line-clamp-3",
-  expandLabel = "Show full error",
+  expandLabel = uiText("Show full error"),
 }: {
   text: string;
   className?: string;
   collapsedClassName?: string;
   expandLabel?: string;
 }) {
+  const uiLocale = useUiLocale();
+
   const [expanded, setExpanded] = useState(false);
   const canExpand = text.length > 180 || text.includes("\n");
 
@@ -242,7 +255,7 @@ function ExpandableText({
           className="focus-ring mt-1 rounded-sm text-2xs font-medium text-muted-foreground underline-offset-2 hover:text-foreground hover:underline"
           onClick={() => setExpanded((value) => !value)}
         >
-          {expanded ? "Show less" : expandLabel}
+          {expanded ? uiText("Show less", undefined, undefined, uiLocale) : expandLabel}
         </button>
       ) : null}
     </div>
@@ -299,6 +312,8 @@ function DiagnosticsTable({
 }
 
 function TraceIdCell({ traceId }: { traceId: string }) {
+  const uiLocale = useUiLocale();
+
   const [copied, setCopied] = useState(false);
   const copyTraceId = useCallback(() => {
     void copyTextToClipboard(traceId)
@@ -332,14 +347,22 @@ function TraceIdCell({ traceId }: { traceId: string }) {
             <button
               type="button"
               className="focus-ring inline-flex size-5 shrink-0 items-center justify-center rounded-sm text-muted-foreground hover:bg-accent hover:text-foreground"
-              aria-label={copied ? "Copied trace ID" : "Copy trace ID"}
+              aria-label={
+                copied
+                  ? uiText("Copied trace ID", undefined, undefined, uiLocale)
+                  : uiText("Copy trace ID", undefined, undefined, uiLocale)
+              }
               onClick={copyTraceId}
             >
               <CopyIcon className="size-3" />
             </button>
           }
         />
-        <TooltipPopup side="top">{copied ? "Copied" : "Copy full trace ID"}</TooltipPopup>
+        <TooltipPopup side="top">
+          {copied
+            ? uiText("Copied", undefined, undefined, uiLocale)
+            : uiText("Copy full trace ID", undefined, undefined, uiLocale)}
+        </TooltipPopup>
       </Tooltip>
     </div>
   );
@@ -354,9 +377,9 @@ function formatProcessName(command: string): string {
 }
 
 function formatProcessType(process: ServerProcessDiagnosticsEntry): string {
-  if (process.depth > 0) return "Subprocess";
-  if (/\b(codex|claude)\b/i.test(process.command)) return "Agent";
-  return "Process";
+  if (process.depth > 0) return uiText("Subprocess");
+  if (/\b(codex|claude)\b/i.test(process.command)) return uiText("Agent");
+  return uiText("Process");
 }
 
 function ProcessNameCell({
@@ -368,6 +391,8 @@ function ProcessNameCell({
   isExpanded: boolean;
   onToggle: (pid: number) => void;
 }) {
+  const uiLocale = useUiLocale();
+
   const name = formatProcessName(process.command);
   const hasChildren = process.childPids.length > 0;
   const ChevronIcon = isExpanded ? ChevronDownIcon : ChevronRightIcon;
@@ -381,7 +406,11 @@ function ProcessNameCell({
         <button
           type="button"
           className="focus-ring inline-flex size-5 items-center justify-center rounded-sm text-muted-foreground hover:bg-accent hover:text-foreground"
-          aria-label={isExpanded ? `Collapse ${name}` : `Expand ${name}`}
+          aria-label={
+            isExpanded
+              ? uiText("Collapse {value0}", { value0: name }, undefined, uiLocale)
+              : uiText("Expand {value0}", { value0: name }, undefined, uiLocale)
+          }
           onClick={() => onToggle(process.pid)}
         >
           <ChevronIcon className="size-3.5" />
@@ -414,6 +443,8 @@ function ProcessSignalActions({
   isSignaling: boolean;
   onSignal: (pid: number, signal: ServerProcessSignal) => void;
 }) {
+  const uiLocale = useUiLocale();
+
   return (
     <div className="flex items-center justify-end gap-1.5">
       <Tooltip>
@@ -425,11 +456,13 @@ function ProcessSignalActions({
               className="focus-ring rounded-sm text-2xs font-medium text-muted-foreground underline-offset-2 hover:text-foreground hover:underline disabled:pointer-events-none disabled:opacity-50"
               onClick={() => onSignal(process.pid, "SIGINT")}
             >
-              INT
+              {uiText("INT", undefined, undefined, uiLocale)}
             </button>
           }
         />
-        <TooltipPopup side="top">Send SIGINT</TooltipPopup>
+        <TooltipPopup side="top">
+          {uiText("Send SIGINT", undefined, undefined, uiLocale)}
+        </TooltipPopup>
       </Tooltip>
       <Tooltip>
         <TooltipTrigger
@@ -440,11 +473,13 @@ function ProcessSignalActions({
               className="focus-ring rounded-sm text-2xs font-medium text-destructive-foreground underline-offset-2 hover:underline disabled:pointer-events-none disabled:opacity-50"
               onClick={() => onSignal(process.pid, "SIGKILL")}
             >
-              KILL
+              {uiText("KILL", undefined, undefined, uiLocale)}
             </button>
           }
         />
-        <TooltipPopup side="top">Send SIGKILL</TooltipPopup>
+        <TooltipPopup side="top">
+          {uiText("Send SIGKILL", undefined, undefined, uiLocale)}
+        </TooltipPopup>
       </Tooltip>
     </div>
   );
@@ -461,6 +496,9 @@ function ProcessDiagnosticsTable({
   onSignal: (pid: number, signal: ServerProcessSignal) => void;
   loading: boolean;
 }) {
+  const uiLocale = useUiLocale();
+  const uiPresentation = useUiPresentation(UI_PRESENTATION_SOURCES);
+
   const [collapsedPids, setCollapsedPids] = useState<ReadonlySet<number>>(() => new Set());
   const visibleProcesses = useMemo(() => {
     const visible: ServerProcessDiagnosticsEntry[] = [];
@@ -512,20 +550,37 @@ function ProcessDiagnosticsTable({
         </colgroup>
         <thead className={cn("sticky top-0 z-10 bg-card", TABLE_HEAD_CLASSNAME)}>
           <tr>
-            <th className="px-4 py-2 font-medium sm:pl-5">Name</th>
-            <th className="px-3 py-2 text-right font-medium">CPU</th>
-            <th className="px-3 py-2 text-right font-medium">Memory</th>
-            <th className="px-3 py-2 font-medium">Command</th>
-            <th className="px-3 py-2 text-right font-medium">PID</th>
-            <th className="px-3 py-2 font-medium">Type</th>
-            <th className="p-2 text-right font-medium sm:pr-4">Signal</th>
+            <th className="px-4 py-2 font-medium sm:pl-5">
+              {uiText("Name", undefined, undefined, uiLocale)}
+            </th>
+            <th className="px-3 py-2 text-right font-medium">
+              {uiText("CPU", undefined, undefined, uiLocale)}
+            </th>
+            <th className="px-3 py-2 text-right font-medium">
+              {uiText("Memory", undefined, undefined, uiLocale)}
+            </th>
+            <th className="px-3 py-2 font-medium">
+              {uiText("Command", undefined, undefined, uiLocale)}
+            </th>
+            <th className="px-3 py-2 text-right font-medium">
+              {uiText("PID", undefined, undefined, uiLocale)}
+            </th>
+            <th className="px-3 py-2 font-medium">
+              {uiText("Type", undefined, undefined, uiLocale)}
+            </th>
+            <th className="p-2 text-right font-medium sm:pr-4">
+              {uiText("Signal", undefined, undefined, uiLocale)}
+            </th>
           </tr>
         </thead>
         <tbody className="divide-y divide-border-subtle">
           {visibleProcesses.length === 0 ? (
             <tr>
               <td colSpan={7} className="p-0">
-                <EmptyRows loading={loading} label="No child processes running." />
+                <EmptyRows
+                  loading={loading}
+                  label={uiText("No child processes running.", undefined, undefined, uiLocale)}
+                />
               </td>
             </tr>
           ) : null}
@@ -542,7 +597,7 @@ function ProcessDiagnosticsTable({
                 {process.cpuPercent.toFixed(1)}%
               </td>
               <td className="px-3 py-2 text-right align-middle font-mono tabular-nums">
-                {formatBytes(process.rssBytes)}
+                {uiPresentation.formatBytes(process.rssBytes)}
               </td>
               <td className="px-3 py-2 align-middle text-muted-foreground">
                 <Tooltip>
@@ -561,7 +616,7 @@ function ProcessDiagnosticsTable({
                 {process.pid}
               </td>
               <td className="truncate px-3 py-2 align-middle text-muted-foreground">
-                {formatProcessType(process)}
+                {uiPresentation.formatProcessType(process)}
               </td>
               <td className="p-2 align-middle sm:pr-4">
                 <ProcessSignalActions
@@ -579,17 +634,41 @@ function ProcessDiagnosticsTable({
 }
 
 const RESOURCE_HISTORY_WINDOWS = [
-  { label: "5m", windowMs: 5 * 60_000, bucketMs: 30_000 },
-  { label: "15m", windowMs: 15 * 60_000, bucketMs: 60_000 },
-  { label: "30m", windowMs: 30 * 60_000, bucketMs: 2 * 60_000 },
-  { label: "1h", windowMs: 60 * 60_000, bucketMs: 5 * 60_000 },
+  {
+    get label() {
+      return uiText("5m");
+    },
+    windowMs: 5 * 60_000,
+    bucketMs: 30_000,
+  },
+  {
+    get label() {
+      return uiText("15m");
+    },
+    windowMs: 15 * 60_000,
+    bucketMs: 60_000,
+  },
+  {
+    get label() {
+      return uiText("30m");
+    },
+    windowMs: 30 * 60_000,
+    bucketMs: 2 * 60_000,
+  },
+  {
+    get label() {
+      return uiText("1h");
+    },
+    windowMs: 60 * 60_000,
+    bucketMs: 5 * 60_000,
+  },
 ] as const;
 
 function formatCpuTime(seconds: number): string {
-  if (seconds < 60) return `${seconds.toFixed(seconds >= 10 ? 1 : 2)}s`;
+  if (seconds < 60) return uiText("{value}s", { value: seconds.toFixed(seconds >= 10 ? 1 : 2) });
   const minutes = seconds / 60;
-  if (minutes < 60) return `${minutes.toFixed(minutes >= 10 ? 1 : 2)}m`;
-  return `${(minutes / 60).toFixed(2)}h`;
+  if (minutes < 60) return uiText("{value}m", { value: minutes.toFixed(minutes >= 10 ? 1 : 2) });
+  return uiText("{value}h", { value: (minutes / 60).toFixed(2) });
 }
 
 function formatShortProcessName(command: string): string {
@@ -604,13 +683,23 @@ function ResourceHistoryProcessNameCell({
   process: ServerProcessResourceHistorySummary;
   visualDepth: number;
 }) {
+  const uiLocale = useUiLocale();
+
   const name = formatShortProcessName(process.command);
 
   return (
     <div
       className="grid min-w-0 grid-cols-[1.25rem_0.375rem_minmax(0,1fr)] items-center gap-2"
       style={{ paddingLeft: `${Math.min(visualDepth, 6) * 10}px` }}
-      aria-label={`${process.isServerRoot ? "Root" : "Child"} process ${name}`}
+      aria-label={uiText(
+        "{root, select, yes {Root} other {Child}} process {name}",
+        {
+          root: process.isServerRoot ? "yes" : "no",
+          name,
+        },
+        undefined,
+        uiLocale,
+      )}
     >
       <span className="size-5 shrink-0" aria-hidden="true" />
       <span
@@ -643,6 +732,8 @@ function ProcessResourceHistoryChart({
     readonly maxCpuPercent: number;
   }>;
 }) {
+  const uiLocale = useUiLocale();
+
   const maxCpuPercent = Math.max(1, ...buckets.map((bucket) => bucket.maxCpuPercent));
 
   return (
@@ -658,7 +749,15 @@ function ProcessResourceHistoryChart({
                   <div className="flex h-full min-w-1 flex-1 items-end">
                     <div
                       className="relative h-full w-full"
-                      aria-label={`Average CPU ${bucket.avgCpuPercent.toFixed(1)}%, peak CPU ${bucket.maxCpuPercent.toFixed(1)}%`}
+                      aria-label={uiText(
+                        "Average CPU {value0}%, peak CPU {value1}%",
+                        {
+                          value0: bucket.avgCpuPercent.toFixed(1),
+                          value1: bucket.maxCpuPercent.toFixed(1),
+                        },
+                        undefined,
+                        uiLocale,
+                      )}
                     >
                       <div
                         className="absolute inset-x-0 bottom-0 rounded-t-sm bg-foreground/15 transition-colors"
@@ -673,7 +772,13 @@ function ProcessResourceHistoryChart({
                 }
               />
               <TooltipPopup side="top">
-                Avg {bucket.avgCpuPercent.toFixed(1)}%, peak {bucket.maxCpuPercent.toFixed(1)}%
+                <UiMessage
+                  message="Avg <slot1></slot1>%, peak <slot3></slot3>%"
+                  slots={{
+                    slot1: bucket.avgCpuPercent.toFixed(1),
+                    slot3: bucket.maxCpuPercent.toFixed(1),
+                  }}
+                />
               </TooltipPopup>
             </Tooltip>
           );
@@ -690,19 +795,24 @@ function ResourceHistoryWindowSelector({
   selectedWindowMs: number;
   onSelect: (windowMs: number) => void;
 }) {
+  const uiLocale = useUiLocale();
+  const uiPresentation = useUiPresentation(UI_PRESENTATION_SOURCES);
+
   const selectedLabel =
-    RESOURCE_HISTORY_WINDOWS.find((option) => option.windowMs === selectedWindowMs)?.label ??
-    RESOURCE_HISTORY_WINDOWS[1].label;
+    uiPresentation.RESOURCE_HISTORY_WINDOWS.find((option) => option.windowMs === selectedWindowMs)
+      ?.label ?? uiPresentation.RESOURCE_HISTORY_WINDOWS[1].label;
   return (
     <SegmentedControl
       size="xs"
-      aria-label="Resource history window"
+      aria-label={uiText("Resource history window", undefined, undefined, uiLocale)}
       value={selectedLabel}
       onValueChange={(label) => {
-        const option = RESOURCE_HISTORY_WINDOWS.find((entry) => entry.label === label);
+        const option = uiPresentation.RESOURCE_HISTORY_WINDOWS.find(
+          (entry) => entry.label === label,
+        );
         if (option) onSelect(option.windowMs);
       }}
-      options={RESOURCE_HISTORY_WINDOWS.map((option) => ({
+      options={uiPresentation.RESOURCE_HISTORY_WINDOWS.map((option) => ({
         value: option.label,
         label: option.label,
       }))}
@@ -717,6 +827,9 @@ function ProcessResourceHistoryTable({
   processes: ReadonlyArray<ServerProcessResourceHistorySummary>;
   loading: boolean;
 }) {
+  const uiLocale = useUiLocale();
+  const uiPresentation = useUiPresentation(UI_PRESENTATION_SOURCES);
+
   const shallowestChildDepth = processes.reduce<number | null>((minDepth, process) => {
     if (process.isServerRoot) return minDepth;
     return minDepth === null ? process.depth : Math.min(minDepth, process.depth);
@@ -742,21 +855,40 @@ function ProcessResourceHistoryTable({
         </colgroup>
         <thead className={cn("sticky top-0 z-10 bg-card", TABLE_HEAD_CLASSNAME)}>
           <tr>
-            <th className="px-4 py-2 font-medium sm:pl-5">Process</th>
-            <th className="px-3 py-2 text-right font-medium">CPU time</th>
-            <th className="px-3 py-2 text-right font-medium">Current</th>
-            <th className="px-3 py-2 text-right font-medium">Average</th>
-            <th className="px-3 py-2 text-right font-medium">Peak</th>
-            <th className="px-3 py-2 text-right font-medium">Max memory</th>
-            <th className="px-3 py-2 font-medium">Command</th>
-            <th className="px-3 py-2 text-right font-medium sm:pr-5">PID</th>
+            <th className="px-4 py-2 font-medium sm:pl-5">
+              {uiText("Process", undefined, undefined, uiLocale)}
+            </th>
+            <th className="px-3 py-2 text-right font-medium">
+              {uiText("CPU time", undefined, undefined, uiLocale)}
+            </th>
+            <th className="px-3 py-2 text-right font-medium">
+              {uiText("Current", undefined, undefined, uiLocale)}
+            </th>
+            <th className="px-3 py-2 text-right font-medium">
+              {uiText("Average", undefined, undefined, uiLocale)}
+            </th>
+            <th className="px-3 py-2 text-right font-medium">
+              {uiText("Peak", undefined, undefined, uiLocale)}
+            </th>
+            <th className="px-3 py-2 text-right font-medium">
+              {uiText("Max memory", undefined, undefined, uiLocale)}
+            </th>
+            <th className="px-3 py-2 font-medium">
+              {uiText("Command", undefined, undefined, uiLocale)}
+            </th>
+            <th className="px-3 py-2 text-right font-medium sm:pr-5">
+              {uiText("PID", undefined, undefined, uiLocale)}
+            </th>
           </tr>
         </thead>
         <tbody className="divide-y divide-border-subtle">
           {processes.length === 0 ? (
             <tr>
               <td colSpan={8} className="p-0">
-                <EmptyRows loading={loading} label="No samples in this window yet." />
+                <EmptyRows
+                  loading={loading}
+                  label={uiText("No samples in this window yet.", undefined, undefined, uiLocale)}
+                />
               </td>
             </tr>
           ) : null}
@@ -773,7 +905,7 @@ function ProcessResourceHistoryTable({
                 />
               </td>
               <td className="px-3 py-2 text-right align-middle font-mono tabular-nums">
-                {formatCpuTime(process.cpuSecondsApprox)}
+                {uiPresentation.formatCpuTime(process.cpuSecondsApprox)}
               </td>
               <td className="px-3 py-2 text-right align-middle font-mono tabular-nums">
                 {process.currentCpuPercent.toFixed(1)}%
@@ -785,7 +917,7 @@ function ProcessResourceHistoryTable({
                 {process.maxCpuPercent.toFixed(1)}%
               </td>
               <td className="px-3 py-2 text-right align-middle font-mono tabular-nums">
-                {formatBytes(process.maxRssBytes)}
+                {uiPresentation.formatBytes(process.maxRssBytes)}
               </td>
               <td className="px-3 py-2 align-middle text-muted-foreground">
                 <Tooltip>
@@ -817,14 +949,21 @@ function ProcessResourceHistoryTable({
  * mounts while open, so the relative-time tick costs nothing otherwise.
  */
 function DiagnosticsLastChecked({ checkedAt }: { checkedAt: string | null }) {
+  const uiLocale = useUiLocale();
+  const uiPresentation = useUiPresentation(UI_PRESENTATION_SOURCES);
+
   useRelativeTimeTick();
-  const relative = checkedAt ? formatRelativeTime(checkedAt) : null;
-  if (!relative) return <>Not checked yet</>;
+  const relative = checkedAt ? uiPresentation.formatRelativeTime(checkedAt) : null;
+  if (!relative) return <>{uiText("Not checked yet", undefined, undefined, uiLocale)}</>;
   return (
-    <>
-      Checked <span className="tabular-nums">{relative.value}</span>
-      {relative.suffix ? ` ${relative.suffix}` : null}
-    </>
+    <UiMessage
+      message="Checked <duration></duration>"
+      slots={{
+        duration: (
+          <span className="tabular-nums">{uiPresentation.formatRelativeTimeLabel(checkedAt!)}</span>
+        ),
+      }}
+    />
   );
 }
 
@@ -866,6 +1005,8 @@ function DiagnosticsRefreshButton({
 }
 
 function RuntimeStatusBadge({ status }: { status: ServerRuntimeLayerStatus }) {
+  const uiPresentation = useUiPresentation(UI_PRESENTATION_SOURCES);
+
   return (
     <span
       className={cn(
@@ -873,7 +1014,7 @@ function RuntimeStatusBadge({ status }: { status: ServerRuntimeLayerStatus }) {
         runtimeLayerStatusClasses(status),
       )}
     >
-      {formatRuntimeLayerStatus(status)}
+      {uiPresentation.formatRuntimeLayerStatus(status)}
     </span>
   );
 }
@@ -883,6 +1024,9 @@ function RuntimeDiagnosticsErrors({
 }: {
   errors: ReadonlyArray<ServerRuntimeLayerDiagnosticsError>;
 }) {
+  const uiLocale = useUiLocale();
+  const uiPresentation = useUiPresentation(UI_PRESENTATION_SOURCES);
+
   if (errors.length === 0) return null;
 
   return (
@@ -894,11 +1038,13 @@ function RuntimeDiagnosticsErrors({
         >
           <AlertTriangleIcon className="mt-0.5 size-3.5 shrink-0" />
           <div className="min-w-0">
-            <span className="font-medium">{formatRuntimeLayerRole(error.source)}</span>
+            <span className="font-medium">
+              {uiPresentation.formatRuntimeLayerRole(error.source)}
+            </span>
             <ExpandableText
               text={error.message}
               collapsedClassName="line-clamp-2"
-              expandLabel="Show full message"
+              expandLabel={uiText("Show full message", undefined, undefined, uiLocale)}
             />
           </div>
         </div>
@@ -914,14 +1060,31 @@ function RuntimeLayersTable({
   data: ServerRuntimeLayerDiagnosticsResult | null;
   loading: boolean;
 }) {
+  const uiLocale = useUiLocale();
+  const uiPresentation = useUiPresentation(UI_PRESENTATION_SOURCES);
+
   const layers = data ? sortRuntimeLayers(data.runtimeLayers) : [];
   if (layers.length === 0) {
-    return <EmptyRows loading={loading} label="No runtime layers found." />;
+    return (
+      <EmptyRows
+        loading={loading}
+        label={uiText("No runtime layers found.", undefined, undefined, uiLocale)}
+      />
+    );
   }
 
   return (
     <DiagnosticsTable
-      headers={["Layer", "Status", "PID", "Memory", "CPU", "Uptime", "Last event", "Notes"]}
+      headers={[
+        uiText("Layer", undefined, undefined, uiLocale),
+        uiText("Status", undefined, undefined, uiLocale),
+        uiText("PID", undefined, undefined, uiLocale),
+        uiText("Memory", undefined, undefined, uiLocale),
+        uiText("CPU", undefined, undefined, uiLocale),
+        uiText("Uptime", undefined, undefined, uiLocale),
+        uiText("Last event", undefined, undefined, uiLocale),
+        uiText("Notes", undefined, undefined, uiLocale),
+      ]}
       minTableWidth="min-w-[980px]"
       columnWidths={[
         "w-[16%]",
@@ -937,31 +1100,31 @@ function RuntimeLayersTable({
       {layers.map((layer) => (
         <tr key={layer.role} className="hover:bg-muted/15">
           <td className="px-4 py-3 align-top font-medium text-foreground first:sm:pl-5">
-            {formatRuntimeLayerRole(layer.role)}
+            {uiPresentation.formatRuntimeLayerRole(layer.role)}
           </td>
           <td className="px-4 py-3 align-top">
             <RuntimeStatusBadge status={layer.status} />
           </td>
           <td className="px-4 py-3 align-top text-right font-mono tabular-nums">
-            {layer.pid ?? "—"}
+            {layer.pid ?? uiText("—", undefined, undefined, uiLocale)}
           </td>
           <td className="px-4 py-3 align-top text-right font-mono tabular-nums">
-            {formatBytes(layer.rssBytes)}
+            {uiPresentation.formatBytes(layer.rssBytes)}
           </td>
           <td className="px-4 py-3 align-top text-right font-mono tabular-nums">
             {layer.cpuPercent.toFixed(1)}%
           </td>
           <td className="px-4 py-3 align-top font-mono tabular-nums text-muted-foreground">
-            {layer.uptimeLabel ?? "—"}
+            {layer.uptimeLabel ?? uiText("—", undefined, undefined, uiLocale)}
           </td>
           <td className="px-4 py-3 align-top font-mono tabular-nums text-muted-foreground">
-            {formatRelativeIsoNoWrap(layer.lastEventAt)}
+            {uiPresentation.formatRelativeIsoNoWrap(layer.lastEventAt)}
           </td>
           <td className="px-4 py-3 align-top text-muted-foreground last:sm:pr-5">
             <ExpandableText
               text={layer.notes.length > 0 ? layer.notes.join("\n") : "—"}
               collapsedClassName="line-clamp-2"
-              expandLabel="Show notes"
+              expandLabel={uiText("Show notes", undefined, undefined, uiLocale)}
             />
           </td>
         </tr>
@@ -979,6 +1142,8 @@ function RuntimeProcessNameCell({
   isExpanded: boolean;
   onToggle: (pid: number) => void;
 }) {
+  const uiLocale = useUiLocale();
+
   const hasChildren = process.childPids.length > 0 && process.pid !== null;
   const ChevronIcon = isExpanded ? ChevronDownIcon : ChevronRightIcon;
 
@@ -992,7 +1157,9 @@ function RuntimeProcessNameCell({
           type="button"
           className="focus-ring inline-flex size-5 items-center justify-center rounded-sm text-muted-foreground hover:bg-accent hover:text-foreground"
           aria-label={
-            isExpanded ? `Collapse ${process.commandLabel}` : `Expand ${process.commandLabel}`
+            isExpanded
+              ? uiText("Collapse {value0}", { value0: process.commandLabel }, undefined, uiLocale)
+              : uiText("Expand {value0}", { value0: process.commandLabel }, undefined, uiLocale)
           }
           onClick={() => onToggle(process.pid!)}
         >
@@ -1033,6 +1200,9 @@ function RuntimeProcessTable({
   processes: ReadonlyArray<ServerRuntimeLayerProcess>;
   loading: boolean;
 }) {
+  const uiLocale = useUiLocale();
+  const uiPresentation = useUiPresentation(UI_PRESENTATION_SOURCES);
+
   const [collapsedPids, setCollapsedPids] = useState<ReadonlySet<number>>(() => new Set());
   const visibleProcesses = useMemo(() => {
     const visible: ServerRuntimeLayerProcess[] = [];
@@ -1085,21 +1255,40 @@ function RuntimeProcessTable({
         </colgroup>
         <thead className={cn("sticky top-0 z-10 bg-card", TABLE_HEAD_CLASSNAME)}>
           <tr>
-            <th className="px-4 py-2 font-medium sm:pl-5">Process</th>
-            <th className="px-3 py-2 font-medium">Role</th>
-            <th className="px-3 py-2 font-medium">Status</th>
-            <th className="px-3 py-2 text-right font-medium">PID</th>
-            <th className="px-3 py-2 text-right font-medium">Memory</th>
-            <th className="px-3 py-2 text-right font-medium">CPU</th>
-            <th className="px-3 py-2 font-medium">Owner</th>
-            <th className="px-3 py-2 font-medium sm:pr-5">Command</th>
+            <th className="px-4 py-2 font-medium sm:pl-5">
+              {uiText("Process", undefined, undefined, uiLocale)}
+            </th>
+            <th className="px-3 py-2 font-medium">
+              {uiText("Role", undefined, undefined, uiLocale)}
+            </th>
+            <th className="px-3 py-2 font-medium">
+              {uiText("Status", undefined, undefined, uiLocale)}
+            </th>
+            <th className="px-3 py-2 text-right font-medium">
+              {uiText("PID", undefined, undefined, uiLocale)}
+            </th>
+            <th className="px-3 py-2 text-right font-medium">
+              {uiText("Memory", undefined, undefined, uiLocale)}
+            </th>
+            <th className="px-3 py-2 text-right font-medium">
+              {uiText("CPU", undefined, undefined, uiLocale)}
+            </th>
+            <th className="px-3 py-2 font-medium">
+              {uiText("Owner", undefined, undefined, uiLocale)}
+            </th>
+            <th className="px-3 py-2 font-medium sm:pr-5">
+              {uiText("Command", undefined, undefined, uiLocale)}
+            </th>
           </tr>
         </thead>
         <tbody className="divide-y divide-border-subtle">
           {visibleProcesses.length === 0 ? (
             <tr>
               <td colSpan={8} className="p-0">
-                <EmptyRows loading={loading} label="No runtime processes found." />
+                <EmptyRows
+                  loading={loading}
+                  label={uiText("No runtime processes found.", undefined, undefined, uiLocale)}
+                />
               </td>
             </tr>
           ) : null}
@@ -1116,16 +1305,16 @@ function RuntimeProcessTable({
                 />
               </td>
               <td className="px-3 py-2 align-middle text-muted-foreground">
-                {formatRuntimeLayerRole(process.role)}
+                {uiPresentation.formatRuntimeLayerRole(process.role)}
               </td>
               <td className="px-3 py-2 align-middle font-mono text-muted-foreground">
                 {process.status}
               </td>
               <td className="px-3 py-2 text-right align-middle font-mono tabular-nums">
-                {process.pid ?? "—"}
+                {process.pid ?? uiText("—", undefined, undefined, uiLocale)}
               </td>
               <td className="px-3 py-2 text-right align-middle font-mono tabular-nums">
-                {formatBytes(process.rssBytes)}
+                {uiPresentation.formatBytes(process.rssBytes)}
               </td>
               <td className="px-3 py-2 text-right align-middle font-mono tabular-nums">
                 {process.cpuPercent.toFixed(1)}%
@@ -1161,21 +1350,34 @@ function OrchestratorHealthTables({
   data: ServerRuntimeLayerDiagnosticsResult | null;
   loading: boolean;
 }) {
+  const uiLocale = useUiLocale();
+  const uiPresentation = useUiPresentation(UI_PRESENTATION_SOURCES);
+
   if (!data) {
-    return <EmptyRows loading={loading} label="No orchestrator data." />;
+    return (
+      <EmptyRows
+        loading={loading}
+        label={uiText("No orchestrator data.", undefined, undefined, uiLocale)}
+      />
+    );
   }
 
   return (
     <div className="grid gap-0 border-t border-border-subtle lg:grid-cols-2 lg:divide-x lg:divide-border-subtle">
       <div className="min-w-0">
         <DiagnosticsTable
-          headers={["Event type", "Count", "Actor", "Last seen"]}
+          headers={[
+            uiText("Event type", undefined, undefined, uiLocale),
+            uiText("Count", undefined, undefined, uiLocale),
+            uiText("Actor", undefined, undefined, uiLocale),
+            uiText("Last seen", undefined, undefined, uiLocale),
+          ]}
           minTableWidth="min-w-[620px]"
         >
           {data.orchestrator.recentEventTypeCounts.length === 0 ? (
             <tr>
               <td colSpan={4} className="px-4 py-4 text-muted-foreground sm:px-5">
-                No recent orchestration events.
+                {uiText("No recent orchestration events.", undefined, undefined, uiLocale)}
               </td>
             </tr>
           ) : (
@@ -1188,10 +1390,10 @@ function OrchestratorHealthTables({
                   {formatCount(event.count)}
                 </td>
                 <td className="px-4 py-3 align-top text-muted-foreground">
-                  {event.actorKind ?? "—"}
+                  {event.actorKind ?? uiText("—", undefined, undefined, uiLocale)}
                 </td>
                 <td className="px-4 py-3 align-top font-mono tabular-nums text-muted-foreground last:sm:pr-5">
-                  {formatRelativeIsoNoWrap(event.lastSeenAt)}
+                  {uiPresentation.formatRelativeIsoNoWrap(event.lastSeenAt)}
                 </td>
               </tr>
             ))
@@ -1200,13 +1402,18 @@ function OrchestratorHealthTables({
       </div>
       <div className="min-w-0 border-t border-border-subtle lg:border-t-0">
         <DiagnosticsTable
-          headers={["Projector", "Cursor", "Lag", "Status"]}
+          headers={[
+            uiText("Projector", undefined, undefined, uiLocale),
+            uiText("Cursor", undefined, undefined, uiLocale),
+            uiText("Lag", undefined, undefined, uiLocale),
+            uiText("Status", undefined, undefined, uiLocale),
+          ]}
           minTableWidth="min-w-[520px]"
         >
           {data.orchestrator.projectorCursors.length === 0 ? (
             <tr>
               <td colSpan={4} className="px-4 py-4 text-muted-foreground sm:px-5">
-                No projector cursors found.
+                {uiText("No projector cursors found.", undefined, undefined, uiLocale)}
               </td>
             </tr>
           ) : (
@@ -1240,20 +1447,34 @@ function ProviderDaemonTables({
   data: ServerRuntimeLayerDiagnosticsResult | null;
   loading: boolean;
 }) {
+  const uiLocale = useUiLocale();
+  const uiPresentation = useUiPresentation(UI_PRESENTATION_SOURCES);
+
   if (!data) {
-    return <EmptyRows loading={loading} label="No provider daemon data." />;
+    return (
+      <EmptyRows
+        loading={loading}
+        label={uiText("No provider daemon data.", undefined, undefined, uiLocale)}
+      />
+    );
   }
 
   return (
     <div className="grid gap-0 border-t border-border-subtle lg:grid-cols-2 lg:divide-x lg:divide-border-subtle">
       <DiagnosticsTable
-        headers={["Status", "Method", "Duration", "Updated", "Error"]}
+        headers={[
+          uiText("Status", undefined, undefined, uiLocale),
+          uiText("Method", undefined, undefined, uiLocale),
+          uiText("Duration", undefined, undefined, uiLocale),
+          uiText("Updated", undefined, undefined, uiLocale),
+          uiText("Error", undefined, undefined, uiLocale),
+        ]}
         minTableWidth="min-w-[720px]"
       >
         {data.providerDaemon.recentCommands.length === 0 ? (
           <tr>
             <td colSpan={5} className="px-4 py-4 text-muted-foreground sm:px-5">
-              No recent daemon commands.
+              {uiText("No recent daemon commands.", undefined, undefined, uiLocale)}
             </td>
           </tr>
         ) : (
@@ -1270,20 +1491,22 @@ function ProviderDaemonTables({
               </td>
               <td className="px-4 py-3 align-top font-mono text-2xs">{command.method}</td>
               <td className="px-4 py-3 text-right align-top font-mono tabular-nums">
-                {command.durationMs === null ? "—" : formatDuration(command.durationMs)}
+                {command.durationMs === null
+                  ? uiText("—", undefined, undefined, uiLocale)
+                  : uiPresentation.formatDuration(command.durationMs)}
               </td>
               <td className="px-4 py-3 align-top font-mono tabular-nums text-muted-foreground">
-                {formatRelativeIsoNoWrap(command.updatedAt)}
+                {uiPresentation.formatRelativeIsoNoWrap(command.updatedAt)}
               </td>
               <td className="px-4 py-3 align-top text-muted-foreground last:sm:pr-5">
                 {command.error ? (
                   <ExpandableText
                     text={command.error}
                     collapsedClassName="line-clamp-2"
-                    expandLabel="Show full error"
+                    expandLabel={uiText("Show full error", undefined, undefined, uiLocale)}
                   />
                 ) : (
-                  "—"
+                  uiText("—", undefined, undefined, uiLocale)
                 )}
               </td>
             </tr>
@@ -1291,13 +1514,17 @@ function ProviderDaemonTables({
         )}
       </DiagnosticsTable>
       <DiagnosticsTable
-        headers={["Runtime event", "Count", "Last seen"]}
+        headers={[
+          uiText("Runtime event", undefined, undefined, uiLocale),
+          uiText("Count", undefined, undefined, uiLocale),
+          uiText("Last seen", undefined, undefined, uiLocale),
+        ]}
         minTableWidth="min-w-[520px]"
       >
         {data.providerDaemon.runtimeEventSummaries.length === 0 ? (
           <tr>
             <td colSpan={3} className="px-4 py-4 text-muted-foreground sm:px-5">
-              No recent daemon runtime events.
+              {uiText("No recent daemon runtime events.", undefined, undefined, uiLocale)}
             </td>
           </tr>
         ) : (
@@ -1310,7 +1537,7 @@ function ProviderDaemonTables({
                 {formatCount(event.count)}
               </td>
               <td className="px-4 py-3 align-top font-mono tabular-nums text-muted-foreground last:sm:pr-5">
-                {formatRelativeIsoNoWrap(event.lastSeenAt)}
+                {uiPresentation.formatRelativeIsoNoWrap(event.lastSeenAt)}
               </td>
             </tr>
           ))
@@ -1327,17 +1554,30 @@ function ProviderSupervisorTable({
   data: ServerRuntimeLayerDiagnosticsResult | null;
   loading: boolean;
 }) {
+  const uiLocale = useUiLocale();
+
   if (!data) {
-    return <EmptyRows loading={loading} label="No supervisor data." />;
+    return (
+      <EmptyRows
+        loading={loading}
+        label={uiText("No supervisor data.", undefined, undefined, uiLocale)}
+      />
+    );
   }
 
   const sessionCounts = Object.entries(data.providerSupervisor.sessionCounts);
   return (
-    <DiagnosticsTable headers={["Session state", "Count"]} minTableWidth="min-w-[420px]">
+    <DiagnosticsTable
+      headers={[
+        uiText("Session state", undefined, undefined, uiLocale),
+        uiText("Count", undefined, undefined, uiLocale),
+      ]}
+      minTableWidth="min-w-[420px]"
+    >
       {sessionCounts.length === 0 ? (
         <tr>
           <td colSpan={2} className="px-4 py-4 text-muted-foreground sm:px-5">
-            No supervisor session counts found.
+            {uiText("No supervisor session counts found.", undefined, undefined, uiLocale)}
           </td>
         </tr>
       ) : (
@@ -1355,14 +1595,18 @@ function ProviderSupervisorTable({
 }
 
 export function DiagnosticsSettingsPanel() {
+  const uiLocale = useUiLocale();
+  const uiPresentation = useUiPresentation(UI_PRESENTATION_SOURCES);
+
   const observability = useServerObservability();
   const availableEditors = useServerAvailableEditors();
   const environmentId = useWorkspaceEnvironmentId();
   const canOpenLocalEditor = getLocalShellCapabilities(environmentId).canOpenLocalEditor;
   const [resourceWindowMs, setResourceWindowMs] = useState(15 * 60_000);
   const selectedResourceWindow =
-    RESOURCE_HISTORY_WINDOWS.find((option) => option.windowMs === resourceWindowMs) ??
-    RESOURCE_HISTORY_WINDOWS[1];
+    uiPresentation.RESOURCE_HISTORY_WINDOWS.find(
+      (option) => option.windowMs === resourceWindowMs,
+    ) ?? uiPresentation.RESOURCE_HISTORY_WINDOWS[1];
   const {
     data: runtimeData,
     error: runtimeError,
@@ -1399,14 +1643,16 @@ export function DiagnosticsSettingsPanel() {
         .then(
           () => {
             toastManager.add({
-              title: "Logs path copied",
+              title: uiText("Logs path copied", undefined, undefined, uiLocale),
               description: logsDirectoryPath,
               type: "success",
             });
           },
           (error: unknown) => {
             setOpenLogsDirectoryError(
-              error instanceof Error ? error.message : "Unable to copy logs folder path.",
+              error instanceof Error
+                ? error.message
+                : uiText("Unable to copy logs folder path.", undefined, undefined, uiLocale),
             );
           },
         );
@@ -1415,7 +1661,9 @@ export function DiagnosticsSettingsPanel() {
 
     const editor = resolveAndPersistPreferredEditor(availableEditors ?? []);
     if (!editor) {
-      setOpenLogsDirectoryError("No available editors found.");
+      setOpenLogsDirectoryError(
+        uiText("No available editors found.", undefined, undefined, uiLocale),
+      );
       return;
     }
 
@@ -1425,13 +1673,15 @@ export function DiagnosticsSettingsPanel() {
       .shell.openInEditor(logsDirectoryPath, editor)
       .catch((error: unknown) => {
         setOpenLogsDirectoryError(
-          error instanceof Error ? error.message : "Unable to open logs folder.",
+          error instanceof Error
+            ? error.message
+            : uiText("Unable to open logs folder.", undefined, undefined, uiLocale),
         );
       })
       .finally(() => {
         setIsOpeningLogsDirectory(false);
       });
-  }, [availableEditors, canOpenLocalEditor, observability?.logsDirectoryPath]);
+  }, [availableEditors, canOpenLocalEditor, observability?.logsDirectoryPath, uiLocale]);
 
   const isInitialLoading = isPending && data === null;
   const isRuntimeInitialLoading = isRuntimePending && runtimeData === null;
@@ -1447,7 +1697,14 @@ export function DiagnosticsSettingsPanel() {
     (pid: number, signal: ServerProcessSignal) => {
       if (
         signal === "SIGKILL" &&
-        !window.confirm(`Send SIGKILL to process ${pid}? It can't clean up first.`)
+        !window.confirm(
+          uiText(
+            "Send SIGKILL to process {value0}? It can''t clean up first.",
+            { value0: pid },
+            undefined,
+            uiLocale,
+          ),
+        )
       ) {
         return;
       }
@@ -1462,16 +1719,23 @@ export function DiagnosticsSettingsPanel() {
             if (isStaleProcessSignalMessage(message)) {
               toastManager.add({
                 type: "info",
-                title: "Process already exited",
-                description: "It is no longer running under Cafe Code.",
+                title: uiText("Process already exited", undefined, undefined, uiLocale),
+                description: uiText(
+                  "It is no longer running under Cafe Code.",
+                  undefined,
+                  undefined,
+                  uiLocale,
+                ),
               });
               return;
             }
 
             toastManager.add({
               type: "error",
-              title: `Could not send ${signal}`,
-              description: message ?? `Failed to send ${signal}.`,
+              title: uiText("Could not send {value0}", { value0: signal }, undefined, uiLocale),
+              description:
+                message ??
+                uiText("Failed to send {value0}.", { value0: signal }, undefined, uiLocale),
             });
             return;
           }
@@ -1480,15 +1744,18 @@ export function DiagnosticsSettingsPanel() {
         .catch((error: unknown) => {
           toastManager.add({
             type: "error",
-            title: `Could not send ${signal}`,
-            description: error instanceof Error ? error.message : `Failed to send ${signal}.`,
+            title: uiText("Could not send {value0}", { value0: signal }, undefined, uiLocale),
+            description:
+              error instanceof Error
+                ? error.message
+                : uiText("Failed to send {value0}.", { value0: signal }, undefined, uiLocale),
           });
         })
         .finally(() => {
           setSignalingPid(null);
         });
     },
-    [refreshProcesses],
+    [refreshProcesses, uiLocale],
   );
 
   const processDiagnosticsError = processData ? Option.getOrNull(processData.error) : null;
@@ -1497,19 +1764,19 @@ export function DiagnosticsSettingsPanel() {
   const traceDiagnosticsPartialFailure = data
     ? Option.getOrElse(data.partialFailure, () => false)
     : false;
-  const runtimeErrors = visibleRuntimeErrors(runtimeData, runtimeError);
+  const runtimeErrors = uiPresentation.visibleRuntimeErrors(runtimeData, runtimeError);
   const trackedRuntimeMemory = runtimeData ? summarizeRuntimeMemory(runtimeData.subprocesses) : 0;
   const trackedRuntimeCpu = runtimeData ? summarizeRuntimeCpu(runtimeData.subprocesses) : 0;
   const providerPipeline = runtimeData?.providerPipeline;
 
   return (
-    <SettingsPageContainer title="Diagnostics">
+    <SettingsPageContainer title={uiText("Diagnostics", undefined, undefined, uiLocale)}>
       <SettingsSection
-        title="Runtime overview"
+        title={uiText("Runtime overview", undefined, undefined, uiLocale)}
         headerAction={
           <DiagnosticsRefreshButton
             isPending={isRuntimePending}
-            label="Refresh runtime diagnostics"
+            label={uiText("Refresh runtime diagnostics", undefined, undefined, uiLocale)}
             checkedAt={runtimeData?.readAt ?? null}
             onClick={refreshRuntime}
           />
@@ -1517,27 +1784,37 @@ export function DiagnosticsSettingsPanel() {
       >
         <StatsGrid>
           <StatBlock
-            label="Backend"
+            label={uiText("Backend", undefined, undefined, uiLocale)}
             value={runtimeData ? `PID ${processData?.serverPid ?? "—"}` : runtimePlaceholder}
-            tooltip="Main backend process that owns orchestration, persistence, and RPC routes."
+            tooltip={uiText(
+              "Main backend process that owns orchestration, persistence, and RPC routes.",
+              undefined,
+              undefined,
+              uiLocale,
+            )}
           />
           <StatBlock
-            label="Orchestrator lag"
+            label={uiText("Orchestrator lag", undefined, undefined, uiLocale)}
             value={
               runtimeData ? formatCount(runtimeData.orchestrator.projectionLag) : runtimePlaceholder
             }
             tone={runtimeData && runtimeData.orchestrator.projectionLag > 0 ? "warning" : "default"}
-            tooltip="Latest persisted orchestration sequence minus the slowest projector cursor."
+            tooltip={uiText(
+              "Latest persisted orchestration sequence minus the slowest projector cursor.",
+              undefined,
+              undefined,
+              uiLocale,
+            )}
           />
           <StatBlock
-            label="Provider daemon"
+            label={uiText("Provider daemon", undefined, undefined, uiLocale)}
             value={
               runtimeData
                 ? runtimeData.providerDaemon.reachable
-                  ? "Online"
+                  ? uiText("Online", undefined, undefined, uiLocale)
                   : runtimeData.providerDaemon.available
-                    ? "Probe failed"
-                    : "Not configured"
+                    ? uiText("Probe failed", undefined, undefined, uiLocale)
+                    : uiText("Not configured", undefined, undefined, uiLocale)
                 : runtimePlaceholder
             }
             tone={
@@ -1545,32 +1822,47 @@ export function DiagnosticsSettingsPanel() {
             }
           />
           <StatBlock
-            label="Tracked memory"
-            value={runtimeData ? formatBytes(trackedRuntimeMemory) : runtimePlaceholder}
-            tooltip="Resident memory across backend, provider daemon, provider supervisor, and attributable child processes in the current process snapshot."
+            label={uiText("Tracked memory", undefined, undefined, uiLocale)}
+            value={
+              runtimeData ? uiPresentation.formatBytes(trackedRuntimeMemory) : runtimePlaceholder
+            }
+            tooltip={uiText(
+              "Resident memory across backend, provider daemon, provider supervisor, and attributable child processes in the current process snapshot.",
+              undefined,
+              undefined,
+              uiLocale,
+            )}
           />
         </StatsGrid>
         <RuntimeDiagnosticsErrors errors={runtimeErrors} />
         <RuntimeLayersTable data={runtimeData} loading={isRuntimeInitialLoading} />
       </SettingsSection>
 
-      <SettingsSection title="Orchestrator subprocesses">
+      <SettingsSection title={uiText("Orchestrator subprocesses", undefined, undefined, uiLocale)}>
         <StatsGrid>
           <StatBlock
-            label="Processes"
+            label={uiText("Processes", undefined, undefined, uiLocale)}
             value={runtimeData ? formatCount(runtimeData.subprocesses.length) : runtimePlaceholder}
           />
           <StatBlock
-            label="CPU"
+            label={uiText("CPU", undefined, undefined, uiLocale)}
             value={runtimeData ? `${trackedRuntimeCpu.toFixed(1)}%` : runtimePlaceholder}
           />
           <StatBlock
-            label="Memory"
-            value={runtimeData ? formatBytes(trackedRuntimeMemory) : runtimePlaceholder}
+            label={uiText("Memory", undefined, undefined, uiLocale)}
+            value={
+              runtimeData ? uiPresentation.formatBytes(trackedRuntimeMemory) : runtimePlaceholder
+            }
           />
           <StatBlock
-            label="Partial read"
-            value={runtimeData ? (runtimeData.partialFailure ? "Yes" : "No") : runtimePlaceholder}
+            label={uiText("Partial read", undefined, undefined, uiLocale)}
+            value={
+              runtimeData
+                ? runtimeData.partialFailure
+                  ? uiText("Yes", undefined, undefined, uiLocale)
+                  : uiText("No", undefined, undefined, uiLocale)
+                : runtimePlaceholder
+            }
             tone={runtimeData?.partialFailure ? "warning" : "default"}
           />
         </StatsGrid>
@@ -1580,10 +1872,10 @@ export function DiagnosticsSettingsPanel() {
         />
       </SettingsSection>
 
-      <SettingsSection title="Orchestrator health">
+      <SettingsSection title={uiText("Orchestrator health", undefined, undefined, uiLocale)}>
         <StatsGrid>
           <StatBlock
-            label="Event sequence"
+            label={uiText("Event sequence", undefined, undefined, uiLocale)}
             value={
               runtimeData
                 ? formatCount(runtimeData.orchestrator.latestEventSequence)
@@ -1591,7 +1883,7 @@ export function DiagnosticsSettingsPanel() {
             }
           />
           <StatBlock
-            label="Projection sequence"
+            label={uiText("Projection sequence", undefined, undefined, uiLocale)}
             value={
               runtimeData
                 ? formatCount(runtimeData.orchestrator.projectionSequence)
@@ -1599,7 +1891,7 @@ export function DiagnosticsSettingsPanel() {
             }
           />
           <StatBlock
-            label="Provider ingest lag"
+            label={uiText("Provider ingest lag", undefined, undefined, uiLocale)}
             value={
               runtimeData
                 ? formatCount(runtimeData.orchestrator.providerRuntimeIngestion.lag)
@@ -1610,10 +1902,15 @@ export function DiagnosticsSettingsPanel() {
                 ? runtimeLayerStatusTone(runtimeData.orchestrator.providerRuntimeIngestion.status)
                 : "default"
             }
-            tooltip="Provider daemon runtime events not yet ingested by the backend. If this grows while the provider daemon has recent events, the provider can be alive while chat projection appears stale."
+            tooltip={uiText(
+              "Provider daemon runtime events not yet ingested by the backend. If this grows while the provider daemon has recent events, the provider can be alive while chat projection appears stale.",
+              undefined,
+              undefined,
+              uiLocale,
+            )}
           />
           <StatBlock
-            label="Queue"
+            label={uiText("Queue", undefined, undefined, uiLocale)}
             value={
               runtimeData
                 ? formatCount(runtimeData.orchestrator.commandQueueDepth)
@@ -1624,7 +1921,7 @@ export function DiagnosticsSettingsPanel() {
             }
           />
           <StatBlock
-            label="Active turns"
+            label={uiText("Active turns", undefined, undefined, uiLocale)}
             value={
               runtimeData
                 ? formatCount(runtimeData.orchestrator.activeTurnCount)
@@ -1634,7 +1931,7 @@ export function DiagnosticsSettingsPanel() {
         </StatsGrid>
         <StatsGrid>
           <StatBlock
-            label="Accepted"
+            label={uiText("Accepted", undefined, undefined, uiLocale)}
             value={
               runtimeData
                 ? formatCount(runtimeData.orchestrator.acceptedCommandCount)
@@ -1642,7 +1939,7 @@ export function DiagnosticsSettingsPanel() {
             }
           />
           <StatBlock
-            label="Rejected"
+            label={uiText("Rejected", undefined, undefined, uiLocale)}
             value={
               runtimeData
                 ? formatCount(runtimeData.orchestrator.rejectedCommandCount)
@@ -1655,7 +1952,7 @@ export function DiagnosticsSettingsPanel() {
             }
           />
           <StatBlock
-            label="Failed"
+            label={uiText("Failed", undefined, undefined, uiLocale)}
             value={
               runtimeData
                 ? formatCount(runtimeData.orchestrator.failedCommandCount)
@@ -1666,7 +1963,7 @@ export function DiagnosticsSettingsPanel() {
             }
           />
           <StatBlock
-            label="Stale flags"
+            label={uiText("Stale flags", undefined, undefined, uiLocale)}
             value={
               runtimeData
                 ? formatCount(runtimeData.orchestrator.staleStateFlags.length)
@@ -1703,15 +2000,15 @@ export function DiagnosticsSettingsPanel() {
         <OrchestratorHealthTables data={runtimeData} loading={isRuntimeInitialLoading} />
       </SettingsSection>
 
-      <SettingsSection title="Provider daemon">
+      <SettingsSection title={uiText("Provider daemon", undefined, undefined, uiLocale)}>
         <StatsGrid>
           <StatBlock
-            label="Reachable"
+            label={uiText("Reachable", undefined, undefined, uiLocale)}
             value={
               runtimeData
                 ? runtimeData.providerDaemon.reachable
-                  ? "Yes"
-                  : "No"
+                  ? uiText("Yes", undefined, undefined, uiLocale)
+                  : uiText("No", undefined, undefined, uiLocale)
                 : runtimePlaceholder
             }
             tone={
@@ -1719,11 +2016,11 @@ export function DiagnosticsSettingsPanel() {
             }
           />
           <StatBlock
-            label="PID"
+            label={uiText("PID", undefined, undefined, uiLocale)}
             value={runtimeData ? String(runtimeData.providerDaemon.pid ?? "—") : runtimePlaceholder}
           />
           <StatBlock
-            label="Sessions"
+            label={uiText("Sessions", undefined, undefined, uiLocale)}
             value={
               runtimeData
                 ? formatCount(runtimeData.providerDaemon.activeSessionCount)
@@ -1731,18 +2028,23 @@ export function DiagnosticsSettingsPanel() {
             }
           />
           <StatBlock
-            label="Event streams"
+            label={uiText("Event streams", undefined, undefined, uiLocale)}
             value={
               runtimeData
                 ? formatCount(runtimeData.providerDaemon.activeStreamCount)
                 : runtimePlaceholder
             }
-            tooltip="Connected consumers of the daemon event journal. This is transport activity, not the number of active model turns."
+            tooltip={uiText(
+              "Connected consumers of the daemon event journal. This is transport activity, not the number of active model turns.",
+              undefined,
+              undefined,
+              uiLocale,
+            )}
           />
         </StatsGrid>
         <StatsGrid>
           <StatBlock
-            label="Events"
+            label={uiText("Events", undefined, undefined, uiLocale)}
             value={
               runtimeData
                 ? formatCount(runtimeData.providerDaemon.retainedEventCount)
@@ -1750,13 +2052,13 @@ export function DiagnosticsSettingsPanel() {
             }
           />
           <StatBlock
-            label="Cursor"
+            label={uiText("Cursor", undefined, undefined, uiLocale)}
             value={
               runtimeData ? formatCount(runtimeData.providerDaemon.eventCursor) : runtimePlaceholder
             }
           />
           <StatBlock
-            label="Commands"
+            label={uiText("Commands", undefined, undefined, uiLocale)}
             value={
               runtimeData
                 ? formatCount(runtimeData.providerDaemon.commandCount)
@@ -1764,7 +2066,7 @@ export function DiagnosticsSettingsPanel() {
             }
           />
           <StatBlock
-            label="Request failures"
+            label={uiText("Request failures", undefined, undefined, uiLocale)}
             value={
               runtimeData
                 ? formatCount(runtimeData.providerDaemon.failedRpcCount)
@@ -1773,36 +2075,46 @@ export function DiagnosticsSettingsPanel() {
             tone={
               runtimeData && runtimeData.providerDaemon.failedRpcCount > 0 ? "warning" : "default"
             }
-            tooltip="Failed RPC calls to the provider daemon."
+            tooltip={uiText(
+              "Failed RPC calls to the provider daemon.",
+              undefined,
+              undefined,
+              uiLocale,
+            )}
           />
         </StatsGrid>
         <ProviderDaemonTables data={runtimeData} loading={isRuntimeInitialLoading} />
       </SettingsSection>
 
-      <SettingsSection title="Provider pipeline">
+      <SettingsSection title={uiText("Provider pipeline", undefined, undefined, uiLocale)}>
         <StatsGrid>
           <StatBlock
-            label="Loop p99"
+            label={uiText("Loop p99", undefined, undefined, uiLocale)}
             value={
               providerPipeline
-                ? formatDuration(providerPipeline.eventLoop.p99LagMs)
+                ? uiPresentation.formatDuration(providerPipeline.eventLoop.p99LagMs)
                 : runtimePlaceholder
             }
             tone={
               providerPipeline && providerPipeline.eventLoop.p99LagMs > 250 ? "warning" : "default"
             }
-            tooltip="Backend event-loop scheduling lag. Sustained growth can delay both provider ingestion and WebSocket progress."
+            tooltip={uiText(
+              "Backend event-loop scheduling lag. Sustained growth can delay both provider ingestion and WebSocket progress.",
+              undefined,
+              undefined,
+              uiLocale,
+            )}
           />
           <StatBlock
-            label="Loop max"
+            label={uiText("Loop max", undefined, undefined, uiLocale)}
             value={
               providerPipeline
-                ? formatDuration(providerPipeline.eventLoop.maxLagMs)
+                ? uiPresentation.formatDuration(providerPipeline.eventLoop.maxLagMs)
                 : runtimePlaceholder
             }
           />
           <StatBlock
-            label="Daemon queue"
+            label={uiText("Daemon queue", undefined, undefined, uiLocale)}
             value={
               providerPipeline
                 ? formatCount(providerPipeline.daemonStream.queuedLiveRecords)
@@ -1815,25 +2127,25 @@ export function DiagnosticsSettingsPanel() {
             }
           />
           <StatBlock
-            label="Daemon queue size"
+            label={uiText("Daemon queue size", undefined, undefined, uiLocale)}
             value={
               providerPipeline
-                ? formatBytes(providerPipeline.daemonStream.queuedLiveBytes)
+                ? uiPresentation.formatBytes(providerPipeline.daemonStream.queuedLiveBytes)
                 : runtimePlaceholder
             }
           />
         </StatsGrid>
         <StatsGrid>
           <StatBlock
-            label="Bridge pending"
+            label={uiText("Bridge pending", undefined, undefined, uiLocale)}
             value={
               providerPipeline
-                ? formatBytes(providerPipeline.backendBridge.pendingBytes)
+                ? uiPresentation.formatBytes(providerPipeline.backendBridge.pendingBytes)
                 : runtimePlaceholder
             }
           />
           <StatBlock
-            label="Bridge pauses"
+            label={uiText("Bridge pauses", undefined, undefined, uiLocale)}
             value={
               providerPipeline
                 ? formatCount(providerPipeline.backendBridge.pauseCount)
@@ -1841,7 +2153,7 @@ export function DiagnosticsSettingsPanel() {
             }
           />
           <StatBlock
-            label="Subscribers"
+            label={uiText("Subscribers", undefined, undefined, uiLocale)}
             value={
               providerPipeline
                 ? formatCount(
@@ -1852,25 +2164,25 @@ export function DiagnosticsSettingsPanel() {
             }
           />
           <StatBlock
-            label="Replay ring"
+            label={uiText("Replay ring", undefined, undefined, uiLocale)}
             value={
               providerPipeline
-                ? `${formatCount(providerPipeline.subscriptions.replayRingEvents)} / ${formatBytes(providerPipeline.subscriptions.replayRingBytes)}`
+                ? `${formatCount(providerPipeline.subscriptions.replayRingEvents)} / ${uiPresentation.formatBytes(providerPipeline.subscriptions.replayRingBytes)}`
                 : runtimePlaceholder
             }
           />
         </StatsGrid>
         <StatsGrid>
           <StatBlock
-            label="WebSocket bulk"
+            label={uiText("WebSocket bulk", undefined, undefined, uiLocale)}
             value={
               providerPipeline
-                ? formatBytes(providerPipeline.webSocket.activeBulkBytes)
+                ? uiPresentation.formatBytes(providerPipeline.webSocket.activeBulkBytes)
                 : runtimePlaceholder
             }
           />
           <StatBlock
-            label="WebSocket overloads"
+            label={uiText("WebSocket overloads", undefined, undefined, uiLocale)}
             value={
               providerPipeline
                 ? formatCount(providerPipeline.webSocket.overloadCloseCount)
@@ -1883,7 +2195,7 @@ export function DiagnosticsSettingsPanel() {
             }
           />
           <StatBlock
-            label="Compacted"
+            label={uiText("Compacted", undefined, undefined, uiLocale)}
             value={
               providerPipeline
                 ? formatCount(providerPipeline.compaction.compactedEventCount)
@@ -1891,7 +2203,7 @@ export function DiagnosticsSettingsPanel() {
             }
           />
           <StatBlock
-            label="Quarantined"
+            label={uiText("Quarantined", undefined, undefined, uiLocale)}
             value={
               providerPipeline
                 ? formatCount(providerPipeline.compaction.quarantinedRowCount)
@@ -1906,24 +2218,36 @@ export function DiagnosticsSettingsPanel() {
         </StatsGrid>
       </SettingsSection>
 
-      <SettingsSection title="Provider supervisor">
+      <SettingsSection title={uiText("Provider supervisor", undefined, undefined, uiLocale)}>
         {runtimeData?.providerSupervisor.configured ? (
           <>
             <StatsGrid>
               <StatBlock
-                label="Reachable"
-                value={runtimeData.providerSupervisor.reachable ? "Yes" : "No"}
+                label={uiText("Reachable", undefined, undefined, uiLocale)}
+                value={
+                  runtimeData.providerSupervisor.reachable
+                    ? uiText("Yes", undefined, undefined, uiLocale)
+                    : uiText("No", undefined, undefined, uiLocale)
+                }
                 tone={runtimeLayerStatusTone(runtimeData.providerSupervisor.status)}
               />
-              <StatBlock label="PID" value={String(runtimeData.providerSupervisor.pid ?? "—")} />
               <StatBlock
-                label="Sessions"
+                label={uiText("PID", undefined, undefined, uiLocale)}
+                value={String(runtimeData.providerSupervisor.pid ?? "—")}
+              />
+              <StatBlock
+                label={uiText("Sessions", undefined, undefined, uiLocale)}
                 value={formatCount(runtimeData.providerSupervisor.activeSessionCount)}
               />
               <StatBlock
-                label="Event streams"
+                label={uiText("Event streams", undefined, undefined, uiLocale)}
                 value={formatCount(runtimeData.providerSupervisor.activeStreamCount)}
-                tooltip="Connected consumers of the optional supervisor event journal. This is transport activity, not the number of active model turns."
+                tooltip={uiText(
+                  "Connected consumers of the optional supervisor event journal. This is transport activity, not the number of active model turns.",
+                  undefined,
+                  undefined,
+                  uiLocale,
+                )}
               />
             </StatsGrid>
             <ProviderSupervisorTable data={runtimeData} loading={isRuntimeInitialLoading} />
@@ -1935,26 +2259,33 @@ export function DiagnosticsSettingsPanel() {
           <div className="flex min-h-11 items-center gap-1.5 px-4 py-3 text-xs text-muted-foreground sm:px-5">
             {runtimeData ? (
               <>
-                <span>Not configured</span>
-                <InfoTip label="About the provider supervisor">
-                  Optional. Providers run in the provider daemon, which is the default.
+                <span>{uiText("Not configured", undefined, undefined, uiLocale)}</span>
+                <InfoTip
+                  label={uiText("About the provider supervisor", undefined, undefined, uiLocale)}
+                >
+                  {uiText(
+                    "Optional. Providers run in the provider daemon, which is the default.",
+                    undefined,
+                    undefined,
+                    uiLocale,
+                  )}
                 </InfoTip>
               </>
             ) : isRuntimeInitialLoading ? (
               runtimePlaceholder
             ) : (
-              "Unavailable"
+              uiText("Unavailable", undefined, undefined, uiLocale)
             )}
           </div>
         )}
       </SettingsSection>
 
       <SettingsSection
-        title="Live processes"
+        title={uiText("Live processes", undefined, undefined, uiLocale)}
         headerAction={
           <DiagnosticsRefreshButton
             isPending={isProcessPending}
-            label="Refresh process diagnostics"
+            label={uiText("Refresh process diagnostics", undefined, undefined, uiLocale)}
             checkedAt={processData ? DateTime.formatIso(processData.readAt) : null}
             onClick={refreshProcesses}
           />
@@ -1962,21 +2293,35 @@ export function DiagnosticsSettingsPanel() {
       >
         <StatsGrid>
           <StatBlock
-            label="Child processes"
+            label={uiText("Child processes", undefined, undefined, uiLocale)}
             value={processData ? formatCount(processData.processCount) : processPlaceholder}
           />
           <StatBlock
-            label="CPU"
+            label={uiText("CPU", undefined, undefined, uiLocale)}
             value={processData ? `${processData.totalCpuPercent.toFixed(1)}%` : processPlaceholder}
-            tooltip="Total CPU across live child processes of the current server process. The desktop shell and other parent processes are not included."
+            tooltip={uiText(
+              "Total CPU across live child processes of the current server process. The desktop shell and other parent processes are not included.",
+              undefined,
+              undefined,
+              uiLocale,
+            )}
           />
           <StatBlock
-            label="Memory"
-            value={processData ? formatBytes(processData.totalRssBytes) : processPlaceholder}
-            tooltip="Total resident memory across live child processes of the current server process. The desktop shell and other parent processes are not included."
+            label={uiText("Memory", undefined, undefined, uiLocale)}
+            value={
+              processData
+                ? uiPresentation.formatBytes(processData.totalRssBytes)
+                : processPlaceholder
+            }
+            tooltip={uiText(
+              "Total resident memory across live child processes of the current server process. The desktop shell and other parent processes are not included.",
+              undefined,
+              undefined,
+              uiLocale,
+            )}
           />
           <StatBlock
-            label="Server PID"
+            label={uiText("Server PID", undefined, undefined, uiLocale)}
             value={processData ? String(processData.serverPid) : processPlaceholder}
           />
         </StatsGrid>
@@ -2005,7 +2350,7 @@ export function DiagnosticsSettingsPanel() {
       </SettingsSection>
 
       <SettingsSection
-        title="Resource history"
+        title={uiText("Resource history", undefined, undefined, uiLocale)}
         headerAction={
           <div className="flex items-center gap-1.5">
             <ResourceHistoryWindowSelector
@@ -2014,7 +2359,7 @@ export function DiagnosticsSettingsPanel() {
             />
             <DiagnosticsRefreshButton
               isPending={isResourcePending}
-              label="Refresh resource history"
+              label={uiText("Refresh resource history", undefined, undefined, uiLocale)}
               checkedAt={resourceData ? DateTime.formatIso(resourceData.readAt) : null}
               onClick={refreshResources}
             />
@@ -2023,27 +2368,41 @@ export function DiagnosticsSettingsPanel() {
       >
         <StatsGrid>
           <StatBlock
-            label="CPU time"
+            label={uiText("CPU time", undefined, undefined, uiLocale)}
             value={
-              resourceData ? formatCpuTime(resourceData.totalCpuSecondsApprox) : resourcePlaceholder
+              resourceData
+                ? uiPresentation.formatCpuTime(resourceData.totalCpuSecondsApprox)
+                : resourcePlaceholder
             }
-            tooltip="Approximate active CPU time for the Cafe Code server root process and its descendants during the selected window. It grows only while sampled processes use CPU and older samples leave as the window moves."
+            tooltip={uiText(
+              "Approximate active CPU time for the Cafe Code server root process and its descendants during the selected window. It grows only while sampled processes use CPU and older samples leave as the window moves.",
+              undefined,
+              undefined,
+              uiLocale,
+            )}
           />
           <StatBlock
-            label="Samples"
+            label={uiText("Samples", undefined, undefined, uiLocale)}
             value={
               resourceData ? formatCount(resourceData.retainedSampleCount) : resourcePlaceholder
             }
-            tooltip="In-memory process samples retained by the server. This resets when the server restarts."
+            tooltip={uiText(
+              "In-memory process samples retained by the server. This resets when the server restarts.",
+              undefined,
+              undefined,
+              uiLocale,
+            )}
           />
           <StatBlock
-            label="Interval"
+            label={uiText("Interval", undefined, undefined, uiLocale)}
             value={
-              resourceData ? formatDuration(resourceData.sampleIntervalMs) : resourcePlaceholder
+              resourceData
+                ? uiPresentation.formatDuration(resourceData.sampleIntervalMs)
+                : resourcePlaceholder
             }
           />
           <StatBlock
-            label="Processes"
+            label={uiText("Processes", undefined, undefined, uiLocale)}
             value={
               resourceData ? formatCount(resourceData.topProcesses.length) : resourcePlaceholder
             }
@@ -2073,7 +2432,7 @@ export function DiagnosticsSettingsPanel() {
       </SettingsSection>
 
       <SettingsSection
-        title="Traces"
+        title={uiText("Traces", undefined, undefined, uiLocale)}
         headerAction={
           <div className="flex items-center gap-1.5">
             <Tooltip>
@@ -2085,7 +2444,11 @@ export function DiagnosticsSettingsPanel() {
                     className="size-5 rounded-sm p-0 text-muted-foreground hover:text-foreground"
                     disabled={!observability?.logsDirectoryPath || isOpeningLogsDirectory}
                     onClick={openLogsDirectory}
-                    aria-label={canOpenLocalEditor ? "Open logs folder" : "Copy logs folder path"}
+                    aria-label={
+                      canOpenLocalEditor
+                        ? uiText("Open logs folder", undefined, undefined, uiLocale)
+                        : uiText("Copy logs folder path", undefined, undefined, uiLocale)
+                    }
                   >
                     {canOpenLocalEditor ? (
                       <FolderOpenIcon className="size-3" />
@@ -2096,12 +2459,14 @@ export function DiagnosticsSettingsPanel() {
                 }
               />
               <TooltipPopup side="top">
-                {canOpenLocalEditor ? "Open logs folder" : "Copy logs folder path"}
+                {canOpenLocalEditor
+                  ? uiText("Open logs folder", undefined, undefined, uiLocale)
+                  : uiText("Copy logs folder path", undefined, undefined, uiLocale)}
               </TooltipPopup>
             </Tooltip>
             <DiagnosticsRefreshButton
               isPending={isPending}
-              label="Refresh trace diagnostics"
+              label={uiText("Refresh trace diagnostics", undefined, undefined, uiLocale)}
               checkedAt={data ? DateTime.formatIso(data.readAt) : null}
               onClick={refresh}
             />
@@ -2110,26 +2475,38 @@ export function DiagnosticsSettingsPanel() {
       >
         <StatsGrid>
           <StatBlock
-            label="Spans"
+            label={uiText("Spans", undefined, undefined, uiLocale)}
             value={data ? formatCount(data.recordCount) : tracePlaceholder}
           />
           <StatBlock
-            label="Failures"
+            label={uiText("Failures", undefined, undefined, uiLocale)}
             value={data ? formatCount(data.failureCount) : tracePlaceholder}
             tone={data && data.failureCount > 0 ? "danger" : "default"}
           />
           <StatBlock
-            label="Slow spans"
+            label={uiText("Slow spans", undefined, undefined, uiLocale)}
             value={data ? formatCount(data.slowSpanCount) : tracePlaceholder}
             tooltip={
               data
-                ? `Spans with a duration of ${formatDuration(data.slowSpanThresholdMs)} or longer.`
-                : "Spans at or above the configured slow-span threshold."
+                ? uiText(
+                    "Spans with a duration of {value0} or longer.",
+                    {
+                      value0: uiPresentation.formatDuration(data.slowSpanThresholdMs),
+                    },
+                    undefined,
+                    uiLocale,
+                  )
+                : uiText(
+                    "Spans at or above the configured slow-span threshold.",
+                    undefined,
+                    undefined,
+                    uiLocale,
+                  )
             }
             tone={data && data.slowSpanCount > 0 ? "warning" : "default"}
           />
           <StatBlock
-            label="Parse errors"
+            label={uiText("Parse errors", undefined, undefined, uiLocale)}
             value={data ? formatCount(data.parseErrorCount) : tracePlaceholder}
             tone={data && data.parseErrorCount > 0 ? "warning" : "default"}
           />
@@ -2154,7 +2531,14 @@ export function DiagnosticsSettingsPanel() {
                 <AlertTriangleIcon className="mt-0.5 size-3.5 shrink-0" />
                 <span>
                   {traceDiagnosticsPartialFailure
-                    ? `Some trace files couldn't be read: ${traceDiagnosticsError.message}`
+                    ? uiText(
+                        "Some trace files couldn''t be read: {value0}",
+                        {
+                          value0: traceDiagnosticsError.message,
+                        },
+                        undefined,
+                        uiLocale,
+                      )
                     : traceDiagnosticsError.message}
                 </span>
               </div>
@@ -2169,9 +2553,16 @@ export function DiagnosticsSettingsPanel() {
         ) : null}
       </SettingsSection>
 
-      <SettingsSection title="Latest failures">
+      <SettingsSection title={uiText("Latest failures", undefined, undefined, uiLocale)}>
         {data && data.latestFailures.length > 0 ? (
-          <DiagnosticsTable headers={["Span", "Cause", "Duration", "Ended"]}>
+          <DiagnosticsTable
+            headers={[
+              uiText("Span", undefined, undefined, uiLocale),
+              uiText("Cause", undefined, undefined, uiLocale),
+              uiText("Duration", undefined, undefined, uiLocale),
+              uiText("Ended", undefined, undefined, uiLocale),
+            ]}
+          >
             {data.latestFailures.map((failure) => (
               <tr key={`${failure.traceId}:${failure.spanId}`}>
                 <td className="px-4 py-3 align-top text-xs font-medium text-foreground first:sm:pl-5">
@@ -2181,23 +2572,31 @@ export function DiagnosticsSettingsPanel() {
                   <ExpandableText text={failure.cause} />
                 </td>
                 <td className="px-4 py-3 align-top font-mono tabular-nums">
-                  {formatDuration(failure.durationMs)}
+                  {uiPresentation.formatDuration(failure.durationMs)}
                 </td>
                 <td className="whitespace-nowrap px-4 py-3 align-top font-mono tabular-nums text-muted-foreground last:sm:pr-5">
-                  {formatRelativeNoWrap(failure.endedAt)}
+                  {uiPresentation.formatRelativeNoWrap(failure.endedAt)}
                 </td>
               </tr>
             ))}
           </DiagnosticsTable>
         ) : (
-          <EmptyRows loading={isInitialLoading} label="No failed spans found." />
+          <EmptyRows
+            loading={isInitialLoading}
+            label={uiText("No failed spans found.", undefined, undefined, uiLocale)}
+          />
         )}
       </SettingsSection>
 
-      <SettingsSection title="Most common failures">
+      <SettingsSection title={uiText("Most common failures", undefined, undefined, uiLocale)}>
         {data && data.commonFailures.length > 0 ? (
           <DiagnosticsTable
-            headers={["Span", "Count", "Cause", "Last seen"]}
+            headers={[
+              uiText("Span", undefined, undefined, uiLocale),
+              uiText("Count", undefined, undefined, uiLocale),
+              uiText("Cause", undefined, undefined, uiLocale),
+              uiText("Last seen", undefined, undefined, uiLocale),
+            ]}
             minTableWidth="min-w-[760px]"
           >
             {data.commonFailures.map((failure) => (
@@ -2212,20 +2611,28 @@ export function DiagnosticsSettingsPanel() {
                   <ExpandableText text={failure.cause} />
                 </td>
                 <td className="w-px whitespace-nowrap px-4 py-3 align-top font-mono tabular-nums text-muted-foreground last:sm:pr-5">
-                  {formatRelativeNoWrap(failure.lastSeenAt)}
+                  {uiPresentation.formatRelativeNoWrap(failure.lastSeenAt)}
                 </td>
               </tr>
             ))}
           </DiagnosticsTable>
         ) : (
-          <EmptyRows loading={isInitialLoading} label="No repeated failures found." />
+          <EmptyRows
+            loading={isInitialLoading}
+            label={uiText("No repeated failures found.", undefined, undefined, uiLocale)}
+          />
         )}
       </SettingsSection>
 
-      <SettingsSection title="Slowest spans">
+      <SettingsSection title={uiText("Slowest spans", undefined, undefined, uiLocale)}>
         {data && data.slowestSpans.length > 0 ? (
           <DiagnosticsTable
-            headers={["Span", "Duration", "Ended", "Trace"]}
+            headers={[
+              uiText("Span", undefined, undefined, uiLocale),
+              uiText("Duration", undefined, undefined, uiLocale),
+              uiText("Ended", undefined, undefined, uiLocale),
+              uiText("Trace", undefined, undefined, uiLocale),
+            ]}
             minTableWidth="min-w-[900px]"
             columnWidths={["w-[44%]", "w-[14%]", "w-[12%]", "w-[30%]"]}
           >
@@ -2235,10 +2642,10 @@ export function DiagnosticsSettingsPanel() {
                   {span.name}
                 </td>
                 <td className="px-4 py-3 align-top font-mono tabular-nums">
-                  {formatDuration(span.durationMs)}
+                  {uiPresentation.formatDuration(span.durationMs)}
                 </td>
                 <td className="w-px whitespace-nowrap px-4 py-3 align-top font-mono tabular-nums text-muted-foreground">
-                  {formatRelativeNoWrap(span.endedAt)}
+                  {uiPresentation.formatRelativeNoWrap(span.endedAt)}
                 </td>
                 <td className="min-w-0 whitespace-nowrap px-4 py-3 align-top text-muted-foreground last:sm:pr-5">
                   <TraceIdCell traceId={span.traceId} />
@@ -2247,11 +2654,14 @@ export function DiagnosticsSettingsPanel() {
             ))}
           </DiagnosticsTable>
         ) : (
-          <EmptyRows loading={isInitialLoading} label="No spans found." />
+          <EmptyRows
+            loading={isInitialLoading}
+            label={uiText("No spans found.", undefined, undefined, uiLocale)}
+          />
         )}
       </SettingsSection>
 
-      <SettingsSection title="Span logs">
+      <SettingsSection title={uiText("Span logs", undefined, undefined, uiLocale)}>
         {data && data.latestWarningAndErrorLogs.length > 0 ? (
           <ScrollArea
             chainVerticalScroll
@@ -2269,11 +2679,21 @@ export function DiagnosticsSettingsPanel() {
               </colgroup>
               <thead className={TABLE_HEAD_CLASSNAME}>
                 <tr>
-                  <th className="whitespace-nowrap px-4 py-2.5 font-medium sm:pl-5">Time</th>
-                  <th className="whitespace-nowrap px-4 py-2.5 font-medium">Level</th>
-                  <th className="whitespace-nowrap px-4 py-2.5 font-medium">Span</th>
-                  <th className="whitespace-nowrap px-4 py-2.5 font-medium">Message</th>
-                  <th className="whitespace-nowrap px-4 py-2.5 font-medium sm:pr-5">Trace</th>
+                  <th className="whitespace-nowrap px-4 py-2.5 font-medium sm:pl-5">
+                    {uiText("Time", undefined, undefined, uiLocale)}
+                  </th>
+                  <th className="whitespace-nowrap px-4 py-2.5 font-medium">
+                    {uiText("Level", undefined, undefined, uiLocale)}
+                  </th>
+                  <th className="whitespace-nowrap px-4 py-2.5 font-medium">
+                    {uiText("Span", undefined, undefined, uiLocale)}
+                  </th>
+                  <th className="whitespace-nowrap px-4 py-2.5 font-medium">
+                    {uiText("Message", undefined, undefined, uiLocale)}
+                  </th>
+                  <th className="whitespace-nowrap px-4 py-2.5 font-medium sm:pr-5">
+                    {uiText("Trace", undefined, undefined, uiLocale)}
+                  </th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-border-subtle">
@@ -2283,7 +2703,7 @@ export function DiagnosticsSettingsPanel() {
                     className="hover:bg-muted/15"
                   >
                     <td className="whitespace-nowrap px-4 py-3 align-top font-mono tabular-nums text-muted-foreground sm:pl-5">
-                      {formatRelativeNoWrap(event.seenAt)}
+                      {uiPresentation.formatRelativeNoWrap(event.seenAt)}
                     </td>
                     <td className="px-4 py-3 align-top">
                       <span className="inline-flex rounded-sm bg-muted px-1.5 py-0.5 font-mono text-2xs font-medium text-foreground">
@@ -2296,7 +2716,7 @@ export function DiagnosticsSettingsPanel() {
                     <td className="px-4 py-3 align-top text-muted-foreground">
                       <ExpandableText
                         collapsedClassName="line-clamp-2"
-                        expandLabel="Show full message"
+                        expandLabel={uiText("Show full message", undefined, undefined, uiLocale)}
                         text={event.message}
                       />
                     </td>
@@ -2309,14 +2729,23 @@ export function DiagnosticsSettingsPanel() {
             </table>
           </ScrollArea>
         ) : (
-          <EmptyRows loading={isInitialLoading} label="No warnings or errors found." />
+          <EmptyRows
+            loading={isInitialLoading}
+            label={uiText("No warnings or errors found.", undefined, undefined, uiLocale)}
+          />
         )}
       </SettingsSection>
 
-      <SettingsSection title="Top span names">
+      <SettingsSection title={uiText("Top span names", undefined, undefined, uiLocale)}>
         {data && data.topSpansByCount.length > 0 ? (
           <DiagnosticsTable
-            headers={["Span", "Count", "Failures", "Average", "Max"]}
+            headers={[
+              uiText("Span", undefined, undefined, uiLocale),
+              uiText("Count", undefined, undefined, uiLocale),
+              uiText("Failures", undefined, undefined, uiLocale),
+              uiText("Average", undefined, undefined, uiLocale),
+              uiText("Max", undefined, undefined, uiLocale),
+            ]}
             minTableWidth="min-w-[760px]"
             columnWidths={["w-[48%]", "w-[13%]", "w-[13%]", "w-[13%]", "w-[13%]"]}
           >
@@ -2332,18 +2761,37 @@ export function DiagnosticsSettingsPanel() {
                   {formatCount(span.failureCount)}
                 </td>
                 <td className="whitespace-nowrap px-4 py-3 align-top font-mono tabular-nums">
-                  {formatDuration(span.averageDurationMs)}
+                  {uiPresentation.formatDuration(span.averageDurationMs)}
                 </td>
                 <td className="whitespace-nowrap px-4 py-3 align-top font-mono tabular-nums last:sm:pr-5">
-                  {formatDuration(span.maxDurationMs)}
+                  {uiPresentation.formatDuration(span.maxDurationMs)}
                 </td>
               </tr>
             ))}
           </DiagnosticsTable>
         ) : (
-          <EmptyRows loading={isInitialLoading} label="No spans found." />
+          <EmptyRows
+            loading={isInitialLoading}
+            label={uiText("No spans found.", undefined, undefined, uiLocale)}
+          />
         )}
       </SettingsSection>
     </SettingsPageContainer>
   );
 }
+
+// Finite source-owned labels/helpers only; no received or user data.
+const UI_PRESENTATION_SOURCES = {
+  RESOURCE_HISTORY_WINDOWS,
+  formatBytes,
+  formatCpuTime,
+  formatDuration,
+  formatProcessType,
+  formatRelativeIsoNoWrap,
+  formatRelativeNoWrap,
+  formatRelativeTime,
+  formatRelativeTimeLabel,
+  formatRuntimeLayerRole,
+  formatRuntimeLayerStatus,
+  visibleRuntimeErrors,
+};

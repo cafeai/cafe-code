@@ -255,7 +255,11 @@ describe("ProviderInstanceRegistryLive — non-runtime settings", () => {
         yield* Deferred.await(fixture.subscribed);
         // Both merged stream branches must subscribe before the first rename.
         yield* Effect.yieldNow;
-        const updates: readonly (Partial<ProviderInstanceConfig> | "clear-subagent-default")[] = [
+        const updates: readonly (
+          | Partial<ProviderInstanceConfig>
+          | "clear-subagent-default"
+          | "clear-context-default"
+        )[] = [
           { displayName: "Renamed" },
           { accentColor: "#222222" },
           { defaultModel: "gpt-6-astra" },
@@ -266,6 +270,9 @@ describe("ProviderInstanceRegistryLive — non-runtime settings", () => {
           { defaultMaxConcurrentSubagents: 4 },
           { defaultMaxConcurrentSubagents: 64 },
           "clear-subagent-default",
+          { defaultCodexContextWindowOverride: 500_000 },
+          { defaultCodexContextWindowOverride: 700_000 },
+          "clear-context-default",
           { displayName: undefined, accentColor: undefined },
         ];
         let entry = initialEntry;
@@ -276,6 +283,11 @@ describe("ProviderInstanceRegistryLive — non-runtime settings", () => {
             const { defaultMaxConcurrentSubagents: _previousDefault, ...resetEntry } = entry;
             entry = resetEntry;
             expect("defaultMaxConcurrentSubagents" in entry).toBe(false);
+          } else if (update === "clear-context-default") {
+            const { defaultCodexContextWindowOverride: _previousContextDefault, ...resetEntry } =
+              entry;
+            entry = resetEntry;
+            expect("defaultCodexContextWindowOverride" in entry).toBe(false);
           } else {
             entry = Object.assign({}, entry, update);
           }
@@ -293,6 +305,7 @@ describe("ProviderInstanceRegistryLive — non-runtime settings", () => {
           });
           if (
             update !== "clear-subagent-default" &&
+            update !== "clear-context-default" &&
             ("displayName" in update || "accentColor" in update)
           ) {
             expect(yield* Queue.take(observed)).toMatchObject({

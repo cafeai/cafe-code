@@ -1,3 +1,4 @@
+import { uiText } from "@cafecode/shared/i18n";
 import { PngBytesSchema, SavePngInputSchema, SavePngResultSchema } from "@cafecode/contracts";
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
@@ -117,9 +118,9 @@ const savePngMethod = makeIpcMethod({
           isCurrent,
           chooseDestination: () =>
             Electron.dialog.showSaveDialog(requestingOwner, {
-              title: "Save image",
+              title: uiText("Save image"),
               defaultPath: input.suggestedName,
-              filters: [{ name: "PNG image", extensions: ["png"] }],
+              filters: [{ name: uiText("PNG image"), extensions: ["png"] }],
               properties: ["createDirectory", "showOverwriteConfirmation"],
             }),
         });

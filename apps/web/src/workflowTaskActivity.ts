@@ -7,6 +7,7 @@ import {
 } from "@cafecode/contracts";
 import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
+import { uiText } from "@cafecode/shared/i18n";
 
 import { isSubagentRuntimeCurrent, type SubagentRuntimeContext } from "./subagent-activity";
 
@@ -223,7 +224,7 @@ export function deriveWorkflowTasks(context: WorkflowTaskContext): DerivedWorkfl
       key,
       taskId,
       turnId: activity.turnId,
-      title: retainedWorkflow.name ?? "Claude workflow",
+      title: retainedWorkflow.name ?? uiText("Claude workflow"),
       ...(description ? { description } : {}),
       ...(summary ? { summary } : !fresh && previous?.summary ? { summary: previous.summary } : {}),
       status,

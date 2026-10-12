@@ -1,3 +1,4 @@
+import { uiText } from "@cafecode/shared/i18n";
 import {
   MAX_TASK_ATRIUM_ERROR_DISMISSALS,
   type EnvironmentId,
@@ -15,6 +16,8 @@ import type { ThreadSession } from "../../types";
 import { readTurnConfiguration } from "../../turnConfiguration";
 import {
   deriveSubagentActivities,
+  subagentDisplayLabel,
+  subagentDisplayDescription,
   type DerivedSubagentActivity,
   type SubagentRunStatus,
   type SubagentRuntimeContext,
@@ -237,20 +240,20 @@ function collectSubagents(
       activity: subagent,
       rowKey: subagent.rowId,
       id: subagent.id,
-      label: subagent.label,
+      label: subagentDisplayLabel(subagent),
       detail:
         // Keep the live provider description visible in the card. The original
         // objective remains the fallback before Codex/Claude reports progress;
         // it must never be relegated to a hover-only affordance.
-        subagent.description ??
+        subagentDisplayDescription(subagent) ??
         subagent.objective ??
         (subagent.status === "waiting"
-          ? "Waiting"
+          ? uiText("Waiting")
           : subagent.status === "active"
-            ? "Working"
+            ? uiText("Working")
             : subagent.status === "unknown"
-              ? "Status unavailable"
-              : "Done"),
+              ? uiText("Status unavailable")
+              : uiText("Done")),
       status: subagent.status,
       running: subagent.status === "active" || subagent.status === "waiting",
       startedAt: toEpoch(subagent.startedAt),
@@ -556,7 +559,7 @@ export function selectAtriumSnapshot(
         key: JSON.stringify([environmentId, threadId]),
         environmentId,
         threadId,
-        title: summary.title.trim().length > 0 ? summary.title : "Untitled chat",
+        title: summary.title.trim().length > 0 ? summary.title : uiText("Untitled chat"),
         provider: session?.provider ?? turnConfiguration?.provider ?? "",
         turnConfiguration,
         projectName: project?.name ?? "",
@@ -609,11 +612,15 @@ export function selectAtriumSnapshot(
 export function formatElapsed(startedAt: number | null, now: number): string {
   if (startedAt === null) return "";
   const seconds = Math.max(0, Math.floor((now - startedAt) / 1000));
-  if (seconds < 60) return `${seconds}s`;
+  if (seconds < 60) return uiText("{seconds}s", { seconds });
   const minutes = Math.floor(seconds / 60);
-  if (minutes < 60) return `${minutes}m ${String(seconds % 60).padStart(2, "0")}s`;
+  if (minutes < 60)
+    return uiText("{minutes}m {seconds}s", {
+      minutes,
+      seconds: String(seconds % 60).padStart(2, "0"),
+    });
   const hours = Math.floor(minutes / 60);
-  return `${hours}h ${String(minutes % 60).padStart(2, "0")}m`;
+  return uiText("{hours}h {minutes}m", { hours, minutes: String(minutes % 60).padStart(2, "0") });
 }
 
 /** Terminal parent clocks require recorded evidence; absence stays unknown. */

@@ -1,3 +1,5 @@
+import { useUiLocale } from "~/i18n";
+import { uiText, type UiLocale } from "@cafecode/shared/i18n";
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 
@@ -6,15 +8,22 @@ import type {
   DictationRewriteTextInput,
   GlobalDictationEvent,
   GlobalDictationInsertionMethod,
+  DictationErrorCode,
 } from "@cafecode/contracts";
 import {
   GlobalDictationInsertError,
   GlobalDictationOverlay,
+  globalDictationStatusFromEvent,
+  formatGlobalDictationStatus,
+  type GlobalDictationStatus,
 } from "~/components/global-dictation/GlobalDictationOverlay";
-import { formatDictationRpcError } from "~/dictation/errors";
+import { formatDictationRpcErrorCode, readDictationRpcErrorCode } from "~/dictation/errors";
 import {
   RealtimeTranscriptionError,
   startRealtimeTranscription,
+  readRealtimeTranscriptionFeedback,
+  formatRealtimeTranscriptionFeedback,
+  type RealtimeTranscriptionFeedback,
   type RealtimeTranscriptionSession,
 } from "~/dictation/realtimeTranscription";
 import { getPrimaryEnvironmentConnection } from "~/environments/runtime";
@@ -22,14 +31,76 @@ import { waitForDictationEnvironmentReady } from "./waitForEnvironment";
 
 type Phase = "recording" | "finalizing" | "review";
 
-function safeDictationError(error: unknown): string {
-  if (error instanceof RealtimeTranscriptionError) return error.message;
+type DictationFeedback =
+  | { readonly kind: "realtime"; readonly feedback: RealtimeTranscriptionFeedback }
+  | { readonly kind: "rpc"; readonly code: DictationErrorCode }
+  | { readonly kind: "legacy"; readonly text: string }
+  | {
+      readonly kind:
+        | "startup-timeout"
+        | "unavailable"
+        | "window-disconnected"
+        | "voice-microphone-stopped"
+        | "stop-failed";
+    };
+
+function safeDictationError(error: unknown): DictationFeedback {
+  const feedback = readRealtimeTranscriptionFeedback(error);
+  if (feedback !== null) return { kind: "realtime", feedback };
+  // Legacy locally constructed sanitized errors remain opaque. Do not reverse
+  // translate arbitrary received prose or reinterpret it as a discriminator.
+  if (error instanceof RealtimeTranscriptionError) return { kind: "legacy", text: error.message };
   if (error instanceof Error && error.message === "dictation_startup_timeout") {
-    return "Cafe's connection took too long. Nothing was inserted; close the review and try again.";
+    return { kind: "startup-timeout" };
   }
-  return (
-    formatDictationRpcError(error) ?? "Dictation could not continue. Your draft is still here."
-  );
+  const code = readDictationRpcErrorCode(error);
+  return code === null ? { kind: "unavailable" } : { kind: "rpc", code };
+}
+
+function formatDictationFeedback(feedback: DictationFeedback, locale: UiLocale): string {
+  switch (feedback.kind) {
+    case "legacy":
+      return feedback.text;
+    case "realtime":
+      return formatRealtimeTranscriptionFeedback(feedback.feedback, locale);
+    case "rpc":
+      return formatDictationRpcErrorCode(feedback.code, locale);
+    case "startup-timeout":
+      return uiText(
+        "Cafe''s connection took too long. Nothing was inserted; close the review and try again.",
+        undefined,
+        undefined,
+        locale,
+      );
+    case "unavailable":
+      return uiText(
+        "Dictation could not continue. Your draft is still here.",
+        undefined,
+        undefined,
+        locale,
+      );
+    case "window-disconnected":
+      return uiText(
+        "Could not connect the dictation window. Close it and try again.",
+        undefined,
+        undefined,
+        locale,
+      );
+    case "voice-microphone-stopped":
+      return uiText(
+        "The voice command microphone stopped. Your draft is unchanged.",
+        undefined,
+        undefined,
+        locale,
+      );
+    case "stop-failed":
+      return uiText(
+        "Could not stop dictation. Use the shortcut or close this window.",
+        undefined,
+        undefined,
+        locale,
+      );
+  }
 }
 
 /**
@@ -38,7 +109,13 @@ function safeDictationError(error: unknown): string {
  * actions remain in Electron main. No transcript is placed in the URL,
  * browser storage, console, or the ordinary chat composer.
  */
-function GlobalDictationApp() {
+export function GlobalDictationApp() {
+  const uiLocale = useUiLocale();
+
+  useEffect(() => {
+    document.title = uiText("Cafe Dictation", undefined, undefined, uiLocale);
+  }, [uiLocale]);
+
   const bridge = window.desktopBridge;
   // The opaque id only correlates this auxiliary renderer with its main-owned
   // session. It is not an authorization token; main also binds exact sender,
@@ -47,8 +124,8 @@ function GlobalDictationApp() {
   const [sessionId, setSessionId] = useState<string | null>(null);
   const [phase, setPhase] = useState<Phase>("recording");
   const [transcript, setTranscript] = useState("");
-  const [errorMessage, setErrorMessage] = useState<string | undefined>();
-  const [statusMessage, setStatusMessage] = useState<string | undefined>();
+  const [errorMessage, setErrorMessage] = useState<DictationFeedback | undefined>();
+  const [statusMessage, setStatusMessage] = useState<GlobalDictationStatus | undefined>();
   const [insertAvailable, setInsertAvailable] = useState(false);
   const [insertionMethod, setInsertionMethod] =
     useState<GlobalDictationInsertionMethod>("accessibility");
@@ -58,7 +135,7 @@ function GlobalDictationApp() {
   const activePhase = useRef<Phase>("recording");
   const activeTranscript = useRef("");
   const authoritativeTranscript = useRef("");
-  const targetGuidance = useRef<string | undefined>(undefined);
+  const targetGuidance = useRef<GlobalDictationStatus | undefined>(undefined);
   const activeSession = useRef<RealtimeTranscriptionSession | null>(null);
   const activeStart = useRef<Promise<RealtimeTranscriptionSession | null> | null>(null);
   const activeAbort = useRef<AbortController | null>(null);
@@ -121,7 +198,7 @@ function GlobalDictationApp() {
     (id: string) => {
       const controller = new AbortController();
       activeAbort.current = controller;
-      setStatusMessage("Connecting your microphone…");
+      setStatusMessage({ kind: "connecting" });
       const pending = (async () => {
         try {
           await waitForDictationEnvironmentReady(controller.signal, 15_000);
@@ -192,21 +269,22 @@ function GlobalDictationApp() {
         setErrorMessage(undefined);
         setInsertAvailable(event.insertAvailable === true);
         setInsertionMethod(event.insertionMethod ?? "accessibility");
-        targetGuidance.current = event.reason;
-        if (event.reason) setStatusMessage(event.reason);
+        targetGuidance.current = globalDictationStatusFromEvent(event);
+        if (targetGuidance.current) setStatusMessage(targetGuidance.current);
         startCapture(event.sessionId);
       } else if (event.sessionId === activeId.current && event.type === "stop") {
         void stopCapture();
       } else if (event.sessionId === activeId.current && event.type === "review") {
         if (event.insertAvailable !== undefined) setInsertAvailable(event.insertAvailable);
         if (event.insertionMethod !== undefined) setInsertionMethod(event.insertionMethod);
-        if (event.reason) setStatusMessage(event.reason);
+        const guidance = globalDictationStatusFromEvent(event);
+        if (guidance) setStatusMessage(guidance);
       } else if (event.sessionId === activeId.current && event.type === "cancel") {
         releaseCapture();
       }
     });
     void notifyDesktop("ready").catch(() => {
-      setErrorMessage("Could not connect the dictation window. Close it and try again.");
+      setErrorMessage({ kind: "window-disconnected" });
     });
     return () => {
       unsubscribe();
@@ -282,7 +360,7 @@ function GlobalDictationApp() {
               commandSession.current = null;
               commandStart.current = null;
               commandAbort.current = null;
-              setErrorMessage("The voice command microphone stopped. Your draft is unchanged.");
+              setErrorMessage({ kind: "voice-microphone-stopped" });
               setCommandResult({ id: crypto.randomUUID(), transcript: "" });
               setCommandPhase("idle");
             }
@@ -377,13 +455,17 @@ function GlobalDictationApp() {
       phase={phase}
       transcript={transcript}
       liveTranscript={transcript}
-      {...(statusMessage === undefined ? {} : { statusMessage })}
-      {...(errorMessage === undefined ? {} : { errorMessage })}
+      {...(statusMessage === undefined
+        ? {}
+        : { statusMessage: formatGlobalDictationStatus(statusMessage, uiLocale) })}
+      {...(errorMessage === undefined
+        ? {}
+        : { errorMessage: formatDictationFeedback(errorMessage, uiLocale) })}
       insertAvailable={insertAvailable}
       insertionMethod={insertionMethod}
       onStopRecording={() => {
         void notifyDesktop("stop").catch(() => {
-          setErrorMessage("Could not stop dictation. Use the shortcut or close this window.");
+          setErrorMessage({ kind: "stop-failed" });
         });
       }}
       onCancel={onCancel}
@@ -402,6 +484,6 @@ function GlobalDictationApp() {
 }
 
 export function mountGlobalDictation(element: HTMLElement): void {
-  document.title = "Cafe Dictation";
+  document.title = uiText("Cafe Dictation");
   createRoot(element).render(<GlobalDictationApp />);
 }

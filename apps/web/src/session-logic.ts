@@ -1,11 +1,14 @@
 import * as Option from "effect/Option";
 import * as Arr from "effect/Array";
 import * as Schema from "effect/Schema";
+import { uiFormatNumber, uiText } from "@cafecode/shared/i18n";
 import {
   ApprovalRequestId,
   isToolLifecycleItemType,
   type OrchestrationLatestTurn,
   type OrchestrationThreadActivity,
+  type OrchestrationThreadActivityCursor,
+  THREAD_DETAIL_ACTIVITY_WINDOW_LIMIT,
   type ProviderTurnConfiguration,
   type OrchestrationProposedPlanId,
   ProviderDriverKind,
@@ -17,6 +20,12 @@ import {
   type TurnId,
 } from "@cafecode/contracts";
 import { summarizeToolArguments } from "@cafecode/shared/toolActivity";
+import { codexRecoveryWorkLogLabel, nativeRetryWorkLogLabel } from "./codexRecovery";
+import {
+  deriveProviderDiagnosticWorkLogRecord,
+  providerDiagnosticWorkLogLabel,
+  type ProviderDiagnosticWorkLogRecord,
+} from "./providerDiagnostic";
 import { readDesktopObservationItem } from "@cafecode/shared/desktopObservation";
 import { isRoutineProviderWorkLogActivity } from "@cafecode/shared/providerWorkLog";
 import { readComputerUsePresentation } from "./components/chat/computerUsePresentation";
@@ -31,6 +40,8 @@ import {
 
 import {
   deriveSubagentActivities,
+  subagentDisplayLabel,
+  subagentDisplayDescription,
   isSubagentRuntimeCurrent,
   type DeriveSubagentActivityOptions,
   type DerivedSubagentActivity,
@@ -46,6 +57,8 @@ import type {
   ThreadSession,
   TurnDiffSummary,
 } from "./types";
+import { compareActivityWindowOrder } from "./activityOrder";
+import { cafeWorkLogDisplayLabel, contextCompactionDisplayLabel } from "./workLogPresentation";
 
 export type ProviderPickerKind = ProviderDriverKind;
 const isProviderInteraction = Schema.is(ProviderInteraction);
@@ -73,12 +86,15 @@ export interface WorkLogEntry {
   turnId?: TurnId | null;
   createdAt: string;
   label: string;
+  /** Cafe-authored display copy is separate from canonical lifecycle labels. */
+  displayLabel?: string;
   detail?: string;
   command?: string;
   rawCommand?: string;
   changedFiles?: ReadonlyArray<string>;
   tone: "thinking" | "tool" | "info" | "error";
   toolTitle?: string;
+  displayToolTitle?: string;
   itemType?: ToolLifecycleItemType;
   requestKind?: PendingApproval["requestKind"];
   desktopObservation?: NonNullable<ReturnType<typeof readDesktopObservationItem>>;
@@ -86,6 +102,10 @@ export interface WorkLogEntry {
   /** Explicit bounded public presentation, never arbitrary native payloads. */
   publicSummary?: ClaudePublicSummary;
   commandInspection?: ClaudeCommandInspection;
+  /** Public occurrence metadata only; private JSON is read after expansion. */
+  providerDiagnostic?: ProviderDiagnosticWorkLogRecord;
+  /** Operation identity is for folding/deduplication, never task authority. */
+  toolCallId?: string;
   /** Frozen accepted-turn settings; never reconstructed from today's catalog. */
   turnConfiguration?: ProviderTurnConfiguration;
   subagent?: {
@@ -109,12 +129,38 @@ export interface WorkLogEntry {
   };
 }
 
+/** Render Cafe-owned copy without translating opaque provider/user labels or
+ * the canonical strings consumed by legacy operation folding. */
+export function workLogDisplayLabel(entry: WorkLogEntry): string {
+  return entry.displayLabel ?? entry.label;
+}
+
+export function workLogDisplayToolTitle(entry: WorkLogEntry): string | undefined {
+  // Resolve the current canonical lifecycle result after folding. Storing only
+  // the start's display title would survive a later canonical completion.
+  return (
+    (entry.itemType === "context_compaction" && entry.toolTitle
+      ? contextCompactionDisplayLabel(entry.toolTitle)
+      : undefined) ??
+    entry.displayToolTitle ??
+    entry.toolTitle
+  );
+}
+
 export interface HistoricalWorkLogSummary {
   turnId: TurnId;
+  /** Unknown latest identity permits reading, not inferred legacy completion. */
+  isHistoricalTurn?: boolean;
   previewEntries: ReadonlyArray<WorkLogEntry>;
   snapshotEntryCount: number;
   /** Subagents are conversation history, not command/tool Work Log rows. */
   subagentEntries?: ReadonlyArray<WorkLogEntry>;
+  /** Immutable exclusive range for the earlier part of the current turn. */
+  before?: OrchestrationThreadActivityCursor;
+  /** Current received snapshots win over separately fetched older versions. */
+  liveActivities?: ReadonlyArray<OrchestrationThreadActivity>;
+  /** Changes only when relevant work leaves the ordinary tail, not per token. */
+  presenceRevision?: string;
 }
 
 interface DerivedWorkLogEntry extends WorkLogEntry {
@@ -182,7 +228,7 @@ export type TimelineEntry =
     };
 
 export function formatDuration(durationMs: number): string {
-  if (!Number.isFinite(durationMs) || durationMs < 0) return "0s";
+  if (!Number.isFinite(durationMs) || durationMs < 0) return uiText("{seconds}s", { seconds: 0 });
 
   // Turn-duration labels are user-facing liveness/status text, not precise
   // profiling metrics. Keep the same whole-second model for both the live
@@ -190,7 +236,7 @@ export function formatDuration(durationMs: number): string {
   // label does not change shape when a turn finishes.
   const elapsedSeconds = Math.max(0, Math.floor(durationMs / 1_000));
   if (elapsedSeconds < 60) {
-    return `${elapsedSeconds}s`;
+    return uiText("{seconds}s", { seconds: elapsedSeconds });
   }
 
   const hours = Math.floor(elapsedSeconds / 3_600);
@@ -199,16 +245,16 @@ export function formatDuration(durationMs: number): string {
   const parts: string[] = [];
 
   if (hours > 0) {
-    parts.push(`${hours}h`);
+    parts.push(uiText("{hours}h", { hours }));
   }
   if (minutes > 0) {
-    parts.push(`${minutes}m`);
+    parts.push(uiText("{minutes}m", { minutes }));
   }
   if (seconds > 0) {
-    parts.push(`${seconds}s`);
+    parts.push(uiText("{seconds}s", { seconds }));
   }
 
-  return parts.length > 0 ? parts.join(" ") : "0s";
+  return parts.length > 0 ? parts.join(" ") : uiText("{seconds}s", { seconds: 0 });
 }
 
 export function formatElapsed(startIso: string, endIso: string | undefined): string | null {
@@ -778,22 +824,23 @@ export function subagentToWorkLogEntry(subagent: DerivedSubagentActivity): WorkL
 } {
   const fallback =
     subagent.status === "waiting"
-      ? "Waiting"
+      ? uiText("Waiting")
       : subagent.status === "active"
-        ? "Working"
+        ? uiText("Working")
         : subagent.status === "failed"
-          ? "Failed"
+          ? uiText("Failed")
           : subagent.status === "stopped"
-            ? "Stopped"
+            ? uiText("Stopped")
             : subagent.status === "unknown"
-              ? "Status unavailable"
-              : "Completed";
+              ? uiText("Status unavailable")
+              : uiText("Completed");
   return {
     id: subagent.rowId,
     turnId: subagent.turnId,
     createdAt: subagent.startedAt,
     label: subagent.label,
-    detail: subagent.objective ?? subagent.description ?? fallback,
+    ...(subagent.displayLabel !== undefined ? { displayLabel: subagent.displayLabel } : {}),
+    detail: subagent.objective ?? subagentDisplayDescription(subagent) ?? fallback,
     tone:
       subagent.status === "failed"
         ? "error"
@@ -803,7 +850,7 @@ export function subagentToWorkLogEntry(subagent: DerivedSubagentActivity): WorkL
     itemType: "collab_agent_tool_call",
     subagent: {
       id: subagent.id,
-      label: subagent.label,
+      label: subagentDisplayLabel(subagent),
       ...(subagent.objective ? { objective: subagent.objective } : {}),
       ...(subagent.description ? { description: subagent.description } : {}),
       status: subagent.status,
@@ -849,9 +896,6 @@ export function deriveHistoricalWorkLogSummaries(input: {
   runtimeSession?: DeriveSubagentActivityOptions["runtimeSession"];
 }): ReadonlyMap<TurnId, HistoricalWorkLogSummary> {
   const latestTurnId = input.latestTurnId ?? null;
-  if (latestTurnId === null) {
-    return new Map();
-  }
   const historicalTurnIds = new Set<TurnId>();
   for (const message of input.messages) {
     if (
@@ -868,13 +912,10 @@ export function deriveHistoricalWorkLogSummaries(input: {
     }
   }
 
-  if (historicalTurnIds.size === 0) {
-    return new Map();
-  }
-
   const entriesByTurnId = new Map<TurnId, WorkLogEntry[]>();
+  const knownHistoricalTurnIds = latestTurnId === null ? new Set<TurnId>() : historicalTurnIds;
   for (const entry of deriveWorkLogEntries(input.activities, undefined, {
-    terminalTurnIds: historicalTurnIds,
+    terminalTurnIds: knownHistoricalTurnIds,
   })) {
     if (
       entry.turnId === null ||
@@ -892,7 +933,7 @@ export function deriveHistoricalWorkLogSummaries(input: {
   }
   const subagentsByTurnId = new Map<TurnId, WorkLogEntry[]>();
   for (const entry of deriveSubagentWorkEntries(input.activities, undefined, {
-    terminalTurnIds: historicalTurnIds,
+    terminalTurnIds: knownHistoricalTurnIds,
     runtimeSession: input.runtimeSession,
   })) {
     if (
@@ -912,10 +953,39 @@ export function deriveHistoricalWorkLogSummaries(input: {
     const entries = entriesByTurnId.get(turnId) ?? [];
     summaries.set(turnId, {
       turnId,
+      isHistoricalTurn: latestTurnId !== null,
       previewEntries: entries.slice(-6),
       snapshotEntryCount: entries.length,
       subagentEntries: subagentsByTurnId.get(turnId) ?? [],
     });
+  }
+  if (latestTurnId !== null && input.activities.length >= THREAD_DETAIL_ACTIVITY_WINDOW_LIMIT) {
+    // Retention exceptions (configuration, plans and child lifecycle heads)
+    // can be much older than the actual live window. Use the canonical raw
+    // tail's floor, not the first exceptional record, or it would hide the
+    // very commands whose retained messages still need a history entry point.
+    const ordinaryTail = [...input.activities]
+      .toSorted(compareActivityWindowOrder)
+      .slice(-THREAD_DETAIL_ACTIVITY_WINDOW_LIMIT);
+    const floor = ordinaryTail[0];
+    if (floor) {
+      summaries.set(latestTurnId, {
+        turnId: latestTurnId,
+        isHistoricalTurn: false,
+        previewEntries: [],
+        snapshotEntryCount: 0,
+        before: {
+          sequence: floor.sequence ?? null,
+          createdAt: floor.createdAt,
+          activityId: floor.id,
+        },
+        liveActivities: input.activities.filter((activity) => activity.turnId === latestTurnId),
+        // An empty current window stays the same through arbitrarily many
+        // context-only updates. Losing its first ordinary operation, however,
+        // is new evidence that an earlier command might now be available.
+        presenceRevision: deriveWorkLogEntries(ordinaryTail, latestTurnId)[0]?.id ?? "empty",
+      });
+    }
   }
   return summaries;
 }
@@ -970,6 +1040,38 @@ function toDerivedWorkLogEntry(
   activity: OrchestrationThreadActivity,
   turnConfiguration?: ProviderTurnConfiguration,
 ): DerivedWorkLogEntry {
+  const providerDiagnostic = deriveProviderDiagnosticWorkLogRecord(activity);
+  if (providerDiagnostic) {
+    // Diagnostic rows are not roster lifecycle rows. Keep only bounded public
+    // identity/status here: raw provider messages/JSON must not enter ordinary
+    // preview, tooltip, path extraction, or renderer debug snapshot surfaces.
+    return {
+      id: activity.id,
+      turnId: activity.turnId,
+      createdAt: activity.createdAt,
+      label: providerDiagnosticWorkLogLabel(providerDiagnostic.summary),
+      tone: providerDiagnostic.summary.status === "error" ? "error" : "info",
+      activityKind: activity.kind,
+      providerDiagnostic,
+    };
+  }
+  const retryLabel =
+    activity.kind === "runtime.warning"
+      ? (codexRecoveryWorkLogLabel(activity) ?? nativeRetryWorkLogLabel(activity.payload))
+      : null;
+  if (retryLabel) {
+    // Admit retry metadata before generic tool/detail extraction. Native JSON
+    // is neither a display preview nor a callback/stringification surface for
+    // these fixed operational rows, and prose fractions never become totals.
+    return {
+      id: activity.id,
+      turnId: activity.turnId,
+      createdAt: activity.createdAt,
+      label: retryLabel,
+      tone: "info",
+      activityKind: activity.kind,
+    };
+  }
   const payload =
     activity.payload && typeof activity.payload === "object"
       ? (activity.payload as Record<string, unknown>)
@@ -1000,6 +1102,8 @@ function toDerivedWorkLogEntry(
       ? payload.detail
       : null;
   const taskLabel = taskSummary || taskDetailAsLabel;
+  const displayLabel =
+    computerUse?.displayLabel ?? (!taskLabel ? cafeWorkLogDisplayLabel(activity) : undefined);
   const detail = isTaskActivity
     ? !taskDetailAsLabel &&
       payload &&
@@ -1016,6 +1120,7 @@ function toDerivedWorkLogEntry(
     turnId: activity.turnId,
     createdAt: activity.createdAt,
     label: computerUse?.label ?? taskLabel ?? activity.summary,
+    ...(displayLabel !== undefined ? { displayLabel } : {}),
     tone:
       activity.kind === "task.progress"
         ? "thinking"
@@ -1028,6 +1133,7 @@ function toDerivedWorkLogEntry(
     activity.kind === "reasoning.summary" ? readClaudePublicSummary(payload) : undefined;
   if (publicSummary) {
     entry.label = "Claude summary";
+    entry.displayLabel = uiText("Claude summary");
     entry.tone = "info";
     entry.publicSummary = publicSummary;
     entry.detail = publicSummary.text;
@@ -1060,6 +1166,7 @@ function toDerivedWorkLogEntry(
     // The plain label remains useful for transcript copy/search consumers; the
     // row renderer uses the same frozen object to show the two compact lines.
     entry.label = `Turn accepted · ${presentation.settings}`;
+    entry.displayLabel = uiText("Turn accepted · {settings}", { settings: presentation.settings });
     entry.detail = `${presentation.account} · ${presentation.modes} · ${presentation.source}`;
     entry.turnConfiguration = turnConfiguration;
   }
@@ -1082,6 +1189,7 @@ function toDerivedWorkLogEntry(
   if (computerUse) {
     entry.computerUse = true;
     entry.toolTitle = "Computer use";
+    entry.displayToolTitle = uiText("Computer use");
   } else if (title) {
     entry.toolTitle = title;
   }
@@ -1213,9 +1321,18 @@ function mergeDerivedWorkLogEntries(
   const requestKind = next.requestKind ?? previous.requestKind;
   const collapseKey = next.collapseKey ?? previous.collapseKey;
   const toolCallId = next.toolCallId ?? previous.toolCallId;
+  const {
+    displayLabel: _previousDisplayLabel,
+    displayToolTitle: previousDisplayToolTitle,
+    ...previousCanonical
+  } = previous;
+  const displayToolTitle =
+    next.displayToolTitle ??
+    (toolTitle === previous.toolTitle ? previousDisplayToolTitle : undefined);
   return {
-    ...previous,
+    ...previousCanonical,
     ...next,
+    ...(displayToolTitle !== undefined ? { displayToolTitle } : {}),
     ...(detail ? { detail } : {}),
     ...(command ? { command } : {}),
     ...(rawCommand ? { rawCommand } : {}),
@@ -1529,7 +1646,10 @@ function summarizeToolTextOutput(value: string): string | null {
     return truncateInlinePreview(firstLine);
   }
   if (lines.length > 1) {
-    return `${lines.length.toLocaleString()} lines`;
+    return uiText("{count, plural, one {{formatted} line} other {{formatted} lines}}", {
+      count: lines.length,
+      formatted: uiFormatNumber(lines.length),
+    });
   }
   return null;
 }
@@ -1544,7 +1664,11 @@ function summarizeToolRawOutput(payload: Record<string, unknown> | null): string
   const totalFiles = asNumber(rawOutput.totalFiles);
   if (totalFiles !== null) {
     const suffix = rawOutput.truncated === true ? "+" : "";
-    return `${totalFiles.toLocaleString()} file${totalFiles === 1 ? "" : "s"}${suffix}`;
+    return uiText("{count, plural, one {{formatted} file} other {{formatted} files}}{suffix}", {
+      count: totalFiles,
+      formatted: uiFormatNumber(totalFiles),
+      suffix,
+    });
   }
 
   const content = asTrimmedString(rawOutput.content);

@@ -1,3 +1,4 @@
+import { subscribeUiLocale, uiText } from "@cafecode/shared/i18n";
 import type {
   DesktopSourceUpdateState,
   DesktopSourceUpdateTrackedBranch,
@@ -200,7 +201,9 @@ export const checkSourceUpdateForTests = Effect.fn("desktop.sourceUpdates.check"
       status: "unavailable",
       runtimeHash,
       checkedAt,
-      message: "No git checkout was found for this Cafe Code install.",
+      get message() {
+        return uiText("No git checkout was found for this Cafe Code install.");
+      },
     };
   }
 
@@ -225,7 +228,9 @@ export const checkSourceUpdateForTests = Effect.fn("desktop.sourceUpdates.check"
       localHash,
       dirty,
       checkedAt,
-      message: "Could not read local git branch or commit.",
+      get message() {
+        return uiText("Could not read local git branch or commit.");
+      },
     };
   }
 
@@ -238,7 +243,9 @@ export const checkSourceUpdateForTests = Effect.fn("desktop.sourceUpdates.check"
       localHash,
       dirty,
       checkedAt,
-      message: "Only branches main and dev are tracked.",
+      get message() {
+        return uiText("Only branches main and dev are tracked.");
+      },
     };
   }
 
@@ -271,7 +278,9 @@ export const checkSourceUpdateForTests = Effect.fn("desktop.sourceUpdates.check"
       localHash,
       dirty,
       checkedAt,
-      message: "Could not fetch the latest branch hash from origin.",
+      get message() {
+        return uiText("Could not fetch the latest branch hash from origin.");
+      },
     };
   }
 
@@ -295,7 +304,9 @@ export const checkSourceUpdateForTests = Effect.fn("desktop.sourceUpdates.check"
       localHash,
       dirty,
       checkedAt,
-      message: `Could not resolve ${remoteRef}.`,
+      get message() {
+        return uiText("Could not resolve {ref}.", { ref: remoteRef });
+      },
     };
   }
 
@@ -311,7 +322,9 @@ export const checkSourceUpdateForTests = Effect.fn("desktop.sourceUpdates.check"
       mergeBaseHash,
       dirty,
       checkedAt,
-      message: "This checkout is current with origin.",
+      get message() {
+        return uiText("This checkout is current with origin.");
+      },
     };
   }
 
@@ -333,7 +346,12 @@ export const checkSourceUpdateForTests = Effect.fn("desktop.sourceUpdates.check"
       mergeBaseHash,
       dirty,
       checkedAt,
-      message: `A newer ${trackedBranch} commit is available at ${shortHash(remoteHash)}.`,
+      get message() {
+        return uiText("A newer {branch} commit is available at {hash}.", {
+          branch: trackedBranch,
+          hash: shortHash(remoteHash),
+        });
+      },
     };
   }
 
@@ -355,9 +373,11 @@ export const checkSourceUpdateForTests = Effect.fn("desktop.sourceUpdates.check"
     mergeBaseHash,
     dirty,
     checkedAt,
-    message: remoteIsAncestor
-      ? `This checkout is ahead of origin/${trackedBranch}.`
-      : `This checkout has diverged from origin/${trackedBranch}.`,
+    get message() {
+      return remoteIsAncestor
+        ? uiText("This checkout is ahead of origin/{branch}.", { branch: trackedBranch })
+        : uiText("This checkout has diverged from origin/{branch}.", { branch: trackedBranch });
+    },
   };
 });
 
@@ -369,13 +389,29 @@ const make = Effect.gen(function* () {
   const inFlightRef = yield* Ref.make(false);
   const runtimeHashRef = yield* Ref.make<string | null>(null);
 
+  // Only source-owned finite presentation getters remain lazy internally.
+  // Every delivered state is a plain snapshot: no getter/function reaches IPC,
+  // and hashes/status/check timestamps retain their original source identity.
+  const snapshot = (state: DesktopSourceUpdateState): DesktopSourceUpdateState => ({ ...state });
+
   const emitState = Ref.get(stateRef).pipe(
     Effect.flatMap((state) =>
-      electronWindow.sendAll(IpcChannels.SOURCE_UPDATE_STATE_CHANNEL, state),
+      electronWindow.sendAll(IpcChannels.SOURCE_UPDATE_STATE_CHANNEL, snapshot(state)),
     ),
   );
   const setState = (state: DesktopSourceUpdateState): Effect.Effect<void> =>
     Ref.set(stateRef, state).pipe(Effect.andThen(emitState));
+  const runPromise = Effect.runPromiseWith(yield* Effect.context<never>());
+  yield* Effect.acquireRelease(
+    Effect.sync(() =>
+      subscribeUiLocale(() => {
+        // Re-emit cached display data only; a language switch must not invoke git,
+        // change check admission, or update the captured runtime revision.
+        void runPromise(emitState).catch(() => undefined);
+      }),
+    ),
+    (unsubscribe) => Effect.sync(unsubscribe),
+  );
   const getRuntimeHash = Effect.gen(function* () {
     const captured = yield* Ref.get(runtimeHashRef);
     if (captured !== null) return captured;
@@ -401,12 +437,18 @@ const make = Effect.gen(function* () {
     Effect.gen(function* () {
       const inFlight = yield* Ref.get(inFlightRef);
       if (inFlight) {
-        return yield* Ref.get(stateRef);
+        return snapshot(yield* Ref.get(stateRef));
       }
 
       yield* Ref.set(inFlightRef, true);
       const previous = yield* Ref.get(stateRef);
-      yield* setState({ ...previous, status: "checking", message: "Checking branch hash." });
+      yield* setState({
+        ...previous,
+        status: "checking",
+        get message() {
+          return uiText("Checking branch hash.");
+        },
+      });
       const runtimeHash = yield* getRuntimeHash;
 
       const next: DesktopSourceUpdateState = yield* checkSourceUpdateForTests(
@@ -435,7 +477,9 @@ const make = Effect.gen(function* () {
               ...previous,
               status: "error" as const,
               checkedAt,
-              message: "Could not check the source branch hash.",
+              get message() {
+                return uiText("Could not check the source branch hash.");
+              },
             } satisfies DesktopSourceUpdateState;
           }),
         ),
@@ -443,7 +487,7 @@ const make = Effect.gen(function* () {
 
       yield* setState(next);
       yield* Ref.set(inFlightRef, false);
-      return next;
+      return snapshot(next);
     }).pipe(Effect.ensuring(Ref.set(inFlightRef, false)));
 
   const configure: Effect.Effect<void, never, Scope.Scope> = Effect.gen(function* () {
@@ -466,7 +510,7 @@ const make = Effect.gen(function* () {
   }).pipe(Effect.withSpan("desktop.sourceUpdates.configure"));
 
   return DesktopSourceUpdates.of({
-    getState: Ref.get(stateRef),
+    getState: Ref.get(stateRef).pipe(Effect.map(snapshot)),
     configure,
     check,
   });

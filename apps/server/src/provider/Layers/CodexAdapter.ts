@@ -23,6 +23,7 @@ import * as NodeFs from "node:fs";
 
 import {
   type CanonicalItemType,
+  validCodexContextWindowOverride,
   type CanonicalRequestType,
   type CodexSettings,
   EventId,
@@ -30,6 +31,7 @@ import {
   type ProviderEvent,
   ProviderInstanceId,
   type ProviderRuntimeEvent,
+  type ProviderNativeRetryProgress,
   type ProviderRequestKind,
   ProviderThreadGoal,
   type ProviderThreadGoalSetInput,
@@ -43,6 +45,8 @@ import {
   ThreadId,
   type TurnId,
   ProviderSendTurnInput,
+  type ProviderSteerTurnInput,
+  type ProviderSession,
   type ProviderSessionForkResult,
   RuntimeTaskId,
   type RuntimeSubagentPresentation,
@@ -62,6 +66,7 @@ import * as Queue from "effect/Queue";
 import * as Ref from "effect/Ref";
 import * as Schema from "effect/Schema";
 import * as Semaphore from "effect/Semaphore";
+import { matchesSubagentPolicySession } from "../subagentPolicyContinuation.ts";
 import * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
@@ -71,9 +76,16 @@ import * as EffectCodexSchema from "effect-codex-app-server/schema";
 
 import { getModelSelectionStringOptionValue } from "@cafecode/shared/model";
 import { summarizeToolArguments } from "@cafecode/shared/toolActivity";
+import {
+  makeProviderDiagnostic,
+  readProviderDiagnosticSummary,
+} from "@cafecode/shared/providerDiagnostic";
 import { resolveCodexServiceTier } from "../codexServiceTier.ts";
 import { resolveCodexDaybreak } from "../codexDaybreak.ts";
-import { classifyCodexTransientFailure } from "../codexTransientFailure.ts";
+import {
+  classifyCodexTransientFailure,
+  redactCodexFailureDiagnosticPayload,
+} from "../codexTransientFailure.ts";
 import { isCodexHistoryRecoveryRequiredError } from "@cafecode/shared/codexHistorySafety";
 import { makeCodexHistorySafetyStore } from "../../persistence/CodexHistorySafety.ts";
 
@@ -160,6 +172,279 @@ const CODEX_SUBAGENT_REASONING_PART_LOOKBACK = 64;
 const CODEX_AUTH_RECOVERY_TASK_ID_HASH_PREFIX = "codex-auth-recovery-sha256:";
 const CODEX_AUTH_RECOVERY_TASK_ID_HASH_DOMAIN = "cafecode/codex-auth-recovery-task/v1";
 const CODEX_ACTIVE_AUTH_RECOVERY_TASK_LIMIT = 4_096;
+const CODEX_NATIVE_RETRY_TARGET_LIMIT = 256;
+const CODEX_NATIVE_RETRY_OBSERVATION_LIMIT = 1_024;
+const CODEX_NATIVE_RETRY_FINGERPRINT_LIMIT = 16_384;
+
+function nativeRetryFingerprint(kind: "event" | "turn", identity: string): string {
+  return hashTextSha256(`cafecode/codex-native-retry-${kind}/v1\u0000${identity}`);
+}
+
+/** Read only an inert own field; provider metadata must not execute accessors. */
+function ownNativeRetryField(value: unknown, key: string): unknown {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return undefined;
+  const prototype = Object.getPrototypeOf(value);
+  if (prototype !== Object.prototype && prototype !== null) return undefined;
+  const descriptor = Object.getOwnPropertyDescriptor(value, key);
+  return descriptor && "value" in descriptor ? descriptor.value : undefined;
+}
+
+function nativeRetryIdentity(value: unknown): string | undefined {
+  return typeof value === "string" &&
+    value.length > 0 &&
+    value.length <= CODEX_SUBAGENT_THREAD_ID_MAX_CHARS &&
+    !/[\p{Cc}\p{Bidi_Control}]/u.test(value)
+    ? value
+    : undefined;
+}
+
+/** Bound inert validation before the typed guard can read any nested field. */
+function isInertNativeRetryPayload(value: unknown): boolean {
+  let remaining = 2_048;
+  const ancestors = new Set<object>();
+  const visit = (entry: unknown, depth: number): boolean => {
+    if (--remaining < 0 || depth > 16) return false;
+    if (entry === null || typeof entry === "string" || typeof entry === "boolean") return true;
+    if (typeof entry === "number") return Number.isFinite(entry);
+    // Optional decoded fields may be undefined, unlike an actual JSON value.
+    if (entry === undefined) return true;
+    if (typeof entry !== "object" || ancestors.has(entry)) return false;
+    const prototype = Object.getPrototypeOf(entry);
+    const array = Array.isArray(entry);
+    if (
+      array ? prototype !== Array.prototype : prototype !== Object.prototype && prototype !== null
+    )
+      return false;
+    if (array) {
+      const length = Object.getOwnPropertyDescriptor(entry, "length");
+      if (
+        !length ||
+        !("value" in length) ||
+        !Number.isSafeInteger(length.value) ||
+        length.value < 0 ||
+        length.value > remaining
+      )
+        return false;
+    }
+    const keys = Reflect.ownKeys(entry);
+    if (keys.length > remaining) return false;
+    ancestors.add(entry);
+    for (const key of keys) {
+      const descriptor = Object.getOwnPropertyDescriptor(entry, key);
+      if (
+        typeof key !== "string" ||
+        !descriptor ||
+        !("value" in descriptor) ||
+        !visit(descriptor.value, depth + 1)
+      )
+        return false;
+    }
+    ancestors.delete(entry);
+    return true;
+  };
+  return visit(value, 0);
+}
+
+interface CodexNativeRetryTarget {
+  currentTurnId: string;
+  readonly seenTurnIds: Set<string>;
+  readonly seenEventIds: Set<string>;
+  observedCount: number;
+  countLimited: boolean;
+  closed: boolean;
+  uncertain: boolean;
+}
+
+/**
+ * Count received retry notifications, not native attempts or future deadlines.
+ *
+ * Codex supplies `willRetry`, a thread and a turn, but no retry clock. Its prose
+ * fraction restarts at each native request (including compaction); interpreting
+ * that fraction as a session-wide counter or timer would be false. This private
+ * bridge-local map instead records unique received envelopes. It is display-only:
+ * neither its count nor a native `willRetry` grants Cafe continuation authority.
+ * Runtime/account ownership and the strict failure classifier remain separate.
+ *
+ * Targets are never evicted to recycle a counter. At a fixed memory bound,
+ * tracking becomes unavailable or an explicit lower bound; it does not claim a
+ * new count of one. Domain-separated fixed-size fingerprints and a total entry
+ * bound limit retained memory. Previously observed turns remain remembered so a
+ * delayed known-old start cannot roll the counter back to an earlier turn. A
+ * newly observed lifecycle start is not proof of upstream wall-clock ordering.
+ */
+export function makeCodexNativeRetryTracker(binding: {
+  readonly threadId: ThreadId;
+  readonly providerInstanceId?: ProviderInstanceId | undefined;
+  readonly runtimeId?: string | undefined;
+}) {
+  const targets = new Map<string, CodexNativeRetryTarget>();
+  let retainedFingerprints = 0;
+  let targetAdmissionClosed = false;
+  return (
+    event: ProviderEvent,
+    rootProviderThreadId: string | undefined,
+  ): ProviderNativeRetryProgress | undefined => {
+    try {
+      const method = ownNativeRetryField(event, "method");
+      const child =
+        method === "codex.subagent/error" ||
+        method === "codex.subagent/turnStarted" ||
+        method === "codex.subagent/turnCompleted" ||
+        method === "codex.subagent/threadStopped";
+      if (
+        (!child &&
+          method !== "error" &&
+          method !== "turn/started" &&
+          method !== "turn/completed") ||
+        ownNativeRetryField(event, "kind") !== "notification" ||
+        ownNativeRetryField(event, "provider") !== PROVIDER ||
+        ownNativeRetryField(event, "threadId") !== binding.threadId ||
+        (binding.providerInstanceId !== undefined &&
+          ownNativeRetryField(event, "providerInstanceId") !== binding.providerInstanceId) ||
+        (binding.runtimeId !== undefined &&
+          ownNativeRetryField(event, "subagentRuntimeId") !== binding.runtimeId)
+      )
+        return undefined;
+      if (nativeRetryIdentity(rootProviderThreadId) === undefined) return undefined;
+
+      const payload = ownNativeRetryField(event, "payload");
+      const targetId = nativeRetryIdentity(ownNativeRetryField(payload, "threadId"));
+      if (
+        !targetId ||
+        (!child && targetId !== rootProviderThreadId) ||
+        (child && targetId === rootProviderThreadId)
+      )
+        return undefined;
+      if (method === "codex.subagent/threadStopped") {
+        const target = targets.get(targetId);
+        if (target) {
+          target.closed = true;
+          retainedFingerprints -= target.seenEventIds.size;
+          target.seenEventIds.clear();
+        }
+        return undefined;
+      }
+      const retry = method === "error" || method === "codex.subagent/error";
+      const started = method === "turn/started" || method === "codex.subagent/turnStarted";
+      if (
+        retry &&
+        (!isInertNativeRetryPayload(payload) ||
+          !readPayload(EffectCodexSchema.V2ErrorNotification, payload))
+      )
+        return undefined;
+      const turn = ownNativeRetryField(payload, "turn");
+      const turnId = nativeRetryIdentity(
+        retry ? ownNativeRetryField(payload, "turnId") : ownNativeRetryField(turn, "id"),
+      );
+      // Child envelopes carry the canonical parent turn outside their payload.
+      // Root envelopes must agree with their own exact native turn if stamped.
+      const envelopeTurnId = ownNativeRetryField(event, "turnId");
+      if (!turnId || (!child && envelopeTurnId !== undefined && envelopeTurnId !== turnId))
+        return undefined;
+      if (!retry) {
+        // Already-decoded lifecycle envelopes can contain large history/items.
+        // Inspect only exact inert lifecycle fields, never scan native history
+        // just to close a display counter or let its size hide a terminal edge.
+        const status = ownNativeRetryField(turn, "status");
+        if (
+          !Array.isArray(ownNativeRetryField(turn, "items")) ||
+          (started
+            ? status !== "inProgress"
+            : status !== "failed" && status !== "completed" && status !== "interrupted")
+        )
+          return undefined;
+      }
+      if (
+        retry &&
+        (ownNativeRetryField(payload, "willRetry") !== true ||
+          typeof ownNativeRetryField(ownNativeRetryField(payload, "error"), "message") !== "string")
+      )
+        return undefined;
+      const eventId = retry ? nativeRetryIdentity(ownNativeRetryField(event, "id")) : undefined;
+      if (retry && !eventId) return undefined;
+      const turnFingerprint = nativeRetryFingerprint("turn", turnId);
+
+      let target = targets.get(targetId);
+      if (!target) {
+        if (
+          targetAdmissionClosed ||
+          targets.size >= CODEX_NATIVE_RETRY_TARGET_LIMIT ||
+          retainedFingerprints >= CODEX_NATIVE_RETRY_FINGERPRINT_LIMIT
+        ) {
+          // Once a new target was observed but could not be remembered, a
+          // later memory release cannot identify whether a seemingly new id
+          // was that same omitted target. Close new-target admission instead
+          // of silently restarting its cumulative display count at one.
+          targetAdmissionClosed = true;
+          return undefined;
+        }
+        target = {
+          currentTurnId: turnId,
+          seenTurnIds: new Set([turnFingerprint]),
+          seenEventIds: new Set(),
+          observedCount: 0,
+          countLimited: false,
+          closed: !retry && !started,
+          uncertain: false,
+        };
+        retainedFingerprints += 1;
+        targets.set(targetId, target);
+      } else if (started && turnId !== target.currentTurnId) {
+        if (target.seenTurnIds.has(turnFingerprint) || target.uncertain) return undefined;
+        if (
+          target.seenTurnIds.size >= CODEX_NATIVE_RETRY_OBSERVATION_LIMIT ||
+          retainedFingerprints - target.seenEventIds.size >= CODEX_NATIVE_RETRY_FINGERPRINT_LIMIT
+        ) {
+          target.uncertain = true;
+          return undefined;
+        }
+        target.seenTurnIds.add(turnFingerprint);
+        retainedFingerprints += 1 - target.seenEventIds.size;
+        target.currentTurnId = turnId;
+        target.seenEventIds.clear();
+        target.observedCount = 0;
+        target.countLimited = false;
+        target.closed = false;
+      }
+      if (turnId !== target.currentTurnId || target.uncertain) return undefined;
+      if (!retry) {
+        // A same-turn duplicate start is not a restart, nor can it reopen an
+        // already terminal turn. Only a fresh proven turn resets this state.
+        if (!started) {
+          target.closed = true;
+          retainedFingerprints -= target.seenEventIds.size;
+          target.seenEventIds.clear();
+        }
+        return undefined;
+      }
+      if (target.closed) return undefined;
+      if (!eventId) return undefined;
+      const eventFingerprint = nativeRetryFingerprint("event", eventId);
+      if (!target.seenEventIds.has(eventFingerprint)) {
+        if (
+          target.seenEventIds.size >= CODEX_NATIVE_RETRY_OBSERVATION_LIMIT ||
+          retainedFingerprints >= CODEX_NATIVE_RETRY_FINGERPRINT_LIMIT
+        ) {
+          target.countLimited = true;
+        } else {
+          target.seenEventIds.add(eventFingerprint);
+          retainedFingerprints += 1;
+          target.observedCount += 1;
+        }
+      }
+      if (target.observedCount === 0) return undefined;
+      return {
+        observedCount: target.observedCount,
+        timing: "unknown",
+        ...(target.countLimited ? { countLimited: true } : {}),
+      };
+    } catch {
+      // Proxy/descriptor uncertainty affects display only. It must neither
+      // execute provider getters nor grant recovery or a fabricated retry count.
+      return undefined;
+    }
+  };
+}
 
 function disposeSchedulingSession(binding: SchedulingSessionBinding | undefined) {
   if (!binding) return Effect.void;
@@ -186,6 +471,8 @@ export interface CodexAdapterLiveOptions {
   >;
   /** Cached owning-driver status only; this getter must never launch a probe. */
   readonly getSubagentConcurrencySupport?: () => boolean;
+  /** Version qualification of this exact owning CLI; no probe or model guess. */
+  readonly getCodexContextWindowSupport?: () => boolean;
   readonly instanceId?: ProviderInstanceId;
   readonly environment?: NodeJS.ProcessEnv;
   readonly prepareRuntimeHome?: Effect.Effect<void, CodexShadowHomeError>;
@@ -441,8 +728,10 @@ export function canonicalizeCodexSubagentDetail(
         publicMessages.push({
           role: "assistant",
           text: item.text,
-          ...(item.phase === "commentary" || item.phase === "final_answer"
-            ? { phase: item.phase }
+          ...(item.phase === "commentary" ||
+          item.phase === "partial_answer" ||
+          item.phase === "final_answer"
+            ? { phase: item.phase === "partial_answer" ? "commentary" : item.phase }
             : {}),
         });
       }
@@ -590,7 +879,7 @@ function shouldAuditCodexBridgeEvent(event: ProviderEvent): boolean {
   );
 }
 
-function bridgeEventLogContext(
+export function bridgeEventLogContext(
   event: ProviderEvent,
   extra?: {
     readonly runtimeEvents?: ReadonlyArray<ProviderRuntimeEvent>;
@@ -598,6 +887,8 @@ function bridgeEventLogContext(
     readonly cause?: unknown;
   },
 ): Record<string, unknown> {
+  const unqualifiedErrorMetadata =
+    redactCodexFailureDiagnosticPayload(event.method, event.payload) !== event.payload;
   return {
     provider: event.provider,
     providerInstanceId: event.providerInstanceId,
@@ -613,7 +904,9 @@ function bridgeEventLogContext(
           canonicalEventTypes: extra.runtimeEvents.map((entry) => entry.type),
         }
       : {}),
-    ...(extra?.cause ? { cause: extra.cause } : {}),
+    ...(extra?.cause
+      ? { cause: unqualifiedErrorMetadata ? "Codex error diagnostic cause redacted." : extra.cause }
+      : {}),
   };
 }
 
@@ -1002,6 +1295,7 @@ function makeSubagentPresentation(input: {
   readonly objective?: string | undefined | null;
   readonly status?: RuntimeSubagentPresentation["status"] | undefined;
   readonly startedAt?: string | undefined;
+  readonly nativeRetry?: ProviderNativeRetryProgress | undefined;
 }): RuntimeSubagentPresentation | undefined {
   const threadId = normalizeCodexSubagentThreadId(input.threadId);
   if (!threadId) {
@@ -1024,6 +1318,7 @@ function makeSubagentPresentation(input: {
     ...(objective ? { objective } : {}),
     ...(input.status ? { status: input.status } : {}),
     ...(input.startedAt ? { startedAt: input.startedAt } : {}),
+    ...(input.nativeRetry ? { nativeRetry: input.nativeRetry } : {}),
   };
 }
 
@@ -1546,6 +1841,9 @@ function codexAuthRecoveryRuntimeEventBase(
 ): Omit<ProviderRuntimeEvent, "type" | "payload"> {
   const { providerRefs: _providerRefs, ...base } = runtimeEventBase(event, canonicalThreadId, {
     rawPayload: diagnostic,
+    // Auth-recovery lifecycle is intentionally content-free. The separately
+    // mapped owning turn/error captures its own diagnostic, never this helper.
+    skipDiagnostic: true,
   });
   // Provider refs are optional diagnostics. The owning canonical turn remains
   // on the event for correct task projection, but duplicating the opaque native
@@ -1777,6 +2075,15 @@ export function redactDesktopToolEvent(event: ProviderEvent): ProviderEvent {
 }
 
 function sanitizeNativeProviderEventForLog(event: ProviderEvent): ProviderEvent {
+  const errorDiagnosticCopy = redactCodexFailureDiagnosticPayload(event.method, event.payload);
+  if (errorDiagnosticCopy !== event.payload)
+    return replaceSensitiveNativeEventPayload(
+      event,
+      readRecordValue(errorDiagnosticCopy) ?? {
+        redacted: true,
+        reason: "invalid-codex-error-diagnostic",
+      },
+    );
   if (event.method.startsWith("cafecode/interaction/")) {
     return replaceSensitiveNativeEventPayload(event, {
       lifecycle: event.method.endsWith("/request") ? "requested" : "resolved",
@@ -1969,9 +2276,10 @@ function providerRefsFromEvent(
 function runtimeEventBase(
   event: ProviderEvent,
   canonicalThreadId: ThreadId,
-  options?: { readonly rawPayload?: unknown },
+  options?: { readonly rawPayload?: unknown; readonly skipDiagnostic?: boolean },
 ): Omit<ProviderRuntimeEvent, "type" | "payload"> {
   const refs = providerRefsFromEvent(event);
+  const diagnostic = options?.skipDiagnostic ? undefined : codexErrorDiagnostic(event);
   return {
     eventId: event.id,
     provider: event.provider,
@@ -1982,12 +2290,112 @@ function runtimeEventBase(
     ...(event.itemId ? { itemId: asRuntimeItemId(event.itemId) } : {}),
     ...(event.requestId ? { requestId: asRuntimeRequestId(event.requestId) } : {}),
     ...(refs ? { providerRefs: refs } : {}),
+    ...(diagnostic ? { diagnostic } : {}),
     raw: {
       source: eventRawSource(event),
       method: event.method,
-      payload: options?.rawPayload ?? event.payload ?? {},
+      payload:
+        options?.rawPayload ??
+        redactCodexFailureDiagnosticPayload(event.method, event.payload) ??
+        {},
     },
   };
+}
+
+/**
+ * Diagnostic capture is intentionally separate from lifecycle classification.
+ * Current official app-server docs describe failed turn.error, while our
+ * qualified pinned V2ErrorNotification additionally carries willRetry and the
+ * exact native target/turn. Capture only those error-envelope fields: turn.items
+ * may contain prompts, tool arguments and full output and must never be copied.
+ * https://learn.chatgpt.com/docs/app-server#turn-events
+ */
+function codexErrorDiagnostic(event: ProviderEvent): ProviderRuntimeEvent["diagnostic"] {
+  const child =
+    event.method === "codex.subagent/error" || event.method === "codex.subagent/turnCompleted";
+  const notification = event.method === "error" || event.method === "codex.subagent/error";
+  const terminal =
+    event.method === "turn/completed" || event.method === "codex.subagent/turnCompleted";
+  if (!notification && !terminal) return undefined;
+  const targetId = nativeRetryIdentity(ownNativeRetryField(event.payload, "threadId"));
+  const turn = terminal ? ownNativeRetryField(event.payload, "turn") : undefined;
+  const items = terminal ? ownNativeRetryField(turn, "items") : undefined;
+  const emptyItems =
+    Array.isArray(items) &&
+    Object.getPrototypeOf(items) === Array.prototype &&
+    Object.getOwnPropertyDescriptor(items, "length")?.value === 0;
+  const error = ownNativeRetryField(terminal ? turn : event.payload, "error");
+  const turnStatus = terminal ? ownNativeRetryField(turn, "status") : undefined;
+  if (terminal && turnStatus !== "failed") return undefined;
+  const nativeTurnId = nativeRetryIdentity(
+    ownNativeRetryField(terminal ? turn : event.payload, terminal ? "id" : "turnId"),
+  );
+  const willRetry = notification && ownNativeRetryField(event.payload, "willRetry") === true;
+  const message = ownNativeRetryField(error, "message");
+  if (typeof message === "string" && isCodexHistoryRecoveryRequiredError(message)) {
+    // This exact normalized history-safety sentinel already discarded native
+    // tool-call material upstream. A debugging disclosure must not revive that
+    // rejected body or its private target identifiers through a new channel.
+    return makeProviderDiagnostic({
+      observedAt: event.createdAt,
+      source: eventRawSource(event),
+      method: event.method,
+      status: "error",
+      subject: { kind: "unknown" },
+      message,
+      payload: { error: { message }, reason: "codex_history_tool_arguments_too_large" },
+      omittedFields: true,
+    });
+  }
+  return makeProviderDiagnostic({
+    observedAt: event.createdAt,
+    source: eventRawSource(event),
+    method: event.method,
+    status: willRetry ? "retry" : "error",
+    subject: child
+      ? targetId
+        ? { kind: "subagent", id: targetId }
+        : { kind: "unknown" }
+      : { kind: "root" },
+    native: {
+      eventId: event.id,
+      ...(targetId ? { threadId: targetId } : {}),
+      ...(nativeTurnId ? { turnId: nativeTurnId } : {}),
+      ...(event.subagentRuntimeId ? { subagentRuntimeId: event.subagentRuntimeId } : {}),
+      ...(event.requestId ? { requestId: event.requestId } : {}),
+    },
+    ...(typeof message === "string" ? { message } : {}),
+    payload: terminal
+      ? {
+          ...(targetId ? { threadId: targetId } : {}),
+          turn: {
+            ...(nativeTurnId ? { id: nativeTurnId } : {}),
+            status: turnStatus,
+            error: error ?? null,
+          },
+        }
+      : {
+          ...(targetId ? { threadId: targetId } : {}),
+          ...(nativeTurnId ? { turnId: nativeTurnId } : {}),
+          willRetry,
+          error: error ?? null,
+        },
+    // A normal terminal envelope has empty items plus the known error tuple.
+    // Real item content or unknown outer metadata remains deliberately absent
+    // and explicitly marked. Empty structural items alone do not make the
+    // received error body incomplete, allowing exact terminal-echo folding.
+    omittedFields: terminal
+      ? !emptyItems ||
+        Object.keys(readRecordValue(turn) ?? {}).some(
+          (key) => !["id", "status", "error", "items"].includes(key),
+        ) ||
+        Object.keys(readRecordValue(event.payload) ?? {}).some(
+          (key) => !["threadId", "turn"].includes(key),
+        )
+      : Object.keys(readRecordValue(event.payload) ?? {}).some(
+          (key) => !["threadId", "turnId", "willRetry", "error"].includes(key),
+        ),
+  });
 }
 
 /**
@@ -2040,7 +2448,13 @@ function subagentRuntimeEventBase(
     32,
   );
   return {
-    ...runtimeEventBase(event, canonicalThreadId, { rawPayload }),
+    ...runtimeEventBase(event, canonicalThreadId, {
+      rawPayload,
+      // Retrying children already publish an exact warning row. Retain only
+      // one private capture per observation; terminal child lifecycle rows
+      // still carry diagnostics for ingestion's display-only error activity.
+      skipDiagnostic: lifecycle === "child-error-retrying",
+    }),
     eventId: EventId.make(`${String(event.id)}:subagent:${childDigest}`),
   };
 }
@@ -2147,7 +2561,7 @@ function enrichCodexSubagentPresentations(
     sourceEvent.method === "codex.subagent/threadStarted"
       ? readPayload(EffectCodexSchema.V2ThreadStartedNotification, sourceEvent.payload)?.thread
       : undefined;
-  return events.map((event) => {
+  const enriched = events.map((event) => {
     if (
       event.type !== "task.started" &&
       event.type !== "task.progress" &&
@@ -2287,12 +2701,14 @@ function enrichCodexSubagentPresentations(
       runtimeId: _previousRuntimeId,
       label: _previousLabel,
       path: _previousPath,
+      nativeRetry: previousNativeRetry,
       ...previousPresentation
     } = previous ?? {};
     const {
       runtimeId: _incomingRuntimeId,
       label: _incomingLabel,
       path: _incomingPath,
+      nativeRetry: incomingNativeRetry,
       ...incomingPresentation
     } = incoming;
     const merged: RuntimeSubagentPresentation = {
@@ -2310,6 +2726,18 @@ function enrichCodexSubagentPresentations(
       // the presentation cache lend it a live generation from an earlier
       // event; missing evidence must remain explicitly unverified.
       ...(runtimeId ? { runtimeId } : {}),
+      // A retry count describes the current operational edge, not permanent
+      // child metadata. Ordinary activity/start/terminal edges clear it. Only a
+      // passive same-runtime rename can retain an already observed retry state.
+      ...(!terminalIsAuthoritative && incomingNativeRetry !== undefined
+        ? { nativeRetry: incomingNativeRetry }
+        : metadataOnly &&
+            previous?.runtimeId !== undefined &&
+            previous.runtimeId === event.subagentRuntimeId &&
+            previousNativeRetry !== undefined &&
+            !previousTerminal
+          ? { nativeRetry: previousNativeRetry }
+          : {}),
       ...(terminalIsAuthoritative && (event.type === "task.progress" || passiveSnapshot)
         ? { status: previous.status }
         : {}),
@@ -2371,8 +2799,40 @@ function enrichCodexSubagentPresentations(
         ...event.payload,
         subagent: merged,
         ...(passiveSnapshot ? { description: "Child metadata refreshed" } : {}),
+        ...(metadataOnly && merged.nativeRetry !== undefined
+          ? {
+              description: `Provider retry · ${merged.nativeRetry.observedCount}${merged.nativeRetry.countLimited ? "+" : ""}`,
+            }
+          : {}),
       },
     } as ProviderRuntimeEvent;
+  });
+  return enriched.map((event) => {
+    const diagnostic = event.diagnostic;
+    if (!diagnostic || diagnostic.summary.subject.kind !== "subagent") return event;
+    const subject = diagnostic.summary.subject;
+    const owner = subject.id ? presentationByThreadId.get(subject.id) : undefined;
+    // The public child name/avatar remains the same qualified descriptor as
+    // the roster. A foreign bridge's metadata cannot rename this occurrence.
+    const label = owner?.presentation.label;
+    const generationMatches =
+      bridgeRuntimeId !== undefined && bridgeRuntimeId === event.subagentRuntimeId;
+    const summary =
+      label && generationMatches
+        ? readProviderDiagnosticSummary({
+            ...diagnostic.summary,
+            subject: { ...subject, label },
+          })
+        : undefined;
+    return summary
+      ? {
+          ...event,
+          diagnostic: {
+            ...diagnostic,
+            summary,
+          },
+        }
+      : event;
   });
 }
 
@@ -2657,6 +3117,7 @@ function codexSubagentItemProgress(item: CodexLifecycleItem): string | undefined
 function mapCodexSubagentProjection(
   event: ProviderEvent,
   canonicalThreadId: ThreadId,
+  nativeRetry: ProviderNativeRetryProgress | undefined,
 ): ReadonlyArray<ProviderRuntimeEvent> | undefined {
   if (!event.method.startsWith("codex.subagent/")) {
     return undefined;
@@ -2680,13 +3141,16 @@ function mapCodexSubagentProjection(
       }),
       type: "runtime.warning",
       payload: {
-        message: message ?? "Subagent failed",
+        message: willRetry ? "Provider reconnecting" : (message ?? "Subagent failed"),
+        ...(willRetry ? { detail: { willRetry: true } } : {}),
+        ...(willRetry && nativeRetry ? { nativeRetry } : {}),
       },
     };
     const presentation = threadId
       ? makeSubagentPresentation({
           threadId,
           status: willRetry ? "active" : "failed",
+          ...(willRetry && nativeRetry ? { nativeRetry } : {}),
         })
       : undefined;
     if (!presentation) {
@@ -2697,7 +3161,9 @@ function mapCodexSubagentProjection(
           event,
           canonicalThreadId,
           presentation,
-          description: message ?? "Retrying",
+          description: nativeRetry
+            ? `Provider retry · ${nativeRetry.observedCount}${nativeRetry.countLimited ? "+" : ""}`
+            : "Provider retry",
           lifecycle: "child-error-retrying",
           rawPayload: {
             source: "codex.child.error",
@@ -2717,7 +3183,13 @@ function mapCodexSubagentProjection(
             childThreadIdHash: hashTextSha256(presentation.threadId),
           },
         });
-    return [warning, taskEvent];
+    // A qualified terminal task already carries the failed child, parent turn
+    // and bounded public error summary. Emitting a duplicate unscoped warning
+    // would wrongly look like fresh parent activity after that root has failed,
+    // advancing its exact completion timestamp and invalidating recovery proof.
+    // Keep the diagnostic fallback above when child identity is unavailable;
+    // an explicitly retrying child still publishes both warning and progress.
+    return willRetry ? [warning, taskEvent] : [taskEvent];
   }
 
   if (event.method === "codex.subagent/threadStarted") {
@@ -3015,7 +3487,16 @@ function mapItemLifecycle(
       ...(event.payload !== undefined &&
       itemType !== "review_entered" &&
       itemType !== "review_exited"
-        ? { data: event.payload }
+        ? {
+            // Public partial replies share Cafe's commentary presentation.
+            // Keep item completion separate from authoritative turn
+            // completion, and never grant async-final question authority to
+            // this new upstream phase.
+            data:
+              item.type === "agentMessage" && item.phase === "partial_answer"
+                ? { ...payload, item: { ...item, phase: "commentary" } }
+                : event.payload,
+          }
         : {}),
     },
   };
@@ -3025,6 +3506,7 @@ function mapToRuntimeEvents(
   event: ProviderEvent,
   canonicalThreadId: ThreadId,
   autoCompactTokenLimit: number | undefined,
+  nativeRetry: ProviderNativeRetryProgress | undefined,
 ): ReadonlyArray<ProviderRuntimeEvent> {
   if (event.method === "cafecode/childUsageAccounting") {
     const accounting = readPayload(UsageAccountingSnapshot, event.payload);
@@ -3037,7 +3519,7 @@ function mapToRuntimeEvents(
       },
     ];
   }
-  const subagentProjection = mapCodexSubagentProjection(event, canonicalThreadId);
+  const subagentProjection = mapCodexSubagentProjection(event, canonicalThreadId, nativeRetry);
   if (subagentProjection !== undefined) {
     return subagentProjection;
   }
@@ -3648,6 +4130,10 @@ function mapToRuntimeEvents(
     const errorMessage = trimText(payload.turn.error?.message);
     const historyRecoveryRequired =
       errorMessage !== undefined && isCodexHistoryRecoveryRequiredError(errorMessage);
+    // Classification includes Codex's exact remote-compaction error wrapper,
+    // but a message/category cannot prove that a native context is available.
+    // Only the outer runtime-owned marker below carries that separate proof.
+    // Native retries and non-failed outcomes never authorize a continuation.
     const codexTransientFailure =
       payload.turn.status === "failed" && !historyRecoveryRequired
         ? classifyCodexTransientFailure(payload.turn.error)
@@ -4361,11 +4847,14 @@ function mapToRuntimeEvents(
             : undefined,
         ),
         payload: {
-          message,
+          message: willRetry ? "Provider reconnecting" : message,
+          ...(willRetry && nativeRetry ? { nativeRetry } : {}),
           ...(!willRetry && !isSubagentError ? { class: "provider_error" as const } : {}),
-          ...(!historyRecoveryRequired && event.payload !== undefined
-            ? { detail: event.payload }
-            : {}),
+          ...(willRetry
+            ? { detail: { willRetry: true } }
+            : !historyRecoveryRequired && event.payload !== undefined
+              ? { detail: redactCodexFailureDiagnosticPayload(event.method, event.payload) }
+              : {}),
         },
       },
     ];
@@ -4842,6 +5331,20 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
             issue: tier.error,
           });
         const existing = sessions.get(input.threadId);
+        // Validate and qualify before any close/retirement. A null Reset is a
+        // Cafe control value only; native start/resume receives an omitted key.
+        const contextWindowOverride = input.codexContextWindowOverride ?? null;
+        if (
+          contextWindowOverride !== null &&
+          (!validCodexContextWindowOverride(contextWindowOverride) ||
+            !options?.getCodexContextWindowSupport?.())
+        ) {
+          return yield* new ProviderAdapterValidationError({
+            provider: PROVIDER,
+            operation: "startSession",
+            issue: "This Codex runtime does not support the requested context-window override.",
+          });
+        }
         const maxConcurrentSubagents = yield* Effect.try({
           try: () =>
             resolveConfiguredSubagentLimit(
@@ -4855,9 +5358,15 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
               issue: "Subagent concurrency must be an integer between 1 and 64.",
             }),
         });
-        if (input.requireIdleForSubagentLimitChange) {
+        if (
+          input.requireIdleForSubagentLimitChange ||
+          input.requireIdleForCodexContextWindowChange
+        ) {
           if (
-            !options?.getSubagentConcurrencySupport?.() ||
+            (input.requireIdleForSubagentLimitChange &&
+              !options?.getSubagentConcurrencySupport?.()) ||
+            (input.requireIdleForCodexContextWindowChange &&
+              !options?.getCodexContextWindowSupport?.()) ||
             (existing &&
               !existing.stopped &&
               (!existing.runtime.closeIfIdle || !(yield* existing.runtime.closeIfIdle)))
@@ -4865,9 +5374,11 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
             return yield* new ProviderAdapterRequestError({
               provider: PROVIDER,
               method: "session/reconfigure",
-              remoteErrorTag: "subagent-concurrency-active",
+              remoteErrorTag: input.requireIdleForCodexContextWindowChange
+                ? "codex-context-window-active"
+                : "subagent-concurrency-active",
               detail:
-                "Subagent concurrency cannot change while provider work is active or uncertain.",
+                "Provider configuration cannot change while provider work is active or uncertain.",
             });
           }
         }
@@ -5004,6 +5515,9 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
             : {}),
           binaryPath: codexConfig.binaryPath,
           ...(maxConcurrentSubagents !== null ? { maxConcurrentSubagents } : {}),
+          ...(contextWindowOverride !== null
+            ? { codexContextWindowOverride: contextWindowOverride }
+            : {}),
           ...(options?.environment ? { environment: options.environment } : {}),
           ...(codexConfig.homePath ? { homePath: codexConfig.homePath } : {}),
           ...(isCodexResumeCursorSchema(input.resumeCursor)
@@ -5055,7 +5569,13 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
             // This reads the runtime's in-memory descriptor, not native history or
             // a provider RPC. Bind naming to the bridge's own generation before
             // consuming any event, including a delayed foreign first notification.
-            const subagentTitleRuntimeId = (yield* runtime.getSession).subagentRuntimeId;
+            const bridgeDescriptor = yield* runtime.getSession;
+            const subagentTitleRuntimeId = bridgeDescriptor.subagentRuntimeId;
+            const observeNativeRetry = makeCodexNativeRetryTracker({
+              threadId: input.threadId,
+              providerInstanceId: input.providerInstanceId ?? bridgeDescriptor.providerInstanceId,
+              runtimeId: subagentTitleRuntimeId,
+            });
             // Auth recovery can fail by terminalizing its owning turn without an
             // upstream authRecoveryCompleted notification. Retain only opaque task
             // digests in session memory so that terminal envelopes can close those
@@ -5072,6 +5592,23 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
                   return;
                 }
                 const event = redactDesktopToolEvent(rawEvent);
+                // This is an in-memory owner descriptor, not a native read or
+                // retry request. Root-target binding follows the current exact
+                // session cursor; replacement bridges own separate counters.
+                const rootProviderThreadId =
+                  event.method === "error" ||
+                  event.method === "turn/started" ||
+                  event.method === "turn/completed" ||
+                  event.method.startsWith("codex.subagent/")
+                    ? yield* runtime.getSession.pipe(
+                        Effect.map((descriptor) =>
+                          nativeRetryIdentity(
+                            ownNativeRetryField(descriptor.resumeCursor, "threadId"),
+                          ),
+                        ),
+                        Effect.catch(() => Effect.succeed(undefined)),
+                      )
+                    : undefined;
                 yield* writeNativeEvent(event).pipe(
                   Effect.catchCause((cause) =>
                     Effect.logWarning("codex.runtime.bridge.native-log-write-failed", {
@@ -5084,10 +5621,12 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
                 );
 
                 const runtimeEvents = yield* Effect.sync(() => {
+                  const nativeRetry = observeNativeRetry(event, rootProviderThreadId);
                   const mapped = mapToRuntimeEvents(
                     event,
                     event.threadId,
                     codexConfig.autoCompactTokenLimit,
+                    nativeRetry,
                   );
                   const authRecoveryTerminals = reconcileCodexAuthRecoveryLifecycle(
                     event,
@@ -5099,7 +5638,43 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
                     subagentPresentationsByThreadId,
                     event,
                     subagentTitleRuntimeId,
-                  );
+                  ).map((entry) => {
+                    const diagnostic = entry.diagnostic;
+                    if (!diagnostic) return entry;
+                    const targetId = diagnostic.snapshot.native.threadId;
+                    const exactRoot =
+                      rootProviderThreadId !== undefined && targetId === rootProviderThreadId;
+                    const exactGeneration =
+                      subagentTitleRuntimeId === undefined ||
+                      subagentTitleRuntimeId === event.subagentRuntimeId;
+                    // Routing already distinguishes root from child events.
+                    // Classification below is display-only and requires that
+                    // same exact target/generation, never a canonical parent
+                    // turn or provider-authored message as proof of origin.
+                    const subject =
+                      exactGeneration &&
+                      (diagnostic.summary.subject.kind === "subagent" ? !exactRoot : exactRoot)
+                        ? diagnostic.summary.subject
+                        : { kind: "unknown" as const };
+                    return {
+                      ...entry,
+                      diagnostic: {
+                        ...diagnostic,
+                        summary: {
+                          ...diagnostic.summary,
+                          subject,
+                          ...(diagnostic.summary.status === "retry" && nativeRetry
+                            ? {
+                                observedRetryCount: nativeRetry.observedCount,
+                                ...(nativeRetry.countLimited
+                                  ? { countLimited: true as const }
+                                  : {}),
+                              }
+                            : {}),
+                        },
+                      },
+                    };
+                  });
                 }).pipe(
                   Effect.catchCause((cause) =>
                     Effect.logWarning("codex.runtime.bridge.map-failed", {
@@ -5374,6 +5949,25 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
     };
   });
 
+  const assertExistingSubagentPolicy = (
+    input: ProviderSendTurnInput | ProviderSteerTurnInput,
+    session: ProviderSession,
+  ) =>
+    input.expectedSubagentPolicySession === undefined ||
+    (input.threadId === input.expectedSubagentPolicySession.threadId &&
+      boundInstanceId === input.expectedSubagentPolicySession.providerInstanceId &&
+      matchesSubagentPolicySession(session, input.expectedSubagentPolicySession))
+      ? Effect.void
+      : Effect.fail(
+          new ProviderAdapterRequestError({
+            provider: PROVIDER,
+            method: "turn/continue",
+            remoteErrorTag: "subagent-policy-continuation-refused",
+            detail:
+              "The existing Codex process or its recorded subagent policy changed. The message was not delivered.",
+          }),
+        );
+
   const sendTurn: CodexAdapterShape["sendTurn"] = Effect.fn("sendTurn")(function* (input) {
     if (input.expectedFailedRoot !== undefined) {
       const current = yield* (yield* requireSession(input.threadId)).runtime.getSession;
@@ -5445,6 +6039,8 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
     const prompt = appendFileAttachmentPrompt(input.input, fileManifest);
 
     const session = yield* requireSession(input.threadId);
+    if (input.expectedSubagentPolicySession !== undefined)
+      yield* assertExistingSubagentPolicy(input, yield* session.runtime.getSession);
     const reasoningEffort =
       input.modelSelection?.instanceId === boundInstanceId
         ? getModelSelectionStringOptionValue(input.modelSelection, "reasoningEffort")
@@ -5452,6 +6048,9 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
     yield* Effect.promise(() => session.nativeControlBinding?.beginTurn() ?? Promise.resolve());
     return yield* session.runtime
       .sendTurn({
+        ...(input.expectedSubagentPolicySession !== undefined
+          ? { expectedSubagentPolicySession: input.expectedSubagentPolicySession }
+          : {}),
         ...(input.codexReview !== undefined
           ? { codexReview: input.codexReview, allowActiveTurnSteerFallback: false }
           : {}),
@@ -5525,6 +6124,9 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
         providerInstanceId: boundInstanceId,
         runtimeMode: sourceSession.runtimeMode,
         maxConcurrentSubagents: sourceSession.maxConcurrentSubagents ?? null,
+        ...(sourceSession.codexContextWindowOverride !== undefined
+          ? { codexContextWindowOverride: sourceSession.codexContextWindowOverride }
+          : {}),
         ...(sourceSession.interactionMode !== undefined
           ? { interactionMode: sourceSession.interactionMode }
           : {}),
@@ -5574,6 +6176,8 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
     const prompt = appendFileAttachmentPrompt(input.input, fileManifest);
 
     const session = yield* requireSession(input.threadId);
+    if (input.expectedSubagentPolicySession !== undefined)
+      yield* assertExistingSubagentPolicy(input, yield* session.runtime.getSession);
     // MessageId is an open Cafe entity id and may be arbitrarily large or
     // contain control code points. Bind it to a deterministic fixed-size token
     // before entering CodexSessionRuntime so provider-owned pending state,
@@ -5585,6 +6189,9 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
     return yield* session.runtime
       .steerTurn({
         expectedTurnId: input.expectedTurnId,
+        ...(input.expectedSubagentPolicySession !== undefined
+          ? { expectedSubagentPolicySession: input.expectedSubagentPolicySession }
+          : {}),
         ...(clientCorrelationId !== undefined ? { clientCorrelationId } : {}),
         ...(prompt !== undefined ? { input: prompt } : {}),
         ...(codexAttachments.length > 0 ? { attachments: codexAttachments } : {}),
@@ -5994,6 +6601,10 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
       get subagentConcurrency() {
         return options?.getSubagentConcurrencySupport?.() ?? false;
       },
+      get codexContextWindow() {
+        return options?.getCodexContextWindowSupport?.() ?? false;
+      },
+      subagentPolicyContinuation: true,
       sessionModelSwitch: "in-session",
       liveSteer: "supported",
       manualCompaction: "supported",

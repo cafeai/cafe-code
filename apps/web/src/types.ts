@@ -100,10 +100,13 @@ export interface Thread {
   runtimeMode: RuntimeMode;
   interactionMode: ProviderInteractionMode;
   subagentLimits?: SubagentLimits | undefined;
+  codexContextWindowOverride?: number | null | undefined;
   session: ThreadSession | null;
   messages: ChatMessage[];
   proposedPlans: ProposedPlan[];
   error: string | null;
+  /** Renderer-only provenance; absent legacy evidence never authorizes a native error popup. */
+  errorOrigin?: "local" | "provider" | undefined;
   createdAt: string;
   archivedAt: string | null;
   updatedAt?: string | undefined;
@@ -126,7 +129,10 @@ export interface ThreadShell {
   runtimeMode: RuntimeMode;
   interactionMode: ProviderInteractionMode;
   subagentLimits?: SubagentLimits | undefined;
+  codexContextWindowOverride?: number | null | undefined;
   error: string | null;
+  /** Local validation is explicit; provider snapshots never inherit this presentation grant. */
+  errorOrigin?: "local" | "provider" | undefined;
   createdAt: string;
   archivedAt: string | null;
   updatedAt?: string | undefined;
@@ -170,6 +176,8 @@ export interface ThreadSession {
   orchestrationStatus: OrchestrationSessionStatus;
   /** Materialized Cafe override only; absence is older/unknown evidence. */
   maxConcurrentSubagents?: number | null | undefined;
+  /** Independently materialized Codex setting; absent legacy evidence remains unknown. */
+  codexContextWindowOverride?: number | null | undefined;
   /** Opaque evidence identifying the currently observed native provider runtime. */
   subagentRuntimeId?: string | null | undefined;
 }

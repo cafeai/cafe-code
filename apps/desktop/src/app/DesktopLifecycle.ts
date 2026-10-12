@@ -1,3 +1,4 @@
+import { uiText } from "@cafecode/shared/i18n";
 import * as Cause from "effect/Cause";
 import * as Context from "effect/Context";
 import * as Duration from "effect/Duration";
@@ -143,12 +144,13 @@ const resolveProviderDaemonQuitAction = Effect.fn(
   const activeSessionCount = health.value.activeSessionCount;
   const result = yield* electronDialog.showMessageBox({
     type: "question",
-    title: "Provider sessions are still running",
-    message: "Provider sessions are still running",
-    detail: `${activeSessionCount} provider session${
-      activeSessionCount === 1 ? " is" : "s are"
-    } still active. Leave Codex, Claude, and other provider sessions running so Cafe Code can reconnect after restart, or stop them now?`,
-    buttons: ["Leave Running", "Stop Sessions", "Cancel Quit"],
+    title: uiText("Provider sessions are still running"),
+    message: uiText("Provider sessions are still running"),
+    detail: uiText(
+      "{count, plural, one {# provider session is} other {# provider sessions are}} still active. Leave Codex, Claude, and other provider sessions running so Cafe Code can reconnect after restart, or stop them now?",
+      { count: activeSessionCount },
+    ),
+    buttons: [uiText("Leave Running"), uiText("Stop Sessions"), uiText("Cancel Quit")],
     defaultId: 0,
     cancelId: CANCEL_PROVIDER_DAEMON_QUIT_BUTTON_INDEX,
     noLink: true,
@@ -192,7 +194,16 @@ function handleBeforeQuit(
       const providerDaemon = yield* DesktopProviderDaemonManager.DesktopProviderDaemonManager;
       const state = yield* DesktopState.DesktopState;
       const electronWindow = yield* ElectronWindow.ElectronWindow;
-      const providerDaemonAction = yield* resolveProviderDaemonQuitAction();
+      // Before the first backend is ready, ensureRunning owns the daemon's
+      // lifecycle lock for readiness/migration observation. Waiting for rich
+      // health here would wait for that same lock before requesting shutdown,
+      // so the startup cancellation fiber could never interrupt the wait.
+      // Unready ownership is not permission to stop a provider: leave it
+      // running and let the startup owner retire only its exact fresh child.
+      // Once ready, preserve the existing Leave/Stop/Cancel session prompt.
+      const providerDaemonAction = (yield* Ref.get(state.backendReady))
+        ? yield* resolveProviderDaemonQuitAction()
+        : "leave-running";
       if (providerDaemonAction === "cancel") {
         yield* logLifecycleInfo("before-quit cancelled with active provider sessions");
         return false;

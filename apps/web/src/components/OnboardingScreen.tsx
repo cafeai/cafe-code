@@ -1,3 +1,6 @@
+import { useUiLocale, useUiPresentation } from "~/i18n";
+import { uiText } from "@cafecode/shared/i18n";
+import { UiMessage } from "~/i18n";
 import {
   type ChangeEvent,
   type CSSProperties,
@@ -57,9 +60,24 @@ import { stackedThreadToast, toastManager } from "./ui/toast";
 const APP_ACCENT_PICKER_FALLBACK = "#2563eb";
 const SIDEBAR_IMAGE_MIME_TYPES = new Set(["image/png", "image/jpeg", "image/gif", "image/webp"]);
 const THEME_CHOICES = [
-  { value: "system", label: "System" },
-  { value: "light", label: "Light" },
-  { value: "dark", label: "Dark" },
+  {
+    value: "system",
+    get label() {
+      return uiText("System");
+    },
+  },
+  {
+    value: "light",
+    get label() {
+      return uiText("Light");
+    },
+  },
+  {
+    value: "dark",
+    get label() {
+      return uiText("Dark");
+    },
+  },
 ] as const;
 
 /**
@@ -117,6 +135,8 @@ function ProviderLoginGuidance({
   readonly provider: ServerProvider;
   readonly loginCommand: string;
 }) {
+  const uiLocale = useUiLocale();
+
   const [isLoggingIn, setIsLoggingIn] = useState(false);
   const canLogIn = provider.authActions?.login === true;
   const instanceId = provider.instanceId;
@@ -129,30 +149,47 @@ function ProviderLoginGuidance({
       .then(() => {
         toastManager.add({
           type: "success",
-          title: `${displayName} login opened`,
-          description: "Complete the login in the window that opened, then refresh status.",
+          title: uiText("{value0} login opened", { value0: displayName }, undefined, uiLocale),
+          description: uiText(
+            "Complete the login in the window that opened, then refresh status.",
+            undefined,
+            undefined,
+            uiLocale,
+          ),
         });
       })
       .catch((error) => {
         toastManager.add(
           stackedThreadToast({
             type: "error",
-            title: `Could not open ${displayName} login`,
+            title: uiText(
+              "Could not open {value0} login",
+              { value0: displayName },
+              undefined,
+              uiLocale,
+            ),
             description:
               error instanceof Error
                 ? error.message
-                : "The provider login command could not be started.",
+                : uiText(
+                    "The provider login command could not be started.",
+                    undefined,
+                    undefined,
+                    uiLocale,
+                  ),
           }),
         );
       })
       .finally(() => {
         setIsLoggingIn(false);
       });
-  }, [displayName, instanceId]);
+  }, [displayName, instanceId, uiLocale]);
 
   return (
     <div className="mt-2 grid gap-1.5">
-      <span className="text-muted-foreground text-xs">Log in by running</span>
+      <span className="text-muted-foreground text-xs">
+        {uiText("Log in by running", undefined, undefined, uiLocale)}
+      </span>
       <LoginCommand command={loginCommand} />
       {canLogIn ? (
         <Button
@@ -167,7 +204,7 @@ function ProviderLoginGuidance({
           ) : (
             <LogInIcon aria-hidden="true" className="size-3.5" />
           )}
-          Log in
+          {uiText("Log in", undefined, undefined, uiLocale)}
         </Button>
       ) : null}
     </div>
@@ -176,12 +213,14 @@ function ProviderLoginGuidance({
 
 /** The login command rendered as a copyable code block. */
 function LoginCommand({ command }: { readonly command: string }) {
+  const uiLocale = useUiLocale();
+
   const { copyToClipboard, isCopied } = useCopyToClipboard();
   return (
     <div className="flex items-center gap-2 rounded-md border border-border bg-muted/40 py-1 pr-1 pl-2.5">
       <code className="min-w-0 flex-1 truncate font-mono text-foreground text-xs">{command}</code>
       <button
-        aria-label="Copy command"
+        aria-label={uiText("Copy command", undefined, undefined, uiLocale)}
         className="grid size-6 shrink-0 cursor-pointer place-items-center rounded text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
         onClick={() => copyToClipboard(command, undefined)}
         type="button"
@@ -208,6 +247,8 @@ function ProviderActionArea({
   readonly driver: ProviderDriverKind;
   readonly provider: ServerProvider | undefined;
 }) {
+  const uiLocale = useUiLocale();
+
   const guidance = providerGuidance(driver);
   const installed = provider?.installed ?? false;
   const authStatus = provider?.auth.status;
@@ -217,11 +258,11 @@ function ProviderActionArea({
     if (!email?.trim()) return null;
     return (
       <div className="mt-2 flex min-w-0 items-center gap-1.5 text-muted-foreground text-xs">
-        <span>Signed in as</span>
+        <span>{uiText("Signed in as", undefined, undefined, uiLocale)}</span>
         <RedactedSensitiveText
-          ariaLabel="Toggle account email visibility"
-          hideTooltip="Click to hide email"
-          revealTooltip="Click to reveal email"
+          ariaLabel={uiText("Toggle account email visibility", undefined, undefined, uiLocale)}
+          hideTooltip={uiText("Click to hide email", undefined, undefined, uiLocale)}
+          revealTooltip={uiText("Click to reveal email", undefined, undefined, uiLocale)}
           value={email}
         />
       </div>
@@ -232,7 +273,10 @@ function ProviderActionArea({
     if (!guidance) return null;
     return (
       <p className="mt-2 text-muted-foreground text-xs leading-5">
-        You can install it with <ExternalLink href={guidance.installUrl} />
+        <UiMessage
+          message={"You can install it with <slot1></slot1>"}
+          slots={{ slot1: <ExternalLink href={guidance.installUrl} /> }}
+        />
       </p>
     );
   }
@@ -281,6 +325,8 @@ function ProviderStatusDot({ provider }: { readonly provider: ServerProvider | u
 }
 
 function IntroPage() {
+  const uiLocale = useUiLocale();
+
   return (
     <div className="cafe-onboarding-step grid w-full max-w-md justify-items-center gap-6 text-center">
       <div className="relative">
@@ -296,10 +342,15 @@ function IntroPage() {
       </div>
       <div className="cafe-onboarding-item grid gap-2.5" style={staggerStyle(1)}>
         <h1 className="text-balance font-semibold text-3xl tracking-tight">
-          Welcome to {APP_BASE_NAME}
+          <UiMessage message={"Welcome to <slot1></slot1>"} slots={{ slot1: APP_BASE_NAME }} />
         </h1>
         <p className="text-balance text-sm text-muted-foreground leading-6">
-          A calm home for long coding sessions with your AI agents.
+          {uiText(
+            "A calm home for long coding sessions with your AI agents.",
+            undefined,
+            undefined,
+            uiLocale,
+          )}
         </p>
       </div>
     </div>
@@ -307,6 +358,9 @@ function IntroPage() {
 }
 
 function ProvidersPage() {
+  const uiLocale = useUiLocale();
+  const uiPresentation = useUiPresentation(UI_PRESENTATION_SOURCES);
+
   const providers = useServerProviders();
   const [isRefreshing, setIsRefreshing] = useState(false);
 
@@ -329,9 +383,16 @@ function ProvidersPage() {
         style={staggerStyle(0)}
       >
         <div className="grid gap-2">
-          <h1 className="font-semibold text-2xl tracking-tight">Connect a provider</h1>
+          <h1 className="font-semibold text-2xl tracking-tight">
+            {uiText("Connect a provider", undefined, undefined, uiLocale)}
+          </h1>
           <p className="text-balance text-sm text-muted-foreground leading-6">
-            Install or sign in to the agents you use. You can change this later in Settings.
+            {uiText(
+              "Install or sign in to the agents you use. You can change this later in Settings.",
+              undefined,
+              undefined,
+              uiLocale,
+            )}
           </p>
         </div>
         <Button
@@ -349,13 +410,13 @@ function ProvidersPage() {
               className="size-4 transition-transform duration-500 group-hover:rotate-180"
             />
           )}
-          Refresh
+          {uiText("Refresh", undefined, undefined, uiLocale)}
         </Button>
       </div>
       <ul className="grid gap-3">
-        {PROVIDER_CLIENT_DEFINITIONS.map((definition, index) => {
+        {uiPresentation.PROVIDER_CLIENT_DEFINITIONS.map((definition, index) => {
           const provider = selectProviderForDriver(providers, definition.value);
-          const summary = getProviderSummary(provider);
+          const summary = uiPresentation.getProviderSummary(provider);
           const Icon = definition.icon;
           const versionLabel = getProviderVersionLabel(provider?.version);
           return (
@@ -434,6 +495,9 @@ function CustomizeRow({
  * Appearance settings, so changes persist and stay in sync.
  */
 function CustomizePage() {
+  const uiLocale = useUiLocale();
+  const uiPresentation = useUiPresentation(UI_PRESENTATION_SOURCES);
+
   const { theme, setTheme } = useTheme();
   const settings = useSettings();
   const { updateSettings } = useUpdateSettings();
@@ -443,7 +507,7 @@ function CustomizePage() {
 
   const brandPrefix = settings.brandWordmarkPrefix.trim() || DEFAULT_BRAND_WORDMARK_PREFIX;
   const usesDefaultImage = settings.sidebarBrandImage === DEFAULT_SIDEBAR_BRAND_IMAGE;
-  const imageSrc = resolveSidebarBrandImageSrc(settings.sidebarBrandImage);
+  const imageSrc = uiPresentation.resolveSidebarBrandImageSrc(settings.sidebarBrandImage);
 
   const handleImageChange = useCallback(
     async (event: ChangeEvent<HTMLInputElement>) => {
@@ -451,11 +515,13 @@ function CustomizePage() {
       event.currentTarget.value = "";
       if (!file) return;
       if (!SIDEBAR_IMAGE_MIME_TYPES.has(file.type)) {
-        setImageError("Choose a PNG, JPEG, GIF, or WebP image.");
+        setImageError(
+          uiText("Choose a PNG, JPEG, GIF, or WebP image.", undefined, undefined, uiLocale),
+        );
         return;
       }
       if (file.size > MAX_SIDEBAR_BRAND_IMAGE_FILE_BYTES) {
-        setImageError("Choose an image under 1 MB.");
+        setImageError(uiText("Choose an image under 1 MB.", undefined, undefined, uiLocale));
         return;
       }
       setImageUploading(true);
@@ -464,27 +530,38 @@ function CustomizePage() {
         setImageError(null);
         updateSettings({ sidebarBrandImage, sidebarBrandImageDataUrl: "" });
       } catch (error) {
-        setImageError(error instanceof Error ? error.message : "Could not upload that image.");
+        setImageError(
+          error instanceof Error
+            ? error.message
+            : uiText("Could not upload that image.", undefined, undefined, uiLocale),
+        );
       } finally {
         setImageUploading(false);
       }
     },
-    [updateSettings],
+    [updateSettings, uiLocale],
   );
 
   return (
     <div className="cafe-onboarding-step grid w-full max-w-xl gap-6">
       <div className="cafe-onboarding-item grid gap-2" style={staggerStyle(0)}>
-        <h1 className="font-semibold text-2xl tracking-tight">Make it yours</h1>
+        <h1 className="font-semibold text-2xl tracking-tight">
+          {uiText("Make it yours", undefined, undefined, uiLocale)}
+        </h1>
         <p className="text-balance text-sm text-muted-foreground leading-6">
-          Optional. You can change any of this later in Settings.
+          {uiText(
+            "Optional. You can change any of this later in Settings.",
+            undefined,
+            undefined,
+            uiLocale,
+          )}
         </p>
       </div>
       <ul className="grid gap-3">
         <CustomizeRow
           control={
             <DraftInput
-              aria-label="Branding name"
+              aria-label={uiText("Branding name", undefined, undefined, uiLocale)}
               className="w-40"
               maxLength={MAX_BRAND_WORDMARK_PREFIX_LENGTH}
               placeholder={DEFAULT_BRAND_WORDMARK_PREFIX}
@@ -496,36 +573,51 @@ function CustomizePage() {
               }
             />
           }
-          description={`Shown as “${brandPrefix} Code” in the sidebar.`}
+          description={uiText(
+            "Shown as “{value0} Code” in the sidebar.",
+            { value0: brandPrefix },
+            undefined,
+            uiLocale,
+          )}
           index={1}
-          title="Code name"
+          title={uiText("Code name", undefined, undefined, uiLocale)}
         />
         <CustomizeRow
           control={
             <ColorWheelPicker
-              ariaLabel="App accent color"
+              ariaLabel={uiText("App accent color", undefined, undefined, uiLocale)}
               defaultPickerColor={APP_ACCENT_PICKER_FALLBACK}
               emptyValue={DEFAULT_APP_ACCENT_COLOR}
               onCommit={(value) => updateSettings({ appAccentColor: value })}
               value={settings.appAccentColor}
             />
           }
-          description="Used for buttons, focus rings, and highlights."
+          description={uiText(
+            "Used for buttons, focus rings, and highlights.",
+            undefined,
+            undefined,
+            uiLocale,
+          )}
           index={2}
-          title="Accent color"
+          title={uiText("Accent color", undefined, undefined, uiLocale)}
         />
         <CustomizeRow
           control={
             <SegmentedControl
-              aria-label="Theme"
+              aria-label={uiText("Theme", undefined, undefined, uiLocale)}
               onValueChange={setTheme}
-              options={THEME_CHOICES}
+              options={uiPresentation.THEME_CHOICES}
               value={theme}
             />
           }
-          description="Match your system, or pick light or dark."
+          description={uiText(
+            "Match your system, or pick light or dark.",
+            undefined,
+            undefined,
+            uiLocale,
+          )}
           index={3}
-          title="Theme"
+          title={uiText("Theme", undefined, undefined, uiLocale)}
         />
         <CustomizeRow
           control={
@@ -551,7 +643,9 @@ function CustomizePage() {
                 ) : (
                   <UploadIcon aria-hidden="true" className="size-3.5" />
                 )}
-                {usesDefaultImage ? "Upload" : "Replace"}
+                {usesDefaultImage
+                  ? uiText("Upload", undefined, undefined, uiLocale)
+                  : uiText("Replace", undefined, undefined, uiLocale)}
               </Button>
               {usesDefaultImage ? null : (
                 <Button
@@ -566,7 +660,7 @@ function CustomizePage() {
                   type="button"
                   variant="ghost"
                 >
-                  Reset
+                  {uiText("Reset", undefined, undefined, uiLocale)}
                 </Button>
               )}
               <input
@@ -578,10 +672,13 @@ function CustomizePage() {
               />
             </div>
           }
-          description={imageError ?? "PNG, JPEG, GIF or WebP, under 1 MB."}
+          description={
+            imageError ??
+            uiText("PNG, JPEG, GIF or WebP, under 1 MB.", undefined, undefined, uiLocale)
+          }
           descriptionError={Boolean(imageError)}
           index={4}
-          title="Sidebar image"
+          title={uiText("Sidebar image", undefined, undefined, uiLocale)}
         />
       </ul>
     </div>
@@ -592,9 +689,15 @@ const ONBOARDING_STEPS = ["intro", "providers", "customize"] as const;
 type OnboardingStep = (typeof ONBOARDING_STEPS)[number];
 
 const STEP_HEADER_LABEL: Record<OnboardingStep, string> = {
-  intro: "Welcome",
-  providers: "Connect a provider",
-  customize: "Make it yours",
+  get intro() {
+    return uiText("Welcome");
+  },
+  get providers() {
+    return uiText("Connect a provider");
+  },
+  get customize() {
+    return uiText("Make it yours");
+  },
 };
 
 /**
@@ -604,6 +707,9 @@ const STEP_HEADER_LABEL: Record<OnboardingStep, string> = {
  * never loop back to itself.
  */
 export function OnboardingScreen() {
+  const uiLocale = useUiLocale();
+  const uiPresentation = useUiPresentation(UI_PRESENTATION_SOURCES);
+
   const [stepIndex, setStepIndex] = useState(0);
   const { updateSettings } = useUpdateSettings();
 
@@ -639,7 +745,7 @@ export function OnboardingScreen() {
       data-testid="onboarding-screen"
       role="dialog"
       aria-modal="true"
-      aria-label={`Welcome to ${APP_BASE_NAME}`}
+      aria-label={uiText("Welcome to {value0}", { value0: APP_BASE_NAME }, undefined, uiLocale)}
     >
       {/* Calm ambient backdrop. */}
       <div aria-hidden="true" className="pointer-events-none absolute inset-0">
@@ -648,7 +754,7 @@ export function OnboardingScreen() {
 
       <header className={headerClassName}>
         <span className="font-medium text-muted-foreground text-xs tabular-nums">
-          {STEP_HEADER_LABEL[step]}
+          {uiPresentation.STEP_HEADER_LABEL[step]}
         </span>
         <Button
           className="text-muted-foreground hover:text-foreground"
@@ -656,7 +762,7 @@ export function OnboardingScreen() {
           size="sm"
           variant="ghost"
         >
-          Skip
+          {uiText("Skip", undefined, undefined, uiLocale)}
         </Button>
       </header>
 
@@ -688,16 +794,16 @@ export function OnboardingScreen() {
                 aria-hidden="true"
                 className="size-4 transition-transform group-hover:-translate-x-0.5"
               />
-              Back
+              {uiText("Back", undefined, undefined, uiLocale)}
             </Button>
           )}
           {isLastStep ? (
             <Button onClick={complete} size="sm" data-testid="onboarding-get-started">
-              Get started
+              {uiText("Get started", undefined, undefined, uiLocale)}
             </Button>
           ) : (
             <Button className="group" onClick={goNext} size="sm">
-              Next
+              {uiText("Next", undefined, undefined, uiLocale)}
               <ArrowRightIcon
                 aria-hidden="true"
                 className="size-4 transition-transform group-hover:translate-x-0.5"
@@ -709,3 +815,12 @@ export function OnboardingScreen() {
     </div>
   );
 }
+
+// Finite source-owned labels/helpers only; no received or user data.
+const UI_PRESENTATION_SOURCES = {
+  PROVIDER_CLIENT_DEFINITIONS,
+  STEP_HEADER_LABEL,
+  THEME_CHOICES,
+  getProviderSummary,
+  resolveSidebarBrandImageSrc,
+};

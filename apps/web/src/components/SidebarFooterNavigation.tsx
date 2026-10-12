@@ -1,3 +1,5 @@
+import { useUiLocale } from "~/i18n";
+import { uiText } from "@cafecode/shared/i18n";
 import { SettingsIcon } from "lucide-react";
 import { memo, type ReactNode } from "react";
 
@@ -27,6 +29,8 @@ export const SidebarFooterNavigation = memo(function SidebarFooterNavigation({
   onOpenSettings,
   settingsTrailing,
 }: SidebarFooterNavigationProps) {
+  const uiLocale = useUiLocale();
+
   const menuButtonClassName =
     "min-w-0 flex-1 select-none gap-2 px-2 py-1.5 text-muted-foreground hover:bg-accent hover:text-foreground";
 
@@ -61,7 +65,9 @@ export const SidebarFooterNavigation = memo(function SidebarFooterNavigation({
                 WebkitMaskSize: "contain",
               }}
             />
-            <span className="truncate text-ui">Atrium</span>
+            <span className="truncate text-ui">
+              {uiText("Atrium", undefined, undefined, uiLocale)}
+            </span>
           </SidebarMenuButton>
         </SidebarMenuItem>
       )}
@@ -73,7 +79,9 @@ export const SidebarFooterNavigation = memo(function SidebarFooterNavigation({
           onClick={onOpenSettings}
         >
           <SettingsIcon className="size-3.5" />
-          <span className="truncate text-ui">Settings</span>
+          <span className="truncate text-ui">
+            {uiText("Settings", undefined, undefined, uiLocale)}
+          </span>
         </SidebarMenuButton>
         {settingsTrailing}
       </SidebarMenuItem>

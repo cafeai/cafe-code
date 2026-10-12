@@ -50,6 +50,176 @@ const decodeThreadItemsListParams = Schema.decodeUnknownSync(
 );
 const isThreadItemsListParams = Schema.is(CodexSchema.CLIENT_REQUEST_PARAMS["thread/items/list"]);
 
+it("preserves Codex 0.162 partial public replies without inventing terminal status", () => {
+  const item = {
+    type: "agentMessage",
+    id: "partial-item",
+    text: "Public progress",
+    phase: "partial_answer",
+  } as const;
+  const notification = {
+    method: "item/completed",
+    params: { threadId: "thread-1", turnId: "turn-1", completedAtMs: 1_778_000_000_000, item },
+  } as const;
+  assert.deepEqual(decodeServerNotification(notification), notification);
+  const completed = {
+    method: "turn/completed",
+    params: {
+      threadId: "thread-1",
+      turn: {
+        id: "turn-1",
+        rootTurnId: "root-turn-1",
+        items: [item],
+        status: "failed",
+        error: null,
+      },
+    },
+  } as const;
+  assert.deepEqual(decodeServerNotification(completed), completed);
+  for (const rootTurnId of [undefined, null, "root-turn-1"] as const) {
+    const legacy = {
+      ...completed,
+      params: {
+        ...completed.params,
+        turn: { ...completed.params.turn, ...(rootTurnId === undefined ? {} : { rootTurnId }) },
+      },
+    };
+    if (rootTurnId === undefined)
+      delete (legacy.params.turn as { rootTurnId?: string | null }).rootTurnId;
+    assert.deepEqual(decodeServerNotification(legacy), legacy);
+  }
+  assert.throws(() =>
+    decodeServerNotification({
+      ...notification,
+      params: { ...notification.params, item: { ...item, phase: "future-private-phase" } },
+    }),
+  );
+  assert.throws(() =>
+    decodeServerNotification({
+      ...completed,
+      params: { ...completed.params, turn: { ...completed.params.turn, rootTurnId: 123 } },
+    }),
+  );
+});
+
+it("preserves Codex 0.162 future error metadata but validates the surrounding failure envelope", () => {
+  for (const codexErrorInfo of [
+    "bioPolicy",
+    "futureFailure",
+    { futureFailure: { code: "opaque" } },
+  ]) {
+    const error = {
+      message: "Public provider error",
+      codexErrorInfo,
+      additionalDetails: null,
+      misalignment: null,
+    };
+    const notification = {
+      method: "error",
+      params: { threadId: "thread-1", turnId: "turn-1", willRetry: false, error },
+    } as const;
+    assert.deepEqual(decodeServerNotification(notification), notification);
+    const terminal = {
+      method: "turn/completed",
+      params: { threadId: "thread-1", turn: { id: "turn-1", items: [], status: "failed", error } },
+    } as const;
+    assert.deepEqual(decodeServerNotification(terminal), terminal);
+    assert.equal(isErrorNotification({ ...notification.params, willRetry: "yes" }), false);
+    assert.equal(
+      isErrorNotification({ ...notification.params, error: { ...error, message: 42 } }),
+      false,
+    );
+  }
+  for (const codexErrorInfo of [42, true, []]) {
+    assert.equal(
+      isErrorNotification({
+        threadId: "thread-1",
+        turnId: "turn-1",
+        willRetry: false,
+        error: { message: "Malformed metadata", codexErrorInfo },
+      }),
+      false,
+    );
+  }
+});
+
+it("preserves contradictory and nested open error metadata through live and terminal decoding", () => {
+  for (const codexErrorInfo of [
+    { responseStreamDisconnected: { httpStatusCode: 503 }, cyberPolicy: { blocked: true } },
+    { responseStreamDisconnected: { httpStatusCode: 503 }, futureFailure: { opaque: true } },
+    {
+      responseStreamDisconnected: { httpStatusCode: 503 },
+      httpConnectionFailed: { httpStatusCode: 503 },
+    },
+    { responseStreamDisconnected: { httpStatusCode: 503, permanent: true } },
+    { responseStreamDisconnected: { httpStatusCode: 503, cyberPolicy: { blocked: true } } },
+  ]) {
+    const error = {
+      message: "Public provider failure",
+      codexErrorInfo,
+      additionalDetails: null,
+      misalignment: null,
+    };
+    const live = {
+      method: "error",
+      params: { threadId: "thread-1", turnId: "turn-1", willRetry: false, error },
+    } as const;
+    const terminal = {
+      method: "turn/completed",
+      params: { threadId: "thread-1", turn: { id: "turn-1", items: [], status: "failed", error } },
+    } as const;
+    // The native schema deliberately declares an open object. No known
+    // tagged variant may erase unknown/conflicting outer or nested evidence.
+    assert.deepEqual(decodeServerNotification(live), live);
+    assert.deepEqual(decodeServerNotification(terminal), terminal);
+  }
+});
+
+it("preserves native error-envelope extensions while retaining declared field validation", () => {
+  const error = {
+    message: "Public provider failure",
+    codexErrorInfo: "serverOverloaded",
+    futurePolicy: "permanent",
+  };
+  const live = {
+    method: "error",
+    params: { threadId: "thread-1", turnId: "turn-1", willRetry: false, error },
+  } as const;
+  const terminal = {
+    method: "turn/completed",
+    params: { threadId: "thread-1", turn: { id: "turn-1", items: [], status: "failed", error } },
+  } as const;
+  assert.deepEqual(decodeServerNotification(live), live);
+  assert.deepEqual(decodeServerNotification(terminal), terminal);
+  for (const invalid of [
+    { ...error, message: 42 },
+    { ...error, additionalDetails: {} },
+    { ...error, codexErrorInfo: 42 },
+  ]) {
+    assert.throws(() =>
+      decodeServerNotification({ ...live, params: { ...live.params, error: invalid } }),
+    );
+    assert.throws(() =>
+      decodeServerNotification({
+        ...terminal,
+        params: { ...terminal.params, turn: { ...terminal.params.turn, error: invalid } },
+      }),
+    );
+  }
+});
+
+it("types explicit Codex 0.162 goal provenance without supplying missing user authority", () => {
+  for (const method of ["thread/goal/set", "thread/goal/clear"] as const) {
+    const decode = Schema.decodeUnknownSync(CodexSchema.CLIENT_REQUEST_PARAMS[method]);
+    for (const origin of ["user", "automatic", null] as const) {
+      const input = { threadId: "thread-1", origin };
+      assert.deepEqual(decode(input), input);
+    }
+    assert.deepEqual(decode({ threadId: "thread-1" }), { threadId: "thread-1" });
+    assert.throws(() => decode({ threadId: "thread-1", origin: "authorized" }));
+  }
+});
+
 it("preserves Codex 0.158 Pro Max account and rate-limit metadata", () => {
   const account = {
     account: { type: "chatgpt", email: null, planType: "promax" },
@@ -112,7 +282,7 @@ it("decodes Codex 0.158 Flex capacity failures without losing terminal notificat
       ...failed.params,
       error: { ...error, codexErrorInfo: "flex-unavailable" },
     }),
-    false,
+    true,
   );
 });
 
@@ -125,8 +295,9 @@ it("decodes Codex 0.159 denial failures and preserves the provider's retry decis
   } as const;
 
   // This classification is terminal when Codex says it is. Decode the exact
-  // upstream discriminator without broadening the error enum or substituting
-  // a retry policy that could repeat a denied action.
+  // upstream discriminator without substituting a retry policy that could
+  // repeat a denied action. The 0.162 open-ended metadata schema also preserves
+  // future identifiers verbatim; only Cafe's strict classifier grants retry.
   for (const willRetry of [false, true]) {
     const failed = {
       method: "error",
@@ -162,7 +333,7 @@ it("decodes Codex 0.159 denial failures and preserves the provider's retry decis
       willRetry: false,
       error: { ...error, codexErrorInfo: "too-many-denials" },
     }),
-    false,
+    true,
   );
 });
 

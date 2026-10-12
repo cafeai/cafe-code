@@ -1,3 +1,5 @@
+import { useUiLocale, useUiPresentation } from "~/i18n";
+import { uiText } from "@cafecode/shared/i18n";
 import {
   MAX_SIDEBAR_BRAND_IMAGE_FILE_BYTES,
   type SidebarBrandImageAsset,
@@ -63,12 +65,14 @@ async function requestRemoteBrandImage(
   if (
     useSavedEnvironmentRuntimeStore.getState().byId[environmentId]?.connectionState !== "connected"
   )
-    throw new Error("Reconnect to the selected server before changing its sidebar image.");
+    throw new Error(uiText("Reconnect to the selected server before changing its sidebar image."));
   try {
     return await fileRequest(environmentId, pathname, init);
   } catch {
     throw new Error(
-      "Could not load or save the selected server's sidebar image. Check its connection and your access.",
+      uiText(
+        "Could not load or save the selected server's sidebar image. Check its connection and your access.",
+      ),
     );
   }
 }
@@ -76,6 +80,8 @@ async function requestRemoteBrandImage(
 /** Image elements cannot send the saved server's bearer. Resolve a private
  * blob URL instead of attaching credentials to a URL or reading primary data. */
 export function useSidebarBrandImageSrc(asset: SidebarBrandImageAsset | null): string {
+  const uiPresentation = useUiPresentation(UI_PRESENTATION_SOURCES);
+
   const environmentId = useWorkspaceEnvironmentId();
   const primaryId = usePrimaryEnvironmentId();
   const remote = environmentId !== null && environmentId !== primaryId;
@@ -109,7 +115,7 @@ export function useSidebarBrandImageSrc(asset: SidebarBrandImageAsset | null): s
     ? connected && image?.key === key
       ? image.url
       : DEFAULT_SIDEBAR_BRAND_IMAGE_SRC
-    : resolveSidebarBrandImageSrc(asset);
+    : uiPresentation.resolveSidebarBrandImageSrc(asset);
 }
 
 export async function uploadSidebarBrandImage(
@@ -132,7 +138,9 @@ export async function uploadSidebarBrandImage(
 
   if (!response.ok) {
     const message = (await response.text()).trim();
-    throw new Error(message || `Sidebar image upload failed (${response.status}).`);
+    throw new Error(
+      message || uiText("Sidebar image upload failed ({status}).", { status: response.status }),
+    );
   }
 
   let payload: { readonly sidebarBrandImage?: unknown };
@@ -140,13 +148,16 @@ export async function uploadSidebarBrandImage(
     try {
       payload = JSON.parse(new TextDecoder().decode(await readBounded(response, 8 * 1024)));
     } catch {
-      throw new Error("Sidebar image upload returned an invalid response.");
+      throw new Error(uiText("Sidebar image upload returned an invalid response."));
     }
   } else {
     payload = await response.json();
   }
   if (!isSidebarBrandImageAsset(payload.sidebarBrandImage)) {
-    throw new Error("Sidebar image upload returned an invalid response.");
+    throw new Error(uiText("Sidebar image upload returned an invalid response."));
   }
   return payload.sidebarBrandImage;
 }
+
+// Finite source-owned labels/helpers only; no received or user data.
+const UI_PRESENTATION_SOURCES = { resolveSidebarBrandImageSrc };

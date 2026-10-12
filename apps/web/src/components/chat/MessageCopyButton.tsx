@@ -1,3 +1,5 @@
+import { useUiLocale } from "~/i18n";
+import { uiText } from "@cafecode/shared/i18n";
 import { memo, useRef } from "react";
 import { CopyIcon, CheckIcon } from "lucide-react";
 import { Button } from "../ui/button";
@@ -21,7 +23,7 @@ const onCopyError = (ref: React.RefObject<HTMLButtonElement | null>, error: Erro
         anchor: ref.current,
       },
       timeout: ANCHORED_TOAST_TIMEOUT_MS,
-      title: "Failed to copy",
+      title: uiText("Failed to copy"),
       description: error.message,
     });
   }
@@ -38,6 +40,8 @@ export const MessageCopyButton = memo(function MessageCopyButton({
   variant?: "outline" | "ghost";
   className?: string;
 }) {
+  const uiLocale = useUiLocale();
+
   const ref = useRef<HTMLButtonElement>(null);
   const { copyToClipboard, isCopied } = useCopyToClipboard<void>({
     onError: (error: Error) => onCopyError(ref, error),
@@ -49,7 +53,11 @@ export const MessageCopyButton = memo(function MessageCopyButton({
       <TooltipTrigger
         render={
           <Button
-            aria-label={isCopied ? "Copied" : "Copy message"}
+            aria-label={
+              isCopied
+                ? uiText("Copied", undefined, undefined, uiLocale)
+                : uiText("Copy message", undefined, undefined, uiLocale)
+            }
             onClick={() => copyToClipboard(text)}
             ref={ref}
             type="button"
@@ -62,8 +70,14 @@ export const MessageCopyButton = memo(function MessageCopyButton({
         {isCopied ? <CheckIcon className="size-3 text-success" /> : <CopyIcon className="size-3" />}
       </TooltipTrigger>
       <TooltipPopup>
-        <p>{isCopied ? "Copied" : "Copy message"}</p>
+        <p>
+          {isCopied
+            ? uiText("Copied", undefined, undefined, uiLocale)
+            : uiText("Copy message", undefined, undefined, uiLocale)}
+        </p>
       </TooltipPopup>
     </Tooltip>
   );
 });
+
+// Finite source-owned labels/helpers only; no received or user data.

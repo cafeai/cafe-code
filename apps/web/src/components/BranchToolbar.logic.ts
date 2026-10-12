@@ -1,3 +1,4 @@
+import { uiText } from "@cafecode/shared/i18n";
 import type { EnvironmentId, VcsRef, ProjectId } from "@cafecode/contracts";
 import * as Schema from "effect/Schema";
 export {
@@ -36,22 +37,22 @@ export function resolveEnvironmentOptionLabel(input: {
       if (!label) return false;
       return !GENERIC_LOCAL_ENVIRONMENT_LABELS.has(label.toLowerCase());
     });
-    return preferredLocalLabel ?? "This device";
+    return preferredLocalLabel ?? uiText("This device");
   }
 
   return runtimeLabel ?? savedLabel ?? input.environmentId;
 }
 
 export function resolveEnvModeLabel(mode: EnvMode): string {
-  return mode === "worktree" ? "New worktree" : "Current checkout";
+  return mode === "worktree" ? uiText("New worktree") : uiText("Current checkout");
 }
 
 export function resolveCurrentWorkspaceLabel(activeWorktreePath: string | null): string {
-  return activeWorktreePath ? "Current worktree" : resolveEnvModeLabel("local");
+  return activeWorktreePath ? uiText("Current worktree") : resolveEnvModeLabel("local");
 }
 
 export function resolveLockedWorkspaceLabel(activeWorktreePath: string | null): string {
-  return activeWorktreePath ? "Worktree" : "Local checkout";
+  return activeWorktreePath ? uiText("Worktree") : uiText("Local checkout");
 }
 
 export function resolveEffectiveEnvMode(input: {

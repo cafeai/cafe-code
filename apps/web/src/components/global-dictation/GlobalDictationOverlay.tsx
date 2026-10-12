@@ -1,3 +1,6 @@
+import { useUiLocale, useUiPresentation } from "~/i18n";
+import { uiText, type UiLocale } from "@cafecode/shared/i18n";
+import { UiMessage } from "~/i18n";
 import {
   ClipboardIcon,
   FileDownIcon,
@@ -12,6 +15,8 @@ import {
   DICTATION_REWRITE_INSTRUCTIONS_MAX_CHARS,
   type DictationRewriteTextInput,
   type GlobalDictationInsertionMethod,
+  type GlobalDictationGuidance,
+  type GlobalDictationEvent,
 } from "@cafecode/contracts";
 
 import "./GlobalDictationOverlay.css";
@@ -35,36 +40,232 @@ type StyleSelection = { readonly style: LocalWritingStyle } | RewriteStyle;
  * raw reason: helper errors may otherwise reveal private target text or paths.
  */
 export class GlobalDictationInsertError extends Error {
+  readonly presentationCode:
+    | "target_changed"
+    | "target_unavailable"
+    | "target_unsupported"
+    | "accessibility_permission_required"
+    | "clipboard_unavailable"
+    | "insertion_uncertain"
+    | "unavailable";
+  readonly insertionMethod: GlobalDictationInsertionMethod;
   constructor(reason: unknown, insertionMethod: GlobalDictationInsertionMethod = "accessibility") {
-    let message: string;
-    switch (reason) {
-      case "target_changed":
-        message = "The original text or selection changed. Nothing was inserted.";
-        break;
-      case "target_unavailable":
-        message = "The original app or text field is no longer open. Nothing was inserted.";
-        break;
-      case "target_unsupported":
-        message = "That text field doesn't accept inserted text. Nothing was inserted.";
-        break;
-      case "accessibility_permission_required":
-        message =
-          "Allow Cafe in System Settings → Privacy & Security → Accessibility, then try again. Nothing was inserted.";
-        break;
-      case "clipboard_unavailable":
-        message = "Cafe could not prepare the clipboard. Nothing was pasted.";
-        break;
-      case "insertion_uncertain":
-        message =
-          insertionMethod === "paste"
-            ? "Your draft may have been pasted. Check the field before trying again; Cafe will not repeat the paste automatically. The draft may remain on the clipboard."
-            : "Insert may have reached the original app. Check that field before trying again; Cafe will not repeat the write automatically.";
-        break;
-      default:
-        message = "Could not insert. Your draft is unchanged.";
-    }
-    super(message);
+    const code =
+      reason === "target_changed" ||
+      reason === "target_unavailable" ||
+      reason === "target_unsupported" ||
+      reason === "accessibility_permission_required" ||
+      reason === "clipboard_unavailable" ||
+      reason === "insertion_uncertain"
+        ? reason
+        : "unavailable";
+    const method = insertionMethod === "paste" ? "paste" : "accessibility";
+    super(formatInsertionGuidance(code, method));
+    this.presentationCode = code;
+    this.insertionMethod = method;
     this.name = "GlobalDictationInsertError";
+  }
+  /** Keep the finite failure, not a translated string, across language changes.
+   * The Error message remains diagnostic data; receipt matching uses no copy. */
+  displayMessage(locale: UiLocale): string {
+    return formatInsertionGuidance(this.presentationCode, this.insertionMethod, locale);
+  }
+}
+
+function formatInsertionGuidance(
+  reason: GlobalDictationInsertError["presentationCode"],
+  insertionMethod: GlobalDictationInsertionMethod,
+  locale?: UiLocale,
+): string {
+  switch (reason) {
+    case "target_changed":
+      return uiText(
+        "The original text or selection changed. Nothing was inserted.",
+        undefined,
+        undefined,
+        locale,
+      );
+    case "target_unavailable":
+      return uiText(
+        "The original app or text field is no longer open. Nothing was inserted.",
+        undefined,
+        undefined,
+        locale,
+      );
+    case "target_unsupported":
+      return uiText(
+        "That text field doesn''t accept inserted text. Nothing was inserted.",
+        undefined,
+        undefined,
+        locale,
+      );
+    case "accessibility_permission_required":
+      return uiText(
+        "Allow Cafe in System Settings → Privacy & Security → Accessibility, then try again. Nothing was inserted.",
+        undefined,
+        undefined,
+        locale,
+      );
+    case "clipboard_unavailable":
+      return uiText(
+        "Cafe could not prepare the clipboard. Nothing was pasted.",
+        undefined,
+        undefined,
+        locale,
+      );
+    case "insertion_uncertain":
+      return insertionMethod === "paste"
+        ? uiText(
+            "Your draft may have been pasted. Check the field before trying again; Cafe will not repeat the paste automatically. The draft may remain on the clipboard.",
+            undefined,
+            undefined,
+            locale,
+          )
+        : uiText(
+            "Insert may have reached the original app. Check that field before trying again; Cafe will not repeat the write automatically.",
+            undefined,
+            undefined,
+            locale,
+          );
+    default:
+      return uiText("Could not insert. Your draft is unchanged.", undefined, undefined, locale);
+  }
+}
+
+/** New native senders publish a finite hint. Older sender prose is kept opaque
+ * rather than reverse-matching English or treating it as target authority. */
+export function formatGlobalDictationGuidance(
+  guidance: GlobalDictationGuidance,
+  locale?: UiLocale,
+): string {
+  return guidance === "accessibility_permission_required"
+    ? uiText(
+        "To enable Insert, allow Cafe Code Accessibility in macOS System Settings. You can still Copy or Save.",
+        undefined,
+        undefined,
+        locale,
+      )
+    : uiText(
+        "Insert is unavailable for this field. You can still Copy or Save your draft.",
+        undefined,
+        undefined,
+        locale,
+      );
+}
+
+export type GlobalDictationStatus =
+  | { readonly kind: "connecting" }
+  | { readonly kind: "guidance"; readonly code: GlobalDictationGuidance }
+  | { readonly kind: "legacy"; readonly text: string };
+
+export function globalDictationStatusFromEvent(
+  event: Pick<GlobalDictationEvent, "guidance" | "reason">,
+): GlobalDictationStatus | undefined {
+  if (
+    event.guidance === "accessibility_permission_required" ||
+    event.guidance === "target_unavailable"
+  ) {
+    return { kind: "guidance", code: event.guidance };
+  }
+  return typeof event.reason === "string" && event.reason.length > 0
+    ? { kind: "legacy", text: event.reason }
+    : undefined;
+}
+
+export function formatGlobalDictationStatus(
+  status: GlobalDictationStatus,
+  locale?: UiLocale,
+): string {
+  if (status.kind === "connecting")
+    return uiText("Connecting your microphone…", undefined, undefined, locale);
+  if (status.kind === "guidance") return formatGlobalDictationGuidance(status.code, locale);
+  return status.text;
+}
+
+type ReviewFeedback =
+  | { readonly kind: "rewrite-ready" | "rewrite-failed"; readonly style: RewriteStyle["style"] }
+  | { readonly kind: "rewrite-unavailable" }
+  | { readonly kind: "exported"; readonly action: "copy" | "save" }
+  | { readonly kind: "action-failed"; readonly action: "copy" | "save" | "insert" }
+  | { readonly kind: "insertion"; readonly error: GlobalDictationInsertError };
+type CommandFeedback =
+  | { readonly kind: "style"; readonly style: WritingStyle }
+  | { readonly kind: "custom" | "cancelled" | "unrecognized" | "microphone-failed" };
+
+function formatReviewFeedback(
+  feedback: ReviewFeedback,
+  labels: Readonly<Record<WritingStyle, string>>,
+  locale: UiLocale,
+): string {
+  switch (feedback.kind) {
+    case "rewrite-ready":
+      return uiText("{value0} draft ready.", { value0: labels[feedback.style] }, undefined, locale);
+    case "rewrite-failed":
+      return uiText(
+        "{value0} rewrite could not finish. Your draft is unchanged.",
+        { value0: labels[feedback.style] },
+        undefined,
+        locale,
+      );
+    case "rewrite-unavailable":
+      return uiText("Rewriting is unavailable right now.", undefined, undefined, locale);
+    case "exported":
+      return feedback.action === "copy"
+        ? uiText("Copied your draft.", undefined, undefined, locale)
+        : uiText("Saved your draft.", undefined, undefined, locale);
+    case "insertion":
+      return feedback.error.displayMessage(locale);
+    case "action-failed":
+      return uiText(
+        "{kind, select, insert {Could not insert. Your draft is unchanged.} copy {Could not copy. Your draft is unchanged.} other {Could not save. Your draft is unchanged.}}",
+        { kind: feedback.action },
+        undefined,
+        locale,
+      );
+  }
+}
+
+function formatCommandFeedback(
+  feedback: CommandFeedback,
+  labels: Readonly<Record<WritingStyle, string>>,
+  locale: UiLocale,
+): string {
+  switch (feedback.kind) {
+    case "style":
+      return uiText(
+        "Voice command: {value0}.",
+        { value0: labels[feedback.style] },
+        undefined,
+        locale,
+      );
+    case "custom":
+      return uiText(
+        "Custom style captured. Review the instructions, then choose Apply custom style.",
+        undefined,
+        undefined,
+        locale,
+      );
+    case "cancelled":
+      return uiText(
+        "Voice command stopped. Your draft is unchanged.",
+        undefined,
+        undefined,
+        locale,
+      );
+    case "unrecognized":
+      return uiText(
+        "Command not recognized. Your draft is unchanged.",
+        undefined,
+        undefined,
+        locale,
+      );
+    case "microphone-failed":
+      return uiText(
+        "The command microphone could not finish. Your draft is unchanged.",
+        undefined,
+        undefined,
+        locale,
+      );
   }
 }
 
@@ -119,6 +320,8 @@ export interface GlobalDictationOverlayProps {
  * "whatever is focused now" would risk sending private text to the wrong app.
  */
 export function GlobalDictationOverlay(props: GlobalDictationOverlayProps) {
+  const uiLocale = useUiLocale();
+
   const isRecording = props.phase !== "review";
   return (
     <section
@@ -126,7 +329,7 @@ export function GlobalDictationOverlay(props: GlobalDictationOverlayProps) {
       data-phase={props.phase}
       data-reduced-transparency={props.reducedTransparency ? "true" : "false"}
       data-cafe-window-no-drag="true"
-      aria-label="Global dictation"
+      aria-label={uiText("Global dictation", undefined, undefined, uiLocale)}
     >
       <div className="cafe-global-dictation__glass">
         {isRecording ? (
@@ -142,22 +345,30 @@ export function GlobalDictationOverlay(props: GlobalDictationOverlayProps) {
 function CardChrome(
   props: Pick<GlobalDictationOverlayProps, "onCancel" | "pinned" | "onPinChange">,
 ) {
+  const uiLocale = useUiLocale();
+
   return (
     <div className="cafe-global-dictation__chrome">
       <button
         type="button"
         className="cafe-global-dictation__icon-button"
         onClick={props.onCancel}
-        aria-label="Close dictation"
+        aria-label={uiText("Close dictation", undefined, undefined, uiLocale)}
       >
         <XIcon aria-hidden="true" size={16} />
       </button>
-      <span className="cafe-global-dictation__brand">Cafe Dictation</span>
+      <span className="cafe-global-dictation__brand">
+        {uiText("Cafe Dictation", undefined, undefined, uiLocale)}
+      </span>
       {props.onPinChange ? (
         <button
           type="button"
           className="cafe-global-dictation__icon-button"
-          aria-label={props.pinned ? "Unpin dictation window" : "Pin dictation window"}
+          aria-label={
+            props.pinned
+              ? uiText("Unpin dictation window", undefined, undefined, uiLocale)
+              : uiText("Pin dictation window", undefined, undefined, uiLocale)
+          }
           aria-pressed={Boolean(props.pinned)}
           onClick={() => props.onPinChange?.(!props.pinned)}
         >
@@ -171,6 +382,8 @@ function CardChrome(
 }
 
 function RecordingCard(props: GlobalDictationOverlayProps) {
+  const uiLocale = useUiLocale();
+
   const finalizing = props.phase === "finalizing";
   return (
     <div className="cafe-global-dictation__recording">
@@ -179,18 +392,30 @@ function RecordingCard(props: GlobalDictationOverlayProps) {
         <div className="cafe-global-dictation__recording-orb" aria-hidden="true">
           <MicIcon size={20} />
         </div>
-        <h1>{finalizing ? "Finishing your words…" : "Listening to you"}</h1>
+        <h1>
+          {finalizing
+            ? uiText("Finishing your words…", undefined, undefined, uiLocale)
+            : uiText("Listening to you", undefined, undefined, uiLocale)}
+        </h1>
         <p
           className="cafe-global-dictation__live-transcript"
-          aria-label="Current transcription preview"
+          aria-label={uiText("Current transcription preview", undefined, undefined, uiLocale)}
         >
-          {props.liveTranscript?.trim() || "Your words will appear here…"}
+          {props.liveTranscript?.trim() ||
+            uiText("Your words will appear here…", undefined, undefined, uiLocale)}
         </p>
       </div>
       <div className="cafe-global-dictation__recording-footer">
         <span>
           {props.statusMessage ??
-            (finalizing ? "Preparing preview" : `Press ${props.shortcutLabel ?? "⌘⇧,"} to review`)}
+            (finalizing
+              ? uiText("Preparing preview", undefined, undefined, uiLocale)
+              : uiText(
+                  "Press {value0} to review",
+                  { value0: props.shortcutLabel ?? "⌘⇧," },
+                  undefined,
+                  uiLocale,
+                ))}
         </span>
         <button
           type="button"
@@ -199,7 +424,9 @@ function RecordingCard(props: GlobalDictationOverlayProps) {
           onClick={props.onStopRecording}
         >
           <SquareIcon size={12} fill="currentColor" aria-hidden="true" />
-          {finalizing ? "Finishing" : "Stop & review"}
+          {finalizing
+            ? uiText("Finishing", undefined, undefined, uiLocale)
+            : uiText("Stop & review", undefined, undefined, uiLocale)}
         </button>
       </div>
       {props.errorMessage && (
@@ -212,6 +439,9 @@ function RecordingCard(props: GlobalDictationOverlayProps) {
 }
 
 function ReviewCard(props: GlobalDictationOverlayProps) {
+  const uiLocale = useUiLocale();
+  const uiPresentation = useUiPresentation(UI_PRESENTATION_SOURCES);
+
   // The session key owns this source snapshot. Late transcript props in review
   // cannot change what a local style or an approved rewrite starts from.
   const [original] = useState(props.transcript);
@@ -228,10 +458,10 @@ function ReviewCard(props: GlobalDictationOverlayProps) {
   const [formalConsented, setFormalConsented] = useState(Boolean(props.formalConsentGranted));
   const [rewriteBusy, setRewriteBusy] = useState(false);
   const [actionBusy, setActionBusy] = useState<"copy" | "save" | "insert" | null>(null);
-  const [feedback, setFeedback] = useState<string | null>(null);
+  const [feedback, setFeedback] = useState<ReviewFeedback | null>(null);
   const [commandArmed, setCommandArmed] = useState(false);
   const [commandStopping, setCommandStopping] = useState(false);
-  const [commandFeedback, setCommandFeedback] = useState<string | null>(null);
+  const [commandFeedback, setCommandFeedback] = useState<CommandFeedback | null>(null);
   const rewriteRevision = useRef(0);
   const rewriteController = useRef<AbortController | null>(null);
   const commandRevision = useRef(0);
@@ -291,13 +521,11 @@ function ReviewCard(props: GlobalDictationOverlayProps) {
         setDraft(rewritten);
         setStyle(selection.style);
         setManualEdited(false);
-        setFeedback(`${writingStyleLabels[selection.style]} draft ready.`);
+        setFeedback({ kind: "rewrite-ready", style: selection.style });
       } catch {
         if (!controller.signal.aborted && rewriteRevision.current === revision) {
           // Do not surface provider error text, which could contain private input.
-          setFeedback(
-            `${writingStyleLabels[selection.style]} rewrite could not finish. Your draft is unchanged.`,
-          );
+          setFeedback({ kind: "rewrite-failed", style: selection.style });
         }
       } finally {
         if (rewriteRevision.current === revision) {
@@ -318,7 +546,7 @@ function ReviewCard(props: GlobalDictationOverlayProps) {
       setFeedback(null);
       if (selection.style === "formal" || selection.style === "custom") {
         if (!rewriteText) {
-          setFeedback("Rewriting is unavailable right now.");
+          setFeedback({ kind: "rewrite-unavailable" });
           return;
         }
         // Prior Formal consent does not cover new custom instructions. Capture
@@ -364,20 +592,18 @@ function ReviewCard(props: GlobalDictationOverlayProps) {
     const command = parseOneShotVoiceCommand(commandResult.transcript);
     if (command?.type === "style") {
       requestStyle({ style: command.style });
-      setCommandFeedback(`Voice command: ${writingStyleLabels[command.style]}.`);
+      setCommandFeedback({ kind: "style", style: command.style });
     } else if (command?.type === "custom-style") {
       cancelRewrite();
       setCustomInstructions(command.instructions);
       setCustomOpen(true);
       setPendingStyle(null);
       setConsentRequest(null);
-      setCommandFeedback(
-        "Custom style captured. Review the instructions, then choose Apply custom style.",
-      );
+      setCommandFeedback({ kind: "custom" });
     } else if (command?.type === "cancel-command") {
-      setCommandFeedback("Voice command stopped. Your draft is unchanged.");
+      setCommandFeedback({ kind: "cancelled" });
     } else {
-      setCommandFeedback("Command not recognized. Your draft is unchanged.");
+      setCommandFeedback({ kind: "unrecognized" });
     }
   }, [cancelRewrite, commandArmed, commandResult, props.voiceCommand, requestStyle]);
 
@@ -406,7 +632,7 @@ function ReviewCard(props: GlobalDictationOverlayProps) {
       commandRevision.current += 1;
       setCommandArmed(false);
       setCommandStopping(false);
-      setCommandFeedback("The command microphone could not finish. Your draft is unchanged.");
+      setCommandFeedback({ kind: "microphone-failed" });
     }
   };
 
@@ -436,16 +662,13 @@ function ReviewCard(props: GlobalDictationOverlayProps) {
       // Native save pickers can be cancelled. Cancellation is neither a save
       // nor an error, and must not display a false "Saved" confirmation.
       if (completed === false) return;
-      if (kind !== "insert")
-        setFeedback(kind === "copy" ? "Copied your draft." : "Saved your draft.");
+      if (kind !== "insert") setFeedback({ kind: "exported", action: kind });
     } catch (error) {
       if (kind === "insert" && error instanceof GlobalDictationInsertError) {
-        setFeedback(error.message);
+        setFeedback({ kind: "insertion", error });
         return;
       }
-      setFeedback(
-        `${kind === "insert" ? "Could not insert" : kind === "copy" ? "Could not copy" : "Could not save"}. Your draft is unchanged.`,
-      );
+      setFeedback({ kind: "action-failed", action: kind });
     } finally {
       setActionBusy(null);
     }
@@ -468,7 +691,7 @@ function ReviewCard(props: GlobalDictationOverlayProps) {
       className="cafe-global-dictation__review"
       role="dialog"
       aria-modal="false"
-      aria-label="Dictation draft"
+      aria-label={uiText("Dictation draft", undefined, undefined, uiLocale)}
     >
       <CardChrome {...props} onCancel={requestCancel} />
       {/* Keep the controls outside this scroll region so a short display,
@@ -479,7 +702,7 @@ function ReviewCard(props: GlobalDictationOverlayProps) {
             className="cafe-global-dictation__field-label"
             htmlFor="cafe-global-dictation-draft"
           >
-            Editable draft
+            {uiText("Editable draft", undefined, undefined, uiLocale)}
           </label>
         </div>
         <textarea
@@ -497,34 +720,43 @@ function ReviewCard(props: GlobalDictationOverlayProps) {
             setConsentRequest(null);
             setFeedback(null);
           }}
-          placeholder="Your transcript is ready to edit…"
+          placeholder={uiText("Your transcript is ready to edit…", undefined, undefined, uiLocale)}
           spellCheck
         />
         <div className="cafe-global-dictation__draft-meta">
           <span>
             {manualEdited
-              ? "Edited by you"
+              ? uiText("Edited by you", undefined, undefined, uiLocale)
               : style === "as-transcribed"
-                ? "Original transcript"
-                : `Styled: ${writingStyleLabels[style]}`}
+                ? uiText("Original transcript", undefined, undefined, uiLocale)
+                : uiText(
+                    "Styled: {value0}",
+                    { value0: uiPresentation.writingStyleLabels[style] },
+                    undefined,
+                    uiLocale,
+                  )}
           </span>
           <button
             type="button"
             disabled={Boolean(actionBusy)}
             onClick={() => requestStyle({ style: "as-transcribed" })}
           >
-            Original / reset
+            {uiText("Original / reset", undefined, undefined, uiLocale)}
           </button>
         </div>
         <details className="cafe-global-dictation__original-comparison">
-          <summary>Compare original transcript</summary>
-          <p>{original || "No transcript was captured."}</p>
+          <summary>{uiText("Compare original transcript", undefined, undefined, uiLocale)}</summary>
+          <p>{original || uiText("No transcript was captured.", undefined, undefined, uiLocale)}</p>
         </details>
 
         <div className="cafe-global-dictation__style-heading">
-          <span>Writing style</span>
+          <span>{uiText("Writing style", undefined, undefined, uiLocale)}</span>
         </div>
-        <div className="cafe-global-dictation__styles" role="group" aria-label="Writing style">
+        <div
+          className="cafe-global-dictation__styles"
+          role="group"
+          aria-label={uiText("Writing style", undefined, undefined, uiLocale)}
+        >
           {(
             [
               "as-transcribed",
@@ -543,7 +775,7 @@ function ReviewCard(props: GlobalDictationOverlayProps) {
               onClick={() => requestStyle({ style: option })}
             >
               {option === "formal" && <SparklesIcon size={13} aria-hidden="true" />}
-              {writingStyleLabels[option]}
+              {uiPresentation.writingStyleLabels[option]}
             </button>
           ))}
           <button
@@ -554,7 +786,7 @@ function ReviewCard(props: GlobalDictationOverlayProps) {
             aria-controls="cafe-global-dictation-custom-style"
             onClick={() => setCustomOpen((open) => !open)}
           >
-            Custom
+            {uiText("Custom", undefined, undefined, uiLocale)}
           </button>
         </div>
 
@@ -568,7 +800,7 @@ function ReviewCard(props: GlobalDictationOverlayProps) {
               className="cafe-global-dictation__field-label"
               htmlFor="cafe-global-dictation-instructions"
             >
-              Custom style instructions
+              {uiText("Custom style instructions", undefined, undefined, uiLocale)}
             </label>
             <textarea
               id="cafe-global-dictation-instructions"
@@ -586,10 +818,17 @@ function ReviewCard(props: GlobalDictationOverlayProps) {
                 setConsentRequest(null);
                 setFeedback(null);
               }}
-              placeholder="For example: concise, warm, with short sentences"
+              placeholder={uiText(
+                "For example: concise, warm, with short sentences",
+                undefined,
+                undefined,
+                uiLocale,
+              )}
               rows={3}
             />
-            <p id="cafe-global-dictation-custom-help">Applies to the original transcript.</p>
+            <p id="cafe-global-dictation-custom-help">
+              {uiText("Applies to the original transcript.", undefined, undefined, uiLocale)}
+            </p>
             <div className="cafe-global-dictation__custom-actions">
               <span>
                 {customInstructions.length} / {DICTATION_REWRITE_INSTRUCTIONS_MAX_CHARS}
@@ -608,7 +847,7 @@ function ReviewCard(props: GlobalDictationOverlayProps) {
                   requestStyle({ style: "custom", instructions: customInstructions.trim() })
                 }
               >
-                Apply custom style
+                {uiText("Apply custom style", undefined, undefined, uiLocale)}
               </button>
             </div>
           </div>
@@ -617,15 +856,19 @@ function ReviewCard(props: GlobalDictationOverlayProps) {
         {pendingStyle && (
           <div ref={styleNotice} className="cafe-global-dictation__notice" role="alert">
             <p>
-              Applying {writingStyleLabels[pendingStyle.style]} starts from the original transcript
-              and replaces your manual edits.
+              <UiMessage
+                message={
+                  "Applying <slot1></slot1> starts from the original transcript and replaces your manual edits."
+                }
+                slots={{ slot1: uiPresentation.writingStyleLabels[pendingStyle.style] }}
+              />
             </p>
             <div className="cafe-global-dictation__notice-actions">
               <button type="button" onClick={() => setPendingStyle(null)}>
-                Keep edits
+                {uiText("Keep edits", undefined, undefined, uiLocale)}
               </button>
               <button type="button" onClick={() => applyStyle(pendingStyle)}>
-                Replace draft
+                {uiText("Replace draft", undefined, undefined, uiLocale)}
               </button>
             </div>
           </div>
@@ -636,12 +879,22 @@ function ReviewCard(props: GlobalDictationOverlayProps) {
             <p>
               {/* Required privacy and billing consent: keep it visible, one line. */}
               {consentRequest.style === "custom"
-                ? "Sends the original transcript and your style instructions to OpenAI for rewriting (uses additional API credits)."
-                : "Sends the original transcript to OpenAI for rewriting (uses additional API credits)."}
+                ? uiText(
+                    "Sends the original transcript and your style instructions to OpenAI for rewriting (uses additional API credits).",
+                    undefined,
+                    undefined,
+                    uiLocale,
+                  )
+                : uiText(
+                    "Sends the original transcript to OpenAI for rewriting (uses additional API credits).",
+                    undefined,
+                    undefined,
+                    uiLocale,
+                  )}
             </p>
             <div className="cafe-global-dictation__notice-actions">
               <button type="button" onClick={() => setConsentRequest(null)}>
-                Not now
+                {uiText("Not now", undefined, undefined, uiLocale)}
               </button>
               <button
                 type="button"
@@ -651,7 +904,7 @@ function ReviewCard(props: GlobalDictationOverlayProps) {
                   void startRewrite(consentRequest);
                 }}
               >
-                Allow & rewrite
+                {uiText("Allow & rewrite", undefined, undefined, uiLocale)}
               </button>
             </div>
           </div>
@@ -659,13 +912,20 @@ function ReviewCard(props: GlobalDictationOverlayProps) {
 
         {discardConfirm && (
           <div className="cafe-global-dictation__notice" role="alert">
-            <p>Discard this draft? It hasn't been inserted or saved.</p>
+            <p>
+              {uiText(
+                "Discard this draft? It hasn''t been inserted or saved.",
+                undefined,
+                undefined,
+                uiLocale,
+              )}
+            </p>
             <div className="cafe-global-dictation__notice-actions">
               <button type="button" onClick={() => setDiscardConfirm(false)}>
-                Keep drafting
+                {uiText("Keep drafting", undefined, undefined, uiLocale)}
               </button>
               <button type="button" onClick={props.onCancel}>
-                Discard draft
+                {uiText("Discard draft", undefined, undefined, uiLocale)}
               </button>
             </div>
           </div>
@@ -673,8 +933,15 @@ function ReviewCard(props: GlobalDictationOverlayProps) {
 
         <div className="cafe-global-dictation__command-row">
           <div>
-            <span>Voice style command</span>
-            <small>Say “style lowercase” or “style warm and concise”.</small>
+            <span>{uiText("Voice style command", undefined, undefined, uiLocale)}</span>
+            <small>
+              {uiText(
+                "Say “style lowercase” or “style warm and concise”.",
+                undefined,
+                undefined,
+                uiLocale,
+              )}
+            </small>
           </div>
           <button
             type="button"
@@ -688,31 +955,35 @@ function ReviewCard(props: GlobalDictationOverlayProps) {
             }
             aria-label={
               commandFinalizing
-                ? "Finishing voice style command"
+                ? uiText("Finishing voice style command", undefined, undefined, uiLocale)
                 : commandArmed
-                  ? "Stop voice style command"
-                  : "Start voice style command"
+                  ? uiText("Stop voice style command", undefined, undefined, uiLocale)
+                  : uiText("Start voice style command", undefined, undefined, uiLocale)
             }
             aria-pressed={commandArmed}
             onClick={() => void toggleCommand()}
           >
             <MicIcon size={17} aria-hidden="true" />
-            {commandFinalizing ? "Finishing" : commandArmed ? "Listening" : "Command"}
+            {commandFinalizing
+              ? uiText("Finishing", undefined, undefined, uiLocale)
+              : commandArmed
+                ? uiText("Listening", undefined, undefined, uiLocale)
+                : uiText("Command", undefined, undefined, uiLocale)}
           </button>
         </div>
         {commandFeedback && (
           <p className="cafe-global-dictation__feedback" role="status">
-            {commandFeedback}
+            {formatCommandFeedback(commandFeedback, uiPresentation.writingStyleLabels, uiLocale)}
           </p>
         )}
         {rewriteBusy && (
           <p className="cafe-global-dictation__feedback" role="status">
-            Refining your draft…
+            {uiText("Refining your draft…", undefined, undefined, uiLocale)}
           </p>
         )}
         {feedback && (
           <p ref={actionFeedback} className="cafe-global-dictation__feedback" role="status">
-            {feedback}
+            {formatReviewFeedback(feedback, uiPresentation.writingStyleLabels, uiLocale)}
           </p>
         )}
         {props.statusMessage && (
@@ -733,7 +1004,12 @@ function ReviewCard(props: GlobalDictationOverlayProps) {
             id="cafe-global-dictation-paste-notice"
             className="cafe-global-dictation__paste-notice"
           >
-            Uses your clipboard briefly. Clipboard-history apps may retain the draft.
+            {uiText(
+              "Uses your clipboard briefly. Clipboard-history apps may retain the draft.",
+              undefined,
+              undefined,
+              uiLocale,
+            )}
           </p>
         )}
         <button
@@ -741,7 +1017,7 @@ function ReviewCard(props: GlobalDictationOverlayProps) {
           className="cafe-global-dictation__quiet-button"
           onClick={requestCancel}
         >
-          Cancel
+          {uiText("Cancel", undefined, undefined, uiLocale)}
         </button>
         <div className="cafe-global-dictation__review-actions">
           <button
@@ -749,14 +1025,16 @@ function ReviewCard(props: GlobalDictationOverlayProps) {
             disabled={!usableDraft || Boolean(actionBusy)}
             onClick={() => void runAction("copy", props.onCopy)}
           >
-            <ClipboardIcon size={15} aria-hidden="true" /> Copy
+            <ClipboardIcon size={15} aria-hidden="true" />
+            {uiText(" Copy", undefined, undefined, uiLocale)}
           </button>
           <button
             type="button"
             disabled={!usableDraft || Boolean(actionBusy)}
             onClick={() => void runAction("save", props.onSave)}
           >
-            <FileDownIcon size={15} aria-hidden="true" /> Save text…
+            <FileDownIcon size={15} aria-hidden="true" />
+            {uiText(" Save text…", undefined, undefined, uiLocale)}
           </button>
           <button
             type="button"
@@ -767,10 +1045,15 @@ function ReviewCard(props: GlobalDictationOverlayProps) {
             disabled={!usableDraft || Boolean(actionBusy) || props.insertAvailable === false}
             onClick={() => void runAction("insert", props.onInsert)}
           >
-            {usesPaste ? "Paste into app" : "Insert"}
+            {usesPaste
+              ? uiText("Paste into app", undefined, undefined, uiLocale)
+              : uiText("Insert", undefined, undefined, uiLocale)}
           </button>
         </div>
       </div>
     </div>
   );
 }
+
+// Finite source-owned labels/helpers only; no received or user data.
+const UI_PRESENTATION_SOURCES = { writingStyleLabels };

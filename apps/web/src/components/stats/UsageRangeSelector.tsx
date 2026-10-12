@@ -1,3 +1,5 @@
+import { useUiLocale, useUiPresentation } from "~/i18n";
+import { uiText } from "@cafecode/shared/i18n";
 import { SegmentedControl } from "../ui/segmented-control";
 import { USAGE_RANGES, type UsageRangeKey } from "./usageRange";
 
@@ -15,12 +17,18 @@ export function UsageRangeSelector({
   value: UsageRangeKey;
   onChange: (value: UsageRangeKey) => void;
 }) {
+  const uiLocale = useUiLocale();
+  const uiPresentation = useUiPresentation(UI_PRESENTATION_SOURCES);
+
   return (
     <SegmentedControl
-      aria-label="Usage date range"
+      aria-label={uiText("Usage date range", undefined, undefined, uiLocale)}
       value={value}
       onValueChange={onChange}
-      options={RANGE_OPTIONS}
+      options={uiPresentation.RANGE_OPTIONS}
     />
   );
 }
+
+// Finite source-owned labels/helpers only; no received or user data.
+const UI_PRESENTATION_SOURCES = { RANGE_OPTIONS };

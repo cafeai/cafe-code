@@ -33,6 +33,7 @@ vi.mock("../remote/api", () => ({
   fetchRemoteEnvironmentDescriptor: vi.fn(),
   fetchRemoteSessionState: mockFetchRemoteSessionState,
   resolveRemoteWebSocketConnectionUrl: vi.fn(() => "ws://remote.example.test"),
+  isRetryableRemoteWebSocketUrlError: vi.fn(() => false),
 }));
 
 vi.mock("./catalog", () => ({

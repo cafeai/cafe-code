@@ -238,6 +238,14 @@ export const MODEL_SLUG_ALIASES_BY_PROVIDER: Partial<
     "claude-sonnet-4.6": "claude-sonnet-4-6",
     "claude-sonnet-4-6-20251117": "claude-sonnet-4-6",
     haiku: "claude-haiku-4-5",
+    // Explicit version aliases never advance the saved bare Haiku selection.
+    // The provider's native-version/live-catalogue gates still own eligibility.
+    "haiku-5.5": "claude-haiku-5-5",
+    "claude-haiku-5.5": "claude-haiku-5-5",
+    "haiku-5-5": "claude-haiku-5-5",
+    "haiku5.5": "claude-haiku-5-5",
+    haiku55: "claude-haiku-5-5",
+    haiku_5_5: "claude-haiku-5-5",
     "haiku-4.5": "claude-haiku-4-5",
     "claude-haiku-4.5": "claude-haiku-4-5",
     "claude-haiku-4-5-20251001": "claude-haiku-4-5",

@@ -2,6 +2,7 @@ import "../index.css";
 import { describe, expect, it } from "vitest";
 import { renderMermaid } from "../lib/mermaid/renderService";
 import { sanitizeMermaidSvg } from "../lib/mermaid/sanitizeSvg";
+import { GANTT_SCHEDULE, GANTT_TASK_DATES } from "./mermaidGantt.test.fixture";
 
 const EXAMPLE = `flowchart TD
     I["Program + public inputs + protected private inputs"] --> A["Compile and admit original sources through CHL"]
@@ -198,6 +199,73 @@ function expectRelativeValues(magnitudes: readonly number[], values: readonly nu
   }
 }
 
+function nativeCalendarTime(date: readonly [number, number, number]): number {
+  return new Date(date[0], date[1] - 1, date[2]).getTime();
+}
+
+function expectGanttDates(parsed: Document): void {
+  // Bind calendar dates to the real axis labels and transforms, not just the
+  // relative ordering of bars. A renderer shifting every date by one day must
+  // fail even if the dependency topology and task widths still look plausible.
+  const grid = parsed.querySelector(".grid")!;
+  expect(grid).not.toBeNull();
+  const offset = Number(grid.getAttribute("transform")?.match(/^translate\(([-\d.]+)/)?.[1]);
+  expect(Number.isFinite(offset)).toBe(true);
+  // d3's axis may translate its zero-origin domain and ticks by a half pixel
+  // for crisp strokes. Derive that native offset from the actual domain path
+  // instead of assuming a device pixel ratio or changing browser media.
+  const strokeOffset = Number(
+    grid
+      .querySelector("path.domain")
+      ?.getAttribute("d")
+      ?.match(/^M([-\d.]+)/)?.[1],
+  );
+  expect(Number.isFinite(strokeOffset)).toBe(true);
+  const anchors = Array.from(grid.querySelectorAll(".tick"), (tick) => {
+    const label = tick.querySelector("text")?.textContent?.trim() ?? "";
+    const calendar = label.match(/^(Oct|Nov)\s+(\d{1,2})$/);
+    expect(calendar, `Unexpected authored axis label ${label}`).not.toBeNull();
+    const x =
+      Number(tick.getAttribute("transform")?.match(/^translate\(([-\d.]+)/)?.[1]) +
+      offset -
+      strokeOffset;
+    expect(Number.isFinite(x)).toBe(true);
+    return {
+      x,
+      time: new Date(2026, calendar![1] === "Oct" ? 9 : 10, Number(calendar![2])).getTime(),
+    };
+  });
+  expect(anchors.length).toBeGreaterThanOrEqual(2);
+  const first = anchors[0]!;
+  const last = anchors.at(-1)!;
+  expect(last.time).toBeGreaterThan(first.time);
+  expect(last.x).toBeGreaterThan(first.x);
+  const xAt = (time: number) =>
+    first.x + ((time - first.time) * (last.x - first.x)) / (last.time - first.time);
+  expect(parsed.querySelectorAll("rect.task")).toHaveLength(GANTT_TASK_DATES.length);
+  for (const task of GANTT_TASK_DATES) {
+    const bar = parsed.querySelector(`rect[id$="-${task.id}"]`)!;
+    expect(bar, `Missing task ${task.id}`).not.toBeNull();
+    const x = Number(bar.getAttribute("x"));
+    const width = Number(bar.getAttribute("width"));
+    const height = Number(bar.getAttribute("height"));
+    expect([x, width, height].every(Number.isFinite)).toBe(true);
+    expect(width).toBeGreaterThan(0);
+    expect(height).toBeGreaterThan(0);
+    // The pinned Gantt scale uses rangeRound. Independent tick anchors and
+    // each task endpoint can therefore differ by at most one output pixel;
+    // this is renderer quantization, not a timing/date tolerance.
+    expect(
+      Math.abs(x - xAt(nativeCalendarTime(task.start))),
+      `${task.id} start`,
+    ).toBeLessThanOrEqual(1);
+    expect(
+      Math.abs(x + width - xAt(nativeCalendarTime(task.end))),
+      `${task.id} end`,
+    ).toBeLessThanOrEqual(1);
+  }
+}
+
 describe("real isolated Mermaid rendering", () => {
   it("sanitizes a basic SVG", () => {
     expect(
@@ -371,10 +439,29 @@ describe("real isolated Mermaid rendering", () => {
     },
   );
 
+  it("renders the full parallel Gantt schedule with exact multi-predecessor dates in both themes", async () => {
+    const themed: string[] = [];
+    for (const theme of ["dark", "light"] as const) {
+      const result = await renderMermaid(GANTT_SCHEDULE, theme);
+      expect(result.width).toBeGreaterThan(0);
+      expect(result.height).toBeGreaterThan(0);
+      const { parsed, labels, presentation } = chartSvg(result.svg);
+      expect(labels).toContain("Illustrative parallel engineering schedule");
+      for (const section of ["Complete transfer", "Original targets", "General system"])
+        expect(labels).toContain(section);
+      for (const task of GANTT_TASK_DATES) expect(labels).toContain(task.label);
+      expectGanttDates(parsed);
+      await decodeChartImage(result.svg);
+      themed.push(presentation);
+    }
+    expect(themed[0]).not.toBe(themed[1]);
+    expect(document.querySelector('iframe[title="Isolated diagram renderer"]')).toBeNull();
+  });
+
   it("rejects malformed, unsupported and oversized graphs without poisoning the queue", async () => {
     for (const source of [
       "flowchart TD\nA[unterminated",
-      "gantt\nsection Build\nCompile :a, 2026-01-01, 1d",
+      "notAMermaidFamily\ntitle Unsupported diagram\nsection Build\nCompile: 5: Team",
       "xychart-beta\nbar [1, broken]",
       'pie\n"a" nope',
       `flowchart TD\n${Array.from({ length: 251 }, (_, i) => `n${i}[Node]`).join("\n")}`,

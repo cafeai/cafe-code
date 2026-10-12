@@ -15,6 +15,7 @@ import {
   type ProviderRequestKind,
   type ProviderSession,
   type ProviderSendTurnInput,
+  type ProviderSubagentPolicySession,
   ProviderThreadGoal,
   type ProviderThreadGoalClearResult,
   type ProviderThreadGoalSetInput,
@@ -28,7 +29,10 @@ import {
   TurnId,
 } from "@cafecode/contracts";
 import { normalizeModelSlug } from "@cafecode/shared/model";
-import { classifyCodexTransientFailure } from "../codexTransientFailure.ts";
+import {
+  classifyCodexTransientFailure,
+  redactCodexFailureDiagnosticPayload,
+} from "../codexTransientFailure.ts";
 import {
   hasVisibleProviderSubagentPublicText,
   type ProviderSubagentActivityInput,
@@ -90,6 +94,7 @@ import * as CodexRpc from "effect-codex-app-server/rpc";
 import * as EffectCodexSchema from "effect-codex-app-server/schema";
 
 import { buildCodexInitializeParams } from "./CodexProvider.ts";
+import { matchesSubagentPolicySession } from "../subagentPolicyContinuation.ts";
 import { isCodexRootAgentPath } from "./CodexSubagentPath.ts";
 import { rewindCodexThreadWithClient } from "./CodexThreadRewind.ts";
 import { codexNativeReviewParams, decodeCodexNativeReviewResponse } from "./CodexNativeReview.ts";
@@ -489,9 +494,12 @@ export interface CodexSessionRuntimeOptions {
   // `model_auto_compact_token_limit`. When absent, app-server owns threshold
   // resolution exactly as it does for the official Codex CUI.
   readonly autoCompactTokenLimit?: number | undefined;
+  /** Explicit Cafe chat override only; absent keeps native config/catalog policy. */
+  readonly codexContextWindowOverride?: number | undefined;
 }
 
 export interface CodexSessionRuntimeSendTurnInput {
+  readonly expectedSubagentPolicySession?: ProviderSubagentPolicySession | undefined;
   readonly cyberAccessProgram?: EffectCodexSchema.V2TurnStartParams__CyberAccessProgram | undefined;
   readonly codexReview?: import("@cafecode/contracts").CodexReviewTarget;
   /** Internal exact-root recovery guard; never forwarded as app-server params. */
@@ -513,6 +521,7 @@ export interface CodexSessionRuntimeSendTurnInput {
 }
 
 export interface CodexSessionRuntimeSteerTurnInput {
+  readonly expectedSubagentPolicySession?: ProviderSubagentPolicySession | undefined;
   readonly expectedTurnId: TurnId;
   /**
    * Fixed-size, content-free correlation derived by CodexAdapter before the
@@ -1597,6 +1606,7 @@ function buildThreadStartParams(input: {
   readonly serviceTier: CodexServiceTier | undefined;
   readonly additionalDirectories?: ReadonlyArray<string> | undefined;
   readonly autoCompactTokenLimit?: number | undefined;
+  readonly codexContextWindowOverride?: number | undefined;
 }): CodexThreadStartParamsWithRuntimeWorkspaceRoots {
   const config = runtimeModeToThreadConfig(input.runtimeMode);
   const runtimeWorkspaceRoots = buildRuntimeWorkspaceRoots({
@@ -1614,6 +1624,13 @@ function buildThreadStartParams(input: {
   // and tool-output budgets provider-owned so resumed/forked sessions preserve
   // upstream's recorded truncation budgets without Cafe forcing extra compacts.
   const threadConfig: Record<string, unknown> = {};
+  if (input.codexContextWindowOverride !== undefined) {
+    // 0.162.1 config_manager.rs loads baseline config plus these overrides.
+    // Reset must omit the key in a fresh runtime: JSON null is converted into
+    // an empty TOML string by utils/json-to-toml, not a deletion operation.
+    // Native ModelInfo still owns capacity clamps, headroom and compaction.
+    threadConfig.model_context_window = input.codexContextWindowOverride;
+  }
   if (input.autoCompactTokenLimit !== undefined) {
     // This is an explicit user override. App-server still applies its upstream
     // context-window clamp and the user's upstream scope configuration.
@@ -2759,6 +2776,7 @@ export const openCodexThread = (input: {
   readonly resumeThreadId: string | undefined;
   readonly additionalDirectories?: ReadonlyArray<string> | undefined;
   readonly autoCompactTokenLimit?: number | undefined;
+  readonly codexContextWindowOverride?: number | undefined;
 }): Effect.Effect<CodexThreadOpenResponse, CodexErrors.CodexAppServerError> => {
   const resumeThreadId = input.resumeThreadId;
   const startParams = buildThreadStartParams({
@@ -2769,6 +2787,7 @@ export const openCodexThread = (input: {
     additionalDirectories: input.additionalDirectories,
     autoCompactTokenLimit: input.autoCompactTokenLimit,
     customInstructions: input.customInstructions,
+    codexContextWindowOverride: input.codexContextWindowOverride,
   });
 
   if (resumeThreadId === undefined) {
@@ -3013,7 +3032,15 @@ export function isCodexPrivateMetadataNotification(method: string): boolean {
   // Source: rust-v0.157.0 app-server-protocol/src/protocol/v2/account.rs,
   // GatewayOAuthChangedNotification. A future login UI must consume it via a
   // private, live-only channel, not the durable conversation event stream.
-  return method === "thread/attachment/updated" || method === "account/gatewayOAuth/changed";
+  // 0.162's prediction result is speculative model text, not an assistant
+  // item, goal, user request or liveness edge. Cafe has no authenticated
+  // prediction surface or retention contract; discard it before observers,
+  // logging and child ownership can treat it as ordinary conversation work.
+  return (
+    method === "thread/attachment/updated" ||
+    method === "account/gatewayOAuth/changed" ||
+    method === "thread/prediction/updated"
+  );
 }
 
 function readNotificationThreadId(notification: CodexServerNotification): string | undefined {
@@ -4208,6 +4235,33 @@ export const reconcileCodexSystemErrorThreadStatusLifecycleBoundary = Effect.fn(
 });
 
 /**
+ * Final unchanged-policy admission for steering uses the same native lifecycle
+ * permit as Stop/root transitions. It never resumes a transcript or creates a
+ * process. A closure after this check is still rejected by the transport's
+ * sticky termination fence rather than redirected into a replacement context.
+ */
+export const assertCodexSubagentPolicySessionBoundary = Effect.fn(
+  "assertCodexSubagentPolicySessionBoundary",
+)(function* (input: {
+  readonly semaphore: Semaphore.Semaphore;
+  readonly closedRef: Ref.Ref<boolean>;
+  readonly sessionRef: Ref.Ref<ProviderSession>;
+  readonly expected: ProviderSubagentPolicySession;
+}) {
+  yield* input.semaphore.withPermits(1)(
+    Effect.gen(function* () {
+      if (
+        (yield* Ref.get(input.closedRef)) ||
+        !matchesSubagentPolicySession(yield* Ref.get(input.sessionRef), input.expected)
+      )
+        return yield* CodexErrors.CodexAppServerRequestError.invalidRequest(
+          "The existing Codex process or its recorded subagent policy changed. The message was not delivered.",
+        );
+    }),
+  );
+});
+
+/**
  * Reserve one native root start without changing the visible aggregate or
  * retiring its children. The app-server contract has one primary active turn;
  * the sole running-session exception is an exact successfully completed root
@@ -4230,6 +4284,7 @@ export const admitCodexTurnStartLifecycleBoundary = Effect.fn(
   readonly serviceTierSnapshotRef?: Ref.Ref<CodexServiceTierSnapshot | undefined> | undefined;
   readonly expectedCompletedRootTurnId?: TurnId | undefined;
   readonly expectedFailedRoot?: ProviderSendTurnInput["expectedFailedRoot"];
+  readonly expectedSubagentPolicySession?: ProviderSubagentPolicySession | undefined;
   readonly latestRootTurnIdRef?: Ref.Ref<string | undefined>;
   readonly nativeContextAvailable?: Effect.Effect<boolean>;
   readonly allowActiveTurnSteerFallback?: boolean | undefined;
@@ -4246,6 +4301,13 @@ export const admitCodexTurnStartLifecycleBoundary = Effect.fn(
             "Cannot send a message after the Codex session has closed.",
           );
         }
+        if (
+          input.expectedSubagentPolicySession !== undefined &&
+          !matchesSubagentPolicySession(session, input.expectedSubagentPolicySession)
+        )
+          return yield* CodexErrors.CodexAppServerRequestError.invalidRequest(
+            "The existing Codex process or its recorded subagent policy changed. The message was not delivered.",
+          );
         if (nativeTurnStartPending || manualCompactionPending) {
           return yield* CodexErrors.CodexAppServerRequestError.invalidRequest(
             "Cannot send a message while another native Codex request is awaiting confirmation.",
@@ -4770,6 +4832,28 @@ export function sanitizeCodexProtocolDiagnosticPayload(input: {
 
   const payload = readRecord(input.payload);
   const method = payload ? readString(payload.method) : undefined;
+  if (
+    method === "error" ||
+    method === "turn/completed" ||
+    method === "turn/started" ||
+    method === "thread/started"
+  ) {
+    if (input.stage === "decode_failed")
+      return {
+        method,
+        stage: input.stage,
+        diagnosticClass: "native-error-decode-failure-redacted",
+      };
+    // Construct a copy without the schema cause or extension-bearing rejected
+    // input. The original notification still drives lifecycle/classification.
+    return { method, params: redactCodexFailureDiagnosticPayload(method, payload?.params) };
+  }
+  if (method === "thread/prediction/updated" || method === "thread/attachment/updated") {
+    // This defense also covers typed-client decode failures, whose schema
+    // issue can embed private attachment values or speculative text before the
+    // runtime's early discard.
+    return { method, diagnosticClass: "private-metadata-redacted", stage: input.stage };
+  }
   if (input.direction === "incoming" && input.stage === "decode_failed" && !method) {
     // A malformed JSON frame has no trustworthy method to route through the
     // private-notification filters. Schema causes can embed the entire actual
@@ -5763,8 +5847,12 @@ const readCodexSubagentPublicHistoryWithClient = Effect.fn(
         role: item.type === "userMessage" ? "user" : "assistant",
         text,
         ...(item.type === "agentMessage" &&
-        (item.phase === "commentary" || item.phase === "final_answer")
-          ? { phase: item.phase }
+        (item.phase === "commentary" ||
+          item.phase === "partial_answer" ||
+          item.phase === "final_answer")
+          ? // A partial answer is public interim output, not a final answer or
+            // proof that its native root/children have finished.
+            { phase: item.phase === "partial_answer" ? "commentary" : item.phase }
           : {}),
         ...(startedAtMs !== undefined ? { startedAtMs } : {}),
         ...(completedAtMs !== undefined ? { completedAtMs } : {}),
@@ -5927,8 +6015,10 @@ export const readCodexSubagentSummaryWithInitializedClient = Effect.fn(
           role: item.type === "userMessage" ? "user" : "assistant",
           text,
           ...(item.type === "agentMessage" &&
-          (item.phase === "commentary" || item.phase === "final_answer")
-            ? { phase: item.phase }
+          (item.phase === "commentary" ||
+            item.phase === "partial_answer" ||
+            item.phase === "final_answer")
+            ? { phase: item.phase === "partial_answer" ? "commentary" : item.phase }
             : {}),
         });
       }
@@ -6253,6 +6343,7 @@ export const makeCodexSessionRuntime = (
       status: "connecting",
       runtimeMode: options.runtimeMode,
       maxConcurrentSubagents: options.maxConcurrentSubagents ?? null,
+      codexContextWindowOverride: options.codexContextWindowOverride ?? null,
       cwd: options.cwd,
       ...(options.additionalDirectories !== undefined
         ? { additionalDirectories: options.additionalDirectories }
@@ -8779,6 +8870,7 @@ export const makeCodexSessionRuntime = (
         resumeThreadId,
         autoCompactTokenLimit: options.autoCompactTokenLimit,
         customInstructions: options.customInstructions,
+        codexContextWindowOverride: options.codexContextWindowOverride,
       });
 
       const providerThreadId = opened.thread.id;
@@ -9143,6 +9235,7 @@ export const makeCodexSessionRuntime = (
               ? undefined
               : input.expectedCompletedRootTurnId,
             expectedFailedRoot: input.expectedFailedRoot,
+            expectedSubagentPolicySession: input.expectedSubagentPolicySession,
             latestRootTurnIdRef: latestHistoryRootTurnRef,
             nativeContextAvailable,
             allowActiveTurnSteerFallback: reviewParams ? false : input.allowActiveTurnSteerFallback,
@@ -9590,6 +9683,13 @@ export const makeCodexSessionRuntime = (
                 ...(input.attachments ? { attachments: input.attachments } : {}),
               });
               yield* assertHistoryUsable(providerThreadId);
+              if (input.expectedSubagentPolicySession !== undefined)
+                yield* assertCodexSubagentPolicySessionBoundary({
+                  semaphore: aggregateLifecycleSemaphore,
+                  closedRef,
+                  sessionRef,
+                  expected: input.expectedSubagentPolicySession,
+                });
               return yield* client.raw.request("turn/steer", params);
             });
           const pendingSteerAdmission = yield* recordPendingSteerProcessing({
@@ -9927,6 +10027,9 @@ export const makeCodexSessionRuntime = (
             }
             yield* client.request("thread/goal/set", {
               threadId: providerThreadId,
+              // This pause follows the owner's explicit Stop, not an
+              // automatic failure/recovery or inferred model instruction.
+              origin: "user",
               status: "paused",
             });
           }).pipe(
@@ -10005,6 +10108,12 @@ export const makeCodexSessionRuntime = (
             yield* assertHistoryUsable(providerThreadId);
           const response = yield* client.request("thread/goal/set", {
             threadId: providerThreadId,
+            // The existing authenticated goal-control path (and explicit
+            // Stop reconciliation) is the source of this provenance. It
+            // neither creates consent nor authorizes new goal mutations.
+            // Match Codex 0.162.1 TUI app_server_session.rs:1599–1607; older
+            // providers ignore this optional field without changing defaults.
+            origin: "user",
             ...(input.objective !== undefined ? { objective: input.objective } : {}),
             ...(input.status !== undefined ? { status: input.status } : {}),
             ...(input.tokenBudget !== undefined ? { tokenBudget: input.tokenBudget } : {}),
@@ -10015,6 +10124,7 @@ export const makeCodexSessionRuntime = (
         const providerThreadId = yield* readProviderThreadId;
         return yield* client.request("thread/goal/clear", {
           threadId: providerThreadId,
+          origin: "user",
         });
       }),
       readThread: Effect.gen(function* () {

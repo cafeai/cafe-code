@@ -21,6 +21,11 @@ import {
 } from "@cafecode/contracts";
 import { requestProviderDaemonJson } from "@cafecode/shared/providerDaemonHttp";
 import { CAFE_CODE_SHELL_ENV_HYDRATED } from "@cafecode/shared/shell";
+import {
+  BACKEND_STARTUP_PROGRESS_FD,
+  makeProviderDaemonStartupProgressTracker,
+  type ProviderDaemonStartupProgress,
+} from "@cafecode/shared/backendStartupProgress";
 import * as Context from "effect/Context";
 import * as Clock from "effect/Clock";
 import * as Data from "effect/Data";
@@ -30,6 +35,7 @@ import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
+import * as PubSub from "effect/PubSub";
 import * as Ref from "effect/Ref";
 import * as Schema from "effect/Schema";
 import * as Schedule from "effect/Schedule";
@@ -122,6 +128,8 @@ export interface DesktopProviderDaemonSnapshot {
 }
 
 export interface DesktopProviderDaemonManagerShape {
+  /** Bounded, content-free feedback from the current owned startup attempt. */
+  readonly startupProgress?: Stream.Stream<ProviderDaemonStartupProgress>;
   /** Configure the main backend loopback port before daemon adoption/spawn. */
   readonly configureCafeMcpPort?: (port: number) => Effect.Effect<void>;
   readonly ensureRunning: Effect.Effect<ProviderDaemonClientConfig>;
@@ -166,6 +174,40 @@ class ProviderDaemonSpawnError extends Data.TaggedError("ProviderDaemonSpawnErro
   }
 }
 
+/** Uncertain child exit is a terminal defect, never an automatic spawn retry. */
+export class ProviderDaemonTerminationUnconfirmedError extends Data.TaggedError(
+  "ProviderDaemonTerminationUnconfirmedError",
+)<{}> {
+  override get message() {
+    return "Provider daemon exit could not be confirmed; its process and recovery files were preserved. Retry connection.";
+  }
+}
+
+/**
+ * Bound waiting for the actual child exit event, not merely sending a signal.
+ * Effect's forceKillAfter wraps signal delivery before its exit wait; it cannot
+ * bound a Node child trapped inside synchronous SQLite. Only this exact handle
+ * is used, and an uncertain result never authorizes marker cleanup/replacement.
+ */
+export const stopOwnedProviderDaemonChild = Effect.fn("desktop.providerDaemon.stopOwnedChild")(
+  function* (handle: ChildProcessSpawner.ChildProcessHandle): Effect.fn.Return<boolean> {
+    const exited = handle.isRunning.pipe(
+      Effect.map((running) => !running),
+      // A failed observation cannot authorize recovery-file cleanup.
+      Effect.catch(() => Effect.succeed(false)),
+    );
+    if (yield* exited) return true;
+    yield* handle
+      .kill({ killSignal: "SIGTERM" })
+      .pipe(Effect.ignore, Effect.timeoutOption(Duration.seconds(15)));
+    if (yield* exited) return true;
+    yield* handle
+      .kill({ killSignal: "SIGKILL" })
+      .pipe(Effect.ignore, Effect.timeoutOption(Duration.seconds(3)));
+    return yield* exited;
+  },
+);
+
 class ProviderDaemonIoError extends Data.TaggedError("ProviderDaemonIoError")<{
   readonly operation: string;
   readonly cause: unknown;
@@ -200,6 +242,8 @@ interface ProviderDaemonState {
   readonly endpoint: Option.Option<ProviderDaemonClientConfig>;
   readonly adoptedExistingProcess: boolean;
   readonly terminate: Option.Option<Effect.Effect<void>>;
+  /** Retain direct-child exit evidence after a failed startup; never adopt a PID as this handle. */
+  readonly ownedChild: Option.Option<ChildProcessSpawner.ChildProcessHandle>;
   readonly lastHealth: Option.Option<ProviderDaemonHealthValue>;
   /** The last successful rich-health observation, independent of liveness publications. */
   readonly lastHealthObservedAt: Option.Option<string>;
@@ -221,6 +265,7 @@ const initialState: ProviderDaemonState = {
   endpoint: Option.none(),
   adoptedExistingProcess: false,
   terminate: Option.none(),
+  ownedChild: Option.none(),
   lastHealth: Option.none(),
   lastHealthObservedAt: Option.none(),
   lastError: Option.none(),
@@ -507,21 +552,31 @@ const removeProviderDaemonIpcSocket = (
   }).pipe(Effect.ignore);
 };
 
-const waitForHealth = (
+export const waitForOwnedProviderDaemonHealth = (
   endpoint: ProviderDaemonClientConfig,
+  progress: ReturnType<typeof makeProviderDaemonStartupProgressTracker>,
+  elapsedMs: Effect.Effect<number>,
+  handle: ChildProcessSpawner.ChildProcessHandle,
+  fetchHealth: typeof fetchProviderDaemonHealth = fetchProviderDaemonHealth,
 ): Effect.Effect<ProviderDaemonHealthValue, ProviderDaemonSpawnError> =>
   Effect.gen(function* () {
-    const startedAt = yield* Clock.currentTimeMillis;
     let lastError: unknown = undefined;
-    while ((yield* Clock.currentTimeMillis) - startedAt < PROVIDER_DAEMON_READINESS_TIMEOUT_MS) {
+    while ((yield* elapsedMs) < progress.deadlineMs) {
+      if (!(yield* handle.isRunning.pipe(Effect.orElseSucceed(() => true)))) break;
+      const remainingMs = Math.max(0, progress.deadlineMs - (yield* elapsedMs));
       const healthResult = yield* Effect.tryPromise({
-        try: () => fetchProviderDaemonHealth(endpoint),
+        try: () => fetchHealth(endpoint),
         catch: (cause) => new ProviderDaemonHealthError({ cause }),
-      }).pipe(Effect.result);
-      if (healthResult._tag === "Success") {
+      }).pipe(
+        Effect.timeout(Duration.millis(remainingMs)),
+        Effect.mapError((cause) => new ProviderDaemonHealthError({ cause })),
+        Effect.result,
+      );
+      if (healthResult._tag === "Success" && (yield* elapsedMs) < progress.deadlineMs) {
         return healthResult.success;
       }
-      lastError = healthResult.failure;
+      if (healthResult._tag === "Failure") lastError = healthResult.failure;
+      if ((yield* elapsedMs) >= progress.deadlineMs) break;
       yield* Effect.sleep(Duration.millis(PROVIDER_DAEMON_READINESS_INTERVAL_MS));
     }
     return yield* new ProviderDaemonSpawnError({
@@ -546,6 +601,11 @@ const makeDesktopProviderDaemonManager = Effect.gen(function* () {
   const state = yield* Ref.make(initialState);
   const cafeMcpPortRef = yield* Ref.make<number | undefined>(undefined);
   const lifecycleMutex = yield* Semaphore.make(1);
+  const startupUpdates = yield* PubSub.sliding<ProviderDaemonStartupProgress>({
+    capacity: 8,
+    replay: 1,
+  });
+  yield* Effect.addFinalizer(() => PubSub.shutdown(startupUpdates));
   const runtimeBuildId = yield* computeProviderDaemonRuntimeBuildId(environment);
 
   const reapStaleProviderRuntimeProcesses = (
@@ -736,6 +796,7 @@ const makeDesktopProviderDaemonManager = Effect.gen(function* () {
         endpoint: Option.some(endpoint),
         adoptedExistingProcess: true,
         terminate: Option.some(terminateExternalPid(marker.pid)),
+        ownedChild: Option.none(),
         lastHealth: Option.some(health.value),
         lastHealthObservedAt: Option.some(healthObservedAt),
         lastError: Option.none(),
@@ -777,6 +838,7 @@ const makeDesktopProviderDaemonManager = Effect.gen(function* () {
     const now = DateTime.formatIso(yield* DateTime.now);
     const bootstrap = {
       mode: "provider-daemon",
+      startupProgressFd: BACKEND_STARTUP_PROGRESS_FD,
       transport: "ipc",
       socketPath,
       cafeCodeHome: environment.baseDir,
@@ -814,70 +876,152 @@ const makeDesktopProviderDaemonManager = Effect.gen(function* () {
             type: "input",
             stream: Stream.encodeText(Stream.make(`${bootstrapJson}\n`)),
           },
+          // Detached stdout/stderr stay ignored. Only this exact child pipe
+          // supplies startup evidence; its reader belongs to this attempt.
+          fd4: { type: "output" },
         },
       },
     );
-    const handle = yield* spawner.spawn(command).pipe(
-      Effect.mapError((cause) => new ProviderDaemonSpawnError({ cause })),
-      Scope.provide(daemonScope),
+    const spawnedAtNanos = yield* Clock.currentTimeNanos;
+    const elapsedMs = Clock.currentTimeNanos.pipe(
+      Effect.map((value) => Number(value - spawnedAtNanos) / 1_000_000),
     );
-    yield* handle.unref.pipe(Effect.ignore);
-    const credentialEncrypted = yield* writeCredential({
-      credentialPath: environment.providerDaemonCredentialPath,
-      token,
-    }).pipe(Effect.provideService(ElectronSafeStorage.ElectronSafeStorage, safeStorage));
+    const feedback: ProviderDaemonStartupProgress[] = [];
+    const progress = makeProviderDaemonStartupProgressTracker(
+      PROVIDER_DAEMON_READINESS_TIMEOUT_MS,
+      (update) => feedback.push(update),
+    );
+    const flushFeedback = Effect.suspend(() =>
+      Effect.forEach(feedback.splice(0), (update) => PubSub.publish(startupUpdates, update)).pipe(
+        Effect.asVoid,
+      ),
+    );
+    // A quit may interrupt readiness, but never the fresh child-to-recovery
+    // handoff. The persistent daemon scope deliberately does not reap a child
+    // when this attempt closes: complete its exact reservation and durable
+    // publication first, or perform bounded exact-handle retirement on an I/O
+    // failure. This fence never applies to adoption or the long readiness wait.
+    const { handle, retireOwnedChild } = yield* Effect.gen(function* () {
+      const handle = yield* spawner.spawn(command).pipe(
+        Effect.mapError((cause) => new ProviderDaemonSpawnError({ cause })),
+        Scope.provide(daemonScope),
+      );
+      progress.start();
+      yield* flushFeedback;
+      yield* handle.getOutputFd(BACKEND_STARTUP_PROGRESS_FD).pipe(
+        Stream.runForEach((bytes) =>
+          Effect.gen(function* () {
+            progress.push(bytes, yield* elapsedMs);
+            yield* flushFeedback;
+          }),
+        ),
+        Effect.catchCause(() =>
+          Effect.sync(() => progress.invalidate()).pipe(Effect.andThen(flushFeedback)),
+        ),
+        Effect.ensuring(Effect.sync(() => progress.end()).pipe(Effect.andThen(flushFeedback))),
+        // The reader is an attempt resource, not part of the publication fence.
+        // Its finalization must remain interruptible even during a pending quit.
+        Effect.interruptible,
+        Effect.forkScoped,
+      );
+      yield* Effect.addFinalizer(() =>
+        Effect.sync(() => {
+          progress.finish("failed");
+          // Retry attempts do not publish a terminal UI failure; ensureRunning
+          // owns that event after its bounded typed-error retries are exhausted.
+          feedback.length = 0;
+        }),
+      );
+      const retireOwnedChild = Effect.gen(function* () {
+        if (!(yield* stopOwnedProviderDaemonChild(handle))) {
+          const error = new ProviderDaemonTerminationUnconfirmedError();
+          yield* Ref.update(state, (current) => ({
+            ...current,
+            status: "error" as const,
+            lastError: Option.some(error.message),
+          }));
+          yield* publishDebugSnapshot;
+          // A defect deliberately bypasses spawnDaemon's typed-error retry.
+          // Preserve the marker, credential and namespace if exit is uncertain.
+          return yield* Effect.die(error);
+        }
+      });
+      yield* handle.unref.pipe(Effect.ignore);
+      // Reserve this exact child before publishing either recovery file. A
+      // partial credential/marker failure is not permission to lose the handle
+      // and retry a second detached runtime over the still-live first child.
+      const previous = yield* Ref.get(state);
+      yield* Ref.set(state, {
+        status: "starting",
+        pid: Option.some(handle.pid),
+        endpoint: Option.some(rootEndpoint),
+        adoptedExistingProcess: false,
+        terminate: Option.some(retireOwnedChild),
+        ownedChild: Option.some(handle),
+        lastHealth: Option.none(),
+        lastHealthObservedAt: Option.none(),
+        lastError: Option.none(),
+        lastEnsureRunningDurationMs: Option.none(),
+        lastAdoptionDurationMs: Option.none(),
+        lastSpawnDurationMs: Option.none(),
+        lastHealthRefreshDurationMs: Option.none(),
+        healthRefreshCount: 0,
+        healthRefreshFailureCount: 0,
+        recoveryCount: previous.recoveryCount,
+        lastRecoveryAt: previous.lastRecoveryAt,
+        lastRecoveryReason: previous.lastRecoveryReason,
+      });
+      yield* publishDebugSnapshot;
 
-    const marker: ProviderDaemonMarkerValue = {
-      version: 2,
-      mode: "provider-daemon",
-      protocolVersion: PROVIDER_DAEMON_PROTOCOL_VERSION,
-      pid: handle.pid,
-      ppid: process.pid,
-      transport: "ipc",
-      httpBaseUrl: rootEndpoint.httpBaseUrl,
-      socketPath,
-      credentialPath: environment.providerDaemonCredentialPath,
-      credentialEncrypted,
-      createdAt: now,
-      updatedAt: now,
-      appVersion: environment.appVersion,
-      runtimeBuildId,
-      ...(cafeMcpPort !== undefined ? { cafeMcpPort } : {}),
-    };
-    yield* writeMarker({ markerPath: environment.providerDaemonMarkerPath, marker });
-    const previous = yield* Ref.get(state);
-    yield* Ref.set(state, {
-      status: "starting",
-      pid: Option.some(handle.pid),
-      endpoint: Option.some(rootEndpoint),
-      adoptedExistingProcess: false,
-      terminate: Option.some(terminateExternalPid(handle.pid)),
-      lastHealth: Option.none(),
-      lastHealthObservedAt: Option.none(),
-      lastError: Option.none(),
-      lastEnsureRunningDurationMs: Option.none(),
-      lastAdoptionDurationMs: Option.none(),
-      lastSpawnDurationMs: Option.none(),
-      lastHealthRefreshDurationMs: Option.none(),
-      healthRefreshCount: 0,
-      healthRefreshFailureCount: 0,
-      recoveryCount: previous.recoveryCount,
-      lastRecoveryAt: previous.lastRecoveryAt,
-      lastRecoveryReason: previous.lastRecoveryReason,
-    });
-    yield* publishDebugSnapshot;
-
-    const health = yield* waitForHealth(rootEndpoint).pipe(
-      Effect.catch((error) =>
-        handle
-          .kill()
-          .pipe(
-            Effect.ignore,
+      yield* Effect.gen(function* () {
+        const credentialEncrypted = yield* writeCredential({
+          credentialPath: environment.providerDaemonCredentialPath,
+          token,
+        }).pipe(Effect.provideService(ElectronSafeStorage.ElectronSafeStorage, safeStorage));
+        const marker: ProviderDaemonMarkerValue = {
+          version: 2,
+          mode: "provider-daemon",
+          protocolVersion: PROVIDER_DAEMON_PROTOCOL_VERSION,
+          pid: handle.pid,
+          ppid: process.pid,
+          transport: "ipc",
+          httpBaseUrl: rootEndpoint.httpBaseUrl,
+          socketPath,
+          credentialPath: environment.providerDaemonCredentialPath,
+          credentialEncrypted,
+          createdAt: now,
+          updatedAt: now,
+          appVersion: environment.appVersion,
+          runtimeBuildId,
+          ...(cafeMcpPort !== undefined ? { cafeMcpPort } : {}),
+        };
+        yield* writeMarker({ markerPath: environment.providerDaemonMarkerPath, marker });
+      }).pipe(
+        Effect.catch((error) =>
+          retireOwnedChild.pipe(
             Effect.andThen(removeMarker(environment.providerDaemonMarkerPath)),
             Effect.andThen(removeCredential(environment.providerDaemonCredentialPath)),
             Effect.andThen(removeProviderDaemonIpcSocket(environment)),
             Effect.andThen(Effect.fail(error)),
           ),
+        ),
+      );
+      return { handle, retireOwnedChild };
+    }).pipe(Effect.uninterruptible);
+
+    const health = yield* waitForOwnedProviderDaemonHealth(
+      rootEndpoint,
+      progress,
+      elapsedMs,
+      handle,
+    ).pipe(
+      Effect.catch((error) =>
+        retireOwnedChild.pipe(
+          Effect.andThen(removeMarker(environment.providerDaemonMarkerPath)),
+          Effect.andThen(removeCredential(environment.providerDaemonCredentialPath)),
+          Effect.andThen(removeProviderDaemonIpcSocket(environment)),
+          Effect.andThen(Effect.fail(error)),
+        ),
       ),
     );
     const healthObservedAt = DateTime.formatIso(yield* DateTime.now);
@@ -887,15 +1031,12 @@ const makeDesktopProviderDaemonManager = Effect.gen(function* () {
     }).pipe(
       Effect.mapError((cause) => new ProviderDaemonSpawnError({ cause })),
       Effect.catch((error) =>
-        handle
-          .kill()
-          .pipe(
-            Effect.ignore,
-            Effect.andThen(removeMarker(environment.providerDaemonMarkerPath)),
-            Effect.andThen(removeCredential(environment.providerDaemonCredentialPath)),
-            Effect.andThen(removeProviderDaemonIpcSocket(environment)),
-            Effect.andThen(Effect.fail(error)),
-          ),
+        retireOwnedChild.pipe(
+          Effect.andThen(removeMarker(environment.providerDaemonMarkerPath)),
+          Effect.andThen(removeCredential(environment.providerDaemonCredentialPath)),
+          Effect.andThen(removeProviderDaemonIpcSocket(environment)),
+          Effect.andThen(Effect.fail(error)),
+        ),
       ),
     );
     const endpoint: ProviderDaemonClientConfig = {
@@ -914,6 +1055,8 @@ const makeDesktopProviderDaemonManager = Effect.gen(function* () {
       ),
     }));
     yield* publishDebugSnapshot;
+    progress.finish("ready");
+    yield* flushFeedback;
     yield* logInfo("started provider daemon", {
       pid: handle.pid,
       endpoint: endpoint.httpBaseUrl,
@@ -922,7 +1065,7 @@ const makeDesktopProviderDaemonManager = Effect.gen(function* () {
     });
     yield* reapStaleProviderRuntimeProcesses([handle.pid, health.upstreamSupervisor?.pid]);
     return endpoint;
-  });
+  }).pipe(Effect.scoped);
 
   const ensureRunningUnlocked = Effect.gen(function* () {
     const ensureStartedAtMs = performance.now();
@@ -936,6 +1079,18 @@ const makeDesktopProviderDaemonManager = Effect.gen(function* () {
       }));
       yield* publishDebugSnapshot;
       return current.endpoint.value;
+    }
+
+    if (Option.isSome(current.ownedChild)) {
+      const stillOwned = yield* current.ownedChild.value.isRunning.pipe(
+        Effect.orElseSucceed(() => true),
+      );
+      if (stillOwned) {
+        // A second ensure must not turn the previous inconclusive retirement
+        // into a missing/stale-marker spawn. Only a later actual child exit or
+        // a new desktop's authenticated adoption can resolve this reservation.
+        return yield* Effect.die(new ProviderDaemonTerminationUnconfirmedError());
+      }
     }
 
     const marker = yield* readMarker(environment.providerDaemonMarkerPath).pipe(
@@ -992,7 +1147,15 @@ const makeDesktopProviderDaemonManager = Effect.gen(function* () {
     yield* publishDebugSnapshot;
     return endpoint;
   });
-  const ensureRunning = lifecycleMutex.withPermits(1)(ensureRunningUnlocked);
+  const ensureRunning = Effect.gen(function* () {
+    if ((yield* Ref.get(state)).status !== "running") {
+      yield* PubSub.publish(startupUpdates, { phase: "starting" });
+    }
+    return yield* lifecycleMutex.withPermits(1)(ensureRunningUnlocked);
+  }).pipe(
+    Effect.tap(() => PubSub.publish(startupUpdates, { phase: "ready" })),
+    Effect.tapCause(() => PubSub.publish(startupUpdates, { phase: "failed" })),
+  );
 
   const currentConfig = Ref.get(state).pipe(Effect.map((current) => current.endpoint));
 
@@ -1180,6 +1343,7 @@ const makeDesktopProviderDaemonManager = Effect.gen(function* () {
   yield* publishDebugSnapshot;
 
   return {
+    startupProgress: Stream.fromPubSub(startupUpdates),
     configureCafeMcpPort: (port) =>
       Number.isInteger(port) && port > 0 && port <= 65_535
         ? Ref.set(cafeMcpPortRef, port)

@@ -1,3 +1,4 @@
+import { uiText } from "@cafecode/shared/i18n";
 import type { EnvironmentId } from "@cafecode/contracts";
 import { ensureEnvironmentApi } from "../environmentApi";
 
@@ -6,6 +7,6 @@ import { ensureEnvironmentApi } from "../environmentApi";
  * that would lose scheduling consent, deduplication, and idle-only admission. */
 export function ensureScheduledFollowupsApi(environmentId: EnvironmentId) {
   const api = ensureEnvironmentApi(environmentId).scheduledFollowups;
-  if (!api) throw new Error("Scheduled follow-ups are unavailable on this backend.");
+  if (!api) throw new Error(uiText("Scheduled follow-ups are unavailable on this backend."));
   return api;
 }

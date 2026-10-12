@@ -26,6 +26,7 @@ import {
   ThreadTurnStartRequestedPayload,
   ProviderJournalMessageRepairResult,
   ProviderThreadAssistantMessagesRepairResult,
+  ThreadTurnRuntimeRecovery,
 } from "./orchestration.ts";
 import { ProviderInstanceId } from "./providerInstance.ts";
 
@@ -66,6 +67,53 @@ const decodeThreadTurnSubagentDetailInput = Schema.decodeUnknownEffect(
 const decodeThreadTurnSubagentDetail = Schema.decodeUnknownEffect(
   OrchestrationThreadTurnSubagentDetail,
 );
+
+it("qualifies optional Cafe continuation ordinals independently from delay bookkeeping", () => {
+  const decode = Schema.decodeUnknownSync(ThreadTurnRuntimeRecovery);
+  const recovery = {
+    sourceEventSequence: 1,
+    turnId: "root",
+    sessionUpdatedAt: "2026-10-10T00:00:00.000Z",
+    codexTransientFailure: {
+      providerInstanceId: "codex",
+      subagentRuntimeId: "123e4567-e89b-42d3-a456-426614174001",
+      chainSourceEventSequence: 1,
+      retryAttempt: 30,
+    },
+  };
+  assert.deepEqual(decode(recovery), recovery);
+  for (const continuationOrdinal of [1, 37, Number.MAX_SAFE_INTEGER]) {
+    const input = {
+      ...recovery,
+      codexTransientFailure: {
+        ...recovery.codexTransientFailure,
+        continuationOrdinal,
+        continuationOrdinalLowerBound: true,
+      },
+    };
+    assert.deepEqual(decode(input), input);
+  }
+  for (const continuationOrdinal of [0, -1, 1.5, Number.MAX_SAFE_INTEGER + 1, "37", null])
+    assert.throws(() =>
+      decode({
+        ...recovery,
+        codexTransientFailure: {
+          ...recovery.codexTransientFailure,
+          continuationOrdinal,
+        },
+      }),
+    );
+  assert.throws(() =>
+    decode({
+      ...recovery,
+      codexTransientFailure: {
+        ...recovery.codexTransientFailure,
+        continuationOrdinal: 37,
+        continuationOrdinalLowerBound: false,
+      },
+    }),
+  );
+});
 
 it.effect("trims branded ids and command string fields at decode boundaries", () =>
   Effect.gen(function* () {

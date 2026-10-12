@@ -1,3 +1,5 @@
+import { useUiLocale } from "~/i18n";
+import { uiText } from "@cafecode/shared/i18n";
 import type { ScheduledFollowupId, ScheduledFollowupRecord } from "@cafecode/contracts";
 import { memo, useCallback, useRef, useState } from "react";
 
@@ -35,6 +37,8 @@ export const ScheduledFollowupConversation = memo(function ScheduledFollowupConv
 });
 
 function ConversationSchedules({ context }: { context: ScheduledFollowupsContext }) {
+  const uiLocale = useUiLocale();
+
   const { schedules, loading, error, refresh } = useScheduledFollowups(
     context.environmentId,
     context.threadId,
@@ -69,7 +73,6 @@ function ConversationSchedules({ context }: { context: ScheduledFollowupsContext
         loading={loading}
         error={error}
         onReview={review}
-        onRefresh={refresh}
       />
       <Dialog
         open={reviewId !== null}
@@ -82,10 +85,16 @@ function ConversationSchedules({ context }: { context: ScheduledFollowupsContext
           finalFocus={() => (returnFocusRef.current?.isConnected ? returnFocusRef.current : false)}
         >
           <DialogHeader>
-            <DialogTitle>Review scheduled follow-up</DialogTitle>
+            <DialogTitle>
+              {uiText("Review scheduled follow-up", undefined, undefined, uiLocale)}
+            </DialogTitle>
             <DialogDescription>
-              Check the instructions, timing and paying account. Opening this review changes
-              nothing; proposals still need your approval.
+              {uiText(
+                "Check the instructions, timing and paying account. Opening this review changes nothing; proposals still need your approval.",
+                undefined,
+                undefined,
+                uiLocale,
+              )}
             </DialogDescription>
           </DialogHeader>
           <DialogPanel>

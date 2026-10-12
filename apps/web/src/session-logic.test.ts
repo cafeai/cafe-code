@@ -756,6 +756,138 @@ describe("findSidebarProposedPlan", () => {
 });
 
 describe("deriveHistoricalWorkLogSummaries", () => {
+  it("keeps exact known turns discoverable when latest-turn metadata is missing", () => {
+    const turnId = TurnId.make("known-turn");
+    const summaries = deriveHistoricalWorkLogSummaries({
+      messages: [
+        {
+          id: MessageId.make("known-message"),
+          role: "user",
+          text: "known",
+          turnId,
+          createdAt: "2026-02-23T00:00:00.000Z",
+          streaming: false,
+        },
+      ],
+      activities: [],
+      latestTurnId: null,
+    });
+    expect([...summaries.keys()]).toEqual([turnId]);
+    expect(summaries.get(turnId)?.snapshotEntryCount).toBe(0);
+    expect(summaries.get(turnId)?.before).toBeUndefined();
+    expect(summaries.get(turnId)?.isHistoricalTurn).toBe(false);
+  });
+
+  it("does not fabricate legacy child or compaction completion with unknown latest identity", () => {
+    const turnId = TurnId.make("unknown-latest-turn");
+    const activities = [
+      makeActivity({
+        id: "legacy-start",
+        turnId,
+        kind: "tool.completed",
+        summary: "Subagent task",
+        payload: {
+          itemType: "collab_agent_tool_call",
+          itemId: "legacy-child",
+          detail: "Started /root/legacy-reader",
+        },
+      }),
+      makeActivity({
+        id: "compact-start",
+        turnId,
+        kind: "tool.started",
+        summary: "Context compaction started",
+        payload: { itemId: "compact", itemType: "context_compaction", title: "Context compaction" },
+      }),
+    ];
+    const summary = deriveHistoricalWorkLogSummaries({
+      messages: [],
+      activities,
+      latestTurnId: null,
+    }).get(turnId);
+    expect(summary?.isHistoricalTurn).toBe(false);
+    expect(summary?.previewEntries[0]?.toolTitle).toBe("Compacting context");
+    expect(summary?.subagentEntries).toHaveLength(1);
+    expect(summary?.subagentEntries?.[0]?.subagent?.status).not.toBe("completed");
+    const knownPrevious = deriveHistoricalWorkLogSummaries({
+      messages: [],
+      activities,
+      latestTurnId: TurnId.make("known-next-turn"),
+    }).get(turnId);
+    expect(knownPrevious?.isHistoricalTurn).toBe(true);
+    expect(knownPrevious?.subagentEntries?.[0]?.subagent?.status).toBe("completed");
+  });
+
+  it("uses the ordinary raw500 floor instead of older retention exceptions", () => {
+    const turnId = TurnId.make("latest");
+    const tail = Array.from({ length: 500 }, (_, index) =>
+      makeActivity({
+        id: `context-${index}`,
+        sequence: index + 100,
+        turnId,
+        kind: "context-window.updated",
+        createdAt: "2026-02-23T00:00:03.000Z",
+      }),
+    );
+    const summaries = deriveHistoricalWorkLogSummaries({
+      messages: [],
+      activities: [
+        makeActivity({ id: "retained-plan", sequence: 1, turnId: "prior", kind: "plan.updated" }),
+        ...tail,
+      ],
+      latestTurnId: turnId,
+    });
+    expect(summaries.get(turnId)?.before).toEqual({
+      sequence: 100,
+      createdAt: "2026-02-23T00:00:03.000Z",
+      activityId: "context-0",
+    });
+    expect(summaries.get(turnId)?.presenceRevision).toBe("empty");
+    expect(summaries.get(turnId)?.liveActivities).toHaveLength(500);
+    expect(summaries.get(turnId)?.previewEntries).toEqual([]);
+  });
+
+  it("changes the gap witness only when an ordinary operation leaves the window", () => {
+    const turnId = TurnId.make("latest");
+    const command = makeActivity({
+      id: "first-command",
+      sequence: 1,
+      turnId,
+      kind: "tool.completed",
+      summary: "Ran command",
+    });
+    const context = Array.from({ length: 500 }, (_, index) =>
+      makeActivity({
+        id: `context-${index}`,
+        sequence: index + 2,
+        turnId,
+        kind: "context-window.updated",
+      }),
+    );
+    const before = deriveHistoricalWorkLogSummaries({
+      messages: [],
+      activities: [command, ...context.slice(0, 499)],
+      latestTurnId: turnId,
+    }).get(turnId);
+    const after = deriveHistoricalWorkLogSummaries({
+      messages: [],
+      activities: context,
+      latestTurnId: turnId,
+    }).get(turnId);
+    const hiddenOnly = deriveHistoricalWorkLogSummaries({
+      messages: [],
+      activities: [
+        ...context.slice(1),
+        makeActivity({ id: "next-context", sequence: 502, turnId, kind: "context-window.updated" }),
+      ],
+      latestTurnId: turnId,
+    }).get(turnId);
+    expect(before?.presenceRevision).toBe("first-command");
+    expect(after?.presenceRevision).toBe("empty");
+    expect(hiddenOnly?.presenceRevision).toBe(after?.presenceRevision);
+    expect(hiddenOnly?.before).not.toEqual(after?.before);
+  });
+
   it("keeps previous turns summarized while excluding the latest turn", () => {
     const previousTurnId = TurnId.make("turn-previous");
     const latestTurnId = TurnId.make("turn-latest");
@@ -1811,6 +1943,166 @@ describe("deriveWorkLogEntries", () => {
       label: "Runtime warning",
       detail: 'Provider stderr: failed to read cached session\n{"retrying":true}',
     });
+  });
+
+  it("renders native retry observations as finite fixed copy without provider prose or JSON", () => {
+    const retry = (payload: Record<string, unknown>) =>
+      deriveWorkLogEntries(
+        [
+          makeActivity({
+            kind: "runtime.warning",
+            summary: "Provider transport retrying",
+            payload,
+          }),
+        ],
+        undefined,
+      )[0]!;
+    const privatePayload = {
+      message: "Reconnecting... 1/5 private native diagnostic",
+      detail: { willRetry: true, error: { message: "private diagnostic", secret: "never show" } },
+      retrying: true,
+    };
+    expect(
+      retry({ ...privatePayload, nativeRetry: { observedCount: 12, timing: "unknown" } }),
+    ).toMatchObject({ label: "Provider retry · 12" });
+    expect(
+      retry({
+        ...privatePayload,
+        nativeRetry: { observedCount: 1024, timing: "unknown", countLimited: true },
+      }),
+    ).toMatchObject({ label: "Provider retry · 1024+" });
+    for (const nativeRetry of [
+      undefined,
+      { observedCount: 0, timing: "unknown" },
+      { observedCount: 1025, timing: "unknown" },
+      { observedCount: 0.5, timing: "unknown" },
+      { observedCount: 12, timing: "known" },
+      { observedCount: 12, timing: "unknown", countLimited: false },
+      { observedCount: 12, timing: "unknown", countLimited: "true" },
+      { observedCount: 12, timing: "unknown", countLimited: undefined },
+      Object.create({ observedCount: 12, timing: "unknown" }),
+    ]) {
+      const row = retry({ ...privatePayload, nativeRetry });
+      expect(row.label).toBe("Provider retry");
+      expect(row).not.toHaveProperty("detail");
+      expect(JSON.stringify(row)).not.toContain("private");
+      expect(JSON.stringify(row)).not.toContain("1/5");
+      expect(JSON.stringify(row)).not.toContain("in 12s");
+    }
+    let reads = 0;
+    const accessor = Object.defineProperty({}, "observedCount", {
+      get() {
+        reads += 1;
+        return 12;
+      },
+    });
+    expect(retry({ ...privatePayload, nativeRetry: accessor }).label).toBe("Provider retry");
+    expect(reads).toBe(0);
+    const detail = {
+      toJSON() {
+        reads += 1;
+        return { privateText: "never stringify" };
+      },
+    };
+    expect(
+      retry({ ...privatePayload, detail, nativeRetry: { observedCount: 12, timing: "unknown" } })
+        .label,
+    ).toBe("Provider retry · 12");
+    expect(reads).toBe(0);
+    // Prose alone is not a semantic retry flag or a cumulative count source.
+    expect(retry({ message: "Reconnecting... 3/5" }).label).toBe("Provider transport retrying");
+  });
+
+  it("keeps retry/error diagnostics out of previews and roster lifecycle folding", () => {
+    const entries = deriveWorkLogEntries(
+      [
+        makeActivity({
+          id: "child-retry",
+          kind: "runtime.warning",
+          payload: {
+            providerDiagnostic: {
+              version: 1,
+              status: "retry",
+              subject: { kind: "subagent", id: "exact-child", label: "Layout reviewer" },
+              observedRetryCount: 12,
+            },
+            message: "private native error",
+            detail: { error: "private payload" },
+          },
+        }),
+        makeActivity({
+          id: "root-error",
+          kind: "runtime.error",
+          tone: "error",
+          summary: "private full error",
+          payload: {
+            providerDiagnostic: { version: 1, status: "error", subject: { kind: "root" } },
+            message: "private native error",
+            command: "must not extract paths",
+            json: "never stringify",
+          },
+        }),
+      ],
+      undefined,
+    );
+    expect(entries).toHaveLength(2);
+    expect(entries[0]).toMatchObject({
+      id: "child-retry",
+      label: "Provider retry · 12",
+      providerDiagnostic: {
+        recorded: true,
+        summary: { subject: { kind: "subagent", id: "exact-child", label: "Layout reviewer" } },
+      },
+    });
+    expect(entries[1]).toMatchObject({
+      id: "root-error",
+      label: "Provider error",
+      tone: "error",
+      providerDiagnostic: { recorded: true, summary: { subject: { kind: "root" } } },
+    });
+    for (const entry of entries) {
+      expect(entry).not.toHaveProperty("subagent");
+      expect(entry).not.toHaveProperty("detail");
+      expect(entry).not.toHaveProperty("command");
+      expect(JSON.stringify(entry)).not.toContain("private");
+      expect(JSON.stringify(entry)).not.toContain("never stringify");
+    }
+  });
+
+  it("keeps saved Cafe waits static and distinguishes their continuation count from native retry cycles", () => {
+    const wait = makeActivity({
+      id: "cafe-wait",
+      kind: "runtime.warning",
+      tone: "info",
+      createdAt: "2026-02-23T00:00:00.000Z",
+      turnId: "failed-root",
+      payload: {
+        recovery: "codex-transient-recovery-waiting",
+        stage: "backoff",
+        retryAttempt: 30,
+        continuationOrdinal: 37,
+        continuationOrdinalLowerBound: true,
+        retryAt: "2026-02-23T00:00:45.000Z",
+        detail: { secret: "not public" },
+      },
+    });
+    const row = deriveWorkLogEntries([wait], undefined)[0]!;
+    expect(row.label).toBe("Cafe recovery · Retry #37+ · backoff 45s");
+    expect(row).not.toHaveProperty("detail");
+    const summaries = deriveHistoricalWorkLogSummaries({
+      messages: [],
+      activities: [wait],
+      latestTurnId: TurnId.make("new-root"),
+    });
+    expect(summaries.get(TurnId.make("failed-root"))?.previewEntries[0]).toEqual(row);
+    expect(deriveWorkLogEntries(structuredClone([wait]), undefined)[0]).toEqual(row);
+    const attempted = {
+      ...wait,
+      payload: { recovery: "codex-transient-continuation-attempted", continuationOrdinal: 38 },
+    };
+    const attemptedRow = deriveWorkLogEntries([attempted], undefined)[0]!;
+    expect(attemptedRow.label).toBe("Cafe recovery · Retry #38");
+    expect(attemptedRow).not.toHaveProperty("detail");
   });
 
   it("hides retryable steer delivery failures from the normal work log", () => {

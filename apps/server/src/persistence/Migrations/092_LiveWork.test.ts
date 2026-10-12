@@ -43,22 +43,31 @@ describe("092_LiveWork", () => {
     Effect.gen(function* () {
       const sql = yield* SqlClient.SqlClient;
       yield* runMigrations({ toMigrationInclusive: 91 });
-      const ran = yield* runMigrations({ toMigrationInclusive: 92 });
-      assert.deepEqual(ran, [[92, "LiveWork"]]);
+      const ran = yield* runMigrations();
+      assert.deepEqual(ran, [
+        [92, "LiveWork"],
+        [93, "RecoveryPresentationIndex"],
+        [94, "CodexContextWindowOverride"],
+        [95, "ProviderActivityDiagnostics"],
+        [96, "ChatImages"],
+      ]);
       assert.deepEqual(
         yield* sql<{ name: string }>`
-          SELECT name FROM effect_sql_migrations WHERE migration_id IN (90, 91, 92)
+          SELECT name FROM effect_sql_migrations WHERE migration_id IN (90, 91, 92, 93, 94, 95)
           ORDER BY migration_id
         `,
         [
           { name: "WorkflowLifecycleRetention" },
           { name: "CodexTransientRecoveryIntents" },
           { name: "LiveWork" },
+          { name: "RecoveryPresentationIndex" },
+          { name: "CodexContextWindowOverride" },
+          { name: "ProviderActivityDiagnostics" },
         ],
       );
       assert.deepEqual(yield* sql`SELECT * FROM projection_live_work`, []);
       yield* assertWorkflowRetention(sql);
-      assert.deepEqual(yield* runMigrations({ toMigrationInclusive: 92 }), []);
+      assert.deepEqual(yield* runMigrations(), []);
     }).pipe(Effect.provide(TestSqliteClient.layerMemory())),
   );
 
@@ -78,9 +87,13 @@ describe("092_LiveWork", () => {
           42, ${at}, 'local-terminal')
       `;
       const before = yield* sql`SELECT * FROM projection_live_work`;
-      assert.deepEqual(yield* runMigrations({ toMigrationInclusive: 92 }), [
+      assert.deepEqual(yield* runMigrations(), [
         [91, "CodexTransientRecoveryIntents"],
         [92, "LiveWork"],
+        [93, "RecoveryPresentationIndex"],
+        [94, "CodexContextWindowOverride"],
+        [95, "ProviderActivityDiagnostics"],
+        [96, "ChatImages"],
       ]);
       assert.deepEqual(yield* sql`SELECT * FROM projection_live_work`, before);
       assert.deepEqual(

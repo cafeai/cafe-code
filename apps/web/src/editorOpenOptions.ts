@@ -1,4 +1,5 @@
 import { type EditorId } from "@cafecode/contracts";
+import { uiText } from "@cafecode/shared/i18n";
 import { FolderClosedIcon } from "lucide-react";
 import { isMacPlatform, isWindowsPlatform } from "~/lib/utils";
 import {
@@ -63,7 +64,7 @@ export const resolveEditorOpenOptions = (
         ? "Finder"
         : isWindowsPlatform(platform)
           ? "Explorer"
-          : "Files",
+          : uiText("Files"),
       Icon: FolderClosedIcon,
       value: "file-manager",
     },

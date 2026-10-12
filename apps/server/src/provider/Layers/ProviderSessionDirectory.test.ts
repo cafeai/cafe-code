@@ -441,6 +441,173 @@ it.layer(makeDirectoryLayer(SqlitePersistenceMemory))("ProviderSessionDirectoryL
       }
     }));
 
+  it("preserves valid legacy Claude roots while accepting only the same native UUID", () =>
+    Effect.gen(function* () {
+      const directory = yield* ProviderSessionDirectory;
+      const sql = yield* SqlClient.SqlClient;
+      const threadId = ThreadId.make("thread-legacy-claude-history-root");
+      const turnId = TurnId.make("turn-legacy-claude-history-root");
+      const rootId = "00000000-0000-4000-8000-000000000961";
+      const legacyCursor = { threadId, resume: rootId, turnCount: 3, forkMessageIds: {} };
+      const timestamp = "2026-08-25T00:00:00.000Z";
+      const instanceId = ProviderInstanceId.make("claude-original");
+      const cwd = path.join(os.tmpdir(), "cafe-legacy-claude-history-fixture");
+      yield* sql`
+        INSERT INTO projection_threads (
+          thread_id, project_id, title, branch, worktree_path,
+          latest_turn_id, created_at, updated_at
+        ) VALUES (${threadId}, NULL, 'Legacy Claude root', NULL, NULL, ${turnId}, ${timestamp}, ${timestamp})
+      `;
+      // Seed exactly the full checkpoint retained by the older release. The
+      // repair must recognize its stable UUID without rewriting historical
+      // private provenance or adopting an incomplete legacy record.
+      yield* sql`
+        INSERT INTO provider_subagent_history_roots (
+          thread_id, turn_id, provider_name, provider_instance_id,
+          resume_cursor_json, cwd, created_at, updated_at
+        ) VALUES (${threadId}, ${turnId}, 'claudeAgent', ${instanceId},
+          ${JSON.stringify(legacyCursor)}, ${cwd}, ${timestamp}, ${timestamp})
+      `;
+      const base = {
+        threadId,
+        turnId,
+        subagentId: "legacy-child",
+        historyId: null,
+        providerName: ProviderDriverKind.make("claudeAgent"),
+        providerInstanceId: instanceId,
+        cwd,
+        createdAt: timestamp,
+        updatedAt: timestamp,
+      };
+      yield* directory.upsertSubagentHistoryBinding({ ...base, resumeCursor: { resume: rootId } });
+      yield* directory.upsertSubagentHistoryBinding({
+        ...base,
+        historyId: "native-agent-history",
+        resumeCursor: { sessionId: rootId, turnCount: 99 },
+      });
+      const stored = Option.getOrThrow(
+        yield* directory.getSubagentHistoryBinding({
+          threadId,
+          turnId,
+          subagentId: base.subagentId,
+          historyId: "native-agent-history",
+        }),
+      );
+      assert.deepEqual(stored.resumeCursor, legacyCursor);
+      assert.equal(stored.providerInstanceId, instanceId);
+      assert.equal(stored.cwd, cwd);
+      for (const [label, override] of [
+        [
+          "different-native-root",
+          { resumeCursor: { resume: "00000000-0000-4000-8000-000000000962" } },
+        ],
+        [
+          "different-account",
+          {
+            resumeCursor: { resume: rootId },
+            providerInstanceId: ProviderInstanceId.make("claude-other"),
+          },
+        ],
+        ["different-cwd", { resumeCursor: { resume: rootId }, cwd: path.join(cwd, "other") }],
+        [
+          "different-provider",
+          { resumeCursor: { resume: rootId }, providerName: ProviderDriverKind.make("codex") },
+        ],
+      ] as const) {
+        const outcome = yield* directory
+          .upsertSubagentHistoryBinding({
+            ...base,
+            subagentId: label,
+            ...override,
+          })
+          .pipe(Effect.result);
+        assert.equal(outcome._tag, "Failure");
+        if (outcome._tag === "Failure")
+          assert.equal(outcome.failure._tag, "ProviderSubagentHistoryBindingConflictError");
+        assert.equal(
+          Option.isNone(
+            yield* directory.getSubagentHistoryBinding({
+              threadId,
+              turnId,
+              subagentId: label,
+              historyId: null,
+            }),
+          ),
+          true,
+        );
+      }
+      const rawRoot = yield* sql<{ readonly resumeCursor: string }>`
+        SELECT resume_cursor_json AS "resumeCursor" FROM provider_subagent_history_roots
+        WHERE thread_id = ${threadId} AND turn_id = ${turnId}
+      `;
+      assert.deepEqual(rawRoot, [{ resumeCursor: JSON.stringify(legacyCursor) }]);
+    }));
+
+  it("never upgrades incomplete Claude roots or weakens other providers' cursor equality", () =>
+    Effect.gen(function* () {
+      const directory = yield* ProviderSessionDirectory;
+      const sql = yield* SqlClient.SqlClient;
+      const threadId = ThreadId.make("thread-incomplete-claude-history-root");
+      const timestamp = "2026-08-25T00:00:00.000Z";
+      const rootId = "00000000-0000-4000-8000-000000000963";
+      yield* sql`
+        INSERT INTO projection_threads (
+          thread_id, project_id, title, branch, worktree_path,
+          latest_turn_id, created_at, updated_at
+        ) VALUES (${threadId}, NULL, 'Incomplete history roots', NULL, NULL, NULL, ${timestamp}, ${timestamp})
+      `;
+      for (const [label, providerName, resumeCursor] of [
+        ["null-claude", "claudeAgent", null],
+        ["id-free-claude", "claudeAgent", { threadId: "cafe-thread-only" }],
+        ["malformed-claude", "claudeAgent", { resume: "not-a-native-uuid" }],
+        ["codex-counter", "codex", { resume: rootId, turnCount: 1 }],
+      ] as const) {
+        const turnId = TurnId.make(`turn-${label}`);
+        const base = {
+          threadId,
+          turnId,
+          subagentId: "original",
+          historyId: null,
+          providerName: ProviderDriverKind.make(providerName),
+          providerInstanceId: ProviderInstanceId.make(providerName),
+          cwd: path.join(os.tmpdir(), "cafe-incomplete-history-fixture"),
+          createdAt: timestamp,
+          updatedAt: timestamp,
+        };
+        yield* directory.upsertSubagentHistoryBinding({ ...base, resumeCursor });
+        const outcome = yield* directory
+          .upsertSubagentHistoryBinding({
+            ...base,
+            subagentId: "forbidden-upgrade",
+            resumeCursor: { resume: rootId, turnCount: 2 },
+          })
+          .pipe(Effect.result);
+        assert.equal(outcome._tag, "Failure");
+        assert.equal(
+          Option.isNone(
+            yield* directory.getSubagentHistoryBinding({
+              threadId,
+              turnId,
+              subagentId: "forbidden-upgrade",
+              historyId: null,
+            }),
+          ),
+          true,
+        );
+        assert.deepEqual(
+          Option.getOrThrow(
+            yield* directory.getSubagentHistoryBinding({
+              threadId,
+              turnId,
+              subagentId: "original",
+              historyId: null,
+            }),
+          ).resumeCursor,
+          resumeCursor,
+        );
+      }
+    }));
+
   it("prunes private history roots to the aggregate per-thread byte budget", () =>
     Effect.gen(function* () {
       const directory = yield* ProviderSessionDirectory;

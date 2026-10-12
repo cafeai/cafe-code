@@ -10,6 +10,10 @@ import { describe, expect, it, vi } from "vitest";
 
 import { createMemoryStorage, type StateStorage } from "../../lib/storage";
 import {
+  createQueuedFollowUpFeedback,
+  formatQueuedFollowUpFeedback,
+} from "./queuedFollowUpFeedback";
+import {
   createFollowUpQueuePersistence,
   FOLLOW_UP_QUEUE_STORAGE_KEY,
   MAX_PERSISTED_FOLLOW_UP_QUEUE_BYTES,
@@ -79,6 +83,38 @@ function raw(storage: StateStorage): string {
 }
 
 describe("follow-up queue persistence", () => {
+  it("never serializes display provenance or changes dispatch truth when a blocked row is translated", async () => {
+    const storage = createMemoryStorage();
+    const persistence = createFollowUpQueuePersistence(storage);
+    const feedback = createQueuedFollowUpFeedback({ code: "missing-attachments", count: 2 });
+    const original = { ...item(), ...feedback };
+    expect((await persistence.save(environmentA, [original])).ok).toBe(true);
+    const before = raw(storage);
+    expect(before).not.toContain("blockedFeedback");
+    expect(before).not.toContain("missing-attachments");
+    expect(before).not.toContain(feedback.blockedReason);
+    for (const locale of ["en", "ja", "ko"] as const) {
+      expect(
+        formatQueuedFollowUpFeedback(original.blockedReason, original.blockedFeedback, locale),
+      ).toBeTruthy();
+      expect(raw(storage)).toBe(before);
+      expect(original.blockedReason).toBe(feedback.blockedReason);
+    }
+    const loaded = persistence.load(environmentA);
+    if (!loaded.ok) throw new Error(loaded.error);
+    expect(loaded.value.pending[0]?.blockedReason).toBe(
+      "Review this queued follow-up before sending.",
+    );
+    expect(
+      formatQueuedFollowUpFeedback(
+        loaded.value.pending[0]!.blockedReason,
+        loaded.value.pending[0]!.blockedFeedback,
+        "ko",
+      ),
+    ).not.toBe(loaded.value.pending[0]!.blockedReason);
+    expect(loaded.value.pending[0]?.dispatchState).toBe("pending");
+    expect(loaded.value.claimed).toEqual([]);
+  });
   it("persists each explicit native priority with the exact account and never fabricates one for legacy queued messages", async () => {
     for (const priority of [undefined, "now", "next", "later"] as const) {
       const storage = createMemoryStorage();

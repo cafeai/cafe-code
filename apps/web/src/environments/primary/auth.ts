@@ -1,3 +1,4 @@
+import { uiText } from "@cafecode/shared/i18n";
 import type {
   AuthAdminPasswordStatus,
   AuthBootstrapInput,
@@ -101,7 +102,9 @@ export async function fetchSessionState(): Promise<AuthSessionState> {
     });
     if (!response.ok) {
       throw new BootstrapHttpError({
-        message: `Failed to load server auth session state (${response.status}).`,
+        message: uiText("Failed to load server auth session state ({status}).", {
+          status: response.status,
+        }),
         status: response.status,
       });
     }
@@ -147,7 +150,7 @@ function parseBootstrapErrorMessage(message: string): string {
 function toFriendlyBootstrapErrorMessage(status: number, message: string): string {
   const parsedMessage = parseBootstrapErrorMessage(message);
   if (status === 401 && INVALID_BOOTSTRAP_CREDENTIAL_MESSAGES.has(parsedMessage)) {
-    return "Invalid pairing token. Check the token and try again.";
+    return uiText("Invalid pairing token. Check the token and try again.");
   }
 
   return parsedMessage;
@@ -168,7 +171,9 @@ async function exchangeBootstrapCredential(credential: string): Promise<AuthBoot
     if (!response.ok) {
       const message = toFriendlyBootstrapErrorMessage(response.status, await response.text());
       throw new BootstrapHttpError({
-        message: message || `Failed to bootstrap auth session (${response.status}).`,
+        message:
+          message ||
+          uiText("Failed to bootstrap auth session ({status}).", { status: response.status }),
         status: response.status,
       });
     }
@@ -180,7 +185,7 @@ async function exchangeBootstrapCredential(credential: string): Promise<AuthBoot
 function toFriendlyPasswordBootstrapErrorMessage(status: number, message: string): string {
   const parsedMessage = parseBootstrapErrorMessage(message);
   if (status === 401) {
-    return "Invalid password. Check the password and try again.";
+    return uiText("Invalid password. Check the password and try again.");
   }
 
   return parsedMessage;
@@ -205,7 +210,11 @@ async function exchangePasswordCredential(
         await response.text(),
       );
       throw new BootstrapHttpError({
-        message: message || `Failed to bootstrap password auth session (${response.status}).`,
+        message:
+          message ||
+          uiText("Failed to bootstrap password auth session ({status}).", {
+            status: response.status,
+          }),
         status: response.status,
       });
     }
@@ -224,7 +233,7 @@ async function waitForAuthenticatedSessionAfterBootstrap(): Promise<AuthSessionS
     }
 
     if (Date.now() - startedAt >= AUTH_SESSION_ESTABLISH_TIMEOUT_MS) {
-      throw new Error("Timed out waiting for authenticated session after bootstrap.");
+      throw new Error(uiText("Timed out waiting for authenticated session after bootstrap."));
     }
 
     await waitForBootstrapRetry(AUTH_SESSION_ESTABLISH_STEP_MS);
@@ -294,7 +303,7 @@ async function bootstrapServerAuth(): Promise<ServerAuthGateState> {
     return {
       status: "requires-auth",
       auth: currentSession.auth,
-      errorMessage: error instanceof Error ? error.message : "Authentication failed.",
+      errorMessage: error instanceof Error ? error.message : uiText("Authentication failed."),
     };
   }
 }
@@ -302,7 +311,7 @@ async function bootstrapServerAuth(): Promise<ServerAuthGateState> {
 export async function submitServerAuthCredential(credential: string): Promise<void> {
   const trimmedCredential = credential.trim();
   if (!trimmedCredential) {
-    throw new Error("Enter a pairing token to continue.");
+    throw new Error(uiText("Enter a pairing token to continue."));
   }
 
   resolvedAuthenticatedGateState = null;
@@ -318,7 +327,7 @@ export async function submitServerPasswordCredential(input: {
   const password = input.password.trim();
   const username = input.username?.trim();
   if (!password) {
-    throw new Error("Enter the admin password to continue.");
+    throw new Error(uiText("Enter the admin password to continue."));
   }
 
   await exchangePasswordCredential({
@@ -345,7 +354,10 @@ export async function createServerPairingCredential(
 
   if (!response.ok) {
     throw new Error(
-      await readErrorMessage(response, `Failed to create pairing credential (${response.status}).`),
+      await readErrorMessage(
+        response,
+        uiText("Failed to create pairing credential ({status}).", { status: response.status }),
+      ),
     );
   }
 
@@ -361,7 +373,7 @@ export async function fetchServerAdminPasswordStatus(): Promise<AuthAdminPasswor
     throw new Error(
       await readJsonErrorMessage(
         response,
-        `Failed to load admin password status (${response.status}).`,
+        uiText("Failed to load admin password status ({status}).", { status: response.status }),
       ),
     );
   }
@@ -372,7 +384,7 @@ export async function fetchServerAdminPasswordStatus(): Promise<AuthAdminPasswor
 export async function setServerAdminPassword(password: string): Promise<AuthAdminPasswordStatus> {
   const trimmedPassword = password.trim();
   if (!trimmedPassword) {
-    throw new Error("Enter an admin password.");
+    throw new Error(uiText("Enter an admin password."));
   }
 
   const payload: AuthSetAdminPasswordInput = { password: trimmedPassword };
@@ -387,7 +399,10 @@ export async function setServerAdminPassword(password: string): Promise<AuthAdmi
 
   if (!response.ok) {
     throw new Error(
-      await readJsonErrorMessage(response, `Failed to update admin password (${response.status}).`),
+      await readJsonErrorMessage(
+        response,
+        uiText("Failed to update admin password ({status}).", { status: response.status }),
+      ),
     );
   }
 
@@ -404,7 +419,7 @@ export async function clearServerAdminPassword(): Promise<AuthAdminPasswordStatu
     throw new Error(
       await readJsonErrorMessage(
         response,
-        `Failed to disable admin password (${response.status}).`,
+        uiText("Failed to disable admin password ({status}).", { status: response.status }),
       ),
     );
   }
@@ -419,7 +434,10 @@ export async function listServerPairingLinks(): Promise<ReadonlyArray<ServerPair
 
   if (!response.ok) {
     throw new Error(
-      await readErrorMessage(response, `Failed to load pairing links (${response.status}).`),
+      await readErrorMessage(
+        response,
+        uiText("Failed to load pairing links ({status}).", { status: response.status }),
+      ),
     );
   }
 
@@ -439,7 +457,10 @@ export async function revokeServerPairingLink(id: string): Promise<void> {
 
   if (!response.ok) {
     throw new Error(
-      await readErrorMessage(response, `Failed to revoke pairing link (${response.status}).`),
+      await readErrorMessage(
+        response,
+        uiText("Failed to revoke pairing link ({status}).", { status: response.status }),
+      ),
     );
   }
 }
@@ -453,7 +474,10 @@ export async function listServerClientSessions(): Promise<
 
   if (!response.ok) {
     throw new Error(
-      await readErrorMessage(response, `Failed to load paired clients (${response.status}).`),
+      await readErrorMessage(
+        response,
+        uiText("Failed to load paired clients ({status}).", { status: response.status }),
+      ),
     );
   }
 
@@ -473,7 +497,10 @@ export async function revokeServerClientSession(sessionId: AuthSessionId): Promi
 
   if (!response.ok) {
     throw new Error(
-      await readErrorMessage(response, `Failed to revoke client session (${response.status}).`),
+      await readErrorMessage(
+        response,
+        uiText("Failed to revoke client session ({status}).", { status: response.status }),
+      ),
     );
   }
 }
@@ -491,7 +518,7 @@ export async function revokeOtherServerClientSessions(): Promise<number> {
     throw new Error(
       await readErrorMessage(
         response,
-        `Failed to revoke other client sessions (${response.status}).`,
+        uiText("Failed to revoke other client sessions ({status}).", { status: response.status }),
       ),
     );
   }

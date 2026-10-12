@@ -1,3 +1,5 @@
+import { useUiLocale } from "~/i18n";
+import { uiText } from "@cafecode/shared/i18n";
 import type { ContextMenuItem } from "@cafecode/contracts";
 import { useThreadActions } from "../../hooks/useThreadActions";
 import { useSettings } from "../../hooks/useSettings";
@@ -20,13 +22,20 @@ function items(target: ThreadRouteTarget): ContextMenuItem[] {
     JSON.stringify([metadata.threadRef.environmentId, metadata.threadRef.threadId]),
   );
   return [
-    { id: "archive", label: "Archive chat", disabled: pending || metadata.working },
-    { id: "delete", label: "Move to Recycle Bin", destructive: true, disabled: pending },
-    { id: "delete-forever", label: "Delete permanently…", destructive: true, disabled: pending },
+    { id: "archive", label: uiText("Archive chat"), disabled: pending || metadata.working },
+    { id: "delete", label: uiText("Move to Recycle Bin"), destructive: true, disabled: pending },
+    {
+      id: "delete-forever",
+      label: uiText("Delete permanently…"),
+      destructive: true,
+      disabled: pending,
+    },
   ];
 }
 
 export function useDeskChatActions() {
+  const uiLocale = useUiLocale();
+
   const { archiveThread, confirmAndDeleteThread, deleteThread, hardDeleteThread } =
     useThreadActions();
   const confirmArchive = useSettings((settings) => settings.confirmThreadArchive);
@@ -48,7 +57,14 @@ export function useDeskChatActions() {
         if (
           confirmArchive &&
           !(await api.dialogs.confirm(
-            `Archive chat "${metadata.title}"?\nYou can restore it from Settings > Archived.`,
+            uiText(
+              'Archive chat "{title}"?\nYou can restore it from Settings > Archived.',
+              {
+                title: metadata.title,
+              },
+              undefined,
+              uiLocale,
+            ),
           ))
         )
           return true;
@@ -74,9 +90,19 @@ export function useDeskChatActions() {
         if (
           !(await api.dialogs.confirm(
             [
-              `Delete chat "${metadata.title}" permanently?`,
-              "This removes local chat history, activity, provider session mappings, attachments, and checkpoint metadata.",
-              "This cannot be undone.",
+              uiText(
+                'Delete chat "{title}" permanently?',
+                { title: metadata.title },
+                undefined,
+                uiLocale,
+              ),
+              uiText(
+                "This removes local chat history, activity, provider session mappings, attachments, and checkpoint metadata.",
+                undefined,
+                undefined,
+                uiLocale,
+              ),
+              uiText("This cannot be undone.", undefined, undefined, uiLocale),
             ].join("\n"),
           ))
         )
@@ -95,11 +121,21 @@ export function useDeskChatActions() {
       toastManager.add(
         stackedThreadToast({
           type: "error",
-          title: "Could not finish the chat action",
+          title: uiText("Could not finish the chat action", undefined, undefined, uiLocale),
           description:
             action === "delete-forever"
-              ? "Check the connection and Recently Deleted before trying again. The action was not automatically repeated."
-              : "Check the chat's connection and current activity before trying again.",
+              ? uiText(
+                  "Check the connection and Recently Deleted before trying again. The action was not automatically repeated.",
+                  undefined,
+                  undefined,
+                  uiLocale,
+                )
+              : uiText(
+                  "Check the chat's connection and current activity before trying again.",
+                  undefined,
+                  undefined,
+                  uiLocale,
+                ),
         }),
       );
     } finally {
@@ -109,3 +145,5 @@ export function useDeskChatActions() {
   };
   return { items, run };
 }
+
+// Finite source-owned labels/helpers only; no received or user data.

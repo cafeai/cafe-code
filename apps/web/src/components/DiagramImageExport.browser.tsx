@@ -14,6 +14,7 @@ import {
 import { renderMermaid, type MermaidResult } from "../lib/mermaid/renderService";
 import { MermaidBlock } from "./MermaidBlock";
 import { anchoredToastManager, toastManager } from "./ui/toast";
+import { GANTT_SCHEDULE, GANTT_TASK_DATES } from "./mermaidGantt.test.fixture";
 
 const SVG_NAMESPACE = "http://www.w3.org/2000/svg";
 
@@ -38,6 +39,7 @@ const DIAGRAMS = [
     family: "pie",
     source: 'pie showData\n title Complete legend\n "First slice" : 25\n "Last slice" : 75',
   },
+  { family: "Gantt", source: GANTT_SCHEDULE },
 ] as const;
 
 interface PngPixels {
@@ -93,6 +95,59 @@ function inkCount(png: PngPixels, top = 0, bottom = png.height): number {
     }
   }
   return ink;
+}
+
+function ganttWithoutTaskBars(result: MermaidResult): MermaidResult {
+  const parsed = new DOMParser().parseFromString(result.svg, "image/svg+xml");
+  expect(parsed.querySelector("parsererror")).toBeNull();
+  expect(parsed.querySelectorAll("rect.task")).toHaveLength(GANTT_TASK_DATES.length);
+  for (const task of GANTT_TASK_DATES) {
+    const bar = parsed.querySelector(`rect[id$="-${task.id}"]`)!;
+    expect(bar).not.toBeNull();
+    bar.remove();
+  }
+  // Change only synthetic task bars: section stripes, native grid, text and
+  // intrinsic dimensions remain exact so they cannot substitute for task ink.
+  return { ...result, svg: new XMLSerializer().serializeToString(parsed.documentElement) };
+}
+
+async function expectEveryGanttTaskPainted(
+  result: MermaidResult,
+  png: PngPixels,
+  theme: "light" | "dark",
+): Promise<void> {
+  // A Gantt chart ends with its time axis, not its last task. Its section
+  // stripes also differ from the outer corner even when every task is missing.
+  // Compare each task to the same SVG with only bars removed, not to a corner
+  // or guessed theme color. Keep all labels/grid/stripes in that baseline.
+  const baseline = await readPng(
+    await createMermaidPng(ganttWithoutTaskBars(result), theme, new AbortController().signal),
+  );
+  expect(baseline.width).toBe(png.width);
+  expect(baseline.height).toBe(png.height);
+  const parsed = new DOMParser().parseFromString(result.svg, "image/svg+xml");
+  const viewBox = parsed.documentElement.getAttribute("viewBox")!.split(/\s+/).map(Number);
+  for (const task of GANTT_TASK_DATES) {
+    const bar = parsed.querySelector(`rect[id$="-${task.id}"]`)!;
+    expect(bar).not.toBeNull();
+    // The known fixture's ordinary bars are wider/taller than this inset. It
+    // lies beyond their rounded stroke and away from centered task labels;
+    // a retained label alone must not qualify missing bar geometry.
+    const x = Number(bar.getAttribute("x")) + 5;
+    const y = Number(bar.getAttribute("y")) + 5;
+    expect(Number(bar.getAttribute("width"))).toBeGreaterThan(10);
+    expect(Number(bar.getAttribute("height"))).toBeGreaterThan(10);
+    const pixelX = Math.floor(((x - viewBox[0]!) * png.width) / viewBox[2]!);
+    const pixelY = Math.floor(((y - viewBox[1]!) * png.height) / viewBox[3]!);
+    const painted = pixelAt(png, pixelX, pixelY);
+    const unpainted = pixelAt(baseline, pixelX, pixelY);
+    expect(painted[3]).toBe(255);
+    expect(unpainted[3]).toBe(255);
+    const contrast = Math.max(
+      ...painted.slice(0, 3).map((channel, index) => Math.abs(channel - unpainted[index]!)),
+    );
+    expect(contrast, `Missing painted task ${task.id}`).toBeGreaterThan(16);
+  }
 }
 
 function fixtureResult(contents: string, width = 100, height = 60): MermaidResult {
@@ -183,8 +238,27 @@ describe("real Mermaid PNG export", () => {
     expect(corner[3]).toBe(255);
     if (theme === "dark") expect(Math.max(...corner.slice(0, 3))).toBeLessThan(100);
     else expect(Math.min(...corner.slice(0, 3))).toBeGreaterThan(200);
+    if (source === GANTT_SCHEDULE) await expectEveryGanttTaskPainted(result, png, theme);
     expect(document.querySelector('iframe[title="Isolated diagram renderer"]')).toBeNull();
   });
+
+  it.each(["light", "dark"] as const)(
+    "does not mistake retained Gantt section stripes or labels for task pixels in %s",
+    async (theme) => {
+      const result = await renderMermaid(GANTT_SCHEDULE, theme);
+      const noBars = ganttWithoutTaskBars(result);
+      const png = await readPng(
+        await createMermaidPng(noBars, theme, new AbortController().signal),
+      );
+      // Prove the control still contains actual chart ink, while the exact
+      // positive task oracle rejects it. A blank/failed image would not test
+      // whether section stripes or retained task labels could satisfy it.
+      expect(inkCount(png)).toBeGreaterThan(100);
+      await expect(expectEveryGanttTaskPainted(result, png, theme)).rejects.toThrow(
+        "Missing painted task src",
+      );
+    },
+  );
 
   it("retains ink at both ends of a diagram longer than the inline preview", async () => {
     const source = `flowchart TD\n${Array.from(
@@ -375,101 +449,118 @@ describe("PNG resource and cancellation boundary", () => {
 });
 
 describe("diagram image actions preserve the viewer", () => {
-  it("copies an image from Source without changing its tab or the exact source", async () => {
-    await page.viewport(900, 700);
-    const transport = installExportTransportFixture();
-    const toast = vi.spyOn(toastManager, "add");
-    const anchoredToast = vi.spyOn(anchoredToastManager, "add");
-    const source = 'flowchart LR\nA["First endpoint"] --> B["Last endpoint"]';
-    const screen = await render(<MermaidBlock code={source} complete theme="light" />);
-    try {
-      await vi.waitFor(
-        () => expect(document.querySelector(".mermaid-preview img")).not.toBeNull(),
-        { timeout: 20_000 },
-      );
-      await page.getByRole("button", { name: "Source", exact: true }).click();
-      expect(document.querySelector(".mermaid-source code")?.textContent).toBe(source);
-      await page.getByRole("button", { name: /diagram.*(?:image|actions)/i }).click();
-      await page.getByRole("menuitem", { name: "Copy image", exact: true }).click();
-      // Wait for the actual byte-ready handoff, not a short preparation poll.
-      // The test and production decode deadlines still bound failures/stalls.
-      const bytes = await transport.copied;
-      expect(transport.copyPng).toHaveBeenCalledTimes(1);
-      expect(bytes).toBeInstanceOf(Uint8Array);
-      expect(
-        inkCount(await readPng(new Blob([new Uint8Array(bytes).buffer], { type: "image/png" }))),
-      ).toBeGreaterThan(100);
-      await expect
-        .element(page.getByRole("button", { name: "Source", exact: true }))
-        .toHaveAttribute("aria-pressed", "true");
-      expect(document.querySelector(".mermaid-source code")?.textContent).toBe(source);
-      expect(transport.copyText).not.toHaveBeenCalled();
-      expect(transport.savePng).not.toHaveBeenCalled();
-      await vi.waitFor(() =>
-        expect(toast.mock.calls.length + anchoredToast.mock.calls.length).toBe(1),
-      );
-      const titles = [...toast.mock.calls, ...anchoredToast.mock.calls].map(([options]) =>
-        String(options.title),
-      );
-      expect(titles[0]).toMatch(/copied/i);
-    } finally {
-      await screen.unmount();
-      transport.restore();
-    }
-  });
+  it.each([
+    { family: "flowchart", source: 'flowchart LR\nA["First endpoint"] --> B["Last endpoint"]' },
+    { family: "Gantt", source: GANTT_SCHEDULE },
+  ])(
+    "copies a $family image from Source without changing its tab or the exact source",
+    async ({ source }) => {
+      await page.viewport(900, 700);
+      const transport = installExportTransportFixture();
+      const toast = vi.spyOn(toastManager, "add");
+      const anchoredToast = vi.spyOn(anchoredToastManager, "add");
+      const screen = await render(<MermaidBlock code={source} complete theme="light" />);
+      try {
+        await vi.waitFor(
+          () => expect(document.querySelector(".mermaid-preview img")).not.toBeNull(),
+          { timeout: 20_000 },
+        );
+        await page.getByRole("button", { name: "Source", exact: true }).click();
+        expect(document.querySelector(".mermaid-source code")?.textContent).toBe(source);
+        await page.getByRole("button", { name: /diagram.*(?:image|actions)/i }).click();
+        await page.getByRole("menuitem", { name: "Copy image", exact: true }).click();
+        // Wait for the actual byte-ready handoff, not a short preparation poll.
+        // The test and production decode deadlines still bound failures/stalls.
+        const bytes = await transport.copied;
+        expect(transport.copyPng).toHaveBeenCalledTimes(1);
+        expect(bytes).toBeInstanceOf(Uint8Array);
+        expect(
+          inkCount(await readPng(new Blob([new Uint8Array(bytes).buffer], { type: "image/png" }))),
+        ).toBeGreaterThan(100);
+        await expect
+          .element(page.getByRole("button", { name: "Source", exact: true }))
+          .toHaveAttribute("aria-pressed", "true");
+        expect(document.querySelector(".mermaid-source code")?.textContent).toBe(source);
+        expect(transport.copyText).not.toHaveBeenCalled();
+        expect(transport.savePng).not.toHaveBeenCalled();
+        await vi.waitFor(() =>
+          expect(toast.mock.calls.length + anchoredToast.mock.calls.length).toBe(1),
+        );
+        const titles = [...toast.mock.calls, ...anchoredToast.mock.calls].map(([options]) =>
+          String(options.title),
+        );
+        expect(titles[0]).toMatch(/copied/i);
+      } finally {
+        await screen.unmount();
+        transport.restore();
+      }
+    },
+  );
 
-  it("exports through the expanded menu without closing, zooming, panning or a save toast", async () => {
-    await page.viewport(900, 700);
-    const transport = installExportTransportFixture();
-    const toast = vi.spyOn(toastManager, "add");
-    const anchoredToast = vi.spyOn(anchoredToastManager, "add");
-    const source = `flowchart TD\n${Array.from(
-      { length: 12 },
-      (_, index) => `N${index}["Endpoint ${index}"]${index < 11 ? ` --> N${index + 1}` : ""}`,
-    ).join("\n")}`;
-    const screen = await render(<MermaidBlock code={source} complete theme="dark" />);
-    try {
-      await vi.waitFor(
-        () => expect(document.querySelector(".mermaid-preview img")).not.toBeNull(),
-        { timeout: 20_000 },
-      );
-      const originalImage = document.querySelector<HTMLImageElement>(".mermaid-preview img")!;
-      await originalImage.decode();
-      await page.getByRole("button", { name: "Expand diagram", exact: true }).click();
-      const dialog = page.getByRole("dialog", { name: "Expanded Mermaid diagram", exact: true });
-      await expect.element(dialog).toBeVisible();
-      await dialog.getByRole("button", { name: "Reset", exact: true }).click();
-      await dialog.getByRole("button", { name: "Zoom in", exact: true }).click();
-      expect(document.querySelector(".mermaid-zoom-value")?.textContent).toBe("125%");
-      const viewport = document.querySelector<HTMLElement>(".mermaid-expanded-viewport")!;
-      await vi.waitFor(() => expect(viewport.scrollHeight).toBeGreaterThan(viewport.clientHeight));
-      viewport.scrollTop = 180;
-      const scrollTop = viewport.scrollTop;
-      await dialog.getByRole("button", { name: /diagram.*(?:image|actions)/i }).click();
-      await page.getByRole("menuitem", { name: /save.*PNG/i }).click();
-      // Only actual native invocation settles this preparation checkpoint;
-      // an error toast or viewer state cannot stand in for successful export.
-      const { png: bytes, suggestedName } = await transport.saved;
-      expect(transport.savePng).toHaveBeenCalledTimes(1);
-      const png = await readPng(new Blob([new Uint8Array(bytes).buffer], { type: "image/png" }));
-      expect(suggestedName).toMatch(/^[A-Za-z0-9][A-Za-z0-9_-]*\.png$/);
-      const result = await renderMermaid(source, "dark");
-      expect(png.width).toBe(Math.ceil(result.width));
-      expect(png.height).toBe(Math.ceil(result.height));
-      expect(inkCount(png, Math.floor((png.height * 9) / 10))).toBeGreaterThan(100);
-      await expect.element(dialog).toBeVisible();
-      expect(document.querySelector(".mermaid-zoom-value")?.textContent).toBe("125%");
-      expect(viewport.scrollTop).toBe(scrollTop);
-      expect(transport.copyPng).not.toHaveBeenCalled();
-      expect(toast).not.toHaveBeenCalled();
-      expect(anchoredToast).not.toHaveBeenCalled();
-      await userEvent.keyboard("{Escape}");
-      await expect
-        .element(page.getByRole("button", { name: "Expand diagram", exact: true }))
-        .toHaveFocus();
-    } finally {
-      await screen.unmount();
-      transport.restore();
-    }
-  });
+  it.each([
+    {
+      family: "flowchart",
+      source: `flowchart TD\n${Array.from(
+        { length: 12 },
+        (_, index) => `N${index}["Endpoint ${index}"]${index < 11 ? ` --> N${index + 1}` : ""}`,
+      ).join("\n")}`,
+      viewportHeight: 700,
+    },
+    { family: "Gantt", source: GANTT_SCHEDULE, viewportHeight: 500 },
+  ])(
+    "exports $family through the expanded menu without closing, zooming, panning or a save toast",
+    async ({ source, viewportHeight }) => {
+      await page.viewport(900, viewportHeight);
+      const transport = installExportTransportFixture();
+      const toast = vi.spyOn(toastManager, "add");
+      const anchoredToast = vi.spyOn(anchoredToastManager, "add");
+      const screen = await render(<MermaidBlock code={source} complete theme="dark" />);
+      try {
+        await vi.waitFor(
+          () => expect(document.querySelector(".mermaid-preview img")).not.toBeNull(),
+          { timeout: 20_000 },
+        );
+        const originalImage = document.querySelector<HTMLImageElement>(".mermaid-preview img")!;
+        await originalImage.decode();
+        await page.getByRole("button", { name: "Expand diagram", exact: true }).click();
+        const dialog = page.getByRole("dialog", { name: "Expanded Mermaid diagram", exact: true });
+        await expect.element(dialog).toBeVisible();
+        await dialog.getByRole("button", { name: "Reset", exact: true }).click();
+        await dialog.getByRole("button", { name: "Zoom in", exact: true }).click();
+        expect(document.querySelector(".mermaid-zoom-value")?.textContent).toBe("125%");
+        const viewport = document.querySelector<HTMLElement>(".mermaid-expanded-viewport")!;
+        await vi.waitFor(() =>
+          expect(viewport.scrollHeight).toBeGreaterThan(viewport.clientHeight),
+        );
+        viewport.scrollTop = 180;
+        const scrollTop = viewport.scrollTop;
+        await dialog.getByRole("button", { name: /diagram.*(?:image|actions)/i }).click();
+        await page.getByRole("menuitem", { name: /save.*PNG/i }).click();
+        // Only actual native invocation settles this preparation checkpoint;
+        // an error toast or viewer state cannot stand in for successful export.
+        const { png: bytes, suggestedName } = await transport.saved;
+        expect(transport.savePng).toHaveBeenCalledTimes(1);
+        const png = await readPng(new Blob([new Uint8Array(bytes).buffer], { type: "image/png" }));
+        expect(suggestedName).toMatch(/^[A-Za-z0-9][A-Za-z0-9_-]*\.png$/);
+        const result = await renderMermaid(source, "dark");
+        expect(png.width).toBe(Math.ceil(result.width));
+        expect(png.height).toBe(Math.ceil(result.height));
+        if (source === GANTT_SCHEDULE) await expectEveryGanttTaskPainted(result, png, "dark");
+        else expect(inkCount(png, Math.floor((png.height * 9) / 10))).toBeGreaterThan(100);
+        await expect.element(dialog).toBeVisible();
+        expect(document.querySelector(".mermaid-zoom-value")?.textContent).toBe("125%");
+        expect(viewport.scrollTop).toBe(scrollTop);
+        expect(transport.copyPng).not.toHaveBeenCalled();
+        expect(toast).not.toHaveBeenCalled();
+        expect(anchoredToast).not.toHaveBeenCalled();
+        await userEvent.keyboard("{Escape}");
+        await expect
+          .element(page.getByRole("button", { name: "Expand diagram", exact: true }))
+          .toHaveFocus();
+      } finally {
+        await screen.unmount();
+        transport.restore();
+      }
+    },
+  );
 });

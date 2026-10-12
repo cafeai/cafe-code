@@ -1,3 +1,5 @@
+import { useUiLocale, useUiPresentation } from "~/i18n";
+import { uiText } from "@cafecode/shared/i18n";
 import { useNavigate } from "@tanstack/react-router";
 import type { ServerProvider } from "@cafecode/contracts";
 import { CircleCheckIcon, DownloadIcon, TriangleAlertIcon, XIcon } from "lucide-react";
@@ -76,6 +78,9 @@ export function SidebarProviderUpdatePillContent({
   readonly providers: ReadonlyArray<ServerProvider>;
   readonly onOpenProviderSettings: () => void;
 }) {
+  const uiLocale = useUiLocale();
+  const uiPresentation = useUiPresentation(UI_PRESENTATION_SOURCES);
+
   const [transitionState, setTransitionState] = useState<ProviderUpdatePillTransitionState>(
     () => INITIAL_PROVIDER_UPDATE_PILL_TRANSITION_STATE,
   );
@@ -83,13 +88,13 @@ export function SidebarProviderUpdatePillContent({
   const effectiveVisibleAfterIso = visibleAfterIso ?? latestProviderCheckedAt(providers);
   const view = useMemo(
     () =>
-      getProviderUpdateSidebarPillView(providers, {
+      uiPresentation.getProviderUpdateSidebarPillView(providers, {
         ...(effectiveVisibleAfterIso !== undefined
           ? { visibleAfterIso: effectiveVisibleAfterIso }
           : {}),
         dismissedKeys: transitionState.dismissedKeys,
       }),
-    [effectiveVisibleAfterIso, providers, transitionState.dismissedKeys],
+    [effectiveVisibleAfterIso, providers, transitionState.dismissedKeys, uiPresentation],
   );
 
   useEffect(() => {
@@ -276,7 +281,12 @@ export function SidebarProviderUpdatePillContent({
             render={
               <button
                 type="button"
-                aria-label="Dismiss provider update notice"
+                aria-label={uiText(
+                  "Dismiss provider update notice",
+                  undefined,
+                  undefined,
+                  uiLocale,
+                )}
                 className="focus-ring relative z-[1] mr-1 inline-flex size-5 items-center justify-center rounded-md opacity-70 transition-opacity duration-(--duration-fast) hover:opacity-100"
                 onClick={() => startExit(displayedView.key, null, displayedView.key)}
               >
@@ -284,7 +294,9 @@ export function SidebarProviderUpdatePillContent({
               </button>
             }
           />
-          <TooltipPopup side="top">Dismiss until provider status changes</TooltipPopup>
+          <TooltipPopup side="top">
+            {uiText("Dismiss until provider status changes", undefined, undefined, uiLocale)}
+          </TooltipPopup>
         </Tooltip>
       )}
     </div>
@@ -305,3 +317,6 @@ export function SidebarProviderUpdatePill() {
     />
   );
 }
+
+// Finite source-owned labels/helpers only; no received or user data.
+const UI_PRESENTATION_SOURCES = { getProviderUpdateSidebarPillView };

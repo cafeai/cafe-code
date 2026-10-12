@@ -20,12 +20,27 @@ import * as Stream from "effect/Stream";
 import * as TestClock from "effect/testing/TestClock";
 import { HttpClient, HttpClientRequest, HttpClientResponse } from "effect/unstable/http";
 import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process";
+import { vi } from "vitest";
 
 import * as DesktopBackendManager from "./DesktopBackendManager.ts";
 import * as DesktopBackendConfiguration from "./DesktopBackendConfiguration.ts";
 import * as DesktopObservability from "../app/DesktopObservability.ts";
 import * as DesktopState from "../app/DesktopState.ts";
 import * as DesktopWindow from "../window/DesktopWindow.ts";
+import { encodeBackendMigrationProgress } from "@cafecode/shared/backendStartupProgress";
+
+vi.mock("./DesktopProcessReaper.ts", async (importOriginal) => {
+  const original = await importOriginal<typeof import("./DesktopProcessReaper.ts")>();
+  return {
+    ...original,
+    // These manager fixtures own only synthetic handles. Reading the host's
+    // process catalogue is unrelated to their readiness/restart/Stop assertions
+    // and can stall on a busy host or accidentally admit a real process with a
+    // fixture-shaped command. Keep that OS boundary inert; the separate reaper
+    // fixtures retain the actual process-selection policy tests.
+    reapMatchingUnixProcesses: () => Effect.succeed([]),
+  };
+});
 
 const decodeDesktopBackendBootstrap = Schema.decodeEffect(
   Schema.fromJsonString(DesktopBackendBootstrap),
@@ -58,6 +73,7 @@ function makeProcess(options?: {
   readonly stderr?: Stream.Stream<Uint8Array>;
   readonly exitCode?: Effect.Effect<ChildProcessSpawner.ExitCode>;
   readonly kill?: ChildProcessSpawner.ChildProcessHandle["kill"];
+  readonly progress?: Stream.Stream<Uint8Array>;
 }): ChildProcessSpawner.ChildProcessHandle {
   return ChildProcessSpawner.makeHandle({
     pid: ChildProcessSpawner.ProcessId(123),
@@ -69,7 +85,7 @@ function makeProcess(options?: {
     kill: options?.kill ?? (() => Effect.void),
     stdin: Sink.drain,
     getInputFd: () => Sink.drain,
-    getOutputFd: () => Stream.empty,
+    getOutputFd: (fd) => (fd === 4 ? (options?.progress ?? Stream.empty) : Stream.empty),
     unref: Effect.succeed(Effect.void),
   });
 }
@@ -212,7 +228,11 @@ describe("DesktopBackendManager", () => {
           2_000,
         );
 
-        assert.deepEqual(yield* decodeBootstrap(bootstrapJson), configWithObservability);
+        assert.deepEqual(yield* decodeBootstrap(bootstrapJson), {
+          ...configWithObservability,
+          startupProgressFd: 4,
+        });
+        assert.deepEqual(spawnedCommand.options.additionalFds?.fd4, { type: "output" });
       }).pipe(Effect.provide(managerLayer));
     }),
   );
@@ -513,6 +533,155 @@ describe("DesktopBackendManager", () => {
           yield* Effect.yieldNow;
         }
         assert.equal(yield* Queue.take(starts), 2);
+      }).pipe(Effect.provide(Layer.merge(TestClock.layer(), managerLayer)));
+    }),
+  );
+
+  it.effect(
+    "allows an owned migration with log capture disabled and closes its reader on stop",
+    () =>
+      Effect.gen(function* () {
+        const progress = yield* Queue.unbounded<Uint8Array>();
+        const ready = yield* Deferred.make<void>();
+        const exited = yield* Deferred.make<void>();
+        let healthy = false;
+        let killed = false;
+        let readerClosed = false;
+        const spawnerLayer = Layer.succeed(
+          ChildProcessSpawner.ChildProcessSpawner,
+          ChildProcessSpawner.make(() =>
+            Effect.succeed(
+              makeProcess({
+                exitCode: Deferred.await(exited).pipe(Effect.as(ChildProcessSpawner.ExitCode(0))),
+                kill: () =>
+                  Effect.sync(() => {
+                    killed = true;
+                  }).pipe(Effect.andThen(Deferred.succeed(exited, undefined)), Effect.asVoid),
+                progress: Stream.fromQueue(progress).pipe(
+                  Stream.ensuring(
+                    Effect.sync(() => {
+                      readerClosed = true;
+                    }),
+                  ),
+                ),
+              }),
+            ),
+          ),
+        );
+        const managerLayer = makeManagerLayer({
+          spawnerLayer,
+          config: { ...baseConfig, captureOutput: false, readinessTimeout: Duration.seconds(2) },
+          httpClientLayer: httpClientLayer((request) =>
+            healthy ? Effect.succeed(responseForRequest(request, 200)) : Effect.never,
+          ),
+          desktopWindow: {
+            handleBackendReady: Deferred.succeed(ready, void 0).pipe(Effect.asVoid),
+          },
+        });
+        yield* Effect.gen(function* () {
+          const manager = yield* DesktopBackendManager.DesktopBackendManager;
+          yield* manager.start;
+          yield* Queue.offer(
+            progress,
+            new TextEncoder().encode(
+              encodeBackendMigrationProgress({ phase: "start", migrationId: 92 }),
+            ),
+          );
+          yield* TestClock.adjust(Duration.seconds(10));
+          assert.equal(killed, false);
+          assert.equal((yield* manager.snapshot).ready, false);
+          healthy = true;
+          yield* Queue.offer(
+            progress,
+            new TextEncoder().encode(
+              encodeBackendMigrationProgress({ phase: "complete", migrationId: 92 }),
+            ),
+          );
+          yield* TestClock.adjust(Duration.millis(1_500));
+          yield* Deferred.await(ready);
+          assert.equal((yield* manager.snapshot).ready, true);
+          assert.equal(killed, false);
+          yield* manager.stop();
+          yield* Effect.yieldNow;
+          assert.equal(readerClosed, true);
+        }).pipe(Effect.provide(Layer.merge(TestClock.layer(), managerLayer)));
+      }),
+  );
+
+  it.effect(
+    "terminates a stalled migration at the absolute cap despite repeated progress starts",
+    () =>
+      Effect.gen(function* () {
+        const progress = yield* Queue.unbounded<Uint8Array>();
+        let killCount = 0;
+        const managerLayer = makeManagerLayer({
+          spawnerLayer: Layer.succeed(
+            ChildProcessSpawner.ChildProcessSpawner,
+            ChildProcessSpawner.make(() =>
+              Effect.succeed(
+                makeProcess({
+                  exitCode: Effect.never,
+                  kill: () =>
+                    Effect.sync(() => {
+                      killCount += 1;
+                    }),
+                  progress: Stream.fromQueue(progress),
+                }),
+              ),
+            ),
+          ),
+          config: { ...baseConfig, readinessTimeout: Duration.seconds(2) },
+          httpClientLayer: httpClientLayer(() => Effect.never),
+        });
+        yield* Effect.gen(function* () {
+          const manager = yield* DesktopBackendManager.DesktopBackendManager;
+          yield* manager.start;
+          const frame = new TextEncoder().encode(
+            encodeBackendMigrationProgress({ phase: "start", migrationId: 92 }),
+          );
+          yield* Queue.offer(progress, frame);
+          yield* TestClock.adjust(Duration.seconds(599));
+          assert.equal(killCount, 0);
+          yield* Queue.offer(progress, frame);
+          yield* TestClock.adjust(Duration.seconds(1));
+          yield* Effect.yieldNow;
+          assert.equal(killCount > 0, true);
+        }).pipe(Effect.provide(Layer.merge(TestClock.layer(), managerLayer)));
+      }),
+  );
+
+  it.effect("does not grant migration time to stdout or malformed private frames", () =>
+    Effect.gen(function* () {
+      let killCount = 0;
+      const frame = new TextEncoder().encode(
+        encodeBackendMigrationProgress({ phase: "start", migrationId: 92 }),
+      );
+      const managerLayer = makeManagerLayer({
+        spawnerLayer: Layer.succeed(
+          ChildProcessSpawner.ChildProcessSpawner,
+          ChildProcessSpawner.make(() =>
+            Effect.succeed(
+              makeProcess({
+                exitCode: Effect.never,
+                kill: () =>
+                  Effect.sync(() => {
+                    killCount += 1;
+                  }),
+                stdout: Stream.make(frame),
+                progress: Stream.make(new TextEncoder().encode("x".repeat(97))),
+              }),
+            ),
+          ),
+        ),
+        config: { ...baseConfig, readinessTimeout: Duration.seconds(2) },
+        httpClientLayer: httpClientLayer(() => Effect.never),
+      });
+      yield* Effect.gen(function* () {
+        const manager = yield* DesktopBackendManager.DesktopBackendManager;
+        yield* manager.start;
+        yield* TestClock.adjust(Duration.seconds(2));
+        yield* Effect.yieldNow;
+        assert.equal(killCount > 0, true);
       }).pipe(Effect.provide(Layer.merge(TestClock.layer(), managerLayer)));
     }),
   );

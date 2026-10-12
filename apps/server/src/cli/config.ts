@@ -368,6 +368,9 @@ export const resolveServerConfig = (
       noBrowser,
       startupPresentation,
       desktopBootstrapToken,
+      ...(mode === "desktop" && bootstrap?.startupProgressFd === 4
+        ? { startupProgressFd: 4 as const }
+        : {}),
       autoBootstrapProjectFromCwd,
       logWebSocketEvents,
       providerDaemon: bootstrap?.providerDaemon,

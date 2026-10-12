@@ -25,6 +25,12 @@ import {
 
 // ── Client Settings (local-only) ───────────────────────────────
 
+// Presentation-only. Missing legacy preferences follow the primary system
+// language; an explicit English selection must remain distinct from default.
+export const UiLanguagePreference = Schema.Literals(["system", "en", "ja", "ko"]);
+export type UiLanguagePreference = typeof UiLanguagePreference.Type;
+export const DEFAULT_UI_LANGUAGE_PREFERENCE: UiLanguagePreference = "system";
+
 export const TimestampFormat = Schema.Literals(["locale", "12-hour", "24-hour"]);
 export type TimestampFormat = typeof TimestampFormat.Type;
 export const DEFAULT_TIMESTAMP_FORMAT: TimestampFormat = "locale";
@@ -279,6 +285,9 @@ export type ChatClickBehavior = typeof ChatClickBehavior.Type;
 export const DEFAULT_CHAT_CLICK_BEHAVIOR: ChatClickBehavior = "preview";
 
 export const ClientSettingsSchema = Schema.Struct({
+  languagePreference: UiLanguagePreference.pipe(
+    Schema.withDecodingDefault(Effect.succeed(DEFAULT_UI_LANGUAGE_PREFERENCE)),
+  ),
   chatClickBehavior: ChatClickBehavior.pipe(
     Schema.withDecodingDefault(Effect.succeed(DEFAULT_CHAT_CLICK_BEHAVIOR)),
   ),
@@ -1079,6 +1088,7 @@ export const ServerSettingsPatch = Schema.Struct({
 export type ServerSettingsPatch = typeof ServerSettingsPatch.Type;
 
 export const ClientSettingsPatch = Schema.Struct({
+  languagePreference: Schema.optionalKey(UiLanguagePreference),
   chatClickBehavior: Schema.optionalKey(ChatClickBehavior),
   autoOpenPlanSidebar: Schema.optionalKey(Schema.Boolean),
   onboardingCompleted: Schema.optionalKey(Schema.Boolean),

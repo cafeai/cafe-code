@@ -2,7 +2,8 @@ import "../../index.css";
 import { useState } from "react";
 import { ProviderDriverKind } from "@cafecode/contracts";
 import { page, userEvent } from "vitest/browser";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { getUiLocale, setUiLocale, uiText } from "@cafecode/shared/i18n";
 import { render } from "vitest-browser-react";
 import { MenuItem } from "../ui/menu";
 import { CompactComposerControlsMenu } from "./CompactComposerControlsMenu";
@@ -78,6 +79,8 @@ async function openEditor() {
 }
 
 describe("per-chat subagent concurrency editor", () => {
+  const originalLocale = getUiLocale();
+  beforeEach(() => setUiLocale("en"));
   let mounted: Awaited<ReturnType<typeof render>> | undefined;
   const viewport = { width: window.innerWidth, height: window.innerHeight };
   const fontSize = document.documentElement.style.fontSize;
@@ -87,6 +90,35 @@ describe("per-chat subagent concurrency editor", () => {
     document.body.innerHTML = "";
     document.documentElement.style.fontSize = fontSize;
     await page.viewport(viewport.width, viewport.height);
+    setUiLocale(originalLocale);
+  });
+  it("retranslates failed save feedback without discarding the draft or repeating policy change", async () => {
+    const onChange = vi.fn(async (_value: number | undefined) => {
+      throw new Error("private fixture details");
+    });
+    mounted = await render(<Harness onChange={onChange} override={5} configured={5} />);
+    await openEditor();
+    await page.getByRole("spinbutton", { name: "Maximum concurrent subagents" }).fill("24");
+    await page.getByRole("button", { name: "Save", exact: true }).click();
+    await expect
+      .element(page.getByRole("alert"))
+      .toHaveTextContent("Could not save this chat's subagent limit. Try again when connected.");
+    setUiLocale("ko");
+    await expect
+      .element(page.getByRole("alert"))
+      .toHaveTextContent(
+        "이 대화의 하위 에이전트 한도를 저장하지 못했습니다. 연결된 상태에서 다시 시도하세요.",
+      );
+    await expect
+      .element(
+        page.getByRole("spinbutton", {
+          name: uiText("Maximum concurrent subagents", undefined, undefined, "ko"),
+        }),
+      )
+      .toHaveValue(24);
+    expect(onChange).toHaveBeenCalledExactlyOnceWith(24);
+    expect(document.body.textContent).not.toContain("private fixture details");
+    await expect.element(page.getByRole("dialog")).toBeVisible();
   });
   it("shows one saved limit while application is pending and explains it in accessible help", async () => {
     const onChange = vi.fn(async () => {});

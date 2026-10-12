@@ -1,3 +1,6 @@
+import { useUiLocale } from "~/i18n";
+import { uiText } from "@cafecode/shared/i18n";
+import { UiMessage } from "~/i18n";
 import { DownloadIcon, RotateCwIcon, TriangleAlertIcon, XIcon } from "lucide-react";
 import { useQueryClient } from "@tanstack/react-query";
 import { useCallback, useState } from "react";
@@ -23,12 +26,16 @@ import { Alert, AlertDescription, AlertTitle } from "../ui/alert";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 
 export function SidebarUpdatePill() {
+  const uiLocale = useUiLocale();
+
   const queryClient = useQueryClient();
   const state = useDesktopUpdateState().data ?? null;
   const [dismissed, setDismissed] = useState(false);
 
   const visible = isElectron && shouldShowDesktopUpdateButton(state) && !dismissed;
-  const tooltip = state ? getDesktopUpdateButtonTooltip(state) : "Update available";
+  const tooltip = state
+    ? getDesktopUpdateButtonTooltip(state)
+    : uiText("Update available", undefined, undefined, uiLocale);
   const disabled = isDesktopUpdateButtonDisabled(state);
   const action = state ? resolveDesktopUpdateButtonAction(state) : "none";
 
@@ -48,15 +55,25 @@ export function SidebarUpdatePill() {
           if (opened) return;
           toastManager.add({
             type: "error",
-            title: "Could not open release",
-            description: "Open the Cafe Code releases page in your browser to install the DMG.",
+            title: uiText("Could not open release", undefined, undefined, uiLocale),
+            description: uiText(
+              "Open the Cafe Code releases page in your browser to install the DMG.",
+              undefined,
+              undefined,
+              uiLocale,
+            ),
           });
         })
         .catch(() => {
           toastManager.add({
             type: "error",
-            title: "Could not open release",
-            description: "Open the Cafe Code releases page in your browser to install the DMG.",
+            title: uiText("Could not open release", undefined, undefined, uiLocale),
+            description: uiText(
+              "Open the Cafe Code releases page in your browser to install the DMG.",
+              undefined,
+              undefined,
+              uiLocale,
+            ),
           });
         });
       return;
@@ -75,7 +92,7 @@ export function SidebarUpdatePill() {
           toastManager.add(
             stackedThreadToast({
               type: "error",
-              title: "Could not download update",
+              title: uiText("Could not download update", undefined, undefined, uiLocale),
               description: actionError,
             }),
           );
@@ -84,9 +101,11 @@ export function SidebarUpdatePill() {
           toastManager.add(
             stackedThreadToast({
               type: "error",
-              title: "Could not start update download",
+              title: uiText("Could not start update download", undefined, undefined, uiLocale),
               description:
-                error instanceof Error ? error.message : "Try again from the update button.",
+                error instanceof Error
+                  ? error.message
+                  : uiText("Try again from the update button.", undefined, undefined, uiLocale),
             }),
           );
         });
@@ -106,7 +125,7 @@ export function SidebarUpdatePill() {
           toastManager.add(
             stackedThreadToast({
               type: "error",
-              title: "Could not install update",
+              title: uiText("Could not install update", undefined, undefined, uiLocale),
               description: actionError,
             }),
           );
@@ -115,14 +134,16 @@ export function SidebarUpdatePill() {
           toastManager.add(
             stackedThreadToast({
               type: "error",
-              title: "Could not install update",
+              title: uiText("Could not install update", undefined, undefined, uiLocale),
               description:
-                error instanceof Error ? error.message : "Try again from the update button.",
+                error instanceof Error
+                  ? error.message
+                  : uiText("Try again from the update button.", undefined, undefined, uiLocale),
             }),
           );
         });
     }
-  }, [action, disabled, queryClient, state]);
+  }, [action, disabled, queryClient, state, uiLocale]);
 
   if (!visible && !showArm64Warning) return null;
 
@@ -131,7 +152,9 @@ export function SidebarUpdatePill() {
       {showArm64Warning && arm64Description && (
         <Alert variant="warning" className="rounded-2xl text-xs">
           <TriangleAlertIcon />
-          <AlertTitle>Intel build on Apple Silicon</AlertTitle>
+          <AlertTitle>
+            {uiText("Intel build on Apple Silicon", undefined, undefined, uiLocale)}
+          </AlertTitle>
           <AlertDescription>{arm64Description}</AlertDescription>
         </Alert>
       )}
@@ -156,27 +179,32 @@ export function SidebarUpdatePill() {
                   {action === "install" ? (
                     <>
                       <RotateCwIcon className="size-3.5" />
-                      <span>Restart to update</span>
+                      <span>{uiText("Restart to update", undefined, undefined, uiLocale)}</span>
                     </>
                   ) : action === "manual" ? (
                     <>
                       <DownloadIcon className="size-3.5" />
-                      <span>View macOS update</span>
+                      <span>{uiText("View macOS update", undefined, undefined, uiLocale)}</span>
                     </>
                   ) : state?.status === "downloading" ? (
                     <>
                       <DownloadIcon className="size-3.5" />
                       <span>
-                        Downloading
-                        {typeof state.downloadPercent === "number"
-                          ? ` (${Math.floor(state.downloadPercent)}%)`
-                          : "…"}
+                        <UiMessage
+                          message={"Downloading<slot1></slot1>"}
+                          slots={{
+                            slot1:
+                              typeof state.downloadPercent === "number"
+                                ? ` (${Math.floor(state.downloadPercent)}%)`
+                                : uiText("…", undefined, undefined, uiLocale),
+                          }}
+                        />
                       </span>
                     </>
                   ) : (
                     <>
                       <DownloadIcon className="size-3.5" />
-                      <span>Update available</span>
+                      <span>{uiText("Update available", undefined, undefined, uiLocale)}</span>
                     </>
                   )}
                 </button>
@@ -190,7 +218,7 @@ export function SidebarUpdatePill() {
                 render={
                   <button
                     type="button"
-                    aria-label="Dismiss update"
+                    aria-label={uiText("Dismiss update", undefined, undefined, uiLocale)}
                     className="focus-ring mr-1 inline-flex size-5 items-center justify-center rounded-md text-subtle-foreground transition-colors duration-(--duration-fast) hover:text-primary"
                     onClick={() => setDismissed(true)}
                   >
@@ -198,7 +226,9 @@ export function SidebarUpdatePill() {
                   </button>
                 }
               />
-              <TooltipPopup side="top">Dismiss until next launch</TooltipPopup>
+              <TooltipPopup side="top">
+                {uiText("Dismiss until next launch", undefined, undefined, uiLocale)}
+              </TooltipPopup>
             </Tooltip>
           )}
         </div>

@@ -1,3 +1,6 @@
+import { useUiLocale, useUiPresentation } from "~/i18n";
+import { uiText } from "@cafecode/shared/i18n";
+import { UiMessage } from "~/i18n";
 import type { ReactNode } from "react";
 import type { ServerProviderAccountRateLimits } from "@cafecode/contracts";
 
@@ -7,6 +10,11 @@ import { formatCodexRateLimitPresentation } from "~/lib/codexRateLimits";
 import { ProviderAccountQuotaDetails, UsageMeterBar } from "../ProviderAccountQuotaDetails";
 import type { ProviderQuotaState } from "./useProviderQuota";
 import { SubagentConcurrencyDetails } from "./SubagentConcurrencyControl";
+import { CodexContextWindowDetails } from "./CodexContextWindowControl";
+import {
+  formatCodexContextWindowOverride,
+  type CodexContextWindowPresentation,
+} from "../../codexContextWindow";
 import {
   formatSubagentConcurrencyLimit,
   type SubagentConcurrencyPresentation,
@@ -22,6 +30,12 @@ function formatPercentage(value: number | null): string | null {
   return `${Math.round(value)}%`;
 }
 
+/** Keep the capacity phrase's existing span while the complete context summary
+ * remains reorderable. This pure, code-owned wrapper has no action authority. */
+function renderContextCapacity(parts: (string | ReactNode)[]): ReactNode {
+  return <span>{parts}</span>;
+}
+
 export function ContextWindowDetails(props: {
   readonly usage: ContextWindowSnapshot | null | undefined;
   readonly rateLimits?: ServerProviderAccountRateLimits | null | undefined;
@@ -30,19 +44,29 @@ export function ContextWindowDetails(props: {
   readonly headerAction?: ReactNode;
   readonly usageResetAction?: ReactNode;
   readonly subagentConcurrency?: SubagentConcurrencyPresentation | null | undefined;
+  readonly codexContextWindow?: CodexContextWindowPresentation | null | undefined;
 }) {
+  const uiLocale = useUiLocale();
+  const uiPresentation = useUiPresentation(UI_PRESENTATION_SOURCES);
+
   const usage = props.usage ?? null;
   const layout = props.layout ?? "popover";
-  const quota = formatCodexRateLimitPresentation(props.rateLimits);
+  const quota = uiPresentation.formatCodexRateLimitPresentation(props.rateLimits);
   const usedPercentage = usage ? formatPercentage(usage.usedPercentage) : null;
   const normalizedPercentage = Math.max(0, Math.min(100, usage?.usedPercentage ?? 0));
   const hasUsage = usage !== null;
   const hasRateLimits = quota !== null;
   const hasSessionQuota = props.sessionQuota !== undefined;
   const hasSubagentLimit = formatSubagentConcurrencyLimit(props.subagentConcurrency) !== null;
+  const hasContextOverride =
+    formatCodexContextWindowOverride(props.codexContextWindow, uiLocale) !== null;
 
-  if (!hasUsage && !hasRateLimits && !hasSubagentLimit && !hasSessionQuota) {
-    return <p className="text-ui text-subtle-foreground">Waiting for usage from this chat.</p>;
+  if (!hasUsage && !hasRateLimits && !hasSubagentLimit && !hasContextOverride && !hasSessionQuota) {
+    return (
+      <p className="text-ui text-subtle-foreground">
+        {uiText("Waiting for usage from this chat.", undefined, undefined, uiLocale)}
+      </p>
+    );
   }
 
   return (
@@ -54,11 +78,15 @@ export function ContextWindowDetails(props: {
     >
       {layout === "popover" && (hasUsage || !hasSessionQuota) ? (
         <div className="flex items-center justify-between gap-2">
-          <div className="label-overline">Context window</div>
+          <div className="label-overline">
+            {uiText("Context window", undefined, undefined, uiLocale)}
+          </div>
           {props.headerAction}
         </div>
       ) : hasUsage || !hasSessionQuota ? (
-        <div className="label-overline">Context window</div>
+        <div className="label-overline">
+          {uiText("Context window", undefined, undefined, uiLocale)}
+        </div>
       ) : null}
 
       {hasUsage && layout === "panel" ? (
@@ -74,11 +102,21 @@ export function ContextWindowDetails(props: {
               : "whitespace-nowrap text-xs font-medium tabular-nums",
           )}
         >
-          <span>{usedPercentage}</span>
-          <span className="mx-1">⋅</span>
-          <span>{formatContextWindowTokens(usage.usedTokens)}</span>
-          <span>/</span>
-          <span>{formatContextWindowTokens(usage.maxTokens ?? null)} context used</span>
+          <UiMessage
+            message={
+              "<percentage></percentage><separator></separator><used></used><divider></divider><capacity>{maximum} context used</capacity>"
+            }
+            values={{
+              maximum: formatContextWindowTokens(usage.maxTokens ?? null),
+              capacity: renderContextCapacity,
+            }}
+            slots={{
+              percentage: <span>{usedPercentage}</span>,
+              separator: <span className="mx-1">⋅</span>,
+              used: <span>{formatContextWindowTokens(usage.usedTokens)}</span>,
+              divider: <span>/</span>,
+            }}
+          />
         </div>
       ) : hasUsage ? (
         <div
@@ -86,7 +124,14 @@ export function ContextWindowDetails(props: {
             layout === "panel" ? "text-ui text-foreground tabular-nums" : "text-sm text-foreground"
           }
         >
-          {formatContextWindowTokens(usage.usedTokens)} tokens used so far
+          {uiText(
+            "{tokens} tokens used so far",
+            {
+              tokens: formatContextWindowTokens(usage.usedTokens),
+            },
+            undefined,
+            uiLocale,
+          )}
         </div>
       ) : null}
 
@@ -94,17 +139,34 @@ export function ContextWindowDetails(props: {
       (usage.totalProcessedTokens ?? null) !== null &&
       (usage.totalProcessedTokens ?? 0) > usage.usedTokens ? (
         <div className="text-xs text-muted-foreground">
-          Total processed: {formatContextWindowTokens(usage.totalProcessedTokens ?? null)} tokens
+          {uiText(
+            "Total processed: {tokens} tokens",
+            {
+              tokens: formatContextWindowTokens(usage.totalProcessedTokens ?? null),
+            },
+            undefined,
+            uiLocale,
+          )}
         </div>
       ) : null}
 
       {hasUsage && usage.compactsAutomatically ? (
         <div className="text-xs text-muted-foreground">
           {usage.autoCompactTokenLimit
-            ? `Automatically compacts around ${formatContextWindowTokens(
-                usage.autoCompactTokenLimit,
-              )} tokens.`
-            : "Automatically compacts its context when needed."}
+            ? uiText(
+                "Automatically compacts around {value0} tokens.",
+                {
+                  value0: formatContextWindowTokens(usage.autoCompactTokenLimit),
+                },
+                undefined,
+                uiLocale,
+              )
+            : uiText(
+                "Automatically compacts its context when needed.",
+                undefined,
+                undefined,
+                uiLocale,
+              )}
         </div>
       ) : null}
 
@@ -125,11 +187,22 @@ export function ContextWindowDetails(props: {
           />
         </div>
       ) : null}
-      {hasSubagentLimit ? (
-        <div className="border-t border-border-subtle pt-2">
-          <SubagentConcurrencyDetails presentation={props.subagentConcurrency} />
+      {hasSubagentLimit || hasContextOverride ? (
+        // These are adjacent policy summaries, not separate usage sections.
+        // One shared divider preserves the single-row boundary while keeping
+        // the outer usage/quota section gap out of the space between policies.
+        <div className="flex flex-col gap-1 border-t border-border-subtle pt-2">
+          {hasSubagentLimit ? (
+            <SubagentConcurrencyDetails presentation={props.subagentConcurrency} />
+          ) : null}
+          {hasContextOverride ? (
+            <CodexContextWindowDetails presentation={props.codexContextWindow} />
+          ) : null}
         </div>
       ) : null}
     </div>
   );
 }
+
+// Finite source-owned labels/helpers only; no received or user data.
+const UI_PRESENTATION_SOURCES = { formatCodexRateLimitPresentation };

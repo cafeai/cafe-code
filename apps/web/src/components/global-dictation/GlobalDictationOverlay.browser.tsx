@@ -1,6 +1,7 @@
 import { page } from "vitest/browser";
 import { describe, expect, it, vi } from "vitest";
 import { render } from "vitest-browser-react";
+import { setUiLocale, uiText } from "@cafecode/shared/i18n";
 import {
   DICTATION_REWRITE_INSTRUCTIONS_MAX_CHARS,
   type DictationRewriteTextInput,
@@ -28,6 +29,94 @@ function props(overrides: Partial<GlobalDictationOverlayProps> = {}): GlobalDict
 }
 
 describe("GlobalDictationOverlay", () => {
+  it("re-renders retained feedback on language changes without exporting the draft again", async () => {
+    setUiLocale("en");
+    const onCopy = vi.fn();
+    const screen = await render(<GlobalDictationOverlay {...props({ onCopy })} />);
+    try {
+      await page.getByRole("button", { name: "Copy", exact: true }).click();
+      await expect
+        .element(page.getByText("Copied your draft.", { exact: true }))
+        .toBeInTheDocument();
+      for (const locale of ["ja", "ko"] as const) {
+        setUiLocale(locale);
+        await expect
+          .element(
+            page.getByText(uiText("Copied your draft.", undefined, undefined, locale), {
+              exact: true,
+            }),
+          )
+          .toBeInTheDocument();
+        await expect
+          .element(
+            page.getByRole("textbox", {
+              name: uiText("Editable draft", undefined, undefined, locale),
+              exact: true,
+            }),
+          )
+          .toHaveValue("Hello, WORLD!");
+        expect(onCopy).toHaveBeenCalledExactlyOnceWith("Hello, WORLD!");
+      }
+    } finally {
+      await screen.unmount();
+      setUiLocale("en");
+    }
+  });
+
+  it("keeps an approved rewrite pending across a language switch and renders its result in the current language", async () => {
+    setUiLocale("en");
+    let finish: (value: string) => void = () => undefined;
+    const pending = new Promise<string>((resolve) => {
+      finish = resolve;
+    });
+    let signal: AbortSignal | undefined;
+    const rewriteText = vi.fn((_input: DictationRewriteTextInput, value: AbortSignal) => {
+      signal = value;
+      return pending;
+    });
+    const screen = await render(
+      <GlobalDictationOverlay {...props({ rewriteText, formalConsentGranted: true })} />,
+    );
+    try {
+      await page.getByRole("button", { name: "Formal", exact: true }).click();
+      expect(rewriteText).toHaveBeenCalledOnce();
+      setUiLocale("ko");
+      await expect
+        .element(
+          page.getByText(uiText("Refining your draft…", undefined, undefined, "ko"), {
+            exact: true,
+          }),
+        )
+        .toBeInTheDocument();
+      expect(signal?.aborted).toBe(false);
+      finish("The approved rewritten draft.");
+      await expect
+        .element(
+          page.getByRole("textbox", {
+            name: uiText("Editable draft", undefined, undefined, "ko"),
+            exact: true,
+          }),
+        )
+        .toHaveValue("The approved rewritten draft.");
+      await expect
+        .element(
+          page.getByText(
+            uiText(
+              "{value0} draft ready.",
+              { value0: uiText("Formal", undefined, undefined, "ko") },
+              undefined,
+              "ko",
+            ),
+            { exact: true },
+          ),
+        )
+        .toBeInTheDocument();
+      expect(rewriteText).toHaveBeenCalledOnce();
+    } finally {
+      await screen.unmount();
+      setUiLocale("en");
+    }
+  });
   it.each([
     { width: 490, height: 510 },
     { width: 360, height: 360 },

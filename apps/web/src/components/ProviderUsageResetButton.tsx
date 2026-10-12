@@ -1,3 +1,5 @@
+import { useUiLocale, useUiPresentation } from "~/i18n";
+import { uiText } from "@cafecode/shared/i18n";
 import { useRef, useState } from "react";
 import { RotateCcwIcon } from "lucide-react";
 import type {
@@ -29,10 +31,18 @@ export type RequestProviderUsageReset = (
 ) => Promise<ProviderUsageResetResult>;
 
 const OUTCOME_TEXT = {
-  reset: "Your usage limit reset was redeemed.",
-  alreadyRedeemed: "This reset was already redeemed. No additional reset was spent.",
-  nothingToReset: "There is no eligible usage window to reset. No reset was spent.",
-  noCredit: "No usage limit resets are available for this account.",
+  get reset() {
+    return uiText("Your usage limit reset was redeemed.");
+  },
+  get alreadyRedeemed() {
+    return uiText("This reset was already redeemed. No additional reset was spent.");
+  },
+  get nothingToReset() {
+    return uiText("There is no eligible usage window to reset. No reset was spent.");
+  },
+  get noCredit() {
+    return uiText("No usage limit resets are available for this account.");
+  },
 } as const;
 
 function resetFailureMessage(error: unknown, fallback: string): string {
@@ -55,6 +65,9 @@ export function ProviderUsageResetButton(props: {
   readonly provider: ServerProvider | null | undefined;
   readonly request: RequestProviderUsageReset;
 }) {
+  const uiLocale = useUiLocale();
+  const uiPresentation = useUiPresentation(UI_PRESENTATION_SOURCES);
+
   const [open, setOpen] = useState(false);
   const [busy, setBusy] = useState(false);
   const [result, setResult] = useState<ProviderUsageResetResult | null>(null);
@@ -96,7 +109,12 @@ export function ProviderUsageResetButton(props: {
         setError(
           resetFailureMessage(
             error,
-            "Could not check reset availability. Check your connection and Codex authentication, then try again.",
+            uiText(
+              "Could not check reset availability. Check your connection and Codex authentication, then try again.",
+              undefined,
+              undefined,
+              uiLocale,
+            ),
           ),
         );
       }
@@ -129,7 +147,12 @@ export function ProviderUsageResetButton(props: {
       setError(
         resetFailureMessage(
           error,
-          "The reset result could not be confirmed. Retry this same reset safely; an already redeemed reset will not be spent again.",
+          uiText(
+            "The reset result could not be confirmed. Retry this same reset safely; an already redeemed reset will not be spent again.",
+            undefined,
+            undefined,
+            uiLocale,
+          ),
         ),
       );
     } finally {
@@ -139,7 +162,7 @@ export function ProviderUsageResetButton(props: {
   };
 
   const count = result?.rateLimits?.rateLimitResetCredits?.availableCount;
-  const quota = formatCodexRateLimitPresentation(result?.rateLimits);
+  const quota = uiPresentation.formatCodexRateLimitPresentation(result?.rateLimits);
   const finished = result?.outcome != null;
   const canRedeem = Boolean(result?.confirmationId && !finished);
 
@@ -159,7 +182,7 @@ export function ProviderUsageResetButton(props: {
           }}
         >
           <RotateCcwIcon className="size-3" />
-          Redeem reset
+          {uiText("Redeem reset", undefined, undefined, uiLocale)}
         </Button>
       ) : null}
       <Dialog
@@ -170,9 +193,14 @@ export function ProviderUsageResetButton(props: {
       >
         <DialogPopup className="max-w-md" showCloseButton={!busy}>
           <DialogHeader>
-            <DialogTitle>{finished ? "Usage reset result" : "Redeem a usage reset?"}</DialogTitle>
+            <DialogTitle>
+              {finished
+                ? uiText("Usage reset result", undefined, undefined, uiLocale)
+                : uiText("Redeem a usage reset?", undefined, undefined, uiLocale)}
+            </DialogTitle>
             <DialogDescription className="pr-5 [overflow-wrap:anywhere]">
-              {target.current?.provider.displayName ?? "Codex"}
+              {target.current?.provider.displayName ??
+                uiText("Codex", undefined, undefined, uiLocale)}
               {target.current?.provider.auth.email
                 ? ` · ${target.current.provider.auth.email}`
                 : ""}
@@ -182,10 +210,14 @@ export function ProviderUsageResetButton(props: {
             {showBusy ? (
               <p role="status" className="flex items-center gap-2 text-muted-foreground">
                 <Spinner aria-hidden="true" className="size-4" />
-                {result?.confirmationId ? "Confirming reset…" : "Checking usage…"}
+                {result?.confirmationId
+                  ? uiText("Confirming reset…", undefined, undefined, uiLocale)
+                  : uiText("Checking usage…", undefined, undefined, uiLocale)}
               </p>
             ) : null}
-            {result?.outcome ? <p role="status">{OUTCOME_TEXT[result.outcome]}</p> : null}
+            {result?.outcome ? (
+              <p role="status">{uiPresentation.OUTCOME_TEXT[result.outcome]}</p>
+            ) : null}
             {/* Keep the last read visible while a confirmation is in flight so
                 the dialog does not empty out and jump. */}
             {result ? (
@@ -198,34 +230,67 @@ export function ProviderUsageResetButton(props: {
                   ) : null}
                   <p className="font-medium tabular-nums">
                     {count === undefined
-                      ? "Reset count not reported"
-                      : `${count} usage limit ${count === 1 ? "reset" : "resets"} available`}
+                      ? uiText("Reset count not reported", undefined, undefined, uiLocale)
+                      : uiText(
+                          "{count} usage limit {count, plural, one {reset} other {resets}} available",
+                          { count },
+                          undefined,
+                          uiLocale,
+                        )}
                   </p>
                 </div>
                 {!finished && !result.retrying && canRedeem ? (
                   <p>
-                    This spends one of your earned resets on eligible Codex limits and can&apos;t be
-                    undone.
+                    {uiText(
+                      "This spends one of your earned resets on eligible Codex limits and can''t be undone.",
+                      undefined,
+                      undefined,
+                      uiLocale,
+                    )}
                   </p>
                 ) : null}
                 {!busy && !finished && !result.retrying && !canRedeem ? (
                   <p>
                     {count === 0
-                      ? "You have no earned resets available. Your limits reset on schedule."
+                      ? uiText(
+                          "You have no earned resets available. Your limits reset on schedule.",
+                          undefined,
+                          undefined,
+                          uiLocale,
+                        )
                       : count === undefined
-                        ? "Codex didn't report reset availability. Try refreshing or updating Codex."
-                        : "Usage is above 5% remaining, so no reset is needed."}
+                        ? uiText(
+                            "Codex didn''t report reset availability. Try refreshing or updating Codex.",
+                            undefined,
+                            undefined,
+                            uiLocale,
+                          )
+                        : uiText(
+                            "Usage is above 5% remaining, so no reset is needed.",
+                            undefined,
+                            undefined,
+                            uiLocale,
+                          )}
                   </p>
                 ) : null}
                 {!busy && result.retrying && !error ? (
                   <p>
-                    An earlier reset&apos;s result is unconfirmed. Retry the same reset to check it
-                    safely.
+                    {uiText(
+                      "An earlier reset''s result is unconfirmed. Retry the same reset to check it safely.",
+                      undefined,
+                      undefined,
+                      uiLocale,
+                    )}
                   </p>
                 ) : null}
                 {finished && !result.rateLimits ? (
                   <p>
-                    Confirmed, but updated usage isn&apos;t available yet. Refresh usage to check.
+                    {uiText(
+                      "Confirmed, but updated usage isn''t available yet. Refresh usage to check.",
+                      undefined,
+                      undefined,
+                      uiLocale,
+                    )}
                   </p>
                 ) : null}
               </>
@@ -238,7 +303,9 @@ export function ProviderUsageResetButton(props: {
           </DialogPanel>
           <DialogFooter>
             <Button type="button" variant="ghost" disabled={busy} onClick={() => setOpen(false)}>
-              {finished ? "Done" : "Cancel"}
+              {finished
+                ? uiText("Done", undefined, undefined, uiLocale)
+                : uiText("Cancel", undefined, undefined, uiLocale)}
             </Button>
             {error && canRedeem ? (
               <Button
@@ -247,12 +314,14 @@ export function ProviderUsageResetButton(props: {
                 disabled={busy}
                 onClick={() => void preview()}
               >
-                Check availability
+                {uiText("Check availability", undefined, undefined, uiLocale)}
               </Button>
             ) : null}
             {canRedeem ? (
               <Button type="button" disabled={busy} onClick={() => void redeem()}>
-                {result?.retrying ? "Retry same reset" : "Redeem 1 reset"}
+                {result?.retrying
+                  ? uiText("Retry same reset", undefined, undefined, uiLocale)
+                  : uiText("Redeem 1 reset", undefined, undefined, uiLocale)}
               </Button>
             ) : (
               <Button
@@ -261,7 +330,9 @@ export function ProviderUsageResetButton(props: {
                 disabled={busy}
                 onClick={() => void preview()}
               >
-                {finished ? "Refresh usage" : "Check again"}
+                {finished
+                  ? uiText("Refresh usage", undefined, undefined, uiLocale)
+                  : uiText("Check again", undefined, undefined, uiLocale)}
               </Button>
             )}
           </DialogFooter>
@@ -270,3 +341,6 @@ export function ProviderUsageResetButton(props: {
     </>
   );
 }
+
+// Finite source-owned labels/helpers only; no received or user data.
+const UI_PRESENTATION_SOURCES = { OUTCOME_TEXT, formatCodexRateLimitPresentation };

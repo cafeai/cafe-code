@@ -1,5 +1,6 @@
 import { beforeEach, expect, it, vi } from "vitest";
 import type { NativeControlActivity } from "@cafecode/contracts";
+import { setUiLocale } from "@cafecode/shared/i18n";
 const mocks = vi.hoisted(() => ({
   panels: [] as any[],
   trays: [] as any[],
@@ -94,10 +95,33 @@ const activity: NativeControlActivity = {
   },
 };
 beforeEach(() => {
+  setUiLocale("en");
   mocks.panels.length = 0;
   mocks.trays.length = 0;
   mocks.menu = [];
   vi.clearAllMocks();
+});
+it("updates native copy on a language change while preserving exact Stop ownership", async () => {
+  const actions = {
+    stop: vi.fn(async () => {}),
+    refresh: vi.fn(async () => {}),
+    inputPolicy: vi.fn(async () => {}),
+  };
+  const indicators = new NativeControlIndicators(actions);
+  try {
+    await indicators.update(activity);
+    setUiLocale("ja");
+    await vi.waitFor(() => {
+      expect(mocks.menu.some((item) => item.label === "コンピューター操作を停止")).toBe(true);
+    });
+    mocks.menu.find((item) => item.label === "コンピューター操作を停止").click();
+    expect(actions.stop).toHaveBeenCalledExactlyOnceWith("episode");
+    expect(mocks.panels).toHaveLength(1);
+    expect(actions.inputPolicy).not.toHaveBeenCalled();
+  } finally {
+    await indicators.close();
+    setUiLocale("en");
+  }
 });
 it("shows a nonactivating excluded panel, keeps the menu while idle, and fences stale updates", async () => {
   const actions = {

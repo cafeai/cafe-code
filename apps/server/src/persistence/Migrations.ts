@@ -13,8 +13,15 @@ import * as Layer from "effect/Layer";
 import * as Effect from "effect/Effect";
 import Migration0084 from "./Migrations/084_ScheduledFollowups.ts";
 import * as Schedule from "effect/Schedule";
+import * as Option from "effect/Option";
+import type { BackendMigrationProgress } from "@cafecode/shared/backendStartupProgress";
 
 import { isSqliteLockTimeoutError } from "./sqliteLockRetry.ts";
+import { ServerConfig } from "../config.ts";
+import {
+  makeBackendMigrationProgressReporter,
+  observeBackendMigrationRun,
+} from "./backendStartupProgress.ts";
 
 // Import all migrations statically
 import Migration0001 from "./Migrations/001_OrchestrationEvents.ts";
@@ -106,8 +113,11 @@ import Migration0088 from "./Migrations/088_CodexHistorySafety.ts";
 import Migration0089 from "./Migrations/089_DuplicateContextBootstrap.ts";
 import Migration0090 from "./Migrations/090_WorkflowLifecycleRetention.ts";
 import Migration0091 from "./Migrations/091_CodexTransientRecoveryIntents.ts";
-import Migration0093 from "./Migrations/093_ChatImages.ts";
 import Migration0092 from "./Migrations/092_LiveWork.ts";
+import Migration0093 from "./Migrations/093_RecoveryPresentationIndex.ts";
+import Migration0094 from "./Migrations/094_CodexContextWindowOverride.ts";
+import Migration0095 from "./Migrations/095_ProviderActivityDiagnostics.ts";
+import Migration0096 from "./Migrations/096_ChatImages.ts";
 
 /**
  * Migration loader with all migrations defined inline.
@@ -216,15 +226,28 @@ export const migrationEntries = [
   [90, "WorkflowLifecycleRetention", Migration0090],
   [91, "CodexTransientRecoveryIntents", Migration0091],
   [92, "LiveWork", Migration0092],
-  [93, "ChatImages", Migration0093],
+  [93, "RecoveryPresentationIndex", Migration0093],
+  [94, "CodexContextWindowOverride", Migration0094],
+  [95, "ProviderActivityDiagnostics", Migration0095],
+  [96, "ChatImages", Migration0096],
 ] as const;
 
-export const makeMigrationLoader = (throughId?: number) =>
+export const makeMigrationLoader = (
+  throughId?: number,
+  report?: (record: BackendMigrationProgress) => void,
+) =>
   Migrator.fromRecord(
     Object.fromEntries(
       migrationEntries
         .filter(([id]) => throughId === undefined || id <= throughId)
-        .map(([id, name, migration]) => [`${id}_${name}`, migration]),
+        .map(([id, name, migration]) => [
+          `${id}_${name}`,
+          report === undefined
+            ? migration
+            : Effect.sync(() => report({ phase: "start", migrationId: id })).pipe(
+                Effect.andThen(migration),
+              ),
+        ]),
     ),
   );
 
@@ -256,6 +279,10 @@ export interface RunMigrationsOptions {
 export const runMigrations = Effect.fn("runMigrations")(function* ({
   toMigrationInclusive,
 }: RunMigrationsOptions = {}) {
+  const config = yield* Effect.serviceOption(ServerConfig);
+  const report = makeBackendMigrationProgressReporter(
+    Option.getOrUndefined(config)?.startupProgressFd,
+  );
   yield* Effect.log(
     toMigrationInclusive === undefined
       ? "Running all migrations..."
@@ -264,7 +291,13 @@ export const runMigrations = Effect.fn("runMigrations")(function* ({
   let attempt = 0;
   const runOnce = Effect.suspend(() => {
     attempt += 1;
-    return run({ loader: makeMigrationLoader(toMigrationInclusive) }).pipe(
+    // Effect commits all pending schema changes in one outer transaction. The
+    // last commit can itself wait on storage, so phase completion must follow
+    // the migrator's settlement rather than a single migration's effect.
+    return observeBackendMigrationRun(
+      (reportStart) => run({ loader: makeMigrationLoader(toMigrationInclusive, reportStart) }),
+      report,
+    ).pipe(
       Effect.tapError((error) =>
         isMigrationLockTimeoutError(error)
           ? Effect.logWarning("SQLite migration writer lock contention observed").pipe(

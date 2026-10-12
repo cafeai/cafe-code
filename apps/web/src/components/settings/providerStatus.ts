@@ -1,3 +1,4 @@
+import { uiText } from "@cafecode/shared/i18n";
 import type { ServerProvider, ServerProviderVersionAdvisory } from "@cafecode/contracts";
 
 /**
@@ -34,16 +35,17 @@ export type ProviderStatusKey = keyof typeof PROVIDER_STATUS_STYLES;
  */
 export function getProviderSummary(provider: ServerProvider | undefined) {
   if (!provider) {
-    return { headline: "Checking…", detail: null };
+    return { headline: uiText("Checking…"), detail: null };
   }
   if (!provider.enabled) {
     // The card's switch already shows that it is off; no extra explanation.
-    return { headline: "Disabled", detail: provider.message ?? null };
+    return { headline: uiText("Disabled"), detail: provider.message ?? null };
   }
   if (!provider.installed) {
     return {
-      headline: "Not found",
-      detail: provider.message ?? "Install the CLI or set its binary path in Advanced settings.",
+      headline: uiText("Not found"),
+      detail:
+        provider.message ?? uiText("Install the CLI or set its binary path in Advanced settings."),
     };
   }
   // A protected startup failure says nothing about credentials or whether an
@@ -51,37 +53,39 @@ export function getProviderSummary(provider: ServerProvider | undefined) {
   // when a previous snapshot has already established authentication.
   if (provider.driver === "grok" && provider.sandbox?.status === "unavailable") {
     return {
-      headline: "Sandbox unavailable",
-      detail: provider.message ?? "Grok could not start its protected connection check.",
+      headline: uiText("Sandbox unavailable"),
+      detail: provider.message ?? uiText("Grok could not start its protected connection check."),
     };
   }
   if (provider.auth.status === "authenticated") {
     const authLabel = provider.auth.label ?? provider.auth.type;
     return {
-      headline: authLabel ? `Authenticated · ${authLabel}` : "Authenticated",
+      headline: authLabel
+        ? uiText("Authenticated · {authLabel}", { authLabel: authLabel })
+        : uiText("Authenticated"),
       detail: provider.message ?? null,
     };
   }
   if (provider.auth.status === "unauthenticated") {
     return {
-      headline: "Not signed in",
+      headline: uiText("Not signed in"),
       detail: provider.message ?? null,
     };
   }
   if (provider.status === "warning") {
     return {
-      headline: "Needs attention",
-      detail: provider.message ?? "Installed, but it couldn't be fully verified.",
+      headline: uiText("Needs attention"),
+      detail: provider.message ?? uiText("Installed, but it couldn't be fully verified."),
     };
   }
   if (provider.status === "error") {
     return {
-      headline: "Unavailable",
-      detail: provider.message ?? "It failed its startup checks.",
+      headline: uiText("Unavailable"),
+      detail: provider.message ?? uiText("It failed its startup checks."),
     };
   }
   // Installed and ready, but the provider did not report sign-in state.
-  return { headline: "Sign-in not verified", detail: provider.message ?? null };
+  return { headline: uiText("Sign-in not verified"), detail: provider.message ?? null };
 }
 
 /**
@@ -112,7 +116,9 @@ export function getProviderVersionAdvisoryPresentation(
     // The popover title already says "Update available"; don't repeat it.
     detail:
       advisory.message ??
-      (versionLabel ? `Install ${versionLabel}.` : "Install the latest version."),
+      (versionLabel
+        ? uiText("Install {versionLabel}.", { versionLabel: versionLabel })
+        : uiText("Install the latest version.")),
     updateCommand: advisory.updateCommand,
     emphasis: "normal" as const,
   };

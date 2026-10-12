@@ -1,3 +1,5 @@
+import { useUiLocale, useUiPresentation } from "~/i18n";
+import { uiText } from "@cafecode/shared/i18n";
 import {
   type ProviderDriverKind,
   type ProviderInstanceId,
@@ -11,7 +13,6 @@ import {
   buildProviderOptionSelectionsFromDescriptors,
   getProviderOptionCurrentLabel,
   getProviderOptionCurrentValue,
-  getProviderOptionDescriptors,
   isClaudeUltrathinkPrompt,
 } from "@cafecode/shared/model";
 import { memo, useCallback, useState } from "react";
@@ -30,6 +31,7 @@ import {
 } from "../ui/menu";
 import { useComposerDraftStore, DraftId } from "../../composerDraftStore";
 import { getProviderModelCapabilities } from "../../providerModels";
+import { getLocalizedProviderOptionDescriptors } from "../../providerOptionPresentation";
 import { cn } from "~/lib/utils";
 
 type ProviderOptions = ReadonlyArray<ProviderOptionSelection>;
@@ -92,7 +94,7 @@ function getSelectedTraits(
   allowPromptInjectedEffort: boolean,
 ) {
   const caps = getProviderModelCapabilities(models, model, provider);
-  const descriptors = getProviderOptionDescriptors({
+  const descriptors = getLocalizedProviderOptionDescriptors({
     caps,
     selections: modelOptions,
   });
@@ -226,12 +228,12 @@ export function getTraitsTriggerLabel(
     .filter((descriptor) => !MENU_ONLY_TRIGGER_DESCRIPTOR_IDS.has(descriptor.id))
     .map((descriptor) => {
       if (ultrathinkPromptControlled && descriptor.id === primarySelectDescriptor?.id) {
-        return "Ultrathink";
+        return uiText("Ultrathink");
       }
       if (descriptor.id === "cyberAccessProgram") {
         return descriptor.currentValue === "daybreakBlue" ||
           descriptor.currentValue === "daybreakRed"
-          ? "Daybreak"
+          ? uiText("Daybreak")
           : undefined;
       }
       if (descriptor.type === "boolean") {
@@ -239,15 +241,18 @@ export function getTraitsTriggerLabel(
           // This summarizes the requested flag, not native account eligibility.
           // Absence must not be mislabeled Off when upstream settings apply.
           return descriptor.currentValue === true
-            ? "Ultracode"
+            ? uiText("Ultracode")
             : descriptor.currentValue === false
-              ? "Ultracode Off"
+              ? uiText("Ultracode Off")
               : undefined;
         }
         if (descriptor.id === "fastMode") {
-          return descriptor.currentValue === true ? "Fast" : "Normal";
+          return descriptor.currentValue === true ? uiText("Fast") : uiText("Normal");
         }
-        return `${descriptor.label} ${descriptor.currentValue === true ? "On" : "Off"}`;
+        return uiText("{label} {state, select, on {On} other {Off}}", {
+          label: descriptor.label,
+          state: descriptor.currentValue === true ? "on" : "off",
+        });
       }
       return getProviderOptionCurrentLabel(descriptor);
     })
@@ -279,6 +284,8 @@ export const TraitsMenuContent = memo(function TraitsMenuContentImpl({
   allowPromptInjectedEffort = true,
   ...persistence
 }: TraitsMenuContentProps & TraitsPersistence) {
+  const uiLocale = useUiLocale();
+
   const setProviderModelOptions = useComposerDraftStore((store) => store.setProviderModelOptions);
   const updateModelOptions = useCallback(
     (nextOptions: ProviderOptions | undefined) => {
@@ -366,20 +373,34 @@ export const TraitsMenuContent = memo(function TraitsMenuContentImpl({
             descriptor.currentValue &&
             !descriptor.options.some((option) => option.id === descriptor.currentValue) ? (
               <p role="status" className="px-2 pb-1.5 text-destructive-foreground text-xs">
-                This saved tier is unavailable. Choose an available tier before sending.
+                {uiText(
+                  "This saved tier is unavailable. Choose an available tier before sending.",
+                  undefined,
+                  undefined,
+                  uiLocale,
+                )}
               </p>
             ) : null}
             {descriptor.id === "cyberAccessProgram" &&
             descriptor.currentValue &&
             !descriptor.options.some((option) => option.id === descriptor.currentValue) ? (
               <p role="status" className="px-2 pb-1.5 text-destructive-foreground text-xs">
-                This Daybreak setting is unavailable. Choose a supported setting before sending.
+                {uiText(
+                  "This Daybreak setting is unavailable. Choose a supported setting before sending.",
+                  undefined,
+                  undefined,
+                  uiLocale,
+                )}
               </p>
             ) : null}
             {ultrathinkInBodyText && descriptor.id === primarySelectDescriptor?.id ? (
               <div className="px-2 pb-1.5 text-muted-foreground text-xs">
-                Your prompt contains &quot;ultrathink&quot; in the text. Remove it to change this
-                option.
+                {uiText(
+                  'Your prompt contains "ultrathink" in the text. Remove it to change this option.',
+                  undefined,
+                  undefined,
+                  uiLocale,
+                )}
               </div>
             ) : null}
             <MenuRadioGroup
@@ -399,8 +420,15 @@ export const TraitsMenuContent = memo(function TraitsMenuContentImpl({
                     descriptor.id === "cyberAccessProgram" ? descriptor.description : undefined
                   }
                 >
-                  {option.label}
-                  {option.isDefault ? " (default)" : ""}
+                  {uiText(
+                    "{label}{isDefault, select, yes { (default)} other {}}",
+                    {
+                      label: option.label,
+                      isDefault: option.isDefault ? "yes" : "no",
+                    },
+                    undefined,
+                    uiLocale,
+                  )}
                 </MenuRadioItem>
               ))}
             </MenuRadioGroup>
@@ -438,10 +466,16 @@ export const TraitsMenuContent = memo(function TraitsMenuContentImpl({
               }}
             >
               {descriptor.id === "ultracode" ? (
-                <MenuRadioItem value="providerDefault">Native default</MenuRadioItem>
+                <MenuRadioItem value="providerDefault">
+                  {uiText("Native default", undefined, undefined, uiLocale)}
+                </MenuRadioItem>
               ) : null}
-              <MenuRadioItem value="on">On</MenuRadioItem>
-              <MenuRadioItem value="off">Off</MenuRadioItem>
+              <MenuRadioItem value="on">
+                {uiText("On", undefined, undefined, uiLocale)}
+              </MenuRadioItem>
+              <MenuRadioItem value="off">
+                {uiText("Off", undefined, undefined, uiLocale)}
+              </MenuRadioItem>
             </MenuRadioGroup>
           </MenuGroup>
         </div>
@@ -450,7 +484,12 @@ export const TraitsMenuContent = memo(function TraitsMenuContentImpl({
         <>
           {descriptors.length > 0 ? <MenuDivider /> : null}
           <MenuItem
-            title="Daybreak is unavailable for this account and model. Turn the saved setting off to continue."
+            title={uiText(
+              "Daybreak is unavailable for this account and model. Turn the saved setting off to continue.",
+              undefined,
+              undefined,
+              uiLocale,
+            )}
             onClick={() =>
               updateModelOptions([
                 ...(buildProviderOptionSelectionsFromDescriptors(descriptors) ?? []),
@@ -458,7 +497,7 @@ export const TraitsMenuContent = memo(function TraitsMenuContentImpl({
               ])
             }
           >
-            Turn unavailable Daybreak off
+            {uiText("Turn unavailable Daybreak off", undefined, undefined, uiLocale)}
           </MenuItem>
         </>
       ) : null}
@@ -478,6 +517,9 @@ export const TraitsPicker = memo(function TraitsPicker({
   triggerClassName,
   ...persistence
 }: TraitsMenuContentProps & TraitsPersistence) {
+  const uiLocale = useUiLocale();
+  const uiPresentation = useUiPresentation(UI_PRESENTATION_SOURCES);
+
   const [isMenuOpen, setIsMenuOpen] = useState(false);
   const { descriptors, primarySelectDescriptor, ultrathinkPromptControlled } =
     getTraitsSectionVisibility({
@@ -502,8 +544,11 @@ export const TraitsPicker = memo(function TraitsPicker({
   }
 
   const triggerLabel =
-    getTraitsTriggerLabel(descriptors, primarySelectDescriptor, ultrathinkPromptControlled) ||
-    "Model settings";
+    uiPresentation.getTraitsTriggerLabel(
+      descriptors,
+      primarySelectDescriptor,
+      ultrathinkPromptControlled,
+    ) || uiText("Model settings", undefined, undefined, uiLocale);
 
   const isCodexStyle = provider === "codex";
 
@@ -555,3 +600,6 @@ export const TraitsPicker = memo(function TraitsPicker({
     </Menu>
   );
 });
+
+// Finite source-owned labels/helpers only; no received or user data.
+const UI_PRESENTATION_SOURCES = { getTraitsTriggerLabel };

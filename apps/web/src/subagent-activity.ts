@@ -5,6 +5,7 @@ import type {
 } from "@cafecode/contracts";
 import { ProviderTaskControlCapability } from "@cafecode/contracts";
 import * as Schema from "effect/Schema";
+import { uiText } from "@cafecode/shared/i18n";
 
 const isTaskControlCapability = Schema.is(ProviderTaskControlCapability);
 
@@ -43,8 +44,12 @@ export interface DerivedSubagentActivity {
   rowId: string;
   turnId: TurnId | null;
   label: string;
+  /** Display-only fallback; received child names remain opaque. */
+  displayLabel?: string;
   objective?: string;
   description?: string;
+  /** Only Cafe-minted legacy progress, resolved after canonical folding. */
+  displayDescription?: string;
   status: SubagentRunStatus;
   startedAt: string;
   updatedAt: string;
@@ -64,6 +69,20 @@ export interface DerivedSubagentActivity {
   /** Opaque native runtime generation; never display it or use it for history routing. */
   runtimeId?: string;
   taskControl?: ProviderTaskControlCapability;
+}
+
+interface CanonicalSubagentActivity extends DerivedSubagentActivity {
+  /** Private provenance, removed only after canonical lifecycle reconciliation. */
+  labelIsFallback?: true;
+  descriptionIsFallback?: "working" | "interrupted";
+}
+
+export function subagentDisplayLabel(subagent: DerivedSubagentActivity): string {
+  return subagent.displayLabel ?? subagent.label;
+}
+
+export function subagentDisplayDescription(subagent: DerivedSubagentActivity): string | undefined {
+  return subagent.displayDescription ?? subagent.description;
 }
 
 const DISPLAY_TEXT_LIMIT = 240;
@@ -196,7 +215,7 @@ function subagentMapKey(activity: OrchestrationThreadActivity, id: string): stri
 }
 
 function upsertStructuredSubagent(
-  byId: Map<string, DerivedSubagentActivity>,
+  byId: Map<string, CanonicalSubagentActivity>,
   activity: OrchestrationThreadActivity,
   payload: Record<string, unknown>,
   options: DeriveSubagentActivityOptions,
@@ -274,12 +293,17 @@ function upsertStructuredSubagent(
     // A native thread rename can arrive after completion. Keep presentation
     // metadata fresh without reopening work, moving its terminal clock, or
     // rebinding the historical transcript to a different opaque history id.
-    const label =
-      safeLine(presentation.label, 96) ??
-      pathLabel(safeLine(presentation.path, 256)) ??
-      previous.label;
-    if (label !== previous.label) {
-      byId.set(key, { ...previous, label, lifecycleRevision: lifecycleRevision(activity) });
+    const receivedLabel =
+      safeLine(presentation.label, 96) ?? pathLabel(safeLine(presentation.path, 256));
+    const label = receivedLabel ?? previous.label;
+    if (label !== previous.label || (receivedLabel !== undefined && previous.labelIsFallback)) {
+      const { labelIsFallback, ...retained } = previous;
+      byId.set(key, {
+        ...retained,
+        label,
+        ...(!receivedLabel && labelIsFallback ? { labelIsFallback } : {}),
+        lifecycleRevision: lifecycleRevision(activity),
+      });
     }
     return true;
   }
@@ -298,11 +322,9 @@ function upsertStructuredSubagent(
       : activity.kind === "task.completed"
         ? (meaningfulDetail ?? previous?.description)
         : (previous?.description ?? meaningfulDetail);
-  const label =
-    safeLine(presentation.label, 96) ??
-    pathLabel(safeLine(presentation.path, 256)) ??
-    previous?.label ??
-    "Subagent";
+  const receivedLabel =
+    safeLine(presentation.label, 96) ?? pathLabel(safeLine(presentation.path, 256));
+  const label = receivedLabel ?? previous?.label ?? "Subagent";
   const startedAt =
     isRestart || !previous
       ? (explicitStartedAt ?? activity.createdAt)
@@ -316,6 +338,9 @@ function upsertStructuredSubagent(
     rowId: previous?.rowId ?? activity.id,
     turnId: activity.turnId,
     label,
+    ...(!receivedLabel && (!previous || previous.labelIsFallback)
+      ? { labelIsFallback: true as const }
+      : {}),
     ...(objective ? { objective } : {}),
     ...(nextDescription ? { description: nextDescription } : {}),
     status,
@@ -336,7 +361,12 @@ function upsertStructuredSubagent(
   return true;
 }
 
-function splitLegacyDetail(detail: string): { label: string; description: string } {
+function splitLegacyDetail(detail: string): {
+  label: string;
+  description: string;
+  labelIsFallback?: true;
+  descriptionIsFallback?: "working" | "interrupted";
+} {
   const colon = detail.indexOf(":");
   if (colon > 0 && colon <= 40) {
     const label = safeLine(detail.slice(0, colon), 96);
@@ -346,12 +376,15 @@ function splitLegacyDetail(detail: string): { label: string; description: string
   const action = /^(?:Started|Interacted with|Interrupted)\s+(.+)$/iu.exec(detail);
   if (action?.[1]) {
     const path = safeLine(action[1], 256);
+    const label = pathLabel(path);
     return {
-      label: pathLabel(path) ?? "Subagent",
+      label: label ?? "Subagent",
+      ...(!label ? { labelIsFallback: true as const } : {}),
       description: /^Interrupted\b/iu.test(detail) ? "Interrupted" : "Working",
+      descriptionIsFallback: /^Interrupted\b/iu.test(detail) ? "interrupted" : "working",
     };
   }
-  return { label: "Subagent", description: detail };
+  return { label: "Subagent", description: detail, labelIsFallback: true };
 }
 
 function legacySubagentStatus(
@@ -369,7 +402,7 @@ function legacySubagentStatus(
 }
 
 function upsertLegacySubagent(
-  byId: Map<string, DerivedSubagentActivity>,
+  byId: Map<string, CanonicalSubagentActivity>,
   activity: OrchestrationThreadActivity,
   payload: Record<string, unknown>,
   options: DeriveSubagentActivityOptions,
@@ -402,13 +435,21 @@ function upsertLegacySubagent(
       ? priorMeaningfulDescription
       : split.description || priorMeaningfulDescription
     : split.description || previous?.description || "Working";
+  const descriptionIsFallback =
+    description === split.description
+      ? split.descriptionIsFallback
+      : description === previous?.description
+        ? previous?.descriptionIsFallback
+        : undefined;
   byId.set(key, {
     id,
     rowId: previous?.rowId ?? activity.id,
     turnId: activity.turnId,
     label: split.label || previous?.label || "Subagent",
+    ...(split.labelIsFallback ? { labelIsFallback: true as const } : {}),
     ...(previous?.objective ? { objective: previous.objective } : {}),
     ...(description ? { description } : {}),
+    ...(descriptionIsFallback ? { descriptionIsFallback } : {}),
     status,
     startedAt: previous?.startedAt ?? activity.createdAt,
     updatedAt: activity.createdAt,
@@ -429,7 +470,7 @@ export function deriveSubagentActivities(
   activities: ReadonlyArray<OrchestrationThreadActivity>,
   options: DeriveSubagentActivityOptions = {},
 ): DerivedSubagentActivity[] {
-  const byId = new Map<string, DerivedSubagentActivity>();
+  const byId = new Map<string, CanonicalSubagentActivity>();
   // Detail snapshots and session derivation already provide monotonic activity
   // order. Avoid a second clone/sort on every Atrium clock tick; retain the
   // defensive sort only for imported or test data that is actually unordered.
@@ -470,10 +511,26 @@ export function deriveSubagentActivities(
       lifecycleRevision: `${subagent.lifecycleRevision}:unverified`,
     });
   }
-  return rows.toSorted((left, right) => {
-    const leftLive = left.status === "active" || left.status === "waiting";
-    const rightLive = right.status === "active" || right.status === "waiting";
-    if (leftLive !== rightLive) return Number(rightLive) - Number(leftLive);
-    return left.startedAt.localeCompare(right.startedAt) || left.id.localeCompare(right.id);
-  });
+  // Translation is strictly after every canonical lifecycle comparison. Drop
+  // private provenance and never mark a received literal "Subagent" as ours.
+  return rows
+    .map((row) => {
+      const { labelIsFallback, descriptionIsFallback, ...entry } = row as CanonicalSubagentActivity;
+      return {
+        ...entry,
+        ...(labelIsFallback ? { displayLabel: uiText("Subagent") } : {}),
+        ...(entry.description && descriptionIsFallback
+          ? {
+              displayDescription:
+                descriptionIsFallback === "interrupted" ? uiText("Interrupted") : uiText("Working"),
+            }
+          : {}),
+      };
+    })
+    .toSorted((left, right) => {
+      const leftLive = left.status === "active" || left.status === "waiting";
+      const rightLive = right.status === "active" || right.status === "waiting";
+      if (leftLive !== rightLive) return Number(rightLive) - Number(leftLive);
+      return left.startedAt.localeCompare(right.startedAt) || left.id.localeCompare(right.id);
+    });
 }

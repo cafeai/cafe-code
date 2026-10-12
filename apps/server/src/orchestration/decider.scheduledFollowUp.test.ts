@@ -208,6 +208,7 @@ describe("scheduled follow-up idle-only admission", () => {
     ["interaction override", { interactionMode: "plan" as const }],
     ["workspace bootstrap", { bootstrap: { runSetupScript: true } }],
     ["concurrency mutation", { subagentLimits: { codex: 8 } }],
+    ["context-window mutation", { codexContextWindowOverride: 500_000 }],
     [
       "runtime recovery",
       {

@@ -7,6 +7,8 @@ import * as Ref from "effect/Ref";
 
 import type * as Electron from "electron";
 import { vi } from "vitest";
+import { setUiLocale } from "@cafecode/shared/i18n";
+import { DESKTOP_UI_LOCALE_CHANGED_CHANNEL } from "../settings/DesktopUiLocaleBridge.ts";
 
 import * as DesktopAssets from "../app/DesktopAssets.ts";
 import * as DesktopConfig from "../app/DesktopConfig.ts";
@@ -19,6 +21,7 @@ import * as ElectronWindow from "../electron/ElectronWindow.ts";
 import * as DesktopServerExposure from "../backend/DesktopServerExposure.ts";
 import * as DesktopIpc from "../ipc/DesktopIpc.ts";
 import * as DesktopWindow from "./DesktopWindow.ts";
+import * as DesktopStartupWindow from "./DesktopStartupWindow.ts";
 
 const environmentInput = {
   dirname: "/repo/apps/desktop/dist-electron",
@@ -73,6 +76,7 @@ function makeFakeBrowserWindow() {
     openDevTools: webContents.openDevTools,
     setPermissionCheckHandler,
     setPermissionRequestHandler,
+    once: window.once,
   };
 }
 
@@ -143,6 +147,8 @@ function makeTestLayer(input: {
   readonly createCount: Ref.Ref<number>;
   readonly mainWindow: Ref.Ref<Option.Option<Electron.BrowserWindow>>;
   readonly onCreate?: (options: Electron.BrowserWindowConstructorOptions) => void;
+  readonly onReveal?: () => void;
+  readonly startupWindow?: DesktopStartupWindow.DesktopStartupWindowShape;
 }) {
   const electronWindowLayer = Layer.succeed(ElectronWindow.ElectronWindow, {
     create: (options) =>
@@ -155,7 +161,7 @@ function makeTestLayer(input: {
     focusedMainOrFirst: Ref.get(input.mainWindow),
     setMain: (window) => Ref.set(input.mainWindow, Option.some(window)),
     clearMain: () => Ref.set(input.mainWindow, Option.none()),
-    reveal: () => Effect.void,
+    reveal: () => Effect.sync(() => input.onReveal?.()),
     sendAll: () => Effect.void,
     destroyAll: Effect.void,
     syncAllAppearance: (sync) => sync(input.window),
@@ -173,12 +179,90 @@ function makeTestLayer(input: {
         electronThemeLayer,
         electronWindowLayer,
         desktopIpcLayer,
+        input.startupWindow
+          ? Layer.succeed(DesktopStartupWindow.DesktopStartupWindow, input.startupWindow)
+          : Layer.empty,
       ),
     ),
   );
 }
 
 describe("DesktopWindow", () => {
+  it.effect(
+    "reconciles the selected locale after document load and retires its exact-window observer",
+    () =>
+      Effect.gen(function* () {
+        setUiLocale("en");
+        const fixture = makeFakeBrowserWindow();
+        const createCount = yield* Ref.make(0);
+        const mainWindow = yield* Ref.make<Option.Option<Electron.BrowserWindow>>(Option.none());
+        yield* Effect.scoped(
+          Effect.gen(function* () {
+            const windows = yield* DesktopWindow.DesktopWindow;
+            yield* windows.handleBackendReady;
+            const loadListener = (
+              fixture.window.webContents.on as ReturnType<typeof vi.fn>
+            ).mock.calls.find(([name]) => name === "did-finish-load")?.[1];
+            assert.isFunction(loadListener);
+            setUiLocale("ja");
+            loadListener!();
+            const send = fixture.window.webContents.send as ReturnType<typeof vi.fn>;
+            assert.deepEqual(send.mock.calls.at(-1), [DESKTOP_UI_LOCALE_CHANGED_CHANNEL, "ja"]);
+            setUiLocale("ko");
+            assert.deepEqual(send.mock.calls.at(-1), [DESKTOP_UI_LOCALE_CHANGED_CHANNEL, "ko"]);
+            assert.equal(
+              yield* Ref.get(createCount),
+              1,
+              "presentation never creates another window",
+            );
+          }).pipe(
+            Effect.provide(makeTestLayer({ window: fixture.window, createCount, mainWindow })),
+          ),
+        );
+        const send = fixture.window.webContents.send as ReturnType<typeof vi.fn>;
+        const calls = send.mock.calls.length;
+        setUiLocale("en");
+        assert.equal(send.mock.calls.length, calls);
+      }).pipe(Effect.ensuring(Effect.sync(() => setUiLocale("en")))),
+  );
+  it.effect("keeps startup feedback until the real main window is revealed", () =>
+    Effect.gen(function* () {
+      const fakeWindow = makeFakeBrowserWindow();
+      const createCount = yield* Ref.make(0);
+      const mainWindow = yield* Ref.make<Option.Option<Electron.BrowserWindow>>(Option.none());
+      const actions: string[] = [];
+      const layer = makeTestLayer({
+        window: fakeWindow.window,
+        createCount,
+        mainWindow,
+        onReveal: () => {
+          actions.push("reveal-main");
+        },
+        startupWindow: {
+          begin: Effect.void,
+          update: () => Effect.void,
+          close: Effect.sync(() => {
+            actions.push("close-startup");
+          }),
+        },
+      });
+      yield* Effect.gen(function* () {
+        const desktopWindow = yield* DesktopWindow.DesktopWindow;
+        yield* desktopWindow.handleBackendReady;
+        assert.deepEqual(actions, [], "a healthy backend is not yet a visible main window");
+        const reveal = fakeWindow.once.mock.calls.find(([name]) => name === "ready-to-show")?.[1];
+        assert.isDefined(reveal);
+        reveal!();
+        yield* Effect.yieldNow;
+        yield* Effect.yieldNow;
+        assert.deepEqual(actions, ["reveal-main", "close-startup"]);
+        reveal!();
+        yield* Effect.yieldNow;
+        assert.deepEqual(actions, ["reveal-main", "close-startup"]);
+      }).pipe(Effect.provide(layer));
+    }),
+  );
+
   it.effect("keeps embedded rendering frames outside the native capability boundary", () =>
     Effect.gen(function* () {
       const fakeWindow = makeFakeBrowserWindow();

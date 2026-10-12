@@ -354,7 +354,7 @@ describe("shared scheduled follow-up reads", () => {
     expect(readScheduledFollowupsSnapshot(environmentId, threadId)).toEqual({
       schedules: [record()],
       loading: false,
-      error: "Schedules could not be refreshed. Reconnect or try again.",
+      error: "refresh-unconfirmed",
     });
     refreshScheduledFollowups(environmentId, threadId);
     await settle();
@@ -370,7 +370,7 @@ describe("shared scheduled follow-up reads", () => {
     expect(readScheduledFollowupsSnapshot(environmentId, threadId)).toMatchObject({
       schedules: [],
       loading: false,
-      error: "Schedules could not be refreshed. Reconnect or try again.",
+      error: "refresh-unconfirmed",
     });
     refreshScheduledFollowups(environmentId, threadId);
     await settle();

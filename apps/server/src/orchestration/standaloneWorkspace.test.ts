@@ -1,5 +1,6 @@
 // @effect-diagnostics nodeBuiltinImport:off
 import * as fs from "node:fs/promises";
+import type { BigIntStats } from "node:fs";
 import * as path from "node:path";
 import { CommandId, ThreadId } from "@cafecode/contracts";
 import { assert, it } from "@effect/vitest";
@@ -16,13 +17,17 @@ import { makeStandaloneWorkspaceStore } from "./standaloneWorkspace.ts";
 
 // Interpose only an explicitly armed metadata observation. Every operation
 // otherwise reaches the real host-native filesystem; there are no timers or
-// probabilistic racing processes, and no fabricated inode/permission results.
+// probabilistic racing processes. Explicit guard fixtures may patch only an
+// armed held-stat observation; namespace replacement remains real filesystem I/O.
 const filesystemObservation = vi.hoisted(() => ({
   beforeLstat: undefined as ((directory: unknown) => Promise<void>) | undefined,
   deviceDelta: 0n,
   volumeUuid: "darwin-volume:11111111-2222-4333-8444-555555555555",
   beforeReadIdentity: undefined as (() => Promise<void>) | undefined,
   afterClose: undefined as (() => void) | undefined,
+  identityReads: 0,
+  heldDirectories: new Map<number, string>(),
+  patchHeldStat: undefined as ((directory: string, stat: BigIntStats) => BigIntStats) | undefined,
 }));
 // Unit fixtures keep native filesystem/descriptor operations, but do not launch
 // df/diskutil. The separately selected native identity test qualifies that
@@ -30,6 +35,7 @@ const filesystemObservation = vi.hoisted(() => ({
 vi.mock("./standaloneFilesystemIdentity.ts", async (importOriginal) => ({
   ...(await importOriginal<typeof import("./standaloneFilesystemIdentity.ts")>()),
   readStandaloneDeviceIdentity: async (_directory: string, device: bigint) => {
+    filesystemObservation.identityReads += 1;
     await filesystemObservation.beforeReadIdentity?.();
     return process.platform === "darwin" ? filesystemObservation.volumeUuid : String(device);
   },
@@ -53,14 +59,21 @@ vi.mock("node:fs/promises", async (importOriginal) => {
     }) as typeof actual.lstat,
     open: (async (...args: Parameters<typeof actual.open>) => {
       const handle = await actual.open(...args);
+      const descriptor = handle.fd;
+      filesystemObservation.heldDirectories.set(descriptor, String(args[0]));
       return new Proxy(handle, {
         get(target, key) {
           if (key === "stat")
-            return async (...options: Parameters<typeof handle.stat>) =>
-              remount(await target.stat(...options));
+            return async (...options: Parameters<typeof handle.stat>) => {
+              const stat = remount(await target.stat(...options));
+              return filesystemObservation.patchHeldStat && stat && typeof stat.dev === "bigint"
+                ? filesystemObservation.patchHeldStat(String(args[0]), stat as BigIntStats)
+                : stat;
+            };
           if (key === "close")
             return async () => {
               await target.close();
+              filesystemObservation.heldDirectories.delete(descriptor);
               filesystemObservation.afterClose?.();
             };
           const value = Reflect.get(target, key, target);
@@ -82,6 +95,232 @@ const createThread = (threadId: ThreadId, projectId: string | null = null) =>
   });
 
 layer("standalone workspace ownership", (it) => {
+  it.effect(
+    "uses one fresh operation-scoped root proof and closes its exact descriptor",
+    (context) =>
+      Effect.gen(function* () {
+        if (process.platform === "win32") return context.skip("POSIX held-root descriptor policy");
+        const thread = ThreadId.make("single-root-proof");
+        yield* createThread(thread);
+        const store = yield* makeStandaloneWorkspaceStore;
+        const cwd = yield* store.resolve(thread);
+        const root = path.dirname(cwd);
+        const readsBefore = filesystemObservation.identityReads;
+        let heldDuringLeaf = false;
+        yield* Effect.gen(function* () {
+          filesystemObservation.beforeLstat = async (directory) => {
+            if (directory === cwd) {
+              heldDuringLeaf = [...filesystemObservation.heldDirectories.values()].includes(root);
+            }
+          };
+          assert.equal(yield* store.resolve(thread), cwd);
+          assert.isTrue(heldDuringLeaf);
+          assert.equal(filesystemObservation.identityReads - readsBefore, 1);
+          assert.equal(filesystemObservation.heldDirectories.size, 0);
+          const restarted = yield* makeStandaloneWorkspaceStore;
+          assert.equal(yield* restarted.resolve(thread), cwd);
+          assert.equal(filesystemObservation.identityReads - readsBefore, 2);
+          assert.equal(filesystemObservation.heldDirectories.size, 0);
+        }).pipe(
+          Effect.ensuring(
+            Effect.sync(() => {
+              filesystemObservation.beforeLstat = undefined;
+            }),
+          ),
+        );
+        yield* store.remove(thread);
+      }),
+  );
+
+  it.effect("closes the root descriptor after helper and leaf admission failures", (context) =>
+    Effect.gen(function* () {
+      if (process.platform === "win32") return context.skip("POSIX held-root descriptor policy");
+      const thread = ThreadId.make("failed-root-proof");
+      yield* createThread(thread);
+      const store = yield* makeStandaloneWorkspaceStore;
+      const cwd = yield* store.resolve(thread);
+      yield* Effect.gen(function* () {
+        filesystemObservation.beforeReadIdentity = async () => {
+          throw new Error("synthetic helper failure");
+        };
+        assert.equal((yield* Effect.result(store.resolve(thread)))._tag, "Failure");
+        assert.equal(filesystemObservation.heldDirectories.size, 0);
+      }).pipe(
+        Effect.ensuring(
+          Effect.sync(() => {
+            filesystemObservation.beforeReadIdentity = undefined;
+          }),
+        ),
+      );
+      const saved = `${cwd}-saved`;
+      yield* Effect.promise(() => fs.rename(cwd, saved));
+      yield* Effect.gen(function* () {
+        assert.equal((yield* Effect.result(store.resolve(thread)))._tag, "Failure");
+        assert.equal(filesystemObservation.heldDirectories.size, 0);
+      }).pipe(Effect.ensuring(Effect.promise(() => fs.rename(saved, cwd))));
+      yield* store.remove(thread);
+    }),
+  );
+
+  it.effect("closes the root descriptor when SQL rejects leaf ownership publication", (context) =>
+    Effect.gen(function* () {
+      if (process.platform === "win32") return context.skip("POSIX held-root descriptor policy");
+      const sql = yield* SqlClient.SqlClient;
+      const config = yield* ServerConfig;
+      const thread = ThreadId.make("failed-leaf-publication");
+      yield* createThread(thread);
+      const store = yield* makeStandaloneWorkspaceStore;
+      yield* sql`CREATE TEMP TRIGGER standalone_fixture_reject_publication BEFORE UPDATE ON standalone_thread_workspaces
+        WHEN NEW.thread_id = 'failed-leaf-publication' BEGIN SELECT RAISE(FAIL, 'isolated fixture rejects publication'); END`;
+      yield* Effect.gen(function* () {
+        assert.equal((yield* Effect.result(store.resolve(thread)))._tag, "Failure");
+        assert.equal(filesystemObservation.heldDirectories.size, 0);
+        const [row] = yield* sql<{
+          workspace_id: string;
+          directory_inode: string | null;
+        }>`SELECT workspace_id, directory_inode FROM standalone_thread_workspaces WHERE thread_id = ${thread}`;
+        assert.equal(row?.directory_inode, null);
+        assert.isDefined(row);
+        yield* Effect.promise(() =>
+          fs.rmdir(path.join(config.baseDir, "standalone-workspaces", row!.workspace_id)),
+        );
+      }).pipe(
+        Effect.ensuring(sql`DROP TRIGGER standalone_fixture_reject_publication`.pipe(Effect.orDie)),
+      );
+      yield* store.remove(thread);
+    }),
+  );
+
+  it.effect(
+    "closes retained root admission when cancelled during delayed leaf inspection",
+    (context) =>
+      Effect.gen(function* () {
+        if (process.platform === "win32") return context.skip("POSIX held-root descriptor policy");
+        const sql = yield* SqlClient.SqlClient;
+        const thread = ThreadId.make("cancelled-held-root");
+        yield* createThread(thread);
+        const store = yield* makeStandaloneWorkspaceStore;
+        const cwd = yield* store.resolve(thread);
+        const original =
+          yield* sql`SELECT * FROM standalone_thread_workspaces WHERE thread_id = ${thread}`;
+        const entered = yield* Deferred.make<void>();
+        const release = yield* Deferred.make<void>();
+        yield* Effect.gen(function* () {
+          filesystemObservation.beforeLstat = async (directory) => {
+            if (directory !== cwd) return;
+            await Effect.runPromise(Deferred.succeed(entered, undefined));
+            await Effect.runPromise(Deferred.await(release));
+          };
+          const attempt = yield* store.resolve(thread).pipe(Effect.forkScoped);
+          yield* Deferred.await(entered);
+          assert.equal(filesystemObservation.heldDirectories.size, 1);
+          yield* Fiber.interrupt(attempt);
+          assert.equal(filesystemObservation.heldDirectories.size, 0);
+          yield* Deferred.succeed(release, undefined);
+          assert.deepEqual(
+            yield* sql`SELECT * FROM standalone_thread_workspaces WHERE thread_id = ${thread}`,
+            original,
+          );
+        }).pipe(
+          Effect.ensuring(
+            Effect.gen(function* () {
+              filesystemObservation.beforeLstat = undefined;
+              yield* Deferred.succeed(release, undefined);
+            }),
+          ),
+        );
+        yield* store.remove(thread);
+      }).pipe(Effect.scoped),
+  );
+
+  it.effect("rejects changed SQL root identity before using retained proof", (context) =>
+    Effect.gen(function* () {
+      if (process.platform === "win32") return context.skip("POSIX held-root descriptor policy");
+      const sql = yield* SqlClient.SqlClient;
+      const thread = ThreadId.make("changed-sql-held-root");
+      yield* createThread(thread);
+      const store = yield* makeStandaloneWorkspaceStore;
+      const cwd = yield* store.resolve(thread);
+      const [original] = yield* sql<{
+        directory_device: string;
+      }>`SELECT directory_device FROM standalone_workspace_root_identity`;
+      assert.isDefined(original);
+      let changed = false;
+      yield* Effect.gen(function* () {
+        filesystemObservation.beforeLstat = async (directory) => {
+          if (directory !== cwd || changed) return;
+          changed = true;
+          await Effect.runPromise(
+            sql`UPDATE standalone_workspace_root_identity SET directory_device = 'inconclusive-fixture-identity'`,
+          );
+        };
+        assert.equal((yield* Effect.result(store.resolve(thread)))._tag, "Failure");
+        assert.isTrue(changed);
+        assert.equal(filesystemObservation.heldDirectories.size, 0);
+        assert.deepEqual(
+          yield* sql`SELECT directory_device FROM standalone_workspace_root_identity`,
+          [{ directory_device: "inconclusive-fixture-identity" }],
+        );
+      }).pipe(
+        Effect.ensuring(
+          Effect.gen(function* () {
+            filesystemObservation.beforeLstat = undefined;
+            yield* sql`UPDATE standalone_workspace_root_identity SET directory_device = ${original!.directory_device}`;
+          }).pipe(Effect.orDie),
+        ),
+      );
+      yield* store.remove(thread);
+    }),
+  );
+
+  for (const mismatch of ["device", "inode", "owner", "type"] as const) {
+    it.effect(
+      `rejects retained root ${mismatch} uncertainty before final permission mutation`,
+      (context) =>
+        Effect.gen(function* () {
+          if (process.platform === "win32")
+            return context.skip("POSIX held-root descriptor policy");
+          const thread = ThreadId.make(`uncertain-held-root-${mismatch}`);
+          yield* createThread(thread);
+          const store = yield* makeStandaloneWorkspaceStore;
+          const cwd = yield* store.resolve(thread);
+          const root = path.dirname(cwd);
+          let armed = false;
+          yield* Effect.gen(function* () {
+            filesystemObservation.beforeLstat = async (directory) => {
+              if (directory !== cwd || armed) return;
+              armed = true;
+              await fs.chmod(root, 0o755);
+            };
+            filesystemObservation.patchHeldStat = (directory, stat) => {
+              if (directory !== root || !armed) return stat;
+              const patch =
+                mismatch === "device"
+                  ? { dev: stat.dev + 31n }
+                  : mismatch === "inode"
+                    ? { ino: stat.ino + 1n }
+                    : mismatch === "owner"
+                      ? { uid: stat.uid + 1n }
+                      : { isDirectory: () => false };
+              return Object.assign(Object.create(Object.getPrototypeOf(stat)), stat, patch);
+            };
+            assert.equal((yield* Effect.result(store.resolve(thread)))._tag, "Failure");
+            assert.isTrue(armed);
+            assert.equal((yield* Effect.promise(() => fs.lstat(root))).mode & 0o777, 0o755);
+            assert.equal(filesystemObservation.heldDirectories.size, 0);
+          }).pipe(
+            Effect.ensuring(
+              Effect.sync(() => {
+                filesystemObservation.beforeLstat = undefined;
+                filesystemObservation.patchHeldStat = undefined;
+              }),
+            ),
+          );
+          yield* store.remove(thread);
+        }),
+    );
+  }
+
   it.effect(
     "reads only already provisioned workspaces without ownership or permission mutations",
     () =>
@@ -590,8 +829,9 @@ layer("standalone workspace ownership", (it) => {
             if (directory === cwd) leafObserved = true;
             if (directory !== root || !leafObserved || rootSaved) return;
             // Initial root admission and leaf ownership have already settled.
-            // Replace exactly at the final metadata recheck, after all held
-            // descriptors close, reproducing the stale-root permission hazard.
+            // Replace exactly at the final namespace recheck. Resolve now
+            // retains its admitted root descriptor; remove retains the original
+            // re-open policy. Neither may chmod the replacement namespace.
             await fs.rename(root, saved);
             rootSaved = true;
             await fs.mkdir(root, { mode: 0o755 });

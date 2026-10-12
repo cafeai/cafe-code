@@ -1,3 +1,6 @@
+import { useUiLocale } from "~/i18n";
+import { uiText, type UiLocale } from "@cafecode/shared/i18n";
+import { UiMessage } from "~/i18n";
 import { useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
@@ -28,6 +31,45 @@ import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 import { SettingsPageContainer, SettingsRow, SettingsSection } from "./settingsLayout";
 import { NativeControlSettings } from "./NativeControlSettings";
 
+type McpFeedbackCode =
+  | "toggle-failed"
+  | "installed"
+  | "removed"
+  | "bridge-missing"
+  | "client-failed";
+
+// Feedback stores only Cafe's finite classification, never provider config or
+// native error contents. Changing language renders it again without an action.
+function formatMcpFeedback(code: McpFeedbackCode, locale: UiLocale): string {
+  switch (code) {
+    case "toggle-failed":
+      return uiText(
+        "Could not change Cafe Code MCP access. Refresh and try again.",
+        undefined,
+        undefined,
+        locale,
+      );
+    case "installed":
+      return uiText("Installed. Restart the agent to apply.", undefined, undefined, locale);
+    case "removed":
+      return uiText("Removed. Restart the agent to apply.", undefined, undefined, locale);
+    case "bridge-missing":
+      return uiText(
+        "Cafe Code is missing a required file. Update or rebuild it, then install again.",
+        undefined,
+        undefined,
+        locale,
+      );
+    case "client-failed":
+      return uiText(
+        "Could not update this agent. Refresh to check for a conflict or file permission issue.",
+        undefined,
+        undefined,
+        locale,
+      );
+  }
+}
+
 export function isLocalMcpEnvironment(backendUrl: string | null | undefined): boolean {
   const bootstrap = window.desktopBridge?.getLocalEnvironmentBootstrap();
   if (!bootstrap?.httpBaseUrl || !backendUrl) return false;
@@ -39,6 +81,8 @@ export function isLocalMcpEnvironment(backendUrl: string | null | undefined): bo
 }
 
 export function McpSettings() {
+  const uiLocale = useUiLocale();
+
   const environmentId = useWorkspaceEnvironmentId();
   const remote = useIsSavedRemoteEnvironment(environmentId);
   const queryClient = useQueryClient();
@@ -46,16 +90,17 @@ export function McpSettings() {
   const [pending, setPending] = useState<string | null>(null);
   // Toggle failures belong next to the switch; install results next to the
   // agent list, so each message appears at the control that caused it.
-  const [feedback, setFeedback] = useState<{
+  const [feedbackCode, setFeedbackCode] = useState<{
     scope: "toggle" | "client";
     error: boolean;
-    text: string;
+    code: McpFeedbackCode;
   } | null>(null);
   const queryKey = ["cafe-mcp", environmentId] as const;
   const status = useQuery({
     queryKey,
     queryFn: () => {
-      if (!environmentId) throw new Error("No Cafe environment.");
+      if (!environmentId)
+        throw new Error(uiText("No Cafe environment.", undefined, undefined, uiLocale));
       return requireEnvironmentConnection(environmentId).client.server.getMcpStatus();
     },
     enabled: environmentId !== null,
@@ -73,7 +118,7 @@ export function McpSettings() {
   async function updateEnabled(enabled: boolean) {
     if (!environmentId || pending || !status.data?.canManage) return;
     setPending("toggle");
-    setFeedback(null);
+    setFeedbackCode(null);
     try {
       const next = await requireEnvironmentConnection(environmentId).client.server.updateSettings({
         mcpEnabled: enabled,
@@ -84,10 +129,10 @@ export function McpSettings() {
       else patchWorkspaceServerConfig(environmentId, { settings: next });
       await queryClient.invalidateQueries({ queryKey });
     } catch {
-      setFeedback({
+      setFeedbackCode({
         scope: "toggle",
         error: true,
-        text: "Could not change Cafe Code MCP access. Refresh and try again.",
+        code: "toggle-failed",
       });
     } finally {
       setPending(null);
@@ -97,31 +142,28 @@ export function McpSettings() {
   async function updateClient(input: CafeMcpClientUpdate) {
     if (!environmentId || !canInstall || pending) return;
     setPending(`${input.client}:${input.operation}`);
-    setFeedback(null);
+    setFeedbackCode(null);
     try {
       const next =
         await requireEnvironmentConnection(environmentId).client.server.updateMcpClient(input);
       queryClient.setQueryData(queryKey, next);
-      setFeedback({
+      setFeedbackCode({
         scope: "client",
         error: false,
-        text:
-          input.operation === "install"
-            ? "Installed. Restart the agent to apply."
-            : "Removed. Restart the agent to apply.",
+        code: input.operation === "install" ? "installed" : "removed",
       });
     } catch (error) {
       // Provider config content and native errors must never reach the page.
-      setFeedback({
+      setFeedbackCode({
         scope: "client",
         error: true,
-        text:
+        code:
           typeof error === "object" &&
           error !== null &&
           "code" in error &&
           error.code === "bridge_missing"
-            ? "Cafe Code is missing a required file. Update or rebuild it, then install again."
-            : "Could not update this agent. Refresh to check for a conflict or file permission issue.",
+            ? "bridge-missing"
+            : "client-failed",
       });
       await queryClient.invalidateQueries({ queryKey });
     } finally {
@@ -129,59 +171,89 @@ export function McpSettings() {
     }
   }
 
-  const clientFeedback = feedback?.scope === "client" ? feedback : null;
-  const toggleFeedback = feedback?.scope === "toggle" ? feedback : null;
+  const clientFeedback = feedbackCode?.scope === "client" ? feedbackCode : null;
+  const toggleFeedback = feedbackCode?.scope === "toggle" ? feedbackCode : null;
 
   return (
-    <SettingsPageContainer title="MCP">
+    <SettingsPageContainer title={uiText("MCP", undefined, undefined, uiLocale)}>
       <SettingsSection>
         <SettingsRow
           title={
             <span className="inline-flex items-center gap-1.5">
-              Chat scheduling
-              <InfoTip label="About chat scheduling">
-                Codex, Claude and Grok get scheduling tools automatically in each chat and account,
-                including separate account profiles. Agents can only propose, list and pause
-                follow-ups: nothing runs until you review the proposal and the account that runs and
-                pays for it in Tasks, then choose Approve &amp; enable. Changing accounts needs
-                another review. These tools are separate from Cafe Code MCP below.
-              </InfoTip>
+              <UiMessage
+                message="Chat scheduling<slot1></slot1>"
+                slots={{
+                  slot1: (
+                    <InfoTip
+                      label={uiText("About chat scheduling", undefined, undefined, uiLocale)}
+                    >
+                      {uiText(
+                        "Codex, Claude and Grok get scheduling tools automatically in each chat and account, including separate account profiles. Agents can only propose, list and pause follow-ups: nothing runs until you review the proposal and the account that runs and pays for it in Tasks, then choose Approve & enable. Changing accounts needs another review. These tools are separate from Cafe Code MCP below.",
+                        undefined,
+                        undefined,
+                        uiLocale,
+                      )}
+                    </InfoTip>
+                  ),
+                }}
+              />
             </span>
           }
-          description="Agents can propose follow-ups in any chat; you approve them in Tasks."
+          description={uiText(
+            "Agents can propose follow-ups in any chat; you approve them in Tasks.",
+            undefined,
+            undefined,
+            uiLocale,
+          )}
           control={
             <Badge variant="secondary">
               <CalendarClockIcon />
-              Built in
+              {uiText("Built in", undefined, undefined, uiLocale)}
             </Badge>
           }
         />
       </SettingsSection>
       {local && !remote && window.desktopBridge?.getNativeControlState && <NativeControlSettings />}
-      <SettingsSection title="Cafe Code MCP" icon={<PlugIcon className="size-3.5" />}>
+      <SettingsSection
+        title={uiText("Cafe Code MCP", undefined, undefined, uiLocale)}
+        icon={<PlugIcon className="size-3.5" />}
+      >
         <SettingsRow
           title={
             <span className="inline-flex items-center gap-1.5">
-              Enable Cafe Code MCP
-              <InfoTip label="About Cafe Code MCP">
-                Only authenticated connections can use these tools. Turning it off blocks new
-                requests, including from agents running in Cafe, but doesn't undo work already
-                started. Chat scheduling stays available, and follow-ups still need your approval in
-                Tasks.
-              </InfoTip>
+              <UiMessage
+                message="Enable Cafe Code MCP<slot1></slot1>"
+                slots={{
+                  slot1: (
+                    <InfoTip label={uiText("About Cafe Code MCP", undefined, undefined, uiLocale)}>
+                      {uiText(
+                        "Only authenticated connections can use these tools. Turning it off blocks new requests, including from agents running in Cafe, but doesn''t undo work already started. Chat scheduling stays available, and follow-ups still need your approval in Tasks.",
+                        undefined,
+                        undefined,
+                        uiLocale,
+                      )}
+                    </InfoTip>
+                  ),
+                }}
+              />
             </span>
           }
-          description="Lets agents manage projects, chats, providers and settings without Cafe approval prompts."
+          description={uiText(
+            "Lets agents manage projects, chats, providers and settings without Cafe approval prompts.",
+            undefined,
+            undefined,
+            uiLocale,
+          )}
           status={
             toggleFeedback ? (
               <span role="alert" className="text-destructive">
-                {toggleFeedback.text}
+                {formatMcpFeedback(toggleFeedback.code, uiLocale)}
               </span>
             ) : null
           }
           control={
             <Switch
-              aria-label="Enable Cafe Code MCP"
+              aria-label={uiText("Enable Cafe Code MCP", undefined, undefined, uiLocale)}
               checked={settings.mcpEnabled}
               disabled={!status.data?.canManage || pending !== null}
               onCheckedChange={(enabled) => void updateEnabled(enabled)}
@@ -190,7 +262,7 @@ export function McpSettings() {
         />
       </SettingsSection>
       <SettingsSection
-        title="Install in agents"
+        title={uiText("Install in agents", undefined, undefined, uiLocale)}
         headerAction={
           <Tooltip>
             <TooltipTrigger
@@ -198,7 +270,7 @@ export function McpSettings() {
                 <Button
                   variant="ghost"
                   size="icon-xs"
-                  aria-label="Refresh MCP status"
+                  aria-label={uiText("Refresh MCP status", undefined, undefined, uiLocale)}
                   disabled={pending !== null || status.isFetching}
                   onClick={() => void status.refetch()}
                 >
@@ -210,17 +282,31 @@ export function McpSettings() {
                 </Button>
               }
             />
-            <TooltipPopup side="top">Refresh</TooltipPopup>
+            <TooltipPopup side="top">
+              {uiText("Refresh", undefined, undefined, uiLocale)}
+            </TooltipPopup>
           </Tooltip>
         }
       >
         <p className="px-4 py-3.5 text-xs text-muted-foreground sm:px-5">
-          Install Cafe's tools into each agent's default profile. Cafe must be running.{" "}
-          <InfoTip label="About installing Cafe's tools">
-            Adds Cafe's project, chat, provider and settings tools. Each agent keeps its own
-            permission settings. Custom provider homes need their own MCP setup. Not needed for chat
-            scheduling.
-          </InfoTip>
+          <UiMessage
+            message="Install Cafe''s tools into each agent''s default profile. Cafe must be running.<slot1></slot1><slot3></slot3>"
+            slots={{
+              slot1: " ",
+              slot3: (
+                <InfoTip
+                  label={uiText("About installing Cafe''s tools", undefined, undefined, uiLocale)}
+                >
+                  {uiText(
+                    "Adds Cafe''s project, chat, provider and settings tools. Each agent keeps its own permission settings. Custom provider homes need their own MCP setup. Not needed for chat scheduling.",
+                    undefined,
+                    undefined,
+                    uiLocale,
+                  )}
+                </InfoTip>
+              ),
+            }}
+          />
         </p>
         {/* Slow first loads show rows shaped like the agent list; fast ones show
             nothing until the real rows arrive (docs/style-guide.md §9). */}
@@ -238,14 +324,24 @@ export function McpSettings() {
           : null}
         {status.isError && !showInitialLoading ? (
           <p role="alert" className="px-4 pb-3.5 text-xs text-destructive sm:px-5">
-            Could not load MCP status. Try refreshing.
+            {uiText("Could not load MCP status. Try refreshing.", undefined, undefined, uiLocale)}
           </p>
         ) : null}
         {status.data && !canInstall && !showInitialLoading ? (
           <p className="px-4 pb-3.5 text-xs text-muted-foreground sm:px-5">
             {remote
-              ? "To install, connect as an owner over HTTPS to a server running the Cafe desktop app."
-              : "Open this page in the local Cafe Code desktop app to install."}
+              ? uiText(
+                  "To install, connect as an owner over HTTPS to a server running the Cafe desktop app.",
+                  undefined,
+                  undefined,
+                  uiLocale,
+                )
+              : uiText(
+                  "Open this page in the local Cafe Code desktop app to install.",
+                  undefined,
+                  undefined,
+                  uiLocale,
+                )}
           </p>
         ) : null}
         {canInstall && !showInitialLoading
@@ -262,10 +358,12 @@ export function McpSettings() {
                       {installed ? (
                         <Badge variant="secondary">
                           <CheckIcon />
-                          Installed
+                          {uiText("Installed", undefined, undefined, uiLocale)}
                         </Badge>
                       ) : client.status === "needs-repair" ? (
-                        <Badge variant="warning">Needs repair</Badge>
+                        <Badge variant="warning">
+                          {uiText("Needs repair", undefined, undefined, uiLocale)}
+                        </Badge>
                       ) : null}
                     </span>
                   }
@@ -279,14 +377,21 @@ export function McpSettings() {
                           size="sm"
                           variant="ghost"
                           disabled={pending !== null}
-                          aria-label={`Remove Cafe MCP from ${client.name}`}
+                          aria-label={uiText(
+                            "Remove Cafe MCP from {value0}",
+                            {
+                              value0: client.name,
+                            },
+                            undefined,
+                            uiLocale,
+                          )}
                           onClick={() =>
                             void updateClient({ client: client.id, operation: "remove" })
                           }
                         >
                           {/* Spinners replace the icon so labels and widths stay put. */}
                           {removing ? <Spinner className="size-3.5" /> : <UnplugIcon />}
-                          Remove
+                          {uiText("Remove", undefined, undefined, uiLocale)}
                         </Button>
                       ) : null}
                       <Button
@@ -297,7 +402,15 @@ export function McpSettings() {
                           client.status === "conflict" ||
                           client.status === "unavailable"
                         }
-                        aria-label={`${installed ? "Reinstall" : "Install"} Cafe MCP for ${client.name}`}
+                        aria-label={uiText(
+                          "{installed, select, yes {Reinstall} other {Install}} Cafe MCP for {client}",
+                          {
+                            installed: installed ? "yes" : "no",
+                            client: client.name,
+                          },
+                          undefined,
+                          uiLocale,
+                        )}
                         onClick={() =>
                           void updateClient({ client: client.id, operation: "install" })
                         }
@@ -309,7 +422,9 @@ export function McpSettings() {
                         ) : (
                           <DownloadIcon />
                         )}
-                        {installed ? "Reinstall" : "Install"}
+                        {installed
+                          ? uiText("Reinstall", undefined, undefined, uiLocale)
+                          : uiText("Install", undefined, undefined, uiLocale)}
                       </Button>
                     </>
                   }
@@ -325,8 +440,18 @@ export function McpSettings() {
             className="border-t border-border-subtle px-4 py-3 text-xs text-destructive sm:px-5"
           >
             {remote
-              ? "This server's connection needs repair. Reinstall in any agent."
-              : "The connection needs repair. Reinstall in any agent."}
+              ? uiText(
+                  "This server''s connection needs repair. Reinstall in any agent.",
+                  undefined,
+                  undefined,
+                  uiLocale,
+                )
+              : uiText(
+                  "The connection needs repair. Reinstall in any agent.",
+                  undefined,
+                  undefined,
+                  uiLocale,
+                )}
           </p>
         ) : null}
         {clientFeedback ? (
@@ -337,10 +462,12 @@ export function McpSettings() {
               clientFeedback.error ? "text-destructive" : "text-muted-foreground",
             )}
           >
-            {clientFeedback.text}
+            {formatMcpFeedback(clientFeedback.code, uiLocale)}
           </p>
         ) : null}
       </SettingsSection>
     </SettingsPageContainer>
   );
 }
+
+// Finite source-owned labels/helpers only; no received or user data.

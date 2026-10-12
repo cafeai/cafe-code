@@ -60,3 +60,5 @@ export function useCopyToClipboard<TContext = void>({
 
   return { copyToClipboard, isCopied };
 }
+
+// Finite source-owned labels/helpers only; no received or user data.

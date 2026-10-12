@@ -1,4 +1,5 @@
 import type { DesktopUpdateInstallMode } from "@cafecode/contracts";
+import { uiText } from "@cafecode/shared/i18n";
 
 export interface DesktopUpdateEligibilityInput {
   readonly isDevelopment: boolean;
@@ -23,6 +24,22 @@ export function getAutoUpdateDisabledReason(args: DesktopUpdateEligibilityInput)
     return "Automatic updates on Linux require running the AppImage build.";
   }
   return null;
+}
+
+/** Keep eligibility/log evidence canonical; localize only the native dialog. */
+export function autoUpdateDisabledReasonForUi(reason: string): string {
+  switch (reason) {
+    case "Automatic updates are not available because no update feed is configured.":
+      return uiText("Automatic updates are not available because no update feed is configured.");
+    case "Automatic updates are only available in packaged production builds.":
+      return uiText("Automatic updates are only available in packaged production builds.");
+    case "Automatic updates are disabled by the CAFE_CODE_DISABLE_AUTO_UPDATE setting.":
+      return uiText("Automatic updates are disabled by the CAFE_CODE_DISABLE_AUTO_UPDATE setting.");
+    case "Automatic updates on Linux require running the AppImage build.":
+      return uiText("Automatic updates on Linux require running the AppImage build.");
+    default:
+      return reason;
+  }
 }
 
 export function resolveUnsignedDesktopUpdateInstallMode(

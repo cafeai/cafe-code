@@ -23,10 +23,10 @@ import {
   parseRequestEntries,
 } from "./protocolMethodEntries.ts";
 
-// Codex 0.159.0 release commit. Keep generation attached to an immutable
+// Codex 0.162.1 release commit. Keep generation attached to an immutable
 // upstream commit rather than a moving tag so a reinstall cannot silently
 // change Cafe's protocol boundary.
-const UPSTREAM_REF = "687a119f0fcaace47e1f1abcc77cec6c813fd6da";
+const UPSTREAM_REF = "092d3acd6bec3e3a14bdc7e7a2810ab628ab759d";
 const USER_AGENT = "effect-codex-app-server-generator";
 const GITHUB_API_BASE =
   "https://api.github.com/repos/openai/codex/contents/codex-rs/app-server-protocol";
@@ -238,6 +238,33 @@ function normalizeNullableTypes(value: typeof Schema.Json.Type): typeof Schema.J
     string,
     typeof Schema.Json.Type
   >;
+  const originalAlternatives = (value as Record<string, typeof Schema.Json.Type>).anyOf;
+  const normalizedAlternatives = normalizedObject.anyOf;
+  if (Array.isArray(originalAlternatives) && Array.isArray(normalizedAlternatives)) {
+    const openExtensionIndex = originalAlternatives.findIndex(
+      (alternative) =>
+        alternative !== null &&
+        typeof alternative === "object" &&
+        !Array.isArray(alternative) &&
+        Object.keys(alternative).length === 1 &&
+        Array.isArray(alternative.type) &&
+        alternative.type.length === 2 &&
+        alternative.type.includes("string") &&
+        alternative.type.includes("object"),
+    );
+    if (openExtensionIndex > 0) {
+      // The exact unqualified extension declares every inert object valid.
+      // Decode it first: tagged Struct variants otherwise strip additional
+      // outer/nested evidence before downstream failure policy sees it. That
+      // erasure could turn contradictory policy/transport metadata into a
+      // clean retryable failure. Known variants remain typed alternatives,
+      // but never gain recovery authority by discarding received evidence.
+      normalizedObject.anyOf = [
+        normalizedAlternatives[openExtensionIndex]!,
+        ...normalizedAlternatives.filter((_alternative, index) => index !== openExtensionIndex),
+      ];
+    }
+  }
   const typeValue = normalizedObject.type;
 
   if (!Array.isArray(typeValue)) {
@@ -245,9 +272,38 @@ function normalizeNullableTypes(value: typeof Schema.Json.Type): typeof Schema.J
   }
 
   const normalizedTypes = typeValue.filter((entry): entry is string => typeof entry === "string");
-  if (normalizedTypes.length !== typeValue.length || !normalizedTypes.includes("null")) {
+  if (normalizedTypes.length !== typeValue.length) {
     return normalizedObject;
   }
+
+  // Codex 0.162 makes error metadata forward-compatible with the exact JSON
+  // Schema type union ["string", "object"]. The generator otherwise renders
+  // that unqualified object branch as Schema.Struct({}), which both drops
+  // future metadata and admits primitive values under Effect's empty-struct
+  // semantics. Expand only this declared type-array union before generation,
+  // and retain its open object as a record, never an unrestricted Unknown.
+  // Known error variants remain typed; this wire compatibility does not grant
+  // any unknown value transient classification or recovery authority.
+  if (
+    normalizedTypes.length === 2 &&
+    normalizedTypes.includes("string") &&
+    normalizedTypes.includes("object")
+  ) {
+    const { type: _types, ...rest } = normalizedObject;
+    return {
+      anyOf: [
+        { ...rest, type: "string" },
+        {
+          ...rest,
+          type: "object",
+          // An omitted object bound means the JSON Schema record is open;
+          // preserve an explicitly declared bound instead of widening it.
+          ...(rest.additionalProperties === undefined ? { additionalProperties: true } : {}),
+        },
+      ],
+    };
+  }
+  if (!normalizedTypes.includes("null")) return normalizedObject;
 
   const nonNullTypes = normalizedTypes.filter((entry) => entry !== "null");
   if (nonNullTypes.length !== 1) {
@@ -286,6 +342,28 @@ function stripNullDefaults(value: typeof Schema.Json.Type): typeof Schema.Json.T
       .filter(([key, child]) => !(key === "default" && child === null))
       .map(([key, child]) => [key, stripNullDefaults(child)]),
   ) as typeof Schema.Json.Type;
+}
+
+function preserveNativeErrorEnvelope(
+  value: typeof Schema.Json.Type,
+  nativeTypeName: string,
+): typeof Schema.Json.Type {
+  if (nativeTypeName !== "TurnError") return value;
+  if (value === null || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error("Unsupported native TurnError schema; requalify its exact envelope boundary.");
+  }
+  const envelope = value as Record<string, typeof Schema.Json.Type>;
+  if (envelope.type !== "object" || envelope.additionalProperties === false) {
+    // Do not silently widen a future closed native contract. The currently
+    // qualified JSON Schema intentionally omits this object bound (open).
+    throw new Error("Unsupported closed native TurnError schema; requalify its error metadata.");
+  }
+  // Preserve only this named native error envelope's declared open remainder.
+  // Its message/category/detail/misalignment fields still use their exact
+  // schemas. A Struct without rest would strip a future policy extension and
+  // manufacture retry authority before Cafe's strict failure policy sees it.
+  // Other notification/request envelopes retain existing decode semantics.
+  return { ...envelope, additionalProperties: envelope.additionalProperties ?? true };
 }
 
 function toPascalCaseMethod(method: string) {
@@ -557,7 +635,7 @@ const generateFiles = Effect.fn("generateFiles")(function* () {
       aggregateSchemas[localDefinitionNames.get(definitionName)!] = stripNullDefaults(
         normalizeNullableTypes(
           rewriteExternalRefs(
-            definitionSchema,
+            preserveNativeErrorEnvelope(definitionSchema, definitionName),
             localDefinitionNames,
             file.namespace,
             exportNameByQualifiedName,
@@ -576,7 +654,7 @@ const generateFiles = Effect.fn("generateFiles")(function* () {
     aggregateSchemas[file.exportName] = stripNullDefaults(
       normalizeNullableTypes(
         rewriteExternalRefs(
-          topLevelSchema,
+          preserveNativeErrorEnvelope(topLevelSchema, file.fileName.replace(/\.json$/, "")),
           localDefinitionNames,
           file.namespace,
           exportNameByQualifiedName,

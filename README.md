@@ -142,6 +142,13 @@ certificate, firewall, or reverse proxy separately, then use the server's
 pairing details. Desktop credentials are encrypted with Electron safe storage;
 browser credentials are retained only for the current browser session.
 
+Transient server disconnects retry automatically with a capped backoff; the
+connection chip shows attempts and the next retry. Credential or configuration
+rejections still require explicit action. Desktop startup gives observed database
+migrations a finite allowance rather than repeatedly rolling them back under
+load. See [connection recovery](./docs/decisions/persistent-websocket-recovery.md)
+for timing, authentication and runtime-adoption limits.
+
 ### Scheduled Follow-ups
 
 Use **Tasks → Scheduled** to schedule one-time or recurring work in a
@@ -250,6 +257,11 @@ yarn start:desktop:debug
 The app prints a localhost-only debug URL on startup.
 
 Useful checks:
+
+The interface supports English, Japanese and Korean. Settings → Appearance →
+Language offers System default or a remembered explicit choice. System default
+uses Japanese/Korean only when it is the primary system language; otherwise it
+uses English. See the [internationalization authoring guide](./docs/internationalization.md).
 
 ```bash
 yarn fmt

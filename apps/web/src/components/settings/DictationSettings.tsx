@@ -1,3 +1,6 @@
+import { useUiLocale, useUiPresentation } from "~/i18n";
+import { uiText, type UiLocale } from "@cafecode/shared/i18n";
+import { UiMessage } from "~/i18n";
 import { usePrimaryEnvironmentId } from "../../environments/primary";
 import {
   CheckCircle2Icon,
@@ -41,10 +44,110 @@ import { SettingsPageContainer, SettingsRow, SettingsSection } from "./settingsL
 
 type CredentialOperation = "saving" | "removing" | null;
 
+type CredentialFeedbackCode =
+  | "credential-not-authorized"
+  | "credential-insecure-transport"
+  | "credential-rate-limited"
+  | "credential-secret-store-failed"
+  | "credential-update-failed";
+
+type DictationFeedbackCode =
+  | CredentialFeedbackCode
+  | "empty-key"
+  | "invalid-key"
+  | "key-replaced"
+  | "key-saved"
+  | "key-removed"
+  | "shortcut-load-failed"
+  | "global-update-failed"
+  | "shortcut-update-failed"
+  | "shortcut-invalid";
+
+// Only finite Cafe-authored codes enter feedback state. Render-time formatting
+// observes the current locale without replaying credential or desktop actions,
+// and no received error detail or rejected API key is retained for translation.
 type OperationFeedback = {
   readonly kind: "success" | "error";
-  readonly message: string;
+  readonly code: DictationFeedbackCode;
 };
+
+function formatDictationFeedback(code: DictationFeedbackCode, locale: UiLocale): string {
+  switch (code) {
+    case "credential-not-authorized":
+      return uiText(
+        "Only an owner session can manage the OpenAI API key.",
+        undefined,
+        undefined,
+        locale,
+      );
+    case "credential-insecure-transport":
+      return uiText(
+        "Use Cafe Code on localhost or over HTTPS to manage this credential.",
+        undefined,
+        undefined,
+        locale,
+      );
+    case "credential-rate-limited":
+      return uiText(
+        "Too many credential requests. Wait a moment and try again.",
+        undefined,
+        undefined,
+        locale,
+      );
+    case "credential-secret-store-failed":
+      return uiText(
+        "Cafe Code could not update its private credential store.",
+        undefined,
+        undefined,
+        locale,
+      );
+    case "credential-update-failed":
+      return uiText(
+        "Cafe Code could not update the dictation credential. Try again.",
+        undefined,
+        undefined,
+        locale,
+      );
+    case "empty-key":
+      return uiText("Enter a new OpenAI API key.", undefined, undefined, locale);
+    case "invalid-key":
+      return uiText("Enter a valid OpenAI API key.", undefined, undefined, locale);
+    case "key-replaced":
+      return uiText(
+        "Key replaced. Access is checked when dictation starts.",
+        undefined,
+        undefined,
+        locale,
+      );
+    case "key-saved":
+      return uiText(
+        "Key saved. Access is checked when dictation starts.",
+        undefined,
+        undefined,
+        locale,
+      );
+    case "key-removed":
+      return uiText("Key removed.", undefined, undefined, locale);
+    case "shortcut-load-failed":
+      return uiText("Could not load the Mac dictation shortcut.", undefined, undefined, locale);
+    case "global-update-failed":
+      return uiText("Could not update global dictation. Try again.", undefined, undefined, locale);
+    case "shortcut-update-failed":
+      return uiText(
+        "Could not set this shortcut. Choose another combination.",
+        undefined,
+        undefined,
+        locale,
+      );
+    case "shortcut-invalid":
+      return uiText(
+        "Press ⌘ ⇧ with a letter, number, or punctuation key.",
+        undefined,
+        undefined,
+        locale,
+      );
+  }
+}
 
 /** The physical key matters here: a shifted comma reports "<" on US keyboards. */
 function macShortcutFromKeyEvent(event: KeyboardEvent): string | null {
@@ -81,31 +184,31 @@ function containsApiKeyControlCharacter(value: string): boolean {
   return false;
 }
 
-function formatCredentialManagementError(error: unknown): string {
+function credentialFeedbackCode(error: unknown): CredentialFeedbackCode {
   switch (readDictationRpcErrorCode(error)) {
     case "not_authorized":
-      return "Only an owner session can manage the OpenAI API key.";
+      return "credential-not-authorized";
     case "insecure_transport":
-      return "Use Cafe Code on localhost or over HTTPS to manage this credential.";
+      return "credential-insecure-transport";
     case "rate_limited":
-      return "Too many credential requests. Wait a moment and try again.";
+      return "credential-rate-limited";
     case "secret_store_failed":
-      return "Cafe Code could not update its private credential store.";
+      return "credential-secret-store-failed";
     default:
-      return "Cafe Code could not update the dictation credential. Try again.";
+      return "credential-update-failed";
   }
 }
 
 function formatStatusError(error: unknown): string {
   switch (readDictationRpcErrorCode(error)) {
     case "not_authorized":
-      return "This session is not authorized to view dictation status.";
+      return uiText("This session is not authorized to view dictation status.");
     case "insecure_transport":
-      return "Dictation status is unavailable over this insecure connection.";
+      return uiText("Dictation status is unavailable over this insecure connection.");
     case "rate_limited":
-      return "Dictation status is temporarily rate limited.";
+      return uiText("Dictation status is temporarily rate limited.");
     default:
-      return "Cafe Code could not load dictation status.";
+      return uiText("Cafe Code could not load dictation status.");
   }
 }
 
@@ -120,7 +223,7 @@ function statusBadge(input: {
     return (
       <Badge variant="error">
         <TriangleAlertIcon />
-        Unavailable
+        {uiText("Unavailable")}
       </Badge>
     );
   }
@@ -137,15 +240,18 @@ function statusBadge(input: {
     return (
       <Badge variant="success">
         <CheckCircle2Icon />
-        Configured
+        {uiText("Configured")}
       </Badge>
     );
   }
 
-  return <Badge variant="secondary">Not configured</Badge>;
+  return <Badge variant="secondary">{uiText("Not configured")}</Badge>;
 }
 
 export function DictationSettings() {
+  const uiLocale = useUiLocale();
+  const uiPresentation = useUiPresentation(UI_PRESENTATION_SOURCES);
+
   const primaryEnvironmentId = useWorkspaceEnvironmentId();
   const remote = useIsSavedRemoteEnvironment(primaryEnvironmentId);
   const localEnvironmentId = usePrimaryEnvironmentId();
@@ -153,14 +259,16 @@ export function DictationSettings() {
   const statusQuery = useQuery(dictationStatusQueryOptions(primaryEnvironmentId));
   const [newApiKey, setNewApiKey] = useState("");
   const [operation, setOperation] = useState<CredentialOperation>(null);
-  const [feedback, setFeedback] = useState<OperationFeedback | null>(null);
+  const [feedbackCode, setFeedbackCode] = useState<OperationFeedback | null>(null);
   const [removeDialogOpen, setRemoveDialogOpen] = useState(false);
-  const [removeError, setRemoveError] = useState<string | null>(null);
+  const [removeErrorCode, setRemoveErrorCode] = useState<CredentialFeedbackCode | null>(null);
   const [globalSettings, setGlobalSettings] = useState<GlobalDictationSettingsState | null>(null);
   const [globalSettingsPending, setGlobalSettingsPending] = useState(false);
-  const [globalSettingsError, setGlobalSettingsError] = useState<string | null>(null);
+  const [globalSettingsErrorCode, setGlobalSettingsErrorCode] =
+    useState<DictationFeedbackCode | null>(null);
   const [capturingShortcut, setCapturingShortcut] = useState(false);
-  const [shortcutCaptureHint, setShortcutCaptureHint] = useState<string | null>(null);
+  const [shortcutCaptureHintCode, setShortcutCaptureHintCode] =
+    useState<DictationFeedbackCode | null>(null);
   const isMacDesktop =
     typeof window !== "undefined" &&
     Boolean(window.desktopBridge) &&
@@ -181,11 +289,11 @@ export function DictationSettings() {
       .then((settings) => {
         if (mounted) {
           setGlobalSettings(settings);
-          setGlobalSettingsError(null);
+          setGlobalSettingsErrorCode(null);
         }
       })
       .catch(() => {
-        if (mounted) setGlobalSettingsError("Could not load the Mac dictation shortcut.");
+        if (mounted) setGlobalSettingsErrorCode("shortcut-load-failed");
       })
       .finally(() => {
         if (mounted) setGlobalSettingsPending(false);
@@ -199,11 +307,11 @@ export function DictationSettings() {
     const bridge = window.desktopBridge;
     if (!bridge) return;
     setGlobalSettingsPending(true);
-    setGlobalSettingsError(null);
+    setGlobalSettingsErrorCode(null);
     try {
       setGlobalSettings(await bridge.setGlobalDictationEnabled(enabled));
     } catch {
-      setGlobalSettingsError("Could not update global dictation. Try again.");
+      setGlobalSettingsErrorCode("global-update-failed");
     } finally {
       setGlobalSettingsPending(false);
     }
@@ -213,13 +321,13 @@ export function DictationSettings() {
     const bridge = window.desktopBridge;
     if (!bridge) return;
     setGlobalSettingsPending(true);
-    setGlobalSettingsError(null);
+    setGlobalSettingsErrorCode(null);
     try {
       setGlobalSettings(await bridge.setGlobalDictationShortcut(shortcut));
       setCapturingShortcut(false);
-      setShortcutCaptureHint(null);
+      setShortcutCaptureHintCode(null);
     } catch {
-      setShortcutCaptureHint("Could not set this shortcut. Choose another combination.");
+      setShortcutCaptureHintCode("shortcut-update-failed");
     } finally {
       setGlobalSettingsPending(false);
     }
@@ -232,13 +340,13 @@ export function DictationSettings() {
       event.stopPropagation();
       if (event.key === "Escape") {
         setCapturingShortcut(false);
-        setShortcutCaptureHint(null);
+        setShortcutCaptureHintCode(null);
         return;
       }
       if (event.repeat || ["Meta", "Shift", "Control", "Alt"].includes(event.key)) return;
       const shortcut = macShortcutFromKeyEvent(event);
       if (shortcut === null) {
-        setShortcutCaptureHint("Press ⌘ ⇧ with a letter, number, or punctuation key.");
+        setShortcutCaptureHintCode("shortcut-invalid");
         return;
       }
       void updateGlobalShortcut(shortcut);
@@ -271,11 +379,11 @@ export function DictationSettings() {
 
       const apiKey = newApiKey.trim();
       if (apiKey.length === 0) {
-        setFeedback({ kind: "error", message: "Enter a new OpenAI API key." });
+        setFeedbackCode({ kind: "error", code: "empty-key" });
         return;
       }
       if (apiKey.length > DICTATION_API_KEY_MAX_CHARS || containsApiKeyControlCharacter(apiKey)) {
-        setFeedback({ kind: "error", message: "Enter a valid OpenAI API key." });
+        setFeedbackCode({ kind: "error", code: "invalid-key" });
         return;
       }
 
@@ -283,21 +391,19 @@ export function DictationSettings() {
       // response is lost after the server commits the write, a now-stored key
       // must not remain visible or reachable through renderer component state.
       setNewApiKey("");
-      setFeedback(null);
+      setFeedbackCode(null);
       setOperation("saving");
       try {
         const nextStatus = await requireEnvironmentConnection(
           primaryEnvironmentId,
         ).client.dictation.setApiKey({ apiKey });
         writeAuthoritativeStatus(nextStatus);
-        setFeedback({
+        setFeedbackCode({
           kind: "success",
-          message: configured
-            ? "Key replaced. Access is checked when dictation starts."
-            : "Key saved. Access is checked when dictation starts.",
+          code: configured ? "key-replaced" : "key-saved",
         });
       } catch (error) {
-        setFeedback({ kind: "error", message: formatCredentialManagementError(error) });
+        setFeedbackCode({ kind: "error", code: credentialFeedbackCode(error) });
       } finally {
         setOperation(null);
       }
@@ -310,17 +416,17 @@ export function DictationSettings() {
       return;
     }
 
-    setFeedback(null);
-    setRemoveError(null);
+    setFeedbackCode(null);
+    setRemoveErrorCode(null);
     setOperation("removing");
     try {
       const nextStatus =
         await requireEnvironmentConnection(primaryEnvironmentId).client.dictation.clearApiKey();
       writeAuthoritativeStatus(nextStatus);
       setRemoveDialogOpen(false);
-      setFeedback({ kind: "success", message: "Key removed." });
+      setFeedbackCode({ kind: "success", code: "key-removed" });
     } catch (error) {
-      setRemoveError(formatCredentialManagementError(error));
+      setRemoveErrorCode(credentialFeedbackCode(error));
     } finally {
       setOperation(null);
     }
@@ -329,9 +435,9 @@ export function DictationSettings() {
   // Only problems get a status line; the badge already says whether a key is
   // stored, so repeating it in prose adds nothing (docs/style-guide.md §10).
   const statusProblem = !primaryEnvironmentId
-    ? "Waiting for Cafe to connect."
+    ? uiText("Waiting for Cafe to connect.", undefined, undefined, uiLocale)
     : statusQuery.isError
-      ? formatStatusError(statusQuery.error)
+      ? uiPresentation.formatStatusError(statusQuery.error)
       : null;
   const showStatusPending = useDelayedFlag(primaryEnvironmentId !== null && statusQuery.isPending);
   const showGlobalSettingsPending = useDelayedFlag(
@@ -342,38 +448,65 @@ export function DictationSettings() {
   const globalKeyStatus = remote ? localStatusQuery.data : status;
   const globalKeyConfigured = globalKeyStatus?.configured === true;
   const globalStatus =
-    globalSettingsError ||
+    (globalSettingsErrorCode ? formatDictationFeedback(globalSettingsErrorCode, uiLocale) : null) ||
     globalSettings?.error ||
     (globalSettings?.enabled
       ? globalSettings.registered
-        ? "Press the shortcut to start, and again to stop."
-        : "Couldn't register this shortcut. Choose another."
+        ? uiText("Press the shortcut to start, and again to stop.", undefined, undefined, uiLocale)
+        : uiText("Couldn't register this shortcut. Choose another.", undefined, undefined, uiLocale)
       : globalSettings && globalKeyStatus && !globalKeyConfigured
         ? remote
-          ? "Add an OpenAI API key in this Mac's local workspace first."
-          : "Add an OpenAI API key first."
+          ? uiText(
+              "Add an OpenAI API key in this Mac's local workspace first.",
+              undefined,
+              undefined,
+              uiLocale,
+            )
+          : uiText("Add an OpenAI API key first.", undefined, undefined, uiLocale)
         : null);
 
   return (
     <SettingsPageContainer
-      title="Dictation"
-      description="OpenAI live transcription for the composer. Needs a paid API project with Realtime access."
+      title={uiText("Dictation", undefined, undefined, uiLocale)}
+      description={uiText(
+        "OpenAI live transcription for the composer. Needs a paid API project with Realtime access.",
+        undefined,
+        undefined,
+        uiLocale,
+      )}
     >
       <SettingsSection>
         <SettingsRow
           title={
             <span className="inline-flex items-center gap-1.5">
-              OpenAI API key
-              <InfoTip label="About the OpenAI API key">
-                Only an owner can add, replace or remove the key. It stays in Cafe's private
-                server-side secret store; this page only learns whether a key is set, and dictation
-                uses short-lived transcription credentials. Audio is sent to OpenAI only while you
-                dictate.
-              </InfoTip>
+              <UiMessage
+                message="OpenAI API key<slot1></slot1>"
+                slots={{
+                  slot1: (
+                    <InfoTip
+                      label={uiText("About the OpenAI API key", undefined, undefined, uiLocale)}
+                    >
+                      {uiText(
+                        "Only an owner can add, replace or remove the key. It stays in Cafe''s private server-side secret store; this page only learns whether a key is set, and dictation uses short-lived transcription credentials. Audio is sent to OpenAI only while you dictate.",
+                        undefined,
+                        undefined,
+                        uiLocale,
+                      )}
+                    </InfoTip>
+                  ),
+                }}
+              />
             </span>
           }
           description={
-            <span id="dictation-api-key-help">Stored only on the server; never shown again.</span>
+            <span id="dictation-api-key-help">
+              {uiText(
+                "Stored only on the server; never shown again.",
+                undefined,
+                undefined,
+                uiLocale,
+              )}
+            </span>
           }
           status={
             statusProblem ? (
@@ -387,26 +520,31 @@ export function DictationSettings() {
                     className="ml-1 h-auto p-0 align-baseline"
                     onClick={() => void statusQuery.refetch()}
                   >
-                    Retry
+                    {uiText("Retry", undefined, undefined, uiLocale)}
                   </Button>
                 ) : null}
               </span>
             ) : status && !status.canManage ? (
               <span className="text-warning-foreground">
-                Only an owner can add, replace or remove this key.
+                {uiText(
+                  "Only an owner can add, replace or remove this key.",
+                  undefined,
+                  undefined,
+                  uiLocale,
+                )}
               </span>
-            ) : feedback ? (
+            ) : feedbackCode ? (
               <span
                 className={
-                  feedback.kind === "success" ? "text-success-foreground" : "text-destructive"
+                  feedbackCode.kind === "success" ? "text-success-foreground" : "text-destructive"
                 }
-                role={feedback.kind === "error" ? "alert" : "status"}
+                role={feedbackCode.kind === "error" ? "alert" : "status"}
               >
-                {feedback.message}
+                {formatDictationFeedback(feedbackCode.code, uiLocale)}
               </span>
             ) : null
           }
-          control={statusBadge({
+          control={uiPresentation.statusBadge({
             environmentReady: primaryEnvironmentId !== null,
             isPending: statusQuery.isPending,
             showPending: showStatusPending,
@@ -416,7 +554,9 @@ export function DictationSettings() {
         >
           <form className="mt-3 space-y-3 border-t border-border-subtle py-4" onSubmit={handleSave}>
             <label className="block space-y-1.5">
-              <span className="block text-xs font-medium text-foreground">New OpenAI API key</span>
+              <span className="block text-xs font-medium text-foreground">
+                {uiText("New OpenAI API key", undefined, undefined, uiLocale)}
+              </span>
               <Input
                 type="password"
                 autoComplete="new-password"
@@ -426,9 +566,13 @@ export function DictationSettings() {
                 value={newApiKey}
                 onChange={(event) => {
                   setNewApiKey(event.target.value);
-                  setFeedback(null);
+                  setFeedbackCode(null);
                 }}
-                placeholder={configured ? "Enter a replacement key" : "Enter an API key"}
+                placeholder={
+                  configured
+                    ? uiText("Enter a replacement key", undefined, undefined, uiLocale)
+                    : uiText("Enter an API key", undefined, undefined, uiLocale)
+                }
                 disabled={!canManage || isBusy}
                 aria-describedby="dictation-api-key-help"
               />
@@ -445,7 +589,9 @@ export function DictationSettings() {
                 ) : (
                   <KeyRoundIcon className="size-3.5" />
                 )}
-                {configured ? "Replace key" : "Save key"}
+                {configured
+                  ? uiText("Replace key", undefined, undefined, uiLocale)
+                  : uiText("Save key", undefined, undefined, uiLocale)}
               </Button>
               {configured ? (
                 <Button
@@ -454,11 +600,11 @@ export function DictationSettings() {
                   variant="outline"
                   disabled={!canManage || isBusy}
                   onClick={() => {
-                    setRemoveError(null);
+                    setRemoveErrorCode(null);
                     setRemoveDialogOpen(true);
                   }}
                 >
-                  Remove key
+                  {uiText("Remove key", undefined, undefined, uiLocale)}
                 </Button>
               ) : null}
             </div>
@@ -467,28 +613,51 @@ export function DictationSettings() {
       </SettingsSection>
 
       {isMacDesktop ? (
-        <SettingsSection title="Global dictation" icon={<KeyboardIcon className="size-3.5" />}>
+        <SettingsSection
+          title={uiText("Global dictation", undefined, undefined, uiLocale)}
+          icon={<KeyboardIcon className="size-3.5" />}
+        >
           <SettingsRow
             title={
               <span className="inline-flex items-center gap-1.5">
-                Enable on this Mac
-                <InfoTip label="About global dictation">
-                  Opens a floating recorder from any app. Review and edit the text before Copy, Save
-                  or Insert; nothing goes into another app until you choose Insert or Paste into
-                  app, and if Cafe can't verify it, your draft stays in the recorder. Audio is sent
-                  only while recording. The shortcut is stored on this Mac.
-                  {remote
-                    ? " The recorder uses this Mac's local key; the key above belongs to the selected workspace and is used for chat dictation there."
-                    : null}
-                </InfoTip>
+                <UiMessage
+                  message="Enable on this Mac<slot1></slot1>"
+                  slots={{
+                    slot1: (
+                      <InfoTip
+                        label={uiText("About global dictation", undefined, undefined, uiLocale)}
+                      >
+                        {uiText(
+                          "Opens a floating recorder from any app. Review and edit the text before Copy, Save or Insert; nothing goes into another app until you choose Insert or Paste into app, and if Cafe can''t verify it, your draft stays in the recorder. Audio is sent only while recording. The shortcut is stored on this Mac.",
+                          undefined,
+                          undefined,
+                          uiLocale,
+                        )}
+                        {remote
+                          ? uiText(
+                              " The recorder uses this Mac''s local key; the key above belongs to the selected workspace and is used for chat dictation there.",
+                              undefined,
+                              undefined,
+                              uiLocale,
+                            )
+                          : null}
+                      </InfoTip>
+                    ),
+                  }}
+                />
               </span>
             }
-            description="Dictate into any Mac app. Insert needs Accessibility permission."
+            description={uiText(
+              "Dictate into any Mac app. Insert needs Accessibility permission.",
+              undefined,
+              undefined,
+              uiLocale,
+            )}
             status={
               globalStatus ? (
                 <span
                   aria-live="polite"
-                  role={globalSettingsError || globalSettings?.error ? "alert" : undefined}
+                  role={globalSettingsErrorCode || globalSettings?.error ? "alert" : undefined}
                 >
                   {globalStatus}
                 </span>
@@ -504,7 +673,7 @@ export function DictationSettings() {
                 ) : null
               ) : (
                 <Switch
-                  aria-label="Enable Mac global dictation"
+                  aria-label={uiText("Enable Mac global dictation", undefined, undefined, uiLocale)}
                   checked={globalSettings?.enabled ?? false}
                   disabled={
                     !globalSettings ||
@@ -517,19 +686,25 @@ export function DictationSettings() {
             }
           />
           <SettingsRow
-            title="Shortcut"
-            description={capturingShortcut ? "⌘⇧ + one key · Esc cancels" : "⌘⇧ + one key"}
+            title={uiText("Shortcut", undefined, undefined, uiLocale)}
+            description={
+              capturingShortcut
+                ? uiText("⌘⇧ + one key · Esc cancels", undefined, undefined, uiLocale)
+                : uiText("⌘⇧ + one key", undefined, undefined, uiLocale)
+            }
             status={
-              shortcutCaptureHint ? (
+              shortcutCaptureHintCode ? (
                 <span className="text-destructive" role="alert">
-                  {shortcutCaptureHint}
+                  {formatDictationFeedback(shortcutCaptureHintCode, uiLocale)}
                 </span>
               ) : null
             }
             control={
               <div className="flex items-center gap-2">
                 <Kbd className="h-6 px-2 text-foreground">
-                  {globalSettings ? macShortcutLabel(globalSettings.shortcut) : "⌘ ⇧ ,"}
+                  {globalSettings
+                    ? macShortcutLabel(globalSettings.shortcut)
+                    : uiText("⌘ ⇧ ,", undefined, undefined, uiLocale)}
                 </Kbd>
                 <Button
                   type="button"
@@ -538,11 +713,13 @@ export function DictationSettings() {
                   className="min-w-18"
                   disabled={!globalSettings || globalSettingsPending}
                   onClick={() => {
-                    setShortcutCaptureHint(null);
+                    setShortcutCaptureHintCode(null);
                     setCapturingShortcut((current) => !current);
                   }}
                 >
-                  {capturingShortcut ? "Cancel" : "Change"}
+                  {capturingShortcut
+                    ? uiText("Cancel", undefined, undefined, uiLocale)
+                    : uiText("Change", undefined, undefined, uiLocale)}
                 </Button>
               </div>
             }
@@ -558,20 +735,27 @@ export function DictationSettings() {
           }
           setRemoveDialogOpen(open);
           if (!open) {
-            setRemoveError(null);
+            setRemoveErrorCode(null);
           }
         }}
       >
         <AlertDialogPopup>
           <AlertDialogHeader>
-            <AlertDialogTitle>Remove the OpenAI API key?</AlertDialogTitle>
+            <AlertDialogTitle>
+              {uiText("Remove the OpenAI API key?", undefined, undefined, uiLocale)}
+            </AlertDialogTitle>
             <AlertDialogDescription>
-              New dictation sessions will no longer start until an owner saves another key.
+              {uiText(
+                "New dictation sessions will no longer start until an owner saves another key.",
+                undefined,
+                undefined,
+                uiLocale,
+              )}
             </AlertDialogDescription>
           </AlertDialogHeader>
-          {removeError ? (
+          {removeErrorCode ? (
             <p className="px-6 pb-2 text-xs text-destructive" role="alert">
-              {removeError}
+              {formatDictationFeedback(removeErrorCode, uiLocale)}
             </p>
           ) : null}
           <AlertDialogFooter>
@@ -579,7 +763,7 @@ export function DictationSettings() {
               disabled={operation === "removing"}
               render={<Button variant="outline" disabled={operation === "removing"} />}
             >
-              Cancel
+              {uiText("Cancel", undefined, undefined, uiLocale)}
             </AlertDialogClose>
             <Button
               type="button"
@@ -592,7 +776,7 @@ export function DictationSettings() {
               ) : (
                 <Trash2Icon className="size-3.5" />
               )}
-              Remove key
+              {uiText("Remove key", undefined, undefined, uiLocale)}
             </Button>
           </AlertDialogFooter>
         </AlertDialogPopup>
@@ -600,3 +784,6 @@ export function DictationSettings() {
     </SettingsPageContainer>
   );
 }
+
+// Finite source-owned labels/helpers only; no received or user data.
+const UI_PRESENTATION_SOURCES = { formatStatusError, statusBadge };

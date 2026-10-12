@@ -105,3 +105,5 @@ export function useSourceControlDiscovery(
 
   return useAtomValue(sourceControlDiscoveryStateAtom(targetKey));
 }
+
+// Finite source-owned labels/helpers only; no received or user data.

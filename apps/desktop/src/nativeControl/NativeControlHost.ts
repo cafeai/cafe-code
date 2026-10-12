@@ -1,3 +1,4 @@
+import { nativeControlDetailForUi } from "./nativeControlPresentation.ts";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import * as fs from "node:fs/promises";
 import { join } from "node:path";
@@ -384,7 +385,7 @@ export class NativeControlHost {
       phase: this.phase,
       driverVersion: NATIVE_CONTROL_VERSION,
       runtimeAvailable,
-      detail: this.detail,
+      detail: nativeControlDetailForUi(this.detail),
       diagnostics: {
         operationTimeoutMs: this.operationTimeoutMs,
         activeOperationCount: this.owner?.inFlight ? 1 : 0,
@@ -464,7 +465,12 @@ export class NativeControlHost {
       threadId,
       enabled: this.enabledThreads.has(threadId),
       revision: this.policyRevision,
-      control: { ...control, enabled: this.enabled, phase: this.phase, detail: this.detail },
+      control: {
+        ...control,
+        enabled: this.enabled,
+        phase: this.phase,
+        detail: nativeControlDetailForUi(this.detail),
+      },
     };
   }
 

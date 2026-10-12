@@ -6,6 +6,7 @@ import {
   recordSavedEnvironmentConnectionAttempt,
   recordSavedEnvironmentConnectionOpened,
   recordSavedEnvironmentManualDisconnect,
+  recordSavedEnvironmentRetryScheduled,
   recordSavedEnvironmentTerminalError,
   recordSavedEnvironmentTransportFailure,
 } from "./savedEnvironmentConnectionLifecycle";
@@ -74,9 +75,10 @@ describe("saved environment connection lifecycle", () => {
     });
   });
 
-  it("becomes exhausted only after the transport's eighth failed attempt", () => {
+  it("keeps retrying prolonged outages at the capped delay", () => {
     let current = makeLifecycle();
-    for (let attempt = 1; attempt <= 8; attempt += 1) {
+    const delays = [1_000, 2_000, 4_000, 8_000, 16_000, 32_000, 64_000];
+    for (let attempt = 1; attempt <= 12; attempt += 1) {
       current = applyPatch(current, recordSavedEnvironmentConnectionAttempt(current));
       current = applyPatch(
         current,
@@ -87,14 +89,37 @@ describe("saved environment connection lifecycle", () => {
       );
 
       expect(current.reconnectAttemptCount).toBe(attempt);
-      expect(current.reconnectPhase).toBe(attempt === 8 ? "exhausted" : "waiting");
+      expect(current.reconnectPhase).toBe("waiting");
+      expect(current.nextRetryAt).toBe(
+        new Date(attempt * 100_000 + delays[Math.min(attempt - 1, 6)]!).toISOString(),
+      );
     }
 
     expect(current).toMatchObject({
-      connectionState: "error",
-      nextRetryAt: null,
-      reconnectAttemptCount: 8,
-      reconnectPhase: "exhausted",
+      connectionState: "disconnected",
+      nextRetryAt: new Date(1_264_000).toISOString(),
+      reconnectAttemptCount: 12,
+      reconnectPhase: "waiting",
+    });
+  });
+
+  it("uses the actual protocol schedule after an open without a healthy heartbeat", () => {
+    const opened = applyPatch(
+      makeLifecycle(),
+      recordSavedEnvironmentConnectionOpened("2026-09-01T12:00:00.000Z"),
+    );
+    const waiting = applyPatch(
+      opened,
+      recordSavedEnvironmentRetryScheduled({
+        retryIndex: 9,
+        nextRetryAt: "2026-09-01T12:01:04.000Z",
+      }),
+    );
+    expect(waiting).toMatchObject({
+      connectionState: "disconnected",
+      reconnectAttemptCount: 10,
+      reconnectPhase: "waiting",
+      nextRetryAt: "2026-09-01T12:01:04.000Z",
     });
   });
 

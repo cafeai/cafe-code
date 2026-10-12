@@ -5,7 +5,6 @@ import {
   getWsConnectionUiState,
   setBrowserOnlineStatus,
   type WsConnectionStatus,
-  useWsConnectionStatus,
 } from "../rpc/wsConnectionState";
 import { getPrimaryEnvironmentConnection } from "../environments/runtime";
 
@@ -18,36 +17,19 @@ export function shouldAutoReconnect(
 ): boolean {
   const uiState = getWsConnectionUiState(status);
 
+  // The protocol owns every active retry and its backoff. Resume events must
+  // neither reset a waiting/attempting schedule nor resurrect a definitive
+  // admission/configuration rejection. Only a stale idle session can resume.
+  if (status.reconnectPhase !== "idle") return false;
+
   if (trigger === "online") {
-    return (
-      uiState === "offline" ||
-      uiState === "reconnecting" ||
-      uiState === "error" ||
-      status.reconnectPhase === "exhausted"
-    );
+    return uiState === "offline" || uiState === "reconnecting" || uiState === "error";
   }
 
-  return (
-    status.online &&
-    status.hasConnected &&
-    (uiState === "reconnecting" || status.reconnectPhase === "exhausted")
-  );
-}
-
-export function shouldRestartStalledReconnect(
-  status: WsConnectionStatus,
-  expectedNextRetryAt: string,
-): boolean {
-  return (
-    status.reconnectPhase === "waiting" &&
-    status.nextRetryAt === expectedNextRetryAt &&
-    status.online &&
-    status.hasConnected
-  );
+  return status.online && status.hasConnected && uiState === "reconnecting";
 }
 
 export function WebSocketConnectionCoordinator() {
-  const status = useWsConnectionStatus();
   const lastForcedReconnectAtRef = useRef(0);
 
   // Reconnect status is surfaced by ConnectionStatusIndicator beside Settings
@@ -87,8 +69,8 @@ export function WebSocketConnectionCoordinator() {
     };
     // Mobile browsers freeze background tabs (the socket dies and the backoff
     // timer stops ticking) and often resume them without firing window focus —
-    // only visibilitychange/pageshow. Reconnect immediately on return instead
-    // of waiting out a stale retry timer.
+    // only visibilitychange/pageshow. Offer the same idle-session wakeup on
+    // return; an active protocol still owns its delayed timer and capped ramp.
     const handleVisible = () => {
       if (document.visibilityState === "visible") {
         triggerAutoReconnect("visible");
@@ -110,41 +92,14 @@ export function WebSocketConnectionCoordinator() {
     };
   }, []);
 
-  useEffect(() => {
-    if (
-      status.reconnectPhase !== "waiting" ||
-      status.nextRetryAt === null ||
-      !status.online ||
-      !status.hasConnected
-    ) {
-      return;
-    }
-
-    const nextRetryAt = status.nextRetryAt;
-    const timeoutMs = Math.max(0, new Date(nextRetryAt).getTime() - Date.now()) + 1_500;
-    const timeoutId = window.setTimeout(() => {
-      const currentStatus = getWsConnectionStatus();
-      if (!shouldRestartStalledReconnect(currentStatus, nextRetryAt)) {
-        return;
-      }
-
-      runReconnect();
-    }, timeoutMs);
-
-    return () => {
-      window.clearTimeout(timeoutId);
-    };
-  }, [
-    status.hasConnected,
-    status.nextRetryAt,
-    status.online,
-    status.reconnectAttemptCount,
-    status.reconnectPhase,
-  ]);
-
+  // A live protocol owns its retry timer, including catch-up after a frozen
+  // renderer. A second UI watchdog must not replace that runtime/reset its
+  // capped ramp because a delayed timer is mistaken for exhausted retries.
   return null;
 }
 
 export function WebSocketConnectionSurface({ children }: { readonly children: ReactNode }) {
   return children;
 }
+
+// Finite source-owned labels/helpers only; no received or user data.

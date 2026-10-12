@@ -1,3 +1,5 @@
+import { useUiLocale } from "~/i18n";
+import { uiText } from "@cafecode/shared/i18n";
 import type { NativeControlChatState, ProviderDriverKind, ThreadId } from "@cafecode/contracts";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { ComputerUseIcon } from "./ComputerUseIcon";
@@ -18,6 +20,8 @@ export function ComputerUseButton({
   provider: ProviderDriverKind;
   local: boolean;
 }) {
+  const uiLocale = useUiLocale();
+
   const bridge = window.desktopBridge;
   const activity = useNativeControlActivity();
   const ownsActivity =
@@ -68,15 +72,47 @@ export function ComputerUseButton({
   const failed = mutation.isError && mutation.variables?.threadId === threadId;
   const unavailable = data.control.phase !== "ready" || !data.control.runtimeAvailable;
   const detail = pending
-    ? "Updating computer use…"
+    ? uiText("Updating computer use…", undefined, undefined, uiLocale)
     : failed
-      ? "Could not change computer use. Try again."
+      ? uiText("Could not change computer use. Try again.", undefined, undefined, uiLocale)
       : unavailable
-        ? "Check local desktop control in Settings → MCP."
-        : `Computer use is ${data.enabled ? "on" : "off"} for this chat. Click to ${data.enabled ? "disable" : "enable"} desktop control and browser page access.`;
+        ? uiText("Check local desktop control in Settings → MCP.", undefined, undefined, uiLocale)
+        : data.enabled
+          ? uiText(
+              "Computer use is on for this chat. Click to disable desktop control and browser page access.",
+              undefined,
+              undefined,
+              uiLocale,
+            )
+          : uiText(
+              "Computer use is off for this chat. Click to enable desktop control and browser page access.",
+              undefined,
+              undefined,
+              uiLocale,
+            );
   const activityDetail =
     ownsActivity && activity
-      ? `${activity.provider === "claudeAgent" ? "Claude" : "Codex"} · ${computerActivityText(activity)} · ${activity.target?.app ?? "Selecting target"}${activity.target?.title ? ` · ${activity.target.title}` : ""}. Window images and controls can be supplied to this chat's selected provider. ${activity.inputPolicy === "background-only" ? "Background input only." : "Foreground input is allowed when needed."}`
+      ? uiText(
+          "{provider} · {activity} · {target}. Window images and controls can be supplied to this chat''s selected provider. {policy}",
+          {
+            provider: activity.provider === "claudeAgent" ? "Claude" : "Codex",
+            activity: computerActivityText(activity, uiLocale),
+            target: activity.target
+              ? [activity.target.app, activity.target.title].filter(Boolean).join(" · ")
+              : uiText("Selecting target", undefined, undefined, uiLocale),
+            policy:
+              activity.inputPolicy === "background-only"
+                ? uiText("Background input only.", undefined, undefined, uiLocale)
+                : uiText(
+                    "Foreground input is allowed when needed.",
+                    undefined,
+                    undefined,
+                    uiLocale,
+                  ),
+          },
+          undefined,
+          uiLocale,
+        )
       : undefined;
   return (
     <div className="flex items-center gap-1">
@@ -87,7 +123,7 @@ export function ComputerUseButton({
               type="button"
               size="sm"
               variant="ghost"
-              aria-label="Computer use"
+              aria-label={uiText("Computer use", undefined, undefined, uiLocale)}
               aria-pressed={data.enabled}
               aria-disabled={pending || unavailable}
               className={cn(
@@ -109,7 +145,9 @@ export function ComputerUseButton({
             role={ownsActivity ? "status" : undefined}
             aria-live={ownsActivity ? "polite" : undefined}
           >
-            {ownsActivity && activity ? computerActivityText(activity) : "Computer use"}
+            {ownsActivity && activity
+              ? computerActivityText(activity, uiLocale)
+              : uiText("Computer use", undefined, undefined, uiLocale)}
           </span>
         </TooltipTrigger>
         <TooltipPopup className="max-w-80">{activityDetail ?? detail}</TooltipPopup>
@@ -121,7 +159,7 @@ export function ComputerUseButton({
           size="sm"
           className="px-2 text-xs"
           disabled={activity.phase === "stopping"}
-          aria-label="Stop computer use"
+          aria-label={uiText("Stop computer use", undefined, undefined, uiLocale)}
           onClick={() => {
             if (activity.episode)
               void bridge
@@ -130,7 +168,7 @@ export function ComputerUseButton({
                 .catch(() => {});
           }}
         >
-          Stop
+          {uiText("Stop", undefined, undefined, uiLocale)}
         </Button>
       )}
     </div>

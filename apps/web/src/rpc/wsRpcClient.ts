@@ -13,7 +13,6 @@ import * as Stream from "effect/Stream";
 
 import { dispatchIdempotentCommandWithTransportRetry } from "./idempotentDispatch";
 import { type WsRpcProtocolClient } from "./protocol";
-import { resetWsReconnectBackoff } from "./wsConnectionState";
 import { WsTransport, type WsTransportOpenEvent } from "./wsTransport";
 
 type RpcTag = keyof WsRpcProtocolClient & string;
@@ -174,6 +173,9 @@ export interface WsRpcClient {
     readonly getThreadTurnActivityPage: RpcUnaryMethod<
       typeof ORCHESTRATION_WS_METHODS.getThreadTurnActivityPage
     >;
+    readonly getThreadActivityDiagnostic: RpcUnaryMethod<
+      typeof ORCHESTRATION_WS_METHODS.getThreadActivityDiagnostic
+    >;
     readonly getThreadTurnSubagentDetail: RpcUnaryMethod<
       typeof ORCHESTRATION_WS_METHODS.getThreadTurnSubagentDetail
     >;
@@ -205,7 +207,7 @@ export function createWsRpcClient(transport: WsTransport): WsRpcClient {
   return {
     dispose: () => transport.dispose(),
     reconnect: async () => {
-      resetWsReconnectBackoff();
+      transport.resetReconnectBackoff();
       await transport.reconnect();
     },
     isHeartbeatFresh: () => transport.isHeartbeatFresh(),
@@ -419,6 +421,10 @@ export function createWsRpcClient(transport: WsTransport): WsRpcClient {
       getThreadTurnActivityPage: (input) =>
         transport.request((client) =>
           client[ORCHESTRATION_WS_METHODS.getThreadTurnActivityPage](input),
+        ),
+      getThreadActivityDiagnostic: (input) =>
+        transport.request((client) =>
+          client[ORCHESTRATION_WS_METHODS.getThreadActivityDiagnostic](input),
         ),
       getThreadTurnSubagentDetail: (input) =>
         transport.request((client) =>

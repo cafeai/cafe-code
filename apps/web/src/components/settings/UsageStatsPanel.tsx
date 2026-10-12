@@ -1,3 +1,6 @@
+import { useUiLocale, useUiPresentation } from "~/i18n";
+import { uiText } from "@cafecode/shared/i18n";
+import { UiMessage } from "~/i18n";
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { UsageStatsSnapshot } from "@cafecode/contracts";
 
@@ -128,6 +131,9 @@ function StatTilesSkeleton({ visible }: { visible: boolean }) {
 }
 
 export function UsageStatsPanel() {
+  const uiLocale = useUiLocale();
+  const uiPresentation = useUiPresentation(UI_PRESENTATION_SOURCES);
+
   const environmentId = useWorkspaceEnvironmentId();
   const settings = useSettings();
   const { updateSettings } = useUpdateSettings();
@@ -135,12 +141,12 @@ export function UsageStatsPanel() {
   const initial = detail.data;
   const [range, setRange] = useState<UsageRangeKey>("30");
   const selected = useMemo(
-    () => (initial === null ? null : selectUsageRange(initial, range)),
-    [initial, range],
+    () => (initial === null ? null : uiPresentation.selectUsageRange(initial, range)),
+    [initial, range, uiPresentation],
   );
   const activityBounds = useMemo(
-    () => (initial === null ? undefined : getUsageRangeBounds(initial, "all")),
-    [initial],
+    () => (initial === null ? undefined : uiPresentation.getUsageRangeBounds(initial, "all")),
+    [initial, uiPresentation],
   );
   const [snapshot, setSnapshot] = useState<UsageStatsSnapshot | null>(null);
   const loadError = detail.phase === "error" && initial === null;
@@ -174,7 +180,11 @@ export function UsageStatsPanel() {
   return (
     // Usage is a dashboard, so it uses the wide page width. Its own container
     // tracks the space left by the sidebar and the user's interface scale.
-    <SettingsPageContainer width="wide" title="Usage" className="@container/usage-page min-w-0">
+    <SettingsPageContainer
+      width="wide"
+      title={uiText("Usage", undefined, undefined, uiLocale)}
+      className="@container/usage-page min-w-0"
+    >
       <SettingsSection
         className="[&>div:first-child]:flex-wrap [&>div:first-child]:gap-2 [&>div:first-child>div]:h-auto"
         headerAction={
@@ -186,8 +196,13 @@ export function UsageStatsPanel() {
                   <span className="relative inline-flex size-2 rounded-full bg-status-running" />
                 </span>
                 {totals && totals.activeSessionCount > 1
-                  ? `${totals.activeSessionCount} chats generating`
-                  : "Generating"}
+                  ? uiText(
+                      "{value0} chats generating",
+                      { value0: totals.activeSessionCount },
+                      undefined,
+                      uiLocale,
+                    )
+                  : uiText("Generating", undefined, undefined, uiLocale)}
               </span>
             ) : null}
             {/* Nothing to filter until a response arrives. */}
@@ -197,15 +212,26 @@ export function UsageStatsPanel() {
       >
         {loadError ? (
           <p className="px-4 py-8 text-center text-xs text-muted-foreground">
-            Usage is unavailable right now. Reconnect to the server and try again.
+            {uiText(
+              "Usage is unavailable right now. Reconnect to the server and try again.",
+              undefined,
+              undefined,
+              uiLocale,
+            )}
           </p>
         ) : totals && !showSkeleton ? (
           <div className={STAT_GRID_CLASS}>
-            <StatTile label="Tokens generated" value={integerFormat.format(totals.outputTokens)} />
-            <StatTile label="Chats sent" value={integerFormat.format(totals.userMessages)} />
             <StatTile
-              label="Time spent generating"
-              value={formatGeneratingTime(totals.generatingMs)}
+              label={uiText("Tokens generated", undefined, undefined, uiLocale)}
+              value={integerFormat.format(totals.outputTokens)}
+            />
+            <StatTile
+              label={uiText("Chats sent", undefined, undefined, uiLocale)}
+              value={integerFormat.format(totals.userMessages)}
+            />
+            <StatTile
+              label={uiText("Time spent generating", undefined, undefined, uiLocale)}
+              value={uiPresentation.formatGeneratingTime(totals.generatingMs)}
             />
           </div>
         ) : (
@@ -218,7 +244,7 @@ export function UsageStatsPanel() {
       {loadError ? null : <UsageCostSection usage={initial} range={range} />}
 
       {loadError ? null : (
-        <SettingsSection title="Activity">
+        <SettingsSection title={uiText("Activity", undefined, undefined, uiLocale)}>
           <div className="px-4 py-4 sm:px-5">
             {initial && !showSkeleton ? (
               <ActivityHeatmap
@@ -241,25 +267,37 @@ export function UsageStatsPanel() {
         </SettingsSection>
       )}
 
-      <SettingsSection title="Data collection">
+      <SettingsSection title={uiText("Data collection", undefined, undefined, uiLocale)}>
         <SettingsRow
           title={
             <span className="inline-flex items-center gap-1.5">
-              Collect usage statistics
-              <InfoTip label="About usage statistics">
-                Tracks tokens, chats and generating time across Cafe Code. Turning it off pauses the
-                counters without clearing them.
-              </InfoTip>
+              <UiMessage
+                message={"Collect usage statistics<slot1></slot1>"}
+                slots={{
+                  slot1: (
+                    <InfoTip
+                      label={uiText("About usage statistics", undefined, undefined, uiLocale)}
+                    >
+                      {uiText(
+                        "Tracks tokens, chats and generating time across Cafe Code. Turning it off pauses the counters without clearing them.",
+                        undefined,
+                        undefined,
+                        uiLocale,
+                      )}
+                    </InfoTip>
+                  ),
+                }}
+              />
             </span>
           }
-          description="Data stays on this machine."
+          description={uiText("Data stays on this machine.", undefined, undefined, uiLocale)}
           control={
             <Switch
               checked={settings.usageStatsEnabled}
               onCheckedChange={(checked) => {
                 updateSettings({ usageStatsEnabled: Boolean(checked) });
               }}
-              aria-label="Collect usage statistics"
+              aria-label={uiText("Collect usage statistics", undefined, undefined, uiLocale)}
             />
           }
         />
@@ -267,3 +305,6 @@ export function UsageStatsPanel() {
     </SettingsPageContainer>
   );
 }
+
+// Finite source-owned labels/helpers only; no received or user data.
+const UI_PRESENTATION_SOURCES = { formatGeneratingTime, getUsageRangeBounds, selectUsageRange };

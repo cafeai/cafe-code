@@ -1,4 +1,5 @@
 import { type TimestampFormat } from "@cafecode/contracts/settings";
+import { uiFormatDateTime, uiText, type UiLocale } from "@cafecode/shared/i18n";
 
 export function getTimestampFormatOptions(
   timestampFormat: TimestampFormat,
@@ -20,32 +21,45 @@ export function getTimestampFormatOptions(
   };
 }
 
-const timestampFormatterCache = new Map<string, Intl.DateTimeFormat>();
-
-function getTimestampFormatter(
-  timestampFormat: TimestampFormat,
-  includeSeconds: boolean,
-): Intl.DateTimeFormat {
-  const cacheKey = `${timestampFormat}:${includeSeconds ? "seconds" : "minutes"}`;
-  const cachedFormatter = timestampFormatterCache.get(cacheKey);
-  if (cachedFormatter) {
-    return cachedFormatter;
-  }
-
-  const formatter = new Intl.DateTimeFormat(
-    undefined,
-    getTimestampFormatOptions(timestampFormat, includeSeconds),
-  );
-  timestampFormatterCache.set(cacheKey, formatter);
-  return formatter;
-}
-
 export function formatTimestamp(isoDate: string, timestampFormat: TimestampFormat): string {
-  return getTimestampFormatter(timestampFormat, true).format(new Date(isoDate));
+  // The English UI locale must not replace the viewer's native hour cycle or
+  // timezone. Explicit 12/24-hour preferences remain authoritative.
+  return uiFormatDateTime(new Date(isoDate), getTimestampFormatOptions(timestampFormat, true));
 }
 
 export function formatShortTimestamp(isoDate: string, timestampFormat: TimestampFormat): string {
-  return getTimestampFormatter(timestampFormat, false).format(new Date(isoDate));
+  return uiFormatDateTime(new Date(isoDate), getTimestampFormatOptions(timestampFormat, false));
+}
+
+/** Recorded diagnostic instants use the viewer's native date/zone, never now. */
+export function getDiagnosticTimestampFormatOptions(
+  timestampFormat: TimestampFormat,
+): Intl.DateTimeFormatOptions {
+  return {
+    year: "numeric",
+    month: "numeric",
+    day: "numeric",
+    ...getTimestampFormatOptions(timestampFormat, true),
+    timeZoneName: "short",
+  };
+}
+
+export function formatDiagnosticTimestamp(
+  isoDate: string,
+  timestampFormat: TimestampFormat,
+  locale?: UiLocale,
+): string {
+  const date = new Date(isoDate);
+  // Legacy malformed timestamps do not crash the work log or acquire a
+  // current timestamp which would falsely imply another retry observation.
+  return Number.isFinite(date.getTime())
+    ? uiFormatDateTime(date, getDiagnosticTimestampFormatOptions(timestampFormat))
+    : uiText("Time not recorded", undefined, undefined, locale);
+}
+
+/** Compact display units are catalog messages, never persisted duration ids. */
+function compactTime(value: number, unit: "second" | "minute" | "hour" | "day"): string {
+  return uiText("{value}{unit, select, second {s} minute {m} hour {h} other {d}}", { value, unit });
 }
 
 /**
@@ -55,20 +69,20 @@ export function formatShortTimestamp(isoDate: string, timestampFormat: Timestamp
  */
 export function formatRelativeTime(isoDate: string): { value: string; suffix: string | null } {
   const diffMs = Date.now() - new Date(isoDate).getTime();
-  if (diffMs < 0) return { value: "just now", suffix: null };
+  if (diffMs < 0) return { value: uiText("just now"), suffix: null };
   const seconds = Math.floor(diffMs / 1000);
-  if (seconds < 60) return { value: "just now", suffix: null };
+  if (seconds < 60) return { value: uiText("just now"), suffix: null };
   const minutes = Math.floor(seconds / 60);
-  if (minutes < 60) return { value: `${minutes}m`, suffix: "ago" };
+  if (minutes < 60) return { value: compactTime(minutes, "minute"), suffix: uiText("ago") };
   const hours = Math.floor(minutes / 60);
-  if (hours < 24) return { value: `${hours}h`, suffix: "ago" };
+  if (hours < 24) return { value: compactTime(hours, "hour"), suffix: uiText("ago") };
   const days = Math.floor(hours / 24);
-  return { value: `${days}d`, suffix: "ago" };
+  return { value: compactTime(days, "day"), suffix: uiText("ago") };
 }
 
 export function formatRelativeTimeLabel(isoDate: string) {
   const relative = formatRelativeTime(isoDate);
-  return relative.suffix ? `${relative.value} ${relative.suffix}` : relative.value;
+  return relative.suffix ? uiText("{duration} ago", { duration: relative.value }) : relative.value;
 }
 
 /**
@@ -77,20 +91,20 @@ export function formatRelativeTimeLabel(isoDate: string) {
  */
 export function formatElapsedDurationLabel(isoDate: string, nowMs: number = Date.now()): string {
   const diffMs = nowMs - new Date(isoDate).getTime();
-  if (diffMs <= 0) return "just now";
+  if (diffMs <= 0) return uiText("just now");
 
   const seconds = Math.floor(diffMs / 1000);
-  if (seconds < 5) return "just now";
-  if (seconds < 60) return `${seconds}s`;
+  if (seconds < 5) return uiText("just now");
+  if (seconds < 60) return compactTime(seconds, "second");
 
   const minutes = Math.floor(seconds / 60);
-  if (minutes < 60) return `${minutes}m`;
+  if (minutes < 60) return compactTime(minutes, "minute");
 
   const hours = Math.floor(minutes / 60);
-  if (hours < 24) return `${hours}h`;
+  if (hours < 24) return compactTime(hours, "hour");
 
   const days = Math.floor(hours / 24);
-  return `${days}d`;
+  return compactTime(days, "day");
 }
 
 /**
@@ -98,21 +112,21 @@ export function formatElapsedDurationLabel(isoDate: string, nowMs: number = Date
  */
 export function formatRelativeTimeUntil(isoDate: string): { value: string; suffix: string | null } {
   const diffMs = new Date(isoDate).getTime() - Date.now();
-  if (diffMs <= 0) return { value: "Expired", suffix: null };
+  if (diffMs <= 0) return { value: uiText("Expired"), suffix: null };
   const seconds = Math.floor(diffMs / 1000);
-  if (seconds < 5) return { value: "Soon", suffix: null };
-  if (seconds < 60) return { value: `${seconds}s`, suffix: "left" };
+  if (seconds < 5) return { value: uiText("Soon"), suffix: null };
+  if (seconds < 60) return { value: compactTime(seconds, "second"), suffix: uiText("left") };
   const minutes = Math.floor(seconds / 60);
-  if (minutes < 60) return { value: `${minutes}m`, suffix: "left" };
+  if (minutes < 60) return { value: compactTime(minutes, "minute"), suffix: uiText("left") };
   const hours = Math.floor(minutes / 60);
-  if (hours < 24) return { value: `${hours}h`, suffix: "left" };
+  if (hours < 24) return { value: compactTime(hours, "hour"), suffix: uiText("left") };
   const days = Math.floor(hours / 24);
-  return { value: `${days}d`, suffix: "left" };
+  return { value: compactTime(days, "day"), suffix: uiText("left") };
 }
 
 export function formatRelativeTimeUntilLabel(isoDate: string): string {
   const relative = formatRelativeTimeUntil(isoDate);
-  return relative.suffix ? `${relative.value} ${relative.suffix}` : relative.value;
+  return relative.suffix ? uiText("{duration} left", { duration: relative.value }) : relative.value;
 }
 
 /**
@@ -121,16 +135,19 @@ export function formatRelativeTimeUntilLabel(isoDate: string): string {
  */
 export function formatExpiresInLabel(isoDate: string, nowMs: number = Date.now()): string {
   const diffMs = new Date(isoDate).getTime() - nowMs;
-  if (diffMs <= 0) return "Expired";
+  if (diffMs <= 0) return uiText("Expired");
 
   const totalSeconds = Math.floor(diffMs / 1000);
-  if (totalSeconds < 5) return "Expires in a moment";
-  if (totalSeconds < 60) return `Expires in ${totalSeconds}s`;
+  if (totalSeconds < 5) return uiText("Expires in a moment");
+  if (totalSeconds < 60) return uiText("Expires in {seconds}s", { seconds: totalSeconds });
 
   if (totalSeconds < 3600) {
     const minutes = Math.floor(totalSeconds / 60);
     const seconds = totalSeconds % 60;
-    return seconds === 0 ? `Expires in ${minutes}m` : `Expires in ${minutes}m ${seconds}s`;
+    return uiText("Expires in {minutes}m{seconds, plural, =0 {} other { {seconds}s}}", {
+      minutes,
+      seconds,
+    });
   }
 
   if (totalSeconds < 86_400) {
@@ -138,22 +155,21 @@ export function formatExpiresInLabel(isoDate: string, nowMs: number = Date.now()
     const rem = totalSeconds % 3600;
     const minutes = Math.floor(rem / 60);
     const seconds = rem % 60;
-    const parts = [`${hours}h`];
-    if (minutes > 0) parts.push(`${minutes}m`);
-    if (seconds > 0) parts.push(`${seconds}s`);
-    return `Expires in ${parts.join(" ")}`;
+    return uiText(
+      "Expires in {hours}h{minutes, plural, =0 {} other { {minutes}m}}{seconds, plural, =0 {} other { {seconds}s}}",
+      { hours, minutes, seconds },
+    );
   }
 
   const days = Math.floor(totalSeconds / 86_400);
   const remAfterDays = totalSeconds % 86_400;
-  if (remAfterDays === 0) return `Expires in ${days}d`;
+  if (remAfterDays === 0) return uiText("Expires in {days}d", { days });
   const hours = Math.floor(remAfterDays / 3600);
   const rem = remAfterDays % 3600;
   const minutes = Math.floor(rem / 60);
   const seconds = rem % 60;
-  const tail: string[] = [];
-  if (hours > 0) tail.push(`${hours}h`);
-  if (minutes > 0) tail.push(`${minutes}m`);
-  if (seconds > 0) tail.push(`${seconds}s`);
-  return tail.length > 0 ? `Expires in ${days}d ${tail.join(" ")}` : `Expires in ${days}d`;
+  return uiText(
+    "Expires in {days}d{hours, plural, =0 {} other { {hours}h}}{minutes, plural, =0 {} other { {minutes}m}}{seconds, plural, =0 {} other { {seconds}s}}",
+    { days, hours, minutes, seconds },
+  );
 }

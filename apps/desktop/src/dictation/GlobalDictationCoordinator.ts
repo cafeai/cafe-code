@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { dirname, join } from "node:path";
+import { getUiLocale, subscribeUiLocale, uiText } from "@cafecode/shared/i18n";
 
 import type {
   GlobalDictationAction,
@@ -30,6 +31,11 @@ import * as DesktopIpc from "../ipc/DesktopIpc.ts";
 import * as IpcChannels from "../ipc/channels.ts";
 import * as DesktopServerExposure from "../backend/DesktopServerExposure.ts";
 import * as DesktopAppSettings from "../settings/DesktopAppSettings.ts";
+import * as DesktopUiLocale from "../settings/DesktopUiLocale.ts";
+import {
+  DESKTOP_UI_LOCALE_CHANGED_CHANNEL,
+  desktopUiLocaleArguments,
+} from "../settings/DesktopUiLocaleBridge.ts";
 import * as ElectronWindow from "../electron/ElectronWindow.ts";
 import {
   trustAudioWebContents,
@@ -87,9 +93,29 @@ function isBoundedDraft(value: unknown): value is string {
 function explainCaptureFailure(reason: MacDictationTargetFailureReason | null): string | undefined {
   if (reason === null) return undefined;
   if (reason === "accessibility_permission_required") {
-    return "To enable Insert, allow Cafe Code Accessibility in macOS System Settings. You can still Copy or Save.";
+    return uiText(
+      "To enable Insert, allow Cafe Code Accessibility in macOS System Settings. You can still Copy or Save.",
+    );
   }
-  return "Insert is unavailable for this field. You can still Copy or Save your draft.";
+  return uiText("Insert is unavailable for this field. You can still Copy or Save your draft.");
+}
+
+type RegistrationFeedback =
+  | "shortcut-used"
+  | "settings-write-failed"
+  | "invalid-shortcut"
+  | "shortcut-write-failed";
+function registrationFeedbackForUi(feedback: RegistrationFeedback): string {
+  switch (feedback) {
+    case "shortcut-used":
+      return uiText("That shortcut is already in use. Choose another shortcut.");
+    case "settings-write-failed":
+      return uiText("Cafe could not save the dictation setting.");
+    case "invalid-shortcut":
+      return uiText("Use Command–Shift with one supported key.");
+    case "shortcut-write-failed":
+      return uiText("Cafe could not save the shortcut.");
+  }
 }
 
 function isTrustedMainSender(
@@ -148,8 +174,8 @@ function isBoundPanelSender(
 function notifyComposerBusy(): void {
   if (!Notification.isSupported()) return;
   new Notification({
-    title: "Cafe Dictation",
-    body: "Finish the dictation in Cafe before starting global dictation.",
+    title: uiText("Cafe Dictation"),
+    body: uiText("Finish the dictation in Cafe before starting global dictation."),
   }).show();
 }
 
@@ -165,6 +191,8 @@ export const installGlobalDictationCoordinator = Effect.gen(function* () {
   const exposure = yield* DesktopServerExposure.DesktopServerExposure;
   const desktopIpc = yield* DesktopIpc.DesktopIpc;
   const electronWindow = yield* ElectronWindow.ElectronWindow;
+  const locale = yield* Effect.serviceOption(DesktopUiLocale.DesktopUiLocale);
+  const systemLocale = Option.isSome(locale) ? yield* locale.value.systemLocale : "en";
   const context = yield* Effect.context<
     | DesktopAppSettings.DesktopAppSettings
     | DesktopServerExposure.DesktopServerExposure
@@ -182,9 +210,15 @@ export const installGlobalDictationCoordinator = Effect.gen(function* () {
       let pendingStartupWindow: BrowserWindow | null = null;
       let latestCaptureId: string | null = null;
       let registeredShortcut: string | null = null;
-      let registrationError: string | null = null;
+      let registrationError: RegistrationFeedback | null = null;
       let composerOwner: { webContents: WebContents; leaseId: string } | null = null;
       let disposed = false;
+      const unsubscribeLocale = subscribeUiLocale(() => {
+        const target = active?.window ?? pendingStartupWindow;
+        if (!disposed && target && !target.isDestroyed()) {
+          target.webContents.send(DESKTOP_UI_LOCALE_CHANGED_CHANNEL, getUiLocale());
+        }
+      });
       let shortcutEnabled = false;
       let configuredShortcut = DesktopAppSettings.DEFAULT_DESKTOP_SETTINGS.globalDictationShortcut;
       let registrationOutcome: DesktopDebugServer.GlobalDictationShortcutDebugSnapshot["registrationOutcome"] =
@@ -267,11 +301,13 @@ export const installGlobalDictationCoordinator = Effect.gen(function* () {
         publishShortcutDebug();
       };
       const notifyPanelFailure = (): void => {
-        const message = "The dictation window did not open. Restart Cafe Code and try again.";
+        const message = uiText(
+          "The dictation window did not open. Restart Cafe Code and try again.",
+        );
         if (Notification.isSupported()) {
-          new Notification({ title: "Cafe Dictation", body: message }).show();
+          new Notification({ title: uiText("Cafe Dictation"), body: message }).show();
         } else {
-          dialog.showErrorBox("Cafe Dictation", message);
+          dialog.showErrorBox(uiText("Cafe Dictation"), message);
         }
       };
       const backend = await runPromise(exposure.backendConfig);
@@ -338,8 +374,10 @@ export const installGlobalDictationCoordinator = Effect.gen(function* () {
           registered: registeredShortcut === current.globalDictationShortcut,
           error:
             environment.platform === "darwin"
-              ? registrationError
-              : "Global dictation is currently available on macOS only.",
+              ? registrationError === null
+                ? null
+                : registrationFeedbackForUi(registrationError)
+              : uiText("Global dictation is currently available on macOS only."),
         };
       };
 
@@ -363,7 +401,7 @@ export const installGlobalDictationCoordinator = Effect.gen(function* () {
         shortcutEnabled = current.globalDictationEnabled;
         if (enabled && (!current.globalDictationEnabled || !registeredShortcut)) {
           if (!register(current.globalDictationShortcut)) {
-            registrationError = "That shortcut is already in use. Choose another shortcut.";
+            registrationError = "shortcut-used";
             noteRegistration("rejected");
             return readSettingsState();
           }
@@ -375,7 +413,7 @@ export const installGlobalDictationCoordinator = Effect.gen(function* () {
             noteRegistration("registered");
           } catch {
             globalShortcut.unregister(current.globalDictationShortcut);
-            registrationError = "Cafe could not save the dictation setting.";
+            registrationError = "settings-write-failed";
             noteRegistration("settings_write_failed");
           }
         } else if (!enabled && current.globalDictationEnabled) {
@@ -389,7 +427,7 @@ export const installGlobalDictationCoordinator = Effect.gen(function* () {
             if (active) closePanel(active);
             noteRegistration("disabled");
           } catch {
-            registrationError = "Cafe could not save the dictation setting.";
+            registrationError = "settings-write-failed";
             noteRegistration("settings_write_failed");
           }
         }
@@ -400,7 +438,7 @@ export const installGlobalDictationCoordinator = Effect.gen(function* () {
         if (environment.platform !== "darwin") return readSettingsState();
         const shortcut = DesktopAppSettings.normalizeGlobalDictationShortcut(raw);
         if (!shortcut) {
-          registrationError = "Use Command–Shift with one supported key.";
+          registrationError = "invalid-shortcut";
           return readSettingsState();
         }
         const current = await runPromise(settings.get);
@@ -408,7 +446,7 @@ export const installGlobalDictationCoordinator = Effect.gen(function* () {
         if (shortcut === current.globalDictationShortcut) return readSettingsState();
         const shouldRegister = current.globalDictationEnabled;
         if (shouldRegister && !register(shortcut)) {
-          registrationError = "That shortcut is already in use. Choose another shortcut.";
+          registrationError = "shortcut-used";
           noteRegistration("rejected");
           return readSettingsState();
         }
@@ -421,7 +459,7 @@ export const installGlobalDictationCoordinator = Effect.gen(function* () {
           noteRegistration(shouldRegister ? "registered" : "disabled");
         } catch {
           if (shouldRegister) globalShortcut.unregister(shortcut);
-          registrationError = "Cafe could not save the shortcut.";
+          registrationError = "shortcut-write-failed";
           noteRegistration("settings_write_failed");
         }
         return readSettingsState();
@@ -465,6 +503,7 @@ export const installGlobalDictationCoordinator = Effect.gen(function* () {
           alwaysOnTop: true,
           backgroundColor: "#00000000",
           webPreferences: {
+            additionalArguments: desktopUiLocaleArguments(systemLocale, getUiLocale()),
             preload: join(dirname(environment.preloadPath), "globalDictationPreload.cjs"),
             contextIsolation: true,
             nodeIntegration: false,
@@ -558,9 +597,9 @@ export const installGlobalDictationCoordinator = Effect.gen(function* () {
           void dialog
             .showMessageBox(panel, {
               type: "question",
-              title: "Discard dictation draft?",
-              message: "Discard the editable draft? It has not been saved automatically.",
-              buttons: ["Keep editing", "Discard"],
+              title: uiText("Discard dictation draft?"),
+              message: uiText("Discard the editable draft? It has not been saved automatically."),
+              buttons: [uiText("Keep editing"), uiText("Discard")],
               defaultId: 0,
               cancelId: 0,
             })
@@ -724,12 +763,24 @@ export const installGlobalDictationCoordinator = Effect.gen(function* () {
           panel.window.showInactive();
           noteToggle("opened");
           panel.resolveReadiness(true);
+          // Ready proves the restricted renderer installed its listeners.
+          // Reconcile any finite language change since BrowserWindow creation
+          // before delivering the existing session-start event.
+          panel.window.webContents.send(DESKTOP_UI_LOCALE_CHANGED_CHANNEL, getUiLocale());
           const captureGuidance = explainCaptureFailure(panel.captureFailure);
           sendPanel(panel, {
             type: "start",
             sessionId: panel.id,
             insertAvailable: panel.insertAvailable,
             insertionMethod: panel.insertionMethod,
+            ...(panel.captureFailure === null
+              ? {}
+              : {
+                  guidance:
+                    panel.captureFailure === "accessibility_permission_required"
+                      ? "accessibility_permission_required"
+                      : "target_unavailable",
+                }),
             ...(captureGuidance === undefined ? {} : { reason: captureGuidance }),
           });
           if (panel.pendingStop) sendPanel(panel, { type: "stop", sessionId: panel.id });
@@ -782,9 +833,9 @@ export const installGlobalDictationCoordinator = Effect.gen(function* () {
               text: action.text,
               chooseDestination: () =>
                 dialog.showSaveDialog(panel.window, {
-                  title: "Save dictation text",
+                  title: uiText("Save dictation text"),
                   defaultPath: "dictation.txt",
-                  filters: [{ name: "Text", extensions: ["txt"] }],
+                  filters: [{ name: uiText("Text"), extensions: ["txt"] }],
                 }),
               isCurrent: () => active === panel && !disposed,
             });
@@ -858,7 +909,7 @@ export const installGlobalDictationCoordinator = Effect.gen(function* () {
               enabled: false,
               shortcut: DesktopAppSettings.DEFAULT_DESKTOP_SETTINGS.globalDictationShortcut,
               registered: false,
-              error: "Unavailable in this window.",
+              error: uiText("Unavailable in this window."),
             });
       ipcMain.handle(IpcChannels.GET_GLOBAL_DICTATION_SETTINGS_CHANNEL, getSettings);
       ipcMain.handle(
@@ -916,7 +967,7 @@ export const installGlobalDictationCoordinator = Effect.gen(function* () {
             registeredShortcut = initial.globalDictationShortcut;
             noteRegistration("registered");
           } else {
-            registrationError = "That shortcut is already in use. Choose another shortcut.";
+            registrationError = "shortcut-used";
             noteRegistration("rejected");
           }
         } else {
@@ -928,6 +979,7 @@ export const installGlobalDictationCoordinator = Effect.gen(function* () {
 
       return () => {
         disposed = true;
+        unsubscribeLocale();
         cancelPendingStartup();
         if (active) closePanel(active);
         if (registeredShortcut) globalShortcut.unregister(registeredShortcut);

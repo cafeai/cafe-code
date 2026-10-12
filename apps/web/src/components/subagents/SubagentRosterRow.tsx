@@ -1,3 +1,5 @@
+import { useUiLocale, useUiPresentation } from "~/i18n";
+import { uiText } from "@cafecode/shared/i18n";
 import { ChevronRightIcon } from "lucide-react";
 import { memo, useEffect, useState } from "react";
 
@@ -17,23 +19,31 @@ export function isLiveSubagentStatus(status: SubagentRosterEntry["subagent"]["st
 export function subagentStatusLabel(status: SubagentRosterEntry["subagent"]["status"]): string {
   switch (status) {
     case "waiting":
-      return "Waiting";
+      return uiText("Waiting");
     case "active":
-      return "Working";
+      return uiText("Working");
     case "failed":
-      return "Failed";
+      return uiText("Failed");
     case "stopped":
-      return "Stopped";
+      return uiText("Stopped");
     case "unknown":
-      return "Status unavailable";
+      return uiText("Status unavailable");
     default:
-      return "Done";
+      return uiText("Done");
   }
 }
 
-/** Shared caveat for rows whose live/terminal status Cafe cannot confirm. */
+/**
+ * Canonical English caveat for callers comparing raw evidence. Keep ordinary
+ * apostrophes here: ICU source escaping belongs only to the display formatter.
+ */
 export const SUBAGENT_STATUS_UNAVAILABLE_DETAIL =
   "Cafe can't confirm whether this subagent is still running. Its saved summary is shown as last reported.";
+export function getSUBAGENT_STATUS_UNAVAILABLE_DETAIL() {
+  return uiText(
+    "Cafe can''t confirm whether this subagent is still running. Its saved summary is shown as last reported.",
+  );
+}
 
 const LIVE_SUBAGENT_CLOCK_INTERVAL_MS = 1_000;
 type LiveSubagentClockListener = (now: number) => void;
@@ -91,10 +101,14 @@ const LiveSubagentElapsed = memo(function LiveSubagentElapsed(props: {
   readonly startedAt: string;
   readonly paused: boolean;
 }) {
+  const uiPresentation = useUiPresentation(UI_PRESENTATION_SOURCES);
+
   const [now, setNow] = useState(() => Date.now());
   useEffect(() => (props.paused ? undefined : subscribeLiveSubagentClock(setNow)), [props.paused]);
   const timestamp = Date.parse(props.startedAt);
-  const elapsed = Number.isNaN(timestamp) ? "" : formatDuration(Math.max(0, now - timestamp));
+  const elapsed = Number.isNaN(timestamp)
+    ? ""
+    : uiPresentation.formatDuration(Math.max(0, now - timestamp));
   return elapsed ? (
     <p
       className="mt-0.5 font-mono text-2xs text-subtle-foreground"
@@ -117,15 +131,20 @@ export const SubagentRosterRow = memo(function SubagentRosterRow(props: {
   readonly compact?: boolean;
   readonly onOpen: (entry: SubagentRosterEntry, trigger: HTMLButtonElement) => void;
 }) {
+  const uiLocale = useUiLocale();
+  const uiPresentation = useUiPresentation(UI_PRESENTATION_SOURCES);
+
   const { subagent } = props.entry;
-  const status = subagentStatusLabel(subagent.status);
+  const status = uiPresentation.subagentStatusLabel(subagent.status);
   const live = isLiveSubagentStatus(subagent.status);
   const terminalElapsed =
     subagent.status !== "unknown" && subagent.completedAt
-      ? formatElapsed(subagent.startedAt, subagent.completedAt)
+      ? uiPresentation.formatElapsed(subagent.startedAt, subagent.completedAt)
       : null;
   const primaryDescription =
-    subagent.description ?? subagent.objective ?? subagentStatusLabel(subagent.status);
+    subagent.description ??
+    subagent.objective ??
+    uiPresentation.subagentStatusLabel(subagent.status);
   const objectiveDescription =
     subagent.objective &&
     subagent.description &&
@@ -141,7 +160,7 @@ export const SubagentRosterRow = memo(function SubagentRosterRow(props: {
         {objectiveDescription ? <p className="break-words">{objectiveDescription}</p> : null}
         {unknownStatus ? (
           <p className={cn(objectiveDescription && "mt-1 text-muted-foreground")}>
-            {SUBAGENT_STATUS_UNAVAILABLE_DETAIL}
+            {uiPresentation.getSUBAGENT_STATUS_UNAVAILABLE_DETAIL()}
           </p>
         ) : null}
       </>
@@ -159,7 +178,16 @@ export const SubagentRosterRow = memo(function SubagentRosterRow(props: {
       )}
       data-subagent-roster-row="true"
       data-subagent-work-row="true"
-      aria-label={`${subagent.label}, ${status}. ${primaryDescription}. Open details`}
+      aria-label={uiText(
+        "{value0}, {value1}. {value2}. Open details",
+        {
+          value0: subagent.label,
+          value1: status,
+          value2: primaryDescription,
+        },
+        undefined,
+        uiLocale,
+      )}
       onClick={(event) => props.onOpen(props.entry, event.currentTarget)}
     >
       <SubagentAvatar
@@ -206,3 +234,11 @@ export const SubagentRosterRow = memo(function SubagentRosterRow(props: {
     </Tooltip>
   );
 });
+
+// Finite source-owned labels/helpers only; no received or user data.
+const UI_PRESENTATION_SOURCES = {
+  formatDuration,
+  formatElapsed,
+  getSUBAGENT_STATUS_UNAVAILABLE_DETAIL,
+  subagentStatusLabel,
+};

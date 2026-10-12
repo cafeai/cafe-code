@@ -7,6 +7,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { render } from "vitest-browser-react";
 
 import { applyInterfaceScalePercent } from "../interfaceScale";
+import { GANTT_SCHEDULE } from "./mermaidGantt.test.fixture";
 
 const {
   confirmMock,
@@ -1312,6 +1313,28 @@ describe("ChatMarkdown", () => {
         "false",
       ]);
       expect(blocks[0]?.textContent).toBe("graph TD\n  A --> B");
+    } finally {
+      await screen.unmount();
+    }
+  });
+
+  it("hands the complete Gantt schedule to the shared renderer without rewriting its dependencies", async () => {
+    const fence = `\`\`\`mermaid\n${GANTT_SCHEDULE}\n\`\`\``;
+    const screen = await render(
+      <ChatMarkdown text={`${fence}\n\nMore schedule notes`} cwd={undefined} isStreaming />,
+    );
+    try {
+      const block = page.getByTestId("mermaid-block");
+      await expect.element(block).toHaveAttribute("data-complete", "true");
+      expect(block.element().textContent).toBe(GANTT_SCHEDULE);
+      expect(document.querySelector(".chat-markdown-shiki")).toBeNull();
+      const original = block.element();
+      await screen.rerender(
+        <ChatMarkdown text={`${fence}\n\nMore schedule notes and final prose.`} cwd={undefined} />,
+      );
+      expect(block.element()).toBe(original);
+      expect(block.element().textContent).toBe(GANTT_SCHEDULE);
+      await expect.element(block).toHaveAttribute("data-complete", "true");
     } finally {
       await screen.unmount();
     }

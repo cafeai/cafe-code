@@ -1,5 +1,7 @@
-"use client";
+import { useUiLocale, useUiPresentation } from "~/i18n";
+("use client");
 
+import { uiText, type UiLocale } from "@cafecode/shared/i18n";
 import {
   ArrowDownIcon,
   ArrowUpIcon,
@@ -31,9 +33,34 @@ import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
  * UX is unchanged — only the owning component has moved.
  */
 const CUSTOM_MODEL_PLACEHOLDER_BY_KIND: Partial<Record<ProviderDriverKind, string>> = {
-  [ProviderDriverKind.make("codex")]: "gpt-6.7-codex-ultra-preview",
-  [ProviderDriverKind.make("claudeAgent")]: "claude-sonnet-5",
+  get [ProviderDriverKind.make("codex")]() {
+    return uiText("gpt-6.7-codex-ultra-preview");
+  },
+  get [ProviderDriverKind.make("claudeAgent")]() {
+    return uiText("claude-sonnet-5");
+  },
 };
+
+type ModelValidationCode = "empty" | "built-in" | "too-long" | "saved";
+
+/** Validation provenance is finite; slugs remain canonical, untranslated data. */
+function formatModelValidation(code: ModelValidationCode, locale: UiLocale): string {
+  switch (code) {
+    case "empty":
+      return uiText("Enter a model slug.", undefined, undefined, locale);
+    case "built-in":
+      return uiText("That model is already built in.", undefined, undefined, locale);
+    case "too-long":
+      return uiText(
+        "Model slugs must be {value0} characters or less.",
+        { value0: MAX_CUSTOM_MODEL_LENGTH },
+        undefined,
+        locale,
+      );
+    case "saved":
+      return uiText("That custom model is already saved.", undefined, undefined, locale);
+  }
+}
 
 interface ProviderModelsSectionProps {
   /** Identifier used to namespace input ids within the DOM. */
@@ -95,8 +122,11 @@ export function ProviderModelsSection({
   onFavoriteModelsChange,
   onModelOrderChange,
 }: ProviderModelsSectionProps) {
+  const uiLocale = useUiLocale();
+  const uiPresentation = useUiPresentation(UI_PRESENTATION_SOURCES);
+
   const [input, setInput] = useState("");
-  const [error, setError] = useState<string | null>(null);
+  const [errorCode, setErrorCode] = useState<ModelValidationCode | null>(null);
   const listRef = useRef<HTMLDivElement | null>(null);
   const hiddenModelSet = useMemo(() => new Set(hiddenModels), [hiddenModels]);
   const favoriteModelSet = useMemo(() => new Set(favoriteModels), [favoriteModels]);
@@ -111,25 +141,25 @@ export function ProviderModelsSection({
   const handleAdd = () => {
     const normalized = driverKind ? normalizeModelSlug(input, driverKind) : input.trim() || null;
     if (!normalized) {
-      setError("Enter a model slug.");
+      setErrorCode("empty");
       return;
     }
     if (models.some((model) => !model.isCustom && model.slug === normalized)) {
-      setError("That model is already built in.");
+      setErrorCode("built-in");
       return;
     }
     if (normalized.length > MAX_CUSTOM_MODEL_LENGTH) {
-      setError(`Model slugs must be ${MAX_CUSTOM_MODEL_LENGTH} characters or less.`);
+      setErrorCode("too-long");
       return;
     }
     if (customModels.includes(normalized)) {
-      setError("That custom model is already saved.");
+      setErrorCode("saved");
       return;
     }
 
     onChange([...customModels, normalized]);
     setInput("");
-    setError(null);
+    setErrorCode(null);
 
     // Scroll the new row into view once the DOM reflects the commit.
     // `MutationObserver` handles the one-frame gap between `onChange` and
@@ -151,7 +181,7 @@ export function ProviderModelsSection({
     onChange(customModels.filter((model) => model !== slug));
     onModelOrderChange(modelOrder.filter((model) => model !== slug));
     onFavoriteModelsChange(favoriteModels.filter((model) => model !== slug));
-    setError(null);
+    setErrorCode(null);
   };
 
   const handleToggleHidden = (slug: string) => {
@@ -185,7 +215,9 @@ export function ProviderModelsSection({
   return (
     <div className="border-t border-border-subtle px-4 py-3 sm:px-5">
       <div className="flex items-baseline gap-1.5 text-xs">
-        <span className="font-medium text-foreground">Models</span>
+        <span className="font-medium text-foreground">
+          {uiText("Models", undefined, undefined, uiLocale)}
+        </span>
         <span className="text-subtle-foreground tabular-nums">{models.length}</span>
       </div>
       <div ref={listRef} className="mt-2 max-h-40 overflow-y-auto pb-1">
@@ -202,10 +234,10 @@ export function ProviderModelsSection({
             nextModel !== undefined && favoriteModelSet.has(nextModel.slug) === isFavorite;
           const descriptors = caps?.optionDescriptors ?? [];
           if (descriptors.some((descriptor) => descriptor.id === "fastMode")) {
-            capLabels.push("Fast mode");
+            capLabels.push(uiText("Fast mode", undefined, undefined, uiLocale));
           }
           if (descriptors.some((descriptor) => descriptor.id === "thinking")) {
-            capLabels.push("Thinking");
+            capLabels.push(uiText("Thinking", undefined, undefined, uiLocale));
           }
           if (
             descriptors.some(
@@ -217,7 +249,7 @@ export function ProviderModelsSection({
                   descriptor.id === "variant"),
             )
           ) {
-            capLabels.push("Reasoning");
+            capLabels.push(uiText("Reasoning", undefined, undefined, uiLocale));
           }
           const hasDetails = capLabels.length > 0 || model.name !== model.slug;
 
@@ -239,7 +271,15 @@ export function ProviderModelsSection({
                   {model.name}
                 </span>
                 {hasDetails ? (
-                  <InfoTip label={`Details for ${model.name}`} popupClassName="max-w-56">
+                  <InfoTip
+                    label={uiText(
+                      "Details for {value0}",
+                      { value0: model.name },
+                      undefined,
+                      uiLocale,
+                    )}
+                    popupClassName="max-w-56"
+                  >
                     <span className="grid gap-1">
                       <code className="block font-mono text-2xs text-foreground">{model.slug}</code>
                       {capLabels.length > 0 ? (
@@ -252,9 +292,15 @@ export function ProviderModelsSection({
                     </span>
                   </InfoTip>
                 ) : null}
-                {isHidden ? <span className="text-2xs text-subtle-foreground">hidden</span> : null}
+                {isHidden ? (
+                  <span className="text-2xs text-subtle-foreground">
+                    {uiText("hidden", undefined, undefined, uiLocale)}
+                  </span>
+                ) : null}
                 {model.isCustom ? (
-                  <span className="text-2xs text-subtle-foreground">custom</span>
+                  <span className="text-2xs text-subtle-foreground">
+                    {uiText("custom", undefined, undefined, uiLocale)}
+                  </span>
                 ) : null}
               </div>
               <div className="flex shrink-0 items-center gap-0.5">
@@ -269,16 +315,24 @@ export function ProviderModelsSection({
                           isFavorite && "text-warning hover:text-warning",
                         )}
                         onClick={() => handleToggleFavorite(model.slug)}
-                        aria-label={`${isFavorite ? "Remove" : "Add"} ${model.name} ${
-                          isFavorite ? "from" : "to"
-                        } favorites`}
+                        aria-label={uiText(
+                          "{action, select, remove {Remove {model} from favorites} other {Add {model} to favorites}}",
+                          {
+                            action: isFavorite ? "remove" : "add",
+                            model: model.name,
+                          },
+                          undefined,
+                          uiLocale,
+                        )}
                       />
                     }
                   >
                     <StarIcon className={cn("size-3", isFavorite && "fill-current")} />
                   </TooltipTrigger>
                   <TooltipPopup side="top">
-                    {isFavorite ? "Remove from favorites" : "Add to favorites"}
+                    {isFavorite
+                      ? uiText("Remove from favorites", undefined, undefined, uiLocale)
+                      : uiText("Add to favorites", undefined, undefined, uiLocale)}
                   </TooltipPopup>
                 </Tooltip>
                 <Tooltip>
@@ -290,13 +344,20 @@ export function ProviderModelsSection({
                         className="size-5 rounded-sm p-0 text-muted-foreground hover:text-foreground"
                         disabled={!canMoveUp}
                         onClick={() => handleMove(model.slug, -1)}
-                        aria-label={`Move ${model.name} up`}
+                        aria-label={uiText(
+                          "Move {value0} up",
+                          { value0: model.name },
+                          undefined,
+                          uiLocale,
+                        )}
                       />
                     }
                   >
                     <ArrowUpIcon className="size-3" />
                   </TooltipTrigger>
-                  <TooltipPopup side="top">Move up</TooltipPopup>
+                  <TooltipPopup side="top">
+                    {uiText("Move up", undefined, undefined, uiLocale)}
+                  </TooltipPopup>
                 </Tooltip>
                 <Tooltip>
                   <TooltipTrigger
@@ -307,13 +368,20 @@ export function ProviderModelsSection({
                         className="size-5 rounded-sm p-0 text-muted-foreground hover:text-foreground"
                         disabled={!canMoveDown}
                         onClick={() => handleMove(model.slug, 1)}
-                        aria-label={`Move ${model.name} down`}
+                        aria-label={uiText(
+                          "Move {value0} down",
+                          { value0: model.name },
+                          undefined,
+                          uiLocale,
+                        )}
                       />
                     }
                   >
                     <ArrowDownIcon className="size-3" />
                   </TooltipTrigger>
-                  <TooltipPopup side="top">Move down</TooltipPopup>
+                  <TooltipPopup side="top">
+                    {uiText("Move down", undefined, undefined, uiLocale)}
+                  </TooltipPopup>
                 </Tooltip>
                 {!model.isCustom ? (
                   <Tooltip>
@@ -324,7 +392,11 @@ export function ProviderModelsSection({
                           variant="ghost"
                           className="size-5 rounded-sm p-0 text-muted-foreground hover:text-foreground"
                           onClick={() => handleToggleHidden(model.slug)}
-                          aria-label={`${isHidden ? "Show" : "Hide"} ${model.name}`}
+                          aria-label={
+                            isHidden
+                              ? uiText("Show {model}", { model: model.name }, undefined, uiLocale)
+                              : uiText("Hide {model}", { model: model.name }, undefined, uiLocale)
+                          }
                         />
                       }
                     >
@@ -335,7 +407,9 @@ export function ProviderModelsSection({
                       )}
                     </TooltipTrigger>
                     <TooltipPopup side="top">
-                      {isHidden ? "Show in picker" : "Hide from picker"}
+                      {isHidden
+                        ? uiText("Show in picker", undefined, undefined, uiLocale)
+                        : uiText("Hide from picker", undefined, undefined, uiLocale)}
                     </TooltipPopup>
                   </Tooltip>
                 ) : null}
@@ -347,14 +421,21 @@ export function ProviderModelsSection({
                           size="icon-xs"
                           variant="ghost"
                           className="size-5 rounded-sm p-0 text-muted-foreground hover:text-foreground"
-                          aria-label={`Remove ${model.slug}`}
+                          aria-label={uiText(
+                            "Remove {value0}",
+                            { value0: model.slug },
+                            undefined,
+                            uiLocale,
+                          )}
                           onClick={() => handleRemove(model.slug)}
                         />
                       }
                     >
                       <XIcon className="size-3" />
                     </TooltipTrigger>
-                    <TooltipPopup side="top">Remove custom model</TooltipPopup>
+                    <TooltipPopup side="top">
+                      {uiText("Remove custom model", undefined, undefined, uiLocale)}
+                    </TooltipPopup>
                   </Tooltip>
                 ) : null}
               </div>
@@ -369,23 +450,34 @@ export function ProviderModelsSection({
           value={input}
           onChange={(event) => {
             setInput(event.target.value);
-            if (error) setError(null);
+            if (errorCode) setErrorCode(null);
           }}
           onKeyDown={(event) => {
             if (event.key !== "Enter") return;
             event.preventDefault();
             handleAdd();
           }}
-          placeholder={driverKind ? CUSTOM_MODEL_PLACEHOLDER_BY_KIND[driverKind] : "model-slug"}
+          placeholder={
+            driverKind
+              ? uiPresentation.CUSTOM_MODEL_PLACEHOLDER_BY_KIND[driverKind]
+              : uiText("model-slug", undefined, undefined, uiLocale)
+          }
           spellCheck={false}
         />
         <Button className="shrink-0" variant="outline" onClick={handleAdd}>
           <PlusIcon className="size-3.5" />
-          Add
+          {uiText("Add", undefined, undefined, uiLocale)}
         </Button>
       </div>
 
-      {error ? <p className="mt-2 text-xs text-destructive">{error}</p> : null}
+      {errorCode ? (
+        <p className="mt-2 text-xs text-destructive">
+          {formatModelValidation(errorCode, uiLocale)}
+        </p>
+      ) : null}
     </div>
   );
 }
+
+// Finite source-owned labels/helpers only; no received or user data.
+const UI_PRESENTATION_SOURCES = { CUSTOM_MODEL_PLACEHOLDER_BY_KIND };

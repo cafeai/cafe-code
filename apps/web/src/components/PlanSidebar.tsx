@@ -1,3 +1,5 @@
+import { useUiLocale } from "~/i18n";
+import { uiText } from "@cafecode/shared/i18n";
 import { memo, useState, useCallback } from "react";
 import type { EnvironmentId } from "@cafecode/contracts";
 import { Badge } from "./ui/badge";
@@ -34,7 +36,7 @@ interface PlanSidebarProps {
 
 const PlanSidebar = memo(function PlanSidebar({
   activeProposedPlan,
-  label = "Plan",
+  label = uiText("Plan"),
   environmentId,
   markdownCwd,
   workspaceRoot,
@@ -43,6 +45,8 @@ const PlanSidebar = memo(function PlanSidebar({
   className,
   onClose,
 }: PlanSidebarProps) {
+  const uiLocale = useUiLocale();
+
   const [proposedPlanExpanded, setProposedPlanExpanded] = useState(false);
   const [isSavingToWorkspace, setIsSavingToWorkspace] = useState(false);
   const { copyToClipboard, isCopied } = useCopyToClipboard();
@@ -76,7 +80,7 @@ const PlanSidebar = memo(function PlanSidebar({
       .then((result) => {
         toastManager.add({
           type: "success",
-          title: "Plan saved",
+          title: uiText("Plan saved", undefined, undefined, uiLocale),
           description: result.relativePath,
         });
       })
@@ -84,8 +88,11 @@ const PlanSidebar = memo(function PlanSidebar({
         toastManager.add(
           stackedThreadToast({
             type: "error",
-            title: "Could not save plan",
-            description: error instanceof Error ? error.message : "An error occurred.",
+            title: uiText("Could not save plan", undefined, undefined, uiLocale),
+            description:
+              error instanceof Error
+                ? error.message
+                : uiText("An error occurred.", undefined, undefined, uiLocale),
           }),
         );
       })
@@ -93,7 +100,7 @@ const PlanSidebar = memo(function PlanSidebar({
         () => setIsSavingToWorkspace(false),
         () => setIsSavingToWorkspace(false),
       );
-  }, [environmentId, planMarkdown, workspaceRoot]);
+  }, [environmentId, planMarkdown, workspaceRoot, uiLocale]);
 
   return (
     <div
@@ -125,7 +132,7 @@ const PlanSidebar = memo(function PlanSidebar({
                     size="icon-xs"
                     variant="ghost"
                     className="text-subtle-foreground hover:text-foreground"
-                    aria-label="Plan actions"
+                    aria-label={uiText("Plan actions", undefined, undefined, uiLocale)}
                   />
                 }
               >
@@ -133,14 +140,18 @@ const PlanSidebar = memo(function PlanSidebar({
               </MenuTrigger>
               <MenuPopup align="end">
                 <MenuItem onClick={handleCopyPlan}>
-                  {isCopied ? "Copied!" : "Copy to clipboard"}
+                  {isCopied
+                    ? uiText("Copied!", undefined, undefined, uiLocale)
+                    : uiText("Copy to clipboard", undefined, undefined, uiLocale)}
                 </MenuItem>
-                <MenuItem onClick={handleDownload}>Download as markdown</MenuItem>
+                <MenuItem onClick={handleDownload}>
+                  {uiText("Download as markdown", undefined, undefined, uiLocale)}
+                </MenuItem>
                 <MenuItem
                   onClick={handleSaveToWorkspace}
                   disabled={!workspaceRoot || isSavingToWorkspace}
                 >
-                  Save to workspace
+                  {uiText("Save to workspace", undefined, undefined, uiLocale)}
                 </MenuItem>
               </MenuPopup>
             </Menu>
@@ -149,7 +160,7 @@ const PlanSidebar = memo(function PlanSidebar({
             size="icon-xs"
             variant="ghost"
             onClick={onClose}
-            aria-label={`Close ${label.toLowerCase()} sidebar`}
+            aria-label={uiText("Close plan sidebar", undefined, undefined, uiLocale)}
             className="text-subtle-foreground hover:text-foreground"
           >
             <PanelRightCloseIcon className="size-3.5" />
@@ -177,7 +188,7 @@ const PlanSidebar = memo(function PlanSidebar({
                   )}
                 />
                 <span className="text-xs font-medium text-muted-foreground transition-colors duration-(--duration-fast) group-hover:text-foreground">
-                  {planTitle ?? "Full plan"}
+                  {planTitle ?? uiText("Full plan", undefined, undefined, uiLocale)}
                 </span>
               </button>
               {proposedPlanExpanded ? (
@@ -195,7 +206,9 @@ const PlanSidebar = memo(function PlanSidebar({
           {/* Empty state */}
           {!planMarkdown ? (
             <div className="flex flex-col items-center justify-center py-12 text-center">
-              <p className="text-ui text-subtle-foreground">No plan yet.</p>
+              <p className="text-ui text-subtle-foreground">
+                {uiText("No plan yet.", undefined, undefined, uiLocale)}
+              </p>
             </div>
           ) : null}
         </div>

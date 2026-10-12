@@ -27,6 +27,7 @@ import {
 } from "./orchestration.ts";
 import { ProviderInstanceId, ProviderDriverKind } from "./providerInstance.ts";
 import { MaxConcurrentSubagents } from "./subagentLimits.ts";
+import { CodexContextWindowOverride } from "./codexContextWindow.ts";
 import { CodexReviewTarget } from "./codexReview.ts";
 import {
   ProviderDeliveryPriority,
@@ -77,8 +78,19 @@ export const ProviderSession = Schema.Struct({
   // Missing is legacy unknown; null means no explicit process override was
   // materialized. A number records configured policy, not universal enforcement.
   maxConcurrentSubagents: Schema.optional(Schema.NullOr(MaxConcurrentSubagents)),
+  // Recorded Cafe native override, never the provider's effective capacity.
+  // Absent is legacy unknown; null positively records no Cafe numeric key.
+  codexContextWindowOverride: Schema.optional(Schema.NullOr(CodexContextWindowOverride)),
   threadId: ThreadId,
   resumeCursor: Schema.optional(Schema.Unknown),
+  // Server-owned read-only history coordinates, distinct from permission to
+  // resume a conversation. Claude can identify persisted child history during
+  // an unfinished first turn, before publishing a durable resume checkpoint.
+  // Never project this private native identity into renderer session metadata.
+  // Older daemons omit it and must not have their live root guessed instead.
+  subagentHistoryResumeCursor: Schema.optional(
+    Schema.Struct({ resume: Schema.String.check(Schema.isUUID()) }),
+  ),
   activeTurnId: Schema.optional(TurnId),
   // Fresh Codex runtime evidence, not a durable or renderer-authored override.
   // Aggregate child work can keep activeTurnId running after its native root
@@ -147,10 +159,15 @@ export const ProviderSessionStartInput = Schema.Struct({
   modelSelection: Schema.optional(ModelSelection),
   // Null/omitted delegates to the existing instance/native launch policy.
   maxConcurrentSubagents: Schema.optional(Schema.NullOr(MaxConcurrentSubagents)),
+  // Orchestration resolves the chat/account request first. Explicit null
+  // clears a previous Cafe runtime fallback; native JSON never receives null.
+  codexContextWindowOverride: Schema.optional(Schema.NullOr(CodexContextWindowOverride)),
   // Internal replacement admission: atomically prove the entire native tree
   // idle before retiring a process for this policy change. Never persist this
   // guard as runtime policy or interpret it as renderer-authored permission.
   requireIdleForSubagentLimitChange: Schema.optional(Schema.Boolean),
+  // Parallel internal guard; context changes require the same whole-tree idle proof.
+  requireIdleForCodexContextWindowChange: Schema.optional(Schema.Boolean),
   resumeCursor: Schema.optional(Schema.Unknown),
   approvalPolicy: Schema.optional(ProviderApprovalPolicy),
   sandboxMode: Schema.optional(ProviderSandboxMode),
@@ -197,6 +214,7 @@ export const ProviderSessionForkResult = Schema.Struct({
   model: Schema.optional(TrimmedNonEmptyString),
   modelSelection: Schema.optional(ModelSelection),
   maxConcurrentSubagents: Schema.optional(Schema.NullOr(MaxConcurrentSubagents)),
+  codexContextWindowOverride: Schema.optional(Schema.NullOr(CodexContextWindowOverride)),
   resumeCursor: Schema.Unknown,
 });
 export type ProviderSessionForkResult = typeof ProviderSessionForkResult.Type;
@@ -206,8 +224,24 @@ export const ProviderSessionForkDiscardInput = Schema.Struct({
 });
 export type ProviderSessionForkDiscardInput = typeof ProviderSessionForkDiscardInput.Type;
 
+/**
+ * Cafe-owned admission for using an unchanged policy in one existing Codex
+ * process. This is not native version support, durable resume authority, or
+ * permission to apply a limit. Every coordinate must match fresh owner state.
+ */
+export const ProviderSubagentPolicySession = Schema.Struct({
+  threadId: ThreadId,
+  providerInstanceId: ProviderInstanceId,
+  subagentRuntimeId: SubagentRuntimeId,
+  maxConcurrentSubagents: MaxConcurrentSubagents,
+});
+export type ProviderSubagentPolicySession = typeof ProviderSubagentPolicySession.Type;
+
 export const ProviderSendTurnInput = Schema.Struct({
   threadId: ThreadId,
+  // Valid only with the owner's additive Cafe continuation-fence guarantee.
+  // Missing inventory must refuse, never recover or launch another process.
+  expectedSubagentPolicySession: Schema.optional(ProviderSubagentPolicySession),
   codexReview: Schema.optional(CodexReviewTarget),
   deliveryPriority: Schema.optional(ProviderDeliveryPriority),
   /** Trusted orchestration provenance; scheduled input must never gain human urgency. */
@@ -251,6 +285,7 @@ export type ProviderSendTurnInput = typeof ProviderSendTurnInput.Type;
 
 export const ProviderSteerTurnInput = Schema.Struct({
   threadId: ThreadId,
+  expectedSubagentPolicySession: Schema.optional(ProviderSubagentPolicySession),
   deliveryPriority: Schema.optional(ProviderDeliveryPriority),
   expectedPrioritySession: Schema.optional(ProviderPrioritySessionBinding),
   expectedTurnId: TurnId,

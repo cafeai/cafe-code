@@ -6,6 +6,7 @@ Last updated: 2026-10-03 07:15:35 JST (UTC+0900)
 Decision authority: implementation choices within the user's approved Mermaid design and explicit request to implement and push dev.
 Implementation status: Implemented. Independent review and local Chromium checks cover the real renderer, security boundary, UI and Markdown integration. Repository checks and a forced desktop build gate publication; replay commands are linked below.
 Supersedes: None. Existing Markdown math, file-link and clipboard policies remain in force.
+Superseded by: [Full-family admission](mermaid-family-admission.md) replaces only the Tiny distribution choice with the exact same-version full local IIFE. All isolation, source-fidelity and inert-output decisions below remain accepted; historical implementation evidence is preserved.
 
 ## Context and alternatives
 

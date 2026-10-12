@@ -1,3 +1,4 @@
+import { uiText } from "@cafecode/shared/i18n";
 import { Component, type ReactNode, type RefObject } from "react";
 
 import { Button } from "../ui/button";
@@ -39,15 +40,19 @@ export class AtriumSubagentDetailBoundary extends Component<
     if (!this.state.hasError) return this.props.children;
     return (
       <section className="flex h-full min-h-0 flex-col gap-4 overflow-auto p-6">
-        <h2 className="text-base font-medium text-foreground">Subagent activity unavailable</h2>
-        <p className="text-sm text-muted-foreground">Close this view and open it again.</p>
+        <h2 className="text-base font-medium text-foreground">
+          {uiText("Subagent activity unavailable")}
+        </h2>
+        <p className="text-sm text-muted-foreground">
+          {uiText("Close this view and open it again.")}
+        </p>
         <Button
           ref={this.props.backButtonRef}
           className="self-start"
           variant="outline"
           onClick={this.props.onBack}
         >
-          Back to Atrium
+          {uiText("Back to Atrium")}
         </Button>
       </section>
     );

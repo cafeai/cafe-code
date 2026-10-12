@@ -8,7 +8,15 @@ import { BRAND_ASSET_PATHS } from "./lib/brand-assets.ts";
 import { getDefaultBuildArch } from "./lib/build-target-arch.ts";
 import { readYarnCatalog, resolveCatalogDependencies } from "./lib/resolve-catalog.ts";
 import { parseRepositoryNodeVersion, REPOSITORY_NODE_VERSION } from "./lib/node-version.ts";
-import { MAC_LOCAL_NETWORK_USAGE_DESCRIPTION } from "./lib/mac-app-privacy.ts";
+import {
+  MAC_LOCAL_NETWORK_USAGE_DESCRIPTION,
+  MAC_MICROPHONE_USAGE_DESCRIPTION,
+  renderMacPrivacyStrings,
+} from "./lib/mac-app-privacy.ts";
+export {
+  MAC_MICROPHONE_USAGE_DESCRIPTION,
+  renderMacPrivacyStrings,
+} from "./lib/mac-app-privacy.ts";
 import { stageNativeCuaRuntime } from "./lib/cua-runtime.ts";
 
 import { createHash } from "node:crypto";
@@ -870,8 +878,21 @@ export function resolveDesktopProductName(version: string): string {
     : (desktopPackageJson.productName ?? "Cafe Code");
 }
 
-export const MAC_MICROPHONE_USAGE_DESCRIPTION =
-  "Cafe Code uses microphone audio only when you start dictation.";
+export const stageMacPrivacyLocalizations = Effect.fn("stageMacPrivacyLocalizations")(function* (
+  resourcesDirectory: string,
+) {
+  const fs = yield* FileSystem.FileSystem;
+  const path = yield* Path.Path;
+  for (const locale of ["en", "ja", "ko"] as const) {
+    const destination = path.join(resourcesDirectory, "ui-locales", `${locale}.lproj`);
+    yield* fs.makeDirectory(destination, { recursive: true });
+    yield* fs.writeFileString(
+      path.join(destination, "InfoPlist.strings"),
+      renderMacPrivacyStrings(locale),
+      { flag: "wx" },
+    );
+  }
+});
 
 export function resolveMacDesktopBuildConfig(
   target: string,
@@ -886,12 +907,17 @@ export function resolveMacDesktopBuildConfig(
         from: "apps/desktop/resources/mac-dictation-target",
         to: "mac-dictation-target",
       },
+      ...(["en", "ja", "ko"] as const).map((locale) => ({
+        from: `apps/desktop/resources/ui-locales/${locale}.lproj`,
+        to: `${locale}.lproj`,
+      })),
     ],
     mac: {
       target: target === "dmg" ? [target, "zip"] : [target],
       icon: "icon.icns",
       category: "public.app-category.developer-tools",
       extendInfo: {
+        CFBundleLocalizations: ["en", "ja", "ko"],
         NSMicrophoneUsageDescription: MAC_MICROPHONE_USAGE_DESCRIPTION,
         NSLocalNetworkUsageDescription: MAC_LOCAL_NETWORK_USAGE_DESCRIPTION,
       },
@@ -1131,6 +1157,8 @@ const buildDesktopArtifact = Effect.fn("buildDesktopArtifact")(function* (
     },
     options.verbose,
   );
+
+  if (options.platform === "mac") yield* stageMacPrivacyLocalizations(stageResourcesDir);
 
   // electron-builder's desktop resource copy has historically been used as
   // an app.asar fallback. Copy ordinary resources before staging the binary:

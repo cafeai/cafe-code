@@ -1,12 +1,17 @@
+import { useUiLocale, useUiPresentation } from "~/i18n";
+import { uiText, type UiLocale } from "@cafecode/shared/i18n";
+import { UiMessage } from "~/i18n";
 import { FileAttachmentPill } from "./FileAttachmentPill";
 import { TurnConfigurationWorkEntry } from "./TurnConfigurationWorkEntry";
 import { ComputerUseIcon } from "./ComputerUseIcon";
 import { ClaudeCommandWorkEntry, ClaudeSummaryWorkEntry } from "./ProviderOperationWorkEntry";
+import { ProviderDiagnosticWorkEntry } from "./ProviderDiagnosticWorkEntry";
 import {
   type EnvironmentId,
   type EditorId,
   type MessageId,
   type OrchestrationThreadActivity,
+  type OrchestrationThreadActivityCursor,
   type ProviderDriverKind,
   type ServerProviderSkill,
   type ThreadId,
@@ -36,6 +41,8 @@ import {
   deriveWorkLogEntries,
   reconcileSubagentWorkEntryRuntime,
   formatElapsed,
+  workLogDisplayLabel,
+  workLogDisplayToolTitle,
   type WorkLogEntry,
 } from "../../session-logic";
 import type { SubagentRuntimeContext } from "../../subagent-activity";
@@ -116,6 +123,14 @@ import {
   type TimelineScrollDebugListState,
 } from "./timelineScrollDebug";
 import { useHistoricalWorkLogPresence } from "./useHistoricalWorkLogPresence";
+import {
+  activityCursor,
+  cursorKey,
+  deriveEarlierWorkLogEntries,
+  EARLIER_WORK_LOG_RETAINED_LIMIT,
+  mergeEarlierWorkLogPages,
+  validateEarlierWorkLogPage,
+} from "./EarlierWorkLog.logic";
 import { DesktopObservation } from "./DesktopObservation";
 import { SubagentRosterRow, type SubagentRosterEntry } from "../subagents/SubagentRosterRow";
 import { SubagentDetailView, type SubagentDetailSelection } from "./SubagentDetailView";
@@ -282,6 +297,8 @@ interface MessagesTimelineProps {
   historicalWorkLogSummariesByTurnId?: Parameters<
     typeof deriveMessagesTimelineRows
   >[0]["historicalWorkLogSummariesByTurnId"];
+  /** Invalidates empty saved-history evidence once per new turn, not per token. */
+  historyRevision?: string;
   completionDividerAfterEntryId: string | null;
   completionSummary: string | null;
   revertTurnCountByUserMessageId: Map<MessageId, number>;
@@ -326,6 +343,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
   listRef,
   timelineEntries,
   historicalWorkLogSummariesByTurnId,
+  historyRevision,
   completionDividerAfterEntryId,
   completionSummary,
   revertTurnCountByUserMessageId,
@@ -353,6 +371,8 @@ export const MessagesTimeline = memo(function MessagesTimeline({
   onOpenSubagentDetail: controlledOpenSubagentDetail,
   onCloseSubagentDetail: controlledCloseSubagentDetail,
 }: MessagesTimelineProps) {
+  const uiLocale = useUiLocale();
+
   const timelineElementRef = useRef<HTMLDivElement | null>(null);
   const activeThreadId = activeThreadIdProp ?? null;
   const chatCopyFormat = useSettings((settings) => settings.chatCopyFormat);
@@ -363,6 +383,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
     environmentId: activeThreadEnvironmentId,
     threadId: activeThreadId,
     summaries: historicalWorkLogSummariesByTurnId,
+    historyRevision,
   });
   const rawRows = useMemo(
     () =>
@@ -1075,7 +1096,6 @@ export const MessagesTimeline = memo(function MessagesTimeline({
       onForkMessage,
       onImageExpand,
       openSubagentDetail,
-      // Same tracker object on every render; listed for completeness only.
       rowEntrances,
     ],
   );
@@ -1137,7 +1157,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
       <div className="flex h-full min-w-0 flex-col overflow-y-auto px-3 sm:px-5 animate-enter-fade">
         <div className="flex min-h-40 flex-1 shrink-0 items-center justify-center">
           <p className="text-sm text-subtle-foreground">
-            Send a message to start the conversation.
+            {uiText("Send a message to start the conversation.", undefined, undefined, uiLocale)}
           </p>
         </div>
         {timelineFooter}
@@ -1230,6 +1250,8 @@ export const MessagesTimeline = memo(function MessagesTimeline({
  * technology.
  */
 function ThreadHistoryLoadingState() {
+  const uiLocale = useUiLocale();
+
   const showSkeleton = useDelayedFlag(true, { delayMs: 300, minVisibleMs: 0 });
   const showLabel = useDelayedFlag(true, { delayMs: 1_500, minVisibleMs: 0 });
   return (
@@ -1266,7 +1288,7 @@ function ThreadHistoryLoadingState() {
             : "sr-only"
         }
       >
-        Loading conversation…
+        {uiText("Loading conversation…", undefined, undefined, uiLocale)}
       </p>
     </div>
   );
@@ -1356,7 +1378,13 @@ const TimelineRowContent = memo(function TimelineRowContent({ row }: { row: Time
       data-message-role={row.kind === "message" ? row.message.role : undefined}
     >
       {row.kind === "work" ? <WorkGroupSection groupedEntries={row.groupedEntries} /> : null}
-      {row.kind === "historical-work" ? <HistoricalWorkLogSection row={row} /> : null}
+      {row.kind === "historical-work" ? (
+        row.summary.before ? (
+          <EarlierWorkLogSection row={row} />
+        ) : (
+          <HistoricalWorkLogSection row={row} />
+        )
+      ) : null}
       {row.kind === "completion-divider" ? (
         <AssistantCompletionDivider completionSummary={row.completionSummary} />
       ) : null}
@@ -1371,6 +1399,8 @@ const TimelineRowContent = memo(function TimelineRowContent({ row }: { row: Time
 });
 
 function UserTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "message" }> }) {
+  const uiLocale = useUiLocale();
+
   const ctx = use(TimelineRowCtx);
   const userImages =
     row.message.attachments?.filter((attachment) => attachment.type === "image") ?? [];
@@ -1393,7 +1423,12 @@ function UserTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "message" 
                   <button
                     type="button"
                     className="block w-full cursor-zoom-in"
-                    aria-label={`Preview ${image.name}`}
+                    aria-label={uiText(
+                      "Preview {value0}",
+                      { value0: image.name },
+                      undefined,
+                      uiLocale,
+                    )}
                     onClick={() => {
                       const preview = buildExpandedImagePreview(userImages, image.id);
                       if (!preview) return;
@@ -1495,6 +1530,8 @@ function TimelineUserImage({ src, alt }: { src: string; alt: string }) {
 }
 
 function RevertUserMessageButton({ messageId }: { messageId: MessageId }) {
+  const uiLocale = useUiLocale();
+
   const ctx = use(TimelineRowCtx);
   const activity = use(TimelineRowActivityCtx);
 
@@ -1505,7 +1542,7 @@ function RevertUserMessageButton({ messageId }: { messageId: MessageId }) {
       variant="outline"
       disabled={activity.isRevertingCheckpoint || activity.isWorking}
       onClick={() => ctx.onRevertUserMessage(messageId)}
-      title="Revert to this message"
+      title={uiText("Revert to this message", undefined, undefined, uiLocale)}
     >
       <Undo2Icon className="size-3" />
     </Button>
@@ -1513,6 +1550,8 @@ function RevertUserMessageButton({ messageId }: { messageId: MessageId }) {
 }
 
 function ForkMessageButton({ messageId }: { messageId: MessageId }) {
+  const uiLocale = useUiLocale();
+
   const ctx = use(TimelineRowCtx);
   const activity = use(TimelineRowActivityCtx);
   if (
@@ -1528,8 +1567,8 @@ function ForkMessageButton({ messageId }: { messageId: MessageId }) {
       type="button"
       size="icon-xs"
       variant="outline"
-      aria-label="Fork from this message"
-      title="Fork from this message"
+      aria-label={uiText("Fork from this message", undefined, undefined, uiLocale)}
+      title={uiText("Fork from this message", undefined, undefined, uiLocale)}
       className={cn(
         MESSAGE_ACTION_BUTTON_CLASS_NAME,
         "opacity-0 transition-[opacity,color,background-color,border-color] duration-(--duration-fast) focus-visible:opacity-100 group-hover:opacity-100 group-hover/assistant:opacity-100 [@media(hover:none)]:opacity-100",
@@ -1625,6 +1664,9 @@ function useSmoothedAssistantText(messageId: MessageId, sourceText: string) {
 }
 
 function AssistantTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "message" }> }) {
+  const uiLocale = useUiLocale();
+  const uiPresentation = useUiPresentation(UI_PRESENTATION_SOURCES);
+
   const ctx = use(TimelineRowCtx);
   const sourceMessageText = row.message.text || (row.message.streaming ? "" : "(empty response)");
   const normalizeCodexCitations = ctx.activeProvider === "codex";
@@ -1682,7 +1724,7 @@ function AssistantTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "mess
       event.stopPropagation();
 
       const clicked = await localApi.contextMenu.show<AssistantMessageContextMenuAction>(
-        [{ id: "copy-message", label: "Copy message" }],
+        [{ id: "copy-message", label: uiText("Copy message", undefined, undefined, uiLocale) }],
         { x: event.clientX, y: event.clientY },
       );
 
@@ -1697,15 +1739,18 @@ function AssistantTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "mess
           toastManager.add(
             stackedThreadToast({
               type: "error",
-              title: "Unable to copy message",
-              description: error instanceof Error ? error.message : "Clipboard write failed.",
+              title: uiText("Unable to copy message", undefined, undefined, uiLocale),
+              description:
+                error instanceof Error
+                  ? error.message
+                  : uiText("Clipboard write failed.", undefined, undefined, uiLocale),
             }),
           );
         }
         return;
       }
     },
-    [ctx.activeProvider, row.message.text],
+    [ctx.activeProvider, row.message.text, uiLocale],
   );
 
   return (
@@ -1742,9 +1787,9 @@ function AssistantTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "mess
               timestampFormat={ctx.timestampFormat}
             />
           ) : (
-            formatMessageMeta(
+            uiPresentation.formatMessageMeta(
               row.message.createdAt,
-              formatElapsed(row.durationStart, row.message.completedAt),
+              uiPresentation.formatElapsed(row.durationStart, row.message.completedAt),
               ctx.timestampFormat,
             )
           )}
@@ -1753,7 +1798,7 @@ function AssistantTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "mess
         {!row.message.streaming && <ForkMessageButton messageId={row.message.id} />}
         {contextCopied ? (
           <span role="status" className="text-2xs text-subtle-foreground animate-enter-fade">
-            Copied
+            {uiText("Copied", undefined, undefined, uiLocale)}
           </span>
         ) : null}
       </div>
@@ -1821,6 +1866,8 @@ function ProposedPlanTimelineRow({
 }
 
 function WorkingTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "working" }> }) {
+  const uiLocale = useUiLocale();
+
   return (
     <div className="py-0.5 pl-1.5">
       <div className="flex items-center gap-2 pt-1 text-2xs text-muted-foreground">
@@ -1832,10 +1879,11 @@ function WorkingTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "workin
         <span>
           {row.createdAt ? (
             <>
-              Working for <WorkingTimer createdAt={row.createdAt} />
+              {uiText("Working for ", undefined, undefined, uiLocale)}
+              <WorkingTimer createdAt={row.createdAt} />
             </>
           ) : (
-            "Working…"
+            uiText("Working…", undefined, undefined, uiLocale)
           )}
         </span>
       </div>
@@ -1850,13 +1898,15 @@ function WorkingTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "workin
 
 /** Live "Working for Xs" label. */
 function WorkingTimer({ createdAt }: { createdAt: string }) {
+  const uiPresentation = useUiPresentation(UI_PRESENTATION_SOURCES);
+
   const textRef = useRef<HTMLSpanElement>(null);
-  const initialText = formatWorkingTimerNow(createdAt);
+  const initialText = uiPresentation.formatWorkingTimerNow(createdAt);
 
   useEffect(() => {
     const updateText = () => {
       if (textRef.current) {
-        textRef.current.textContent = formatWorkingTimerNow(createdAt);
+        textRef.current.textContent = uiPresentation.formatWorkingTimerNow(createdAt);
       }
     };
     updateText();
@@ -1877,13 +1927,19 @@ function LiveMessageMeta({
   durationStart: string | null | undefined;
   timestampFormat: TimestampFormat;
 }) {
+  const uiPresentation = useUiPresentation(UI_PRESENTATION_SOURCES);
+
   const textRef = useRef<HTMLSpanElement>(null);
-  const initialText = formatLiveMessageMetaNow(createdAt, durationStart, timestampFormat);
+  const initialText = uiPresentation.formatLiveMessageMetaNow(
+    createdAt,
+    durationStart,
+    timestampFormat,
+  );
 
   useEffect(() => {
     const updateText = () => {
       if (textRef.current) {
-        textRef.current.textContent = formatLiveMessageMetaNow(
+        textRef.current.textContent = uiPresentation.formatLiveMessageMetaNow(
           createdAt,
           durationStart,
           timestampFormat,
@@ -1937,6 +1993,290 @@ function compareHistoricalActivityRows(
   return left.id.localeCompare(right.id);
 }
 
+interface EarlierWorkLogState {
+  readonly owner: string;
+  readonly upper: OrchestrationThreadActivityCursor | null;
+  readonly next: OrchestrationThreadActivityCursor | null;
+  readonly activities: ReadonlyArray<OrchestrationThreadActivity>;
+  readonly loaded: boolean;
+  readonly hasOlder: boolean;
+  readonly truncated: boolean;
+  readonly loading: boolean;
+  readonly error: boolean;
+  readonly lastRequest: {
+    readonly before: OrchestrationThreadActivityCursor;
+    readonly older: boolean;
+  } | null;
+}
+
+function emptyEarlierWorkLog(owner: string): EarlierWorkLogState {
+  return {
+    owner,
+    upper: null,
+    next: null,
+    activities: [],
+    loaded: false,
+    hasOlder: false,
+    truncated: false,
+    loading: false,
+    error: false,
+    lastRequest: null,
+  };
+}
+
+/**
+ * An explicit reader for work evicted from the bounded current-turn window.
+ * Its immutable upper filter does not drift as tokens arrive. Every response
+ * is fenced to the requesting owner/generation and remains presentation data;
+ * it never enters the live store or confers provider/task control authority.
+ */
+const EarlierWorkLogSection = memo(function EarlierWorkLogSection({
+  row,
+}: {
+  row: Extract<MessagesTimelineRow, { kind: "historical-work" }>;
+}) {
+  const uiLocale = useUiLocale();
+  const uiPresentation = useUiPresentation(UI_PRESENTATION_SOURCES);
+
+  const ctx = use(TimelineRowCtx);
+  const { onHistoricalWorkLogPresenceResolved } = ctx;
+  const owner = JSON.stringify([ctx.activeThreadEnvironmentId, ctx.activeThreadId, row.turnId]);
+  const ownerRef = useRef(owner);
+  const generationRef = useRef(0);
+  const pendingRef = useRef<string | null>(null);
+  const [expandedOwner, setExpandedOwner] = useState<string | null>(null);
+  const [state, setState] = useState(() => emptyEarlierWorkLog(owner));
+  const current = state.owner === owner ? state : emptyEarlierWorkLog(owner);
+  const isExpanded = expandedOwner === owner;
+
+  useLayoutEffect(() => {
+    ownerRef.current = owner;
+    return () => {
+      // Cleanup also fences a request when a virtualized row unmounts. Merely
+      // collapsing the disclosure is not provider cancellation or a new turn.
+      generationRef.current++;
+      pendingRef.current = null;
+    };
+  }, [owner]);
+
+  const loadPage = useCallback(
+    async (before: OrchestrationThreadActivityCursor, older: boolean) => {
+      if (pendingRef.current === owner) return;
+      const generation = ++generationRef.current;
+      const threadId = ctx.activeThreadId;
+      pendingRef.current = owner;
+      const stillOwned = () => ownerRef.current === owner && generationRef.current === generation;
+      const limit = older ? HISTORICAL_WORK_LOG_PAGE_SIZE : HISTORICAL_WORK_LOG_PREVIEW_LIMIT;
+      setState((previous) => ({
+        ...(older && previous.owner === owner ? previous : emptyEarlierWorkLog(owner)),
+        upper: older && previous.owner === owner ? previous.upper : before,
+        loading: true,
+        error: false,
+        lastRequest: { before, older },
+      }));
+      try {
+        const api = readEnvironmentApi(ctx.activeThreadEnvironmentId);
+        if (!api || threadId === null) throw new Error("History disconnected");
+        const page = await api.orchestration.getThreadTurnActivityPage({
+          threadId,
+          turnId: row.turnId,
+          offset: 0,
+          limit,
+          before,
+        });
+        if (!stillOwned()) return;
+        validateEarlierWorkLogPage({ page, threadId, turnId: row.turnId, before, limit });
+        setState((previous) => {
+          if (!stillOwned() || previous.owner !== owner) return previous;
+          return {
+            ...previous,
+            activities: older
+              ? mergeEarlierWorkLogPages(page.activities, previous.activities)
+              : page.activities,
+            next: page.activities[0] ? activityCursor(page.activities[0]) : null,
+            hasOlder: page.totalCount > page.activities.length,
+            truncated:
+              older &&
+              (previous.truncated ||
+                new Set([...page.activities, ...previous.activities].map((activity) => activity.id))
+                  .size > EARLIER_WORK_LOG_RETAINED_LIMIT),
+            loaded: true,
+            loading: false,
+            error: false,
+          };
+        });
+      } catch {
+        if (stillOwned())
+          setState((previous) =>
+            previous.owner === owner ? { ...previous, loading: false, error: true } : previous,
+          );
+      } finally {
+        if (stillOwned()) pendingRef.current = null;
+      }
+    },
+    [ctx.activeThreadEnvironmentId, ctx.activeThreadId, owner, row.turnId],
+  );
+
+  const visibleEntries = useMemo(
+    () =>
+      uiPresentation.deriveEarlierWorkLogEntries({
+        activities: current.activities,
+        liveActivities: row.summary.liveActivities ?? [],
+        turnId: row.turnId,
+      }),
+    [current.activities, row.summary.liveActivities, row.turnId, uiPresentation],
+  );
+  const showLoading = useDelayedFlag(isExpanded && current.loading && visibleEntries.length === 0);
+  const before = row.summary.before;
+  useEffect(() => {
+    // An exhausted *captured* range cannot prove a later, larger range empty.
+    // Only publish a negative when it still matches the current disclosure.
+    if (
+      current.loaded &&
+      !current.hasOlder &&
+      visibleEntries.length === 0 &&
+      before &&
+      current.upper &&
+      cursorKey(before) === cursorKey(current.upper)
+    ) {
+      onHistoricalWorkLogPresenceResolved(row.turnId, false);
+    }
+  }, [
+    before,
+    current.loaded,
+    current.hasOlder,
+    current.upper,
+    onHistoricalWorkLogPresenceResolved,
+    row.turnId,
+    visibleEntries.length,
+  ]);
+
+  return (
+    <div
+      className="rounded-xl border border-border-subtle bg-card"
+      data-historical-work-log-row={isExpanded ? "expanded" : "collapsed"}
+    >
+      <div className="flex min-w-0 items-center justify-between gap-2 pr-2">
+        <button
+          type="button"
+          aria-expanded={isExpanded}
+          className="focus-ring flex min-w-0 flex-1 items-center gap-1.5 rounded-xl px-2.5 py-1.5 text-left text-2xs text-subtle-foreground transition-colors duration-(--duration-fast) hover:text-foreground"
+          onClick={() => {
+            setExpandedOwner(isExpanded ? null : owner);
+            if (!isExpanded && !current.loaded && before) void loadPage(before, false);
+          }}
+        >
+          <ChevronRightIcon
+            aria-hidden="true"
+            className={cn(
+              "size-3 shrink-0 transition-transform duration-(--duration-fast) ease-out",
+              isExpanded && "rotate-90",
+            )}
+          />
+          <span className="truncate font-medium text-muted-foreground">
+            <UiMessage
+              message={"Earlier work<slot1></slot1>"}
+              slots={{
+                slot1:
+                  current.loaded && visibleEntries.length > 0
+                    ? ` (${visibleEntries.length}${current.hasOlder || current.truncated ? "+" : ""})`
+                    : "",
+              }}
+            />
+          </span>
+          <ProviderWorkLogErrorIndicator entries={visibleEntries} />
+        </button>
+        {isExpanded ? (
+          <div className="flex shrink-0 items-center gap-2">
+            <button
+              type="button"
+              disabled={current.loading}
+              className="focus-ring rounded-sm text-2xs text-subtle-foreground transition-colors duration-(--duration-fast) hover:text-foreground disabled:opacity-50"
+              onClick={() => {
+                if (before) void loadPage(before, false);
+              }}
+            >
+              {uiText("Recent", undefined, undefined, uiLocale)}
+            </button>
+            {current.hasOlder && current.next ? (
+              <button
+                type="button"
+                disabled={current.loading}
+                className="focus-ring rounded-sm text-2xs text-subtle-foreground transition-colors duration-(--duration-fast) hover:text-foreground disabled:opacity-50"
+                onClick={() => {
+                  if (current.next) void loadPage(current.next, true);
+                }}
+              >
+                {current.loading
+                  ? uiText("Loading…", undefined, undefined, uiLocale)
+                  : uiText("Show older", undefined, undefined, uiLocale)}
+              </button>
+            ) : null}
+          </div>
+        ) : null}
+      </div>
+      {isExpanded ? (
+        <div className="px-2 pb-1.5 animate-enter-rise">
+          {visibleEntries.length > 0 ? (
+            <IntentAwareWorkLogList
+              entries={visibleEntries}
+              scrollable={visibleEntries.length > MAX_VISIBLE_WORK_LOG_ENTRIES}
+              workspaceRoot={ctx.workspaceRoot}
+            />
+          ) : showLoading ? (
+            <div
+              role="status"
+              aria-label={uiText("Loading earlier work", undefined, undefined, uiLocale)}
+              className="space-y-1.5 px-1 py-1"
+            >
+              <Skeleton className="h-3 w-3/5" />
+              <Skeleton className="h-3 w-2/5" />
+            </div>
+          ) : current.loaded && !current.error && !current.loading ? (
+            <p className="px-0.5 py-1 text-2xs text-subtle-foreground">
+              {uiText("No earlier commands in this page.", undefined, undefined, uiLocale)}
+            </p>
+          ) : null}
+          {current.error ? (
+            <div
+              className="flex items-center gap-2 px-0.5 py-1 text-2xs text-subtle-foreground"
+              role="status"
+            >
+              <span>{uiText("Couldn’t load earlier work.", undefined, undefined, uiLocale)}</span>
+              <button
+                type="button"
+                className="focus-ring rounded-sm font-medium text-muted-foreground hover:text-foreground"
+                onClick={() => {
+                  if (current.lastRequest)
+                    void loadPage(current.lastRequest.before, current.lastRequest.older);
+                }}
+              >
+                {uiText("Retry", undefined, undefined, uiLocale)}
+              </button>
+            </div>
+          ) : null}
+        </div>
+      ) : null}
+    </div>
+  );
+});
+
+type HistoricalWorkLogError = "disconnected" | "initial" | "older" | "all";
+
+/** Keep the failed operation's finite identity, not its startup-language copy. */
+function formatHistoricalWorkLogError(error: HistoricalWorkLogError, locale: UiLocale): string {
+  switch (error) {
+    case "disconnected":
+      return uiText("Work log unavailable while disconnected.", undefined, undefined, locale);
+    case "initial":
+      return uiText("Couldn’t load the work log.", undefined, undefined, locale);
+    case "older":
+      return uiText("Couldn’t load older entries.", undefined, undefined, locale);
+    case "all":
+      return uiText("Couldn’t load the full work log.", undefined, undefined, locale);
+  }
+}
+
 /** Owns its own expand/collapse state so toggling re-renders only this row.
  *  State resets on unmount which is fine — work groups start collapsed. */
 const HistoricalWorkLogSection = memo(function HistoricalWorkLogSection({
@@ -1944,6 +2284,9 @@ const HistoricalWorkLogSection = memo(function HistoricalWorkLogSection({
 }: {
   row: Extract<MessagesTimelineRow, { kind: "historical-work" }>;
 }) {
+  const uiLocale = useUiLocale();
+  const uiPresentation = useUiPresentation(UI_PRESENTATION_SOURCES);
+
   const ctx = use(TimelineRowCtx);
   const { onHistoricalWorkLogPresenceResolved, workspaceRoot } = ctx;
   const [isExpanded, setIsExpanded] = useState(false);
@@ -1953,7 +2296,7 @@ const HistoricalWorkLogSection = memo(function HistoricalWorkLogSection({
   const [initialPageLoaded, setInitialPageLoaded] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
   const [isLoadingOlder, setIsLoadingOlder] = useState(false);
-  const [loadError, setLoadError] = useState<string | null>(null);
+  const [loadErrorCode, setLoadErrorCode] = useState<HistoricalWorkLogError | null>(null);
 
   useEffect(() => {
     if (!isExpanded || initialPageLoaded) {
@@ -1963,14 +2306,14 @@ const HistoricalWorkLogSection = memo(function HistoricalWorkLogSection({
     const activeThreadId = ctx.activeThreadId;
     if (!api || activeThreadId === null) {
       setInitialPageLoaded(true);
-      setLoadError("Work log unavailable while disconnected.");
+      setLoadErrorCode("disconnected");
       return;
     }
 
     let cancelled = false;
     const loadInitialPage = async () => {
       setIsLoading(true);
-      setLoadError(null);
+      setLoadErrorCode(null);
       try {
         const knownTotal = (
           await api.orchestration.getThreadTurnActivityPage({
@@ -2003,7 +2346,7 @@ const HistoricalWorkLogSection = memo(function HistoricalWorkLogSection({
         setInitialPageLoaded(true);
       } catch {
         if (!cancelled) {
-          setLoadError("Couldn’t load the work log.");
+          setLoadErrorCode("initial");
         }
       } finally {
         if (!cancelled) {
@@ -2027,15 +2370,21 @@ const HistoricalWorkLogSection = memo(function HistoricalWorkLogSection({
 
   const visibleEntries = useMemo(() => {
     if (activityRows.length > 0) {
-      return deriveWorkLogEntries(activityRows, row.turnId, {
-        terminalTurnIds: new Set([row.turnId]),
+      return uiPresentation.deriveWorkLogEntries(activityRows, row.turnId, {
+        terminalTurnIds: row.summary.isHistoricalTurn === false ? undefined : new Set([row.turnId]),
       });
     }
     return row.summary.previewEntries.slice(-HISTORICAL_WORK_LOG_PREVIEW_LIMIT);
-  }, [activityRows, row.summary.previewEntries, row.turnId]);
+  }, [
+    activityRows,
+    row.summary.previewEntries,
+    row.summary.isHistoricalTurn,
+    row.turnId,
+    uiPresentation,
+  ]);
   const subagentEntries = useMemo(() => {
-    const hydratedEntries = deriveSubagentWorkEntries(activityRows, row.turnId, {
-      terminalTurnIds: new Set([row.turnId]),
+    const hydratedEntries = uiPresentation.deriveSubagentWorkEntries(activityRows, row.turnId, {
+      terminalTurnIds: row.summary.isHistoricalTurn === false ? undefined : new Set([row.turnId]),
       runtimeSession: ctx.subagentRuntimeSession,
     });
     return mergeHistoricalSubagentEntries(
@@ -2043,8 +2392,15 @@ const HistoricalWorkLogSection = memo(function HistoricalWorkLogSection({
       hydratedEntries,
       ctx.subagentRuntimeSession,
     ).map((entry) => reconcileSubagentWorkEntryRuntime(entry, ctx.subagentRuntimeSession));
-  }, [activityRows, row.summary.subagentEntries, row.turnId, ctx.subagentRuntimeSession]);
-  const historicalWorkLogDisplayState = deriveHistoricalWorkLogDisplayState({
+  }, [
+    activityRows,
+    row.summary.subagentEntries,
+    row.summary.isHistoricalTurn,
+    row.turnId,
+    ctx.subagentRuntimeSession,
+    uiPresentation,
+  ]);
+  const historicalWorkLogDisplayState = uiPresentation.deriveHistoricalWorkLogDisplayState({
     snapshotEntryCount: row.summary.snapshotEntryCount,
     previewEntryCount: row.summary.previewEntries.length,
     visibleEntryCount: visibleEntries.length,
@@ -2055,7 +2411,8 @@ const HistoricalWorkLogSection = memo(function HistoricalWorkLogSection({
   const countLabel = historicalWorkLogDisplayState.countLabel;
   // The latest saved label previews a collapsed log; nothing else is shown
   // when no preview exists (no implementation placeholders).
-  const compactSummary = row.summary.previewEntries.at(-1)?.label ?? null;
+  const compactEntry = row.summary.previewEntries.at(-1);
+  const compactSummary = compactEntry ? workLogDisplayLabel(compactEntry) : null;
   const hasOlder =
     loadedOffset !== null
       ? loadedOffset > 0
@@ -2086,13 +2443,13 @@ const HistoricalWorkLogSection = memo(function HistoricalWorkLogSection({
     const api = readEnvironmentApi(ctx.activeThreadEnvironmentId);
     const activeThreadId = ctx.activeThreadId;
     if (!api || activeThreadId === null) {
-      setLoadError("Work log unavailable while disconnected.");
+      setLoadErrorCode("disconnected");
       return;
     }
     const nextOffset = Math.max(0, loadedOffset - HISTORICAL_WORK_LOG_PAGE_SIZE);
     const limit = loadedOffset - nextOffset;
     setIsLoadingOlder(true);
-    setLoadError(null);
+    setLoadErrorCode(null);
     try {
       const page = await api.orchestration.getThreadTurnActivityPage({
         threadId: activeThreadId,
@@ -2104,7 +2461,7 @@ const HistoricalWorkLogSection = memo(function HistoricalWorkLogSection({
       setActivityRows((current) => mergeHistoricalActivityRows([...page.activities, ...current]));
       setLoadedOffset(page.offset);
     } catch {
-      setLoadError("Couldn’t load older entries.");
+      setLoadErrorCode("older");
     } finally {
       setIsLoadingOlder(false);
     }
@@ -2117,11 +2474,11 @@ const HistoricalWorkLogSection = memo(function HistoricalWorkLogSection({
     const api = readEnvironmentApi(ctx.activeThreadEnvironmentId);
     const activeThreadId = ctx.activeThreadId;
     if (!api || activeThreadId === null) {
-      setLoadError("Work log unavailable while disconnected.");
+      setLoadErrorCode("disconnected");
       return;
     }
     setIsLoadingOlder(true);
-    setLoadError(null);
+    setLoadErrorCode(null);
     try {
       const page = await api.orchestration.getThreadTurnActivityPage({
         threadId: activeThreadId,
@@ -2133,7 +2490,7 @@ const HistoricalWorkLogSection = memo(function HistoricalWorkLogSection({
       setActivityRows(page.activities);
       setLoadedOffset(page.offset);
     } catch {
-      setLoadError("Couldn’t load the full work log.");
+      setLoadErrorCode("all");
     } finally {
       setIsLoadingOlder(false);
     }
@@ -2173,7 +2530,12 @@ const HistoricalWorkLogSection = memo(function HistoricalWorkLogSection({
                 isExpanded && "rotate-90",
               )}
             />
-            <span className="shrink-0 font-medium text-muted-foreground">Work log{countLabel}</span>
+            <span className="shrink-0 font-medium text-muted-foreground">
+              <UiMessage message={"Work log<slot1></slot1>"} slots={{ slot1: countLabel }} />
+            </span>
+            <ProviderWorkLogErrorIndicator
+              entries={[...row.summary.previewEntries, ...visibleEntries]}
+            />
             {!isExpanded && compactSummary ? (
               <span className="truncate">{compactSummary}</span>
             ) : null}
@@ -2187,7 +2549,7 @@ const HistoricalWorkLogSection = memo(function HistoricalWorkLogSection({
                   disabled={isLoadingOlder}
                   onClick={loadAllPages}
                 >
-                  Show all
+                  {uiText("Show all", undefined, undefined, uiLocale)}
                 </button>
               ) : null}
               {hasOlder ? (
@@ -2197,7 +2559,9 @@ const HistoricalWorkLogSection = memo(function HistoricalWorkLogSection({
                   disabled={isLoadingOlder}
                   onClick={loadOlderPage}
                 >
-                  {isLoadingOlder ? "Loading…" : "Show older"}
+                  {isLoadingOlder
+                    ? uiText("Loading…", undefined, undefined, uiLocale)
+                    : uiText("Show older", undefined, undefined, uiLocale)}
                 </button>
               ) : null}
             </div>
@@ -2207,13 +2571,19 @@ const HistoricalWorkLogSection = memo(function HistoricalWorkLogSection({
           <div className="px-2 pb-1.5 animate-enter-rise">
             {isLoading && visibleEntries.length === 0 ? (
               showLoading ? (
-                <div role="status" aria-label="Loading work log" className="space-y-1.5 px-1 py-1">
+                <div
+                  role="status"
+                  aria-label={uiText("Loading work log", undefined, undefined, uiLocale)}
+                  className="space-y-1.5 px-1 py-1"
+                >
                   <Skeleton className="h-3 w-3/5" />
                   <Skeleton className="h-3 w-2/5" />
                 </div>
               ) : null
             ) : visibleEntries.length === 0 ? (
-              <p className="px-0.5 py-1 text-2xs text-subtle-foreground">No commands or tools.</p>
+              <p className="px-0.5 py-1 text-2xs text-subtle-foreground">
+                {uiText("No commands or tools.", undefined, undefined, uiLocale)}
+              </p>
             ) : (
               <div className="space-y-0.5">
                 {visibleEntries.map((workEntry) => (
@@ -2225,8 +2595,10 @@ const HistoricalWorkLogSection = memo(function HistoricalWorkLogSection({
                 ))}
               </div>
             )}
-            {loadError ? (
-              <p className="mt-1 px-0.5 text-2xs text-destructive-foreground">{loadError}</p>
+            {loadErrorCode ? (
+              <p className="mt-1 px-0.5 text-2xs text-destructive-foreground">
+                {formatHistoricalWorkLogError(loadErrorCode, uiLocale)}
+              </p>
             ) : null}
           </div>
         ) : null}
@@ -2238,18 +2610,29 @@ const HistoricalWorkLogSection = memo(function HistoricalWorkLogSection({
 const SubagentGroupSection = memo(function SubagentGroupSection(props: {
   readonly entries: ReadonlyArray<SubagentRosterEntry>;
 }) {
+  const uiLocale = useUiLocale();
+
   const { onOpenSubagentDetail } = use(TimelineRowCtx);
   const { subagentDetailOpen } = use(TimelineRowActivityCtx);
   if (props.entries.length === 0) return null;
 
   return (
     <section
-      aria-label={`${props.entries.length} ${props.entries.length === 1 ? "subagent" : "subagents"}`}
+      aria-label={uiText(
+        "{count, plural, one {# subagent} other {# subagents}}",
+        {
+          count: props.entries.length,
+        },
+        undefined,
+        uiLocale,
+      )}
       className="rounded-xl border border-border-subtle bg-card px-2 py-1.5"
       data-subagent-turn-group="true"
     >
       {/* Every row is shown, so the heading carries no count. */}
-      <p className="mb-1 px-0.5 text-2xs font-medium text-subtle-foreground">Subagents</p>
+      <p className="mb-1 px-0.5 text-2xs font-medium text-subtle-foreground">
+        {uiText("Subagents", undefined, undefined, uiLocale)}
+      </p>
       <div className="space-y-0.5">
         {props.entries.map((entry) => (
           <SubagentRosterRow
@@ -2277,6 +2660,8 @@ const IntentAwareWorkLogList = memo(function IntentAwareWorkLogList(props: {
   readonly entering?: boolean;
   readonly workspaceRoot: string | undefined;
 }) {
+  const uiLocale = useUiLocale();
+
   const scrollerRef = useRef<HTMLDivElement | null>(null);
   const [following, setFollowing] = useState(true);
   const [newEntries, setNewEntries] = useState(0);
@@ -2337,7 +2722,8 @@ const IntentAwareWorkLogList = memo(function IntentAwareWorkLogList(props: {
           data-work-log-jump-to-latest="true"
           onClick={jumpToLatest}
         >
-          {newEntries} new · Jump to latest
+          {newEntries}
+          {uiText(" new · Jump to latest", undefined, undefined, uiLocale)}
         </button>
       ) : null}
     </div>
@@ -2349,6 +2735,8 @@ const WorkGroupSection = memo(function WorkGroupSection({
 }: {
   groupedEntries: Extract<MessagesTimelineRow, { kind: "work" }>["groupedEntries"];
 }) {
+  const uiLocale = useUiLocale();
+
   const { workspaceRoot } = use(TimelineRowCtx);
   const [isExpanded, setIsExpanded] = useState(false);
   const ordinaryEntries = groupedEntries.filter((entry) => !entry.subagent);
@@ -2363,7 +2751,9 @@ const WorkGroupSection = memo(function WorkGroupSection({
   const hiddenCount = ordinaryEntries.length - visibleEntries.length;
   const onlyToolEntries = ordinaryEntries.every((entry) => entry.tone === "tool");
   const showHeader = hasOverflow || !onlyToolEntries;
-  const groupLabel = onlyToolEntries ? "Tool calls" : "Work log";
+  const groupLabel = onlyToolEntries
+    ? uiText("Tool calls", undefined, undefined, uiLocale)
+    : uiText("Work log", undefined, undefined, uiLocale);
 
   return (
     <div className="space-y-2" data-turn-activity-groups="true">
@@ -2376,7 +2766,10 @@ const WorkGroupSection = memo(function WorkGroupSection({
           {showHeader ? (
             // The count is shown only where rows are hidden ("Show N more").
             <div className="mb-1.5 flex items-center justify-between gap-2 px-0.5">
-              <p className="text-2xs font-medium text-subtle-foreground">{groupLabel}</p>
+              <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1">
+                <p className="text-2xs font-medium text-subtle-foreground">{groupLabel}</p>
+                <ProviderWorkLogErrorIndicator entries={ordinaryEntries} />
+              </div>
               {hasOverflow ? (
                 <button
                   type="button"
@@ -2384,7 +2777,9 @@ const WorkGroupSection = memo(function WorkGroupSection({
                   aria-expanded={isExpanded}
                   onClick={() => setIsExpanded((value) => !value)}
                 >
-                  {isExpanded ? "Show less" : `Show ${hiddenCount} more`}
+                  {isExpanded
+                    ? uiText("Show less", undefined, undefined, uiLocale)
+                    : uiText("Show {value0} more", { value0: hiddenCount }, undefined, uiLocale)}
                   <ChevronRightIcon
                     aria-hidden="true"
                     className={cn(
@@ -2414,6 +2809,33 @@ const WorkGroupSection = memo(function WorkGroupSection({
 // Leaf components
 // ---------------------------------------------------------------------------
 
+/** Counts only retained/hydrated observations, never unseen history. This
+ * content-free marker keeps a terminal failure discoverable while its outer
+ * Work Log is collapsed without bringing private provider prose into chrome. */
+const ProviderWorkLogErrorIndicator = memo(function ProviderWorkLogErrorIndicator(props: {
+  readonly entries: ReadonlyArray<WorkLogEntry>;
+}) {
+  const uiLocale = useUiLocale();
+  const count = new Set(
+    props.entries
+      .filter((entry) => entry.providerDiagnostic?.summary.status === "error")
+      .map((entry) => entry.id),
+  ).size;
+  return count > 0 ? (
+    <span
+      className="shrink-0 text-2xs text-destructive-foreground"
+      data-work-log-provider-errors="true"
+    >
+      {uiText(
+        "{count, plural, one {Provider error} other {Provider errors}} · {count}",
+        { count },
+        undefined,
+        uiLocale,
+      )}
+    </span>
+  ) : null;
+});
+
 const MAX_COLLAPSED_USER_MESSAGE_LINES = 8;
 const MAX_COLLAPSED_USER_MESSAGE_LENGTH = 600;
 const COLLAPSED_USER_MESSAGE_FADE_HEIGHT_REM = 1.75;
@@ -2435,6 +2857,8 @@ const CollapsibleUserMessageBody = memo(function CollapsibleUserMessageBody(prop
   skills: ReadonlyArray<Pick<ServerProviderSkill, "name" | "displayName">>;
   footer?: ReactNode;
 }) {
+  const uiLocale = useUiLocale();
+
   const [expanded, setExpanded] = useState(false);
   const hasVisibleBody = props.text.trim().length > 0;
   const canCollapse = hasVisibleBody && shouldCollapseUserMessage(props.text);
@@ -2483,7 +2907,9 @@ const CollapsibleUserMessageBody = memo(function CollapsibleUserMessageBody(prop
               onClick={() => setExpanded((value) => !value)}
               className="-ml-1 h-6 rounded-md px-1.5 text-xs text-muted-foreground hover:bg-accent hover:text-foreground"
             >
-              {expanded ? "Show less" : "Show full message"}
+              {expanded
+                ? uiText("Show less", undefined, undefined, uiLocale)
+                : uiText("Show full message", undefined, undefined, uiLocale)}
             </Button>
           ) : null}
           {props.footer ? (
@@ -2553,7 +2979,10 @@ function formatMessageMeta(
   timestampFormat: TimestampFormat,
 ): string {
   if (!duration) return formatTimestamp(createdAt, timestampFormat);
-  return `${formatTimestamp(createdAt, timestampFormat)} • ${duration}`;
+  return uiText("{timestamp} • {duration}", {
+    timestamp: formatTimestamp(createdAt, timestampFormat),
+    duration,
+  });
 }
 
 function workToneIcon(tone: TimelineWorkEntry["tone"]): {
@@ -2603,7 +3032,10 @@ function workEntryPreview(
   const displayPath = formatWorkspaceRelativePath(firstPath, workspaceRoot);
   return workEntry.changedFiles!.length === 1
     ? displayPath
-    : `${displayPath} +${workEntry.changedFiles!.length - 1} more`;
+    : uiText("{path} +{count} more", {
+        path: displayPath,
+        count: workEntry.changedFiles!.length - 1,
+      });
 }
 
 function workEntryRawCommand(
@@ -2682,7 +3114,14 @@ function openFileWithPreferredEditor(input: {
 }
 
 function toolWorkEntryHeading(workEntry: TimelineWorkEntry): string {
-  if (workEntry.computerUse) return workEntry.label;
+  // Compaction's canonical title carries its observed lifecycle phase. A
+  // localized summary must not replace that title or imply a terminal outcome
+  // for a hydrated start whose latest turn metadata is unavailable.
+  if (workEntry.itemType === "context_compaction" && workEntry.toolTitle) {
+    return workLogDisplayToolTitle(workEntry) ?? workEntry.toolTitle;
+  }
+  if (workEntry.computerUse || workEntry.displayLabel) return workLogDisplayLabel(workEntry);
+  if (workEntry.displayToolTitle) return workLogDisplayToolTitle(workEntry) ?? "";
   if (!workEntry.toolTitle) {
     return capitalizePhrase(normalizeCompactToolLabel(workEntry.label));
   }
@@ -2701,6 +3140,18 @@ const OrdinaryWorkEntryRow = memo(function OrdinaryWorkEntryRow(props: {
   workspaceRoot: string | undefined;
 }) {
   const { activeThreadEnvironmentId, activeThreadId, timestampFormat } = use(TimelineRowCtx);
+  if (props.workEntry.providerDiagnostic)
+    return (
+      <ProviderDiagnosticWorkEntry
+        diagnostic={props.workEntry.providerDiagnostic}
+        environmentId={activeThreadEnvironmentId}
+        threadId={activeThreadId}
+        turnId={props.workEntry.turnId ?? null}
+        activityId={props.workEntry.id}
+        createdAt={props.workEntry.createdAt}
+        timestampFormat={timestampFormat}
+      />
+    );
   if (props.workEntry.turnConfiguration)
     return <TurnConfigurationWorkEntry configuration={props.workEntry.turnConfiguration} />;
   if (props.workEntry.publicSummary)
@@ -2721,6 +3172,9 @@ const OrdinaryWorkEntryContent = memo(function OrdinaryWorkEntryContent(props: {
   workEntry: TimelineWorkEntry;
   workspaceRoot: string | undefined;
 }) {
+  const uiLocale = useUiLocale();
+  const uiPresentation = useUiPresentation(UI_PRESENTATION_SOURCES);
+
   const { workEntry, workspaceRoot } = props;
   const { activeThreadEnvironmentId, timestampFormat } = use(TimelineRowCtx);
   const defaultEditor = useSettings((settings) => settings.defaultEditor);
@@ -2729,8 +3183,8 @@ const OrdinaryWorkEntryContent = memo(function OrdinaryWorkEntryContent(props: {
     getLocalShellCapabilities(activeThreadEnvironmentId).canOpenLocalEditor;
   const iconConfig = workToneIcon(workEntry.tone);
   const EntryIcon = workEntryIcon(workEntry);
-  const heading = toolWorkEntryHeading(workEntry);
-  const rawPreview = workEntryPreview(workEntry, workspaceRoot);
+  const heading = uiPresentation.toolWorkEntryHeading(workEntry);
+  const rawPreview = uiPresentation.workEntryPreview(workEntry, workspaceRoot);
   const preview =
     rawPreview &&
     normalizeCompactToolLabel(rawPreview).toLowerCase() ===
@@ -2878,11 +3332,14 @@ const OrdinaryWorkEntryContent = memo(function OrdinaryWorkEntryContent(props: {
               <MenuTrigger
                 className="focus-ring rounded-sm px-1 text-2xs text-subtle-foreground transition-colors duration-(--duration-fast) hover:text-foreground"
                 data-work-log-more-files="true"
-                aria-label={`${extraChangedFiles.length} more changed ${
-                  extraChangedFiles.length === 1 ? "file" : "files"
-                }`}
+                aria-label={uiText(
+                  "{count, plural, one {# more changed file} other {# more changed files}}",
+                  { count: extraChangedFiles.length },
+                  undefined,
+                  uiLocale,
+                )}
               >
-                +{extraChangedFiles.length} more
+                {uiText("+{count} more", { count: extraChangedFiles.length }, undefined, uiLocale)}
               </MenuTrigger>
               <MenuPopup align="start" className="max-w-[min(32rem,calc(100vw-2rem))]">
                 {extraChangedFiles.map((filePath) => {
@@ -2912,7 +3369,25 @@ const OrdinaryWorkEntryContent = memo(function OrdinaryWorkEntryContent(props: {
       <button
         className="group/file-open block w-full rounded-lg px-1 py-1 text-left transition-colors duration-(--duration-fast) hover:bg-accent focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
         onClick={() => openResolvedFile(primaryChangedFile)}
-        title={`${openVerb} ${formatWorkspaceRelativePath(primaryChangedFile, workspaceRoot)}`}
+        title={
+          openVerb === "Open"
+            ? uiText(
+                "Open {path}",
+                {
+                  path: formatWorkspaceRelativePath(primaryChangedFile, workspaceRoot),
+                },
+                undefined,
+                uiLocale,
+              )
+            : uiText(
+                "Copy {path}",
+                {
+                  path: formatWorkspaceRelativePath(primaryChangedFile, workspaceRoot),
+                },
+                undefined,
+                uiLocale,
+              )
+        }
         type="button"
       >
         {rowContent}
@@ -2930,6 +3405,8 @@ const ChangedFileChip = memo(function ChangedFileChip(props: {
   readonly openVerb: "Open" | "Copy";
   readonly onOpen: (filePath: string) => void;
 }) {
+  const uiLocale = useUiLocale();
+
   const displayPath = formatWorkspaceRelativePath(props.filePath, props.workspaceRoot);
   const canOpenFile = resolveWorkspaceFilePath(props.filePath, props.workspaceRoot) !== null;
   return (
@@ -2947,7 +3424,13 @@ const ChangedFileChip = memo(function ChangedFileChip(props: {
         event.stopPropagation();
         props.onOpen(props.filePath);
       }}
-      title={canOpenFile ? `${props.openVerb} ${displayPath}` : displayPath}
+      title={
+        canOpenFile
+          ? props.openVerb === "Open"
+            ? uiText("Open {path}", { path: displayPath }, undefined, uiLocale)
+            : uiText("Copy {path}", { path: displayPath }, undefined, uiLocale)
+          : displayPath
+      }
       type="button"
     >
       {displayPath}
@@ -2966,12 +3449,17 @@ const WorkEntryOpenPaths = memo(function WorkEntryOpenPaths(props: {
   readonly openVerb: "Open" | "Copy";
   readonly onOpen: (filePath: string) => void;
 }) {
+  const uiLocale = useUiLocale();
+
   const revealClassName =
     "focus-ring inline-flex size-5 shrink-0 items-center justify-center rounded-sm text-subtle-foreground opacity-0 transition-[opacity,color] duration-(--duration-fast) hover:text-foreground focus-visible:opacity-100 group-hover/work-row:opacity-100 data-[popup-open]:opacity-100 [@media(hover:none)]:opacity-100";
   const [singlePath] = props.paths;
   if (props.paths.length === 1 && singlePath !== undefined) {
     const displayPath = formatWorkspaceRelativePath(singlePath, props.workspaceRoot);
-    const label = `${props.openVerb} ${displayPath}`;
+    const label =
+      props.openVerb === "Open"
+        ? uiText("Open {path}", { path: displayPath }, undefined, uiLocale)
+        : uiText("Copy {path}", { path: displayPath }, undefined, uiLocale);
     return (
       <Tooltip>
         <TooltipTrigger
@@ -2998,7 +3486,11 @@ const WorkEntryOpenPaths = memo(function WorkEntryOpenPaths(props: {
     <Menu>
       <MenuTrigger
         className={revealClassName}
-        aria-label={`${props.openVerb} a file from this command`}
+        aria-label={
+          props.openVerb === "Open"
+            ? uiText("Open a file from this command", undefined, undefined, uiLocale)
+            : uiText("Copy a file from this command", undefined, undefined, uiLocale)
+        }
         data-work-log-open-path="true"
       >
         <ExternalLinkIcon aria-hidden="true" className="size-3" />
@@ -3019,3 +3511,17 @@ const WorkEntryOpenPaths = memo(function WorkEntryOpenPaths(props: {
     </Menu>
   );
 });
+
+// Finite source-owned labels/helpers only; no received or user data.
+const UI_PRESENTATION_SOURCES = {
+  deriveEarlierWorkLogEntries,
+  deriveHistoricalWorkLogDisplayState,
+  deriveSubagentWorkEntries,
+  deriveWorkLogEntries,
+  formatElapsed,
+  formatLiveMessageMetaNow,
+  formatMessageMeta,
+  formatWorkingTimerNow,
+  toolWorkEntryHeading,
+  workEntryPreview,
+};

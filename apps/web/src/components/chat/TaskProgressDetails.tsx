@@ -1,3 +1,5 @@
+import { useUiLocale } from "~/i18n";
+import { uiText } from "@cafecode/shared/i18n";
 import { CircleCheckIcon, CircleIcon, LoaderCircleIcon } from "lucide-react";
 import { memo } from "react";
 
@@ -22,6 +24,8 @@ export const TaskProgressDetails = memo(function TaskProgressDetails(props: {
     | ((workEntry: WorkLogEntry, trigger: HTMLButtonElement) => void)
     | undefined;
 }) {
+  const uiLocale = useUiLocale();
+
   const plan = props.plan;
   const hasPlan = Boolean(plan && plan.steps.length > 0);
   const subagents = (props.subagents ?? []).filter(
@@ -36,11 +40,13 @@ export const TaskProgressDetails = memo(function TaskProgressDetails(props: {
     <>
       {subagents.length > 0 ? (
         <section
-          aria-label="Active subagents"
+          aria-label={uiText("Active subagents", undefined, undefined, uiLocale)}
           className={cn(hasPlan && "mb-3 border-border-subtle border-b pb-3")}
           data-composer-subagent-list="true"
         >
-          <p className="mb-1 text-xs font-medium text-muted-foreground">Active subagents</p>
+          <p className="mb-1 text-xs font-medium text-muted-foreground">
+            {uiText("Active subagents", undefined, undefined, uiLocale)}
+          </p>
           <div className="space-y-0.5">
             {subagents.map((entry) => (
               <SubagentRosterRow
@@ -63,7 +69,11 @@ export const TaskProgressDetails = memo(function TaskProgressDetails(props: {
       ) : null}
 
       {hasPlan ? (
-        <ol aria-label="Task list" className="space-y-3" data-composer-task-progress-list="true">
+        <ol
+          aria-label={uiText("Task list", undefined, undefined, uiLocale)}
+          className="space-y-3"
+          data-composer-task-progress-list="true"
+        >
           {displaySteps.map((step) => {
             const { status } = step;
             const label = TASK_PROGRESS_STATUS_LABELS[status];

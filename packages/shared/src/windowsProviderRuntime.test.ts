@@ -1,12 +1,21 @@
 // @effect-diagnostics nodeBuiltinImport:off
+import type { ChildProcess, spawn as nodeSpawn } from "node:child_process";
+import { EventEmitter } from "node:events";
+import { PassThrough } from "node:stream";
 import { describe, expect, it, vi } from "vitest";
 import type { ProviderDaemonHealth, ProviderDaemonMarker } from "@cafecode/contracts";
 import type { WindowsOwnershipSession, WindowsProcessIdentity } from "./windowsProcessOwnership.ts";
 import {
   createWindowsProviderRuntime,
+  spawnWindowsProviderRuntimeChild,
   WindowsProviderRuntimeError,
   type WindowsProviderRuntimeOptions,
+  type WindowsRuntimeStartupProgress,
 } from "./windowsProviderRuntime.ts";
+import {
+  encodeBackendMigrationProgress,
+  makeProviderDaemonStartupProgressTracker,
+} from "./backendStartupProgress.ts";
 
 const ownershipId = "be5b2b29-72ef-4d31-9571-50856776e18b";
 const identity: WindowsProcessIdentity = { pid: 101, creationTime100ns: "134032074530123456" };
@@ -153,9 +162,10 @@ function fixture(initial: ProviderDaemonMarker | null = marker()) {
     }),
     close: vi.fn(async () => {}),
   };
-  const spawn = vi.fn(async () => {
+  const closeStartupProgress = vi.fn();
+  const spawn = vi.fn<WindowsProviderRuntimeOptions["spawn"]>(async () => {
     processes.set(201, { pid: 201, creationTime100ns: "134050000000000000" });
-    return { pid: 201, hasExited: () => childExited };
+    return { pid: 201, hasExited: () => childExited, closeStartupProgress };
   });
   const options: WindowsProviderRuntimeOptions = {
     role: "provider-daemon",
@@ -193,6 +203,7 @@ function fixture(initial: ProviderDaemonMarker | null = marker()) {
     options,
     session,
     spawn,
+    closeStartupProgress,
     processes,
     runtime: createWindowsProviderRuntime(options),
     get record() {
@@ -200,6 +211,12 @@ function fixture(initial: ProviderDaemonMarker | null = marker()) {
     },
     get revision() {
       return revision;
+    },
+    get elapsedMs() {
+      return clock;
+    },
+    advanceClock(milliseconds: number) {
+      clock += milliseconds;
     },
     setRecord(next: ProviderDaemonMarker | null) {
       record = next;
@@ -243,6 +260,155 @@ function fixture(initial: ProviderDaemonMarker | null = marker()) {
 }
 
 describe("Windows provider runtime ownership lifecycle", () => {
+  it("releases the guard during an exact fresh migration and re-admits only its unchanged prepared revision", async () => {
+    const f = fixture(null);
+    let held = false;
+    let progress!: WindowsRuntimeStartupProgress;
+    const phases = vi.fn();
+    const fetchHealth = vi.fn(async () => {
+      expect(held).toBe(false);
+      if (f.elapsedMs === 0) throw new Error("synthetic migration not ready");
+      return f.health();
+    });
+    const open = vi.fn(async () => {
+      expect(held).toBe(false);
+      held = true;
+      return {
+        ...f.session,
+        close: async () => {
+          await f.session.close();
+          held = false;
+        },
+      };
+    });
+    const runtime = createWindowsProviderRuntime({
+      ...f.options,
+      openSession: open,
+      onStartupProgress: phases,
+      spawn: async (bootstrap, input) => {
+        expect(held).toBe(true);
+        expect(bootstrap.startupProgressFd).toBe(4);
+        progress = input!;
+        progress.tracker.push(
+          Buffer.from(encodeBackendMigrationProgress({ phase: "start", migrationId: 92 })),
+          progress.elapsedMs(),
+        );
+        return f.spawn(bootstrap, input);
+      },
+      fetchHealth,
+      sleep: async () => {
+        expect(held).toBe(false);
+        // Exceed the unchanged native helper's 120-second session bound. The
+        // migration wait must not retain that helper or its interprocess guard.
+        f.advanceClock(240_000);
+        progress.tracker.push(
+          Buffer.from(encodeBackendMigrationProgress({ phase: "complete", migrationId: 92 })),
+          progress.elapsedMs(),
+        );
+      },
+    });
+    expect((await runtime.ensure()).marker.windowsOwnershipState).toBe("committed");
+    expect(open).toHaveBeenCalledTimes(2);
+    expect(f.session.close).toHaveBeenCalledTimes(2);
+    expect(f.session.publish).toHaveBeenLastCalledWith(
+      expect.objectContaining({ expectedRevision: "revision-2" }),
+    );
+    expect(phases.mock.calls.map(([phase]) => phase)).toEqual([
+      { phase: "starting" },
+      { phase: "migrating", migrationId: 92 },
+      { phase: "starting" },
+      { phase: "ready" },
+    ]);
+    expect(f.closeStartupProgress).toHaveBeenCalledTimes(1);
+    expect(f.session.terminate).not.toHaveBeenCalled();
+  });
+
+  it("preserves a replacement record when the prepared revision changes outside the guard", async () => {
+    const f = fixture(null);
+    const runtime = createWindowsProviderRuntime({
+      ...f.options,
+      fetchHealth: async () => {
+        const health = f.health();
+        f.setRecord(marker());
+        return health;
+      },
+    });
+    await expect(runtime.ensure()).rejects.toMatchObject({ reason: "ownership-changed" });
+    expect(f.record).toEqual(marker());
+    expect(f.session.publish).toHaveBeenCalledTimes(2);
+    expect(f.session.retire).not.toHaveBeenCalled();
+    expect(f.session.terminate).not.toHaveBeenCalled();
+    expect(f.options.issueLease).not.toHaveBeenCalled();
+    expect(f.processes.has(201)).toBe(true);
+    expect(f.closeStartupProgress).toHaveBeenCalledTimes(1);
+  });
+
+  it("preserves the exact prepared child when native re-admission is inconclusive", async () => {
+    const f = fixture(null);
+    const runtime = createWindowsProviderRuntime({
+      ...f.options,
+      fetchHealth: async () => {
+        f.setObservationUnknown(true);
+        return f.health();
+      },
+    });
+    await expect(runtime.ensure()).rejects.toMatchObject({ reason: "child-admission-uncertain" });
+    expect(f.record?.windowsOwnershipState).toBe("prepared");
+    expect(f.record?.pid).toBe(201);
+    expect(f.processes.has(201)).toBe(true);
+    expect(f.session.publish).toHaveBeenCalledTimes(2);
+    expect(f.session.retire).not.toHaveBeenCalled();
+    expect(f.session.terminate).not.toHaveBeenCalled();
+    expect(f.closeStartupProgress).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not wait or acquire another guard after an unconfirmed helper close", async () => {
+    const f = fixture(null);
+    vi.mocked(f.session.close).mockRejectedValueOnce(new Error("synthetic lost close reply"));
+    await expect(f.runtime.ensure()).rejects.toMatchObject({ reason: "ownership-unavailable" });
+    expect(f.options.openSession).toHaveBeenCalledTimes(1);
+    expect(f.options.fetchHealth).not.toHaveBeenCalled();
+    expect(f.record?.windowsOwnershipState).toBe("prepared");
+    expect(f.processes.has(201)).toBe(true);
+    expect(f.closeStartupProgress).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps migration timeout nonrenewable and preserves the child and prepared credential record", async () => {
+    const f = fixture(null);
+    let progress!: WindowsRuntimeStartupProgress;
+    f.setUnavailable(true);
+    const runtime = createWindowsProviderRuntime({
+      ...f.options,
+      spawn: async (bootstrap, input) => {
+        progress = input!;
+        progress.tracker.push(
+          Buffer.from(encodeBackendMigrationProgress({ phase: "start", migrationId: 92 })),
+          0,
+        );
+        return f.spawn(bootstrap, input);
+      },
+      sleep: async () => {
+        const absoluteDeadline = progress.tracker.deadlineMs;
+        f.advanceClock(absoluteDeadline - 1);
+        progress.tracker.push(
+          Buffer.from(encodeBackendMigrationProgress({ phase: "start", migrationId: 93 })),
+          progress.elapsedMs(),
+        );
+        expect(progress.tracker.deadlineMs).toBe(absoluteDeadline);
+        f.advanceClock(1);
+      },
+    });
+    await expect(runtime.ensure()).rejects.toMatchObject({ reason: "prepared-attempt-uncertain" });
+    expect(f.options.openSession).toHaveBeenCalledTimes(1);
+    expect(f.record?.windowsOwnershipState).toBe("prepared");
+    expect(f.record?.pid).toBe(201);
+    expect(f.processes.has(201)).toBe(true);
+    expect(f.session.publish).toHaveBeenCalledTimes(2);
+    expect(f.session.retire).not.toHaveBeenCalled();
+    expect(f.session.terminate).not.toHaveBeenCalled();
+    expect(f.closeStartupProgress).toHaveBeenCalledTimes(1);
+  });
+
   it("adopts a matching authenticated process and obtains a scoped lease", async () => {
     const f = fixture();
     const result = await f.runtime.ensure();
@@ -698,5 +864,109 @@ describe("Windows provider runtime ownership lifecycle", () => {
       expect(String(error)).not.toMatch(/PRIVATE|profile|synthetic-private/);
     }
     expect(f.session.close).toHaveBeenCalledTimes(1);
+  });
+});
+
+function directChildFixture() {
+  const bootstrapPipe = new PassThrough();
+  const progressPipe = new PassThrough();
+  const child = Object.assign(new EventEmitter(), {
+    pid: 201,
+    stdio: [null, null, null, bootstrapPipe, progressPipe],
+    unref: vi.fn(),
+    kill: vi.fn(),
+  });
+  const spawnChild = vi.fn(() => {
+    queueMicrotask(() => child.emit("spawn"));
+    return child as unknown as ChildProcess;
+  }) as unknown as typeof nodeSpawn;
+  return { child, bootstrapPipe, progressPipe, spawnChild };
+}
+
+describe("Windows direct child startup progress boundary", () => {
+  const launchOptions = {
+    executable: "C:\\fixture\\native-node.exe",
+    entrypoint: "C:\\fixture\\daemon.js",
+    cwd: "C:\\fixture",
+    env: {},
+    bootstrap: {
+      cafeCodeHome: "C:\\fixture",
+      mode: "provider-daemon" as const,
+      transport: "ipc" as const,
+      socketPath,
+      token,
+      startupProgressFd: 4 as const,
+    },
+  };
+
+  it("drains fd 4 after rejection, ignores detached output and closes only the progress handle", async () => {
+    const f = directChildFixture();
+    const report = vi.fn();
+    const tracker = makeProviderDaemonStartupProgressTracker(30_000, report);
+    tracker.start();
+    const child = await spawnWindowsProviderRuntimeChild({
+      ...launchOptions,
+      spawnChild: f.spawnChild,
+      startupProgress: { tracker, elapsedMs: () => 0 },
+    });
+    expect(f.spawnChild).toHaveBeenCalledWith(
+      launchOptions.executable,
+      [launchOptions.entrypoint, "provider-daemon", "--bootstrap-fd", "3"],
+      expect.objectContaining({
+        shell: false,
+        detached: true,
+        windowsHide: true,
+        stdio: ["ignore", "ignore", "ignore", "pipe", "pipe"],
+      }),
+    );
+    f.progressPipe.write(
+      Buffer.from(encodeBackendMigrationProgress({ phase: "start", migrationId: 92 })),
+    );
+    expect(report).toHaveBeenLastCalledWith({ phase: "migrating", migrationId: 92 });
+    f.progressPipe.write(Buffer.from("SECRET invalid arbitrary child output\n"));
+    f.progressPipe.write(Buffer.alloc(128 * 1_024, 65));
+    expect(f.progressPipe.readableLength).toBe(0);
+    expect(tracker.deadlineMs).toBe(30_000);
+    expect(JSON.stringify(report.mock.calls)).not.toMatch(/SECRET|arbitrary/);
+    child.closeStartupProgress?.();
+    child.closeStartupProgress?.();
+    expect(f.progressPipe.destroyed).toBe(true);
+    expect(f.child.kill).not.toHaveBeenCalled();
+    expect(child.hasExited()).toBe(false);
+  });
+
+  it("always drains an unobserved progress pipe and closes it on exact child exit", async () => {
+    const f = directChildFixture();
+    const child = await spawnWindowsProviderRuntimeChild({
+      ...launchOptions,
+      spawnChild: f.spawnChild,
+    });
+    f.progressPipe.write(Buffer.alloc(128 * 1_024, 65));
+    expect(f.progressPipe.readableLength).toBe(0);
+    f.child.emit("exit", 0);
+    expect(child.hasExited()).toBe(true);
+    expect(f.progressPipe.destroyed).toBe(true);
+    expect(f.child.kill).not.toHaveBeenCalled();
+  });
+
+  it("revokes an active migration allowance after a progress pipe I/O error", async () => {
+    const f = directChildFixture();
+    const report = vi.fn();
+    const tracker = makeProviderDaemonStartupProgressTracker(30_000, report);
+    const child = await spawnWindowsProviderRuntimeChild({
+      ...launchOptions,
+      spawnChild: f.spawnChild,
+      startupProgress: { tracker, elapsedMs: () => 0 },
+    });
+    f.progressPipe.write(
+      Buffer.from(encodeBackendMigrationProgress({ phase: "start", migrationId: 92 })),
+    );
+    expect(tracker.deadlineMs).toBe(3_600_000);
+    f.progressPipe.emit("error", new Error("PRIVATE synthetic error"));
+    expect(tracker.deadlineMs).toBe(30_000);
+    expect(report).toHaveBeenLastCalledWith({ phase: "starting" });
+    expect(JSON.stringify(report.mock.calls)).not.toContain("PRIVATE");
+    child.closeStartupProgress?.();
+    expect(f.child.kill).not.toHaveBeenCalled();
   });
 });

@@ -18,6 +18,8 @@ import type {
   OrchestrationThreadDetailSnapshot,
   OrchestrationThreadTurnActivityPage,
   OrchestrationThreadTurnActivityPageInput,
+  OrchestrationThreadActivityDiagnosticInput,
+  OrchestrationThreadActivityDiagnosticResult,
   OrchestrationThreadTurnSubagentDetailInput,
   OrchestrationThreadTurnWorkLogPresenceInput,
   OrchestrationThreadTurnWorkLogPresenceResult,
@@ -396,12 +398,19 @@ export interface ProjectionSnapshotQueryShape {
     input: OrchestrationThreadTurnActivityPageInput,
   ) => Effect.Effect<OrchestrationThreadTurnActivityPage, ProjectionRepositoryError>;
 
+  /** Private inert diagnostics; transport separately checks owner and secure access. */
+  readonly getThreadActivityDiagnostic: (
+    input: OrchestrationThreadActivityDiagnosticInput,
+  ) => Effect.Effect<OrchestrationThreadActivityDiagnosticResult, ProjectionRepositoryError>;
+
   /**
-   * Test whether bounded historical turns contain displayable work-log rows.
+   * Test whether bounded historical/current turns contain displayable work-log rows.
    *
    * This is deliberately an existence query rather than a count/page query so
    * scrolling through a long conversation does not scan every activity in a
    * multi-hour turn merely to decide whether a collapsed row should exist.
+   * A singleton `before` tuple narrows current-turn discovery to omitted older
+   * activity; it is ordering data, never provider or sibling-turn authority.
    */
   readonly getThreadTurnWorkLogPresence: (
     input: OrchestrationThreadTurnWorkLogPresenceInput,

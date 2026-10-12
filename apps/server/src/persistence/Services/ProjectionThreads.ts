@@ -14,6 +14,7 @@ import {
   ProviderInteractionMode,
   RuntimeMode,
   SubagentLimits,
+  CodexContextWindowOverride,
   ThreadId,
   TurnId,
 } from "@cafecode/contracts";
@@ -32,6 +33,7 @@ export const ProjectionThread = Schema.Struct({
   title: Schema.String,
   modelSelection: ModelSelection,
   subagentLimits: Schema.optional(SubagentLimits),
+  codexContextWindowOverride: Schema.optional(Schema.NullOr(CodexContextWindowOverride)),
   runtimeMode: RuntimeMode,
   interactionMode: ProviderInteractionMode,
   branch: Schema.NullOr(Schema.String),
@@ -49,19 +51,38 @@ export const ProjectionThread = Schema.Struct({
 export type ProjectionThread = typeof ProjectionThread.Type;
 
 /** One decoder shared by repository and snapshot reads; SQL NULL is legacy absence. */
-const ProjectionThreadSqlFields = ProjectionThread.mapFields(
+const ProjectionThreadMappedSqlFields = ProjectionThread.mapFields(
   Struct.assign({
     modelSelection: Schema.fromJsonString(ModelSelection),
     subagentLimits: Schema.NullOr(Schema.fromJsonString(SubagentLimits)),
+    codexContextWindowOverride: Schema.NullOr(CodexContextWindowOverride),
   }),
 );
+// Preserve legacy absence separately from an explicit Reset to live inheritance.
+const ProjectionThreadSqlFields = Schema.Struct({
+  ...ProjectionThreadMappedSqlFields.fields,
+  codexContextWindowOverrideKnown: Schema.Int.check(Schema.isBetween({ minimum: 0, maximum: 1 })),
+});
 export const ProjectionThreadSqlRow = ProjectionThreadSqlFields.pipe(
   Schema.decodeTo(
     Schema.toType(ProjectionThread),
     SchemaTransformation.transform<ProjectionThread, typeof ProjectionThreadSqlFields.Type>({
-      decode: ({ subagentLimits, ...row }) =>
-        subagentLimits === null ? row : { ...row, subagentLimits },
-      encode: (row) => ({ ...row, subagentLimits: row.subagentLimits ?? null }),
+      decode: ({
+        subagentLimits,
+        codexContextWindowOverride,
+        codexContextWindowOverrideKnown,
+        ...row
+      }) => ({
+        ...row,
+        ...(subagentLimits === null ? {} : { subagentLimits }),
+        ...(codexContextWindowOverrideKnown === 1 ? { codexContextWindowOverride } : {}),
+      }),
+      encode: (row) => ({
+        ...row,
+        subagentLimits: row.subagentLimits ?? null,
+        codexContextWindowOverride: row.codexContextWindowOverride ?? null,
+        codexContextWindowOverrideKnown: row.codexContextWindowOverride === undefined ? 0 : 1,
+      }),
     }),
   ),
 );

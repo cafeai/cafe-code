@@ -1,3 +1,4 @@
+import { uiText } from "@cafecode/shared/i18n";
 import type { Menu as MenuPrimitive } from "@base-ui/react/menu";
 import type { ContextMenuItem } from "@cafecode/contracts";
 import {
@@ -272,7 +273,7 @@ export function showContextMenu<T extends string>(
         <MenuTrigger id={triggerId} hidden tabIndex={-1} aria-hidden="true" />
         <MenuPopup
           ref={registerPopup}
-          aria-label="Actions"
+          aria-label={uiText("Actions")}
           className={panelClass}
           positionerClassName={positionerClass}
           anchor={anchor}

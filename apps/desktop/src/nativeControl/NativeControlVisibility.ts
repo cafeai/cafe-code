@@ -1,3 +1,4 @@
+import { uiText, subscribeUiLocale } from "@cafecode/shared/i18n";
 import { BrowserWindow, Menu, nativeImage, Tray } from "electron";
 import type { NativeControlActivity } from "@cafecode/contracts";
 import * as IpcChannels from "../ipc/channels.ts";
@@ -6,14 +7,14 @@ import { markAuxiliaryWindow, isLiveMainCandidate } from "../electron/ElectronWi
 
 export function activityLabel(activity: NativeControlActivity): string {
   if (activity.phase === "controlling" && activity.usingSystemPointer)
-    return "Using the real mouse";
+    return uiText("Using the real mouse");
   return {
-    inactive: "Computer use off",
-    idle: "Computer use active · idle",
-    "reading-controls": "Reading window controls",
-    capturing: "Taking a screenshot",
-    controlling: "Controlling",
-    stopping: "Stopping computer use…",
+    inactive: uiText("Computer use off"),
+    idle: uiText("Computer use active · idle"),
+    "reading-controls": uiText("Reading window controls"),
+    capturing: uiText("Taking a screenshot"),
+    controlling: uiText("Controlling"),
+    stopping: uiText("Stopping computer use…"),
   }[activity.phase];
 }
 const providerLabel = (activity: NativeControlActivity) =>
@@ -21,7 +22,7 @@ const providerLabel = (activity: NativeControlActivity) =>
     ? "Codex"
     : activity.provider === "claudeAgent"
       ? "Claude"
-      : "Cafe preview";
+      : uiText("Cafe preview");
 const document = `<!doctype html><html><head><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'none'"><title>Cafe computer-use indicator</title><style>
 html,body{margin:0;width:100%;height:100%;overflow:hidden;background:transparent;font:12px -apple-system,BlinkMacSystemFont,sans-serif;box-sizing:border-box}body{border:3px solid #5b52e8;border-radius:8px}#badge{position:absolute;top:3px;right:3px;max-width:calc(100% - 24px);box-sizing:border-box;padding:5px 9px;background:#24202f;color:white;border-radius:0 0 0 7px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;letter-spacing:.1px}@media(prefers-reduced-transparency:reduce){#badge{background:#24202f}}@media(prefers-contrast:more){body{border-color:#ad9eff}#badge{outline:1px solid white}}
 </style></head><body><div id="badge" role="status"></div></body></html>`;
@@ -37,6 +38,7 @@ export class NativeControlIndicators implements Visibility {
   private timer: ReturnType<typeof setTimeout> | undefined;
   private queue: Promise<void> = Promise.resolve();
   private disposed = false;
+  private readonly unsubscribeLocale: () => void;
   private readonly actions: {
     stop: (episode: string) => Promise<void>;
     refresh: (episode: string) => Promise<void>;
@@ -44,6 +46,13 @@ export class NativeControlIndicators implements Visibility {
   };
   constructor(actions: NativeControlIndicators["actions"]) {
     this.actions = actions;
+    this.unsubscribeLocale = subscribeUiLocale(() => {
+      const activity = this.current;
+      if (!activity?.episode || this.disposed) return;
+      const job = this.queue.catch(() => {}).then(() => this.apply(activity));
+      this.queue = job;
+      void job.catch(() => this.failed(activity.episode));
+    });
   }
   update(activity: NativeControlActivity): Promise<void> {
     if (this.disposed) return Promise.reject(new Error("Indicators are unavailable"));
@@ -81,13 +90,15 @@ export class NativeControlIndicators implements Visibility {
     const provider = providerLabel(activity);
     const label = activityLabel(activity);
     const target = activity.target
-      ? `${activity.target.app} · ${activity.target.title}`
-      : "Selecting target";
+      ? uiText("{app} · {title}", { app: activity.target.app, title: activity.target.title })
+      : uiText("Selecting target");
     const episode = activity.episode!;
-    this.tray.setToolTip(`${provider} · ${label}\n${target}`);
+    this.tray.setToolTip(
+      uiText("{provider} · {activity}\n{target}", { provider, activity: label, target }),
+    );
     this.tray.setContextMenu(
       Menu.buildFromTemplate([
-        { label: `${provider} · ${label}`, enabled: false },
+        { label: uiText("{provider} · {activity}", { provider, activity: label }), enabled: false },
         { label: target, enabled: false },
         ...((activity.target?.scope === "window" || activity.target?.scope === "browser") &&
         activity.target.visible === false
@@ -95,8 +106,8 @@ export class NativeControlIndicators implements Visibility {
               {
                 label:
                   activity.target.visibilityReason === "occluded"
-                    ? "Target outline hidden behind overlapping windows"
-                    : "Target window is off screen",
+                    ? uiText("Target outline hidden behind overlapping windows")
+                    : uiText("Target window is off screen"),
                 enabled: false,
               },
             ]
@@ -104,17 +115,22 @@ export class NativeControlIndicators implements Visibility {
         {
           label:
             activity.provider === "human"
-              ? "Local permission preview; images stay in Cafe."
-              : `Window images and controls can be supplied to the selected ${provider} provider.`,
+              ? uiText("Local permission preview; images stay in Cafe.")
+              : uiText(
+                  "Window images and controls can be supplied to the selected {provider} provider.",
+                  { provider },
+                ),
           enabled: false,
         },
         {
-          label: `Provider binding: ${activity.providerInstanceId?.slice(0, 80) ?? "Local preview"}`,
+          label: uiText("Provider binding: {binding}", {
+            binding: activity.providerInstanceId?.slice(0, 80) ?? uiText("Local preview"),
+          }),
           enabled: false,
         },
         { type: "separator" },
         {
-          label: "Background input only",
+          label: uiText("Background input only"),
           type: "checkbox",
           checked: activity.inputPolicy === "background-only",
           enabled: activity.phase !== "stopping",
@@ -129,12 +145,12 @@ export class NativeControlIndicators implements Visibility {
           },
         },
         {
-          label: "Return to owning chat",
+          label: uiText("Return to owning chat"),
           enabled: activity.provider !== "human",
           click: () => this.openChat(activity),
         },
         {
-          label: "Stop computer use",
+          label: uiText("Stop computer use"),
           enabled: activity.phase !== "stopping",
           click: () => {
             void this.actions.stop(episode).catch(() => this.failed(episode));
@@ -191,13 +207,12 @@ export class NativeControlIndicators implements Visibility {
     const border = this.border;
     if (!border || border.isDestroyed() || border.webContents.isDestroyed())
       throw new Error("Window indicator lost");
-    const scope =
+    const badge =
       activity.target?.scope === "display"
-        ? " · whole main display"
+        ? uiText("{provider} · {activity} · whole main display", { provider, activity: label })
         : activity.target?.scope === "browser"
-          ? " · connected tab"
-          : "";
-    const badge = `${provider} · ${label}${scope}`;
+          ? uiText("{provider} · {activity} · connected tab", { provider, activity: label })
+          : uiText("{provider} · {activity}", { provider, activity: label });
     await border.webContents.executeJavaScript(
       `document.getElementById("badge").textContent=${JSON.stringify(badge)};document.body.setAttribute("aria-label",${JSON.stringify(`${badge} · ${target}`)});`,
       false,
@@ -291,6 +306,7 @@ export class NativeControlIndicators implements Visibility {
   }
   async close(): Promise<void> {
     this.disposed = true;
+    this.unsubscribeLocale();
     this.retire();
     await this.queue.catch(() => {});
   }

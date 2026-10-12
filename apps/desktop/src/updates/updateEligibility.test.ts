@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   getAutoUpdateDisabledReason,
+  autoUpdateDisabledReasonForUi,
   resolveUnsignedDesktopUpdateInstallMode,
   type DesktopUpdateEligibilityInput,
 } from "./updateEligibility.ts";
@@ -15,6 +16,20 @@ const eligibleInput: DesktopUpdateEligibilityInput = {
 };
 
 describe("desktop update eligibility", () => {
+  it("keeps finite disabled-reason presentation English and unknown evidence unchanged", () => {
+    for (const input of [
+      { ...eligibleInput, hasUpdateFeedConfig: false },
+      { ...eligibleInput, isDevelopment: true },
+      { ...eligibleInput, disabledByEnv: true },
+      { ...eligibleInput, platform: "linux" as const },
+    ]) {
+      const canonical = getAutoUpdateDisabledReason(input)!;
+      expect(autoUpdateDisabledReasonForUi(canonical)).toBe(canonical);
+    }
+    expect(autoUpdateDisabledReasonForUi("Received provider detail {value}")).toBe(
+      "Received provider detail {value}",
+    );
+  });
   it("enables packaged Windows, macOS, and AppImage builds with a feed", () => {
     expect(getAutoUpdateDisabledReason(eligibleInput)).toBeNull();
     expect(getAutoUpdateDisabledReason({ ...eligibleInput, platform: "darwin" })).toBeNull();

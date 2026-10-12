@@ -285,6 +285,69 @@ it("edits a scoped account concurrency default without changing runtime config o
   expect(fixture.onRestartRuntime).not.toHaveBeenCalled();
 });
 
+it("validates and clears the Codex account context default without runtime writes or restart", async () => {
+  const fixture = cardFixture("minimal", true);
+  const instance = { ...fixture.instance, config: { maxConcurrentSubagents: 6 } };
+  const card = (current: ProviderInstanceConfig) => (
+    <TooltipProvider>
+      <ProviderInstanceCard
+        instanceId={fixture.instanceId}
+        instance={current}
+        driverOption={DRIVER_OPTION_BY_VALUE[fixture.instance.driver]}
+        liveProvider={fixture.provider}
+        isSettingsOpen
+        onSettingsOpenChange={fixture.onSettingsOpenChange}
+        isDefaultProvider={false}
+        onSetDefaultProvider={fixture.onSetDefaultProvider}
+        onUpdate={fixture.onUpdate}
+        onRestartRuntime={fixture.onRestartRuntime}
+        hiddenModels={[]}
+        favoriteModels={[]}
+        modelOrder={[]}
+        onHiddenModelsChange={vi.fn()}
+        onFavoriteModelsChange={vi.fn()}
+        onModelOrderChange={vi.fn()}
+      />
+    </TooltipProvider>
+  );
+  mounted = await render(card(instance));
+  const input = page.getByRole("spinbutton", {
+    name: "Default context window (tokens)",
+    exact: true,
+  });
+  const blur = () =>
+    page.getByRole("heading", { name: `${fixture.displayName} settings`, exact: true }).click();
+  await input.fill("500000");
+  await blur();
+  expect(fixture.onUpdate).toHaveBeenLastCalledWith(
+    expect.objectContaining({
+      defaultCodexContextWindowOverride: 500_000,
+      config: { maxConcurrentSubagents: 6 },
+    }),
+  );
+  await mounted.rerender(card({ ...instance, defaultCodexContextWindowOverride: 500_000 }));
+  fixture.onUpdate.mockClear();
+  for (const value of ["0", "1.5", "9007199254740992"]) {
+    await input.fill(value);
+    await blur();
+    expect(fixture.onUpdate).not.toHaveBeenCalled();
+    await expect
+      .element(page.getByRole("alert"))
+      .toHaveTextContent("Enter a positive whole token count within the supported numeric range.");
+    await expect.element(input).toHaveAttribute("aria-invalid", "true");
+  }
+  await input.fill("");
+  await blur();
+  expect(fixture.onUpdate).toHaveBeenLastCalledWith(
+    expect.not.objectContaining({
+      defaultCodexContextWindowOverride: expect.anything(),
+    }),
+  );
+  await expect.element(page.getByRole("alert")).not.toBeInTheDocument();
+  expect(fixture.onRestartRuntime).not.toHaveBeenCalled();
+  expect(api.ensureLocalApi).not.toHaveBeenCalled();
+});
+
 it("keeps runtime settings in a collapsed Advanced section with the reload warning", async () => {
   const fixture = cardFixture("minimal", true);
   const instance = {

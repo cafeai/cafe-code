@@ -1,10 +1,13 @@
 # Per-chat subagent concurrency
 
 Status: Accepted design; implemented with synthetic regression coverage
-Last updated: 2026-10-10 17:30:23 JST (UTC+0900)
+Last updated: 2026-10-11 10:54:53 JST (UTC+0900)
 Partially superseded by: [Live account subagent-default inheritance](live-account-subagent-default.md)
 for new-chat-only seeding, account fallback resolution and saved-only label presentation. The accepted history
 below is retained; requested/materialized evidence and safety rules remain in force.
+Also partially superseded by: [Existing-runtime policy continuation](existing-runtime-subagent-policy-continuation.md)
+only for an authenticated, exact-process, no-recovery follow-up retaining the same
+known numeric policy. Fresh configuration and replacement qualification remain strict.
 
 ## Context and authority
 

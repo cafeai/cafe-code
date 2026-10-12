@@ -4,6 +4,22 @@
   "license": "AGPL-3.0-or-later",
   "type": "module",
   "exports": {
+    "./providerDiagnostic": {
+      "types": "./src/providerDiagnostic.ts",
+      "import": "./src/providerDiagnostic.ts"
+    },
+    "./i18n": {
+      "types": "./src/i18n.ts",
+      "import": "./src/i18n.ts"
+    },
+    "./desktopStartupDocument": {
+      "types": "./src/desktopStartupDocument.ts",
+      "import": "./src/desktopStartupDocument.ts"
+    },
+    "./backendStartupProgress": {
+      "types": "./src/backendStartupProgress.ts",
+      "import": "./src/backendStartupProgress.ts"
+    },
     "./liveWork": {
       "types": "./src/liveWork.ts",
       "import": "./src/liveWork.ts"
@@ -199,7 +215,8 @@
   },
   "dependencies": {
     "@cafecode/contracts": "workspace:*",
-    "effect": "catalog:"
+    "effect": "catalog:",
+    "intl-messageformat": "12.1.3"
   },
   "devDependencies": {
     "@effect/language-service": "catalog:",

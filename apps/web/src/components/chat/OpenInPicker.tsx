@@ -1,3 +1,5 @@
+import { useUiLocale, useUiPresentation } from "~/i18n";
+import { uiText } from "@cafecode/shared/i18n";
 import {
   EditorId,
   type EnvironmentId,
@@ -27,8 +29,8 @@ export function openProjectInEditor(cwd: string, editor: EditorId) {
     ?.shell.openInEditor(cwd, editor)
     .catch((error: unknown) => {
       toastManager.add({
-        title: "Unable to open project",
-        description: openFailureMessage(error, "The project was not opened."),
+        title: uiText("Unable to open project"),
+        description: openFailureMessage(error, uiText("The project was not opened.")),
         type: "error",
       });
     });
@@ -40,8 +42,8 @@ export function openProjectInTerminal(cwd: string, terminal: TerminalAvailabilit
     ?.shell.openTerminal(cwd)
     .catch((error: unknown) => {
       toastManager.add({
-        title: `Unable to open ${terminal.label}`,
-        description: openFailureMessage(error, "The terminal was not opened."),
+        title: uiText("Unable to open {value0}", { value0: terminal.label }),
+        description: openFailureMessage(error, uiText("The terminal was not opened.")),
         type: "error",
       });
     });
@@ -62,16 +64,24 @@ export const OpenInPicker = memo(function OpenInPicker({
   openInCwd: string | null;
   shortcutOnly?: boolean;
 }) {
+  const uiLocale = useUiLocale();
+  const uiPresentation = useUiPresentation(UI_PRESENTATION_SOURCES);
+
   const pane = useChatPane();
   const primary = usePrimaryEnvironmentId();
   const remote = Boolean(environmentId && environmentId !== primary);
   const [preferredEditor, setPreferredEditor] = usePreferredEditor(availableEditors);
   const options = useMemo(
-    () => resolveEditorOpenOptions(navigator.platform, availableEditors),
-    [availableEditors],
+    () => uiPresentation.resolveEditorOpenOptions(navigator.platform, availableEditors),
+    [availableEditors, uiPresentation],
   );
   const primaryOption = options.find(({ value }) => value === preferredEditor) ?? null;
-  const terminalMenuLabel = `Open ${terminal.label} Here`;
+  const terminalMenuLabel = uiText(
+    "Open {value0} Here",
+    { value0: terminal.label },
+    undefined,
+    uiLocale,
+  );
 
   const openInEditor = useCallback(
     (editorId: EditorId | null) => {
@@ -92,8 +102,8 @@ export const OpenInPicker = memo(function OpenInPicker({
   }, [remote, openInCwd, terminal]);
 
   const openFavoriteEditorShortcutLabel = useMemo(
-    () => shortcutLabelForCommand(keybindings, "editor.openFavorite"),
-    [keybindings],
+    () => uiPresentation.shortcutLabelForCommand(keybindings, "editor.openFavorite"),
+    [keybindings, uiPresentation],
   );
 
   useEffect(() => {
@@ -113,7 +123,7 @@ export const OpenInPicker = memo(function OpenInPicker({
 
   if (remote || shortcutOnly) return null;
   return (
-    <Group aria-label="Subscription actions">
+    <Group aria-label={uiText("Subscription actions", undefined, undefined, uiLocale)}>
       <Button
         size="xs"
         variant="outline"
@@ -122,16 +132,28 @@ export const OpenInPicker = memo(function OpenInPicker({
       >
         {primaryOption?.Icon && <primaryOption.Icon aria-hidden="true" className="size-3.5" />}
         <span className="sr-only @3xl/header-actions:not-sr-only @3xl/header-actions:ml-0.5">
-          Open
+          {uiText("Open", undefined, undefined, uiLocale)}
         </span>
       </Button>
       <GroupSeparator className="hidden @3xl/header-actions:block" />
       <Menu>
-        <MenuTrigger render={<Button aria-label="Copy options" size="icon-xs" variant="outline" />}>
+        <MenuTrigger
+          render={
+            <Button
+              aria-label={uiText("Copy options", undefined, undefined, uiLocale)}
+              size="icon-xs"
+              variant="outline"
+            />
+          }
+        >
           <ChevronDownIcon aria-hidden="true" className="size-4" />
         </MenuTrigger>
         <MenuPopup align="end">
-          {options.length === 0 && <MenuItem disabled>No installed editors found</MenuItem>}
+          {options.length === 0 && (
+            <MenuItem disabled>
+              {uiText("No installed editors found", undefined, undefined, uiLocale)}
+            </MenuItem>
+          )}
           {options.map(({ label, Icon, value }) => (
             <MenuItem key={value} onClick={() => openInEditor(value)}>
               <Icon aria-hidden="true" className="text-muted-foreground" />
@@ -147,7 +169,7 @@ export const OpenInPicker = memo(function OpenInPicker({
             onClick={openTerminal}
             title={
               !openInCwd
-                ? "No workspace directory is available."
+                ? uiText("No workspace directory is available.", undefined, undefined, uiLocale)
                 : !terminal.available
                   ? terminal.unavailableReason
                   : undefined
@@ -166,3 +188,6 @@ export const OpenInPicker = memo(function OpenInPicker({
     </Group>
   );
 });
+
+// Finite source-owned labels/helpers only; no received or user data.
+const UI_PRESENTATION_SOURCES = { resolveEditorOpenOptions, shortcutLabelForCommand };

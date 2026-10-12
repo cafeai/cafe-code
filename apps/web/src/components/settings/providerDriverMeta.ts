@@ -1,3 +1,4 @@
+import { uiText } from "@cafecode/shared/i18n";
 import {
   ClaudeSettings,
   CodexSettings,
@@ -51,7 +52,9 @@ export const PROVIDER_CLIENT_DEFINITIONS: readonly ProviderClientDefinition[] = 
     label: "Grok Build",
     icon: GrokIcon,
     settingsSchema: GrokSettings,
-    badgeLabel: "Early Access",
+    get badgeLabel() {
+      return uiText("Early Access");
+    },
   },
   {
     value: ProviderDriverKind.make("opencode"),

@@ -32,11 +32,13 @@ Supported formats are PNG, JPEG, GIF and WebP, identified from their bytes. Limi
 
 ## Publication, ownership and delivery
 
+Migration 96 preserves image tables and ownership created by the former local migration 93. It also installs the idempotent upstream recovery index if that local ledger entry caused upstream migration 93 to be skipped; existing ledger entries remain unchanged.
+
 The independently subscribed publication worker handles completed assistant-message events with a dropping 64-entry queue. It does not parse Markdown, read files or write image bytes on the provider token ingestion path. A viewer's manifest request can also materialize an exact saved, completed assistant message in a Codex/Claude chat, covering historical replies and worker/arrival races. Other providers remain excluded. No caller can supply an arbitrary path to import: import sources come exclusively from parser-admitted image nodes in that saved message.
 
 The server admits regular files only below the chat's worktree/project root and explicit additional workspace roots. Standalone chats use the existing identity-verified owned directory. Leaf and parent symlinks below the admitted root are rejected. Source reads are bounded and check held-file identity, size and modification timestamps plus parent namespace identity before and after reading. Platform-specific traversal qualification is recorded in AGENTS.md.
 
-Migration 93 stores bounded raster bytes in `chat_image_assets`, deduplicated by SHA-256, and exact `(thread, message, source)` ownership in `chat_message_images`. Bytes and ownership commit together, avoiding a split filesystem/database publication and orphan-file cleanup. This deliberately adds bounded binary storage to Cafe's private SQLite database; no base64 or image bytes enter message projections, WebSocket snapshots or provider event journals. Large files remain unsupported. Publication rechecks the unchanged completed message and deletion tombstone after file I/O.
+Migration 96 stores bounded raster bytes in `chat_image_assets`, deduplicated by SHA-256, and exact `(thread, message, source)` ownership in `chat_message_images`. Bytes and ownership commit together, avoiding a split filesystem/database publication and orphan-file cleanup. This deliberately adds bounded binary storage to Cafe's private SQLite database; no base64 or image bytes enter message projections, WebSocket snapshots or provider event journals. Large files remain unsupported. Publication rechecks the unchanged completed message and deletion tombstone after file I/O.
 
 Each message's reference is immutable. Reusing a filename in a later reply saves that later file's bytes without changing earlier replies. Published images survive source deletion and backend restart. Fork/duplicate projection copies the image binding to the copied message identity; rewind/message deletion and hard deletion release ownership, and the final reference releases the shared bytes. Images already published do not require the original workspace to remain available.
 
@@ -46,7 +48,7 @@ The renderer uses the selected environment's `fileRequest` transport: primary co
 
 ## Claude prompt lifecycle
 
-Cafe uses the pinned `@anthropic-ai/claude-agent-sdk` 0.3.288's supported preset append:
+Cafe uses the pinned `@anthropic-ai/claude-agent-sdk` 0.3.295's supported preset append:
 
 ```ts
 systemPrompt: {

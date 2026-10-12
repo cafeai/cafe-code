@@ -1,3 +1,4 @@
+import { uiText } from "@cafecode/shared/i18n";
 import type {
   ServerRuntimeLayerDiagnosticsError,
   ServerRuntimeLayerDiagnosticsResult,
@@ -8,6 +9,22 @@ import type {
 
 /** Sentence-case label for a runtime layer or diagnostic source id ("provider-daemon" → "Provider daemon"). */
 export function formatRuntimeLayerRole(role: string): string {
+  switch (role) {
+    case "desktop":
+      return uiText("Desktop");
+    case "backend":
+      return uiText("Backend");
+    case "orchestrator":
+      return uiText("Orchestrator");
+    case "provider-daemon":
+      return uiText("Provider daemon");
+    case "provider-supervisor":
+      return uiText("Provider supervisor");
+    case "client":
+      return uiText("Client");
+    case "provider-runtime-ingestion":
+      return uiText("Provider runtime ingestion");
+  }
   const words = role.split("-").join(" ");
   return words.length === 0 ? words : `${words[0]?.toUpperCase() ?? ""}${words.slice(1)}`;
 }
@@ -16,15 +33,15 @@ export function formatRuntimeLayerRole(role: string): string {
 export function formatRuntimeLayerStatus(status: ServerRuntimeLayerStatus): string {
   switch (status) {
     case "online":
-      return "Online";
+      return uiText("Online");
     case "degraded":
-      return "Degraded";
+      return uiText("Degraded");
     case "offline":
-      return "Offline";
+      return uiText("Offline");
     case "unknown":
-      return "Unknown";
+      return uiText("Unknown");
     case "not-configured":
-      return "Not configured";
+      return uiText("Not configured");
   }
 }
 
@@ -98,7 +115,15 @@ export function visibleRuntimeErrors(
   if (providerRuntimeIngestion && providerRuntimeIngestion.status !== "online") {
     errors.push({
       source: "provider-runtime-ingestion",
-      message: `Backend ingestion is ${providerRuntimeIngestion.lag} provider daemon events behind; chats may lag provider output.`,
+      message: uiText(
+        "Backend ingestion is {count, plural, one {{displayCount} provider daemon event} other {{displayCount} provider daemon events}} behind; chats may lag provider output.",
+        {
+          count: providerRuntimeIngestion.lag,
+          // Preserve the existing ungrouped diagnostic count. The separate
+          // numeric value controls plural grammar, not its display spelling.
+          displayCount: String(providerRuntimeIngestion.lag),
+        },
+      ),
     });
   }
   return errors;

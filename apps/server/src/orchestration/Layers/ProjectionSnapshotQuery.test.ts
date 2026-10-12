@@ -4665,6 +4665,149 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
       }),
   );
 
+  it.effect("retains one indexed exact-owned recovery observation beyond the tail", () =>
+    Effect.gen(function* () {
+      const sql = yield* SqlClient.SqlClient;
+      const snapshotQuery = yield* ProjectionSnapshotQuery;
+      const threadId = ThreadId.make("thread-recovery-presentation-cap");
+      yield* sql`
+        INSERT INTO projection_projects (
+          project_id, title, workspace_root, default_model_selection_json,
+          scripts_json, created_at, updated_at, deleted_at
+        ) VALUES ('project-recovery-cap', 'Recovery fixture', '/tmp/inert-recovery-fixture',
+          NULL, '[]', '2026-10-10T00:00:00.000Z', '2026-10-10T00:00:00.000Z', NULL)
+      `;
+      yield* sql`
+        INSERT INTO projection_threads (
+          thread_id, project_id, title, model_selection_json, runtime_mode, interaction_mode,
+          branch, worktree_path, latest_turn_id, latest_user_message_at,
+          pending_approval_count, pending_user_input_count, has_actionable_proposed_plan,
+          created_at, updated_at, deleted_at
+        ) VALUES (${threadId}, 'project-recovery-cap', 'Failed root with live children',
+          '{"instanceId":"exact-account","model":"gpt-6.1-sol"}', 'full-access', 'default',
+          NULL, NULL, 'failed-recovery-root', NULL, 0, 0, 0,
+          '2026-10-10T00:00:00.000Z', '2026-10-10T00:00:01.000Z', NULL)
+      `;
+      yield* sql`
+        INSERT INTO projection_thread_sessions (
+          thread_id, status, provider_name, provider_instance_id, subagent_runtime_id,
+          runtime_mode, active_turn_id, last_error, updated_at
+        ) VALUES (${threadId}, 'ready', 'codex', 'exact-account', '123e4567-e89b-42d3-a456-426614174001',
+          'full-access', NULL, NULL, '2026-10-10T00:00:01.000Z')
+      `;
+      const owner = {
+        providerInstanceId: "exact-account",
+        subagentRuntimeId: "123e4567-e89b-42d3-a456-426614174001",
+        sessionUpdatedAt: "2026-10-10T00:00:01.000Z",
+      };
+      const insertMarker = (
+        id: string,
+        sequence: number,
+        payload: unknown,
+        turnId = "failed-recovery-root",
+      ) => sql`
+        INSERT INTO projection_thread_activities (
+          activity_id, thread_id, turn_id, tone, kind, summary, payload_json, sequence, created_at
+        ) VALUES (${id}, ${threadId}, ${turnId}, 'info', 'runtime.warning', 'Recovery',
+          ${JSON.stringify(payload)}, ${sequence}, '2026-10-10T00:00:02.000Z')`;
+      yield* insertMarker("recovery-foreign-account", 50, {
+        ...owner,
+        providerInstanceId: "foreign",
+        recovery: "codex-transient-recovery-waiting",
+      });
+      yield* insertMarker("recovery-foreign-runtime", 51, {
+        ...owner,
+        subagentRuntimeId: "foreign",
+        recovery: "codex-transient-recovery-waiting",
+      });
+      yield* insertMarker("recovery-stale-owner", 52, {
+        ...owner,
+        sessionUpdatedAt: "2026-10-09T00:00:01.000Z",
+        recovery: "codex-transient-recovery-waiting",
+      });
+      yield* insertMarker(
+        "recovery-old-turn",
+        53,
+        { ...owner, recovery: "codex-transient-recovery-waiting" },
+        "old-recovery-root",
+      );
+      yield* sql`
+        WITH RECURSIVE numbers(index_value) AS (
+          SELECT 1 UNION ALL SELECT index_value + 1 FROM numbers
+          WHERE index_value < ${THREAD_DETAIL_ACTIVITY_LIMIT + 100}
+        ) INSERT INTO projection_thread_activities (
+          activity_id, thread_id, turn_id, tone, kind, summary, payload_json, sequence, created_at
+        ) SELECT printf('recovery-tail-%04d', index_value), ${threadId}, 'failed-recovery-root',
+          'tool', 'tool.completed', 'Child activity', '{}', index_value + 100,
+          '2026-10-10T00:00:03.000Z' FROM numbers
+      `;
+      const captured = captureThreadActivityStatements(sql);
+      const repositoryIdentityResolver = yield* RepositoryIdentityResolver;
+      const capturedLayer = Layer.fresh(OrchestrationProjectionSnapshotQueryLive).pipe(
+        Layer.provide(
+          Layer.mergeAll(
+            Layer.succeed(SqlClient.SqlClient, captured.sql),
+            Layer.succeed(RepositoryIdentityResolver, repositoryIdentityResolver),
+          ),
+        ),
+      );
+      const readCaptured = () =>
+        Effect.gen(function* () {
+          const query = yield* ProjectionSnapshotQuery;
+          return yield* query.getThreadDetailById(threadId);
+        }).pipe(Effect.provide(capturedLayer));
+      for (const [index, recovery] of [
+        "codex-transient-recovery-waiting",
+        "codex-transient-recovery-uncertain",
+        "codex-transient-recovery-cancelled",
+      ].entries()) {
+        const id = `recovery-current-${index}`;
+        yield* insertMarker(id, index + 1, {
+          ...owner,
+          recovery,
+          continuationOrdinal: 37,
+          retryAttempt: 30,
+          retryAt: "2026-10-10T00:00:47.000Z",
+          stage: "backoff",
+        });
+        for (let read = 0; read < 2; read += 1) {
+          const detail = yield* readCaptured();
+          assert.equal(detail._tag, "Some");
+          if (detail._tag === "Some") {
+            assert.equal(detail.value.activities.length, THREAD_DETAIL_ACTIVITY_LIMIT + 1);
+            assert.deepEqual(
+              detail.value.activities.filter((a) => a.kind === "runtime.warning").map((a) => a.id),
+              [id],
+            );
+          }
+        }
+      }
+      const statement = captured.statements.at(-1)!;
+      const plan = yield* sql.unsafe<{ readonly detail: string }>(
+        `EXPLAIN QUERY PLAN ${statement[0]}`,
+        statement[1],
+      );
+      const recoveryPlan = plan.filter((row) =>
+        row.detail.includes("idx_projection_recovery_presentation_owner_order"),
+      );
+      assert.equal(recoveryPlan.length, 1);
+      assert.match(recoveryPlan[0]!.detail, /^SEARCH /u);
+      // Changing the owner generation or latest turn cannot resurrect an old
+      // timer on a fresh subscription. Only the ordinary tail remains.
+      yield* sql`UPDATE projection_thread_sessions SET subagent_runtime_id = '123e4567-e89b-42d3-a456-426614174002' WHERE thread_id = ${threadId}`;
+      const replaced = yield* snapshotQuery.getThreadDetailById(threadId);
+      assert.equal(replaced._tag, "Some");
+      if (replaced._tag === "Some")
+        assert.equal(replaced.value.activities.length, THREAD_DETAIL_ACTIVITY_LIMIT);
+      yield* sql`UPDATE projection_thread_sessions SET subagent_runtime_id = '123e4567-e89b-42d3-a456-426614174001' WHERE thread_id = ${threadId}`;
+      yield* sql`UPDATE projection_threads SET latest_turn_id = 'new-root' WHERE thread_id = ${threadId}`;
+      const newTurn = yield* snapshotQuery.getThreadDetailById(threadId);
+      assert.equal(newTurn._tag, "Some");
+      if (newTurn._tag === "Some")
+        assert.equal(newTurn.value.activities.length, THREAD_DETAIL_ACTIVITY_LIMIT);
+    }),
+  );
+
   it.effect("retains task-plan and current-turn subagent state beyond the activity tail cap", () =>
     Effect.gen(function* () {
       const snapshotQuery = yield* ProjectionSnapshotQuery;

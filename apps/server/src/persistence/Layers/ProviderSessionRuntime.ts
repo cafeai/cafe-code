@@ -14,6 +14,7 @@ import * as Schema from "effect/Schema";
 import * as Struct from "effect/Struct";
 import { makeConversationRewindStore } from "./ConversationRewinds.ts";
 import { makeTaskControlJournal } from "../TaskControlJournal.ts";
+import { normalizeClaudeSubagentHistoryRoot } from "../../provider/claudeSubagentHistoryRoot.ts";
 
 import {
   PersistenceDecodeError,
@@ -85,6 +86,11 @@ const GetSubagentHistoryBindingRequestSchema = Schema.Struct({
   turnId: TurnId,
   subagentId: Schema.String,
   historyId: Schema.String,
+});
+
+const GetSubagentHistoryRootRequestSchema = Schema.Struct({
+  threadId: ThreadId,
+  turnId: TurnId,
 });
 
 /** Child identity rows are small; cap them independently from private roots. */
@@ -242,6 +248,26 @@ const makeProviderSessionRuntimeRepository = Effect.gen(function* () {
           cwd,
           created_at AS "createdAt",
           updated_at AS "updatedAt"
+      `,
+  });
+
+  const getSubagentHistoryRootRow = SqlSchema.findOneOption({
+    Request: GetSubagentHistoryRootRequestSchema,
+    Result: ProviderSubagentHistoryRootDbRowSchema,
+    execute: ({ threadId, turnId }) =>
+      sql`
+        SELECT
+          thread_id AS "threadId",
+          turn_id AS "turnId",
+          provider_name AS "providerName",
+          provider_instance_id AS "providerInstanceId",
+          resume_cursor_json AS "resumeCursor",
+          cwd,
+          created_at AS "createdAt",
+          updated_at AS "updatedAt"
+        FROM provider_subagent_history_roots
+        WHERE thread_id = ${threadId}
+          AND turn_id = ${turnId}
       `,
   });
 
@@ -468,12 +494,16 @@ const makeProviderSessionRuntimeRepository = Effect.gen(function* () {
 
   const upsertSubagentHistoryBinding: ProviderSessionRuntimeRepositoryShape["upsertSubagentHistoryBinding"] =
     (binding) => {
+      const claudeHistoryRoot =
+        binding.providerName === "claudeAgent"
+          ? normalizeClaudeSubagentHistoryRoot(binding.resumeCursor)
+          : undefined;
       const root = {
         threadId: binding.threadId,
         turnId: binding.turnId,
         providerName: binding.providerName,
         providerInstanceId: binding.providerInstanceId,
-        resumeCursor: binding.resumeCursor,
+        resumeCursor: claudeHistoryRoot ?? binding.resumeCursor,
         cwd: binding.cwd,
         createdAt: binding.createdAt,
         updatedAt: binding.updatedAt,
@@ -494,6 +524,32 @@ const makeProviderSessionRuntimeRepository = Effect.gen(function* () {
       return sql
         .withTransaction(
           Effect.gen(function* () {
+            if (claudeHistoryRoot !== undefined) {
+              const previous = Option.getOrUndefined(
+                yield* getSubagentHistoryRootRow({
+                  threadId: binding.threadId,
+                  turnId: binding.turnId,
+                }).pipe(Effect.mapError(mapUpsertError)),
+              );
+              const previousClaudeRoot =
+                previous?.providerName === "claudeAgent"
+                  ? normalizeClaudeSubagentHistoryRoot(previous.resumeCursor)
+                  : undefined;
+              if (
+                previous !== undefined &&
+                previous.providerInstanceId === binding.providerInstanceId &&
+                previous.cwd === binding.cwd &&
+                previousClaudeRoot?.resume === claudeHistoryRoot.resume
+              ) {
+                // Older valid roots retained the whole resumable checkpoint.
+                // Its counter/maps may change without changing native history
+                // ownership. Preserve those exact stored bytes while allowing
+                // only the same verified UUID/account/cwd to add child tuples.
+                // Incomplete/null legacy roots never enter this equivalence
+                // branch; SQL's unchanged immutable predicate refuses upgrades.
+                root.resumeCursor = previous.resumeCursor;
+              }
+            }
             const persistedRoot = yield* upsertSubagentHistoryRootRow(root).pipe(
               Effect.mapError(mapUpsertError),
             );

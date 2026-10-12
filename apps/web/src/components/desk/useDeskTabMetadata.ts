@@ -1,3 +1,5 @@
+import { useUiLocale, useUiPresentation } from "~/i18n";
+import { uiText } from "@cafecode/shared/i18n";
 import { scopedThreadKey, scopeProjectRef } from "@cafecode/client-runtime";
 
 import { useComposerDraftStore } from "../../composerDraftStore";
@@ -16,7 +18,8 @@ function deriveMetadata(
   lastVisitedAt: string | undefined,
 ) {
   return {
-    title: thread?.title ?? (target.kind === "draft" ? "New chat" : "Unavailable chat"),
+    title:
+      thread?.title ?? (target.kind === "draft" ? uiText("New chat") : uiText("Unavailable chat")),
     projectName: projectName ?? null,
     // Match the Projects row's shell timestamp precedence, including immediately
     // after draft promotion. A missing shell can still use its local draft date.
@@ -82,6 +85,8 @@ export function readDeskTabOpenContext(target: ThreadRouteTarget) {
  * canonical server metadata; there is no separate tab-only title to diverge.
  */
 export function useDeskTabMetadata(target: ThreadRouteTarget) {
+  const uiPresentation = useUiPresentation(UI_PRESENTATION_SOURCES);
+
   const draft = useComposerDraftStore((state) =>
     target.kind === "draft" ? state.draftThreadsByThreadKey[target.draftId] : undefined,
   );
@@ -97,5 +102,8 @@ export function useDeskTabMetadata(target: ThreadRouteTarget) {
   const lastVisitedAt = useUiStateStore((state) =>
     threadRef ? state.threadLastVisitedAtById[scopedThreadKey(threadRef)] : undefined,
   );
-  return deriveMetadata(target, draft, thread, projectName, lastVisitedAt);
+  return uiPresentation.deriveMetadata(target, draft, thread, projectName, lastVisitedAt);
 }
+
+// Finite source-owned labels/helpers only; no received or user data.
+const UI_PRESENTATION_SOURCES = { deriveMetadata };

@@ -1,3 +1,5 @@
+import { useUiLocale, useUiPresentation } from "~/i18n";
+import { uiText } from "@cafecode/shared/i18n";
 import type { ProviderThreadGoal, ProviderThreadGoalStatus } from "@cafecode/contracts";
 import {
   CheckIcon,
@@ -52,17 +54,17 @@ export interface ThreadGoalSetPatch {
 export function threadGoalStatusLabel(status: ProviderThreadGoalStatus): string {
   switch (status) {
     case "active":
-      return "Active";
+      return uiText("Active");
     case "paused":
-      return "Paused";
+      return uiText("Paused");
     case "blocked":
-      return "Blocked";
+      return uiText("Blocked");
     case "usageLimited":
-      return "Usage limited";
+      return uiText("Usage limited");
     case "budgetLimited":
-      return "Budget reached";
+      return uiText("Budget reached");
     case "complete":
-      return "Complete";
+      return uiText("Complete");
   }
 }
 
@@ -90,17 +92,17 @@ function formatDuration(totalSeconds: number, compact: boolean): string {
   const minutes = Math.floor((seconds % 3_600) / 60);
   const remainingSeconds = seconds % 60;
   if (compact) {
-    if (days > 0) return `${days}d ${hours}h`;
-    if (hours > 0) return `${hours}h ${minutes}m`;
-    if (minutes > 0) return `${minutes}m`;
-    return "<1m";
+    if (days > 0) return uiText("{days}d {hours}h", { days, hours });
+    if (hours > 0) return uiText("{hours}h {minutes}m", { hours, minutes });
+    if (minutes > 0) return uiText("{minutes}m", { minutes });
+    return uiText("'<1m'");
   }
   const parts: string[] = [];
-  if (days > 0) parts.push(`${days}d`);
-  if (hours > 0) parts.push(`${hours}h`);
-  if (minutes > 0) parts.push(`${minutes}m`);
+  if (days > 0) parts.push(uiText("{days}d", { days }));
+  if (hours > 0) parts.push(uiText("{hours}h", { hours }));
+  if (minutes > 0) parts.push(uiText("{minutes}m", { minutes }));
   if (parts.length === 0 || (days === 0 && hours === 0)) {
-    parts.push(`${remainingSeconds}s`);
+    parts.push(uiText("{seconds}s", { seconds: remainingSeconds }));
   }
   return parts.join(" ");
 }
@@ -153,17 +155,20 @@ export const ThreadGoalFooterButton = memo(function ThreadGoalFooterButton(props
   readonly className?: string;
   readonly onClick: () => void;
 }) {
+  const uiLocale = useUiLocale();
+  const uiPresentation = useUiPresentation(UI_PRESENTATION_SOURCES);
+
   const nowMs = useGoalClock(props.goal?.status === "active" && props.isTurnRunning);
   const label = useMemo(() => {
     const goal = props.goal;
-    if (goal === null) return "Goal";
+    if (goal === null) return uiText("Goal", undefined, undefined, uiLocale);
     if (goal.status === "active" && goal.tokenBudget !== null) {
       return `${compactNumberFormatter.format(goal.tokensUsed)} / ${compactNumberFormatter.format(
         goal.tokenBudget,
       )}`;
     }
     if (goal.status === "active") {
-      return formatDuration(
+      return uiPresentation.formatDuration(
         effectiveGoalTimeSeconds({
           goal,
           activeTurnStartedAt: props.activeTurnStartedAt,
@@ -173,8 +178,8 @@ export const ThreadGoalFooterButton = memo(function ThreadGoalFooterButton(props
         true,
       );
     }
-    return threadGoalStatusLabel(goal.status);
-  }, [nowMs, props.activeTurnStartedAt, props.goal, props.isTurnRunning]);
+    return uiPresentation.threadGoalStatusLabel(goal.status);
+  }, [nowMs, props.activeTurnStartedAt, props.goal, props.isTurnRunning, uiLocale, uiPresentation]);
 
   return (
     <Button
@@ -185,8 +190,12 @@ export const ThreadGoalFooterButton = memo(function ThreadGoalFooterButton(props
         "shrink-0 px-2 text-muted-foreground hover:text-foreground sm:px-3",
         props.className,
       )}
-      aria-label={props.goal === null ? "Create goal" : "Open goal"}
-      title={props.goal?.objective ?? "Goal"}
+      aria-label={
+        props.goal === null
+          ? uiText("Create goal", undefined, undefined, uiLocale)
+          : uiText("Open goal", undefined, undefined, uiLocale)
+      }
+      title={props.goal?.objective ?? uiText("Goal", undefined, undefined, uiLocale)}
       onClick={props.onClick}
     >
       <TargetIcon />
@@ -208,6 +217,9 @@ export const ThreadGoalDialog = memo(function ThreadGoalDialog(props: {
   readonly onSetGoal: (patch: ThreadGoalSetPatch) => Promise<void>;
   readonly onClearGoal: () => Promise<void>;
 }) {
+  const uiLocale = useUiLocale();
+  const uiPresentation = useUiPresentation(UI_PRESENTATION_SOURCES);
+
   const [mode, setMode] = useState<ThreadGoalDialogMode>(props.mode);
   const [objective, setObjective] = useState(props.seedObjective ?? props.goal?.objective ?? "");
   const [tokenBudgetText, setTokenBudgetText] = useState(
@@ -254,13 +266,15 @@ export const ThreadGoalDialog = memo(function ThreadGoalDialog(props: {
         props.onOpenChange(false);
       } catch (cause) {
         setError(
-          cause instanceof Error ? cause.message : "The goal operation could not be queued.",
+          cause instanceof Error
+            ? cause.message
+            : uiText("The goal operation could not be queued.", undefined, undefined, uiLocale),
         );
       } finally {
         setPending(false);
       }
     },
-    [props],
+    [props, uiLocale],
   );
 
   const commitObjective = useCallback(() => {
@@ -306,17 +320,17 @@ export const ThreadGoalDialog = memo(function ThreadGoalDialog(props: {
           <DialogHeader>
             <DialogTitle>
               {props.goal === null
-                ? "Create goal"
+                ? uiText("Create goal", undefined, undefined, uiLocale)
                 : mode === "replace"
-                  ? "Replace goal"
+                  ? uiText("Replace goal", undefined, undefined, uiLocale)
                   : mode === "edit"
-                    ? "Edit goal"
-                    : "Goal"}
+                    ? uiText("Edit goal", undefined, undefined, uiLocale)
+                    : uiText("Goal", undefined, undefined, uiLocale)}
             </DialogTitle>
             {props.goal !== null && !isEditor ? (
               <DialogDescription className="flex items-center gap-2">
                 <Badge variant={goalStatusVariant(props.goal.status)}>
-                  {threadGoalStatusLabel(props.goal.status)}
+                  {uiPresentation.threadGoalStatusLabel(props.goal.status)}
                 </Badge>
               </DialogDescription>
             ) : null}
@@ -326,7 +340,9 @@ export const ThreadGoalDialog = memo(function ThreadGoalDialog(props: {
             {isEditor ? (
               <>
                 <label className="grid gap-1.5">
-                  <span className="font-medium text-sm">Objective</span>
+                  <span className="font-medium text-sm">
+                    {uiText("Objective", undefined, undefined, uiLocale)}
+                  </span>
                   <Textarea
                     autoFocus
                     value={objective}
@@ -346,14 +362,16 @@ export const ThreadGoalDialog = memo(function ThreadGoalDialog(props: {
                 </label>
 
                 <label className="grid gap-1.5">
-                  <span className="font-medium text-sm">Token budget</span>
+                  <span className="font-medium text-sm">
+                    {uiText("Token budget", undefined, undefined, uiLocale)}
+                  </span>
                   <Input
                     nativeInput
                     type="number"
                     min={1}
                     step={1}
                     inputMode="numeric"
-                    placeholder="No limit"
+                    placeholder={uiText("No limit", undefined, undefined, uiLocale)}
                     value={tokenBudgetText}
                     aria-invalid={!budgetIsValid ? "true" : undefined}
                     onChange={(event) => setTokenBudgetText(event.currentTarget.value)}
@@ -364,14 +382,20 @@ export const ThreadGoalDialog = memo(function ThreadGoalDialog(props: {
               <>
                 <p className="whitespace-pre-wrap text-sm leading-6">{props.goal.objective}</p>
                 <dl className="grid grid-cols-[auto_1fr] gap-x-5 gap-y-2 border-t border-border-subtle pt-4 text-sm">
-                  <dt className="text-muted-foreground">Time</dt>
-                  <dd>{formatDuration(effectiveTime, false)}</dd>
-                  <dt className="text-muted-foreground">Tokens</dt>
+                  <dt className="text-muted-foreground">
+                    {uiText("Time", undefined, undefined, uiLocale)}
+                  </dt>
+                  <dd>{uiPresentation.formatDuration(effectiveTime, false)}</dd>
+                  <dt className="text-muted-foreground">
+                    {uiText("Tokens", undefined, undefined, uiLocale)}
+                  </dt>
                   <dd>{numberFormatter.format(props.goal.tokensUsed)}</dd>
-                  <dt className="text-muted-foreground">Budget</dt>
+                  <dt className="text-muted-foreground">
+                    {uiText("Budget", undefined, undefined, uiLocale)}
+                  </dt>
                   <dd>
                     {props.goal.tokenBudget === null
-                      ? "No limit"
+                      ? uiText("No limit", undefined, undefined, uiLocale)
                       : numberFormatter.format(props.goal.tokenBudget)}
                   </dd>
                 </dl>
@@ -385,7 +409,7 @@ export const ThreadGoalDialog = memo(function ThreadGoalDialog(props: {
               <>
                 {props.goal !== null ? (
                   <Button variant="outline" disabled={pending} onClick={() => setMode("summary")}>
-                    Cancel
+                    {uiText("Cancel", undefined, undefined, uiLocale)}
                   </Button>
                 ) : null}
                 <Button
@@ -393,7 +417,9 @@ export const ThreadGoalDialog = memo(function ThreadGoalDialog(props: {
                   onClick={requestObjectiveCommit}
                 >
                   <CheckIcon />
-                  {pending ? "Saving" : "Save"}
+                  {pending
+                    ? uiText("Saving", undefined, undefined, uiLocale)
+                    : uiText("Save", undefined, undefined, uiLocale)}
                 </Button>
               </>
             ) : props.goal !== null ? (
@@ -404,11 +430,11 @@ export const ThreadGoalDialog = memo(function ThreadGoalDialog(props: {
                   onClick={() => void runOperation(props.onClearGoal)}
                 >
                   <Trash2Icon />
-                  Clear
+                  {uiText("Clear", undefined, undefined, uiLocale)}
                 </Button>
                 <Button variant="outline" disabled={pending} onClick={() => setMode("edit")}>
                   <PencilIcon />
-                  Edit
+                  {uiText("Edit", undefined, undefined, uiLocale)}
                 </Button>
                 {props.goal.status === "active" ? (
                   <Button
@@ -416,7 +442,7 @@ export const ThreadGoalDialog = memo(function ThreadGoalDialog(props: {
                     onClick={() => void runOperation(() => props.onSetGoal({ status: "paused" }))}
                   >
                     <CirclePauseIcon />
-                    Pause
+                    {uiText("Pause", undefined, undefined, uiLocale)}
                   </Button>
                 ) : props.goal.status === "paused" ||
                   props.goal.status === "blocked" ||
@@ -426,7 +452,7 @@ export const ThreadGoalDialog = memo(function ThreadGoalDialog(props: {
                     onClick={() => void runOperation(() => props.onSetGoal({ status: "active" }))}
                   >
                     <CirclePlayIcon />
-                    Resume
+                    {uiText("Resume", undefined, undefined, uiLocale)}
                   </Button>
                 ) : null}
               </>
@@ -438,13 +464,22 @@ export const ThreadGoalDialog = memo(function ThreadGoalDialog(props: {
       <AlertDialog open={replaceConfirmOpen} onOpenChange={setReplaceConfirmOpen}>
         <AlertDialogPopup>
           <AlertDialogHeader>
-            <AlertDialogTitle>Replace the active goal?</AlertDialogTitle>
+            <AlertDialogTitle>
+              {uiText("Replace the active goal?", undefined, undefined, uiLocale)}
+            </AlertDialogTitle>
             <AlertDialogDescription>
-              The existing unfinished goal will be replaced.
+              {uiText(
+                "The existing unfinished goal will be replaced.",
+                undefined,
+                undefined,
+                uiLocale,
+              )}
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
-            <AlertDialogClose render={<Button variant="outline" />}>Cancel</AlertDialogClose>
+            <AlertDialogClose render={<Button variant="outline" />}>
+              {uiText("Cancel", undefined, undefined, uiLocale)}
+            </AlertDialogClose>
             <Button
               disabled={pending}
               onClick={() => {
@@ -452,7 +487,7 @@ export const ThreadGoalDialog = memo(function ThreadGoalDialog(props: {
                 commitObjective();
               }}
             >
-              Replace
+              {uiText("Replace", undefined, undefined, uiLocale)}
             </Button>
           </AlertDialogFooter>
         </AlertDialogPopup>
@@ -460,3 +495,6 @@ export const ThreadGoalDialog = memo(function ThreadGoalDialog(props: {
     </>
   );
 });
+
+// Finite source-owned labels/helpers only; no received or user data.
+const UI_PRESENTATION_SOURCES = { formatDuration, threadGoalStatusLabel };

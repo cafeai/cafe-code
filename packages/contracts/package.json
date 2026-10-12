@@ -20,6 +20,10 @@
       "types": "./src/settings.ts",
       "import": "./src/settings.ts"
     },
+    "./codexContextWindow": {
+      "types": "./src/codexContextWindow.ts",
+      "import": "./src/codexContextWindow.ts"
+    },
     "./providerSupervisor": {
       "types": "./src/providerSupervisor.ts",
       "import": "./src/providerSupervisor.ts"

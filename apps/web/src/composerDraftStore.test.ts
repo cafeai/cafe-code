@@ -981,7 +981,10 @@ describe("composerDraftStore project draft thread mapping", () => {
     const store = useComposerDraftStore.getState();
     store.setProjectDraftThreadId(projectRef, draftId, { threadId });
     store.setPrompt(draftId, "promote me");
+    store.setCodexContextWindowOverride(draftId, 500_000);
     markPromotedDraftThread(threadId);
+
+    expect(draftByKey(draftId)?.codexContextWindowOverride).toBe(500_000);
 
     finalizePromotedDraftThreadByRef(scopeThreadRef(TEST_ENVIRONMENT_ID, threadId));
 
@@ -1570,6 +1573,41 @@ describe("composerDraftStore sticky composer settings", () => {
 });
 
 describe("deriveNewChatComposerDefaults", () => {
+  it("round-trips chat-local context overrides and resets without sticky/default leakage", () => {
+    resetComposerDraftStore();
+    const target = scopeThreadRef(TEST_ENVIRONMENT_ID, ThreadId.make("context-chat"));
+    const peer = scopeThreadRef(TEST_ENVIRONMENT_ID, ThreadId.make("context-peer"));
+    const store = useComposerDraftStore.getState();
+    const options = useComposerDraftStore.persist.getOptions();
+    const defaults = deriveNewChatComposerDefaults({
+      ...DEFAULT_UNIFIED_SETTINGS,
+      providerInstances: {
+        [CODEX_INSTANCE]: { driver: CODEX_DRIVER, defaultCodexContextWindowOverride: 500_000 },
+      },
+    });
+    store.applyStickyState(target, defaults);
+    expect(store.getComposerDraft(target)?.codexContextWindowOverride).toBeUndefined();
+    for (const value of [1_000_000, null]) {
+      store.setCodexContextWindowOverride(target, value);
+      const persisted = options.partialize!(useComposerDraftStore.getState());
+      useComposerDraftStore.setState(
+        options.merge!(JSON.parse(JSON.stringify(persisted)), useComposerDraftStore.getState()),
+      );
+      expect(store.getComposerDraft(target)?.codexContextWindowOverride).toBe(value);
+      store.setModelSelection(target, createModelSelection(CLAUDE_AGENT_INSTANCE, "claude-test"));
+      expect(store.getComposerDraft(target)?.codexContextWindowOverride).toBe(value);
+      store.applyStickyState(peer, defaults);
+      expect(store.getComposerDraft(peer)?.codexContextWindowOverride).toBeUndefined();
+      expect(
+        useComposerDraftStore.getState().stickyModelSelectionByProvider[CODEX_INSTANCE]?.options,
+      ).toBeUndefined();
+    }
+    for (const invalid of [0, -1, 1.5, NaN, Infinity, Number.MAX_SAFE_INTEGER + 1]) {
+      store.setCodexContextWindowOverride(target, invalid);
+      expect(store.getComposerDraft(target)?.codexContextWindowOverride).toBeNull();
+    }
+    resetComposerDraftStore();
+  });
   it("does not freeze a project account's live default into new draft metadata", () => {
     resetComposerDraftStore();
     const target = scopeThreadRef(TEST_ENVIRONMENT_ID, ThreadId.make("project-limit-chat"));

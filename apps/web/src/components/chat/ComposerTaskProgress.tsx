@@ -1,3 +1,5 @@
+import { useUiLocale } from "~/i18n";
+import { uiText } from "@cafecode/shared/i18n";
 import { BotIcon } from "lucide-react";
 import { memo, useRef, useState } from "react";
 
@@ -47,6 +49,8 @@ export const ComposerTaskProgress = memo(function ComposerTaskProgress(props: {
   readonly activeTaskCount?: number | undefined;
   readonly activeAgentCount?: number | undefined;
 }) {
+  const uiLocale = useUiLocale();
+
   const { plan } = props;
   const [internalOpen, setInternalOpen] = useState(false);
   const open = props.open ?? internalOpen;
@@ -107,12 +111,38 @@ export const ComposerTaskProgress = memo(function ComposerTaskProgress(props: {
     : { completedCount: 0, currentIndex: 0 };
   const completionPercentage = total > 0 ? (completedCount / total) * 100 : 0;
   const liveLabel = hasPlan
-    ? `Task progress: step ${currentIndex} of ${total}${hasSubagents ? `, ${subagents.length} active ${subagents.length === 1 ? "subagent" : "subagents"}` : ""}`
+    ? hasSubagents
+      ? uiText(
+          "Task progress: step {step} of {total}, {count, plural, one {# active subagent} other {# active subagents}}",
+          { step: currentIndex, total, count: subagents.length },
+          undefined,
+          uiLocale,
+        )
+      : uiText(
+          "Task progress: step {step} of {total}",
+          { step: currentIndex, total },
+          undefined,
+          uiLocale,
+        )
     : hasSubagents
-      ? `${subagents.length} active ${subagents.length === 1 ? "subagent" : "subagents"}`
+      ? uiText(
+          "{count, plural, one {# active subagent} other {# active subagents}}",
+          {
+            count: subagents.length,
+          },
+          undefined,
+          uiLocale,
+        )
       : activeCount
-        ? `${activeCount} active ${activeCount === 1 ? "task" : "tasks"}`
-        : "Tasks and scheduled follow-ups";
+        ? uiText(
+            "{count, plural, one {# active task} other {# active tasks}}",
+            {
+              count: activeCount,
+            },
+            undefined,
+            uiLocale,
+          )
+        : uiText("Tasks and scheduled follow-ups", undefined, undefined, uiLocale);
 
   const triggerContent = (
     <>
@@ -150,12 +180,38 @@ export const ComposerTaskProgress = memo(function ComposerTaskProgress(props: {
         <BotIcon className="size-3.5 shrink-0" aria-hidden="true" />
       )}
       <span aria-live="polite">
-        {hasPlan ? `Step ${currentIndex} / ${total}` : null}
+        {hasPlan
+          ? uiText(
+              "Step {value0} / {value1}",
+              { value0: currentIndex, value1: total },
+              undefined,
+              uiLocale,
+            )
+          : null}
         {hasPlan && hasSubagents ? " · " : null}
-        {hasSubagents ? `${subagents.length} ${subagents.length === 1 ? "agent" : "agents"}` : null}
-        {!hasPlan && !hasSubagents ? `Tasks${activeCount ? ` · ${activeCount}` : ""}` : null}
+        {hasSubagents
+          ? uiText(
+              "{count, plural, one {# agent} other {# agents}}",
+              { count: subagents.length },
+              undefined,
+              uiLocale,
+            )
+          : null}
+        {!hasPlan && !hasSubagents
+          ? uiText(
+              "Tasks{value0}",
+              { value0: activeCount ? ` · ${activeCount}` : "" },
+              undefined,
+              uiLocale,
+            )
+          : null}
         {(hasPlan || hasSubagents) && taskCount
-          ? ` · ${taskCount} ${taskCount === 1 ? "task" : "tasks"}`
+          ? uiText(
+              " · {count, plural, one {# task} other {# tasks}}",
+              { count: taskCount },
+              undefined,
+              uiLocale,
+            )
           : null}
       </span>
     </>
@@ -177,7 +233,12 @@ export const ComposerTaskProgress = memo(function ComposerTaskProgress(props: {
             size="xs"
             variant="ghost"
             className={triggerClassName}
-            aria-label={`${liveLabel}. Show task list`}
+            aria-label={uiText(
+              "{value0}. Show task list",
+              { value0: liveLabel },
+              undefined,
+              uiLocale,
+            )}
             data-composer-task-progress="true"
             data-composer-task-progress-trigger="true"
           />
@@ -209,12 +270,26 @@ export const ComposerTaskProgress = memo(function ComposerTaskProgress(props: {
         <div className="flex max-h-[min(28rem,calc(100dvh-3rem))] min-h-0 w-full flex-col">
           <div className="shrink-0 border-border-subtle border-b px-4 py-3">
             <div className="flex items-baseline justify-between gap-3">
-              <PopoverTitle className="text-sm leading-5">Tasks</PopoverTitle>
+              <PopoverTitle className="text-sm leading-5">
+                {uiText("Tasks", undefined, undefined, uiLocale)}
+              </PopoverTitle>
               <div className="flex shrink-0 items-center gap-1">
                 <span className="text-muted-foreground text-xs tabular-nums">
-                  {hasPlan ? `${completedCount} of ${total} completed` : null}
+                  {hasPlan
+                    ? uiText(
+                        "{value0} of {value1} completed",
+                        {
+                          value0: completedCount,
+                          value1: total,
+                        },
+                        undefined,
+                        uiLocale,
+                      )
+                    : null}
                   {hasPlan && hasSubagents ? " · " : null}
-                  {hasSubagents ? `${subagents.length} active` : null}
+                  {hasSubagents
+                    ? uiText("{value0} active", { value0: subagents.length }, undefined, uiLocale)
+                    : null}
                 </span>
                 {props.onShowOnSide ? (
                   <SessionPlacementButton
@@ -235,13 +310,15 @@ export const ComposerTaskProgress = memo(function ComposerTaskProgress(props: {
           </div>
 
           <div
-            aria-label="Task details"
+            aria-label={uiText("Task details", undefined, undefined, uiLocale)}
             className="min-h-0 overflow-y-auto overscroll-contain px-4 py-3 outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring"
             data-task-list-scroll="true"
             role="region"
             tabIndex={0}
           >
-            {props.providerTasks ? <ProviderTasks context={props.providerTasks} /> : null}
+            {props.providerTasks ? (
+              <ProviderTasks context={props.providerTasks} section="workflows" />
+            ) : null}
             <TaskProgressDetails
               plan={plan}
               subagents={subagents}
@@ -256,6 +333,11 @@ export const ComposerTaskProgress = memo(function ComposerTaskProgress(props: {
                 key={`${props.scheduledFollowups.environmentId}:${props.scheduledFollowups.threadId}:${props.scheduledFollowups.modelSelection.instanceId}`}
                 context={props.scheduledFollowups}
               />
+            ) : null}
+            {/* Keep transient ordinary tasks below stable task sections;
+                workflow cards retain their original position above the plan. */}
+            {props.providerTasks ? (
+              <ProviderTasks context={props.providerTasks} section="tasks" />
             ) : null}
           </div>
         </div>

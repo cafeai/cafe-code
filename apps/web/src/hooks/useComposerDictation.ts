@@ -1,3 +1,5 @@
+import { useUiLocale, useUiPresentation } from "~/i18n";
+import { uiText } from "@cafecode/shared/i18n";
 import type {
   DictationRealtimeClientSecret,
   DictationTranscriptionModel,
@@ -51,7 +53,7 @@ interface ScopedPhase {
 /** Convert all transport/RPC failures to fixed strings safe for a user toast. */
 export function formatComposerDictationError(error: unknown): string {
   if (error instanceof RealtimeTranscriptionError) return error.message;
-  return formatDictationRpcError(error) ?? "Cafe could not start dictation.";
+  return formatDictationRpcError(error) ?? uiText("Cafe could not start dictation.");
 }
 
 export interface ComposerDictationController {
@@ -78,6 +80,9 @@ export interface ComposerDictationController {
 export function useComposerDictation(
   input: UseComposerDictationInput,
 ): ComposerDictationController {
+  const uiLocale = useUiLocale();
+  const uiPresentation = useUiPresentation(UI_PRESENTATION_SOURCES);
+
   const inputRef = useRef(input);
   inputRef.current = input;
 
@@ -125,11 +130,14 @@ export function useComposerDictation(
     releaseDesktopCapture();
   }, [releaseDesktopCapture]);
 
-  const reportErrorOnce = useCallback((generation: number, error: unknown) => {
-    if (reportedErrorGenerationRef.current === generation) return;
-    reportedErrorGenerationRef.current = generation;
-    inputRef.current.onError(formatComposerDictationError(error));
-  }, []);
+  const reportErrorOnce = useCallback(
+    (generation: number, error: unknown) => {
+      if (reportedErrorGenerationRef.current === generation) return;
+      reportedErrorGenerationRef.current = generation;
+      inputRef.current.onError(uiPresentation.formatComposerDictationError(error));
+    },
+    [uiPresentation],
+  );
 
   const start = useCallback(async (): Promise<boolean> => {
     const currentInput = inputRef.current;
@@ -166,7 +174,14 @@ export function useComposerDictation(
             ownedRangeRef.current = null;
             pendingStartAbortRef.current = null;
             transition(sessionKey, "idle");
-            currentInput.onError("Finish the other dictation before starting this one.");
+            currentInput.onError(
+              uiText(
+                "Finish the other dictation before starting this one.",
+                undefined,
+                undefined,
+                uiLocale,
+              ),
+            );
           }
           return false;
         }
@@ -234,7 +249,7 @@ export function useComposerDictation(
       reportErrorOnce(generation, error);
       return false;
     }
-  }, [releaseDesktopCapture, reportErrorOnce, transition]);
+  }, [releaseDesktopCapture, reportErrorOnce, transition, uiLocale]);
 
   const stop = useCallback((): Promise<boolean> => {
     if (phaseRef.current === "finalizing") {
@@ -350,15 +365,18 @@ export function useComposerDictation(
     isEditingLocked: phase === "starting" || phase === "recording" || phase === "finalizing",
     statusMessage:
       phase === "starting"
-        ? "Connecting microphone"
+        ? uiText("Connecting microphone", undefined, undefined, uiLocale)
         : phase === "recording"
-          ? "Listening"
+          ? uiText("Listening", undefined, undefined, uiLocale)
           : phase === "finalizing"
-            ? "Finishing dictation"
+            ? uiText("Finishing dictation", undefined, undefined, uiLocale)
             : phase === "error"
-              ? "Dictation stopped"
-              : "Dictation ready",
+              ? uiText("Dictation stopped", undefined, undefined, uiLocale)
+              : uiText("Dictation ready", undefined, undefined, uiLocale),
     finish,
     toggle,
   };
 }
+
+// Finite source-owned labels/helpers only; no received or user data.
+const UI_PRESENTATION_SOURCES = { formatComposerDictationError };

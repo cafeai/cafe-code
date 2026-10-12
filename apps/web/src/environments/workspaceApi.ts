@@ -1,3 +1,4 @@
+import { uiText } from "@cafecode/shared/i18n";
 import type { EnvironmentId, LocalApi, ServerConfig } from "@cafecode/contracts";
 import { readLocalApi } from "../localApi";
 import { readPrimaryEnvironmentDescriptor } from "./primary";
@@ -47,7 +48,9 @@ export function readWorkspaceApi(
         : (...args: unknown[]) =>
             Promise.resolve((method as (...args: unknown[]) => unknown)(...args)).catch(() => {
               throw new Error(
-                "The selected server operation did not complete. Check the connection and your access before trying again.",
+                uiText(
+                  "The selected server operation did not complete. Check the connection and your access before trying again.",
+                ),
               );
             }),
     ]),
@@ -57,7 +60,7 @@ export function readWorkspaceApi(
 
 export function ensureWorkspaceApi(environmentId = readWorkspaceEnvironmentId()): LocalApi {
   const api = readWorkspaceApi(environmentId);
-  if (!api) throw new Error("Reconnect to the selected Cafe server before trying again.");
+  if (!api) throw new Error(uiText("Reconnect to the selected Cafe server before trying again."));
   return api;
 }
 

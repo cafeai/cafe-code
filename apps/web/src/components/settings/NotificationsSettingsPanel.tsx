@@ -1,3 +1,5 @@
+import { useUiLocale } from "~/i18n";
+import { uiText } from "@cafecode/shared/i18n";
 import { useEffect, useState } from "react";
 
 import { isElectron } from "../../env";
@@ -18,6 +20,8 @@ import { SettingsPageContainer, SettingsRow, SettingsSection } from "./settingsL
  * when the tab is frozen or closed.
  */
 export function NotificationsSettingsPanel() {
+  const uiLocale = useUiLocale();
+
   const settings = useSettings();
   const { updateSettings } = useUpdateSettings();
   const settingsHydrated = useClientSettingsHydrated();
@@ -62,7 +66,11 @@ export function NotificationsSettingsPanel() {
       }
       updateSettings({ notificationsEnabled: nextEnabled });
     } catch (error) {
-      setToggleError(error instanceof Error ? error.message : "Could not update notifications.");
+      setToggleError(
+        error instanceof Error
+          ? error.message
+          : uiText("Could not update notifications.", undefined, undefined, uiLocale),
+      );
     } finally {
       setIsApplying(false);
     }
@@ -71,16 +79,26 @@ export function NotificationsSettingsPanel() {
   const unsupportedReason =
     !isElectron && !webPushSupport.supported
       ? webPushSupport.reason === "insecure-context"
-        ? "Needs an HTTPS connection to the server."
-        : "This browser can't show push notifications. On iOS, add Cafe to your home screen first."
+        ? uiText("Needs an HTTPS connection to the server.", undefined, undefined, uiLocale)
+        : uiText(
+            "This browser can't show push notifications. On iOS, add Cafe to your home screen first.",
+            undefined,
+            undefined,
+            uiLocale,
+          )
       : null;
 
   return (
-    <SettingsPageContainer title="Notifications">
+    <SettingsPageContainer title={uiText("Notifications", undefined, undefined, uiLocale)}>
       <SettingsSection>
         <SettingsRow
-          title="Chat completion notifications"
-          description="Notify when a chat finishes, even in the background. This device only."
+          title={uiText("Chat completion notifications", undefined, undefined, uiLocale)}
+          description={uiText(
+            "Notify when a chat finishes, even in the background. This device only.",
+            undefined,
+            undefined,
+            uiLocale,
+          )}
           status={
             toggleError ? (
               <span className="text-destructive-foreground">{toggleError}</span>
@@ -95,7 +113,12 @@ export function NotificationsSettingsPanel() {
               onCheckedChange={(checked) => {
                 void handleToggle(Boolean(checked));
               }}
-              aria-label="Enable chat completion notifications"
+              aria-label={uiText(
+                "Enable chat completion notifications",
+                undefined,
+                undefined,
+                uiLocale,
+              )}
             />
           }
         />

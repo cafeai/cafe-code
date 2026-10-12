@@ -21,7 +21,7 @@ import {
   getProviderOptionDescriptors,
   resolvePromptInjectedEffort,
 } from "@cafecode/shared/model";
-import { compareSemverVersions } from "@cafecode/shared/semver";
+import { compareSemverVersions, parseSemver } from "@cafecode/shared/semver";
 import {
   query as claudeQuery,
   type SlashCommand as ClaudeSlashCommand,
@@ -142,6 +142,13 @@ function decodeClaudeModelCatalog(raw: unknown) {
 // with native 1M context and no Fast mode or selectable 200K/[1m] variant.
 // Leave its context selector absent, as for Sonnet 5: the CLI owns native
 // context/compaction resolution and its live usage supplies the actual window.
+// Haiku 5.5 (verified 2026-10-11 against the same official model-config guide)
+// requires CLI 2.1.293 and also supports five efforts with Medium default.
+// Its 1M window is native, not an optional [1m] variant, so it likewise has no
+// context selector or legacy thinking Boolean. The API's 128K output ceiling
+// is independent of the user's native CLI response budget and is not a reason
+// to silently raise that budget. Live discovery still controls availability
+// and can narrow these fallback options for an account or deployment.
 const DECODED_CLAUDE_MODEL_CATALOG = decodeClaudeModelCatalog(claudeModelCatalog);
 const VERSIONED_BUILT_IN_MODELS = DECODED_CLAUDE_MODEL_CATALOG.models;
 const BUILT_IN_MODELS: ReadonlyArray<ServerProviderModel> = VERSIONED_BUILT_IN_MODELS.map(
@@ -159,9 +166,24 @@ function isClaudeModelSupportedByVersion(
   model: VersionedClaudeModel,
   version: string | null | undefined,
 ): boolean {
-  return model.minimumClaudeCodeVersion
-    ? !!version && compareSemverVersions(version, model.minimumClaudeCodeVersion) >= 0
-    : true;
+  if (!model.minimumClaudeCodeVersion) return true;
+  // A generic semver sort deliberately orders malformed strings lexically.
+  // That is not native capability evidence: "unknown" sorts above a release,
+  // and a later prerelease has not qualified the published model's control
+  // contract. Admit only bounded canonical stable versions observed by the
+  // existing executable probe; imported SDK versions never fill this gap.
+  if (
+    typeof version !== "string" ||
+    version.length > 64 ||
+    !/^(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)$/.test(version)
+  )
+    return false;
+  const parsed = parseSemver(version);
+  return (
+    parsed !== null &&
+    [parsed.major, parsed.minor, parsed.patch].every(Number.isSafeInteger) &&
+    compareSemverVersions(version, model.minimumClaudeCodeVersion) >= 0
+  );
 }
 
 export function getBuiltInClaudeModelsForVersion(

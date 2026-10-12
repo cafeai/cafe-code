@@ -1,6 +1,7 @@
 import * as NodeFileSystem from "@effect/platform-node/NodeFileSystem";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, describe, it } from "@effect/vitest";
+import { getUiLocale, setUiLocale, uiText } from "@cafecode/shared/i18n";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
@@ -88,6 +89,79 @@ const withHarness = <A, E, R>(
   }).pipe(Effect.provide(NodeServices.layer), Effect.scoped);
 
 describe("DesktopServerExposure", () => {
+  it.effect("refreshes only endpoint display copy when the interface language changes", () =>
+    withHarness(
+      lanNetworkInterfaces,
+      Effect.gen(function* () {
+        const previousLocale = getUiLocale();
+        yield* Effect.addFinalizer(() => Effect.sync(() => setUiLocale(previousLocale)));
+        setUiLocale("en");
+
+        const serverExposure = yield* DesktopServerExposure.DesktopServerExposure;
+        const settings = yield* DesktopAppSettings.DesktopAppSettings;
+        yield* serverExposure.configureFromSettings({ port: 4173 });
+        yield* serverExposure.setMode("network-accessible");
+        const originalState = yield* serverExposure.getState;
+        const originalSettings = yield* settings.get;
+        const originalBackend = yield* serverExposure.backendConfig;
+        const english = yield* serverExposure.getAdvertisedEndpoints;
+        assert.deepEqual(
+          english.map((endpoint) => endpoint.provider.label),
+          ["Desktop", "Desktop", "Manual"],
+        );
+        assert.equal(english[2]?.defaultPreferenceKey, "manual:public:https:Custom HTTPS");
+
+        for (const locale of ["ja", "ko"] as const) {
+          setUiLocale(locale);
+          const localized = yield* serverExposure.getAdvertisedEndpoints;
+          assert.deepEqual(
+            localized.map((endpoint) => endpoint.provider.label),
+            [uiText("Desktop"), uiText("Desktop"), uiText("Manual")],
+          );
+          assert.notEqual(localized[0]?.provider.label, "Desktop");
+          assert.notEqual(localized[2]?.provider.label, "Manual");
+          assert.equal(localized[2]?.defaultPreferenceKey, "manual:public:https:Custom HTTPS");
+          assert.deepEqual(
+            localized.map(
+              ({ label: _label, description: _description, provider, ...endpoint }) => ({
+                ...endpoint,
+                provider: {
+                  id: provider.id,
+                  kind: provider.kind,
+                  isAddon: provider.isAddon,
+                },
+              }),
+            ),
+            english.map(({ label: _label, description: _description, provider, ...endpoint }) => ({
+              ...endpoint,
+              provider: {
+                id: provider.id,
+                kind: provider.kind,
+                isAddon: provider.isAddon,
+              },
+            })),
+          );
+          assert.equal(
+            Object.getOwnPropertyDescriptor(localized[0]!.provider, "label")?.get,
+            undefined,
+          );
+          assert.equal(
+            Object.getOwnPropertyDescriptor(localized[2]!.provider, "label")?.get,
+            undefined,
+          );
+          assert.deepEqual(yield* serverExposure.getState, originalState);
+          assert.deepEqual(yield* settings.get, originalSettings);
+          assert.deepEqual(yield* serverExposure.backendConfig, originalBackend);
+        }
+
+        // A previously delivered IPC snapshot must not mutate after a switch.
+        assert.equal(english[0]?.provider.label, "Desktop");
+        assert.equal(english[2]?.provider.label, "Manual");
+      }),
+      { CAFE_CODE_DESKTOP_HTTPS_ENDPOINTS: "https://public.example.test" },
+    ),
+  );
+
   it.effect("falls back to local-only without losing the requested network preference", () =>
     withHarness(
       emptyNetworkInterfaces,
@@ -313,6 +387,7 @@ describe("DesktopServerExposure", () => {
             source: "user",
             status: "unknown",
             description: "User-configured HTTPS endpoint for this desktop backend.",
+            defaultPreferenceKey: "manual:public:https:Custom HTTPS",
           },
           {
             id: "manual:http://desktop.example.test:3773",
@@ -329,6 +404,7 @@ describe("DesktopServerExposure", () => {
             source: "user",
             status: "unknown",
             description: "User-configured endpoint for this desktop backend.",
+            defaultPreferenceKey: "manual:public:http:Custom endpoint",
           },
         ]);
       }),

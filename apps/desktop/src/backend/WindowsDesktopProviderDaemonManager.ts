@@ -8,6 +8,7 @@ import {
   ProviderDaemonLiveness,
 } from "@cafecode/contracts";
 import { requestProviderDaemonJson } from "@cafecode/shared/providerDaemonHttp";
+import type { ProviderDaemonStartupProgress } from "@cafecode/shared/backendStartupProgress";
 import { CAFE_CODE_SHELL_ENV_HYDRATED } from "@cafecode/shared/shell";
 import {
   createWindowsProviderRuntime,
@@ -19,9 +20,11 @@ import {
 } from "@cafecode/shared/windowsProviderRuntime";
 import * as Effect from "effect/Effect";
 import * as Option from "effect/Option";
+import * as PubSub from "effect/PubSub";
 import * as Ref from "effect/Ref";
 import * as Schema from "effect/Schema";
 import * as Semaphore from "effect/Semaphore";
+import * as Stream from "effect/Stream";
 
 import type { DesktopEnvironmentShape } from "../app/DesktopEnvironment.ts";
 import * as DesktopDebugServer from "../debug/DesktopDebugServer.ts";
@@ -72,6 +75,13 @@ export const makeWindowsDesktopProviderDaemonManager = Effect.fn(function* (
   const context = yield* Effect.context<never>();
   const run = Effect.runPromiseWith(context);
   const mutex = yield* Semaphore.make(1);
+  // A single sanitized replay frame lets the inert startup window attach after
+  // spawning. Sliding capacity bounds observers without delaying ownership.
+  const startupUpdates = yield* PubSub.sliding<ProviderDaemonStartupProgress>({
+    capacity: 8,
+    replay: 1,
+  });
+  yield* Effect.addFinalizer(() => PubSub.shutdown(startupUpdates));
   let cafeMcpPort: number | undefined;
   const requestJson = dependencies.requestJson ?? requestProviderDaemonJson;
   const initial: DesktopProviderDaemonSnapshot = {
@@ -131,7 +141,10 @@ export const makeWindowsDesktopProviderDaemonManager = Effect.fn(function* (
       const bytes = Buffer.from(base64, "base64");
       return encrypted ? run(safeStorage.decryptString(bytes)) : bytes.toString("utf8");
     },
-    spawn: (bootstrap) => {
+    onStartupProgress: (progress) => {
+      Effect.runSync(PubSub.publish(startupUpdates, progress));
+    },
+    spawn: (bootstrap, startupProgress) => {
       const childEnvironment = { ...process.env };
       for (const name of [
         "CAFE_CODE_PORT",
@@ -157,6 +170,7 @@ export const makeWindowsDesktopProviderDaemonManager = Effect.fn(function* (
           [CAFE_CODE_SHELL_ENV_HYDRATED]: "1",
         },
         bootstrap,
+        ...(startupProgress === undefined ? {} : { startupProgress }),
       });
     },
     stopSupervisor: async (owner) => {
@@ -250,6 +264,7 @@ export const makeWindowsDesktopProviderDaemonManager = Effect.fn(function* (
           : { lastSpawnDurationMs: Option.some(elapsed) }),
       }));
       yield* publish;
+      yield* PubSub.publish(startupUpdates, { phase: "ready" });
       return result.endpoint;
     });
   const lifecycle = (action: () => Promise<WindowsProviderRuntimeResult>) =>
@@ -258,6 +273,7 @@ export const makeWindowsDesktopProviderDaemonManager = Effect.fn(function* (
         Effect.gen(function* () {
           const started = performance.now();
           yield* Ref.update(state, (current) => ({ ...current, status: "starting" as const }));
+          yield* PubSub.publish(startupUpdates, { phase: "starting" });
           yield* publish;
           const result = yield* Effect.tryPromise({ try: action, catch: failure }).pipe(
             Effect.catch((error) =>
@@ -268,6 +284,7 @@ export const makeWindowsDesktopProviderDaemonManager = Effect.fn(function* (
                   lastError: Option.some(error.message),
                 }));
                 yield* publish;
+                yield* PubSub.publish(startupUpdates, { phase: "failed" });
                 return yield* Effect.die(error);
               }),
             ),
@@ -371,6 +388,7 @@ export const makeWindowsDesktopProviderDaemonManager = Effect.fn(function* (
           })
         : Effect.die(new Error("Invalid Cafe MCP backend port.")),
     ensureRunning,
+    startupProgress: Stream.fromPubSub(startupUpdates),
     recover,
     currentConfig: Ref.get(state).pipe(Effect.map((current) => current.endpoint)),
     observeProcessOwnership: Effect.tryPromise({

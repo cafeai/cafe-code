@@ -138,6 +138,7 @@ import {
   makeCodexNotificationRetirementFence,
   makeCodexChildConversationAdmissionFence,
   makeCodexSubagentRuntimeGeneration,
+  makeCodexSessionRuntime,
   updateCodexActiveContextCompactions,
   updateCodexPendingSteerProcessingFromNotification,
   validateCodexSubagentThreadReadMetadata,
@@ -156,6 +157,9 @@ const isCodexAppServerRequestError = Schema.is(CodexErrors.CodexAppServerRequest
 const decodeMessageId = Schema.decodeUnknownSync(MessageId);
 const decodeCodexErrorNotification = Schema.decodeUnknownSync(
   EffectCodexSchema.V2ErrorNotification,
+);
+const decodeNativeNotificationForDiagnostics = Schema.decodeUnknownSync(
+  EffectCodexSchema.ServerNotification,
 );
 
 const publicEntry = (
@@ -177,6 +181,156 @@ const childMetadata = (id: string, parentThreadId: string): AncestryMetadata => 
   sessionId: id,
   source: { subAgent: { thread_spawn: { depth: 1, parent_thread_id: parentThreadId } } },
 });
+
+effectIt.effect("binds goal mutation provenance to existing explicit controls and user Stop", () =>
+  Effect.gen(function* () {
+    // The real runtime and typed JSONL client run against a scoped in-memory
+    // peer. No provider executable, configuration, profile or credential is
+    // touched while verifying these authenticated goal-control wire shapes.
+    const output = yield* Queue.unbounded<Uint8Array>();
+    const calls: Array<{ method: string; params?: Record<string, unknown> }> = [];
+    const nativeThreadId = "synthetic-goal-thread";
+    const goal = {
+      threadId: nativeThreadId,
+      objective: "Explicit owner goal",
+      status: "active",
+      tokenBudget: null,
+      tokensUsed: 7,
+      timeUsedSeconds: 2,
+      createdAt: 1,
+      updatedAt: 2,
+    };
+    const thread = {
+      id: nativeThreadId,
+      cliVersion: "0.162.1",
+      createdAt: 1,
+      updatedAt: 1,
+      cwd: process.cwd(),
+      ephemeral: false,
+      modelProvider: "openai",
+      preview: "",
+      projectId: null,
+      sessionId: "synthetic-session",
+      source: "appServer",
+      turns: [],
+      status: { type: "idle" },
+    };
+    const opened = {
+      cwd: process.cwd(),
+      model: "gpt-6.1-sol",
+      modelProvider: "openai",
+      approvalPolicy: "never",
+      approvalsReviewer: "user",
+      sandbox: { type: "dangerFullAccess" },
+      thread,
+    };
+    const encoder = new TextEncoder();
+    let pending = "";
+    const spawner = ChildProcessSpawner.make(() =>
+      Effect.succeed(
+        ChildProcessSpawner.makeHandle({
+          pid: ChildProcessSpawner.ProcessId(7002),
+          exitCode: Effect.never,
+          isRunning: Effect.succeed(true),
+          kill: () => Effect.void,
+          unref: Effect.succeed(Effect.void),
+          stdin: Sink.forEach((chunk: Uint8Array) =>
+            Effect.gen(function* () {
+              pending += new TextDecoder().decode(chunk);
+              const lines = pending.split("\n");
+              pending = lines.pop() ?? "";
+              for (const line of lines) {
+                const request = JSON.parse(line) as {
+                  id?: string | number;
+                  method: string;
+                  params?: Record<string, unknown>;
+                };
+                calls.push({
+                  method: request.method,
+                  ...(request.params ? { params: request.params } : {}),
+                });
+                if (request.id === undefined) continue;
+                const result =
+                  request.method === "initialize"
+                    ? {
+                        userAgent: "synthetic",
+                        codexHome: process.cwd(),
+                        platformFamily: "synthetic",
+                        platformOs: "synthetic",
+                      }
+                    : request.method === "thread/start"
+                      ? opened
+                      : request.method === "thread/read"
+                        ? { thread }
+                        : request.method === "thread/turns/list"
+                          ? { data: [], nextCursor: null }
+                          : request.method === "thread/goal/get"
+                            ? { goal }
+                            : request.method === "thread/goal/set"
+                              ? { goal: { ...goal, ...request.params } }
+                              : request.method === "thread/goal/clear"
+                                ? { cleared: true }
+                                : {};
+                yield* Queue.offer(
+                  output,
+                  encoder.encode(`${JSON.stringify({ id: request.id, result })}\n`),
+                );
+              }
+            }),
+          ),
+          stdout: Stream.fromQueue(output),
+          stderr: Stream.empty,
+          all: Stream.empty,
+          getInputFd: () => Sink.drain,
+          getOutputFd: () => Stream.empty,
+        }),
+      ),
+    );
+    const runtime = yield* makeCodexSessionRuntime({
+      threadId: ThreadId.make("synthetic-goal-cafe-thread"),
+      binaryPath: "never-launched-provider",
+      environment: {},
+      cwd: process.cwd(),
+      runtimeMode: "full-access",
+    }).pipe(Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner));
+    yield* runtime.start();
+    yield* runtime.setGoal({ objective: "Owner edited goal", status: "active", tokenBudget: 100 });
+    yield* runtime.clearGoal;
+    yield* runtime.interruptTurn(TurnId.make("synthetic-goal-turn"));
+    assert.deepEqual(
+      calls.filter(
+        (call) => call.method === "thread/goal/set" || call.method === "thread/goal/clear",
+      ),
+      [
+        {
+          method: "thread/goal/set",
+          params: {
+            threadId: nativeThreadId,
+            origin: "user",
+            objective: "Owner edited goal",
+            status: "active",
+            tokenBudget: 100,
+          },
+        },
+        { method: "thread/goal/clear", params: { threadId: nativeThreadId, origin: "user" } },
+        {
+          method: "thread/goal/set",
+          params: { threadId: nativeThreadId, origin: "user", status: "paused" },
+        },
+      ],
+    );
+    assert.equal(
+      calls.some((call) => call.method === "turn/start" || call.method === "turn/steer"),
+      false,
+    );
+    assert.equal(
+      calls
+        .filter((call) => call.method === "thread/goal/get")
+        .every((call) => !Object.hasOwn(call.params ?? {}, "origin")),
+      true,
+    );
+  }),
+);
 
 it("binds native event generations to the originating runtime across resume and delayed publication", () => {
   const original = makeCodexSubagentRuntimeGeneration();
@@ -1483,6 +1637,32 @@ describe("Codex subagent thread ownership validation", () => {
       subagentThreadId: nestedChild.id,
     });
   };
+
+  effectIt.effect(
+    "maps partial public answers to commentary in both bounded native history paths",
+    () =>
+      Effect.gen(function* () {
+        const item = {
+          ...publicEntry("partial-item", "Public interim answer").item,
+          phase: "partial_answer" as const,
+        };
+        const paginated = yield* readPublicHistoryFixture(() =>
+          Effect.succeed({ data: [{ turnId: "child-turn", item }], nextCursor: null }),
+        );
+        const summarized = yield* readSummaryHistoryFixture(() =>
+          Effect.succeed({
+            data: [{ ...makeCodexSummaryTurnFixture("child-turn"), items: [item] }],
+            nextCursor: null,
+          }),
+        );
+        for (const snapshot of [paginated, summarized]) {
+          assert.deepEqual(snapshot.publicHistory, [
+            { role: "assistant", text: "Public interim answer", phase: "commentary" },
+          ]);
+          assert.equal(canonicalizeCodexSubagentDetail(snapshot).messages[0]?.phase, "commentary");
+        }
+      }),
+  );
 
   effectIt.effect("filters full summary variants and overlapping identities in chronology", () =>
     Effect.gen(function* () {
@@ -3105,6 +3285,69 @@ describe("buildCodexAppServerArgs", () => {
 });
 
 describe("Codex protocol diagnostic redaction", () => {
+  it("redacts the actual typed schema cause of malformed private attachment metadata", () => {
+    for (const invalidField of ["attachmentId", "identityKey", "operation"] as const) {
+      const params = {
+        threadId: "thread-1",
+        attachmentId: "attachment-1",
+        attachmentType: "native",
+        identityKey: "identity-1",
+        operation: "created",
+        [invalidField]: { privateValue: "private-attachment-schema-sentinel" },
+      };
+      assert.throws(
+        () =>
+          decodeNativeNotificationForDiagnostics({ method: "thread/attachment/updated", params }),
+        (cause: unknown) => {
+          assert.match(String(cause), /private-attachment-schema-sentinel/);
+          const diagnostic = sanitizeCodexProtocolDiagnosticPayload({
+            direction: "incoming",
+            stage: "decode_failed",
+            payload: { method: "thread/attachment/updated", cause: String(cause) },
+          });
+          assert.deepEqual(diagnostic, {
+            method: "thread/attachment/updated",
+            diagnosticClass: "private-metadata-redacted",
+            stage: "decode_failed",
+          });
+          assert.doesNotMatch(JSON.stringify(diagnostic), /private-attachment-schema-sentinel/);
+          return true;
+        },
+      );
+    }
+  });
+  it("does not copy unrecognized error metadata or decode causes into protocol diagnostics", () => {
+    for (const method of ["error", "turn/completed", "turn/started", "thread/started"] as const) {
+      const error = {
+        message: "Public error",
+        codexErrorInfo: {
+          responseStreamDisconnected: {
+            httpStatusCode: 503,
+            hidden: "private-diagnostic-inner-sentinel",
+          },
+        },
+        futurePolicy: "private-diagnostic-outer-sentinel",
+      };
+      const turn = { id: "turn-1", items: [], status: "failed", error };
+      const params =
+        method === "error"
+          ? { threadId: "thread-1", turnId: "turn-1", willRetry: false, error }
+          : method === "thread/started"
+            ? { thread: { turns: [turn] } }
+            : { threadId: "thread-1", turn };
+      for (const stage of ["decoded", "decode_failed"] as const) {
+        const redacted = sanitizeCodexProtocolDiagnosticPayload({
+          direction: "incoming",
+          stage,
+          payload: { method, params, cause: "private-diagnostic-cause-sentinel" },
+        });
+        assert.doesNotMatch(
+          JSON.stringify(redacted),
+          /private-diagnostic-(?:inner|outer|cause)-sentinel/,
+        );
+      }
+    }
+  });
   it("does not retain private wire content in methodless framing failures", () => {
     const redacted = sanitizeCodexProtocolDiagnosticPayload({
       direction: "incoming",
@@ -3136,6 +3379,8 @@ describe("Codex protocol diagnostic redaction", () => {
       "mcpServer/elicitation/request",
       "item/permissions/requestApproval",
       "account/gatewayOAuth/changed",
+      "thread/prediction/updated",
+      "thread/attachment/updated",
     ]) {
       for (const stage of ["decoded", "decode_failed"] as const) {
         const redacted = sanitizeCodexProtocolDiagnosticPayload({
@@ -5234,7 +5479,19 @@ describe("Codex child conversation routing", () => {
   it("classifies live child work and terminal thread/read errors conservatively", () => {
     assert.equal(isCodexPrivateMetadataNotification("thread/attachment/updated"), true);
     assert.equal(isCodexPrivateMetadataNotification("account/gatewayOAuth/changed"), true);
+    assert.equal(isCodexPrivateMetadataNotification("thread/prediction/updated"), true);
     assert.equal(isCodexPrivateMetadataNotification("item/agentMessage/delta"), false);
+    assert.equal(
+      isCodexChildConversationWorkNotification({
+        method: "thread/prediction/updated",
+        params: {
+          threadId: "thread-child",
+          sourceTurnId: "not-a-live-turn",
+          result: { type: "completed", text: "PRIVATE_PREDICTION" },
+        },
+      }),
+      false,
+    );
     assert.equal(
       isCodexChildConversationWorkNotification({
         method: "account/gatewayOAuth/changed",
@@ -8112,6 +8369,7 @@ describe("openCodexThread", () => {
             serviceTier: undefined,
             resumeThreadId: method === "thread/resume" ? "native-root" : undefined,
             customInstructions: "Follow my custom coding conventions.",
+            codexContextWindowOverride: 128_000,
           }),
         );
         assert.equal(opened.serviceTier, serviceTier);
@@ -8123,6 +8381,10 @@ describe("openCodexThread", () => {
         assert.equal(typeof instructions, "string");
         assert.ok(instructions.includes("Follow my custom coding conventions."));
         assert.ok(instructions.includes("Cafe displays images"));
+        assert.equal(
+          Reflect.get(Reflect.get(calls[0]!.payload as object, "config"), "model_context_window"),
+          128_000,
+        );
         assert.equal(Reflect.has(calls[0]!.payload as object, "input"), false);
       }
     },
@@ -8394,6 +8656,44 @@ describe("openCodexThread", () => {
         model_auto_compact_token_limit: 150_000,
       });
     }
+  });
+
+  it("translates an explicit nominal context override on start/resume and omits it on inheritance", async () => {
+    const calls: Array<{ method: "thread/start" | "thread/resume"; payload: unknown }> = [];
+    const client = {
+      raw: {
+        request: (method: "thread/start" | "thread/resume", payload: unknown) => {
+          calls.push({ method, payload });
+          return Effect.succeed(makeThreadOpenResponse("context-thread"));
+        },
+      },
+    };
+    for (const resumeThreadId of [undefined, "existing-thread"]) {
+      for (const codexContextWindowOverride of [500_000, undefined]) {
+        await Effect.runPromise(
+          openCodexThread({
+            client,
+            threadId: ThreadId.make("context-thread"),
+            runtimeMode: "full-access",
+            cwd: process.cwd(),
+            requestedModel: "gpt-6.1-sol",
+            serviceTier: undefined,
+            resumeThreadId,
+            ...(codexContextWindowOverride !== undefined ? { codexContextWindowOverride } : {}),
+          }),
+        );
+        const config = (calls.at(-1)!.payload as { config: Record<string, unknown> }).config;
+        assert.deepEqual(
+          config,
+          codexContextWindowOverride === undefined ? {} : { model_context_window: 500_000 },
+        );
+        assert.equal("model_auto_compact_token_limit" in config, false);
+      }
+    }
+    assert.deepEqual(
+      calls.map((call) => call.method),
+      ["thread/start", "thread/start", "thread/resume", "thread/resume"],
+    );
   });
 
   it("propagates non-recoverable resume failures", async () => {

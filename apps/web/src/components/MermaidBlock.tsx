@@ -1,3 +1,5 @@
+import { useUiLocale } from "~/i18n";
+import { uiText } from "@cafecode/shared/i18n";
 import {
   memo,
   useCallback,
@@ -47,6 +49,8 @@ function ExpandedDiagram({
   exportTheme: "dark" | "light";
   exportDisabled: boolean;
 }) {
+  const uiLocale = useUiLocale();
+
   const viewportRef = useRef<HTMLDivElement>(null);
   const dragRef = useRef<{
     pointerId: number;
@@ -131,34 +135,43 @@ function ExpandedDiagram({
   return (
     <>
       <div className="mermaid-expanded-heading">
-        <DialogTitle className="text-base">Expanded Mermaid diagram</DialogTitle>
+        <DialogTitle className="text-base">
+          {uiText("Expanded Mermaid diagram", undefined, undefined, uiLocale)}
+        </DialogTitle>
         <DialogDescription className="text-xs">
-          Zoom to inspect. Scroll or drag to pan.
+          {uiText("Zoom to inspect. Scroll or drag to pan.", undefined, undefined, uiLocale)}
         </DialogDescription>
       </div>
-      <div className="mermaid-expanded-toolbar" role="group" aria-label="Diagram zoom controls">
+      <div
+        className="mermaid-expanded-toolbar"
+        role="group"
+        aria-label={uiText("Diagram zoom controls", undefined, undefined, uiLocale)}
+      >
         <Button size="xs" variant="outline" onClick={() => changeZoom("fit")}>
-          Fit
+          {uiText("Fit", undefined, undefined, uiLocale)}
         </Button>
         <Button size="xs" variant="ghost" onClick={() => changeZoom(1)}>
-          Reset
+          {uiText("Reset", undefined, undefined, uiLocale)}
         </Button>
         <Button
           size="icon-xs"
           variant="ghost"
-          aria-label="Zoom out"
+          aria-label={uiText("Zoom out", undefined, undefined, uiLocale)}
           disabled={scale <= MIN_ZOOM}
           onClick={() => changeZoom(Math.max(MIN_ZOOM, scale / 1.25))}
         >
           <MinusIcon />
         </Button>
-        <output className="mermaid-zoom-value" aria-label="Zoom level">
+        <output
+          className="mermaid-zoom-value"
+          aria-label={uiText("Zoom level", undefined, undefined, uiLocale)}
+        >
           {Math.round(scale * 100)}%
         </output>
         <Button
           size="icon-xs"
           variant="ghost"
-          aria-label="Zoom in"
+          aria-label={uiText("Zoom in", undefined, undefined, uiLocale)}
           disabled={scale >= MAX_ZOOM}
           onClick={() => changeZoom(Math.min(MAX_ZOOM, scale * 1.25))}
         >
@@ -166,7 +179,7 @@ function ExpandedDiagram({
         </Button>
         <div className="ml-auto">
           <ImageExportMenu
-            label="Diagram"
+            label={uiText("Diagram", undefined, undefined, uiLocale)}
             contentKey={result}
             disabled={exportDisabled}
             createPng={(signal) => createMermaidPng(result, exportTheme, signal)}
@@ -179,7 +192,12 @@ function ExpandedDiagram({
         className="mermaid-expanded-viewport"
         data-dragging={dragging || undefined}
         role="region"
-        aria-label="Expanded diagram; scroll or drag to pan"
+        aria-label={uiText(
+          "Expanded diagram; scroll or drag to pan",
+          undefined,
+          undefined,
+          uiLocale,
+        )}
         tabIndex={0}
         onPointerDown={beginPan}
         onPointerMove={(event) => {
@@ -198,7 +216,7 @@ function ExpandedDiagram({
         >
           <img
             src={url}
-            alt={result.title || "Mermaid diagram"}
+            alt={result.title || uiText("Mermaid diagram", undefined, undefined, uiLocale)}
             draggable={false}
             style={{ width: result.width * scale, height: result.height * scale }}
           />
@@ -250,6 +268,8 @@ export const MermaidBlock = memo(function MermaidBlock({
   complete,
   theme,
 }: MermaidBlockProps) {
+  const uiLocale = useUiLocale();
+
   const [diagramState, setDiagramState] = useState<DiagramState | null>(() =>
     readCachedDiagram(code, theme, complete),
   );
@@ -344,7 +364,11 @@ export const MermaidBlock = memo(function MermaidBlock({
     <Dialog open={expanded && shownImage !== null} onOpenChange={setExpanded}>
       <div className="mermaid-block" data-mermaid-block="" data-theme={theme}>
         <div className="mermaid-toolbar">
-          <div className="mermaid-view-toggle" role="group" aria-label="Mermaid view">
+          <div
+            className="mermaid-view-toggle"
+            role="group"
+            aria-label={uiText("Mermaid view", undefined, undefined, uiLocale)}
+          >
             <Button
               size="xs"
               variant={showSource ? "ghost" : "secondary"}
@@ -352,7 +376,7 @@ export const MermaidBlock = memo(function MermaidBlock({
               disabled={!complete || failed}
               onClick={() => setView("diagram")}
             >
-              Diagram
+              {uiText("Diagram", undefined, undefined, uiLocale)}
             </Button>
             <Button
               size="xs"
@@ -360,22 +384,29 @@ export const MermaidBlock = memo(function MermaidBlock({
               aria-pressed={showSource}
               onClick={() => setView("source")}
             >
-              Source
+              {uiText("Source", undefined, undefined, uiLocale)}
             </Button>
             {showPendingSpinner ? (
               <Spinner
-                aria-label="Rendering diagram"
+                aria-label={uiText("Rendering diagram", undefined, undefined, uiLocale)}
                 className="ml-1 size-3.5 text-subtle-foreground"
               />
             ) : null}
           </div>
           <div className="mermaid-actions">
-            <Button size="xs" variant="ghost" onClick={copySource} aria-label="Copy Mermaid source">
+            <Button
+              size="xs"
+              variant="ghost"
+              onClick={copySource}
+              aria-label={uiText("Copy Mermaid source", undefined, undefined, uiLocale)}
+            >
               {copied ? <CheckIcon /> : <CopyIcon />}
-              {copied ? "Copied" : "Copy"}
+              {copied
+                ? uiText("Copied", undefined, undefined, uiLocale)
+                : uiText("Copy", undefined, undefined, uiLocale)}
             </Button>
             <ImageExportMenu
-              label="Diagram"
+              label={uiText("Diagram", undefined, undefined, uiLocale)}
               contentKey={ready?.result}
               disabled={!ready || ready.theme !== theme || !shownImage}
               createPng={(signal) => {
@@ -390,7 +421,7 @@ export const MermaidBlock = memo(function MermaidBlock({
             />
             <DialogTrigger
               disabled={!shownImage}
-              aria-label="Expand diagram"
+              aria-label={uiText("Expand diagram", undefined, undefined, uiLocale)}
               render={<Button size="icon-xs" variant="ghost" />}
             >
               <Maximize2Icon />
@@ -399,19 +430,29 @@ export const MermaidBlock = memo(function MermaidBlock({
         </div>
         {copyFailed && (
           <p className="mermaid-notice" role="status">
-            Couldn&apos;t copy. Use Source to select the code.
+            {uiText(
+              "Couldn''t copy. Use Source to select the code.",
+              undefined,
+              undefined,
+              uiLocale,
+            )}
           </p>
         )}
         {failed && (
           <p className="mermaid-notice" role="status">
-            Couldn&apos;t render this diagram. Showing its source.
+            {uiText(
+              "Couldn''t render this diagram. Showing its source.",
+              undefined,
+              undefined,
+              uiLocale,
+            )}
           </p>
         )}
         {showSource || pending ? (
           <pre
             className="mermaid-source"
             tabIndex={0}
-            aria-label="Mermaid source"
+            aria-label={uiText("Mermaid source", undefined, undefined, uiLocale)}
             aria-busy={pending || undefined}
           >
             <code>{code}</code>
@@ -420,13 +461,20 @@ export const MermaidBlock = memo(function MermaidBlock({
           <div
             className="mermaid-preview"
             role="region"
-            aria-label="Mermaid diagram preview; scroll to inspect"
+            aria-label={uiText(
+              "Mermaid diagram preview; scroll to inspect",
+              undefined,
+              undefined,
+              uiLocale,
+            )}
             tabIndex={0}
           >
             <img
               key={shownImage.url}
               src={shownImage.url}
-              alt={shownImage.result.title || "Mermaid diagram"}
+              alt={
+                shownImage.result.title || uiText("Mermaid diagram", undefined, undefined, uiLocale)
+              }
               width={shownImage.result.width}
               height={shownImage.result.height}
               draggable={false}
@@ -449,3 +497,5 @@ export const MermaidBlock = memo(function MermaidBlock({
     </Dialog>
   );
 });
+
+// Finite source-owned labels/helpers only; no received or user data.

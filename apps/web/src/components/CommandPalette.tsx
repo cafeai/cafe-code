@@ -1,5 +1,8 @@
-"use client";
+import { useUiLocale, useUiPresentation } from "~/i18n";
+("use client");
 
+import { uiText } from "@cafecode/shared/i18n";
+import { UiMessage } from "~/i18n";
 import { scopeProjectRef, scopeThreadRef } from "@cafecode/client-runtime";
 import {
   DEFAULT_MODEL,
@@ -124,7 +127,7 @@ function getLocalFileManagerName(platform: string): string {
   if (isWindowsPlatform(platform)) {
     return "Explorer";
   }
-  return "Files";
+  return uiText("Files");
 }
 
 function getEnvironmentBrowsePlatform(os: string | null | undefined): string {
@@ -187,7 +190,7 @@ function remoteProjectSourceLabel(source: AddProjectRemoteSource): string {
     case "azure-devops":
       return "Azure DevOps";
     case "url":
-      return "Git URL";
+      return uiText("Git URL");
   }
 }
 
@@ -231,9 +234,12 @@ function remoteProjectInputPlaceholder(flow: AddProjectCloneFlow | null): string
   if (!flow) return null;
   if (flow.step === "confirm") return null;
   if (flow.source === "url") {
-    return "Enter Git clone URL";
+    return uiText("Enter Git clone URL");
   }
-  return `Enter ${remoteProjectSourceLabel(flow.source)} repository (${remoteProjectSourcePathHint(flow.source)})`;
+  return uiText("Enter {source} repository ({pathHint})", {
+    source: remoteProjectSourceLabel(flow.source),
+    pathHint: remoteProjectSourcePathHint(flow.source),
+  });
 }
 
 function sourceProviderKind(source: AddProjectRemoteSource): AddProjectRemoteProviderKind | null {
@@ -263,7 +269,7 @@ function buildAddProjectRemoteSourceReadiness(
 ): AddProjectRemoteSourceReadiness {
   const unavailable = {
     ready: false,
-    hint: "Provider status unavailable. Open Settings -> Source Control and rescan.",
+    hint: uiText("Provider status unavailable. Open Settings -'>' Source Control and rescan."),
   } as const;
   const defaultReadiness: AddProjectRemoteSourceReadiness = {
     url: { ready: true, hint: null },
@@ -299,7 +305,10 @@ function buildAddProjectRemoteSourceReadiness(
         ready: false,
         hint:
           Option.getOrNull(provider.auth.detail) ??
-          `${provider.label} is not authenticated. Open Settings -> Source Control for setup guidance.`,
+          uiText(
+            "{provider} is not authenticated. Open Settings -'>' Source Control for setup guidance.",
+            { provider: provider.label },
+          ),
       };
       continue;
     }
@@ -415,6 +424,9 @@ function CommandPaletteDialog() {
 }
 
 function OpenCommandPaletteDialog() {
+  const uiLocale = useUiLocale();
+  const uiPresentation = useUiPresentation(UI_PRESENTATION_SOURCES);
+
   const navigate = useNavigate();
   const setOpen = useCommandPaletteStore((store) => store.setOpen);
   const openIntent = useCommandPaletteStore((store) => store.openIntent);
@@ -684,7 +696,7 @@ function OpenCommandPaletteDialog() {
 
   const allThreadItems = useMemo(
     () =>
-      buildThreadActionItems({
+      uiPresentation.buildThreadActionItems({
         threads,
         ...(activeThreadId ? { activeThreadId } : {}),
         projectTitleById,
@@ -699,7 +711,14 @@ function OpenCommandPaletteDialog() {
           });
         },
       }),
-    [activeThreadId, navigate, projectTitleById, settings.sidebarThreadSortOrder, threads],
+    [
+      activeThreadId,
+      navigate,
+      projectTitleById,
+      settings.sidebarThreadSortOrder,
+      threads,
+      uiPresentation,
+    ],
   );
   const recentThreadItems = allThreadItems.slice(0, RECENT_THREAD_LIMIT);
 
@@ -778,8 +797,8 @@ function OpenCommandPaletteDialog() {
           kind: "action",
           value: `action:add-project:${environmentId}:local`,
           searchTerms: ["local", "folder", "directory", "browse"],
-          title: "Local folder",
-          description: "Browse a folder on disk",
+          title: uiText("Local folder", undefined, undefined, uiLocale),
+          description: uiText("Browse a folder on disk", undefined, undefined, uiLocale),
           icon: <FolderPlusIcon className={ITEM_ICON_CLASS} />,
           keepOpen: true,
           run: async () => {
@@ -790,16 +809,27 @@ function OpenCommandPaletteDialog() {
 
       const orderedSources: ReadonlyArray<AddProjectRemoteSource> = [
         "url",
-        ...sortAddProjectProviderSources(readinessBySource),
+        ...uiPresentation.sortAddProjectProviderSources(readinessBySource),
       ];
 
       for (const source of orderedSources) {
-        const label = remoteProjectSourceLabel(source);
-        const title = source === "url" ? "Git URL" : `${label} repository`;
+        const label = uiPresentation.remoteProjectSourceLabel(source);
+        const title =
+          source === "url"
+            ? uiText("Git URL", undefined, undefined, uiLocale)
+            : uiText("{source} repository", { source: label }, undefined, uiLocale);
         const description =
           source === "url"
-            ? "Clone from a remote URL"
-            : `Clone ${label} ${remoteProjectSourcePathHint(source)}`;
+            ? uiText("Clone from a remote URL", undefined, undefined, uiLocale)
+            : uiText(
+                "Clone {source} {pathHint}",
+                {
+                  source: label,
+                  pathHint: remoteProjectSourcePathHint(source),
+                },
+                undefined,
+                uiLocale,
+              );
         const readiness = readinessBySource[source];
 
         if (!readiness.ready) {
@@ -820,9 +850,15 @@ function OpenCommandPaletteDialog() {
         });
       }
 
-      return [{ value: `sources:${environmentId}`, label: "Sources", items: sourceItems }];
+      return [
+        {
+          value: `sources:${environmentId}`,
+          label: uiText("Sources", undefined, undefined, uiLocale),
+          items: sourceItems,
+        },
+      ];
     },
-    [startAddProjectBrowse, startAddProjectClone],
+    [startAddProjectBrowse, startAddProjectClone, uiLocale, uiPresentation],
   );
 
   const startAddProjectSourceSelection = useCallback(
@@ -835,7 +871,7 @@ function OpenCommandPaletteDialog() {
         addonIcon: <FolderPlusIcon className={ADDON_ICON_CLASS} />,
         groups: buildAddProjectSourceGroups(
           environmentId,
-          buildAddProjectRemoteSourceReadiness(initialDiscovery),
+          uiPresentation.buildAddProjectRemoteSourceReadiness(initialDiscovery),
         ),
       });
 
@@ -855,14 +891,14 @@ function OpenCommandPaletteDialog() {
               addonIcon: <FolderPlusIcon className={ADDON_ICON_CLASS} />,
               groups: buildAddProjectSourceGroups(
                 environmentId,
-                buildAddProjectRemoteSourceReadiness(discovery),
+                uiPresentation.buildAddProjectRemoteSourceReadiness(discovery),
               ),
             },
           ];
         });
       });
     },
-    [buildAddProjectSourceGroups],
+    [buildAddProjectSourceGroups, uiPresentation],
   );
 
   const openAddProjectFlow = useCallback(() => {
@@ -871,14 +907,14 @@ function OpenCommandPaletteDialog() {
       toastManager.add(
         stackedThreadToast({
           type: "error",
-          title: "Unable to browse projects",
-          description: "No environment is available.",
+          title: uiText("Unable to browse projects", undefined, undefined, uiLocale),
+          description: uiText("No environment is available.", undefined, undefined, uiLocale),
         }),
       );
       return;
     }
     void startAddProjectSourceSelection(environmentId);
-  }, [defaultAddProjectEnvironmentId, startAddProjectSourceSelection]);
+  }, [defaultAddProjectEnvironmentId, startAddProjectSourceSelection, uiLocale]);
 
   useLayoutEffect(() => {
     if (openIntent?.kind !== "add-project") {
@@ -896,7 +932,7 @@ function OpenCommandPaletteDialog() {
     kind: "action",
     value: "action:new-thread",
     searchTerms: ["new chat", "new thread", "standalone", "no project", "create", "draft"],
-    title: "New chat",
+    title: uiText("New chat", undefined, undefined, uiLocale),
     icon: <SquarePenIcon className={ITEM_ICON_CLASS} />,
     shortcutCommand: "chat.new",
     run: handleNewStandaloneChat,
@@ -913,9 +949,10 @@ function OpenCommandPaletteDialog() {
         value: "action:new-thread-in-current",
         searchTerms: ["new chat", "new thread", "chat", "create", "draft"],
         title: (
-          <>
-            New chat in <span className="font-semibold">{activeProjectTitle}</span>
-          </>
+          <UiMessage
+            message="New chat in <project></project>"
+            slots={{ project: <span className="font-semibold">{activeProjectTitle}</span> }}
+          />
         ),
         icon: <SquarePenIcon className={ITEM_ICON_CLASS} />,
         run: async () => {
@@ -934,10 +971,16 @@ function OpenCommandPaletteDialog() {
       kind: "submenu",
       value: "action:new-thread-in",
       searchTerms: ["new chat", "new thread", "project", "pick", "choose", "select"],
-      title: "New chat in…",
+      title: uiText("New chat in…", undefined, undefined, uiLocale),
       icon: <SquarePenIcon className={ITEM_ICON_CLASS} />,
       addonIcon: <SquarePenIcon className={ADDON_ICON_CLASS} />,
-      groups: [{ value: "projects", label: "Projects", items: projectThreadItems }],
+      groups: [
+        {
+          value: "projects",
+          label: uiText("Projects", undefined, undefined, uiLocale),
+          items: projectThreadItems,
+        },
+      ],
     });
   }
 
@@ -962,7 +1005,7 @@ function OpenCommandPaletteDialog() {
       "url",
       "environment",
     ],
-    title: "Add project",
+    title: uiText("Add project", undefined, undefined, uiLocale),
     icon: <FolderPlusIcon className={ITEM_ICON_CLASS} />,
     keepOpen: true,
     run: async () => {
@@ -974,17 +1017,17 @@ function OpenCommandPaletteDialog() {
     kind: "action",
     value: "action:settings",
     searchTerms: ["settings", "preferences", "configuration", "keybindings"],
-    title: "Open settings",
+    title: uiText("Open settings", undefined, undefined, uiLocale),
     icon: <SettingsIcon className={ITEM_ICON_CLASS} />,
     run: async () => {
       await navigate({ to: "/settings" });
     },
   });
 
-  const rootGroups = buildRootGroups({ actionItems, recentThreadItems });
+  const rootGroups = uiPresentation.buildRootGroups({ actionItems, recentThreadItems });
   const activeGroups = currentView ? currentView.groups : rootGroups;
 
-  const filteredGroups = filterCommandPaletteGroups({
+  const filteredGroups = uiPresentation.filterCommandPaletteGroups({
     activeGroups,
     query: deferredQuery,
     isInSubmenu: currentView !== null,
@@ -1002,8 +1045,13 @@ function OpenCommandPaletteDialog() {
         toastManager.add(
           stackedThreadToast({
             type: "error",
-            title: "Failed to add project",
-            description: "Windows-style paths are only supported on Windows.",
+            title: uiText("Failed to add project", undefined, undefined, uiLocale),
+            description: uiText(
+              "Windows-style paths are only supported on Windows.",
+              undefined,
+              undefined,
+              uiLocale,
+            ),
           }),
         );
         return;
@@ -1013,8 +1061,13 @@ function OpenCommandPaletteDialog() {
         toastManager.add(
           stackedThreadToast({
             type: "error",
-            title: "Failed to add project",
-            description: "Relative paths require an active project.",
+            title: uiText("Failed to add project", undefined, undefined, uiLocale),
+            description: uiText(
+              "Relative paths require an active project.",
+              undefined,
+              undefined,
+              uiLocale,
+            ),
           }),
         );
         return;
@@ -1074,7 +1127,7 @@ function OpenCommandPaletteDialog() {
         toastManager.add(
           stackedThreadToast({
             type: "error",
-            title: "Failed to add project",
+            title: uiText("Failed to add project", undefined, undefined, uiLocale),
             ...errorDescription(error),
           }),
         );
@@ -1091,6 +1144,7 @@ function OpenCommandPaletteDialog() {
       settings.defaultThreadEnvMode,
       settings.sidebarThreadSortOrder,
       threads,
+      uiLocale,
     ],
   );
 
@@ -1125,8 +1179,8 @@ function OpenCommandPaletteDialog() {
       toastManager.add(
         stackedThreadToast({
           type: "error",
-          title: "Unable to clone project",
-          description: "Environment API is not available.",
+          title: uiText("Unable to clone project", undefined, undefined, uiLocale),
+          description: uiText("Environment API is not available.", undefined, undefined, uiLocale),
         }),
       );
       return;
@@ -1198,7 +1252,7 @@ function OpenCommandPaletteDialog() {
         toastManager.add(
           stackedThreadToast({
             type: "error",
-            title: "Repository lookup failed",
+            title: uiText("Repository lookup failed", undefined, undefined, uiLocale),
             ...errorDescription(error),
           }),
         );
@@ -1217,8 +1271,13 @@ function OpenCommandPaletteDialog() {
       toastManager.add(
         stackedThreadToast({
           type: "error",
-          title: "Clone failed",
-          description: "Windows-style paths are only supported on Windows.",
+          title: uiText("Clone failed", undefined, undefined, uiLocale),
+          description: uiText(
+            "Windows-style paths are only supported on Windows.",
+            undefined,
+            undefined,
+            uiLocale,
+          ),
         }),
       );
       return;
@@ -1228,8 +1287,13 @@ function OpenCommandPaletteDialog() {
       toastManager.add(
         stackedThreadToast({
           type: "error",
-          title: "Clone failed",
-          description: "Relative paths require an active project.",
+          title: uiText("Clone failed", undefined, undefined, uiLocale),
+          description: uiText(
+            "Relative paths require an active project.",
+            undefined,
+            undefined,
+            uiLocale,
+          ),
         }),
       );
       return;
@@ -1261,7 +1325,7 @@ function OpenCommandPaletteDialog() {
       toastManager.add(
         stackedThreadToast({
           type: "error",
-          title: "Clone failed",
+          title: uiText("Clone failed", undefined, undefined, uiLocale),
           ...errorDescription(error),
         }),
       );
@@ -1299,7 +1363,7 @@ function OpenCommandPaletteDialog() {
   const canBrowseUp =
     isBrowsing && !relativePathNeedsActiveProject && canNavigateUp(browseDirectoryPath);
 
-  const browseGroups = buildBrowseGroups({
+  const browseGroups = uiPresentation.buildBrowseGroups({
     browseEntries: filteredBrowseEntries,
     browseQuery: query,
     canBrowseUp,
@@ -1311,9 +1375,11 @@ function OpenCommandPaletteDialog() {
   const cloneDestinationBrowseGroups = useMemo(
     () =>
       browseGroups.map((group) =>
-        group.value === "directories" ? { ...group, label: "Select parent folder" } : group,
+        group.value === "directories"
+          ? { ...group, label: uiText("Select parent folder", undefined, undefined, uiLocale) }
+          : group,
       ),
-    [browseGroups],
+    [browseGroups, uiLocale],
   );
 
   const remoteProjectContext = useMemo(() => {
@@ -1338,8 +1404,8 @@ function OpenCommandPaletteDialog() {
   }
 
   const inputPlaceholder =
-    remoteProjectInputPlaceholder(addProjectCloneFlow) ??
-    getCommandPaletteInputPlaceholder(paletteMode);
+    uiPresentation.remoteProjectInputPlaceholder(addProjectCloneFlow) ??
+    uiPresentation.getCommandPaletteInputPlaceholder(paletteMode);
   const isSubmenu = paletteMode === "submenu" || paletteMode === "submenu-browse";
   const hasHighlightedBrowseItem = highlightedItemValue?.startsWith("browse:") ?? false;
   const canSubmitBrowsePath = isBrowsing && !relativePathNeedsActiveProject;
@@ -1350,27 +1416,31 @@ function OpenCommandPaletteDialog() {
     !hasHighlightedBrowseItem &&
     (hasTrailingPathSeparator(query) ? !browseResult : exactBrowseEntry === null);
   const useMetaForMod = isMacPlatform(navigator.platform);
-  const submitModifierLabel = useMetaForMod ? "\u2318" : "Ctrl";
+  const submitModifierLabel = useMetaForMod
+    ? uiText("⌘", undefined, undefined, uiLocale)
+    : uiText("Ctrl", undefined, undefined, uiLocale);
   const isCloneDestinationStep = addProjectCloneFlow?.step === "confirm";
   const submitActionLabel = isCloneDestinationStep
     ? willCreateProjectPath
-      ? "Create & Clone"
-      : "Clone"
+      ? uiText("Create & Clone", undefined, undefined, uiLocale)
+      : uiText("Clone", undefined, undefined, uiLocale)
     : willCreateProjectPath
-      ? "Create & Add"
-      : "Add";
-  const addShortcutLabel = hasHighlightedBrowseItem ? `${submitModifierLabel} Enter` : "Enter";
+      ? uiText("Create & Add", undefined, undefined, uiLocale)
+      : uiText("Add", undefined, undefined, uiLocale);
+  const addShortcutLabel = hasHighlightedBrowseItem
+    ? uiText("{value0} Enter", { value0: submitModifierLabel }, undefined, uiLocale)
+    : uiText("Enter", undefined, undefined, uiLocale);
   const remoteProjectButtonLabel = addProjectCloneFlow
     ? addProjectCloneFlow.source === "url"
-      ? "Continue"
-      : "Lookup"
+      ? uiText("Continue", undefined, undefined, uiLocale)
+      : uiText("Lookup", undefined, undefined, uiLocale)
     : null;
   const isRemoteProjectPending = isRemoteProjectLookingUp || isRemoteProjectCloning;
   const canSubmitRemoteProjectFlow =
     addProjectCloneFlow?.step === "repository" &&
     query.trim().length > 0 &&
     !isRemoteProjectPending;
-  const fileManagerName = getLocalFileManagerName(navigator.platform);
+  const fileManagerName = uiPresentation.getLocalFileManagerName(navigator.platform);
   const canOpenProjectFromFileManager =
     isBrowsing &&
     browseEnvironmentId !== null &&
@@ -1452,7 +1522,7 @@ function OpenCommandPaletteDialog() {
       toastManager.add(
         stackedThreadToast({
           type: "error",
-          title: "Unable to run command",
+          title: uiText("Unable to run command", undefined, undefined, uiLocale),
           ...errorDescription(error),
         }),
       );
@@ -1493,7 +1563,7 @@ function OpenCommandPaletteDialog() {
 
   return (
     <CommandDialogPopup
-      aria-label="Command palette"
+      aria-label={uiText("Command palette", undefined, undefined, uiLocale)}
       className="overflow-hidden p-0"
       data-testid="command-palette"
       finalFocus={() => {
@@ -1506,7 +1576,7 @@ function OpenCommandPaletteDialog() {
     >
       <Command
         key={`${viewStack.length}-${browseGeneration}-${isBrowsing}-${addProjectCloneFlow?.step ?? "none"}`}
-        aria-label="Command palette"
+        aria-label={uiText("Command palette", undefined, undefined, uiLocale)}
         autoHighlight={isBrowsing || isRemoteProjectCloneFlow ? false : "always"}
         mode="none"
         onItemHighlighted={(value) => {
@@ -1536,7 +1606,7 @@ function OpenCommandPaletteDialog() {
                     <button
                       type="button"
                       className="flex cursor-pointer items-center"
-                      aria-label="Back"
+                      aria-label={uiText("Back", undefined, undefined, uiLocale)}
                       onClick={popView}
                     >
                       <ArrowLeftIcon />
@@ -1556,7 +1626,15 @@ function OpenCommandPaletteDialog() {
               size="xs"
               tabIndex={-1}
               className="absolute inset-e-2.5 top-1/2 gap-1.5 pe-1 ps-2 -translate-y-1/2 [@media(hover:none)_and_(pointer:coarse)]:pe-2"
-              aria-label={`${remoteProjectButtonLabel ?? "Continue"} (Enter)`}
+              aria-label={uiText(
+                "{value0} (Enter)",
+                {
+                  value0:
+                    remoteProjectButtonLabel ?? uiText("Continue", undefined, undefined, uiLocale),
+                },
+                undefined,
+                uiLocale,
+              )}
               disabled={!canSubmitRemoteProjectFlow}
               onMouseDown={(event) => {
                 event.preventDefault();
@@ -1564,12 +1642,24 @@ function OpenCommandPaletteDialog() {
               onClick={() => {
                 void submitAddProjectCloneFlow();
               }}
-              title={`${remoteProjectButtonLabel ?? "Continue"} (Enter)`}
+              title={uiText(
+                "{value0} (Enter)",
+                {
+                  value0:
+                    remoteProjectButtonLabel ?? uiText("Continue", undefined, undefined, uiLocale),
+                },
+                undefined,
+                uiLocale,
+              )}
             >
-              <span>{isRemoteProjectPending ? "Working" : remoteProjectButtonLabel}</span>
+              <span>
+                {isRemoteProjectPending
+                  ? uiText("Working", undefined, undefined, uiLocale)
+                  : remoteProjectButtonLabel}
+              </span>
               {/* Keyboard hint is meaningless on touch-only devices; see CommandFooter below. */}
               <KbdGroup className="pointer-events-none -me-0.5 items-center gap-1 [@media(hover:none)_and_(pointer:coarse)]:hidden">
-                <Kbd>Enter</Kbd>
+                <Kbd>{uiText("Enter", undefined, undefined, uiLocale)}</Kbd>
               </KbdGroup>
             </Button>
           ) : isBrowsing ? (
@@ -1581,7 +1671,15 @@ function OpenCommandPaletteDialog() {
                 "absolute inset-e-2.5 top-1/2 pe-1 ps-2 -translate-y-1/2 [@media(hover:none)_and_(pointer:coarse)]:pe-2",
                 hasHighlightedBrowseItem ? "gap-1" : "gap-1.5",
               )}
-              aria-label={`${submitActionLabel} (${addShortcutLabel})`}
+              aria-label={uiText(
+                "{action} ({shortcut})",
+                {
+                  action: submitActionLabel,
+                  shortcut: addShortcutLabel,
+                },
+                undefined,
+                uiLocale,
+              )}
               disabled={
                 relativePathNeedsActiveProject || (isCloneDestinationStep && isRemoteProjectPending)
               }
@@ -1598,14 +1696,28 @@ function OpenCommandPaletteDialog() {
                   void handleAddProject(resolvedAddProjectPath);
                 }
               }}
-              title={`${submitActionLabel} (${addShortcutLabel})`}
+              title={uiText(
+                "{action} ({shortcut})",
+                {
+                  action: submitActionLabel,
+                  shortcut: addShortcutLabel,
+                },
+                undefined,
+                uiLocale,
+              )}
             >
               <span>
-                {isCloneDestinationStep && isRemoteProjectPending ? "Cloning" : submitActionLabel}
+                {isCloneDestinationStep && isRemoteProjectPending
+                  ? uiText("Cloning", undefined, undefined, uiLocale)
+                  : submitActionLabel}
               </span>
               {/* Keyboard hint is meaningless on touch-only devices; see CommandFooter below. */}
               <KbdGroup className="pointer-events-none -me-0.5 items-center gap-1 [@media(hover:none)_and_(pointer:coarse)]:hidden">
-                <Kbd>{hasHighlightedBrowseItem ? `${submitModifierLabel} Enter` : "Enter"}</Kbd>
+                <Kbd>
+                  {hasHighlightedBrowseItem
+                    ? uiText("{value0} Enter", { value0: submitModifierLabel }, undefined, uiLocale)
+                    : uiText("Enter", undefined, undefined, uiLocale)}
+                </Kbd>
               </KbdGroup>
             </Button>
           ) : null}
@@ -1614,7 +1726,7 @@ function OpenCommandPaletteDialog() {
           {remoteProjectContext ? (
             <div className="p-2 pb-0">
               <div className="px-2 py-1.5 font-medium text-muted-foreground text-xs">
-                Repository
+                {uiText("Repository", undefined, undefined, uiLocale)}
               </div>
               <div className="flex min-h-8 items-center gap-2 rounded-sm px-2 py-1.5">
                 {remoteProjectContext.icon}
@@ -1641,20 +1753,45 @@ function OpenCommandPaletteDialog() {
               ? {
                   emptyStateMessage:
                     addProjectCloneFlow.source === "url"
-                      ? "Enter a Git clone URL and press Enter to continue."
-                      : "Enter a repository path and press Enter to look it up.",
+                      ? uiText(
+                          "Enter a Git clone URL and press Enter to continue.",
+                          undefined,
+                          undefined,
+                          uiLocale,
+                        )
+                      : uiText(
+                          "Enter a repository path and press Enter to look it up.",
+                          undefined,
+                          undefined,
+                          uiLocale,
+                        ),
                 }
               : addProjectCloneFlow?.step === "confirm"
                 ? {
-                    emptyStateMessage:
+                    emptyStateMessage: uiText(
                       "Choose a parent folder or type a destination path and press Enter to clone.",
+                      undefined,
+                      undefined,
+                      uiLocale,
+                    ),
                   }
                 : relativePathNeedsActiveProject
-                  ? { emptyStateMessage: "Relative paths require an active project." }
+                  ? {
+                      emptyStateMessage: uiText(
+                        "Relative paths require an active project.",
+                        undefined,
+                        undefined,
+                        uiLocale,
+                      ),
+                    }
                   : willCreateProjectPath
                     ? {
-                        emptyStateMessage:
+                        emptyStateMessage: uiText(
                           "Press Enter to create this folder and add it as a project.",
+                          undefined,
+                          undefined,
+                          uiLocale,
+                        ),
                       }
                     : {})}
           />
@@ -1674,30 +1811,38 @@ function OpenCommandPaletteDialog() {
               <Kbd>
                 <ArrowDownIcon />
               </Kbd>
-              <span className="text-muted-foreground">Navigate</span>
+              <span className="text-muted-foreground">
+                {uiText("Navigate", undefined, undefined, uiLocale)}
+              </span>
             </KbdGroup>
             {addProjectCloneFlow?.step === "repository" ? (
               <KbdGroup className="items-center gap-1.5">
-                <Kbd>Enter</Kbd>
+                <Kbd>{uiText("Enter", undefined, undefined, uiLocale)}</Kbd>
                 <span className="text-muted-foreground">
-                  {remoteProjectButtonLabel ?? "Continue"}
+                  {remoteProjectButtonLabel ?? uiText("Continue", undefined, undefined, uiLocale)}
                 </span>
               </KbdGroup>
             ) : !canSubmitBrowsePath || hasHighlightedBrowseItem ? (
               <KbdGroup className="items-center gap-1.5">
-                <Kbd>Enter</Kbd>
-                <span className="text-muted-foreground">Select</span>
+                <Kbd>{uiText("Enter", undefined, undefined, uiLocale)}</Kbd>
+                <span className="text-muted-foreground">
+                  {uiText("Select", undefined, undefined, uiLocale)}
+                </span>
               </KbdGroup>
             ) : null}
             {isSubmenu ? (
               <KbdGroup className="items-center gap-1.5">
-                <Kbd>Backspace</Kbd>
-                <span className="text-muted-foreground">Back</span>
+                <Kbd>{uiText("Backspace", undefined, undefined, uiLocale)}</Kbd>
+                <span className="text-muted-foreground">
+                  {uiText("Back", undefined, undefined, uiLocale)}
+                </span>
               </KbdGroup>
             ) : null}
             <KbdGroup className="items-center gap-1.5">
-              <Kbd>Esc</Kbd>
-              <span className="text-muted-foreground">Close</span>
+              <Kbd>{uiText("Esc", undefined, undefined, uiLocale)}</Kbd>
+              <span className="text-muted-foreground">
+                {uiText("Close", undefined, undefined, uiLocale)}
+              </span>
             </KbdGroup>
           </div>
           {canOpenProjectFromFileManager ? (
@@ -1710,7 +1855,7 @@ function OpenCommandPaletteDialog() {
                 void handleOpenProjectFromFileManager();
               }}
             >
-              {`Open in ${fileManagerName}`}
+              {uiText("Open in {value0}", { value0: fileManagerName }, undefined, uiLocale)}
             </Button>
           ) : null}
         </CommandFooter>
@@ -1718,3 +1863,17 @@ function OpenCommandPaletteDialog() {
     </CommandDialogPopup>
   );
 }
+
+// Finite source-owned labels/helpers only; no received or user data.
+const UI_PRESENTATION_SOURCES = {
+  buildAddProjectRemoteSourceReadiness,
+  buildBrowseGroups,
+  buildRootGroups,
+  buildThreadActionItems,
+  filterCommandPaletteGroups,
+  getCommandPaletteInputPlaceholder,
+  getLocalFileManagerName,
+  remoteProjectInputPlaceholder,
+  remoteProjectSourceLabel,
+  sortAddProjectProviderSources,
+};

@@ -372,6 +372,29 @@
       }
     },
     {
+      "slug": "claude-haiku-5-5",
+      "name": "Claude Haiku 5.5",
+      "isCustom": false,
+      "minimumClaudeCodeVersion": "2.1.293",
+      "capabilities": {
+        "optionDescriptors": [
+          {
+            "id": "effort",
+            "label": "Reasoning",
+            "type": "select",
+            "options": [
+              { "id": "low", "label": "Low" },
+              { "id": "medium", "label": "Medium", "isDefault": true },
+              { "id": "high", "label": "High" },
+              { "id": "xhigh", "label": "Extra High" },
+              { "id": "max", "label": "Max" }
+            ],
+            "currentValue": "medium"
+          }
+        ]
+      }
+    },
+    {
       "slug": "claude-haiku-4-5",
       "name": "Claude Haiku 4.5",
       "isCustom": false,

@@ -1,3 +1,4 @@
+import { getUiLocale, subscribeUiLocale, uiText } from "@cafecode/shared/i18n";
 /**
  * Web Push client plumbing for the per-device notifications toggle.
  *
@@ -66,14 +67,16 @@ export async function enableWebPushNotifications(): Promise<void> {
   if (permission !== "granted") {
     throw new Error(
       permission === "denied"
-        ? "Notification permission was denied. Allow notifications for this site in your browser settings, then try again."
-        : "Notification permission was not granted.",
+        ? uiText(
+            "Notification permission was denied. Allow notifications for this site in your browser settings, then try again.",
+          )
+        : uiText("Notification permission was not granted."),
     );
   }
 
   const keyResponse = await fetch("/api/notifications/web-push/public-key");
   if (!keyResponse.ok) {
-    throw new Error("The server could not provide a push key.");
+    throw new Error(uiText("The server could not provide a push key."));
   }
   const { publicKey } = (await keyResponse.json()) as { publicKey: string };
 
@@ -87,14 +90,46 @@ export async function enableWebPushNotifications(): Promise<void> {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({
-      subscription: subscription.toJSON(),
+      subscription: { ...subscription.toJSON(), uiLocale: getUiLocale() },
       label: navigator.userAgent.slice(0, 120),
     }),
   });
   if (!storeResponse.ok) {
     await subscription.unsubscribe().catch(() => {});
-    throw new Error("The server rejected the push subscription.");
+    throw new Error(uiText("The server rejected the push subscription."));
   }
+}
+
+/** Refresh presentation for an existing subscription only. Do not request
+ * permission, create a service worker, subscribe, or resurrect a disabled
+ * endpoint. The update-only server route binds the exact endpoint and keys.
+ * Serializing updates prevents an older locale response winning a newer one. */
+export function installWebPushLocaleSynchronization(): () => void {
+  let disposed = false;
+  let pending = Promise.resolve();
+  const update = () => {
+    pending = pending
+      .then(async () => {
+        if (disposed || typeof navigator === "undefined" || !("serviceWorker" in navigator)) return;
+        const registration = await navigator.serviceWorker.getRegistration("/sw.js");
+        const subscription = await registration?.pushManager.getSubscription();
+        if (!subscription || disposed) return;
+        await fetch("/api/notifications/web-push/subscriptions/locale", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            subscription: { ...subscription.toJSON(), uiLocale: getUiLocale() },
+          }),
+        });
+      })
+      .catch(() => {});
+  };
+  const unsubscribe = subscribeUiLocale(update);
+  update();
+  return () => {
+    disposed = true;
+    unsubscribe();
+  };
 }
 
 /** Unsubscribe locally and remove the subscription server-side. */
@@ -117,10 +152,14 @@ function describeUnsupported(
 ): string {
   switch (reason) {
     case "insecure-context":
-      return "Push notifications require HTTPS. Connect to the server over HTTPS to enable them on this device.";
+      return uiText(
+        "Push notifications require HTTPS. Connect to the server over HTTPS to enable them on this device.",
+      );
     case "no-service-worker":
     case "no-push-manager":
     case "no-notifications":
-      return "This browser does not support push notifications. On iOS, add the app to your home screen first.";
+      return uiText(
+        "This browser does not support push notifications. On iOS, add the app to your home screen first.",
+      );
   }
 }

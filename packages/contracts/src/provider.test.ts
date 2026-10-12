@@ -322,6 +322,23 @@ describe("providerInstanceId routing key (slice-2 invariant)", () => {
     expect(session.providerInstanceId).toBe("codex_work");
   });
 
+  it("retains private history coordinates without making a fresh session resumable", () => {
+    const legacy = {
+      provider: "claudeAgent",
+      providerInstanceId: "claude_personal",
+      status: "running",
+      runtimeMode: "full-access",
+      threadId: "thread-1",
+      createdAt: "2024-01-01T00:00:00Z",
+      updatedAt: "2024-01-01T00:00:00Z",
+    };
+    expect(decodeProviderSession(legacy).subagentHistoryResumeCursor).toBeUndefined();
+    const historyRoot = { resume: "00000000-0000-4000-8000-000000000941" };
+    const session = decodeProviderSession({ ...legacy, subagentHistoryResumeCursor: historyRoot });
+    expect(session.subagentHistoryResumeCursor).toEqual(historyRoot);
+    expect(session.resumeCursor).toBeUndefined();
+  });
+
   it("preserves the provider-owned effective model selection on a session", () => {
     const session = decodeProviderSession({
       provider: "grok",

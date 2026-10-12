@@ -2,9 +2,9 @@
 
 Decision status: Accepted within the current user-authorized repair
 Implementation status: Implemented; normal rebuilt-runtime adoption required
-Verification status: Local source/default/browser qualification passes; no live provider qualification
+Verification status: Combined source/renderer qualification passed locally; forced build remains the final release gate; no live provider qualification
 Created: 2026-10-10 21:31:04 JST (UTC+0900)
-Last updated: 2026-10-10 23:17:37 JST (UTC+0900)
+Last updated: 2026-10-11 02:38:08 JST (UTC+0900)
 Decision authority: the user's request for persistent backed-off recovery until
 explicit Stop, correct surviving-child presentation, and compact Stop/restart UI.
 Partially supersedes: the failed-root availability assumption in
@@ -57,6 +57,9 @@ outcome. Diagnostic and exact server recovery bookkeeping do not extend terminal
 root execution time; schema-valid child lifecycle events preserve their own
 timestamps without extending an already failed parent's clock. Genuine root
 late-tool activity and completed-parent history retain their existing behavior.
+Qualified terminal child errors retain failed status and bounded error detail in
+the child task, without a duplicate unscoped warning that would re-date its parent.
+Missing child identity retains the diagnostic fallback, not guessed child scope.
 
 Automatic continuation requires an allowlisted definitive transient category:
 transport, server failure or temporary rate limiting. Bounded structured errors
@@ -65,6 +68,14 @@ request UUID is separately recognized. Arbitrary prose, inherited/accessor field
 auth, billing/quota, policy, history and unknown errors do not gain retry authority.
 Provider-native retry warnings remain native-owned; Cafe never nests another
 submission inside that loop or changes native retry configuration.
+
+Codex 0.162.1 remote compaction retains the underlying `other` error variant and
+uses one exact `Error running remote compact task: ` wrapper after its finite
+native retry budget. Recognize only that anchored wrapper around the same
+UUID-bearing processing-error form, not arbitrary prefix stripping. This fixes
+a classifier omission under the accepted decision, not a new retry category or
+permission to bypass pending/uncertain compaction. Definitive native completion
+clears tracked automatic-compaction items; manual reservations remain separate.
 
 The server-authored durable marker binds the failed turn, account, exact runtime
 generation and session timestamp. Its hashed command is a server decision minted
@@ -87,7 +98,7 @@ as client authority. Missing or contradictory acceptance remains uncertain, not
 permission to associate a different turn or resend the request.
 
 Each definitively accepted continuation that fails transiently may schedule the
-next one. There is no attempt cutoff. Exponential delays have bounded equal jitter
+next one. There is no attempt cutoff. Exponential delays have bounded 75–100% jitter
 and a 60-second cap; bookkeeping saturates rather than overflowing. Waits run
 outside the shared serial worker. Successful acceptance alone does not reset the
 failure chain, preventing fast repeated failures from producing a retry storm.
@@ -107,11 +118,32 @@ This does not weaken approvals or native whole-tree idle admission for settings.
 - Keep the root failed while exact-generation active children remain visible and
   ticking. Atrium age/dismissal cannot hide such children; terminal and unavailable
   histories retain their existing behavior.
-- Show a compact root-failure/live-agent/recovery notice, not a stopped claim while
-  workers continue. Stop remains usable even when the root itself is terminal;
+- Lead the compact notice with Reconnecting or Agents running while retaining the
+  root failure in its explanation and work log, not a stopped claim while workers
+  continue. Stop remains usable even when the root itself is terminal;
   manual new-turn input remains available.
+- Suppress only the matching current provider-error banner while exact account,
+  generation, immutable completion time and pending automatic-recovery metadata
+  agree. The error remains in history; cancellation, uncertainty, unavailable
+  environments and unrelated manual failures retain notifications. Surviving
+  children alone do not imply unattended recovery. Keep a compact ongoing footer
+  with the historical root duration and the normal red Stop for an empty recovery
+  composer. The Stop callback rechecks canonical state; a typed draft retains
+  ordinary new-turn submission, not an invented running-turn queue.
 - Show a countdown only from bounded received server timing metadata. Display
   markers describe work, never confer recovery permission.
+- Separate native reconnect observations from Cafe continuation generations.
+  Typed native warning envelopes increment a runtime-local deduplicated counter
+  for the exact native target/turn; 1,024 observations becomes a lower bound, not
+  a retry cutoff. Native timing is unknown, so never guess its next deadline.
+  Cafe's durable continuation ordinal advances only after the preceding exact
+  accepted receipt, independently of the capped delay exponent. Older saturated
+  chains show a lower bound, and malformed optional count metadata is omitted.
+  Preparation waits reuse the ordinal. Live countdowns use the actual recorded
+  sleep deadline; saved work-log rows stay static. Snapshot and renderer retain
+  one latest exact-current-turn/account/runtime/session-time display marker beyond
+  the ordinary tail, including cancellation/uncertain/attempted dominance. This
+  narrow projection index and display exception cannot grant retry authority.
 - Keep private native conversation identities, resume cursors, prompts, provider
   error text and credentials out of new public operational payloads/diagnostics.
 - Unknown ACK, genuinely missing ownership and permanent errors require
@@ -158,6 +190,12 @@ with isolated synthetic peers/SQL only. Browser fixtures cover both themes,
 compact active-child/recovery presentation and real Stop dispatch. Legacy error,
 closed and replacement-generation negatives remain mandatory.
 
+The real SQL-backed worker regression advances 36 consecutively accepted/failed
+continuations, beyond the persisted exponent's saturation at 30, and explicitly
+stops the next wait. It asserts no original input/attachment replay, runtime
+replacement or steer, no changed original terminal time, and no later submission
+after Stop. The counter cap is a delay bound, never a fixed retry cutoff.
+
 The no-start association fixtures must drain native failure events before the
 acknowledgment, then qualify exact receipt/nonce/message association and the next
 failure-chain retry. Refuse foreign accounts, actors, receipts, messages, missing
@@ -170,12 +208,21 @@ provider interruption, paid retry probes and profile mutation are not part of
 default verification. Record exact build/push evidence before marking the release
 complete.
 
-Local qualification used Node 24.21.0 and Corepack Yarn 4.17.1: formatting/check,
+Earlier local qualification used Node 24.21.0 and Corepack Yarn 4.17.1: formatting/check,
 lint and typecheck passed; all ten uncached default test tasks passed with 7,700
 ordinary passing tests and the existing expected failure/skips unchanged. All
 1,406 browser tests passed with the original two-worker bound and deadlines.
 Independent frozen-source recovery qualification passed 601 tests, including the
 real ingestion/engine/SQL association and ownership/cancellation boundaries.
+Those earlier passes are not proof of the expanded source. Combined qualification
+at `2026-10-11 02:38:08 JST (UTC+0900)` passes formatting/check, lint and all ten
+uncached typecheck tasks; default tests pass 7,875 ordinary tests with the existing
+expected failure/eight skips unchanged, and all 1,408 browser tests in 95 files
+pass. Independent final notification/footer/Stop review closes exact-owner,
+cancellation, uncertainty, current live-work and manual draft boundaries. See
+[the provider compatibility report](../provider-updates-2026-10-11.md) for commands
+and qualification scope. The forced build follows final documentation formatting;
+record its exact source and outcome with the release checkpoint.
 
 The full browser run exposed an existing tooltip fixture that hovered during its
 dialog's opening transform. Its narrow test-only correction waits for actual

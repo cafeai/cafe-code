@@ -1,3 +1,6 @@
+import { useUiLocale, useUiPresentation } from "~/i18n";
+import { uiText } from "@cafecode/shared/i18n";
+import { UiMessage } from "~/i18n";
 import { scopeProjectRef, scopeThreadRef } from "@cafecode/client-runtime";
 import type { EnvironmentId, VcsRef, ThreadId } from "@cafecode/contracts";
 import { useInfiniteQuery, useQueryClient } from "@tanstack/react-query";
@@ -60,7 +63,7 @@ interface BranchToolbarBranchSelectorProps {
 }
 
 function toBranchActionErrorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : "An error occurred.";
+  return error instanceof Error ? error.message : uiText("An error occurred.");
 }
 
 function getBranchTriggerLabel(input: {
@@ -70,10 +73,10 @@ function getBranchTriggerLabel(input: {
 }): string {
   const { activeWorktreePath, effectiveEnvMode, resolvedActiveBranch } = input;
   if (!resolvedActiveBranch) {
-    return "Select ref";
+    return uiText("Select ref");
   }
   if (effectiveEnvMode === "worktree" && !activeWorktreePath) {
-    return `From ${resolvedActiveBranch}`;
+    return uiText("From {branch}", { branch: resolvedActiveBranch });
   }
   return resolvedActiveBranch;
 }
@@ -90,6 +93,9 @@ export function BranchToolbarBranchSelector({
   onCheckoutPullRequestRequest,
   onComposerFocusRequest,
 }: BranchToolbarBranchSelectorProps) {
+  const uiLocale = useUiLocale();
+  const uiPresentation = useUiPresentation(UI_PRESENTATION_SOURCES);
+
   // ---------------------------------------------------------------------------
   // Thread / project state (pushed down from parent to colocate with mutation)
   // ---------------------------------------------------------------------------
@@ -208,7 +214,11 @@ export function BranchToolbarBranchSelector({
   useEffect(() => {
     if (!branchCwd) return;
     void queryClient.prefetchInfiniteQuery(
-      gitBranchSearchInfiniteQueryOptions({ environmentId, cwd: branchCwd, query: "" }),
+      gitBranchSearchInfiniteQueryOptions({
+        environmentId,
+        cwd: branchCwd,
+        query: "",
+      }),
     );
   }, [branchCwd, environmentId, queryClient]);
 
@@ -295,11 +305,16 @@ export function BranchToolbarBranchSelector({
   const shouldVirtualizeBranchList = filteredBranchPickerItems.length > 40;
   const totalBranchCount = branchesSearchData?.pages[0]?.totalCount ?? 0;
   const branchStatusText = isBranchesSearchPending
-    ? "Loading refs..."
+    ? uiText("Loading refs...", undefined, undefined, uiLocale)
     : isFetchingNextPage
-      ? "Loading more refs..."
+      ? uiText("Loading more refs...", undefined, undefined, uiLocale)
       : hasNextPage
-        ? `Showing ${refs.length} of ${totalBranchCount} refs`
+        ? uiText(
+            "Showing {shown} of {total} refs",
+            { shown: refs.length, total: totalBranchCount },
+            undefined,
+            uiLocale,
+          )
         : null;
 
   // ---------------------------------------------------------------------------
@@ -363,8 +378,8 @@ export function BranchToolbarBranchSelector({
         toastManager.add(
           stackedThreadToast({
             type: "error",
-            title: "Failed to switch ref.",
-            description: toBranchActionErrorMessage(error),
+            title: uiText("Failed to switch ref.", undefined, undefined, uiLocale),
+            description: uiPresentation.toBranchActionErrorMessage(error),
           }),
         );
       }
@@ -395,8 +410,8 @@ export function BranchToolbarBranchSelector({
         toastManager.add(
           stackedThreadToast({
             type: "error",
-            title: "Failed to create and switch ref.",
-            description: toBranchActionErrorMessage(error),
+            title: uiText("Failed to create and switch ref.", undefined, undefined, uiLocale),
+            description: uiPresentation.toBranchActionErrorMessage(error),
           }),
         );
       }
@@ -490,7 +505,7 @@ export function BranchToolbarBranchSelector({
     maybeFetchNextBranchPage();
   }, [refs.length, maybeFetchNextBranchPage, shouldVirtualizeBranchList]);
 
-  const triggerLabel = getBranchTriggerLabel({
+  const triggerLabel = uiPresentation.getBranchTriggerLabel({
     activeWorktreePath,
     effectiveEnvMode,
     resolvedActiveBranch,
@@ -518,7 +533,10 @@ export function BranchToolbarBranchSelector({
             <SourceControlIcon className="size-3.5 shrink-0 text-muted-foreground" />
             <span className="flex min-w-0 flex-col items-start">
               <span className="truncate font-medium">
-                Checkout {sourceControlPresentation.terminology.singular}
+                <UiMessage
+                  message={"Checkout <slot1></slot1>"}
+                  slots={{ slot1: sourceControlPresentation.terminology.singular }}
+                />
               </span>
               <span className="truncate text-muted-foreground text-xs">{prReference}</span>
             </span>
@@ -535,7 +553,12 @@ export function BranchToolbarBranchSelector({
           value={itemValue}
           onClick={() => createRef(trimmedBranchQuery)}
         >
-          <span className="truncate">Create new ref &quot;{trimmedBranchQuery}&quot;</span>
+          <span className="truncate">
+            <UiMessage
+              message={'Create new ref "<slot1></slot1>"'}
+              slots={{ slot1: trimmedBranchQuery }}
+            />
+          </span>
         </ComboboxItem>
       );
     }
@@ -546,13 +569,13 @@ export function BranchToolbarBranchSelector({
     const hasSecondaryWorktree =
       refName.worktreePath && activeProjectCwd && refName.worktreePath !== activeProjectCwd;
     const badge = refName.current
-      ? "current"
+      ? uiText("current", undefined, undefined, uiLocale)
       : hasSecondaryWorktree
-        ? "worktree"
+        ? uiText("worktree", undefined, undefined, uiLocale)
         : refName.isRemote
-          ? "remote"
+          ? uiText("remote", undefined, undefined, uiLocale)
           : refName.isDefault
-            ? "default"
+            ? uiText("default", undefined, undefined, uiLocale)
             : null;
     return (
       <ComboboxItem
@@ -602,14 +625,14 @@ export function BranchToolbarBranchSelector({
           <ComboboxInput
             className="[&_input]:font-sans rounded-md"
             inputClassName="ring-0"
-            placeholder="Search refs..."
+            placeholder={uiText("Search refs...", undefined, undefined, uiLocale)}
             showTrigger={false}
             size="sm"
             value={branchQuery}
             onChange={(event) => setBranchQuery(event.target.value)}
           />
         </div>
-        <ComboboxEmpty>No refs found.</ComboboxEmpty>
+        <ComboboxEmpty>{uiText("No refs found.", undefined, undefined, uiLocale)}</ComboboxEmpty>
 
         {shouldVirtualizeBranchList ? (
           <ComboboxListVirtualized>
@@ -640,3 +663,6 @@ export function BranchToolbarBranchSelector({
     </Combobox>
   );
 }
+
+// Finite source-owned labels/helpers only; no received or user data.
+const UI_PRESENTATION_SOURCES = { getBranchTriggerLabel, toBranchActionErrorMessage };

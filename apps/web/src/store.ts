@@ -21,9 +21,12 @@ import type {
   ScopedThreadRef,
 } from "@cafecode/contracts";
 import {
+  isCodexNativeRetryWarningPayload,
   isProviderDriverKind,
   MAX_RUNTIME_SUBAGENT_IDENTITIES_PER_TURN,
   ProviderDriverKind,
+  RuntimeSubagentPresentation,
+  THREAD_DETAIL_ACTIVITY_WINDOW_LIMIT,
 } from "@cafecode/contracts";
 import type { ThreadId, TurnId } from "@cafecode/contracts";
 import * as Schema from "effect/Schema";
@@ -47,7 +50,10 @@ import { readTurnConfiguration } from "./turnConfiguration";
 import { readWorkflowTaskPresentation } from "./workflowTaskActivity";
 import { subagentLimitsEqual } from "./subagentConcurrency";
 import { threadForkPrefix } from "./lib/threadForkPrefix";
+import { isCurrentCodexRecoveryMarker } from "./codexRecovery";
+import { compareActivityWindowOrder } from "./activityOrder";
 const isProviderDriverKindValue = Schema.is(ProviderDriverKind);
+const isRuntimeSubagentPresentation = Schema.is(RuntimeSubagentPresentation);
 
 export interface EnvironmentState {
   projectIds: ProjectId[];
@@ -77,6 +83,8 @@ export interface EnvironmentState {
    * this chat's policy. Optional for existing in-memory fixture/state shapes.
    */
   subagentPolicySequenceByThreadId?: Record<ThreadId, number>;
+  /** Independent watermark: unrelated subagent saves cannot certify context intent. */
+  codexContextPolicySequenceByThreadId?: Record<ThreadId, number>;
   threadSessionById: Record<ThreadId, ThreadSession | null>;
   threadTurnStateById: Record<ThreadId, ThreadTurnState>;
 
@@ -118,6 +126,7 @@ const initialEnvironmentState: EnvironmentState = {
   threadIdsByProjectId: {},
   threadShellById: {},
   subagentPolicySequenceByThreadId: {},
+  codexContextPolicySequenceByThreadId: {},
   threadSessionById: {},
   threadTurnStateById: {},
   messageIdsByThreadId: {},
@@ -140,7 +149,7 @@ const initialState: AppState = {
 const MAX_THREAD_MESSAGES = 2_000;
 const MAX_THREAD_CHECKPOINTS = 500;
 const MAX_THREAD_PROPOSED_PLANS = 200;
-const MAX_THREAD_ACTIVITIES = 500;
+const MAX_THREAD_ACTIVITIES = THREAD_DETAIL_ACTIVITY_WINDOW_LIMIT;
 const EMPTY_MESSAGE_IDS: MessageId[] = [];
 const EMPTY_THREAD_IDS: ThreadId[] = [];
 
@@ -197,6 +206,9 @@ function mapSession(session: OrchestrationSession): ThreadSession {
       : {}),
     ...(session.maxConcurrentSubagents !== undefined
       ? { maxConcurrentSubagents: session.maxConcurrentSubagents }
+      : {}),
+    ...(session.codexContextWindowOverride !== undefined
+      ? { codexContextWindowOverride: session.codexContextWindowOverride }
       : {}),
     ...(session.lastError ? { lastError: session.lastError } : {}),
   };
@@ -278,6 +290,7 @@ function mapProject(
 }
 
 function mapThread(thread: OrchestrationThread, environmentId: EnvironmentId): Thread {
+  const error = sanitizeThreadErrorMessage(thread.session?.lastError);
   return {
     id: thread.id,
     environmentId,
@@ -288,10 +301,12 @@ function mapThread(thread: OrchestrationThread, environmentId: EnvironmentId): T
     runtimeMode: thread.runtimeMode,
     interactionMode: thread.interactionMode,
     subagentLimits: thread.subagentLimits,
+    codexContextWindowOverride: thread.codexContextWindowOverride,
     session: thread.session ? mapSession(thread.session) : null,
     messages: thread.messages.map((message) => mapMessage(environmentId, message)),
     proposedPlans: thread.proposedPlans.map(mapProposedPlan),
-    error: sanitizeThreadErrorMessage(thread.session?.lastError),
+    error,
+    errorOrigin: error === null ? undefined : "provider",
     createdAt: thread.createdAt,
     archivedAt: thread.archivedAt,
     updatedAt: thread.updatedAt,
@@ -314,6 +329,7 @@ function mapThreadShell(
   turnState: ThreadTurnState;
   summary: SidebarThreadSummary;
 } {
+  const error = sanitizeThreadErrorMessage(thread.session?.lastError);
   const shell: ThreadShell = {
     id: thread.id,
     environmentId,
@@ -324,7 +340,9 @@ function mapThreadShell(
     runtimeMode: thread.runtimeMode,
     interactionMode: thread.interactionMode,
     subagentLimits: thread.subagentLimits,
-    error: sanitizeThreadErrorMessage(thread.session?.lastError),
+    codexContextWindowOverride: thread.codexContextWindowOverride,
+    error,
+    errorOrigin: error === null ? undefined : "provider",
     createdAt: thread.createdAt,
     archivedAt: thread.archivedAt,
     updatedAt: thread.updatedAt,
@@ -374,7 +392,9 @@ function toThreadShell(thread: Thread): ThreadShell {
     runtimeMode: thread.runtimeMode,
     interactionMode: thread.interactionMode,
     subagentLimits: thread.subagentLimits,
+    codexContextWindowOverride: thread.codexContextWindowOverride,
     error: thread.error,
+    errorOrigin: thread.errorOrigin,
     createdAt: thread.createdAt,
     archivedAt: thread.archivedAt,
     updatedAt: thread.updatedAt,
@@ -445,10 +465,12 @@ function cloneThreadContextForDuplicate(input: {
   return {
     ...targetThread,
     subagentLimits: sourceThread.subagentLimits ? { ...sourceThread.subagentLimits } : undefined,
+    codexContextWindowOverride: sourceThread.codexContextWindowOverride,
     latestTurn,
     pendingSourceProposedPlan: latestTurn?.sourceProposedPlan,
     session: null,
     error: null,
+    errorOrigin: undefined,
     // A duplicate carries visible conversation context into a fresh provider
     // session. Provider-owned goal continuation state must never cross that
     // new session boundary.
@@ -568,7 +590,8 @@ function threadSessionsEqual(
     left.updatedAt === right.updatedAt &&
     left.lastError === right.lastError &&
     left.subagentRuntimeId === right.subagentRuntimeId &&
-    left.maxConcurrentSubagents === right.maxConcurrentSubagents
+    left.maxConcurrentSubagents === right.maxConcurrentSubagents &&
+    left.codexContextWindowOverride === right.codexContextWindowOverride
   );
 }
 
@@ -611,7 +634,9 @@ function threadShellsEqual(left: ThreadShell | undefined, right: ThreadShell): b
     left.runtimeMode === right.runtimeMode &&
     left.interactionMode === right.interactionMode &&
     subagentLimitsEqual(left.subagentLimits, right.subagentLimits) &&
+    left.codexContextWindowOverride === right.codexContextWindowOverride &&
     left.error === right.error &&
+    left.errorOrigin === right.errorOrigin &&
     left.createdAt === right.createdAt &&
     left.archivedAt === right.archivedAt &&
     left.updatedAt === right.updatedAt &&
@@ -787,19 +812,62 @@ function reconcileThreadSubagentPolicy(
 }
 
 /**
+ * Requested context has its own exact-chat watermark. A title/subagent update
+ * is not evidence that this independently acknowledged scalar has caught up.
+ */
+function reconcileThreadCodexContextPolicy(
+  state: EnvironmentState,
+  shell: ThreadShell,
+  sequence: number | undefined,
+): { state: EnvironmentState; shell: ThreadShell } {
+  const previousSequence = state.codexContextPolicySequenceByThreadId?.[shell.id];
+  if (previousSequence !== undefined && (sequence === undefined || sequence <= previousSequence)) {
+    const previous = state.threadShellById[shell.id]?.codexContextWindowOverride;
+    return {
+      state,
+      shell:
+        previous === shell.codexContextWindowOverride
+          ? shell
+          : { ...shell, codexContextWindowOverride: previous },
+    };
+  }
+  if (sequence === undefined) return { state, shell };
+  return {
+    shell,
+    state: {
+      ...state,
+      codexContextPolicySequenceByThreadId: {
+        ...state.codexContextPolicySequenceByThreadId,
+        [shell.id]: sequence,
+      },
+    },
+  };
+}
+
+/**
  * Detail-stream writer owns messages, activities, plans and diffs, but also
- * keeps the shared shell/session/turn current. The policy watermark travels
- * with its map atomically; sidebar summaries remain shell-stream-only.
+ * keeps the shared shell/session/turn current. Policy watermarks travel with
+ * their maps atomically; sidebar summaries remain shell-stream-only.
  */
 function writeThreadState(
   state: EnvironmentState,
   nextThread: Thread,
   previousThread?: Thread,
   policySequence?: number,
+  contextPolicySequence?: number,
 ): EnvironmentState {
   // Local lifecycle/error changes carry no policy witness. Qualified stream
   // snapshots/events alone may replace a previously sequenced policy.
-  const policy = reconcileThreadSubagentPolicy(state, toThreadShell(nextThread), policySequence);
+  const subagentPolicy = reconcileThreadSubagentPolicy(
+    state,
+    toThreadShell(nextThread),
+    policySequence,
+  );
+  const policy = reconcileThreadCodexContextPolicy(
+    subagentPolicy.state,
+    subagentPolicy.shell,
+    contextPolicySequence,
+  );
   const nextShell = policy.shell;
   const nextTurnState = toThreadTurnState(nextThread);
   const previousShell = state.threadShellById[nextThread.id];
@@ -926,7 +994,12 @@ function writeThreadShellState(
   },
   policySequence: number,
 ): EnvironmentState {
-  const policy = reconcileThreadSubagentPolicy(state, nextThread.shell, policySequence);
+  const subagentPolicy = reconcileThreadSubagentPolicy(state, nextThread.shell, policySequence);
+  const policy = reconcileThreadCodexContextPolicy(
+    subagentPolicy.state,
+    subagentPolicy.shell,
+    policySequence,
+  );
   nextThread = { ...nextThread, shell: policy.shell };
   const previousShell = state.threadShellById[nextThread.shell.id];
 
@@ -1028,6 +1101,8 @@ function removeThreadState(state: EnvironmentState, threadId: ThreadId): Environ
   const { [threadId]: _removedShell, ...threadShellById } = state.threadShellById;
   const { [threadId]: _removedPolicySequence, ...subagentPolicySequenceByThreadId } =
     state.subagentPolicySequenceByThreadId ?? {};
+  const { [threadId]: _removedContextPolicySequence, ...codexContextPolicySequenceByThreadId } =
+    state.codexContextPolicySequenceByThreadId ?? {};
   const { [threadId]: _removedSession, ...threadSessionById } = state.threadSessionById;
   const { [threadId]: _removedTurnState, ...threadTurnStateById } = state.threadTurnStateById;
   const { [threadId]: _removedMessageIds, ...messageIdsByThreadId } = state.messageIdsByThreadId;
@@ -1049,6 +1124,7 @@ function removeThreadState(state: EnvironmentState, threadId: ThreadId): Environ
     threadIdsByProjectId: nextThreadIdsByProjectId,
     threadShellById,
     subagentPolicySequenceByThreadId,
+    codexContextPolicySequenceByThreadId,
     threadSessionById,
     threadTurnStateById,
     messageIdsByThreadId,
@@ -1079,6 +1155,52 @@ function maxIso(left: string | null, right: string): string {
 
 function latestTurnStateIsTerminal(state: NonNullable<Thread["latestTurn"]>["state"]): boolean {
   return state === "completed" || state === "error" || state === "interrupted";
+}
+
+/**
+ * Match the projection pipeline's narrow terminal-clock exclusions. Retry
+ * bookkeeping is not renewed root execution; schema-valid child work beneath
+ * a failed root has its own clock. Ordinary late real tool work keeps the
+ * existing clock extension semantics. This never changes lifecycle status.
+ */
+function isTerminalClockBookkeeping(
+  event: Extract<OrchestrationEvent, { type: "thread.activity-appended" }>,
+  state: NonNullable<Thread["latestTurn"]>["state"],
+): boolean {
+  const activity = event.payload.activity;
+  if (
+    activity.kind === "provider.turn.configuration" ||
+    activity.kind === "provider.context.bootstrap.accepted" ||
+    activity.kind === "runtime.error"
+  )
+    return true;
+  if (
+    state === "error" &&
+    activity.kind === "runtime.warning" &&
+    (event.commandId?.startsWith("provider:codex:") || event.commandId?.startsWith("server:")) &&
+    isCodexNativeRetryWarningPayload(activity.payload)
+  )
+    return true;
+  const payload = activity.payload;
+  if (typeof payload !== "object" || payload === null || Array.isArray(payload)) return false;
+  const recovery = Object.getOwnPropertyDescriptor(payload, "recovery")?.value;
+  if (
+    event.commandId?.startsWith("server:") &&
+    activity.kind === "runtime.warning" &&
+    [
+      "codex-transient-recovery-waiting",
+      "codex-transient-continuation-attempted",
+      "codex-transient-continuation-accepted",
+      "codex-transient-recovery-cancelled",
+      "codex-transient-recovery-uncertain",
+    ].includes(recovery)
+  )
+    return true;
+  return (
+    state === "error" &&
+    ["task.started", "task.progress", "task.completed"].includes(activity.kind) &&
+    isRuntimeSubagentPresentation(Object.getOwnPropertyDescriptor(payload, "subagent")?.value)
+  );
 }
 
 function shouldIgnoreStaleSessionSet(thread: Thread, incomingSession: ThreadSession): boolean {
@@ -1159,17 +1281,10 @@ function compareActivities(
   left: Thread["activities"][number],
   right: Thread["activities"][number],
 ): number {
-  if (left.sequence !== undefined && right.sequence !== undefined) {
-    if (left.sequence !== right.sequence) {
-      return left.sequence - right.sequence;
-    }
-  } else if (left.sequence !== undefined) {
-    return 1;
-  } else if (right.sequence !== undefined) {
-    return -1;
-  }
-
-  return left.createdAt.localeCompare(right.createdAt) || left.id.localeCompare(right.id);
+  // The retention floor and DB-backed older-page cursor must share an order,
+  // including legacy null-sequence ties; locale-specific opaque-id ordering
+  // could otherwise strand an evicted row on the wrong side of the cursor.
+  return compareActivityWindowOrder(left, right);
 }
 
 function boundedSubagentIdentity(value: unknown): string | undefined {
@@ -1268,6 +1383,7 @@ function structuredTaskLifecycleKeys(
 function retainThreadActivityWindow(
   activities: ReadonlyArray<OrchestrationThreadActivity>,
   currentTurnId: TurnId | null | undefined,
+  session: Thread["session"],
 ): OrchestrationThreadActivity[] {
   const byId = new Map<string, OrchestrationThreadActivity>();
   for (const activity of activities) byId.set(activity.id, activity);
@@ -1285,6 +1401,15 @@ function retainThreadActivityWindow(
       )
     : undefined;
   if (latestTurnConfiguration) retainedIds.add(latestTurnConfiguration.id);
+
+  // Native children can produce more than the ordinary tail while a failed
+  // root waits. Keep exactly one latest owner-bound operational marker so a
+  // reload does not lose its retry number/deadline or resurrect a cancelled
+  // wait. Foreign/replayed owner metadata earns no retention exception.
+  const latestRecovery = ordered.findLast((activity) =>
+    isCurrentCodexRecoveryMarker(activity, currentTurnId ?? null, session),
+  );
+  if (latestRecovery) retainedIds.add(latestRecovery.id);
 
   const retainedSubagentIdentities = new Set<string>();
   const latestSubagentLifecycleByKey = new Map<string, OrchestrationThreadActivity>();
@@ -1457,6 +1582,7 @@ function updateThreadState(
   threadId: ThreadId,
   updater: (thread: Thread) => Thread,
   policySequence?: number,
+  contextPolicySequence?: number,
 ): EnvironmentState {
   const currentThread = getThreadFromEnvironmentState(state, threadId);
   if (!currentThread) {
@@ -1466,7 +1592,7 @@ function updateThreadState(
   if (nextThread === currentThread) {
     return state;
   }
-  return writeThreadState(state, nextThread, currentThread, policySequence);
+  return writeThreadState(state, nextThread, currentThread, policySequence, contextPolicySequence);
 }
 
 function mergeThreadMessage(previous: ChatMessage, incoming: ChatMessage): ChatMessage {
@@ -1788,7 +1914,10 @@ function syncEnvironmentShellSnapshot(
       .filter(
         (thread) =>
           !nextThreadIds.has(thread.id) &&
-          (state.subagentPolicySequenceByThreadId?.[thread.id] ?? -1) > snapshot.snapshotSequence,
+          Math.max(
+            state.subagentPolicySequenceByThreadId?.[thread.id] ?? -1,
+            state.codexContextPolicySequenceByThreadId?.[thread.id] ?? -1,
+          ) > snapshot.snapshotSequence,
       )
       .map((thread) => thread.id),
   );
@@ -1803,6 +1932,10 @@ function syncEnvironmentShellSnapshot(
     threadShellById: retainThreadScopedRecord(state.threadShellById, nextThreadIds),
     subagentPolicySequenceByThreadId: retainThreadScopedRecord(
       state.subagentPolicySequenceByThreadId ?? {},
+      nextThreadIds,
+    ),
+    codexContextPolicySequenceByThreadId: retainThreadScopedRecord(
+      state.codexContextPolicySequenceByThreadId ?? {},
       nextThreadIds,
     ),
     threadSessionById: retainThreadScopedRecord(state.threadSessionById, newerOmittedIds),
@@ -1878,6 +2011,7 @@ export function syncServerThreadDetail(
       environmentState,
       mapThread(thread, environmentId),
       previousThread,
+      snapshotSequence,
       snapshotSequence,
     ),
   );
@@ -2000,6 +2134,7 @@ function applyEnvironmentOrchestrationEvent(
           runtimeMode: event.payload.runtimeMode,
           interactionMode: event.payload.interactionMode,
           subagentLimits: event.payload.subagentLimits,
+          codexContextWindowOverride: event.payload.codexContextWindowOverride,
           branch: event.payload.branch,
           worktreePath: event.payload.worktreePath,
           latestTurn: null,
@@ -2016,7 +2151,7 @@ function applyEnvironmentOrchestrationEvent(
         },
         environmentId,
       );
-      return writeThreadState(state, nextThread, previousThread, event.sequence);
+      return writeThreadState(state, nextThread, previousThread, event.sequence, event.sequence);
     }
 
     case "thread.duplicated": {
@@ -2031,6 +2166,8 @@ function applyEnvironmentOrchestrationEvent(
         targetThread,
         duplicatedAt: event.payload.duplicatedAt,
       });
+      // Created/copied target metadata already owns the scalar policy. A
+      // source's newer cross-stream metadata cannot retroactively rewrite it.
       const nextState = writeThreadState(state, nextThread, targetThread);
       return {
         ...nextState,
@@ -2098,8 +2235,10 @@ function applyEnvironmentOrchestrationEvent(
     }
 
     case "thread.deleted":
-      return (state.subagentPolicySequenceByThreadId?.[event.payload.threadId] ?? -1) >
-        event.sequence
+      return Math.max(
+        state.subagentPolicySequenceByThreadId?.[event.payload.threadId] ?? -1,
+        state.codexContextPolicySequenceByThreadId?.[event.payload.threadId] ?? -1,
+      ) > event.sequence
         ? state
         : removeThreadState(state, event.payload.threadId);
 
@@ -2131,6 +2270,9 @@ function applyEnvironmentOrchestrationEvent(
           ...(event.payload.subagentLimits !== undefined
             ? { subagentLimits: event.payload.subagentLimits }
             : {}),
+          ...(event.payload.codexContextWindowOverride !== undefined
+            ? { codexContextWindowOverride: event.payload.codexContextWindowOverride }
+            : {}),
           ...(event.payload.modelSelection !== undefined
             ? { modelSelection: normalizeModelSelection(event.payload.modelSelection) }
             : {}),
@@ -2141,6 +2283,7 @@ function applyEnvironmentOrchestrationEvent(
           updatedAt: event.payload.updatedAt,
         }),
         event.payload.subagentLimits !== undefined ? event.sequence : undefined,
+        event.payload.codexContextWindowOverride !== undefined ? event.sequence : undefined,
       );
       const currentSummary = nextState.sidebarThreadSummaryById[event.payload.threadId];
       if (!currentSummary) {
@@ -2209,6 +2352,9 @@ function applyEnvironmentOrchestrationEvent(
             ...(event.payload.subagentLimits !== undefined
               ? { subagentLimits: event.payload.subagentLimits }
               : {}),
+            ...(event.payload.codexContextWindowOverride !== undefined
+              ? { codexContextWindowOverride: event.payload.codexContextWindowOverride }
+              : {}),
             pendingSourceProposedPlan: event.payload.sourceProposedPlan,
             session: {
               ...(previousSession?.subagentRuntimeId !== undefined
@@ -2216,6 +2362,9 @@ function applyEnvironmentOrchestrationEvent(
                 : {}),
               ...(previousSession?.maxConcurrentSubagents !== undefined
                 ? { maxConcurrentSubagents: previousSession.maxConcurrentSubagents }
+                : {}),
+              ...(previousSession?.codexContextWindowOverride !== undefined
+                ? { codexContextWindowOverride: previousSession.codexContextWindowOverride }
                 : {}),
               provider: previousSession?.provider ?? ProviderDriverKind.make("codex"),
               ...(previousSession?.providerInstanceId !== undefined
@@ -2231,6 +2380,7 @@ function applyEnvironmentOrchestrationEvent(
           };
         },
         event.payload.subagentLimits !== undefined ? event.sequence : undefined,
+        event.payload.codexContextWindowOverride !== undefined ? event.sequence : undefined,
       );
 
     case "thread.turn-interrupt-requested": {
@@ -2321,6 +2471,11 @@ function applyEnvironmentOrchestrationEvent(
           ...thread,
           session: mergeSessionSnapshot(previousSession, incomingSession),
           error: sanitizeThreadErrorMessage(event.payload.session.lastError),
+          // Authoritative provider receipt replaces any renderer-local grant,
+          // including when the received error text happens to be unchanged.
+          errorOrigin: sanitizeThreadErrorMessage(event.payload.session.lastError)
+            ? "provider"
+            : undefined,
           latestTurn,
           updatedAt: event.occurredAt,
         };
@@ -2494,15 +2649,16 @@ function applyEnvironmentOrchestrationEvent(
             appendedActivity,
           ],
           thread.latestTurn?.turnId ?? appendedActivity.turnId,
+          thread.session,
         );
         const latestTurn =
           // Accepted settings are presentation metadata, not a model execution
           // edge. Their late durable append must not inflate generation time,
           // completion labels or terminal lifecycle state after a fast turn.
-          event.payload.activity.kind !== "provider.turn.configuration" &&
           event.payload.activity.turnId !== null &&
           thread.latestTurn?.turnId === event.payload.activity.turnId &&
-          latestTurnStateIsTerminal(thread.latestTurn.state)
+          latestTurnStateIsTerminal(thread.latestTurn.state) &&
+          !isTerminalClockBookkeeping(event, thread.latestTurn.state)
             ? buildLatestTurn({
                 previous: thread.latestTurn,
                 turnId: thread.latestTurn.turnId,
@@ -2594,7 +2750,10 @@ function applyEnvironmentShellEvent(
         event.sequence,
       );
     case "thread-removed":
-      return (state.subagentPolicySequenceByThreadId?.[event.threadId] ?? -1) > event.sequence
+      return Math.max(
+        state.subagentPolicySequenceByThreadId?.[event.threadId] ?? -1,
+        state.codexContextPolicySequenceByThreadId?.[event.threadId] ?? -1,
+      ) > event.sequence
         ? state
         : removeThreadState(state, event.threadId);
   }
@@ -2833,8 +2992,11 @@ export function setError(
     getStoredEnvironmentState(state, threadRef.environmentId),
     threadRef.threadId,
     (thread) => {
-      if (thread.error === error) return thread;
-      return { ...thread, error };
+      const errorOrigin = error === null ? undefined : ("local" as const);
+      if (thread.error === error && thread.errorOrigin === errorOrigin) return thread;
+      // This action represents an explicit local operation/validation result,
+      // not a provider-session acknowledgment or canonical error dismissal.
+      return { ...thread, error, errorOrigin };
     },
   );
   return commitEnvironmentState(state, threadRef.environmentId, nextEnvironmentState);

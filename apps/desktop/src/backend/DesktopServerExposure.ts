@@ -1,7 +1,9 @@
+import { uiText } from "@cafecode/shared/i18n";
 import * as NodeOS from "node:os";
 
 import {
   createAdvertisedEndpoint,
+  normalizeHttpBaseUrl,
   type CreateAdvertisedEndpointInput,
 } from "@cafecode/shared/advertisedEndpoint";
 import type {
@@ -57,14 +59,20 @@ interface DesktopAdvertisedEndpointInput {
 
 const DESKTOP_CORE_ENDPOINT_PROVIDER: AdvertisedEndpointProvider = {
   id: "desktop-core",
-  label: "Desktop",
+  // Native modules load before the saved interface language is admitted. Keep
+  // only Cafe-authored display copy lazy; the endpoint identity stays fixed.
+  get label() {
+    return uiText("Desktop");
+  },
   kind: "core",
   isAddon: false,
 };
 
 const DESKTOP_MANUAL_ENDPOINT_PROVIDER: AdvertisedEndpointProvider = {
   id: "manual",
-  label: "Manual",
+  get label() {
+    return uiText("Manual");
+  },
   kind: "manual",
   isAddon: false,
 };
@@ -163,18 +171,27 @@ const createDesktopEndpoint = (
 ): AdvertisedEndpoint =>
   createAdvertisedEndpoint({
     ...input,
-    provider: DESKTOP_CORE_ENDPOINT_PROVIDER,
+    // Publish a plain snapshot, not an accessor crossing the native bridge.
+    provider: { ...DESKTOP_CORE_ENDPOINT_PROVIDER },
     source: "desktop-core",
   });
 
 const createManualEndpoint = (
   input: Omit<CreateAdvertisedEndpointInput, "provider" | "source">,
-): AdvertisedEndpoint =>
-  createAdvertisedEndpoint({
+): AdvertisedEndpoint => {
+  const scheme = new URL(normalizeHttpBaseUrl(input.httpBaseUrl)).protocol.replace(/:$/u, "");
+  // These English tokens preserve the preexisting persisted selection identity;
+  // they are not display copy and must never depend on the current language.
+  const originalLabelIdentity = isHttpsEndpointUrl(input.httpBaseUrl)
+    ? "Custom HTTPS"
+    : "Custom endpoint";
+  return createAdvertisedEndpoint({
     ...input,
-    provider: DESKTOP_MANUAL_ENDPOINT_PROVIDER,
+    provider: { ...DESKTOP_MANUAL_ENDPOINT_PROVIDER },
     source: "user",
+    defaultPreferenceKey: `manual:${input.reachability}:${scheme}:${originalLabelIdentity}`,
   });
+};
 
 const resolveDesktopCoreAdvertisedEndpoints = (
   input: DesktopAdvertisedEndpointInput,
@@ -184,12 +201,12 @@ const resolveDesktopCoreAdvertisedEndpoints = (
   const endpoints: AdvertisedEndpoint[] = [
     createDesktopEndpoint({
       id: `desktop-loopback:${localBaseUrl}`,
-      label: "This machine",
+      label: uiText("This machine"),
       httpBaseUrl: localBaseUrl,
       reachability: "loopback",
       status: "available",
       isDefault: lanBaseUrl === null,
-      description: "Loopback endpoint for this desktop app.",
+      description: uiText("Loopback endpoint for this desktop app."),
     }),
   ];
 
@@ -197,12 +214,12 @@ const resolveDesktopCoreAdvertisedEndpoints = (
     endpoints.push(
       createDesktopEndpoint({
         id: `desktop-lan:${lanBaseUrl}`,
-        label: "Local network",
+        label: uiText("Local network"),
         httpBaseUrl: lanBaseUrl,
         reachability: "lan",
         status: "available",
         isDefault: true,
-        description: "Reachable from devices on the same network.",
+        description: uiText("Reachable from devices on the same network."),
       }),
     );
   }
@@ -212,13 +229,15 @@ const resolveDesktopCoreAdvertisedEndpoints = (
       endpoints.push(
         createManualEndpoint({
           id: `manual:${customEndpointUrl}`,
-          label: isHttpsEndpointUrl(customEndpointUrl) ? "Custom HTTPS" : "Custom endpoint",
+          label: isHttpsEndpointUrl(customEndpointUrl)
+            ? uiText("Custom HTTPS")
+            : uiText("Custom endpoint"),
           httpBaseUrl: customEndpointUrl,
           reachability: "public",
           status: "unknown",
           description: isHttpsEndpointUrl(customEndpointUrl)
-            ? "User-configured HTTPS endpoint for this desktop backend."
-            : "User-configured endpoint for this desktop backend.",
+            ? uiText("User-configured HTTPS endpoint for this desktop backend.")
+            : uiText("User-configured endpoint for this desktop backend."),
         }),
       );
     } catch {

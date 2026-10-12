@@ -16,6 +16,7 @@ import {
   MessageId,
   ModelSelection,
   MaxConcurrentSubagents,
+  CodexContextWindowOverride,
   NonNegativeInt,
   ThreadId,
   ProviderInterruptTurnInput,
@@ -48,6 +49,7 @@ import {
   ThreadTurnSubagentId,
   type ProviderRuntimeEvent,
   type ProviderSession,
+  type ProviderSubagentPolicySession,
 } from "@cafecode/contracts";
 import { createHmac, randomBytes, randomUUID } from "node:crypto";
 import { modelAcceptsImages, UNSUPPORTED_MODEL_IMAGES_MESSAGE } from "@cafecode/shared/model";
@@ -97,6 +99,8 @@ import {
   type ProviderRuntimeOwnerEvidence,
 } from "../providerRuntimeOwnerEvidence.ts";
 import { getCodexRootTurnCompletion } from "../codexRootTurnCompletion.ts";
+import { matchesSubagentPolicySession } from "../subagentPolicyContinuation.ts";
+import { normalizeClaudeSubagentHistoryRoot } from "../claudeSubagentHistoryRoot.ts";
 import {
   ProviderSessionDirectory,
   type ProviderRuntimeBinding,
@@ -427,6 +431,9 @@ function toRuntimePayloadFromSession(
     ...(session.maxConcurrentSubagents !== undefined
       ? { maxConcurrentSubagents: session.maxConcurrentSubagents }
       : {}),
+    ...(session.codexContextWindowOverride !== undefined
+      ? { codexContextWindowOverride: session.codexContextWindowOverride }
+      : {}),
     ...(extra?.modelSelection !== undefined ? { modelSelection: extra.modelSelection } : {}),
     ...(extra?.lastRuntimeEvent !== undefined ? { lastRuntimeEvent: extra.lastRuntimeEvent } : {}),
     ...(extra?.lastRuntimeEventAt !== undefined
@@ -455,6 +462,19 @@ function readPersistedMaxConcurrentSubagents(
   const raw =
     "maxConcurrentSubagents" in runtimePayload ? runtimePayload.maxConcurrentSubagents : undefined;
   return raw === null || Schema.is(MaxConcurrentSubagents)(raw) ? raw : undefined;
+}
+
+/** Exact-owner saved configuration; never infer a legacy number from usage. */
+function readPersistedCodexContextWindowOverride(
+  runtimePayload: ProviderRuntimeBinding["runtimePayload"],
+): number | null | undefined {
+  if (!runtimePayload || typeof runtimePayload !== "object" || Array.isArray(runtimePayload))
+    return undefined;
+  const raw =
+    "codexContextWindowOverride" in runtimePayload
+      ? runtimePayload.codexContextWindowOverride
+      : undefined;
+  return raw === null || Schema.is(CodexContextWindowOverride)(raw) ? raw : undefined;
 }
 
 function readPersistedCwd(
@@ -739,19 +759,26 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
     Effect.succeed(event).pipe(
       Effect.tap((canonicalEvent) =>
         canonicalEventLogger
-          ? canonicalEventLogger.write(canonicalEvent, canonicalEvent.threadId).pipe(
-              Effect.catchCause((cause) =>
-                Effect.logWarning("provider.runtime.canonical-log-write-failed", {
-                  provider: canonicalEvent.provider,
-                  providerInstanceId: canonicalEvent.providerInstanceId,
-                  threadId: canonicalEvent.threadId,
-                  turnId: canonicalEvent.turnId,
-                  eventId: canonicalEvent.eventId,
-                  eventType: canonicalEvent.type,
-                  cause: Cause.pretty(cause),
-                }),
-              ),
-            )
+          ? canonicalEventLogger
+              .write(
+                // The private diagnostic copy has its own durable owner reader.
+                // Do not broaden optional ordinary NDJSON observability logs.
+                { ...canonicalEvent, diagnostic: undefined },
+                canonicalEvent.threadId,
+              )
+              .pipe(
+                Effect.catchCause((cause) =>
+                  Effect.logWarning("provider.runtime.canonical-log-write-failed", {
+                    provider: canonicalEvent.provider,
+                    providerInstanceId: canonicalEvent.providerInstanceId,
+                    threadId: canonicalEvent.threadId,
+                    turnId: canonicalEvent.turnId,
+                    eventId: canonicalEvent.eventId,
+                    eventType: canonicalEvent.type,
+                    cause: Cause.pretty(cause),
+                  }),
+                ),
+              )
           : Effect.void,
       ),
       Effect.flatMap((canonicalEvent) => PubSub.publish(runtimeEventPubSub, canonicalEvent)),
@@ -1041,6 +1068,51 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
       }
 
       const cwd = boundedSubagentHistoryCwd(readPersistedCwd(binding.runtimePayload));
+      let resumeCursor: unknown | null;
+      if (event.provider === "claudeAgent") {
+        if (cwd === null) return;
+        const runtimeId = isRecord(binding.runtimePayload)
+          ? binding.runtimePayload.subagentRuntimeId
+          : undefined;
+        // Fresh Claude queries expose their durable transcript root at init,
+        // before a resumable checkpoint exists. Only the exact still-current
+        // account/query snapshot can supply that private identity; neither a
+        // null saved cursor nor an old child event may borrow a newer query.
+        if (typeof runtimeId !== "string" || runtimeId !== event.subagentRuntimeId) return;
+        const eventHistoryRoot = normalizeClaudeSubagentHistoryRoot({
+          resume:
+            event.type === "task.started" ||
+            event.type === "task.progress" ||
+            event.type === "task.completed"
+              ? event.claudeSubagentHistorySessionId
+              : undefined,
+        });
+        if (eventHistoryRoot === undefined) return;
+        const adapter = yield* registry.getByInstance(providerInstanceId);
+        const liveSessions = yield* adapter
+          .listSessions()
+          .pipe(Effect.timeout(PROVIDER_ORPHAN_INVENTORY_TIMEOUT));
+        if ((yield* registry.getByInstance(providerInstanceId)) !== adapter) return;
+        const liveSession = liveSessions.find(
+          (session) =>
+            session.threadId === event.threadId &&
+            session.provider === event.provider &&
+            session.providerInstanceId === providerInstanceId &&
+            session.subagentRuntimeId === runtimeId &&
+            session.cwd === cwd &&
+            session.status !== "closed",
+        );
+        const historyRoot = normalizeClaudeSubagentHistoryRoot(
+          liveSession?.subagentHistoryResumeCursor,
+        );
+        // A single native query can adopt a different conversation. Its runtime
+        // UUID alone is therefore insufficient to attribute an earlier child
+        // to the latest session UUID: the immutable event stamp must agree.
+        if (historyRoot === undefined || historyRoot.resume !== eventHistoryRoot.resume) return;
+        resumeCursor = historyRoot;
+      } else {
+        resumeCursor = freezeSubagentHistoryResumeCursor(binding.resumeCursor);
+      }
       const persistedAt = yield* nowIso;
       yield* directory.upsertSubagentHistoryBinding({
         threadId: event.threadId,
@@ -1049,7 +1121,7 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
         historyId: subagent.historyId ?? null,
         providerName: event.provider,
         providerInstanceId,
-        resumeCursor: freezeSubagentHistoryResumeCursor(binding.resumeCursor),
+        resumeCursor,
         cwd,
         createdAt: persistedAt,
         updatedAt: persistedAt,
@@ -1079,6 +1151,12 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
     readonly resumeCursor?: unknown;
   }): Effect.Effect<void> =>
     Effect.gen(function* () {
+      // Claude's ordinary send receipt is not native-history authority: a new
+      // query may still have no UUID, and resumed checkpoints contain mutable
+      // turn counters. Its exact child lifecycle captures a stable native root
+      // through the generation-fenced inventory path above instead. Do not
+      // precreate an incomplete immutable root that later init cannot repair.
+      if (input.provider === "claudeAgent") return;
       const persistedAt = yield* nowIso;
       const cwd = boundedSubagentHistoryCwd(readPersistedCwd(input.binding.runtimePayload));
       yield* directory.upsertSubagentHistoryBinding({
@@ -1609,6 +1687,14 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
         ...(persistedMaxConcurrentSubagents !== undefined
           ? { maxConcurrentSubagents: persistedMaxConcurrentSubagents }
           : {}),
+        ...(input.binding.provider === "codex" &&
+        readPersistedCodexContextWindowOverride(input.binding.runtimePayload) !== undefined
+          ? {
+              codexContextWindowOverride: readPersistedCodexContextWindowOverride(
+                input.binding.runtimePayload,
+              ),
+            }
+          : {}),
         ...(hasResumeCursor ? { resumeCursor: input.binding.resumeCursor } : {}),
         runtimeMode: input.binding.runtimeMode ?? "full-access",
       } satisfies ProviderSessionStartInput;
@@ -1798,6 +1884,12 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
           threadId,
           provider: resolvedProvider,
         };
+        if (input.codexContextWindowOverride !== undefined && resolvedProvider !== "codex") {
+          return yield* toValidationError(
+            "ProviderService.startSession",
+            "Context-window overrides are supported only for Codex.",
+          );
+        }
         if (!instanceInfo.enabled) {
           return yield* toValidationError(
             "ProviderService.startSession",
@@ -1829,6 +1921,18 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
             : persistedBinding?.providerInstanceId === resolvedInstanceId
               ? readPersistedMaxConcurrentSubagents(persistedBinding.runtimePayload)
               : undefined;
+        // Explicit null defeats the old numeric durable binding. Native sees
+        // omission only after guarded retirement; absent control-only callers
+        // may recover configuration from this same authenticated account.
+        const effectiveContextWindowOverride =
+          resolvedProvider === "codex"
+            ? input.codexContextWindowOverride !== undefined
+              ? input.codexContextWindowOverride
+              : persistedBinding?.provider === "codex" &&
+                  persistedBinding.providerInstanceId === resolvedInstanceId
+                ? readPersistedCodexContextWindowOverride(persistedBinding.runtimePayload)
+                : undefined
+            : undefined;
         yield* Effect.annotateCurrentSpan({
           "provider.kind": resolvedProvider,
           "provider.resume_cursor.source":
@@ -1860,6 +1964,9 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
           ...(effectiveResumeCursor !== undefined ? { resumeCursor: effectiveResumeCursor } : {}),
           ...(effectiveMaxConcurrentSubagents !== undefined
             ? { maxConcurrentSubagents: effectiveMaxConcurrentSubagents }
+            : {}),
+          ...(effectiveContextWindowOverride !== undefined
+            ? { codexContextWindowOverride: effectiveContextWindowOverride }
             : {}),
         } satisfies ProviderSessionStartInput;
         const recoveredFromRejectedResumeCursor = yield* Ref.make(false);
@@ -2047,6 +2154,14 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
                 ),
               }
             : {}),
+          ...(existingTarget.provider === "codex" &&
+          readPersistedCodexContextWindowOverride(existingTarget.runtimePayload) !== undefined
+            ? {
+                codexContextWindowOverride: readPersistedCodexContextWindowOverride(
+                  existingTarget.runtimePayload,
+                ),
+              }
+            : {}),
           resumeCursor: existingTarget.resumeCursor,
         } satisfies ProviderSessionForkResult;
       }
@@ -2160,6 +2275,9 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
           ...(fork.maxConcurrentSubagents !== undefined
             ? { maxConcurrentSubagents: fork.maxConcurrentSubagents }
             : {}),
+          ...(fork.codexContextWindowOverride !== undefined
+            ? { codexContextWindowOverride: fork.codexContextWindowOverride }
+            : {}),
           activeTurnId: null,
           lastError: null,
           lastRuntimeEvent: "provider.session.forked",
@@ -2237,6 +2355,29 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
       }
     });
 
+  // Called under the service's thread lifecycle lock, using only fresh native
+  // inventory. Neither a durable binding nor a former CLI version may authorize
+  // this unchanged-policy exception. The native runtime checks it once more.
+  const assertSubagentPolicyContinuation = (input: {
+    readonly operation: string;
+    readonly threadId: ThreadId;
+    readonly instanceId: ProviderInstanceId;
+    readonly guaranteed: boolean | undefined;
+    readonly isActive: boolean;
+    readonly session: ProviderSession | undefined;
+    readonly expected: ProviderSubagentPolicySession;
+  }) =>
+    input.guaranteed === true &&
+    input.isActive &&
+    input.threadId === input.expected.threadId &&
+    input.instanceId === input.expected.providerInstanceId &&
+    matchesSubagentPolicySession(input.session, input.expected)
+      ? Effect.void
+      : toValidationError(
+          input.operation,
+          "The existing Codex process or its recorded subagent policy changed. The message was not delivered.",
+        );
+
   const sendTurn: ProviderServiceShape["sendTurn"] = Effect.fn("sendTurn")(function* (rawInput) {
     const parsed = yield* decodeInputOrValidationError({
       operation: "ProviderService.sendTurn",
@@ -2278,7 +2419,9 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
         // A transient-failure continuation is authorized only for the same
         // still-owned native context. Missing inventory cannot authorize a
         // replacement app-server (which could strand surviving children).
-        allowRecovery: input.expectedFailedRoot === undefined,
+        allowRecovery:
+          input.expectedFailedRoot === undefined &&
+          input.expectedSubagentPolicySession === undefined,
         ...(input.expectedFailedRoot !== undefined
           ? { requiredProvider: ProviderDriverKind.make("codex") }
           : {}),
@@ -2320,6 +2463,7 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
       const hasImages = input.attachments.some((attachment) => attachment.type === "image");
       const inspectLiveSession =
         hasImages ||
+        input.expectedSubagentPolicySession !== undefined ||
         routed.adapter.provider === "codex" ||
         (routed.adapter.capabilities.liveSteer === "supported" &&
           input.allowActiveTurnSteerFallback !== false);
@@ -2328,6 +2472,26 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
             (session) => session.threadId === input.threadId,
           )
         : undefined;
+      if (input.expectedSubagentPolicySession !== undefined) {
+        if (
+          input.codexReview !== undefined ||
+          (input.modelSelection !== undefined &&
+            input.modelSelection.instanceId !== routed.instanceId)
+        )
+          return yield* toValidationError(
+            "ProviderService.sendTurn",
+            "Existing subagent-policy continuation cannot change the owning Codex process.",
+          );
+        yield* assertSubagentPolicyContinuation({
+          operation: "ProviderService.sendTurn",
+          threadId: input.threadId,
+          instanceId: routed.instanceId,
+          guaranteed: routed.adapter.capabilities.subagentPolicyContinuation,
+          isActive: routed.isActive,
+          session: activeSession,
+          expected: input.expectedSubagentPolicySession,
+        });
+      }
       if (input.expectedFailedRoot !== undefined) {
         const expected = input.expectedFailedRoot;
         const failure = activeSession?.codexRootTurnFailure;
@@ -2386,6 +2550,9 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
             );
           const turn = yield* routed.adapter.steerTurn({
             threadId: input.threadId,
+            ...(input.expectedSubagentPolicySession !== undefined
+              ? { expectedSubagentPolicySession: input.expectedSubagentPolicySession }
+              : {}),
             ...(input.deliveryPriority !== undefined
               ? {
                   deliveryPriority: input.deliveryPriority,
@@ -2582,9 +2749,23 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
         operation: "ProviderService.steerTurn",
         // A bound priority targets an existing live query. Recovery would
         // create a different incarnation before discovering the mismatch.
-        allowRecovery: input.deliveryPriority === undefined,
+        allowRecovery:
+          input.deliveryPriority === undefined && input.expectedSubagentPolicySession === undefined,
       });
       metricProvider = routed.adapter.provider;
+      if (input.expectedSubagentPolicySession !== undefined) {
+        yield* assertSubagentPolicyContinuation({
+          operation: "ProviderService.steerTurn",
+          threadId: input.threadId,
+          instanceId: routed.instanceId,
+          guaranteed: routed.adapter.capabilities.subagentPolicyContinuation,
+          isActive: routed.isActive,
+          session: (yield* routed.adapter.listSessions()).find(
+            (session) => session.threadId === input.threadId,
+          ),
+          expected: input.expectedSubagentPolicySession,
+        });
+      }
       if (input.deliveryPriority !== undefined && routed.adapter.provider !== "claudeAgent") {
         return yield* toValidationError(
           "ProviderService.steerTurn",

@@ -468,6 +468,9 @@ function toShellThread(thread: OrchestrationReadModel["threads"][number]) {
     runtimeMode: thread.runtimeMode,
     interactionMode: thread.interactionMode,
     ...(thread.subagentLimits !== undefined ? { subagentLimits: thread.subagentLimits } : {}),
+    ...(thread.codexContextWindowOverride !== undefined
+      ? { codexContextWindowOverride: thread.codexContextWindowOverride }
+      : {}),
     branch: thread.branch,
     worktreePath: thread.worktreePath,
     latestTurn: thread.latestTurn,
@@ -1685,6 +1688,23 @@ function findSessionRail(): HTMLElement | null {
   return document.querySelector<HTMLElement>('[data-session-rail="true"]');
 }
 
+function expectEmptyScheduledSessionRailTasks(): void {
+  // A server chat keeps Scheduled available when its current work retires.
+  // Scope this assertion to the task container so unrelated rail usage text
+  // cannot satisfy it, and prove no stale active rows or extra placeholder stay.
+  const tasks = findSessionRail()?.querySelector<HTMLElement>('[data-session-rail-tasks="true"]');
+  const scheduled = tasks?.querySelector<HTMLElement>('[data-scheduled-followups="true"]');
+  expect(tasks).toBeTruthy();
+  expect(scheduled).toBeTruthy();
+  expect(tasks?.children).toHaveLength(1);
+  expect(tasks?.firstElementChild).toBe(scheduled);
+  expect(scheduled?.querySelector("h3")?.textContent).toBe("Scheduled 0");
+  expect(scheduled?.textContent).toContain(
+    "Schedule a check-in or a repeating task for this chat.",
+  );
+  expect(tasks?.textContent).not.toContain("No tasks yet.");
+}
+
 function findComposerProviderModelPicker(): HTMLButtonElement | null {
   return document.querySelector<HTMLButtonElement>('[data-chat-provider-model-picker="true"]');
 }
@@ -2068,7 +2088,13 @@ async function mountChatView(options: {
   };
 }
 
-type ChatViewBrowserPart = "composer" | "navigation" | "layout" | "desk" | "standalone";
+type ChatViewBrowserPart =
+  | "composer"
+  | "navigation"
+  | "layout"
+  | "desk"
+  | "standalone"
+  | "recovery-footer";
 
 const chatViewBrowserPart = (
   globalThis as typeof globalThis & {
@@ -2196,6 +2222,370 @@ describe(`ChatView full app (${chatViewBrowserPart})`, () => {
     document.body.innerHTML = "";
   });
 
+  if (chatViewBrowserPart === "recovery-footer") {
+    const snapshotWithTerminalRoot = (
+      mode: "retry" | "agents" | "uncertain" | "foreign" | "cancelled",
+    ): OrchestrationReadModel => {
+      const base = createSnapshotWithActiveSubagent();
+      const failedAt = isoAt(1_010);
+      return {
+        ...base,
+        threads: base.threads.map((thread) => {
+          if (thread.id !== THREAD_ID) return thread;
+          const turnId = thread.latestTurn!.turnId;
+          const childRows =
+            mode === "uncertain" || mode === "cancelled"
+              ? []
+              : thread.activities.map((row) =>
+                  mode !== "foreign"
+                    ? row
+                    : {
+                        ...row,
+                        payload: {
+                          ...(row.payload as Record<string, unknown>),
+                          subagent: {
+                            ...((row.payload as Record<string, unknown>).subagent as object),
+                            runtimeId: "b73284bf-01be-4dbf-94c8-b54e54f17802",
+                          },
+                        },
+                      },
+                );
+          return {
+            ...thread,
+            latestTurn: { ...thread.latestTurn!, state: "error", completedAt: failedAt },
+            session: {
+              ...thread.session!,
+              status: "ready",
+              activeTurnId: null,
+              providerInstanceId: ProviderInstanceId.make("codex"),
+              updatedAt: failedAt,
+              lastError: "Synthetic transient root failure",
+            },
+            activities: [
+              ...childRows,
+              {
+                id: EventId.make("root-footer-command"),
+                kind: "tool.completed",
+                tone: "tool",
+                summary: "Ran command",
+                turnId,
+                sequence: 2,
+                createdAt: isoAt(1_009),
+                payload: {
+                  itemId: "finished-command",
+                  itemType: "command_execution",
+                  status: "completed",
+                },
+              },
+              ...(mode === "agents"
+                ? []
+                : [
+                    {
+                      id: EventId.make("root-footer-recovery"),
+                      kind: "runtime.warning",
+                      tone: "info" as const,
+                      summary: "Recovery metadata",
+                      turnId,
+                      sequence: 3,
+                      createdAt: failedAt,
+                      payload: {
+                        recovery:
+                          mode === "uncertain"
+                            ? "codex-transient-recovery-uncertain"
+                            : mode === "cancelled"
+                              ? "codex-transient-recovery-cancelled"
+                              : "codex-transient-recovery-waiting",
+                        providerInstanceId: mode === "foreign" ? "foreign-account" : "codex",
+                        subagentRuntimeId: SUBAGENT_RUNTIME_ID,
+                        sessionUpdatedAt: failedAt,
+                        ...(mode === "uncertain" || mode === "cancelled"
+                          ? {}
+                          : {
+                              stage: "backoff",
+                              retryAttempt: 3,
+                              continuationOrdinal: 37,
+                              retryAt: isoAt(1_055),
+                            }),
+                      },
+                    },
+                  ]),
+            ],
+          };
+        }),
+      };
+    };
+
+    it("keeps a persisted provider failure discoverable in the Work Log without clearing canonical error state", async () => {
+      const base = snapshotWithTerminalRoot("agents");
+      const source = base.threads[0]!;
+      const failure = source.session!.lastError!;
+      const hash = async (value: string) =>
+        Array.from(
+          new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(value))),
+          (byte) => byte.toString(16).padStart(2, "0"),
+        ).join("");
+      const providerErrorHash = await hash(failure);
+      const providerErrorOwnerHash = await hash(
+        JSON.stringify([
+          source.id,
+          source.latestTurn!.turnId,
+          source.session!.providerInstanceId,
+          source.session!.subagentRuntimeId,
+        ]),
+      );
+      const activityId = EventId.make("persisted-provider-error-exact-occurrence");
+      const privateMessage = "Private synthetic received error details";
+      const privateJson = JSON.stringify({
+        error: { message: privateMessage, code: "synthetic_503" },
+      });
+      const snapshot: OrchestrationReadModel = {
+        ...base,
+        threads: [
+          {
+            ...source,
+            activities: [
+              ...source.activities,
+              {
+                id: activityId,
+                kind: "runtime.error",
+                tone: "error",
+                summary: "Provider error",
+                turnId: source.latestTurn!.turnId,
+                sequence: 3,
+                createdAt: source.session!.updatedAt,
+                payload: {
+                  providerDiagnostic: { version: 1, status: "error", subject: { kind: "root" } },
+                  providerErrorHash,
+                  providerErrorOwnerHash,
+                },
+              },
+            ],
+          },
+        ],
+      };
+      const detailRequests: NormalizedWsRpcRequestBody[] = [];
+      const toastSpy = vi.spyOn(toastManager, "add");
+      const mounted = await mountChatView({
+        viewport: WIDE_FOOTER_VIEWPORT,
+        snapshot,
+        resolveRpc: (body) => {
+          if (body._tag !== ORCHESTRATION_WS_METHODS.getThreadActivityDiagnostic) return undefined;
+          detailRequests.push(body);
+          return {
+            threadId: body.threadId,
+            turnId: body.turnId,
+            activityId: body.activityId,
+            diagnostic: {
+              version: 1,
+              observedAt: source.session!.updatedAt,
+              source: "codex.error",
+              native: { eventId: "synthetic-private-receipt" },
+              message: privateMessage,
+              json: privateJson,
+              redacted: false,
+              truncated: false,
+              omittedFields: false,
+            },
+          };
+        },
+      });
+      const errorBanner = () =>
+        Array.from(document.querySelectorAll<HTMLElement>('[data-slot="alert"]')).find((element) =>
+          element.textContent?.includes(failure),
+        ) ?? null;
+      try {
+        await waitForComposerEditor();
+        await vi.waitFor(() => {
+          expect(errorBanner()).toBeNull();
+          expect(
+            document.querySelector('[data-work-log-provider-errors="true"]')?.textContent,
+          ).toBe("Provider error · 1");
+        });
+        expect(detailRequests).toHaveLength(0);
+        expect(document.body.textContent).not.toContain(privateMessage);
+        expect(document.querySelector("[data-provider-diagnostic-json]")).toBeNull();
+        expect(toastSpy.mock.calls.some(([options]) => options.description === failure)).toBe(
+          false,
+        );
+        expect(selectThreadByRef(useStore.getState(), THREAD_REF)?.error).toBe(failure);
+        expect(selectThreadByRef(useStore.getState(), THREAD_REF)?.latestTurn).toEqual(
+          source.latestTurn,
+        );
+        const inspect = page.getByRole("button", {
+          name: "Inspect provider diagnostic: Root · Provider error",
+          exact: true,
+        });
+        await expect.element(inspect).toHaveAttribute("aria-expanded", "false");
+        await inspect.click();
+        await expect.element(page.getByText(privateMessage, { exact: true })).toBeVisible();
+        expect(detailRequests).toHaveLength(1);
+        expect(detailRequests[0]).toMatchObject({
+          threadId: THREAD_ID,
+          turnId: source.latestTurn!.turnId,
+          activityId,
+        });
+        expect(document.querySelector("[data-provider-diagnostic-json]")?.textContent).toBe(
+          privateJson,
+        );
+        await inspect.click();
+        expect(document.querySelector("[data-provider-diagnostic-json]")).toBeNull();
+        expect(document.body.textContent).not.toContain(privateMessage);
+        expect(selectThreadByRef(useStore.getState(), THREAD_REF)?.error).toBe(failure);
+        expect(selectThreadByRef(useStore.getState(), THREAD_REF)?.latestTurn).toEqual(
+          source.latestTurn,
+        );
+      } finally {
+        await mounted.cleanup();
+        toastSpy.mockRestore();
+      }
+    });
+
+    it("reveals elapsed time from the exact running root through the real composer", async () => {
+      const base = createSnapshotWithActiveSubagent();
+      const startedAt = new Date(Date.now() - 125_000).toISOString();
+      const snapshot: OrchestrationReadModel = {
+        ...base,
+        threads: base.threads.map((thread) => ({
+          ...thread,
+          latestTurn: { ...thread.latestTurn!, startedAt },
+        })),
+      };
+      const mounted = await mountChatView({ viewport: WIDE_FOOTER_VIEWPORT, snapshot });
+      try {
+        await waitForComposerEditor();
+        const timer = await waitForElement(
+          () =>
+            document.querySelector<HTMLElement>('[role="timer"][aria-label="Elapsed turn time"]'),
+          "Running root elapsed timer missing",
+        );
+        const disclosure = timer.closest<HTMLElement>("[data-activity-elapsed-revealed]")!;
+        expect(disclosure.getAttribute("data-activity-elapsed-revealed")).toBe("false");
+        const status = timer.closest<HTMLButtonElement>("button")!;
+        await page
+          .getByRole("button", { name: status.getAttribute("aria-label")!, exact: true })
+          .hover();
+        await vi.waitFor(() => {
+          expect(disclosure.getAttribute("data-activity-elapsed-revealed")).toBe("true");
+          expect(timer.textContent).toMatch(/2m \d+s/);
+        });
+        expect(document.querySelector('button[aria-label="Stop generation"]')).not.toBeNull();
+      } finally {
+        await mounted.cleanup();
+      }
+    });
+
+    it.each([
+      ["retry", "Reconnecting · root 9s"],
+      ["agents", "Agents running · root 9s"],
+      ["uncertain", "Needs reconciliation · root 9s"],
+    ] as const)(
+      "keeps %s context visibly active and exposes the red composer Stop without reopening the root",
+      async (mode, label) => {
+        const snapshot = snapshotWithTerminalRoot(mode);
+        const mounted = await mountChatView({
+          viewport: WIDE_FOOTER_VIEWPORT,
+          snapshot,
+          resolveRpc: (body) =>
+            body._tag === ORCHESTRATION_WS_METHODS.dispatchCommand
+              ? { sequence: snapshot.snapshotSequence + 1 }
+              : undefined,
+        });
+        try {
+          await waitForComposerEditor();
+          // Independent agents and failed-root recovery are visible live work,
+          // but cannot borrow the finished root's start for a running counter.
+          expect(
+            document.querySelector('[role="timer"][aria-label="Elapsed turn time"]'),
+          ).toBeNull();
+          await vi.waitFor(() =>
+            expect(
+              document.querySelector('[data-completion-divider="true"]')?.textContent,
+            ).toContain(label),
+          );
+          const stop = page.getByRole("button", { name: "Stop recovery", exact: true });
+          await expect.element(stop).toBeVisible();
+          expect(stop.element().className).toContain("bg-destructive/90");
+          await stop.click();
+          await vi.waitFor(() => {
+            const commands = wsRequests.filter(
+              (request) => request._tag === ORCHESTRATION_WS_METHODS.dispatchCommand,
+            );
+            expect(
+              commands.filter((request) => request.type === "thread.session.stop"),
+            ).toHaveLength(1);
+            expect(
+              commands.some(
+                (request) =>
+                  request.type === "thread.turn.start" || request.type === "thread.turn.interrupt",
+              ),
+            ).toBe(false);
+          });
+          expect(selectThreadByRef(useStore.getState(), THREAD_REF)?.latestTurn).toEqual(
+            snapshot.threads[0]!.latestTurn,
+          );
+        } finally {
+          await mounted.cleanup();
+        }
+      },
+    );
+
+    it.each(["foreign", "cancelled"] as const)(
+      "does not revive Stop or active footer from %s recovery evidence",
+      async (mode) => {
+        const snapshot = snapshotWithTerminalRoot(mode);
+        const mounted = await mountChatView({ viewport: WIDE_FOOTER_VIEWPORT, snapshot });
+        try {
+          await waitForComposerEditor();
+          await vi.waitFor(() =>
+            expect(
+              document.querySelector('[data-completion-divider="true"]')?.textContent,
+            ).toContain("Worked for 9s"),
+          );
+          expect(document.querySelector('button[aria-label="Stop recovery"]')).toBeNull();
+          expect((await waitForSendButton()).disabled).toBe(true);
+          expect(
+            wsRequests.some(
+              (request) =>
+                request.type === "thread.session.stop" || request.type === "thread.turn.start",
+            ),
+          ).toBe(false);
+        } finally {
+          await mounted.cleanup();
+        }
+      },
+    );
+
+    it("keeps a terminal-root draft sendable as a new turn and never labels it a running-turn queue", async () => {
+      const snapshot = snapshotWithTerminalRoot("retry");
+      const mounted = await mountChatView({
+        viewport: WIDE_FOOTER_VIEWPORT,
+        snapshot,
+        resolveRpc: (body) =>
+          body._tag === ORCHESTRATION_WS_METHODS.dispatchCommand
+            ? { sequence: snapshot.snapshotSequence + 1 }
+            : undefined,
+      });
+      try {
+        await waitForComposerEditor();
+        await expect
+          .element(page.getByRole("button", { name: "Stop recovery", exact: true }))
+          .toBeVisible();
+        useComposerDraftStore.getState().setPrompt(THREAD_REF, "Take a new direction");
+        const send = await waitForSendButton();
+        expect(send.disabled).toBe(false);
+        expect(document.querySelector('button[aria-label="Queue message"]')).toBeNull();
+        send.click();
+        await vi.waitFor(() => {
+          const command = wsRequests.find((request) => request.type === "thread.turn.start");
+          expect(command?.message).toMatchObject({ text: "Take a new direction" });
+          expect(wsRequests.some((request) => request.type === "thread.session.stop")).toBe(false);
+        });
+      } finally {
+        await mounted.cleanup();
+      }
+    });
+  }
+
   if (chatViewBrowserPart === "composer") {
     const createCodexRecoverySnapshot = (uncertain = false): OrchestrationReadModel => {
       const base = createSnapshotWithActiveSubagent();
@@ -2239,6 +2629,7 @@ describe(`ChatView full app (${chatViewBrowserPart})`, () => {
                         ? {}
                         : {
                             retryAttempt: 3,
+                            continuationOrdinal: 37,
                             stage: "backoff",
                             retryAt: new Date(Date.parse(failedAt) + 60_000).toISOString(),
                           }),
@@ -2249,6 +2640,151 @@ describe(`ChatView full app (${chatViewBrowserPart})`, () => {
         ),
       };
     };
+    it.each(["light", "dark"] as const)(
+      "uses only a compact notice for exact pending recovery without dismissing failures in %s mode",
+      async (theme) => {
+        localStorage.setItem("cafe-code:theme", theme);
+        const base = createCodexRecoverySnapshot();
+        const source = base.threads[0]!;
+        const failure = source.session!.lastError!;
+        const snapshot: OrchestrationReadModel = {
+          ...base,
+          threads: [
+            {
+              ...source,
+              activities: [
+                {
+                  id: EventId.make("pending-recovery-root-error"),
+                  kind: "runtime.error",
+                  tone: "error",
+                  summary: "Runtime error",
+                  turnId: source.latestTurn!.turnId,
+                  payload: { message: failure },
+                  createdAt: source.session!.updatedAt,
+                },
+                ...source.activities,
+              ],
+            },
+          ],
+        };
+        const toastSpy = vi.spyOn(toastManager, "add");
+        const mounted = await mountChatView({
+          viewport: WIDE_FOOTER_VIEWPORT,
+          snapshot,
+          resolveRpc: (body) =>
+            body._tag === ORCHESTRATION_WS_METHODS.dispatchCommand &&
+            body.type === "thread.turn.start"
+              ? failBrowserWsRpc(
+                  new OrchestrationDispatchCommandError({ message: "Manual send rejected" }),
+                )
+              : undefined,
+        });
+        const errorBanner = () =>
+          Array.from(document.querySelectorAll<HTMLElement>('[data-slot="alert"]')).find(
+            (element) => element.textContent?.includes(failure),
+          ) ?? null;
+        const publish = (recovery: string, ownerPatch: Record<string, unknown> = {}) => {
+          const previous = fixture.snapshot.threads[0]!;
+          const sequence = fixture.snapshot.snapshotSequence + 1;
+          const marker = source.activities.at(-1)!;
+          const thread = {
+            ...previous,
+            activities: [
+              ...previous.activities,
+              {
+                ...marker,
+                id: EventId.make(`notification-${sequence}`),
+                sequence,
+                payload: { ...(marker.payload as object), recovery, ...ownerPatch },
+              },
+            ],
+          };
+          fixture.snapshot = { ...fixture.snapshot, snapshotSequence: sequence, threads: [thread] };
+          rpcHarness.emitStreamValue(ORCHESTRATION_WS_METHODS.subscribeThread, {
+            kind: "snapshot",
+            snapshot: { snapshotSequence: sequence, thread },
+          });
+          return `notification-${sequence}`;
+        };
+        try {
+          await waitForComposerEditor();
+          await vi.waitFor(() => {
+            expect(
+              document.querySelector('[data-codex-recovery-notice="true"]')?.textContent,
+            ).toContain("Reconnecting");
+            expect(errorBanner()).toBeNull();
+            expect(
+              [...document.querySelectorAll("[data-work-log]")]
+                .map((node) => node.textContent)
+                .join(" "),
+            ).toContain("Provider error");
+          });
+          expect(toastSpy.mock.calls.some(([options]) => options.description === failure)).toBe(
+            false,
+          );
+          expect(selectThreadByRef(useStore.getState(), THREAD_REF)?.error).toBe(failure);
+          expect(selectThreadByRef(useStore.getState(), THREAD_REF)?.latestTurn).toEqual(
+            source.latestTurn,
+          );
+
+          // A foreign marker must not retire the current owner's compact wait.
+          publish("codex-transient-recovery-uncertain", { providerInstanceId: "foreign-account" });
+          await waitForLayout();
+          expect(errorBanner()).toBeNull();
+
+          // Uncertain, cancelled and terminal recovery preserve the canonical
+          // failure, but never restore its private prose as a popup.
+          for (const recovery of [
+            "codex-transient-recovery-uncertain",
+            "codex-transient-recovery-cancelled",
+            "codex-transient-root-failed",
+          ]) {
+            const markerId = publish(recovery);
+            await vi.waitFor(() => {
+              // Absence alone is immediate now. Bind each assertion to its
+              // actual received snapshot before advancing to the next one.
+              expect(
+                selectThreadByRef(useStore.getState(), THREAD_REF)?.activities.some(
+                  (activity) => activity.id === markerId,
+                ),
+              ).toBe(true);
+              expect(errorBanner()).toBeNull();
+            });
+            expect(selectThreadByRef(useStore.getState(), THREAD_REF)?.error).toBe(failure);
+            const waitingMarkerId = publish("codex-transient-recovery-waiting");
+            await vi.waitFor(() => {
+              expect(
+                selectThreadByRef(useStore.getState(), THREAD_REF)?.activities.some(
+                  (activity) => activity.id === waitingMarkerId,
+                ),
+              ).toBe(true);
+              expect(errorBanner()).toBeNull();
+            });
+          }
+
+          // A rejected new manual send remains a separate, visible occurrence
+          // even while the failed provider root still has a pending recovery.
+          useComposerDraftStore.getState().setPrompt(THREAD_REF, "A new manual direction");
+          (await waitForSendButton()).click();
+          await vi.waitFor(() => {
+            expect(findSendFailureToastTitle()).not.toBeNull();
+            expect(selectThreadByRef(useStore.getState(), THREAD_REF)?.error).toBe(
+              "Failed to send message.",
+            );
+            expect(selectThreadByRef(useStore.getState(), THREAD_REF)?.errorOrigin).toBe("local");
+            expect(document.querySelector('button[aria-label="Dismiss error"]')).not.toBeNull();
+          });
+          expect(
+            selectThreadByRef(useStore.getState(), THREAD_REF)?.activities.some(
+              (activity) => activity.id === "pending-recovery-root-error",
+            ),
+          ).toBe(true);
+        } finally {
+          toastSpy.mockRestore();
+          await mounted.cleanup();
+        }
+      },
+    );
     it.each([false, true])(
       "keeps terminal-root recovery Stop independent from input with rail docked=%s",
       async (docked) => {
@@ -2279,9 +2815,9 @@ describe(`ChatView full app (${chatViewBrowserPart})`, () => {
             '[data-codex-recovery-notice="true"]',
           )!;
           expect(document.querySelectorAll('[data-codex-recovery-notice="true"]')).toHaveLength(1);
-          expect(notice.textContent).toContain("Root failed");
+          expect(notice.textContent).toContain("Reconnecting");
           expect(notice.textContent).toContain("1 agent active");
-          expect(notice.textContent).toMatch(/Retry in \d+s/u);
+          expect(notice.textContent).toMatch(/Retry #37 in \d+s/u);
           if (docked) expect(findSessionRail()?.contains(notice)).toBe(true);
           await stop.click();
           await vi.waitFor(() => {
@@ -3243,7 +3779,7 @@ describe(`ChatView full app (${chatViewBrowserPart})`, () => {
 
         await vi.waitFor(() => {
           expect(findSessionRail()?.textContent).not.toContain("Cross-turn roster audit");
-          expect(findSessionRail()?.textContent).toContain("No tasks yet.");
+          expectEmptyScheduledSessionRailTasks();
           expect(selectThreadByRef(useStore.getState(), THREAD_REF)?.latestTurn?.turnId).toBe(
             "turn-after-cross-turn-subagent-spawn",
           );
@@ -3319,7 +3855,7 @@ describe(`ChatView full app (${chatViewBrowserPart})`, () => {
           expect(thread?.session?.subagentRuntimeId).toBeNull();
           expect(thread?.session?.orchestrationStatus).toBe("running");
           expect(findSessionRail()?.textContent).not.toContain("Cross-turn roster audit");
-          expect(findSessionRail()?.textContent).toContain("No tasks yet.");
+          expectEmptyScheduledSessionRailTasks();
           expect(findSessionRail()?.textContent).not.toContain("1 active");
         });
         await page.getByRole("button", { name: "Show in composer" }).click();
@@ -3659,7 +4195,7 @@ describe(`ChatView full app (${chatViewBrowserPart})`, () => {
           expect(findSessionRail()).not.toBeNull();
         });
         expect(document.querySelector('[data-chat-right-column="true"]')).not.toBeNull();
-        expect(findSessionRail()?.textContent).toContain("No tasks yet.");
+        await vi.waitFor(expectEmptyScheduledSessionRailTasks);
       } finally {
         await mounted.cleanup();
       }
@@ -4758,7 +5294,8 @@ describe(`ChatView full app (${chatViewBrowserPart})`, () => {
 
     it("restores rejected direct sends and reports every delivery attempt before a successful retry", async () => {
       const messageText = "Retry this exact direct message";
-      const repeatedFailure = "The message identity ledger is temporarily busy.";
+      const privateRequestId = "synthetic-private-provider-receipt";
+      const repeatedFailure = `stream disconnected before completion: request ID ${privateRequestId}`;
       let turnStartAttempts = 0;
       const dispatchedMessageTexts: string[] = [];
       const closeToastSpy = vi.spyOn(toastManager, "close");
@@ -4813,6 +5350,12 @@ describe(`ChatView full app (${chatViewBrowserPart})`, () => {
             );
             expect(document.body.textContent).toContain(repeatedFailure);
             expect(findSendFailureToastTitle()).not.toBeNull();
+            expect(document.body.textContent).not.toContain(privateRequestId);
+            expect(
+              [...document.querySelectorAll("[title]")].some((element) =>
+                element.getAttribute("title")?.includes(privateRequestId),
+              ),
+            ).toBe(false);
           },
           { timeout: 8_000, interval: 16 },
         );
@@ -7598,6 +8141,332 @@ describe(`ChatView full app (${chatViewBrowserPart})`, () => {
           })),
         };
       }
+      function continuationSnapshot(running: boolean) {
+        const original = running
+          ? createSnapshotWithActiveSubagent()
+          : policySnapshot(undefined, 12);
+        return {
+          ...original,
+          threads: original.threads.map((thread) => ({
+            ...thread,
+            subagentLimits: {},
+            session: thread.session
+              ? {
+                  ...thread.session,
+                  providerInstanceId: account,
+                  maxConcurrentSubagents: 12,
+                  subagentRuntimeId: SUBAGENT_RUNTIME_ID,
+                }
+              : null,
+          })),
+        };
+      }
+      function configureExistingContinuation(next: TestFixture) {
+        configureLiveDefaults(next);
+        next.serverConfig = {
+          ...next.serverConfig,
+          keybindings: [
+            {
+              command: "composer.steer",
+              shortcut: {
+                key: "enter",
+                modKey: false,
+                ctrlKey: true,
+                metaKey: false,
+                altKey: false,
+                shiftKey: false,
+              },
+            },
+          ],
+          providers: next.serverConfig.providers.map((provider) =>
+            provider.instanceId === account
+              ? {
+                  ...provider,
+                  // Bind the fixture's exact saved model/options explicitly;
+                  // fallback catalogues evolve independently of this policy.
+                  models: [
+                    {
+                      slug: "gpt-5",
+                      name: "GPT-5",
+                      isCustom: false,
+                      capabilities: createModelCapabilities({ optionDescriptors: [] }),
+                    },
+                  ],
+                  runtimeCapabilities: {
+                    threadGoals: "unsupported",
+                    ...provider.runtimeCapabilities,
+                    liveSteer: "supported",
+                    subagentConcurrency: false,
+                    subagentPolicyContinuation: true,
+                  },
+                }
+              : provider,
+          ),
+        };
+      }
+      it.each(["send", "steer"] as const)(
+        "admits exact existing-process %s while the native version capability is unknown",
+        async (action) => {
+          const mounted = await mountChatView({
+            viewport: WIDE_FOOTER_VIEWPORT,
+            snapshot: continuationSnapshot(action === "steer"),
+            configureFixture: configureExistingContinuation,
+            resolveRpc: (body) =>
+              body._tag === ORCHESTRATION_WS_METHODS.dispatchCommand ? { sequence: 2 } : undefined,
+          });
+          const prompt = "Continue this exact owned process with its applied limit";
+          try {
+            await waitForServerConfigToApply();
+            expect(
+              getServerConfig()?.providers.find((provider) => provider.instanceId === account)
+                ?.runtimeCapabilities?.subagentConcurrency,
+            ).toBe(false);
+            useComposerDraftStore.getState().setPrompt(THREAD_REF, prompt);
+            await vi.waitFor(() =>
+              expect(document.querySelector('[contenteditable="true"]')?.textContent).toContain(
+                prompt,
+              ),
+            );
+            if (action === "steer") {
+              (await waitForComposerEditor()).focus();
+              await userEvent.keyboard("{Control>}{Enter}{/Control}");
+            } else (await waitForSendButton()).click();
+            await vi.waitFor(() =>
+              expect(
+                wsRequests.filter(
+                  (body) =>
+                    body.type === (action === "steer" ? "thread.turn.steer" : "thread.turn.start"),
+                ),
+              ).toHaveLength(1),
+            );
+            expect(wsRequests.some((body) => body.type === "thread.create")).toBe(false);
+            expect(
+              getServerConfig()?.providers.find((provider) => provider.instanceId === account)
+                ?.runtimeCapabilities?.subagentConcurrency,
+            ).toBe(false);
+          } finally {
+            await mounted.cleanup();
+          }
+        },
+      );
+      it("does not lend an applied numeric session limit without Cafe continuation availability", async () => {
+        const mounted = await mountChatView({
+          viewport: WIDE_FOOTER_VIEWPORT,
+          snapshot: continuationSnapshot(false),
+          configureFixture: (next) => {
+            configureExistingContinuation(next);
+            next.serverConfig = {
+              ...next.serverConfig,
+              providers: next.serverConfig.providers.map((provider) =>
+                provider.instanceId === account
+                  ? {
+                      ...provider,
+                      runtimeCapabilities: {
+                        liveSteer: "supported",
+                        threadGoals: "unsupported",
+                        subagentConcurrency: false,
+                      },
+                    }
+                  : provider,
+              ),
+            };
+          },
+        });
+        const prompt = "Do not consume this unsupported fresh-start policy";
+        try {
+          await waitForServerConfigToApply();
+          useComposerDraftStore.getState().setPrompt(THREAD_REF, prompt);
+          await vi.waitFor(() =>
+            expect(document.querySelector('[contenteditable="true"]')?.textContent).toContain(
+              prompt,
+            ),
+          );
+          (await waitForSendButton()).click();
+          await vi.waitFor(() =>
+            expect(document.body.textContent).toContain(
+              "This provider runtime does not support the account subagent limit.",
+            ),
+          );
+          expect(wsRequests.some((body) => body.type === "thread.turn.start")).toBe(false);
+          expect(useComposerDraftStore.getState().getComposerDraft(THREAD_REF)?.prompt).toBe(
+            prompt,
+          );
+        } finally {
+          await mounted.cleanup();
+        }
+      });
+      it("delivers a queued follow-up only through the exact existing-process continuation guarantee", async () => {
+        const queue = createFollowUpQueuePersistence();
+        const snapshot = continuationSnapshot(false);
+        const thread = snapshot.threads[0]!;
+        expect(
+          (
+            await queue.save(LOCAL_ENVIRONMENT_ID, [
+              {
+                id: "exact-continuation-queued",
+                environmentId: LOCAL_ENVIRONMENT_ID,
+                threadId: THREAD_ID,
+                promptText: "Continue the already-materialized exact queued process",
+                images: [],
+                files: [],
+                provider: ProviderDriverKind.make("codex"),
+                model: thread.modelSelection.model,
+                promptEffort: null,
+                modelSelection: thread.modelSelection,
+                runtimeMode: thread.runtimeMode,
+                interactionMode: "default",
+                queuedAt: isoAt(1000),
+                blockedReason: null,
+              },
+            ])
+          ).ok,
+        ).toBe(true);
+        const mounted = await mountChatView({
+          viewport: WIDE_FOOTER_VIEWPORT,
+          snapshot,
+          configureFixture: configureExistingContinuation,
+          resolveRpc: (body) =>
+            body._tag === ORCHESTRATION_WS_METHODS.dispatchCommand ? { sequence: 2 } : undefined,
+        });
+        try {
+          await waitForServerConfigToApply();
+          await vi.waitFor(() =>
+            expect(wsRequests.filter((body) => body.type === "thread.turn.start")).toHaveLength(1),
+          );
+          const submitted = wsRequests.find((body) => body.type === "thread.turn.start")!;
+          expect(submitted).toMatchObject({
+            threadId: THREAD_ID,
+            message: { text: "Continue the already-materialized exact queued process" },
+          });
+          expect(submitted).not.toHaveProperty("subagentLimits");
+          await vi.waitFor(() => {
+            const persisted = queue.load(LOCAL_ENVIRONMENT_ID);
+            expect(persisted.ok).toBe(true);
+            if (persisted.ok) {
+              expect(persisted.value.pending).toHaveLength(0);
+              expect(persisted.value.claimed).toHaveLength(0);
+            }
+          });
+          expect(
+            getServerConfig()?.providers.find((provider) => provider.instanceId === account)
+              ?.runtimeCapabilities?.subagentConcurrency,
+          ).toBe(false);
+        } finally {
+          await mounted.cleanup();
+        }
+      });
+      it.each(["send", "steer"] as const)(
+        "rechecks exact continuation authority after deferred %s attachment preparation",
+        async (action) => {
+          const mounted = await mountChatView({
+            viewport: WIDE_FOOTER_VIEWPORT,
+            snapshot: continuationSnapshot(action === "steer"),
+            configureFixture: configureExistingContinuation,
+          });
+          const prompt = "Preserve this exact continuation-race draft";
+          const originalRead = FileReader.prototype.readAsDataURL;
+          const prepared: { reader: FileReader; blob: Blob }[] = [];
+          let restoreReadSpy: (() => void) | undefined;
+          const releaseReaders = () => {
+            for (const { reader, blob } of prepared.splice(0)) originalRead.call(reader, blob);
+          };
+          try {
+            await waitForServerConfigToApply();
+            useComposerDraftStore.getState().setPrompt(THREAD_REF, prompt);
+            useComposerDraftStore.getState().addImages(THREAD_REF, [
+              {
+                id: "continuation-race-image",
+                type: "image",
+                name: "draft.png",
+                mimeType: "image/png",
+                sizeBytes: 1,
+                previewUrl: "data:image/png;base64,eA==",
+                file: new File(["x"], "draft.png", { type: "image/png" }),
+              },
+            ]);
+            await vi.waitFor(() =>
+              expect(
+                useComposerDraftStore
+                  .getState()
+                  .getComposerDraft(THREAD_REF)
+                  ?.persistedAttachments.map((image) => image.id),
+              ).toEqual(["continuation-race-image"]),
+            );
+            const readSpy = vi
+              .spyOn(FileReader.prototype, "readAsDataURL")
+              .mockImplementation(function (this: FileReader, blob: Blob) {
+                prepared.push({ reader: this, blob });
+              });
+            restoreReadSpy = () => readSpy.mockRestore();
+            await vi.waitFor(() =>
+              expect(document.querySelector('[contenteditable="true"]')?.textContent).toContain(
+                prompt,
+              ),
+            );
+            if (action === "steer") {
+              (await waitForComposerEditor()).focus();
+              await userEvent.keyboard("{Control>}{Enter}{/Control}");
+            } else (await waitForSendButton()).click();
+            await vi.waitFor(() => expect(prepared).toHaveLength(1));
+            // The fleet revokes Cafe continuation availability while bytes
+            // are being prepared. Numeric history is insufficient at this
+            // advisory boundary, even though the policy remains unchanged;
+            // actual owner qualification is additionally required server-side.
+            fixture.serverConfig = {
+              ...fixture.serverConfig,
+              providers: fixture.serverConfig.providers.map((provider) =>
+                provider.instanceId === account
+                  ? {
+                      ...provider,
+                      runtimeCapabilities: {
+                        ...provider.runtimeCapabilities!,
+                        subagentPolicyContinuation: false,
+                      },
+                    }
+                  : provider,
+              ),
+            };
+            rpcHarness.emitStreamValue(WS_METHODS.subscribeServerConfig, {
+              version: 1,
+              type: "snapshot",
+              config: encodeServerConfig(fixture.serverConfig),
+            });
+            await vi.waitFor(() =>
+              expect(
+                getServerConfig()?.providers.find((provider) => provider.instanceId === account)
+                  ?.runtimeCapabilities?.subagentPolicyContinuation,
+              ).toBe(false),
+            );
+            releaseReaders();
+            await vi.waitFor(() =>
+              expect(document.body.textContent).toContain(
+                "This provider runtime does not support the account subagent limit.",
+              ),
+            );
+            expect(
+              wsRequests.some(
+                (body) => body.type === "thread.turn.start" || body.type === "thread.turn.steer",
+              ),
+            ).toBe(false);
+            expect(useComposerDraftStore.getState().getComposerDraft(THREAD_REF)?.prompt).toBe(
+              prompt,
+            );
+            expect(
+              useComposerDraftStore
+                .getState()
+                .getComposerDraft(THREAD_REF)
+                ?.images.map((image) => image.id),
+            ).toEqual(["continuation-race-image"]);
+            const persisted = createFollowUpQueuePersistence().load(LOCAL_ENVIRONMENT_ID);
+            expect(persisted.ok).toBe(true);
+            if (persisted.ok) expect(persisted.value.claimed).toHaveLength(0);
+          } finally {
+            restoreReadSpy?.();
+            releaseReaders();
+            await mounted.cleanup();
+          }
+        },
+      );
       it.each(["plan follow-up", "native review"] as const)(
         "refuses unsupported inherited account policy in direct %s actions before dispatch or consuming work",
         async (action) => {
@@ -8274,6 +9143,612 @@ describe(`ChatView full app (${chatViewBrowserPart})`, () => {
           await mounted.cleanup();
         }
       });
+    });
+
+    describe("Codex context-window ownership", () => {
+      const account = ProviderInstanceId.make("codex");
+      const peer = ProviderInstanceId.make("codex-context-peer");
+      function contextSnapshot(
+        requested: number | null = 500_000,
+        configured: number | null = 500_000,
+      ) {
+        const base = createSnapshotForTargetUser({
+          targetMessageId: MessageId.make("context-ownership"),
+          targetText: "Synthetic context history",
+        });
+        return {
+          ...base,
+          threads: base.threads.map((thread) => ({
+            ...thread,
+            codexContextWindowOverride: requested,
+            session: thread.session
+              ? {
+                  ...thread.session,
+                  providerInstanceId: account,
+                  codexContextWindowOverride: configured,
+                }
+              : null,
+          })),
+        };
+      }
+      function configureContext(next: TestFixture) {
+        const baseProvider = next.serverConfig.providers.find(
+          (provider) => provider.instanceId === account,
+        )!;
+        next.serverConfig = {
+          ...next.serverConfig,
+          providers: [
+            ...next.serverConfig.providers,
+            { ...baseProvider, instanceId: peer, displayName: "Context peer" },
+          ].map((provider) => ({
+            ...provider,
+            runtimeCapabilities: {
+              liveSteer: "unsupported",
+              threadGoals: "unsupported",
+              ...provider.runtimeCapabilities,
+              codexContextWindow: true,
+            },
+            models: [
+              {
+                slug: "gpt-5",
+                name: "Fixture GPT5",
+                isCustom: false,
+                capabilities: createModelCapabilities({ optionDescriptors: [] }),
+              },
+              {
+                slug: "gpt-5.6-sol",
+                name: "Fixture Sol",
+                isCustom: false,
+                capabilities: createModelCapabilities({ optionDescriptors: [] }),
+              },
+            ],
+          })),
+          settings: {
+            ...next.serverConfig.settings,
+            providerInstances: {
+              ...next.serverConfig.settings.providerInstances,
+              [account]: {
+                driver: ProviderDriverKind.make("codex"),
+                defaultModel: "gpt-5",
+                defaultCodexContextWindowOverride: 600_000,
+              },
+              [peer]: {
+                driver: ProviderDriverKind.make("codex"),
+                defaultModel: "gpt-5",
+                defaultCodexContextWindowOverride: 900_000,
+              },
+            },
+          },
+        };
+      }
+      function publishContext(
+        requested: number | null,
+        configured: number | null = 500_000,
+        sequence = fixture.snapshot.snapshotSequence + 1,
+      ) {
+        const thread = {
+          ...fixture.snapshot.threads[0]!,
+          codexContextWindowOverride: requested,
+          session: fixture.snapshot.threads[0]!.session
+            ? { ...fixture.snapshot.threads[0]!.session!, codexContextWindowOverride: configured }
+            : null,
+        };
+        fixture.snapshot = { ...fixture.snapshot, snapshotSequence: sequence, threads: [thread] };
+        rpcHarness.emitStreamValue(ORCHESTRATION_WS_METHODS.subscribeThread, {
+          kind: "snapshot",
+          snapshot: { snapshotSequence: sequence, thread },
+        });
+      }
+      async function openContextEditor() {
+        await page.getByRole("button", { name: "More composer controls", exact: true }).click();
+        await page.getByRole("menuitem", { name: "Context window…", exact: true }).click();
+        await expect
+          .element(page.getByRole("dialog", { name: "Context window", exact: true }))
+          .toBeVisible();
+      }
+      const contextInput = () =>
+        page.getByRole("spinbutton", { name: "Context window (tokens)", exact: true });
+      function updateContextDefault(value: number | undefined) {
+        const { defaultCodexContextWindowOverride: _previous, ...instance } =
+          fixture.serverConfig.settings.providerInstances[account]!;
+        fixture.serverConfig = {
+          ...fixture.serverConfig,
+          settings: {
+            ...fixture.serverConfig.settings,
+            providerInstances: {
+              ...fixture.serverConfig.settings.providerInstances,
+              [account]: {
+                ...instance,
+                ...(value === undefined ? {} : { defaultCodexContextWindowOverride: value }),
+              },
+            },
+          },
+        };
+        applySettingsUpdated(fixture.serverConfig.settings);
+      }
+
+      it("reflects live exact-account defaults, chat precedence, pending Reset and clear in Tasks without provider calls", async () => {
+        const mounted = await mountChatView({
+          viewport: WIDE_FOOTER_VIEWPORT,
+          snapshot: contextSnapshot(),
+          configureFixture: configureContext,
+        });
+        try {
+          await waitForServerConfigToApply();
+          useUiStateStore.getState().setSessionRailDocked(true);
+          await vi.waitFor(() =>
+            expect(findSessionRail()?.textContent).toContain("Context override: 500K"),
+          );
+          updateContextDefault(700_000);
+          await waitForLayout();
+          expect(findSessionRail()?.textContent).not.toContain("700K");
+          publishContext(null);
+          await vi.waitFor(() =>
+            expect(findSessionRail()?.textContent).toContain(
+              "Context override: 500K → 700K when idle",
+            ),
+          );
+          await openContextEditor();
+          await expect.element(contextInput()).toHaveValue(null);
+          await page
+            .getByRole("dialog")
+            .getByRole("button", { name: "Close", exact: true })
+            .click();
+          publishContext(null, 700_000);
+          await vi.waitFor(() =>
+            expect(findSessionRail()?.textContent).toContain("Context override: 700K"),
+          );
+          updateContextDefault(undefined);
+          await vi.waitFor(() =>
+            expect(findSessionRail()?.textContent).toContain(
+              "Context override: 700K → Codex default when idle",
+            ),
+          );
+          publishContext(null, null);
+          await vi.waitFor(() =>
+            expect(
+              findSessionRail()?.querySelector("[data-codex-context-window-details]"),
+            ).toBeNull(),
+          );
+          expect(
+            useComposerDraftStore.getState().getComposerDraft(THREAD_REF)
+              ?.codexContextWindowOverride,
+          ).toBeUndefined();
+          expect(
+            wsRequests.some(
+              (body) =>
+                body.type === "thread.turn.start" ||
+                body.type === "thread.meta.update" ||
+                body.type === "thread.session.stop",
+            ),
+          ).toBe(false);
+        } finally {
+          await mounted.cleanup();
+        }
+      });
+
+      it("binds metadata ACK to this context field, never another chat or omission, and leaves next sends canonical", async () => {
+        const mounted = await mountChatView({
+          viewport: WIDE_FOOTER_VIEWPORT,
+          snapshot: contextSnapshot(),
+          configureFixture: configureContext,
+          resolveRpc: (body) =>
+            body._tag === ORCHESTRATION_WS_METHODS.dispatchCommand ? { sequence: 3 } : undefined,
+        });
+        try {
+          await waitForServerConfigToApply();
+          useUiStateStore.getState().setSessionRailDocked(true);
+          await page.getByRole("button", { name: "More composer controls", exact: true }).click();
+          const labels = page.getByRole("menu").element().textContent!;
+          expect(labels.indexOf("Subagent limit…")).toBeLessThan(labels.indexOf("Context window…"));
+          expect(labels.indexOf("Context window…")).toBeLessThan(labels.indexOf("Mode"));
+          await page.getByRole("menuitem", { name: "Context window…", exact: true }).click();
+          await contextInput().fill("1000000");
+          await page.getByRole("button", { name: "Save", exact: true }).click();
+          await vi.waitFor(() =>
+            expect(
+              useComposerDraftStore.getState().getComposerDraft(THREAD_REF)
+                ?.codexContextWindowOverride,
+            ).toBe(1_000_000),
+          );
+          const saved = wsRequests.find((body) => body.type === "thread.meta.update")!;
+          expect(saved).toMatchObject({
+            threadId: THREAD_ID,
+            codexContextWindowOverride: 1_000_000,
+          });
+          expect(saved).not.toHaveProperty("subagentLimits");
+          rpcHarness.emitStreamValue(ORCHESTRATION_WS_METHODS.subscribeThread, {
+            kind: "event",
+            event: {
+              type: "thread.meta-updated",
+              sequence: 4,
+              eventId: EventId.make("context-omission"),
+              aggregateKind: "thread",
+              aggregateId: THREAD_ID,
+              occurredAt: NOW_ISO,
+              commandId: null,
+              causationEventId: null,
+              correlationId: null,
+              metadata: {},
+              payload: {
+                threadId: THREAD_ID,
+                title: "Context omission title",
+                updatedAt: NOW_ISO,
+                subagentLimits: { codex: 5 },
+              },
+            },
+          });
+          const unrelated = addThreadToSnapshot(
+            fixture.snapshot,
+            ThreadId.make("other-context-chat"),
+          ).threads[1]!;
+          rpcHarness.emitStreamValue(ORCHESTRATION_WS_METHODS.subscribeShell, {
+            kind: "thread-upserted",
+            sequence: 5,
+            thread: { ...toShellThread(unrelated), codexContextWindowOverride: 800_000 },
+          });
+          await vi.waitFor(() =>
+            expect(selectThreadByRef(useStore.getState(), THREAD_REF)?.title).toBe(
+              "Context omission title",
+            ),
+          );
+          expect(
+            useComposerDraftStore.getState().getComposerDraft(THREAD_REF)
+              ?.codexContextWindowOverride,
+          ).toBe(1_000_000);
+          expect(
+            useStore.getState().environmentStateById[LOCAL_ENVIRONMENT_ID]
+              ?.codexContextPolicySequenceByThreadId?.[THREAD_ID],
+          ).toBe(1);
+          publishContext(900_000, 500_000, 6);
+          await vi.waitFor(() =>
+            expect(
+              useComposerDraftStore.getState().getComposerDraft(THREAD_REF)
+                ?.codexContextWindowOverride,
+            ).toBeUndefined(),
+          );
+          useComposerDraftStore.getState().setPrompt(THREAD_REF, "Use durable context intent");
+          (await waitForSendButton()).click();
+          await vi.waitFor(() =>
+            expect(wsRequests.some((body) => body.type === "thread.turn.start")).toBe(true),
+          );
+          expect(wsRequests.find((body) => body.type === "thread.turn.start")).not.toHaveProperty(
+            "codexContextWindowOverride",
+          );
+          expect(
+            selectThreadByRef(useStore.getState(), THREAD_REF)?.codexContextWindowOverride,
+          ).toBe(900_000);
+          expect(wsRequests.some((body) => body.type === "thread.session.stop")).toBe(false);
+        } finally {
+          await mounted.cleanup();
+        }
+      });
+
+      it.each([
+        { before: true, reset: false },
+        { before: false, reset: false },
+        { before: true, reset: true },
+        { before: false, reset: true },
+      ])(
+        "does not resurrect obsolete ACK intent over newer canonical metadata (before=$before reset=$reset)",
+        async ({ before, reset }) => {
+          let release!: (value: { sequence: number }) => void;
+          const pending = new Promise<{ sequence: number }>((resolve) => {
+            release = resolve;
+          });
+          const mounted = await mountChatView({
+            viewport: DEFAULT_VIEWPORT,
+            snapshot: contextSnapshot(),
+            configureFixture: configureContext,
+            resolveRpc: (body) =>
+              body._tag === ORCHESTRATION_WS_METHODS.dispatchCommand ? pending : undefined,
+          });
+          try {
+            await openContextEditor();
+            if (!reset) await contextInput().fill("700000");
+            await page.getByRole("button", { name: reset ? "Reset" : "Save", exact: true }).click();
+            await vi.waitFor(() =>
+              expect(wsRequests.some((body) => body.type === "thread.meta.update")).toBe(true),
+            );
+            if (!before) {
+              release({ sequence: 2 });
+              await vi.waitFor(() =>
+                expect(
+                  useComposerDraftStore.getState().getComposerDraft(THREAD_REF)
+                    ?.codexContextWindowOverride,
+                ).toBe(reset ? null : 700_000),
+              );
+            }
+            publishContext(900_000, 500_000, 3);
+            await vi.waitFor(() =>
+              expect(
+                selectThreadByRef(useStore.getState(), THREAD_REF)?.codexContextWindowOverride,
+              ).toBe(900_000),
+            );
+            if (before) release({ sequence: 2 });
+            await vi.waitFor(() => {
+              expect(document.querySelector('[role="dialog"]')).toBeNull();
+              expect(
+                useComposerDraftStore.getState().getComposerDraft(THREAD_REF)
+                  ?.codexContextWindowOverride,
+              ).toBeUndefined();
+            });
+            await openContextEditor();
+            await expect.element(contextInput()).toHaveValue(900_000);
+          } finally {
+            release({ sequence: 2 });
+            await mounted.cleanup();
+          }
+        },
+      );
+
+      it.each(["account", "model"] as const)(
+        "fences a late ACK across %s away-and-back without closing the replacement editor",
+        async (transition) => {
+          let release!: (value: { sequence: number }) => void;
+          const pending = new Promise<{ sequence: number }>((resolve) => {
+            release = resolve;
+          });
+          const mounted = await mountChatView({
+            viewport: WIDE_FOOTER_VIEWPORT,
+            snapshot: contextSnapshot(),
+            configureFixture: configureContext,
+            resolveRpc: (body) =>
+              body._tag === ORCHESTRATION_WS_METHODS.dispatchCommand ? pending : undefined,
+          });
+          try {
+            await openContextEditor();
+            await contextInput().fill("700000");
+            await page.getByRole("button", { name: "Save", exact: true }).click();
+            await vi.waitFor(() =>
+              expect(wsRequests.some((body) => body.type === "thread.meta.update")).toBe(true),
+            );
+            useComposerDraftStore
+              .getState()
+              .setModelSelection(
+                THREAD_REF,
+                createModelSelection(
+                  transition === "account" ? peer : account,
+                  transition === "model" ? "gpt-5.6-sol" : "gpt-5",
+                ),
+              );
+            await vi.waitFor(() => expect(document.querySelector('[role="dialog"]')).toBeNull());
+            useUiStateStore.getState().setSessionRailDocked(true);
+            await vi.waitFor(() =>
+              expect(findSessionRail()?.textContent).toContain(
+                transition === "account"
+                  ? "Context override: 500K · saved"
+                  : "Context override: 500K",
+              ),
+            );
+            expect(findSessionRail()?.textContent).not.toContain("→");
+            useComposerDraftStore
+              .getState()
+              .setModelSelection(THREAD_REF, createModelSelection(account, "gpt-5"));
+            await openContextEditor();
+            await contextInput().fill("800000");
+            release({ sequence: 2 });
+            await waitForLayout();
+            await expect
+              .element(page.getByRole("dialog", { name: "Context window", exact: true }))
+              .toBeVisible();
+            await expect.element(contextInput()).toHaveValue(800_000);
+            expect(
+              useComposerDraftStore.getState().getComposerDraft(THREAD_REF)
+                ?.codexContextWindowOverride,
+            ).toBeUndefined();
+            expect(wsRequests.filter((body) => body.type === "thread.meta.update")).toHaveLength(1);
+          } finally {
+            release({ sequence: 2 });
+            await mounted.cleanup();
+          }
+        },
+      );
+
+      it("captures only a local chat's explicit context choice in first-send bootstrap without seeding account or future drafts", async () => {
+        const mounted = await mountChatView({
+          viewport: DEFAULT_VIEWPORT,
+          snapshot: createProjectlessSnapshot(),
+          initialPath: "/",
+          configureFixture: (next) => {
+            configureContext(next);
+            configureStandaloneShortcut(next);
+          },
+          resolveRpc: (body) =>
+            body._tag === ORCHESTRATION_WS_METHODS.dispatchCommand ? { sequence: 2 } : undefined,
+        });
+        try {
+          newChatShortcut();
+          await vi.waitFor(() =>
+            expect(mounted.router.state.location.pathname).toMatch(UUID_ROUTE_RE),
+          );
+          const draftId = draftIdFromPath(mounted.router.state.location.pathname);
+          expect(
+            useComposerDraftStore.getState().getComposerDraft(draftId)?.codexContextWindowOverride,
+          ).toBeUndefined();
+          await openContextEditor();
+          await expect.element(contextInput()).toHaveValue(null);
+          await contextInput().fill("1000000");
+          await page.getByRole("button", { name: "Save", exact: true }).click();
+          expect(wsRequests.some((body) => body.type === "thread.meta.update")).toBe(false);
+          expect(
+            useComposerDraftStore.getState().getComposerDraft(draftId)?.codexContextWindowOverride,
+          ).toBe(1_000_000);
+          useComposerDraftStore.getState().setPrompt(draftId, "First context-bound message");
+          await waitForStandaloneComposerText("First context-bound message");
+          (await waitForSendButton()).click();
+          await vi.waitFor(() =>
+            expect(wsRequests.find((body) => body.type === "thread.turn.start")).toMatchObject({
+              threadId: draftThreadIdFor(draftId),
+              codexContextWindowOverride: 1_000_000,
+              bootstrap: { createThread: { codexContextWindowOverride: 1_000_000 } },
+            }),
+          );
+          const submittedId = draftThreadIdFor(draftId);
+          fixture.snapshot = addThreadToSnapshot(fixture.snapshot, submittedId);
+          fixture.snapshot = {
+            ...fixture.snapshot,
+            threads: fixture.snapshot.threads.map((thread) =>
+              thread.id === submittedId
+                ? {
+                    ...thread,
+                    projectId: null,
+                    branch: null,
+                    session: null,
+                    codexContextWindowOverride: 1_000_000,
+                  }
+                : thread,
+            ),
+          };
+          // Match the established draft promotion boundary: received started
+          // session evidence, not a bare create shell or elapsed time, owns
+          // navigation from the editable draft to its canonical server chat.
+          await startPromotedServerThreadViaDomainEvent(submittedId);
+          await vi.waitFor(() =>
+            expect(mounted.router.state.location.pathname).toBe(serverThreadPath(submittedId)),
+          );
+          expect(
+            selectThreadByRef(
+              useStore.getState(),
+              scopeThreadRef(LOCAL_ENVIRONMENT_ID, submittedId),
+            )?.codexContextWindowOverride,
+          ).toBe(1_000_000);
+          newChatShortcut();
+          await vi.waitFor(() =>
+            expect(draftIdFromPath(mounted.router.state.location.pathname)).not.toBe(draftId),
+          );
+          const fresh = draftIdFromPath(mounted.router.state.location.pathname);
+          expect(
+            useComposerDraftStore.getState().getComposerDraft(fresh)?.codexContextWindowOverride,
+          ).toBeUndefined();
+          expect(
+            JSON.stringify(useComposerDraftStore.getState().stickyModelSelectionByProvider),
+          ).not.toContain("codexContextWindowOverride");
+        } finally {
+          await mounted.cleanup();
+        }
+      });
+
+      it.each([
+        { driver: "claudeAgent", model: "claude-opus-4-8", reset: false },
+        { driver: "claudeAgent", model: "claude-opus-4-8", reset: true },
+        { driver: "grok", model: "grok-4.6", reset: false },
+        { driver: "grok", model: "grok-4.6", reset: true },
+      ] as const)(
+        "preserves latent Codex chat metadata during first $driver bootstrap without a non-Codex turn override (reset=$reset)",
+        async ({ driver, model, reset }) => {
+          const otherAccount = ProviderInstanceId.make(`context-bootstrap-${driver}`);
+          const requested = reset ? null : 1_000_000;
+          const mounted = await mountChatView({
+            viewport: DEFAULT_VIEWPORT,
+            snapshot: createProjectlessSnapshot(),
+            initialPath: "/",
+            configureFixture: (next) => {
+              configureContext(next);
+              configureStandaloneShortcut(next);
+              next.serverConfig = {
+                ...next.serverConfig,
+                providers: [
+                  ...next.serverConfig.providers,
+                  {
+                    driver: ProviderDriverKind.make(driver),
+                    instanceId: otherAccount,
+                    enabled: true,
+                    installed: true,
+                    version: "synthetic-context-bootstrap",
+                    status: "ready",
+                    auth: { status: "authenticated" },
+                    checkedAt: NOW_ISO,
+                    models: [
+                      {
+                        slug: model,
+                        name: `Synthetic ${driver}`,
+                        isCustom: false,
+                        capabilities: createModelCapabilities({ optionDescriptors: [] }),
+                      },
+                    ],
+                    slashCommands: [],
+                    skills: [],
+                  },
+                ],
+                settings: {
+                  ...next.serverConfig.settings,
+                  providerInstances: {
+                    ...next.serverConfig.settings.providerInstances,
+                    [otherAccount]: {
+                      driver: ProviderDriverKind.make(driver),
+                      defaultModel: model,
+                    },
+                  },
+                },
+              };
+            },
+            resolveRpc: (body) =>
+              body._tag === ORCHESTRATION_WS_METHODS.dispatchCommand ? { sequence: 2 } : undefined,
+          });
+          try {
+            newChatShortcut();
+            await vi.waitFor(() =>
+              expect(mounted.router.state.location.pathname).toMatch(UUID_ROUTE_RE),
+            );
+            const draftId = draftIdFromPath(mounted.router.state.location.pathname);
+            expect(
+              useComposerDraftStore.getState().getComposerDraft(draftId)
+                ?.codexContextWindowOverride,
+            ).toBeUndefined();
+            await openContextEditor();
+            await expect.element(contextInput()).toHaveValue(null);
+            if (!reset) await contextInput().fill("1000000");
+            await page.getByRole("button", { name: reset ? "Reset" : "Save", exact: true }).click();
+            expect(
+              useComposerDraftStore.getState().getComposerDraft(draftId)
+                ?.codexContextWindowOverride,
+            ).toBe(requested);
+            useComposerDraftStore
+              .getState()
+              .setModelSelection(draftId, createModelSelection(otherAccount, model));
+            await page.getByRole("button", { name: "More composer controls", exact: true }).click();
+            await expect
+              .element(page.getByRole("menuitem", { name: "Context window…", exact: true }))
+              .not.toBeInTheDocument();
+            await userEvent.keyboard("{Escape}");
+            expect(
+              useComposerDraftStore.getState().getComposerDraft(draftId)
+                ?.codexContextWindowOverride,
+            ).toBe(requested);
+            useComposerDraftStore
+              .getState()
+              .setPrompt(draftId, "First message after changing the draft provider");
+            await waitForStandaloneComposerText("First message after changing the draft provider");
+            (await waitForSendButton()).click();
+            await vi.waitFor(() =>
+              expect(wsRequests.find((body) => body.type === "thread.turn.start")).toMatchObject({
+                threadId: draftThreadIdFor(draftId),
+                modelSelection: { instanceId: otherAccount, model },
+                bootstrap: {
+                  createThread: {
+                    modelSelection: { instanceId: otherAccount, model },
+                    codexContextWindowOverride: requested,
+                  },
+                },
+              }),
+            );
+            const sent = wsRequests.find((body) => body.type === "thread.turn.start")!;
+            expect(sent).not.toHaveProperty("codexContextWindowOverride");
+            expect(sent.modelSelection).not.toHaveProperty("options.codexContextWindowOverride");
+            expect(
+              JSON.stringify(useComposerDraftStore.getState().stickyModelSelectionByProvider),
+            ).not.toContain("codexContextWindowOverride");
+            expect(
+              wsRequests.some(
+                (body) => body.type === "thread.meta.update" || body.type === "thread.session.stop",
+              ),
+            ).toBe(false);
+          } finally {
+            await mounted.cleanup();
+          }
+        },
+      );
     });
 
     it("edits the exact standalone chat policy, preserves the other driver and sends its captured override", async () => {

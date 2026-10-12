@@ -194,6 +194,8 @@ describe("Mermaid source and parsed-graph admission", () => {
     'graph TD\nA@{ img: "https://example.invalid/image" }',
     'graph TD\nA@{ "img": "https://example.invalid/image" }',
     "graph TD\nA@{ 'img': 'https://example.invalid/image' }",
+    'gantt\nBuild :a, 2026-10-12, 1d\nclick a href "https://example.invalid/"',
+    "gantt\nBuild :a, 2026-10-12, 1d\nclick a call callback()",
   ])(
     "rejects interactive, image, or configuration syntax at both boundaries %s",
     async (source) => {
@@ -383,6 +385,170 @@ describe("Mermaid source and parsed-graph admission", () => {
       'pie showData\n"Empty" : 0\n"Used" : 1',
     ];
     for (const source of admitted) expect(await admitsParsedGraph(source)).toBe(true);
+  });
+
+  it("admits ordinary Gantt dates, status tags and sequential tasks", async () => {
+    const admitted = [
+      "gantt\nBuild :a, 2026-10-12, 1d",
+      "gantt\ndateFormat YYYY-MM-DD\nsection Delivery\nBuild :done, a, 2026-10-12, 1d\nReview :active, b, after a, 2d\nPublish :crit, p, after b, 1d",
+      "gantt\nBuild :2026-10-12, 1d\nReview :2d",
+      "gantt\ndateFormat YYYY-MM-DD\nLeap day :a, 2028-02-29, 2028-03-01\nReview :b, after a, 1w",
+      "gantt\nFirst :a, 2026-10-12, 2d\nSecond :b, 2026-10-12, 3d\nJoin :c, after a b, 1d",
+      "gantt\ndateFormat YYYY-MM-DD\ninclusiveEndDates\nBuild :a, 2026-10-12, 2026-10-13",
+      "gantt\nFuture :later, 2026-10-15, 1d\nBuild :a, 2026-10-12, until later",
+      "gantt\nweekday monday\ntickInterval 1week\ntodayMarker off\nBuild :a, 2026-10-12, 14d",
+      "gantt\nBuild :a, 2026-10-12, 1h\nReview :b, after a, 1m\nPublish :c, after b, 1ms",
+    ];
+    for (const source of admitted) expect(await admitsParsedGraph(source)).toBe(true);
+  });
+
+  it.each([
+    ["Gantt without tasks", "gantt\ntitle Empty schedule"],
+    [
+      "Gantt milestone requiring stripped CSS transforms",
+      "gantt\nBuild :a, 2026-10-12, 1d\nPublish :milestone, p, after a, 0d",
+    ],
+    ["Gantt invalid calendar date", "gantt\nBuild :a, 2026-02-29, 1d"],
+    ["Gantt invalid month", "gantt\nBuild :a, 2026-13-01, 1d"],
+    [
+      "Gantt reversed explicit end",
+      "gantt\ndateFormat YYYY-MM-DD\nBuild :a, 2026-10-12, 2026-10-11",
+    ],
+    ["Gantt negative duration", "gantt\nBuild :a, 2026-10-12, -1d"],
+    ["Gantt unbounded duration", "gantt\nBuild :a, 2026-10-12, 999999999d"],
+    ["Gantt unbounded domain", "gantt\ndateFormat YYYY-MM-DD\nBuild :a, 2026-10-12, 2040-10-12"],
+    ["Gantt duplicate identity", "gantt\nFirst :a, 2026-10-12, 1d\nSecond :a, after a, 1d"],
+    ["Gantt repeated status tags", "gantt\nBuild :active, active, a, 2026-10-12, 1d"],
+    ["Gantt prototype identity", "gantt\nBuild :__proto__, 2026-10-12, 1d"],
+    ["Gantt prototype section", "gantt\nsection constructor\nBuild :a, 2026-10-12, 1d"],
+    [
+      "Gantt reordered numeric categories",
+      "gantt\nsection 2\nFirst :a, 2026-10-12, 1d\nsection 1\nSecond :b, after a, 1d",
+    ],
+    ["Gantt unsupported date format", "gantt\ndateFormat MM/DD/YYYY\nBuild :a, 10/12/2026, 1d"],
+    ["Gantt unsafe top axis", "gantt\ntopAxis\nBuild :a, 2026-10-12, 1d"],
+    [
+      "Gantt unbounded native week filter",
+      "gantt\ntickInterval 999999999week\nBuild :a, 2026-10-12, 1d",
+    ],
+    ["Gantt missing predecessor", "gantt\nBuild :a, after missing, 1d"],
+    ["Gantt self dependency", "gantt\nBuild :a, after a, 1d"],
+    ["Gantt dependency cycle", "gantt\nFirst :a, after b, 1d\nSecond :b, after a, 1d"],
+    ["Gantt missing until task", "gantt\nBuild :a, 2026-10-12, until missing"],
+    [
+      "Gantt exclusion loop",
+      "gantt\nexcludes monday,tuesday,wednesday,thursday,friday,saturday,sunday\nBuild :a, 2026-10-12, 1d",
+    ],
+    [
+      "Gantt excessive millisecond ticks",
+      "gantt\ntickInterval 1millisecond\nBuild :a, 2026-10-12, 1d",
+    ],
+    ["Gantt zero tick interval", "gantt\ntickInterval 0day\nBuild :a, 2026-10-12, 1d"],
+    [
+      "Gantt resource-bearing marker CSS",
+      "gantt\ntodayMarker stroke:url(https://example.invalid/x)\nBuild :a, 2026-10-12, 1d",
+    ],
+  ])("rejects %s without invoking Gantt layout", async (_name, source) => {
+    // The layout sentinel is installed only inside the opaque frame. A false
+    // response proves malformed dates/dependencies cannot reach that renderer;
+    // production still exposes only the same fixed, source-free failure.
+    expect(await admitsParsedGraph(source)).toBe(false);
+  });
+
+  it("counts all Gantt task, section and dependency work before rendering", async () => {
+    const tasks = Array.from(
+      { length: 251 },
+      (_, index) => `Task${index} :t${index}, 2026-10-12, 1d`,
+    );
+    expect(await admitsParsedGraph(`gantt\n${tasks.join("\n")}`)).toBe(false);
+    const sections = Array.from({ length: 251 }, (_, index) => `section Section${index}`);
+    expect(await admitsParsedGraph(`gantt\n${sections.join("\n")}\nBuild :a, 2026-10-12, 1d`)).toBe(
+      false,
+    );
+    // Individually unique references resolve to real prior tasks. This proves
+    // the aggregate edge budget rather than merely duplicate-ID refusal.
+    const roots = Array.from(
+      { length: 12 },
+      (_, index) => `Root${index} :r${index}, 2026-10-12, 1d`,
+    );
+    const predecessors = Array.from({ length: 12 }, (_, index) => `r${index}`).join(" ");
+    const joins = Array.from(
+      { length: 21 },
+      (_, index) => `Join${index} :j${index}, after ${predecessors}, 1d`,
+    );
+    expect(await admitsParsedGraph(`gantt\n${roots.concat(joins.slice(0, 20)).join("\n")}`)).toBe(
+      true,
+    );
+    expect(await admitsParsedGraph(`gantt\n${roots.concat(joins).join("\n")}`)).toBe(false);
+    const dense = Array.from(
+      { length: 245 },
+      (_, index) => `Task${index} :t${index}, 2026-10-12, 10d`,
+    );
+    expect(await admitsParsedGraph(`gantt\n${dense.slice(0, 230).join("\n")}`)).toBe(true);
+    expect(await admitsParsedGraph(`gantt\n${dense.join("\n")}`)).toBe(false);
+  });
+
+  it("rejects dangerous Gantt inputs before invoking the native resolving accessor", async () => {
+    // The fixed fixture wrapper emits only a fresh synthetic marker if Cafe
+    // reaches getTasks(), which is the pinned engine's date-resolution boundary.
+    // Keeping this distinct from the layout sentinel proves exclusions, dense
+    // ticks and unsafe raw dates cannot enter that earlier native work either.
+    const marker = `gantt-resolution-${crypto.randomUUID()}`;
+    const resolutions: unknown[] = [];
+    const observe = (event: MessageEvent<unknown>) => {
+      if (event.data === marker) resolutions.push(event.data);
+    };
+    window.addEventListener("message", observe);
+    const mutation = `const resolveTasks = diagram.db.getTasks.bind(diagram.db);
+      diagram.db.getTasks = () => {
+        parent.postMessage(${JSON.stringify(marker)}, "*");
+        return resolveTasks();
+      };`;
+    try {
+      for (const source of [
+        "gantt\nexcludes monday,tuesday,wednesday,thursday,friday,saturday,sunday\nBuild :a, 2026-10-12, 1d",
+        "gantt\ntickInterval 1millisecond\nBuild :a, 2026-10-12, 1d",
+        "gantt\nBuild :a, 2026-02-29, 1d",
+        "gantt\nFirst :a, after b, 1d\nSecond :b, after a, 1d",
+      ]) {
+        expect(await admitsParsedGraph(source, mutation)).toBe(false);
+      }
+      expect(resolutions).toEqual([]);
+      // A safe input must reach the wrapper; otherwise an ineffective mutation
+      // could make the preceding non-invocation assertions pass vacuously.
+      expect(await admitsParsedGraph("gantt\nBuild :a, 2026-10-12, 1d", mutation)).toBe(true);
+      await expect.poll(() => resolutions).toEqual([marker]);
+    } finally {
+      window.removeEventListener("message", observe);
+    }
+  });
+
+  it.each([
+    ["task list as a map", "diagram.db.getTasks = () => new Map();"],
+    ["sparse task list", "diagram.db.getTasks = () => new Array(1);"],
+    ["section list as a set", "diagram.db.getSections = () => new Set(['Build']);"],
+    ["sparse section list", "diagram.db.getSections = () => new Array(1);"],
+    ["foreign section label", "diagram.db.getSections = () => [1];"],
+    ["changed date format", "diagram.db.getDateFormat = () => 'MM/DD/YYYY';"],
+    ["missing raw task identity", "diagram.db.findTaskById = () => undefined;"],
+    [
+      "replaced resolved task identity",
+      "const tasks = diagram.db.getTasks.bind(diagram.db); diagram.db.getTasks = () => tasks().map((task) => ({ ...task }));",
+    ],
+    [
+      "nonfinite resolved end date",
+      "const tasks = diagram.db.getTasks.bind(diagram.db); diagram.db.getTasks = () => { const rows = tasks(); rows[0].endTime = new Date(NaN); return rows; };",
+    ],
+    [
+      "resolved dates inconsistent with the admitted dependencies",
+      "const tasks = diagram.db.getTasks.bind(diagram.db); diagram.db.getTasks = () => { const rows = tasks(); rows[0].endTime = new Date(rows[0].endTime.getTime() + 1); return rows; };",
+    ],
+  ])("rejects unfamiliar Gantt parsed contracts: %s", async (_name, mutation) => {
+    // Only a fixed test-authored adapter is replaced. The real pinned parser,
+    // raw identity checks and production admission still execute inside the
+    // isolated frame, and the source itself never becomes executable code.
+    const source = "gantt\ndateFormat YYYY-MM-DD\nsection Build\nCompile :a, 2026-10-12, 1d";
+    expect(await admitsParsedGraph(source, mutation)).toBe(false);
   });
 
   it.each([

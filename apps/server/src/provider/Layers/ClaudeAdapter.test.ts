@@ -437,13 +437,17 @@ function emitWorkflowFixtureSystemMessage(
     ...fields,
   } as unknown as SDKMessage);
 }
-function emitWorkflowFixtureInit(query: FakeClaudeQuery, version = "2.1.288"): void {
+function emitWorkflowFixtureInit(
+  query: FakeClaudeQuery,
+  version = "2.1.288",
+  sessionId = WORKFLOW_FIXTURE_SESSION_ID,
+): void {
   // Use a complete typed public init envelope; only workflow_progress itself
   // needs the received-extension cast above. The cwd is inert fixture metadata.
   query.emit({
     type: "system",
     subtype: "init",
-    session_id: WORKFLOW_FIXTURE_SESSION_ID,
+    session_id: sessionId,
     uuid: "71000000-0000-4000-8000-000000000133",
     claude_code_version: version,
     apiKeySource: "none",
@@ -7779,6 +7783,7 @@ describe("ClaudeAdapterLive", () => {
         input: "reconcile background snapshot membership",
         attachments: [],
       });
+      emitWorkflowFixtureInit(harness.query, "2.1.288", "snapshot-session");
 
       const snapshotTaskA = {
         task_id: "snapshot-a",
@@ -7878,6 +7883,7 @@ describe("ClaudeAdapterLive", () => {
         input: "verify terminal-before-snapshot ordering",
         attachments: [],
       });
+      emitWorkflowFixtureInit(harness.query, "2.1.288", "terminal-before-shrink-session");
 
       harness.query.emit({
         type: "system",
@@ -7953,6 +7959,7 @@ describe("ClaudeAdapterLive", () => {
         provider: ProviderDriverKind.make("claudeAgent"),
         runtimeMode: "full-access",
       });
+      emitWorkflowFixtureInit(harness.query, "2.1.288", "provider-ambient-omission-session");
 
       harness.query.emit({
         type: "system",
@@ -8018,6 +8025,7 @@ describe("ClaudeAdapterLive", () => {
         provider: ProviderDriverKind.make("claudeAgent"),
         runtimeMode: "full-access",
       });
+      emitWorkflowFixtureInit(harness.query, "2.1.288", "full-snapshot-eviction-session");
 
       harness.query.emit({
         type: "system",
@@ -8061,8 +8069,767 @@ describe("ClaudeAdapterLive", () => {
   });
 
   it.effect(
-    "retains task incarnation authority when a live background binding is restored after generic map eviction",
+    "fences resumed Claude task runs and correlates agent ids only through exact task tools",
     () => {
+      const harness = makeHarness({ nativeVersion: "2.1.295", environment: {} });
+      return Effect.gen(function* () {
+        const adapter = yield* ClaudeAdapter;
+        const session = yield* adapter.startSession({
+          threadId: THREAD_ID,
+          runtimeMode: "approval-required",
+        });
+        const turn = yield* adapter.sendTurn({ threadId: THREAD_ID, input: "work" });
+        const observed: ProviderRuntimeEvent[] = [];
+        const done = yield* Deferred.make<void>();
+        yield* adapter.streamEvents.pipe(
+          Stream.runForEach((event) =>
+            Effect.gen(function* () {
+              observed.push(event);
+              if (event.type === "task.progress" && event.payload.summary === "Exact current run")
+                yield* Deferred.succeed(done, undefined);
+            }),
+          ),
+          Effect.forkChild,
+        );
+        emitWorkflowFixtureInit(harness.query, "2.1.295");
+        for (const task_id of ["known-parent", "different-parent"]) {
+          emitWorkflowFixtureSystemMessage(harness.query, "task_started", {
+            task_id,
+            run_id: "001",
+            tool_use_id: `${task_id}-tool`,
+            task_type: "local_agent",
+            description: task_id,
+          });
+        }
+        const legacy = {
+          task_id: "legacy-explicit-run",
+          task_type: "local_agent",
+          tool_use_id: "legacy-tool",
+          description: "Legacy task",
+        };
+        emitWorkflowFixtureSystemMessage(harness.query, "task_started", legacy);
+        emitWorkflowFixtureSystemMessage(harness.query, "task_started", {
+          ...legacy,
+          run_id: "002",
+        });
+        const child = {
+          task_id: "stable-child-task",
+          task_type: "local_agent",
+          description: "Child",
+          parent_task_id: "known-parent",
+        };
+        emitWorkflowFixtureSystemMessage(harness.query, "task_started", {
+          ...child,
+          run_id: "001",
+          tool_use_id: "old-child-tool",
+        });
+        // A resume is a new control incarnation even if its previous task has
+        // not emitted a terminal bookend yet. Its native task id stays stable.
+        emitWorkflowFixtureSystemMessage(harness.query, "task_started", {
+          ...child,
+          run_id: "002",
+          tool_use_id: "current-child-tool",
+        });
+        for (const fields of [
+          { run_id: "001", tool_use_id: "old-child-tool" },
+          { tool_use_id: "current-child-tool" },
+          { run_id: "003", tool_use_id: "current-child-tool" },
+          { run_id: "002", tool_use_id: "current-child-tool", session_id: "foreign-session" },
+        ])
+          emitWorkflowFixtureSystemMessage(harness.query, "task_notification", {
+            ...child,
+            ...fields,
+            status: "completed",
+            summary: "Rejected result",
+            output_file: "",
+          });
+        emitWorkflowFixtureSystemMessage(harness.query, "task_started", {
+          ...child,
+          run_id: "001",
+          tool_use_id: "old-child-tool",
+        });
+        emitWorkflowFixtureSystemMessage(harness.query, "task_updated", {
+          task_id: child.task_id,
+          run_id: "001",
+          patch: { status: "failed", description: "Stale patch" },
+        });
+        emitWorkflowFixtureSystemMessage(harness.query, "task_updated", {
+          task_id: child.task_id,
+          run_id: "002",
+          patch: { status: "running", description: "Current patch" },
+        });
+        emitWorkflowFixtureSystemMessage(harness.query, "background_tasks_changed", {
+          tasks: [{ ...child, run_id: "002" }],
+        });
+        // A mixed stale level cannot retract or overwrite the current run.
+        emitWorkflowFixtureSystemMessage(harness.query, "background_tasks_changed", {
+          tasks: [{ ...child, run_id: "001", description: "Stale level" }],
+        });
+        emitWorkflowFixtureSystemMessage(harness.query, "task_progress", {
+          ...child,
+          run_id: "002",
+          parent_task_id: "different-parent",
+          tool_use_id: "current-child-tool",
+          summary: "Wrong parent",
+          usage: { total_tokens: 1, tool_uses: 0, duration_ms: 1 },
+        });
+        const assistant = (agent_id: string, parent_tool_use_id: string | null, text: string) =>
+          ({
+            type: "assistant",
+            agent_id,
+            parent_tool_use_id,
+            session_id: WORKFLOW_FIXTURE_SESSION_ID,
+            uuid: `agent-frame-${text}`,
+            message: {
+              id: `message-${text}`,
+              role: "assistant",
+              content: [{ type: "text", text }],
+            },
+          }) as unknown as SDKMessage;
+        harness.query.emit(assistant(child.task_id, "contradictory-tool", "Wrong tool"));
+        harness.query.emit(assistant("unbound-agent", null, "Unknown agent"));
+        harness.query.emit(assistant(child.task_id, null, "Exact agent task summary"));
+        emitWorkflowFixtureSystemMessage(harness.query, "task_progress", {
+          task_id: child.task_id,
+          run_id: "002",
+          tool_use_id: "current-child-tool",
+          description: "Current patch",
+          summary: "Exact current run",
+          usage: { total_tokens: 2, tool_uses: 1, duration_ms: 2 },
+        });
+        yield* Deferred.await(done);
+        const starts = observed.filter(
+          (event) => event.type === "task.started" && event.payload.taskId === child.task_id,
+        );
+        assert.equal(starts.length, 2);
+        const legacyStarts = observed.filter(
+          (event) => event.type === "task.started" && event.payload.taskId === legacy.task_id,
+        );
+        assert.equal(legacyStarts.length, 2);
+        if (legacyStarts[0]?.type !== "task.started" || legacyStarts[1]?.type !== "task.started")
+          throw new Error("Missing legacy upgrade starts");
+        assert.notEqual(
+          legacyStarts[0].payload.subagent?.taskControl?.taskGeneration,
+          legacyStarts[1].payload.subagent?.taskControl?.taskGeneration,
+        );
+        if (starts[0]?.type !== "task.started" || starts[1]?.type !== "task.started")
+          throw new Error("Missing run starts");
+        const prior = starts[0].payload.subagent?.taskControl;
+        const current = starts[1].payload.subagent?.taskControl;
+        assert.ok(prior);
+        assert.ok(current);
+        assert.notEqual(prior.taskGeneration, current.taskGeneration);
+        assert.equal(
+          observed.some(
+            (event) => event.type === "task.completed" && event.payload.taskId === child.task_id,
+          ),
+          false,
+        );
+        const progress = observed.filter(
+          (event) => event.type === "task.progress" && event.payload.taskId === child.task_id,
+        );
+        assert.equal(
+          progress.some(
+            (event) =>
+              event.type === "task.progress" &&
+              event.payload.summary === "Exact agent task summary",
+          ),
+          true,
+        );
+        assert.equal(
+          progress.some(
+            (event) =>
+              event.type === "task.progress" &&
+              ["Wrong parent", "Stale level", "Wrong tool", "Unknown agent"].includes(
+                event.payload.summary ?? event.payload.description ?? "",
+              ),
+          ),
+          false,
+        );
+        assert.equal(
+          progress.every(
+            (event) =>
+              event.type === "task.progress" && event.payload.subagent?.historyId === undefined,
+          ),
+          true,
+        );
+        assert.equal((yield* adapter.listSessions())[0]?.status, "running");
+        const control = {
+          threadId: THREAD_ID,
+          turnId: turn.turnId,
+          providerInstanceId: ProviderInstanceId.make("claudeAgent"),
+          runtimeId: session.subagentRuntimeId!,
+          taskId: child.task_id,
+          action: "stop" as const,
+        };
+        assert.equal(
+          (yield* adapter.controlTask!({ ...control, taskGeneration: prior.taskGeneration }).pipe(
+            Effect.result,
+          ))._tag,
+          "Failure",
+        );
+        assert.deepEqual(
+          yield* adapter.controlTask!({ ...control, taskGeneration: current.taskGeneration }),
+          { status: "accepted" },
+        );
+        assert.deepEqual(harness.query.stopTaskCalls, [child.task_id]);
+      }).pipe(Effect.provide(harness.layer));
+    },
+  );
+
+  it.effect.each([{ terminal: false }, { terminal: true }])(
+    "revokes task controls on a newer run level and waits for an exact start to renew them (terminal: $terminal)",
+    ({ terminal }) => {
+      const harness = makeHarness({
+        nativeVersion: "2.1.295",
+        environment: {},
+        newQueryPerSession: true,
+      });
+      return Effect.gen(function* () {
+        const adapter = yield* ClaudeAdapter;
+        const session = yield* adapter.startSession({
+          threadId: THREAD_ID,
+          runtimeMode: "approval-required",
+        });
+        const turn = yield* adapter.sendTurn({ threadId: THREAD_ID, input: "work" });
+        emitWorkflowFixtureSystemMessage(harness.query, "background_tasks_changed", { tasks: [] }); // pre-init
+        emitWorkflowFixtureInit(harness.query, "2.1.295");
+        const task = {
+          task_id: "level-first-task",
+          task_type: "local_agent",
+          tool_use_id: "level-first-tool",
+          description: "Level-first task",
+        };
+        const firstFiber = yield* adapter.streamEvents.pipe(
+          Stream.filter((event) => event.type === "task.started"),
+          Stream.runHead,
+          Effect.forkChild,
+        );
+        // Legacy first observation has no run id. The first later explicit run
+        // must also rotate this receipt rather than borrowing its old authority.
+        emitWorkflowFixtureSystemMessage(harness.query, "task_started", task);
+        const first = yield* Fiber.join(firstFiber);
+        if (first._tag !== "Some" || first.value.type !== "task.started")
+          throw new Error("Missing initial start");
+        const firstControl = first.value.payload.subagent?.taskControl;
+        assert.ok(firstControl);
+        const control = {
+          threadId: THREAD_ID,
+          turnId: turn.turnId,
+          runtimeId: session.subagentRuntimeId!,
+          providerInstanceId: ProviderInstanceId.make("claudeAgent"),
+          taskId: task.task_id,
+          taskGeneration: firstControl.taskGeneration,
+          action: "stop" as const,
+        };
+        const priorLevelFiber = yield* adapter.streamEvents.pipe(
+          Stream.filter(
+            (event) => event.type === "task.progress" && event.payload.taskId === task.task_id,
+          ),
+          Stream.runHead,
+          Effect.forkChild,
+        );
+        emitWorkflowFixtureSystemMessage(harness.query, "background_tasks_changed", {
+          tasks: [task],
+        });
+        const priorLevel = yield* Fiber.join(priorLevelFiber);
+        if (priorLevel._tag !== "Some" || priorLevel.value.type !== "task.progress")
+          throw new Error("Missing prior level");
+        assert.equal(
+          priorLevel.value.payload.subagent?.taskControl?.taskGeneration,
+          firstControl.taskGeneration,
+        );
+        if (terminal) {
+          const ended = yield* adapter.streamEvents.pipe(
+            Stream.filter(
+              (event) => event.type === "task.completed" && event.payload.taskId === task.task_id,
+            ),
+            Stream.runHead,
+            Effect.forkChild,
+          );
+          emitWorkflowFixtureSystemMessage(harness.query, "task_notification", {
+            ...task,
+            status: "completed",
+            summary: "Original task complete",
+            output_file: "",
+          });
+          const oldTerminal = yield* Fiber.join(ended);
+          assert.equal(oldTerminal._tag, "Some");
+        }
+        const levelFiber = yield* adapter.streamEvents.pipe(
+          Stream.filter(
+            (event) => event.type === "task.progress" && event.payload.taskId === task.task_id,
+          ),
+          Stream.runHead,
+          Effect.forkChild,
+        );
+        emitWorkflowFixtureSystemMessage(harness.query, "background_tasks_changed", {
+          tasks: [{ ...task, run_id: "002" }],
+        });
+        const level = yield* Fiber.join(levelFiber);
+        if (level._tag !== "Some" || level.value.type !== "task.progress")
+          throw new Error("Missing new level");
+        assert.equal(level.value.payload.subagent?.taskControl, undefined);
+        assert.equal((yield* adapter.controlTask!(control).pipe(Effect.result))._tag, "Failure");
+        assert.equal(
+          (yield* adapter.controlTask!({ ...control, action: "background" }).pipe(Effect.result))
+            ._tag,
+          "Failure",
+        );
+        assert.deepEqual(harness.query.stopTaskCalls, []);
+        assert.deepEqual(harness.query.backgroundTaskCalls, []);
+        const events: ProviderRuntimeEvent[] = [];
+        const started = yield* Deferred.make<void>();
+        const eventsFiber = yield* adapter.streamEvents.pipe(
+          Stream.runForEach((event) =>
+            Effect.gen(function* () {
+              events.push(event);
+              if (
+                event.type === "task.started" &&
+                event.payload.taskId === task.task_id &&
+                event.payload.description === "Qualified renewed task"
+              )
+                yield* Deferred.succeed(started, undefined);
+            }),
+          ),
+          Effect.forkChild,
+        );
+        for (const fields of [
+          { tasks: [], session_id: "foreign-session" },
+          { tasks: [{ ...task, run_id: "001" }] },
+          { tasks: [{ ...task }] },
+        ])
+          emitWorkflowFixtureSystemMessage(harness.query, "background_tasks_changed", fields);
+        emitWorkflowFixtureSystemMessage(harness.query, "background_tasks_changed", {
+          tasks: [{ ...task, run_id: "002" }],
+        });
+        emitWorkflowFixtureSystemMessage(harness.query, "background_tasks_changed", {
+          tasks: [{ ...task, run_id: "003" }],
+        });
+        emitWorkflowFixtureSystemMessage(harness.query, "task_started", {
+          ...task,
+          run_id: "001",
+          description: "Old start",
+        });
+        emitWorkflowFixtureSystemMessage(harness.query, "task_started", {
+          ...task,
+          run_id: "002",
+          description: "Old start",
+        });
+        emitWorkflowFixtureSystemMessage(harness.query, "task_notification", {
+          ...task,
+          run_id: "001",
+          status: "completed",
+          summary: "Old result",
+          output_file: "",
+        });
+        emitWorkflowFixtureSystemMessage(harness.query, "task_started", {
+          ...task,
+          run_id: "003",
+          description: "Qualified renewed task",
+        });
+        yield* Deferred.await(started);
+        const renewed = events.find(
+          (event) => event.type === "task.started" && event.payload.taskId === task.task_id,
+        );
+        if (renewed?.type !== "task.started") throw new Error("Missing renewed start");
+        const nextControl = renewed.payload.subagent?.taskControl;
+        assert.ok(nextControl);
+        assert.notEqual(nextControl.taskGeneration, firstControl.taskGeneration);
+        assert.equal(
+          events.some(
+            (event) =>
+              event.type === "task.completed" ||
+              (event.type === "task.progress" && event.payload.visibility === "ambient"),
+          ),
+          false,
+        );
+        assert.equal(events.filter((event) => event.type === "task.started").length, 1);
+        assert.equal((yield* adapter.controlTask!(control).pipe(Effect.result))._tag, "Failure");
+        assert.deepEqual(
+          yield* adapter.controlTask!({ ...control, taskGeneration: nextControl.taskGeneration }),
+          { status: "accepted" },
+        );
+        assert.deepEqual(harness.query.stopTaskCalls, [task.task_id]);
+        // Replacement query/session authority cannot be borrowed by an old
+        // session's legacy empty level; the old process is never relaunched.
+        // This adapter exposes one queue, not a broadcast stream. Retire the
+        // prior collector before the replacement's exact event barriers.
+        yield* Fiber.interrupt(eventsFiber);
+        yield* adapter.stopSession(THREAD_ID);
+        yield* adapter.startSession({ threadId: THREAD_ID, runtimeMode: "approval-required" });
+        yield* adapter.sendTurn({ threadId: THREAD_ID, input: "replacement work" });
+        assert.equal(harness.createInputs.length, 2);
+        const nextQuery = harness.queries[1]!;
+        const initialized = yield* adapter.streamEvents.pipe(
+          Stream.filter(
+            (event) =>
+              event.type === "session.configured" && event.raw?.method === "claude/system/init",
+          ),
+          Stream.runHead,
+          Effect.forkChild,
+        );
+        yield* TestClock.adjust(100);
+        emitWorkflowFixtureInit(nextQuery, "2.1.295", "replacement-session");
+        const freshInit = yield* Fiber.join(initialized);
+        assert.equal(freshInit._tag, "Some");
+        const replacementTask = {
+          task_id: "replacement-task",
+          task_type: "local_agent",
+          tool_use_id: "replacement-tool",
+          run_id: "001",
+          description: "Replacement task",
+          session_id: "replacement-session",
+        };
+        const replacementLevel = yield* adapter.streamEvents.pipe(
+          Stream.filter(
+            (event) =>
+              event.type === "task.progress" && event.payload.taskId === replacementTask.task_id,
+          ),
+          Stream.runHead,
+          Effect.forkChild,
+        );
+        yield* TestClock.adjust(100);
+        emitWorkflowFixtureSystemMessage(nextQuery, "task_started", replacementTask);
+        emitWorkflowFixtureSystemMessage(nextQuery, "background_tasks_changed", {
+          tasks: [replacementTask],
+          session_id: "replacement-session",
+        });
+        const currentLevel = yield* Fiber.join(replacementLevel);
+        if (currentLevel._tag !== "Some" || currentLevel.value.type !== "task.progress")
+          throw new Error("Missing replacement level");
+        const replacementReceipt = currentLevel.value.payload.subagent?.taskControl;
+        assert.ok(replacementReceipt);
+        const replacementEvents: ProviderRuntimeEvent[] = [];
+        const replacementBarrier = yield* Deferred.make<void>();
+        yield* adapter.streamEvents.pipe(
+          Stream.runForEach((event) =>
+            Effect.gen(function* () {
+              replacementEvents.push(event);
+              if (event.type === "task.progress" && event.payload.summary === "Replacement barrier")
+                yield* Deferred.succeed(replacementBarrier, undefined);
+            }),
+          ),
+          Effect.forkChild,
+        );
+        yield* TestClock.adjust(100);
+        emitWorkflowFixtureSystemMessage(nextQuery, "background_tasks_changed", {
+          tasks: [],
+          session_id: WORKFLOW_FIXTURE_SESSION_ID,
+        });
+        emitWorkflowFixtureSystemMessage(harness.query, "background_tasks_changed", { tasks: [] });
+        emitWorkflowFixtureSystemMessage(nextQuery, "task_progress", {
+          ...replacementTask,
+          summary: "Replacement barrier",
+          usage: { total_tokens: 1, tool_uses: 0, duration_ms: 1 },
+        });
+        yield* Deferred.await(replacementBarrier);
+        assert.equal(
+          replacementEvents.some(
+            (event) => event.type === "task.progress" && event.payload.visibility === "ambient",
+          ),
+          false,
+        );
+        const replacementProgress = replacementEvents.find(
+          (event) =>
+            event.type === "task.progress" && event.payload.summary === "Replacement barrier",
+        );
+        if (replacementProgress?.type !== "task.progress")
+          throw new Error("Missing replacement progress");
+        assert.equal(
+          replacementProgress.payload.subagent?.taskControl?.taskGeneration,
+          replacementReceipt.taskGeneration,
+        );
+        assert.equal(harness.createInputs.length, 2);
+      }).pipe(Effect.provide(harness.layer));
+    },
+  );
+
+  it.effect.each(["task_progress", "task_updated", "task_notification"] as const)(
+    "revokes a legacy task receipt when its first run identity arrives on $0",
+    (subtype) => {
+      const harness = makeHarness({ nativeVersion: "2.1.295", environment: {} });
+      return Effect.gen(function* () {
+        const adapter = yield* ClaudeAdapter;
+        const session = yield* adapter.startSession({
+          threadId: THREAD_ID,
+          runtimeMode: "approval-required",
+        });
+        const turn = yield* adapter.sendTurn({ threadId: THREAD_ID, input: "work" });
+        emitWorkflowFixtureInit(harness.query, "2.1.295");
+        const task = {
+          task_id: "legacy-edge-task",
+          task_type: "local_agent",
+          tool_use_id: "legacy-edge-tool",
+          description: "Legacy task",
+        };
+        const firstFiber = yield* adapter.streamEvents.pipe(
+          Stream.filter((event) => event.type === "task.started"),
+          Stream.runHead,
+          Effect.forkChild,
+        );
+        emitWorkflowFixtureSystemMessage(harness.query, "task_started", task);
+        const first = yield* Fiber.join(firstFiber);
+        if (first._tag !== "Some" || first.value.type !== "task.started")
+          throw new Error("Missing legacy start");
+        const oldReceipt = first.value.payload.subagent?.taskControl;
+        assert.ok(oldReceipt);
+        const expectedType = subtype === "task_notification" ? "task.completed" : "task.progress";
+        const edgeFiber = yield* adapter.streamEvents.pipe(
+          Stream.filter(
+            (event) => event.type === expectedType && event.payload.taskId === task.task_id,
+          ),
+          Stream.runHead,
+          Effect.forkChild,
+        );
+        emitWorkflowFixtureSystemMessage(harness.query, subtype, {
+          ...task,
+          run_id: "001",
+          summary: "Exact current edge",
+          status: subtype === "task_notification" ? "completed" : "running",
+          output_file: "",
+          patch: { description: "Exact current edge" },
+          usage: { total_tokens: 1, tool_uses: 0, duration_ms: 1 },
+        });
+        const edge = yield* Fiber.join(edgeFiber);
+        if (
+          edge._tag !== "Some" ||
+          (edge.value.type !== "task.progress" && edge.value.type !== "task.completed")
+        )
+          throw new Error("Missing exact current edge");
+        assert.equal(edge.value.payload.subagent?.taskControl, undefined);
+        const control = {
+          threadId: THREAD_ID,
+          turnId: turn.turnId,
+          runtimeId: session.subagentRuntimeId!,
+          providerInstanceId: ProviderInstanceId.make("claudeAgent"),
+          taskId: task.task_id,
+          taskGeneration: oldReceipt.taskGeneration,
+          action: "stop" as const,
+        };
+        assert.equal((yield* adapter.controlTask!(control).pipe(Effect.result))._tag, "Failure");
+        assert.deepEqual(harness.query.stopTaskCalls, []);
+        const renewedFiber = yield* adapter.streamEvents.pipe(
+          Stream.filter(
+            (event) => event.type === "task.started" && event.payload.taskId === task.task_id,
+          ),
+          Stream.runHead,
+          Effect.forkChild,
+        );
+        emitWorkflowFixtureSystemMessage(harness.query, "task_started", { ...task, run_id: "001" });
+        const renewed = yield* Fiber.join(renewedFiber);
+        if (renewed._tag !== "Some" || renewed.value.type !== "task.started")
+          throw new Error("Missing exact renewed start");
+        assert.ok(renewed.value.payload.subagent?.taskControl);
+        assert.notEqual(
+          renewed.value.payload.subagent.taskControl.taskGeneration,
+          oldReceipt.taskGeneration,
+        );
+        assert.equal((yield* adapter.controlTask!(control).pipe(Effect.result))._tag, "Failure");
+        assert.deepEqual(harness.query.stopTaskCalls, []);
+        assert.deepEqual(
+          yield* adapter.controlTask!({
+            ...control,
+            taskGeneration: renewed.value.payload.subagent.taskControl.taskGeneration,
+          }),
+          { status: "accepted" },
+        );
+        assert.deepEqual(harness.query.stopTaskCalls, [task.task_id]);
+      }).pipe(Effect.provide(harness.layer));
+    },
+  );
+
+  it.effect(
+    "settles an exact newer level run without manufacturing a missing start control receipt",
+    () => {
+      const harness = makeHarness({ nativeVersion: "2.1.295", environment: {} });
+      return Effect.gen(function* () {
+        const adapter = yield* ClaudeAdapter;
+        yield* adapter.startSession({ threadId: THREAD_ID, runtimeMode: "approval-required" });
+        yield* adapter.sendTurn({ threadId: THREAD_ID, input: "work" });
+        emitWorkflowFixtureInit(harness.query, "2.1.295");
+        const task = {
+          task_id: "missed-start-task",
+          task_type: "local_agent",
+          description: "Resumed task",
+        };
+        const observed: ProviderRuntimeEvent[] = [];
+        const done = yield* Deferred.make<void>();
+        yield* adapter.streamEvents.pipe(
+          Stream.runForEach((event) =>
+            Effect.gen(function* () {
+              observed.push(event);
+              if (event.type === "task.completed" && event.payload.taskId === task.task_id)
+                yield* Deferred.succeed(done, undefined);
+            }),
+          ),
+          Effect.forkChild,
+        );
+        emitWorkflowFixtureSystemMessage(harness.query, "task_started", {
+          ...task,
+          tool_use_id: "old-task-tool",
+          run_id: "001",
+        });
+        emitWorkflowFixtureSystemMessage(harness.query, "background_tasks_changed", {
+          tasks: [{ ...task, run_id: "002" }],
+        });
+        emitWorkflowFixtureSystemMessage(harness.query, "task_progress", {
+          ...task,
+          run_id: "002",
+          summary: "Current resumed progress",
+          usage: { total_tokens: 1, tool_uses: 0, duration_ms: 1 },
+        });
+        emitWorkflowFixtureSystemMessage(harness.query, "task_notification", {
+          ...task,
+          run_id: "002",
+          status: "completed",
+          summary: "Current resumed completion",
+          output_file: "",
+        });
+        yield* Deferred.await(done);
+        const completed = observed.find((event) => event.type === "task.completed");
+        if (completed?.type !== "task.completed") throw new Error("Missing exact completion");
+        assert.equal(completed.payload.summary, "Current resumed completion");
+        assert.equal(completed.payload.subagent?.taskControl, undefined);
+        assert.equal(observed.filter((event) => event.type === "task.started").length, 1);
+        const progress = observed.find(
+          (event) =>
+            event.type === "task.progress" && event.payload.summary === "Current resumed progress",
+        );
+        if (progress?.type !== "task.progress") throw new Error("Missing exact progress");
+        assert.equal(progress.payload.subagent?.taskControl, undefined);
+        assert.deepEqual(harness.query.stopTaskCalls, []);
+        assert.deepEqual(harness.query.backgroundTaskCalls, []);
+      }).pipe(Effect.provide(harness.layer));
+    },
+  );
+
+  it.effect(
+    "rejects unowned and non-JSON Claude task extension authority before diagnostics",
+    () => {
+      const harness = makeHarness({ nativeVersion: "2.1.295", environment: {} });
+      return Effect.gen(function* () {
+        const adapter = yield* ClaudeAdapter;
+        yield* adapter.startSession({ threadId: THREAD_ID, runtimeMode: "approval-required" });
+        yield* adapter.sendTurn({ threadId: THREAD_ID, input: "work" });
+        const observed: ProviderRuntimeEvent[] = [];
+        const done = yield* Deferred.make<void>();
+        yield* adapter.streamEvents.pipe(
+          Stream.runForEach((event) =>
+            Effect.gen(function* () {
+              observed.push(event);
+              if (event.type === "task.started" && event.payload.taskId === "qualified-final-task")
+                yield* Deferred.succeed(done, undefined);
+            }),
+          ),
+          Effect.forkChild,
+        );
+        const base = {
+          type: "system",
+          subtype: "task_started",
+          task_type: "local_agent",
+          description: "Rejected task",
+          task_id: "rejected-task",
+          run_id: "001",
+          session_id: WORKFLOW_FIXTURE_SESSION_ID,
+          uuid: "extension-rejected",
+        };
+        harness.query.emit(base as unknown as SDKMessage); // Pre-init is not identity authority.
+        emitWorkflowFixtureInit(harness.query, "2.1.295");
+        harness.query.emit({ ...base, session_id: "foreign-session" } as unknown as SDKMessage);
+        harness.query.emit({
+          ...base,
+          parent_tool_use_id: "foreign-child-tool",
+        } as unknown as SDKMessage);
+        let getterCalls = 0;
+        for (const key of ["run_id", "parent_task_id", "agent_id"] as const) {
+          const frame = { ...base } as Record<string, unknown>;
+          Object.defineProperty(frame, key, {
+            enumerable: true,
+            get() {
+              getterCalls++;
+              return "001";
+            },
+          });
+          harness.query.emit(frame as unknown as SDKMessage);
+          const inherited = { ...base } as Record<string, unknown>;
+          delete inherited[key];
+          Object.setPrototypeOf(inherited, { [key]: "001" });
+          harness.query.emit(inherited as unknown as SDKMessage);
+        }
+        for (const run_id of [
+          " ",
+          " padded ",
+          "bad\u0000run",
+          "bad\u202erun",
+          "x".repeat(9000),
+          1,
+          null,
+        ])
+          harness.query.emit({ ...base, run_id } as unknown as SDKMessage);
+        const inheritedTask = { ...base } as Record<string, unknown>;
+        delete inheritedTask.task_id;
+        Object.setPrototypeOf(inheritedTask, { task_id: "rejected-task" });
+        harness.query.emit(inheritedTask as unknown as SDKMessage);
+        const rows: unknown[] = [];
+        Object.defineProperty(rows, "0", {
+          enumerable: true,
+          get() {
+            getterCalls++;
+            return { task_id: "rejected-task", run_id: "001" };
+          },
+        });
+        emitWorkflowFixtureSystemMessage(harness.query, "background_tasks_changed", {
+          tasks: rows,
+        });
+        for (const key of ["constructor", "map", "slice"]) {
+          const overridden = [{ task_id: "rejected-task", run_id: "001" }];
+          Object.defineProperty(overridden, key, {
+            get() {
+              getterCalls++;
+              return undefined;
+            },
+          });
+          emitWorkflowFixtureSystemMessage(harness.query, "background_tasks_changed", {
+            tasks: overridden,
+          });
+        }
+        emitWorkflowFixtureSystemMessage(harness.query, "task_started", {
+          task_id: "qualified-final-task",
+          run_id: "001",
+          task_type: "local_agent",
+          description: "Qualified task",
+          tool_use_id: "qualified-tool",
+          // Unknown parents are not guessed into a query-local relationship.
+          parent_task_id: "unknown-parent",
+        });
+        yield* Deferred.await(done);
+        assert.equal(getterCalls, 0);
+        assert.deepEqual(
+          observed
+            .filter(
+              (event) =>
+                event.type === "task.started" ||
+                event.type === "task.progress" ||
+                event.type === "task.completed",
+            )
+            .map((event) => event.payload.taskId),
+          ["qualified-final-task"],
+        );
+        assert.equal((yield* adapter.listSessions())[0]?.status, "running");
+      }).pipe(Effect.provide(harness.layer));
+    },
+  );
+
+  it.effect.each([
+    {
+      originalRoot: "00000000-0000-4000-8000-000000000031",
+      expectedRoot: "00000000-0000-4000-8000-000000000031",
+    },
+    { originalRoot: "synthetic", expectedRoot: undefined },
+  ])(
+    "retains task incarnation authority when a live background binding is restored after generic map eviction ($originalRoot)",
+    ({ originalRoot, expectedRoot }) => {
       const harness = makeHarness({ nativeVersion: "2.1.287", environment: {} });
       return Effect.gen(function* () {
         const adapter = yield* ClaudeAdapter;
@@ -8083,10 +8850,11 @@ describe("ClaudeAdapterLive", () => {
           ),
           Effect.forkChild,
         );
+        const replacementRoot = "00000000-0000-4000-8000-000000000032";
         const base = {
           type: "system",
           task_id: "reused-task",
-          session_id: "synthetic",
+          session_id: originalRoot,
           uuid: "00000000-0000-4000-8000-000000000023",
         };
         harness.query.emit({
@@ -8115,21 +8883,28 @@ describe("ClaudeAdapterLive", () => {
           type: "system",
           subtype: "background_tasks_changed",
           tasks: [{ task_id: "reused-task", description: "New task" }],
-          session_id: "synthetic",
+          session_id: originalRoot,
           uuid: "snapshot",
         } as unknown as SDKMessage;
         harness.query.emit(snapshot);
+        // The same SDK query can adopt a replacement native root while an
+        // older background task remains live. Generic-map eviction must not
+        // make restoration borrow that replacement root's history authority.
+        emitWorkflowFixtureInit(harness.query, "2.1.287", replacementRoot);
         for (let index = 0; index < 4096; index++)
           harness.query.emit({
             ...base,
+            session_id: replacementRoot,
             subtype: "task_started",
             task_id: `filler-${index}`,
+            tool_use_id: `filler-tool-${index}`,
             task_type: "local_bash",
             description: "Filler",
           } as SDKMessage);
-        harness.query.emit(snapshot);
+        harness.query.emit({ ...snapshot, session_id: replacementRoot } as SDKMessage);
         harness.query.emit({
           ...base,
+          session_id: replacementRoot,
           subtype: "task_notification",
           status: "completed",
           summary: "Ambiguous old result",
@@ -8137,6 +8912,7 @@ describe("ClaudeAdapterLive", () => {
         } as SDKMessage);
         harness.query.emit({
           ...base,
+          session_id: replacementRoot,
           subtype: "task_progress",
           tool_use_id: "new-tool",
           description: "New task",
@@ -8152,6 +8928,9 @@ describe("ClaudeAdapterLive", () => {
         );
         if (initial?.type !== "task.started" || restored?.type !== "task.progress")
           throw new Error("Missing exact binding evidence");
+        assert.equal(initial.claudeSubagentHistorySessionId, expectedRoot);
+        assert.equal(restored.claudeSubagentHistorySessionId, expectedRoot);
+        assert.notEqual(restored.claudeSubagentHistorySessionId, replacementRoot);
         const reference = restored.payload.individualTaskControl!;
         assert.ok(reference);
         assert.equal(
@@ -8200,6 +8979,7 @@ describe("ClaudeAdapterLive", () => {
         input: "retain live background presentation through generic churn",
         attachments: [],
       });
+      emitWorkflowFixtureInit(harness.query, "2.1.288", "generic-churn-background-session");
 
       harness.query.emit({
         type: "system",
@@ -8271,6 +9051,7 @@ describe("ClaudeAdapterLive", () => {
         input: "start the retained background task",
         attachments: [],
       });
+      emitWorkflowFixtureInit(harness.query, "2.1.288", "retained-member-turn-session");
 
       const retainedTask = {
         task_id: "retained-member-turn-target",
@@ -9399,7 +10180,30 @@ describe("ClaudeAdapterLive", () => {
 
         const readSubagentDetail = adapter.readSubagentDetail;
         assert.ok(readSubagentDetail);
-        const detail = yield* readSubagentDetail(THREAD_ID, taskId, { cwd });
+        const activeSession = (yield* adapter.listSessions()).find(
+          (session) => session.threadId === THREAD_ID,
+        );
+        // History has a native root as soon as SDK init/task metadata arrives.
+        // That is not permission to resume an unfinished first root turn.
+        assert.equal(activeSession?.resumeCursor, undefined);
+        assert.deepEqual(activeSession?.subagentHistoryResumeCursor, { resume: sessionId });
+        // An incomplete persisted root is not a wildcard for this live query.
+        // It must remain refused even though the exact transcript exists.
+        const incompleteRoot = yield* readSubagentDetail(THREAD_ID, taskId, {
+          resumeCursor: null,
+          cwd,
+        }).pipe(Effect.result);
+        assert.equal(incompleteRoot._tag, "Failure");
+        if (incompleteRoot._tag === "Failure") {
+          assert.equal(incompleteRoot.failure._tag, "ProviderSubagentDetailReadError");
+          if (incompleteRoot.failure._tag === "ProviderSubagentDetailReadError") {
+            assert.equal(incompleteRoot.failure.reason, "session-unavailable");
+          }
+        }
+        const detail = yield* readSubagentDetail(THREAD_ID, taskId, {
+          resumeCursor: activeSession?.subagentHistoryResumeCursor,
+          cwd,
+        });
         assert.deepEqual(
           detail.messages.map(({ role, text }) => ({ role, text })),
           [
@@ -9408,6 +10212,72 @@ describe("ClaudeAdapterLive", () => {
           ],
         );
         assert.equal(JSON.stringify(detail).includes("PRIVATE"), false);
+        const replacementRootId = "00000000-0000-4000-8000-000000000945";
+        const replacementStarted = yield* Stream.filter(
+          adapter.streamEvents,
+          (event) =>
+            event.type === "thread.started" && event.payload.providerThreadId === replacementRootId,
+        ).pipe(Stream.take(1), Stream.runDrain, Effect.forkChild);
+        harness.query.emit({
+          type: "system",
+          subtype: "init",
+          session_id: replacementRootId,
+          capabilities: [],
+          uuid: "00000000-0000-4000-8000-000000000946",
+        } as unknown as SDKMessage);
+        yield* Fiber.join(replacementStarted);
+        const progressEvents: ProviderRuntimeEvent[] = [];
+        const delayedProgress = yield* Stream.filter(
+          adapter.streamEvents,
+          (event) => event.type === "task.progress" && String(event.payload.taskId) === taskId,
+        ).pipe(
+          Stream.tap((event) => Effect.sync(() => progressEvents.push(event))),
+          Stream.take(1),
+          Stream.runDrain,
+          Effect.forkChild,
+        );
+        harness.query.emit({
+          type: "system",
+          subtype: "task_progress",
+          task_id: taskId,
+          tool_use_id: toolUseId,
+          description: "Still the original task",
+          session_id: replacementRootId,
+          uuid: "00000000-0000-4000-8000-000000000947",
+        } as unknown as SDKMessage);
+        yield* Fiber.join(delayedProgress);
+        // The query generation is unchanged, but the task still owns its old
+        // native root. Its delayed event must not authorize the replacement.
+        const oldProgress = progressEvents[0];
+        assert.equal(oldProgress?.type, "task.progress");
+        assert.equal(
+          oldProgress?.type === "task.progress"
+            ? oldProgress.claudeSubagentHistorySessionId
+            : undefined,
+          sessionId,
+        );
+        const replacement = (yield* adapter.listSessions()).find(
+          (session) => session.threadId === THREAD_ID,
+        );
+        assert.deepEqual(replacement?.subagentHistoryResumeCursor, { resume: replacementRootId });
+        const wrongRoot = yield* readSubagentDetail(THREAD_ID, taskId, {
+          resumeCursor: replacement?.subagentHistoryResumeCursor,
+          cwd,
+          historyId,
+        }).pipe(Effect.result);
+        assert.equal(wrongRoot._tag, "Failure");
+        if (
+          wrongRoot._tag === "Failure" &&
+          wrongRoot.failure._tag === "ProviderSubagentDetailReadError"
+        ) {
+          assert.equal(wrongRoot.failure.reason, "child-identity-mismatch");
+        }
+        const original = yield* readSubagentDetail(THREAD_ID, taskId, {
+          resumeCursor: { resume: sessionId },
+          cwd,
+          historyId,
+        });
+        assert.deepEqual(original.messages, detail.messages);
       }).pipe(
         Effect.ensuring(
           Effect.sync(() => {
@@ -10091,10 +10961,19 @@ describe("ClaudeAdapterLive", () => {
     "shows an assistant-first subagent and lets its later task start replace the recovery title",
     () => {
       const harness = makeHarness();
+      const originalRoot = "00000000-0000-4000-8000-000000000041";
+      const replacementRoot = "00000000-0000-4000-8000-000000000042";
       return Effect.gen(function* () {
         const adapter = yield* ClaudeAdapter;
+        const completedTurn = yield* Deferred.make<ProviderRuntimeEvent>();
         const taskEventsFiber = yield* Stream.filter(
-          adapter.streamEvents,
+          adapter.streamEvents.pipe(
+            Stream.tap((event) =>
+              event.type === "turn.completed"
+                ? Deferred.succeed(completedTurn, event)
+                : Effect.void,
+            ),
+          ),
           (event) => event.type === "task.progress" || event.type === "task.started",
         ).pipe(Stream.take(5), Stream.runCollect, Effect.forkChild);
 
@@ -10102,6 +10981,10 @@ describe("ClaudeAdapterLive", () => {
           threadId: THREAD_ID,
           provider: ProviderDriverKind.make("claudeAgent"),
           runtimeMode: "full-access",
+        });
+        const originalTurn = yield* adapter.sendTurn({
+          threadId: THREAD_ID,
+          input: "start an assistant-first background reviewer",
         });
 
         // parent_tool_use_id is the SDK's explicit indication that this frame
@@ -10111,7 +10994,7 @@ describe("ClaudeAdapterLive", () => {
           type: "assistant",
           parent_tool_use_id: "agent-tool-assistant-first",
           task_description: "Recovered child title",
-          session_id: "sdk-session-assistant-first-subagent",
+          session_id: originalRoot,
           uuid: "assistant-first-subagent-progress",
           message: {
             id: "assistant-first-subagent-message",
@@ -10127,7 +11010,7 @@ describe("ClaudeAdapterLive", () => {
           type: "assistant",
           parent_tool_use_id: "agent-tool-independent",
           task_description: "Independent child title",
-          session_id: "sdk-session-assistant-first-subagent",
+          session_id: originalRoot,
           uuid: "assistant-first-independent-progress",
           message: {
             id: "assistant-first-independent-message",
@@ -10139,6 +11022,19 @@ describe("ClaudeAdapterLive", () => {
             },
           },
         } as unknown as SDKMessage);
+        harness.query.emit(makeSuccessfulClaudeResult(originalRoot));
+        assert.equal((yield* Deferred.await(completedTurn)).turnId, originalTurn.turnId);
+        yield* TestClock.adjust(1_000);
+        const laterTurn = yield* adapter.sendTurn({
+          threadId: THREAD_ID,
+          input: "begin an unrelated later root turn while the reviewer remains active",
+        });
+        assert.notEqual(laterTurn.turnId, originalTurn.turnId);
+        // First authoritative task-generation assignment is a promotion of the
+        // assistant-first binding, not a new incarnation. A settled root turn,
+        // new Cafe turn and root replacement between those frames must not
+        // replace its first observed history root, owning turn or start clock.
+        emitWorkflowFixtureInit(harness.query, "2.1.287", replacementRoot);
         harness.query.emit({
           type: "system",
           subtype: "task_started",
@@ -10146,7 +11042,7 @@ describe("ClaudeAdapterLive", () => {
           tool_use_id: "agent-tool-assistant-first",
           description: "Authoritative child title",
           task_type: "local_agent",
-          session_id: "sdk-session-assistant-first-subagent",
+          session_id: replacementRoot,
           uuid: "assistant-first-subagent-started",
         } as unknown as SDKMessage);
         harness.query.emit({
@@ -10155,7 +11051,7 @@ describe("ClaudeAdapterLive", () => {
           // A replayed assistant frame can retain the provisional description;
           // it must not roll the authoritative task_started title backward.
           task_description: "Recovered child title",
-          session_id: "sdk-session-assistant-first-subagent",
+          session_id: replacementRoot,
           uuid: "assistant-first-subagent-late-progress",
           message: {
             id: "assistant-first-subagent-late-message",
@@ -10198,12 +11094,30 @@ describe("ClaudeAdapterLive", () => {
           ],
         );
         assert.equal(taskEvents[4]?.payload.description, "Authoritative child title");
+        // The retired provisional alias has no live binding and its ambient
+        // retraction deliberately carries no history authority. Promotion and
+        // subsequent child progress must keep the original root, not borrow
+        // the replacement query's root when receiving a task generation.
+        assert.deepEqual(
+          taskEvents.map((event) => event.claudeSubagentHistorySessionId),
+          [originalRoot, originalRoot, undefined, originalRoot, originalRoot],
+        );
+        assert.equal(
+          taskEvents.some((event) => event.claudeSubagentHistorySessionId === replacementRoot),
+          false,
+        );
         const owningTurnId = taskEvents[0]?.turnId;
         assert.ok(owningTurnId);
-        assert.equal(
-          taskEvents.every((event) => event.turnId === owningTurnId),
-          true,
+        assert.equal(owningTurnId, originalTurn.turnId);
+        const originalStartedAt = taskEvents[0]?.createdAt;
+        assert.ok(originalStartedAt);
+        assert.equal(taskEvents[0]?.payload.subagent?.startedAt, originalStartedAt);
+        assert.deepEqual(
+          taskEvents.map((event) => [event.turnId, event.payload.subagent?.startedAt]),
+          Array.from({ length: taskEvents.length }, () => [owningTurnId, originalStartedAt]),
         );
+        assert.equal(taskEvents[3]?.payload.subagent?.startedAt, originalStartedAt);
+        assert.equal(taskEvents[4]?.payload.subagent?.startedAt, originalStartedAt);
         assert.equal(
           taskEvents.every((event) => event.payload.subagent?.historyId === undefined),
           true,
@@ -11040,6 +11954,7 @@ describe("ClaudeAdapterLive", () => {
         session_id: "sdk-session-191",
         uuid: "commands-changed-1",
       } as unknown as SDKMessage);
+      emitWorkflowFixtureInit(harness.query, "2.1.288", "sdk-session-204");
       harness.query.emit({
         type: "system",
         subtype: "background_tasks_changed",

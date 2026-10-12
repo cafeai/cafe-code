@@ -32,6 +32,13 @@ Assistant chat prose uses `text-chat-foreground`, preserving its softer 80%
 foreground reading colour in both themes. Labels, controls and user messages
 keep their existing text tiers.
 
+The inert pre-backend startup document is a deliberate boot-only exception to
+React/CSS asset loading: its small semantic-token adapter mirrors the boot-shell
+light/dark surfaces, rem typography and shared stepped spinner without loading
+fonts, remote assets or privileged renderer code. Use native theme and the
+existing interface scale, fixed short phase labels and reduced-motion behavior;
+do not extend this exception to ordinary application UI.
+
 | Purpose  | Classes                                                                                          | Use                                                                                                                                                                                             |
 | -------- | ------------------------------------------------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | Surfaces | `bg-background`, `bg-sunken`, `bg-card`, `bg-raised` (= `bg-popover`)                            | Page content; sidebar and chrome; in-flow panels (work log, settings sections, composer); floating panels (menus, popovers, dialogs, toasts). Light mode is an off-white page with white cards. |
@@ -69,7 +76,8 @@ plain-language states when the provider supplies evidence: Running command,
 Waiting for an agent, or Waiting for your answer. Confirmed native work can
 continue after the response ends; keep its navigation spinner and show
 Background work running. The line opens the existing Tasks surface when there
-is work to inspect. Avoid a second timer or a new status panel. See
+is work to inspect. Elapsed turn time appears only on hover or keyboard focus
+within that same line; do not add an always-visible second timer or status panel. See
 `docs/live-chat-activity.md` for the evidence boundary.
 
 Decorative layers (sidebar stars, ambiance, Atrium scene) derive their colour
@@ -194,26 +202,30 @@ The entrance utilities `animate-enter-rise`, `animate-enter-fade`,
 
 ### Patterns
 
-| Situation                                 | Motion                                                                                                                                             |
-| ----------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Menu, select, popover, tooltip            | Fade + scale from 0.96 at the anchor (`origin-(--transform-origin)`): base/ease-out in, fast/ease-in out                                           |
-| Dialog, command palette                   | Backdrop fade; panel fade + slight scale and rise: slow in, fast out                                                                               |
-| Sheet, side panel, session rail           | Slide from its edge + fade                                                                                                                         |
-| Sidebar collapse                          | The existing 200ms width/position slide (a documented exception, required by `AGENTS.md`) with `ease-out`; the chrome stays mounted while it exits |
-| Switching chat, Desk tab or settings page | New content `animate-enter-rise` once it is ready; the old view leaves instantly                                                                   |
-| Push/back views (subagent detail)         | `animate-enter-from-end` in; back uses `animate-enter-from-start`                                                                                  |
-| List add, remove, reorder                 | `@formkit/auto-animate`                                                                                                                            |
-| Expand/collapse                           | Rotate the chevron; revealed content `animate-enter-rise`                                                                                          |
-| Segmented control, tabs                   | Indicator slides with `transform`                                                                                                                  |
-| Toast                                     | Slide + fade: emphasis in, fast out                                                                                                                |
-| New chat message                          | `animate-enter-rise`, only for rows appended live — never for rows a virtualized list re-mounts while scrolling                                    |
-| Looping status (spin, pulse)              | The existing stepped `animate-*` tokens only                                                                                                       |
+| Situation                                 | Motion                                                                                                                                                     |
+| ----------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Menu, select, popover, tooltip            | Fade + scale from 0.96 at the anchor (`origin-(--transform-origin)`): base/ease-out in, fast/ease-in out                                                   |
+| Dialog, command palette                   | Backdrop fade; panel fade + slight scale and rise: slow in, fast out                                                                                       |
+| Sheet, side panel, session rail           | Slide from its edge + fade                                                                                                                                 |
+| Sidebar collapse                          | The existing 200ms width/position slide (a documented exception, required by `AGENTS.md`) with `ease-out`; the chrome stays mounted while it exits         |
+| Switching chat, Desk tab or settings page | New content `animate-enter-rise` once it is ready; the old view leaves instantly                                                                           |
+| Push/back views (subagent detail)         | `animate-enter-from-end` in; back uses `animate-enter-from-start`                                                                                          |
+| List add, remove, reorder                 | `@formkit/auto-animate`                                                                                                                                    |
+| Expand/collapse                           | Rotate the chevron; revealed content `animate-enter-rise`                                                                                                  |
+| Live activity elapsed time                | Hover/focus expands a clipped grid column and fades its text using base/ease-out; keep the line height steady and disable transitions under reduced motion |
+| Segmented control, tabs                   | Indicator slides with `transform`                                                                                                                          |
+| Toast                                     | Slide + fade: emphasis in, fast out                                                                                                                        |
+| New chat message                          | `animate-enter-rise`, only for rows appended live — never for rows a virtualized list re-mounts while scrolling                                            |
+| Looping status (spin, pulse)              | The existing stepped `animate-*` tokens only                                                                                                               |
 
 ### Rules
 
 - Animate `opacity`, `transform`, `translate` and `scale`. Width, height,
   left or top need a documented reason (the composer tab and sidebar slide
-  are the existing ones).
+  are the existing ones). The live activity elapsed-time grid is another narrow
+  exception: expanding its intrinsic horizontal space on explicit hover/focus
+  makes the requested counter discoverable without an always-visible gap or
+  changing composer height. Never animate its per-second text updates.
 - A minimized composer tools tab is a shallow lip. Its decoration may animate
   height and its caret may lower; keep the larger click area and editor steady.
 - Every overlay animates in **and** out, and exits are faster than entrances.

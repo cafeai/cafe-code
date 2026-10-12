@@ -1,3 +1,5 @@
+import { useUiLocale } from "~/i18n";
+import { uiText } from "@cafecode/shared/i18n";
 import { type ServerProvider } from "@cafecode/contracts";
 import { memo, useState } from "react";
 import { Alert, AlertAction, AlertDescription, AlertTitle } from "../ui/alert";
@@ -9,6 +11,8 @@ export const ProviderStatusBanner = memo(function ProviderStatusBanner({
 }: {
   status: ServerProvider | null;
 }) {
+  const uiLocale = useUiLocale();
+
   const [dismissedStatusKey, setDismissedStatusKey] = useState<string | null>(null);
 
   if (!status || status.status === "ready" || status.status === "disabled") {
@@ -24,7 +28,9 @@ export const ProviderStatusBanner = memo(function ProviderStatusBanner({
   // The title already states the condition, so the body carries only the
   // provider's own explanation when it supplied one.
   const title =
-    status.status === "error" ? `${providerLabel} unavailable` : `${providerLabel} limited`;
+    status.status === "error"
+      ? uiText("{provider} unavailable", { provider: providerLabel }, undefined, uiLocale)
+      : uiText("{provider} limited", { provider: providerLabel }, undefined, uiLocale);
   const message = status.message?.trim() || null;
 
   if (isDismissed) {
@@ -44,7 +50,7 @@ export const ProviderStatusBanner = memo(function ProviderStatusBanner({
         <AlertAction>
           <button
             type="button"
-            aria-label="Dismiss provider status"
+            aria-label={uiText("Dismiss provider status", undefined, undefined, uiLocale)}
             className="inline-flex size-6 items-center justify-center rounded-md text-muted-foreground transition-colors hover:text-foreground"
             onClick={() => setDismissedStatusKey(statusDismissKey)}
           >

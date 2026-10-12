@@ -6,7 +6,12 @@ import {
   getFileAttachmentPreview,
   downloadFileAttachment,
 } from "./fileAttachments";
-import { FileAttachmentRequestError, getFileAttachmentErrorMessage } from "./fileAttachmentErrors";
+import {
+  FileAttachmentRequestError,
+  formatFileAttachmentErrorCode,
+  getFileAttachmentErrorMessage,
+  readFileAttachmentErrorCode,
+} from "./fileAttachmentErrors";
 
 const mocks = vi.hoisted(() => ({ bearer: vi.fn() }));
 vi.mock("../environments/primary", () => ({
@@ -281,6 +286,33 @@ describe("environment-scoped file attachment transport", () => {
     expect(getFileAttachmentErrorMessage(error)).toBe(
       "Several files are being processed. Please try again shortly.",
     );
+  });
+
+  it("retains only the original exact locally constructed classification", () => {
+    const error = new FileAttachmentRequestError("busy");
+    Object.defineProperty(error, "code", { value: "owner-access" });
+    error.message = "private wrapper detail";
+    expect(readFileAttachmentErrorCode(error)).toBe("busy");
+    expect(getFileAttachmentErrorMessage(error, "ko")).toBe(
+      "여러 파일을 처리 중입니다. 잠시 후 다시 시도하세요.",
+    );
+    expect(formatFileAttachmentErrorCode("busy", "en")).toBe(
+      "Several files are being processed. Please try again shortly.",
+    );
+    expect(error.message).toBe("private wrapper detail");
+    expect(
+      readFileAttachmentErrorCode(Object.create(FileAttachmentRequestError.prototype)),
+    ).toBeNull();
+    const received = new Proxy(
+      {},
+      {
+        get() {
+          throw new Error("Received properties must not be read");
+        },
+      },
+    );
+    expect(readFileAttachmentErrorCode(received)).toBeNull();
+    expect(getFileAttachmentErrorMessage(received, "ko")).toBeNull();
   });
 
   it("distinguishes network failure from missing saved-environment authentication", async () => {

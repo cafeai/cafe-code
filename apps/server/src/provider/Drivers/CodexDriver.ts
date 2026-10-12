@@ -62,6 +62,7 @@ import { makeManagedServerProvider } from "../makeManagedServerProvider.ts";
 import type { ProviderDriver, ProviderInstance } from "../ProviderDriver.ts";
 import type { ServerProviderDraft } from "../providerSnapshot.ts";
 import { supportsSubagentConcurrency } from "./SubagentConcurrency.ts";
+import { supportsCodexContextWindow } from "./CodexContextWindow.ts";
 import { mergeProviderInstanceEnvironment } from "../ProviderInstanceEnvironment.ts";
 import {
   enrichProviderSnapshotWithVersionAdvisory,
@@ -137,6 +138,10 @@ const withInstanceIdentity =
       liveSteer: "supported",
       threadGoals: "supported",
       subagentConcurrency: supportsSubagentConcurrency("codex", snapshot.version),
+      codexContextWindow: supportsCodexContextWindow(snapshot.version),
+      // This Cafe owner supports a separately fenced unchanged-policy
+      // continuation. It must not upgrade the native version qualification.
+      subagentPolicyContinuation: true,
     },
   });
 
@@ -267,6 +272,7 @@ export const CodexDriver: ProviderDriver<CodexSettings, CodexDriverEnv> = {
         getModels: () => snapshot.getSnapshot.pipe(Effect.map((value) => value.models)),
         getSubagentConcurrencySupport: () =>
           supportsSubagentConcurrency("codex", observedCliVersion),
+        getCodexContextWindowSupport: () => supportsCodexContextWindow(observedCliVersion),
         instanceId,
         environment: effectiveEnvironment,
         prepareRuntimeHome: refreshCodexShadowHome,

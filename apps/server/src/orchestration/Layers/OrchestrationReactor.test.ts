@@ -70,6 +70,7 @@ describe("OrchestrationReactor", () => {
           Layer.succeed(WebPushNotifications, {
             getPublicKey: () => Effect.succeed("test-vapid-public-key"),
             saveSubscription: () => Effect.void,
+            updateSubscriptionLocale: () => Effect.void,
             removeSubscription: () => Effect.void,
             start: () => {
               started.push("web-push-notifications");

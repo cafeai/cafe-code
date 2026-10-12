@@ -34,6 +34,7 @@ import * as DesktopObservability from "./app/DesktopObservability.ts";
 import * as DesktopPowerSaveBlocker from "./app/DesktopPowerSaveBlocker.ts";
 import * as DesktopServerExposure from "./backend/DesktopServerExposure.ts";
 import * as DesktopClientSettings from "./settings/DesktopClientSettings.ts";
+import * as DesktopUiLocale from "./settings/DesktopUiLocale.ts";
 import * as DesktopSavedEnvironments from "./settings/DesktopSavedEnvironments.ts";
 import * as DesktopRemoteCertificates from "./settings/DesktopRemoteCertificates.ts";
 import * as DesktopAppSettings from "./settings/DesktopAppSettings.ts";
@@ -44,6 +45,7 @@ import * as DesktopNativePermissions from "./nativeControl/DesktopNativePermissi
 import * as DesktopUpdates from "./updates/DesktopUpdates.ts";
 import * as DesktopSourceUpdates from "./updates/DesktopSourceUpdates.ts";
 import * as DesktopWindow from "./window/DesktopWindow.ts";
+import * as DesktopStartupWindow from "./window/DesktopStartupWindow.ts";
 import { resolveLinuxSafeStoragePasswordStore } from "./app/LinuxSafeStorageCommandLine.ts";
 import {
   isDesktopRuntimeSelfTestEnabled,
@@ -111,15 +113,22 @@ const desktopFoundationLayer = Layer.mergeAll(
   DesktopNativeControl.layer,
 ).pipe(Layer.provideMerge(desktopEnvironmentLayer));
 
-const desktopServerExposureLayer = DesktopServerExposure.layer.pipe(
-  Layer.provideMerge(DesktopServerExposure.networkInterfacesLayer),
+const desktopLocalizedFoundationLayer = DesktopUiLocale.layer.pipe(
   Layer.provideMerge(desktopFoundationLayer),
 );
 
-const desktopWindowLayer = DesktopWindow.layer.pipe(Layer.provideMerge(desktopServerExposureLayer));
+const desktopServerExposureLayer = DesktopServerExposure.layer.pipe(
+  Layer.provideMerge(DesktopServerExposure.networkInterfacesLayer),
+  Layer.provideMerge(desktopLocalizedFoundationLayer),
+);
+
+const desktopStartupWindowLayer = DesktopStartupWindow.layer.pipe(
+  Layer.provideMerge(desktopServerExposureLayer),
+);
+const desktopWindowLayer = DesktopWindow.layer.pipe(Layer.provideMerge(desktopStartupWindowLayer));
 
 const desktopProviderDaemonLayer = DesktopProviderDaemonManager.layer.pipe(
-  Layer.provideMerge(desktopFoundationLayer),
+  Layer.provideMerge(desktopLocalizedFoundationLayer),
 );
 
 const desktopBackendLayer = DesktopBackendManager.layer.pipe(

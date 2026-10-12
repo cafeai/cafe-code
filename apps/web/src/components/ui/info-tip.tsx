@@ -1,4 +1,5 @@
 import { InfoIcon } from "lucide-react";
+import { uiText } from "@cafecode/shared/i18n";
 import { type ReactNode, useId, useState } from "react";
 
 import { cn } from "~/lib/utils";
@@ -17,7 +18,7 @@ import { Tooltip, TooltipPopup, TooltipTrigger } from "./tooltip";
  */
 export function InfoTip({
   children,
-  label = "More information",
+  label = uiText("More information"),
   side = "top",
   className,
   popupClassName,

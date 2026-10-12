@@ -1,3 +1,10 @@
+import {
+  UI_DIRECTION,
+  resolveUiLocale,
+  uiMessageParts,
+  uiText,
+  type UiLocale,
+} from "@cafecode/shared/i18n";
 import Mime from "@effect/platform-node/Mime";
 import {
   CAFE_CODE_ENVIRONMENT_ENDPOINT_PATH,
@@ -236,21 +243,57 @@ function escapeHtml(value: string): string {
 // hit the plain-HTTP listener while HTTPS is enabled. It explains how to trust the
 // self-signed certificate and links to the secure site, instead of serving the app
 // over cleartext.
-function renderHttpsBootstrapPage(input: {
+export function renderHttpsBootstrapPage(input: {
   readonly hostname: string;
   readonly httpsPort: number;
+  readonly uiLocale?: UiLocale;
 }): string {
+  const locale = resolveUiLocale(input.uiLocale ?? "en");
   const secureOrigin = `https://${input.hostname}:${input.httpsPort}/`;
   const secureOriginAttr = escapeHtml(secureOrigin);
-  const secureOriginText = escapeHtml(secureOrigin);
   const certPathAttr = escapeHtml(CAFE_CODE_HTTPS_CERTIFICATE_PATH);
+  // Catalogs supply text and named slots, never executable HTML. Only these
+  // code-owned tags survive escaping; URL attributes stay independently bound.
+  type TrustedHtml = { readonly html: string };
+  const renderParts = (parts: readonly (string | TrustedHtml)[]): string =>
+    parts.map((part) => (typeof part === "string" ? escapeHtml(part) : part.html)).join("");
+  const strong = (chunks: (string | TrustedHtml)[]): TrustedHtml => ({
+    html: `<strong>${renderParts(chunks)}</strong>`,
+  });
+  const iosInstructions = renderParts(
+    uiMessageParts<TrustedHtml>(
+      "<strong>iOS:</strong> open the downloaded profile, then enable it in Settings → General → VPN & Device Management, and turn it on under Certificate Trust Settings.",
+      { strong },
+      undefined,
+      locale,
+    ),
+  );
+  const androidInstructions = renderParts(
+    uiMessageParts<TrustedHtml>(
+      "<strong>Android:</strong> Settings → Security → install a certificate → CA certificate.",
+      { strong },
+      undefined,
+      locale,
+    ),
+  );
+  const openInstructions = renderParts(
+    uiMessageParts<TrustedHtml>(
+      "Then open <code>{origin}</code>",
+      {
+        origin: secureOrigin,
+        code: (chunks) => ({ html: `<code>${renderParts(chunks)}</code>` }),
+      },
+      undefined,
+      locale,
+    ),
+  );
   return `<!doctype html>
-<html lang="en">
+<html lang="${locale}" dir="${UI_DIRECTION}">
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <meta name="robots" content="noindex" />
-<title>Cafe Code — secure connection required</title>
+<title>${escapeHtml(uiText("Cafe Code — secure connection required", undefined, undefined, locale))}</title>
 <style>
   :root { color-scheme: light dark; }
   body { margin: 0; min-height: 100vh; display: grid; place-items: center;
@@ -271,18 +314,31 @@ function renderHttpsBootstrapPage(input: {
 </head>
 <body>
   <div class="card">
-    <h1>This server uses HTTPS</h1>
-    <p>For a secure connection, install Cafe Code's certificate on this device, then open the secure site.</p>
-    <a class="btn primary" href="${certPathAttr}" download="cafe-code.crt">Download certificate</a>
-    <a class="btn secondary" href="${secureOriginAttr}">Continue to secure site →</a>
+    <h1>${escapeHtml(uiText("This server uses HTTPS", undefined, undefined, locale))}</h1>
+    <p>${escapeHtml(uiText("For a secure connection, install Cafe Code''s certificate on this device, then open the secure site.", undefined, undefined, locale))}</p>
+    <a class="btn primary" href="${certPathAttr}" download="cafe-code.crt">${escapeHtml(uiText("Download certificate", undefined, undefined, locale))}</a>
+    <a class="btn secondary" href="${secureOriginAttr}">${escapeHtml(uiText("Continue to secure site →", undefined, undefined, locale))}</a>
     <ol>
-      <li><strong>iOS:</strong> open the downloaded profile, then enable it in Settings → General → VPN &amp; Device Management, and turn it on under Certificate Trust Settings.</li>
-      <li><strong>Android:</strong> Settings → Security → install a certificate → CA certificate.</li>
-      <li>Then open <code>${secureOriginText}</code></li>
+      <li>${iosInstructions}</li>
+      <li>${androidInstructions}</li>
+      <li>${openInstructions}</li>
     </ol>
   </div>
 </body>
 </html>`;
+}
+
+/** This unauthenticated public page has no access to private client settings.
+ * A finite presentation query wins; otherwise only the first language range
+ * matters. Never reflect arbitrary headers/query text into the document. */
+export function resolveHttpsBootstrapLocale(
+  query: string | null,
+  acceptLanguage: string | undefined,
+): UiLocale {
+  if (query === "en" || query === "ja" || query === "ko") return query;
+  if (typeof acceptLanguage !== "string" || acceptLanguage.length > 2_048) return "en";
+  const primary = acceptLanguage.split(",", 1)[0]?.split(";", 1)[0]?.trim();
+  return resolveUiLocale("system", primary ? [primary] : []);
 }
 
 // Serves the public self-signed certificate (PEM) so devices can trust the HTTPS
@@ -347,10 +403,12 @@ const WebPushSubscribeRequest = Schema.Struct({
 const WebPushUnsubscribeRequest = Schema.Struct({
   endpoint: Schema.String,
 });
+const WebPushLocaleRequest = Schema.Struct({ subscription: WebPushSubscriptionInput });
 
 // Hoisted compiled decoders — building these per request rebuilds the codec every time.
 const decodeWebPushSubscribeRequest = Schema.decodeUnknownEffect(WebPushSubscribeRequest);
 const decodeWebPushUnsubscribeRequest = Schema.decodeUnknownEffect(WebPushUnsubscribeRequest);
+const decodeWebPushLocaleRequest = Schema.decodeUnknownEffect(WebPushLocaleRequest);
 
 const respondToWebPushError = (error: WebPushNotificationsError) =>
   Effect.logWarning("web push route failed", { detail: error.detail, cause: error.cause }).pipe(
@@ -433,6 +491,27 @@ export const webPushUnsubscribeRouteLayer = HttpRouter.add(
     }
     const webPush = yield* WebPushNotifications;
     yield* webPush.removeSubscription(decoded.endpoint);
+    return HttpServerResponse.empty({ status: 204, headers: browserApiCorsHeaders });
+  }).pipe(
+    Effect.catchTag("AuthError", respondToAuthError),
+    Effect.catchTag("WebPushNotificationsError", respondToWebPushError),
+  ),
+);
+
+export const webPushLocaleRouteLayer = HttpRouter.add(
+  "POST",
+  "/api/notifications/web-push/subscriptions/locale",
+  Effect.gen(function* () {
+    yield* requireAuthenticatedRequest;
+    const request = yield* HttpServerRequest.HttpServerRequest;
+    const body = yield* request.json.pipe(Effect.catch(() => Effect.succeed(null)));
+    const decoded = yield* decodeWebPushLocaleRequest(body).pipe(
+      Effect.catch(() => Effect.succeed(null)),
+    );
+    if (!decoded || !decoded.subscription.uiLocale)
+      return HttpServerResponse.text("Invalid subscription locale payload.", { status: 400 });
+    const webPush = yield* WebPushNotifications;
+    yield* webPush.updateSubscriptionLocale(decoded.subscription);
     return HttpServerResponse.empty({ status: 204, headers: browserApiCorsHeaders });
   }).pipe(
     Effect.catchTag("AuthError", respondToAuthError),
@@ -760,6 +839,10 @@ export const staticAndDevRouteLayer = HttpRouter.add(
           renderHttpsBootstrapPage({
             hostname: url.value.hostname,
             httpsPort: config.httpsPort,
+            uiLocale: resolveHttpsBootstrapLocale(
+              url.value.searchParams.get("uiLocale"),
+              request.headers["accept-language"],
+            ),
           }),
           {
             status: 200,

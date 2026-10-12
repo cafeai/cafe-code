@@ -41,6 +41,10 @@ import { HttpRouter, HttpServerRequest } from "effect/unstable/http";
 import { RpcSerialization, RpcServer } from "effect/unstable/rpc";
 
 import { ServerConfig } from "./config.ts";
+import {
+  canReadProviderActivityDiagnostic,
+  hasObservedPrivateRpcTransport,
+} from "./websocket/providerDiagnosticAccess.ts";
 import { Keybindings } from "./keybindings.ts";
 import * as ExternalLauncher from "./process/externalLauncher.ts";
 import { normalizeDispatchCommand } from "./orchestration/Normalizer.ts";
@@ -137,7 +141,6 @@ import {
   OpenAiRealtimeDictation,
   type OpenAiRealtimeDictationShape,
 } from "./dictation/Services/OpenAiRealtimeDictation.ts";
-import { isLoopbackRemoteAddress } from "./http.ts";
 const isOrchestrationDispatchCommandError = Schema.is(OrchestrationDispatchCommandError);
 const decodeQuotaClaudeSettings = Schema.decodeUnknownSync(ClaudeSettings);
 const isWorkspacePathOutsideRootError = Schema.is(WorkspacePathOutsideRootError);
@@ -614,6 +617,11 @@ const makeWsRpcLayer = (
                 ...(bootstrap.createThread.subagentLimits !== undefined
                   ? { subagentLimits: bootstrap.createThread.subagentLimits }
                   : {}),
+                ...(bootstrap.createThread.codexContextWindowOverride !== undefined
+                  ? {
+                      codexContextWindowOverride: bootstrap.createThread.codexContextWindowOverride,
+                    }
+                  : {}),
                 runtimeMode: bootstrap.createThread.runtimeMode,
                 interactionMode: bootstrap.createThread.interactionMode,
                 branch: bootstrap.createThread.branch,
@@ -1002,6 +1010,45 @@ const makeWsRpcLayer = (
                   }),
               ),
             ),
+            { "rpc.aggregate": "orchestration" },
+          ),
+        [ORCHESTRATION_WS_METHODS.getThreadActivityDiagnostic]: (input) =>
+          observeRpcEffect(
+            ORCHESTRATION_WS_METHODS.getThreadActivityDiagnostic,
+            Effect.gen(function* () {
+              // Authentication alone admits ordinary collaboration views, not
+              // private received JSON. No diagnostic identifiers grant access.
+              if (!canReadProviderActivityDiagnostic(currentSession.role, secureSecretTransport)) {
+                return yield* new OrchestrationGetSnapshotError({
+                  message:
+                    "Diagnostic details require an owner connection over HTTPS or the same machine.",
+                });
+              }
+              const validateCurrentOwner = sessions.validateActiveSession(currentSession).pipe(
+                Effect.mapError(
+                  () =>
+                    new OrchestrationGetSnapshotError({
+                      message: "Diagnostic details require a current authenticated owner session.",
+                    }),
+                ),
+              );
+              // A revoked/expired owner can retain the upgraded socket. Recheck
+              // exact parent-session authority before touching private storage
+              // and again before releasing bytes after an asynchronous lookup.
+              // This narrow read fence does not replay credentials, alter other
+              // RPCs, or grant provider/control authority to diagnostic IDs.
+              yield* validateCurrentOwner;
+              const result = yield* projectionSnapshotQuery.getThreadActivityDiagnostic(input).pipe(
+                Effect.mapError(
+                  () =>
+                    new OrchestrationGetSnapshotError({
+                      message: "Diagnostic details are unavailable for this activity.",
+                    }),
+                ),
+              );
+              yield* validateCurrentOwner;
+              return result;
+            }),
             { "rpc.aggregate": "orchestration" },
           ),
         [ORCHESTRATION_WS_METHODS.getThreadTurnSubagentDetail]: (input) =>
@@ -2026,7 +2073,7 @@ export const websocketRpcRouteLayer = Layer.unwrap(
         // a local/IPC boundary; direct non-loopback cleartext always fails shut.
         const secureSecretTransport = Option.match(request.remoteAddress, {
           onNone: () => false,
-          onSome: isLoopbackRemoteAddress,
+          onSome: hasObservedPrivateRpcTransport,
         });
         const rpcWebSocketHttpEffect = yield* RpcServer.toHttpEffectWebsocket(WsRpcGroup, {
           disableTracing: true,

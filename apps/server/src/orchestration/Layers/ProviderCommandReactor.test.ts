@@ -257,9 +257,13 @@ describe("ProviderCommandReactor", () => {
     readonly testClock?: TestClock.TestClock;
     readonly standalone?: boolean;
     readonly subagentConcurrency?: boolean | "unknown";
+    readonly codexContextWindow?: boolean | "unknown";
+    readonly subagentPolicyContinuation?: boolean;
+    readonly subagentRuntimeId?: ProviderSession["subagentRuntimeId"];
     readonly providerInstances?: ServerSettings["providerInstances"];
   }) {
     const now = "2026-01-01T00:00:00.000Z";
+    const configuredSubagentRuntimeId = input?.subagentRuntimeId;
     const baseDir = input?.baseDir ?? fs.mkdtempSync(path.join(os.tmpdir(), "t3code-reactor-"));
     createdBaseDirs.add(baseDir);
     const { stateDir, systemPromptPath } = deriveServerPathsSync(baseDir, undefined);
@@ -308,6 +312,9 @@ describe("ProviderCommandReactor", () => {
         provider,
         ...(providerInstanceId ? { providerInstanceId } : {}),
         status: "ready" as const,
+        ...(configuredSubagentRuntimeId !== undefined
+          ? { subagentRuntimeId: configuredSubagentRuntimeId }
+          : {}),
         runtimeMode:
           typeof input === "object" &&
           input !== null &&
@@ -339,9 +346,14 @@ describe("ProviderCommandReactor", () => {
         ...(typeof input === "object" && input !== null && "maxConcurrentSubagents" in input
           ? { maxConcurrentSubagents: input.maxConcurrentSubagents as number | null }
           : {}),
+        ...(typeof input === "object" && input !== null && "codexContextWindowOverride" in input
+          ? { codexContextWindowOverride: input.codexContextWindowOverride as number | null }
+          : {}),
         resumeCursor: resumeCursor ?? { opaque: `resume-${sessionIndex}` },
-        createdAt: now,
-        updatedAt: now,
+        // Exact-generation fixtures represent a native materialization after
+        // its admitted first intent, not a stale pre-intent replay snapshot.
+        createdAt: configuredSubagentRuntimeId === undefined ? now : "2026-01-01T00:00:02.000Z",
+        updatedAt: configuredSubagentRuntimeId === undefined ? now : "2026-01-01T00:00:02.000Z",
       };
       const existingSessionIndex = runtimeSessions.findIndex(
         (candidate) => candidate.threadId === threadId,
@@ -484,9 +496,15 @@ describe("ProviderCommandReactor", () => {
         liveSteer: input?.liveSteer ?? "unsupported",
         threadGoals: input?.threadGoals ?? "unsupported",
         manualCompaction: input?.manualCompaction ?? "unsupported",
+        ...(input?.codexContextWindow === "unknown"
+          ? {}
+          : { codexContextWindow: input?.codexContextWindow ?? true }),
         ...(input?.subagentConcurrency === "unknown"
           ? {}
           : { subagentConcurrency: input?.subagentConcurrency ?? true }),
+        ...(input?.subagentPolicyContinuation !== undefined
+          ? { subagentPolicyContinuation: input.subagentPolicyContinuation }
+          : {}),
       }),
     );
     const service: ProviderServiceShape = {
@@ -743,7 +761,14 @@ describe("ProviderCommandReactor", () => {
     ): Promise<void> => {
       const snapshot = await Effect.runPromise(snapshotQuery.getSnapshot());
       const thread = snapshot.threads.find((entry) => entry.id === threadId);
-      const session = thread?.session;
+      const detail = await Effect.runPromise(snapshotQuery.getThreadDetailById(threadId));
+      const contextOverride = Option.getOrUndefined(detail)?.session?.codexContextWindowOverride;
+      // Retain the exact materialized context witness, not requested metadata,
+      // while leaving the existing fixture's other lifecycle fields unchanged.
+      const session = thread?.session && {
+        ...thread.session,
+        ...(contextOverride !== undefined ? { codexContextWindowOverride: contextOverride } : {}),
+      };
       if (!session) {
         throw new Error(`Cannot mark thread '${threadId}' ready without a projected session.`);
       }
@@ -1352,6 +1377,242 @@ describe("ProviderCommandReactor", () => {
       await harness.drain();
     }
 
+    it.each([false, "unknown"] as const)(
+      "continues identical numeric policy only in the exact existing Codex process with %s native support",
+      async (subagentConcurrency) => {
+        const runtimeId = SubagentRuntimeId.make("00000000-0000-4000-8000-000000000016");
+        const harness = await createHarness({
+          standalone: true,
+          subagentRuntimeId: runtimeId,
+          subagentPolicyContinuation: true,
+        });
+        await change(harness, "set-original-sixteen", { codex: 16 });
+        await send(harness, "qualified-original-sixteen");
+        await harness.markThreadReady(threadId, "2026-01-01T00:00:02.000Z");
+        harness.getCapabilities.mockImplementation(() =>
+          Effect.succeed({
+            sessionModelSwitch: "in-session",
+            liveSteer: "supported",
+            subagentPolicyContinuation: true,
+            ...(subagentConcurrency === "unknown" ? {} : { subagentConcurrency }),
+          }),
+        );
+        await send(harness, "same-process-follow-up");
+        expect(harness.startSession).toHaveBeenCalledTimes(1);
+        expect(harness.stopSession).not.toHaveBeenCalled();
+        expect(harness.sendTurn.mock.calls[1]?.[0].expectedSubagentPolicySession).toEqual({
+          threadId,
+          providerInstanceId: ProviderInstanceId.make("codex"),
+          subagentRuntimeId: runtimeId,
+          maxConcurrentSubagents: 16,
+        });
+      },
+    );
+
+    it.each([
+      "legacy owner",
+      "missing generation",
+      "changed generation",
+      "changed policy",
+      "cwd replacement",
+      "directories replacement",
+      "model replacement",
+      "runtime replacement",
+    ] as const)(
+      "refuses unchanged-policy exemption for %s with unknown native support",
+      async (reason) => {
+        const runtimeId = SubagentRuntimeId.make("00000000-0000-4000-8000-000000000016");
+        const harness = await createHarness({
+          standalone: true,
+          subagentRuntimeId: runtimeId,
+          subagentPolicyContinuation: true,
+        });
+        await change(harness, `sixteen-before-${reason}`, { codex: 16 });
+        await send(harness, `first-before-${reason}`);
+        await harness.markThreadReady(threadId, "2026-01-01T00:00:02.000Z");
+        harness.getCapabilities.mockImplementation(() =>
+          Effect.succeed({
+            sessionModelSwitch: reason === "model replacement" ? "unsupported" : "in-session",
+            liveSteer: "supported",
+            ...(reason === "legacy owner" ? {} : { subagentPolicyContinuation: true }),
+          }),
+        );
+        const session = harness.runtimeSessions[0]!;
+        if (reason === "missing generation")
+          harness.runtimeSessions[0] = { ...session, subagentRuntimeId: undefined };
+        if (reason === "changed generation")
+          harness.runtimeSessions[0] = {
+            ...session,
+            subagentRuntimeId: SubagentRuntimeId.make("00000000-0000-4000-8000-000000000017"),
+          };
+        if (reason === "changed policy")
+          await change(harness, "different-pending-seventeen", { codex: 17 });
+        if (reason === "cwd replacement")
+          harness.runtimeSessions[0] = {
+            ...session,
+            cwd: path.join(session.cwd!, "different-workspace"),
+          };
+        if (reason === "directories replacement")
+          harness.runtimeSessions[0] = {
+            ...session,
+            additionalDirectories: [path.join(session.cwd!, "different-additional-root")],
+          };
+        if (reason === "runtime replacement")
+          harness.runtimeSessions[0] = { ...session, runtimeMode: "full-access" };
+        await send(
+          harness,
+          `refused-follow-up-${reason}`,
+          true,
+          reason === "model replacement"
+            ? { instanceId: ProviderInstanceId.make("codex"), model: "changed-model" }
+            : undefined,
+        );
+        expect(harness.startSession).toHaveBeenCalledTimes(1);
+        expect(harness.sendTurn).toHaveBeenCalledTimes(1);
+        expect(harness.stopSession).not.toHaveBeenCalled();
+      },
+    );
+
+    it.each([
+      ["direct steer", "accepted"],
+      ["direct steer", "no active turn"],
+      ["direct steer", "legacy owner"],
+      ["direct steer", "changed generation"],
+      ["start routed to steer", "accepted"],
+      ["failed start fallback", "accepted"],
+      ["failed start fallback", "no active turn"],
+    ] as const)(
+      "retains the exact existing-process fence for %s (%s) without native recovery",
+      async (entrypoint, outcome) => {
+        const runtimeId = SubagentRuntimeId.make("00000000-0000-4000-8000-000000000016");
+        const harness = await createHarness({
+          standalone: true,
+          liveSteer: "supported",
+          subagentRuntimeId: runtimeId,
+          subagentPolicyContinuation: true,
+        });
+        await change(harness, "sixteen-before-steer", { codex: 16 });
+        await send(harness, "first-before-steer");
+        const activeTurnId = asTurnId("first-before-steer-native-turn");
+        const messageId = asMessageId("fenced-follow-up-steer");
+        const unknownCapabilities = () =>
+          Effect.succeed({
+            sessionModelSwitch: "in-session" as const,
+            liveSteer: "supported" as const,
+            ...(outcome === "legacy owner" ? {} : { subagentPolicyContinuation: true }),
+          });
+        const native = harness.runtimeSessions[0]!;
+        if (entrypoint !== "direct steer")
+          await harness.markThreadReady(threadId, "2026-01-01T00:00:02.000Z");
+        if (entrypoint === "failed start fallback") {
+          // Preparation initially has qualified native support. A real active
+          // turn race can be observed only by the attempted start, after which
+          // the independent version probe is unknown. Its steer fallback must
+          // gain the same exact-process fence instead of borrowing recovery.
+          harness.sendTurn.mockImplementationOnce(() =>
+            Effect.suspend(() => {
+              harness.getCapabilities.mockImplementation(unknownCapabilities);
+              harness.runtimeSessions[0] = { ...native, status: "running", activeTurnId };
+              return Effect.fail(
+                new ProviderAdapterRequestError({
+                  provider: "codex",
+                  method: "turn/start",
+                  detail: `Cannot start a new Codex turn while active turn '${activeTurnId}' is running.`,
+                }),
+              );
+            }),
+          );
+        } else {
+          harness.getCapabilities.mockImplementation(unknownCapabilities);
+          harness.runtimeSessions[0] = {
+            ...native,
+            status: "running",
+            activeTurnId,
+            ...(outcome === "changed generation"
+              ? {
+                  subagentRuntimeId: SubagentRuntimeId.make("00000000-0000-4000-8000-000000000017"),
+                }
+              : {}),
+          };
+        }
+        harness.steerTurn.mockImplementation((input) =>
+          outcome === "no active turn"
+            ? Effect.fail(
+                new ProviderAdapterRequestError({
+                  provider: "codex",
+                  method: "turn/steer",
+                  detail: "no active turn to steer",
+                }),
+              )
+            : Effect.succeed({ threadId, turnId: input.expectedTurnId }),
+        );
+        const commonCommand = {
+          commandId: CommandId.make(`fenced-${entrypoint}-${outcome}`),
+          threadId,
+          message: {
+            messageId,
+            role: "user" as const,
+            text: "Synthetic exact-process follow-up",
+            attachments: [],
+          },
+          createdAt: "2026-01-01T00:00:03.000Z",
+        };
+        await Effect.runPromise(
+          harness.engine.dispatch(
+            entrypoint === "direct steer"
+              ? { ...commonCommand, type: "thread.turn.steer" }
+              : {
+                  ...commonCommand,
+                  type: "thread.turn.start",
+                  runtimeMode: "approval-required",
+                  interactionMode: "default",
+                },
+          ),
+        );
+        const refused = outcome !== "accepted";
+        await waitFor(async () => {
+          const detail = await harness.readThreadDetail(threadId);
+          return (
+            detail?.activities.some((activity) =>
+              refused
+                ? activity.kind ===
+                  (entrypoint === "direct steer"
+                    ? "provider.turn.steer.failed"
+                    : "provider.turn.start.failed")
+                : activity.kind === "provider.turn.steer.accepted" &&
+                  (activity.payload as Readonly<Record<string, unknown>> | undefined)?.messageId ===
+                    messageId,
+            ) === true
+          );
+        });
+        await harness.drain();
+        expect(harness.startSession).toHaveBeenCalledTimes(1);
+        expect(harness.stopSession).not.toHaveBeenCalled();
+        expect(harness.sendTurn).toHaveBeenCalledTimes(
+          entrypoint === "failed start fallback" ? 2 : 1,
+        );
+        const reachedNative = outcome !== "legacy owner" && outcome !== "changed generation";
+        expect(harness.steerTurn).toHaveBeenCalledTimes(reachedNative ? 1 : 0);
+        if (reachedNative)
+          expect(harness.steerTurn.mock.calls[0]?.[0].expectedSubagentPolicySession).toEqual({
+            threadId,
+            providerInstanceId: ProviderInstanceId.make("codex"),
+            subagentRuntimeId: runtimeId,
+            maxConcurrentSubagents: 16,
+          });
+        const detail = await harness.readThreadDetail(threadId);
+        expect(detail?.messages.some((message) => message.id === messageId)).toBe(true);
+        expect(
+          detail?.activities.some(
+            (activity) =>
+              activity.kind === "runtime.warning" &&
+              (activity.payload as Readonly<Record<string, unknown>> | undefined)?.recovery ===
+                "turn-start-after-no-active-turn",
+          ),
+        ).toBe(false);
+      },
+    );
+
     it.each(["known inherited", "unknown legacy"] as const)(
       "inherits an edited account default for an existing chat with %s process evidence on its next idle send",
       async (evidence) => {
@@ -1905,6 +2166,433 @@ describe("ProviderCommandReactor", () => {
       expect(harness.runtimeSessions[0]?.maxConcurrentSubagents).toBeNull();
     });
 
+    async function contextOverride(
+      harness: Awaited<ReturnType<typeof createHarness>>,
+      key: string,
+      value: number | null,
+    ) {
+      await Effect.runPromise(
+        harness.engine.dispatch({
+          type: "thread.meta.update",
+          commandId: CommandId.make(key),
+          threadId,
+          codexContextWindowOverride: value,
+        }),
+      );
+      await harness.drain();
+    }
+    async function contextDefault(
+      harness: Awaited<ReturnType<typeof createHarness>>,
+      value: number | undefined,
+    ) {
+      const settings = await Effect.runPromise(harness.serverSettings.getSettings);
+      const instanceId = ProviderInstanceId.make("codex");
+      const instance = settings.providerInstances[instanceId] ?? {
+        driver: ProviderDriverKind.make("codex"),
+      };
+      const { defaultCodexContextWindowOverride: _old, ...retained } = instance;
+      await Effect.runPromise(
+        harness.serverSettings.updateSettings({
+          providerInstances: {
+            ...settings.providerInstances,
+            [instanceId]: {
+              ...retained,
+              ...(value !== undefined ? { defaultCodexContextWindowOverride: value } : {}),
+            },
+          },
+        }),
+      );
+    }
+
+    it("resolves live Codex context account defaults, keeps explicit chat precedence and clears safely", async () => {
+      const harness = await createHarness({ standalone: true });
+      await contextDefault(harness, 500_000);
+      await send(harness, "context-inherited-first");
+      expect(harness.startSession.mock.calls[0]?.[1]).toMatchObject({
+        codexContextWindowOverride: 500_000,
+      });
+      expect(
+        (await harness.readThreadDetail(threadId))?.codexContextWindowOverride,
+      ).toBeUndefined();
+      await harness.markThreadReady(threadId, "2026-01-01T00:00:02.000Z");
+      await contextOverride(harness, "context-explicit", 600_000);
+      await contextDefault(harness, 700_000);
+      expect(harness.startSession).toHaveBeenCalledTimes(1);
+      await send(harness, "context-explicit-send");
+      expect(harness.startSession.mock.calls[1]?.[1]).toMatchObject({
+        codexContextWindowOverride: 600_000,
+        requireIdleForCodexContextWindowChange: true,
+      });
+      await harness.markThreadReady(threadId, "2026-01-01T00:00:04.000Z");
+      await contextOverride(harness, "context-reset-to-account", null);
+      await send(harness, "context-reset-account-send");
+      expect(harness.startSession.mock.calls[2]?.[1]).toMatchObject({
+        codexContextWindowOverride: 700_000,
+        requireIdleForCodexContextWindowChange: true,
+      });
+      await harness.markThreadReady(threadId, "2026-01-01T00:00:06.000Z");
+      await contextDefault(harness, undefined);
+      await send(harness, "context-native-send");
+      expect(harness.startSession.mock.calls[3]?.[1]).toMatchObject({
+        codexContextWindowOverride: null,
+        requireIdleForCodexContextWindowChange: true,
+      });
+      expect(harness.runtimeSessions[0]?.codexContextWindowOverride).toBeNull();
+      expect(harness.stopSession).not.toHaveBeenCalled();
+    });
+
+    it("never consumes a disabled Codex account's context default during ordinary preparation", async () => {
+      const instanceId = ProviderInstanceId.make("codex");
+      const harness = await createHarness({
+        standalone: true,
+        codexContextWindow: false,
+        providerInstances: {
+          [instanceId]: {
+            driver: ProviderDriverKind.make("codex"),
+            enabled: false,
+            defaultCodexContextWindowOverride: 500_000,
+          },
+        },
+      });
+      // Isolate default resolution from the unchanged downstream disabled-owner
+      // admission. The synthetic provider refuses; no native process is started.
+      harness.startSession.mockImplementationOnce(() =>
+        Effect.fail(
+          new ProviderAdapterRequestError({
+            provider: "codex",
+            method: "startSession",
+            detail: "Synthetic disabled owner refusal.",
+          }),
+        ),
+      );
+      await send(harness, "disabled-context-default-prepare", true);
+      expect(harness.startSession).toHaveBeenCalledTimes(1);
+      expect(harness.startSession.mock.calls[0]?.[1]).toMatchObject({
+        codexContextWindowOverride: null,
+      });
+      expect(harness.startSession.mock.calls[0]?.[1]).not.toHaveProperty(
+        "requireIdleForCodexContextWindowChange",
+      );
+      expect(harness.sendTurn).not.toHaveBeenCalled();
+      expect(harness.steerTurn).not.toHaveBeenCalled();
+      expect(harness.stopSession).not.toHaveBeenCalled();
+      expect(
+        (await harness.readThreadDetail(threadId))?.codexContextWindowOverride,
+      ).toBeUndefined();
+    });
+
+    it("never consumes a disabled Codex account's context default during a retained direct steer", async () => {
+      const instanceId = ProviderInstanceId.make("codex");
+      const harness = await createHarness({
+        standalone: true,
+        liveSteer: "supported",
+        codexContextWindow: false,
+        providerInstances: {
+          [instanceId]: {
+            driver: ProviderDriverKind.make("codex"),
+            enabled: false,
+            defaultCodexContextWindowOverride: 500_000,
+          },
+        },
+      });
+      const root = asTurnId("disabled-context-retained-root");
+      await harness.setRunningCodexTurn(root, "2026-01-01T00:00:01.000Z");
+      // This retained-process fixture qualifies only context default selection.
+      // The existing provider boundary still refuses this disabled owner.
+      harness.steerTurn.mockImplementationOnce(() =>
+        Effect.fail(
+          new ProviderAdapterRequestError({
+            provider: "codex",
+            method: "turn/steer",
+            detail: "Synthetic disabled owner refusal.",
+          }),
+        ),
+      );
+      await Effect.runPromise(
+        harness.engine.dispatch({
+          type: "thread.turn.steer",
+          commandId: CommandId.make("disabled-context-default-steer"),
+          threadId,
+          message: {
+            messageId: asMessageId("disabled-context-default-steer"),
+            role: "user",
+            text: "Synthetic retained-owner steer",
+            attachments: [],
+          },
+          createdAt: "2026-01-01T00:00:02.000Z",
+        }),
+      );
+      await waitFor(
+        async () =>
+          (await harness.readThreadDetail(threadId))?.activities.some(
+            (activity) => activity.kind === "provider.turn.steer.failed",
+          ) === true,
+      );
+      await harness.drain();
+      expect(harness.steerTurn).toHaveBeenCalledTimes(1);
+      expect(harness.startSession).not.toHaveBeenCalled();
+      expect(harness.sendTurn).not.toHaveBeenCalled();
+      expect(harness.stopSession).not.toHaveBeenCalled();
+      expect(harness.runtimeSessions[0]?.activeTurnId).toBe(root);
+      expect(harness.runtimeSessions[0]).not.toHaveProperty("codexContextWindowOverride");
+      expect(
+        (await harness.readThreadDetail(threadId))?.codexContextWindowOverride,
+      ).toBeUndefined();
+    });
+
+    it("defers context and combined policy changes on native child-wake refusal without replay", async () => {
+      const harness = await createHarness({
+        standalone: true,
+        subagentRuntimeId: SubagentRuntimeId.make("00000000-0000-4000-8000-000000000020"),
+      });
+      await contextOverride(harness, "context-before-wake", 500_000);
+      await send(harness, "context-before-wake-send");
+      expect((await harness.readThreadDetail(threadId))?.session?.codexContextWindowOverride).toBe(
+        500_000,
+      );
+      await harness.markThreadReady(threadId, "2026-01-01T00:00:02.000Z");
+      await contextOverride(harness, "context-after-wake", 600_000);
+      await change(harness, "combined-subagent-change", { codex: 5 });
+      harness.startSession.mockImplementationOnce(() =>
+        Effect.fail(
+          new ProviderAdapterRequestError({
+            provider: "codex",
+            method: "session/reconfigure",
+            detail: "Native work is uncertain.",
+            remoteErrorTag: "codex-context-window-active",
+          }),
+        ),
+      );
+      await send(harness, "context-wake-retained-send");
+      expect(harness.startSession.mock.calls[1]?.[1]).toMatchObject({
+        codexContextWindowOverride: 600_000,
+        requireIdleForCodexContextWindowChange: true,
+        requireIdleForSubagentLimitChange: true,
+      });
+      expect(harness.runtimeSessions[0]?.codexContextWindowOverride).toBe(500_000);
+      expect((await harness.readThreadDetail(threadId))?.session?.codexContextWindowOverride).toBe(
+        500_000,
+      );
+      expect((await harness.readThreadDetail(threadId))?.codexContextWindowOverride).toBe(600_000);
+      expect(harness.sendTurn).toHaveBeenCalledTimes(2);
+      expect(harness.stopSession).not.toHaveBeenCalled();
+      await harness.markThreadReady(threadId, "2026-01-01T00:00:04.000Z");
+      await send(harness, "context-after-idle-send");
+      expect(harness.runtimeSessions[0]?.codexContextWindowOverride).toBe(600_000);
+      expect(harness.runtimeSessions[0]?.maxConcurrentSubagents).toBe(5);
+    });
+
+    it.each([false, "unknown"] as const)(
+      "refuses numeric Codex context intent with %s support",
+      async (support) => {
+        const harness = await createHarness({ standalone: true, codexContextWindow: support });
+        await contextDefault(harness, 500_000);
+        await send(harness, `unqualified-context-${support}`, true);
+        expect(harness.startSession).not.toHaveBeenCalled();
+        expect(harness.sendTurn).not.toHaveBeenCalled();
+      },
+    );
+
+    it.each([false, "unknown"] as const)(
+      "preserves unsupported %s context Reset intent without new native delivery",
+      async (support) => {
+        const harness = await createHarness({
+          standalone: true,
+          subagentRuntimeId: SubagentRuntimeId.make("00000000-0000-4000-8000-000000000020"),
+        });
+        await contextOverride(harness, "context-reset-known-first", 500_000);
+        await send(harness, "context-reset-known-send");
+        await harness.markThreadReady(threadId, "2026-01-01T00:00:02.000Z");
+        await contextOverride(harness, "context-reset-pending", null);
+        harness.getCapabilities.mockImplementation(() =>
+          Effect.succeed({
+            sessionModelSwitch: "in-session",
+            liveSteer: "unsupported",
+            ...(support === "unknown" ? {} : { codexContextWindow: false }),
+          }),
+        );
+        await send(harness, `context-reset-unqualified-${support}`, true);
+        expect(harness.startSession).toHaveBeenCalledTimes(1);
+        expect(harness.sendTurn).toHaveBeenCalledTimes(1);
+        expect(harness.stopSession).not.toHaveBeenCalled();
+        expect(harness.runtimeSessions[0]?.codexContextWindowOverride).toBe(500_000);
+        expect(
+          (await harness.readThreadDetail(threadId))?.session?.codexContextWindowOverride,
+        ).toBe(500_000);
+        expect((await harness.readThreadDetail(threadId))?.codexContextWindowOverride).toBeNull();
+      },
+    );
+
+    it.each([false, "unknown"] as const)(
+      "refuses numeric context intent before a %s-capability direct steer",
+      async (support) => {
+        const harness = await createHarness({ standalone: true, liveSteer: "supported" });
+        await contextOverride(harness, "context-before-steer", 500_000);
+        await send(harness, "context-before-steer-send");
+        const activeTurnId = asTurnId("context-before-steer-send-native-turn");
+        harness.runtimeSessions[0] = {
+          ...harness.runtimeSessions[0]!,
+          status: "running",
+          activeTurnId,
+        };
+        await contextOverride(harness, "context-pending-steer", 600_000);
+        harness.getCapabilities.mockImplementation(() =>
+          Effect.succeed({
+            sessionModelSwitch: "in-session",
+            liveSteer: "supported",
+            ...(support === "unknown" ? {} : { codexContextWindow: false }),
+          }),
+        );
+        await Effect.runPromise(
+          harness.engine.dispatch({
+            type: "thread.turn.steer",
+            commandId: CommandId.make(`context-refused-steer-${support}`),
+            threadId,
+            message: {
+              messageId: asMessageId(`context-refused-steer-${support}`),
+              role: "user",
+              text: "Synthetic unqualified context steer",
+              attachments: [],
+            },
+            createdAt: "2026-01-01T00:00:03.000Z",
+          }),
+        );
+        await waitFor(
+          async () =>
+            (await harness.readThreadDetail(threadId))?.activities.some(
+              (activity) => activity.kind === "provider.turn.steer.failed",
+            ) === true,
+        );
+        await harness.drain();
+        expect(harness.steerTurn).not.toHaveBeenCalled();
+        expect(harness.startSession).toHaveBeenCalledTimes(1);
+        expect(harness.sendTurn).toHaveBeenCalledTimes(1);
+        expect(harness.stopSession).not.toHaveBeenCalled();
+        expect(harness.runtimeSessions[0]?.codexContextWindowOverride).toBe(500_000);
+      },
+    );
+
+    it.each([
+      ["exact numeric", "codex", "codex", 500_000, 500_000],
+      ["exact inherited", "codex", "codex", null, null],
+      ["exact unknown", "codex", "codex", undefined, undefined],
+      ["different account", "codex", "codex-former-account", 500_000, null],
+      ["different driver", "claudeAgent", "codex", 500_000, null],
+    ] as const)(
+      "retains only %s context evidence for control-only materialization",
+      async (_label, providerName, providerInstanceId, prior, expected) => {
+        const harness = await createHarness({ standalone: true, threadGoals: "supported" });
+        await contextDefault(harness, 700_000);
+        await contextOverride(harness, "context-pending-control-only", 600_000);
+        await Effect.runPromise(
+          harness.engine.dispatch({
+            type: "thread.session.set",
+            commandId: CommandId.make("context-control-prior-session"),
+            threadId,
+            session: {
+              threadId,
+              providerName,
+              providerInstanceId: ProviderInstanceId.make(providerInstanceId),
+              ...(prior !== undefined ? { codexContextWindowOverride: prior } : {}),
+              status: "ready",
+              activeTurnId: null,
+              runtimeMode: "approval-required",
+              lastError: null,
+              updatedAt: "2026-01-01T00:00:01.000Z",
+            },
+            createdAt: "2026-01-01T00:00:01.000Z",
+          }),
+        );
+        await Effect.runPromise(
+          harness.engine.dispatch({
+            type: "thread.goal.set",
+            commandId: CommandId.make("context-control-goal"),
+            threadId,
+            objective: "Synthetic retained context control",
+            status: "active",
+            expectedUpdatedAt: null,
+            createdAt: "2026-01-01T00:00:02.000Z",
+          }),
+        );
+        await waitFor(() => harness.setGoal.mock.calls.length === 1);
+        await harness.drain();
+        expect(harness.startSession).toHaveBeenCalledTimes(1);
+        const start = harness.startSession.mock.calls[0]?.[1];
+        if (expected === undefined) expect(start).not.toHaveProperty("codexContextWindowOverride");
+        else expect(start).toHaveProperty("codexContextWindowOverride", expected);
+        expect(start).not.toHaveProperty("requireIdleForCodexContextWindowChange");
+        expect(harness.sendTurn).not.toHaveBeenCalled();
+        expect(harness.stopSession).not.toHaveBeenCalled();
+        expect((await harness.readThreadDetail(threadId))?.codexContextWindowOverride).toBe(
+          600_000,
+        );
+      },
+    );
+
+    it("selects only each exact Codex account's context default on account switches", async () => {
+      const first = ProviderInstanceId.make("codex-first-context-account");
+      const second = ProviderInstanceId.make("codex-second-context-account");
+      const inherited = ProviderInstanceId.make("codex-native-context-account");
+      const harness = await createHarness({
+        standalone: true,
+        threadModelSelection: { instanceId: first, model: "synthetic-model" },
+        providerInstances: {
+          [first]: {
+            driver: ProviderDriverKind.make("codex"),
+            defaultCodexContextWindowOverride: 500_000,
+          },
+          [second]: {
+            driver: ProviderDriverKind.make("codex"),
+            defaultCodexContextWindowOverride: 700_000,
+          },
+          [inherited]: { driver: ProviderDriverKind.make("codex") },
+        },
+      });
+      await send(harness, "context-first-owner-send");
+      expect(harness.startSession.mock.calls[0]?.[1]).toMatchObject({
+        providerInstanceId: first,
+        codexContextWindowOverride: 500_000,
+      });
+      await harness.markThreadReady(threadId, "2026-01-01T00:00:02.000Z");
+      await send(harness, "context-second-owner-send", false, {
+        instanceId: second,
+        model: "synthetic-model",
+      });
+      expect(harness.startSession.mock.calls[1]?.[1]).toMatchObject({
+        providerInstanceId: second,
+        codexContextWindowOverride: 700_000,
+      });
+      expect(harness.startSession.mock.calls[1]?.[1]).not.toHaveProperty(
+        "requireIdleForCodexContextWindowChange",
+      );
+      await harness.markThreadReady(threadId, "2026-01-01T00:00:04.000Z");
+      await send(harness, "context-inherited-owner-send", false, {
+        instanceId: inherited,
+        model: "synthetic-model",
+      });
+      expect(harness.startSession.mock.calls[2]?.[1]).toMatchObject({
+        providerInstanceId: inherited,
+        codexContextWindowOverride: null,
+      });
+      expect(
+        (await harness.readThreadDetail(threadId))?.codexContextWindowOverride,
+      ).toBeUndefined();
+    });
+
+    it("keeps saved context edits lifecycle-neutral while root work is active", async () => {
+      const harness = await createHarness({ standalone: true, liveSteer: "supported" });
+      await contextOverride(harness, "context-running-first", 500_000);
+      await send(harness, "context-running-first-send");
+      await contextOverride(harness, "context-running-edit", 600_000);
+      await contextDefault(harness, 700_000);
+      expect(harness.startSession).toHaveBeenCalledTimes(1);
+      expect(harness.runtimeSessions[0]?.codexContextWindowOverride).toBe(500_000);
+      expect(harness.stopSession).not.toHaveBeenCalled();
+      await harness.markThreadReady(threadId, "2026-01-01T00:00:02.000Z");
+      await send(harness, "context-running-after-idle");
+      expect(harness.runtimeSessions[0]?.codexContextWindowOverride).toBe(600_000);
+    });
+
     it("rejects a requested override when the configured runtime is unqualified", async () => {
       const harness = await createHarness({ standalone: true, subagentConcurrency: false });
       await change(harness, "unsupported-limit", { codex: 2 });
@@ -2332,10 +3020,13 @@ describe("ProviderCommandReactor", () => {
       harness: Awaited<ReturnType<typeof createHarness>>,
       root = failedRoot,
       startBeforeMarker = false,
+      observedAt?: string,
     ) {
-      const at = new Date(
-        Date.parse("2026-01-01T00:00:04.000Z") + harness.sendTurn.mock.calls.length * 1000,
-      ).toISOString();
+      const at =
+        observedAt ??
+        new Date(
+          Date.parse("2026-01-01T00:00:04.000Z") + harness.sendTurn.mock.calls.length * 1000,
+        ).toISOString();
       await harness.setRunningCodexTurn(root, at);
       for (const status of ["error", "ready"] as const)
         await Effect.runPromise(
@@ -2518,6 +3209,112 @@ describe("ProviderCommandReactor", () => {
         WHERE intent.source_kind = 'intent' ORDER BY intent.sequence`);
       expect(rows.map((row) => row.attempt)).toEqual([0, 1]);
       expect(harness.startSession).not.toHaveBeenCalled();
+    });
+
+    it("continues past the saturated attempt counter until explicit Stop without replaying work", async () => {
+      const clock = await makeClock();
+      const harness = await createHarness({ startReactor: false, testClock: clock });
+      harness.sendTurn.mockImplementation(() =>
+        Effect.sync(() => {
+          const turnId = TurnId.make(`continued-root-${harness.sendTurn.mock.calls.length}`);
+          // Match the live native owner at ACK, allowing ordinary accepted-start
+          // reconciliation to consume the exact pending continuation input.
+          const prior = harness.runtimeSessions[0]!;
+          const { codexRootTurnFailure: _failure, ...owner } = prior;
+          harness.runtimeSessions.splice(0, 1, {
+            ...owner,
+            status: "running",
+            activeTurnId: turnId,
+          });
+          return { threadId, turnId };
+        }),
+      );
+      await seed(harness);
+      const terminalTime = await failedCompletedAt(harness);
+      let clockNow = Date.parse("2026-01-01T00:00:10.000Z");
+      // Exercise the real SQL-backed worker rather than only its delay helper.
+      // Thirty is a bounded persisted exponent, not a retry-count ceiling. Every
+      // newly accepted native root supplies its own definite failure proof.
+      for (let attempt = 0; attempt < 36; attempt += 1) {
+        try {
+          await waitForIntent(harness, attempt + 1);
+        } catch (cause) {
+          throw new Error(`Missing persistent recovery intent ${attempt + 1}`, { cause });
+        }
+        const elapsed = attempt === 0 ? 1000 : 60_000;
+        await Effect.runPromise(clock.adjust(elapsed));
+        clockNow += elapsed;
+        await waitFor(() => harness.sendTurn.mock.calls.length === attempt + 1);
+        await harness.drain();
+        const request = harness.sendTurn.mock.calls[attempt]?.[0];
+        expect(request?.expectedFailedRoot?.turnId).toBe(
+          attempt === 0 ? failedRoot : TurnId.make(`continued-root-${attempt}`),
+        );
+        expect(request?.input).not.toContain(originalText);
+        expect(request).not.toHaveProperty("attachments");
+        await Effect.runPromise(clock.adjust(1));
+        clockNow += 1;
+        await recordFailure(
+          harness,
+          TurnId.make(`continued-root-${attempt + 1}`),
+          false,
+          new Date(clockNow).toISOString(),
+        );
+      }
+      await waitForIntent(harness, 37);
+      const rows = await Effect.runPromise(harness.sql<{ readonly attempt: number }>`
+        SELECT json_extract(event.payload_json, '$.runtimeRecovery.codexTransientFailure.retryAttempt') AS attempt
+        FROM orchestration_codex_transient_recovery_intents AS intent
+        JOIN orchestration_events AS event ON event.sequence = intent.sequence
+        WHERE intent.source_kind = 'intent' ORDER BY intent.sequence`);
+      expect(rows.map((row) => row.attempt)).toEqual(
+        Array.from({ length: 37 }, (_, attempt) => Math.min(attempt, 30)),
+      );
+      const ordinalRows = await Effect.runPromise(harness.sql<{ readonly ordinal: number }>`
+        SELECT json_extract(event.payload_json, '$.runtimeRecovery.codexTransientFailure.continuationOrdinal') AS ordinal
+        FROM orchestration_codex_transient_recovery_intents AS intent
+        JOIN orchestration_events AS event ON event.sequence = intent.sequence
+        WHERE intent.source_kind = 'intent' ORDER BY intent.sequence`);
+      expect(ordinalRows.map((row) => row.ordinal)).toEqual(
+        Array.from({ length: 37 }, (_, index) => index + 1),
+      );
+      // The operational deadline is the actual bounded sleep, not the native
+      // provider's internal retry fraction or a prediction from its warning.
+      const waits = await Effect.runPromise(harness.sql<{
+        readonly ordinal: number;
+        readonly delay: number;
+      }>`
+        SELECT json_extract(payload_json, '$.activity.payload.continuationOrdinal') AS ordinal,
+          CAST(ROUND((julianday(json_extract(payload_json, '$.activity.payload.retryAt')) -
+            julianday(json_extract(payload_json, '$.activity.createdAt'))) * 86400000) AS INTEGER) AS delay
+        FROM orchestration_events WHERE event_type = 'thread.activity-appended'
+          AND json_extract(payload_json, '$.activity.payload.recovery') = 'codex-transient-recovery-waiting'
+        ORDER BY sequence`);
+      expect(waits.map((row) => row.ordinal)).toEqual(
+        Array.from({ length: 37 }, (_, index) => index + 1),
+      );
+      waits.forEach((row, index) => {
+        const base = Math.min(60000, 1000 * 2 ** Math.min(index, 6));
+        expect(row.delay).toBeGreaterThanOrEqual(base * 0.75);
+        expect(row.delay).toBeLessThanOrEqual(base);
+      });
+      expect(await failedCompletedAt(harness)).toBe(terminalTime);
+      expect(harness.startSession).not.toHaveBeenCalled();
+      expect(harness.stopSession).not.toHaveBeenCalled();
+      expect(harness.steerTurn).not.toHaveBeenCalled();
+      await Effect.runPromise(
+        harness.engine.dispatch({
+          type: "thread.session.stop",
+          commandId: CommandId.make("cmd-stop-saturated-recovery"),
+          threadId,
+          createdAt: "2026-01-01T01:00:00.000Z",
+        }),
+      );
+      await waitFor(() => harness.stopSession.mock.calls.length === 1);
+      await harness.drain();
+      await Effect.runPromise(clock.adjust(120_000));
+      await harness.drain();
+      expect(harness.sendTurn).toHaveBeenCalledTimes(36);
     });
 
     it.each(["failure", "intent"] as const)(
@@ -4022,6 +4819,61 @@ describe("ProviderCommandReactor", () => {
     expect(thread?.session?.lastError).toContain("before a provider turn started");
     expect(harness.sendTurn).not.toHaveBeenCalled();
   });
+
+  it.each([undefined, null, 600_000] as const)(
+    "adopts only exact observed context configuration %s at startup without borrowing a former generation",
+    async (observedContext) => {
+      const harness = await createHarness({ startReactor: false });
+      const threadId = ThreadId.make("thread-1");
+      const turnId = asTurnId("synthetic-context-startup-root");
+      const oldId = SubagentRuntimeId.make("00000000-0000-4000-8000-000000000021");
+      const newId = SubagentRuntimeId.make("00000000-0000-4000-8000-000000000022");
+      const at = "2026-01-01T00:00:01.000Z";
+      await Effect.runPromise(
+        harness.engine.dispatch({
+          type: "thread.session.set",
+          commandId: CommandId.make("context-startup-former-binding"),
+          threadId,
+          session: {
+            threadId,
+            status: "running",
+            providerName: "codex",
+            providerInstanceId: ProviderInstanceId.make("codex"),
+            subagentRuntimeId: oldId,
+            codexContextWindowOverride: 500_000,
+            runtimeMode: "approval-required",
+            activeTurnId: turnId,
+            lastError: null,
+            updatedAt: at,
+          },
+          createdAt: at,
+        }),
+      );
+      harness.runtimeSessions.push({
+        threadId,
+        provider: ProviderDriverKind.make("codex"),
+        providerInstanceId: ProviderInstanceId.make("codex"),
+        status: "running",
+        subagentRuntimeId: newId,
+        ...(observedContext !== undefined ? { codexContextWindowOverride: observedContext } : {}),
+        runtimeMode: "approval-required",
+        activeTurnId: turnId,
+        createdAt: at,
+        updatedAt: at,
+      });
+      await harness.startReactor();
+      await harness.drain();
+      const session = (await harness.readThreadDetail(threadId))?.session;
+      expect(session?.subagentRuntimeId).toBe(newId);
+      if (observedContext === undefined)
+        expect(session).not.toHaveProperty("codexContextWindowOverride");
+      else expect(session).toHaveProperty("codexContextWindowOverride", observedContext);
+      expect(harness.startSession).not.toHaveBeenCalled();
+      expect(harness.stopSession).not.toHaveBeenCalled();
+      expect(harness.interruptTurn).not.toHaveBeenCalled();
+      expect(harness.sendTurn).not.toHaveBeenCalled();
+    },
+  );
 
   it("closes a projected running turn on startup when its provider session is gone", async () => {
     const harness = await createHarness({ startReactor: false });

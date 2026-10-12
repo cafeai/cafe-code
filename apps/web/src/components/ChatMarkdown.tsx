@@ -1,3 +1,5 @@
+import { useUiLocale, useUiPresentation } from "~/i18n";
+import { uiText } from "@cafecode/shared/i18n";
 import { CheckIcon, CopyIcon } from "lucide-react";
 import type { ServerProviderSkill } from "@cafecode/contracts";
 import React, {
@@ -218,6 +220,8 @@ export function sanitizeHighlightedCodeHtml(html: string): string {
 }
 
 function MarkdownCodeBlock({ code, children }: { code: string; children: ReactNode }) {
+  const uiLocale = useUiLocale();
+
   const [copied, setCopied] = useState(false);
   const copiedTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const handleCopy = useCallback(() => {
@@ -251,8 +255,16 @@ function MarkdownCodeBlock({ code, children }: { code: string; children: ReactNo
         type="button"
         className="chat-markdown-copy-button"
         onClick={handleCopy}
-        title={copied ? "Copied" : "Copy code"}
-        aria-label={copied ? "Copied" : "Copy code"}
+        title={
+          copied
+            ? uiText("Copied", undefined, undefined, uiLocale)
+            : uiText("Copy code", undefined, undefined, uiLocale)
+        }
+        aria-label={
+          copied
+            ? uiText("Copied", undefined, undefined, uiLocale)
+            : uiText("Copy code", undefined, undefined, uiLocale)
+        }
       >
         {copied ? <CheckIcon className="size-3" /> : <CopyIcon className="size-3" />}
       </button>
@@ -424,16 +436,21 @@ const MARKDOWN_FILE_LINK_CLASS_NAME =
 const MARKDOWN_FILE_LINK_ICON_CLASS_NAME = "chat-markdown-file-link-icon size-3.5 shrink-0";
 const MARKDOWN_FILE_LINK_LABEL_CLASS_NAME = "chat-markdown-file-link-label truncate";
 
-function getFileManagerRevealLabel(
+function getFileManagerName(
   platform = typeof navigator === "undefined" ? "" : navigator.platform,
 ): string {
+  // File-manager brands are opaque platform metadata, not case-folded UI copy.
   if (isMacPlatform(platform)) {
-    return "Open in Finder";
+    return "Finder";
   }
   if (isWindowsPlatform(platform)) {
-    return "Open in Explorer";
+    return "Explorer";
   }
-  return "Open in Files";
+  return "Files";
+}
+
+function getFileManagerRevealLabel(): string {
+  return uiText("Open in {fileManager}", { fileManager: getFileManagerName() });
 }
 
 function pathParentSegments(path: string): string[] {
@@ -506,40 +523,55 @@ const MarkdownFileLink = memo(function MarkdownFileLink({
   theme,
   className,
 }: MarkdownFileLinkProps) {
+  const uiLocale = useUiLocale();
+  const uiPresentation = useUiPresentation(UI_PRESENTATION_SOURCES);
+
   const environmentId = useWorkspaceEnvironmentId();
   const localShellCapabilities = getLocalShellCapabilities(environmentId);
   const canOpenLocalEditor = localShellCapabilities.canOpenLocalEditor;
   const canRevealLocalPath = localShellCapabilities.canOpenLocalPath;
   const linkRef = useRef<HTMLAnchorElement | null>(null);
-  const handleCopy = useCallback((value: string, title: string) => {
-    void copyTextToClipboard(value).then(
-      () => {
-        // A copy confirmation is inline (style guide §10): a brief
-        // tooltip-style note anchored to the link, not a stacked toast.
-        const anchor = linkRef.current;
-        if (!anchor?.isConnected) return;
-        anchoredToastManager.add({
-          data: { tooltipStyle: true },
-          positionerProps: { anchor },
-          timeout: 1200,
-          title: `${title} copied`,
-        });
-      },
-      (error) => {
-        toastManager.add(
-          stackedThreadToast({
-            type: "error",
-            title: `Failed to copy ${title.toLowerCase()}`,
-            description: error instanceof Error ? error.message : "An error occurred.",
-          }),
-        );
-      },
-    );
-  }, []);
+  const handleCopy = useCallback(
+    (value: string, kind: "full" | "relative") => {
+      void copyTextToClipboard(value).then(
+        () => {
+          // A copy confirmation is inline (style guide §10): a brief
+          // tooltip-style note anchored to the link, not a stacked toast.
+          const anchor = linkRef.current;
+          if (!anchor?.isConnected) return;
+          anchoredToastManager.add({
+            data: { tooltipStyle: true },
+            positionerProps: { anchor },
+            timeout: 1200,
+            title:
+              kind === "full"
+                ? uiText("Full path copied", undefined, undefined, uiLocale)
+                : uiText("Relative path copied", undefined, undefined, uiLocale),
+          });
+        },
+        (error) => {
+          toastManager.add(
+            stackedThreadToast({
+              type: "error",
+              title:
+                kind === "full"
+                  ? uiText("Failed to copy full path", undefined, undefined, uiLocale)
+                  : uiText("Failed to copy relative path", undefined, undefined, uiLocale),
+              description:
+                error instanceof Error
+                  ? error.message
+                  : uiText("An error occurred.", undefined, undefined, uiLocale),
+            }),
+          );
+        },
+      );
+    },
+    [uiLocale],
+  );
 
   const handleOpen = useCallback(() => {
     if (!canOpenLocalEditor) {
-      handleCopy(targetPath, "Full path");
+      handleCopy(targetPath, "full");
       return;
     }
 
@@ -547,7 +579,7 @@ const MarkdownFileLink = memo(function MarkdownFileLink({
     if (!api) {
       toastManager.add({
         type: "error",
-        title: "Open file is unavailable",
+        title: uiText("Open file is unavailable", undefined, undefined, uiLocale),
       });
       return;
     }
@@ -555,7 +587,14 @@ const MarkdownFileLink = memo(function MarkdownFileLink({
     void (async () => {
       if (openPolicy === "confirm") {
         const confirmed = await api.dialogs.confirm(
-          `This file is outside the current workspace:\n\n${targetPath}\n\nOpen it anyway?`,
+          uiText(
+            "This file is outside the current workspace:\n\n{value0}\n\nOpen it anyway?",
+            {
+              value0: targetPath,
+            },
+            undefined,
+            uiLocale,
+          ),
         );
         if (!confirmed) {
           return;
@@ -567,25 +606,28 @@ const MarkdownFileLink = memo(function MarkdownFileLink({
       toastManager.add(
         stackedThreadToast({
           type: "error",
-          title: "Unable to open file",
-          description: error instanceof Error ? error.message : "An error occurred.",
+          title: uiText("Unable to open file", undefined, undefined, uiLocale),
+          description:
+            error instanceof Error
+              ? error.message
+              : uiText("An error occurred.", undefined, undefined, uiLocale),
         }),
       );
     });
-  }, [canOpenLocalEditor, handleCopy, openPolicy, targetPath]);
+  }, [canOpenLocalEditor, handleCopy, openPolicy, targetPath, uiLocale]);
 
   const handleReveal = useCallback(() => {
     if (!canRevealLocalPath) {
-      handleCopy(filePath, "Full path");
+      handleCopy(filePath, "full");
       return;
     }
 
     const api = readLocalApi();
-    const fileManagerLabel = getFileManagerRevealLabel();
+    const fileManager = getFileManagerName();
     if (!api) {
       toastManager.add({
         type: "error",
-        title: `${fileManagerLabel} is unavailable`,
+        title: uiText("Open in {fileManager} is unavailable", { fileManager }, undefined, uiLocale),
       });
       return;
     }
@@ -593,7 +635,14 @@ const MarkdownFileLink = memo(function MarkdownFileLink({
     void (async () => {
       if (openPolicy === "confirm") {
         const confirmed = await api.dialogs.confirm(
-          `This file is outside the current workspace:\n\n${targetPath}\n\nReveal it anyway?`,
+          uiText(
+            "This file is outside the current workspace:\n\n{value0}\n\nReveal it anyway?",
+            {
+              value0: targetPath,
+            },
+            undefined,
+            uiLocale,
+          ),
         );
         if (!confirmed) {
           return;
@@ -605,12 +654,15 @@ const MarkdownFileLink = memo(function MarkdownFileLink({
       toastManager.add(
         stackedThreadToast({
           type: "error",
-          title: `Unable to ${fileManagerLabel.toLowerCase()}`,
-          description: error instanceof Error ? error.message : "An error occurred.",
+          title: uiText("Unable to open in {fileManager}", { fileManager }, undefined, uiLocale),
+          description:
+            error instanceof Error
+              ? error.message
+              : uiText("An error occurred.", undefined, undefined, uiLocale),
         }),
       );
     });
-  }, [canRevealLocalPath, filePath, handleCopy, openPolicy, targetPath]);
+  }, [canRevealLocalPath, filePath, handleCopy, openPolicy, targetPath, uiLocale]);
 
   const handleContextMenu = useCallback(
     async (event: ReactMouseEvent<HTMLAnchorElement>) => {
@@ -622,12 +674,19 @@ const MarkdownFileLink = memo(function MarkdownFileLink({
 
       const clicked = await api.contextMenu.show(
         [
-          ...(canOpenLocalEditor ? ([{ id: "open", label: "Open file" }] as const) : []),
-          ...(canRevealLocalPath
-            ? ([{ id: "reveal", label: getFileManagerRevealLabel() }] as const)
+          ...(canOpenLocalEditor
+            ? ([
+                { id: "open", label: uiText("Open file", undefined, undefined, uiLocale) },
+              ] as const)
             : []),
-          { id: "copy-relative", label: "Copy relative path" },
-          { id: "copy-full", label: "Copy full path" },
+          ...(canRevealLocalPath
+            ? ([{ id: "reveal", label: uiPresentation.getFileManagerRevealLabel() }] as const)
+            : []),
+          {
+            id: "copy-relative",
+            label: uiText("Copy relative path", undefined, undefined, uiLocale),
+          },
+          { id: "copy-full", label: uiText("Copy full path", undefined, undefined, uiLocale) },
         ] as const,
         { x: event.clientX, y: event.clientY },
       );
@@ -641,11 +700,11 @@ const MarkdownFileLink = memo(function MarkdownFileLink({
         return;
       }
       if (clicked === "copy-relative") {
-        handleCopy(displayPath, "Relative path");
+        handleCopy(displayPath, "relative");
         return;
       }
       if (clicked === "copy-full") {
-        handleCopy(targetPath, "Full path");
+        handleCopy(targetPath, "full");
       }
     },
     [
@@ -656,6 +715,8 @@ const MarkdownFileLink = memo(function MarkdownFileLink({
       handleOpen,
       handleReveal,
       targetPath,
+      uiLocale,
+      uiPresentation,
     ],
   );
 
@@ -691,7 +752,9 @@ const MarkdownFileLink = memo(function MarkdownFileLink({
       >
         <div className="markdown-file-link-tooltip-scroll overflow-x-auto whitespace-nowrap">
           {displayPath}
-          {openPolicy === "confirm" ? " (outside workspace)" : ""}
+          {openPolicy === "confirm"
+            ? uiText(" (outside workspace)", undefined, undefined, uiLocale)
+            : ""}
         </div>
       </TooltipPopup>
     </Tooltip>
@@ -862,3 +925,6 @@ function ChatMarkdown({
 }
 
 export default memo(ChatMarkdown);
+
+// Finite source-owned labels/helpers only; no received or user data.
+const UI_PRESENTATION_SOURCES = { getFileManagerRevealLabel };

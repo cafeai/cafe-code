@@ -568,6 +568,27 @@ describe("Codex picker model/list refresh", () => {
     ).toEqual(["gpt-provider", "custom-model"]);
   });
 
+  it("does not resurrect omitted GPT-5.5 from the cold fallback or erase an explicit custom selection", () => {
+    const upstream = [
+      {
+        slug: "gpt-6.1-sol",
+        name: "Account Sol",
+        isCustom: false,
+        capabilities: null,
+      },
+    ];
+    // A conclusive native catalogue replaces the generic startup fallback.
+    // The official October 14 retirement excludes API-key sessions, so keep
+    // explicit user-entered IDs rather than applying a wall-clock/global ban.
+    expect(finalizeCodexModelListRefresh(upstream, [])).toEqual(upstream);
+    expect(finalizeCodexModelListRefresh(upstream, ["gpt-5.5"])).toEqual([
+      ...upstream,
+      { slug: "gpt-5.5", name: "gpt-5.5", isCustom: true, capabilities: null },
+    ]);
+    const api = [{ slug: "gpt-5.5", name: "Account GPT-5.5", isCustom: false, capabilities: null }];
+    expect(finalizeCodexModelListRefresh(api, [])).toEqual(api);
+  });
+
   it("uses exact bundled controls for custom Astra absent from the live catalog", () => {
     const upstream = [
       {

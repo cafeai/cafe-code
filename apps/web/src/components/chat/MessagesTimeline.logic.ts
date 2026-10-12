@@ -1,4 +1,5 @@
 import * as Equal from "effect/Equal";
+import { uiText } from "@cafecode/shared/i18n";
 import {
   type HistoricalWorkLogSummary,
   type TimelineEntry,
@@ -289,7 +290,13 @@ export function deriveHistoricalWorkLogDisplayState(
       : input.rawTotalCount !== null
         ? input.rawTotalCount > input.previewEntryCount
         : input.snapshotEntryCount > 0;
-  const countLabel = displayCount > 0 ? ` (${displayCount}${countIsLowerBound ? "+" : ""})` : "";
+  const countLabel =
+    displayCount > 0
+      ? uiText(" ({count}{lowerBound, select, yes {+} other {}})", {
+          count: displayCount,
+          lowerBound: countIsLowerBound ? "yes" : "no",
+        })
+      : "";
 
   return {
     countLabel,
@@ -326,7 +333,7 @@ export function deriveMessagesTimelineRows(input: {
     insertedHistoricalWorkTurnIds.add(turnId);
     nextRows.push({
       kind: "historical-work",
-      id: `historical-work:${turnId}`,
+      id: `${summary.before ? "earlier-work" : "historical-work"}:${turnId}`,
       createdAt:
         summary.previewEntries.at(-1)?.createdAt ??
         summary.subagentEntries?.at(-1)?.createdAt ??
@@ -354,7 +361,9 @@ export function deriveMessagesTimelineRows(input: {
     .flatMap((summary) => {
       if (anchoredTurnIds.has(summary.turnId)) return [];
       const createdAt =
-        summary.previewEntries.at(-1)?.createdAt ?? summary.subagentEntries?.at(-1)?.createdAt;
+        summary.previewEntries.at(-1)?.createdAt ??
+        summary.subagentEntries?.at(-1)?.createdAt ??
+        summary.before?.createdAt;
       return createdAt ? [{ turnId: summary.turnId, createdAt }] : [];
     })
     .toSorted((left, right) => left.createdAt.localeCompare(right.createdAt));

@@ -1,10 +1,16 @@
-import type { MaxConcurrentSubagents, ProviderInstanceId, ThreadId } from "@cafecode/contracts";
+import type {
+  CodexContextWindowOverride,
+  MaxConcurrentSubagents,
+  ProviderInstanceId,
+  ThreadId,
+} from "@cafecode/contracts";
 
 interface SessionLimitIdentity {
   readonly threadId: ThreadId;
   readonly providerName: string | null;
   readonly providerInstanceId?: ProviderInstanceId | null | undefined;
   readonly maxConcurrentSubagents?: MaxConcurrentSubagents | null | undefined;
+  readonly codexContextWindowOverride?: CodexContextWindowOverride | null | undefined;
   readonly subagentRuntimeId?: string | null | undefined;
 }
 
@@ -19,6 +25,7 @@ export function materializedSubagentLimitFields(
   previous?: SessionLimitIdentity | null,
 ): {
   readonly maxConcurrentSubagents?: MaxConcurrentSubagents | null;
+  readonly codexContextWindowOverride?: CodexContextWindowOverride | null;
   readonly subagentRuntimeId?: string | null;
 } {
   // Ordinary parent lifecycle updates must retain the exact native context.
@@ -36,7 +43,29 @@ export function materializedSubagentLimitFields(
       : sameBinding
         ? previous.subagentRuntimeId
         : undefined;
-  const runtimeFields = runtimeId === undefined ? {} : { subagentRuntimeId: runtimeId };
+  // Requested metadata is not process evidence. Carry the context override
+  // only from an incoming exact observation or this same authenticated binding.
+  // An explicit null clears a prior numeric fallback; absence remains unknown.
+  // Null/absent are the same legacy unknown generation representation; their
+  // normalization is not proof of retirement or native ownership. Preserve
+  // recorded configuration only, never idle/adoption/continuation authority.
+  // A known generation -> null or a different generation cannot borrow the
+  // former runtime's configuration on an omitted lifecycle field. Omitted
+  // incoming generations remain compatible with ordinary lifecycle producers.
+  const sameContextBinding =
+    sameBinding &&
+    (incoming.subagentRuntimeId === undefined ||
+      (incoming.subagentRuntimeId ?? null) === (previous.subagentRuntimeId ?? null));
+  const contextOverride =
+    incoming.codexContextWindowOverride !== undefined
+      ? incoming.codexContextWindowOverride
+      : sameContextBinding
+        ? previous.codexContextWindowOverride
+        : undefined;
+  const runtimeFields = {
+    ...(runtimeId === undefined ? {} : { subagentRuntimeId: runtimeId }),
+    ...(contextOverride === undefined ? {} : { codexContextWindowOverride: contextOverride }),
+  };
   if (incoming.maxConcurrentSubagents !== undefined) {
     return { ...runtimeFields, maxConcurrentSubagents: incoming.maxConcurrentSubagents };
   }

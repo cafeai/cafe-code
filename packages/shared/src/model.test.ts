@@ -201,6 +201,19 @@ describe("normalizeModelSlug", () => {
     expect(normalizeModelSlug("sonnet-5", claude)).toBe("claude-sonnet-5");
     expect(normalizeModelSlug("sonnet5", claude)).toBe("claude-sonnet-5");
     expect(normalizeModelSlug("claude-sonnet-5", claude)).toBe("claude-sonnet-5");
+    for (const alias of [
+      "haiku-5.5",
+      "claude-haiku-5.5",
+      "haiku-5-5",
+      "haiku5.5",
+      "haiku55",
+      "haiku_5_5",
+      "claude-haiku-5-5",
+    ]) {
+      expect(normalizeModelSlug(alias, claude)).toBe("claude-haiku-5-5");
+    }
+    expect(normalizeModelSlug("haiku", claude)).toBe("claude-haiku-4-5");
+    expect(normalizeModelSlug("haiku-4.5", claude)).toBe("claude-haiku-4-5");
   });
 
   it("returns null for empty or missing values", () => {
@@ -219,6 +232,8 @@ describe("resolveModelSlugForProvider", () => {
     expect(resolveModelSlugForProvider(claude, "sonnet")).toBe("claude-sonnet-5");
     expect(resolveModelSlugForProvider(claude, "sonnet[1m]")).toBe("claude-sonnet-5");
     expect(resolveModelSlugForProvider(claude, "sonnet-5.5")).toBe("claude-sonnet-5-5");
+    expect(resolveModelSlugForProvider(claude, "haiku")).toBe("claude-haiku-4-5");
+    expect(resolveModelSlugForProvider(claude, "haiku-5.5")).toBe("claude-haiku-5-5");
   });
   it("defaults new Codex selections to Astra while preserving explicit Sol selections", () => {
     const codex = ProviderDriverKind.make("codex");

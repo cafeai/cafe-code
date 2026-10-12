@@ -8,6 +8,7 @@ import {
   ApprovalRequestId,
   CodexSettings,
   EventId,
+  isCodexNativeRetryWarningPayload,
   MessageId,
   ProviderDriverKind,
   ProviderInstanceId,
@@ -23,12 +24,17 @@ import {
   type ProviderUserInputAnswers,
   type ServerProviderModel,
   ThreadId,
+  SubagentRuntimeId,
   THREAD_TURN_SUBAGENT_DETAIL_MAX_MESSAGE_BYTES,
   THREAD_TURN_SUBAGENT_DETAIL_MAX_MESSAGES,
   THREAD_TURN_SUBAGENT_DETAIL_MAX_TOTAL_BYTES,
   TurnId,
 } from "@cafecode/contracts";
 import { createModelSelection } from "@cafecode/shared/model";
+import {
+  makeProviderDiagnostic,
+  readProviderDiagnosticSummary,
+} from "@cafecode/shared/providerDiagnostic";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { it, vi } from "@effect/vitest";
 
@@ -73,8 +79,10 @@ import {
   type CodexThreadSnapshot,
 } from "./CodexSessionRuntime.ts";
 import {
+  bridgeEventLogContext,
   canonicalizeCodexSubagentDetail,
   makeCodexAdapter,
+  makeCodexNativeRetryTracker,
   redactDesktopToolEvent,
   type CodexAdapterLiveOptions,
 } from "./CodexAdapter.ts";
@@ -84,8 +92,10 @@ import {
   type SchedulingSessionBroker,
 } from "../../scheduledFollowups/sessionRuntime.ts";
 import { installNativeControlSessionBroker } from "../../nativeControl/sessionRuntime.ts";
+import { CODEX_HISTORY_DIAGNOSIS_UNCERTAIN_MESSAGE } from "../codexHistorySafety.ts";
 const decodeCodexSettings = Schema.decodeSync(CodexSettings);
 const decodeMessageId = Schema.decodeUnknownSync(MessageId);
+const decodeNativeNotification = Schema.decodeUnknownSync(EffectCodexSchema.ServerNotification);
 const isStartedItem = Schema.is(EffectCodexSchema.V2ItemStartedNotification);
 const isCompletedItem = Schema.is(EffectCodexSchema.V2ItemCompletedNotification);
 
@@ -115,6 +125,445 @@ const retainedDetailBytes = (detail: ReturnType<typeof canonicalizeCodexSubagent
       total + utf8Bytes(message.text) + (message.omission ? utf8Bytes(message.omission.tail) : 0),
     0,
   );
+
+const retryTestRuntimeId = "b9c6b24c-3323-4d5e-bc74-9df5b7806108";
+const retryTestAccountId = ProviderInstanceId.make("codex_retry_test");
+function retryObservationFrame(
+  id: string,
+  targetId = "native-root",
+  nativeTurnId = "native-turn-1",
+  child = false,
+): ProviderEvent {
+  return {
+    id: asEventId(id),
+    kind: "notification",
+    provider: ProviderDriverKind.make("codex"),
+    providerInstanceId: retryTestAccountId,
+    subagentRuntimeId: retryTestRuntimeId,
+    threadId: asThreadId("visible-retry-thread"),
+    createdAt: "2026-10-11T00:00:00.000Z",
+    method: child ? "codex.subagent/error" : "error",
+    turnId: asTurnId(child ? "canonical-parent-turn" : nativeTurnId),
+    payload: {
+      threadId: targetId,
+      turnId: nativeTurnId,
+      error: { message: "Reconnecting... 1/5", codexErrorInfo: "serverOverloaded" },
+      willRetry: true,
+    },
+  };
+}
+
+function retryTurnFrame(
+  turnId: string,
+  completed = false,
+  targetId = "native-root",
+  child = false,
+): ProviderEvent {
+  return {
+    ...retryObservationFrame(`turn-${turnId}-${completed}`, targetId, turnId, child),
+    method: child
+      ? completed
+        ? "codex.subagent/turnCompleted"
+        : "codex.subagent/turnStarted"
+      : completed
+        ? "turn/completed"
+        : "turn/started",
+    payload: {
+      threadId: targetId,
+      turn: { id: turnId, items: [], status: completed ? "failed" : "inProgress", error: null },
+    },
+  };
+}
+
+const boundRetryTracker = () =>
+  makeCodexNativeRetryTracker({
+    threadId: asThreadId("visible-retry-thread"),
+    providerInstanceId: retryTestAccountId,
+    runtimeId: retryTestRuntimeId,
+  });
+
+it("counts unique qualified native warning envelopes without interpreting restarted fractions", () => {
+  const observe = boundRetryTracker();
+  for (const [index, fraction] of ["1/5", "2/5", "1/5", "1/2", "2/2"].entries()) {
+    const event = retryObservationFrame(`retry-${index}`);
+    const payload = event.payload as { error: { message: string } };
+    payload.error.message = `Reconnecting... ${fraction}`;
+    assert.deepEqual(observe(event, "native-root"), {
+      observedCount: index + 1,
+      timing: "unknown",
+    });
+    assert.deepEqual(observe(event, "native-root"), {
+      observedCount: index + 1,
+      timing: "unknown",
+    });
+  }
+  const policy = {
+    ...retryObservationFrame("native-policy-retry"),
+    payload: {
+      threadId: "native-root",
+      turnId: "native-turn-1",
+      willRetry: true,
+      error: { message: "Too many tool calls were denied", codexErrorInfo: "tooManyDenials" },
+    },
+  };
+  // A typed native retry is an observation even when Cafe must not auto-replay
+  // the terminal category. This counter is never continuation admission.
+  assert.deepEqual(observe(policy, "native-root"), { observedCount: 6, timing: "unknown" });
+});
+
+it("binds native retry observations to the exact account, runtime, visible thread and root target", () => {
+  const observe = boundRetryTracker();
+  const valid = retryObservationFrame("valid-retry");
+  for (const invalid of [
+    { ...valid, provider: ProviderDriverKind.make("claude") },
+    { ...valid, providerInstanceId: ProviderInstanceId.make("codex_foreign") },
+    { ...valid, providerInstanceId: undefined },
+    { ...valid, subagentRuntimeId: "bd89b1eb-f8d6-42b6-916f-cf6ee08a2642" },
+    { ...valid, subagentRuntimeId: undefined },
+    { ...valid, threadId: asThreadId("foreign-visible-thread") },
+    { ...valid, turnId: asTurnId("foreign-turn") },
+    { ...valid, kind: "request" as const },
+    retryObservationFrame("wrong-root", "native-child"),
+    retryObservationFrame("child-cannot-own-root", "native-root", "native-turn-1", true),
+  ])
+    assert.equal(observe(invalid, "native-root"), undefined);
+  assert.equal(observe(valid, undefined), undefined);
+  assert.equal(
+    observe(
+      retryObservationFrame("unknown-child-owner", "native-child", "child-turn", true),
+      undefined,
+    ),
+    undefined,
+  );
+  assert.deepEqual(observe(valid, "native-root"), { observedCount: 1, timing: "unknown" });
+  assert.deepEqual(
+    observe(retryObservationFrame("child-1", "native-child", "child-turn", true), "native-root"),
+    { observedCount: 1, timing: "unknown" },
+  );
+  assert.deepEqual(observe(retryObservationFrame("root-2"), "native-root"), {
+    observedCount: 2,
+    timing: "unknown",
+  });
+  assert.deepEqual(boundRetryTracker()(valid, "native-root"), {
+    observedCount: 1,
+    timing: "unknown",
+  });
+});
+
+it("resets native retry observations only for a new proven turn and never reopens a terminal turn", () => {
+  const observe = boundRetryTracker();
+  assert.equal(observe(retryTurnFrame("native-turn-1"), "native-root"), undefined);
+  assert.deepEqual(observe(retryObservationFrame("old-1"), "native-root"), {
+    observedCount: 1,
+    timing: "unknown",
+  });
+  assert.equal(observe(retryTurnFrame("native-turn-1"), "native-root"), undefined);
+  assert.deepEqual(observe(retryObservationFrame("old-2"), "native-root"), {
+    observedCount: 2,
+    timing: "unknown",
+  });
+  assert.equal(observe(retryTurnFrame("native-turn-2"), "native-root"), undefined);
+  assert.equal(observe(retryTurnFrame("native-turn-1"), "native-root"), undefined);
+  assert.equal(observe(retryObservationFrame("late-old"), "native-root"), undefined);
+  assert.deepEqual(
+    observe(retryObservationFrame("new-1", "native-root", "native-turn-2"), "native-root"),
+    { observedCount: 1, timing: "unknown" },
+  );
+  assert.equal(observe(retryTurnFrame("native-turn-1", true), "native-root"), undefined);
+  assert.deepEqual(
+    observe(retryObservationFrame("new-2", "native-root", "native-turn-2"), "native-root"),
+    { observedCount: 2, timing: "unknown" },
+  );
+  assert.equal(observe(retryTurnFrame("native-turn-2", true), "native-root"), undefined);
+  assert.equal(
+    observe(retryObservationFrame("after-terminal", "native-root", "native-turn-2"), "native-root"),
+    undefined,
+  );
+  assert.equal(observe(retryTurnFrame("native-turn-2"), "native-root"), undefined);
+  assert.equal(
+    observe(
+      retryObservationFrame("after-late-start", "native-root", "native-turn-2"),
+      "native-root",
+    ),
+    undefined,
+  );
+  assert.equal(observe(retryTurnFrame("native-turn-3"), "native-root"), undefined);
+  assert.deepEqual(
+    observe(
+      retryObservationFrame("fresh-after-terminal", "native-root", "native-turn-3"),
+      "native-root",
+    ),
+    { observedCount: 1, timing: "unknown" },
+  );
+});
+
+it("bounds native retry counters without evicting targets or claiming a precise count after saturation", () => {
+  const observe = boundRetryTracker();
+  for (let index = 1; index <= 1_024; index++) {
+    assert.deepEqual(observe(retryObservationFrame(`retry-${index}`), "native-root"), {
+      observedCount: index,
+      timing: "unknown",
+    });
+  }
+  assert.deepEqual(observe(retryObservationFrame("retry-1"), "native-root"), {
+    observedCount: 1_024,
+    timing: "unknown",
+  });
+  assert.deepEqual(observe(retryObservationFrame("retry-overflow"), "native-root"), {
+    observedCount: 1_024,
+    timing: "unknown",
+    countLimited: true,
+  });
+  assert.deepEqual(observe(retryObservationFrame("retry-1"), "native-root"), {
+    observedCount: 1_024,
+    timing: "unknown",
+    countLimited: true,
+  });
+  for (let index = 1; index < 256; index++) {
+    assert.deepEqual(
+      observe(
+        retryObservationFrame(`child-${index}`, `child-${index}`, "child-turn", true),
+        "native-root",
+      ),
+      { observedCount: 1, timing: "unknown" },
+    );
+  }
+  assert.equal(
+    observe(
+      retryObservationFrame("untracked-child", "child-256", "child-turn", true),
+      "native-root",
+    ),
+    undefined,
+  );
+  assert.deepEqual(
+    observe(retryObservationFrame("child-second", "child-1", "child-turn", true), "native-root"),
+    { observedCount: 2, timing: "unknown" },
+  );
+  assert.equal(observe(retryTurnFrame("new-bounded-turn"), "native-root"), undefined);
+  assert.deepEqual(
+    observe(
+      retryObservationFrame("reset-bounded", "native-root", "new-bounded-turn"),
+      "native-root",
+    ),
+    { observedCount: 1, timing: "unknown" },
+  );
+});
+
+it("bounds total retry fingerprint memory without recycling an unavailable counter", () => {
+  const observe = boundRetryTracker();
+  for (let target = 0; target < 16; target++) {
+    for (let index = 1; index <= 1_024; index++) {
+      const result = observe(
+        retryObservationFrame(`memory-${target}-${index}`, `child-${target}`, "child-turn", true),
+        "native-root",
+      );
+      if (target < 15) assert.deepEqual(result, { observedCount: index, timing: "unknown" });
+      else
+        assert.deepEqual(
+          result,
+          index <= 1_008
+            ? { observedCount: index, timing: "unknown" }
+            : { observedCount: 1_008, timing: "unknown", countLimited: true },
+        );
+      if (target === 15 && index === 1_024) {
+        assert.ok(result);
+        const diagnostic = makeProviderDiagnostic({
+          observedAt: "2026-01-01T00:00:00.000Z",
+          source: "codex.app-server.notification",
+          status: "retry",
+          subject: { kind: "subagent", id: "child-15" },
+          observedRetryCount: result.observedCount,
+          ...(result.countLimited === true ? { countLimited: true } : {}),
+          payload: { error: { message: "Provider reconnecting" }, willRetry: true },
+        });
+        // Tracking all admitted targets can exhaust the global budget before
+        // this target's counter saturates. The summary must remain finite
+        // native retry evidence for downstream immutable clock classification.
+        assert.equal(diagnostic.summary.observedRetryCount, 1_008);
+        assert.equal(diagnostic.summary.countLimited, true);
+        assert.deepEqual(readProviderDiagnosticSummary(diagnostic.summary), diagnostic.summary);
+        assert.equal(
+          isCodexNativeRetryWarningPayload({
+            message: "Provider reconnecting",
+            retrying: true,
+            detail: { willRetry: true },
+            nativeRetry: result,
+            providerDiagnostic: diagnostic.summary,
+          }),
+          true,
+        );
+      }
+    }
+  }
+  assert.equal(
+    observe(
+      retryObservationFrame("unavailable-memory", "child-new", "child-turn", true),
+      "native-root",
+    ),
+    undefined,
+  );
+  assert.equal(
+    observe(
+      {
+        ...retryObservationFrame("stop-child", "child-0", "child-turn", true),
+        method: "codex.subagent/threadStopped",
+        payload: { threadId: "child-0" },
+      },
+      "native-root",
+    ),
+    undefined,
+  );
+  assert.equal(
+    observe(
+      retryObservationFrame("stopped-late-retry", "child-0", "child-turn", true),
+      "native-root",
+    ),
+    undefined,
+  );
+  assert.equal(
+    observe(
+      retryObservationFrame("still-unavailable-after-stop", "child-new", "child-turn", true),
+      "native-root",
+    ),
+    undefined,
+  );
+  assert.deepEqual(
+    observe(
+      retryObservationFrame("tracked-after-release", "child-15", "child-turn", true),
+      "native-root",
+    ),
+    { observedCount: 1_009, timing: "unknown", countLimited: true },
+  );
+  assert.deepEqual(
+    observe(retryObservationFrame("memory-15-1", "child-15", "child-turn", true), "native-root"),
+    { observedCount: 1_009, timing: "unknown", countLimited: true },
+  );
+});
+
+it("terminal retry observation admission does not inspect large native item history", () => {
+  const observe = boundRetryTracker();
+  assert.deepEqual(observe(retryObservationFrame("before-large-terminal"), "native-root"), {
+    observedCount: 1,
+    timing: "unknown",
+  });
+  let historyReads = 0;
+  const items = new Proxy(new Array(100_000), {
+    ownKeys: () => {
+      historyReads++;
+      throw new Error("history must remain unread");
+    },
+  });
+  const terminal = retryTurnFrame("native-turn-1", true);
+  assert.equal(
+    observe(
+      {
+        ...terminal,
+        payload: {
+          threadId: "native-root",
+          turn: { id: "native-turn-1", status: "failed", items, error: null },
+        },
+      },
+      "native-root",
+    ),
+    undefined,
+  );
+  assert.equal(historyReads, 0);
+  assert.equal(observe(retryObservationFrame("after-large-terminal"), "native-root"), undefined);
+});
+
+it("fails closed on malformed or executable retry metadata without reading getters", () => {
+  const observe = boundRetryTracker();
+  const valid = retryObservationFrame("valid-after-malformed");
+  let getterCalls = 0;
+  const accessor = { ...(valid.payload as object) };
+  Object.defineProperty(accessor, "turnId", {
+    enumerable: true,
+    get: () => {
+      getterCalls++;
+      return "native-turn-1";
+    },
+  });
+  const nestedAccessor = { message: "Native retry" };
+  Object.defineProperty(nestedAccessor, "codexErrorInfo", {
+    enumerable: true,
+    get: () => {
+      getterCalls++;
+      return "serverOverloaded";
+    },
+  });
+  const malformed = [
+    { ...(valid.payload as object), willRetry: false },
+    { ...(valid.payload as object), willRetry: "true" },
+    { ...(valid.payload as object), turnId: "" },
+    { ...(valid.payload as object), threadId: "native-root\n" },
+    { ...(valid.payload as object), error: { message: 3 } },
+    { ...(valid.payload as object), error: { message: "Native retry", codexErrorInfo: 3 } },
+    Object.create(valid.payload as object),
+    accessor,
+    { ...(valid.payload as object), error: nestedAccessor },
+    { ...(valid.payload as object), future: new Date() },
+    {
+      ...(valid.payload as object),
+      future: new Proxy(
+        {},
+        {
+          ownKeys: () => {
+            throw new Error("inert proxy refusal");
+          },
+        },
+      ),
+    },
+  ];
+  for (const payload of malformed)
+    assert.equal(observe({ ...valid, payload }, "native-root"), undefined);
+  assert.equal(observe({ ...valid, id: asEventId("x".repeat(513)) }, "native-root"), undefined);
+  assert.equal(getterCalls, 0);
+  assert.deepEqual(observe(valid, "native-root"), { observedCount: 1, timing: "unknown" });
+});
+
+it("redacts bridge causes for unqualified native error metadata without changing owner references", () => {
+  const error = {
+    message: "Public native error",
+    codexErrorInfo: { responseStreamDisconnected: { httpStatusCode: 503 } },
+    futurePolicy: "private-bridge-metadata-sentinel",
+  };
+  const event: ProviderEvent = {
+    id: asEventId("bridge-error-event"),
+    kind: "notification",
+    provider: ProviderDriverKind.make("codex"),
+    threadId: asThreadId("bridge-thread"),
+    turnId: asTurnId("bridge-turn"),
+    createdAt: "2026-10-11T00:00:00.000Z",
+    method: "error",
+    payload: { threadId: "bridge-thread", turnId: "bridge-turn", willRetry: false, error },
+  };
+  const original = JSON.stringify(event);
+  const context = bridgeEventLogContext(event, {
+    stage: "failed",
+    cause: "private-bridge-cause-sentinel",
+  });
+  assert.equal(context.cause, "Codex error diagnostic cause redacted.");
+  assert.equal(context.threadId, event.threadId);
+  assert.equal(context.turnId, event.turnId);
+  assert.equal(context.eventId, event.id);
+  assert.doesNotMatch(JSON.stringify(context), /private-bridge-(?:metadata|cause)-sentinel/);
+  assert.equal(JSON.stringify(event), original);
+  assert.equal(
+    bridgeEventLogContext(
+      {
+        ...event,
+        payload: {
+          threadId: "bridge-thread",
+          turnId: "bridge-turn",
+          willRetry: false,
+          error: { message: "Public error", codexErrorInfo: "serverOverloaded" },
+        },
+      },
+      { cause: "Known public cause" },
+    ).cause,
+    "Known public cause",
+  );
+});
 
 it("preserves public reply phase and canonical item times with honest native cutoff", () => {
   const detail = canonicalizeCodexSubagentDetail({
@@ -161,6 +610,28 @@ it("preserves public reply phase and canonical item times with honest native cut
     historyIncomplete: true,
   });
   assert.doesNotMatch(JSON.stringify(detail), /private-native-child|Infinity/);
+});
+
+it("presents native partial answers as public commentary, never a completed final answer", () => {
+  const detail = canonicalizeCodexSubagentDetail({
+    threadId: "native-child",
+    turns: [
+      {
+        id: asTurnId("child-turn"),
+        items: [
+          {
+            type: "agentMessage",
+            id: "partial-item",
+            text: "Public interim answer",
+            phase: "partial_answer",
+          },
+        ],
+      },
+    ],
+  });
+  assert.deepEqual(detail.messages, [
+    { key: "m0", role: "assistant", text: "Public interim answer", phase: "commentary" },
+  ]);
 });
 
 it("canonicalizes only public subagent chat text and strips unsafe controls", () => {
@@ -484,6 +955,7 @@ class FakeCodexRuntime implements CodexSessionRuntimeShape {
       status,
       runtimeMode: this.options.runtimeMode,
       maxConcurrentSubagents: this.options.maxConcurrentSubagents ?? null,
+      codexContextWindowOverride: this.options.codexContextWindowOverride ?? null,
       threadId: this.options.threadId,
       cwd: this.options.cwd,
       ...(this.options.model ? { model: this.options.model } : {}),
@@ -872,6 +1344,7 @@ it.effect(
 function makeConcurrencyTestLayer(
   factory: ReturnType<typeof makeRuntimeFactory>,
   instanceLimit?: number,
+  contextSupport: () => boolean = () => true,
 ) {
   return Layer.effect(
     CodexAdapter,
@@ -879,7 +1352,11 @@ function makeConcurrencyTestLayer(
       decodeCodexSettings({
         ...(instanceLimit !== undefined ? { maxConcurrentSubagents: instanceLimit } : {}),
       }),
-      { makeRuntime: factory.factory, getSubagentConcurrencySupport: () => true },
+      {
+        makeRuntime: factory.factory,
+        getSubagentConcurrencySupport: () => true,
+        getCodexContextWindowSupport: contextSupport,
+      },
     ),
   ).pipe(
     Layer.provideMerge(ServerConfig.layerTest(process.cwd(), process.cwd())),
@@ -989,6 +1466,102 @@ it.effect(
       assert.equal(factory.lastRuntime?.options.maxConcurrentSubagents, undefined);
       assert.deepEqual(factory.lastRuntime?.options.resumeCursor, session.resumeCursor);
     }).pipe(Effect.provide(makeConcurrencyTestLayer(factory)));
+  },
+);
+
+it.effect(
+  "applies combined chat context and subagent overrides through one final idle admission and omits native Reset",
+  () => {
+    const factory = makeRuntimeFactory();
+    return Effect.gen(function* () {
+      const adapter = yield* CodexAdapter;
+      const initial = yield* adapter.startSession({
+        threadId: asThreadId("context-guard"),
+        runtimeMode: "full-access",
+        codexContextWindowOverride: 500_000,
+        maxConcurrentSubagents: 3,
+      });
+      assert.equal(initial.codexContextWindowOverride, 500_000);
+      assert.equal(factory.lastRuntime?.options.codexContextWindowOverride, 500_000);
+      const original = factory.lastRuntime!;
+      original.closeIfIdleImpl.mockResolvedValue(false);
+      const denied = yield* adapter
+        .startSession({
+          threadId: initial.threadId,
+          runtimeMode: "full-access",
+          codexContextWindowOverride: 600_000,
+          maxConcurrentSubagents: 4,
+          requireIdleForCodexContextWindowChange: true,
+          requireIdleForSubagentLimitChange: true,
+        })
+        .pipe(Effect.result);
+      assert.equal(denied._tag, "Failure");
+      if (denied._tag === "Failure")
+        assert.equal(
+          "remoteErrorTag" in denied.failure ? denied.failure.remoteErrorTag : null,
+          "codex-context-window-active",
+        );
+      assert.equal(factory.runtimes.length, 1);
+      assert.equal(original.closeIfIdleImpl.mock.calls.length, 1);
+      assert.equal(original.closeImpl.mock.calls.length, 0);
+      for (const value of [0, -1, 1.5, NaN, Infinity, Number.MAX_SAFE_INTEGER + 1]) {
+        const invalid = yield* adapter
+          .startSession({
+            threadId: initial.threadId,
+            runtimeMode: "full-access",
+            codexContextWindowOverride: value,
+          })
+          .pipe(Effect.result);
+        assert.equal(invalid._tag, "Failure");
+      }
+      assert.equal(original.closeImpl.mock.calls.length, 0);
+      original.closeIfIdleImpl.mockResolvedValue(true);
+      const reset = yield* adapter.startSession({
+        threadId: initial.threadId,
+        runtimeMode: "full-access",
+        resumeCursor: initial.resumeCursor,
+        codexContextWindowOverride: null,
+        maxConcurrentSubagents: null,
+        requireIdleForCodexContextWindowChange: true,
+        requireIdleForSubagentLimitChange: true,
+      });
+      assert.equal(reset.codexContextWindowOverride, null);
+      assert.equal(factory.lastRuntime?.options.codexContextWindowOverride, undefined);
+      assert.deepEqual(factory.lastRuntime?.options.resumeCursor, initial.resumeCursor);
+      assert.equal(original.closeIfIdleImpl.mock.calls.length, 2);
+      assert.equal(factory.lastRuntime?.options.autoCompactTokenLimit, undefined);
+    }).pipe(Effect.provide(makeConcurrencyTestLayer(factory)));
+  },
+);
+
+it.effect(
+  "refuses unsupported context Reset before native retirement and preserves current configuration",
+  () => {
+    const factory = makeRuntimeFactory();
+    let supported = true;
+    return Effect.gen(function* () {
+      const adapter = yield* CodexAdapter;
+      const initial = yield* adapter.startSession({
+        threadId: asThreadId("context-reset-unsupported"),
+        runtimeMode: "full-access",
+        codexContextWindowOverride: 500_000,
+      });
+      const original = factory.lastRuntime!;
+      supported = false;
+      const result = yield* adapter
+        .startSession({
+          threadId: initial.threadId,
+          runtimeMode: "full-access",
+          codexContextWindowOverride: null,
+          requireIdleForCodexContextWindowChange: true,
+        })
+        .pipe(Effect.result);
+      assert.equal(result._tag, "Failure");
+      assert.equal(factory.runtimes.length, 1);
+      assert.equal(original.closeIfIdleImpl.mock.calls.length, 0);
+      assert.equal(original.closeImpl.mock.calls.length, 0);
+      assert.equal((yield* adapter.listSessions())[0]?.codexContextWindowOverride, 500_000);
+    }).pipe(Effect.provide(makeConcurrencyTestLayer(factory, undefined, () => supported)));
   },
 );
 
@@ -1765,6 +2338,79 @@ sessionErrorLayer("CodexAdapterLive session errors", (it) => {
     }),
   );
 
+  it.effect(
+    "binds unchanged-policy send and steer to the exact native runtime and retains the final fence",
+    () =>
+      Effect.gen(function* () {
+        const adapter = yield* CodexAdapter;
+        const threadId = asThreadId("fenced-existing-policy");
+        yield* adapter.startSession({
+          threadId,
+          runtimeMode: "full-access",
+          maxConcurrentSubagents: 16,
+        });
+        const runtime = sessionRuntimeFactory.lastRuntime;
+        assert.ok(runtime);
+        const expected = {
+          threadId,
+          providerInstanceId: ProviderInstanceId.make("codex"),
+          subagentRuntimeId: SubagentRuntimeId.make("00000000-0000-4000-8000-000000000016"),
+          maxConcurrentSubagents: 16,
+        };
+        const snapshot = yield* runtime.getSession;
+        runtime.getSessionImpl.mockResolvedValue({ ...snapshot, ...expected, status: "ready" });
+        yield* adapter.sendTurn({
+          threadId,
+          input: "Synthetic next turn",
+          expectedSubagentPolicySession: expected,
+        });
+        yield* adapter.steerTurn({
+          threadId,
+          expectedTurnId: asTurnId("active-root"),
+          input: "Synthetic steer",
+          expectedSubagentPolicySession: expected,
+        });
+        assert.deepEqual(
+          runtime.sendTurnImpl.mock.calls[0]?.[0].expectedSubagentPolicySession,
+          expected,
+        );
+        assert.deepEqual(
+          runtime.steerTurnImpl.mock.calls[0]?.[0].expectedSubagentPolicySession,
+          expected,
+        );
+        runtime.getSessionImpl.mockResolvedValue({
+          ...snapshot,
+          ...expected,
+          status: "ready",
+          maxConcurrentSubagents: 17,
+        });
+        assert.equal(
+          (yield* adapter
+            .sendTurn({
+              threadId,
+              input: "Synthetic refused send",
+              expectedSubagentPolicySession: expected,
+            })
+            .pipe(Effect.result))._tag,
+          "Failure",
+        );
+        assert.equal(
+          (yield* adapter
+            .steerTurn({
+              threadId,
+              expectedTurnId: asTurnId("active-root"),
+              input: "Synthetic refused steer",
+              expectedSubagentPolicySession: expected,
+            })
+            .pipe(Effect.result))._tag,
+          "Failure",
+        );
+        assert.equal(runtime.sendTurnImpl.mock.calls.length, 1);
+        assert.equal(runtime.steerTurnImpl.mock.calls.length, 1);
+        assert.equal(runtime.closeImpl.mock.calls.length, 0);
+      }),
+  );
+
   it.effect("routes live steering through Codex turn/steer without turn-start overrides", () =>
     Effect.gen(function* () {
       const adapter = yield* CodexAdapter;
@@ -2101,6 +2747,219 @@ lifecycleLayer("CodexAdapterLive lifecycle", (it) => {
             { state: "failed", errorMessage: "Native failure", codexTransientFailure: "transport" },
           ],
         );
+      }),
+  );
+
+  it.effect("omits unqualified nested startup error metadata from canonical raw diagnostics", () =>
+    Effect.gen(function* () {
+      const { adapter, runtime } = yield* startLifecycleRuntime();
+      const error = {
+        message: "Public error",
+        codexErrorInfo: "serverOverloaded",
+        futurePolicy: "private-startup-error-sentinel",
+      };
+      const turn = { id: "startup-turn", items: [], status: "failed", error };
+      const eventsFiber = yield* Stream.runCollect(Stream.take(adapter.streamEvents, 2)).pipe(
+        Effect.forkChild,
+      );
+      for (const envelope of [
+        { method: "turn/started", params: { threadId: "provider-thread-1", turn } },
+        {
+          method: "thread/started",
+          params: {
+            thread: {
+              id: "provider-thread-1",
+              cliVersion: "0.162.1",
+              createdAt: 0,
+              updatedAt: 0,
+              cwd: "/fixture",
+              ephemeral: true,
+              modelProvider: "openai",
+              preview: "",
+              projectId: null,
+              sessionId: "session-1",
+              source: "appServer",
+              status: { type: "idle" },
+              turns: [turn],
+            },
+          },
+        },
+      ]) {
+        const decoded = decodeNativeNotification(envelope);
+        yield* runtime.emit({
+          id: asEventId(`startup-privacy-${decoded.method}`),
+          kind: "notification",
+          provider: ProviderDriverKind.make("codex"),
+          threadId: asThreadId("thread-1"),
+          turnId: asTurnId("startup-turn"),
+          createdAt: "2026-10-11T00:00:00.000Z",
+          method: decoded.method,
+          payload: decoded.params,
+        });
+      }
+      const events = Array.from(yield* Fiber.join(eventsFiber));
+      assert.deepEqual(
+        events.map((event) => event.type),
+        ["turn.started", "thread.started"],
+      );
+      assert.doesNotMatch(JSON.stringify(events), /private-startup-error-sentinel/);
+      assert.equal(runtime.sendTurnImpl.mock.calls.length, 0);
+      assert.equal(runtime.steerTurnImpl.mock.calls.length, 0);
+    }),
+  );
+
+  it.effect(
+    "retains conflicting typed native failure evidence without canonical recovery authority",
+    () =>
+      Effect.gen(function* () {
+        const { adapter, runtime } = yield* startLifecycleRuntime();
+        const cases: Array<Record<string, unknown>> = [
+          { responseStreamDisconnected: { httpStatusCode: 503 }, cyberPolicy: { blocked: true } },
+          {
+            responseStreamDisconnected: { httpStatusCode: 503 },
+            futureFailure: { opaque: "private-error-inner-sentinel" },
+          },
+          {
+            responseStreamDisconnected: { httpStatusCode: 503 },
+            httpConnectionFailed: { httpStatusCode: 503 },
+          },
+          { responseStreamDisconnected: { httpStatusCode: 503, permanent: true } },
+          { responseStreamDisconnected: { httpStatusCode: 503, cyberPolicy: { blocked: true } } },
+        ].map((codexErrorInfo) => ({ codexErrorInfo }));
+        cases.push({
+          codexErrorInfo: "serverOverloaded",
+          futurePolicy: "private-error-outer-sentinel",
+        });
+        const eventsFiber = yield* Stream.runCollect(
+          Stream.take(adapter.streamEvents, cases.length * 2),
+        ).pipe(Effect.forkChild);
+        for (const [index, errorMetadata] of cases.entries()) {
+          const turnId = `ambiguous-error-${index}`;
+          const error = {
+            message: "Native stream failure",
+            ...errorMetadata,
+            additionalDetails: null,
+            misalignment: null,
+          };
+          for (const envelope of [
+            {
+              method: "error",
+              params: { threadId: "provider-thread-1", turnId, willRetry: false, error },
+            },
+            {
+              method: "turn/completed",
+              params: {
+                threadId: "provider-thread-1",
+                turn: { id: turnId, items: [], status: "failed", error },
+              },
+            },
+          ]) {
+            // Match the real client boundary before the canonical adapter.
+            const decoded = decodeNativeNotification(envelope);
+            yield* runtime.emit({
+              id: asEventId(`${turnId}-${decoded.method}`),
+              kind: "notification",
+              provider: ProviderDriverKind.make("codex"),
+              threadId: asThreadId("thread-1"),
+              turnId: asTurnId(turnId),
+              createdAt: "2026-10-10T15:01:00.000Z",
+              method: decoded.method,
+              nativeContextAvailable: true,
+              payload: decoded.params,
+            });
+          }
+        }
+        const events = Array.from(yield* Fiber.join(eventsFiber));
+        // Unknown error extension data is now available ONLY through the new
+        // explicitly owned private diagnostic. The original canonical fields
+        // retain the same content-free policy and never acquire recovery proof.
+        assert.doesNotMatch(
+          JSON.stringify(events.map(({ diagnostic: _private, ...ordinary }) => ordinary)),
+          /private-error-(?:inner|outer)-sentinel/,
+        );
+        assert.doesNotMatch(
+          JSON.stringify(events.map((event) => event.diagnostic?.summary)),
+          /private-error-(?:inner|outer)-sentinel/,
+        );
+        assert.match(events[2]!.diagnostic!.snapshot.json, /private-error-inner-sentinel/);
+        assert.match(
+          events[events.length - 1]!.diagnostic!.snapshot.json,
+          /private-error-outer-sentinel/,
+        );
+        for (const [index, event] of events.entries()) {
+          assert.equal(event.type, index % 2 === 0 ? "runtime.error" : "turn.completed");
+          if (event.type === "turn.completed")
+            assert.deepEqual(event.payload, {
+              state: "failed",
+              errorMessage: "Native stream failure",
+              nativeContextAvailable: true,
+            });
+        }
+        assert.equal(runtime.sendTurnImpl.mock.calls.length, 0);
+        assert.equal(runtime.steerTurnImpl.mock.calls.length, 0);
+      }),
+  );
+
+  it.effect(
+    "classifies definitive remote-compaction failures without manufacturing context availability",
+    () =>
+      Effect.gen(function* () {
+        const { adapter, runtime } = yield* startLifecycleRuntime(
+          "79a58c30-cd43-4927-ae4a-d340ba31b613",
+        );
+        const message =
+          "Error running remote compact task: stream disconnected before completion: An error occurred while processing your request. You can retry your request, or contact us through our help center at help.openai.com if the error persists. Please include the request ID eb45b1d3-36e9-4f02-a321-8ea87f01185c in your message.";
+        const cases = [
+          { status: "failed", info: "other", ownerAvailable: true },
+          { status: "failed", info: "other", ownerAvailable: false },
+          { status: "failed", info: "usageLimitExceeded", ownerAvailable: true },
+          { status: "failed", info: "bioPolicy", ownerAvailable: true },
+          { status: "failed", info: "futureFailure", ownerAvailable: true },
+          { status: "failed", info: { futureFailure: { reason: "opaque" } }, ownerAvailable: true },
+          { status: "interrupted", info: "other", ownerAvailable: true },
+          { status: "completed", info: "other", ownerAvailable: true },
+        ] as const;
+        const eventsFiber = yield* Stream.runCollect(
+          Stream.take(adapter.streamEvents, cases.length),
+        ).pipe(Effect.forkChild);
+        for (const [index, current] of cases.entries())
+          yield* runtime.emit({
+            id: asEventId(`remote-compaction-failure-${index}`),
+            kind: "notification",
+            provider: ProviderDriverKind.make("codex"),
+            threadId: asThreadId("thread-1"),
+            turnId: asTurnId(`remote-compaction-root-${index}`),
+            createdAt: "2026-10-10T15:01:00.000Z",
+            method: "turn/completed",
+            ...(current.ownerAvailable ? { nativeContextAvailable: true as const } : {}),
+            payload: {
+              threadId: "provider-thread-1",
+              // Provider JSON may describe availability, but it cannot replace
+              // the outer runtime-owned proof after Stop, closure or pending I/O.
+              nativeContextAvailable: true,
+              turn: {
+                id: `remote-compaction-root-${index}`,
+                items: [],
+                itemsView: "notLoaded",
+                status: current.status,
+                error: { message, codexErrorInfo: current.info, additionalDetails: null },
+              },
+            },
+          });
+        const events = Array.from(yield* Fiber.join(eventsFiber));
+        for (const [index, event] of events.entries()) {
+          assert.equal(event.type, "turn.completed");
+          if (event.type !== "turn.completed") continue;
+          const current = cases[index]!;
+          assert.deepEqual(event.payload, {
+            state: current.status,
+            errorMessage: message,
+            ...(index < 2 ? { codexTransientFailure: "server" } : {}),
+            ...(current.ownerAvailable ? { nativeContextAvailable: true } : {}),
+          });
+        }
+        assert.equal(runtime.sendTurnImpl.mock.calls.length, 0);
+        assert.equal(runtime.steerTurnImpl.mock.calls.length, 0);
       }),
   );
 
@@ -2987,6 +3846,54 @@ lifecycleLayer("CodexAdapterLive lifecycle", (it) => {
       assert.equal(firstEvent.value.itemId, "msg_1");
       assert.equal(firstEvent.value.turnId, "turn-1");
       assert.equal(firstEvent.value.payload.itemType, "assistant_message");
+    }),
+  );
+
+  it.effect("maps a live partial answer to commentary without completing its native turn", () =>
+    Effect.gen(function* () {
+      const { adapter, runtime } = yield* startLifecycleRuntime();
+      const firstEventFiber = yield* Stream.runHead(adapter.streamEvents).pipe(Effect.forkChild);
+      yield* runtime.emit({
+        id: asEventId("evt-partial-answer"),
+        kind: "notification",
+        provider: ProviderDriverKind.make("codex"),
+        createdAt: "2026-01-01T00:00:00.000Z",
+        method: "item/completed",
+        threadId: asThreadId("thread-1"),
+        turnId: asTurnId("turn-1"),
+        itemId: asItemId("partial-item"),
+        payload: {
+          completedAtMs: 1_778_000_000_000,
+          threadId: "thread-1",
+          turnId: "turn-1",
+          item: {
+            type: "agentMessage",
+            id: "partial-item",
+            text: "Public interim answer",
+            phase: "partial_answer",
+          },
+        },
+      });
+      const event = yield* Fiber.join(firstEventFiber);
+      assert.equal(event._tag, "Some");
+      if (event._tag !== "Some") return;
+      assert.equal(event.value.type, "item.completed");
+      if (event.value.type !== "item.completed") return;
+      assert.equal(event.value.payload.itemType, "assistant_message");
+      assert.equal(event.value.payload.detail, "Public interim answer");
+      assert.deepEqual(event.value.payload.data, {
+        completedAtMs: 1_778_000_000_000,
+        threadId: "thread-1",
+        turnId: "turn-1",
+        item: {
+          type: "agentMessage",
+          id: "partial-item",
+          text: "Public interim answer",
+          phase: "commentary",
+        },
+      });
+      assert.equal(runtime.sendTurnImpl.mock.calls.length, 0);
+      assert.equal(runtime.steerTurnImpl.mock.calls.length, 0);
     }),
   );
 
@@ -4921,7 +5828,7 @@ lifecycleLayer("CodexAdapterLive lifecycle", (it) => {
     }),
   );
 
-  it.effect("maps retryable Codex error notifications to runtime.warning", () =>
+  it.effect("maps retryable Codex error notifications to a finite native retry observation", () =>
     Effect.gen(function* () {
       const { adapter, runtime } = yield* startLifecycleRuntime();
       const firstEventFiber = yield* Stream.runHead(adapter.streamEvents).pipe(Effect.forkChild);
@@ -4935,7 +5842,7 @@ lifecycleLayer("CodexAdapterLive lifecycle", (it) => {
         method: "error",
         turnId: asTurnId("turn-1"),
         payload: {
-          threadId: "thread-1",
+          threadId: "provider-thread-1",
           turnId: "turn-1",
           error: {
             message: "Reconnecting... 2/5",
@@ -4955,8 +5862,140 @@ lifecycleLayer("CodexAdapterLive lifecycle", (it) => {
         return;
       }
       assert.equal(firstEvent.value.turnId, "turn-1");
-      assert.equal(firstEvent.value.payload.message, "Reconnecting... 2/5");
+      assert.deepEqual(firstEvent.value.payload, {
+        message: "Provider reconnecting",
+        detail: { willRetry: true },
+        nativeRetry: { observedCount: 1, timing: "unknown" },
+      });
+      assert.match(JSON.stringify(firstEvent.value.raw), /Reconnecting\.\.\. 2\/5/);
+      assert.deepEqual(firstEvent.value.diagnostic?.summary, {
+        version: 1,
+        status: "retry",
+        subject: { kind: "root" },
+        observedRetryCount: 1,
+      });
+      assert.equal(firstEvent.value.diagnostic?.snapshot.native.threadId, "provider-thread-1");
+      assert.equal(firstEvent.value.diagnostic?.snapshot.native.turnId, "turn-1");
+      assert.equal(
+        JSON.parse(firstEvent.value.diagnostic!.snapshot.json).error.message,
+        "Reconnecting... 2/5",
+      );
     }),
+  );
+
+  it.effect(
+    "publishes cumulative root native retry observations while retaining guarded debug fractions",
+    () =>
+      Effect.gen(function* () {
+        const { adapter, runtime } = yield* startLifecycleRuntime(retryTestRuntimeId);
+        const resultFiber = yield* Stream.take(adapter.streamEvents, 3).pipe(
+          Stream.runCollect,
+          Effect.forkChild,
+        );
+        for (const [index, fraction] of ["1/5", "2/5", "1/2"].entries()) {
+          yield* runtime.emit({
+            ...retryObservationFrame(`adapter-native-retry-${index}`, "provider-thread-1"),
+            threadId: asThreadId("thread-1"),
+            payload: {
+              threadId: "provider-thread-1",
+              turnId: "native-turn-1",
+              willRetry: true,
+              error: { message: `Reconnecting... ${fraction}`, codexErrorInfo: "serverOverloaded" },
+            },
+          });
+        }
+        const events = Array.from(yield* Fiber.join(resultFiber));
+        assert.equal(events.length, 3);
+        for (const [index, event] of events.entries()) {
+          assert.equal(event.type, "runtime.warning");
+          if (event.type !== "runtime.warning") continue;
+          assert.deepEqual(event.payload, {
+            message: "Provider reconnecting",
+            detail: { willRetry: true },
+            nativeRetry: { observedCount: index + 1, timing: "unknown" },
+          });
+          assert.doesNotMatch(JSON.stringify(event.payload), /Reconnecting|1\/5|2\/5|1\/2/);
+          assert.match(JSON.stringify(event.raw), /Reconnecting/);
+        }
+        assert.equal(runtime.sendTurnImpl.mock.calls.length, 0);
+        assert.equal(runtime.steerTurnImpl.mock.calls.length, 0);
+      }),
+  );
+
+  it.effect(
+    "shows child retry observations separately and clears them on substantive activity or completion",
+    () =>
+      Effect.gen(function* () {
+        const { adapter, runtime } = yield* startLifecycleRuntime(retryTestRuntimeId);
+        const retry = (id: string): ProviderEvent => ({
+          ...retryObservationFrame(id, "native-child", "child-turn", true),
+          threadId: asThreadId("thread-1"),
+        });
+        const frames: ReadonlyArray<ProviderEvent> = [
+          retry("child-first-retry"),
+          {
+            ...retry("child-name"),
+            method: "codex.subagent/threadNameUpdated",
+            payload: { threadId: "native-child", threadName: "Named child" },
+          },
+          {
+            ...retry("child-real-progress"),
+            method: "codex.subagent/itemCompleted",
+            payload: {
+              completedAtMs: Date.parse("2026-10-11T00:00:00.000Z"),
+              threadId: "native-child",
+              turnId: "child-turn",
+              item: { type: "webSearch", id: "child-search", query: "synthetic", action: null },
+            },
+          },
+          retry("child-second-retry"),
+          {
+            ...retryTurnFrame("child-turn", true, "native-child", true),
+            threadId: asThreadId("thread-1"),
+          },
+        ];
+        const resultFiber = yield* Stream.take(adapter.streamEvents, 7).pipe(
+          Stream.runCollect,
+          Effect.forkChild,
+        );
+        for (const frame of frames) yield* runtime.emit(frame);
+        const events = Array.from(yield* Fiber.join(resultFiber));
+        const tasks = events.filter(
+          (event) => event.type === "task.progress" || event.type === "task.completed",
+        );
+        assert.equal(tasks.length, 5);
+        assert.deepEqual(
+          tasks.map((event) => event.payload.subagent?.nativeRetry),
+          [
+            { observedCount: 1, timing: "unknown" },
+            { observedCount: 1, timing: "unknown" },
+            undefined,
+            { observedCount: 2, timing: "unknown" },
+            undefined,
+          ],
+        );
+        assert.deepEqual(
+          tasks.map((event) =>
+            event.type === "task.progress" ? event.payload.description : undefined,
+          ),
+          [
+            "Provider retry · 1",
+            "Provider retry · 1",
+            "Searched for synthetic",
+            "Provider retry · 2",
+            undefined,
+          ],
+        );
+        assert.equal(tasks[1]?.payload.subagent?.label, "Named child");
+        assert.equal(tasks[4]?.payload.subagent?.status, "failed");
+        const warnings = events.filter((event) => event.type === "runtime.warning");
+        assert.equal(warnings[1]?.diagnostic?.summary.subject.kind, "subagent");
+        assert.equal(warnings[1]?.diagnostic?.summary.subject.label, "Named child");
+        assert.equal(warnings[1]?.diagnostic?.summary.observedRetryCount, 2);
+        assert.equal(tasks[1]?.diagnostic, undefined);
+        assert.equal(runtime.sendTurnImpl.mock.calls.length, 0);
+        assert.equal(runtime.steerTurnImpl.mock.calls.length, 0);
+      }),
   );
 
   it.effect(
@@ -5000,6 +6039,120 @@ lifecycleLayer("CodexAdapterLive lifecycle", (it) => {
       }),
   );
 
+  it.effect("retains a complete native error tuple in a minimal failed terminal echo", () =>
+    Effect.gen(function* () {
+      const { adapter, runtime } = yield* startLifecycleRuntime(retryTestRuntimeId);
+      const eventsFiber = yield* Stream.take(adapter.streamEvents, 2).pipe(
+        Stream.runCollect,
+        Effect.forkChild,
+      );
+      const error = {
+        message: "Response stream interrupted",
+        codexErrorInfo: { responseStreamDisconnected: { httpStatusCode: 503 } },
+        additionalDetails: null,
+      };
+      const frame = {
+        kind: "notification" as const,
+        provider: ProviderDriverKind.make("codex"),
+        threadId: asThreadId("thread-1"),
+        subagentRuntimeId: retryTestRuntimeId,
+        createdAt: "2026-10-12T00:00:00.000Z",
+        turnId: asTurnId("turn-1"),
+      };
+      yield* runtime.emit({
+        ...frame,
+        id: asEventId("complete-error-tuple"),
+        method: "error",
+        payload: { threadId: "provider-thread-1", turnId: "turn-1", error, willRetry: false },
+      });
+      yield* runtime.emit({
+        ...frame,
+        id: asEventId("complete-terminal-echo"),
+        method: "turn/completed",
+        payload: {
+          threadId: "provider-thread-1",
+          turn: { id: "turn-1", status: "failed", error, items: [] },
+        },
+      });
+      const events = yield* Fiber.join(eventsFiber);
+      assert.deepEqual(
+        events.map((event) => event.type),
+        ["runtime.error", "turn.completed"],
+      );
+      const notification = events[0]!.diagnostic!.snapshot;
+      const terminal = events[1]!.diagnostic!.snapshot;
+      for (const snapshot of [notification, terminal]) {
+        assert.equal(snapshot.redacted, false);
+        assert.equal(snapshot.truncated, false);
+        // Empty native item history removes no actual item bytes. This exact
+        // envelope is complete enough for the private store's terminal echo
+        // comparison; nonempty/unknown payload omissions remain ineligible.
+        assert.equal(snapshot.omittedFields, false);
+        assert.equal(snapshot.native.threadId, "provider-thread-1");
+        assert.equal(snapshot.native.turnId, "turn-1");
+        assert.equal(snapshot.native.subagentRuntimeId, retryTestRuntimeId);
+      }
+      assert.deepEqual(JSON.parse(notification.json).error, error);
+      assert.deepEqual(JSON.parse(terminal.json).turn.error, error);
+      assert.equal(runtime.sendTurnImpl.mock.calls.length, 0);
+      assert.equal(runtime.steerTurnImpl.mock.calls.length, 0);
+    }),
+  );
+
+  it.effect(
+    "captures terminal-only failed-root diagnostics without copying turn items or credentials",
+    () =>
+      Effect.gen(function* () {
+        const { adapter, runtime } = yield* startLifecycleRuntime();
+        const eventFiber = yield* Stream.runHead(adapter.streamEvents).pipe(Effect.forkChild);
+        yield* runtime.emit({
+          id: asEventId("terminal-only-diagnostic"),
+          kind: "notification",
+          provider: ProviderDriverKind.make("codex"),
+          threadId: asThreadId("thread-1"),
+          createdAt: "2026-10-12T00:00:00.000Z",
+          method: "turn/completed",
+          turnId: asTurnId("turn-1"),
+          payload: {
+            threadId: "provider-thread-1",
+            turn: {
+              id: "turn-1",
+              status: "failed",
+              items: [],
+              error: {
+                message: "Request interrupted; request ID debug-request-123",
+                codexErrorInfo: { responseStreamDisconnected: { httpStatusCode: 503 } },
+                additionalDetails: "Cookie: first=private; second=private",
+                extension: { api_key: "private", auth: { token: "private" }, code: "E_STREAM" },
+              },
+              prompt: "unrelated-private-prompt",
+            },
+          },
+        });
+        const event = yield* Fiber.join(eventFiber);
+        assert.equal(event._tag, "Some");
+        if (event._tag !== "Some") return;
+        assert.equal(event.value.type, "turn.completed");
+        if (event.value.type !== "turn.completed") return;
+        assert.equal(event.value.payload.state, "failed");
+        assert.deepEqual(event.value.diagnostic?.summary, {
+          version: 1,
+          status: "error",
+          subject: { kind: "root" },
+        });
+        const snapshot = event.value.diagnostic!.snapshot;
+        assert.equal(snapshot.native.turnId, "turn-1");
+        assert.equal(snapshot.redacted, true);
+        assert.equal(snapshot.omittedFields, true);
+        assert.equal(snapshot.json.includes("private"), false);
+        assert.equal(snapshot.json.includes("items"), false);
+        assert.equal(snapshot.json.includes("debug-request-123"), true);
+        assert.equal(snapshot.json.includes("E_STREAM"), true);
+        assert.equal(runtime.sendTurnImpl.mock.calls.length, 0);
+        assert.equal(runtime.steerTurnImpl.mock.calls.length, 0);
+      }),
+  );
+
   for (const willRetry of [false, true]) {
     it.effect(`preserves the provider's tooManyDenials willRetry=${willRetry} decision`, () =>
       Effect.gen(function* () {
@@ -5038,7 +6191,10 @@ lifecycleLayer("CodexAdapterLive lifecycle", (it) => {
         )
           return;
         assert.equal(firstEvent.value.turnId, "turn-1");
-        assert.equal(firstEvent.value.payload.message, "Too many tool calls were denied");
+        assert.equal(
+          firstEvent.value.payload.message,
+          willRetry ? "Provider reconnecting" : "Too many tool calls were denied",
+        );
         if (firstEvent.value.type === "runtime.error") {
           assert.equal(firstEvent.value.payload.class, "provider_error");
         }
@@ -5049,46 +6205,115 @@ lifecycleLayer("CodexAdapterLive lifecycle", (it) => {
     );
   }
 
-  it.effect("maps terminal Codex subagent errors to work-log warnings", () =>
-    Effect.gen(function* () {
-      const { adapter, runtime } = yield* startLifecycleRuntime();
-      const firstEventFiber = yield* Stream.runHead(adapter.streamEvents).pipe(Effect.forkChild);
+  it.effect(
+    "publishes one qualified failed child task without a duplicate parent-clock warning",
+    () =>
+      Effect.gen(function* () {
+        const { adapter, runtime } = yield* startLifecycleRuntime();
+        const eventsFiber = yield* Stream.take(adapter.streamEvents, 2).pipe(
+          Stream.runCollect,
+          Effect.forkChild,
+        );
 
-      yield* runtime.emit({
-        id: asEventId("evt-subagent-capacity-error"),
-        kind: "notification",
-        provider: ProviderDriverKind.make("codex"),
-        threadId: asThreadId("thread-1"),
-        createdAt: "2026-01-01T00:00:00.000Z",
-        method: "codex.subagent/error",
-        turnId: asTurnId("turn-parent"),
-        payload: {
-          threadId: "provider-child-thread",
-          turnId: "provider-child-turn",
-          error: {
-            message: "Selected model is at capacity. Please try a different model.",
-            codexErrorInfo: "serverOverloaded",
-            additionalDetails: null,
+        yield* runtime.emit({
+          id: asEventId("evt-subagent-capacity-error"),
+          kind: "notification",
+          provider: ProviderDriverKind.make("codex"),
+          threadId: asThreadId("thread-1"),
+          createdAt: "2026-01-01T00:00:00.000Z",
+          method: "codex.subagent/error",
+          turnId: asTurnId("turn-parent"),
+          payload: {
+            threadId: "provider-child-thread",
+            turnId: "provider-child-turn",
+            error: {
+              message: "Selected model is at capacity. Please try a different model.",
+              codexErrorInfo: "serverOverloaded",
+              additionalDetails: null,
+            },
+            willRetry: false,
           },
+        } satisfies ProviderEvent);
+        // An explicit following envelope proves the child produced exactly one
+        // event, without waiting for silence or changing any test deadline.
+        yield* runtime.emit({
+          id: asEventId("terminal-child-boundary"),
+          kind: "notification",
+          provider: ProviderDriverKind.make("codex"),
+          threadId: asThreadId("thread-1"),
+          createdAt: "2026-01-01T00:00:01.000Z",
+          method: "warning",
+          payload: { message: "Terminal child fixture boundary" },
+        });
+        const events = Array.from(yield* Fiber.join(eventsFiber));
+        assert.equal(events.length, 2);
+        const child = events[0];
+        assert.equal(child?.type, "task.completed");
+        if (child?.type !== "task.completed") return;
+        assert.equal(child.turnId, "turn-parent");
+        assert.equal(child.payload.subagent?.threadId, "provider-child-thread");
+        assert.equal(child.payload.subagent?.status, "failed");
+        assert.equal(
+          child.payload.summary,
+          "Selected model is at capacity. Please try a different model.",
+        );
+        assert.deepEqual(child.raw?.payload, {
+          source: "codex.child.error",
           willRetry: false,
-        },
-      } satisfies ProviderEvent);
+          childThreadIdHash: crypto
+            .createHash("sha256")
+            .update("provider-child-thread")
+            .digest("hex"),
+        });
+        assert.deepEqual(child.diagnostic?.summary, {
+          version: 1,
+          status: "error",
+          subject: { kind: "subagent", id: "provider-child-thread" },
+        });
+        assert.equal(child.diagnostic?.snapshot.native.turnId, "provider-child-turn");
+        assert.equal(child.diagnostic?.snapshot.native.threadId, "provider-child-thread");
+        const boundary = events[1];
+        assert.equal(boundary?.eventId, "terminal-child-boundary");
+        assert.equal(boundary?.type, "runtime.warning");
+        if (boundary?.type === "runtime.warning")
+          assert.equal(boundary.payload.message, "Terminal child fixture boundary");
+        assert.equal(runtime.sendTurnImpl.mock.calls.length, 0);
+        assert.equal(runtime.steerTurnImpl.mock.calls.length, 0);
+      }),
+  );
 
-      const firstEvent = yield* Fiber.join(firstEventFiber);
-      assert.equal(firstEvent._tag, "Some");
-      if (firstEvent._tag !== "Some") {
-        return;
-      }
-      assert.equal(firstEvent.value.type, "runtime.warning");
-      if (firstEvent.value.type !== "runtime.warning") {
-        return;
-      }
-      assert.equal(firstEvent.value.turnId, "turn-parent");
-      assert.equal(
-        firstEvent.value.payload.message,
-        "Selected model is at capacity. Please try a different model.",
-      );
-    }),
+  it.effect(
+    "retains a bounded child warning fallback when malformed payload has no qualified child identity",
+    () =>
+      Effect.gen(function* () {
+        const { adapter, runtime } = yield* startLifecycleRuntime();
+        const resultFiber = yield* Stream.runHead(adapter.streamEvents).pipe(Effect.forkChild);
+        yield* runtime.emit({
+          id: asEventId("unqualified-child-terminal"),
+          kind: "notification",
+          provider: ProviderDriverKind.make("codex"),
+          threadId: asThreadId("thread-1"),
+          turnId: asTurnId("parent-turn"),
+          createdAt: "2026-01-01T00:00:00.000Z",
+          method: "codex.subagent/error",
+          message: "Unqualified child failure",
+          payload: { willRetry: false, error: { message: "Native child failure" } },
+        });
+        const event = yield* Fiber.join(resultFiber);
+        assert.equal(event._tag, "Some");
+        if (event._tag !== "Some") return;
+        assert.equal(event.value.type, "runtime.warning");
+        if (event.value.type !== "runtime.warning") return;
+        assert.equal(event.value.turnId, "parent-turn");
+        assert.equal(event.value.payload.message, "Unqualified child failure");
+        assert.equal(event.value.payload.nativeRetry, undefined);
+        assert.deepEqual(event.value.diagnostic?.summary.subject, { kind: "unknown" });
+        assert.deepEqual(event.value.raw?.payload, {
+          source: "codex.child.error",
+          willRetry: false,
+          childThreadIdHash: null,
+        });
+      }),
   );
 
   it.effect("maps Codex warning notifications to runtime.warning", () =>
@@ -6465,6 +7690,19 @@ lifecycleLayer("CodexAdapterLive lifecycle", (it) => {
 
       const ignoredEvents = [
         {
+          id: asEventId("evt-codex-private-prediction"),
+          kind: "notification" as const,
+          provider: ProviderDriverKind.make("codex"),
+          threadId: asThreadId("thread-1"),
+          createdAt: "2026-01-01T00:00:00.000Z",
+          method: "thread/prediction/updated",
+          payload: {
+            threadId: "provider-thread-1",
+            sourceTurnId: "old-prediction-turn",
+            result: { type: "completed", text: "PRIVATE_PREDICTION" },
+          },
+        },
+        {
           id: asEventId("evt-codex-gateway-login"),
           kind: "notification" as const,
           provider: ProviderDriverKind.make("codex"),
@@ -7266,6 +8504,63 @@ it.effect("flushes managed native logs when the adapter layer shuts down", () =>
         },
       } satisfies ProviderEvent);
       yield* runtime.emit({
+        id: asEventId("evt-native-log-prediction"),
+        kind: "notification",
+        provider: ProviderDriverKind.make("codex"),
+        threadId: asThreadId("thread-logger"),
+        createdAt: "2026-01-01T00:00:00.000Z",
+        method: "thread/prediction/updated",
+        payload: {
+          threadId: "provider-thread-logger",
+          sourceTurnId: "old-prediction-turn",
+          result: { type: "completed", text: "native-log-secret-prediction" },
+        },
+      } satisfies ProviderEvent);
+      yield* runtime.emit({
+        id: asEventId("evt-native-log-unknown-root-error"),
+        kind: "notification",
+        provider: ProviderDriverKind.make("codex"),
+        threadId: asThreadId("thread-logger"),
+        createdAt: "2026-01-01T00:00:00.000Z",
+        method: "error",
+        payload: {
+          threadId: "provider-thread-1",
+          turnId: "private-failed-root",
+          willRetry: false,
+          error: {
+            message: "Public error",
+            codexErrorInfo: {
+              responseStreamDisconnected: {
+                httpStatusCode: 503,
+                hidden: "native-log-secret-error-inner",
+              },
+            },
+            futurePolicy: "native-log-secret-error-outer",
+          },
+        },
+      });
+      yield* runtime.emit({
+        id: asEventId("evt-native-log-unknown-root-completed"),
+        kind: "notification",
+        provider: ProviderDriverKind.make("codex"),
+        threadId: asThreadId("thread-logger"),
+        createdAt: "2026-01-01T00:00:00.000Z",
+        method: "turn/completed",
+        payload: {
+          threadId: "provider-thread-1",
+          turn: {
+            id: "private-failed-root",
+            items: [],
+            status: "failed",
+            error: {
+              message: "Public error",
+              codexErrorInfo: "serverOverloaded",
+              futurePolicy: "native-log-secret-terminal-outer",
+            },
+          },
+        },
+      });
+      yield* runtime.emit({
         id: asEventId("evt-native-log"),
         kind: "notification",
         provider: ProviderDriverKind.make("codex"),
@@ -7348,6 +8643,7 @@ it.effect("flushes managed native logs when the adapter layer shuts down", () =>
       assert.match(contents, /"reason":"model-provider-auth-recovery-content"/);
       assert.doesNotMatch(contents, /thread\/attachment\/updated/);
       assert.doesNotMatch(contents, /account\/gatewayOAuth\/changed/);
+      assert.doesNotMatch(contents, /thread\/prediction\/updated/);
       assert.doesNotMatch(contents, /native-log-secret/);
     } finally {
       if (!scopeClosed) {
@@ -7754,6 +9050,110 @@ it.effect(
         });
         yield* adapter.interruptTurn(threadId);
         assert.deepEqual(lifecycle, ["bound", "active", "begin", "end", "disposed"]);
+      }),
+    ),
+);
+
+it.effect(
+  "keeps accepted native-control turn authority through an uncertain history diagnosis warning",
+  () =>
+    schedulingCase(({ createAdapter }) =>
+      Effect.gen(function* () {
+        const lifecycle: string[] = [];
+        const threadId = asThreadId("native-control-history-diagnosis");
+        const instanceId = ProviderInstanceId.make("codex-history-diagnosis");
+        const uninstall = installNativeControlSessionBroker({
+          bind: async (identity) => {
+            assert.deepEqual(identity, {
+              threadId,
+              providerInstanceId: instanceId,
+              provider: "codex",
+            });
+            lifecycle.push("bound");
+            return {
+              name: "cafe-native-abcdefghijklmnopqrstuv",
+              launch: {
+                command: process.execPath,
+                args: ["synthetic native bridge.mjs", "synthetic private connection.json"],
+                env: { ELECTRON_RUN_AS_NODE: "1" },
+              },
+              activate: async () => {
+                lifecycle.push("active");
+              },
+              beginTurn: async () => {
+                lifecycle.push("begin");
+              },
+              endTurn: async () => {
+                lifecycle.push("end");
+              },
+              dispose: async () => {
+                lifecycle.push("disposed");
+              },
+            };
+          },
+        });
+        yield* Effect.addFinalizer(() => Effect.sync(uninstall));
+        const factory = makeRuntimeFactory();
+        const adapter = yield* createAdapter(instanceId, factory.factory);
+        yield* adapter.startSession({ threadId, runtimeMode: "approval-required" });
+        const runtime = factory.lastRuntime!;
+        const accepted = yield* adapter.sendTurn({
+          threadId,
+          input: "Synthetic owner-authorized prompt; no live provider or desktop",
+        });
+        assert.equal(accepted.turnId, asTurnId("turn-1"));
+        assert.deepEqual(lifecycle, ["bound", "active", "begin"]);
+
+        // The accepted native turn still owns its desktop lease while history
+        // diagnosis is uncertain. A warning is observable evidence, never an
+        // acknowledged end-turn or permission to replace the provider runtime.
+        const warningRead = yield* Stream.runHead(adapter.streamEvents).pipe(Effect.forkChild);
+        yield* runtime.emit({
+          id: asEventId("native-control-history-warning"),
+          kind: "notification",
+          provider: ProviderDriverKind.make("codex"),
+          threadId,
+          turnId: accepted.turnId,
+          createdAt: "2026-10-07T00:00:00.000Z",
+          method: "warning",
+          message: CODEX_HISTORY_DIAGNOSIS_UNCERTAIN_MESSAGE,
+          payload: { message: CODEX_HISTORY_DIAGNOSIS_UNCERTAIN_MESSAGE },
+        });
+        const warning = yield* Fiber.join(warningRead);
+        assert.ok(Option.isSome(warning));
+        assert.equal(warning.value.type, "runtime.warning");
+        assert.equal(warning.value.payload.message, CODEX_HISTORY_DIAGNOSIS_UNCERTAIN_MESSAGE);
+        assert.deepEqual(lifecycle, ["bound", "active", "begin"]);
+        assert.equal(factory.runtimes.length, 1);
+        assert.equal(runtime.sendTurnImpl.mock.calls.length, 1);
+        assert.equal(runtime.closeImpl.mock.calls.length, 0);
+
+        const completionRead = yield* Stream.runHead(adapter.streamEvents).pipe(Effect.forkChild);
+        yield* runtime.emit({
+          id: asEventId("native-control-history-definitive-completion"),
+          kind: "notification",
+          provider: ProviderDriverKind.make("codex"),
+          threadId,
+          turnId: accepted.turnId,
+          createdAt: "2026-10-07T00:00:01.000Z",
+          method: "turn/completed",
+          payload: {
+            threadId: "provider-thread-1",
+            turn: {
+              id: accepted.turnId,
+              items: [],
+              itemsView: "notLoaded",
+              status: "completed",
+              error: null,
+            },
+          },
+        });
+        const completion = yield* Fiber.join(completionRead);
+        assert.ok(Option.isSome(completion));
+        assert.equal(completion.value.type, "turn.completed");
+        assert.deepEqual(lifecycle, ["bound", "active", "begin", "end"]);
+        assert.equal(runtime.sendTurnImpl.mock.calls.length, 1);
+        assert.equal(runtime.closeImpl.mock.calls.length, 0);
       }),
     ),
 );

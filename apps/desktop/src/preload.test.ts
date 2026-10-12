@@ -2,6 +2,7 @@ import type { DesktopBridge } from "@cafecode/contracts";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import * as IpcChannels from "./ipc/channels.ts";
+import { DESKTOP_UI_LOCALE_CHANGED_CHANNEL } from "./settings/DesktopUiLocaleBridge.ts";
 
 const electron = vi.hoisted(() => ({
   exposeInMainWorld: vi.fn(),
@@ -43,6 +44,23 @@ function setMainFrameIdentity(value: boolean | undefined): void {
 }
 
 describe("desktop preload capability boundary", () => {
+  it("delivers only finite locale metadata and retires listeners without invoking IPC", async () => {
+    setMainFrameIdentity(true);
+    await import("./preload.ts");
+    const [, bridge] = electron.exposeInMainWorld.mock.calls[0] as [string, DesktopBridge];
+    expect(bridge.systemUiLocale).toBe("en");
+    expect(bridge.initialUiLocale).toBe("en");
+    const listener = vi.fn();
+    const unsubscribe = bridge.onUiLocaleChanged!(listener);
+    const [channel, wrapped] = electron.on.mock.calls.at(-1)!;
+    expect(channel).toBe(DESKTOP_UI_LOCALE_CHANGED_CHANNEL);
+    for (const value of ["ja", {}, "system", "../../secret", "ko", null]) wrapped({}, value);
+    expect(listener.mock.calls).toEqual([["ja"], ["ko"]]);
+    unsubscribe();
+    expect(electron.removeListener).toHaveBeenCalledWith(channel, wrapped);
+    expect(electron.invoke).not.toHaveBeenCalled();
+    expect(electron.sendSync).not.toHaveBeenCalled();
+  });
   it("publishes the working native bridge only into the main frame", async () => {
     setMainFrameIdentity(true);
     await import("./preload.ts");

@@ -1,4 +1,5 @@
 import * as React from "react";
+import { uiText } from "@cafecode/shared/i18n";
 import { isLiveWorkRuntimeCurrent } from "@cafecode/shared/liveWork";
 import type { SidebarProjectSortOrder, SidebarThreadSortOrder } from "@cafecode/contracts/settings";
 import {
@@ -55,22 +56,22 @@ export function buildSidebarThreadContextMenuItems(input: {
   readonly forkDisabled?: boolean;
 }): ReadonlyArray<SidebarThreadContextMenuItem> {
   const items: SidebarThreadContextMenuItem[] = [
-    { id: "rename", label: "Rename chat" },
-    { id: "fork", label: "Fork chat", disabled: input.forkDisabled === true },
-    { id: "move", label: "Move chat…" },
-    { id: "copy-path", label: "Copy path" },
-    { id: "copy-thread-id", label: "Copy chat ID" },
+    { id: "rename", label: uiText("Rename chat") },
+    { id: "fork", label: uiText("Fork chat"), disabled: input.forkDisabled === true },
+    { id: "move", label: uiText("Move chat…") },
+    { id: "copy-path", label: uiText("Copy path") },
+    { id: "copy-thread-id", label: uiText("Copy chat ID") },
   ];
 
   if (input.debugEnabled) {
     items.push({
       id: "repair-thread",
-      label: "Attempt repair from provider history",
+      label: uiText("Attempt repair from provider history"),
       disabled: input.repairRunning,
     });
   }
 
-  items.push({ id: "delete", label: "Move to Recycle Bin", destructive: true });
+  items.push({ id: "delete", label: uiText("Move to Recycle Bin"), destructive: true });
   return items;
 }
 
@@ -144,6 +145,29 @@ const THREAD_STATUS_PILLS: Record<ThreadStatusPill["label"], ThreadStatusPill> =
 
 export function getThreadStatusPill(label: ThreadStatusPill["label"]): ThreadStatusPill {
   return THREAD_STATUS_PILLS[label];
+}
+
+/** `label` is also a stable status/priority key and data attribute. Keep that
+ * canonical English identity separate from the copy shown or announced. */
+export function threadStatusDisplayLabel(label: ThreadStatusPill["label"]): string {
+  switch (label) {
+    case "Working":
+      return uiText("Working");
+    case "Background work":
+      return uiText("Background work");
+    case "Connecting":
+      return uiText("Connecting");
+    case "Completed":
+      return uiText("Completed");
+    case "Failed":
+      return uiText("Failed");
+    case "Pending Approval":
+      return uiText("Pending Approval");
+    case "Awaiting Input":
+      return uiText("Awaiting Input");
+    case "Plan Ready":
+      return uiText("Plan Ready");
+  }
 }
 
 type ThreadStatusInput = Pick<
@@ -513,19 +537,26 @@ export function resolveProjectStatusIndicator(
  * Short, count-aware phrases for the collapsed overflow toggle. The full
  * status label stays available through each row once the list is expanded.
  */
-const HIDDEN_THREAD_STATUS_PHRASES: Record<
-  ThreadStatusPill["label"],
-  { readonly one: string; readonly other: string }
-> = {
-  "Pending Approval": { one: "needs approval", other: "need approval" },
-  "Awaiting Input": { one: "needs input", other: "need input" },
-  Working: { one: "working", other: "working" },
-  "Background work": { one: "running background work", other: "running background work" },
-  Connecting: { one: "connecting", other: "connecting" },
-  "Plan Ready": { one: "plan ready", other: "plans ready" },
-  Failed: { one: "failed", other: "failed" },
-  Completed: { one: "unread", other: "unread" },
-};
+function hiddenThreadStatusCountLabel(status: ThreadStatusPill["label"], count: number): string {
+  switch (status) {
+    case "Pending Approval":
+      return uiText("{count, plural, one {# needs approval} other {# need approval}}", { count });
+    case "Awaiting Input":
+      return uiText("{count, plural, one {# needs input} other {# need input}}", { count });
+    case "Working":
+      return uiText("{count} working", { count });
+    case "Background work":
+      return uiText("{count} running background work", { count });
+    case "Connecting":
+      return uiText("{count} connecting", { count });
+    case "Plan Ready":
+      return uiText("{count, plural, one {# plan ready} other {# plans ready}}", { count });
+    case "Failed":
+      return uiText("{count} failed", { count });
+    case "Completed":
+      return uiText("{count} unread", { count });
+  }
+}
 
 export interface HiddenThreadStatusSummary {
   /** Pill whose dot/color represents the summarized group. */
@@ -558,11 +589,10 @@ export function summarizeHiddenThreadStatuses(
       status !== null && THREAD_STATUS_PRIORITY[status.label] === priority,
   );
   const status = group.find((member) => member.label === "Working") ?? highestPriorityStatus;
-  const phrases = HIDDEN_THREAD_STATUS_PHRASES[status.label];
   return {
     status,
     count: group.length,
-    text: `${group.length} ${group.length === 1 ? phrases.one : phrases.other}`,
+    text: hiddenThreadStatusCountLabel(status.label, group.length),
   };
 }
 

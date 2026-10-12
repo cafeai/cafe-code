@@ -1,5 +1,7 @@
-"use client";
+import { useUiLocale } from "~/i18n";
+("use client");
 
+import { uiText } from "@cafecode/shared/i18n";
 import { Toast } from "@base-ui/react/toast";
 import {
   useEffect,
@@ -112,13 +114,15 @@ function handleToastDismissClick(
 }
 
 function CopyErrorButton({ text }: { text: string }) {
+  const uiLocale = useUiLocale();
+
   const { copyToClipboard, isCopied } = useCopyToClipboard();
 
   return (
     <button
       className="inline-flex size-5 shrink-0 cursor-pointer items-center justify-center rounded-md p-0 text-subtle-foreground transition-colors duration-(--duration-fast) hover:text-foreground"
       onClick={() => copyToClipboard(text)}
-      title="Copy error"
+      title={uiText("Copy error", undefined, undefined, uiLocale)}
       type="button"
     >
       {isCopied ? <CheckIcon className="size-3 text-success" /> : <CopyIcon className="size-3" />}
@@ -153,9 +157,11 @@ function ToastExpandableSection({
   children: ReactNode;
   labels: { expand?: string; collapse?: string };
 }) {
+  const uiLocale = useUiLocale();
+
   const [open, setOpen] = useState(false);
-  const expandLabel = labels.expand ?? "Show details";
-  const collapseLabel = labels.collapse ?? "Hide details";
+  const expandLabel = labels.expand ?? uiText("Show details", undefined, undefined, uiLocale);
+  const collapseLabel = labels.collapse ?? uiText("Hide details", undefined, undefined, uiLocale);
 
   return (
     <div className="min-w-0">
@@ -182,6 +188,8 @@ function ToastDescriptionAndExpandable({
   toastDescription: unknown;
   toastType: unknown;
 }) {
+  const uiLocale = useUiLocale();
+
   const expandableContent = toastData?.expandableContent;
   const labels = toastData?.expandableLabels ?? {};
   const descriptionTrigger = toastData?.expandableDescriptionTrigger ?? false;
@@ -204,8 +212,8 @@ function ToastDescriptionAndExpandable({
     );
   }
 
-  const expandLabel = labels.expand ?? "Show details";
-  const collapseLabel = labels.collapse ?? "Hide details";
+  const expandLabel = labels.expand ?? uiText("Show details", undefined, undefined, uiLocale);
+  const collapseLabel = labels.collapse ?? uiText("Hide details", undefined, undefined, uiLocale);
 
   const toggle = () => setOpen((v) => !v);
   const onKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {
@@ -502,6 +510,8 @@ function ToastProvider({ children, position = "top-right", ...props }: ToastProv
 }
 
 function Toasts({ position = "top-right" }: { position: ToastPosition }) {
+  const uiLocale = useUiLocale();
+
   const { toasts } = Toast.useToastManager<ThreadToastData>();
   const activeThreadRef = useActiveThreadRefFromRoute();
   const isTop = position.startsWith("top");
@@ -638,7 +648,7 @@ function Toasts({ position = "top-right" }: { position: ToastPosition }) {
               />
               <div className={toastCornerDismissClass}>
                 <button
-                  aria-label="Dismiss notification"
+                  aria-label={uiText("Dismiss notification", undefined, undefined, uiLocale)}
                   className={toastCornerOrbClass}
                   data-slot="toast-close"
                   onClick={() =>
@@ -687,6 +697,8 @@ function AnchoredToastProvider({ children, ...props }: Toast.Provider.Props) {
 }
 
 function AnchoredToasts() {
+  const uiLocale = useUiLocale();
+
   const { toasts } = Toast.useToastManager<ThreadToastData>();
   const activeThreadRef = useActiveThreadRefFromRoute();
 
@@ -733,7 +745,12 @@ function AnchoredToasts() {
                     <>
                       <div className={toastCornerDismissClass}>
                         <button
-                          aria-label="Dismiss notification"
+                          aria-label={uiText(
+                            "Dismiss notification",
+                            undefined,
+                            undefined,
+                            uiLocale,
+                          )}
                           className={toastCornerOrbClass}
                           data-slot="toast-close"
                           onClick={() =>

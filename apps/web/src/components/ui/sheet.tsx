@@ -1,5 +1,7 @@
-"use client";
+import { useUiLocale } from "~/i18n";
+("use client");
 
+import { uiText } from "@cafecode/shared/i18n";
 import { Dialog as SheetPrimitive } from "@base-ui/react/dialog";
 import { XIcon } from "lucide-react";
 import { cn } from "~/lib/utils";
@@ -73,6 +75,8 @@ function SheetPopup({
   side?: "right" | "left" | "top" | "bottom";
   variant?: "default" | "inset";
 }) {
+  const uiLocale = useUiLocale();
+
   return (
     <SheetPortal keepMounted={keepMounted}>
       <SheetBackdrop />
@@ -101,7 +105,7 @@ function SheetPopup({
           {children}
           {showCloseButton && (
             <SheetPrimitive.Close
-              aria-label="Close"
+              aria-label={uiText("Close", undefined, undefined, uiLocale)}
               className="absolute end-2 top-2"
               render={<Button size="icon" variant="ghost" />}
             >

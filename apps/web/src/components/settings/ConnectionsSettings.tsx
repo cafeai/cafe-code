@@ -1,3 +1,6 @@
+import { useUiLocale, useUiPresentation } from "~/i18n";
+import { uiFormatDateTime, uiText, type UiLocale } from "@cafecode/shared/i18n";
+import { UiMessage } from "~/i18n";
 import {
   ChevronDownIcon,
   DownloadIcon,
@@ -89,17 +92,74 @@ import { resolveServerConfigVersionMismatch } from "~/versionSkew";
 import { useServerConfig } from "~/rpc/serverState";
 import { SavedEnvironmentsSettings } from "./SavedEnvironmentsSettings";
 
-const accessTimestampFormatter = new Intl.DateTimeFormat(undefined, {
-  dateStyle: "medium",
-  timeStyle: "short",
-});
+type ConnectionFeedbackCode =
+  | "password-empty"
+  | "password-short"
+  | "password-mismatch"
+  | "password-update-failed"
+  | "password-disable-failed"
+  | "password-load-failed"
+  | "exposure-update-failed"
+  | "https-update-failed"
+  | "pairing-revoke-failed"
+  | "client-revoke-failed"
+  | "other-clients-revoke-failed"
+  | "exposure-load-failed"
+  | "endpoints-load-failed";
+
+type ConnectionFeedback =
+  | { readonly kind: "received"; readonly text: string }
+  | { readonly kind: "source"; readonly code: ConnectionFeedbackCode };
+
+/**
+ * Distinguish finite Cafe fallbacks from received errors before retaining them.
+ * A language change can format only our codes; it cannot reinterpret an error
+ * message as a catalog key or repeat password/network/auth operations.
+ */
+function connectionFeedback(error: unknown, fallback: ConnectionFeedbackCode): ConnectionFeedback {
+  return error instanceof Error
+    ? { kind: "received", text: error.message }
+    : { kind: "source", code: fallback };
+}
+
+function formatConnectionFeedback(feedback: ConnectionFeedback, locale: UiLocale): string {
+  if (feedback.kind === "received") return feedback.text;
+  switch (feedback.code) {
+    case "password-empty":
+      return uiText("Enter an admin password.", undefined, undefined, locale);
+    case "password-short":
+      return uiText("Admin password must be at least 8 characters.", undefined, undefined, locale);
+    case "password-mismatch":
+      return uiText("Passwords do not match.", undefined, undefined, locale);
+    case "password-update-failed":
+      return uiText("Failed to update admin password.", undefined, undefined, locale);
+    case "password-disable-failed":
+      return uiText("Failed to disable admin password.", undefined, undefined, locale);
+    case "password-load-failed":
+      return uiText("Failed to load admin password status.", undefined, undefined, locale);
+    case "exposure-update-failed":
+      return uiText("Failed to update network exposure.", undefined, undefined, locale);
+    case "https-update-failed":
+      return uiText("Failed to update HTTPS.", undefined, undefined, locale);
+    case "pairing-revoke-failed":
+      return uiText("Failed to revoke pairing link.", undefined, undefined, locale);
+    case "client-revoke-failed":
+      return uiText("Failed to revoke client access.", undefined, undefined, locale);
+    case "other-clients-revoke-failed":
+      return uiText("Failed to revoke other clients.", undefined, undefined, locale);
+    case "exposure-load-failed":
+      return uiText("Failed to load network exposure state.", undefined, undefined, locale);
+    case "endpoints-load-failed":
+      return uiText("Failed to load reachable endpoints.", undefined, undefined, locale);
+  }
+}
 
 function formatAccessTimestamp(value: string): string {
   const parsed = new Date(value);
   if (Number.isNaN(parsed.getTime())) {
     return value;
   }
-  return accessTimestampFormatter.format(parsed);
+  return uiFormatDateTime(parsed, { dateStyle: "medium", timeStyle: "short" });
 }
 
 type ConnectionStatusDotProps = {
@@ -277,6 +337,10 @@ function selectPairingEndpoint(
 }
 
 function endpointDefaultPreferenceKey(endpoint: AdvertisedEndpoint): string {
+  // Native source-owned display labels may change language. A supplied stable
+  // preference receipt preserves their earlier selection independently of
+  // translated copy; legacy/addon/user endpoint labels remain opaque below.
+  if (endpoint.defaultPreferenceKey) return endpoint.defaultPreferenceKey;
   if (endpoint.id.startsWith("desktop-loopback:")) {
     return "desktop-core:loopback:http";
   }
@@ -325,6 +389,9 @@ const PairingLinkListRow = memo(function PairingLinkListRow({
   revokingPairingLinkId,
   onRevoke,
 }: PairingLinkListRowProps) {
+  const uiLocale = useUiLocale();
+  const uiPresentation = useUiPresentation(UI_PRESENTATION_SOURCES);
+
   const nowMs = useRelativeTimeTick(1_000);
   const expiresAtMs = useMemo(
     () => new Date(pairingLink.expiresAt).getTime(),
@@ -350,10 +417,10 @@ const PairingLinkListRow = memo(function PairingLinkListRow({
             key: endpointDefaultPreferenceKey(endpoint),
             label: endpoint.label,
             url,
-            detail: "Pairing URL",
+            detail: uiText("Pairing URL", undefined, undefined, uiLocale),
           };
         }),
-    [endpoints, pairingLink.credential],
+    [endpoints, pairingLink.credential, uiLocale],
   );
   const shareablePairingUrl =
     endpointPairingUrl ??
@@ -369,11 +436,14 @@ const PairingLinkListRow = memo(function PairingLinkListRow({
     onCopy: (kind) => {
       toastManager.add({
         type: "success",
-        title: kind === "link" ? "Pairing URL copied" : "Pairing code copied",
+        title:
+          kind === "link"
+            ? uiText("Pairing URL copied", undefined, undefined, uiLocale)
+            : uiText("Pairing code copied", undefined, undefined, uiLocale),
         description:
           kind === "link"
-            ? "Open it on the device you want to pair."
-            : "Enter it on the device you want to pair.",
+            ? uiText("Open it on the device you want to pair.", undefined, undefined, uiLocale)
+            : uiText("Enter it on the device you want to pair.", undefined, undefined, uiLocale),
       });
     },
     onError: (error, kind) => {
@@ -383,10 +453,12 @@ const PairingLinkListRow = memo(function PairingLinkListRow({
           type: "error",
           title: canCopyToClipboard
             ? kind === "link"
-              ? "Could not copy pairing URL"
-              : "Could not copy pairing code"
-            : "Clipboard copy unavailable",
-          description: canCopyToClipboard ? error.message : "Showing the full value instead.",
+              ? uiText("Could not copy pairing URL", undefined, undefined, uiLocale)
+              : uiText("Could not copy pairing code", undefined, undefined, uiLocale)
+            : uiText("Clipboard copy unavailable", undefined, undefined, uiLocale),
+          description: canCopyToClipboard
+            ? error.message
+            : uiText("Showing the full value instead.", undefined, undefined, uiLocale),
         }),
       );
     },
@@ -410,13 +482,24 @@ const PairingLinkListRow = memo(function PairingLinkListRow({
 
   const expiresAbsolute = formatAccessTimestamp(pairingLink.expiresAt);
 
-  const roleLabel = pairingLink.role === "owner" ? "Owner" : "Client";
-  const primaryLabel = pairingLink.label ?? `${roleLabel} link`;
+  const roleLabel =
+    pairingLink.role === "owner"
+      ? uiText("Owner", undefined, undefined, uiLocale)
+      : uiText("Client", undefined, undefined, uiLocale);
+  const primaryLabel =
+    pairingLink.label ??
+    uiText(
+      "{role, select, owner {Owner link} other {Client link}}",
+      { role: pairingLink.role },
+      undefined,
+      uiLocale,
+    );
   const defaultEndpointCopyOption =
     endpointCopyOptions.find((option) => option.key === defaultEndpointKey) ??
     endpointCopyOptions[0] ??
     null;
-  const defaultEndpointCopyLabel = defaultEndpointCopyOption?.label ?? "URL";
+  const defaultEndpointCopyLabel =
+    defaultEndpointCopyOption?.label ?? uiText("URL", undefined, undefined, uiLocale);
   const renderEndpointMenuItems = (
     options: typeof endpointCopyOptions = endpointCopyOptions,
     renderDetail = true,
@@ -434,9 +517,13 @@ const PairingLinkListRow = memo(function PairingLinkListRow({
   const renderPairingCodeMenuItem = (renderDetail = true) => (
     <MenuItem onClick={handleCopyCode}>
       <span className="min-w-0 flex-1">
-        <span className="block truncate">Copy code</span>
+        <span className="block truncate">
+          {uiText("Copy code", undefined, undefined, uiLocale)}
+        </span>
         {renderDetail ? (
-          <span className="block truncate text-2xs text-muted-foreground">Code only</span>
+          <span className="block truncate text-2xs text-muted-foreground">
+            {uiText("Code only", undefined, undefined, uiLocale)}
+          </span>
         ) : null}
       </span>
     </MenuItem>
@@ -460,18 +547,26 @@ const PairingLinkListRow = memo(function PairingLinkListRow({
       {options?.codeFirst ? (
         <>
           <MenuGroup>
-            <MenuGroupLabel>Pairing code</MenuGroupLabel>
+            <MenuGroupLabel>
+              {uiText("Pairing code", undefined, undefined, uiLocale)}
+            </MenuGroupLabel>
             {renderPairingCodeMenuItem(false)}
           </MenuGroup>
           {endpointCopyOptions.length > 0 ? <MenuSeparator /> : null}
         </>
       ) : null}
-      {renderCompactEndpointGroup("Pairing URLs", endpointCopyOptions, false)}
+      {renderCompactEndpointGroup(
+        uiText("Pairing URLs", undefined, undefined, uiLocale),
+        endpointCopyOptions,
+        false,
+      )}
       {!options?.codeFirst ? (
         <>
           {endpointCopyOptions.length > 0 ? <MenuSeparator /> : null}
           <MenuGroup>
-            <MenuGroupLabel>Pairing code</MenuGroupLabel>
+            <MenuGroupLabel>
+              {uiText("Pairing code", undefined, undefined, uiLocale)}
+            </MenuGroupLabel>
             {renderPairingCodeMenuItem(false)}
           </MenuGroup>
         </>
@@ -489,7 +584,14 @@ const PairingLinkListRow = memo(function PairingLinkListRow({
         <div className="min-w-0 flex-1 space-y-1">
           <div className="flex min-h-5 items-center gap-1.5">
             <ConnectionStatusDot
-              tooltipText={`Link created at ${formatAccessTimestamp(pairingLink.createdAt)}`}
+              tooltipText={uiText(
+                "Link created at {timestamp}",
+                {
+                  timestamp: formatAccessTimestamp(pairingLink.createdAt),
+                },
+                undefined,
+                uiLocale,
+              )}
               dotClassName="bg-warning"
             />
             <h3 className="text-ui font-medium text-foreground">{primaryLabel}</h3>
@@ -504,7 +606,7 @@ const PairingLinkListRow = memo(function PairingLinkListRow({
                       <button
                         type="button"
                         className="focus-ring inline-flex size-4 shrink-0 items-center justify-center rounded-sm text-subtle-foreground hover:text-foreground"
-                        aria-label="Show QR code"
+                        aria-label={uiText("Show QR code", undefined, undefined, uiLocale)}
                       />
                     }
                   >
@@ -516,7 +618,12 @@ const PairingLinkListRow = memo(function PairingLinkListRow({
                       size={88}
                       level="M"
                       marginSize={2}
-                      title="Pairing link — scan to open on another device"
+                      title={uiText(
+                        "Pairing link — scan to open on another device",
+                        undefined,
+                        undefined,
+                        uiLocale,
+                      )}
                     />
                   </PopoverPopup>
                 </>
@@ -528,13 +635,22 @@ const PairingLinkListRow = memo(function PairingLinkListRow({
               delay={500}
               render={<p className="w-fit text-xs text-muted-foreground tabular-nums" />}
             >
-              {[roleLabel, formatExpiresInLabel(pairingLink.expiresAt, nowMs)].join(" · ")}
+              {[roleLabel, uiPresentation.formatExpiresInLabel(pairingLink.expiresAt, nowMs)].join(
+                " · ",
+              )}
             </TooltipTrigger>
-            <TooltipPopup side="top">Expires {expiresAbsolute}</TooltipPopup>
+            <TooltipPopup side="top">
+              <UiMessage message="Expires <slot1></slot1>" slots={{ slot1: expiresAbsolute }} />
+            </TooltipPopup>
           </Tooltip>
           {shareablePairingUrl === null ? (
             <p className="text-2xs text-muted-foreground">
-              Copy the code and pair using this server&apos;s network address.
+              {uiText(
+                "Copy the code and pair using this server''s network address.",
+                undefined,
+                undefined,
+                uiLocale,
+              )}
             </p>
           ) : null}
         </div>
@@ -543,7 +659,9 @@ const PairingLinkListRow = memo(function PairingLinkListRow({
             {canCopyToClipboard ? (
               <>
                 {shareablePairingUrl ? (
-                  <Group aria-label="Copy selected endpoint">
+                  <Group
+                    aria-label={uiText("Copy selected endpoint", undefined, undefined, uiLocale)}
+                  >
                     <Button
                       size="xs"
                       variant="outline"
@@ -551,7 +669,10 @@ const PairingLinkListRow = memo(function PairingLinkListRow({
                       onClick={handleCopyDefaultLink}
                     >
                       <span className="truncate">
-                        Copy pairing URL for: {defaultEndpointCopyLabel}
+                        <UiMessage
+                          message="Copy pairing URL for: <slot1></slot1>"
+                          slots={{ slot1: defaultEndpointCopyLabel }}
+                        />
                       </span>
                     </Button>
                     <GroupSeparator />
@@ -561,7 +682,12 @@ const PairingLinkListRow = memo(function PairingLinkListRow({
                           <Button
                             size="icon-xs"
                             variant="outline"
-                            aria-label="Choose endpoint to copy"
+                            aria-label={uiText(
+                              "Choose endpoint to copy",
+                              undefined,
+                              undefined,
+                              uiLocale,
+                            )}
                           />
                         }
                       >
@@ -574,22 +700,38 @@ const PairingLinkListRow = memo(function PairingLinkListRow({
                   </Group>
                 ) : (
                   <Button size="xs" variant="outline" onClick={handleCopyCode}>
-                    Copy code
+                    {uiText("Copy code", undefined, undefined, uiLocale)}
                   </Button>
                 )}
               </>
             ) : (
               <DialogTrigger render={<Button size="xs" variant="outline" />}>
-                {shareablePairingUrl ? "Show link" : "Show code"}
+                {shareablePairingUrl
+                  ? uiText("Show link", undefined, undefined, uiLocale)
+                  : uiText("Show code", undefined, undefined, uiLocale)}
               </DialogTrigger>
             )}
             <DialogPopup className="max-w-md">
               <DialogHeader>
-                <DialogTitle>{shareablePairingUrl ? "Pairing link" : "Pairing code"}</DialogTitle>
+                <DialogTitle>
+                  {shareablePairingUrl
+                    ? uiText("Pairing link", undefined, undefined, uiLocale)
+                    : uiText("Pairing code", undefined, undefined, uiLocale)}
+                </DialogTitle>
                 <DialogDescription>
                   {shareablePairingUrl
-                    ? "Copying isn't available here, so copy this link by hand or scan the code."
-                    : "Copying isn't available here, so copy this code by hand."}
+                    ? uiText(
+                        "Copying isn''t available here, so copy this link by hand or scan the code.",
+                        undefined,
+                        undefined,
+                        uiLocale,
+                      )
+                    : uiText(
+                        "Copying isn''t available here, so copy this code by hand.",
+                        undefined,
+                        undefined,
+                        uiLocale,
+                      )}
                 </DialogDescription>
               </DialogHeader>
               <DialogPanel className="space-y-4">
@@ -608,18 +750,23 @@ const PairingLinkListRow = memo(function PairingLinkListRow({
                       size={132}
                       level="M"
                       marginSize={2}
-                      title="Pairing link — scan to open on another device"
+                      title={uiText(
+                        "Pairing link — scan to open on another device",
+                        undefined,
+                        undefined,
+                        uiLocale,
+                      )}
                     />
                   </div>
                 ) : null}
               </DialogPanel>
               <DialogFooter variant="bare">
                 <Button variant="outline" onClick={() => setIsRevealDialogOpen(false)}>
-                  Done
+                  {uiText("Done", undefined, undefined, uiLocale)}
                 </Button>
                 {canCopyToClipboard ? (
                   <Button variant="outline" size="xs" onClick={handleCopyCode}>
-                    Copy code
+                    {uiText("Copy code", undefined, undefined, uiLocale)}
                   </Button>
                 ) : null}
               </DialogFooter>
@@ -633,7 +780,7 @@ const PairingLinkListRow = memo(function PairingLinkListRow({
             onClick={() => void onRevoke(pairingLink.id)}
           >
             <BusyButtonLabel busy={revokingPairingLinkId === pairingLink.id}>
-              Revoke
+              {uiText("Revoke", undefined, undefined, uiLocale)}
             </BusyButtonLabel>
           </Button>
         </div>
@@ -649,27 +796,62 @@ type ConnectedClientListRowProps = {
   onRevokeSession: (sessionId: ServerClientSessionRecord["sessionId"]) => void;
 };
 
+function clientDeviceTypeLabel(
+  deviceType: AuthClientSession["client"]["deviceType"],
+): string | null {
+  // The authenticated device enum remains unchanged; only its finite display
+  // labels are translated. Received OS/browser names are never title-cased.
+  switch (deviceType) {
+    case "desktop":
+      return uiText("Desktop");
+    case "mobile":
+      return uiText("Mobile");
+    case "tablet":
+      return uiText("Tablet");
+    case "bot":
+      return uiText("Bot");
+    case "unknown":
+      return null;
+  }
+}
+
 const ConnectedClientListRow = memo(function ConnectedClientListRow({
   clientSession,
   presentation = "current",
   revokingClientSessionId,
   onRevokeSession,
 }: ConnectedClientListRowProps) {
+  const uiLocale = useUiLocale();
+  const uiPresentation = useUiPresentation(UI_PRESENTATION_SOURCES);
+
   const nowMs = useRelativeTimeTick(1_000);
   const isLive = clientSession.current || clientSession.connected;
   const lastConnectedAt = clientSession.lastConnectedAt;
   const statusTooltip = isLive
     ? lastConnectedAt
-      ? `Connected for ${formatElapsedDurationLabel(lastConnectedAt, nowMs)}`
-      : "Connected"
+      ? uiText(
+          "Connected for {value0}",
+          {
+            value0: uiPresentation.formatElapsedDurationLabel(lastConnectedAt, nowMs),
+          },
+          undefined,
+          uiLocale,
+        )
+      : uiText("Connected", undefined, undefined, uiLocale)
     : lastConnectedAt
-      ? `Last connected at ${formatAccessTimestamp(lastConnectedAt)}`
-      : "Not connected yet.";
-  const roleLabel = clientSession.role === "owner" ? "Owner" : "Client";
+      ? uiText(
+          "Last connected at {value0}",
+          { value0: formatAccessTimestamp(lastConnectedAt) },
+          undefined,
+          uiLocale,
+        )
+      : uiText("Not connected yet.", undefined, undefined, uiLocale);
+  const roleLabel =
+    clientSession.role === "owner"
+      ? uiText("Owner", undefined, undefined, uiLocale)
+      : uiText("Client", undefined, undefined, uiLocale);
   const deviceInfoBits = [
-    clientSession.client.deviceType !== "unknown"
-      ? clientSession.client.deviceType[0]?.toUpperCase() + clientSession.client.deviceType.slice(1)
-      : null,
+    uiPresentation.clientDeviceTypeLabel(clientSession.client.deviceType),
     clientSession.client.os ?? null,
     clientSession.client.browser ?? null,
     clientSession.client.ipAddress ?? null,
@@ -690,7 +872,11 @@ const ConnectedClientListRow = memo(function ConnectedClientListRow({
               pingClassName={isLive ? "bg-success/60 duration-2000" : null}
             />
             <h3 className="text-ui font-medium text-foreground">{primaryLabel}</h3>
-            {clientSession.current ? <Badge variant="secondary">This device</Badge> : null}
+            {clientSession.current ? (
+              <Badge variant="secondary">
+                {uiText("This device", undefined, undefined, uiLocale)}
+              </Badge>
+            ) : null}
           </div>
           <p className="text-xs text-muted-foreground">
             {[roleLabel, ...deviceInfoBits].join(" · ")}
@@ -706,7 +892,7 @@ const ConnectedClientListRow = memo(function ConnectedClientListRow({
               onClick={() => void onRevokeSession(clientSession.sessionId)}
             >
               <BusyButtonLabel busy={revokingClientSessionId === clientSession.sessionId}>
-                Revoke
+                {uiText("Revoke", undefined, undefined, uiLocale)}
               </BusyButtonLabel>
             </Button>
           ) : null}
@@ -731,6 +917,8 @@ const AuthorizedClientsHeaderAction = memo(function AuthorizedClientsHeaderActio
   isRevokingOtherClients,
   onRevokeOtherClients,
 }: AuthorizedClientsHeaderActionProps) {
+  const uiLocale = useUiLocale();
+
   const [dialogOpen, setDialogOpen] = useState(false);
   const [pairingLabel, setPairingLabel] = useState("");
   const [isCreatingPairingLink, setIsCreatingPairingLink] = useState(false);
@@ -742,18 +930,21 @@ const AuthorizedClientsHeaderAction = memo(function AuthorizedClientsHeaderActio
       setPairingLabel("");
       setDialogOpen(false);
     } catch (error) {
-      const message = error instanceof Error ? error.message : "Failed to create pairing URL.";
+      const message =
+        error instanceof Error
+          ? error.message
+          : uiText("Failed to create pairing URL.", undefined, undefined, uiLocale);
       toastManager.add(
         stackedThreadToast({
           type: "error",
-          title: "Could not create pairing URL",
+          title: uiText("Could not create pairing URL", undefined, undefined, uiLocale),
           description: message,
         }),
       );
     } finally {
       setIsCreatingPairingLink(false);
     }
-  }, [pairingLabel, createPairingCredential]);
+  }, [pairingLabel, createPairingCredential, uiLocale]);
 
   return (
     <div className="flex items-center gap-2">
@@ -766,7 +957,9 @@ const AuthorizedClientsHeaderAction = memo(function AuthorizedClientsHeaderActio
         aria-busy={isRevokingOtherClients || undefined}
         onClick={() => void onRevokeOtherClients()}
       >
-        <BusyButtonLabel busy={isRevokingOtherClients}>Revoke others</BusyButtonLabel>
+        <BusyButtonLabel busy={isRevokingOtherClients}>
+          {uiText("Revoke others", undefined, undefined, uiLocale)}
+        </BusyButtonLabel>
       </Button>
       <Dialog
         open={dialogOpen}
@@ -781,26 +974,33 @@ const AuthorizedClientsHeaderAction = memo(function AuthorizedClientsHeaderActio
           render={
             <Button size="xs" variant="default">
               <PlusIcon className="size-3" />
-              Create link
+              {uiText("Create link", undefined, undefined, uiLocale)}
             </Button>
           }
         />
         <DialogPopup className="max-w-sm">
           <DialogHeader>
-            <DialogTitle>Create pairing link</DialogTitle>
+            <DialogTitle>
+              {uiText("Create pairing link", undefined, undefined, uiLocale)}
+            </DialogTitle>
             <DialogDescription>
-              Another device can use this one-time link to connect.
+              {uiText(
+                "Another device can use this one-time link to connect.",
+                undefined,
+                undefined,
+                uiLocale,
+              )}
             </DialogDescription>
           </DialogHeader>
           <DialogPanel>
             <label className="block">
               <span className="mb-1.5 block text-xs font-medium text-foreground">
-                Device name (optional)
+                {uiText("Device name (optional)", undefined, undefined, uiLocale)}
               </span>
               <Input
                 value={pairingLabel}
                 onChange={(event) => setPairingLabel(event.target.value)}
-                placeholder="e.g. Living room iPad"
+                placeholder={uiText("e.g. Living room iPad", undefined, undefined, uiLocale)}
                 disabled={isCreatingPairingLink}
                 autoFocus
               />
@@ -812,14 +1012,16 @@ const AuthorizedClientsHeaderAction = memo(function AuthorizedClientsHeaderActio
               disabled={isCreatingPairingLink}
               onClick={() => setDialogOpen(false)}
             >
-              Cancel
+              {uiText("Cancel", undefined, undefined, uiLocale)}
             </Button>
             <Button
               disabled={isCreatingPairingLink}
               aria-busy={isCreatingPairingLink || undefined}
               onClick={() => void handleCreatePairingLink()}
             >
-              <BusyButtonLabel busy={isCreatingPairingLink}>Create link</BusyButtonLabel>
+              <BusyButtonLabel busy={isCreatingPairingLink}>
+                {uiText("Create link", undefined, undefined, uiLocale)}
+              </BusyButtonLabel>
             </Button>
           </DialogFooter>
         </DialogPopup>
@@ -845,46 +1047,46 @@ const AdminPasswordManagementRow = memo(function AdminPasswordManagementRow({
   onSetPassword,
   onClearPassword,
 }: AdminPasswordManagementRowProps) {
+  const uiLocale = useUiLocale();
+
   const [passwordDialogOpen, setPasswordDialogOpen] = useState(false);
   const [passwordDialogMode, setPasswordDialogMode] = useState<"enable" | "change">("enable");
   const [disableDialogOpen, setDisableDialogOpen] = useState(false);
   const [password, setPassword] = useState("");
   const [confirmPassword, setConfirmPassword] = useState("");
-  const [dialogError, setDialogError] = useState<string | null>(null);
+  const [dialogErrorCode, setDialogErrorCode] = useState<ConnectionFeedback | null>(null);
   const resetPasswordDialog = useCallback(() => {
     setPassword("");
     setConfirmPassword("");
-    setDialogError(null);
+    setDialogErrorCode(null);
   }, []);
   const openPasswordDialog = useCallback((mode: "enable" | "change") => {
     setPasswordDialogMode(mode);
     setPasswordDialogOpen(true);
-    setDialogError(null);
+    setDialogErrorCode(null);
   }, []);
   const handleSavePassword = useCallback(async () => {
     const nextPassword = password.trim();
     if (!nextPassword) {
-      setDialogError("Enter an admin password.");
+      setDialogErrorCode({ kind: "source", code: "password-empty" });
       return;
     }
     if (nextPassword.length < 8) {
-      setDialogError("Admin password must be at least 8 characters.");
+      setDialogErrorCode({ kind: "source", code: "password-short" });
       return;
     }
     if (nextPassword !== confirmPassword.trim()) {
-      setDialogError("Passwords do not match.");
+      setDialogErrorCode({ kind: "source", code: "password-mismatch" });
       return;
     }
 
-    setDialogError(null);
+    setDialogErrorCode(null);
     try {
       await onSetPassword(nextPassword);
       setPasswordDialogOpen(false);
       resetPasswordDialog();
     } catch (caughtError) {
-      setDialogError(
-        caughtError instanceof Error ? caughtError.message : "Failed to update admin password.",
-      );
+      setDialogErrorCode(connectionFeedback(caughtError, "password-update-failed"));
     }
   }, [confirmPassword, onSetPassword, password, resetPasswordDialog]);
   const handleClearPassword = useCallback(async () => {
@@ -892,27 +1094,33 @@ const AdminPasswordManagementRow = memo(function AdminPasswordManagementRow({
       await onClearPassword();
       setDisableDialogOpen(false);
     } catch (caughtError) {
-      setDialogError(
-        caughtError instanceof Error ? caughtError.message : "Failed to disable admin password.",
-      );
+      setDialogErrorCode(connectionFeedback(caughtError, "password-disable-failed"));
     }
   }, [onClearPassword]);
 
   const isConfigured = configured === true;
+  const dialogErrorText = dialogErrorCode
+    ? formatConnectionFeedback(dialogErrorCode, uiLocale)
+    : null;
   const controlsDisabled = isLoading || isSaving || configured === null;
   const showLoadingSpinner = useDelayedFlag(isLoading);
 
   return (
     <>
       <SettingsRow
-        title="Admin password"
-        description="Lets owners sign in from the pairing screen with a password."
+        title={uiText("Admin password", undefined, undefined, uiLocale)}
+        description={uiText(
+          "Lets owners sign in from the pairing screen with a password.",
+          undefined,
+          undefined,
+          uiLocale,
+        )}
         status={error ? <span className="block text-destructive-foreground">{error}</span> : null}
         control={
           <>
             {showLoadingSpinner ? (
               <Spinner
-                aria-label="Loading password status"
+                aria-label={uiText("Loading password status", undefined, undefined, uiLocale)}
                 className="size-3.5 text-muted-foreground"
               />
             ) : null}
@@ -924,7 +1132,7 @@ const AdminPasswordManagementRow = memo(function AdminPasswordManagementRow({
                 onClick={() => openPasswordDialog("change")}
               >
                 <KeyRoundIcon className="size-3" />
-                Change
+                {uiText("Change", undefined, undefined, uiLocale)}
               </Button>
             ) : null}
             <Switch
@@ -935,10 +1143,10 @@ const AdminPasswordManagementRow = memo(function AdminPasswordManagementRow({
                   openPasswordDialog("enable");
                 } else {
                   setDisableDialogOpen(true);
-                  setDialogError(null);
+                  setDialogErrorCode(null);
                 }
               }}
-              aria-label="Enable password authentication"
+              aria-label={uiText("Enable password authentication", undefined, undefined, uiLocale)}
             />
           </>
         }
@@ -956,16 +1164,23 @@ const AdminPasswordManagementRow = memo(function AdminPasswordManagementRow({
         <DialogPopup className="max-w-sm">
           <DialogHeader>
             <DialogTitle>
-              {passwordDialogMode === "enable" ? "Enable admin password" : "Change admin password"}
+              {passwordDialogMode === "enable"
+                ? uiText("Enable admin password", undefined, undefined, uiLocale)
+                : uiText("Change admin password", undefined, undefined, uiLocale)}
             </DialogTitle>
             <DialogDescription>
-              Set the password used for owner login from the pairing screen.
+              {uiText(
+                "Set the password used for owner login from the pairing screen.",
+                undefined,
+                undefined,
+                uiLocale,
+              )}
             </DialogDescription>
           </DialogHeader>
           <DialogPanel className="space-y-3">
             <label className="block">
               <span className="mb-1.5 block text-xs font-medium text-foreground">
-                Admin password
+                {uiText("Admin password", undefined, undefined, uiLocale)}
               </span>
               <Input
                 value={password}
@@ -978,7 +1193,7 @@ const AdminPasswordManagementRow = memo(function AdminPasswordManagementRow({
             </label>
             <label className="block">
               <span className="mb-1.5 block text-xs font-medium text-foreground">
-                Confirm password
+                {uiText("Confirm password", undefined, undefined, uiLocale)}
               </span>
               <Input
                 value={confirmPassword}
@@ -988,8 +1203,8 @@ const AdminPasswordManagementRow = memo(function AdminPasswordManagementRow({
                 disabled={isSaving}
               />
             </label>
-            {dialogError ? (
-              <p className="text-xs text-destructive-foreground">{dialogError}</p>
+            {dialogErrorText ? (
+              <p className="text-xs text-destructive-foreground">{dialogErrorText}</p>
             ) : null}
           </DialogPanel>
           <DialogFooter variant="bare">
@@ -1001,7 +1216,7 @@ const AdminPasswordManagementRow = memo(function AdminPasswordManagementRow({
                 resetPasswordDialog();
               }}
             >
-              Cancel
+              {uiText("Cancel", undefined, undefined, uiLocale)}
             </Button>
             <Button
               disabled={isSaving}
@@ -1009,7 +1224,9 @@ const AdminPasswordManagementRow = memo(function AdminPasswordManagementRow({
               onClick={() => void handleSavePassword()}
             >
               <BusyButtonLabel busy={isSaving}>
-                {passwordDialogMode === "enable" ? "Enable" : "Save"}
+                {passwordDialogMode === "enable"
+                  ? uiText("Enable", undefined, undefined, uiLocale)
+                  : uiText("Save", undefined, undefined, uiLocale)}
               </BusyButtonLabel>
             </Button>
           </DialogFooter>
@@ -1021,27 +1238,33 @@ const AdminPasswordManagementRow = memo(function AdminPasswordManagementRow({
           if (isSaving) return;
           setDisableDialogOpen(open);
           if (!open) {
-            setDialogError(null);
+            setDialogErrorCode(null);
           }
         }}
       >
         <AlertDialogPopup>
           <AlertDialogHeader>
-            <AlertDialogTitle>Disable password authentication?</AlertDialogTitle>
+            <AlertDialogTitle>
+              {uiText("Disable password authentication?", undefined, undefined, uiLocale)}
+            </AlertDialogTitle>
             <AlertDialogDescription>
-              This clears the saved admin password. Existing sessions stay active until revoked or
-              expired.
+              {uiText(
+                "This clears the saved admin password. Existing sessions stay active until revoked or expired.",
+                undefined,
+                undefined,
+                uiLocale,
+              )}
             </AlertDialogDescription>
           </AlertDialogHeader>
-          {dialogError ? (
-            <div className="px-6 pb-2 text-xs text-destructive-foreground">{dialogError}</div>
+          {dialogErrorText ? (
+            <div className="px-6 pb-2 text-xs text-destructive-foreground">{dialogErrorText}</div>
           ) : null}
           <AlertDialogFooter>
             <AlertDialogClose
               disabled={isSaving}
               render={<Button variant="outline" disabled={isSaving} />}
             >
-              Cancel
+              {uiText("Cancel", undefined, undefined, uiLocale)}
             </AlertDialogClose>
             <Button
               variant="destructive"
@@ -1049,7 +1272,9 @@ const AdminPasswordManagementRow = memo(function AdminPasswordManagementRow({
               aria-busy={isSaving || undefined}
               onClick={() => void handleClearPassword()}
             >
-              <BusyButtonLabel busy={isSaving}>Disable</BusyButtonLabel>
+              <BusyButtonLabel busy={isSaving}>
+                {uiText("Disable", undefined, undefined, uiLocale)}
+              </BusyButtonLabel>
             </Button>
           </AlertDialogFooter>
         </AlertDialogPopup>
@@ -1085,6 +1310,8 @@ const PairingClientsList = memo(function PairingClientsList({
   onRevokePairingLink,
   onRevokeClientSession,
 }: PairingClientsListProps) {
+  const uiLocale = useUiLocale();
+
   const isEmpty = pairingLinks.length === 0 && clientSessions.length === 0;
   const showSkeleton = useDelayedFlag(isLoading && isEmpty);
   return (
@@ -1115,7 +1342,9 @@ const PairingClientsList = memo(function PairingClientsList({
 
       {isEmpty && !isLoading ? (
         <div className={accessRowClassName(presentation)}>
-          <p className="text-xs text-muted-foreground">No pairing links or devices yet.</p>
+          <p className="text-xs text-muted-foreground">
+            {uiText("No pairing links or devices yet.", undefined, undefined, uiLocale)}
+          </p>
         </div>
       ) : null}
     </>
@@ -1157,6 +1386,8 @@ const AdvertisedEndpointListRow = memo(function AdvertisedEndpointListRow({
   presentation = "current",
   onSetDefault,
 }: AdvertisedEndpointListRowProps) {
+  const uiLocale = useUiLocale();
+
   const isAvailable = endpoint.status === "available";
   const isEndpointRail = presentation === "endpoint-rail";
   return (
@@ -1172,13 +1403,19 @@ const AdvertisedEndpointListRow = memo(function AdvertisedEndpointListRow({
           <p className="min-w-0 truncate text-xs leading-5 text-muted-foreground">
             {endpoint.httpBaseUrl}
           </p>
-          {!isAvailable ? <Badge variant="outline">Unavailable</Badge> : null}
+          {!isAvailable ? (
+            <Badge variant="outline">{uiText("Unavailable", undefined, undefined, uiLocale)}</Badge>
+          ) : null}
         </div>
         <div className="ml-auto flex min-h-6 shrink-0 items-center justify-end gap-2">
-          {isDefault ? <Badge className="bg-primary/10 text-primary">Default</Badge> : null}
+          {isDefault ? (
+            <Badge className="bg-primary/10 text-primary">
+              {uiText("Default", undefined, undefined, uiLocale)}
+            </Badge>
+          ) : null}
           {isAvailable && !isDefault ? (
             <Button size="xs" variant="outline" onClick={() => onSetDefault(endpoint)}>
-              Set as default
+              {uiText("Set as default", undefined, undefined, uiLocale)}
             </Button>
           ) : null}
         </div>
@@ -1209,8 +1446,10 @@ function RestartButtonLabel({
           !restarting && "invisible",
         )}
       >
-        <Spinner className="size-3.5" />
-        Restarting…
+        <UiMessage
+          message={"<slot1></slot1>Restarting…"}
+          slots={{ slot1: <Spinner className="size-3.5" /> }}
+        />
       </span>
     </span>
   );
@@ -1229,6 +1468,8 @@ function NetworkAccessDescription({
   onToggleExpanded: () => void;
   fallback: ReactNode;
 }) {
+  const uiLocale = useUiLocale();
+
   if (!endpoint) {
     return fallback;
   }
@@ -1238,7 +1479,7 @@ function NetworkAccessDescription({
       <span className="min-w-0 truncate">{endpoint.httpBaseUrl}</span>
       {hiddenEndpointCount > 0 ? (
         <span className="shrink-0 text-xs font-medium">
-          {expanded ? "Hide" : `+${hiddenEndpointCount}`}
+          {expanded ? uiText("Hide", undefined, undefined, uiLocale) : `+${hiddenEndpointCount}`}
         </span>
       ) : null}
     </>
@@ -1246,7 +1487,7 @@ function NetworkAccessDescription({
 
   return (
     <span className="inline-flex min-w-0 max-w-full items-baseline gap-1">
-      <span className="shrink-0">Reachable at</span>
+      <span className="shrink-0">{uiText("Reachable at", undefined, undefined, uiLocale)}</span>
       {hiddenEndpointCount > 0 ? (
         <button
           type="button"
@@ -1264,6 +1505,9 @@ function NetworkAccessDescription({
 }
 
 export function ConnectionsSettings() {
+  const uiLocale = useUiLocale();
+  const uiPresentation = useUiPresentation(UI_PRESENTATION_SOURCES);
+
   const environmentId = useWorkspaceEnvironmentId();
   const isPrimary =
     !environmentId || environmentId === readPrimaryEnvironmentDescriptor()?.environmentId;
@@ -1291,19 +1535,21 @@ export function ConnectionsSettings() {
   const [desktopAdvertisedEndpoints, setDesktopAdvertisedEndpoints] = useState<
     ReadonlyArray<AdvertisedEndpoint>
   >([]);
-  const [desktopServerExposureError, setDesktopServerExposureError] = useState<string | null>(null);
+  const [desktopServerExposureErrorCode, setDesktopServerExposureErrorCode] =
+    useState<ConnectionFeedback | null>(null);
   const [desktopPairingLinks, setDesktopPairingLinks] = useState<
     ReadonlyArray<ServerPairingLinkRecord>
   >([]);
   const [desktopClientSessions, setDesktopClientSessions] = useState<
     ReadonlyArray<ServerClientSessionRecord>
   >([]);
-  const [desktopAccessManagementError, setDesktopAccessManagementError] = useState<string | null>(
-    null,
-  );
+  const [desktopAccessManagementErrorCode, setDesktopAccessManagementErrorCode] =
+    useState<ConnectionFeedback | null>(null);
   const [isLoadingDesktopAccessManagement, setIsLoadingDesktopAccessManagement] = useState(false);
   const [adminPasswordConfigured, setAdminPasswordConfigured] = useState<boolean | null>(null);
-  const [adminPasswordError, setAdminPasswordError] = useState<string | null>(null);
+  const [adminPasswordErrorCode, setAdminPasswordErrorCode] = useState<ConnectionFeedback | null>(
+    null,
+  );
   const [isLoadingAdminPassword, setIsLoadingAdminPassword] = useState(false);
   const [isSavingAdminPassword, setIsSavingAdminPassword] = useState(false);
   const [revokingDesktopPairingLinkId, setRevokingDesktopPairingLinkId] = useState<string | null>(
@@ -1324,7 +1570,8 @@ export function ConnectionsSettings() {
     boolean | null
   >(null);
   const primaryServerConfig = useServerConfig();
-  const primaryVersionMismatch = resolveServerConfigVersionMismatch(primaryServerConfig);
+  const primaryVersionMismatch =
+    uiPresentation.resolveServerConfigVersionMismatch(primaryServerConfig);
   const [isAdvertisedEndpointListExpanded, setIsAdvertisedEndpointListExpanded] = useState(true);
   const defaultAdvertisedEndpointKey = useUiStateStore(
     (state) => state.defaultAdvertisedEndpointKey,
@@ -1341,7 +1588,7 @@ export function ConnectionsSettings() {
     async (checked: boolean) => {
       if (!desktopBridge) return;
       setIsUpdatingDesktopServerExposure(true);
-      setDesktopServerExposureError(null);
+      setDesktopServerExposureErrorCode(null);
       try {
         const nextState = await desktopBridge.setServerExposureMode(
           checked ? "network-accessible" : "local-only",
@@ -1350,21 +1597,21 @@ export function ConnectionsSettings() {
         setIsDesktopServerExposureDialogOpen(false);
         setIsUpdatingDesktopServerExposure(false);
       } catch (error) {
-        const message =
-          error instanceof Error ? error.message : "Failed to update network exposure.";
+        const feedback = connectionFeedback(error, "exposure-update-failed");
+        const message = formatConnectionFeedback(feedback, uiLocale);
         setIsDesktopServerExposureDialogOpen(false);
-        setDesktopServerExposureError(message);
+        setDesktopServerExposureErrorCode(feedback);
         toastManager.add(
           stackedThreadToast({
             type: "error",
-            title: "Could not update network access",
+            title: uiText("Could not update network access", undefined, undefined, uiLocale),
             description: message,
           }),
         );
         setIsUpdatingDesktopServerExposure(false);
       }
     },
-    [desktopBridge],
+    [desktopBridge, uiLocale],
   );
 
   const handleConfirmDesktopServerExposureChange = useCallback(() => {
@@ -1377,27 +1624,28 @@ export function ConnectionsSettings() {
     async (enabled: boolean) => {
       if (!desktopBridge) return;
       setIsUpdatingDesktopServerHttps(true);
-      setDesktopServerExposureError(null);
+      setDesktopServerExposureErrorCode(null);
       try {
         const nextState = await desktopBridge.setServerHttpsEnabled(enabled);
         setDesktopServerExposureState(nextState);
         setIsDesktopServerHttpsDialogOpen(false);
         setIsUpdatingDesktopServerHttps(false);
       } catch (error) {
-        const message = error instanceof Error ? error.message : "Failed to update HTTPS.";
+        const feedback = connectionFeedback(error, "https-update-failed");
+        const message = formatConnectionFeedback(feedback, uiLocale);
         setIsDesktopServerHttpsDialogOpen(false);
-        setDesktopServerExposureError(message);
+        setDesktopServerExposureErrorCode(feedback);
         toastManager.add(
           stackedThreadToast({
             type: "error",
-            title: "Could not update HTTPS",
+            title: uiText("Could not update HTTPS", undefined, undefined, uiLocale),
             description: message,
           }),
         );
         setIsUpdatingDesktopServerHttps(false);
       }
     },
-    [desktopBridge],
+    [desktopBridge, uiLocale],
   );
 
   const handleConfirmDesktopServerHttpsChange = useCallback(() => {
@@ -1405,39 +1653,44 @@ export function ConnectionsSettings() {
     void handleDesktopServerHttpsChange(pendingDesktopServerHttpsEnabled);
   }, [handleDesktopServerHttpsChange, pendingDesktopServerHttpsEnabled]);
 
-  const handleRevokeDesktopPairingLink = useCallback(async (id: string) => {
-    setRevokingDesktopPairingLinkId(id);
-    setDesktopAccessManagementError(null);
-    try {
-      await revokeServerPairingLink(id);
-    } catch (error) {
-      const message = error instanceof Error ? error.message : "Failed to revoke pairing link.";
-      setDesktopAccessManagementError(message);
-      toastManager.add(
-        stackedThreadToast({
-          type: "error",
-          title: "Could not revoke pairing link",
-          description: message,
-        }),
-      );
-    } finally {
-      setRevokingDesktopPairingLinkId(null);
-    }
-  }, []);
+  const handleRevokeDesktopPairingLink = useCallback(
+    async (id: string) => {
+      setRevokingDesktopPairingLinkId(id);
+      setDesktopAccessManagementErrorCode(null);
+      try {
+        await revokeServerPairingLink(id);
+      } catch (error) {
+        const feedback = connectionFeedback(error, "pairing-revoke-failed");
+        const message = formatConnectionFeedback(feedback, uiLocale);
+        setDesktopAccessManagementErrorCode(feedback);
+        toastManager.add(
+          stackedThreadToast({
+            type: "error",
+            title: uiText("Could not revoke pairing link", undefined, undefined, uiLocale),
+            description: message,
+          }),
+        );
+      } finally {
+        setRevokingDesktopPairingLinkId(null);
+      }
+    },
+    [uiLocale],
+  );
 
   const handleRevokeDesktopClientSession = useCallback(
     async (sessionId: ServerClientSessionRecord["sessionId"]) => {
       setRevokingDesktopClientSessionId(sessionId);
-      setDesktopAccessManagementError(null);
+      setDesktopAccessManagementErrorCode(null);
       try {
         await revokeServerClientSession(sessionId);
       } catch (error) {
-        const message = error instanceof Error ? error.message : "Failed to revoke client access.";
-        setDesktopAccessManagementError(message);
+        const feedback = connectionFeedback(error, "client-revoke-failed");
+        const message = formatConnectionFeedback(feedback, uiLocale);
+        setDesktopAccessManagementErrorCode(feedback);
         toastManager.add(
           stackedThreadToast({
             type: "error",
-            title: "Could not revoke client access",
+            title: uiText("Could not revoke client access", undefined, undefined, uiLocale),
             description: message,
           }),
         );
@@ -1445,79 +1698,108 @@ export function ConnectionsSettings() {
         setRevokingDesktopClientSessionId(null);
       }
     },
-    [],
+    [uiLocale],
   );
 
   const handleRevokeOtherDesktopClients = useCallback(async () => {
     setIsRevokingOtherDesktopClients(true);
-    setDesktopAccessManagementError(null);
+    setDesktopAccessManagementErrorCode(null);
     try {
       const revokedCount = await revokeOtherServerClientSessions();
       toastManager.add({
         type: "success",
-        title: revokedCount === 1 ? "Revoked 1 other device" : `Revoked ${revokedCount} devices`,
-        description: "They need a new pairing link to reconnect.",
+        title:
+          revokedCount === 1
+            ? uiText("Revoked 1 other device", undefined, undefined, uiLocale)
+            : uiText("Revoked {value0} devices", { value0: revokedCount }, undefined, uiLocale),
+        description: uiText(
+          "They need a new pairing link to reconnect.",
+          undefined,
+          undefined,
+          uiLocale,
+        ),
       });
     } catch (error) {
-      const message = error instanceof Error ? error.message : "Failed to revoke other clients.";
-      setDesktopAccessManagementError(message);
+      const feedback = connectionFeedback(error, "other-clients-revoke-failed");
+      const message = formatConnectionFeedback(feedback, uiLocale);
+      setDesktopAccessManagementErrorCode(feedback);
       toastManager.add(
         stackedThreadToast({
           type: "error",
-          title: "Could not revoke other clients",
+          title: uiText("Could not revoke other clients", undefined, undefined, uiLocale),
           description: message,
         }),
       );
     } finally {
       setIsRevokingOtherDesktopClients(false);
     }
-  }, []);
+  }, [uiLocale]);
 
-  const handleSetAdminPassword = useCallback(async (password: string) => {
-    setIsSavingAdminPassword(true);
-    setAdminPasswordError(null);
-    try {
-      const result = await setServerAdminPassword(password);
-      setAdminPasswordConfigured(result.configured);
-      toastManager.add({
-        type: "success",
-        title: "Admin password updated",
-        description: "Password login is available from the pairing screen.",
-      });
-    } catch (error) {
-      const message = error instanceof Error ? error.message : "Failed to update admin password.";
-      setAdminPasswordError(message);
-      toastManager.add(
-        stackedThreadToast({
-          type: "error",
-          title: "Could not update admin password",
-          description: message,
-        }),
-      );
-      throw error;
-    } finally {
-      setIsSavingAdminPassword(false);
-    }
-  }, []);
+  const handleSetAdminPassword = useCallback(
+    async (password: string) => {
+      setIsSavingAdminPassword(true);
+      setAdminPasswordErrorCode(null);
+      try {
+        const result = await setServerAdminPassword(password);
+        setAdminPasswordConfigured(result.configured);
+        toastManager.add({
+          type: "success",
+          title: uiText("Admin password updated", undefined, undefined, uiLocale),
+          description: uiText(
+            "Password login is available from the pairing screen.",
+            undefined,
+            undefined,
+            uiLocale,
+          ),
+        });
+      } catch (error) {
+        const feedback = connectionFeedback(error, "password-update-failed");
+        const message = formatConnectionFeedback(feedback, uiLocale);
+        setAdminPasswordErrorCode(feedback);
+        toastManager.add(
+          stackedThreadToast({
+            type: "error",
+            title: uiText("Could not update admin password", undefined, undefined, uiLocale),
+            description: message,
+          }),
+        );
+        throw error;
+      } finally {
+        setIsSavingAdminPassword(false);
+      }
+    },
+    [uiLocale],
+  );
 
   const handleClearAdminPassword = useCallback(async () => {
     setIsSavingAdminPassword(true);
-    setAdminPasswordError(null);
+    setAdminPasswordErrorCode(null);
     try {
       const result = await clearServerAdminPassword();
       setAdminPasswordConfigured(result.configured);
       toastManager.add({
         type: "success",
-        title: "Password authentication disabled",
-        description: "New browser logins will need a pairing link.",
+        title: uiText("Password authentication disabled", undefined, undefined, uiLocale),
+        description: uiText(
+          "New browser logins will need a pairing link.",
+          undefined,
+          undefined,
+          uiLocale,
+        ),
       });
     } catch (error) {
-      const message = error instanceof Error ? error.message : "Failed to disable admin password.";
-      setAdminPasswordError(message);
+      const feedback = connectionFeedback(error, "password-disable-failed");
+      const message = formatConnectionFeedback(feedback, uiLocale);
+      setAdminPasswordErrorCode(feedback);
       toastManager.add(
         stackedThreadToast({
           type: "error",
-          title: "Could not disable password authentication",
+          title: uiText(
+            "Could not disable password authentication",
+            undefined,
+            undefined,
+            uiLocale,
+          ),
           description: message,
         }),
       );
@@ -1525,7 +1807,7 @@ export function ConnectionsSettings() {
     } finally {
       setIsSavingAdminPassword(false);
     }
-  }, []);
+  }, [uiLocale]);
 
   useEffect(() => {
     if (desktopBridge) {
@@ -1554,14 +1836,14 @@ export function ConnectionsSettings() {
   useEffect(() => {
     if (!canManageLocalBackend) {
       setAdminPasswordConfigured(null);
-      setAdminPasswordError(null);
+      setAdminPasswordErrorCode(null);
       setIsLoadingAdminPassword(false);
       return;
     }
 
     let cancelled = false;
     setIsLoadingAdminPassword(true);
-    setAdminPasswordError(null);
+    setAdminPasswordErrorCode(null);
     void fetchServerAdminPasswordStatus()
       .then((status) => {
         if (cancelled) return;
@@ -1570,9 +1852,7 @@ export function ConnectionsSettings() {
       .catch((error: unknown) => {
         if (cancelled) return;
         setAdminPasswordConfigured(null);
-        setAdminPasswordError(
-          error instanceof Error ? error.message : "Failed to load admin password status.",
-        );
+        setAdminPasswordErrorCode(connectionFeedback(error, "password-load-failed"));
       })
       .finally(() => {
         if (cancelled) return;
@@ -1639,7 +1919,7 @@ export function ConnectionsSettings() {
             break;
         }
 
-        setDesktopAccessManagementError(null);
+        setDesktopAccessManagementErrorCode(null);
         setIsLoadingDesktopAccessManagement(false);
       },
       {
@@ -1659,26 +1939,12 @@ export function ConnectionsSettings() {
         })
         .catch((error: unknown) => {
           if (cancelled) return;
-          const message =
-            error instanceof Error ? error.message : "Failed to load network exposure state.";
-          setDesktopServerExposureError(message);
-        });
-      void desktopBridge
-        .getAdvertisedEndpoints()
-        .then((endpoints) => {
-          if (cancelled) return;
-          setDesktopAdvertisedEndpoints(endpoints);
-        })
-        .catch((error: unknown) => {
-          if (cancelled) return;
-          const message =
-            error instanceof Error ? error.message : "Failed to load reachable endpoints.";
-          setDesktopServerExposureError(message);
+          setDesktopServerExposureErrorCode(connectionFeedback(error, "exposure-load-failed"));
         });
     } else {
       setDesktopServerExposureState(null);
       setDesktopAdvertisedEndpoints([]);
-      setDesktopServerExposureError(null);
+      setDesktopServerExposureErrorCode(null);
     }
 
     return () => {
@@ -1688,14 +1954,44 @@ export function ConnectionsSettings() {
   }, [canManageLocalBackend, desktopBridge]);
 
   useEffect(() => {
+    if (!canManageLocalBackend || !desktopBridge) return;
+    let cancelled = false;
+    let revision = 0;
+    const refreshDisplayMetadata = () => {
+      const requestRevision = ++revision;
+      void desktopBridge
+        .getAdvertisedEndpoints()
+        .then((endpoints) => {
+          if (cancelled || requestRevision !== revision) return;
+          setDesktopAdvertisedEndpoints(endpoints);
+        })
+        .catch((error: unknown) => {
+          if (cancelled || requestRevision !== revision) return;
+          setDesktopServerExposureErrorCode(connectionFeedback(error, "endpoints-load-failed"));
+        });
+    };
+    // Main publishes this finite event after admitting its saved language, so
+    // the read cannot race a renderer-only optimistic language update. Keep
+    // authentication subscriptions, password/exposure reads and actions in
+    // their existing effects; a display refresh never recreates them.
+    const unsubscribe = desktopBridge.onUiLocaleChanged?.(refreshDisplayMetadata);
+    refreshDisplayMetadata();
+    return () => {
+      cancelled = true;
+      revision++;
+      unsubscribe?.();
+    };
+  }, [canManageLocalBackend, desktopBridge]);
+
+  useEffect(() => {
     if (canManageLocalBackend) return;
     setIsLoadingDesktopAccessManagement(false);
     setDesktopPairingLinks([]);
     setDesktopClientSessions([]);
-    setDesktopAccessManagementError(null);
+    setDesktopAccessManagementErrorCode(null);
     setDesktopServerExposureState(null);
     setDesktopAdvertisedEndpoints([]);
-    setDesktopServerExposureError(null);
+    setDesktopServerExposureErrorCode(null);
   }, [canManageLocalBackend]);
   const visibleDesktopPairingLinks = useMemo(
     () => desktopPairingLinks.filter((pairingLink) => pairingLink.role === "client"),
@@ -1729,7 +2025,7 @@ export function ConnectionsSettings() {
     desktopBridge !== undefined &&
       canManageLocalBackend &&
       desktopServerExposureState === null &&
-      desktopServerExposureError === null,
+      desktopServerExposureErrorCode === null,
   );
   const exposureSkeleton = showExposureSkeleton ? (
     <Skeleton aria-hidden className="mt-0.5 h-3 w-40" />
@@ -1742,7 +2038,7 @@ export function ConnectionsSettings() {
         setPendingDesktopServerExposureMode(checked ? "network-accessible" : "local-only");
         setIsDesktopServerExposureDialogOpen(true);
       }}
-      aria-label="Enable network access"
+      aria-label={uiText("Enable network access", undefined, undefined, uiLocale)}
     />
   );
   const renderHttpsToggle = () => (
@@ -1753,7 +2049,7 @@ export function ConnectionsSettings() {
         setPendingDesktopServerHttpsEnabled(checked);
         setIsDesktopServerHttpsDialogOpen(true);
       }}
-      aria-label="Enable HTTPS"
+      aria-label={uiText("Enable HTTPS", undefined, undefined, uiLocale)}
     />
   );
   const renderEndpointRows = (presentation: AccessSectionPresentation) =>
@@ -1771,11 +2067,17 @@ export function ConnectionsSettings() {
           );
         })
       : null;
+  const desktopAccessManagementErrorText = desktopAccessManagementErrorCode
+    ? formatConnectionFeedback(desktopAccessManagementErrorCode, uiLocale)
+    : null;
+  const desktopServerExposureErrorText = desktopServerExposureErrorCode
+    ? formatConnectionFeedback(desktopServerExposureErrorCode, uiLocale)
+    : null;
   const renderAuthorizedClients = (presentation: AccessSectionPresentation) => (
     <>
-      {desktopAccessManagementError ? (
+      {desktopAccessManagementErrorText ? (
         <div className={accessRowClassName(presentation)}>
-          <p className="text-xs text-destructive-foreground">{desktopAccessManagementError}</p>
+          <p className="text-xs text-destructive-foreground">{desktopAccessManagementErrorText}</p>
         </div>
       ) : null}
       <PairingClientsList
@@ -1801,7 +2103,7 @@ export function ConnectionsSettings() {
   );
   const renderNetworkAccessRow = () => (
     <SettingsRow
-      title="Network access"
+      title={uiText("Network access", undefined, undefined, uiLocale)}
       description={
         isLocalBackendNetworkAccessible ? (
           <NetworkAccessDescription
@@ -1811,10 +2113,22 @@ export function ConnectionsSettings() {
             onToggleExpanded={() => setIsAdvertisedEndpointListExpanded((expanded) => !expanded)}
             fallback={
               desktopServerExposureState?.endpointUrl
-                ? `Reachable at ${desktopServerExposureState.endpointUrl}`
+                ? uiText(
+                    "Reachable at {url}",
+                    { url: desktopServerExposureState.endpointUrl },
+                    undefined,
+                    uiLocale,
+                  )
                 : desktopServerExposureState?.advertisedHost
-                  ? `Reachable on your network; pairing links use ${desktopServerExposureState.advertisedHost}.`
-                  : "Reachable on your network."
+                  ? uiText(
+                      "Reachable on your network; pairing links use {host}.",
+                      {
+                        host: desktopServerExposureState.advertisedHost,
+                      },
+                      undefined,
+                      uiLocale,
+                    )
+                  : uiText("Reachable on your network.", undefined, undefined, uiLocale)
             }
           />
         ) : desktopServerExposureState ? null : (
@@ -1822,8 +2136,10 @@ export function ConnectionsSettings() {
         )
       }
       status={
-        desktopServerExposureError ? (
-          <span className="block text-destructive-foreground">{desktopServerExposureError}</span>
+        desktopServerExposureErrorText ? (
+          <span className="block text-destructive-foreground">
+            {desktopServerExposureErrorText}
+          </span>
         ) : null
       }
       control={renderNetworkAccessToggle()}
@@ -1831,7 +2147,7 @@ export function ConnectionsSettings() {
   );
   const renderHttpsRow = () => (
     <SettingsRow
-      title="HTTPS"
+      title={uiText("HTTPS", undefined, undefined, uiLocale)}
       description={
         desktopServerExposureState ? (
           desktopServerExposureState.httpsEnabled ? (
@@ -1847,11 +2163,15 @@ export function ConnectionsSettings() {
                 className="focus-ring inline-flex items-center gap-1 rounded-sm font-medium text-primary hover:underline"
               >
                 <DownloadIcon className="size-3.5" />
-                Download certificate
+                {uiText("Download certificate", undefined, undefined, uiLocale)}
               </a>
-              <InfoTip label="About the certificate">
-                Other devices must install and trust this certificate before they can open the WebUI
-                over HTTPS.
+              <InfoTip label={uiText("About the certificate", undefined, undefined, uiLocale)}>
+                {uiText(
+                  "Other devices must install and trust this certificate before they can open the WebUI over HTTPS.",
+                  undefined,
+                  undefined,
+                  uiLocale,
+                )}
               </InfoTip>
             </span>
           ) : null
@@ -1864,11 +2184,16 @@ export function ConnectionsSettings() {
   );
   const renderDisabledNetworkAccessRow = () => (
     <SettingsRow
-      title="Network access"
+      title={uiText("Network access", undefined, undefined, uiLocale)}
       description={
         currentAuthPolicy === "remote-reachable"
-          ? "Change this where the server is started."
-          : "Restart the server so other devices on your network can reach it."
+          ? uiText("Change this where the server is started.", undefined, undefined, uiLocale)
+          : uiText(
+              "Restart the server so other devices on your network can reach it.",
+              undefined,
+              undefined,
+              uiLocale,
+            )
       }
       control={
         <Tooltip>
@@ -1878,31 +2203,47 @@ export function ConnectionsSettings() {
                 <Switch
                   checked={isLocalBackendNetworkAccessible}
                   disabled
-                  aria-label="Enable network access"
+                  aria-label={uiText("Enable network access", undefined, undefined, uiLocale)}
                 />
               </span>
             }
           />
-          <TooltipPopup side="top">Set where the server is started.</TooltipPopup>
+          <TooltipPopup side="top">
+            {uiText("Set where the server is started.", undefined, undefined, uiLocale)}
+          </TooltipPopup>
         </Tooltip>
       }
     />
   );
 
   return (
-    <SettingsPageContainer title="WebUI">
+    <SettingsPageContainer title={uiText("WebUI", undefined, undefined, uiLocale)}>
       <SavedEnvironmentsSettings />
       {canManageLocalBackend ? (
         <>
-          <SettingsSection title={isPrimary ? "Local server" : "Selected server"}>
+          <SettingsSection
+            title={
+              isPrimary
+                ? uiText("Local server", undefined, undefined, uiLocale)
+                : uiText("Selected server", undefined, undefined, uiLocale)
+            }
+          >
             {primaryVersionMismatch ? (
               <SettingsRow
-                title="Version drift"
+                title={uiText("Version drift", undefined, undefined, uiLocale)}
                 description={
                   <span className="flex items-center gap-1 text-warning-foreground">
-                    <TriangleAlertIcon className="size-3.5 shrink-0" />
-                    Client {primaryVersionMismatch.clientVersion} and server{" "}
-                    {primaryVersionMismatch.serverVersion} differ; update both if connections fail.
+                    <UiMessage
+                      message={
+                        "<slot1></slot1>Client <slot3></slot3> and server<slot5></slot5><slot7></slot7> differ; update both if connections fail."
+                      }
+                      slots={{
+                        slot1: <TriangleAlertIcon className="size-3.5 shrink-0" />,
+                        slot3: primaryVersionMismatch.clientVersion,
+                        slot5: " ",
+                        slot7: primaryVersionMismatch.serverVersion,
+                      }}
+                    />
                   </span>
                 }
               />
@@ -1920,7 +2261,11 @@ export function ConnectionsSettings() {
               configured={adminPasswordConfigured}
               isLoading={isLoadingAdminPassword}
               isSaving={isSavingAdminPassword}
-              error={adminPasswordError}
+              error={
+                adminPasswordErrorCode
+                  ? formatConnectionFeedback(adminPasswordErrorCode, uiLocale)
+                  : null
+              }
               onSetPassword={handleSetAdminPassword}
               onClearPassword={handleClearAdminPassword}
             />
@@ -1928,7 +2273,7 @@ export function ConnectionsSettings() {
 
           {isLocalBackendRemotelyReachable ? (
             <SettingsSection
-              title="Paired devices"
+              title={uiText("Paired devices", undefined, undefined, uiLocale)}
               headerAction={
                 <AuthorizedClientsHeaderAction
                   createPairingCredential={createServerPairingCredential}
@@ -1955,13 +2300,23 @@ export function ConnectionsSettings() {
               <AlertDialogHeader>
                 <AlertDialogTitle>
                   {pendingDesktopServerExposureMode === "network-accessible"
-                    ? "Enable network access?"
-                    : "Disable network access?"}
+                    ? uiText("Enable network access?", undefined, undefined, uiLocale)
+                    : uiText("Disable network access?", undefined, undefined, uiLocale)}
                 </AlertDialogTitle>
                 <AlertDialogDescription>
                   {pendingDesktopServerExposureMode === "network-accessible"
-                    ? "Cafe Code will restart to expose this environment over the network."
-                    : "Cafe Code will restart and limit this environment back to this machine."}
+                    ? uiText(
+                        "Cafe Code will restart to expose this environment over the network.",
+                        undefined,
+                        undefined,
+                        uiLocale,
+                      )
+                    : uiText(
+                        "Cafe Code will restart and limit this environment back to this machine.",
+                        undefined,
+                        undefined,
+                        uiLocale,
+                      )}
                 </AlertDialogDescription>
               </AlertDialogHeader>
               <AlertDialogFooter>
@@ -1969,7 +2324,7 @@ export function ConnectionsSettings() {
                   disabled={isUpdatingDesktopServerExposure}
                   render={<Button variant="outline" disabled={isUpdatingDesktopServerExposure} />}
                 >
-                  Cancel
+                  {uiText("Cancel", undefined, undefined, uiLocale)}
                 </AlertDialogClose>
                 <Button
                   variant={
@@ -1982,8 +2337,8 @@ export function ConnectionsSettings() {
                 >
                   <RestartButtonLabel restarting={isUpdatingDesktopServerExposure}>
                     {pendingDesktopServerExposureMode === "network-accessible"
-                      ? "Restart and enable"
-                      : "Restart and disable"}
+                      ? uiText("Restart and enable", undefined, undefined, uiLocale)
+                      : uiText("Restart and disable", undefined, undefined, uiLocale)}
                   </RestartButtonLabel>
                 </Button>
               </AlertDialogFooter>
@@ -2002,10 +2357,12 @@ export function ConnectionsSettings() {
             <AlertDialogPopup>
               <AlertDialogHeader>
                 <AlertDialogTitle>
-                  {pendingDesktopServerHttpsEnabled ? "Enable HTTPS?" : "Disable HTTPS?"}
+                  {pendingDesktopServerHttpsEnabled
+                    ? uiText("Enable HTTPS?", undefined, undefined, uiLocale)
+                    : uiText("Disable HTTPS?", undefined, undefined, uiLocale)}
                 </AlertDialogTitle>
                 <AlertDialogDescription>
-                  Cafe Code will restart to apply this.
+                  {uiText("Cafe Code will restart to apply this.", undefined, undefined, uiLocale)}
                 </AlertDialogDescription>
               </AlertDialogHeader>
               <AlertDialogFooter>
@@ -2013,7 +2370,7 @@ export function ConnectionsSettings() {
                   disabled={isUpdatingDesktopServerHttps}
                   render={<Button variant="outline" disabled={isUpdatingDesktopServerHttps} />}
                 >
-                  Cancel
+                  {uiText("Cancel", undefined, undefined, uiLocale)}
                 </AlertDialogClose>
                 <Button
                   variant={pendingDesktopServerHttpsEnabled === false ? "destructive" : "default"}
@@ -2024,8 +2381,8 @@ export function ConnectionsSettings() {
                 >
                   <RestartButtonLabel restarting={isUpdatingDesktopServerHttps}>
                     {pendingDesktopServerHttpsEnabled
-                      ? "Restart and enable"
-                      : "Restart and disable"}
+                      ? uiText("Restart and enable", undefined, undefined, uiLocale)
+                      : uiText("Restart and disable", undefined, undefined, uiLocale)}
                   </RestartButtonLabel>
                 </Button>
               </AlertDialogFooter>
@@ -2034,9 +2391,22 @@ export function ConnectionsSettings() {
         </>
       ) : (
         <p className="px-1 text-xs text-muted-foreground">
-          Only the owner can manage pairing and paired devices.
+          {uiText(
+            "Only the owner can manage pairing and paired devices.",
+            undefined,
+            undefined,
+            uiLocale,
+          )}
         </p>
       )}
     </SettingsPageContainer>
   );
 }
+
+// Finite source-owned labels/helpers only; no received or user data.
+const UI_PRESENTATION_SOURCES = {
+  clientDeviceTypeLabel,
+  formatElapsedDurationLabel,
+  formatExpiresInLabel,
+  resolveServerConfigVersionMismatch,
+};

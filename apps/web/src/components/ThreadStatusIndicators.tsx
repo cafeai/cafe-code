@@ -1,3 +1,5 @@
+import { useUiLocale, useUiPresentation } from "~/i18n";
+import { uiText } from "@cafecode/shared/i18n";
 import { scopeProjectRef, scopedThreadKey, scopeThreadRef } from "@cafecode/client-runtime";
 import type { VcsStatusResult } from "@cafecode/contracts";
 import { GitPullRequestIcon } from "lucide-react";
@@ -29,27 +31,39 @@ export function prStatusIndicator(
 
   if (pr.state === "open") {
     return {
-      label: `${presentation.shortName} open`,
+      label: uiText("{value0} open", { value0: presentation.shortName }),
       colorClass: "text-success-foreground",
-      tooltip: `#${pr.number} ${presentation.shortName} open: ${pr.title}`,
+      tooltip: uiText("#{value0} {value1} open: {value2}", {
+        value0: pr.number,
+        value1: presentation.shortName,
+        value2: pr.title,
+      }),
       url: pr.url,
     };
   }
   if (pr.state === "closed") {
     return {
-      label: `${presentation.shortName} closed`,
+      label: uiText("{value0} closed", { value0: presentation.shortName }),
       colorClass: "text-subtle-foreground",
-      tooltip: `#${pr.number} ${presentation.shortName} closed: ${pr.title}`,
+      tooltip: uiText("#{value0} {value1} closed: {value2}", {
+        value0: pr.number,
+        value1: presentation.shortName,
+        value2: pr.title,
+      }),
       url: pr.url,
     };
   }
   if (pr.state === "merged") {
     return {
-      label: `${presentation.shortName} merged`,
+      label: uiText("{value0} merged", { value0: presentation.shortName }),
       // Merged keeps the source-control hosts' conventional violet; there is
       // no semantic token for it and recolouring it would hurt recognition.
       colorClass: "text-violet-600 dark:text-violet-300",
-      tooltip: `#${pr.number} ${presentation.shortName} merged: ${pr.title}`,
+      tooltip: uiText("#{value0} {value1} merged: {value2}", {
+        value0: pr.number,
+        value1: presentation.shortName,
+        value2: pr.title,
+      }),
       url: pr.url,
     };
   }
@@ -81,6 +95,8 @@ export { ThreadStatusDot, ThreadStatusLabel } from "./ThreadStatusLabel";
  * thread status dot, matching the sidebar's leading indicators.
  */
 export function ThreadRowLeadingStatus({ thread }: { thread: SidebarThreadSummary }) {
+  const uiPresentation = useUiPresentation(UI_PRESENTATION_SOURCES);
+
   const threadRef = scopeThreadRef(thread.environmentId, thread.id);
   const lastVisitedAt = useUiStateStore(
     (state) => state.threadLastVisitedAtById[scopedThreadKey(threadRef)],
@@ -101,7 +117,7 @@ export function ThreadRowLeadingStatus({ thread }: { thread: SidebarThreadSummar
     cwd: thread.branch != null ? gitCwd : null,
   });
   const pr = resolveThreadPr(thread.branch, gitStatus.data);
-  const prStatus = prStatusIndicator(pr, gitStatus.data?.sourceControlProvider);
+  const prStatus = uiPresentation.prStatusIndicator(pr, gitStatus.data?.sourceControlProvider);
   const threadStatus = resolveThreadStatusPill({
     thread: {
       ...thread,
@@ -138,3 +154,6 @@ export function ThreadRowLeadingStatus({ thread }: { thread: SidebarThreadSummar
 export function ThreadRowTrailingStatus(_props: { thread: SidebarThreadSummary }) {
   return null;
 }
+
+// Finite source-owned labels/helpers only; no received or user data.
+const UI_PRESENTATION_SOURCES = { prStatusIndicator };

@@ -12,6 +12,7 @@ import {
 } from "../lib/mermaid/renderService";
 import { applyInterfaceScalePercent } from "../interfaceScale";
 import { MermaidBlock } from "./MermaidBlock";
+import { GANTT_SCHEDULE } from "./mermaidGantt.test.fixture";
 
 const mocks = vi.hoisted(() => ({
   render: vi.fn<(source: string, theme: "dark" | "light") => Promise<MermaidResult>>(),
@@ -42,6 +43,11 @@ const REAL_CHARTS = [
     "Primary pool" : 610698
     "Secondary pool" : 1563944
     "Header bytes" : 150\n`,
+  },
+  {
+    name: "Gantt dependency schedule",
+    label: "Final evidence and replay",
+    source: GANTT_SCHEDULE,
   },
 ] as const;
 
@@ -348,13 +354,24 @@ describe("Mermaid block", () => {
   it.each(
     REAL_CHARTS.flatMap((chart) =>
       (["light", "dark"] as const).flatMap((theme) =>
-        [80, 130].map((scale) => ({ ...chart, theme, scale })),
+        [80, 130].flatMap((scale) =>
+          (chart.name === "Gantt dependency schedule" ? [false, true] : [false]).map(
+            (reducedMotion) => ({ ...chart, theme, scale, reducedMotion }),
+          ),
+        ),
       ),
     ),
   )(
-    "retains real $name source, copy and expanded controls at $theme/$scale%",
-    async ({ source, label, theme, scale }) => {
+    "retains real $name source, copy and expanded controls at $theme/$scale% with reduced motion $reducedMotion",
+    async ({ source, label, theme, scale, reducedMotion }) => {
       await page.viewport(390, 700);
+      const originalMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+      await cdp().send("Emulation.setEmulatedMedia", {
+        features: [
+          { name: "prefers-reduced-motion", value: reducedMotion ? "reduce" : "no-preference" },
+        ],
+      });
+      expect(window.matchMedia("(prefers-reduced-motion: reduce)").matches).toBe(reducedMotion);
       applyInterfaceScalePercent(scale);
       document.documentElement.classList.toggle("dark", theme === "dark");
       const host = document.createElement("div");
@@ -430,7 +447,7 @@ describe("Mermaid block", () => {
         expect(document.querySelector(".mermaid-zoom-value")?.textContent).toBe("125%");
         await page.getByRole("button", { name: "Zoom out", exact: true }).click();
         expect(document.querySelector(".mermaid-zoom-value")?.textContent).toBe("100%");
-        // Both real chart families are smaller than the large rectangle used
+        // Real chart families are smaller than the large rectangle used
         // by the existing control fixture. Two zoom steps ensure scroll room
         // on both axes before exercising keyboard input and pointer capture.
         await page.getByRole("button", { name: "Zoom in", exact: true }).click();
@@ -489,6 +506,11 @@ describe("Mermaid block", () => {
       } finally {
         await screen.unmount();
         host.remove();
+        await cdp().send("Emulation.setEmulatedMedia", {
+          features: [
+            { name: "prefers-reduced-motion", value: originalMotion ? "reduce" : "no-preference" },
+          ],
+        });
       }
     },
   );

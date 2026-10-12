@@ -1,3 +1,4 @@
+import { uiText } from "@cafecode/shared/i18n";
 import type { EnvironmentId, ProjectSearchEntriesResult } from "@cafecode/contracts";
 import { queryOptions } from "@tanstack/react-query";
 import { ensureEnvironmentApi } from "~/environmentApi";
@@ -32,7 +33,7 @@ export function projectSearchEntriesQueryOptions(input: {
     queryKey: projectQueryKeys.searchEntries(input.environmentId, input.cwd, input.query, limit),
     queryFn: async () => {
       if (!input.cwd || !input.environmentId) {
-        throw new Error("Workspace entry search is unavailable.");
+        throw new Error(uiText("Workspace entry search is unavailable."));
       }
       const api = ensureEnvironmentApi(input.environmentId);
       return api.projects.searchEntries({

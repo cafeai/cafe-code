@@ -1,3 +1,4 @@
+import { uiText } from "@cafecode/shared/i18n";
 import { ProviderTurnConfiguration, type RuntimeMode } from "@cafecode/contracts";
 import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
@@ -9,9 +10,15 @@ import {
 
 /** Access names shared with the composer's access control. */
 const RUNTIME_MODE_LABELS: Readonly<Record<RuntimeMode, string>> = {
-  "approval-required": "Supervised",
-  "auto-accept-edits": "Auto-accept edits",
-  "full-access": "Full access",
+  get "approval-required"() {
+    return uiText("Supervised");
+  },
+  get "auto-accept-edits"() {
+    return uiText("Auto-accept edits");
+  },
+  get "full-access"() {
+    return uiText("Full access");
+  },
 };
 
 /**
@@ -52,28 +59,44 @@ export function readTurnConfiguration(payload: unknown): ProviderTurnConfigurati
 }
 
 const EFFORT_LABELS: Readonly<Record<string, string>> = {
-  none: "None",
-  minimal: "Minimal",
-  low: "Low",
-  medium: "Medium",
-  high: "High",
-  xhigh: "Extra high",
-  max: "Max",
-  ultra: "Ultra",
+  get none() {
+    return uiText("None");
+  },
+  get minimal() {
+    return uiText("Minimal");
+  },
+  get low() {
+    return uiText("Low");
+  },
+  get medium() {
+    return uiText("Medium");
+  },
+  get high() {
+    return uiText("High");
+  },
+  get xhigh() {
+    return uiText("Extra high");
+  },
+  get max() {
+    return uiText("Max");
+  },
+  get ultra() {
+    return uiText("Ultra");
+  },
 };
 
 function presentServiceTier(tier: string): string {
   switch (tier) {
     case "default":
-      return "Fast off · Service tier: Standard";
+      return uiText("Fast off · Service tier: Standard");
     case "priority":
     case "fast":
-      return "Fast on · Service tier: Fast";
+      return uiText("Fast on · Service tier: Fast");
     case "ultrafast":
-      return "Fast on · Service tier: Ultra fast";
+      return uiText("Fast on · Service tier: Ultra fast");
     default:
       // Future native ids stay exact; their speed/cost semantics are unknown.
-      return `Service tier: ${tier}`;
+      return uiText("Service tier: {tier}", { tier });
   }
 }
 
@@ -83,14 +106,14 @@ function presentServiceTier(tier: string): string {
 function presentCompactServiceTier(tier: string): string {
   switch (tier) {
     case "default":
-      return "Fast off";
+      return uiText("Fast off");
     case "priority":
     case "fast":
-      return "Fast on";
+      return uiText("Fast on");
     case "ultrafast":
-      return "Ultra fast";
+      return uiText("Ultra fast");
     default:
-      return `Service tier: ${tier}`;
+      return uiText("Service tier: {tier}", { tier });
   }
 }
 
@@ -98,12 +121,12 @@ function presentCompactServiceTier(tier: string): string {
 function knownServiceTierName(tier: string): string | null {
   switch (tier) {
     case "default":
-      return "Standard";
+      return uiText("Standard");
     case "priority":
     case "fast":
-      return "Fast";
+      return uiText("Fast");
     case "ultrafast":
-      return "Ultra fast";
+      return uiText("Ultra fast");
     default:
       return null;
   }
@@ -118,8 +141,8 @@ function knownServiceTierName(tier: string): string | null {
 function requestedUltracodeLabel(configuration: ProviderTurnConfiguration): string | undefined {
   return configuration.provider === "claudeAgent" && configuration.ultracode !== undefined
     ? configuration.ultracode
-      ? "Ultracode requested on"
-      : "Ultracode requested off"
+      ? uiText("Ultracode requested on")
+      : uiText("Ultracode requested off")
     : undefined;
 }
 
@@ -137,12 +160,12 @@ export function presentTurnConfigurationSummary(configuration: ProviderTurnConfi
 } {
   const full = presentTurnConfiguration(configuration);
   const isOpenCode = configuration.provider === "opencode";
-  const model = configuration.modelDisplayName ?? configuration.model ?? "Default model";
+  const model = configuration.modelDisplayName ?? configuration.model ?? uiText("Default model");
   const effort =
     configuration.effort === undefined
       ? isOpenCode
-        ? "Default variant"
-        : "Default effort"
+        ? uiText("Default variant")
+        : uiText("Default effort")
       : Object.hasOwn(EFFORT_LABELS, configuration.effort)
         ? EFFORT_LABELS[configuration.effort]!
         : configuration.effort;
@@ -155,21 +178,22 @@ export function presentTurnConfigurationSummary(configuration: ProviderTurnConfi
       ? presentCompactServiceTier(routedTier)
       : configuration.provider === "codex" || configuration.provider === "claudeAgent"
         ? configuration.fastMode === undefined
-          ? "Fast status not recorded"
+          ? uiText("Fast status not recorded")
           : configuration.fastMode
-            ? "Fast on"
-            : "Fast off"
+            ? uiText("Fast on")
+            : uiText("Fast off")
         : undefined;
   const interactionMode =
     configuration.interactionMode === undefined
-      ? "Default mode"
-      : { default: "Build", plan: "Plan", auto: "Auto" }[configuration.interactionMode];
+      ? uiText("Default mode")
+      : { default: uiText("Build"), plan: uiText("Plan"), auto: uiText("Auto") }[
+          configuration.interactionMode
+        ];
   const nativeMode = nativePermissionModeLabel(configuration);
   const modes = nativeMode
     ? [nativeMode]
     : [interactionMode, RUNTIME_MODE_LABELS[configuration.runtimeMode]];
   const tierName = routedTier === undefined ? null : knownServiceTierName(routedTier);
-  const tierDetail = tierName ? ` · Service tier: ${tierName}` : "";
   return {
     summary: [
       model,
@@ -182,7 +206,15 @@ export function presentTurnConfigurationSummary(configuration: ProviderTurnConfi
     ]
       .filter((value) => value !== undefined)
       .join(" · "),
-    detail: `${full.source}${tierDetail}. ${full.sourceDescription}`,
+    detail: uiText(
+      "{source}{tier, select, absent {} other { · Service tier: {tierName}}}. {description}",
+      {
+        source: full.source,
+        tier: tierName === null ? "absent" : "present",
+        tierName: tierName ?? "",
+        description: full.sourceDescription,
+      },
+    ),
   };
 }
 
@@ -194,15 +226,19 @@ export function presentTurnConfiguration(configuration: ProviderTurnConfiguratio
   readonly source: string;
   readonly sourceDescription: string;
 } {
-  const model = configuration.modelDisplayName ?? configuration.model ?? "Model: provider default";
+  const model =
+    configuration.modelDisplayName ?? configuration.model ?? uiText("Model: provider default");
   const effort =
     configuration.effort === undefined
-      ? `${configuration.provider === "opencode" ? "Variant" : "Effort"}: provider default`
-      : `${configuration.provider === "opencode" ? "Variant" : "Effort"}: ${
-          Object.hasOwn(EFFORT_LABELS, configuration.effort)
+      ? uiText("{provider, select, opencode {Variant} other {Effort}}: provider default", {
+          provider: configuration.provider,
+        })
+      : uiText("{provider, select, opencode {Variant} other {Effort}}: {effort}", {
+          provider: configuration.provider,
+          effort: Object.hasOwn(EFFORT_LABELS, configuration.effort)
             ? EFFORT_LABELS[configuration.effort]
-            : configuration.effort
-        }`;
+            : configuration.effort,
+        });
   // Prefer routing captured from the exact native start over submitted options.
   // Old snapshots stay unknown rather than borrowing today's session settings.
   const fast =
@@ -211,34 +247,39 @@ export function presentTurnConfiguration(configuration: ProviderTurnConfiguratio
       ? presentServiceTier((configuration.resolvedServiceTier ?? configuration.serviceTier)!)
       : configuration.provider === "codex" || configuration.provider === "claudeAgent"
         ? configuration.fastMode === undefined
-          ? "Fast status not recorded"
+          ? uiText("Fast status not recorded")
           : configuration.fastMode
-            ? "Fast on"
-            : "Fast off"
+            ? uiText("Fast on")
+            : uiText("Fast off")
         : undefined;
   const runtimeMode = RUNTIME_MODE_LABELS[configuration.runtimeMode];
   const interactionMode =
     configuration.interactionMode === undefined
-      ? "Mode: provider default"
-      : { default: "Build", plan: "Plan", auto: "Auto" }[configuration.interactionMode];
+      ? uiText("Mode: provider default")
+      : { default: uiText("Build"), plan: uiText("Plan"), auto: uiText("Auto") }[
+          configuration.interactionMode
+        ];
   return {
     settings: [model, effort, requestedUltracodeLabel(configuration), fast]
       .filter((value) => value !== undefined)
       .join(" · "),
     // This is the configured instance label, deliberately not an auth email,
     // account identifier, token, or a fresh read of the provider's credentials.
-    account: `Account: ${configuration.providerDisplayName}`,
-    modes: `${interactionMode} · ${runtimeMode}`,
+    account: uiText("Account: {account}", { account: configuration.providerDisplayName }),
+    modes: uiText("{interactionMode} · {runtimeMode}", { interactionMode, runtimeMode }),
     source:
       configuration.settingsSource === "submitted"
-        ? "Submitted settings"
-        : "Existing session settings",
-    sourceDescription:
-      (configuration.settingsSource === "submitted"
-        ? "Settings Cafe submitted for this accepted turn. Provider defaults may be inherited; this is not independent execution or billing confirmation."
-        : "Settings of the existing session that accepted this input. Provider defaults may be inherited; this is not independent execution or billing confirmation.") +
-      (configuration.provider === "codex" && configuration.resolvedServiceTier !== undefined
-        ? " Fast mode uses the native session routing captured for this turn."
-        : ""),
+        ? uiText("Submitted settings")
+        : uiText("Existing session settings"),
+    sourceDescription: uiText(
+      "{source, select, submitted {Settings Cafe submitted for this accepted turn.} other {Settings of the existing session that accepted this input.}} Provider defaults may be inherited; this is not independent execution or billing confirmation.{nativeFast, select, yes { Fast mode uses the native session routing captured for this turn.} other {}}",
+      {
+        source: configuration.settingsSource,
+        nativeFast:
+          configuration.provider === "codex" && configuration.resolvedServiceTier !== undefined
+            ? "yes"
+            : "no",
+      },
+    ),
   };
 }

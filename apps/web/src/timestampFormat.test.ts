@@ -5,6 +5,8 @@ import {
   formatExpiresInLabel,
   formatRelativeTimeUntilLabel,
   getTimestampFormatOptions,
+  formatDiagnosticTimestamp,
+  getDiagnosticTimestampFormatOptions,
 } from "./timestampFormat";
 
 describe("getTimestampFormatOptions", () => {
@@ -31,6 +33,31 @@ describe("getTimestampFormatOptions", () => {
       minute: "2-digit",
       hour12: false,
     });
+  });
+});
+
+describe("diagnostic timestamps", () => {
+  it("retains native date/zone and seconds while honoring the explicit hour preference", () => {
+    expect(getDiagnosticTimestampFormatOptions("locale")).toEqual({
+      year: "numeric",
+      month: "numeric",
+      day: "numeric",
+      hour: "numeric",
+      minute: "2-digit",
+      second: "2-digit",
+      timeZoneName: "short",
+    });
+    expect(getDiagnosticTimestampFormatOptions("12-hour").hour12).toBe(true);
+    expect(getDiagnosticTimestampFormatOptions("24-hour").hour12).toBe(false);
+    expect(formatDiagnosticTimestamp("2026-10-12T05:32:08.000Z", "24-hour")).toBe(
+      new Intl.DateTimeFormat(undefined, getDiagnosticTimestampFormatOptions("24-hour")).format(
+        new Date("2026-10-12T05:32:08.000Z"),
+      ),
+    );
+  });
+
+  it("does not substitute now for an invalid legacy recorded instant", () => {
+    expect(formatDiagnosticTimestamp("not an instant", "locale")).toBe("Time not recorded");
   });
 });
 

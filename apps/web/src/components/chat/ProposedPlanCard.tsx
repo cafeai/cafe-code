@@ -1,3 +1,6 @@
+import { useUiLocale } from "~/i18n";
+import { uiText } from "@cafecode/shared/i18n";
+import { UiMessage } from "~/i18n";
 import { memo, useEffect, useState, useId } from "react";
 import type { EnvironmentId } from "@cafecode/contracts";
 import {
@@ -39,6 +42,8 @@ export const ProposedPlanCard = memo(function ProposedPlanCard({
   cwd: string | undefined;
   workspaceRoot: string | undefined;
 }) {
+  const uiLocale = useUiLocale();
+
   const [expanded, setExpanded] = useState(false);
   const [isSaveDialogOpen, setIsSaveDialogOpen] = useState(false);
   const [savePath, setSavePath] = useState("");
@@ -55,14 +60,18 @@ export const ProposedPlanCard = memo(function ProposedPlanCard({
       toastManager.add(
         stackedThreadToast({
           type: "error",
-          title: "Could not copy plan",
-          description: error instanceof Error ? error.message : "An error occurred while copying.",
+          title: uiText("Could not copy plan", undefined, undefined, uiLocale),
+          description:
+            error instanceof Error
+              ? error.message
+              : uiText("An error occurred while copying.", undefined, undefined, uiLocale),
         }),
       );
     },
   });
   const savePathInputId = useId();
-  const title = proposedPlanTitle(planMarkdown) ?? "Proposed plan";
+  const title =
+    proposedPlanTitle(planMarkdown) ?? uiText("Proposed plan", undefined, undefined, uiLocale);
   const lineCount = planMarkdown.split("\n").length;
   const canCollapse = planMarkdown.length > 900 || lineCount > 20;
   const displayedPlanMarkdown = stripDisplayedPlanMarkdown(planMarkdown);
@@ -85,8 +94,13 @@ export const ProposedPlanCard = memo(function ProposedPlanCard({
       toastManager.add(
         stackedThreadToast({
           type: "error",
-          title: "Workspace path is unavailable",
-          description: "This chat doesn't have a workspace to save into.",
+          title: uiText("Workspace path is unavailable", undefined, undefined, uiLocale),
+          description: uiText(
+            "This chat doesn''t have a workspace to save into.",
+            undefined,
+            undefined,
+            uiLocale,
+          ),
         }),
       );
       return;
@@ -104,7 +118,7 @@ export const ProposedPlanCard = memo(function ProposedPlanCard({
     if (!relativePath) {
       toastManager.add({
         type: "warning",
-        title: "Enter a workspace path",
+        title: uiText("Enter a workspace path", undefined, undefined, uiLocale),
       });
       return;
     }
@@ -124,8 +138,11 @@ export const ProposedPlanCard = memo(function ProposedPlanCard({
         toastManager.add(
           stackedThreadToast({
             type: "error",
-            title: "Could not save plan",
-            description: error instanceof Error ? error.message : "An error occurred while saving.",
+            title: uiText("Could not save plan", undefined, undefined, uiLocale),
+            description:
+              error instanceof Error
+                ? error.message
+                : uiText("An error occurred while saving.", undefined, undefined, uiLocale),
           }),
         );
       })
@@ -143,7 +160,7 @@ export const ProposedPlanCard = memo(function ProposedPlanCard({
     <div className="rounded-2xl border border-border bg-card p-4 sm:p-5">
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div className="flex min-w-0 items-center gap-2">
-          <Badge variant="secondary">Plan</Badge>
+          <Badge variant="secondary">{uiText("Plan", undefined, undefined, uiLocale)}</Badge>
           <p className="truncate text-sm font-medium text-foreground">{title}</p>
         </div>
         {savedRelativePath ? (
@@ -152,22 +169,32 @@ export const ProposedPlanCard = memo(function ProposedPlanCard({
             className="ml-auto min-w-0 truncate text-2xs text-subtle-foreground animate-enter-fade"
             title={savedRelativePath}
           >
-            Saved to {savedRelativePath}
+            <UiMessage message={"Saved to <slot1></slot1>"} slots={{ slot1: savedRelativePath }} />
           </p>
         ) : null}
         <Menu>
           <MenuTrigger
-            render={<Button aria-label="Plan actions" size="icon-xs" variant="outline" />}
+            render={
+              <Button
+                aria-label={uiText("Plan actions", undefined, undefined, uiLocale)}
+                size="icon-xs"
+                variant="outline"
+              />
+            }
           >
             <EllipsisIcon aria-hidden="true" className="size-4" />
           </MenuTrigger>
           <MenuPopup align="end">
             <MenuItem onClick={handleCopyPlan}>
-              {isCopied ? "Copied" : "Copy to clipboard"}
+              {isCopied
+                ? uiText("Copied", undefined, undefined, uiLocale)
+                : uiText("Copy to clipboard", undefined, undefined, uiLocale)}
             </MenuItem>
-            <MenuItem onClick={handleDownload}>Download as markdown</MenuItem>
+            <MenuItem onClick={handleDownload}>
+              {uiText("Download as markdown", undefined, undefined, uiLocale)}
+            </MenuItem>
             <MenuItem onClick={openSaveDialog} disabled={!workspaceRoot || isSavingToWorkspace}>
-              Save to workspace
+              {uiText("Save to workspace", undefined, undefined, uiLocale)}
             </MenuItem>
           </MenuPopup>
         </Menu>
@@ -191,7 +218,9 @@ export const ProposedPlanCard = memo(function ProposedPlanCard({
               data-scroll-anchor-ignore
               onClick={() => setExpanded((value) => !value)}
             >
-              {expanded ? "Collapse plan" : "Expand plan"}
+              {expanded
+                ? uiText("Collapse plan", undefined, undefined, uiLocale)
+                : uiText("Expand plan", undefined, undefined, uiLocale)}
             </Button>
           </div>
         ) : null}
@@ -207,14 +236,27 @@ export const ProposedPlanCard = memo(function ProposedPlanCard({
       >
         <DialogPopup className="max-w-xl">
           <DialogHeader>
-            <DialogTitle>Save plan to workspace</DialogTitle>
+            <DialogTitle>
+              {uiText("Save plan to workspace", undefined, undefined, uiLocale)}
+            </DialogTitle>
             <DialogDescription>
-              Enter a path relative to <code>{workspaceRoot ?? "the workspace"}</code>.
+              <UiMessage
+                message={"Enter a path relative to <slot1></slot1>."}
+                slots={{
+                  slot1: (
+                    <code>
+                      {workspaceRoot ?? uiText("the workspace", undefined, undefined, uiLocale)}
+                    </code>
+                  ),
+                }}
+              />
             </DialogDescription>
           </DialogHeader>
           <DialogPanel className="space-y-3">
             <label htmlFor={savePathInputId} className="grid gap-1.5">
-              <span className="text-xs font-medium text-foreground">Workspace path</span>
+              <span className="text-xs font-medium text-foreground">
+                {uiText("Workspace path", undefined, undefined, uiLocale)}
+              </span>
               <Input
                 id={savePathInputId}
                 value={savePath}
@@ -232,14 +274,16 @@ export const ProposedPlanCard = memo(function ProposedPlanCard({
               onClick={() => setIsSaveDialogOpen(false)}
               disabled={isSavingToWorkspace}
             >
-              Cancel
+              {uiText("Cancel", undefined, undefined, uiLocale)}
             </Button>
             <Button
               size="sm"
               onClick={() => void handleSaveToWorkspace()}
               disabled={isSavingToWorkspace}
             >
-              {isSavingToWorkspace ? "Saving…" : "Save"}
+              {isSavingToWorkspace
+                ? uiText("Saving…", undefined, undefined, uiLocale)
+                : uiText("Save", undefined, undefined, uiLocale)}
             </Button>
           </DialogFooter>
         </DialogPopup>

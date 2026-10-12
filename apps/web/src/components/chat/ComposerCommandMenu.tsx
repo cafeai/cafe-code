@@ -1,3 +1,5 @@
+import { useUiLocale, useUiPresentation } from "~/i18n";
+import { uiText } from "@cafecode/shared/i18n";
 import {
   type ProjectEntry,
   type ProviderDriverKind,
@@ -84,7 +86,7 @@ function groupCommandItems(
   groupSlashCommandSections: boolean,
 ): ComposerCommandGroup[] {
   if (triggerKind === "skill") {
-    return items.length > 0 ? [{ id: "skills", label: "Skills", items }] : [];
+    return items.length > 0 ? [{ id: "skills", label: uiText("Skills"), items }] : [];
   }
   if (triggerKind !== "slash-command" || !groupSlashCommandSections) {
     return [{ id: "default", label: null, items }];
@@ -95,10 +97,10 @@ function groupCommandItems(
 
   const groups: ComposerCommandGroup[] = [];
   if (builtInItems.length > 0) {
-    groups.push({ id: "built-in", label: "Built-in", items: builtInItems });
+    groups.push({ id: "built-in", label: uiText("Built-in"), items: builtInItems });
   }
   if (providerItems.length > 0) {
-    groups.push({ id: "provider", label: "Provider", items: providerItems });
+    groups.push({ id: "provider", label: uiText("Provider"), items: providerItems });
   }
   return groups;
 }
@@ -115,11 +117,18 @@ export const ComposerCommandMenu = memo(function ComposerCommandMenu(props: {
   onHighlightedItemChange: (itemId: string | null) => void;
   onSelect: (item: ComposerCommandItem) => void;
 }) {
+  const uiLocale = useUiLocale();
+  const uiPresentation = useUiPresentation(UI_PRESENTATION_SOURCES);
+
   const listRef = useRef<HTMLDivElement>(null);
   const groups = useMemo(
     () =>
-      groupCommandItems(props.items, props.triggerKind, props.groupSlashCommandSections ?? true),
-    [props.groupSlashCommandSections, props.items, props.triggerKind],
+      uiPresentation.groupCommandItems(
+        props.items,
+        props.triggerKind,
+        props.groupSlashCommandSections ?? true,
+      ),
+    [props.groupSlashCommandSections, props.items, props.triggerKind, uiPresentation],
   );
 
   useLayoutEffect(() => {
@@ -178,23 +187,28 @@ export const ComposerCommandMenu = memo(function ComposerCommandMenu(props: {
             {props.triggerKind === "skill" ? (
               <CommandGroup>
                 <CommandGroupLabel className="px-0 pt-0 pb-1 text-xs font-medium text-muted-foreground">
-                  Skills
+                  {uiText("Skills", undefined, undefined, uiLocale)}
                 </CommandGroupLabel>
                 <p className="text-muted-foreground text-xs">
                   {props.isLoading
-                    ? "Searching workspace skills…"
+                    ? uiText("Searching workspace skills…", undefined, undefined, uiLocale)
                     : (props.emptyStateText ??
-                      "No skills found. Try / to browse provider commands.")}
+                      uiText(
+                        "No skills found. Try / to browse provider commands.",
+                        undefined,
+                        undefined,
+                        uiLocale,
+                      ))}
                 </p>
               </CommandGroup>
             ) : (
               <p className="text-muted-foreground text-xs">
                 {props.isLoading
-                  ? "Searching workspace files…"
+                  ? uiText("Searching workspace files…", undefined, undefined, uiLocale)
                   : (props.emptyStateText ??
                     (props.triggerKind === "path"
-                      ? "No matching files or folders."
-                      : "No matching command."))}
+                      ? uiText("No matching files or folders.", undefined, undefined, uiLocale)
+                      : uiText("No matching command.", undefined, undefined, uiLocale)))}
               </p>
             )}
           </div>
@@ -211,8 +225,12 @@ const ComposerCommandMenuItem = memo(function ComposerCommandMenuItem(props: {
   onHighlight: (itemId: string | null) => void;
   onSelect: (item: ComposerCommandItem) => void;
 }) {
+  const uiPresentation = useUiPresentation(UI_PRESENTATION_SOURCES);
+
   const skillSourceLabel =
-    props.item.type === "skill" ? formatProviderSkillInstallSource(props.item.skill) : null;
+    props.item.type === "skill"
+      ? uiPresentation.formatProviderSkillInstallSource(props.item.skill)
+      : null;
 
   return (
     <CommandItem
@@ -264,3 +282,6 @@ const ComposerCommandMenuItem = memo(function ComposerCommandMenuItem(props: {
     </CommandItem>
   );
 });
+
+// Finite source-owned labels/helpers only; no received or user data.
+const UI_PRESENTATION_SOURCES = { formatProviderSkillInstallSource, groupCommandItems };

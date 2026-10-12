@@ -1,3 +1,4 @@
+import { uiText } from "@cafecode/shared/i18n";
 import { getKnownEnvironmentHttpBaseUrl } from "@cafecode/client-runtime";
 import type {
   AuthSessionRole,
@@ -216,7 +217,11 @@ export function resolveEnvironmentHttpUrl(input: {
 }): string {
   const httpBaseUrl = getEnvironmentHttpBaseUrl(input.environmentId);
   if (!httpBaseUrl) {
-    throw new Error(`Unable to resolve HTTP base URL for environment ${input.environmentId}.`);
+    throw new Error(
+      uiText("Unable to resolve HTTP base URL for environment {environmentId}.", {
+        environmentId: input.environmentId,
+      }),
+    );
   }
 
   const url = new URL(httpBaseUrl);

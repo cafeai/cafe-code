@@ -1,3 +1,5 @@
+import { useUiLocale, useUiPresentation } from "~/i18n";
+import { uiText } from "@cafecode/shared/i18n";
 import { useEffect, useState, type ReactNode } from "react";
 import { useDelayedFlag } from "~/hooks/useDelayedFlag";
 import { CircleAlertIcon, LoaderCircleIcon, RefreshCwIcon, WifiOffIcon } from "lucide-react";
@@ -22,8 +24,8 @@ import {
   type ConnectionIssue,
 } from "./ConnectionStatusIndicator.logic";
 
-// Mirror the precedence the toast surface used: offline (no network) wins over
-// an exhausted retry loop, which wins over an in-flight reconnect.
+// Offline (no network) wins over a terminal admission rejection, which wins
+// over an in-flight reconnect. Transient failures never exhaust their retry.
 function resolveConnectionIssue(status: WsConnectionStatus): ConnectionIssue | null {
   const uiState = getWsConnectionUiState(status);
   if (uiState === "offline" && status.disconnectedAt !== null) {
@@ -39,12 +41,12 @@ function resolveConnectionIssue(status: WsConnectionStatus): ConnectionIssue | n
 }
 
 function getConnectionDisplayName(status: WsConnectionStatus): string {
-  return status.connectionLabel?.trim() || "Cafe Code Server";
+  return status.connectionLabel?.trim() || uiText("Cafe Code Server");
 }
 
-// A running total of attempts this outage rather than "N/8": the backoff cap is
-// not a real ceiling — focus/visibility/online events keep retrying past it, so
-// the count climbs until the socket actually reconnects.
+// Report the enforcing schedule's attempts rather than a fictitious "N/8".
+// The delay is capped, but the active protocol owns persistent retries; browser
+// resume events do not bypass its ramp. Only a healthy received Pong resets it.
 function formatAttemptCount(status: WsConnectionStatus): string | null {
   return formatAttemptCountValue(status.reconnectAttemptCount);
 }
@@ -53,12 +55,12 @@ function formatAttemptCountValue(count: number): string | null {
   if (count < 1) {
     return null;
   }
-  return `${count} attempt${count === 1 ? "" : "s"}`;
+  return uiText("{count, plural, one {{count} attempt} other {{count} attempts}}", { count });
 }
 
 function formatRetryCountdown(nextRetryAt: string, nowMs: number): string {
   const remainingMs = Math.max(0, new Date(nextRetryAt).getTime() - nowMs);
-  return `${Math.max(1, Math.ceil(remainingMs / 1000))}s`;
+  return uiText("{seconds}s", { seconds: Math.max(1, Math.ceil(remainingMs / 1000)) });
 }
 
 const ISSUE_VISUALS: Record<
@@ -66,19 +68,31 @@ const ISSUE_VISUALS: Record<
   { label: string; tone: string; icon: typeof WifiOffIcon; spin?: boolean }
 > = {
   reconnecting: {
-    label: "Reconnecting…",
+    get label() {
+      return uiText("Reconnecting…");
+    },
     tone: "text-status-attention-foreground",
     icon: LoaderCircleIcon,
     spin: true,
   },
-  offline: { label: "Offline", tone: "text-muted-foreground", icon: WifiOffIcon },
+  offline: {
+    get label() {
+      return uiText("Offline");
+    },
+    tone: "text-muted-foreground",
+    icon: WifiOffIcon,
+  },
   exhausted: {
-    label: "Disconnected",
+    get label() {
+      return uiText("Disconnected");
+    },
     tone: "text-status-error-foreground",
     icon: CircleAlertIcon,
   },
   disconnected: {
-    label: "Disconnected",
+    get label() {
+      return uiText("Disconnected");
+    },
     tone: "text-muted-foreground",
     icon: CircleAlertIcon,
   },
@@ -110,6 +124,9 @@ export function ConnectionStatusIndicator({
   readonly fallback?: ReactNode;
   readonly side?: "top" | "bottom";
 }) {
+  const uiLocale = useUiLocale();
+  const uiPresentation = useUiPresentation(UI_PRESENTATION_SOURCES);
+
   const status = useWsConnectionStatus();
   const primaryEnvironmentId = usePrimaryEnvironmentId();
   const savedRuntime = useSavedEnvironmentRuntimeStore((state) => state.byId[environmentId]);
@@ -164,14 +181,15 @@ export function ConnectionStatusIndicator({
     return fallback;
   }
 
-  const visual = ISSUE_VISUALS[displayIssue];
+  const visual = uiPresentation.ISSUE_VISUALS[displayIssue];
   const Icon = visual.icon;
   const attemptLabel = isPrimaryEnvironment
-    ? formatAttemptCount(status)
-    : formatAttemptCountValue(savedRuntime?.reconnectAttemptCount ?? 0);
+    ? uiPresentation.formatAttemptCount(status)
+    : uiPresentation.formatAttemptCountValue(savedRuntime?.reconnectAttemptCount ?? 0);
   const connectionDisplayName = isPrimaryEnvironment
-    ? getConnectionDisplayName(status)
-    : savedEnvironment?.label.trim() || "Saved Cafe Code Server";
+    ? uiPresentation.getConnectionDisplayName(status)
+    : savedEnvironment?.label.trim() ||
+      uiText("Saved Cafe Code Server", undefined, undefined, uiLocale);
   const nextRetryAt = isPrimaryEnvironment ? status.nextRetryAt : savedNextRetryAt;
   const lastError = isPrimaryEnvironment ? status.lastError : (savedRuntime?.lastError ?? null);
 
@@ -200,7 +218,14 @@ export function ConnectionStatusIndicator({
               visual.tone,
               className,
             )}
-            aria-label={`Connection ${visual.label}. Show reconnect details.`}
+            aria-label={uiText(
+              "Connection {value0}. Show reconnect details.",
+              {
+                value0: visual.label,
+              },
+              undefined,
+              uiLocale,
+            )}
           >
             <Icon
               className={cn("size-3 shrink-0", visual.spin && "animate-spin")}
@@ -213,27 +238,42 @@ export function ConnectionStatusIndicator({
       <PopoverPopup tooltipStyle side={side} align="end" className="w-max max-w-64 px-3 py-2">
         <div className="space-y-1.5 leading-tight">
           <div className="text-xs font-medium text-foreground">
-            {displayIssue === "offline" ? "Offline" : `Disconnected from ${connectionDisplayName}`}
+            {displayIssue === "offline"
+              ? uiText("Offline", undefined, undefined, uiLocale)
+              : uiText(
+                  "Disconnected from {value0}",
+                  { value0: connectionDisplayName },
+                  undefined,
+                  uiLocale,
+                )}
           </div>
           <div className="space-y-0.5 text-2xs text-muted-foreground">
             {displayIssue === "offline" ? (
-              <div>Waiting for network.</div>
+              <div>{uiText("Waiting for network.", undefined, undefined, uiLocale)}</div>
             ) : displayIssue === "exhausted" ? (
               <div>
-                {attemptLabel
-                  ? isPrimaryEnvironment
-                    ? `Paused after ${attemptLabel}; retries when you're back.`
-                    : `Retries exhausted after ${attemptLabel}.`
-                  : "Retries exhausted trying to reconnect."}
+                {uiText(
+                  "Automatic reconnect paused. Check the connection, then retry.",
+                  undefined,
+                  undefined,
+                  uiLocale,
+                )}
               </div>
             ) : displayIssue === "disconnected" ? (
-              <div>This connection is inactive.</div>
+              <div>{uiText("This connection is inactive.", undefined, undefined, uiLocale)}</div>
             ) : (
               <>
                 <div>
                   {nextRetryAt === null
-                    ? "Reconnecting now…"
-                    : `Next attempt in ${formatRetryCountdown(nextRetryAt, nowMs)}`}
+                    ? uiText("Reconnecting now…", undefined, undefined, uiLocale)
+                    : uiText(
+                        "Next attempt in {value0}",
+                        {
+                          value0: uiPresentation.formatRetryCountdown(nextRetryAt, nowMs),
+                        },
+                        undefined,
+                        uiLocale,
+                      )}
                 </div>
                 {attemptLabel ? <div>{attemptLabel}</div> : null}
               </>
@@ -247,7 +287,9 @@ export function ConnectionStatusIndicator({
               className="mt-1 inline-flex items-center gap-1 rounded-md border border-border bg-background px-2 py-1 text-2xs font-medium text-foreground transition-colors duration-(--duration-fast) hover:bg-muted"
             >
               <RefreshCwIcon className="size-3" aria-hidden="true" />
-              {displayIssue === "exhausted" ? "Retry" : "Retry now"}
+              {displayIssue === "exhausted"
+                ? uiText("Retry", undefined, undefined, uiLocale)
+                : uiText("Retry now", undefined, undefined, uiLocale)}
             </button>
           ) : null}
         </div>
@@ -255,3 +297,12 @@ export function ConnectionStatusIndicator({
     </Popover>
   );
 }
+
+// Finite source-owned labels/helpers only; no received or user data.
+const UI_PRESENTATION_SOURCES = {
+  ISSUE_VISUALS,
+  formatAttemptCount,
+  formatAttemptCountValue,
+  formatRetryCountdown,
+  getConnectionDisplayName,
+};

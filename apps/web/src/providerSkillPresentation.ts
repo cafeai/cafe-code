@@ -1,3 +1,4 @@
+import { uiText } from "@cafecode/shared/i18n";
 import type { ServerProviderSkill } from "@cafecode/contracts";
 
 function titleCaseWords(value: string): string {
@@ -26,16 +27,16 @@ export function formatProviderSkillInstallSource(
   skill: Pick<ServerProviderSkill, "path" | "pluginId" | "scope">,
 ): string | null {
   if (skill.pluginId?.trim()) {
-    return "App";
+    return uiText("App");
   }
   const normalizedPath = normalizePathSeparators(skill.path ?? "");
   if (normalizedPath.includes("/.codex/plugins/") || normalizedPath.includes("/.agents/plugins/")) {
-    return "App";
+    return uiText("App");
   }
 
   const normalizedScope = skill.scope?.trim().toLowerCase();
   if (normalizedScope === "system") {
-    return "System";
+    return uiText("System");
   }
   if (
     normalizedScope === "project" ||
@@ -43,10 +44,10 @@ export function formatProviderSkillInstallSource(
     normalizedScope === "workspace" ||
     normalizedScope === "local"
   ) {
-    return "Project";
+    return uiText("Project");
   }
   if (normalizedScope === "user" || normalizedScope === "personal") {
-    return "Personal";
+    return uiText("Personal");
   }
   if (normalizedScope) {
     return titleCaseWords(normalizedScope);

@@ -1,3 +1,5 @@
+import { useUiLocale, useUiPresentation } from "~/i18n";
+import { uiText } from "@cafecode/shared/i18n";
 import { useMemo, type CSSProperties } from "react";
 import {
   DEFAULT_UNIFIED_SETTINGS,
@@ -40,9 +42,15 @@ const DEFAULT_AMBIANCE_PICKER_COLOR = "#48cfff";
 const EFFECT_TILES = AMBIANCE_EFFECTS;
 
 const REACT_MODE_LABELS: Record<AmbianceReactMode, string> = {
-  off: "Nothing",
-  session: "Session state",
-  live: "Session + activity",
+  get off() {
+    return uiText("Nothing");
+  },
+  get session() {
+    return uiText("Session state");
+  },
+  get live() {
+    return uiText("Session + activity");
+  },
 };
 
 /**
@@ -57,27 +65,46 @@ const COST_DOT_CLASS: Record<AmbianceCost, string> = {
 };
 
 function AmbianceSurfaceToggle({
-  label,
+  surface,
   checked,
   onCheckedChange,
 }: {
-  label: string;
+  surface: "sidebar" | "chat" | "composer";
   checked: boolean;
   onCheckedChange: (checked: boolean) => void;
 }) {
+  const uiLocale = useUiLocale();
+
+  // Select whole accessible sentences from the canonical surface, rather than
+  // lowercasing a translated heading and assuming English sentence grammar.
+  const label =
+    surface === "sidebar"
+      ? uiText("Sidebar", undefined, undefined, uiLocale)
+      : surface === "chat"
+        ? uiText("Chat", undefined, undefined, uiLocale)
+        : uiText("Composer", undefined, undefined, uiLocale);
+  const accessibleLabel =
+    surface === "sidebar"
+      ? uiText("Draw ambiance on the sidebar", undefined, undefined, uiLocale)
+      : surface === "chat"
+        ? uiText("Draw ambiance on the chat", undefined, undefined, uiLocale)
+        : uiText("Draw ambiance on the composer", undefined, undefined, uiLocale);
   return (
     <label className="flex items-center gap-2.5 text-xs text-muted-foreground">
       {label}
       <Switch
         checked={checked}
         onCheckedChange={(value) => onCheckedChange(Boolean(value))}
-        aria-label={`Draw ambiance on the ${label.toLowerCase()}`}
+        aria-label={accessibleLabel}
       />
     </label>
   );
 }
 
 export function AmbianceSettingsPanel() {
+  const uiLocale = useUiLocale();
+  const uiPresentation = useUiPresentation(UI_PRESENTATION_SOURCES);
+
   const settings = useSettings();
   const { updateSettings } = useUpdateSettings();
 
@@ -97,27 +124,32 @@ export function AmbianceSettingsPanel() {
   const opacityDirty = settings.ambianceOpacity !== DEFAULT_AMBIANCE_OPACITY;
 
   return (
-    <SettingsPageContainer title="Ambiance">
+    <SettingsPageContainer title={uiText("Ambiance", undefined, undefined, uiLocale)}>
       <SettingsSection>
         <SettingsRow
-          title="Weather layer"
-          description="Animated weather over the app. Off keeps the sidebar stars."
+          title={uiText("Weather layer", undefined, undefined, uiLocale)}
+          description={uiText(
+            "Animated weather over the app. Off keeps the sidebar stars.",
+            undefined,
+            undefined,
+            uiLocale,
+          )}
           control={
             <Switch
               checked={settings.ambianceEnabled}
               onCheckedChange={(checked) => updateSettings({ ambianceEnabled: Boolean(checked) })}
-              aria-label="Enable ambiance"
+              aria-label={uiText("Enable ambiance", undefined, undefined, uiLocale)}
             />
           }
         />
 
         <SettingsRow
-          title="Effect"
-          description="Heavier effects use more battery."
+          title={uiText("Effect", undefined, undefined, uiLocale)}
+          description={uiText("Heavier effects use more battery.", undefined, undefined, uiLocale)}
           resetAction={
             settings.ambianceEffect !== DEFAULT_AMBIANCE_EFFECT ? (
               <SettingResetButton
-                label="ambiance effect"
+                label={uiText("ambiance effect", undefined, undefined, uiLocale)}
                 onClick={() => updateSettings({ ambianceEffect: DEFAULT_AMBIANCE_EFFECT })}
               />
             ) : null
@@ -131,14 +163,19 @@ export function AmbianceSettingsPanel() {
                 : undefined
             }
           >
-            {EFFECT_TILES.map((tile) => {
+            {uiPresentation.EFFECT_TILES.map((tile) => {
               const selected = settings.ambianceEffect === tile.effect;
               return (
                 <button
                   key={tile.effect}
                   type="button"
                   aria-pressed={selected}
-                  aria-label={`${tile.label} effect`}
+                  aria-label={uiText(
+                    "{value0} effect",
+                    { value0: tile.label },
+                    undefined,
+                    uiLocale,
+                  )}
                   className={cn(
                     "group focus-ring overflow-hidden rounded-lg border text-left transition-colors duration-(--duration-fast)",
                     selected
@@ -166,7 +203,9 @@ export function AmbianceSettingsPanel() {
                         className={cn("size-1.5 shrink-0 rounded-full", COST_DOT_CLASS[tile.cost])}
                       />
                       {AMBIANCE_COST_LABEL[tile.cost]}
-                      {tile.backend === "webgl" ? " · GPU" : ""}
+                      {tile.backend === "webgl"
+                        ? uiText(" · GPU", undefined, undefined, uiLocale)
+                        : ""}
                     </span>
                   </span>
                 </button>
@@ -176,12 +215,17 @@ export function AmbianceSettingsPanel() {
         </SettingsRow>
 
         <SettingsRow
-          title="Intensity"
-          description="Base density; chat activity can add more."
+          title={uiText("Intensity", undefined, undefined, uiLocale)}
+          description={uiText(
+            "Base density; chat activity can add more.",
+            undefined,
+            undefined,
+            uiLocale,
+          )}
           resetAction={
             intensityDirty ? (
               <SettingResetButton
-                label="ambiance intensity"
+                label={uiText("ambiance intensity", undefined, undefined, uiLocale)}
                 onClick={() => updateSettings({ ambianceIntensity: DEFAULT_AMBIANCE_INTENSITY })}
               />
             ) : null
@@ -193,7 +237,7 @@ export function AmbianceSettingsPanel() {
                 min={MIN_AMBIANCE_INTENSITY}
                 max={MAX_AMBIANCE_INTENSITY}
                 step={0.05}
-                aria-label="Ambiance intensity"
+                aria-label={uiText("Ambiance intensity", undefined, undefined, uiLocale)}
                 onValueChange={(value) =>
                   updateSettings({
                     ambianceIntensity: Math.min(
@@ -211,12 +255,17 @@ export function AmbianceSettingsPanel() {
         />
 
         <SettingsRow
-          title="Opacity"
-          description="How visible the weather is, without changing its density."
+          title={uiText("Opacity", undefined, undefined, uiLocale)}
+          description={uiText(
+            "How visible the weather is, without changing its density.",
+            undefined,
+            undefined,
+            uiLocale,
+          )}
           resetAction={
             opacityDirty ? (
               <SettingResetButton
-                label="ambiance opacity"
+                label={uiText("ambiance opacity", undefined, undefined, uiLocale)}
                 onClick={() => updateSettings({ ambianceOpacity: DEFAULT_AMBIANCE_OPACITY })}
               />
             ) : null
@@ -228,7 +277,7 @@ export function AmbianceSettingsPanel() {
                 min={MIN_AMBIANCE_OPACITY}
                 max={MAX_AMBIANCE_OPACITY}
                 step={0.05}
-                aria-label="Ambiance opacity"
+                aria-label={uiText("Ambiance opacity", undefined, undefined, uiLocale)}
                 onValueChange={(value) =>
                   updateSettings({
                     ambianceOpacity: Math.min(
@@ -246,12 +295,17 @@ export function AmbianceSettingsPanel() {
         />
 
         <SettingsRow
-          title="React to chat"
-          description="How much chat activity changes the weather."
+          title={uiText("React to chat", undefined, undefined, uiLocale)}
+          description={uiText(
+            "How much chat activity changes the weather.",
+            undefined,
+            undefined,
+            uiLocale,
+          )}
           resetAction={
             settings.ambianceReactMode !== DEFAULT_AMBIANCE_REACT_MODE ? (
               <SettingResetButton
-                label="ambiance chat reaction"
+                label={uiText("ambiance chat reaction", undefined, undefined, uiLocale)}
                 onClick={() => updateSettings({ ambianceReactMode: DEFAULT_AMBIANCE_REACT_MODE })}
               />
             ) : null
@@ -265,18 +319,23 @@ export function AmbianceSettingsPanel() {
                 }
               }}
             >
-              <SelectTrigger className="w-full sm:w-44" aria-label="React to chat">
-                <SelectValue>{REACT_MODE_LABELS[settings.ambianceReactMode]}</SelectValue>
+              <SelectTrigger
+                className="w-full sm:w-44"
+                aria-label={uiText("React to chat", undefined, undefined, uiLocale)}
+              >
+                <SelectValue>
+                  {uiPresentation.REACT_MODE_LABELS[settings.ambianceReactMode]}
+                </SelectValue>
               </SelectTrigger>
               <SelectPopup align="end" alignItemWithTrigger={false}>
                 <SelectItem hideIndicator value="off">
-                  {REACT_MODE_LABELS.off}
+                  {uiPresentation.REACT_MODE_LABELS.off}
                 </SelectItem>
                 <SelectItem hideIndicator value="session">
-                  {REACT_MODE_LABELS.session}
+                  {uiPresentation.REACT_MODE_LABELS.session}
                 </SelectItem>
                 <SelectItem hideIndicator value="live">
-                  {REACT_MODE_LABELS.live}
+                  {uiPresentation.REACT_MODE_LABELS.live}
                 </SelectItem>
               </SelectPopup>
             </Select>
@@ -284,22 +343,27 @@ export function AmbianceSettingsPanel() {
         />
 
         <SettingsRow
-          title="Surfaces"
-          description="Composer tints the prompt frame instead of drawing weather."
+          title={uiText("Surfaces", undefined, undefined, uiLocale)}
+          description={uiText(
+            "Composer tints the prompt frame instead of drawing weather.",
+            undefined,
+            undefined,
+            uiLocale,
+          )}
           control={
             <div className="flex flex-col items-end gap-2">
               <AmbianceSurfaceToggle
-                label="Sidebar"
+                surface="sidebar"
                 checked={settings.ambianceSurfaceSidebar}
                 onCheckedChange={(checked) => updateSettings({ ambianceSurfaceSidebar: checked })}
               />
               <AmbianceSurfaceToggle
-                label="Chat"
+                surface="chat"
                 checked={settings.ambianceSurfaceThread}
                 onCheckedChange={(checked) => updateSettings({ ambianceSurfaceThread: checked })}
               />
               <AmbianceSurfaceToggle
-                label="Composer"
+                surface="composer"
                 checked={settings.ambianceSurfaceComposer}
                 onCheckedChange={(checked) => updateSettings({ ambianceSurfaceComposer: checked })}
               />
@@ -308,12 +372,17 @@ export function AmbianceSettingsPanel() {
         />
 
         <SettingsRow
-          title="Weather color"
-          description="Defaults to the accent color set in Appearance."
+          title={uiText("Weather color", undefined, undefined, uiLocale)}
+          description={uiText(
+            "Defaults to the accent color set in Appearance.",
+            undefined,
+            undefined,
+            uiLocale,
+          )}
           resetAction={
             settings.ambianceColor !== DEFAULT_UNIFIED_SETTINGS.ambianceColor ? (
               <SettingResetButton
-                label="weather color"
+                label={uiText("weather color", undefined, undefined, uiLocale)}
                 onClick={() => updateSettings({ ambianceColor: DEFAULT_AMBIANCE_COLOR })}
               />
             ) : null
@@ -330,14 +399,19 @@ export function AmbianceSettingsPanel() {
         />
       </SettingsSection>
 
-      <SettingsSection title="Task Atrium">
+      <SettingsSection title={uiText("Task Atrium", undefined, undefined, uiLocale)}>
         <SettingsRow
-          title="Task Atrium"
-          description="Adds an Atrium button above Settings: a read-only overview of chats and subagents."
+          title={uiText("Task Atrium", undefined, undefined, uiLocale)}
+          description={uiText(
+            "Adds an Atrium button above Settings: a read-only overview of chats and subagents.",
+            undefined,
+            undefined,
+            uiLocale,
+          )}
           resetAction={
             settings.ambianceAtriumEnabled !== DEFAULT_AMBIANCE_ATRIUM_ENABLED ? (
               <SettingResetButton
-                label="task atrium"
+                label={uiText("task atrium", undefined, undefined, uiLocale)}
                 onClick={() =>
                   updateSettings({ ambianceAtriumEnabled: DEFAULT_AMBIANCE_ATRIUM_ENABLED })
                 }
@@ -350,18 +424,18 @@ export function AmbianceSettingsPanel() {
               onCheckedChange={(checked) =>
                 updateSettings({ ambianceAtriumEnabled: Boolean(checked) })
               }
-              aria-label="Enable Task Atrium"
+              aria-label={uiText("Enable Task Atrium", undefined, undefined, uiLocale)}
             />
           }
         />
 
         <SettingsRow
-          title="Atrium color"
-          description="Defaults to the weather color."
+          title={uiText("Atrium color", undefined, undefined, uiLocale)}
+          description={uiText("Defaults to the weather color.", undefined, undefined, uiLocale)}
           resetAction={
             settings.ambianceAtriumColor !== DEFAULT_UNIFIED_SETTINGS.ambianceAtriumColor ? (
               <SettingResetButton
-                label="atrium color"
+                label={uiText("atrium color", undefined, undefined, uiLocale)}
                 onClick={() =>
                   updateSettings({ ambianceAtriumColor: DEFAULT_AMBIANCE_ATRIUM_COLOR })
                 }
@@ -382,3 +456,6 @@ export function AmbianceSettingsPanel() {
     </SettingsPageContainer>
   );
 }
+
+// Finite source-owned labels/helpers only; no received or user data.
+const UI_PRESENTATION_SOURCES = { EFFECT_TILES, REACT_MODE_LABELS };

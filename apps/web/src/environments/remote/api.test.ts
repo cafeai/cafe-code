@@ -6,6 +6,7 @@ import {
   fetchRemoteEnvironmentDescriptor,
   fetchRemoteSessionState,
   issueRemoteWebSocketToken,
+  isRetryableRemoteWebSocketUrlError,
   resolveRemoteWebSocketConnectionUrl,
   remoteEnvironmentErrorMessage,
 } from "./api";
@@ -26,6 +27,64 @@ beforeEach(() => {
 });
 
 describe("remote environment api", () => {
+  it.each([null, {}, { token: 42 }, { token: "  " }])(
+    "rejects malformed successful socket capability %j",
+    async (value) => {
+      globalThis.fetch = vi.fn().mockResolvedValue(new Response(JSON.stringify(value)));
+      const error = await resolveRemoteWebSocketConnectionUrl({
+        wsBaseUrl: "wss://remote.example/",
+        httpBaseUrl: "https://remote.example/",
+        bearerToken: "isolated-bearer",
+      }).catch((error: unknown) => error);
+      expect(error).toBeInstanceOf(Error);
+      expect(isRetryableRemoteWebSocketUrlError(error)).toBe(false);
+      expect(String(error)).toContain("invalid socket token");
+    },
+  );
+  it.each([408, 429, 500, 503, 599])(
+    "retries socket token HTTP %s without replaying enrollment",
+    async (status) => {
+      const fetchMock = vi.fn().mockResolvedValue(new Response(null, { status }));
+      globalThis.fetch = fetchMock;
+      const error = await issueRemoteWebSocketToken({
+        httpBaseUrl: "https://remote.example/",
+        bearerToken: "isolated-bearer",
+      }).catch((error: unknown) => error);
+      expect(isRetryableRemoteWebSocketUrlError(error)).toBe(true);
+      expect(fetchMock).toHaveBeenCalledExactlyOnceWith(
+        "https://remote.example/api/auth/ws-token",
+        expect.objectContaining({ method: "POST", credentials: "omit", redirect: "error" }),
+      );
+      expect(Object.hasOwn(fetchMock.mock.calls[0]![1], "body")).toBe(false);
+    },
+  );
+
+  it.each([400, 401, 403, 404, 409, 422])("does not retry socket token HTTP %s", async (status) => {
+    globalThis.fetch = vi.fn().mockResolvedValue(new Response(null, { status }));
+    const error = await issueRemoteWebSocketToken({
+      httpBaseUrl: "https://remote.example/",
+      bearerToken: "isolated-bearer",
+    }).catch((error: unknown) => error);
+    expect(isRetryableRemoteWebSocketUrlError(error)).toBe(false);
+  });
+
+  it("retries sanitized network failure but rejects unknown and malformed-response failures", async () => {
+    globalThis.fetch = vi.fn().mockRejectedValue(new Error("private network cause"));
+    const networkError = await issueRemoteWebSocketToken({
+      httpBaseUrl: "https://remote.example/",
+      bearerToken: "isolated-bearer",
+    }).catch((error: unknown) => error);
+    expect(isRetryableRemoteWebSocketUrlError(networkError)).toBe(true);
+    expect(String(networkError)).not.toContain("private network cause");
+    expect(isRetryableRemoteWebSocketUrlError(new Error("unknown failure"))).toBe(false);
+    globalThis.fetch = vi.fn().mockResolvedValue(new Response("not JSON"));
+    const malformed = await issueRemoteWebSocketToken({
+      httpBaseUrl: "https://remote.example/",
+      bearerToken: "isolated-bearer",
+    }).catch((error: unknown) => error);
+    expect(isRetryableRemoteWebSocketUrlError(malformed)).toBe(false);
+  });
+
   it("approves a desktop certificate before retrying only the public descriptor", async () => {
     const prepareRemoteCertificate = vi.fn().mockResolvedValue("approved");
     window.desktopBridge = { prepareRemoteCertificate } as unknown as NonNullable<

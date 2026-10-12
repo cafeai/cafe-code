@@ -33,6 +33,7 @@ import {
   type ServerSettings,
 } from "@cafecode/contracts";
 import { McpSettings } from "./McpSettings";
+import { getUiLocale, setUiLocale } from "@cafecode/shared/i18n";
 
 const harness = vi.hoisted(() => ({
   getStatus: vi.fn(),
@@ -90,6 +91,7 @@ const status: CafeMcpStatus = {
 };
 let mounted: Awaited<ReturnType<typeof render>> | undefined;
 const originalBridge = window.desktopBridge;
+const originalLocale = getUiLocale();
 function mount() {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   return render(
@@ -101,6 +103,7 @@ function mount() {
 
 describe("MCP settings", () => {
   beforeEach(() => {
+    setUiLocale("en");
     vi.clearAllMocks();
     harness.settings = DEFAULT_SERVER_SETTINGS;
     harness.backendUrl = "http://127.0.0.1:3774/";
@@ -127,6 +130,28 @@ describe("MCP settings", () => {
     mounted = undefined;
     if (originalBridge) window.desktopBridge = originalBridge;
     else delete window.desktopBridge;
+    setUiLocale(originalLocale);
+  });
+
+  it("retranslates retained access failure without repeating the security toggle", async () => {
+    harness.updateSettings.mockRejectedValueOnce(new Error("private fixture details"));
+    mounted = await mount();
+    const toggle = page.getByRole("switch", { name: "Enable Cafe Code MCP" });
+    await expect.element(toggle).toBeEnabled();
+    await toggle.click();
+    await expect
+      .element(page.getByRole("alert"))
+      .toHaveTextContent("Could not change Cafe Code MCP access. Refresh and try again.");
+    setUiLocale("ko");
+    await expect
+      .element(page.getByRole("alert"))
+      .toHaveTextContent(
+        "Cafe Code MCP 접근 권한을 변경하지 못했습니다. 새로고침한 뒤 다시 시도하세요.",
+      );
+    expect(harness.updateSettings).toHaveBeenCalledTimes(1);
+    expect(harness.applySettings).not.toHaveBeenCalled();
+    expect(harness.getStatus).toHaveBeenCalledTimes(1);
+    expect(document.body.textContent).not.toContain("private fixture details");
   });
 
   it.each(["disabled", "unavailable"] as const)(

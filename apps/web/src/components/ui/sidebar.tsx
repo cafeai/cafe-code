@@ -1,3 +1,5 @@
+import { useUiLocale } from "~/i18n";
+import { uiText } from "@cafecode/shared/i18n";
 import { mergeProps } from "@base-ui/react/merge-props";
 import { useRender } from "@base-ui/react/use-render";
 import { cva, type VariantProps } from "class-variance-authority";
@@ -184,6 +186,8 @@ function Sidebar({
   collapsible?: "offcanvas" | "icon" | "none";
   resizable?: boolean | SidebarResizableOptions;
 }) {
+  const uiLocale = useUiLocale();
+
   const { isMobile, state, openMobile, setOpenMobile } = useSidebar();
   const resolvedResizable = React.useMemo<SidebarResolvedResizableOptions | null>(() => {
     if (isMobile || collapsible === "none" || !resizable) {
@@ -248,8 +252,10 @@ function Sidebar({
             }
           >
             <SheetHeader className="sr-only">
-              <SheetTitle>Sidebar</SheetTitle>
-              <SheetDescription>Displays the mobile sidebar.</SheetDescription>
+              <SheetTitle>{uiText("Sidebar", undefined, undefined, uiLocale)}</SheetTitle>
+              <SheetDescription>
+                {uiText("Displays the mobile sidebar.", undefined, undefined, uiLocale)}
+              </SheetDescription>
             </SheetHeader>
             <div
               className={cn(
@@ -325,6 +331,8 @@ function Sidebar({
 }
 
 function SidebarTrigger({ className, onClick, ...props }: React.ComponentProps<typeof Button>) {
+  const uiLocale = useUiLocale();
+
   const { toggleSidebar, open, openMobile, isMobile } = useSidebar();
   const sidebarOpen = isMobile ? openMobile : open;
 
@@ -342,7 +350,7 @@ function SidebarTrigger({ className, onClick, ...props }: React.ComponentProps<t
       {...props}
     >
       {sidebarOpen ? <PanelLeftCloseIcon /> : <PanelLeftIcon />}
-      <span className="sr-only">Toggle Sidebar</span>
+      <span className="sr-only">{uiText("Toggle Sidebar", undefined, undefined, uiLocale)}</span>
     </Button>
   );
 }
@@ -360,6 +368,8 @@ function SidebarRail({
   onPointerUp,
   ...props
 }: React.ComponentProps<"button">) {
+  const uiLocale = useUiLocale();
+
   const { open, toggleSidebar } = useSidebar();
   const sidebarInstance = React.use(SidebarInstanceContext);
   const railRef = React.useRef<HTMLButtonElement | null>(null);
@@ -380,8 +390,12 @@ function SidebarRail({
   } | null>(null);
   const resolvedResizable = sidebarInstance?.resizable ?? null;
   const canResize = resolvedResizable !== null && open;
-  const railLabel = canResize ? "Resize Sidebar" : "Toggle Sidebar";
-  const railTitle = canResize ? "Drag to resize sidebar" : "Toggle Sidebar";
+  const railLabel = canResize
+    ? uiText("Resize Sidebar", undefined, undefined, uiLocale)
+    : uiText("Toggle Sidebar", undefined, undefined, uiLocale);
+  const railTitle = canResize
+    ? uiText("Drag to resize sidebar", undefined, undefined, uiLocale)
+    : uiText("Toggle Sidebar", undefined, undefined, uiLocale);
 
   const stopResize = React.useCallback(
     (pointerId: number) => {

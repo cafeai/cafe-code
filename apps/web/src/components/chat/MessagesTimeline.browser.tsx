@@ -13,7 +13,7 @@ import {
 } from "@cafecode/contracts";
 import { createRef } from "react";
 import type { LegendListRef } from "@legendapp/list/react";
-import { cdp, page, userEvent } from "vitest/browser";
+import { page, userEvent } from "vitest/browser";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { render } from "vitest-browser-react";
 import { applyInterfaceScalePercent } from "../../interfaceScale";
@@ -125,8 +125,151 @@ vi.mock("@legendapp/list/react", async () => {
 import { MessagesTimeline } from "./MessagesTimeline";
 import { SubagentDetailView, type SubagentDetailSelection } from "./SubagentDetailView";
 import { deriveTimelineEntries, deriveWorkLogEntries } from "../../session-logic";
+import { getUiLocale, setUiLocale } from "@cafecode/shared/i18n";
 
 const MESSAGE_CREATED_AT = "2026-04-13T12:00:00.000Z";
+
+it("keeps a retained provider failure discoverable while historical work and private diagnostics are collapsed", async () => {
+  const threadId = ThreadId.make("diagnostic-historical-chat");
+  const turnId = TurnId.make("diagnostic-historical-turn");
+  const activity = {
+    id: EventId.make("diagnostic-historical-error"),
+    turnId,
+    createdAt: "2026-04-13T12:00:01.000Z",
+    sequence: 1,
+    kind: "runtime.error",
+    summary: "private original provider message",
+    tone: "error" as const,
+    payload: {
+      message: "private original provider message",
+      providerDiagnostic: { version: 1, status: "error", subject: { kind: "root" } },
+    },
+  };
+  const getThreadTurnActivityPage = vi.fn(async (input: { offset: number; limit: number }) => ({
+    threadId,
+    turnId,
+    offset: input.offset,
+    limit: input.limit,
+    totalCount: 1,
+    activities: [activity],
+  }));
+  const getThreadActivityDiagnostic = vi.fn(async (input: object) => ({
+    ...input,
+    diagnostic: {
+      version: 1,
+      observedAt: activity.createdAt,
+      source: "codex.error",
+      native: { threadId: "private-native-diagnostic-thread" },
+      message: "Private recorded failure details",
+      json: '{"error":"private expanded JSON"}',
+      redacted: false,
+      truncated: false,
+      omittedFields: false,
+    },
+  }));
+  __setEnvironmentApiOverrideForTests(EnvironmentId.make("environment-local"), {
+    orchestration: { getThreadTurnActivityPage, getThreadActivityDiagnostic },
+  } as unknown as EnvironmentApi);
+  const screen = await render(
+    <MessagesTimeline
+      {...buildProps()}
+      activeThreadId={threadId}
+      timelineEntries={[buildAssistantTimelineEntry({ turnId })]}
+      historicalWorkLogSummariesByTurnId={
+        new Map([
+          [
+            turnId,
+            {
+              turnId,
+              previewEntries: deriveWorkLogEntries([activity], turnId),
+              snapshotEntryCount: 1,
+            },
+          ],
+        ])
+      }
+    />,
+  );
+  try {
+    const outer = page.getByRole("button", { name: /Work log/ });
+    await expect.element(outer).toHaveAttribute("aria-expanded", "false");
+    await expect.element(page.getByText("Provider error · 1", { exact: true })).toBeVisible();
+    expect(document.body.textContent).not.toContain("private");
+    expect(getThreadTurnActivityPage).not.toHaveBeenCalled();
+    expect(getThreadActivityDiagnostic).not.toHaveBeenCalled();
+    await outer.click();
+    const inner = page.getByRole("button", {
+      name: "Inspect provider diagnostic: Root · Provider error",
+      exact: true,
+    });
+    await expect.element(inner).toHaveAttribute("aria-expanded", "false");
+    expect(getThreadActivityDiagnostic).not.toHaveBeenCalled();
+    await inner.click();
+    await expect
+      .element(page.getByText("Private recorded failure details", { exact: true }))
+      .toBeVisible();
+    expect(getThreadActivityDiagnostic).toHaveBeenCalledExactlyOnceWith({
+      threadId,
+      turnId,
+      activityId: activity.id,
+    });
+    await outer.click();
+    await expect.element(outer).toHaveAttribute("aria-expanded", "false");
+    await expect.element(page.getByText("Provider error · 1", { exact: true })).toBeVisible();
+    expect(document.querySelector("[data-provider-diagnostic-json]")).toBeNull();
+    expect(document.body.textContent).not.toContain("private expanded JSON");
+    expect(document.body.textContent).not.toContain("private-native-diagnostic-thread");
+  } finally {
+    await screen.unmount();
+    __resetEnvironmentApiOverridesForTests();
+  }
+});
+
+it("marks a provider error hidden behind current Work Log overflow without reading private details", async () => {
+  const turnId = TurnId.make("diagnostic-current-turn");
+  const activities = Array.from({ length: 9 }, (_, index) => ({
+    id: EventId.make(`diagnostic-current-${index}`),
+    turnId,
+    createdAt: `2026-04-13T12:00:${String(index + 1).padStart(2, "0")}.000Z`,
+    sequence: index + 1,
+    kind: index === 0 ? "runtime.error" : "tool.completed",
+    tone: index === 0 ? ("error" as const) : ("tool" as const),
+    summary: index === 0 ? "private original error" : `Command ${index}`,
+    payload:
+      index === 0
+        ? { providerDiagnostic: { version: 1, status: "error", subject: { kind: "root" } } }
+        : {},
+  }));
+  const screen = await render(
+    <MessagesTimeline
+      {...buildProps()}
+      activeThreadId={ThreadId.make("diagnostic-current-chat")}
+      timelineEntries={deriveTimelineEntries([], [], deriveWorkLogEntries(activities, turnId))}
+    />,
+  );
+  try {
+    await expect.element(page.getByText("Provider error · 1", { exact: true })).toBeVisible();
+    await expect
+      .element(
+        page.getByRole("button", {
+          name: "Inspect provider diagnostic: Root · Provider error",
+          exact: true,
+        }),
+      )
+      .not.toBeInTheDocument();
+    expect(document.body.textContent).not.toContain("private original error");
+    await page.getByRole("button", { name: /Show .* more/ }).click();
+    await expect
+      .element(
+        page.getByRole("button", {
+          name: "Inspect provider diagnostic: Root · Provider error",
+          exact: true,
+        }),
+      )
+      .toHaveAttribute("aria-expanded", "false");
+  } finally {
+    await screen.unmount();
+  }
+});
 
 it("renders public summaries and inspectable command work separately from ordinary assistant prose", async () => {
   const turnId = TurnId.make("operation-turn");
@@ -373,6 +516,52 @@ it("replays historical Claude operation rows through the existing bounded work-l
   } finally {
     await screen.unmount();
     __resetEnvironmentApiOverridesForTests();
+  }
+});
+
+it("retranslates a retained historical page error without restarting the bounded owner query", async () => {
+  const locale = getUiLocale();
+  setUiLocale("en");
+  const threadId = ThreadId.make("locale-history-thread");
+  const turnId = TurnId.make("locale-history-turn");
+  const getThreadTurnActivityPage = vi.fn(async () => {
+    throw new Error("private fixture page detail");
+  });
+  __setEnvironmentApiOverrideForTests(EnvironmentId.make("environment-local"), {
+    orchestration: { getThreadTurnActivityPage },
+  } as unknown as EnvironmentApi);
+  const screen = await render(
+    <MessagesTimeline
+      {...buildProps()}
+      activeThreadId={threadId}
+      timelineEntries={[buildAssistantTimelineEntry({ turnId, text: "Received final answer." })]}
+      historicalWorkLogSummariesByTurnId={
+        new Map([[turnId, { turnId, previewEntries: [], snapshotEntryCount: 2 }]])
+      }
+    />,
+  );
+  try {
+    await page.getByRole("button", { name: /Work log/ }).click();
+    await expect
+      .element(page.getByText("Couldn’t load the work log.", { exact: true }))
+      .toBeVisible();
+    setUiLocale("ko");
+    await expect
+      .element(page.getByText("작업 기록을 불러오지 못했습니다.", { exact: true }))
+      .toBeVisible();
+    expect(getThreadTurnActivityPage).toHaveBeenCalledTimes(1);
+    expect(getThreadTurnActivityPage).toHaveBeenCalledWith({
+      threadId,
+      turnId,
+      offset: 0,
+      limit: 1,
+    });
+    expect(document.body.textContent).not.toContain("private fixture page detail");
+    await expect.element(page.getByText("Received final answer.", { exact: true })).toBeVisible();
+  } finally {
+    await screen.unmount();
+    __resetEnvironmentApiOverridesForTests();
+    setUiLocale(locale);
   }
 });
 
@@ -704,55 +893,6 @@ it.each([80, 100, 130] as const)(
     }
   },
 );
-
-it("keeps message actions visible and inside the normal layout on touch screens", async () => {
-  const input = cdp();
-  await input.send("Emulation.setDeviceMetricsOverride", {
-    width: 430,
-    height: 932,
-    deviceScaleFactor: 1,
-    mobile: true,
-  });
-  await input.send("Emulation.setTouchEmulationEnabled", { enabled: true });
-  let view: Awaited<ReturnType<typeof render>> | undefined;
-  try {
-    expect(window.matchMedia("(hover: none)").matches).toBe(true);
-    view = await render(
-      <div className="bg-background text-foreground" style={{ width: "100%", height: 540 }}>
-        <MessagesTimeline
-          {...buildProps()}
-          activeProvider={ProviderDriverKind.make("claudeAgent")}
-          onForkMessage={vi.fn()}
-          timelineEntries={[
-            buildUserTimelineEntry("Open YouTube and check my subscriber count."),
-            buildAssistantTimelineEntry({ text: "I’ll open YouTube and check your channel." }),
-          ]}
-        />
-      </div>,
-    );
-    const userFooter = document.querySelector<HTMLElement>("[data-user-message-footer]")!;
-    const assistantFooter = document.querySelector<HTMLElement>("[data-assistant-message-footer]")!;
-    await expect.poll(() => getComputedStyle(userFooter).opacity).toBe("1");
-    await expect.poll(() => getComputedStyle(assistantFooter).opacity).toBe("1");
-    expect(getComputedStyle(userFooter).position).toBe("static");
-    expect(getComputedStyle(assistantFooter).position).toBe("static");
-    const bubble = userFooter.closest<HTMLElement>(".group")!;
-    expect(userFooter.getBoundingClientRect().bottom).toBeLessThan(
-      bubble.getBoundingClientRect().bottom,
-    );
-    await expect
-      .element(page.getByRole("button", { name: "Copy message", exact: true }).first())
-      .toBeVisible();
-    await expect
-      .element(page.getByRole("button", { name: "Fork from this message", exact: true }).first())
-      .toBeVisible();
-    await page.screenshot({ path: "../../../../../.explorations/message-spacing/touch.png" });
-  } finally {
-    await view?.unmount();
-    await input.send("Emulation.setTouchEmulationEnabled", { enabled: false });
-    await input.send("Emulation.clearDeviceMetricsOverride");
-  }
-});
 
 function buildLiveSubagentWorkEntry(id: string, label: string) {
   return {

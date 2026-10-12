@@ -1,3 +1,5 @@
+import { useUiLocale } from "~/i18n";
+import { uiText } from "@cafecode/shared/i18n";
 import { useEffect, useRef, useState, type CSSProperties, type ReactNode } from "react";
 import { XIcon } from "lucide-react";
 
@@ -180,6 +182,8 @@ function ComposerBannerStackAlert({
   readonly exiting: boolean;
   readonly onDismissRequest: () => void;
 }) {
+  const uiLocale = useUiLocale();
+
   const dismissOnly = item.onDismiss && !item.actions;
 
   return (
@@ -200,7 +204,9 @@ function ComposerBannerStackAlert({
             <Button
               size="icon-xs"
               variant="ghost"
-              aria-label={item.dismissLabel ?? "Dismiss warning"}
+              aria-label={
+                item.dismissLabel ?? uiText("Dismiss warning", undefined, undefined, uiLocale)
+              }
               disabled={exiting}
               onClick={onDismissRequest}
             >

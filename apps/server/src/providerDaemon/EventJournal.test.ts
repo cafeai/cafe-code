@@ -13,7 +13,8 @@ import { PROVIDER_PIPELINE_POLICY, utf8ByteLength } from "@cafecode/shared/provi
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
-import { describe, expect, it } from "vitest";
+import { DatabaseSync } from "node:sqlite";
+import { describe, expect, it, vi } from "vitest";
 
 import { SqlitePersistenceMemory } from "../persistence/Layers/Sqlite.ts";
 import {
@@ -168,6 +169,73 @@ function makeCommandEvent(id: string, output: string): ProviderRuntimeEvent {
 }
 
 describe("ProviderDaemonEventJournal", () => {
+  it("retains current and legacy Claude task history roots through SQLite append and replay", async () => {
+    await Effect.runPromise(
+      Effect.gen(function* () {
+        const historySessionId = "00000000-0000-4000-8000-000000000961";
+        const base = {
+          provider: "claudeAgent",
+          providerInstanceId: "claude_history_account",
+          createdAt: "2026-10-11T00:00:00Z",
+          threadId: "claude-history-parent",
+          turnId: "claude-history-turn",
+          subagentRuntimeId: "00000000-0000-4000-8000-000000000962",
+        };
+        const tasks = [
+          { type: "task.started", payload: { taskId: "native-task" } },
+          {
+            type: "task.progress",
+            payload: { taskId: "native-task", description: "Reviewing files" },
+          },
+          { type: "task.completed", payload: { taskId: "native-task", status: "completed" } },
+        ];
+        const inputs = tasks.flatMap((task, index) => [
+          { ...base, ...task, eventId: `claude-history-legacy-${index}` },
+          {
+            ...base,
+            ...task,
+            eventId: `claude-history-current-${index}`,
+            claudeSubagentHistorySessionId: historySessionId,
+          },
+        ]);
+        const decodeEvent = Schema.decodeUnknownSync(ProviderRuntimeEventSchema);
+        const events = inputs.map((input) => decodeEvent(input));
+        // Compare against unencoded input before publication, then inspect
+        // actual SQLite bytes. A shared lossy task codec must not conceal
+        // history-root loss by producing equal live and replayed records.
+        expect(events).toEqual(inputs);
+        const ownerKey = "synthetic-claude-task-history";
+        const journal = yield* makePersistentProviderDaemonEventJournal({ capacity: 10, ownerKey });
+        const delivered: ProviderDaemonEventRecord[] = [];
+        const subscription = yield* journal.subscribeWithReplayBoundary((record) => {
+          delivered.push(record);
+        });
+        yield* Effect.addFinalizer(() => Effect.sync(subscription.unsubscribe));
+        const published = yield* Effect.forEach(events, (event) => journal.publish(event), {
+          concurrency: 1,
+        });
+        expect(subscription.replayBoundaryCursor).toBe(0);
+        expect(published.map((record) => record.event)).toEqual(inputs);
+        expect(delivered).toEqual(published);
+        const replayJournal = yield* makePersistentProviderDaemonEventJournal({
+          capacity: 10,
+          ownerKey,
+        });
+        const replayed = yield* replayJournal.replayAfter(0);
+        expect(replayed).toEqual(published);
+        expect(replayed.map((record) => record.cursor)).toEqual([1, 2, 3, 4, 5, 6]);
+        const sql = yield* SqlClient.SqlClient;
+        const rows = yield* sql<{ readonly eventJson: string }>`
+          SELECT event_json AS "eventJson"
+          FROM provider_daemon_events
+          WHERE owner_key = ${ownerKey}
+          ORDER BY cursor
+        `;
+        expect(rows.map((row) => JSON.parse(row.eventJson))).toEqual(inputs);
+      }).pipe(Effect.scoped, Effect.provide(SqlitePersistenceMemory)),
+    );
+  });
+
   it.each(assistantSourceFixtures)(
     "preserves exact assistant source through persistent publish, live delivery and replay: $name",
     async ({ chunks }) => {
@@ -371,6 +439,245 @@ describe("ProviderDaemonEventJournal", () => {
         );
       }).pipe(Effect.scoped, Effect.provide(SqlitePersistenceMemory)),
     );
+  });
+
+  it("repairs only the finite replay page and examines a long retained suffix linearly", async () => {
+    // Observe the actual isolated SQLite engine, not a mocked journal. Counting
+    // its length predicate is deterministic under slow CI and proves that page
+    // repair does not revisit the whole suffix. This local ASCII fixture keeps
+    // the overridden SQL BLOB length semantics identical; the production client and
+    // database are never changed, and the prototype observer is always restored.
+    const observedDatabase: { current: DatabaseSync | undefined } = { current: undefined };
+    const originalPrepare = DatabaseSync.prototype.prepare;
+    const prepareObserver = vi
+      .spyOn(DatabaseSync.prototype, "prepare")
+      .mockImplementation(function (this: DatabaseSync, query: string) {
+        observedDatabase.current = this;
+        return originalPrepare.call(this, query);
+      });
+    try {
+      await Effect.runPromise(
+        Effect.gen(function* () {
+          const sql = yield* SqlClient.SqlClient;
+          const ownerKey = "synthetic-bounded-replay";
+          const expectedCursors: number[] = [];
+          const expectedIds: EventId[] = [];
+          const futureOversized = makeCommandEvent(
+            "synthetic-future-oversized",
+            "x".repeat(300_000),
+          );
+          const futureJson = encodeProviderRuntimeEventJsonForTest(futureOversized);
+          const malformedJson = `{"invalid":"${"z".repeat(300_000)}"}`;
+          for (let index = 0; index < 256; index += 1) {
+            const event =
+              index === 16 ? futureOversized : makeRuntimeEvent(`synthetic-replay-${index}`);
+            const json =
+              index === 24 ? malformedJson : encodeProviderRuntimeEventJsonForTest(event);
+            const inserted = (yield* sql`
+              INSERT INTO provider_daemon_events (owner_key, emitted_at, event_json)
+              VALUES (${ownerKey}, ${event.createdAt}, ${json})
+              RETURNING cursor
+            `) as unknown as ReadonlyArray<{ readonly cursor: number }>;
+            expectedCursors.push(inserted[0]!.cursor);
+            expectedIds.push(event.eventId);
+            // Interleaved foreign-owner cursors must not enlarge the page or
+            // become repair authority for this exact journal owner.
+            if (index % 32 === 0) {
+              yield* sql`
+                INSERT INTO provider_daemon_events (owner_key, emitted_at, event_json)
+                VALUES (${"synthetic-foreign-owner"}, ${event.createdAt}, ${malformedJson})
+              `;
+            }
+          }
+          const journal = yield* makePersistentProviderDaemonEventJournal({
+            capacity: 512,
+            ownerKey,
+            startupPruneDelayMs: 60_000,
+          });
+          let lengthEvaluations = 0;
+          expect(observedDatabase.current).toBeDefined();
+          observedDatabase.current!.function("length", (value) => {
+            lengthEvaluations += 1;
+            return value instanceof Uint8Array ? value.byteLength : null;
+          });
+          const liveCursors: number[] = [];
+          const subscription = yield* journal.subscribeWithReplayBoundary((record) => {
+            liveCursors.push(record.cursor);
+          });
+          // An inherited row beyond the captured high-water mark must remain
+          // untouched even though it shares this owner and is oversized.
+          const beyondBoundary = (yield* sql`
+            INSERT INTO provider_daemon_events (owner_key, emitted_at, event_json)
+            VALUES (${ownerKey}, ${futureOversized.createdAt}, ${futureJson})
+            RETURNING cursor
+          `) as unknown as ReadonlyArray<{ readonly cursor: number }>;
+          const live = yield* journal.publish(makeRuntimeEvent("synthetic-live-after-boundary"));
+          const firstPage = yield* journal.replayPageThrough(0, subscription.replayBoundaryCursor);
+          expect(firstPage.map((record) => record.cursor)).toEqual(expectedCursors.slice(0, 8));
+          expect(lengthEvaluations).toBe(8);
+          const futureRows = (yield* sql`
+            SELECT event_json AS "eventJson"
+            FROM provider_daemon_events
+            WHERE owner_key = ${ownerKey} AND cursor = ${expectedCursors[16]!}
+          `) as unknown as ReadonlyArray<{ readonly eventJson: string }>;
+          expect(futureRows[0]?.eventJson).toBe(futureJson);
+          const prematureQuarantine = yield* sql`
+            SELECT cursor FROM provider_daemon_event_quarantine WHERE owner_key = ${ownerKey}
+          `;
+          expect(prematureQuarantine).toEqual([]);
+          const replayed = [...firstPage];
+          while (true) {
+            const page = yield* journal.replayPageThrough(
+              replayed.at(-1)!.cursor,
+              subscription.replayBoundaryCursor,
+            );
+            if (page.length === 0) break;
+            expect(page.length).toBeLessThanOrEqual(8);
+            expect(
+              page.reduce((bytes, record) => bytes + encodedRuntimeEventBytes(record.event), 0),
+            ).toBeLessThanOrEqual(PROVIDER_PIPELINE_POLICY.daemonReplayPageBytes);
+            replayed.push(...page);
+          }
+          subscription.unsubscribe();
+          expect(replayed.map((record) => record.cursor)).toEqual(expectedCursors);
+          expect(
+            replayed.filter((_, index) => index !== 24).map((record) => record.event.eventId),
+          ).toEqual(expectedIds.filter((_, index) => index !== 24));
+          expect(replayed[24]?.event.type).toBe("runtime.warning");
+          expect(encodedRuntimeEventBytes(replayed[16]?.event)).toBeLessThanOrEqual(
+            PROVIDER_PIPELINE_POLICY.canonicalEventMaxBytes,
+          );
+          // Two historical repairs can rescan only their own eight-row pages.
+          // The old suffix repair evaluates thousands of predicates here.
+          expect(lengthEvaluations).toBeLessThanOrEqual(256 + 2 * 8);
+          expect(liveCursors).toEqual([live.cursor]);
+          expect(replayed.some((record) => record.cursor > subscription.replayBoundaryCursor)).toBe(
+            false,
+          );
+          const foreignRows = (yield* sql`
+            SELECT event_json AS "eventJson" FROM provider_daemon_events
+            WHERE owner_key = ${"synthetic-foreign-owner"}
+          `) as unknown as ReadonlyArray<{ readonly eventJson: string }>;
+          expect(foreignRows).toHaveLength(8);
+          expect(foreignRows.every((row) => row.eventJson === malformedJson)).toBe(true);
+          const beyondBoundaryRows = (yield* sql`
+            SELECT event_json AS "eventJson" FROM provider_daemon_events
+            WHERE owner_key = ${ownerKey} AND cursor = ${beyondBoundary[0]!.cursor}
+          `) as unknown as ReadonlyArray<{ readonly eventJson: string }>;
+          expect(beyondBoundaryRows[0]?.eventJson).toBe(futureJson);
+        }).pipe(Effect.scoped, Effect.provide(SqlitePersistenceMemory)),
+      );
+    } finally {
+      prepareObserver.mockRestore();
+    }
+  });
+
+  it("enforces the existing byte bound for inherited multibyte rows smaller than the character limit", async () => {
+    await Effect.runPromise(
+      Effect.gen(function* () {
+        const sql = yield* SqlClient.SqlClient;
+        const ownerKey = "synthetic-multibyte-replay";
+        const events = Array.from({ length: 8 }, (_, index) =>
+          makeCommandEvent(`synthetic-unicode-${index}`, "漢".repeat(50_000)),
+        );
+        for (const event of events) {
+          const json = encodeProviderRuntimeEventJsonForTest(event);
+          expect(json.length).toBeLessThan(PROVIDER_PIPELINE_POLICY.canonicalEventMaxBytes);
+          expect(utf8ByteLength(json)).toBeGreaterThan(
+            PROVIDER_PIPELINE_POLICY.canonicalEventMaxBytes,
+          );
+          yield* sql`
+            INSERT INTO provider_daemon_events (owner_key, emitted_at, event_json)
+            VALUES (${ownerKey}, ${event.createdAt}, ${json})
+          `;
+        }
+        const journal = yield* makePersistentProviderDaemonEventJournal({
+          ownerKey,
+          capacity: 16,
+          startupPruneDelayMs: 60_000,
+        });
+        const replayed = yield* journal.replayPageThrough(0, 8);
+        expect(replayed.map((record) => record.cursor)).toEqual([1, 2, 3, 4, 5, 6, 7, 8]);
+        expect(replayed.map((record) => record.event.eventId)).toEqual(
+          events.map((event) => event.eventId),
+        );
+        for (const record of replayed) {
+          expect(record.event.compaction?.originalEncodedBytes).toBeGreaterThan(
+            PROVIDER_PIPELINE_POLICY.canonicalEventMaxBytes,
+          );
+          expect(encodedRuntimeEventBytes(record.event)).toBeLessThanOrEqual(
+            PROVIDER_PIPELINE_POLICY.canonicalEventMaxBytes,
+          );
+        }
+        expect(
+          replayed.reduce((bytes, record) => bytes + encodedRuntimeEventBytes(record.event), 0),
+        ).toBeLessThanOrEqual(PROVIDER_PIPELINE_POLICY.daemonReplayPageBytes);
+      }).pipe(Effect.scoped, Effect.provide(SqlitePersistenceMemory)),
+    );
+  });
+
+  it("continues bounded replay when retention removes a probed page before decoding", async () => {
+    let pruneNextProbe = false;
+    const ownerKey = "synthetic-retention-between-probe-and-fetch";
+    const originalPrepare = DatabaseSync.prototype.prepare;
+    const prepareObserver = vi
+      .spyOn(DatabaseSync.prototype, "prepare")
+      .mockImplementation(function (this: DatabaseSync, query: string) {
+        const statement = originalPrepare.call(this, query);
+        if (
+          /SELECT\s+cursor\s+FROM provider_daemon_events/u.test(query) &&
+          query.includes("LIMIT")
+        ) {
+          const originalAll = statement.all;
+          vi.spyOn(statement, "all").mockImplementation((...bindings) => {
+            const rows = originalAll.apply(statement, bindings);
+            const firstBinding: unknown = bindings[0];
+            if (pruneNextProbe && firstBinding === ownerKey && rows.length > 0) {
+              pruneNextProbe = false;
+              // Inject only the real retention race: the metadata query has
+              // returned, but its complete finite range disappears before the
+              // repair/fetch. A later retained event must not be mistaken for
+              // exhausted replay. No production retention or deadline changes.
+              const first = rows[0]!.cursor;
+              const last = rows.at(-1)!.cursor;
+              this.prepare(
+                "DELETE FROM provider_daemon_events WHERE owner_key = ? AND cursor >= ? AND cursor <= ?",
+              ).run(ownerKey, first!, last!);
+            }
+            return rows;
+          });
+        }
+        return statement;
+      });
+    try {
+      await Effect.runPromise(
+        Effect.gen(function* () {
+          const journal = yield* makePersistentProviderDaemonEventJournal({
+            ownerKey,
+            capacity: 32,
+            startupPruneDelayMs: 60_000,
+          });
+          const published: ProviderDaemonEventRecord[] = [];
+          for (let index = 0; index < 12; index += 1) {
+            published.push(yield* journal.publish(makeRuntimeEvent(`synthetic-retained-${index}`)));
+          }
+          pruneNextProbe = true;
+          const replayed = yield* journal.replayPageThrough(0, published.at(-1)!.cursor);
+          expect(pruneNextProbe).toBe(false);
+          expect(replayed.map((record) => record.cursor)).toEqual(
+            published.slice(8).map((record) => record.cursor),
+          );
+          expect(replayed.map((record) => record.event.eventId)).toEqual(
+            published.slice(8).map((record) => record.event.eventId),
+          );
+          expect(
+            yield* journal.replayPageThrough(replayed.at(-1)!.cursor, published.at(-1)!.cursor),
+          ).toEqual([]);
+        }).pipe(Effect.scoped, Effect.provide(SqlitePersistenceMemory)),
+      );
+    } finally {
+      prepareObserver.mockRestore();
+    }
   });
 
   it("prunes the persistent journal to its configured owner capacity", async () => {

@@ -9,6 +9,7 @@
 import {
   RuntimeMode,
   MaxConcurrentSubagents,
+  CodexContextWindowOverride,
   IsoDateTime,
   OrchestrationSessionStatus,
   ProviderInstanceId,
@@ -32,6 +33,7 @@ export const ProjectionThreadSession = Schema.Struct({
   runtimeMode: RuntimeMode,
   subagentRuntimeId: Schema.optional(Schema.NullOr(SubagentRuntimeId)),
   maxConcurrentSubagents: Schema.optional(Schema.NullOr(MaxConcurrentSubagents)),
+  codexContextWindowOverride: Schema.optional(Schema.NullOr(CodexContextWindowOverride)),
   activeTurnId: Schema.NullOr(TurnId),
   lastError: Schema.NullOr(Schema.String),
   updatedAt: IsoDateTime,
@@ -48,6 +50,8 @@ const ProjectionThreadSessionSqlFields = Schema.Struct({
   subagentRuntimeId: Schema.NullOr(SubagentRuntimeId),
   maxConcurrentSubagents: Schema.NullOr(MaxConcurrentSubagents),
   maxConcurrentSubagentsKnown: Schema.Int.check(Schema.isBetween({ minimum: 0, maximum: 1 })),
+  codexContextWindowOverride: Schema.NullOr(CodexContextWindowOverride),
+  codexContextWindowOverrideKnown: Schema.Int.check(Schema.isBetween({ minimum: 0, maximum: 1 })),
 });
 export const ProjectionThreadSessionSqlRow = ProjectionThreadSessionSqlFields.pipe(
   Schema.decodeTo(
@@ -59,18 +63,23 @@ export const ProjectionThreadSessionSqlRow = ProjectionThreadSessionSqlFields.pi
       decode: ({
         maxConcurrentSubagents,
         maxConcurrentSubagentsKnown,
+        codexContextWindowOverride,
+        codexContextWindowOverrideKnown,
         subagentRuntimeId,
         ...row
       }) => ({
         ...row,
         ...(subagentRuntimeId === null ? {} : { subagentRuntimeId }),
         ...(maxConcurrentSubagentsKnown === 1 ? { maxConcurrentSubagents } : {}),
+        ...(codexContextWindowOverrideKnown === 1 ? { codexContextWindowOverride } : {}),
       }),
       encode: (row) => ({
         ...row,
         subagentRuntimeId: row.subagentRuntimeId ?? null,
         maxConcurrentSubagents: row.maxConcurrentSubagents ?? null,
         maxConcurrentSubagentsKnown: row.maxConcurrentSubagents === undefined ? 0 : 1,
+        codexContextWindowOverride: row.codexContextWindowOverride ?? null,
+        codexContextWindowOverrideKnown: row.codexContextWindowOverride === undefined ? 0 : 1,
       }),
     }),
   ),

@@ -1,3 +1,4 @@
+import { useUiLocale, useUiPresentation } from "~/i18n";
 import type { ProviderTurnConfiguration } from "@cafecode/contracts";
 import { BotIcon } from "lucide-react";
 import { memo } from "react";
@@ -16,7 +17,9 @@ import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 export const TurnConfigurationWorkEntry = memo(function TurnConfigurationWorkEntry(props: {
   readonly configuration: ProviderTurnConfiguration;
 }) {
-  const presentation = presentTurnConfigurationSummary(props.configuration);
+  const uiPresentation = useUiPresentation(UI_PRESENTATION_SOURCES);
+
+  const presentation = uiPresentation.presentTurnConfigurationSummary(props.configuration);
   return (
     <div className="flex min-w-0 items-start gap-2 py-0.5" data-turn-configuration-row="true">
       <span className="flex size-5 shrink-0 items-center justify-center text-subtle-foreground">
@@ -44,3 +47,6 @@ export const TurnConfigurationWorkEntry = memo(function TurnConfigurationWorkEnt
     </div>
   );
 });
+
+// Finite source-owned labels/helpers only; no received or user data.
+const UI_PRESENTATION_SOURCES = { presentTurnConfigurationSummary };

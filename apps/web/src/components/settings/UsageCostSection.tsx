@@ -1,3 +1,6 @@
+import { useUiLocale, useUiPresentation } from "~/i18n";
+import { uiText } from "@cafecode/shared/i18n";
+import { UiMessage } from "~/i18n";
 import { useMemo, useState, type ReactNode } from "react";
 import type { ProviderDriverKind, UsageStatsGetResult } from "@cafecode/contracts";
 import { rollUpCost, resolveModelRate, type ModelRate } from "@cafecode/shared/modelPricing";
@@ -69,8 +72,18 @@ function formatShare(percent: number, tokens: number): string {
 
 type Mode = "cost" | "tokens";
 const MODE_OPTIONS = [
-  { value: "cost", label: "Cost" },
-  { value: "tokens", label: "Tokens" },
+  {
+    value: "cost",
+    get label() {
+      return uiText("Cost");
+    },
+  },
+  {
+    value: "tokens",
+    get label() {
+      return uiText("Tokens");
+    },
+  },
 ] as const satisfies ReadonlyArray<{ value: Mode; label: string }>;
 const INITIAL_VISIBLE_MODEL_ROWS = 12;
 /** Narrow enough that all five composition figures share one row on a wide page. */
@@ -136,6 +149,8 @@ function TokenCountFigure({
   valueClassName?: string;
   align?: "left" | "right";
 }) {
+  const uiPresentation = useUiPresentation(UI_PRESENTATION_SOURCES);
+
   const exact = `${formatFullTokenCount(value)}${suffix}`;
   return (
     <div
@@ -156,7 +171,7 @@ function TokenCountFigure({
         aria-hidden="true"
         data-usage-token-compact={context}
       >
-        {formatCompactTokenCount(value)}
+        {uiPresentation.formatCompactTokenCount(value)}
       </div>
     </div>
   );
@@ -170,6 +185,8 @@ function UsageProviderSummary({
   entry: Pick<ModelCostRow, "provider" | "cost" | "priced" | "tokens">;
   maxCost: number;
 }) {
+  const uiLocale = useUiLocale();
+
   const Icon = PROVIDER_ICON_BY_PROVIDER[entry.provider as never];
   const displayedCost = useCountUp(entry.cost, { decimals: 2 });
   const displayedTokens = useCountUp(entry.tokens);
@@ -189,7 +206,9 @@ function UsageProviderSummary({
           )}
           data-usage-provider-cost-value="true"
         >
-          {entry.priced ? formatUsd(displayedCost) : "Unpriced"}
+          {entry.priced
+            ? formatUsd(displayedCost)
+            : uiText("Unpriced", undefined, undefined, uiLocale)}
         </span>
       </div>
       <div className="mt-1.5 h-1 overflow-hidden rounded-full bg-muted">
@@ -211,12 +230,15 @@ function UsageProviderSummary({
  * displayed value across resorting without creating per-row RAF timers.
  */
 function UsageModelRow({ entry }: { entry: ModelCostRow }) {
+  const uiLocale = useUiLocale();
+  const uiPresentation = useUiPresentation(UI_PRESENTATION_SOURCES);
+
   const Icon = PROVIDER_ICON_BY_PROVIDER[entry.provider as never];
   const displayedCost = useCountUp(entry.cost, { decimals: 2 });
   const displayedTokens = useCountUp(entry.tokens);
   const displayedGeneratingMs = useCountUp(entry.generatingMs ?? 0);
-  const label = formatUsageModelLabel(entry.model);
-  const explanation = getUsageModelExplanation(entry.model);
+  const label = uiPresentation.formatUsageModelLabel(entry.model);
+  const explanation = uiPresentation.getUsageModelExplanation(entry.model);
 
   return (
     <tr
@@ -228,16 +250,24 @@ function UsageModelRow({ entry }: { entry: ModelCostRow }) {
         <span className="flex min-w-0 items-center gap-1.5">
           {Icon ? <Icon className="size-3.5 shrink-0 opacity-70" /> : null}
           <span className="truncate">{label}</span>
-          {explanation ? <InfoTip label={`About ${label}`}>{explanation}</InfoTip> : null}
+          {explanation ? (
+            <InfoTip label={uiText("About {value0}", { value0: label }, undefined, uiLocale)}>
+              {explanation}
+            </InfoTip>
+          ) : null}
         </span>
       </td>
       <td className="py-1.5 pl-3 text-right tabular-nums" data-usage-model-cost-value="true">
         {!entry.hasTokenUsage ? (
-          <span className="text-muted-foreground">—</span>
+          <span className="text-muted-foreground">
+            {uiText("—", undefined, undefined, uiLocale)}
+          </span>
         ) : entry.priced ? (
           formatUsd(displayedCost)
         ) : (
-          <span className="text-muted-foreground">Unpriced</span>
+          <span className="text-muted-foreground">
+            {uiText("Unpriced", undefined, undefined, uiLocale)}
+          </span>
         )}
       </td>
       <td className="py-1.5 pl-3 text-right">
@@ -254,8 +284,8 @@ function UsageModelRow({ entry }: { entry: ModelCostRow }) {
         data-usage-model-generating-time
       >
         {entry.generatingMs === undefined
-          ? "Not recorded"
-          : formatGeneratingTime(displayedGeneratingMs)}
+          ? uiText("Not recorded", undefined, undefined, uiLocale)
+          : uiPresentation.formatGeneratingTime(displayedGeneratingMs)}
       </td>
     </tr>
   );
@@ -279,11 +309,17 @@ type StatTileProps = (
 };
 
 function StatTile(props: StatTileProps) {
+  const uiLocale = useUiLocale();
+
   return (
     <div className="min-w-0" data-usage-composition-tile={props.id}>
       <div className="flex min-w-0 items-center gap-1 text-xs text-muted-foreground">
         <span className="truncate">{props.label}</span>
-        {props.info ? <InfoTip label={`About ${props.label}`}>{props.info}</InfoTip> : null}
+        {props.info ? (
+          <InfoTip label={uiText("About {value0}", { value0: props.label }, undefined, uiLocale)}>
+            {props.info}
+          </InfoTip>
+        ) : null}
       </div>
       {"rawTokens" in props ? (
         <TokenCountFigure
@@ -389,12 +425,15 @@ export function UsageCostContent({
    */
   labelCurrency?: boolean;
 }) {
+  const uiLocale = useUiLocale();
+  const uiPresentation = useUiPresentation(UI_PRESENTATION_SOURCES);
+
   const [localRange, setLocalRange] = useState<UsageRangeKey>("30");
   const range = controlledRange ?? localRange;
   const [mode, setMode] = useState<Mode>("cost");
   const selected = useMemo(
-    () => (usage === null ? null : selectUsageRange(usage, range)),
-    [usage, range],
+    () => (usage === null ? null : uiPresentation.selectUsageRange(usage, range)),
+    [usage, range, uiPresentation],
   );
   const rangeSelectorVisible = showRangeSelector && controlledRange === undefined;
   // Until the first detailed response arrives there is nothing to estimate:
@@ -416,10 +455,10 @@ export function UsageCostContent({
           <UsageRangeSelector value={range} onChange={setLocalRange} />
         ) : null}
         <SegmentedControl
-          aria-label="Chart measure"
+          aria-label={uiText("Chart measure", undefined, undefined, uiLocale)}
           value={mode}
           onValueChange={setMode}
-          options={MODE_OPTIONS}
+          options={uiPresentation.MODE_OPTIONS}
         />
       </div>
       {/* The mode survives period changes, but the numeric odometers must not:
@@ -444,6 +483,9 @@ function UsageCostMetrics({
   mode: Mode;
   labelCurrency: boolean;
 }) {
+  const uiLocale = useUiLocale();
+  const uiPresentation = useUiPresentation(UI_PRESENTATION_SOURCES);
+
   const [showAllModels, setShowAllModels] = useState(false);
   const overrides = useSettings((settings) => settings.modelPricingOverrides) as
     | Record<string, ModelRate>
@@ -599,13 +641,13 @@ function UsageCostMetrics({
       const series: UsageChartSeries[] = [
         {
           key: "cached",
-          label: "Cached input",
+          label: uiText("Cached input", undefined, undefined, uiLocale),
           color: TOKEN_BAND_COLORS.cached,
           values: days.map((day) => day.cachedInputTokens),
         },
         {
           key: "fresh",
-          label: "Uncached input",
+          label: uiText("Uncached input", undefined, undefined, uiLocale),
           color: TOKEN_BAND_COLORS.fresh,
           values: days.map((day) =>
             Math.max(0, day.inputTokens - day.cachedInputTokens - day.cacheWriteInputTokens),
@@ -616,13 +658,13 @@ function UsageCostMetrics({
           // either the cached-read or fresh-input band. Keep them explicit so
           // the stacked graph accounts for the same tokens as the totals.
           key: "written",
-          label: "Cache writes",
+          label: uiText("Cache writes", undefined, undefined, uiLocale),
           color: TOKEN_BAND_COLORS.written,
           values: days.map((day) => day.cacheWriteInputTokens),
         },
         {
           key: "output",
-          label: "Output",
+          label: uiText("Output", undefined, undefined, uiLocale),
           color: TOKEN_BAND_COLORS.output,
           values: days.map((day) => day.outputTokens),
         },
@@ -632,7 +674,7 @@ function UsageCostMetrics({
         series,
         hasUnpriced: false,
         format: (value: number) =>
-          `${formatFullTokenCount(value)} tokens (${formatCompactTokenCount(value)})`,
+          `${formatFullTokenCount(value)} tokens (${uiPresentation.formatCompactTokenCount(value)})`,
       };
     }
 
@@ -641,7 +683,7 @@ function UsageCostMetrics({
     const series: UsageChartSeries[] = [
       {
         key: "cost",
-        label: "Estimated cost",
+        label: uiText("Estimated cost", undefined, undefined, uiLocale),
         color: COST_SERIES_COLOR,
         values: days.map((day) => dailyCosts.get(day.day)?.cost ?? 0),
       },
@@ -652,7 +694,7 @@ function UsageCostMetrics({
       hasUnpriced: days.some((day) => (dailyCosts.get(day.day)?.unpricedTokens ?? 0) > 0),
       format: (value: number) => formatUsd(value),
     };
-  }, [usage, mode, overrides]);
+  }, [usage, mode, overrides, uiLocale, uiPresentation]);
 
   // Missing model attribution is real recorded usage, but has no trustworthy
   // rate. Include that gap in cost quality instead of implying 100% coverage.
@@ -672,12 +714,19 @@ function UsageCostMetrics({
     recordingStartedAt === undefined ? undefined : formatUsageRecordingDate(recordingStartedAt);
   const recordingUtc =
     recordedSince && recordingStartedAt ? new Date(recordingStartedAt).toISOString() : undefined;
-  const modelTimeExplanation =
-    "Counts full active-turn time, including tools and waits. Concurrent chats count separately. " +
-    (recordingUtc
-      ? `Recorded since ${recordingUtc} (UTC); earlier history is not included. `
-      : "Earlier history is not included. ") +
-    "Not recorded means no time was measured for that model.";
+  const modelTimeExplanation = recordingUtc
+    ? uiText(
+        "Counts full active-turn time, including tools and waits. Concurrent chats count separately. Recorded since {recordedSince} (UTC); earlier history is not included. Not recorded means no time was measured for that model.",
+        { recordedSince: recordingUtc },
+        undefined,
+        uiLocale,
+      )
+    : uiText(
+        "Counts full active-turn time, including tools and waits. Concurrent chats count separately. Earlier history is not included. Not recorded means no time was measured for that model.",
+        undefined,
+        undefined,
+        uiLocale,
+      );
 
   return (
     <>
@@ -685,10 +734,18 @@ function UsageCostMetrics({
         {/* Hero + provider split */}
         <div className="min-w-0">
           <div className="flex items-center gap-1.5 text-xs font-medium text-muted-foreground">
-            <span>{labelCurrency ? "Estimated cost (USD)" : "Estimated cost"}</span>
-            <InfoTip label="About estimated cost">
-              Published standard API rates, or your custom rates if set. Excludes long-context and
-              speed-tier adjustments; not your subscription bill.
+            <span>
+              {labelCurrency
+                ? uiText("Estimated cost (USD)", undefined, undefined, uiLocale)
+                : uiText("Estimated cost", undefined, undefined, uiLocale)}
+            </span>
+            <InfoTip label={uiText("About estimated cost", undefined, undefined, uiLocale)}>
+              {uiText(
+                "Published standard API rates, or your custom rates if set. Excludes long-context and speed-tier adjustments; not your subscription bill.",
+                undefined,
+                undefined,
+                uiLocale,
+              )}
             </InfoTip>
           </div>
           <div
@@ -700,7 +757,9 @@ function UsageCostMetrics({
 
           <div className="mt-5 flex flex-col gap-3">
             {view.providers.length === 0 ? (
-              <p className="text-xs text-muted-foreground">No usage by model in this period.</p>
+              <p className="text-xs text-muted-foreground">
+                {uiText("No usage by model in this period.", undefined, undefined, uiLocale)}
+              </p>
             ) : (
               view.providers.map((entry) => (
                 <UsageProviderSummary
@@ -720,7 +779,9 @@ function UsageCostMetrics({
               className="text-xs font-medium text-muted-foreground"
               data-usage-cost-chart-label="true"
             >
-              {mode === "cost" ? "Daily cost" : "Daily tokens"}
+              {mode === "cost"
+                ? uiText("Daily cost", undefined, undefined, uiLocale)
+                : uiText("Daily tokens", undefined, undefined, uiLocale)}
             </span>
             <TokenCountFigure
               // All can include lifetime volume predating the daily ledger.
@@ -733,10 +794,23 @@ function UsageCostMetrics({
             />
             {chart.hasUnpriced ? (
               <span className="flex items-center gap-1 text-xs text-subtle-foreground">
-                Partial estimate
-                <InfoTip label="About partial estimate">
-                  Usage without a daily model rate is left out of the daily cost.
-                </InfoTip>
+                <UiMessage
+                  message={"Partial estimate<slot1></slot1>"}
+                  slots={{
+                    slot1: (
+                      <InfoTip
+                        label={uiText("About partial estimate", undefined, undefined, uiLocale)}
+                      >
+                        {uiText(
+                          "Usage without a daily model rate is left out of the daily cost.",
+                          undefined,
+                          undefined,
+                          uiLocale,
+                        )}
+                      </InfoTip>
+                    ),
+                  }}
+                />
               </span>
             ) : null}
           </div>
@@ -775,21 +849,25 @@ function UsageCostMetrics({
       <div className={COMPOSITION_GRID_CLASS}>
         <StatTile
           id="processed"
-          label="Processed tokens"
+          label={uiText("Processed tokens", undefined, undefined, uiLocale)}
           rawTokens={processedDisplay}
           info="Input plus output. Cached input counts again each time a request reads it."
           detail={view.hasInputDetail ? undefined : "Older history recorded output only"}
         />
         <StatTile
           id="cached"
-          label="Cached input"
+          label={uiText("Cached input", undefined, undefined, uiLocale)}
           rawTokens={cachedDisplay}
           detail={view.input > 0 ? `${cachedInputPercentDisplay.toFixed(1)}% of input` : undefined}
         />
-        <StatTile id="uncached" label="Uncached input" rawTokens={freshDisplay} />
+        <StatTile
+          id="uncached"
+          label={uiText("Uncached input", undefined, undefined, uiLocale)}
+          rawTokens={freshDisplay}
+        />
         <StatTile
           id="output"
-          label="Output"
+          label={uiText("Output", undefined, undefined, uiLocale)}
           rawTokens={outputDisplay}
           detail={
             view.reasoning > 0 ? (
@@ -804,7 +882,7 @@ function UsageCostMetrics({
         />
         <StatTile
           id="cache-savings"
-          label="Net cache savings"
+          label={uiText("Net cache savings", undefined, undefined, uiLocale)}
           value={formatUsd(cacheSavingsDisplay)}
           info="Cache-read discounts minus cache-write premiums."
           detail={
@@ -826,18 +904,33 @@ function UsageCostMetrics({
               <thead>
                 <tr className="text-xs text-muted-foreground">
                   <th scope="col" className="min-w-[8rem] py-1.5 text-left font-medium">
-                    Model
+                    {uiText("Model", undefined, undefined, uiLocale)}
                   </th>
                   <th scope="col" className="py-1.5 pl-3 text-right font-medium">
-                    Cost
+                    {uiText("Cost", undefined, undefined, uiLocale)}
                   </th>
                   <th scope="col" className="py-1.5 pl-3 text-right font-medium">
-                    Tokens
+                    {uiText("Tokens", undefined, undefined, uiLocale)}
                   </th>
                   <th scope="col" className="min-w-[8rem] py-1.5 pl-4 text-right font-medium">
                     <span className="inline-flex items-center justify-end gap-1">
-                      Time spent generating
-                      <InfoTip label="About time spent generating">{modelTimeExplanation}</InfoTip>
+                      <UiMessage
+                        message={"Time spent generating<slot1></slot1>"}
+                        slots={{
+                          slot1: (
+                            <InfoTip
+                              label={uiText(
+                                "About time spent generating",
+                                undefined,
+                                undefined,
+                                uiLocale,
+                              )}
+                            >
+                              {modelTimeExplanation}
+                            </InfoTip>
+                          ),
+                        }}
+                      />
                     </span>
                   </th>
                 </tr>
@@ -846,7 +939,7 @@ function UsageCostMetrics({
                 {view.models.length === 0 ? (
                   <tr>
                     <td colSpan={4} className="py-3 text-xs text-muted-foreground">
-                      Nothing recorded in this period.
+                      {uiText("Nothing recorded in this period.", undefined, undefined, uiLocale)}
                     </td>
                   </tr>
                 ) : (
@@ -864,14 +957,24 @@ function UsageCostMetrics({
                   <tr className="border-t border-border-subtle" data-usage-unattributed-row>
                     <td className="py-1.5 pr-3">
                       <span className="flex min-w-0 items-center gap-1.5">
-                        <span className="truncate">Unattributed usage</span>
-                        <InfoTip label="About unattributed usage">
-                          Usage recorded without a provider or model, such as older history.
-                          It&apos;s counted but not priced.
+                        <span className="truncate">
+                          {uiText("Unattributed usage", undefined, undefined, uiLocale)}
+                        </span>
+                        <InfoTip
+                          label={uiText("About unattributed usage", undefined, undefined, uiLocale)}
+                        >
+                          {uiText(
+                            "Usage recorded without a provider or model, such as older history. It''s counted but not priced.",
+                            undefined,
+                            undefined,
+                            uiLocale,
+                          )}
                         </InfoTip>
                       </span>
                     </td>
-                    <td className="py-1.5 pl-3 text-right text-muted-foreground">Unpriced</td>
+                    <td className="py-1.5 pl-3 text-right text-muted-foreground">
+                      {uiText("Unpriced", undefined, undefined, uiLocale)}
+                    </td>
                     <td className="py-1.5 pl-3 text-right">
                       <TokenCountFigure
                         value={unattributedDisplay}
@@ -881,7 +984,9 @@ function UsageCostMetrics({
                         valueClassName="font-normal text-muted-foreground"
                       />
                     </td>
-                    <td className="py-1.5 pl-4 text-right text-2xs text-muted-foreground">—</td>
+                    <td className="py-1.5 pl-4 text-right text-2xs text-muted-foreground">
+                      {uiText("—", undefined, undefined, uiLocale)}
+                    </td>
                   </tr>
                 ) : null}
               </tbody>
@@ -891,10 +996,16 @@ function UsageCostMetrics({
             <p data-usage-model-time-coverage>
               {recordedSince && recordingUtc ? (
                 <>
-                  Time recorded since <time dateTime={recordingUtc}>{recordedSince}</time>
+                  {uiText("Time recorded since ", undefined, undefined, uiLocale)}
+                  <time dateTime={recordingUtc}>{recordedSince}</time>
                 </>
               ) : (
-                "Per-model time is unavailable on this server."
+                uiText(
+                  "Per-model time is unavailable on this server.",
+                  undefined,
+                  undefined,
+                  uiLocale,
+                )
               )}
             </p>
             {view.models.length > INITIAL_VISIBLE_MODEL_ROWS ? (
@@ -905,20 +1016,31 @@ function UsageCostMetrics({
                 aria-expanded={showAllModels}
                 onClick={() => setShowAllModels((value) => !value)}
               >
-                {showAllModels ? "Show fewer models" : `Show all ${view.models.length} models`}
+                {showAllModels
+                  ? uiText("Show fewer models", undefined, undefined, uiLocale)
+                  : uiText(
+                      "Show all {value0} models",
+                      { value0: view.models.length },
+                      undefined,
+                      uiLocale,
+                    )}
               </Button>
             ) : null}
           </div>
         </div>
 
         <div className="min-w-0">
-          <div className="text-xs font-medium text-muted-foreground">Cost quality</div>
+          <div className="text-xs font-medium text-muted-foreground">
+            {uiText("Cost quality", undefined, undefined, uiLocale)}
+          </div>
           <dl className="mt-2 flex flex-col gap-1.5 text-sm">
             <div className="flex items-baseline gap-2">
-              <dt className="text-muted-foreground">Priced</dt>
+              <dt className="text-muted-foreground">
+                {uiText("Priced", undefined, undefined, uiLocale)}
+              </dt>
               <dd className="ml-auto tabular-nums">
                 {pricedPercent === null
-                  ? "—"
+                  ? uiText("—", undefined, undefined, uiLocale)
                   : formatShare(
                       displayedPricedPercent,
                       Math.max(view.rollup.pricedTokens, displayedPricedPercent > 0 ? 1 : 0),
@@ -926,10 +1048,12 @@ function UsageCostMetrics({
               </dd>
             </div>
             <div className="flex items-baseline gap-2">
-              <dt className="text-muted-foreground">Unpriced</dt>
+              <dt className="text-muted-foreground">
+                {uiText("Unpriced", undefined, undefined, uiLocale)}
+              </dt>
               <dd className="ml-auto tabular-nums">
                 {pricedPercent === null
-                  ? "—"
+                  ? uiText("—", undefined, undefined, uiLocale)
                   : formatShare(
                       displayedUnpricedPercent,
                       Math.max(unpricedTokens, displayedUnpricedPercent > 0 ? 1 : 0),
@@ -943,13 +1067,21 @@ function UsageCostMetrics({
             className="mt-3 flex items-center gap-1.5 text-2xs text-subtle-foreground"
             data-usage-cost-coverage
           >
-            Estimates from recorded usage; may be incomplete.
-            <InfoTip label="About cost estimates">
-              Priced share covers recorded tokens only; interrupted requests may not report all
-              usage, so this is not a complete billing record. Codex subagent usage includes only
-              observed increments after a baseline; earlier child usage is not backfilled, and child
-              tokens do not increase the main chat’s context-window meter.
-            </InfoTip>
+            <UiMessage
+              message={"Estimates from recorded usage; may be incomplete.<slot1></slot1>"}
+              slots={{
+                slot1: (
+                  <InfoTip label={uiText("About cost estimates", undefined, undefined, uiLocale)}>
+                    {uiText(
+                      "Priced share covers recorded tokens only; interrupted requests may not report all usage, so this is not a complete billing record. Codex subagent usage includes only observed increments after a baseline; earlier child usage is not backfilled, and child tokens do not increase the main chat’s context-window meter.",
+                      undefined,
+                      undefined,
+                      uiLocale,
+                    )}
+                  </InfoTip>
+                ),
+              }}
+            />
           </p>
         </div>
       </div>
@@ -965,8 +1097,10 @@ export function UsageCostSection({
   usage: UsageStatsGetResult | null;
   range: UsageRangeKey;
 }) {
+  const uiLocale = useUiLocale();
+
   return (
-    <SettingsSection title="Cost (USD)">
+    <SettingsSection title={uiText("Cost (USD)", undefined, undefined, uiLocale)}>
       <UsageCostContent
         usage={usage}
         range={range}
@@ -976,3 +1110,13 @@ export function UsageCostSection({
     </SettingsSection>
   );
 }
+
+// Finite source-owned labels/helpers only; no received or user data.
+const UI_PRESENTATION_SOURCES = {
+  MODE_OPTIONS,
+  formatCompactTokenCount,
+  formatGeneratingTime,
+  formatUsageModelLabel,
+  getUsageModelExplanation,
+  selectUsageRange,
+};

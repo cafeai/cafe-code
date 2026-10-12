@@ -1,3 +1,5 @@
+import { useUiLocale } from "~/i18n";
+import { uiText } from "@cafecode/shared/i18n";
 import { Maximize2Icon, MinusIcon, PlusIcon } from "lucide-react";
 import {
   useEffect,
@@ -44,6 +46,8 @@ const MIN_ZOOM = 0.01;
 const MAX_ZOOM = 4;
 
 function ExpandedTable({ children, tableProps, exportContentKey, createPng }: ExpandedTableProps) {
+  const uiLocale = useUiLocale();
+
   const viewportRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLDivElement>(null);
   const contentRef = useRef<HTMLDivElement>(null);
@@ -161,38 +165,48 @@ function ExpandedTable({ children, tableProps, exportContentKey, createPng }: Ex
   return (
     <>
       <div className="markdown-table-expanded-heading">
-        <DialogTitle className="text-base">Expanded table</DialogTitle>
+        <DialogTitle className="text-base">
+          {uiText("Expanded table", undefined, undefined, uiLocale)}
+        </DialogTitle>
         <DialogDescription className="text-xs">
-          Zoom to inspect. Scroll or drag empty space to pan.
+          {uiText(
+            "Zoom to inspect. Scroll or drag empty space to pan.",
+            undefined,
+            undefined,
+            uiLocale,
+          )}
         </DialogDescription>
       </div>
       <div
         className="markdown-table-expanded-toolbar"
         role="group"
-        aria-label="Table zoom controls"
+        aria-label={uiText("Table zoom controls", undefined, undefined, uiLocale)}
       >
         <Button size="xs" variant="outline" onClick={() => changeZoom("fit")}>
-          Fit
+          {uiText("Fit", undefined, undefined, uiLocale)}
         </Button>
         <Button size="xs" variant="ghost" onClick={() => changeZoom(1)}>
-          Reset
+          {uiText("Reset", undefined, undefined, uiLocale)}
         </Button>
         <Button
           size="icon-xs"
           variant="ghost"
-          aria-label="Zoom out"
+          aria-label={uiText("Zoom out", undefined, undefined, uiLocale)}
           disabled={scale <= MIN_ZOOM}
           onClick={() => changeZoom(Math.max(MIN_ZOOM, scale / 1.25))}
         >
           <MinusIcon />
         </Button>
-        <output className="markdown-table-zoom-value" aria-label="Zoom level">
+        <output
+          className="markdown-table-zoom-value"
+          aria-label={uiText("Zoom level", undefined, undefined, uiLocale)}
+        >
           {scale < 0.005 ? "<1%" : `${Math.round(scale * 100)}%`}
         </output>
         <Button
           size="icon-xs"
           variant="ghost"
-          aria-label="Zoom in"
+          aria-label={uiText("Zoom in", undefined, undefined, uiLocale)}
           disabled={scale >= MAX_ZOOM}
           onClick={() => changeZoom(Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, scale * 1.25)))}
         >
@@ -200,7 +214,7 @@ function ExpandedTable({ children, tableProps, exportContentKey, createPng }: Ex
         </Button>
         <div className="markdown-table-expanded-export">
           <ImageExportMenu
-            label="Table"
+            label={uiText("Table", undefined, undefined, uiLocale)}
             contentKey={exportContentKey}
             createPng={createPng}
             suggestedName="table.png"
@@ -212,7 +226,7 @@ function ExpandedTable({ children, tableProps, exportContentKey, createPng }: Ex
         className="markdown-table-expanded-viewport"
         data-dragging={dragging || undefined}
         role="region"
-        aria-label="Expanded table; scroll to inspect"
+        aria-label={uiText("Expanded table; scroll to inspect", undefined, undefined, uiLocale)}
         tabIndex={0}
         onPointerDown={beginPan}
         onPointerMove={(event) => {
@@ -251,6 +265,8 @@ function ExpandedTable({ children, tableProps, exportContentKey, createPng }: Ex
  * position across chat metadata updates, while its dialog keeps the original
  * semantic table and the same sanitized React children fully interactive. */
 export function MarkdownTable({ node: _node, children, ...props }: TableProps & ExtraProps) {
+  const uiLocale = useUiLocale();
+
   const [expanded, setExpanded] = useState(false);
   const { resolvedTheme } = useTheme();
   const sourceTableRef = useRef<HTMLTableElement>(null);
@@ -283,13 +299,13 @@ export function MarkdownTable({ node: _node, children, ...props }: TableProps & 
       <div className="markdown-table-block">
         <div className="markdown-table-inline-toolbar">
           <ImageExportMenu
-            label="Table"
+            label={uiText("Table", undefined, undefined, uiLocale)}
             contentKey={exportContentKey}
             createPng={createPng}
             suggestedName="table.png"
           />
           <DialogTrigger
-            aria-label="Expand table"
+            aria-label={uiText("Expand table", undefined, undefined, uiLocale)}
             render={<Button size="icon-xs" variant="ghost" />}
           >
             <Maximize2Icon />

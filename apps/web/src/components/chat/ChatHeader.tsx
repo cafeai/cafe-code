@@ -1,3 +1,5 @@
+import { useUiLocale } from "~/i18n";
+import { uiText } from "@cafecode/shared/i18n";
 import {
   type EnvironmentId,
   type EditorId,
@@ -48,6 +50,8 @@ export const ChatHeader = memo(function ChatHeader({
   terminal,
   compact = false,
 }: ChatHeaderProps) {
+  const uiLocale = useUiLocale();
+
   const primaryEnvironmentId = usePrimaryEnvironmentId();
   const localShellCapabilities = getLocalShellCapabilities();
   const showOpenInPicker = shouldShowOpenInPicker({
@@ -105,7 +109,7 @@ export const ChatHeader = memo(function ChatHeader({
             variant="outline"
             className="shrink-0 text-2xs text-status-attention-foreground sm:text-2xs"
           >
-            No Git
+            {uiText("No Git", undefined, undefined, uiLocale)}
           </Badge>
         )}
       </div>

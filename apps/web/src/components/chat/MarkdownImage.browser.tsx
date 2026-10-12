@@ -5,6 +5,7 @@ import { render } from "vitest-browser-react";
 import { afterEach, beforeEach, expect, it, vi, type Mock } from "vitest";
 import ChatMarkdown from "../ChatMarkdown";
 import { applyInterfaceScalePercent } from "../../interfaceScale";
+import { setUiLocale } from "@cafecode/shared/i18n";
 
 const mocks = vi.hoisted(() => ({ fileRequest: vi.fn() }));
 vi.mock("../../attachments/fileAttachments", async (importOriginal) => ({
@@ -15,6 +16,7 @@ vi.mock("../../attachments/fileAttachments", async (importOriginal) => ({
 let image: Uint8Array;
 let fetcher: Mock<(url: string | URL, init?: RequestInit) => Promise<Response>>;
 beforeEach(() => {
+  setUiLocale("en");
   const canvas = document.createElement("canvas");
   canvas.width = 320;
   canvas.height = 160;
@@ -50,9 +52,29 @@ beforeEach(() => {
   );
 });
 afterEach(() => {
+  setUiLocale("en");
   vi.unstubAllGlobals();
   vi.restoreAllMocks();
   applyInterfaceScalePercent(100);
+});
+
+it("relabels an existing image across languages without fetching or replacing its bytes", async () => {
+  const preview = vi.fn();
+  const screen = await render(fixture("remote", false, undefined, preview));
+  await expect.element(page.getByRole("img", { name: "Chart" })).toBeVisible();
+  const source = page.getByRole("img", { name: "Chart" }).element().getAttribute("src");
+  for (const [locale, label] of [
+    ["ja", "Chart を拡大"],
+    ["ko", "Chart 확대"],
+  ] as const) {
+    setUiLocale(locale);
+    await expect.element(page.getByRole("button", { name: label, exact: true })).toBeVisible();
+    await page.getByRole("button", { name: label, exact: true }).click();
+    expect(page.getByRole("img", { name: "Chart" }).element().getAttribute("src")).toBe(source);
+    expect(fetcher).toHaveBeenCalledTimes(2);
+  }
+  expect(preview).toHaveBeenCalledTimes(2);
+  await screen.unmount();
 });
 
 function fixture(

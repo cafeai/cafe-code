@@ -13,6 +13,8 @@ import {
   OrchestrationThread,
   OrchestrationThreadTurnActivityPageInput,
   OrchestrationThreadTurnSubagentDetailInput,
+  OrchestrationThreadActivityCursor,
+  THREAD_DETAIL_ACTIVITY_WINDOW_LIMIT,
   ProviderThreadGoal,
   ProjectScript,
   TurnId,
@@ -59,6 +61,7 @@ import { ProjectionCheckpoint } from "../../persistence/Services/ProjectionCheck
 import { ProjectionProject } from "../../persistence/Services/ProjectionProjects.ts";
 import { ProjectionState } from "../../persistence/Services/ProjectionState.ts";
 import { ProjectionThreadActivity } from "../../persistence/Services/ProjectionThreadActivities.ts";
+import { makeProviderActivityDiagnosticStore } from "../../persistence/Layers/ProviderActivityDiagnostics.ts";
 import { ProjectionThreadMessage } from "../../persistence/Services/ProjectionThreadMessages.ts";
 import { ProjectionThreadProposedPlan } from "../../persistence/Services/ProjectionThreadProposedPlans.ts";
 import { ProjectionThreadSessionSqlRow } from "../../persistence/Services/ProjectionThreadSessions.ts";
@@ -98,7 +101,7 @@ import {
 const decodeReadModel = Schema.decodeUnknownEffect(OrchestrationReadModel);
 const decodeShellSnapshot = Schema.decodeUnknownEffect(OrchestrationShellSnapshot);
 const decodeThread = Schema.decodeUnknownEffect(OrchestrationThread);
-export const THREAD_DETAIL_ACTIVITY_LIMIT = 500;
+export const THREAD_DETAIL_ACTIVITY_LIMIT = THREAD_DETAIL_ACTIVITY_WINDOW_LIMIT;
 export const THREAD_DETAIL_MESSAGE_LIMIT = 2_000;
 const ProjectionProjectDbRowSchema = ProjectionProject.mapFields(
   Struct.assign({
@@ -303,6 +306,7 @@ const ThreadTurnActivityPageLookupInput = OrchestrationThreadTurnActivityPageInp
 const ThreadTurnLookupInput = Schema.Struct({
   threadId: ThreadId,
   turnId: TurnId,
+  before: Schema.optional(OrchestrationThreadActivityCursor),
 });
 const ThreadTurnSubagentLookupInput = OrchestrationThreadTurnSubagentDetailInput;
 const CountRowSchema = Schema.Struct({
@@ -411,6 +415,9 @@ function mapSessionRow(
     ...(row.subagentRuntimeId !== undefined ? { subagentRuntimeId: row.subagentRuntimeId } : {}),
     ...(row.maxConcurrentSubagents !== undefined
       ? { maxConcurrentSubagents: row.maxConcurrentSubagents }
+      : {}),
+    ...(row.codexContextWindowOverride !== undefined
+      ? { codexContextWindowOverride: row.codexContextWindowOverride }
       : {}),
     activeTurnId: row.activeTurnId,
     lastError: row.lastError,
@@ -600,6 +607,7 @@ function toPersistenceSqlOrDecodeError(sqlOperation: string, decodeOperation: st
 
 const makeProjectionSnapshotQuery = Effect.gen(function* () {
   const sql = yield* SqlClient.SqlClient;
+  const diagnosticStore = makeProviderActivityDiagnosticStore(sql);
   const listLiveWorkRows = SqlSchema.findAll({
     Request: Schema.NullOr(ThreadId),
     Result: Schema.Struct({
@@ -810,6 +818,8 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
           title,
           model_selection_json AS "modelSelection",
           subagent_limits_json AS "subagentLimits",
+          codex_context_window_override AS "codexContextWindowOverride",
+          codex_context_window_override_known AS "codexContextWindowOverrideKnown",
           runtime_mode AS "runtimeMode",
           interaction_mode AS "interactionMode",
           branch,
@@ -839,6 +849,8 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
           title,
           model_selection_json AS "modelSelection",
           subagent_limits_json AS "subagentLimits",
+          codex_context_window_override AS "codexContextWindowOverride",
+          codex_context_window_override_known AS "codexContextWindowOverrideKnown",
           runtime_mode AS "runtimeMode",
           interaction_mode AS "interactionMode",
           branch,
@@ -870,6 +882,8 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
           title,
           model_selection_json AS "modelSelection",
           subagent_limits_json AS "subagentLimits",
+          codex_context_window_override AS "codexContextWindowOverride",
+          codex_context_window_override_known AS "codexContextWindowOverrideKnown",
           runtime_mode AS "runtimeMode",
           interaction_mode AS "interactionMode",
           branch,
@@ -901,6 +915,8 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
           title,
           model_selection_json AS "modelSelection",
           subagent_limits_json AS "subagentLimits",
+          codex_context_window_override AS "codexContextWindowOverride",
+          codex_context_window_override_known AS "codexContextWindowOverrideKnown",
           runtime_mode AS "runtimeMode",
           interaction_mode AS "interactionMode",
           branch,
@@ -999,6 +1015,8 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
           max_concurrent_subagents AS "maxConcurrentSubagents",
           subagent_runtime_id AS "subagentRuntimeId",
           max_concurrent_subagents_known AS "maxConcurrentSubagentsKnown",
+          codex_context_window_override AS "codexContextWindowOverride",
+          codex_context_window_override_known AS "codexContextWindowOverrideKnown",
           active_turn_id AS "activeTurnId",
           last_error AS "lastError",
           updated_at AS "updatedAt"
@@ -1042,6 +1060,8 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
           sessions.max_concurrent_subagents AS "maxConcurrentSubagents",
           sessions.subagent_runtime_id AS "subagentRuntimeId",
           sessions.max_concurrent_subagents_known AS "maxConcurrentSubagentsKnown",
+          sessions.codex_context_window_override AS "codexContextWindowOverride",
+          sessions.codex_context_window_override_known AS "codexContextWindowOverrideKnown",
           sessions.active_turn_id AS "activeTurnId",
           sessions.last_error AS "lastError",
           sessions.updated_at AS "updatedAt"
@@ -1070,6 +1090,8 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
           sessions.max_concurrent_subagents AS "maxConcurrentSubagents",
           sessions.subagent_runtime_id AS "subagentRuntimeId",
           sessions.max_concurrent_subagents_known AS "maxConcurrentSubagentsKnown",
+          sessions.codex_context_window_override AS "codexContextWindowOverride",
+          sessions.codex_context_window_override_known AS "codexContextWindowOverrideKnown",
           sessions.active_turn_id AS "activeTurnId",
           sessions.last_error AS "lastError",
           sessions.updated_at AS "updatedAt"
@@ -1098,6 +1120,8 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
           sessions.max_concurrent_subagents AS "maxConcurrentSubagents",
           sessions.subagent_runtime_id AS "subagentRuntimeId",
           sessions.max_concurrent_subagents_known AS "maxConcurrentSubagentsKnown",
+          sessions.codex_context_window_override AS "codexContextWindowOverride",
+          sessions.codex_context_window_override_known AS "codexContextWindowOverrideKnown",
           sessions.active_turn_id AS "activeTurnId",
           sessions.last_error AS "lastError",
           sessions.updated_at AS "updatedAt"
@@ -1363,6 +1387,8 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
           title,
           model_selection_json AS "modelSelection",
           subagent_limits_json AS "subagentLimits",
+          codex_context_window_override AS "codexContextWindowOverride",
+          codex_context_window_override_known AS "codexContextWindowOverrideKnown",
           runtime_mode AS "runtimeMode",
           interaction_mode AS "interactionMode",
           branch,
@@ -2489,6 +2515,32 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
             activity_id DESC
           LIMIT 1
         ),
+        latest_recovery_presentation_activity_id AS (
+          -- One exact-owned current-turn display observation survives an
+          -- arbitrary child/tool tail. Cancellation and uncertain ACK dominate
+          -- an earlier countdown just as they do in the live renderer. Indexed
+          -- owner equality plus native ordering bounds the lookup to one row;
+          -- no transcript JSON scan or provider work is authorized here.
+          SELECT activity_id FROM projection_thread_activities
+            INDEXED BY idx_projection_recovery_presentation_owner_order
+          WHERE thread_id = ${threadId}
+            AND turn_id = (SELECT latest_turn_id FROM projection_threads
+              WHERE thread_id = ${threadId} LIMIT 1)
+            AND kind = 'runtime.warning'
+            AND json_extract(payload_json, '$.recovery') IN (
+              'codex-transient-root-failed', 'codex-transient-recovery-waiting',
+              'codex-transient-recovery-cancelled', 'codex-transient-recovery-uncertain',
+              'codex-transient-continuation-attempted'
+            )
+            AND json_extract(payload_json, '$.providerInstanceId') = (
+              SELECT provider_instance_id FROM projection_thread_sessions WHERE thread_id = ${threadId})
+            AND json_extract(payload_json, '$.subagentRuntimeId') = (
+              SELECT subagent_runtime_id FROM projection_thread_sessions WHERE thread_id = ${threadId})
+            AND json_extract(payload_json, '$.sessionUpdatedAt') = (
+              SELECT updated_at FROM projection_thread_sessions WHERE thread_id = ${threadId})
+          ORDER BY CASE WHEN sequence IS NULL THEN 0 ELSE 1 END DESC,
+            sequence DESC, created_at DESC, activity_id DESC LIMIT 1
+        ),
         subagent_hydration AS (
           SELECT CASE
             WHEN COUNT(*) = 3 AND COALESCE(SUM(completed), 0) = 3 THEN 1
@@ -2754,6 +2806,9 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
           FROM latest_turn_configuration_activity_id
           UNION
           SELECT activity_id
+          FROM latest_recovery_presentation_activity_id
+          UNION
+          SELECT activity_id
           FROM global_subagent_lifecycle_activity_ids
           UNION
           SELECT activity_id
@@ -2807,15 +2862,35 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
       `,
   });
 
+  /**
+   * Match the same null-first total order used by both snapshots and pages.
+   * Never resolve the cursor id to a mutable row: Claude disclosed summaries
+   * deliberately replace their prior projection at a newer ledger sequence.
+   * The tuple is only a read filter, and every caller below still binds both
+   * exact thread and native turn before applying this predicate.
+   */
+  const activityBeforePredicate = (
+    before: typeof OrchestrationThreadActivityCursor.Encoded | undefined,
+  ) => {
+    if (before === undefined) return sql`1 = 1`;
+    const earlierTie = sql`(created_at < ${before.createdAt} OR
+      (created_at = ${before.createdAt} AND activity_id < ${before.activityId}))`;
+    return before.sequence === null
+      ? sql`sequence IS NULL AND ${earlierTie}`
+      : sql`(sequence IS NULL OR sequence < ${before.sequence} OR
+          (sequence = ${before.sequence} AND ${earlierTie}))`;
+  };
+
   const countThreadActivityRowsByTurn = SqlSchema.findOne({
     Request: ThreadTurnActivityPageLookupInput,
     Result: CountRowSchema,
-    execute: ({ threadId, turnId }) =>
+    execute: ({ threadId, turnId, before }) =>
       sql`
         SELECT COUNT(*) AS "count"
         FROM projection_thread_activities
         WHERE thread_id = ${threadId}
           AND turn_id = ${turnId}
+          AND ${activityBeforePredicate(before)}
           AND ${historicalWorkLogActivityPredicate}
       `,
   });
@@ -2823,13 +2898,14 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
   const findThreadTurnWorkLogPresence = SqlSchema.findOne({
     Request: ThreadTurnLookupInput,
     Result: WorkLogPresenceRowSchema,
-    execute: ({ threadId, turnId }) =>
+    execute: ({ threadId, turnId, before }) =>
       sql`
         SELECT EXISTS(
           SELECT 1
           FROM projection_thread_activities
           WHERE thread_id = ${threadId}
             AND turn_id = ${turnId}
+            AND ${activityBeforePredicate(before)}
             AND ${historicalWorkLogActivityPredicate}
           LIMIT 1
         ) AS "hasWorkLog"
@@ -2864,8 +2940,17 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
   const listThreadActivityRowsByTurnPage = SqlSchema.findAll({
     Request: ThreadTurnActivityPageLookupInput,
     Result: ProjectionThreadActivityDbRowSchema,
-    execute: ({ threadId, turnId, offset, limit }) =>
-      sql`
+    execute: ({ threadId, turnId, offset, limit, before }) => {
+      // Keyset mode reads the nearest older bounded page, then the service
+      // reverses those rows back to ordinary chronological display. Legacy
+      // historical readers keep their existing ascending offset behavior.
+      const order =
+        before === undefined
+          ? sql`CASE WHEN sequence IS NULL THEN 0 ELSE 1 END ASC,
+              sequence ASC, created_at ASC, activity_id ASC`
+          : sql`CASE WHEN sequence IS NULL THEN 0 ELSE 1 END DESC,
+              sequence DESC, created_at DESC, activity_id DESC`;
+      return sql`
         SELECT
           activity_id AS "activityId",
           thread_id AS "threadId",
@@ -2879,15 +2964,13 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
         FROM projection_thread_activities
         WHERE thread_id = ${threadId}
           AND turn_id = ${turnId}
+          AND ${activityBeforePredicate(before)}
           AND ${historicalWorkLogActivityPredicate}
-        ORDER BY
-          CASE WHEN sequence IS NULL THEN 0 ELSE 1 END ASC,
-          sequence ASC,
-          created_at ASC,
-          activity_id ASC
+        ORDER BY ${order}
         LIMIT ${limit}
         OFFSET ${offset}
-      `,
+      `;
+    },
   });
 
   const getThreadSessionRowByThread = SqlSchema.findOneOption({
@@ -2904,6 +2987,8 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
           max_concurrent_subagents AS "maxConcurrentSubagents",
           subagent_runtime_id AS "subagentRuntimeId",
           max_concurrent_subagents_known AS "maxConcurrentSubagentsKnown",
+          codex_context_window_override AS "codexContextWindowOverride",
+          codex_context_window_override_known AS "codexContextWindowOverrideKnown",
           active_turn_id AS "activeTurnId",
           last_error AS "lastError",
           updated_at AS "updatedAt"
@@ -3242,6 +3327,9 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
                 title: row.title,
                 modelSelection: row.modelSelection,
                 ...(row.subagentLimits !== undefined ? { subagentLimits: row.subagentLimits } : {}),
+                ...(row.codexContextWindowOverride !== undefined
+                  ? { codexContextWindowOverride: row.codexContextWindowOverride }
+                  : {}),
                 runtimeMode: row.runtimeMode,
                 interactionMode: row.interactionMode,
                 branch: row.branch,
@@ -3473,6 +3561,9 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
                   ...(row.subagentLimits !== undefined
                     ? { subagentLimits: row.subagentLimits }
                     : {}),
+                  ...(row.codexContextWindowOverride !== undefined
+                    ? { codexContextWindowOverride: row.codexContextWindowOverride }
+                    : {}),
                   runtimeMode: row.runtimeMode,
                   interactionMode: row.interactionMode,
                   branch: row.branch,
@@ -3610,6 +3701,9 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
                   modelSelection: row.modelSelection,
                   ...(row.subagentLimits !== undefined
                     ? { subagentLimits: row.subagentLimits }
+                    : {}),
+                  ...(row.codexContextWindowOverride !== undefined
+                    ? { codexContextWindowOverride: row.codexContextWindowOverride }
                     : {}),
                   runtimeMode: row.runtimeMode,
                   interactionMode: row.interactionMode,
@@ -3752,6 +3846,9 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
                 title: row.title,
                 modelSelection: row.modelSelection,
                 ...(row.subagentLimits !== undefined ? { subagentLimits: row.subagentLimits } : {}),
+                ...(row.codexContextWindowOverride !== undefined
+                  ? { codexContextWindowOverride: row.codexContextWindowOverride }
+                  : {}),
                 runtimeMode: row.runtimeMode,
                 interactionMode: row.interactionMode,
                 branch: row.branch,
@@ -3899,6 +3996,9 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
                 title: row.title,
                 modelSelection: row.modelSelection,
                 ...(row.subagentLimits !== undefined ? { subagentLimits: row.subagentLimits } : {}),
+                ...(row.codexContextWindowOverride !== undefined
+                  ? { codexContextWindowOverride: row.codexContextWindowOverride }
+                  : {}),
                 runtimeMode: row.runtimeMode,
                 interactionMode: row.interactionMode,
                 branch: row.branch,
@@ -4134,6 +4234,9 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
         modelSelection: threadRow.value.modelSelection,
         ...(threadRow.value.subagentLimits !== undefined
           ? { subagentLimits: threadRow.value.subagentLimits }
+          : {}),
+        ...(threadRow.value.codexContextWindowOverride !== undefined
+          ? { codexContextWindowOverride: threadRow.value.codexContextWindowOverride }
           : {}),
         runtimeMode: threadRow.value.runtimeMode,
         interactionMode: threadRow.value.interactionMode,
@@ -4517,39 +4620,54 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
   const getThreadTurnActivityPage: ProjectionSnapshotQueryShape["getThreadTurnActivityPage"] = (
     input,
   ) =>
-    Effect.gen(function* () {
-      const [countRow, activityRows] = yield* Effect.all([
-        countThreadActivityRowsByTurn(input).pipe(
-          Effect.mapError(
-            toPersistenceSqlOrDecodeError(
-              "ProjectionSnapshotQuery.getThreadTurnActivityPage:countActivities:query",
-              "ProjectionSnapshotQuery.getThreadTurnActivityPage:countActivities:decodeRow",
+    sql
+      .withTransaction(
+        Effect.gen(function* () {
+          const [countRow, activityRows] = yield* Effect.all([
+            countThreadActivityRowsByTurn(input).pipe(
+              Effect.mapError(
+                toPersistenceSqlOrDecodeError(
+                  "ProjectionSnapshotQuery.getThreadTurnActivityPage:countActivities:query",
+                  "ProjectionSnapshotQuery.getThreadTurnActivityPage:countActivities:decodeRow",
+                ),
+              ),
             ),
-          ),
-        ),
-        listThreadActivityRowsByTurnPage(input).pipe(
-          Effect.mapError(
-            toPersistenceSqlOrDecodeError(
-              "ProjectionSnapshotQuery.getThreadTurnActivityPage:listActivities:query",
-              "ProjectionSnapshotQuery.getThreadTurnActivityPage:listActivities:decodeRows",
+            listThreadActivityRowsByTurnPage(input).pipe(
+              Effect.mapError(
+                toPersistenceSqlOrDecodeError(
+                  "ProjectionSnapshotQuery.getThreadTurnActivityPage:listActivities:query",
+                  "ProjectionSnapshotQuery.getThreadTurnActivityPage:listActivities:decodeRows",
+                ),
+              ),
             ),
-          ),
-        ),
-      ]);
+          ]);
 
-      // Keep historical work-log hydration bounded. The thread-detail snapshot
-      // already carries recent activity for live rendering; this query is the
-      // DB-backed page path for older turns and must not grow into a full
-      // thread-history read.
-      return {
-        threadId: input.threadId,
-        turnId: input.turnId,
-        offset: input.offset,
-        limit: input.limit,
-        totalCount: countRow.count,
-        activities: activityRows.map(mapActivityRow),
-      };
-    });
+          // Count and page describe one short SQLite read transaction. Across
+          // requests the live range can change (including summary replacement),
+          // so before-mode's count is remaining work before that captured cursor,
+          // not a claim of frozen history or historical versions. Older pages use
+          // another received tuple rather than offsets in that changing prefix.
+          const orderedRows = input.before === undefined ? activityRows : activityRows.toReversed();
+          return {
+            threadId: input.threadId,
+            turnId: input.turnId,
+            offset: input.offset,
+            limit: input.limit,
+            totalCount: countRow.count,
+            activities: orderedRows.map(mapActivityRow),
+            ...(input.before === undefined ? {} : { before: input.before }),
+          };
+        }),
+      )
+      .pipe(
+        Effect.mapError((cause) =>
+          isPersistenceError(cause)
+            ? cause
+            : toPersistenceSqlError(
+                "ProjectionSnapshotQuery.getThreadTurnActivityPage:transaction",
+              )(cause),
+        ),
+      );
 
   const getThreadTurnWorkLogPresence: ProjectionSnapshotQueryShape["getThreadTurnWorkLogPresence"] =
     (input) =>
@@ -4562,6 +4680,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
           findThreadTurnWorkLogPresence({
             threadId: input.threadId,
             turnId,
+            ...(input.before === undefined ? {} : { before: input.before }),
           }).pipe(
             Effect.mapError(
               toPersistenceSqlOrDecodeError(
@@ -4701,6 +4820,9 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
         modelSelection: threadRow.value.modelSelection,
         ...(threadRow.value.subagentLimits !== undefined
           ? { subagentLimits: threadRow.value.subagentLimits }
+          : {}),
+        ...(threadRow.value.codexContextWindowOverride !== undefined
+          ? { codexContextWindowOverride: threadRow.value.codexContextWindowOverride }
           : {}),
         runtimeMode: threadRow.value.runtimeMode,
         interactionMode: threadRow.value.interactionMode,
@@ -4913,6 +5035,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
     getUnsettledCodexSteerIntentEvents,
     getCodexSteerIntentRecoveryBarriers,
     getThreadTurnActivityPage,
+    getThreadActivityDiagnostic: diagnosticStore.read,
     getThreadTurnWorkLogPresence,
     hasThreadTurnSubagentActivity,
     getThreadDetailById,

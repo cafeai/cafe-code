@@ -1,3 +1,5 @@
+import { useUiLocale } from "~/i18n";
+import { uiText } from "@cafecode/shared/i18n";
 import { memo, useCallback, useRef, useState } from "react";
 import type { EnvironmentId, TaskAtriumErrorDismissal, ThreadId } from "@cafecode/contracts";
 import { isCodexHistoryRecoveryRequiredError } from "@cafecode/shared/codexHistorySafety";
@@ -9,6 +11,7 @@ import { CircleAlertIcon, XIcon } from "lucide-react";
 import { useSettings, useUpdateSettings } from "../../hooks/useSettings";
 import { getClientSettingsSnapshot } from "../../hooks/clientSettingsState";
 import { useStore } from "../../store";
+import { shouldShowThreadErrorBanner } from "../../providerErrorPresentation";
 import {
   buildThreadErrorDismissal,
   collectCodexAppServerExitDismissals,
@@ -19,6 +22,7 @@ import {
 
 export const ThreadErrorBanner = memo(function ThreadErrorBanner({
   error,
+  errorOrigin,
   scopeKey,
   environmentId,
   threadId,
@@ -28,6 +32,8 @@ export const ThreadErrorBanner = memo(function ThreadErrorBanner({
   onPrepareShorterResponse,
 }: {
   error: string | null;
+  /** Only renderer-owned validation/operation feedback may use the generic banner. */
+  errorOrigin?: "local" | "provider" | undefined;
   /** Stable environment/thread identity for immediate local dismissal feedback. */
   scopeKey: string;
   environmentId: EnvironmentId;
@@ -38,6 +44,8 @@ export const ThreadErrorBanner = memo(function ThreadErrorBanner({
   /** Prepare editable text only; ChatView revalidates current ownership and content. */
   onPrepareShorterResponse?: (() => void) | undefined;
 }) {
+  const uiLocale = useUiLocale();
+
   const [dismissedErrorsByScope, setDismissedErrorsByScope] = useState<
     Readonly<Record<string, { error: string; occurrence: TaskAtriumErrorDismissal | null }>>
   >({});
@@ -150,7 +158,17 @@ export const ThreadErrorBanner = memo(function ThreadErrorBanner({
   // so a different local error stays visible even after remount. Persistence
   // contains identities/timestamps only, never
   // provider error text, and acknowledging it cannot mutate provider truth.
-  if (!error || dismissed) return null;
+  if (
+    !error ||
+    dismissed ||
+    !shouldShowThreadErrorBanner({
+      error,
+      errorOrigin,
+      providerError: session?.lastError,
+      isClaudeResponseLimitFailure,
+    })
+  )
+    return null;
   const recoveryForScope =
     recoveryState?.scopeKey === scopeKey && recoveryState.error === error ? recoveryState : null;
   return (
@@ -172,10 +190,15 @@ export const ThreadErrorBanner = memo(function ThreadErrorBanner({
                   if (canPrepareShorterResponse) onPrepareShorterResponse();
                 }}
               >
-                Prepare shorter response
+                {uiText("Prepare shorter response", undefined, undefined, uiLocale)}
               </Button>
               <span className="text-muted-foreground text-xs">
-                Review effort, then send from the composer.
+                {uiText(
+                  "Review effort, then send from the composer.",
+                  undefined,
+                  undefined,
+                  uiLocale,
+                )}
               </span>
             </div>
           ) : null}
@@ -190,12 +213,18 @@ export const ThreadErrorBanner = memo(function ThreadErrorBanner({
                   void recover();
                 }}
               >
-                {recoveryForScope?.pending ? "Continuing…" : "Continue in new chat"}
+                {recoveryForScope?.pending
+                  ? uiText("Continuing…", undefined, undefined, uiLocale)
+                  : uiText("Continue in new chat", undefined, undefined, uiLocale)}
               </Button>
               {recoveryForScope?.failed ? (
                 <span role="status">
-                  Couldn&apos;t confirm the new chat. No prompt was sent — check your chat list
-                  before trying again.
+                  {uiText(
+                    "Couldn''t confirm the new chat. No prompt was sent — check your chat list before trying again.",
+                    undefined,
+                    undefined,
+                    uiLocale,
+                  )}
                 </span>
               ) : null}
             </div>
@@ -204,7 +233,7 @@ export const ThreadErrorBanner = memo(function ThreadErrorBanner({
         <AlertAction>
           <button
             type="button"
-            aria-label="Dismiss error"
+            aria-label={uiText("Dismiss error", undefined, undefined, uiLocale)}
             className="focus-ring inline-flex size-6 items-center justify-center rounded-md text-muted-foreground transition-colors duration-(--duration-fast) hover:text-foreground"
             onClick={dismiss}
           >

@@ -1,3 +1,4 @@
+import { uiText } from "@cafecode/shared/i18n";
 import { type EnvironmentId, type ThreadId } from "@cafecode/contracts";
 import {
   infiniteQueryOptions,
@@ -64,8 +65,8 @@ export function gitBranchSearchInfiniteQueryOptions(input: {
     queryKey: gitQueryKeys.branchSearch(input.environmentId, input.cwd, normalizedQuery),
     initialPageParam: 0,
     queryFn: async ({ pageParam }) => {
-      if (!input.cwd) throw new Error("Git refs are unavailable.");
-      if (!input.environmentId) throw new Error("Git refs are unavailable.");
+      if (!input.cwd) throw new Error(uiText("Git refs are unavailable."));
+      if (!input.environmentId) throw new Error(uiText("Git refs are unavailable."));
       const api = ensureEnvironmentApi(input.environmentId);
       return api.vcs.listRefs({
         cwd: input.cwd,
@@ -98,7 +99,7 @@ export function gitResolvePullRequestQueryOptions(input: {
     ] as const,
     queryFn: async () => {
       if (!input.cwd || !input.reference || !input.environmentId) {
-        throw new Error("Pull request lookup is unavailable.");
+        throw new Error(uiText("Pull request lookup is unavailable."));
       }
       const api = ensureEnvironmentApi(input.environmentId);
       return api.git.resolvePullRequest({ cwd: input.cwd, reference: input.reference });
@@ -123,7 +124,7 @@ export function gitCreateWorktreeMutationOptions(input: {
       args: Parameters<ReturnType<typeof ensureEnvironmentApi>["vcs"]["createWorktree"]>[0],
     ) => {
       if (!input.environmentId) {
-        throw new Error("Worktree creation is unavailable.");
+        throw new Error(uiText("Worktree creation is unavailable."));
       }
       return ensureEnvironmentApi(input.environmentId).vcs.createWorktree(args);
     },
@@ -146,7 +147,7 @@ export function gitRemoveWorktreeMutationOptions(input: {
       args: Parameters<ReturnType<typeof ensureEnvironmentApi>["vcs"]["removeWorktree"]>[0],
     ) => {
       if (!input.environmentId) {
-        throw new Error("Worktree removal is unavailable.");
+        throw new Error(uiText("Worktree removal is unavailable."));
       }
       return ensureEnvironmentApi(input.environmentId).vcs.removeWorktree(args);
     },
@@ -169,7 +170,7 @@ export function gitPreparePullRequestThreadMutationOptions(input: {
       threadId?: ThreadId;
     }) => {
       if (!input.cwd || !input.environmentId) {
-        throw new Error("Opening a pull request in a chat isn't available.");
+        throw new Error(uiText("Opening a pull request in a chat isn't available."));
       }
       const api = ensureEnvironmentApi(input.environmentId);
       return api.git.preparePullRequestThread({

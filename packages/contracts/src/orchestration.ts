@@ -9,6 +9,8 @@ import {
   ProviderTaskControlResult,
 } from "./providerTaskControls.ts";
 import { MaxConcurrentSubagents, SubagentLimits } from "./subagentLimits.ts";
+import { CodexContextWindowOverride } from "./codexContextWindow.ts";
+import { ProviderDiagnosticSnapshot } from "./providerDiagnostic.ts";
 import { RepositoryIdentity } from "./environment.ts";
 import { CodexReviewTarget } from "./codexReview.ts";
 import {
@@ -42,6 +44,7 @@ export const ORCHESTRATION_WS_METHODS = {
   getDeletedShellSnapshot: "orchestration.getDeletedShellSnapshot",
   getThreadTurnWorkLogPresence: "orchestration.getThreadTurnWorkLogPresence",
   getThreadTurnActivityPage: "orchestration.getThreadTurnActivityPage",
+  getThreadActivityDiagnostic: "orchestration.getThreadActivityDiagnostic",
   getThreadTurnSubagentDetail: "orchestration.getThreadTurnSubagentDetail",
   controlTask: "orchestration.controlTask",
   hardDeleteThread: "orchestration.hardDeleteThread",
@@ -327,6 +330,8 @@ export const OrchestrationSession = Schema.Struct({
   providerName: Schema.NullOr(TrimmedNonEmptyString),
   providerInstanceId: Schema.optional(ProviderInstanceId),
   maxConcurrentSubagents: Schema.optional(Schema.NullOr(MaxConcurrentSubagents)),
+  // Exact materialized Cafe configuration, not a reconstructed context meter.
+  codexContextWindowOverride: Schema.optional(Schema.NullOr(CodexContextWindowOverride)),
   runtimeMode: RuntimeMode.pipe(Schema.withDecodingDefault(Effect.succeed(DEFAULT_RUNTIME_MODE))),
   activeTurnId: Schema.NullOr(TurnId),
   lastError: Schema.NullOr(TrimmedNonEmptyString),
@@ -403,6 +408,9 @@ export const OrchestrationThread = Schema.Struct({
   title: TrimmedNonEmptyString,
   modelSelection: ModelSelection,
   subagentLimits: Schema.optional(SubagentLimits),
+  // Dedicated Codex chat intent: null Reset inherits the selected account's
+  // live preference, then native guidance. Never copied to sticky model options.
+  codexContextWindowOverride: Schema.optional(Schema.NullOr(CodexContextWindowOverride)),
   runtimeMode: RuntimeMode,
   interactionMode: ProviderInteractionMode.pipe(
     Schema.withDecodingDefault(Effect.succeed(DEFAULT_PROVIDER_INTERACTION_MODE)),
@@ -462,6 +470,7 @@ export const OrchestrationThreadShell = Schema.Struct({
   title: TrimmedNonEmptyString,
   modelSelection: ModelSelection,
   subagentLimits: Schema.optional(SubagentLimits),
+  codexContextWindowOverride: Schema.optional(Schema.NullOr(CodexContextWindowOverride)),
   runtimeMode: RuntimeMode,
   interactionMode: ProviderInteractionMode.pipe(
     Schema.withDecodingDefault(Effect.succeed(DEFAULT_PROVIDER_INTERACTION_MODE)),
@@ -563,7 +572,35 @@ export const OrchestrationThreadDetailSnapshotChunk = Schema.Struct({
 export type OrchestrationThreadDetailSnapshotChunk =
   typeof OrchestrationThreadDetailSnapshotChunk.Type;
 
+/** Shared bounded live activity tail; older work is read on explicit expansion. */
+export const THREAD_DETAIL_ACTIVITY_WINDOW_LIMIT = 500;
 export const THREAD_TURN_ACTIVITY_PAGE_MAX_LIMIT = 1_000;
+
+/**
+ * Captured projection ordering values, not an ownership or authorization token.
+ *
+ * A live Claude summary may be upserted under the same activity id at a later
+ * ledger sequence. Resolving that mutable id again would move an "earlier"
+ * boundary. Keep the caller's received tuple immutable instead, and always
+ * apply it inside the independently authenticated exact thread/turn range.
+ * These finite fields cannot authorize a provider read or reveal a sibling
+ * turn; they only narrow an already admitted local projection query.
+ */
+export const OrchestrationThreadActivityCursor = Schema.Struct({
+  sequence: Schema.NullOr(
+    NonNegativeInt.check(Schema.isLessThanOrEqualTo(Number.MAX_SAFE_INTEGER)),
+  ),
+  createdAt: IsoDateTime.check(
+    Schema.isNonEmpty(),
+    Schema.isMaxLength(128),
+    Schema.isPattern(/^[^\p{Cc}\p{Bidi_Control}]+$/u),
+  ),
+  activityId: EventId.check(
+    Schema.isMaxLength(4_096),
+    Schema.isPattern(/^[^\p{Cc}\p{Bidi_Control}]+$/u),
+  ),
+});
+export type OrchestrationThreadActivityCursor = typeof OrchestrationThreadActivityCursor.Type;
 
 export const OrchestrationThreadTurnActivityPageInput = Schema.Struct({
   threadId: ThreadId,
@@ -572,7 +609,8 @@ export const OrchestrationThreadTurnActivityPageInput = Schema.Struct({
   limit: PositiveInt.check(Schema.isLessThanOrEqualTo(THREAD_TURN_ACTIVITY_PAGE_MAX_LIMIT)).pipe(
     Schema.withDecodingDefault(Effect.succeed(50)),
   ),
-});
+  before: Schema.optional(OrchestrationThreadActivityCursor),
+}).check(Schema.makeFilter((input) => input.before === undefined || input.offset === 0));
 export type OrchestrationThreadTurnActivityPageInput =
   typeof OrchestrationThreadTurnActivityPageInput.Type;
 
@@ -583,6 +621,9 @@ export const OrchestrationThreadTurnActivityPage = Schema.Struct({
   limit: PositiveInt,
   totalCount: NonNegativeInt,
   activities: Schema.Array(OrchestrationThreadActivity),
+  // Echo the exact consumed bound so a newer renderer can detect a saved
+  // server which silently ignored its additive cursor field.
+  before: Schema.optional(OrchestrationThreadActivityCursor),
 });
 export type OrchestrationThreadTurnActivityPage = typeof OrchestrationThreadTurnActivityPage.Type;
 
@@ -900,13 +941,31 @@ export type OrchestrationThreadTurnSubagentDetail =
 
 export const THREAD_TURN_WORK_LOG_PRESENCE_MAX_TURNS = 256;
 
+/** Private diagnostics are read only after an explicit disclosure action. */
+export const OrchestrationThreadActivityDiagnosticInput = Schema.Struct({
+  threadId: ThreadId,
+  turnId: Schema.NullOr(TurnId),
+  activityId: EventId,
+});
+export type OrchestrationThreadActivityDiagnosticInput =
+  typeof OrchestrationThreadActivityDiagnosticInput.Type;
+export const OrchestrationThreadActivityDiagnosticResult = Schema.Struct({
+  threadId: ThreadId,
+  turnId: Schema.NullOr(TurnId),
+  activityId: EventId,
+  diagnostic: Schema.NullOr(ProviderDiagnosticSnapshot),
+});
+export type OrchestrationThreadActivityDiagnosticResult =
+  typeof OrchestrationThreadActivityDiagnosticResult.Type;
+
 export const OrchestrationThreadTurnWorkLogPresenceInput = Schema.Struct({
   threadId: ThreadId,
   turnIds: Schema.Array(TurnId).check(
     Schema.isMinLength(1),
     Schema.isMaxLength(THREAD_TURN_WORK_LOG_PRESENCE_MAX_TURNS),
   ),
-});
+  before: Schema.optional(OrchestrationThreadActivityCursor),
+}).check(Schema.makeFilter((input) => input.before === undefined || input.turnIds.length === 1));
 export type OrchestrationThreadTurnWorkLogPresenceInput =
   typeof OrchestrationThreadTurnWorkLogPresenceInput.Type;
 
@@ -957,6 +1016,7 @@ const ThreadCreateCommand = Schema.Struct({
   title: TrimmedNonEmptyString,
   modelSelection: ModelSelection,
   subagentLimits: Schema.optional(SubagentLimits),
+  codexContextWindowOverride: Schema.optional(Schema.NullOr(CodexContextWindowOverride)),
   runtimeMode: RuntimeMode,
   interactionMode: ProviderInteractionMode.pipe(
     Schema.withDecodingDefault(Effect.succeed(DEFAULT_PROVIDER_INTERACTION_MODE)),
@@ -1028,6 +1088,7 @@ const ThreadMetaUpdateCommand = Schema.Struct({
   title: Schema.optional(TrimmedNonEmptyString),
   modelSelection: Schema.optional(ModelSelection),
   subagentLimits: Schema.optional(SubagentLimits),
+  codexContextWindowOverride: Schema.optional(Schema.NullOr(CodexContextWindowOverride)),
   branch: Schema.optional(Schema.NullOr(TrimmedNonEmptyString)),
   worktreePath: Schema.optional(Schema.NullOr(TrimmedNonEmptyString)),
 });
@@ -1053,6 +1114,7 @@ const ThreadTurnStartBootstrapCreateThread = Schema.Struct({
   title: TrimmedNonEmptyString,
   modelSelection: ModelSelection,
   subagentLimits: Schema.optional(SubagentLimits),
+  codexContextWindowOverride: Schema.optional(Schema.NullOr(CodexContextWindowOverride)),
   runtimeMode: RuntimeMode,
   interactionMode: ProviderInteractionMode,
   branch: Schema.NullOr(TrimmedNonEmptyString),
@@ -1095,6 +1157,13 @@ export const ThreadTurnRuntimeRecovery = Schema.Struct({
       subagentRuntimeId: SubagentRuntimeId,
       chainSourceEventSequence: PositiveInt,
       retryAttempt: NonNegativeInt.check(Schema.isLessThanOrEqualTo(30)),
+      // Count accepted Cafe continuation generations independently from the
+      // capped delay exponent and native reconnect observations. These optional
+      // values are display metadata only and never participate in admission.
+      continuationOrdinal: Schema.optional(
+        PositiveInt.check(Schema.isLessThanOrEqualTo(Number.MAX_SAFE_INTEGER)),
+      ),
+      continuationOrdinalLowerBound: Schema.optional(Schema.Literal(true)),
     }),
   ),
 });
@@ -1130,6 +1199,7 @@ export const ThreadTurnStartCommand = Schema.Struct({
   }),
   modelSelection: Schema.optional(ModelSelection),
   subagentLimits: Schema.optional(SubagentLimits),
+  codexContextWindowOverride: Schema.optional(Schema.NullOr(CodexContextWindowOverride)),
   titleSeed: Schema.optional(TrimmedNonEmptyString),
   runtimeMode: RuntimeMode.pipe(Schema.withDecodingDefault(Effect.succeed(DEFAULT_RUNTIME_MODE))),
   interactionMode: ProviderInteractionMode.pipe(
@@ -1156,6 +1226,7 @@ const ClientThreadTurnStartCommand = Schema.Struct({
   }),
   modelSelection: Schema.optional(ModelSelection),
   subagentLimits: Schema.optional(SubagentLimits),
+  codexContextWindowOverride: Schema.optional(Schema.NullOr(CodexContextWindowOverride)),
   titleSeed: Schema.optional(TrimmedNonEmptyString),
   runtimeMode: RuntimeMode,
   interactionMode: ProviderInteractionMode,
@@ -1635,6 +1706,7 @@ export const ThreadCreatedPayload = Schema.Struct({
   title: TrimmedNonEmptyString,
   modelSelection: ModelSelection,
   subagentLimits: Schema.optional(SubagentLimits),
+  codexContextWindowOverride: Schema.optional(Schema.NullOr(CodexContextWindowOverride)),
   runtimeMode: RuntimeMode.pipe(Schema.withDecodingDefault(Effect.succeed(DEFAULT_RUNTIME_MODE))),
   interactionMode: ProviderInteractionMode.pipe(
     Schema.withDecodingDefault(Effect.succeed(DEFAULT_PROVIDER_INTERACTION_MODE)),
@@ -1686,6 +1758,7 @@ export const ThreadMetaUpdatedPayload = Schema.Struct({
   title: Schema.optional(TrimmedNonEmptyString),
   modelSelection: Schema.optional(ModelSelection),
   subagentLimits: Schema.optional(SubagentLimits),
+  codexContextWindowOverride: Schema.optional(Schema.NullOr(CodexContextWindowOverride)),
   branch: Schema.optional(Schema.NullOr(TrimmedNonEmptyString)),
   worktreePath: Schema.optional(Schema.NullOr(TrimmedNonEmptyString)),
   updatedAt: IsoDateTime,
@@ -1740,6 +1813,7 @@ export const ThreadTurnStartRequestedPayload = Schema.Struct({
   messageId: MessageId,
   modelSelection: Schema.optional(ModelSelection),
   subagentLimits: Schema.optional(SubagentLimits),
+  codexContextWindowOverride: Schema.optional(Schema.NullOr(CodexContextWindowOverride)),
   titleSeed: Schema.optional(TrimmedNonEmptyString),
   runtimeMode: RuntimeMode.pipe(Schema.withDecodingDefault(Effect.succeed(DEFAULT_RUNTIME_MODE))),
   interactionMode: ProviderInteractionMode.pipe(
@@ -2240,6 +2314,10 @@ export const OrchestrationRpcSchemas = {
   getThreadTurnActivityPage: {
     input: OrchestrationThreadTurnActivityPageInput,
     output: OrchestrationThreadTurnActivityPage,
+  },
+  getThreadActivityDiagnostic: {
+    input: OrchestrationThreadActivityDiagnosticInput,
+    output: OrchestrationThreadActivityDiagnosticResult,
   },
   getThreadTurnWorkLogPresence: {
     input: OrchestrationThreadTurnWorkLogPresenceInput,

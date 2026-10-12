@@ -1,3 +1,4 @@
+import { uiText } from "@cafecode/shared/i18n";
 import dmSansNormal from "@fontsource-variable/dm-sans/files/dm-sans-latin-opsz-normal.woff2?inline";
 import dmSansExtendedNormal from "@fontsource-variable/dm-sans/files/dm-sans-latin-ext-opsz-normal.woff2?inline";
 import dmSansItalic from "@fontsource-variable/dm-sans/files/dm-sans-latin-opsz-italic.woff2?inline";
@@ -35,7 +36,9 @@ const MAX_EMBEDDED_IMAGE_PIXELS = 4_194_304;
 const MAX_SOURCE_IMAGES = 256;
 const MAX_EMBEDDED_IMAGE_CHARACTERS = 4 * 1024 * 1024;
 const EXPORT_PADDING = 8;
-const TABLE_EXPORT_FAILURE = "This table could not be exported as an image.";
+function getTABLE_EXPORT_FAILURE() {
+  return uiText("This table could not be exported as an image.");
+}
 
 // Rebuild only the presentation vocabulary emitted by Markdown and untrusted
 // KaTeX. Never clone a live tree: assigning an img src during cloning can begin
@@ -288,7 +291,7 @@ export interface TableExportSvg {
 }
 
 function rejectExport(): never {
-  throw new Error(TABLE_EXPORT_FAILURE);
+  throw new Error(getTABLE_EXPORT_FAILURE());
 }
 
 function copyPresentation(
@@ -548,12 +551,12 @@ export async function createTablePng(source: HTMLTableElement, signal: AbortSign
       if (error) reject(error);
       else resolve();
     };
-    const aborted = () => finish(new DOMException("Image export cancelled.", "AbortError"));
-    const timeout = setTimeout(() => finish(new Error(TABLE_EXPORT_FAILURE)), 15_000);
+    const aborted = () => finish(new DOMException(uiText("Image export cancelled."), "AbortError"));
+    const timeout = setTimeout(() => finish(new Error(getTABLE_EXPORT_FAILURE())), 15_000);
     signal.addEventListener("abort", aborted, { once: true });
     void document.fonts.ready.then(
       () => finish(),
-      () => finish(new Error(TABLE_EXPORT_FAILURE)),
+      () => finish(new Error(getTABLE_EXPORT_FAILURE())),
     );
   });
   signal.throwIfAborted();

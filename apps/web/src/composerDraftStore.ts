@@ -12,6 +12,8 @@ import {
   ProviderOptionSelection,
   RuntimeMode,
   SubagentLimits,
+  CodexContextWindowOverride,
+  validCodexContextWindowOverride,
   type ServerProvider,
   type ScopedProjectRef,
   type ScopedThreadRef,
@@ -128,6 +130,7 @@ const PersistedComposerThreadDraftState = Schema.Struct({
   runtimeMode: Schema.optionalKey(RuntimeMode),
   interactionMode: Schema.optionalKey(ProviderInteractionMode),
   subagentLimits: Schema.optionalKey(SubagentLimits),
+  codexContextWindowOverride: Schema.optionalKey(Schema.NullOr(CodexContextWindowOverride)),
 });
 type PersistedComposerThreadDraftState = typeof PersistedComposerThreadDraftState.Type;
 
@@ -249,6 +252,8 @@ export interface ComposerThreadDraftState {
   interactionMode: ProviderInteractionMode | null;
   /** Whole-object desired policy, including an explicit empty reset. Never sticky. */
   subagentLimits?: SubagentLimits;
+  /** Chat-local intent; null is a reset, undefined is absent/overlay disposal. Never sticky. */
+  codexContextWindowOverride?: number | null;
 }
 
 /**
@@ -324,7 +329,7 @@ export function selectStandaloneDraftSessions(
  * Raw `ThreadId` is intentionally excluded so callers cannot drop environment
  * identity for real threads.
  */
-type ComposerThreadTarget = ScopedThreadRef | DraftId;
+export type ComposerThreadTarget = ScopedThreadRef | DraftId;
 
 /**
  * Persisted store for composer content plus draft-session metadata.
@@ -458,6 +463,10 @@ interface ComposerDraftStoreState {
     interactionMode: ProviderInteractionMode | null | undefined,
   ) => void;
   setSubagentLimits: (threadRef: ComposerThreadTarget, limits: SubagentLimits | undefined) => void;
+  setCodexContextWindowOverride: (
+    threadRef: ComposerThreadTarget,
+    value: number | null | undefined,
+  ) => void;
   addImage: (threadRef: ComposerThreadTarget, image: ComposerImageAttachment) => void;
   addImages: (threadRef: ComposerThreadTarget, images: ComposerImageAttachment[]) => void;
   removeImage: (threadRef: ComposerThreadTarget, imageId: string) => void;
@@ -708,7 +717,8 @@ function shouldRemoveDraft(draft: ComposerThreadDraftState): boolean {
     draft.activeProvider === null &&
     draft.runtimeMode === null &&
     draft.interactionMode === null &&
-    draft.subagentLimits === undefined
+    draft.subagentLimits === undefined &&
+    draft.codexContextWindowOverride === undefined
   );
 }
 
@@ -1616,6 +1626,13 @@ function normalizePersistedDraftsByThreadId(
     const subagentLimits = isSubagentLimits(draftCandidate.subagentLimits)
       ? draftCandidate.subagentLimits
       : undefined;
+    const codexContextWindowOverride =
+      draftCandidate.codexContextWindowOverride === null
+        ? null
+        : typeof draftCandidate.codexContextWindowOverride === "number" &&
+            validCodexContextWindowOverride(draftCandidate.codexContextWindowOverride)
+          ? draftCandidate.codexContextWindowOverride
+          : undefined;
     const prompt = promptCandidate;
     // If the draft already has the v3 shape, use it directly
     const legacyDraftCandidate = draftValue as LegacyPersistedComposerThreadDraftState;
@@ -1672,7 +1689,8 @@ function normalizePersistedDraftsByThreadId(
       !hasModelData &&
       !runtimeMode &&
       !interactionMode &&
-      subagentLimits === undefined
+      subagentLimits === undefined &&
+      codexContextWindowOverride === undefined
     ) {
       continue;
     }
@@ -1704,6 +1722,7 @@ function normalizePersistedDraftsByThreadId(
       ...(runtimeMode ? { runtimeMode } : {}),
       ...(interactionMode ? { interactionMode } : {}),
       ...(subagentLimits !== undefined ? { subagentLimits } : {}),
+      ...(codexContextWindowOverride !== undefined ? { codexContextWindowOverride } : {}),
     };
   }
 
@@ -1781,7 +1800,8 @@ function partializeComposerDraftStoreState(
       !hasModelData &&
       draft.runtimeMode === null &&
       draft.interactionMode === null &&
-      draft.subagentLimits === undefined
+      draft.subagentLimits === undefined &&
+      draft.codexContextWindowOverride === undefined
     ) {
       continue;
     }
@@ -1801,6 +1821,9 @@ function partializeComposerDraftStoreState(
       ...(draft.runtimeMode ? { runtimeMode: draft.runtimeMode } : {}),
       ...(draft.interactionMode ? { interactionMode: draft.interactionMode } : {}),
       ...(draft.subagentLimits !== undefined ? { subagentLimits: draft.subagentLimits } : {}),
+      ...(draft.codexContextWindowOverride !== undefined
+        ? { codexContextWindowOverride: draft.codexContextWindowOverride }
+        : {}),
     };
     persistedDraftsByThreadKey[threadKey] = persistedDraft;
   }
@@ -2033,6 +2056,9 @@ function toHydratedThreadDraft(
     interactionMode: persistedDraft.interactionMode ?? null,
     ...(persistedDraft.subagentLimits !== undefined
       ? { subagentLimits: persistedDraft.subagentLimits }
+      : {}),
+    ...(persistedDraft.codexContextWindowOverride !== undefined
+      ? { codexContextWindowOverride: persistedDraft.codexContextWindowOverride }
       : {}),
   };
 }
@@ -2746,6 +2772,27 @@ const composerDraftStore = create<ComposerDraftStoreState>()(
             const next = {
               ...rest,
               ...(limits !== undefined ? { subagentLimits: { ...limits } } : {}),
+            };
+            const draftsByThreadKey = { ...state.draftsByThreadKey };
+            if (shouldRemoveDraft(next)) delete draftsByThreadKey[threadKey];
+            else draftsByThreadKey[threadKey] = next;
+            return { draftsByThreadKey };
+          });
+        },
+        setCodexContextWindowOverride: (threadRef, value) => {
+          const threadKey = resolveComposerDraftKey(get(), threadRef);
+          if (
+            !threadKey ||
+            (value !== undefined && value !== null && !validCodexContextWindowOverride(value))
+          )
+            return;
+          set((state) => {
+            const base = state.draftsByThreadKey[threadKey] ?? createEmptyThreadDraft();
+            if (base.codexContextWindowOverride === value) return state;
+            const { codexContextWindowOverride: _previous, ...rest } = base;
+            const next = {
+              ...rest,
+              ...(value !== undefined ? { codexContextWindowOverride: value } : {}),
             };
             const draftsByThreadKey = { ...state.draftsByThreadKey };
             if (shouldRemoveDraft(next)) delete draftsByThreadKey[threadKey];

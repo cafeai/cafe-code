@@ -19,6 +19,7 @@ import {
   type WsRpcProtocolSocketUrlProvider,
 } from "./protocol";
 import { isTransportConnectionErrorMessage } from "./transportError";
+import { resetWsReconnectBackoff } from "./wsConnectionState";
 
 interface SubscribeOptions {
   readonly retryDelay?: Duration.Input;
@@ -80,7 +81,6 @@ export class WsTransport {
   private activeSessionId = 0;
   private session: TransportSession;
   private lastHeartbeatPongAt = 0;
-  private heartbeatRecoveryInFlight = false;
   private readonly streamRequestStartListeners = new Set<(info: StreamRequestStartInfo) => void>();
   private readonly openListeners = new Set<(event: WsTransportOpenEvent) => void>();
   private successfulOpenCount = 0;
@@ -196,7 +196,10 @@ export class WsTransport {
           const formattedError = formatErrorMessage(error);
           if (!isTransportConnectionErrorMessage(formattedError)) {
             console.warn("WebSocket RPC subscription failed", {
-              error: formattedError,
+              // Schema errors can quote received values, and provider errors
+              // may carry private URLs or tokens. Classification stays local;
+              // console diagnostics publish no untrusted response/error text.
+              error: "The WebSocket RPC subscription failed.",
               retrying: options?.retryNonTransportErrors === true,
             });
             if (options?.retryNonTransportErrors !== true) {
@@ -258,25 +261,13 @@ export class WsTransport {
     await reconnectOperation;
   }
 
-  private scheduleHeartbeatRecovery() {
-    if (this.disposed || this.heartbeatRecoveryInFlight) {
-      return;
+  resetReconnectBackoff(): void {
+    // The singleton atom belongs only to the primary backend. Retrying a saved
+    // environment cannot clear an unrelated primary outage or terminal state.
+    // Its own lifecycle is reset when reconnect() creates the scoped session.
+    if (this.lifecycleHandlers?.trackGlobalConnectionStatus !== false) {
+      resetWsReconnectBackoff();
     }
-
-    this.heartbeatRecoveryInFlight = true;
-    queueMicrotask(() => {
-      void this.reconnect()
-        .catch((error) => {
-          if (!this.disposed) {
-            console.warn("WebSocket heartbeat recovery failed", {
-              error: formatErrorMessage(error),
-            });
-          }
-        })
-        .finally(() => {
-          this.heartbeatRecoveryInFlight = false;
-        });
-    });
   }
 
   isHeartbeatFresh(maxAgeMs = 15_000): boolean {
@@ -308,10 +299,10 @@ export class WsTransport {
   }
 
   private createSession(): TransportSession {
-    // A replacement protocol session owns a fresh bounded socket-retry
+    // A replacement protocol session owns a fresh capped socket-retry
     // schedule. Notify environment-scoped lifecycle models before its first
-    // URL resolution/socket attempt so their exhaustion counters reset with
-    // the transport that actually enforces the bound.
+    // URL resolution/socket attempt so their attempt counters reset with
+    // the transport that actually enforces the backoff.
     try {
       this.lifecycleHandlers?.onSessionStart?.();
     } catch {
@@ -350,8 +341,13 @@ export class WsTransport {
             this.lifecycleHandlers?.onHeartbeatPong?.();
           },
           onHeartbeatTimeout: () => {
+            // Effect recycles the timed-out socket through its ordinary retry
+            // schedule and rejects pending requests/subscriptions. Replacing
+            // the whole runtime here would reset that backoff on every missed
+            // Pong and keep a repeatedly half-dead peer in a rapid reconnect
+            // loop. Explicit user reconnects still replace the whole session.
+            this.lastHeartbeatPongAt = 0;
             this.lifecycleHandlers?.onHeartbeatTimeout?.();
-            this.scheduleHeartbeatRecovery();
           },
           onRequestStart: (info) => {
             this.lifecycleHandlers?.onRequestStart?.(info);

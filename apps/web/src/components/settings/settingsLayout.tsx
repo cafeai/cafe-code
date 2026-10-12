@@ -1,3 +1,5 @@
+import { useUiLocale } from "~/i18n";
+import { uiText } from "@cafecode/shared/i18n";
 import { Undo2Icon } from "lucide-react";
 import { type ComponentPropsWithoutRef, type ReactNode, useEffect, useState } from "react";
 
@@ -134,6 +136,8 @@ export function BusyButtonLabel({
 }
 
 export function SettingResetButton({ label, onClick }: { label: string; onClick: () => void }) {
+  const uiLocale = useUiLocale();
+
   return (
     <Tooltip>
       <TooltipTrigger
@@ -141,7 +145,7 @@ export function SettingResetButton({ label, onClick }: { label: string; onClick:
           <Button
             size="icon-xs"
             variant="ghost"
-            aria-label={`Reset ${label} to default`}
+            aria-label={uiText("Reset {value0} to default", { value0: label }, undefined, uiLocale)}
             className="size-5 rounded-sm p-0 text-muted-foreground hover:text-foreground"
             onClick={(event) => {
               event.stopPropagation();
@@ -152,7 +156,9 @@ export function SettingResetButton({ label, onClick }: { label: string; onClick:
           </Button>
         }
       />
-      <TooltipPopup side="top">Reset to default</TooltipPopup>
+      <TooltipPopup side="top">
+        {uiText("Reset to default", undefined, undefined, uiLocale)}
+      </TooltipPopup>
     </Tooltip>
   );
 }

@@ -1,4 +1,5 @@
 import "../../index.css";
+import { getUiLocale, setUiLocale } from "@cafecode/shared/i18n";
 import { EnvironmentId, type ChatFileAttachment } from "@cafecode/contracts";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { page } from "vitest/browser";
@@ -22,14 +23,75 @@ const attachment: ChatFileAttachment = {
   mimeType: "text/html",
   sizeBytes: 42,
 };
+const originalLocale = getUiLocale();
 
 describe("inert file attachment pills", () => {
   beforeEach(() => {
+    setUiLocale("en");
     vi.mocked(downloadFileAttachment).mockResolvedValue();
   });
   afterEach(() => {
+    setUiLocale(originalLocale);
     vi.resetAllMocks();
   });
+
+  it.each([
+    {
+      kind: "no-preview",
+      english: "No text preview for this format. Download the file to inspect it.",
+      korean: "이 형식은 텍스트 미리보기가 없습니다. 파일을 다운로드하여 확인하세요.",
+    },
+    {
+      kind: "classified",
+      english: "Several files are being processed. Please try again shortly.",
+      korean: "여러 파일을 처리 중입니다. 잠시 후 다시 시도하세요.",
+    },
+    {
+      kind: "preview-unknown",
+      english: "This file could not be previewed. You can still download it.",
+      korean: "이 파일을 미리 보지 못했습니다. 다운로드할 수는 있습니다.",
+    },
+    {
+      kind: "download-unknown",
+      english: "This file could not be downloaded. Please try again.",
+      korean: "이 파일을 다운로드하지 못했습니다. 다시 시도하세요.",
+    },
+  ])(
+    "repaints retained $kind feedback without repeating file IO",
+    async ({ kind, english, korean }) => {
+      const privateFailure = new Error(
+        "private-body /private/credentials <script>unsafe()</script>",
+      );
+      if (kind === "no-preview") vi.mocked(getFileAttachmentPreview).mockResolvedValue(null);
+      else if (kind === "classified") {
+        const error = new FileAttachmentRequestError("busy");
+        error.message = privateFailure.message;
+        vi.mocked(getFileAttachmentPreview).mockRejectedValue(error);
+      } else if (kind === "preview-unknown")
+        vi.mocked(getFileAttachmentPreview).mockRejectedValue(privateFailure);
+      else vi.mocked(downloadFileAttachment).mockRejectedValue(privateFailure);
+      const screen = await render(
+        <FileAttachmentPill environmentId={environmentId} attachment={attachment} />,
+      );
+      try {
+        if (kind === "download-unknown") await page.getByLabelText("Download source.html").click();
+        else await page.getByRole("button", { name: "source.html", exact: true }).click();
+        await expect.element(page.getByRole("status")).toHaveTextContent(english);
+        setUiLocale("ko");
+        await expect.element(page.getByRole("status")).toHaveTextContent(korean);
+        expect(getFileAttachmentPreview).toHaveBeenCalledTimes(kind === "download-unknown" ? 0 : 1);
+        expect(downloadFileAttachment).toHaveBeenCalledTimes(kind === "download-unknown" ? 1 : 0);
+        await expect
+          .element(page.getByRole("button", { name: "source.html", exact: true }))
+          .toBeEnabled();
+        const pill = document.querySelector("[data-file-attachment]");
+        expect(pill?.textContent).not.toMatch(/private-body|credentials|unsafe/);
+        expect(pill?.querySelector("script, iframe, img")).toBeNull();
+      } finally {
+        await screen.unmount();
+      }
+    },
+  );
 
   it("shows HTML source as escaped text, with a separately explicit download", async () => {
     vi.mocked(getFileAttachmentPreview).mockResolvedValue({

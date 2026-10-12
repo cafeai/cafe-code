@@ -363,6 +363,7 @@ it.layer(NodeServices.layer)("cli config resolution", (it) => {
           cafeCodeHome: baseDir,
           noBrowser: true,
           desktopBootstrapToken: "desktop-token",
+          startupProgressFd: 4,
           otlpTracesUrl: "http://localhost:4318/v1/traces",
           otlpMetricsUrl: "http://localhost:4318/v1/metrics",
         }),
@@ -418,6 +419,7 @@ it.layer(NodeServices.layer)("cli config resolution", (it) => {
         noBrowser: true,
         startupPresentation: "browser",
         desktopBootstrapToken: "desktop-token",
+        startupProgressFd: 4,
         autoBootstrapProjectFromCwd: false,
         logWebSocketEvents: false,
       });

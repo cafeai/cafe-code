@@ -1,8 +1,10 @@
+import { useUiLocale } from "~/i18n";
+import { uiText } from "@cafecode/shared/i18n";
 import { SquarePenIcon } from "lucide-react";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 
 export function SidebarNewChatButton({
-  label = "New chat",
+  label = uiText("New chat"),
   disabled,
   onClick,
 }: {
@@ -10,6 +12,8 @@ export function SidebarNewChatButton({
   disabled?: boolean;
   onClick: () => void;
 }) {
+  const uiLocale = useUiLocale();
+
   return (
     <Tooltip>
       <TooltipTrigger
@@ -25,7 +29,7 @@ export function SidebarNewChatButton({
           </button>
         }
       />
-      <TooltipPopup side="right">New chat</TooltipPopup>
+      <TooltipPopup side="right">{uiText("New chat", undefined, undefined, uiLocale)}</TooltipPopup>
     </Tooltip>
   );
 }

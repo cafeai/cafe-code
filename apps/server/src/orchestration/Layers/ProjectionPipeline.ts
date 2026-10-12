@@ -1,4 +1,5 @@
 import {
+  isCodexNativeRetryWarningPayload,
   ApprovalRequestId,
   type ChatAttachment,
   type OrchestrationEvent,
@@ -977,6 +978,9 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
             ...(event.payload.subagentLimits !== undefined
               ? { subagentLimits: event.payload.subagentLimits }
               : {}),
+            ...(event.payload.codexContextWindowOverride !== undefined
+              ? { codexContextWindowOverride: event.payload.codexContextWindowOverride }
+              : {}),
             runtimeMode: event.payload.runtimeMode,
             interactionMode: event.payload.interactionMode,
             branch: event.payload.branch,
@@ -1116,6 +1120,9 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
             ...(event.payload.subagentLimits !== undefined
               ? { subagentLimits: event.payload.subagentLimits }
               : {}),
+            ...(event.payload.codexContextWindowOverride !== undefined
+              ? { codexContextWindowOverride: event.payload.codexContextWindowOverride }
+              : {}),
             ...(event.payload.branch !== undefined ? { branch: event.payload.branch } : {}),
             ...(event.payload.worktreePath !== undefined
               ? { worktreePath: event.payload.worktreePath }
@@ -1170,6 +1177,9 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
               : {}),
             ...(event.payload.subagentLimits !== undefined
               ? { subagentLimits: event.payload.subagentLimits }
+              : {}),
+            ...(event.payload.codexContextWindowOverride !== undefined
+              ? { codexContextWindowOverride: event.payload.codexContextWindowOverride }
               : {}),
             runtimeMode: event.payload.runtimeMode,
             interactionMode: event.payload.interactionMode,
@@ -1759,6 +1769,18 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
               const payload = event.payload.activity.payload;
               if (
                 existingTurn.value.state === "error" &&
+                (event.commandId?.startsWith("server:") ||
+                  event.commandId?.startsWith("provider:codex:")) &&
+                event.payload.activity.kind === "runtime.warning" &&
+                isCodexNativeRetryWarningPayload(payload)
+              ) {
+                // Native retry observations can belong to an independently
+                // running child. Grouping them under the parent is not proof
+                // that its failed root resumed or changed its terminal time.
+                return;
+              }
+              if (
+                existingTurn.value.state === "error" &&
                 ["task.started", "task.progress", "task.completed"].includes(
                   event.payload.activity.kind,
                 ) &&
@@ -1800,6 +1822,17 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
           yield* Effect.forEach(keptRows, projectionThreadActivityRepository.upsert, {
             concurrency: 1,
           }).pipe(Effect.asVoid);
+          // Revert temporarily replaces every activity, including retained
+          // rows. Prune only after reinsertion so their private copies survive.
+          yield* sql`DELETE FROM provider_activity_diagnostics
+            WHERE thread_id = ${event.payload.threadId} AND NOT EXISTS (
+              SELECT 1 FROM projection_thread_activities AS retained
+              WHERE retained.activity_id = provider_activity_diagnostics.activity_id
+                AND retained.thread_id = provider_activity_diagnostics.thread_id
+                AND retained.turn_id IS provider_activity_diagnostics.turn_id
+            )`.pipe(
+            Effect.mapError(toPersistenceSqlError("ProjectionPipeline.pruneRevertedDiagnostics")),
+          );
           return;
         }
 
@@ -1903,6 +1936,10 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
           ...(Option.isSome(existingSession) &&
           existingSession.value.maxConcurrentSubagents !== undefined
             ? { maxConcurrentSubagents: existingSession.value.maxConcurrentSubagents }
+            : {}),
+          ...(Option.isSome(existingSession) &&
+          existingSession.value.codexContextWindowOverride !== undefined
+            ? { codexContextWindowOverride: existingSession.value.codexContextWindowOverride }
             : {}),
           activeTurnId: null,
           lastError: null,

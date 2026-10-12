@@ -1,3 +1,5 @@
+import { useUiLocale } from "~/i18n";
+import { uiText } from "@cafecode/shared/i18n";
 import {
   Fragment,
   useEffect,
@@ -338,6 +340,8 @@ export function useDeskRouteSync() {
 }
 
 function GroupGrip({ group }: { group: DeskGroup }) {
+  const uiLocale = useUiLocale();
+
   const drag = useDraggable({
     id: `group:${group.id}`,
     data: { kind: "group", groupId: group.id } satisfies DragData,
@@ -348,8 +352,8 @@ function GroupGrip({ group }: { group: DeskGroup }) {
       ref={drag.setNodeRef}
       {...drag.listeners}
       {...drag.attributes}
-      aria-label={`Move ${group.name} group`}
-      title={`Move ${group.name} group`}
+      aria-label={uiText("Move {value0} group", { value0: group.name }, undefined, uiLocale)}
+      title={uiText("Move {value0} group", { value0: group.name }, undefined, uiLocale)}
     >
       <GripVertical size={12} />
     </button>
@@ -371,6 +375,8 @@ function ChatTab({
   onMenu: (key: string, position: { x: number; y: number }) => void;
   onRename: (target: ThreadRouteTarget) => void;
 }) {
+  const uiLocale = useUiLocale();
+
   const meta = useDeskTabMetadata(target);
   const dispatch = useDeskStore((s) => s.dispatch);
   const selected = group.activeTabKey === tabKey;
@@ -456,14 +462,16 @@ function ChatTab({
           render={
             <button
               className="desk-tab-action"
-              aria-label={`Close tab ${meta.title}`}
+              aria-label={uiText("Close tab {value0}", { value0: meta.title }, undefined, uiLocale)}
               onClick={() => dispatch({ type: "close", tabKey })}
             >
               <X size={12} />
             </button>
           }
         />
-        <TooltipPopup side="bottom">Close tab (chat keeps running)</TooltipPopup>
+        <TooltipPopup side="bottom">
+          {uiText("Close tab (chat keeps running)", undefined, undefined, uiLocale)}
+        </TooltipPopup>
       </Tooltip>
     </div>
   );
@@ -494,6 +502,8 @@ function GroupTabs({
   controls: ReactNode;
   rect: DeskRect;
 }) {
+  const uiLocale = useUiLocale();
+
   const desk = useDeskStore((s) => s.desk);
   const strip = useRef<HTMLDivElement>(null);
   const titlebar = useRef<HTMLDivElement>(null);
@@ -599,7 +609,9 @@ function GroupTabs({
               </button>
             }
           />
-          <TooltipPopup side="bottom">Rename group</TooltipPopup>
+          <TooltipPopup side="bottom">
+            {uiText("Rename group", undefined, undefined, uiLocale)}
+          </TooltipPopup>
         </Tooltip>
       </div>
       <div
@@ -610,7 +622,7 @@ function GroupTabs({
         className="desk-tab-strip"
         style={tabStripStyle}
         role="tablist"
-        aria-label={`${group.name} tabs`}
+        aria-label={uiText("{value0} tabs", { value0: group.name }, undefined, uiLocale)}
       >
         {group.tabs.map((key, index) => {
           const target = desk.targets[key];
@@ -644,13 +656,17 @@ function GroupTabs({
       </div>
       <button
         className="desk-icon"
-        aria-label={restoreGroups ? "Restore all groups" : `Focus ${group.name}`}
+        aria-label={
+          restoreGroups
+            ? uiText("Restore all groups", undefined, undefined, uiLocale)
+            : uiText("Focus {value0}", { value0: group.name }, undefined, uiLocale)
+        }
         title={
           restoreGroups
             ? canRestoreGroups
-              ? "Restore all groups"
-              : "Enlarge the window to restore all groups"
-            : "Focus group"
+              ? uiText("Restore all groups", undefined, undefined, uiLocale)
+              : uiText("Enlarge the window to restore all groups", undefined, undefined, uiLocale)
+            : uiText("Focus group", undefined, undefined, uiLocale)
         }
         disabled={restoreGroups && !canRestoreGroups}
         onClick={onToggleFocus}
@@ -662,7 +678,12 @@ function GroupTabs({
           render={
             <button
               className="desk-icon"
-              aria-label={`${group.name} tab actions`}
+              aria-label={uiText(
+                "{value0} tab actions",
+                { value0: group.name },
+                undefined,
+                uiLocale,
+              )}
               onClick={(e) => {
                 const r = e.currentTarget.getBoundingClientRect();
                 onMenu(null, { x: r.left, y: r.bottom });
@@ -672,7 +693,9 @@ function GroupTabs({
             </button>
           }
         />
-        <TooltipPopup side="bottom">Tab actions</TooltipPopup>
+        <TooltipPopup side="bottom">
+          {uiText("Tab actions", undefined, undefined, uiLocale)}
+        </TooltipPopup>
       </Tooltip>
     </div>
   );
@@ -691,6 +714,8 @@ function Pane({
   children: ReactNode;
   hint: DropHint;
 }) {
+  const uiLocale = useUiLocale();
+
   const dispatch = useDeskStore((s) => s.dispatch);
   const drop = useDroppable({
     id: `pane:${group.id}`,
@@ -701,7 +726,7 @@ function Pane({
       ref={drop.setNodeRef}
       className="desk-pane"
       style={rectStyle(rect)}
-      aria-label={`${group.name} chat group`}
+      aria-label={uiText("{value0} chat group", { value0: group.name }, undefined, uiLocale)}
       data-active={active}
       onPointerDownCapture={(event) => {
         // Only a primary gesture selects the pane. Opening a tab's secondary
@@ -728,6 +753,8 @@ function ResizeDivider({
   rect: DeskRect;
   area: DeskSize;
 }) {
+  const uiLocale = useUiLocale();
+
   const dispatch = useDeskStore((s) => s.dispatch);
   const x = node.axis === "x";
   const limits = deskResizeBounds(node, {
@@ -751,7 +778,7 @@ function ResizeDivider({
       tabIndex={0}
       className="desk-divider"
       data-axis={node.axis}
-      aria-label="Resize chat groups"
+      aria-label={uiText("Resize chat groups", undefined, undefined, uiLocale)}
       aria-orientation={x ? "vertical" : "horizontal"}
       aria-valuenow={Math.round(node.ratio * 100)}
       aria-valuemin={Math.round((limits?.min ?? node.ratio) * 100)}
@@ -815,6 +842,8 @@ function ResizeDivider({
 }
 
 export default function DeskWorkspace() {
+  const uiLocale = useUiLocale();
+
   useDeskRouteSync();
   const isMobile = useIsMobile();
   const compactNavigation = !isElectron && isMobile;
@@ -975,77 +1004,136 @@ export default function DeskWorkspace() {
     };
     if (key && target) {
       if (group.previewTabKey === key)
-        item("keep-open", "Keep open", { type: "keepOpen", tabKey: key });
+        item("keep-open", uiText("Keep open", undefined, undefined, uiLocale), {
+          type: "keepOpen",
+          tabKey: key,
+        });
       items.push({
         id: "rename-chat",
-        label: "Rename chat…",
+        label: uiText("Rename chat…", undefined, undefined, uiLocale),
         disabled: !readDeskTabMetadata(target).threadRef,
       });
       items.push(...chatActions.items(target));
-      item("close", "Close tab", { type: "close", tabKey: key });
+      item("close", uiText("Close tab", undefined, undefined, uiLocale), {
+        type: "close",
+        tabKey: key,
+      });
       item(
         "others",
-        "Close other tabs",
+        uiText("Close other tabs", undefined, undefined, uiLocale),
         { type: "closeOthers", tabKey: key },
         group.tabs.length < 2,
       );
       item(
         "right",
-        "Close tabs to the right",
+        uiText("Close tabs to the right", undefined, undefined, uiLocale),
         { type: "closeRight", tabKey: key },
         group.tabs.at(-1) === key,
       );
       for (const edge of ["right", "bottom"] as const)
         item(
           `split-${edge}`,
-          `Split ${edge === "right" ? "right" : "below"}`,
+          edge === "right"
+            ? uiText("Split right", undefined, undefined, uiLocale)
+            : uiText("Split below", undefined, undefined, uiLocale),
           { type: "split", tabKey: key, targetGroupId: groupId, edge },
           groupIds.length >= 4 || group.tabs.length < 2,
         );
       for (const otherId of groupIds)
         if (otherId !== groupId)
-          item(`move-${otherId}`, `Move tab to ${current.groups[otherId]!.name}`, {
-            type: "move",
-            tabKey: key,
-            groupId: otherId,
-            index: current.groups[otherId]!.tabs.length,
-          });
+          item(
+            `move-${otherId}`,
+            uiText(
+              "Move tab to {group}",
+              { group: current.groups[otherId]!.name },
+              undefined,
+              uiLocale,
+            ),
+            {
+              type: "move",
+              tabKey: key,
+              groupId: otherId,
+              index: current.groups[otherId]!.tabs.length,
+            },
+          );
     }
     item(
       "close-group",
-      "Close all tabs in group",
+      uiText("Close all tabs in group", undefined, undefined, uiLocale),
       { type: "closeGroup", groupId },
       !group.tabs.length,
     );
-    item("close-all", "Close all tabs", { type: "closeAll" }, !hasTabs);
-    item("reopen", "Reopen closed tab", { type: "reopen" }, !current.closed.length);
-    items.push({ id: "all-tabs", label: "Search open tabs…" });
-    items.push({ id: "rename-group", label: "Rename group…" });
+    item(
+      "close-all",
+      uiText("Close all tabs", undefined, undefined, uiLocale),
+      { type: "closeAll" },
+      !hasTabs,
+    );
+    item(
+      "reopen",
+      uiText("Reopen closed tab", undefined, undefined, uiLocale),
+      { type: "reopen" },
+      !current.closed.length,
+    );
+    items.push({
+      id: "all-tabs",
+      label: uiText("Search open tabs…", undefined, undefined, uiLocale),
+    });
+    items.push({
+      id: "rename-group",
+      label: uiText("Rename group…", undefined, undefined, uiLocale),
+    });
     for (const otherId of groupIds)
       if (otherId !== groupId) {
-        item(`merge-${otherId}`, `Merge into ${current.groups[otherId]!.name}`, {
-          type: "merge",
-          sourceGroupId: groupId,
-          targetGroupId: otherId,
-        });
-        item(`swap-${otherId}`, `Swap with ${current.groups[otherId]!.name}`, {
-          type: "swapGroups",
-          firstGroupId: groupId,
-          secondGroupId: otherId,
-        });
+        item(
+          `merge-${otherId}`,
+          uiText(
+            "Merge into {group}",
+            { group: current.groups[otherId]!.name },
+            undefined,
+            uiLocale,
+          ),
+          {
+            type: "merge",
+            sourceGroupId: groupId,
+            targetGroupId: otherId,
+          },
+        );
+        item(
+          `swap-${otherId}`,
+          uiText(
+            "Swap with {group}",
+            { group: current.groups[otherId]!.name },
+            undefined,
+            uiLocale,
+          ),
+          {
+            type: "swapGroups",
+            firstGroupId: groupId,
+            secondGroupId: otherId,
+          },
+        );
       }
     item(
       "focus",
-      restoreGroups ? "Restore all groups" : "Focus group",
+      restoreGroups
+        ? uiText("Restore all groups", undefined, undefined, uiLocale)
+        : uiText("Focus group", undefined, undefined, uiLocale),
       { type: "focus", groupId: restoreGroups ? null : groupId },
       restoreGroups && !canRestoreGroups,
     );
     const railDocked = group.sessionRailDocked ?? defaultDocked;
-    item("session-rail", railDocked ? "Unpin session information" : "Pin session information", {
-      type: "sessionRail",
-      groupId,
-      docked: !railDocked,
-    });
+    item(
+      "session-rail",
+      railDocked
+        ? uiText("Unpin session information", undefined, undefined, uiLocale)
+        : uiText("Pin session information", undefined, undefined, uiLocale),
+      {
+        type: "sessionRail",
+        groupId,
+        docked: !railDocked,
+      },
+    );
     const clicked = await readLocalApi()?.contextMenu.show(items, position);
     if (!clicked || menuOwner.current !== owner) return;
     // Chat mutations retain their captured environment/chat authority and
@@ -1233,12 +1321,12 @@ export default function DeskWorkspace() {
                     onClick={() => useCommandPaletteStore.getState().setOpen(true)}
                   >
                     <Search />
-                    Open a chat
+                    {uiText("Open a chat", undefined, undefined, uiLocale)}
                   </Button>
                   {desk.closed.length > 0 ? (
                     <Button variant="ghost" onClick={() => dispatch({ type: "reopen" })}>
                       <RotateCcw />
-                      Reopen closed tab
+                      {uiText("Reopen closed tab", undefined, undefined, uiLocale)}
                     </Button>
                   ) : null}
                 </>
@@ -1298,7 +1386,7 @@ export default function DeskWorkspace() {
                                 <div
                                   className="desk-group-switcher"
                                   role="group"
-                                  aria-label="Chat groups"
+                                  aria-label={uiText("Chat groups", undefined, undefined, uiLocale)}
                                 >
                                   {groupIds.map((id) => (
                                     <button
@@ -1319,11 +1407,16 @@ export default function DeskWorkspace() {
                                       title={
                                         canRestoreGroups
                                           ? undefined
-                                          : "Enlarge the window to restore all groups"
+                                          : uiText(
+                                              "Enlarge the window to restore all groups",
+                                              undefined,
+                                              undefined,
+                                              uiLocale,
+                                            )
                                       }
                                       onClick={() => toggleGroupFocus(groupId)}
                                     >
-                                      Restore layout
+                                      {uiText("Restore layout", undefined, undefined, uiLocale)}
                                     </button>
                                   )}
                                 </div>
@@ -1377,9 +1470,14 @@ export default function DeskWorkspace() {
       >
         <DialogPopup>
           <div className="p-5 space-y-3">
-            <DialogTitle>Rename tab group</DialogTitle>
+            <DialogTitle>{uiText("Rename tab group", undefined, undefined, uiLocale)}</DialogTitle>
             <DialogDescription>
-              Groups organize open chats without moving their projects.
+              {uiText(
+                "Groups organize open chats without moving their projects.",
+                undefined,
+                undefined,
+                uiLocale,
+              )}
             </DialogDescription>
             <form
               onSubmit={(e) => {
@@ -1398,13 +1496,13 @@ export default function DeskWorkspace() {
               }}
             >
               <Input
-                aria-label="Group name"
+                aria-label={uiText("Group name", undefined, undefined, uiLocale)}
                 maxLength={80}
                 value={groupName}
                 onChange={(e) => setGroupName(e.target.value)}
               />
               <Button type="submit" className="mt-3" disabled={!groupName.trim()}>
-                Save
+                {uiText("Save", undefined, undefined, uiLocale)}
               </Button>
             </form>
           </div>
@@ -1418,11 +1516,13 @@ export default function DeskWorkspace() {
       >
         <DialogPopup>
           <div className="p-5 space-y-3">
-            <DialogTitle>Open tabs</DialogTitle>
-            <DialogDescription>Select a chat in this group.</DialogDescription>
+            <DialogTitle>{uiText("Open tabs", undefined, undefined, uiLocale)}</DialogTitle>
+            <DialogDescription>
+              {uiText("Select a chat in this group.", undefined, undefined, uiLocale)}
+            </DialogDescription>
             <Input
               type="search"
-              aria-label="Search open tabs"
+              aria-label={uiText("Search open tabs", undefined, undefined, uiLocale)}
               value={filter}
               onChange={(e) => setFilter(e.target.value)}
             />
@@ -1456,3 +1556,5 @@ export default function DeskWorkspace() {
     </SidebarInset>
   );
 }
+
+// Finite source-owned labels/helpers only; no received or user data.

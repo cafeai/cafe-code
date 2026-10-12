@@ -1,3 +1,5 @@
+import { useUiLocale } from "~/i18n";
+import { uiText } from "@cafecode/shared/i18n";
 import { type ApprovalRequestId } from "@cafecode/contracts";
 import { memo, useEffect, useEffectEvent, useRef, useState } from "react";
 import { type PendingUserInput } from "../../session-logic";
@@ -87,6 +89,8 @@ const ComposerPendingUserInputCard = memo(function ComposerPendingUserInputCard(
   autoResolutionSnoozed: boolean;
   onSnoozeAutoResolution: () => void;
 }) {
+  const uiLocale = useUiLocale();
+
   const pane = useChatPane();
   const progress = derivePendingUserInputProgress(prompt.questions, answers, questionIndex);
   const activeQuestion = progress.activeQuestion;
@@ -207,8 +211,15 @@ const ComposerPendingUserInputCard = memo(function ComposerPendingUserInputCard(
     Number.isFinite(requestedAtMs) &&
     nowMs >= countdownVisibleAtMs
       ? nowMs < countdownDeadlineMs
-        ? `Continues automatically in ${Math.max(1, Math.ceil((countdownDeadlineMs - nowMs) / 1_000))}s`
-        : "Continuing automatically"
+        ? uiText(
+            "Continues automatically in {seconds}s",
+            {
+              seconds: Math.max(1, Math.ceil((countdownDeadlineMs - nowMs) / 1_000)),
+            },
+            undefined,
+            uiLocale,
+          )
+        : uiText("Continuing automatically", undefined, undefined, uiLocale)
       : null;
 
   return (
@@ -230,7 +241,9 @@ const ComposerPendingUserInputCard = memo(function ComposerPendingUserInputCard(
       </div>
       <p className="mt-1.5 text-sm text-foreground">{activeQuestion.question}</p>
       {activeQuestion.multiSelect ? (
-        <p className="mt-1 text-xs text-muted-foreground">Select one or more.</p>
+        <p className="mt-1 text-xs text-muted-foreground">
+          {uiText("Select one or more.", undefined, undefined, uiLocale)}
+        </p>
       ) : null}
       <div className="mt-3 space-y-1">
         {activeQuestion.options.map((option, index) => {

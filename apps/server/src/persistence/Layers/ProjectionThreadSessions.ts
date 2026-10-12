@@ -30,6 +30,8 @@ const makeProjectionThreadSessionRepository = Effect.gen(function* () {
           subagent_runtime_id,
           max_concurrent_subagents,
           max_concurrent_subagents_known,
+          codex_context_window_override,
+          codex_context_window_override_known,
           active_turn_id,
           last_error,
           updated_at
@@ -43,6 +45,8 @@ const makeProjectionThreadSessionRepository = Effect.gen(function* () {
           ${row.subagentRuntimeId ?? null},
           ${row.maxConcurrentSubagents ?? null},
           ${row.maxConcurrentSubagents === undefined ? 0 : 1},
+          ${row.codexContextWindowOverride ?? null},
+          ${row.codexContextWindowOverride === undefined ? 0 : 1},
           ${row.activeTurnId},
           ${row.lastError},
           ${row.updatedAt}
@@ -56,6 +60,8 @@ const makeProjectionThreadSessionRepository = Effect.gen(function* () {
           subagent_runtime_id = excluded.subagent_runtime_id,
           max_concurrent_subagents = excluded.max_concurrent_subagents,
           max_concurrent_subagents_known = excluded.max_concurrent_subagents_known,
+          codex_context_window_override = excluded.codex_context_window_override,
+          codex_context_window_override_known = excluded.codex_context_window_override_known,
           active_turn_id = excluded.active_turn_id,
           last_error = excluded.last_error,
           updated_at = excluded.updated_at
@@ -76,6 +82,8 @@ const makeProjectionThreadSessionRepository = Effect.gen(function* () {
           subagent_runtime_id AS "subagentRuntimeId",
           max_concurrent_subagents AS "maxConcurrentSubagents",
           max_concurrent_subagents_known AS "maxConcurrentSubagentsKnown",
+          codex_context_window_override AS "codexContextWindowOverride",
+          codex_context_window_override_known AS "codexContextWindowOverrideKnown",
           active_turn_id AS "activeTurnId",
           last_error AS "lastError",
           updated_at AS "updatedAt"

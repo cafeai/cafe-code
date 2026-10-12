@@ -1,3 +1,5 @@
+import { useUiLocale } from "~/i18n";
+import { uiText } from "@cafecode/shared/i18n";
 import { parseScopedThreadKey, scopeProjectRef, scopeThreadRef } from "@cafecode/client-runtime";
 import { type ScopedThreadRef, ThreadId } from "@cafecode/contracts";
 import { isCodexHistoryRecoveryRequiredError } from "@cafecode/shared/codexHistorySafety";
@@ -32,6 +34,8 @@ import { useSettings } from "./useSettings";
 const pendingHistoryRecoveries = new Set<string>();
 
 export function useThreadActions() {
+  const uiLocale = useUiLocale();
+
   const sidebarThreadSortOrder = useSettings((settings) => settings.sidebarThreadSortOrder);
   const confirmThreadDelete = useSettings((settings) => settings.confirmThreadDelete);
   const clearComposerDraftForThread = useComposerDraftStore((store) => store.clearDraftThread);
@@ -157,12 +161,32 @@ export function useThreadActions() {
       try {
         const confirmed = await localApi.dialogs.confirm(
           [
-            "Continue in a new chat?",
-            "Cafe will copy the visible conversation into a new chat using the same selected account. On your next explicit message, a bounded excerpt of recent visible messages will provide context to a fresh Codex session; hidden native history is not copied.",
+            uiText("Continue in a new chat?", undefined, undefined, uiLocale),
+            uiText(
+              "Cafe will copy the visible conversation into a new chat using the same selected account. On your next explicit message, a bounded excerpt of recent visible messages will provide context to a fresh Codex session; hidden native history is not copied.",
+              undefined,
+              undefined,
+              uiLocale,
+            ),
             source.projectId === null
-              ? "This standalone chat receives a new empty workspace; existing workspace files are not copied."
-              : "The new chat keeps this project's workspace context.",
-            "Your original chat and workspace files remain unchanged. No prompt is sent automatically, and your current draft stays in the original chat.",
+              ? uiText(
+                  "This standalone chat receives a new empty workspace; existing workspace files are not copied.",
+                  undefined,
+                  undefined,
+                  uiLocale,
+                )
+              : uiText(
+                  "The new chat keeps this project's workspace context.",
+                  undefined,
+                  undefined,
+                  uiLocale,
+                ),
+            uiText(
+              "Your original chat and workspace files remain unchanged. No prompt is sent automatically, and your current draft stays in the original chat.",
+              undefined,
+              undefined,
+              uiLocale,
+            ),
           ].join("\n\n"),
         );
         if (!confirmed || !stillCurrent()) return;
@@ -200,7 +224,7 @@ export function useThreadActions() {
         pendingHistoryRecoveries.delete(pendingKey);
       }
     },
-    [getCurrentRouteThreadRef, resolveThreadTarget, router],
+    [getCurrentRouteThreadRef, resolveThreadTarget, router, uiLocale],
   );
 
   const archiveThread = useCallback(
@@ -211,7 +235,9 @@ export function useThreadActions() {
       if (!resolved) return;
       const { thread, threadRef } = resolved;
       if (thread.session?.status === "running" && thread.session.activeTurnId != null) {
-        throw new Error("Can't archive a chat while it's running.");
+        throw new Error(
+          uiText("Can't archive a chat while it's running.", undefined, undefined, uiLocale),
+        );
       }
 
       const currentRouteThreadRef = getCurrentRouteThreadRef();
@@ -235,7 +261,7 @@ export function useThreadActions() {
       await archiveCommand;
       refreshArchivedThreadsForEnvironment(threadRef.environmentId);
     },
-    [getCurrentRouteThreadRef, resolveThreadTarget],
+    [getCurrentRouteThreadRef, resolveThreadTarget, uiLocale],
   );
 
   const unarchiveThread = useCallback(async (target: ScopedThreadRef) => {
@@ -272,8 +298,13 @@ export function useThreadActions() {
         if (!localApi) return;
         const confirmed = await localApi.dialogs.confirm(
           [
-            "Delete this chat forever?",
-            "Its history, attachments and checkpoints are removed. This can't be undone.",
+            uiText("Delete this chat forever?", undefined, undefined, uiLocale),
+            uiText(
+              "Its history, attachments and checkpoints are removed. This can't be undone.",
+              undefined,
+              undefined,
+              uiLocale,
+            ),
           ].join("\n"),
         );
         if (!confirmed) {
@@ -287,7 +318,7 @@ export function useThreadActions() {
         refreshDeletedThreadsForEnvironment(target.environmentId);
       }
     },
-    [clearComposerDraftForThread],
+    [clearComposerDraftForThread, uiLocale],
   );
 
   const deleteThread = useCallback(
@@ -352,10 +383,15 @@ export function useThreadActions() {
         localApi &&
         (await localApi.dialogs.confirm(
           [
-            "This chat is the only one using this worktree:",
+            uiText(
+              "This chat is the only one using this worktree:",
+              undefined,
+              undefined,
+              uiLocale,
+            ),
             displayWorktreePath ?? orphanedWorktreePath,
             "",
-            "Delete the worktree too?",
+            uiText("Delete the worktree too?", undefined, undefined, uiLocale),
           ].join("\n"),
         ));
 
@@ -435,7 +471,10 @@ export function useThreadActions() {
           environmentId: threadRef.environmentId,
         });
       } catch (error) {
-        const message = error instanceof Error ? error.message : "Unknown error removing worktree.";
+        const message =
+          error instanceof Error
+            ? error.message
+            : uiText("Unknown error removing worktree.", undefined, undefined, uiLocale);
         console.error("Failed to remove orphaned worktree after thread deletion", {
           threadId: threadRef.threadId,
           projectCwd: threadProject.cwd,
@@ -445,8 +484,21 @@ export function useThreadActions() {
         toastManager.add(
           stackedThreadToast({
             type: "error",
-            title: "Chat deleted, but the worktree couldn't be removed",
-            description: `Could not remove ${displayWorktreePath ?? orphanedWorktreePath}. ${message}`,
+            title: uiText(
+              "Chat deleted, but the worktree couldn't be removed",
+              undefined,
+              undefined,
+              uiLocale,
+            ),
+            description: uiText(
+              "Could not remove {value1}. {message}",
+              {
+                value1: displayWorktreePath ?? orphanedWorktreePath,
+                message: message,
+              },
+              undefined,
+              uiLocale,
+            ),
           }),
         );
       }
@@ -459,6 +511,7 @@ export function useThreadActions() {
       queryClient,
       resolveThreadTarget,
       sidebarThreadSortOrder,
+      uiLocale,
     ],
   );
 
@@ -470,11 +523,16 @@ export function useThreadActions() {
       const resolved = resolveThreadTarget(target);
 
       if (confirmThreadDelete && localApi) {
-        const title = resolved?.thread.title ?? "this chat";
+        const title = resolved?.thread.title ?? uiText("this chat", undefined, undefined, uiLocale);
         const confirmed = await localApi.dialogs.confirm(
           [
-            `Move "${title}" to the Recycle Bin?`,
-            "You can restore it from Settings > Recently Deleted.",
+            uiText('Move "{title}" to the Recycle Bin?', { title: title }, undefined, uiLocale),
+            uiText(
+              "You can restore it from Settings > Recently Deleted.",
+              undefined,
+              undefined,
+              uiLocale,
+            ),
           ].join("\n"),
         );
         if (!confirmed) {
@@ -484,7 +542,7 @@ export function useThreadActions() {
 
       await deleteThread(target);
     },
-    [confirmThreadDelete, deleteThread, resolveThreadTarget],
+    [confirmThreadDelete, deleteThread, resolveThreadTarget, uiLocale],
   );
 
   return {

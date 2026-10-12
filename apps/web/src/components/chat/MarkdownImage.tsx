@@ -1,3 +1,5 @@
+import { uiText } from "@cafecode/shared/i18n";
+import { useUiLocale } from "~/i18n";
 import {
   CHAT_IMAGES_PATH,
   CHAT_IMAGE_MAX_BYTES,
@@ -101,6 +103,7 @@ export function MarkdownImage({
   alt: string;
   context: MarkdownImageContext;
 }) {
+  const uiLocale = useUiLocale();
   const { environmentId, threadId, messageId, isStreaming, onImageExpand } = context;
   const [revision, setRevision] = useState(0);
   const identity = JSON.stringify([
@@ -170,13 +173,17 @@ export function MarkdownImage({
   if (current.failed)
     return (
       <span className="my-2 flex items-center gap-2 text-xs text-muted-foreground">
-        <span>{alt ? `${alt} · Image unavailable` : "Image unavailable"}</span>
+        <span>
+          {alt
+            ? uiText("{alt} · Image unavailable", { alt }, undefined, uiLocale)
+            : uiText("Image unavailable", undefined, undefined, uiLocale)}
+        </span>
         <button
           type="button"
           className="underline underline-offset-2"
           onClick={() => setRevision((v) => v + 1)}
         >
-          Retry
+          {uiText("Retry", undefined, undefined, uiLocale)}
         </button>
       </span>
     );
@@ -196,9 +203,18 @@ export function MarkdownImage({
         <button
           type="button"
           className="block h-full w-full cursor-zoom-in"
-          aria-label={`Enlarge ${alt || "image"}`}
+          aria-label={
+            alt
+              ? uiText("Enlarge {alt}", { alt }, undefined, uiLocale)
+              : uiText("Enlarge image", undefined, undefined, uiLocale)
+          }
           onClick={() =>
-            onImageExpand({ images: [{ src: current.src!, name: alt || "Image" }], index: 0 })
+            onImageExpand({
+              images: [
+                { src: current.src!, name: alt || uiText("Image", undefined, undefined, uiLocale) },
+              ],
+              index: 0,
+            })
           }
         >
           <img
@@ -212,7 +228,9 @@ export function MarkdownImage({
         </button>
       ) : loading ? (
         <span className="flex min-h-16 items-center justify-center text-xs text-muted-foreground">
-          {isStreaming ? "Preparing image…" : "Loading image…"}
+          {isStreaming
+            ? uiText("Preparing image…", undefined, undefined, uiLocale)
+            : uiText("Loading image…", undefined, undefined, uiLocale)}
         </span>
       ) : null}
     </span>

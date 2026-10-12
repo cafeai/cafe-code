@@ -19,6 +19,8 @@ import {
   type OrchestrationThreadShell,
   type OrchestrationCommand,
   type OrchestrationEvent,
+  type OrchestrationThreadActivityDiagnosticInput,
+  type ProviderDiagnosticSnapshot,
   type ProviderRuntimeEvent,
   ORCHESTRATION_WS_METHODS,
   ProjectId,
@@ -38,6 +40,7 @@ import {
 } from "@cafecode/contracts";
 import { assert, it } from "@effect/vitest";
 import { assertFailure, assertInclude, assertTrue } from "@effect/vitest/utils";
+import * as Clock from "effect/Clock";
 import * as DateTime from "effect/DateTime";
 import * as Deferred from "effect/Deferred";
 import * as Duration from "effect/Duration";
@@ -52,6 +55,7 @@ import * as Path from "effect/Path";
 import * as PubSub from "effect/PubSub";
 import * as Ref from "effect/Ref";
 import * as Stream from "effect/Stream";
+import * as TestClock from "effect/testing/TestClock";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
 import { ChildProcessSpawner } from "effect/unstable/process";
 import {
@@ -980,6 +984,7 @@ const buildAppUnderTest = (options?: {
           getPostTerminalStaleSteerCandidates: () => Effect.succeed([]),
           getPostTerminalStaleSteerCandidateThreadIds: () => Effect.succeed([]),
           getThreadTurnActivityPage: () => Effect.die("unused"),
+          getThreadActivityDiagnostic: () => Effect.die("unused"),
           getThreadTurnWorkLogPresence: () => Effect.die("unused"),
           hasThreadTurnSubagentActivity: () => Effect.die("unused"),
           getThreadDetailById: () => Effect.succeed(Option.none()),
@@ -1407,6 +1412,47 @@ const extractSessionTokenFromSetCookie = (cookieHeader: string): string => {
   }
   return token;
 };
+
+/**
+ * Mint two independent owners inside the existing isolated auth fixture. The
+ * second authenticates through the real password exchange because desktop
+ * bootstrap credentials are intentionally single-use. It can revoke the
+ * first owner's exact durable session while that owner's socket stays open.
+ */
+const makeRevocableDiagnosticOwnerSocket = () =>
+  Effect.gen(function* () {
+    const ownerCookie = yield* getAuthenticatedSessionCookieHeader();
+    const password = "synthetic-diagnostic-control-owner-password";
+    const configured = yield* HttpClient.post("/api/auth/admin-password", {
+      headers: { cookie: ownerCookie },
+      body: HttpBody.jsonUnsafe({ password }),
+    });
+    assert.equal(configured.status, 200);
+    const controlOwner = yield* bootstrapPasswordSession(password);
+    assert.equal(controlOwner.response.status, 200);
+    const controlCookie = controlOwner.cookie?.split(";")[0] ?? "";
+    assert.isNotEmpty(controlCookie);
+    const listed = yield* HttpClient.get("/api/auth/clients", {
+      headers: { cookie: ownerCookie },
+    });
+    assert.equal(listed.status, 200);
+    const clients = (yield* listed.json) as ReadonlyArray<{
+      readonly sessionId: string;
+      readonly current: boolean;
+    }>;
+    const owner = clients.find((entry) => entry.current);
+    assert.isDefined(owner);
+    const wsUrl = appendSessionCookieToWsUrl(
+      yield* getWsServerUrl("/ws", { authenticated: false }),
+      ownerCookie,
+    );
+    const revoke = () =>
+      HttpClient.post("/api/auth/clients/revoke", {
+        headers: { cookie: controlCookie },
+        body: HttpBody.jsonUnsafe({ sessionId: owner!.sessionId }),
+      }).pipe(Effect.tap((response) => Effect.sync(() => assert.equal(response.status, 200))));
+    return { wsUrl, revoke };
+  });
 
 const splitHeaderTokens = (value: string | null) =>
   (value ?? "")
@@ -3602,6 +3648,390 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
         );
         assert.equal(calls, 0);
       }).pipe(Effect.provide(makeProductionHttpServerTestLayer())),
+  );
+
+  it.effect(
+    "reads private activity diagnostics only on an explicit owner request with exact identity",
+    () =>
+      Effect.gen(function* () {
+        const calls: OrchestrationThreadActivityDiagnosticInput[] = [];
+        const diagnostic: ProviderDiagnosticSnapshot = {
+          version: 1,
+          observedAt: "2026-10-12T00:00:00.000Z",
+          source: "codex.app-server.notification",
+          method: "error",
+          native: { threadId: "private-native-thread", turnId: "private-native-turn" },
+          message: "Connection interrupted",
+          json: '{"error":{"message":"Connection interrupted","requestId":"private-request"}}',
+          redacted: false,
+          truncated: false,
+          omittedFields: false,
+        };
+        yield* buildAppUnderTest({
+          layers: {
+            projectionSnapshotQuery: {
+              getThreadActivityDiagnostic: (input) =>
+                Effect.sync(() => {
+                  calls.push(input);
+                  return { ...input, diagnostic: input.turnId === null ? null : diagnostic };
+                }),
+            },
+          },
+        });
+        const wsUrl = yield* getWsServerUrl("/ws");
+        yield* Effect.scoped(
+          withWsRpcClient(wsUrl, (client) =>
+            Effect.gen(function* () {
+              // Establishing the ordinary authenticated stream must not fetch a
+              // private snapshot. Only this narrow explicit disclosure RPC does.
+              assert.deepEqual(calls, []);
+              const input = {
+                threadId: ThreadId.make("thread-private-diagnostic"),
+                turnId: TurnId.make("turn-private-diagnostic"),
+                activityId: EventId.make("activity-private-diagnostic"),
+              };
+              const result =
+                yield* client[ORCHESTRATION_WS_METHODS.getThreadActivityDiagnostic](input);
+              assert.deepEqual(result, { ...input, diagnostic });
+              assert.deepEqual(calls, [input]);
+              const nullTurnInput = { ...input, turnId: null };
+              const unavailable =
+                yield* client[ORCHESTRATION_WS_METHODS.getThreadActivityDiagnostic](nullTurnInput);
+              assert.deepEqual(unavailable, { ...nullTurnInput, diagnostic: null });
+              assert.deepEqual(calls, [input, nullTurnInput]);
+            }),
+          ),
+        );
+      }).pipe(Effect.provide(makeProductionHttpServerTestLayer())),
+  );
+
+  it.effect(
+    "denies private activity diagnostics to a paired client before any private reader access",
+    () =>
+      Effect.gen(function* () {
+        let calls = 0;
+        yield* buildAppUnderTest({
+          layers: {
+            projectionSnapshotQuery: {
+              getThreadActivityDiagnostic: (input) =>
+                Effect.sync(() => {
+                  calls += 1;
+                  return { ...input, diagnostic: null };
+                }),
+            },
+          },
+        });
+        // The fixture mints a scoped client session through the real auth
+        // exchange. It does not assume possession of ordinary read access means
+        // ownership, and never reads a user's credentials or provider profile.
+        const pairing = yield* HttpClient.post("/api/auth/pairing-token", {
+          headers: { cookie: yield* getAuthenticatedSessionCookieHeader() },
+        });
+        const { credential } = (yield* pairing.json) as { credential: string };
+        const cookie = yield* getAuthenticatedSessionCookieHeader(credential);
+        const wsUrl = appendSessionCookieToWsUrl(
+          yield* getWsServerUrl("/ws", { authenticated: false }),
+          cookie,
+        );
+        yield* Effect.scoped(
+          withWsRpcClient(wsUrl, (client) =>
+            Effect.gen(function* () {
+              for (const turnId of [TurnId.make("turn-private-diagnostic"), null]) {
+                const error = yield* client[ORCHESTRATION_WS_METHODS.getThreadActivityDiagnostic]({
+                  threadId: ThreadId.make("thread-private-diagnostic"),
+                  turnId,
+                  activityId: EventId.make("activity-private-diagnostic"),
+                }).pipe(Effect.flip);
+                assert.equal(
+                  error.message,
+                  "Diagnostic details require an owner connection over HTTPS or the same machine.",
+                );
+                assert.equal(error.cause, undefined);
+              }
+            }),
+          ),
+        );
+        assert.equal(calls, 0);
+      }).pipe(Effect.provide(makeProductionHttpServerTestLayer())),
+  );
+
+  it.effect("returns a content-free diagnostic reader failure to the owner", () =>
+    Effect.gen(function* () {
+      let calls = 0;
+      yield* buildAppUnderTest({
+        layers: {
+          projectionSnapshotQuery: {
+            getThreadActivityDiagnostic: () =>
+              Effect.suspend(() => {
+                calls += 1;
+                return Effect.fail(
+                  new PersistenceSqlError({
+                    operation: "private-diagnostic-reader",
+                    detail: "private-reader-failure-sentinel",
+                    cause: { json: "private-diagnostic-json-sentinel" },
+                  }),
+                );
+              }),
+          },
+        },
+      });
+      const wsUrl = yield* getWsServerUrl("/ws");
+      yield* Effect.scoped(
+        withWsRpcClient(wsUrl, (client) =>
+          Effect.gen(function* () {
+            const error = yield* client[ORCHESTRATION_WS_METHODS.getThreadActivityDiagnostic]({
+              threadId: ThreadId.make("thread-private-diagnostic"),
+              turnId: TurnId.make("turn-private-diagnostic"),
+              activityId: EventId.make("activity-private-diagnostic"),
+            }).pipe(Effect.flip);
+            assert.equal(error.message, "Diagnostic details are unavailable for this activity.");
+            assert.equal(error.cause, undefined);
+            assert.notMatch(
+              JSON.stringify(error),
+              /private-reader-failure-sentinel|private-diagnostic-json-sentinel/u,
+            );
+          }),
+        ),
+      );
+      assert.equal(calls, 1);
+    }).pipe(Effect.provide(makeProductionHttpServerTestLayer())),
+  );
+
+  it.effect(
+    "refuses new private diagnostic queries on the same owner socket after revocation",
+    () =>
+      Effect.gen(function* () {
+        let calls = 0;
+        yield* buildAppUnderTest({
+          layers: {
+            projectionSnapshotQuery: {
+              getThreadActivityDiagnostic: (input) =>
+                Effect.sync(() => {
+                  calls += 1;
+                  return { ...input, diagnostic: null };
+                }),
+            },
+          },
+        });
+        const { wsUrl, revoke } = yield* makeRevocableDiagnosticOwnerSocket();
+        yield* Effect.scoped(
+          withWsRpcClient(wsUrl, (client) =>
+            Effect.gen(function* () {
+              const input = {
+                threadId: ThreadId.make("revoked-diagnostic-owner-thread"),
+                turnId: TurnId.make("revoked-diagnostic-owner-turn"),
+                activityId: EventId.make("revoked-diagnostic-owner-activity"),
+              };
+              assert.deepEqual(
+                yield* client[ORCHESTRATION_WS_METHODS.getThreadActivityDiagnostic](input),
+                { ...input, diagnostic: null },
+              );
+              assert.equal(calls, 1);
+              yield* revoke();
+              // Retain this exact upgraded socket rather than reconnecting and
+              // accidentally qualifying only the existing upgrade auth check.
+              const error = yield* client[ORCHESTRATION_WS_METHODS.getThreadActivityDiagnostic](
+                input,
+              ).pipe(Effect.flip);
+              assert.equal(
+                error.message,
+                "Diagnostic details require a current authenticated owner session.",
+              );
+              assert.equal(error.cause, undefined);
+              assert.equal(calls, 1);
+            }),
+          ),
+        );
+      }).pipe(Effect.provide(makeProductionHttpServerTestLayer())),
+  );
+
+  it.effect("refuses private diagnostics after the upgraded owner's parent session expires", () =>
+    Effect.gen(function* () {
+      const liveClock = yield* Clock.Clock;
+      let now = TEST_EPOCH.epochMilliseconds;
+      const admissionClock: Clock.Clock = {
+        currentTimeMillisUnsafe: () => now,
+        currentTimeMillis: Effect.sync(() => now),
+        currentTimeNanosUnsafe: () => BigInt(now) * 1_000_000n,
+        currentTimeNanos: Effect.sync(() => BigInt(now) * 1_000_000n),
+        // Only session-observation time is controlled. Delegate every sleep to
+        // the existing clock: advancing TestClock across a 30-day session would
+        // iteratively drain all due sleeps, obscuring this admission boundary.
+        // Native socket timing and the existing test deadline stay unchanged.
+        sleep: (duration) => liveClock.sleep(duration),
+      };
+      yield* Effect.gen(function* () {
+        let calls = 0;
+        yield* buildAppUnderTest({
+          layers: {
+            projectionSnapshotQuery: {
+              getThreadActivityDiagnostic: (input) =>
+                Effect.sync(() => {
+                  calls += 1;
+                  return { ...input, diagnostic: null };
+                }),
+            },
+          },
+        });
+        const owner = yield* bootstrapBrowserSession();
+        assert.equal(owner.response.status, 200);
+        const ownerCookie = owner.cookie?.split(";")[0] ?? "";
+        assert.isNotEmpty(ownerCookie);
+        const parentExpiresAt = Date.parse(owner.body.expiresAt);
+        assert.isTrue(Number.isFinite(parentExpiresAt));
+        assert.isAbove(parentExpiresAt, now);
+        const wsUrl = appendSessionCookieToWsUrl(
+          yield* getWsServerUrl("/ws", { authenticated: false }),
+          ownerCookie,
+        );
+        yield* Effect.scoped(
+          withWsRpcClient(wsUrl, (client) =>
+            Effect.gen(function* () {
+              const input = {
+                threadId: ThreadId.make("expired-diagnostic-owner-thread"),
+                turnId: null,
+                activityId: EventId.make("expired-diagnostic-owner-activity"),
+              };
+              yield* client[ORCHESTRATION_WS_METHODS.getThreadActivityDiagnostic](input);
+              assert.equal(calls, 1);
+              // Move to the actual server-minted parent expiry, not a guessed
+              // TTL. Equality must refuse the same socket before a new query.
+              now = parentExpiresAt;
+              const error = yield* client[ORCHESTRATION_WS_METHODS.getThreadActivityDiagnostic](
+                input,
+              ).pipe(Effect.flip);
+              assert.equal(
+                error.message,
+                "Diagnostic details require a current authenticated owner session.",
+              );
+              assert.equal(error.cause, undefined);
+              assert.equal(calls, 1);
+            }),
+          ),
+        );
+      }).pipe(Effect.provideService(Clock.Clock, admissionClock));
+    }).pipe(Effect.provide(makeProductionHttpServerTestLayer())),
+  );
+
+  it.effect(
+    "revalidates the exact owner after a pending query before releasing private bytes",
+    () =>
+      Effect.gen(function* () {
+        const entered = yield* Deferred.make<void>();
+        const release = yield* Deferred.make<void>();
+        let calls = 0;
+        const privateSentinel = "synthetic-pending-private-diagnostic-do-not-release";
+        const diagnostic: ProviderDiagnosticSnapshot = {
+          version: 1,
+          observedAt: "2026-10-12T00:00:00.000Z",
+          source: "synthetic.error",
+          native: {},
+          message: privateSentinel,
+          json: JSON.stringify({ error: { message: privateSentinel } }),
+          redacted: false,
+          truncated: false,
+          omittedFields: false,
+        };
+        yield* buildAppUnderTest({
+          layers: {
+            projectionSnapshotQuery: {
+              getThreadActivityDiagnostic: (input) =>
+                Effect.gen(function* () {
+                  calls += 1;
+                  yield* Deferred.succeed(entered, undefined);
+                  yield* Deferred.await(release);
+                  return { ...input, diagnostic };
+                }),
+            },
+          },
+        });
+        const { wsUrl, revoke } = yield* makeRevocableDiagnosticOwnerSocket();
+        yield* Effect.scoped(
+          withWsRpcClient(wsUrl, (client) =>
+            Effect.gen(function* () {
+              const input = {
+                threadId: ThreadId.make("pending-diagnostic-owner-thread"),
+                turnId: TurnId.make("pending-diagnostic-owner-turn"),
+                activityId: EventId.make("pending-diagnostic-owner-activity"),
+              };
+              const pending = yield* client[ORCHESTRATION_WS_METHODS.getThreadActivityDiagnostic](
+                input,
+              ).pipe(Effect.flip, Effect.forkChild);
+              yield* Deferred.await(entered);
+              assert.equal(calls, 1);
+              yield* revoke();
+              yield* Deferred.succeed(release, undefined);
+              const error = yield* Fiber.join(pending);
+              assert.equal(
+                error.message,
+                "Diagnostic details require a current authenticated owner session.",
+              );
+              assert.equal(error.cause, undefined);
+              assert.notMatch(
+                JSON.stringify(error),
+                /synthetic-pending-private-diagnostic-do-not-release/u,
+              );
+              // The post-query check also leaves the pre-query fence intact for
+              // subsequent requests on that same now-revoked connection.
+              const nextError = yield* client[ORCHESTRATION_WS_METHODS.getThreadActivityDiagnostic](
+                input,
+              ).pipe(Effect.flip);
+              assert.equal(nextError.message, error.message);
+              assert.equal(calls, 1);
+            }).pipe(Effect.ensuring(Deferred.succeed(release, undefined))),
+          ),
+        );
+      }).pipe(Effect.provide(makeProductionHttpServerTestLayer())),
+  );
+
+  it.effect(
+    "keeps private reads available after the socket upgrade token expires while its parent stays active",
+    () =>
+      Effect.gen(function* () {
+        let calls = 0;
+        yield* buildAppUnderTest({
+          layers: {
+            projectionSnapshotQuery: {
+              getThreadActivityDiagnostic: (input) =>
+                Effect.sync(() => {
+                  calls += 1;
+                  return { ...input, diagnostic: null };
+                }),
+            },
+          },
+        });
+        const ownerToken = yield* getAuthenticatedBearerSessionToken();
+        const issued = yield* HttpClient.post("/api/auth/ws-token", {
+          headers: { authorization: `Bearer ${ownerToken}` },
+        });
+        assert.equal(issued.status, 200);
+        const upgrade = (yield* issued.json) as { readonly token: string };
+        const wsUrl = `${yield* getWsServerUrl("/ws", { authenticated: false })}?wsToken=${encodeURIComponent(upgrade.token)}`;
+        yield* Effect.scoped(
+          withWsRpcClient(wsUrl, (client) =>
+            Effect.gen(function* () {
+              const input = {
+                threadId: ThreadId.make("active-parent-diagnostic-thread"),
+                turnId: null,
+                activityId: EventId.make("active-parent-diagnostic-activity"),
+              };
+              assert.deepEqual(
+                yield* client[ORCHESTRATION_WS_METHODS.getThreadActivityDiagnostic](input),
+                { ...input, diagnostic: null },
+              );
+              // The dedicated upgrade token lasts five minutes, whereas the
+              // parent session lasts 30 days. Reuse the same admitted socket so
+              // token replay cannot masquerade as current parent validation.
+              yield* TestClock.adjust(Duration.minutes(6));
+              assert.deepEqual(
+                yield* client[ORCHESTRATION_WS_METHODS.getThreadActivityDiagnostic](input),
+                { ...input, diagnostic: null },
+              );
+              assert.equal(calls, 2);
+            }),
+          ),
+        );
+      }).pipe(Effect.provide(Layer.merge(makeProductionHttpServerTestLayer(), TestClock.layer()))),
   );
 
   it.effect("orders the hard-delete RPC across provider, ingestion, and engine barriers", () =>
@@ -6294,7 +6724,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
   );
 
   it.effect(
-    "bootstraps first-send worktree turns on the server before dispatching turn start",
+    "bootstraps first-send worktree turns and chat-local context policy before dispatching turn start",
     () =>
       Effect.gen(function* () {
         const dispatchedCommands: Array<OrchestrationCommand> = [];
@@ -6375,6 +6805,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
                 createThread: {
                   projectId: defaultProjectId,
                   title: "Bootstrap Thread",
+                  codexContextWindowOverride: 500_000,
                   modelSelection: defaultModelSelection,
                   runtimeMode: "full-access",
                   interactionMode: "default",
@@ -6414,6 +6845,11 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
         assert.deepEqual(refreshStatus.mock.calls[0]?.[0], "/tmp/bootstrap-worktree");
 
         const finalCommand = dispatchedCommands[2];
+        const createdCommand = dispatchedCommands[0];
+        assertTrue(createdCommand?.type === "thread.create");
+        if (createdCommand?.type === "thread.create") {
+          assert.equal(createdCommand.codexContextWindowOverride, 500_000);
+        }
         assertTrue(finalCommand?.type === "thread.turn.start");
         if (finalCommand?.type === "thread.turn.start") {
           assert.equal(finalCommand.bootstrap, undefined);

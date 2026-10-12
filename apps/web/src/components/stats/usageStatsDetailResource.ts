@@ -319,3 +319,5 @@ export function resetUsageStatsDetailResourceForTests(): void {
   for (const resource of resources.values()) resource.reset();
   resources.clear();
 }
+
+// Finite source-owned labels/helpers only; no received or user data.

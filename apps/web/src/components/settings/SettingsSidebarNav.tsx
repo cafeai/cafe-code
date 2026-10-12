@@ -1,3 +1,5 @@
+import { useUiLocale, useUiPresentation } from "~/i18n";
+import { uiText } from "@cafecode/shared/i18n";
 import { useCallback, type ComponentType } from "react";
 import {
   ActivityIcon,
@@ -66,49 +68,152 @@ type SettingsNavGroup = {
 
 export const SETTINGS_NAV_GROUPS: ReadonlyArray<SettingsNavGroup> = [
   {
-    label: "Preferences",
+    get label() {
+      return uiText("Preferences");
+    },
     items: [
       {
-        label: "Appearance",
+        get label() {
+          return uiText("Appearance");
+        },
         to: "/settings/appearance",
         icon: PaletteIcon,
         activePaths: ["/settings/general"],
       },
-      { label: "Ambiance", to: "/settings/ambiance", icon: CloudDrizzleIcon },
-      { label: "Chats", to: "/settings/chat-threads", icon: MessageSquareIcon },
-      { label: "Notifications", to: "/settings/notifications", icon: BellIcon },
-      { label: "Files", to: "/settings/files", icon: FileTextIcon },
-      { label: "Keybindings", to: "/settings/keybindings", icon: KeyboardIcon },
+      {
+        get label() {
+          return uiText("Ambiance");
+        },
+        to: "/settings/ambiance",
+        icon: CloudDrizzleIcon,
+      },
+      {
+        get label() {
+          return uiText("Chats");
+        },
+        to: "/settings/chat-threads",
+        icon: MessageSquareIcon,
+      },
+      {
+        get label() {
+          return uiText("Notifications");
+        },
+        to: "/settings/notifications",
+        icon: BellIcon,
+      },
+      {
+        get label() {
+          return uiText("Files");
+        },
+        to: "/settings/files",
+        icon: FileTextIcon,
+      },
+      {
+        get label() {
+          return uiText("Keybindings");
+        },
+        to: "/settings/keybindings",
+        icon: KeyboardIcon,
+      },
     ],
   },
   {
-    label: "AI & Integrations",
+    get label() {
+      return uiText("AI & Integrations");
+    },
     items: [
-      { label: "Providers", to: "/settings/providers", icon: BotIcon },
-      { label: "MCP", to: "/settings/mcp", icon: PlugIcon },
-      { label: "Dictation", to: "/settings/dictation", icon: MicIcon },
-      { label: "Source Control", to: "/settings/source-control", icon: GitBranchIcon },
-      { label: "WebUI", to: "/settings/connections", icon: MonitorSmartphoneIcon },
+      {
+        get label() {
+          return uiText("Providers");
+        },
+        to: "/settings/providers",
+        icon: BotIcon,
+      },
+      {
+        get label() {
+          return uiText("MCP");
+        },
+        to: "/settings/mcp",
+        icon: PlugIcon,
+      },
+      {
+        get label() {
+          return uiText("Dictation");
+        },
+        to: "/settings/dictation",
+        icon: MicIcon,
+      },
+      {
+        get label() {
+          return uiText("Source Control");
+        },
+        to: "/settings/source-control",
+        icon: GitBranchIcon,
+      },
+      {
+        get label() {
+          return uiText("WebUI");
+        },
+        to: "/settings/connections",
+        icon: MonitorSmartphoneIcon,
+      },
     ],
   },
   {
-    label: "Data",
+    get label() {
+      return uiText("Data");
+    },
     items: [
-      { label: "Usage", to: "/settings/stats", icon: BarChart3Icon },
-      { label: "Archive", to: "/settings/archived", icon: ArchiveIcon },
-      { label: "Recently Deleted", to: "/settings/recently-deleted", icon: Trash2Icon },
+      {
+        get label() {
+          return uiText("Usage");
+        },
+        to: "/settings/stats",
+        icon: BarChart3Icon,
+      },
+      {
+        get label() {
+          return uiText("Archive");
+        },
+        to: "/settings/archived",
+        icon: ArchiveIcon,
+      },
+      {
+        get label() {
+          return uiText("Recently Deleted");
+        },
+        to: "/settings/recently-deleted",
+        icon: Trash2Icon,
+      },
     ],
   },
   {
-    label: "Advanced",
+    get label() {
+      return uiText("Advanced");
+    },
     items: [
-      { label: "System", to: "/settings/system", icon: Settings2Icon },
-      { label: "Diagnostics", to: "/settings/diagnostics", icon: ActivityIcon },
+      {
+        get label() {
+          return uiText("System");
+        },
+        to: "/settings/system",
+        icon: Settings2Icon,
+      },
+      {
+        get label() {
+          return uiText("Diagnostics");
+        },
+        to: "/settings/diagnostics",
+        icon: ActivityIcon,
+      },
     ],
   },
 ];
 
 export function SettingsSidebarNav({ pathname }: { pathname: string }) {
+  const uiLocale = useUiLocale();
+  const uiPresentation = useUiPresentation(UI_PRESENTATION_SOURCES);
+
   const navigate = useNavigate();
   const navigateBackWithinApp = useSettingsBackNavigation();
   const { isMobile, setOpenMobile } = useSidebar();
@@ -131,7 +236,7 @@ export function SettingsSidebarNav({ pathname }: { pathname: string }) {
   return (
     <>
       <SidebarContent className="overflow-x-hidden">
-        {SETTINGS_NAV_GROUPS.map((group) => (
+        {uiPresentation.SETTINGS_NAV_GROUPS.map((group) => (
           <SidebarGroup key={group.label} className="px-2 py-2 first:pt-3">
             {/* Same section-label treatment as the sidebar's Chats/Projects
                 headings; size and colour are explicit so they win over the
@@ -185,7 +290,7 @@ export function SettingsSidebarNav({ pathname }: { pathname: string }) {
               onClick={handleBackClick}
             >
               <ArrowLeftIcon className="size-4" />
-              <span>Back</span>
+              <span>{uiText("Back", undefined, undefined, uiLocale)}</span>
             </SidebarMenuButton>
           </SidebarMenuItem>
         </SidebarMenu>
@@ -193,3 +298,6 @@ export function SettingsSidebarNav({ pathname }: { pathname: string }) {
     </>
   );
 }
+
+// Finite source-owned labels/helpers only; no received or user data.
+const UI_PRESENTATION_SOURCES = { SETTINGS_NAV_GROUPS };

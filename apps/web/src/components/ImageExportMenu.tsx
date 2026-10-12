@@ -1,3 +1,5 @@
+import { useUiLocale } from "~/i18n";
+import { uiText } from "@cafecode/shared/i18n";
 import { CopyIcon, DownloadIcon, MoreHorizontalIcon } from "lucide-react";
 import { useLayoutEffect, useMemo, useRef, useState } from "react";
 
@@ -10,7 +12,8 @@ import { toastManager } from "./ui/toast";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "./ui/tooltip";
 
 interface ImageExportMenuProps {
-  label: "Diagram" | "Table";
+  /** Presentation copy only; filename/content identity are independently bound. */
+  label: string;
   contentKey: unknown;
   createPng: (signal: AbortSignal) => Promise<Blob>;
   suggestedName: string;
@@ -28,6 +31,8 @@ export function ImageExportMenu({
   suggestedName,
   disabled = false,
 }: ImageExportMenuProps) {
+  const uiLocale = useUiLocale();
+
   const owner = useMemo(() => ({ contentKey, disabled }), [contentKey, disabled]);
   const currentOwner = useRef(owner);
   const mounted = useRef(false);
@@ -76,7 +81,7 @@ export function ImageExportMenu({
             // cancelled native dialogs deliberately emit no success notification.
             toastManager.add({
               type: "success",
-              title: `${label} image copied`,
+              title: uiText("{value0} image copied", { value0: label }, undefined, uiLocale),
               timeout: 2000,
               data: { hideCopyButton: true },
             });
@@ -86,11 +91,24 @@ export function ImageExportMenu({
           if (!isCurrent()) return;
           toastManager.add({
             type: "error",
-            title: action === "copy" ? "Couldn't copy image" : "Couldn't save image",
+            title:
+              action === "copy"
+                ? uiText("Couldn''t copy image", undefined, undefined, uiLocale)
+                : uiText("Couldn''t save image", undefined, undefined, uiLocale),
             description:
               action === "copy"
-                ? "Try again, or use Save as PNG. Some browsers don't allow image clipboard access."
-                : "Try again. Unsupported content or an unavailable destination can prevent image export.",
+                ? uiText(
+                    "Try again, or use Save as PNG. Some browsers don''t allow image clipboard access.",
+                    undefined,
+                    undefined,
+                    uiLocale,
+                  )
+                : uiText(
+                    "Try again. Unsupported content or an unavailable destination can prevent image export.",
+                    undefined,
+                    undefined,
+                    uiLocale,
+                  ),
             data: { hideCopyButton: true },
           });
         },
@@ -108,7 +126,7 @@ export function ImageExportMenu({
         <TooltipTrigger
           render={
             <MenuTrigger
-              aria-label={`${label} image actions`}
+              aria-label={uiText("{value0} image actions", { value0: label }, undefined, uiLocale)}
               // Keep the trigger focusable while work is pending: menu close
               // must restore keyboard focus even before clipboard preparation
               // settles. Its actions are disabled and the single-flight guard
@@ -119,20 +137,26 @@ export function ImageExportMenu({
             />
           }
         >
-          {showBusy ? <Spinner aria-label="Preparing image" /> : <MoreHorizontalIcon />}
+          {showBusy ? (
+            <Spinner aria-label={uiText("Preparing image", undefined, undefined, uiLocale)} />
+          ) : (
+            <MoreHorizontalIcon />
+          )}
         </TooltipTrigger>
-        <TooltipPopup>Copy or save image</TooltipPopup>
+        <TooltipPopup>{uiText("Copy or save image", undefined, undefined, uiLocale)}</TooltipPopup>
       </Tooltip>
       <MenuPopup align="end" className="min-w-44" data-cafe-window-no-drag="true">
         <MenuItem disabled={disabled || busy} onClick={() => start("copy")}>
           <CopyIcon />
-          Copy image
+          {uiText("Copy image", undefined, undefined, uiLocale)}
         </MenuItem>
         <MenuItem disabled={disabled || busy} onClick={() => start("save")}>
           <DownloadIcon />
-          Save as PNG
+          {uiText("Save as PNG", undefined, undefined, uiLocale)}
         </MenuItem>
       </MenuPopup>
     </Menu>
   );
 }
+
+// Finite source-owned labels/helpers only; no received or user data.

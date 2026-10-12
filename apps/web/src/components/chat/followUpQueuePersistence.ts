@@ -1,3 +1,4 @@
+import { uiText } from "@cafecode/shared/i18n";
 import {
   ChatFileAttachment,
   ChatImageAttachment,
@@ -19,6 +20,7 @@ import * as Schema from "effect/Schema";
 
 import type { ComposerImageAttachment } from "../../composerDraftStore";
 import type { StateStorage } from "../../lib/storage";
+import { createQueuedFollowUpFeedback } from "./queuedFollowUpFeedback";
 
 export const FOLLOW_UP_QUEUE_STORAGE_KEY = "cafe-code:follow-up-queue:v1";
 export const MAX_PERSISTED_FOLLOW_UPS_PER_ENVIRONMENT = 64;
@@ -81,6 +83,8 @@ export interface FollowUpQueuePersistenceItem {
   readonly interactionMode: ProviderInteractionMode;
   readonly queuedAt: string;
   readonly blockedReason: string | null;
+  /** Presentation-only source provenance is deliberately never serialized. */
+  readonly blockedFeedback?: object | undefined;
   readonly automaticSteerRetry?: unknown;
 }
 
@@ -116,14 +120,26 @@ export type FollowUpQueuePersistenceResult<A = void> =
 
 const failure = (error: string): FollowUpQueuePersistenceResult<never> => ({ ok: false, error });
 const success = <A>(value: A): FollowUpQueuePersistenceResult<A> => ({ ok: true, value });
-const STORAGE_FAILURE =
-  "Could not save the follow-up queue. Browser storage may be unavailable or full; keep this page open and try again.";
-const INVALID_QUEUE =
-  "Saved follow-up queue data is invalid or exceeds its safety limit. Existing data was left untouched.";
-const CLAIMED_MESSAGE =
-  "Delivery status is unknown after reload. Inspect the timeline before removing this queued message.";
-const QUEUE_CHANGED =
-  "This queued follow-up changed in another view. Reload and review it before trying again.";
+function getSTORAGE_FAILURE() {
+  return uiText(
+    "Could not save the follow-up queue. Browser storage may be unavailable or full; keep this page open and try again.",
+  );
+}
+function getINVALID_QUEUE() {
+  return uiText(
+    "Saved follow-up queue data is invalid or exceeds its safety limit. Existing data was left untouched.",
+  );
+}
+function getCLAIMED_MESSAGE() {
+  return uiText(
+    "Delivery status is unknown after reload. Inspect the timeline before removing this queued message.",
+  );
+}
+function getQUEUE_CHANGED() {
+  return uiText(
+    "This queued follow-up changed in another view. Reload and review it before trying again.",
+  );
+}
 
 function itemKey(item: { environmentId: EnvironmentId; threadId: ThreadId; id: string }): string {
   return JSON.stringify([item.environmentId, item.threadId, item.id]);
@@ -144,16 +160,16 @@ function validatedImagePayload(image: PersistedImage): string {
     !/^image\/(?:png|jpeg|gif|webp)$/i.test(image.mimeType) ||
     !image.dataUrl.startsWith(prefix)
   ) {
-    throw new Error(INVALID_QUEUE);
+    throw new Error(getINVALID_QUEUE());
   }
   const encoded = image.dataUrl.slice(prefix.length);
   if (encoded.length % 4 !== 0 || !/^[A-Za-z0-9+/]*={0,2}$/.test(encoded)) {
-    throw new Error(INVALID_QUEUE);
+    throw new Error(getINVALID_QUEUE());
   }
   const decodedSize =
     (encoded.length / 4) * 3 - (encoded.endsWith("==") ? 2 : encoded.endsWith("=") ? 1 : 0);
   if (decodedSize !== image.sizeBytes || decodedSize > PROVIDER_SEND_TURN_MAX_IMAGE_BYTES) {
-    throw new Error(INVALID_QUEUE);
+    throw new Error(getINVALID_QUEUE());
   }
   return encoded;
 }
@@ -169,10 +185,10 @@ function validateItemBounds(items: readonly PersistedItem[]): void {
   for (const item of items) {
     const key = itemKey(item);
     if (seen.has(key) || !Number.isFinite(Date.parse(item.queuedAt)))
-      throw new Error(INVALID_QUEUE);
+      throw new Error(getINVALID_QUEUE());
     seen.add(key);
     const count = (counts.get(item.environmentId) ?? 0) + 1;
-    if (count > MAX_PERSISTED_FOLLOW_UPS_PER_ENVIRONMENT) throw new Error(INVALID_QUEUE);
+    if (count > MAX_PERSISTED_FOLLOW_UPS_PER_ENVIRONMENT) throw new Error(getINVALID_QUEUE());
     counts.set(item.environmentId, count);
     const attachments = [...item.images, ...item.files];
     if (
@@ -180,7 +196,7 @@ function validateItemBounds(items: readonly PersistedItem[]): void {
       attachments.reduce((total, attachment) => total + attachment.sizeBytes, 0) >
         PROVIDER_SEND_TURN_MAX_TOTAL_ATTACHMENT_BYTES
     ) {
-      throw new Error(INVALID_QUEUE);
+      throw new Error(getINVALID_QUEUE());
     }
   }
 }
@@ -194,7 +210,7 @@ function validateItems(items: readonly PersistedItem[]): void {
 
 async function persistImage(image: ComposerImageAttachment): Promise<PersistedImage> {
   if (image.file.size !== image.sizeBytes || image.file.size > PROVIDER_SEND_TURN_MAX_IMAGE_BYTES) {
-    throw new Error(INVALID_QUEUE);
+    throw new Error(getINVALID_QUEUE());
   }
   const bytes = new Uint8Array(await image.file.arrayBuffer());
   let binary = "";
@@ -256,7 +272,7 @@ function expectedIntent(item: FollowUpQueuePersistenceItem): PersistedItem {
       const source = item.images[index]!;
       const payload = knownImagePayloads.get(source.file);
       if (payload === undefined || source.file.size !== image.sizeBytes)
-        throw new Error(QUEUE_CHANGED);
+        throw new Error(getQUEUE_CHANGED());
       return Object.assign({}, image, { dataUrl: `data:${image.mimeType};base64,${payload}` });
     }),
   };
@@ -286,11 +302,11 @@ async function encodeItems(
         source.file.size !== image.sizeBytes ||
         !/^image\/(?:png|jpeg|gif|webp)$/i.test(image.mimeType)
       )
-        throw new Error(INVALID_QUEUE);
+        throw new Error(getINVALID_QUEUE());
       encodedBytes += `data:${image.mimeType};base64,`.length + Math.ceil(image.sizeBytes / 3) * 4;
     }
   }
-  if (encodedBytes > MAX_PERSISTED_FOLLOW_UP_QUEUE_BYTES) throw new Error(INVALID_QUEUE);
+  if (encodedBytes > MAX_PERSISTED_FOLLOW_UP_QUEUE_BYTES) throw new Error(getINVALID_QUEUE());
   const complete: PersistedItem[] = [];
   for (const [index, item] of encoded.entries()) {
     const images: PersistedImage[] = [];
@@ -330,11 +346,11 @@ function hydrateItem(item: PersistedItem): HydratedFollowUpQueueItem {
     queuedAt: item.queuedAt,
     providerModels: [],
     expanded: false,
-    blockedReason: item.dispatch
-      ? CLAIMED_MESSAGE
+    ...(item.dispatch
+      ? createQueuedFollowUpFeedback({ code: "claimed-after-reload" })
       : item.blocked
-        ? "Review this queued follow-up before sending."
-        : null,
+        ? createQueuedFollowUpFeedback({ code: "review-before-send" })
+        : { blockedReason: null }),
     dispatchState: item.dispatch ? "claimed" : "pending",
     ...(item.dispatch ? { claimedDispatch: item.dispatch } : {}),
   };
@@ -364,7 +380,7 @@ export function createFollowUpQueuePersistence(storage?: StateStorage) {
       raw.length > MAX_PERSISTED_FOLLOW_UP_QUEUE_BYTES ||
       utf8Length(raw) > MAX_PERSISTED_FOLLOW_UP_QUEUE_BYTES
     ) {
-      throw new Error(INVALID_QUEUE);
+      throw new Error(getINVALID_QUEUE());
     }
     const decoded = decodeQueue(JSON.parse(raw));
     validateItems(decoded.items);
@@ -378,7 +394,7 @@ export function createFollowUpQueuePersistence(storage?: StateStorage) {
       serialized.length > MAX_PERSISTED_FOLLOW_UP_QUEUE_BYTES ||
       utf8Length(serialized) > MAX_PERSISTED_FOLLOW_UP_QUEUE_BYTES
     ) {
-      throw new Error(INVALID_QUEUE);
+      throw new Error(getINVALID_QUEUE());
     }
     const target = selectedStorage();
     const result = target.setItem(FOLLOW_UP_QUEUE_STORAGE_KEY, serialized);
@@ -386,7 +402,7 @@ export function createFollowUpQueuePersistence(storage?: StateStorage) {
       (result !== null && typeof result === "object" && "then" in result) ||
       target.getItem(FOLLOW_UP_QUEUE_STORAGE_KEY) !== serialized
     ) {
-      throw new Error(STORAGE_FAILURE);
+      throw new Error(getSTORAGE_FAILURE());
     }
   };
   return {
@@ -403,7 +419,7 @@ export function createFollowUpQueuePersistence(storage?: StateStorage) {
           claimed: items.filter((item) => item.dispatchState === "claimed"),
         });
       } catch {
-        return failure(INVALID_QUEUE);
+        return failure(getINVALID_QUEUE());
       }
     },
     async save(
@@ -417,11 +433,11 @@ export function createFollowUpQueuePersistence(storage?: StateStorage) {
           ordinary.length > MAX_PERSISTED_FOLLOW_UPS_PER_ENVIRONMENT ||
           ordinary.some((item) => item.environmentId !== environmentId)
         )
-          return failure(INVALID_QUEUE);
+          return failure(getINVALID_QUEUE());
         const complete = await encodeItems(ordinary);
         // A claim, removal, or newer save that ran while image bytes were read
         // owns the newer state. Never let that stale async snapshot resurrect it.
-        if (currentGeneration !== generation) return failure(QUEUE_CHANGED);
+        if (currentGeneration !== generation) return failure(getQUEUE_CHANGED());
         const existing = read();
         const next = [...existing];
         for (const item of complete) {
@@ -430,13 +446,13 @@ export function createFollowUpQueuePersistence(storage?: StateStorage) {
           // overwrites an edit made in another mounted view. Editing is an
           // explicit compare-and-replace operation below; claims survive saves.
           if (previous?.dispatch) continue;
-          if (previous && !sameIntent(previous, item)) return failure(QUEUE_CHANGED);
+          if (previous && !sameIntent(previous, item)) return failure(getQUEUE_CHANGED());
           if (!previous) next.push(item);
         }
         write(next);
         return success(undefined);
       } catch {
-        return failure(STORAGE_FAILURE);
+        return failure(getSTORAGE_FAILURE());
       }
     },
     async replacePending(
@@ -450,20 +466,20 @@ export function createFollowUpQueuePersistence(storage?: StateStorage) {
           expected.automaticSteerRetry != null ||
           replacement.automaticSteerRetry != null
         )
-          return failure(QUEUE_CHANGED);
+          return failure(getQUEUE_CHANGED());
         // Capture the old image byte identity before an asynchronous encode can
         // yield to another view's edit, removal, or claim.
         const previousIntent = expectedIntent(expected);
         const [next] = await encodeItems([replacement]);
-        if (currentGeneration !== generation) return failure(QUEUE_CHANGED);
+        if (currentGeneration !== generation) return failure(getQUEUE_CHANGED());
         const items = read();
         const target = items.find((item) => itemKey(item) === itemKey(expected));
         if (!target || target.dispatch || !sameIntent(target, previousIntent))
-          return failure(QUEUE_CHANGED);
+          return failure(getQUEUE_CHANGED());
         write(items.map((item) => (item === target ? next! : item)));
         return success(undefined);
       } catch {
-        return failure(STORAGE_FAILURE);
+        return failure(getSTORAGE_FAILURE());
       }
     },
     claim(
@@ -474,10 +490,10 @@ export function createFollowUpQueuePersistence(storage?: StateStorage) {
       try {
         const items = read();
         const target = items.find((item) => itemKey(item) === claimKey(claim));
-        if (!target) return failure("Save this queued follow-up before sending it.");
-        if (target.dispatch !== null) return failure(CLAIMED_MESSAGE);
+        if (!target) return failure(uiText("Save this queued follow-up before sending it."));
+        if (target.dispatch !== null) return failure(getCLAIMED_MESSAGE());
         if (itemKey(expected) !== claimKey(claim) || !sameIntent(target, expectedIntent(expected)))
-          return failure(QUEUE_CHANGED);
+          return failure(getQUEUE_CHANGED());
         write(
           items.map((item) =>
             item === target
@@ -489,7 +505,7 @@ export function createFollowUpQueuePersistence(storage?: StateStorage) {
         );
         return success(undefined);
       } catch {
-        return failure(STORAGE_FAILURE);
+        return failure(getSTORAGE_FAILURE());
       }
     },
     removePending(scope: FollowUpQueueItemScope): FollowUpQueuePersistenceResult {
@@ -500,11 +516,11 @@ export function createFollowUpQueuePersistence(storage?: StateStorage) {
         if (!target) return success(undefined);
         // A persisted delivery attempt may only be cleared through the exact
         // command/message tuple, never by a stale ordinary-queue Remove action.
-        if (target.dispatch !== null) return failure(CLAIMED_MESSAGE);
+        if (target.dispatch !== null) return failure(getCLAIMED_MESSAGE());
         write(items.filter((item) => item !== target));
         return success(undefined);
       } catch {
-        return failure(STORAGE_FAILURE);
+        return failure(getSTORAGE_FAILURE());
       }
     },
     settleClaim(claim: FollowUpQueueClaim): FollowUpQueuePersistenceResult {
@@ -517,11 +533,11 @@ export function createFollowUpQueuePersistence(storage?: StateStorage) {
           target.dispatch?.commandId !== claim.commandId ||
           target.dispatch.messageId !== claim.messageId
         )
-          return failure(CLAIMED_MESSAGE);
+          return failure(getCLAIMED_MESSAGE());
         write(items.filter((item) => item !== target));
         return success(undefined);
       } catch {
-        return failure(STORAGE_FAILURE);
+        return failure(getSTORAGE_FAILURE());
       }
     },
   };

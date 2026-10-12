@@ -1,4 +1,5 @@
 import type { NativeControlPermissionsState } from "@cafecode/contracts";
+import { uiText } from "@cafecode/shared/i18n";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
@@ -63,20 +64,23 @@ export const layer = Layer.effect(
       choose: async (state) => {
         const missing = missingNativePermissions(state);
         const labels: Record<NativePermission, string> = {
-          accessibility: "Open Accessibility Settings",
-          "screen-recording": "Open Screen Recording Settings",
+          accessibility: uiText("Open Accessibility Settings"),
+          "screen-recording": uiText("Open Screen Recording Settings"),
         };
         const descriptions: Record<NativePermission, string> = {
-          accessibility: "Accessibility lets computer use click and type.",
-          "screen-recording": "Screen Recording lets computer use see your screen.",
+          accessibility: uiText("Accessibility lets computer use click and type."),
+          "screen-recording": uiText("Screen Recording lets computer use see your screen."),
         };
         const result = await Effect.runPromise(
           dialog.showMessageBox({
             type: "info",
-            title: "Allow computer use",
-            message: "Computer use needs macOS permissions",
-            detail: `${missing.map((permission) => descriptions[permission]).join("\n")}\n\nEnable Cafe Code in Privacy & Security. A restart may be required after granting access.`,
-            buttons: [...missing.map((permission) => labels[permission]), "Not Now"],
+            title: uiText("Allow computer use"),
+            message: uiText("Computer use needs macOS permissions"),
+            detail: uiText(
+              "{permissions}\n\nEnable Cafe Code in Privacy & Security. A restart may be required after granting access.",
+              { permissions: missing.map((permission) => descriptions[permission]).join("\n") },
+            ),
+            buttons: [...missing.map((permission) => labels[permission]), uiText("Not Now")],
             defaultId: 0,
             cancelId: missing.length,
             noLink: true,

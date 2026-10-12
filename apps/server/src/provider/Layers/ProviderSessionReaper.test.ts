@@ -218,6 +218,7 @@ describe("ProviderSessionReaper", () => {
           getUnsettledCodexSteerIntentEvents: () => Effect.die("unused"),
           getCodexSteerIntentRecoveryBarriers: () => Effect.die("unused"),
           getThreadTurnActivityPage: () => Effect.die("unused"),
+          getThreadActivityDiagnostic: () => Effect.die("unused"),
           getThreadTurnWorkLogPresence: () => Effect.die("unused"),
           hasThreadTurnSubagentActivity: () => Effect.die("unused"),
           getThreadDetailById: () => Effect.die("unused"),

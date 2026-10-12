@@ -8,6 +8,7 @@ import * as Effect from "effect/Effect";
 import * as Option from "effect/Option";
 import * as Stream from "effect/Stream";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
+import { vi } from "vitest";
 
 import * as SqliteClient from "./NodeSqliteClient.ts";
 
@@ -54,6 +55,108 @@ effectIt("NodeSqliteClient statement diagnostics stay redacted and opt-in", () =
       42,
     );
     assert.deepStrictEqual(disabledRecords, []);
+  }),
+);
+
+effectIt(
+  "NodeSqliteClient statement diagnostics preserve native failures without retaining them",
+  () =>
+    Effect.sync(() => {
+      const records: unknown[] = [];
+      const clock = [10, 40];
+      const report = SqliteClient.makeSqliteStatementDiagnosticReporter({
+        enabled: true,
+        write: (record) => records.push(record),
+        now: () => clock.shift() ?? 40,
+        slowStatementMs: 25,
+      });
+      const sqlText = "INSERT INTO private_entries(value) VALUES (?)";
+      const nativeFailure = new Error("private failure with sk-never-log-this-value");
+
+      let observedFailure: unknown;
+      try {
+        report(sqlText, 1, () => {
+          throw nativeFailure;
+        });
+      } catch (cause) {
+        observedFailure = cause;
+      }
+      assert.strictEqual(observedFailure, nativeFailure);
+      assert.equal(records.length, 2);
+      assert.deepInclude(records[1] as object, {
+        phase: "slow-complete",
+        operation: "insert",
+        parameterCount: 1,
+        durationMs: 30,
+        outcome: "failure",
+      });
+      const serialized = JSON.stringify(records);
+      assert.equal(serialized.includes(sqlText), false);
+      assert.equal(serialized.includes("private_entries"), false);
+      assert.equal(serialized.includes(nativeFailure.message), false);
+      assert.equal(serialized.includes("sk-never-log-this-value"), false);
+    }),
+);
+
+effectIt.effect("NodeSqliteClient diagnoses native writes in every execution mode", () =>
+  Effect.gen(function* () {
+    // Use only an isolated in-memory database. Capture the real production
+    // reporter boundary so this fails when any `.run()` route bypasses it.
+    const envName = "CAFE_CODE_SQL_STATEMENT_DIAGNOSTICS";
+    const previousEnvironment = process.env[envName];
+    process.env[envName] = "1";
+    const stderrWrite = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    try {
+      yield* Effect.scoped(
+        Effect.gen(function* () {
+          const sql = yield* SqlClient.SqlClient;
+          const created =
+            yield* sql`CREATE TABLE private_writes(id INTEGER PRIMARY KEY, value TEXT NOT NULL)`;
+          assert.deepStrictEqual(created, []);
+
+          const secretParameter = "sk-never-log-this-write";
+          const raw = yield* sql`INSERT INTO private_writes(value) VALUES (${secretParameter})`.raw;
+          assert.deepStrictEqual(raw, { changes: 1, lastInsertRowid: 1 });
+
+          const values =
+            yield* sql`UPDATE private_writes SET value = (${"changed-private-value"}) WHERE id = (${1})`
+              .values;
+          assert.deepStrictEqual(values, []);
+          const unprepared = yield* sql`DELETE FROM private_writes WHERE id = (${1})`.unprepared;
+          assert.deepStrictEqual(unprepared, []);
+          const rows = yield* sql`SELECT value FROM private_writes`;
+          assert.deepStrictEqual(rows, []);
+        }).pipe(Effect.provide(SqliteClient.layerMemory())),
+      );
+
+      const diagnosticPrefix = "[Cafe Code SQLite] ";
+      const lines = stderrWrite.mock.calls.flatMap(([chunk]) =>
+        typeof chunk === "string" && chunk.startsWith(diagnosticPrefix) ? [chunk] : [],
+      );
+      const records = lines.map((line) => JSON.parse(line.slice(diagnosticPrefix.length)));
+      const starts = records.filter((record) => record.phase === "start");
+      assert.deepStrictEqual(
+        starts.map(({ operation, parameterCount }) => ({ operation, parameterCount })),
+        [
+          { operation: "create", parameterCount: 0 },
+          { operation: "insert", parameterCount: 1 },
+          { operation: "update", parameterCount: 2 },
+          { operation: "delete", parameterCount: 1 },
+          { operation: "select", parameterCount: 0 },
+        ],
+      );
+      const serialized = JSON.stringify(records);
+      assert.equal(serialized.includes("private_writes"), false);
+      assert.equal(serialized.includes("sk-never-log-this-write"), false);
+      assert.equal(serialized.includes("changed-private-value"), false);
+    } finally {
+      stderrWrite.mockRestore();
+      if (previousEnvironment === undefined) {
+        delete process.env[envName];
+      } else {
+        process.env[envName] = previousEnvironment;
+      }
+    }
   }),
 );
 

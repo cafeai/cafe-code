@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import type { WsConnectionStatus } from "../rpc/wsConnectionState";
-import { shouldAutoReconnect, shouldRestartStalledReconnect } from "./WebSocketConnectionSurface";
+import { shouldAutoReconnect } from "./WebSocketConnectionSurface";
 
 function makeStatus(overrides: Partial<WsConnectionStatus> = {}): WsConnectionStatus {
   return {
@@ -18,7 +18,10 @@ function makeStatus(overrides: Partial<WsConnectionStatus> = {}): WsConnectionSt
     online: true,
     phase: "idle",
     reconnectAttemptCount: 0,
-    reconnectMaxAttempts: 8,
+    reconnectMaxAttempts: null,
+    retryDelayMs: null,
+    heartbeatTimeoutCount: 0,
+    lastHeartbeatTimeoutAt: null,
     reconnectPhase: "idle",
     socketUrl: null,
     ...overrides,
@@ -39,7 +42,7 @@ describe("WebSocketConnectionSurface.logic", () => {
     ).toBe(true);
   });
 
-  it("forces reconnect on focus only for previously connected disconnected states", () => {
+  it("forces reconnect on focus only for previously connected idle disconnected states", () => {
     expect(
       shouldAutoReconnect(
         makeStatus({
@@ -47,7 +50,7 @@ describe("WebSocketConnectionSurface.logic", () => {
           online: true,
           phase: "disconnected",
           reconnectAttemptCount: 3,
-          reconnectPhase: "waiting",
+          reconnectPhase: "idle",
         }),
         "focus",
       ),
@@ -60,55 +63,47 @@ describe("WebSocketConnectionSurface.logic", () => {
           online: true,
           phase: "disconnected",
           reconnectAttemptCount: 1,
-          reconnectPhase: "waiting",
+          reconnectPhase: "idle",
         }),
         "focus",
       ),
     ).toBe(false);
   });
 
-  it("forces reconnect on focus for exhausted reconnect loops", () => {
-    expect(
-      shouldAutoReconnect(
-        makeStatus({
-          hasConnected: true,
-          online: true,
-          phase: "disconnected",
-          reconnectAttemptCount: 8,
-          reconnectPhase: "exhausted",
-        }),
-        "focus",
-      ),
-    ).toBe(true);
-  });
+  it.each(["focus", "visible", "online"] as const)(
+    "does not retry terminal admission on %s",
+    (trigger) => {
+      expect(
+        shouldAutoReconnect(
+          makeStatus({
+            hasConnected: true,
+            online: true,
+            phase: "disconnected",
+            reconnectAttemptCount: 8,
+            reconnectPhase: "exhausted",
+          }),
+          trigger,
+        ),
+      ).toBe(false);
+    },
+  );
 
-  it("restarts a stalled reconnect window after the scheduled retry time passes", () => {
-    expect(
-      shouldRestartStalledReconnect(
-        makeStatus({
-          hasConnected: true,
-          nextRetryAt: "2026-04-03T20:00:01.000Z",
-          online: true,
-          phase: "disconnected",
-          reconnectAttemptCount: 3,
-          reconnectPhase: "waiting",
-        }),
-        "2026-04-03T20:00:01.000Z",
-      ),
-    ).toBe(true);
-
-    expect(
-      shouldRestartStalledReconnect(
-        makeStatus({
-          hasConnected: true,
-          nextRetryAt: "2026-04-03T20:00:01.000Z",
-          online: true,
-          phase: "disconnected",
-          reconnectAttemptCount: 3,
-          reconnectPhase: "attempting",
-        }),
-        "2026-04-03T20:00:01.000Z",
-      ),
-    ).toBe(false);
-  });
+  it.each(["waiting", "attempting"] as const)(
+    "preserves the enforcing %s schedule even past its deadline",
+    (phase) => {
+      expect(
+        shouldAutoReconnect(
+          makeStatus({
+            hasConnected: true,
+            nextRetryAt: "2026-04-03T20:00:01.000Z",
+            online: true,
+            phase: "disconnected",
+            reconnectAttemptCount: 3,
+            reconnectPhase: phase,
+          }),
+          "focus",
+        ),
+      ).toBe(false);
+    },
+  );
 });

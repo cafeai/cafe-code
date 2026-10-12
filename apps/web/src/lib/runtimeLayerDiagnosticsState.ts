@@ -76,3 +76,5 @@ export function useRuntimeLayerDiagnostics(): RuntimeLayerDiagnosticsState {
     refresh,
   };
 }
+
+// Finite source-owned labels/helpers only; no received or user data.

@@ -5,6 +5,8 @@ import {
   ItemLifecyclePayload,
   ProviderRuntimeEvent,
   UsageAccountingSnapshot,
+  ProviderNativeRetryProgress,
+  isCodexNativeRetryWarningPayload,
 } from "./providerRuntime.ts";
 
 const decodeRuntimeEvent = Schema.decodeUnknownSync(ProviderRuntimeEvent);
@@ -70,6 +72,180 @@ describe("ItemLifecyclePayload source text", () => {
 });
 
 describe("ProviderRuntimeEvent", () => {
+  it("preserves exact Claude task history identity through object and JSON codecs", () => {
+    const historySessionId = "00000000-0000-4000-8000-000000000961";
+    const base = {
+      eventId: "claude-history-task",
+      provider: "claudeAgent",
+      providerInstanceId: "claude_history_account",
+      createdAt: "2026-10-11T00:00:00Z",
+      threadId: "claude-history-parent",
+      turnId: "claude-history-turn",
+      subagentRuntimeId: "00000000-0000-4000-8000-000000000962",
+    };
+    const tasks = [
+      { type: "task.started", payload: { taskId: "native-task" } },
+      {
+        type: "task.progress",
+        payload: { taskId: "native-task", description: "Reviewing files" },
+      },
+      { type: "task.completed", payload: { taskId: "native-task", status: "completed" } },
+    ];
+    for (const task of tasks) {
+      const legacy = { ...base, ...task };
+      const current = { ...legacy, claudeSubagentHistorySessionId: historySessionId };
+      for (const input of [legacy, current]) {
+        // A task's root is ownership evidence, not a normalizable display
+        // identifier. Check each codec independently so encode and decode
+        // cannot agree on silently discarding the new private field.
+        const decoded = decodeRuntimeEvent(input);
+        expect(decoded).toEqual(input);
+        expect(JSON.parse(encodeRuntimeEventJson(decoded))).toEqual(input);
+        expect(decodeRuntimeEventJson(JSON.stringify(input))).toEqual(input);
+        expect(decodeRuntimeEventJson(encodeRuntimeEventJson(decoded))).toEqual(input);
+      }
+      for (const claudeSubagentHistorySessionId of [
+        "",
+        "not-a-uuid",
+        ` ${historySessionId}`,
+        `${historySessionId} `,
+        `\t${historySessionId}\r\n`,
+        "00000000-0000-0000-8000-000000000961",
+        "00000000-0000-4000-0000-000000000961",
+        null,
+        15,
+        {},
+        [],
+      ]) {
+        const invalid = { ...legacy, claudeSubagentHistorySessionId };
+        expect(() => decodeRuntimeEvent(invalid)).toThrow();
+        expect(() => decodeRuntimeEventJson(JSON.stringify(invalid))).toThrow();
+      }
+    }
+  });
+
+  it("admits only inert content-free native retry bookkeeping without invoking accessors", () => {
+    const payload = {
+      message: "Provider reconnecting",
+      retrying: true,
+      detail: { willRetry: true },
+      nativeRetry: { observedCount: 12, timing: "unknown" },
+    };
+    expect(isCodexNativeRetryWarningPayload(payload)).toBe(true);
+    expect(
+      isCodexNativeRetryWarningPayload({
+        ...payload,
+        nativeRetry: { ...payload.nativeRetry, countLimited: true },
+      }),
+    ).toBe(true);
+    const { nativeRetry: _retry, ...legacy } = payload;
+    expect(isCodexNativeRetryWarningPayload(legacy)).toBe(true);
+    const diagnosticSummary = {
+      version: 1,
+      status: "retry",
+      subject: { kind: "subagent", id: "child-id", label: "Reviewer" },
+      observedRetryCount: 12,
+    };
+    expect(
+      isCodexNativeRetryWarningPayload({ ...payload, providerDiagnostic: diagnosticSummary }),
+    ).toBe(true);
+    expect(
+      isCodexNativeRetryWarningPayload({
+        ...payload,
+        nativeRetry: { observedCount: 1_008, timing: "unknown", countLimited: true },
+        providerDiagnostic: {
+          ...diagnosticSummary,
+          observedRetryCount: 1_008,
+          countLimited: true,
+        },
+      }),
+    ).toBe(true);
+    for (const providerDiagnostic of [
+      { ...diagnosticSummary, version: 2 },
+      { ...diagnosticSummary, status: "error" },
+      { ...diagnosticSummary, snapshot: { json: "private" } },
+      { ...diagnosticSummary, observedRetryCount: 1_025 },
+      { version: 1, status: "retry", subject: { kind: "root" }, countLimited: true },
+      { ...diagnosticSummary, subject: { kind: "root", id: "forged" } },
+      { ...diagnosticSummary, subject: { kind: "subagent", id: "x".repeat(513) } },
+      {
+        ...diagnosticSummary,
+        subject: Object.defineProperty({}, "kind", {
+          get() {
+            throw new Error("Do not invoke");
+          },
+        }),
+      },
+    ])
+      expect(isCodexNativeRetryWarningPayload({ ...payload, providerDiagnostic })).toBe(false);
+    for (const malformed of [
+      { ...payload, retrying: false },
+      { ...payload, message: "Other warning" },
+      { ...payload, detail: { willRetry: true, private: "must not qualify" } },
+      { ...payload, nativeRetry: { observedCount: 12, timing: "guessed" } },
+      { ...payload, nativeRetry: { ...payload.nativeRetry, countLimited: false } },
+      { ...payload, nativeRetry: undefined },
+      { ...payload, private: "unknown" },
+      Object.create(payload),
+    ])
+      expect(isCodexNativeRetryWarningPayload(malformed)).toBe(false);
+    let reads = 0;
+    const accessor = Object.defineProperty({}, "message", {
+      get() {
+        reads += 1;
+        return payload.message;
+      },
+    });
+    expect(isCodexNativeRetryWarningPayload(accessor)).toBe(false);
+    const detailAccessor = {
+      ...payload,
+      detail: Object.defineProperty({}, "willRetry", {
+        get() {
+          reads += 1;
+          return true;
+        },
+      }),
+    };
+    expect(isCodexNativeRetryWarningPayload(detailAccessor)).toBe(false);
+    expect(reads).toBe(0);
+  });
+  it("keeps bounded native retry observations separate from scheduling authority", () => {
+    const decode = Schema.decodeUnknownSync(ProviderNativeRetryProgress);
+    expect(decode({ observedCount: 12, timing: "unknown" })).toEqual({
+      observedCount: 12,
+      timing: "unknown",
+    });
+    expect(decode({ observedCount: 1024, timing: "unknown", countLimited: true })).toEqual({
+      observedCount: 1024,
+      timing: "unknown",
+      countLimited: true,
+    });
+    for (const observedCount of [0, -1, 1.5, 1025, Number.MAX_SAFE_INTEGER, "12", null])
+      expect(() => decode({ observedCount, timing: "unknown" })).toThrow();
+    expect(() => decode({ observedCount: 12, timing: "scheduled" })).toThrow();
+    expect(() => decode({ observedCount: 12, timing: "unknown", countLimited: false })).toThrow();
+    const warning = {
+      type: "runtime.warning",
+      eventId: "retry-display",
+      provider: "codex",
+      providerInstanceId: "exact-account",
+      createdAt: "2026-10-10T11:01:00Z",
+      threadId: "thread-1",
+      turnId: "root",
+      payload: {
+        message: "Provider reconnecting",
+        detail: { willRetry: true },
+        nativeRetry: { observedCount: 12, timing: "unknown" },
+      },
+    };
+    expect(decodeRuntimeEventJson(encodeRuntimeEventJson(decodeRuntimeEvent(warning)))).toEqual(
+      warning,
+    );
+    // Old providers have neither count nor native deadline and stay valid.
+    expect(
+      decodeRuntimeEvent({ ...warning, payload: { message: "Provider reconnecting" } }).payload,
+    ).toEqual({ message: "Provider reconnecting" });
+  });
   it("round trips content-free failed-root evidence and rejects permissive availability flags", () => {
     const input = {
       type: "turn.completed",
