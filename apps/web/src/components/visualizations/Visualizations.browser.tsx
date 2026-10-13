@@ -505,7 +505,7 @@ async function installPoolInlineImagePeer(images: readonly PoolInlineImage[]) {
   });
   return { peers, transfers };
 }
-async function wheelVisualizationScroller(element: HTMLElement, deltaY: number) {
+async function prepareVisualizationScrollerWheel(element: HTMLElement) {
   const bounds = element.getBoundingClientRect();
   let x = bounds.left + bounds.width / 2;
   let y = bounds.top + Math.min(bounds.height / 2, 100);
@@ -518,6 +518,9 @@ async function wheelVisualizationScroller(element: HTMLElement, deltaY: number) 
     frame = owner.ownerDocument.defaultView?.frameElement ?? null;
   }
   await cdp().send("Input.dispatchMouseEvent", { type: "mouseMoved", x, y });
+  return { x, y };
+}
+async function wheelVisualizationScroller({ x, y }: { x: number; y: number }, deltaY: number) {
   await cdp().send("Input.dispatchMouseEvent", { type: "mouseWheel", x, y, deltaX: 0, deltaY });
 }
 
@@ -671,9 +674,10 @@ describe("Full-access live inline visualizations", () => {
         // metadata-only aspect-ratio box and decoded content can differ by the
         // actual border extent; sampling scrollTop in that interval would mix
         // a tail-layout adjustment with the subsequent physical wheel delta.
-        // Observe native decoded geometry, the public measured row size, and
-        // the settled physical/public tail instead of adding time or relaxing
-        // the unchanged -64px review-intent assertion below.
+        // The independently held second manifest also has a real delayed
+        // loading child. Observe both native bordered rows and their public
+        // measured sizes, then the settled physical/public tail, rather than
+        // adding time or relaxing the unchanged -64px review-intent assertion.
         await vi.waitFor(() => {
           const image = imageNode as HTMLImageElement;
           expect(image.complete).toBe(true);
@@ -698,20 +702,92 @@ describe("Full-access live inline visualizations", () => {
             measuredRow.getBoundingClientRect().height,
             3,
           );
+          const heldHost = hosts[1]!;
+          const loadingChild = heldHost.querySelector<HTMLSpanElement>(":scope > span");
+          expect(heldHost.style.aspectRatio).toBe("");
+          expect(loadingChild).not.toBeNull();
+          expect(loadingChild!.textContent).toBe(uiText("Loading image…"));
+          const heldStyle = getComputedStyle(heldHost);
+          const heldBorderHeight =
+            Number.parseFloat(heldStyle.borderTopWidth) +
+            Number.parseFloat(heldStyle.borderBottomWidth);
+          expect(heldHost.getBoundingClientRect().height).toBeCloseTo(
+            loadingChild!.getBoundingClientRect().height + heldBorderHeight,
+            3,
+          );
+          const heldIndex = state!.data.findIndex((_, itemIndex) =>
+            state!.elementAtIndex(itemIndex)?.contains(heldHost),
+          );
+          expect(heldIndex).toBeGreaterThanOrEqual(0);
+          const heldRow = state!.elementAtIndex(heldIndex) as HTMLElement;
+          expect(state!.sizeAtIndex(heldIndex)).toBeCloseTo(
+            heldRow.getBoundingClientRect().height,
+            3,
+          );
           expect(state!.isAtEnd).toBe(true);
           expect(state!.scroll).toBeCloseTo(scroller.scrollTop, 0);
           expect(scroller.scrollHeight - scroller.clientHeight - scroller.scrollTop).toBeLessThan(
             1,
           );
         });
-        const beforeWheel = scroller.scrollTop;
-        await wheelVisualizationScroller(scroller, -64);
-        await vi.waitFor(() => {
-          expect(
-            document.querySelector('[data-pool-timeline][data-following="false"]'),
-          ).not.toBeNull();
-          expect(scroller.scrollTop).toBeCloseTo(beforeWheel - 64, 0);
-        });
+        // Await native pointer preparation before sampling the physical
+        // baseline, then dispatch the unchanged wheel without another wait.
+        // Passive capture can observe an already-applied compositor scroll,
+        // so its event proves trusted delta/owner admission, not pre-default
+        // position. Child events do not bubble across the iframe boundary;
+        // observe both legitimate surfaces without altering input handlers.
+        expect(frameDocument).not.toBeNull();
+        const timeline = scroller.closest<HTMLElement>("[data-pool-timeline]")!;
+        let wheelCount = 0;
+        let admission:
+          | {
+              trusted: boolean;
+              deltaY: number;
+              deltaMode: number;
+              following: boolean;
+              exactOwner: boolean;
+            }
+          | undefined;
+        const observeWheel = (event: WheelEvent) => {
+          wheelCount += 1;
+          if (admission) return;
+          admission = {
+            trusted: event.isTrusted,
+            deltaY: event.deltaY,
+            deltaMode: event.deltaMode,
+            following: timeline.dataset.following === "true",
+            exactOwner:
+              scroller.isConnected &&
+              frameElement() === frame &&
+              frame.contentDocument === frameDocument &&
+              (event.currentTarget === scroller || event.currentTarget === frameDocument),
+          };
+        };
+        scroller.addEventListener("wheel", observeWheel, { capture: true, passive: true });
+        frameDocument!.addEventListener("wheel", observeWheel, { capture: true, passive: true });
+        try {
+          const wheelPosition = await prepareVisualizationScrollerWheel(scroller);
+          const beforeWheel = scroller.scrollTop;
+          expect(Number.isFinite(beforeWheel)).toBe(true);
+          expect(timeline.dataset.following).toBe("true");
+          await wheelVisualizationScroller(wheelPosition, -64);
+          await vi.waitFor(() => {
+            expect(wheelCount).toBe(1);
+            expect(admission).toBeDefined();
+            expect(admission!.trusted).toBe(true);
+            expect(admission!.deltaY).toBe(-64);
+            expect(admission!.deltaMode).toBe(0);
+            expect(admission!.following).toBe(true);
+            expect(admission!.exactOwner).toBe(true);
+            expect(
+              document.querySelector('[data-pool-timeline][data-following="false"]'),
+            ).not.toBeNull();
+            expect(scroller.scrollTop).toBeCloseTo(beforeWheel - 64, 0);
+          });
+        } finally {
+          scroller.removeEventListener("wheel", observeWheel, true);
+          frameDocument!.removeEventListener("wheel", observeWheel, true);
+        }
         const reviewTop = scroller.scrollTop;
         const anchorTop = anchor.getBoundingClientRect().top;
         // New image metadata and an actual child natural-height change arrive after

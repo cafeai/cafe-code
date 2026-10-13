@@ -2276,6 +2276,7 @@ describe("ProviderRuntimeIngestion", () => {
             providerInstanceId: instanceId,
             subagentRuntimeId: null,
             codexContextWindowOverride: formerContext,
+            codexAutoCompactTokenLimit: formerContext,
             status: "ready",
             runtimeMode: "approval-required",
             activeTurnId: null,
@@ -2319,14 +2320,22 @@ describe("ProviderRuntimeIngestion", () => {
       expect(lifecycle?.type).toBe("thread.session.set");
       if (driver === "codex") {
         expect(thread.session?.codexContextWindowOverride).toBe(formerContext);
+        // A legacy unknown generation cannot substantiate the newer opening
+        // request proof even when its historical context is retained.
+        expect(thread.session).not.toHaveProperty("codexAutoCompactTokenLimit");
         if (lifecycle?.type === "thread.session.set")
           expect(lifecycle.session.codexContextWindowOverride).toBe(formerContext);
+        if (lifecycle?.type === "thread.session.set")
+          expect(lifecycle.session).not.toHaveProperty("codexAutoCompactTokenLimit");
       } else {
         // Reusing an account identifier does not rebind a Codex-only setting
         // to another native driver, even when legacy generation is unknown.
         expect(thread.session).not.toHaveProperty("codexContextWindowOverride");
+        expect(thread.session).not.toHaveProperty("codexAutoCompactTokenLimit");
         if (lifecycle?.type === "thread.session.set")
           expect(lifecycle.session).not.toHaveProperty("codexContextWindowOverride");
+        if (lifecycle?.type === "thread.session.set")
+          expect(lifecycle.session).not.toHaveProperty("codexAutoCompactTokenLimit");
       }
       expect(thread.session).toMatchObject({
         providerInstanceId: instanceId,
@@ -2362,6 +2371,7 @@ describe("ProviderRuntimeIngestion", () => {
             providerInstanceId: instanceId,
             subagentRuntimeId: null,
             codexContextWindowOverride: formerContext,
+            codexAutoCompactTokenLimit: formerContext,
             status: "ready",
             runtimeMode: "approval-required",
             activeTurnId: null,
@@ -2412,9 +2422,12 @@ describe("ProviderRuntimeIngestion", () => {
       expect(adoption?.type).toBe("thread.session.set");
       if (adoption?.type === "thread.session.set")
         expect(adoption.session).not.toHaveProperty("codexContextWindowOverride");
+      if (adoption?.type === "thread.session.set")
+        expect(adoption.session).not.toHaveProperty("codexAutoCompactTokenLimit");
       // Inventory qualifies the generation only. It cannot copy a previous
       // setting or invent a configuration observation for this separate path.
       expect(thread.session?.codexContextWindowOverride).toBeUndefined();
+      expect(thread.session).not.toHaveProperty("codexAutoCompactTokenLimit");
       expect(thread.session).toMatchObject({
         status: "ready",
         activeTurnId: null,

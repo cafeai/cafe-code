@@ -51,10 +51,11 @@ describe("092_LiveWork", () => {
         [95, "ProviderActivityDiagnostics"],
         [96, "GeneratedVisualizations"],
         [97, "ChatImages"],
+        [98, "CodexAutoCompactRequest"],
       ]);
       assert.deepEqual(
         yield* sql<{ name: string }>`
-          SELECT name FROM effect_sql_migrations WHERE migration_id IN (90, 91, 92, 93, 94, 95, 96, 97)
+          SELECT name FROM effect_sql_migrations WHERE migration_id IN (90, 91, 92, 93, 94, 95, 96, 97, 98)
           ORDER BY migration_id
         `,
         [
@@ -66,6 +67,7 @@ describe("092_LiveWork", () => {
           { name: "ProviderActivityDiagnostics" },
           { name: "GeneratedVisualizations" },
           { name: "ChatImages" },
+          { name: "CodexAutoCompactRequest" },
         ],
       );
       assert.deepEqual(yield* sql`SELECT * FROM projection_live_work`, []);
@@ -98,6 +100,7 @@ describe("092_LiveWork", () => {
         [95, "ProviderActivityDiagnostics"],
         [96, "GeneratedVisualizations"],
         [97, "ChatImages"],
+        [98, "CodexAutoCompactRequest"],
       ]);
       assert.deepEqual(yield* sql`SELECT * FROM projection_live_work`, before);
       assert.deepEqual(

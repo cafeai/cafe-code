@@ -76,8 +76,9 @@ describe("FollowUpQueueShelf", () => {
   });
   it.each([
     { deliveryStatus: "sending" as const, label: "Sending" },
-    { deliveryStatus: "received" as const, label: "Received" },
+    { deliveryStatus: "received" as const, label: "Accepted" },
     { deliveryStatus: "waiting" as const, label: "Waiting" },
+    { deliveryStatus: "waiting-for-compaction" as const, label: "Waiting for compaction" },
   ])(
     "shows $label beside the exact steering message without resend controls",
     async ({ deliveryStatus, label }) => {
@@ -151,7 +152,7 @@ describe("FollowUpQueueShelf", () => {
     try {
       const retry = page.getByRole("button", { name: "Retry delivery" });
       expect(document.body.textContent).toContain("1 steer needs attention");
-      expect(document.body.textContent).not.toContain("Waiting for compact");
+      expect(document.body.textContent).not.toContain("Waiting for compaction");
       await expect
         .element(page.getByRole("button", { name: "Send", exact: true }))
         .not.toBeInTheDocument();
@@ -353,8 +354,8 @@ describe("FollowUpQueueShelf", () => {
     );
 
     try {
-      expect(document.body.textContent ?? "").toContain("1 steer waiting for compact");
-      expect(document.body.textContent ?? "").toContain("Waiting for compact");
+      expect(document.body.textContent ?? "").toContain("1 steer waiting for compaction");
+      expect(document.body.textContent ?? "").toContain("Waiting for compaction");
       await expect
         .element(page.getByLabelText("Queued steer waiting for Codex context compaction"))
         .toBeInTheDocument();

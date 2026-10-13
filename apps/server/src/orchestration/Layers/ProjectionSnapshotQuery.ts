@@ -419,6 +419,9 @@ function mapSessionRow(
     ...(row.codexContextWindowOverride !== undefined
       ? { codexContextWindowOverride: row.codexContextWindowOverride }
       : {}),
+    ...(row.codexAutoCompactTokenLimit !== undefined
+      ? { codexAutoCompactTokenLimit: row.codexAutoCompactTokenLimit }
+      : {}),
     activeTurnId: row.activeTurnId,
     lastError: row.lastError,
     updatedAt: row.updatedAt,
@@ -709,7 +712,11 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
     "NOT (kind IN ('task.started', 'task.progress', 'task.completed') AND json_type(payload_json, '$.subagent') IS NOT NULL)",
     "NOT (kind IN ('tool.updated', 'tool.completed') AND COALESCE(json_extract(payload_json, '$.detail'), '') LIKE 'ExitPlanMode:%')",
     "NOT (kind = 'provider.turn.steer.failed' AND COALESCE(json_extract(payload_json, '$.retryableFollowUp'), 0) = 1)",
-    "kind != 'provider.turn.steer.accepted'",
+    // The server-authored acceptance receipt is an outcome of one exact steer
+    // intent, not a periodic observation. Keep it beside the attempted receipt
+    // in presence/count/page queries so historical logs can show the handoff.
+    // The repeated native progress/wait observations below stay filtered; none
+    // of these presentation choices grants settlement or retry authority.
     sql`NOT (kind = 'task.progress' AND COALESCE(${routineSteerProgressPredicate}, 0))`,
     sql`NOT (kind = 'runtime.warning' AND COALESCE(${routineRuntimeWarningPredicate}, 0))`,
   ]);
@@ -1017,6 +1024,8 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
           max_concurrent_subagents_known AS "maxConcurrentSubagentsKnown",
           codex_context_window_override AS "codexContextWindowOverride",
           codex_context_window_override_known AS "codexContextWindowOverrideKnown",
+          codex_auto_compact_token_limit AS "codexAutoCompactTokenLimit",
+          codex_auto_compact_token_limit_known AS "codexAutoCompactTokenLimitKnown",
           active_turn_id AS "activeTurnId",
           last_error AS "lastError",
           updated_at AS "updatedAt"
@@ -1062,6 +1071,8 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
           sessions.max_concurrent_subagents_known AS "maxConcurrentSubagentsKnown",
           sessions.codex_context_window_override AS "codexContextWindowOverride",
           sessions.codex_context_window_override_known AS "codexContextWindowOverrideKnown",
+          sessions.codex_auto_compact_token_limit AS "codexAutoCompactTokenLimit",
+          sessions.codex_auto_compact_token_limit_known AS "codexAutoCompactTokenLimitKnown",
           sessions.active_turn_id AS "activeTurnId",
           sessions.last_error AS "lastError",
           sessions.updated_at AS "updatedAt"
@@ -1092,6 +1103,8 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
           sessions.max_concurrent_subagents_known AS "maxConcurrentSubagentsKnown",
           sessions.codex_context_window_override AS "codexContextWindowOverride",
           sessions.codex_context_window_override_known AS "codexContextWindowOverrideKnown",
+          sessions.codex_auto_compact_token_limit AS "codexAutoCompactTokenLimit",
+          sessions.codex_auto_compact_token_limit_known AS "codexAutoCompactTokenLimitKnown",
           sessions.active_turn_id AS "activeTurnId",
           sessions.last_error AS "lastError",
           sessions.updated_at AS "updatedAt"
@@ -1122,6 +1135,8 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
           sessions.max_concurrent_subagents_known AS "maxConcurrentSubagentsKnown",
           sessions.codex_context_window_override AS "codexContextWindowOverride",
           sessions.codex_context_window_override_known AS "codexContextWindowOverrideKnown",
+          sessions.codex_auto_compact_token_limit AS "codexAutoCompactTokenLimit",
+          sessions.codex_auto_compact_token_limit_known AS "codexAutoCompactTokenLimitKnown",
           sessions.active_turn_id AS "activeTurnId",
           sessions.last_error AS "lastError",
           sessions.updated_at AS "updatedAt"
@@ -2989,6 +3004,8 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
           max_concurrent_subagents_known AS "maxConcurrentSubagentsKnown",
           codex_context_window_override AS "codexContextWindowOverride",
           codex_context_window_override_known AS "codexContextWindowOverrideKnown",
+          codex_auto_compact_token_limit AS "codexAutoCompactTokenLimit",
+          codex_auto_compact_token_limit_known AS "codexAutoCompactTokenLimitKnown",
           active_turn_id AS "activeTurnId",
           last_error AS "lastError",
           updated_at AS "updatedAt"

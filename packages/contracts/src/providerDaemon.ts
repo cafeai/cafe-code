@@ -454,6 +454,9 @@ export const ProviderDaemonAdapterCapabilities = Schema.Struct({
   // Exact authenticated owner qualification for Codex's chat-local native
   // context override. Missing on older owners means unsupported, not inherited.
   codexContextWindow: Schema.optional(Schema.Boolean),
+  // Separate from numeric-context support: older Cafe owners did not pair or
+  // attest the compaction request. Preserve missing/false across authentication.
+  codexContextCompaction: Schema.optional(Schema.Boolean),
   // Cafe's exact existing-process/no-recovery fence, not native CLI support.
   // Older owners omit it and cannot admit this continuation exception.
   subagentPolicyContinuation: Schema.optional(Schema.Boolean),

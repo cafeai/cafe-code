@@ -43,6 +43,29 @@ function activity(
 }
 
 describe("work-log presentation localization boundary", () => {
+  it.each([
+    ["provider.turn.steer.delivery-attempted", "Steer delivery attempted"],
+    ["provider.turn.steer.accepted", "Steer accepted"],
+  ])("renders fixed public %s without touching private summaries or payloads", (kind, label) => {
+    let reads = 0;
+    const privatePayload = Object.defineProperty({}, "detail", {
+      get() {
+        reads += 1;
+        throw new Error("private payload must not be inspected");
+      },
+    });
+    const receipt = activity(kind, "private prompt and correlation data", privatePayload);
+    const [row] = deriveWorkLogEntries([receipt], undefined);
+    expect(row).toMatchObject({ label, displayLabel: `translated:${label}`, tone: "info" });
+    expect(row?.detail).toBeUndefined();
+    expect(row?.toolTitle).toBeUndefined();
+    expect(row?.command).toBeUndefined();
+    expect(row?.changedFiles).toBeUndefined();
+    expect(JSON.stringify(row)).not.toContain("private prompt");
+    expect(reads).toBe(0);
+    expect(receipt.summary).toBe("private prompt and correlation data");
+  });
+
   it("localizes only an exact Cafe envelope, never arbitrary summaries or provider ICU", () => {
     expect(cafeWorkLogDisplayLabel(activity("approval.resolved", "Approval resolved"))).toBe(
       "translated:Approval resolved",

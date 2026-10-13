@@ -1,4 +1,5 @@
 import { isArchivedPrivateToolServer } from "../archivedToolPrivacy.ts";
+import { readCodexAutoCompactTokenLimit } from "../codexContextWindowPolicy.ts";
 
 import {
   readVisualizationSessionBroker,
@@ -5109,6 +5110,10 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
   options?: CodexAdapterLiveOptions,
 ) {
   const boundInstanceId = options?.instanceId ?? ProviderInstanceId.make("codex");
+  // Capture one admitted own scalar for this immutable adapter owner. An
+  // inherited setting or accessor cannot supply opening policy, and later
+  // config-object mutation cannot make usage describe a different request.
+  const autoCompactTokenLimit = readCodexAutoCompactTokenLimit(codexConfig);
   const fileSystem = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
   const childProcessSpawner = yield* ChildProcessSpawner.ChildProcessSpawner;
@@ -5553,9 +5558,7 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
             ? { resumeCursor: input.resumeCursor }
             : {}),
           runtimeMode: input.runtimeMode,
-          ...(codexConfig.autoCompactTokenLimit !== undefined
-            ? { autoCompactTokenLimit: codexConfig.autoCompactTokenLimit }
-            : {}),
+          ...(autoCompactTokenLimit !== undefined ? { autoCompactTokenLimit } : {}),
           ...(input.modelSelection?.instanceId === boundInstanceId
             ? { model: input.modelSelection.model }
             : {}),
@@ -5721,7 +5724,7 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
                   const mapped = mapToRuntimeEvents(
                     event,
                     event.threadId,
-                    codexConfig.autoCompactTokenLimit,
+                    autoCompactTokenLimit,
                     nativeRetry,
                   );
                   const authRecoveryTerminals = reconcileCodexAuthRecoveryLifecycle(
@@ -6675,6 +6678,9 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
         return options?.getSubagentConcurrencySupport?.() ?? false;
       },
       get codexContextWindow() {
+        return options?.getCodexContextWindowSupport?.() ?? false;
+      },
+      get codexContextCompaction() {
         return options?.getCodexContextWindowSupport?.() ?? false;
       },
       subagentPolicyContinuation: true,

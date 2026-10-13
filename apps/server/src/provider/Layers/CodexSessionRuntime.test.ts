@@ -149,6 +149,7 @@ import {
   type CodexAggregateRootCompletion,
   type CodexReasoningEffortSnapshot,
   type CodexSubagentHistoryReadClient,
+  type CodexSessionRuntimeOptions,
 } from "./CodexSessionRuntime.ts";
 import {
   buildCodexSteerClientCorrelationId,
@@ -183,155 +184,242 @@ const childMetadata = (id: string, parentThreadId: string): AncestryMetadata => 
   source: { subAgent: { thread_spawn: { depth: 1, parent_thread_id: parentThreadId } } },
 });
 
-effectIt.effect("binds goal mutation provenance to existing explicit controls and user Stop", () =>
-  Effect.gen(function* () {
-    // The real runtime and typed JSONL client run against a scoped in-memory
-    // peer. No provider executable, configuration, profile or credential is
-    // touched while verifying these authenticated goal-control wire shapes.
-    const output = yield* Queue.unbounded<Uint8Array>();
-    const calls: Array<{ method: string; params?: Record<string, unknown> }> = [];
-    const nativeThreadId = "synthetic-goal-thread";
-    const goal = {
-      threadId: nativeThreadId,
-      objective: "Explicit owner goal",
-      status: "active",
-      tokenBudget: null,
-      tokensUsed: 7,
-      timeUsedSeconds: 2,
-      createdAt: 1,
-      updatedAt: 2,
-    };
-    const thread = {
-      id: nativeThreadId,
-      cliVersion: "0.162.1",
-      createdAt: 1,
-      updatedAt: 1,
-      cwd: process.cwd(),
-      ephemeral: false,
-      modelProvider: "openai",
-      preview: "",
-      projectId: null,
-      sessionId: "synthetic-session",
-      source: "appServer",
-      turns: [],
-      status: { type: "idle" },
-    };
-    const opened = {
-      cwd: process.cwd(),
-      model: "gpt-6.1-sol",
-      modelProvider: "openai",
-      approvalPolicy: "never",
-      approvalsReviewer: "user",
-      sandbox: { type: "dangerFullAccess" },
-      thread,
-    };
-    const encoder = new TextEncoder();
-    let pending = "";
-    const spawner = ChildProcessSpawner.make(() =>
-      Effect.succeed(
-        ChildProcessSpawner.makeHandle({
-          pid: ChildProcessSpawner.ProcessId(7002),
-          exitCode: Effect.never,
-          isRunning: Effect.succeed(true),
-          kill: () => Effect.void,
-          unref: Effect.succeed(Effect.void),
-          stdin: Sink.forEach((chunk: Uint8Array) =>
-            Effect.gen(function* () {
-              pending += new TextDecoder().decode(chunk);
-              const lines = pending.split("\n");
-              pending = lines.pop() ?? "";
-              for (const line of lines) {
-                const request = JSON.parse(line) as {
-                  id?: string | number;
-                  method: string;
-                  params?: Record<string, unknown>;
-                };
-                calls.push({
-                  method: request.method,
-                  ...(request.params ? { params: request.params } : {}),
-                });
-                if (request.id === undefined) continue;
-                const result =
-                  request.method === "initialize"
-                    ? {
-                        userAgent: "synthetic",
-                        codexHome: process.cwd(),
-                        platformFamily: "synthetic",
-                        platformOs: "synthetic",
-                      }
-                    : request.method === "thread/start"
-                      ? opened
-                      : request.method === "thread/read"
-                        ? { thread }
-                        : request.method === "thread/turns/list"
-                          ? { data: [], nextCursor: null }
-                          : request.method === "thread/goal/get"
-                            ? { goal }
-                            : request.method === "thread/goal/set"
-                              ? { goal: { ...goal, ...request.params } }
-                              : request.method === "thread/goal/clear"
-                                ? { cleared: true }
-                                : {};
-                yield* Queue.offer(
-                  output,
-                  encoder.encode(`${JSON.stringify({ id: request.id, result })}\n`),
-                );
-              }
+for (const request of [
+  { label: "inherited", expected: null },
+  { label: "paired", context: 800_000, expected: 800_000 },
+  { label: "explicit", context: 800_000, explicit: 600_000, expected: 600_000 },
+  { label: "paired-resume", context: 800_000, resume: true, expected: 800_000 },
+  { label: "inherited-setting", inherited: true, expected: null },
+  { label: "accessor-setting", accessor: true, expected: null },
+  {
+    label: "captured-setting",
+    context: 800_000,
+    explicit: 600_000,
+    mutate: true,
+    expected: 600_000,
+  },
+  { label: "failed-opening", context: 800_000, failed: true, expected: 800_000 },
+] as const)
+  effectIt.effect(
+    `records ${request.label} opening request before retaining explicit goal controls`,
+    () =>
+      Effect.gen(function* () {
+        // The real runtime and typed JSONL client run against a scoped in-memory
+        // peer. No provider executable, configuration, profile or credential is
+        // touched while verifying these authenticated goal-control wire shapes.
+        const output = yield* Queue.unbounded<Uint8Array>();
+        const openingWillFail = "failed" in request;
+        const calls: Array<{ method: string; params?: Record<string, unknown> }> = [];
+        const nativeThreadId = "synthetic-goal-thread";
+        const goal = {
+          threadId: nativeThreadId,
+          objective: "Explicit owner goal",
+          status: "active",
+          tokenBudget: null,
+          tokensUsed: 7,
+          timeUsedSeconds: 2,
+          createdAt: 1,
+          updatedAt: 2,
+        };
+        const thread = {
+          id: nativeThreadId,
+          cliVersion: "0.162.1",
+          createdAt: 1,
+          updatedAt: 1,
+          cwd: process.cwd(),
+          ephemeral: false,
+          modelProvider: "openai",
+          preview: "",
+          projectId: null,
+          sessionId: "synthetic-session",
+          source: "appServer",
+          turns: [],
+          status: { type: "idle" },
+        };
+        const opened = {
+          cwd: process.cwd(),
+          model: "gpt-6.1-sol",
+          modelProvider: "openai",
+          approvalPolicy: "never",
+          approvalsReviewer: "user",
+          sandbox: { type: "dangerFullAccess" },
+          thread,
+        };
+        const encoder = new TextEncoder();
+        let pending = "";
+        const spawner = ChildProcessSpawner.make(() =>
+          Effect.succeed(
+            ChildProcessSpawner.makeHandle({
+              pid: ChildProcessSpawner.ProcessId(7002),
+              exitCode: Effect.never,
+              isRunning: Effect.succeed(true),
+              kill: () => Effect.void,
+              unref: Effect.succeed(Effect.void),
+              stdin: Sink.forEach((chunk: Uint8Array) =>
+                Effect.gen(function* () {
+                  pending += new TextDecoder().decode(chunk);
+                  const lines = pending.split("\n");
+                  pending = lines.pop() ?? "";
+                  for (const line of lines) {
+                    const request = JSON.parse(line) as {
+                      id?: string | number;
+                      method: string;
+                      params?: Record<string, unknown>;
+                    };
+                    calls.push({
+                      method: request.method,
+                      ...(request.params ? { params: request.params } : {}),
+                    });
+                    if (request.id === undefined) continue;
+                    const result =
+                      request.method === "initialize"
+                        ? {
+                            userAgent: "synthetic",
+                            codexHome: process.cwd(),
+                            platformFamily: "synthetic",
+                            platformOs: "synthetic",
+                          }
+                        : request.method === "thread/start" || request.method === "thread/resume"
+                          ? opened
+                          : request.method === "thread/read"
+                            ? { thread }
+                            : request.method === "thread/turns/list"
+                              ? { data: [], nextCursor: null }
+                              : request.method === "thread/goal/get"
+                                ? { goal }
+                                : request.method === "thread/goal/set"
+                                  ? { goal: { ...goal, ...request.params } }
+                                  : request.method === "thread/goal/clear"
+                                    ? { cleared: true }
+                                    : {};
+                    yield* Queue.offer(
+                      output,
+                      encoder.encode(
+                        `${JSON.stringify({
+                          id: request.id,
+                          ...(openingWillFail &&
+                          (request.method === "thread/start" || request.method === "thread/resume")
+                            ? { error: { code: -32602, message: "Synthetic opening refused" } }
+                            : { result }),
+                        })}\n`,
+                      ),
+                    );
+                  }
+                }),
+              ),
+              stdout: Stream.fromQueue(output),
+              stderr: Stream.empty,
+              all: Stream.empty,
+              getInputFd: () => Sink.drain,
+              getOutputFd: () => Stream.empty,
             }),
           ),
-          stdout: Stream.fromQueue(output),
-          stderr: Stream.empty,
-          all: Stream.empty,
-          getInputFd: () => Sink.drain,
-          getOutputFd: () => Stream.empty,
-        }),
-      ),
-    );
-    const runtime = yield* makeCodexSessionRuntime({
-      threadId: ThreadId.make("synthetic-goal-cafe-thread"),
-      binaryPath: "never-launched-provider",
-      environment: {},
-      cwd: process.cwd(),
-      runtimeMode: "full-access",
-    }).pipe(Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner));
-    yield* runtime.start();
-    yield* runtime.setGoal({ objective: "Owner edited goal", status: "active", tokenBudget: 100 });
-    yield* runtime.clearGoal;
-    yield* runtime.interruptTurn(TurnId.make("synthetic-goal-turn"));
-    assert.deepEqual(
-      calls.filter(
-        (call) => call.method === "thread/goal/set" || call.method === "thread/goal/clear",
-      ),
-      [
-        {
-          method: "thread/goal/set",
-          params: {
-            threadId: nativeThreadId,
-            origin: "user",
-            objective: "Owner edited goal",
-            status: "active",
-            tokenBudget: 100,
-          },
-        },
-        { method: "thread/goal/clear", params: { threadId: nativeThreadId, origin: "user" } },
-        {
-          method: "thread/goal/set",
-          params: { threadId: nativeThreadId, origin: "user", status: "paused" },
-        },
-      ],
-    );
-    assert.equal(
-      calls.some((call) => call.method === "turn/start" || call.method === "turn/steer"),
-      false,
-    );
-    assert.equal(
-      calls
-        .filter((call) => call.method === "thread/goal/get")
-        .every((call) => !Object.hasOwn(call.params ?? {}, "origin")),
-      true,
-    );
-  }),
-);
+        );
+        let accessorReads = 0;
+        const runtimeOptions = {
+          threadId: ThreadId.make("synthetic-goal-cafe-thread"),
+          binaryPath: "never-launched-provider",
+          environment: {},
+          cwd: process.cwd(),
+          runtimeMode: "full-access",
+          ...("context" in request ? { codexContextWindowOverride: request.context } : {}),
+          ...("explicit" in request ? { autoCompactTokenLimit: request.explicit } : {}),
+          ...("resume" in request ? { resumeCursor: { threadId: nativeThreadId } } : {}),
+        } satisfies CodexSessionRuntimeOptions;
+        if ("inherited" in request) {
+          Object.setPrototypeOf(runtimeOptions, {
+            autoCompactTokenLimit: 150_000,
+            codexContextWindowOverride: 800_000,
+          });
+        }
+        if ("accessor" in request) {
+          for (const field of ["autoCompactTokenLimit", "codexContextWindowOverride"]) {
+            Object.defineProperty(runtimeOptions, field, {
+              enumerable: true,
+              get: () => {
+                accessorReads += 1;
+                return 150_000;
+              },
+            });
+          }
+        }
+        const runtime = yield* makeCodexSessionRuntime(runtimeOptions).pipe(
+          Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
+        );
+        // Mere runtime construction/settings are not evidence of a successful
+        // native opening. The additive request field is unknown until its ACK.
+        assert.equal(Object.hasOwn(yield* runtime.getSession, "codexAutoCompactTokenLimit"), false);
+        if ("mutate" in request) {
+          Object.defineProperty(runtimeOptions, "autoCompactTokenLimit", { value: 150_000 });
+          Object.defineProperty(runtimeOptions, "codexContextWindowOverride", { value: 500_000 });
+        }
+        if (openingWillFail) {
+          const exit = yield* Effect.exit(runtime.start());
+          assert.equal(exit._tag, "Failure");
+          assert.equal(
+            Object.hasOwn(yield* runtime.getSession, "codexAutoCompactTokenLimit"),
+            false,
+          );
+          return;
+        }
+        yield* runtime.start();
+        const session = yield* runtime.getSession;
+        assert.equal(accessorReads, 0);
+        assert.equal(
+          session.codexContextWindowOverride,
+          "context" in request ? request.context : null,
+        );
+        assert.equal(session.codexAutoCompactTokenLimit, request.expected);
+        const opening = calls.find(
+          (call) => call.method === ("resume" in request ? "thread/resume" : "thread/start"),
+        )!;
+        assert.deepEqual(opening.params?.config, {
+          ...("context" in request ? { model_context_window: request.context } : {}),
+          ...(request.expected !== null
+            ? { model_auto_compact_token_limit: request.expected }
+            : {}),
+        });
+        yield* runtime.setGoal({
+          objective: "Owner edited goal",
+          status: "active",
+          tokenBudget: 100,
+        });
+        yield* runtime.clearGoal;
+        yield* runtime.interruptTurn(TurnId.make("synthetic-goal-turn"));
+        assert.deepEqual(
+          calls.filter(
+            (call) => call.method === "thread/goal/set" || call.method === "thread/goal/clear",
+          ),
+          [
+            {
+              method: "thread/goal/set",
+              params: {
+                threadId: nativeThreadId,
+                origin: "user",
+                objective: "Owner edited goal",
+                status: "active",
+                tokenBudget: 100,
+              },
+            },
+            { method: "thread/goal/clear", params: { threadId: nativeThreadId, origin: "user" } },
+            {
+              method: "thread/goal/set",
+              params: { threadId: nativeThreadId, origin: "user", status: "paused" },
+            },
+          ],
+        );
+        assert.equal(
+          calls.some((call) => call.method === "turn/start" || call.method === "turn/steer"),
+          false,
+        );
+        assert.equal(
+          calls
+            .filter((call) => call.method === "thread/goal/get")
+            .every((call) => !Object.hasOwn(call.params ?? {}, "origin")),
+          true,
+        );
+      }),
+  );
 
 it("binds native event generations to the originating runtime across resume and delayed publication", () => {
   const original = makeCodexSubagentRuntimeGeneration();

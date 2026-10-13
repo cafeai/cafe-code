@@ -352,7 +352,59 @@ function readIntentSequence(payload: Readonly<Record<string, unknown>> | null): 
   return typeof value === "number" && Number.isSafeInteger(value) && value >= 0 ? value : null;
 }
 
-export type SteeringDeliveryStatus = "sending" | "received" | "waiting" | "steering";
+/**
+ * MessageId is reused by automatic steer retries. A same-message notification
+ * alone therefore cannot retire the newer attempt while its command ACK is
+ * missing. Explicit intent proof wins; canonical activity ordering is only the
+ * legacy fallback after the durable intent is known. Never borrow a malformed
+ * or older sequence, and never replace these ordering witnesses with clocks.
+ */
+export function doesSteerActivityMatchPendingAttempt(input: {
+  readonly activity: Pick<OrchestrationThreadActivity, "payload" | "sequence">;
+  readonly pendingIntentSequence: number | null;
+  readonly requiresIntentSequence?: boolean;
+}): boolean {
+  const payload = readUnknownRecord(input.activity.payload);
+  const explicitSequence = readIntentSequence(payload);
+  if (payload?.intentSequence !== undefined && explicitSequence === null) return false;
+  const activitySequence = input.activity.sequence;
+  if (
+    activitySequence !== undefined &&
+    (typeof activitySequence !== "number" ||
+      !Number.isSafeInteger(activitySequence) ||
+      activitySequence < 0)
+  ) {
+    return false;
+  }
+  if (input.pendingIntentSequence === null) return input.requiresIntentSequence !== true;
+  if (explicitSequence !== null) return explicitSequence === input.pendingIntentSequence;
+  if (activitySequence !== undefined) return activitySequence > input.pendingIntentSequence;
+  // Brand-new unique message IDs retain legacy exact-message/clock-skew
+  // compatibility. Reused IDs never fall back to an unversioned observation.
+  return input.requiresIntentSequence !== true;
+}
+
+/** Parsed retry candidates must pass the same attempt fence before ownership
+ * moves out of a live pending row. A legacy root-idle recheck may bypass ordinary
+ * shelf deduplication, but cannot bypass this exact current-generation check. */
+export function doesRetryableSteerFailureMatchPendingAttempt(input: {
+  readonly failureIntentSequence: number | null;
+  readonly pendingIntentSequence: number | null;
+  readonly requiresIntentSequence: boolean;
+}): boolean {
+  if (input.pendingIntentSequence === null) return !input.requiresIntentSequence;
+  if (input.failureIntentSequence !== null) {
+    return input.failureIntentSequence === input.pendingIntentSequence;
+  }
+  return !input.requiresIntentSequence;
+}
+
+export type SteeringDeliveryStatus =
+  | "sending"
+  | "received"
+  | "waiting"
+  | "waiting-for-compaction"
+  | "steering";
 
 /** Presentation only: neither an ACK nor a timed observation settles a steer. */
 export function deriveSteeringDeliveryStatus(input: {
@@ -362,8 +414,15 @@ export function deriveSteeringDeliveryStatus(input: {
   readonly pendingIntentSequence: number | null;
   readonly dispatchedAt: string;
   readonly previousStatus?: SteeringDeliveryStatus | undefined;
+  /** Exact pending-turn observation, never a different current/child turn. */
+  readonly contextCompactionActive?: boolean;
+  readonly requiresIntentSequence?: boolean;
 }): SteeringDeliveryStatus {
   if (input.provider !== "codex") return "steering";
+  // A reversible presentation overlay: compaction may block a native steer
+  // before its ACK. It does not prove receipt and must not become a sticky
+  // observed receipt phase when the compaction item completes.
+  if (input.contextCompactionActive === true) return "waiting-for-compaction";
   const previousStatus =
     input.previousStatus === "received" || input.previousStatus === "waiting"
       ? input.previousStatus
@@ -379,6 +438,14 @@ export function deriveSteeringDeliveryStatus(input: {
     ) {
       continue;
     }
+    if (
+      !doesSteerActivityMatchPendingAttempt({
+        activity,
+        pendingIntentSequence: input.pendingIntentSequence,
+        requiresIntentSequence: input.requiresIntentSequence === true,
+      })
+    )
+      continue;
     const intentSequence = readIntentSequence(payload);
     if (input.pendingIntentSequence !== null && intentSequence !== null) {
       if (input.pendingIntentSequence !== intentSequence) continue;

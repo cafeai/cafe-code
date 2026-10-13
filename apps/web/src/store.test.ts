@@ -637,6 +637,123 @@ describe("thread concurrency projection", () => {
       expect(threadsOf(state)[0]?.session?.subagentRuntimeId).toBe(runtimeId);
     },
   );
+
+  it("projects actual compaction request proof and conserves only partial lifecycle omissions under the exact known owner", () => {
+    const thread = makeThread();
+    let state = makeState(thread);
+    const runtimeA = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+    const runtimeB = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+    const setSession = (
+      sequence: number,
+      request: number | null | undefined,
+      runtimeId: string | undefined,
+      account = "codex",
+    ) => {
+      state = applyOrchestrationEvent(
+        state,
+        makeEvent(
+          "thread.session-set",
+          {
+            threadId: thread.id,
+            session: {
+              threadId: thread.id,
+              providerName: "codex",
+              providerInstanceId: ProviderInstanceId.make(account),
+              status: "ready",
+              runtimeMode: "approval-required",
+              activeTurnId: null,
+              lastError: null,
+              codexContextWindowOverride: 800_000,
+              // A proof-only update with unchanged timestamp must invalidate the
+              // renderer's session equality cache independently from its context.
+              updatedAt: "2026-10-14T00:00:00.000Z",
+              ...(runtimeId !== undefined ? { subagentRuntimeId: runtimeId } : {}),
+              ...(request !== undefined ? { codexAutoCompactTokenLimit: request } : {}),
+            },
+          },
+          { sequence },
+        ),
+        localEnvironmentId,
+      );
+    };
+    setSession(1, 800_000, runtimeA);
+    expect(threadsOf(state)[0]?.session?.codexAutoCompactTokenLimit).toBe(800_000);
+    setSession(2, 150_000, runtimeA);
+    expect(threadsOf(state)[0]?.session?.codexAutoCompactTokenLimit).toBe(150_000);
+    setSession(3, undefined, undefined);
+    expect(threadsOf(state)[0]?.session?.codexAutoCompactTokenLimit).toBe(150_000);
+    setSession(4, undefined, runtimeA);
+    expect(threadsOf(state)[0]?.session?.codexAutoCompactTokenLimit).toBeUndefined();
+    setSession(5, null, runtimeB);
+    expect(threadsOf(state)[0]?.session?.codexAutoCompactTokenLimit).toBeNull();
+    setSession(6, 800_000, runtimeA);
+    setSession(7, undefined, runtimeA, "codex-other");
+    expect(threadsOf(state)[0]?.session?.codexAutoCompactTokenLimit).toBeUndefined();
+    setSession(8, 800_000, runtimeA);
+    setSession(9, undefined, runtimeB);
+    expect(threadsOf(state)[0]?.session?.codexAutoCompactTokenLimit).toBeUndefined();
+  });
+
+  it.each([null, undefined])(
+    "never fills authoritative snapshot compaction proof %s from a saved800K preference",
+    (request) => {
+      const thread = makeThread({
+        codexContextWindowOverride: 800_000,
+        session: {
+          provider: ProviderDriverKind.make("codex"),
+          providerInstanceId: ProviderInstanceId.make("codex"),
+          status: "ready",
+          orchestrationStatus: "ready",
+          createdAt: "2026-10-14T00:00:00.000Z",
+          updatedAt: "2026-10-14T00:00:00.000Z",
+          codexContextWindowOverride: 800_000,
+          codexAutoCompactTokenLimit: 800_000,
+          subagentRuntimeId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        },
+      });
+      const state = syncServerThreadDetail(
+        makeState(thread),
+        {
+          id: thread.id,
+          projectId: thread.projectId,
+          title: thread.title,
+          modelSelection: thread.modelSelection,
+          runtimeMode: thread.runtimeMode,
+          interactionMode: thread.interactionMode,
+          branch: thread.branch,
+          worktreePath: thread.worktreePath,
+          latestTurn: null,
+          createdAt: thread.createdAt,
+          updatedAt: "2026-10-14T00:00:00.000Z",
+          archivedAt: null,
+          deletedAt: null,
+          messages: [],
+          proposedPlans: [],
+          activities: [],
+          checkpoints: [],
+          goal: null,
+          codexContextWindowOverride: 800_000,
+          session: {
+            threadId: thread.id,
+            providerName: "codex",
+            providerInstanceId: ProviderInstanceId.make("codex"),
+            status: "ready",
+            runtimeMode: "approval-required",
+            activeTurnId: null,
+            lastError: null,
+            updatedAt: "2026-10-14T00:00:00.000Z",
+            codexContextWindowOverride: 800_000,
+            subagentRuntimeId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+            ...(request !== undefined ? { codexAutoCompactTokenLimit: request } : {}),
+          },
+        },
+        localEnvironmentId,
+        10,
+      );
+      expect(threadsOf(state)[0]?.session?.codexAutoCompactTokenLimit).toBe(request);
+      expect(threadsOf(state)[0]?.codexContextWindowOverride).toBe(800_000);
+    },
+  );
 });
 
 describe("bootstrap selectors", () => {

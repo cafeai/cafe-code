@@ -1,12 +1,14 @@
 import { createHash, randomUUID } from "node:crypto";
 import { redactVisualizationNativePayload } from "../../visualizations/nativePrivacy.ts";
 import { readMcpAppModelContext } from "../../mcpApps/owner.ts";
+import { readCodexAutoCompactTokenLimit } from "../codexContextWindowPolicy.ts";
 import type { SchedulingSessionBinding } from "../../scheduledFollowups/sessionRuntime.ts";
 import {
   ApprovalRequestId,
   CODEX_MAX_CONCURRENT_SUBAGENTS,
   type CodexTransientFailureCategory,
   DEFAULT_MODEL,
+  validCodexContextWindowOverride,
   EventId,
   ProviderDriverKind,
   ProviderItemId,
@@ -6220,6 +6222,21 @@ export const makeCodexSessionRuntime = (
   ChildProcessSpawner.ChildProcessSpawner | Scope.Scope
 > =>
   Effect.gen(function* () {
+    // One immutable scalar pair owns this native opening and its subsequent
+    // request evidence. Do not evaluate accessors or accept inherited values;
+    // do not reread mutable options after the asynchronous native ACK.
+    const contextDescriptor = Object.getOwnPropertyDescriptor(
+      options,
+      "codexContextWindowOverride",
+    );
+    const codexContextWindowOverride =
+      contextDescriptor !== undefined &&
+      Object.hasOwn(contextDescriptor, "value") &&
+      typeof contextDescriptor.value === "number" &&
+      validCodexContextWindowOverride(contextDescriptor.value)
+        ? contextDescriptor.value
+        : undefined;
+    const autoCompactTokenLimit = readCodexAutoCompactTokenLimit(options);
     const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
     const runtimeScope = yield* Scope.Scope;
     const events = yield* Queue.unbounded<ProviderEvent>();
@@ -6404,7 +6421,7 @@ export const makeCodexSessionRuntime = (
       status: "connecting",
       runtimeMode: options.runtimeMode,
       maxConcurrentSubagents: options.maxConcurrentSubagents ?? null,
-      codexContextWindowOverride: options.codexContextWindowOverride ?? null,
+      codexContextWindowOverride: codexContextWindowOverride ?? null,
       cwd: options.cwd,
       ...(options.additionalDirectories !== undefined
         ? { additionalDirectories: options.additionalDirectories }
@@ -8929,9 +8946,9 @@ export const makeCodexSessionRuntime = (
         serviceTier: options.serviceTier,
         additionalDirectories: options.additionalDirectories,
         resumeThreadId,
-        autoCompactTokenLimit: options.autoCompactTokenLimit,
+        autoCompactTokenLimit,
         customInstructions: options.customInstructions,
-        codexContextWindowOverride: options.codexContextWindowOverride,
+        codexContextWindowOverride,
       });
 
       const providerThreadId = opened.thread.id;
@@ -8960,6 +8977,10 @@ export const makeCodexSessionRuntime = (
       const openedThreadStatusType = readCodexSnapshotThreadStatusType(opened.thread.status);
       const session = {
         ...(yield* Ref.get(sessionRef)),
+        // Publish this only after the actual thread/start or thread/resume
+        // opening succeeds. It attests the nominal structured request, never
+        // a native resolved threshold or a saved legacy process's pairing.
+        codexAutoCompactTokenLimit: autoCompactTokenLimit ?? codexContextWindowOverride ?? null,
         status:
           historyBlocked || openedThreadStatusType === "systemError"
             ? "error"

@@ -237,6 +237,9 @@ export const ServerProviderRuntimeCapabilities = Schema.Struct({
   // Fleet presentation is advisory; final authenticated native-owner
   // capability admission still controls explicit context requests.
   codexContextWindow: Schema.optional(Schema.Boolean),
+  // This backend knows paired request provenance; native-owner RPC remains
+  // authoritative. Absence on an older build is unsupported, never inferred.
+  codexContextCompaction: Schema.optional(Schema.Boolean),
   /** Explicit priority is qualified against the configured native CLI. */
   deliveryPriority: Schema.optional(Schema.Boolean),
   taskControls: Schema.optional(Schema.Boolean),

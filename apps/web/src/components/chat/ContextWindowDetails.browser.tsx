@@ -167,11 +167,14 @@ describe("ContextWindowDetails reset availability", () => {
         configured: number | null | undefined,
         inherited?: number,
         showSubagent = true,
+        configuredAutoCompactTokenLimit?: number | null,
       ) => {
         const codexContextWindow = deriveCodexContextWindowPresentation({
           requested,
           configured,
           inherited,
+          configuredAutoCompactTokenLimit,
+          canApplyWhenIdle: true,
         });
         return layout === "rail" ? (
           <div style={{ width: 280, height: 600 }}>
@@ -264,7 +267,7 @@ describe("ContextWindowDetails reset availability", () => {
       assertSinglePolicyRow(
         document.querySelector<HTMLElement>("[data-subagent-concurrency-details]")!,
       );
-      await mounted.rerender(content(700_000, 700_000, undefined, false));
+      await mounted.rerender(content(700_000, 700_000, undefined, false, 700_000));
       expect(document.querySelector("[data-subagent-concurrency-details]")).toBeNull();
       await expect.element(page.getByText("Context override: 700K", { exact: true })).toBeVisible();
       const finalPolicySection = assertSinglePolicyRow(
@@ -319,6 +322,7 @@ describe("ContextWindowDetails reset availability", () => {
           codexContextWindow={deriveCodexContextWindowPresentation({
             requested: 1_000_000,
             configured: 500_000,
+            canApplyWhenIdle: true,
           })}
           onShowInComposer={() => {}}
         />

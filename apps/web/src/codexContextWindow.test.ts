@@ -58,6 +58,8 @@ describe("Codex context-window preference presentation", () => {
       requested: 1_000_000,
       configured: null,
       pending: true,
+      pendingCompaction: true,
+      canApplyWhenIdle: false,
       source: "Chat override",
     });
     expect(
@@ -70,6 +72,8 @@ describe("Codex context-window preference presentation", () => {
       requested: 750_000,
       configured: 500_000,
       pending: true,
+      pendingCompaction: true,
+      canApplyWhenIdle: false,
       source: "Account default",
     });
   });
@@ -265,12 +269,107 @@ describe("Codex context-window preference presentation", () => {
       requested: null,
       configured: 800_000,
       requestedAutoCompactTokenLimit: 150_000,
+      canApplyWhenIdle: true,
     });
     expect(reset.pending).toBe(true);
     expect(estimateCodexContextCompactionThreshold(reset)).toBeNull();
     expect(formatCodexContextWindowOverride(reset, "en")).toBe(
       "Context override: 800K → Codex default when idle",
     );
+  });
+
+  it.each([undefined, null, 472_000, NaN, Infinity, -1, 0, 1.5, Number.MAX_SAFE_INTEGER + 1])(
+    "keeps matching800Kcontext pending when companion proof is %s rather than estimating applied policy",
+    (configuredAutoCompactTokenLimit) => {
+      const presentation = deriveCodexContextWindowPresentation({
+        requested: 800_000,
+        configured: 800_000,
+        configuredAutoCompactTokenLimit,
+        canApplyWhenIdle: true,
+      });
+      expect(presentation.pending).toBe(true);
+      expect(presentation.pendingCompaction).toBe(true);
+      expect(formatCodexContextWindowOverride(presentation, "en")).toBe(
+        "Context override: 800K · compaction when idle",
+      );
+      expect(estimateCodexContextCompactionThreshold(presentation)).toBe(720_000);
+      // The estimate is saved intent only; never substitute720K for the800K
+      // nominal request that the successful native opening must actually prove.
+      expect(presentation.configured).toBe(800_000);
+    },
+  );
+
+  it("matches only actual nominal companion proof, including explicit account precedence and reset", () => {
+    for (const explicit of [undefined, 150_000, 900_000]) {
+      const desired = explicit ?? 800_000;
+      const applied = deriveCodexContextWindowPresentation({
+        requested: 800_000,
+        configured: 800_000,
+        requestedAutoCompactTokenLimit: explicit,
+        configuredAutoCompactTokenLimit: desired,
+        canApplyWhenIdle: true,
+      });
+      expect(applied.pending).toBe(false);
+      expect(formatCodexContextWindowOverride(applied, "en")).toBe("Context override: 800K");
+      const changed = deriveCodexContextWindowPresentation({
+        ...applied,
+        configuredAutoCompactTokenLimit: desired === 150_000 ? 800_000 : 150_000,
+      });
+      expect(changed.pending).toBe(true);
+      expect(formatCodexContextWindowOverride(changed, "en")).toContain("compaction when idle");
+    }
+    expect(
+      deriveCodexContextWindowPresentation({
+        requested: null,
+        configured: null,
+        configuredAutoCompactTokenLimit: null,
+      }).pending,
+    ).toBe(false);
+    expect(
+      deriveCodexContextWindowPresentation({
+        requested: null,
+        configured: null,
+        configuredAutoCompactTokenLimit: 800_000,
+      }).pendingCompaction,
+    ).toBe(false);
+    expect(
+      deriveCodexContextWindowPresentation({
+        requested: null,
+        configured: null,
+        configuredAutoCompactTokenLimit: undefined,
+      }).pending,
+    ).toBe(false);
+    // An explicit account compaction preference without any current or saved
+    // numeric context intent retains its pre-existing startup path; the new
+    // paired-context presenter does not promise an unsolicited migration.
+    expect(
+      deriveCodexContextWindowPresentation({
+        requested: null,
+        configured: null,
+        requestedAutoCompactTokenLimit: 150_000,
+        canApplyWhenIdle: true,
+      }).pending,
+    ).toBe(false);
+  });
+
+  it("never promises idle adoption with unknown or unsupported paired owner capability", () => {
+    for (const canApplyWhenIdle of [undefined, false]) {
+      const same = deriveCodexContextWindowPresentation({
+        requested: 800_000,
+        configured: 800_000,
+        canApplyWhenIdle,
+      });
+      expect(same.pending).toBe(true);
+      expect(formatCodexContextWindowOverride(same, "en")).toBe("Context override: 800K · saved");
+      const changed = deriveCodexContextWindowPresentation({
+        requested: 800_000,
+        configured: 500_000,
+        canApplyWhenIdle,
+      });
+      expect(formatCodexContextWindowOverride(changed, "en")).toBe(
+        "Context override: 500K → 800K · saved",
+      );
+    }
   });
 
   it.each(["en", "ja", "ko"] as const)(

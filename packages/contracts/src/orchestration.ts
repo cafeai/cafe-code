@@ -332,6 +332,9 @@ export const OrchestrationSession = Schema.Struct({
   maxConcurrentSubagents: Schema.optional(Schema.NullOr(MaxConcurrentSubagents)),
   // Exact materialized Cafe configuration, not a reconstructed context meter.
   codexContextWindowOverride: Schema.optional(Schema.NullOr(CodexContextWindowOverride)),
+  // Received exact-opening request evidence only. Missing legacy metadata
+  // cannot be reconstructed from a saved context override or token usage.
+  codexAutoCompactTokenLimit: Schema.optional(Schema.NullOr(CodexContextWindowOverride)),
   runtimeMode: RuntimeMode.pipe(Schema.withDecodingDefault(Effect.succeed(DEFAULT_RUNTIME_MODE))),
   activeTurnId: Schema.NullOr(TurnId),
   lastError: Schema.NullOr(TrimmedNonEmptyString),

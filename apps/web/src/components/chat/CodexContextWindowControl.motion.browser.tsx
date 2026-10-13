@@ -66,6 +66,7 @@ it.each([false, true].flatMap((dark) => [80, 130].map((scale) => ({ dark, scale 
           codexContextWindow={deriveCodexContextWindowPresentation({
             requested: 800_000,
             configured: 500_000,
+            canApplyWhenIdle: true,
           })}
         />
       </div>,
@@ -116,6 +117,8 @@ it("retains accessible context-dialog input and stationary reduced-motion geomet
       presentation={deriveCodexContextWindowPresentation({
         requested: 500_000,
         configured: 500_000,
+        configuredAutoCompactTokenLimit: 500_000,
+        canApplyWhenIdle: true,
       })}
       onChange={async () => {}}
     />,

@@ -13,6 +13,13 @@ export interface CodexContextWindowPresentation {
   readonly source: "Chat override" | "Account default" | "Codex default";
   /** Exact selected account's saved request, never a resolved native threshold. */
   readonly requestedAutoCompactTokenLimit?: number;
+  /** Actual nominal request recorded at native opening, not the resolved threshold.
+   * Null positively records omission; absence remains legacy/unknown evidence. */
+  readonly configuredAutoCompactTokenLimit?: number | null;
+  /** The same context number does not prove the companion policy was sent. */
+  readonly pendingCompaction: boolean;
+  /** Advisory exact-owner capability only, never authority to replace a process. */
+  readonly canApplyWhenIdle: boolean;
 }
 
 /** Only the exact enabled Codex account may supply a live inherited numeric preference. */
@@ -68,6 +75,8 @@ export function deriveCodexContextWindowPresentation(input: {
   readonly configured: number | null | undefined;
   readonly inherited?: number | undefined;
   readonly requestedAutoCompactTokenLimit?: number | undefined;
+  readonly configuredAutoCompactTokenLimit?: number | null | undefined;
+  readonly canApplyWhenIdle?: boolean | undefined;
 }): CodexContextWindowPresentation {
   const override =
     typeof input.requested === "number" && validCodexContextWindowOverride(input.requested)
@@ -89,10 +98,28 @@ export function deriveCodexContextWindowPresentation(input: {
     validCodexContextWindowOverride(input.requestedAutoCompactTokenLimit)
       ? input.requestedAutoCompactTokenLimit
       : undefined;
+  const configuredAutoCompactTokenLimit =
+    input.configuredAutoCompactTokenLimit === null
+      ? null
+      : typeof input.configuredAutoCompactTokenLimit === "number" &&
+          validCodexContextWindowOverride(input.configuredAutoCompactTokenLimit)
+        ? input.configuredAutoCompactTokenLimit
+        : undefined;
+  // Compare nominal requests, not the derived 90% estimate or received usable
+  // context meter. A legacy 800K context-only session must not look as though its
+  // missing companion request had already adopted the saved compaction policy.
+  const desiredAutoCompactTokenLimit = requestedAutoCompactTokenLimit ?? requested;
+  const pendingCompaction =
+    configured !== undefined &&
+    (requested !== null || typeof configured === "number") &&
+    desiredAutoCompactTokenLimit !== null &&
+    desiredAutoCompactTokenLimit !== configuredAutoCompactTokenLimit;
   return {
     requested,
     configured,
-    pending: configured !== undefined && configured !== requested,
+    pending: configured !== undefined && (configured !== requested || pendingCompaction),
+    pendingCompaction,
+    canApplyWhenIdle: input.canApplyWhenIdle === true,
     source:
       override !== null
         ? "Chat override"
@@ -102,6 +129,7 @@ export function deriveCodexContextWindowPresentation(input: {
     // Preserve legacy absent-key/null/current-to-saved semantics. This separate
     // request exists only when its exact account actually supplied a valid value.
     ...(requestedAutoCompactTokenLimit !== undefined ? { requestedAutoCompactTokenLimit } : {}),
+    ...(configuredAutoCompactTokenLimit !== undefined ? { configuredAutoCompactTokenLimit } : {}),
   };
 }
 
@@ -165,14 +193,26 @@ export function formatCodexContextWindowOverride(
   if (configured === requested) {
     return requested === null
       ? null
-      : uiText(
-          "Context override: {tokens}",
-          {
-            tokens: formatCodexContextWindowTokens(requested, locale),
-          },
-          undefined,
-          locale,
-        );
+      : presentation.pendingCompaction
+        ? presentation.canApplyWhenIdle
+          ? uiText(
+              "Context override: {tokens} · compaction when idle",
+              { tokens: formatCodexContextWindowTokens(requested, locale) },
+              undefined,
+              locale,
+            )
+          : uiText(
+              "Context override: {tokens} · saved",
+              { tokens: formatCodexContextWindowTokens(requested, locale) },
+              undefined,
+              locale,
+            )
+        : uiText(
+            "Context override: {tokens}",
+            { tokens: formatCodexContextWindowTokens(requested, locale) },
+            undefined,
+            locale,
+          );
   }
   const current =
     configured === null
@@ -182,12 +222,9 @@ export function formatCodexContextWindowOverride(
     requested === null
       ? uiText("Codex default", undefined, undefined, locale)
       : formatCodexContextWindowTokens(requested, locale);
-  return uiText(
-    "Context override: {current} → {next} when idle",
-    { current, next },
-    undefined,
-    locale,
-  );
+  return presentation.canApplyWhenIdle
+    ? uiText("Context override: {current} → {next} when idle", { current, next }, undefined, locale)
+    : uiText("Context override: {current} → {next} · saved", { current, next }, undefined, locale);
 }
 
 /** An injective tuple prevents a reused pane from carrying an edit into another target/model. */

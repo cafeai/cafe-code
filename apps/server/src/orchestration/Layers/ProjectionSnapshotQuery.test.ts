@@ -5743,15 +5743,19 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
     }),
   );
 
-  it.effect("omits routine steering diagnostics from historical presence, counts and pages", () =>
+  it.effect("retains steer receipts while omitting repeated historical steering diagnostics", () =>
     Effect.gen(function* () {
       const snapshotQuery = yield* ProjectionSnapshotQuery;
       const sql = yield* SqlClient.SqlClient;
       const threadId = ThreadId.make("thread-steering-presentation");
       const hiddenTurn = TurnId.make("turn-steering-only");
       const mixedTurn = TurnId.make("turn-steering-and-work");
+      const receiptTurn = TurnId.make("turn-steering-receipts");
       const hidden = [
-        { kind: "provider.turn.steer.accepted", payload: { messageId: "message-1" } },
+        {
+          kind: "provider.turn.steer.failed",
+          payload: { messageId: "message-1", retryableFollowUp: true },
+        },
         { kind: "task.progress", payload: { taskId: "codex-turn-steer:correlation-1" } },
         { kind: "task.progress", payload: { taskId: "codex-turn-steer-processing:correlation-1" } },
         { kind: "task.progress", payload: { detail: "Codex app-server accepted turn/steer." } },
@@ -5808,6 +5812,35 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
           },
         },
       ];
+      // Receipts are bounded server-authored identities, not a copy of the
+      // steer prompt or native error. Their display must survive even when a
+      // historical turn contains no other ordinary work-log activity.
+      const receipts = [
+        {
+          kind: "provider.turn.steer.delivery-attempted",
+          summary: "Steer delivery attempted",
+          payload: {
+            provider: "codex",
+            messageId: "message-receipt",
+            intentSequence: 41,
+            expectedTurnId: receiptTurn,
+            delivery: "live-steer",
+            deliveryState: "attempted",
+            reason: "live-steer",
+          },
+        },
+        {
+          kind: "provider.turn.steer.accepted",
+          summary: "Steer accepted",
+          payload: {
+            provider: "codex",
+            messageId: "message-receipt",
+            intentSequence: 41,
+            acceptedTurnId: receiptTurn,
+            clientCorrelationId: codexClientCorrelationId,
+          },
+        },
+      ];
       const visible = [
         { kind: "runtime.warning", payload: { message: "Provider connection lost" } },
         {
@@ -5842,11 +5875,29 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
              'Useful activity', ${JSON.stringify(activity.payload)}, ${hidden.length + index + 1}, '2026-10-09T12:00:01.000Z')
         `;
       }
+      for (const turnId of [receiptTurn, mixedTurn]) {
+        for (const [index, activity] of receipts.entries()) {
+          const payload = {
+            ...activity.payload,
+            ...(activity.kind === "provider.turn.steer.accepted"
+              ? { acceptedTurnId: turnId }
+              : { expectedTurnId: turnId }),
+          };
+          yield* sql`
+            INSERT INTO projection_thread_activities
+              (activity_id, thread_id, turn_id, tone, kind, summary, payload_json, sequence, created_at)
+            VALUES
+              (${`${turnId}-receipt-${index}`}, ${threadId}, ${turnId}, 'info', ${activity.kind},
+               ${activity.summary}, ${JSON.stringify(payload)},
+               ${hidden.length + visible.length + index + 1}, '2026-10-09T12:00:02.000Z')
+          `;
+        }
+      }
       const presence = yield* snapshotQuery.getThreadTurnWorkLogPresence({
         threadId,
-        turnIds: [hiddenTurn, mixedTurn, TurnId.make("turn-absent")],
+        turnIds: [hiddenTurn, mixedTurn, receiptTurn, TurnId.make("turn-absent")],
       });
-      assert.deepStrictEqual(presence.turnIdsWithWorkLog, [mixedTurn]);
+      assert.deepStrictEqual(presence.turnIdsWithWorkLog, [mixedTurn, receiptTurn]);
       const hiddenPage = yield* snapshotQuery.getThreadTurnActivityPage({
         threadId,
         turnId: hiddenTurn,
@@ -5861,7 +5912,7 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
         offset: 0,
         limit: 2,
       });
-      assert.equal(firstPage.totalCount, visible.length);
+      assert.equal(firstPage.totalCount, visible.length + receipts.length);
       assert.deepStrictEqual(
         firstPage.activities.map((activity) => activity.id),
         ["visible-steering-0", "visible-steering-1"],
@@ -5874,8 +5925,38 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
       });
       assert.deepStrictEqual(
         secondPage.activities.map((activity) => activity.id),
-        ["visible-steering-2", "visible-steering-3", "visible-steering-4", "visible-steering-5"],
+        [
+          "visible-steering-2",
+          "visible-steering-3",
+          "visible-steering-4",
+          "visible-steering-5",
+          `${mixedTurn}-receipt-0`,
+          `${mixedTurn}-receipt-1`,
+        ],
       );
+      const receiptPage = yield* snapshotQuery.getThreadTurnActivityPage({
+        threadId,
+        turnId: receiptTurn,
+        offset: 0,
+        limit: 10,
+      });
+      assert.equal(receiptPage.totalCount, receipts.length);
+      assert.deepStrictEqual(
+        receiptPage.activities.map((activity) => ({
+          kind: activity.kind,
+          summary: activity.summary,
+          payload: activity.payload,
+        })),
+        receipts,
+      );
+      const siblingPage = yield* snapshotQuery.getThreadTurnActivityPage({
+        threadId: ThreadId.make("thread-steering-sibling"),
+        turnId: receiptTurn,
+        offset: 0,
+        limit: 10,
+      });
+      assert.equal(siblingPage.totalCount, 0);
+      assert.deepStrictEqual(siblingPage.activities, []);
       // Presentation filtering never deletes the receipts used by recovery.
       const retained = yield* sql<{ count: number }>`
         SELECT COUNT(*) AS count FROM projection_thread_activities

@@ -258,6 +258,7 @@ describe("ProviderCommandReactor", () => {
     readonly standalone?: boolean;
     readonly subagentConcurrency?: boolean | "unknown";
     readonly codexContextWindow?: boolean | "unknown";
+    readonly codexContextCompaction?: boolean | "unknown";
     readonly subagentPolicyContinuation?: boolean;
     readonly subagentRuntimeId?: ProviderSession["subagentRuntimeId"];
     readonly providerInstances?: ServerSettings["providerInstances"];
@@ -280,91 +281,123 @@ describe("ProviderCommandReactor", () => {
       instanceId: ProviderInstanceId.make("codex"),
       model: "gpt-5-codex",
     };
-    const startSession = vi.fn<ProviderServiceShape["startSession"]>((_, input) => {
-      const sessionIndex = nextSessionIndex++;
-      const resumeCursor =
-        typeof input === "object" && input !== null && "resumeCursor" in input
-          ? input.resumeCursor
-          : undefined;
-      const threadId =
-        typeof input === "object" &&
-        input !== null &&
-        "threadId" in input &&
-        typeof input.threadId === "string"
-          ? ThreadId.make(input.threadId)
-          : ThreadId.make(`thread-${sessionIndex}`);
-      const inputModelSelection =
-        typeof input === "object" && input !== null && "modelSelection" in input
-          ? (input.modelSelection as ModelSelection | undefined)
-          : undefined;
-      const providerInstanceId =
-        typeof input === "object" && input !== null && "providerInstanceId" in input
-          ? (input.providerInstanceId as ProviderInstanceId | undefined)
-          : inputModelSelection?.instanceId;
-      const provider =
-        typeof input === "object" &&
-        input !== null &&
-        "provider" in input &&
-        typeof input.provider === "string"
-          ? (input.provider as ProviderSession["provider"])
-          : ProviderDriverKind.make(inputModelSelection?.instanceId ?? modelSelection.instanceId);
-      const session: ProviderSession = {
-        provider,
-        ...(providerInstanceId ? { providerInstanceId } : {}),
-        status: "ready" as const,
-        ...(configuredSubagentRuntimeId !== undefined
-          ? { subagentRuntimeId: configuredSubagentRuntimeId }
-          : {}),
-        runtimeMode:
+    let readInstanceSettings = (): Effect.Effect<ServerSettings["providerInstances"]> =>
+      Effect.succeed(input?.providerInstances ?? {});
+    const startSession = vi.fn<ProviderServiceShape["startSession"]>((_, input) =>
+      Effect.gen(function* () {
+        // Read this fixture's isolated current settings at actual opening, just
+        // as the selected adapter does. Never inspect an ambient provider/profile.
+        const instanceSettings = yield* readInstanceSettings();
+        const sessionIndex = nextSessionIndex++;
+        const resumeCursor =
+          typeof input === "object" && input !== null && "resumeCursor" in input
+            ? input.resumeCursor
+            : undefined;
+        const threadId =
           typeof input === "object" &&
           input !== null &&
-          "runtimeMode" in input &&
-          (input.runtimeMode === "approval-required" ||
-            input.runtimeMode === "auto-accept-edits" ||
-            input.runtimeMode === "full-access")
-            ? input.runtimeMode
-            : "full-access",
-        ...(typeof input === "object" &&
-        input !== null &&
-        "interactionMode" in input &&
-        (input.interactionMode === "default" ||
-          input.interactionMode === "plan" ||
-          input.interactionMode === "auto")
-          ? { interactionMode: input.interactionMode }
-          : {}),
-        ...(typeof input === "object" &&
-        input !== null &&
-        "cwd" in input &&
-        typeof input.cwd === "string"
-          ? { cwd: input.cwd }
-          : {}),
-        ...((inputModelSelection?.model ?? modelSelection.model)
-          ? { model: inputModelSelection?.model ?? modelSelection.model }
-          : {}),
-        ...(inputModelSelection ? { modelSelection: inputModelSelection } : {}),
-        threadId,
-        ...(typeof input === "object" && input !== null && "maxConcurrentSubagents" in input
-          ? { maxConcurrentSubagents: input.maxConcurrentSubagents as number | null }
-          : {}),
-        ...(typeof input === "object" && input !== null && "codexContextWindowOverride" in input
-          ? { codexContextWindowOverride: input.codexContextWindowOverride as number | null }
-          : {}),
-        resumeCursor: resumeCursor ?? { opaque: `resume-${sessionIndex}` },
-        // Exact-generation fixtures represent a native materialization after
-        // its admitted first intent, not a stale pre-intent replay snapshot.
-        createdAt: configuredSubagentRuntimeId === undefined ? now : "2026-01-01T00:00:02.000Z",
-        updatedAt: configuredSubagentRuntimeId === undefined ? now : "2026-01-01T00:00:02.000Z",
-      };
-      const existingSessionIndex = runtimeSessions.findIndex(
-        (candidate) => candidate.threadId === threadId,
-      );
-      if (existingSessionIndex >= 0) {
-        runtimeSessions.splice(existingSessionIndex, 1, session);
-      } else {
-        runtimeSessions.push(session);
-      }
-      return Effect.succeed(session);
-    });
+          "threadId" in input &&
+          typeof input.threadId === "string"
+            ? ThreadId.make(input.threadId)
+            : ThreadId.make(`thread-${sessionIndex}`);
+        const inputModelSelection =
+          typeof input === "object" && input !== null && "modelSelection" in input
+            ? (input.modelSelection as ModelSelection | undefined)
+            : undefined;
+        const providerInstanceId =
+          typeof input === "object" && input !== null && "providerInstanceId" in input
+            ? (input.providerInstanceId as ProviderInstanceId | undefined)
+            : inputModelSelection?.instanceId;
+        const provider =
+          typeof input === "object" &&
+          input !== null &&
+          "provider" in input &&
+          typeof input.provider === "string"
+            ? (input.provider as ProviderSession["provider"])
+            : ProviderDriverKind.make(inputModelSelection?.instanceId ?? modelSelection.instanceId);
+        const instance =
+          providerInstanceId === undefined ? undefined : instanceSettings[providerInstanceId];
+        const config =
+          instance?.driver === "codex" && instance.enabled !== false ? instance.config : undefined;
+        const compactionDescriptor =
+          config !== null && typeof config === "object" && !Array.isArray(config)
+            ? Object.getOwnPropertyDescriptor(config, "autoCompactTokenLimit")
+            : undefined;
+        const explicitCompactionRequest =
+          compactionDescriptor !== undefined &&
+          Object.hasOwn(compactionDescriptor, "value") &&
+          typeof compactionDescriptor.value === "number" &&
+          Number.isSafeInteger(compactionDescriptor.value) &&
+          compactionDescriptor.value > 0
+            ? compactionDescriptor.value
+            : undefined;
+        const session: ProviderSession = {
+          provider,
+          ...(providerInstanceId ? { providerInstanceId } : {}),
+          status: "ready" as const,
+          ...(configuredSubagentRuntimeId !== undefined
+            ? { subagentRuntimeId: configuredSubagentRuntimeId }
+            : {}),
+          runtimeMode:
+            typeof input === "object" &&
+            input !== null &&
+            "runtimeMode" in input &&
+            (input.runtimeMode === "approval-required" ||
+              input.runtimeMode === "auto-accept-edits" ||
+              input.runtimeMode === "full-access")
+              ? input.runtimeMode
+              : "full-access",
+          ...(typeof input === "object" &&
+          input !== null &&
+          "interactionMode" in input &&
+          (input.interactionMode === "default" ||
+            input.interactionMode === "plan" ||
+            input.interactionMode === "auto")
+            ? { interactionMode: input.interactionMode }
+            : {}),
+          ...(typeof input === "object" &&
+          input !== null &&
+          "cwd" in input &&
+          typeof input.cwd === "string"
+            ? { cwd: input.cwd }
+            : {}),
+          ...((inputModelSelection?.model ?? modelSelection.model)
+            ? { model: inputModelSelection?.model ?? modelSelection.model }
+            : {}),
+          ...(inputModelSelection ? { modelSelection: inputModelSelection } : {}),
+          threadId,
+          ...(typeof input === "object" && input !== null && "maxConcurrentSubagents" in input
+            ? { maxConcurrentSubagents: input.maxConcurrentSubagents as number | null }
+            : {}),
+          ...(typeof input === "object" && input !== null && "codexContextWindowOverride" in input
+            ? { codexContextWindowOverride: input.codexContextWindowOverride as number | null }
+            : {}),
+          // The synthetic current producer records its actual companion nominal
+          // request. Legacy migration cases explicitly remove this proof instead
+          // of pretending an old context-only session ran the new opening path.
+          ...(provider === "codex"
+            ? {
+                codexAutoCompactTokenLimit:
+                  explicitCompactionRequest ?? input.codexContextWindowOverride ?? null,
+              }
+            : {}),
+          resumeCursor: resumeCursor ?? { opaque: `resume-${sessionIndex}` },
+          // Exact-generation fixtures represent a native materialization after
+          // its admitted first intent, not a stale pre-intent replay snapshot.
+          createdAt: configuredSubagentRuntimeId === undefined ? now : "2026-01-01T00:00:02.000Z",
+          updatedAt: configuredSubagentRuntimeId === undefined ? now : "2026-01-01T00:00:02.000Z",
+        };
+        const existingSessionIndex = runtimeSessions.findIndex(
+          (candidate) => candidate.threadId === threadId,
+        );
+        if (existingSessionIndex >= 0) {
+          runtimeSessions.splice(existingSessionIndex, 1, session);
+        } else {
+          runtimeSessions.push(session);
+        }
+        return session;
+      }),
+    );
     const sendTurn = vi.fn<ProviderServiceShape["sendTurn"]>((input) => {
       const threadId = input.threadId;
       return Effect.succeed({
@@ -499,6 +532,9 @@ describe("ProviderCommandReactor", () => {
         ...(input?.codexContextWindow === "unknown"
           ? {}
           : { codexContextWindow: input?.codexContextWindow ?? true }),
+        ...(input?.codexContextCompaction === "unknown"
+          ? {}
+          : { codexContextCompaction: input?.codexContextCompaction ?? true }),
         ...(input?.subagentConcurrency === "unknown"
           ? {}
           : { subagentConcurrency: input?.subagentConcurrency ?? true }),
@@ -729,6 +765,14 @@ describe("ProviderCommandReactor", () => {
     const snapshotQuery = await runtime.runPromise(Effect.service(ProjectionSnapshotQuery));
     const reactor = await runtime.runPromise(Effect.service(ProviderCommandReactor));
     const serverSettings = await runtime.runPromise(Effect.service(ServerSettingsService));
+    readInstanceSettings = () =>
+      // An isolated fixture settings failure is a test defect, not a simulated
+      // provider failure. Keep that failure visible rather than widening the
+      // synthetic provider service's public error channel or supplying defaults.
+      serverSettings.getSettings.pipe(
+        Effect.orDie,
+        Effect.map((settings) => settings.providerInstances),
+      );
     scope = await Effect.runPromise(Scope.make("sequential"));
     const startReactor = () => {
       const start = reactor.start().pipe(Scope.provide(scope!));
@@ -763,11 +807,15 @@ describe("ProviderCommandReactor", () => {
       const thread = snapshot.threads.find((entry) => entry.id === threadId);
       const detail = await Effect.runPromise(snapshotQuery.getThreadDetailById(threadId));
       const contextOverride = Option.getOrUndefined(detail)?.session?.codexContextWindowOverride;
+      const compactionRequest = Option.getOrUndefined(detail)?.session?.codexAutoCompactTokenLimit;
       // Retain the exact materialized context witness, not requested metadata,
       // while leaving the existing fixture's other lifecycle fields unchanged.
       const session = thread?.session && {
         ...thread.session,
         ...(contextOverride !== undefined ? { codexContextWindowOverride: contextOverride } : {}),
+        ...(compactionRequest !== undefined
+          ? { codexAutoCompactTokenLimit: compactionRequest }
+          : {}),
       };
       if (!session) {
         throw new Error(`Cannot mark thread '${threadId}' ready without a projected session.`);
@@ -2203,6 +2251,281 @@ describe("ProviderCommandReactor", () => {
         }),
       );
     }
+
+    async function compactionOverride(
+      harness: Awaited<ReturnType<typeof createHarness>>,
+      value: number | undefined,
+    ) {
+      const settings = await Effect.runPromise(harness.serverSettings.getSettings);
+      const instanceId = ProviderInstanceId.make("codex");
+      const instance = settings.providerInstances[instanceId] ?? {
+        driver: ProviderDriverKind.make("codex"),
+      };
+      await Effect.runPromise(
+        harness.serverSettings.updateSettings({
+          providerInstances: {
+            ...settings.providerInstances,
+            [instanceId]: {
+              ...instance,
+              config: value === undefined ? {} : { autoCompactTokenLimit: value },
+            },
+          },
+        }),
+      );
+    }
+
+    it.each([undefined, null, 472_000])(
+      "reconciles the same 800K context with %s compaction evidence through the final idle guard",
+      async (evidence) => {
+        const harness = await createHarness({
+          standalone: true,
+          // A current native opening always mints an exact generation. Missing
+          // generation must not qualify compaction evidence in projections.
+          subagentRuntimeId: SubagentRuntimeId.make("00000000-0000-4000-8000-000000000023"),
+        });
+        await contextOverride(harness, "paired-context-seed", 800_000);
+        await send(harness, "paired-context-seed-send");
+        await harness.markThreadReady(threadId, "2026-01-01T00:00:02.000Z");
+        const { codexAutoCompactTokenLimit: _former, ...legacy } = harness.runtimeSessions[0]!;
+        const resumeCursor = legacy.resumeCursor;
+        harness.runtimeSessions[0] = {
+          ...legacy,
+          ...(evidence === undefined ? {} : { codexAutoCompactTokenLimit: evidence }),
+        };
+        await send(harness, "paired-context-migration-send");
+        expect(harness.startSession).toHaveBeenCalledTimes(2);
+        expect(harness.startSession.mock.calls[1]?.[1]).toMatchObject({
+          codexContextWindowOverride: 800_000,
+          requireIdleForCodexContextWindowChange: true,
+          resumeCursor,
+        });
+        expect(harness.runtimeSessions[0]?.codexAutoCompactTokenLimit).toBe(800_000);
+        expect(
+          (await harness.readThreadDetail(threadId))?.session?.codexAutoCompactTokenLimit,
+        ).toBe(800_000);
+        expect(harness.sendTurn).toHaveBeenCalledTimes(2);
+        expect(harness.stopSession).not.toHaveBeenCalled();
+      },
+    );
+
+    it("reuses exact paired 800K process proof without reopening or replaying input", async () => {
+      const harness = await createHarness({ standalone: true });
+      await contextOverride(harness, "paired-reuse-seed", 800_000);
+      await send(harness, "paired-reuse-seed-send");
+      await harness.markThreadReady(threadId, "2026-01-01T00:00:02.000Z");
+      const current = harness.runtimeSessions[0];
+      await send(harness, "paired-reuse-followup");
+      expect(harness.runtimeSessions[0]).toBe(current);
+      expect(harness.startSession).toHaveBeenCalledTimes(1);
+      expect(harness.sendTurn).toHaveBeenCalledTimes(2);
+      expect(harness.stopSession).not.toHaveBeenCalled();
+    });
+
+    it("retains a busy legacy context for steering and migrates only after separately observed native idle", async () => {
+      const harness = await createHarness({
+        standalone: true,
+        liveSteer: "supported",
+        subagentRuntimeId: SubagentRuntimeId.make("00000000-0000-4000-8000-000000000023"),
+      });
+      await contextOverride(harness, "paired-busy-seed", 800_000);
+      await send(harness, "paired-busy-seed-send");
+      const rootTurnId = asTurnId("paired-busy-seed-send-native-turn");
+      const { codexAutoCompactTokenLimit: _former, ...legacy } = harness.runtimeSessions[0]!;
+      harness.runtimeSessions[0] = {
+        ...legacy,
+        status: "running",
+        activeTurnId: rootTurnId,
+      };
+      const busy = harness.runtimeSessions[0];
+      const getCapabilities = harness.getCapabilities.getMockImplementation()!;
+      harness.getCapabilities.mockImplementation((instanceId) =>
+        getCapabilities(instanceId).pipe(
+          Effect.map(
+            ({ codexContextCompaction: _formerCapability, ...legacyCapabilities }) =>
+              legacyCapabilities,
+          ),
+        ),
+      );
+      const messageId = asMessageId("paired-busy-retained-steer");
+      harness.steerTurn.mockImplementationOnce((input) =>
+        Effect.succeed({ threadId: input.threadId, turnId: input.expectedTurnId }),
+      );
+      await Effect.runPromise(
+        harness.engine.dispatch({
+          type: "thread.turn.steer",
+          commandId: CommandId.make("paired-busy-retained-steer"),
+          threadId,
+          message: {
+            messageId,
+            role: "user",
+            text: "Synthetic retained-root guidance",
+            attachments: [],
+          },
+          createdAt: "2026-01-01T00:00:03.000Z",
+        }),
+      );
+      await waitFor(
+        async () =>
+          (await harness.readThreadDetail(threadId))?.activities.some(
+            (activity) =>
+              activity.kind === "provider.turn.steer.accepted" &&
+              (activity.payload as Readonly<Record<string, unknown>> | undefined)?.messageId ===
+                messageId,
+          ) === true,
+      );
+      await harness.drain();
+      expect(harness.startSession).toHaveBeenCalledTimes(1);
+      expect(harness.runtimeSessions[0]).toBe(busy);
+      expect(harness.runtimeSessions[0]).not.toHaveProperty("codexAutoCompactTokenLimit");
+      expect(harness.runtimeSessions[0]?.activeTurnId).toBe(rootTurnId);
+      expect(harness.steerTurn).toHaveBeenCalledTimes(1);
+      expect(harness.steerTurn.mock.calls[0]?.[0].expectedTurnId).toBe(rootTurnId);
+      expect(harness.sendTurn).toHaveBeenCalledTimes(1);
+      expect(harness.stopSession).not.toHaveBeenCalled();
+      // Saving/steering cannot upgrade an old owner. Qualify a current owner
+      // separately before the later idle materialization is allowed to open.
+      harness.getCapabilities.mockImplementation(getCapabilities);
+      await harness.markThreadReady(threadId, "2026-01-01T00:00:04.000Z");
+      const { activeTurnId: _completed, ...idle } = harness.runtimeSessions[0]!;
+      harness.runtimeSessions[0] = { ...idle, status: "ready" };
+      await send(harness, "paired-busy-after-idle");
+      expect(harness.startSession.mock.calls[1]?.[1]).toMatchObject({
+        codexContextWindowOverride: 800_000,
+        requireIdleForCodexContextWindowChange: true,
+      });
+      expect(harness.runtimeSessions[0]?.codexAutoCompactTokenLimit).toBe(800_000);
+      expect(harness.sendTurn).toHaveBeenCalledTimes(2);
+      expect(harness.stopSession).not.toHaveBeenCalled();
+      expect(harness.interruptTurn).not.toHaveBeenCalled();
+    });
+
+    it("retains the exact legacy process when a child wakes during compaction migration admission", async () => {
+      const harness = await createHarness({ standalone: true });
+      await contextOverride(harness, "paired-child-seed", 800_000);
+      await send(harness, "paired-child-seed-send");
+      await harness.markThreadReady(threadId, "2026-01-01T00:00:02.000Z");
+      const { codexAutoCompactTokenLimit: _former, ...legacy } = harness.runtimeSessions[0]!;
+      harness.runtimeSessions[0] = legacy;
+      harness.startSession.mockImplementationOnce(() =>
+        Effect.fail(
+          new ProviderAdapterRequestError({
+            provider: "codex",
+            method: "session/reconfigure",
+            remoteErrorTag: "codex-context-window-active",
+            detail: "Synthetic native child woke before final admission.",
+          }),
+        ),
+      );
+      await send(harness, "paired-child-retained-send");
+      expect(harness.startSession.mock.calls[1]?.[1]).toMatchObject({
+        codexContextWindowOverride: 800_000,
+        requireIdleForCodexContextWindowChange: true,
+      });
+      expect(harness.runtimeSessions[0]).toBe(legacy);
+      expect(harness.runtimeSessions[0]).not.toHaveProperty("codexAutoCompactTokenLimit");
+      expect(harness.sendTurn).toHaveBeenCalledTimes(2);
+      expect(harness.stopSession).not.toHaveBeenCalled();
+      expect(harness.interruptTurn).not.toHaveBeenCalled();
+      await harness.markThreadReady(threadId, "2026-01-01T00:00:04.000Z");
+      await send(harness, "paired-child-after-idle");
+      expect(harness.runtimeSessions[0]?.codexAutoCompactTokenLimit).toBe(800_000);
+      expect(harness.sendTurn).toHaveBeenCalledTimes(3);
+    });
+
+    it.each([false, "unknown"] as const)(
+      "refuses %s paired-compaction owners before numeric context materialization",
+      async (support) => {
+        const harness = await createHarness({ standalone: true, codexContextCompaction: support });
+        await contextOverride(harness, "paired-unqualified-seed", 800_000);
+        await send(harness, `paired-unqualified-${support}`, true);
+        expect(harness.startSession).not.toHaveBeenCalled();
+        expect(harness.sendTurn).not.toHaveBeenCalled();
+        expect(harness.stopSession).not.toHaveBeenCalled();
+        expect((await harness.readThreadDetail(threadId))?.codexContextWindowOverride).toBe(
+          800_000,
+        );
+      },
+    );
+
+    it.each([false, "unknown"] as const)(
+      "does not reopen an idle legacy 800K session into a %s paired-compaction owner",
+      async (support) => {
+        const harness = await createHarness({ standalone: true });
+        await contextOverride(harness, "paired-owner-migration-seed", 800_000);
+        await send(harness, "paired-owner-migration-first");
+        await harness.markThreadReady(threadId, "2026-01-01T00:00:02.000Z");
+        const { codexAutoCompactTokenLimit: _former, ...legacy } = harness.runtimeSessions[0]!;
+        harness.runtimeSessions[0] = legacy;
+        const getCapabilities = harness.getCapabilities.getMockImplementation()!;
+        harness.getCapabilities.mockImplementation((instanceId) =>
+          getCapabilities(instanceId).pipe(
+            Effect.map((capabilities) => {
+              const { codexContextCompaction: _old, ...retained } = capabilities;
+              return support === "unknown"
+                ? retained
+                : { ...retained, codexContextCompaction: false };
+            }),
+          ),
+        );
+        await send(harness, `paired-owner-migration-refused-${support}`, true);
+        expect(harness.startSession).toHaveBeenCalledTimes(1);
+        expect(harness.sendTurn).toHaveBeenCalledTimes(1);
+        expect(harness.runtimeSessions[0]).toBe(legacy);
+        expect(harness.runtimeSessions[0]).not.toHaveProperty("codexAutoCompactTokenLimit");
+        expect(harness.stopSession).not.toHaveBeenCalled();
+        expect((await harness.readThreadDetail(threadId))?.codexContextWindowOverride).toBe(
+          800_000,
+        );
+      },
+    );
+
+    it.each([false, "unknown"] as const)(
+      "preserves explicit-only account compaction on a %s context/pair owner without legacy replacement",
+      async (support) => {
+        const harness = await createHarness({
+          standalone: true,
+          codexContextWindow: support,
+          codexContextCompaction: support,
+        });
+        await compactionOverride(harness, 150_000);
+        await send(harness, `explicit-only-first-${support}`);
+        expect(harness.startSession.mock.calls[0]?.[1].codexContextWindowOverride).toBeNull();
+        expect(harness.runtimeSessions[0]?.codexAutoCompactTokenLimit).toBe(150_000);
+        await harness.markThreadReady(threadId, "2026-01-01T00:00:02.000Z");
+        const { codexAutoCompactTokenLimit: _former, ...legacy } = harness.runtimeSessions[0]!;
+        harness.runtimeSessions[0] = legacy;
+        await send(harness, `explicit-only-legacy-${support}`);
+        expect(harness.runtimeSessions[0]).toBe(legacy);
+        expect(harness.runtimeSessions[0]).not.toHaveProperty("codexAutoCompactTokenLimit");
+        expect(harness.startSession).toHaveBeenCalledTimes(1);
+        expect(harness.sendTurn).toHaveBeenCalledTimes(2);
+        expect(harness.stopSession).not.toHaveBeenCalled();
+      },
+    );
+
+    it("reconciles explicit account compaction edits and clearing while the context number stays 800K", async () => {
+      const harness = await createHarness({ standalone: true });
+      await contextOverride(harness, "paired-explicit-context", 800_000);
+      await compactionOverride(harness, 150_000);
+      await send(harness, "paired-explicit-first");
+      expect(harness.runtimeSessions[0]?.codexAutoCompactTokenLimit).toBe(150_000);
+      await harness.markThreadReady(threadId, "2026-01-01T00:00:02.000Z");
+      await compactionOverride(harness, 600_000);
+      expect(harness.startSession).toHaveBeenCalledTimes(1);
+      await send(harness, "paired-explicit-changed");
+      expect(harness.startSession.mock.calls[1]?.[1]).toMatchObject({
+        codexContextWindowOverride: 800_000,
+        requireIdleForCodexContextWindowChange: true,
+      });
+      expect(harness.runtimeSessions[0]?.codexAutoCompactTokenLimit).toBe(600_000);
+      await harness.markThreadReady(threadId, "2026-01-01T00:00:04.000Z");
+      await compactionOverride(harness, undefined);
+      await send(harness, "paired-explicit-cleared");
+      expect(harness.runtimeSessions[0]?.codexAutoCompactTokenLimit).toBe(800_000);
+      expect(harness.startSession).toHaveBeenCalledTimes(3);
+      expect(harness.sendTurn).toHaveBeenCalledTimes(3);
+      expect(harness.stopSession).not.toHaveBeenCalled();
+    });
 
     it("resolves live Codex context account defaults, keeps explicit chat precedence and clears safely", async () => {
       const harness = await createHarness({ standalone: true });
@@ -4820,9 +5143,13 @@ describe("ProviderCommandReactor", () => {
     expect(harness.sendTurn).not.toHaveBeenCalled();
   });
 
-  it.each([undefined, null, 600_000] as const)(
-    "adopts only exact observed context configuration %s at startup without borrowing a former generation",
-    async (observedContext) => {
+  it.each([
+    { observedContext: undefined, observedCompaction: undefined },
+    { observedContext: null, observedCompaction: null },
+    { observedContext: 600_000, observedCompaction: 150_000 },
+  ])(
+    "adopts exact observed context/compaction $observedContext/$observedCompaction at startup without borrowing a former generation",
+    async ({ observedContext, observedCompaction }) => {
       const harness = await createHarness({ startReactor: false });
       const threadId = ThreadId.make("thread-1");
       const turnId = asTurnId("synthetic-context-startup-root");
@@ -4841,6 +5168,7 @@ describe("ProviderCommandReactor", () => {
             providerInstanceId: ProviderInstanceId.make("codex"),
             subagentRuntimeId: oldId,
             codexContextWindowOverride: 500_000,
+            codexAutoCompactTokenLimit: 500_000,
             runtimeMode: "approval-required",
             activeTurnId: turnId,
             lastError: null,
@@ -4856,6 +5184,9 @@ describe("ProviderCommandReactor", () => {
         status: "running",
         subagentRuntimeId: newId,
         ...(observedContext !== undefined ? { codexContextWindowOverride: observedContext } : {}),
+        ...(observedCompaction !== undefined
+          ? { codexAutoCompactTokenLimit: observedCompaction }
+          : {}),
         runtimeMode: "approval-required",
         activeTurnId: turnId,
         createdAt: at,
@@ -4868,6 +5199,83 @@ describe("ProviderCommandReactor", () => {
       if (observedContext === undefined)
         expect(session).not.toHaveProperty("codexContextWindowOverride");
       else expect(session).toHaveProperty("codexContextWindowOverride", observedContext);
+      if (observedCompaction === undefined)
+        expect(session).not.toHaveProperty("codexAutoCompactTokenLimit");
+      else expect(session).toHaveProperty("codexAutoCompactTokenLimit", observedCompaction);
+      expect(harness.startSession).not.toHaveBeenCalled();
+      expect(harness.stopSession).not.toHaveBeenCalled();
+      expect(harness.interruptTurn).not.toHaveBeenCalled();
+      expect(harness.sendTurn).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each([undefined, null, 472_000, 800_000])(
+    "reconciles complete same-generation compaction proof %s at startup without opening or interrupting work",
+    async (observedCompaction) => {
+      const harness = await createHarness({ startReactor: false });
+      const threadId = ThreadId.make("thread-1");
+      const turnId = asTurnId("synthetic-compaction-startup-root");
+      const runtimeId = SubagentRuntimeId.make("00000000-0000-4000-8000-000000000024");
+      const at = "2026-01-01T00:00:01.000Z";
+      await Effect.runPromise(
+        harness.engine.dispatch({
+          type: "thread.meta.update",
+          commandId: CommandId.make("compaction-startup-saved-intent"),
+          threadId,
+          codexContextWindowOverride: 900_000,
+        }),
+      );
+      await Effect.runPromise(
+        harness.engine.dispatch({
+          type: "thread.session.set",
+          commandId: CommandId.make("compaction-startup-former-proof"),
+          threadId,
+          session: {
+            threadId,
+            status: "running",
+            providerName: "codex",
+            providerInstanceId: ProviderInstanceId.make("codex"),
+            subagentRuntimeId: runtimeId,
+            codexContextWindowOverride: 800_000,
+            codexAutoCompactTokenLimit: 800_000,
+            runtimeMode: "approval-required",
+            activeTurnId: turnId,
+            lastError: null,
+            updatedAt: at,
+          },
+          createdAt: at,
+        }),
+      );
+      const observedSession: ProviderSession = {
+        threadId,
+        provider: ProviderDriverKind.make("codex"),
+        providerInstanceId: ProviderInstanceId.make("codex"),
+        status: "running",
+        subagentRuntimeId: runtimeId,
+        codexContextWindowOverride: 800_000,
+        ...(observedCompaction !== undefined
+          ? { codexAutoCompactTokenLimit: observedCompaction }
+          : {}),
+        runtimeMode: "approval-required",
+        activeTurnId: turnId,
+        createdAt: at,
+        updatedAt: at,
+      };
+      harness.runtimeSessions.push(observedSession);
+      await harness.startReactor();
+      await harness.drain();
+      const detail = await harness.readThreadDetail(threadId);
+      expect(detail?.codexContextWindowOverride).toBe(900_000);
+      expect(detail?.session).toMatchObject({
+        subagentRuntimeId: runtimeId,
+        codexContextWindowOverride: 800_000,
+        status: "running",
+        activeTurnId: turnId,
+      });
+      if (observedCompaction === undefined)
+        expect(detail?.session).not.toHaveProperty("codexAutoCompactTokenLimit");
+      else expect(detail?.session?.codexAutoCompactTokenLimit).toBe(observedCompaction);
+      expect(harness.runtimeSessions[0]).toBe(observedSession);
       expect(harness.startSession).not.toHaveBeenCalled();
       expect(harness.stopSession).not.toHaveBeenCalled();
       expect(harness.interruptTurn).not.toHaveBeenCalled();

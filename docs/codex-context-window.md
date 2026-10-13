@@ -2,7 +2,7 @@
 
 Status: Implemented; native account capacity and hosted release qualification are separate
 Created: 2026-10-12 11:10:24 JST (UTC+0900)
-Last updated: 2026-10-13 18:28:32 JST (UTC+0900)
+Last updated: 2026-10-14 00:39:49 JST (UTC+0900)
 
 For Codex chats, use **More composer controls → Context window…** beneath
 Subagent limit… to save a custom token count. Blank or Reset removes the chat's
@@ -19,7 +19,9 @@ action edits global Codex configuration or affects another account.
 The Tasks/context details and pinned sidebar show the override beside the
 subagent limit, including an inherited provider default. A compact current-to-saved
 label shows a pending change when recorded session configuration is known; unknown
-configuration is marked saved. Clearing a choice still retains a known current
+configuration is marked saved. Matching context with missing/different recorded
+compaction-request evidence is also pending, not proof that the estimate applies.
+Clearing a choice still retains a known current
 override while a return to inheritance is pending. Further source/configuration
 details live in the information tooltip rather than extra status rows.
 
@@ -45,7 +47,9 @@ The immediately next send may be a steer that keeps the current configuration.
 Unsupported or unknown runtime qualification refuses numeric intent while keeping
 the unsent prompt available; the preference is not silently discarded.
 Explicit numeric configuration requires the configured owner's reviewed stable
-Codex runtime, 0.162.1 or newer, and its authenticated capability. Reset can still
+Codex runtime, 0.162.1 or newer, and both authenticated context and paired-compaction
+capabilities from its actual Cafe owner. Older context-only daemons cannot qualify
+the new policy. Reset can still
 clear saved chat intent when the editor cannot apply a number.
 
 The context meter continues to show Codex's reported usable window. It can differ
@@ -62,6 +66,14 @@ Resetting a chat still pairs an inherited provider context default; clearing the
 final context choice removes only the derived request, not a separate compaction
 setting. No global Codex config file is changed.
 
+Cafe separately records the nominal automatic-compaction request after an actual
+successful native opening. Missing older evidence stays unknown; it is not
+backfilled from the saved 800K choice. At the next ordinary send, an older session
+with the same context number but missing/different compaction policy is safely
+retired/resumed only after the existing final root/children/ingress idle checks.
+Steering ongoing work retains its current policy. An incompatible or uncertain
+owner refuses new application instead of claiming success or restarting work.
+
 Codex retains its native scope, context cap, margin and buffering. In the reviewed
 version's default total scope, 800K nominal context permits a 720K base compaction
 threshold even though a 5% reserve produces a 760K usable meter. That example is
@@ -73,6 +85,7 @@ Use the repository's normal rebuilt daemon/session adoption. Saving the preferen
 does not upgrade/install Codex or restart an active daemon. Native availability
 and account-specific capacity are not established by synthetic tests.
 
-See [the design and safety decision](decisions/codex-context-window-override.md)
-and its [compaction pairing successor](decisions/codex-context-compaction-pairing.md),
+See [the design and safety decision](decisions/codex-context-window-override.md),
+its [compaction pairing successor](decisions/codex-context-compaction-pairing.md),
+its [actual-opening adoption successor](decisions/codex-compaction-request-adoption.md),
 and [Codex's configuration reference](https://learn.chatgpt.com/docs/config-file/config-reference).

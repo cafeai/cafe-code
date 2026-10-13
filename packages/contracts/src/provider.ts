@@ -81,6 +81,10 @@ export const ProviderSession = Schema.Struct({
   // Recorded Cafe native override, never the provider's effective capacity.
   // Absent is legacy unknown; null positively records no Cafe numeric key.
   codexContextWindowOverride: Schema.optional(Schema.NullOr(CodexContextWindowOverride)),
+  // Exact nominal auto-compaction request sent by this native opening, not the
+  // provider's resolved threshold. Null positively records omission; a legacy
+  // runtime missing this field has unknown pairing even if its context matches.
+  codexAutoCompactTokenLimit: Schema.optional(Schema.NullOr(CodexContextWindowOverride)),
   threadId: ThreadId,
   resumeCursor: Schema.optional(Schema.Unknown),
   // Server-owned read-only history coordinates, distinct from permission to

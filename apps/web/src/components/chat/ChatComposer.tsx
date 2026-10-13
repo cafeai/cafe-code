@@ -406,7 +406,7 @@ export interface SteeringFollowUpViewItem {
   dispatchedAt: string;
   files?: readonly ChatFileAttachment[];
   environmentId?: EnvironmentId;
-  deliveryStatus?: "sending" | "received" | "waiting" | "steering";
+  deliveryStatus?: "sending" | "received" | "waiting" | "waiting-for-compaction" | "steering";
 }
 
 const STEERING_DELIVERY_PRESENTATION = {
@@ -420,7 +420,7 @@ const STEERING_DELIVERY_PRESENTATION = {
   },
   received: {
     get label() {
-      return uiText("Received");
+      return uiText("Accepted");
     },
     get description() {
       return uiText("Codex received your message. Waiting for it to pick it up.");
@@ -432,6 +432,16 @@ const STEERING_DELIVERY_PRESENTATION = {
     },
     get description() {
       return uiText("Codex received your message and hasn''t picked it up yet.");
+    },
+  },
+  "waiting-for-compaction": {
+    get label() {
+      return uiText("Waiting for compaction");
+    },
+    get description() {
+      return uiText(
+        "Codex is compacting this turn. Your message is preserved while delivery waits.",
+      );
     },
   },
   steering: {
@@ -459,7 +469,7 @@ function queuedAutomaticSteerCountLabel(items: readonly FollowUpQueueViewItem[])
     if (automaticSteerItems[0]?.blockedReason) return uiText("1 steer needs attention");
     const kind = automaticSteerItems[0]?.automaticSteerRetry?.nonSteerableTurnKind;
     return kind === "compact"
-      ? uiText("1 steer waiting for compact")
+      ? uiText("1 steer waiting for compaction")
       : kind === "review"
         ? uiText("1 steer waiting for review")
         : uiText("1 follow-up requeued");
@@ -506,7 +516,7 @@ function automaticSteerRetryStatus(item: FollowUpQueueViewItem): {
   if (kind === "compact") {
     return {
       ariaLabel: uiText("Queued steer waiting for Codex context compaction"),
-      label: uiText("Waiting for compact"),
+      label: uiText("Waiting for compaction"),
       title: uiText(
         "Codex is compacting the active turn; Cafe Code will retry this steer automatically when compaction finishes.",
       ),
@@ -1572,7 +1582,8 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
       : activeThread?.codexContextWindowOverride;
   const contextSupported =
     selectedProvider === "codex" &&
-    selectedProviderStatus?.runtimeCapabilities?.codexContextWindow === true;
+    selectedProviderStatus?.runtimeCapabilities?.codexContextWindow === true &&
+    selectedProviderStatus.runtimeCapabilities.codexContextCompaction === true;
   const contextPresentation =
     selectedProvider === "codex"
       ? deriveCodexContextWindowPresentation({
@@ -1592,6 +1603,16 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
             activeThread.session.provider === "codex"
               ? activeThread.session.codexContextWindowOverride
               : undefined,
+          configuredAutoCompactTokenLimit:
+            activeThread?.session?.providerInstanceId === selectedInstanceId &&
+            activeThread.session.provider === "codex"
+              ? activeThread.session.codexAutoCompactTokenLimit
+              : undefined,
+          canApplyWhenIdle:
+            contextSupported &&
+            selectedProviderStatus?.enabled === true &&
+            selectedProviderStatus.driver === "codex" &&
+            selectedProviderStatus.instanceId === selectedInstanceId,
         })
       : null;
   const saveContextOverride = useCodexContextWindowOverride({

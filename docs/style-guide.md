@@ -259,10 +259,13 @@ The entrance utilities `animate-enter-rise`, `animate-enter-fade`,
 - **Don't repeat.** Never restate what a switch, badge, button or heading
   already shows, and don't narrate the screen ("the summary above remains
   available").
-- **Delivery status stays with the message.** Show Sending, Received and
-  delayed pickup in the steering shelf. Routine delivery receipts and periodic
-  "still working" checks stay in diagnostics, rather than repeating as work-log
-  rows. Keep actual failures visible and preserve exact-message confirmation.
+- **Delivery status stays with the message.** Show Sending, Accepted,
+  Waiting for compaction and correlated delayed pickup in the steering shelf.
+  Keep the concise Steer delivery attempted and Steer accepted confirmations
+  inspectable in the Work log, including history. Duplicate native progress and
+  periodic "still working" checks stay in diagnostics. Keep actual failures
+  visible and preserve exact-message confirmation; an accepted request is not
+  proof that the provider has picked it up. See [steer delivery](steering-delivery.md).
 - **Metadata on demand.** Timestamps, durations, paths, IDs, environment
   variable names, version requirements and technical caveats go in a hover,
   an `InfoTip` or a collapsed "Advanced" section.

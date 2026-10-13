@@ -35,6 +35,12 @@ function contextCompactionEstimateHelp() {
   );
 }
 
+function contextCompactionRequestHelp() {
+  return uiText(
+    "Matching context counts do not prove that the compaction request was applied. Missing or different recorded requests remain pending; unknown runtime support does not promise idle adoption.",
+  );
+}
+
 function ContextWindowHelp({
   presentation,
 }: {
@@ -60,6 +66,9 @@ function ContextWindowHelp({
         {uiPresentation.contextWindowHelp()}
         {formatCodexContextCompactionEstimate(presentation, uiLocale) !== null ? (
           <span className="mt-1 block">{uiPresentation.contextCompactionEstimateHelp()}</span>
+        ) : null}
+        {presentation?.pendingCompaction ? (
+          <span className="mt-1 block">{uiPresentation.contextCompactionRequestHelp()}</span>
         ) : null}
         {presentation ? (
           <span className="mt-1 block">
@@ -236,6 +245,7 @@ function CodexContextWindowEditor(props: CodexContextWindowControlProps) {
 const UI_PRESENTATION_SOURCES = {
   contextWindowHelp,
   contextCompactionEstimateHelp,
+  contextCompactionRequestHelp,
   formatCodexContextCompactionEstimate,
   formatCodexContextWindowOverride,
   codexContextWindowSourceLabel,

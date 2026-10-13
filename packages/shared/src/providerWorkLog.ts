@@ -1,4 +1,4 @@
-/** Routine Codex lifecycle observations belong in the steering shelf or diagnostics. */
+/** Duplicate/polling observations stay in diagnostics; canonical receipts stay visible. */
 export const CODEX_STEER_PROGRESS_TASK_PREFIXES = [
   "codex-turn-steer:",
   "codex-turn-steer-processing:",
@@ -60,7 +60,6 @@ export function isRoutineProviderWorkLogActivity(activity: {
   readonly kind: string;
   readonly payload: unknown;
 }): boolean {
-  if (activity.kind === "provider.turn.steer.accepted") return true;
   const payload =
     activity.payload !== null &&
     typeof activity.payload === "object" &&

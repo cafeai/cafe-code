@@ -36,6 +36,85 @@ function makeDirectoryLayer<E, R>(persistenceLayer: Layer.Layer<SqlClient.SqlCli
 }
 
 it.layer(makeDirectoryLayer(SqlitePersistenceMemory))("ProviderSessionDirectoryLive", (it) => {
+  it("retires unknown complete-observation compaction proof but preserves partial heartbeats", () =>
+    Effect.gen(function* () {
+      const directory = yield* ProviderSessionDirectory;
+      const threadId = ThreadId.make("compaction-request-owner");
+      const owner = {
+        threadId,
+        provider: ProviderDriverKind.make("codex"),
+        providerInstanceId: ProviderInstanceId.make("request-owner"),
+      };
+      yield* directory.upsert({
+        ...owner,
+        runtimePayload: {
+          subagentRuntimeId: "00000000-0000-4000-8000-000000000061",
+          codexContextWindowOverride: 800_000,
+          codexAutoCompactTokenLimit: 800_000,
+          unrelated: "retained",
+        },
+      });
+      yield* directory.upsert({
+        ...owner,
+        runtimePayload: {
+          activeTurnId: "root",
+          subagentRuntimeId: "00000000-0000-4000-8000-000000000061",
+        },
+      });
+      assert.equal(
+        (
+          Option.getOrThrow(yield* directory.getBinding(threadId)).runtimePayload as Record<
+            string,
+            unknown
+          >
+        ).codexAutoCompactTokenLimit,
+        800_000,
+      );
+      yield* directory.upsert({
+        ...owner,
+        runtimePayload: {
+          subagentRuntimeId: "00000000-0000-4000-8000-000000000062",
+          codexContextWindowOverride: 800_000,
+        },
+      });
+      let payload = Option.getOrThrow(yield* directory.getBinding(threadId))
+        .runtimePayload as Record<string, unknown>;
+      assert.equal(Object.hasOwn(payload, "codexAutoCompactTokenLimit"), false);
+      assert.equal(payload.unrelated, "retained");
+      yield* directory.upsert({
+        ...owner,
+        runtimePayload: { codexAutoCompactTokenLimit: 800_000 },
+      });
+      yield* directory.upsert({
+        ...owner,
+        nativeSessionObservation: true,
+        runtimePayload: {
+          subagentRuntimeId: "00000000-0000-4000-8000-000000000062",
+        },
+      });
+      payload = Option.getOrThrow(yield* directory.getBinding(threadId)).runtimePayload as Record<
+        string,
+        unknown
+      >;
+      assert.equal(Object.hasOwn(payload, "codexAutoCompactTokenLimit"), false);
+      assert.equal(Object.hasOwn(payload, "nativeSessionObservation"), false);
+      yield* directory.upsert({ ...owner, runtimePayload: { codexAutoCompactTokenLimit: null } });
+      payload = Option.getOrThrow(yield* directory.getBinding(threadId)).runtimePayload as Record<
+        string,
+        unknown
+      >;
+      assert.equal(payload.codexAutoCompactTokenLimit, null);
+      yield* directory.upsert({
+        ...owner,
+        providerInstanceId: ProviderInstanceId.make("different-request-owner"),
+        runtimePayload: {},
+      });
+      payload = Option.getOrThrow(yield* directory.getBinding(threadId)).runtimePayload as Record<
+        string,
+        unknown
+      >;
+      assert.equal(Object.hasOwn(payload, "codexAutoCompactTokenLimit"), false);
+    }));
   it("upserts and reads thread bindings", () =>
     Effect.gen(function* () {
       const directory = yield* ProviderSessionDirectory;

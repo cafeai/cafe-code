@@ -14,6 +14,44 @@ import {
 } from "./chatDebugSummary";
 
 describe("chat diagnostic projections", () => {
+  it("reports nominal Codex request proof without inventing an effective threshold or legacy proof", () => {
+    const session = {
+      provider: ProviderDriverKind.make("codex"),
+      status: "ready" as const,
+      orchestrationStatus: "ready" as const,
+      createdAt: "2026-10-14T00:00:00.000Z",
+      updatedAt: "2026-10-14T00:00:00.000Z",
+      codexContextWindowOverride: 800_000,
+      codexAutoCompactTokenLimit: 800_000,
+    };
+    expect(summarizeDebugSession(session)).toMatchObject({
+      codexContextWindowOverride: 800_000,
+      hasCodexContextWindowRequestEvidence: true,
+      codexAutoCompactTokenLimit: 800_000,
+      hasCodexAutoCompactRequestEvidence: true,
+    });
+    expect(summarizeDebugSession({ ...session, codexAutoCompactTokenLimit: null })).toMatchObject({
+      codexAutoCompactTokenLimit: null,
+      hasCodexAutoCompactRequestEvidence: true,
+    });
+    for (const unknown of [undefined, NaN, Infinity, -1, 0, 1.5, Number.MAX_SAFE_INTEGER + 1]) {
+      expect(
+        summarizeDebugSession({ ...session, codexAutoCompactTokenLimit: unknown }),
+      ).toMatchObject({
+        codexAutoCompactTokenLimit: null,
+        hasCodexAutoCompactRequestEvidence: false,
+      });
+    }
+    expect(
+      summarizeDebugSession({ ...session, provider: ProviderDriverKind.make("claudeAgent") }),
+    ).toMatchObject({
+      codexContextWindowOverride: null,
+      hasCodexContextWindowRequestEvidence: false,
+      codexAutoCompactTokenLimit: null,
+      hasCodexAutoCompactRequestEvidence: false,
+    });
+    expect(JSON.stringify(summarizeDebugSession(session))).not.toContain("720000");
+  });
   it("reports runtime evidence without exposing its correlation key or worker content", () => {
     const activity: OrchestrationThreadActivity = {
       id: EventId.make("subagent-event"),

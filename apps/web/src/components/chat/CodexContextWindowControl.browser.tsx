@@ -21,6 +21,8 @@ function Harness(props: {
   configured?: number | null;
   inherited?: number;
   requestedAutoCompactTokenLimit?: number;
+  configuredAutoCompactTokenLimit?: number | null;
+  pairedSupported?: boolean;
   supported?: boolean;
   provider?: "codex" | "claudeAgent";
 }) {
@@ -32,6 +34,8 @@ function Harness(props: {
     configured: props.configured,
     inherited: props.inherited,
     requestedAutoCompactTokenLimit: props.requestedAutoCompactTokenLimit,
+    configuredAutoCompactTokenLimit: props.configuredAutoCompactTokenLimit,
+    canApplyWhenIdle: supported && props.pairedSupported !== false,
   });
   return (
     <>
@@ -52,7 +56,7 @@ function Harness(props: {
           provider === "codex" ? (
             <MenuItem
               disabled={
-                !supported &&
+                (!supported || props.pairedSupported === false) &&
                 props.override == null &&
                 props.configured == null &&
                 presentation.requested === null
@@ -68,7 +72,7 @@ function Harness(props: {
         <CodexContextWindowControl
           open={open}
           onOpenChange={setOpen}
-          supported={supported}
+          supported={supported && props.pairedSupported !== false}
           override={props.override}
           presentation={presentation}
           onChange={props.onChange}
@@ -291,6 +295,106 @@ describe("Codex context-window editor", () => {
     expect(document.querySelector("[data-codex-context-compaction-estimate]")).toBeNull();
     expect(onChange).not.toHaveBeenCalled();
   });
+
+  it.each(["en", "ja", "ko"] as const)(
+    "distinguishes same-context pending compaction and context-only legacy support in %s without changing saved intent",
+    async (locale) => {
+      setUiLocale(locale);
+      const onChange = vi.fn(async () => {});
+      const view = (proof: number | null | undefined, pairedSupported = true) => (
+        <Harness
+          onChange={onChange}
+          override={800_000}
+          configured={800_000}
+          {...(proof !== undefined ? { configuredAutoCompactTokenLimit: proof } : {})}
+          pairedSupported={pairedSupported}
+        />
+      );
+      mounted = await render(view(undefined));
+      // Use the real editor button/keyboard path; no action applies the nominal
+      // companion in this renderer-only fixture or rewrites the saved choice.
+      const presentation = (proof: number | null | undefined, supported = true) =>
+        deriveCodexContextWindowPresentation({
+          requested: 800_000,
+          configured: 800_000,
+          configuredAutoCompactTokenLimit: proof,
+          canApplyWhenIdle: supported,
+        });
+      // The Harness menu labels are fixture-owned English; production details
+      // inside the retained dialog use the actual active locale.
+      await page
+        .getByRole("button", {
+          name: uiText("More composer controls", undefined, undefined, locale),
+          exact: true,
+        })
+        .click();
+      await page.getByRole("menuitem", { name: "Context window…", exact: true }).click();
+      const label = uiText(
+        "Context override: {tokens} · compaction when idle",
+        {
+          tokens: formatCodexContextWindowTokens(800_000, locale),
+        },
+        undefined,
+        locale,
+      );
+      await expect.element(page.getByText(label, { exact: true })).toBeVisible();
+      await expect
+        .element(
+          page.getByText(formatCodexContextCompactionEstimate(presentation(undefined), locale)!, {
+            exact: true,
+          }),
+        )
+        .toBeVisible();
+      await mounted.rerender(view(800_000));
+      await expect
+        .element(
+          page.getByText(
+            uiText(
+              "Context override: {tokens}",
+              {
+                tokens: formatCodexContextWindowTokens(800_000, locale),
+              },
+              undefined,
+              locale,
+            ),
+            { exact: true },
+          ),
+        )
+        .toBeVisible();
+      const input = page.getByRole("spinbutton", {
+        name: uiText("Context window (tokens)", undefined, undefined, locale),
+        exact: true,
+      });
+      await input.fill("900000");
+      await mounted.rerender(view(null, false));
+      await expect
+        .element(
+          page.getByText(
+            uiText(
+              "Context override: {tokens} · saved",
+              {
+                tokens: formatCodexContextWindowTokens(800_000, locale),
+              },
+              undefined,
+              locale,
+            ),
+            { exact: true },
+          ),
+        )
+        .toBeVisible();
+      await expect.element(input).toBeDisabled();
+      await expect.element(input).toHaveValue(900_000);
+      await expect
+        .element(
+          page.getByRole("button", {
+            name: uiText("Save", undefined, undefined, locale),
+            exact: true,
+          }),
+        )
+        .toBeDisabled();
+      expect(onChange).not.toHaveBeenCalled();
+    },
+  );
 
   it.each([
     { dark: false, scale: 80, locale: "ja" as const },

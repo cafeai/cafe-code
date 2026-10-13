@@ -2,13 +2,14 @@
 
 Decision status: Accepted
 Created: 2026-10-13 15:54:01 JST (UTC+0900)
-Last updated: 2026-10-13 18:28:32 JST (UTC+0900)
+Last updated: 2026-10-14 00:15:20 JST (UTC+0900)
 Decision authority: User requested diagnosis, any necessary fix, tests and this
 context/compaction changeset's push to dev.
 Implementation status: Implemented; synthetic fixtures below, hosted release qualification separate
 Supersedes: [Context-window override](codex-context-window-override.md), only its
 decision to leave automatic compaction independent of an explicit context choice
-Superseded by: None
+Superseded by: [Actual-opening request adoption](codex-compaction-request-adoption.md),
+only materialized compaction provenance and existing-session migration
 
 ## Context and native source contract
 

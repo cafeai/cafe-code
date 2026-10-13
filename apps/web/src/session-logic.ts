@@ -58,7 +58,11 @@ import type {
   TurnDiffSummary,
 } from "./types";
 import { compareActivityWindowOrder } from "./activityOrder";
-import { cafeWorkLogDisplayLabel, contextCompactionDisplayLabel } from "./workLogPresentation";
+import {
+  cafeWorkLogDisplayLabel,
+  codexSteerDeliveryWorkLogLabel,
+  contextCompactionDisplayLabel,
+} from "./workLogPresentation";
 
 export type ProviderPickerKind = ProviderDriverKind;
 const isProviderInteraction = Schema.is(ProviderInteraction);
@@ -1044,6 +1048,20 @@ function toDerivedWorkLogEntry(
   activity: OrchestrationThreadActivity,
   turnConfiguration?: ProviderTurnConfiguration,
 ): DerivedWorkLogEntry {
+  const deliveryLabel = codexSteerDeliveryWorkLogLabel(activity.kind);
+  if (deliveryLabel) {
+    // Delivery observations contain only the fixed public phase. In particular,
+    // don't let generic tool/detail extraction copy inputs, IDs, or raw provider
+    // content from the receipt into a collapsed row, tooltip or diagnostic copy.
+    return {
+      id: activity.id,
+      turnId: activity.turnId,
+      createdAt: activity.createdAt,
+      ...deliveryLabel,
+      tone: "info",
+      activityKind: activity.kind,
+    };
+  }
   const providerDiagnostic = deriveProviderDiagnosticWorkLogRecord(activity);
   if (providerDiagnostic) {
     // Diagnostic rows are not roster lifecycle rows. Keep only bounded public

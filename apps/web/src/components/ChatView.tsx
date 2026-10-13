@@ -261,6 +261,8 @@ import {
   deriveSteeringDeliveryStatus,
   deriveComposerSendState,
   doesSteerFailureActivityMatchPending,
+  doesSteerActivityMatchPendingAttempt,
+  doesRetryableSteerFailureMatchPendingAttempt,
   doesSteerProcessingActivityMatchPending,
   hasServerAcknowledgedLocalDispatch,
   isSteerProcessingActivityTimely,
@@ -629,6 +631,9 @@ interface PendingSteerDispatch {
   readonly environmentId: EnvironmentId;
   readonly threadId: ThreadId;
   readonly messageId: MessageId;
+  /** Renderer attempt identity; never a new provider or retry authority. */
+  readonly commandId: CommandId;
+  readonly requiresIntentSequence: boolean;
   readonly turnId: TurnId | null;
   readonly snapshot: ComposerSendSnapshot;
   readonly dispatchedAt: string;
@@ -770,18 +775,32 @@ function threadHasTerminalTurnAfterSteer(thread: Thread, pending: PendingSteerDi
 }
 
 function threadHasSteerFailureForPending(thread: Thread, pending: PendingSteerDispatch) {
-  return thread.activities.some((activity) =>
-    doesSteerFailureActivityMatchPending({
-      activity,
-      pendingMessageId: pending.messageId,
-      pendingIntentSequence: pending.intentSequence,
-      dispatchedAt: pending.dispatchedAt,
-    }),
+  return thread.activities.some(
+    (activity) =>
+      doesSteerFailureActivityMatchPending({
+        activity,
+        pendingMessageId: pending.messageId,
+        pendingIntentSequence: pending.intentSequence,
+        dispatchedAt: pending.dispatchedAt,
+      }) &&
+      doesSteerActivityMatchPendingAttempt({
+        activity,
+        pendingIntentSequence: pending.intentSequence,
+        requiresIntentSequence: pending.requiresIntentSequence,
+      }),
   );
 }
 
-function threadHasSteerRecoveryForMessage(thread: Thread, messageId: MessageId) {
-  return thread.activities.some((activity) => readSteerRecoveryMessageId(activity) === messageId);
+function threadHasSteerRecoveryForMessage(thread: Thread, pending: PendingSteerDispatch) {
+  return thread.activities.some(
+    (activity) =>
+      readSteerRecoveryMessageId(activity) === pending.messageId &&
+      doesSteerActivityMatchPendingAttempt({
+        activity,
+        pendingIntentSequence: pending.intentSequence,
+        requiresIntentSequence: pending.requiresIntentSequence,
+      }),
+  );
 }
 
 function threadHasSteerProcessingStarted(thread: Thread, pending: PendingSteerDispatch) {
@@ -801,6 +820,14 @@ function threadHasSteerProcessingStarted(thread: Thread, pending: PendingSteerDi
     if (!isSteerProcessingActivity) {
       return false;
     }
+    if (
+      !doesSteerActivityMatchPendingAttempt({
+        activity,
+        pendingIntentSequence: pending.intentSequence,
+        requiresIntentSequence: pending.requiresIntentSequence,
+      })
+    )
+      return false;
     const processingMessageId = readSteerProcessingMessageId(payload);
     if (
       !isSteerProcessingActivityTimely({
@@ -840,7 +867,7 @@ function threadHasResolvedPendingSteer(thread: Thread, pending: PendingSteerDisp
     terminalTurnAfterSteer: threadHasTerminalTurnAfterSteer(thread, pending),
     steerProcessingStarted: threadHasSteerProcessingStarted(thread, pending),
     steerFailureRecorded: threadHasSteerFailureForPending(thread, pending),
-    steerRecoveryRecorded: threadHasSteerRecoveryForMessage(thread, pending.messageId),
+    steerRecoveryRecorded: threadHasSteerRecoveryForMessage(thread, pending),
     assistantResponseAfterSteer: threadHasAssistantResponseAfterSteer(thread, pending),
   });
 }
@@ -1666,9 +1693,21 @@ export default function ChatView(props: ChatViewProps) {
       if (retryableSteerReconstructionInFlightRef.current.has(sourceMessageKey)) {
         continue;
       }
-      retryableSteerReconstructionInFlightRef.current.add(sourceMessageKey);
-
       const pending = pendingSteerDispatchByMessageIdRef.current[sourceMessageKey];
+      if (
+        pending &&
+        !doesRetryableSteerFailureMatchPendingAttempt({
+          failureIntentSequence: candidate.failure.intentSequence,
+          pendingIntentSequence: pending.intentSequence,
+          requiresIntentSequence: pending.requiresIntentSequence,
+        })
+      ) {
+        // The legacy blocked-root exception above permits restoring the exact
+        // rejected generation once, never replacing a newer in-flight retry.
+        // Before its command ACK, keep ownership with the reused pending row.
+        continue;
+      }
+      retryableSteerReconstructionInFlightRef.current.add(sourceMessageKey);
       if (pending) {
         removePendingSteerDispatch(candidate.failure.messageId);
       }
@@ -1932,6 +1971,7 @@ export default function ChatView(props: ChatViewProps) {
             pendingIntentSequence: pending.intentSequence,
             dispatchedAt: pending.dispatchedAt,
             previousStatus: pending.deliveryStatus,
+            requiresIntentSequence: pending.requiresIntentSequence,
           });
           // Detail snapshots retain a bounded activity tail. Remember observed
           // receipt/wait phases so trimming or catch-up cannot flash "Sending".
@@ -3118,10 +3158,19 @@ export default function ChatView(props: ChatViewProps) {
             pendingIntentSequence: pending.intentSequence,
             dispatchedAt: pending.dispatchedAt,
             previousStatus: pending.deliveryStatus,
+            requiresIntentSequence: pending.requiresIntentSequence,
+            // Provisional/unknown turns cannot attribute current or child
+            // compaction to this steer. This reversible overlay is deliberately
+            // not retained by the cross-thread receipt-cache effect above.
+            contextCompactionActive:
+              activeThread !== undefined &&
+              pending.turnId !== null &&
+              threadHasActiveContextCompaction(activeThread, pending.turnId),
           }),
         })),
     [
       activeThreadId,
+      activeThread,
       pendingSteerDispatchByMessageId,
       threadActivities,
       steeringProvider,
@@ -5588,6 +5637,8 @@ export default function ChatView(props: ChatViewProps) {
           environmentId: activeThread.environmentId,
           threadId: activeThread.id,
           messageId: messageIdForSend,
+          commandId: commandIdForSend,
+          requiresIntentSequence: options?.queuedItem?.automaticSteerRetry != null,
           turnId: activeThread.session?.activeTurnId ?? activeThread.latestTurn?.turnId ?? null,
           snapshot,
           dispatchedAt: messageCreatedAt,
@@ -5657,7 +5708,7 @@ export default function ChatView(props: ChatViewProps) {
       }
       updatePendingSteerDispatches((current) => {
         const pending = current[String(messageIdForSend)];
-        if (pending?.dispatchedAt !== messageCreatedAt) {
+        if (pending?.commandId !== commandIdForSend) {
           return current;
         }
         return {
@@ -5670,6 +5721,25 @@ export default function ChatView(props: ChatViewProps) {
         clearActiveComposerContent(composerContentAtAdmission);
       }
     } catch (err) {
+      if (!options?.queuedItem && isIndeterminateTransportError(err)) {
+        // wsRpcClient already exhausted its bounded exact-command reconnect
+        // recovery. This is unknown delivery, not proof that the provider
+        // rejected it. Keep the exact pending row and optimistic input until
+        // its own durable receipt/processing/failure arrives; restoring the
+        // composer would invite a different command that duplicates delivery.
+        // Exact processing/recovery can retire the unique-message pending row
+        // before this late transport outcome. Consuming the admitted payload
+        // must not depend on that row still existing. The consumer compares
+        // immutable content references and editor ownership, preserving any
+        // newer or reopened draft instead of making submitted input sendable.
+        clearActiveComposerContent(composerContentAtAdmission);
+        return;
+      }
+      if (
+        pendingSteerDispatchByMessageIdRef.current[String(messageIdForSend)]?.commandId !==
+        commandIdForSend
+      )
+        return;
       removePendingSteerDispatch(messageIdForSend);
       setOptimisticUserMessages((existing) => {
         const removed = existing.filter((message) => message.id === messageIdForSend);
@@ -8156,6 +8226,9 @@ export default function ChatView(props: ChatViewProps) {
         : undefined,
   });
   const sessionRailUsage = deriveLatestContextWindowSnapshot(threadActivities);
+  const contextPolicyStatus = providerStatuses.find(
+    (status) => status.instanceId === subagentPolicyInstanceId && status.driver === "codex",
+  );
   const sessionRailContextOverride =
     subagentPolicyDriver === "codex"
       ? deriveCodexContextWindowPresentation({
@@ -8178,6 +8251,15 @@ export default function ChatView(props: ChatViewProps) {
             activeThread.session.provider === "codex"
               ? activeThread.session.codexContextWindowOverride
               : undefined,
+          configuredAutoCompactTokenLimit:
+            activeThread.session?.providerInstanceId === subagentPolicyInstanceId &&
+            activeThread.session.provider === "codex"
+              ? activeThread.session.codexAutoCompactTokenLimit
+              : undefined,
+          canApplyWhenIdle:
+            contextPolicyStatus?.enabled === true &&
+            contextPolicyStatus.runtimeCapabilities?.codexContextWindow === true &&
+            contextPolicyStatus.runtimeCapabilities.codexContextCompaction === true,
         })
       : null;
   const sessionRailRateLimits = shouldSurfaceProviderAccountRateLimits(activeProviderStatus)

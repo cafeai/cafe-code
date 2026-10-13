@@ -3274,6 +3274,16 @@ const make = Effect.gen(function* () {
                 incomingRuntimeId === thread.session.subagentRuntimeId)
                 ? { codexContextWindowOverride: thread.session.codexContextWindowOverride }
                 : {}),
+              ...(thread.session?.codexAutoCompactTokenLimit !== undefined &&
+              typeof thread.session.subagentRuntimeId === "string" &&
+              thread.session.subagentRuntimeId.length > 0 &&
+              thread.session.providerName === "codex" &&
+              event.provider === "codex" &&
+              thread.session.providerInstanceId === event.providerInstanceId &&
+              (incomingRuntimeId === undefined ||
+                incomingRuntimeId === thread.session.subagentRuntimeId)
+                ? { codexAutoCompactTokenLimit: thread.session.codexAutoCompactTokenLimit }
+                : {}),
               activeTurnId: nextActiveTurnId,
               lastError,
               updatedAt: now,
@@ -3454,7 +3464,11 @@ const make = Effect.gen(function* () {
         // A generation witness is not a configuration observation. Explicitly
         // spreading the old context setting would bypass the projection's
         // omitted-field generation fence and bind it to a different runtime.
-        const { codexContextWindowOverride: _formerContext, ...retainedSession } = thread.session;
+        const {
+          codexContextWindowOverride: _formerContext,
+          codexAutoCompactTokenLimit: _formerAutoCompact,
+          ...retainedSession
+        } = thread.session;
         yield* dispatchObservedSession(
           {
             type: "thread.session.set",

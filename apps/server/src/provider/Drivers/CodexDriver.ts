@@ -139,6 +139,10 @@ const withInstanceIdentity =
       threadGoals: "supported",
       subagentConcurrency: supportsSubagentConcurrency("codex", snapshot.version),
       codexContextWindow: supportsCodexContextWindow(snapshot.version),
+      // Both this build's paired-request implementation and the configured
+      // native runtime are required. A legacy daemon's context-only bit cannot
+      // establish that a new opening will apply the companion policy.
+      codexContextCompaction: supportsCodexContextWindow(snapshot.version),
       // This Cafe owner supports a separately fenced unchanged-policy
       // continuation. It must not upgrade the native version qualification.
       subagentPolicyContinuation: true,

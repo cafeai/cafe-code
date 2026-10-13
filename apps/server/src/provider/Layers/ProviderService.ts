@@ -434,6 +434,14 @@ function toRuntimePayloadFromSession(
     ...(session.codexContextWindowOverride !== undefined
       ? { codexContextWindowOverride: session.codexContextWindowOverride }
       : {}),
+    // Store only actual adapter evidence. A missing legacy field must not be
+    // manufactured from persisted context intent during recovery/hydration.
+    ...(session.provider === "codex" &&
+    typeof session.subagentRuntimeId === "string" &&
+    session.subagentRuntimeId.length > 0 &&
+    session.codexAutoCompactTokenLimit !== undefined
+      ? { codexAutoCompactTokenLimit: session.codexAutoCompactTokenLimit }
+      : {}),
     ...(extra?.modelSelection !== undefined ? { modelSelection: extra.modelSelection } : {}),
     ...(extra?.lastRuntimeEvent !== undefined ? { lastRuntimeEvent: extra.lastRuntimeEvent } : {}),
     ...(extra?.lastRuntimeEventAt !== undefined
@@ -861,6 +869,10 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
         threadId,
         provider: session.provider,
         providerInstanceId,
+        // This is a complete admitted adapter observation, unlike partial
+        // generation-stamped runtime events. The private negative-evidence
+        // marker can retire absent proof but never creates configuration.
+        nativeSessionObservation: true,
         runtimeMode: session.runtimeMode,
         status: toRuntimeStatus(session),
         ...(extra && "resumeCursor" in extra

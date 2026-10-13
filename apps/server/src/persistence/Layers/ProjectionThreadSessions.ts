@@ -32,6 +32,8 @@ const makeProjectionThreadSessionRepository = Effect.gen(function* () {
           max_concurrent_subagents_known,
           codex_context_window_override,
           codex_context_window_override_known,
+          codex_auto_compact_token_limit,
+          codex_auto_compact_token_limit_known,
           active_turn_id,
           last_error,
           updated_at
@@ -47,6 +49,8 @@ const makeProjectionThreadSessionRepository = Effect.gen(function* () {
           ${row.maxConcurrentSubagents === undefined ? 0 : 1},
           ${row.codexContextWindowOverride ?? null},
           ${row.codexContextWindowOverride === undefined ? 0 : 1},
+          ${row.codexAutoCompactTokenLimit ?? null},
+          ${row.codexAutoCompactTokenLimit === undefined ? 0 : 1},
           ${row.activeTurnId},
           ${row.lastError},
           ${row.updatedAt}
@@ -62,6 +66,8 @@ const makeProjectionThreadSessionRepository = Effect.gen(function* () {
           max_concurrent_subagents_known = excluded.max_concurrent_subagents_known,
           codex_context_window_override = excluded.codex_context_window_override,
           codex_context_window_override_known = excluded.codex_context_window_override_known,
+          codex_auto_compact_token_limit = excluded.codex_auto_compact_token_limit,
+          codex_auto_compact_token_limit_known = excluded.codex_auto_compact_token_limit_known,
           active_turn_id = excluded.active_turn_id,
           last_error = excluded.last_error,
           updated_at = excluded.updated_at
@@ -84,6 +90,8 @@ const makeProjectionThreadSessionRepository = Effect.gen(function* () {
           max_concurrent_subagents_known AS "maxConcurrentSubagentsKnown",
           codex_context_window_override AS "codexContextWindowOverride",
           codex_context_window_override_known AS "codexContextWindowOverrideKnown",
+          codex_auto_compact_token_limit AS "codexAutoCompactTokenLimit",
+          codex_auto_compact_token_limit_known AS "codexAutoCompactTokenLimitKnown",
           active_turn_id AS "activeTurnId",
           last_error AS "lastError",
           updated_at AS "updatedAt"

@@ -43,6 +43,8 @@ export interface ProviderAdapterCapabilities {
   readonly subagentConcurrency?: boolean;
   /** Reviewed Codex thread-local nominal-window override; not model capacity. */
   readonly codexContextWindow?: boolean;
+  /** This Cafe owner pairs and attests nominal compaction requests on opening. */
+  readonly codexContextCompaction?: boolean;
   /** Cafe exact-process unchanged-policy delivery; never native CLI support. */
   readonly subagentPolicyContinuation?: boolean;
   /**

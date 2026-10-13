@@ -1369,6 +1369,24 @@ function makeConcurrencyTestLayer(
   );
 }
 
+it.effect("binds paired compaction support to the current qualified native owner", () => {
+  const factory = makeRuntimeFactory();
+  let qualified = false;
+  return Effect.gen(function* () {
+    const adapter = yield* CodexAdapter;
+    // Configuration intent must not grant a capability. Both getters observe
+    // the same independently qualified native runtime, including later loss.
+    assert.equal(adapter.capabilities.codexContextWindow, false);
+    assert.equal(adapter.capabilities.codexContextCompaction, false);
+    qualified = true;
+    assert.equal(adapter.capabilities.codexContextWindow, true);
+    assert.equal(adapter.capabilities.codexContextCompaction, true);
+    qualified = false;
+    assert.equal(adapter.capabilities.codexContextCompaction, false);
+    assert.equal(factory.runtimes.length, 0);
+  }).pipe(Effect.provide(makeConcurrencyTestLayer(factory, undefined, () => qualified)));
+});
+
 it.effect(
   "keeps Codex chat overrides isolated and preserves configured evidence across fork/resume",
   () => {
@@ -2607,21 +2625,36 @@ sessionErrorLayer("CodexAdapterLive session errors", (it) => {
     },
   );
 
-  for (const autoCompactTokenLimit of [150_000, undefined]) {
+  for (const request of [
+    { label: "explicit compaction", autoCompactTokenLimit: 150_000 },
+    { label: "no separate compaction setting", autoCompactTokenLimit: undefined },
+    { label: "inherited compaction ignored", autoCompactTokenLimit: undefined, inherited: true },
+    { label: "accessor compaction ignored", autoCompactTokenLimit: undefined, accessor: true },
+  ] as const) {
+    const { autoCompactTokenLimit } = request;
     it.effect(
-      `keeps native usage capacity authoritative for an 800K context request with ${
-        autoCompactTokenLimit === undefined
-          ? "no separate compaction setting"
-          : "explicit compaction"
-      }`,
+      `keeps native usage capacity authoritative for an 800K context request with ${request.label}`,
       () => {
         const customRuntimeFactory = makeRuntimeFactory();
+        let accessorReads = 0;
         const customLayer = Layer.effect(
           CodexAdapter,
           Effect.gen(function* () {
             const codexConfig = decodeCodexSettings({
               ...(autoCompactTokenLimit !== undefined ? { autoCompactTokenLimit } : {}),
             });
+            if ("inherited" in request) {
+              Object.setPrototypeOf(codexConfig, { autoCompactTokenLimit: 150_000 });
+            }
+            if ("accessor" in request) {
+              Object.defineProperty(codexConfig, "autoCompactTokenLimit", {
+                enumerable: true,
+                get: () => {
+                  accessorReads += 1;
+                  return 150_000;
+                },
+              });
+            }
             return yield* makeCodexAdapter(codexConfig, {
               makeRuntime: customRuntimeFactory.factory,
               getCodexContextWindowSupport: () => true,
@@ -2648,6 +2681,10 @@ sessionErrorLayer("CodexAdapterLive session errors", (it) => {
           assert.equal(session.codexContextWindowOverride, 800_000);
           assert.equal(runtime.options.codexContextWindowOverride, 800_000);
           assert.equal(runtime.options.autoCompactTokenLimit, autoCompactTokenLimit);
+          assert.equal(accessorReads, 0);
+          // The adapter cannot fabricate new-opening request evidence from
+          // settings; only the actual native runtime can report that field.
+          assert.equal(session.codexAutoCompactTokenLimit, undefined);
           assert.equal(
             "autoCompactTokenLimit" in runtime.options,
             autoCompactTokenLimit !== undefined,
@@ -2704,6 +2741,7 @@ sessionErrorLayer("CodexAdapterLive session errors", (it) => {
           assert.equal(usage.compactsAutomatically, true);
           assert.equal(usage.autoCompactTokenLimit, autoCompactTokenLimit);
           assert.equal("autoCompactTokenLimit" in usage, autoCompactTokenLimit !== undefined);
+          assert.equal(accessorReads, 0);
         }).pipe(Effect.provide(customLayer));
       },
     );

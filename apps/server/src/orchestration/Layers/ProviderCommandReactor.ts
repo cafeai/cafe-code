@@ -68,6 +68,7 @@ import {
 import {
   resolveCodexContextWindowPolicy,
   hasCodexContextWindowChange,
+  readCodexAutoCompactTokenLimit,
 } from "../../provider/codexContextWindowPolicy.ts";
 import { TextGeneration } from "../../textGeneration/TextGeneration.ts";
 import { ProviderService } from "../../provider/Services/ProviderService.ts";
@@ -1253,7 +1254,11 @@ const make = Effect.gen(function* () {
         payload?.subagentRuntimeId === session.subagentRuntimeId &&
         hasLiveProviderRuntimeOwner(payload, observedRuntimeAt);
       if (liveSession || detachedOwner) continue;
-      const { codexContextWindowOverride: _retiredContext, ...retiredFields } = session;
+      const {
+        codexContextWindowOverride: _retiredContext,
+        codexAutoCompactTokenLimit: _retiredCompaction,
+        ...retiredFields
+      } = session;
       const retiredSession = { ...retiredFields, subagentRuntimeId: null };
       const cleared = yield* setThreadSession({
         threadId: thread.id,
@@ -1282,18 +1287,30 @@ const make = Effect.gen(function* () {
         thread?.session == null ||
         thread.session.providerName !== session.provider ||
         thread.session.providerInstanceId !== session.providerInstanceId ||
-        thread.session.subagentRuntimeId === session.subagentRuntimeId
+        (thread.session.subagentRuntimeId === session.subagentRuntimeId &&
+          thread.session.codexAutoCompactTokenLimit === session.codexAutoCompactTokenLimit)
       )
         continue;
       // Generation adoption is not permission to attach the former process's
       // numeric configuration. Only this exact inventory observation can
       // establish the current runtime's configured context; absence is unknown.
-      const { codexContextWindowOverride: _formerContext, ...priorSessionFields } = thread.session;
+      // A complete same-generation inventory can also revoke old compaction
+      // proof. Equality of generations does not make a previously projected
+      // number stronger than this fresh exact-owner observation. This metadata
+      // reconciliation never opens, restarts or interrupts the native process.
+      const {
+        codexContextWindowOverride: _formerContext,
+        codexAutoCompactTokenLimit: _formerCompaction,
+        ...priorSessionFields
+      } = thread.session;
       const adoptedSession = {
         ...priorSessionFields,
         subagentRuntimeId: session.subagentRuntimeId,
         ...(session.codexContextWindowOverride !== undefined
           ? { codexContextWindowOverride: session.codexContextWindowOverride }
+          : {}),
+        ...(session.codexAutoCompactTokenLimit !== undefined
+          ? { codexAutoCompactTokenLimit: session.codexAutoCompactTokenLimit }
           : {}),
       };
       const adopted = yield* setThreadSession({
@@ -1689,8 +1706,12 @@ const make = Effect.gen(function* () {
             concurrencyInstance?.driver === "codex" && concurrencyInstance.enabled !== false
               ? concurrencyInstance.defaultCodexContextWindowOverride
               : undefined,
+          accountAutoCompactTokenLimit:
+            concurrencyInstance?.driver === "codex" && concurrencyInstance.enabled !== false
+              ? readCodexAutoCompactTokenLimit(concurrencyInstance.config)
+              : undefined,
         })
-      : { requested: undefined, configured: null };
+      : { requested: undefined, configured: null, configuredAutoCompactTokenLimit: null };
     const desiredCapabilities = yield* providerService.getCapabilities(desiredInstanceId);
     const assertRequestedContextWindowSupport = Effect.suspend(() =>
       (contextWindowPolicy.requested !== undefined ||
@@ -1712,6 +1733,27 @@ const make = Effect.gen(function* () {
               provider: providerErrorLabel(desiredDriverKind),
               method: "thread.turn.start",
               detail: "This provider runtime does not support configured subagent limits.",
+            }),
+          )
+        : Effect.void,
+    );
+    // Older authenticated owners may support only the context key, not its
+    // companion compaction request. That old capability is not permission to
+    // reopen repeatedly and claim the pairing was applied. Require both exact
+    // owner qualifications only at materialization; busy retained steering
+    // still preserves its current process and never gains replacement authority.
+    const assertCompactionMaterializationSupport = Effect.suspend(() =>
+      (contextWindowPolicy.requested !== undefined ||
+        (codexContextWindowOverride !== undefined && codexContextWindowOverride !== null) ||
+        contextWindowChanged) &&
+      (desiredCapabilities.codexContextWindow !== true ||
+        desiredCapabilities.codexContextCompaction !== true)
+        ? Effect.fail(
+            new ProviderAdapterRequestError({
+              provider: providerErrorLabel(desiredDriverKind),
+              method: "thread.turn.start",
+              detail:
+                "This Codex owner does not support paired context and compaction configuration.",
             }),
           )
         : Effect.void,
@@ -1827,6 +1869,7 @@ const make = Effect.gen(function* () {
     }) =>
       assertRequestedSubagentSupport.pipe(
         Effect.andThen(assertRequestedContextWindowSupport),
+        Effect.andThen(assertCompactionMaterializationSupport),
         Effect.andThen(
           Effect.suspend(() =>
             providerService.startSession(threadId, {
@@ -1921,6 +1964,9 @@ const make = Effect.gen(function* () {
               : {}),
             ...(session.codexContextWindowOverride !== undefined
               ? { codexContextWindowOverride: session.codexContextWindowOverride }
+              : {}),
+            ...(session.codexAutoCompactTokenLimit !== undefined
+              ? { codexAutoCompactTokenLimit: session.codexAutoCompactTokenLimit }
               : {}),
             // Provider turn ids are not orchestration turn ids.
             activeTurnId: null,

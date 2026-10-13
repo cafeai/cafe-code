@@ -129,11 +129,29 @@ describe("RemoteProviderService", () => {
                 sessionModelSwitch: "in-session" as const,
                 liveSteer: "unsupported" as const,
                 codexContextWindow: true,
+                codexContextCompaction: true,
               };
             }),
           effect: delivery,
         });
         assert.equal(qualified, 1);
+        // A context-only legacy owner may understand the number but cannot
+        // prove that this opening pairs the automatic-compaction request.
+        for (const paired of [undefined, false, "true"] as const) {
+          const refused = yield* guardRemoteCodexContextWindowStart({
+            request: { ...base, codexContextWindowOverride: 800_000 },
+            readCapabilities: () =>
+              Effect.succeed({
+                sessionModelSwitch: "in-session" as const,
+                liveSteer: "supported" as const,
+                codexContextWindow: true,
+                ...(paired === undefined ? {} : { codexContextCompaction: paired as boolean }),
+              }),
+            effect: delivery,
+          }).pipe(Effect.result);
+          assert.equal(refused._tag, "Failure");
+          assert.equal(deliveries, 1);
+        }
         for (const request of [
           { ...base, providerInstanceId: undefined, codexContextWindowOverride: 500_000 },
           {

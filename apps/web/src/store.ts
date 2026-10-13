@@ -210,6 +210,9 @@ function mapSession(session: OrchestrationSession): ThreadSession {
     ...(session.codexContextWindowOverride !== undefined
       ? { codexContextWindowOverride: session.codexContextWindowOverride }
       : {}),
+    ...(session.codexAutoCompactTokenLimit !== undefined
+      ? { codexAutoCompactTokenLimit: session.codexAutoCompactTokenLimit }
+      : {}),
     ...(session.lastError ? { lastError: session.lastError } : {}),
   };
 }
@@ -591,7 +594,8 @@ function threadSessionsEqual(
     left.lastError === right.lastError &&
     left.subagentRuntimeId === right.subagentRuntimeId &&
     left.maxConcurrentSubagents === right.maxConcurrentSubagents &&
-    left.codexContextWindowOverride === right.codexContextWindowOverride
+    left.codexContextWindowOverride === right.codexContextWindowOverride &&
+    left.codexAutoCompactTokenLimit === right.codexAutoCompactTokenLimit
   );
 }
 
@@ -1250,6 +1254,19 @@ function mergeSessionSnapshot(
 
   return {
     ...incomingSession,
+    // Only a partial lifecycle edge (omitted generation) may conserve already
+    // observed proof under the exact account and known native generation. A
+    // complete explicit generation observation with no proof, even the same
+    // generation, is authoritative legacy/unknown data and clears old proof.
+    ...(incomingSession.codexAutoCompactTokenLimit === undefined &&
+    previousSession.provider === incomingSession.provider &&
+    previousSession.providerInstanceId === incomingSession.providerInstanceId &&
+    incomingSession.subagentRuntimeId === undefined &&
+    typeof previousSession.subagentRuntimeId === "string" &&
+    previousSession.subagentRuntimeId.length > 0 &&
+    previousSession.codexAutoCompactTokenLimit !== undefined
+      ? { codexAutoCompactTokenLimit: previousSession.codexAutoCompactTokenLimit }
+      : {}),
     // Ordinary lifecycle edges may omit generation evidence. Retain it only
     // within the exact provider/account; explicit null clears it when a legacy
     // runtime is materialized, and an account switch cannot borrow authority.
@@ -2365,6 +2382,9 @@ function applyEnvironmentOrchestrationEvent(
                 : {}),
               ...(previousSession?.codexContextWindowOverride !== undefined
                 ? { codexContextWindowOverride: previousSession.codexContextWindowOverride }
+                : {}),
+              ...(previousSession?.codexAutoCompactTokenLimit !== undefined
+                ? { codexAutoCompactTokenLimit: previousSession.codexAutoCompactTokenLimit }
                 : {}),
               provider: previousSession?.provider ?? ProviderDriverKind.make("codex"),
               ...(previousSession?.providerInstanceId !== undefined

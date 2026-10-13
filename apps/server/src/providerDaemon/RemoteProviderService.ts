@@ -510,10 +510,10 @@ export const guardRemoteCodexContextWindowStart = <A, E, R, E2, R2>(input: {
       });
     }
     const capabilities = yield* input.readCapabilities(input.request.providerInstanceId);
-    if (capabilities.codexContextWindow !== true) {
+    if (capabilities.codexContextWindow !== true || capabilities.codexContextCompaction !== true) {
       return yield* new ProviderValidationError({
         operation: "ProviderDaemonRemoteProviderService.startSession",
-        issue: "This Codex owner does not support context-window reconfiguration.",
+        issue: "This Codex owner does not support paired context and compaction reconfiguration.",
       });
     }
     return yield* input.effect;

@@ -1,10 +1,14 @@
-import { type TurnId, OrchestrationThreadActivity } from "@cafecode/contracts";
+import {
+  type TurnId,
+  OrchestrationThreadActivity,
+  validCodexContextWindowOverride,
+} from "@cafecode/contracts";
 import { CODEX_AUTO_COMPACT_POLICY_SOURCE } from "@cafecode/shared/codexCompaction";
 import { derivePhase, isLatestTurnSettled } from "../../session-logic";
 import { type ChatMessage, type Thread, type TurnDiffSummary } from "../../types";
 
 /** Pure bounded diagnostic projections, isolated from composer and transport state. */
-export const DEBUG_SNAPSHOT_VERSION = 14;
+export const DEBUG_SNAPSHOT_VERSION = 15;
 const DEBUG_TEXT_PREVIEW_LIMIT = 120;
 const DEBUG_JSON_PREVIEW_LIMIT = 600;
 export const DEBUG_RECENT_MESSAGE_LIMIT = 6;
@@ -234,6 +238,10 @@ function summarizeDebugCodexCompaction(
     readDebugNumber(latestContextWindowPayload?.inputTokens);
   const latestPayloadLimit = readDebugNumber(latestContextWindowPayload?.autoCompactTokenLimit);
   const latestCompactionActivity = compactionActivities.at(-1) ?? null;
+  const currentNominalRequest =
+    thread.session?.provider === "codex"
+      ? debugRecordedCodexRequest(thread.session.codexAutoCompactTokenLimit)
+      : undefined;
 
   return {
     policy: {
@@ -244,6 +252,10 @@ function summarizeDebugCodexCompaction(
           ? "upstream-model-metadata-or-codex-config"
           : "explicit-cafe-provider-override",
       explicitCafeOverride: latestPayloadLimit,
+      // The opened runtime's nominal request is independently received proof,
+      // not a reconstructed90% estimate or an effective provider threshold.
+      nominalRequestAtNativeOpening: currentNominalRequest ?? null,
+      nominalRequestEvidenceKnown: currentNominalRequest !== undefined,
       // App-server owns the default threshold and scope. Cafe cannot infer a
       // precise resolved threshold from the effective-window token event
       // without duplicating model metadata logic that changes upstream.
@@ -849,16 +861,36 @@ function summarizeDebugLatestTurn(latestTurn: Thread["latestTurn"]) {
   };
 }
 
+function debugRecordedCodexRequest(value: unknown): number | null | undefined {
+  return value === null
+    ? null
+    : typeof value === "number" && validCodexContextWindowOverride(value)
+      ? value
+      : undefined;
+}
+
 export function summarizeDebugSession(session: Thread["session"]) {
   if (!session) {
     return null;
   }
+  const codexContextRequest =
+    session.provider === "codex"
+      ? debugRecordedCodexRequest(session.codexContextWindowOverride)
+      : undefined;
+  const codexCompactionRequest =
+    session.provider === "codex"
+      ? debugRecordedCodexRequest(session.codexAutoCompactTokenLimit)
+      : undefined;
   return {
     provider: session.provider,
     providerInstanceId: session.providerInstanceId ?? null,
     status: session.status,
     orchestrationStatus: session.orchestrationStatus,
     hasSubagentRuntimeEvidence: typeof session.subagentRuntimeId === "string",
+    codexContextWindowOverride: codexContextRequest ?? null,
+    hasCodexContextWindowRequestEvidence: codexContextRequest !== undefined,
+    codexAutoCompactTokenLimit: codexCompactionRequest ?? null,
+    hasCodexAutoCompactRequestEvidence: codexCompactionRequest !== undefined,
     activeTurnId: session.activeTurnId ?? null,
     createdAt: session.createdAt,
     updatedAt: session.updatedAt,

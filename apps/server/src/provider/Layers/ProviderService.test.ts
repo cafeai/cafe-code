@@ -4634,6 +4634,89 @@ routing.layer("ProviderServiceLive routing", (it) => {
       }),
   );
 
+  it.effect(
+    "persists adapter request proof without hydrating unknown sessions from saved context",
+    () =>
+      Effect.gen(function* () {
+        const provider = yield* ProviderService;
+        const directory = yield* ProviderSessionDirectory;
+        const threadId = asThreadId("recorded-compaction-request");
+        const original = routing.codex.startSession.getMockImplementation()!;
+        for (const proof of [800_000, null, undefined]) {
+          routing.codex.startSession.mockImplementationOnce((input) =>
+            original(input).pipe(
+              Effect.map((session) => {
+                const recorded = {
+                  ...session,
+                  ...(proof !== undefined
+                    ? {
+                        subagentRuntimeId: SubagentRuntimeId.make(
+                          "00000000-0000-4000-8000-000000000064",
+                        ),
+                      }
+                    : {}),
+                  ...(proof !== undefined ? { codexAutoCompactTokenLimit: proof } : {}),
+                };
+                routing.codex.updateSession(threadId, () => recorded);
+                return recorded;
+              }),
+            ),
+          );
+          const opened = yield* provider.startSession(threadId, {
+            provider: CODEX_DRIVER,
+            providerInstanceId: codexInstanceId,
+            threadId,
+            runtimeMode: "full-access",
+            codexContextWindowOverride: 800_000,
+          });
+          assert.equal(opened.codexAutoCompactTokenLimit, proof);
+          const payload = Option.getOrThrow(yield* directory.getBinding(threadId))
+            .runtimePayload as Record<string, unknown>;
+          assert.equal(payload.codexAutoCompactTokenLimit, proof);
+          assert.equal(Object.hasOwn(payload, "codexAutoCompactTokenLimit"), proof !== undefined);
+          if (proof === 800_000) {
+            const fork = yield* provider.forkSession({
+              operationId: "request-proof-is-not-fork-authority",
+              sourceThreadId: threadId,
+              targetThreadId: asThreadId("request-proof-dormant-fork"),
+              title: "Dormant fork",
+            });
+            assert.equal(Object.hasOwn(fork, "codexAutoCompactTokenLimit"), false);
+            const forkPayload = Option.getOrThrow(yield* directory.getBinding(fork.targetThreadId))
+              .runtimePayload as Record<string, unknown>;
+            assert.equal(Object.hasOwn(forkPayload, "codexAutoCompactTokenLimit"), false);
+          }
+          const observed = (yield* provider.listSessions()).find(
+            (session) => session.threadId === threadId,
+          )!;
+          assert.equal(observed.codexAutoCompactTokenLimit, proof);
+        }
+        yield* directory.upsert({
+          threadId,
+          provider: CODEX_DRIVER,
+          providerInstanceId: codexInstanceId,
+          runtimePayload: { codexAutoCompactTokenLimit: 800_000 },
+        });
+        const unknown = (yield* provider.listSessions()).find(
+          (session) => session.threadId === threadId,
+        )!;
+        assert.equal(Object.hasOwn(unknown, "codexAutoCompactTokenLimit"), false);
+        yield* routing.codex.stopAll();
+        routing.codex.startSession.mockClear();
+        yield* provider.sendTurn({ threadId, input: "Resume once", attachments: [] });
+        assert.equal(routing.codex.startSession.mock.calls.length, 1);
+        assert.equal(
+          Object.hasOwn(routing.codex.startSession.mock.calls[0]![0], "codexAutoCompactTokenLimit"),
+          false,
+        );
+        assert.equal(
+          (yield* provider.listSessions()).find((session) => session.threadId === threadId)!
+            .codexAutoCompactTokenLimit,
+          undefined,
+        );
+      }),
+  );
+
   it.effect("rejects malformed or non-Codex context requests before adapter delivery", () =>
     Effect.gen(function* () {
       const provider = yield* ProviderService;
