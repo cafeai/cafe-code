@@ -36,6 +36,8 @@ import type {
   VisualizationDetailsResult,
   VisualizationViewerInput,
   VisualizationViewerTicketResult,
+  VisualizationDiscardViewerTicketInput,
+  VisualizationDiscardViewerTicketResult,
   VisualizationExportHtmlResult,
 } from "./visualizationApi.ts";
 import type {
@@ -587,6 +589,10 @@ export interface EnvironmentApi {
     list: (input: VisualizationListInput) => Promise<VisualizationListResult>;
     details: (input: VisualizationDetailsInput) => Promise<VisualizationDetailsResult>;
     viewerTicket: (input: VisualizationViewerInput) => Promise<VisualizationViewerTicketResult>;
+    /** Old backends cannot safely emulate exact unused-ticket cancellation. */
+    discardViewerTicket?: (
+      input: VisualizationDiscardViewerTicketInput,
+    ) => Promise<VisualizationDiscardViewerTicketResult>;
     exportHtml?: (input: VisualizationDetailsInput) => Promise<VisualizationExportHtmlResult>;
   };
   /** Absent on older backends; never emulate a scheduler in the renderer. */

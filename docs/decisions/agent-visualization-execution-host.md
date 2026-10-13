@@ -2,10 +2,11 @@
 
 Decision status: Accepted; integrated implementation with focused macOS qualification
 Created: 2026-10-12 23:36:18 JST (UTC+0900)
-Last updated: 2026-10-13 02:22:03 JST (UTC+0900)
+Last updated: 2026-10-13 03:38:06 JST (UTC+0900)
 Decision authority: the user explicitly selected sandboxed Electron execution and a watchdog, accepted no hard macOS memory cap, prohibited installations, and retained the full visualization/MCP Apps goal.
 Implementation status: integrated source; focused native macOS arm64 checks pass. Full native-platform and hosted release qualification are separate gates, not established by the source or this decision.
 Supersedes: the unresolved macOS hard-memory execution gate described in the [foundation decision](agent-visualization-foundations.md), only to the extent of the explicit exception below. Data, privacy and lifecycle foundations remain in force.
+Superseded by: [automatic viewport pool](agent-visualization-viewport-pool.md), only the single-viewer/manual-generated-activation choice; sandbox, ownership, privacy, finite deadlines and external-App consent remain preserved.
 
 ## Context and alternatives
 
@@ -61,6 +62,18 @@ private source, and refuse shared/unknown process ownership.
   A newly opened viewer remains hidden until the exact current lease commits
   geometry/visibility; consent resume cannot reveal an uncommitted surface.
   Startup modal revocation also fences late capability/ticket/open acknowledgements.
+- Keep full document geometry separate from its visible native clip. The trusted
+  renderer intersects bounded clipping ancestors; main converts owner CSS pixels
+  using the exact owner's zoom and preserves the full-size child inside a masked
+  native parent. This corrects embedding without a new WebContents/process,
+  source rewrite, guest-zoom override or larger capture allowance. The pinned
+  [Electron View implementation](https://github.com/electron/electron/blob/9f0109679540320c5dc5b7bef0aa94733058e8c2/shell/browser/api/electron_api_view.cc)
+  needs an explicitly materialized layer and positive radius; zero radius or
+  dimensions below 32 DIP clear its mask. Reject those tiny visible slices.
+  [Chromium's layer-mask contract](https://github.com/chromium/chromium/blob/refs/tags/148.0.7778.280/ui/views/view.h)
+  includes child layers. Source/runtime bounds and preserved guest pixels do not
+  substitute for an actual screen-compositor observation; no desktop-wide
+  capture or OS screen-recording permission is introduced to obtain that proof.
 - Each fresh App-operation consent may yield the view for at most30 seconds;
   repeated requests while suspended cannot reset that deadline. Sequential
   operations never renew the document's absolute5-minute execution lease.
@@ -73,6 +86,13 @@ service failure, kernel failure or whole-system resource pressure. No hard total
 memory limit is promised on macOS, as explicitly accepted by the user. Chromium
 sandboxing and bounded trusted copies/messages remain required; neither is a
 claim of a universal RAM quota or escape-proof browser implementation.
+
+Small self-contained WebGL shaders use the same existing sandbox and may share
+native GPU resources. Canonical authoring guidance recommends bounded physical
+resolution/work, reusable resources, visible-only rendering, reduced-motion and
+context-loss fallbacks, and teardown. These preferences are not enforced GPU
+quotas or protection from a GPU-service stall. No new engine, runtime or global
+hardware-acceleration policy is selected.
 
 Renderer termination may affect other views if their processes are shared. The
 pre-source separation check is therefore mandatory, as are exact retirement and

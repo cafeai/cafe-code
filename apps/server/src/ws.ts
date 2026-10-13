@@ -819,6 +819,11 @@ const makeWsRpcLayer = (
             withVisualizations((service) => service.viewerTicket(input)),
             true,
           ),
+        [WS_METHODS.visualizationsDiscardViewerTicket]: (input) =>
+          privateVisualizationRead(
+            withVisualizations((service) => service.discardViewerTicket(input)),
+            true,
+          ),
         [WS_METHODS.visualizationsExportHtml]: (input) =>
           privateVisualizationRead(withVisualizations((service) => service.exportHtml(input))),
         [WS_METHODS.mcpAppsPrepare]: (input) =>

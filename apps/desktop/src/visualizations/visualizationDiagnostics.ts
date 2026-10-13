@@ -40,6 +40,29 @@ export interface VisualizationSurfaceDiagnostics {
     | "ready";
   readonly captureWidth: number;
   readonly captureHeight: number;
+  /** Fixed geometry scalars only; positions, page content and native objects stay private. */
+  readonly geometryOutcome: "uncommitted" | "full" | "partial" | "refused";
+  readonly viewportWidth: number;
+  readonly viewportHeight: number;
+  readonly clipWidth: number;
+  readonly clipHeight: number;
+  readonly ownerZoom: number;
+  readonly nativeVisibility: "hidden" | "visible" | "unknown";
+  readonly visibilityHintSent: "hidden" | "visible" | "not-sent";
+  readonly visibilityCommitted: boolean;
+  readonly layoutHeight: number;
+  readonly layoutConstrained: boolean;
+  readonly layoutSequence: number;
+  readonly layoutPublications: number;
+  readonly layoutRefusals: number;
+  readonly layoutRefusal:
+    | "none"
+    | "owner"
+    | "frame"
+    | "invalid"
+    | "rate"
+    | "geometry"
+    | "visibility";
 }
 export interface VisualizationHostDiagnostics {
   readonly available: boolean;
@@ -61,6 +84,10 @@ export interface VisualizationHostDiagnostics {
     | "retirement-uncertain"
     | "owner-revoked";
   readonly native: VisualizationSurfaceDiagnostics | null;
+  readonly viewerCount: number;
+  readonly previewCount: number;
+  readonly nativeWorkCount: number;
+  readonly continuationCount: number;
 }
 
 let reader: (() => VisualizationHostDiagnostics) | null = null;
@@ -107,8 +134,27 @@ export function readVisualizationDiagnostics(): VisualizationHostDiagnostics | n
             captureOutcome: native.captureOutcome,
             captureWidth: native.captureWidth,
             captureHeight: native.captureHeight,
+            geometryOutcome: native.geometryOutcome,
+            viewportWidth: native.viewportWidth,
+            viewportHeight: native.viewportHeight,
+            clipWidth: native.clipWidth,
+            clipHeight: native.clipHeight,
+            ownerZoom: native.ownerZoom,
+            nativeVisibility: native.nativeVisibility,
+            visibilityHintSent: native.visibilityHintSent,
+            visibilityCommitted: native.visibilityCommitted,
+            layoutHeight: native.layoutHeight,
+            layoutConstrained: native.layoutConstrained,
+            layoutSequence: native.layoutSequence,
+            layoutPublications: native.layoutPublications,
+            layoutRefusals: native.layoutRefusals,
+            layoutRefusal: native.layoutRefusal,
           }
         : null,
+      viewerCount: value.viewerCount,
+      previewCount: value.previewCount,
+      nativeWorkCount: value.nativeWorkCount,
+      continuationCount: value.continuationCount,
     };
   } catch {
     return null;

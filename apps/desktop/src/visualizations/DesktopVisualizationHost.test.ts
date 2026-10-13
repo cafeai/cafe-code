@@ -4,6 +4,7 @@ import type * as Electron from "electron";
 import { requestVisualizationHost } from "@cafecode/shared/visualizationHostClient";
 import {
   VISUALIZATION_HOST_ACTIVE_MS,
+  VISUALIZATION_HOST_PREVIEW_MS,
   VISUALIZATION_HOST_SUSPEND_MS,
   type VisualizationHostDocument,
   type VisualizationHostOwner,
@@ -50,6 +51,8 @@ function windowFixture() {
 async function fixture(options?: {
   retire?: boolean;
   initialize?: () => Promise<void>;
+  installSource?: () => Promise<void>;
+  now?: () => number;
   kind?: "generated" | "mcp-app";
 }) {
   const surfaces: (VisualizationSurface & { calls: ReturnType<typeof vi.fn> })[] = [];
@@ -57,6 +60,7 @@ async function fixture(options?: {
   const host = new DesktopVisualizationHost({
     stateDirectory: "unused-without-publication",
     preloadPath: "unused-injected-preload",
+    ...(options?.now ? { now: options.now } : {}),
     createSurface: (input) => {
       callbacks.push(input);
       let current = true;
@@ -67,6 +71,7 @@ async function fixture(options?: {
         initialize: options?.initialize ?? (async () => {}),
         installSource: async () => {
           calls("source");
+          await options?.installSource?.();
         },
         isCurrent: () => current,
         capture: async () => ({ png: new Uint8Array([1, 2, 3]), width: 400, height: 200 }),
@@ -105,6 +110,35 @@ async function fixture(options?: {
 }
 
 describe("main-owned visualization leases", () => {
+  it("passes full CSS viewport and separate visible clip only to the exact admitted surface", async () => {
+    const f = await fixture();
+    const clipBounds = { x: 10, y: 60, width: 300, height: 100 };
+    const opened = await f.host.open(f.window, {
+      ticket: f.ticket,
+      bounds,
+      clipBounds,
+      appearance: "dark",
+    });
+    expect(opened.state).toBe("active");
+    expect(f.callbacks[0]).toMatchObject({ bounds, clipBounds });
+    const update = vi.spyOn(f.surfaces[0]!, "update");
+    const changedClip = { ...clipBounds, height: 80 };
+    await f.host.update(f.window, {
+      leaseId: opened.leaseId,
+      bounds,
+      clipBounds: changedClip,
+      visible: true,
+      appearance: "dark",
+    });
+    expect(update).toHaveBeenCalledExactlyOnceWith(
+      bounds,
+      "dark",
+      undefined,
+      undefined,
+      changedClip,
+      false,
+    );
+  });
   it("separates active open admission from an exact acknowledged visibility update", async () => {
     const f = await fixture();
     const state = await f.open();
@@ -165,9 +199,9 @@ describe("main-owned visualization leases", () => {
     expect(f.host.inspect(f.ticket, state.leaseId)!.documentGeneration).toBe(generation);
     expect(f.surfaces[0]!.calls).toHaveBeenCalledWith("update");
   });
-  it("retires ordinary hidden views and cannot renew the absolute viewer lease", async () => {
+  it("preserves the finite absolute external App lease", async () => {
     vi.useFakeTimers();
-    const f = await fixture();
+    const f = await fixture({ kind: "mcp-app" });
     const state = await f.open();
     await vi.advanceTimersByTimeAsync(VISUALIZATION_HOST_ACTIVE_MS - 10);
     await f.host.update(f.window, {
@@ -179,6 +213,228 @@ describe("main-owned visualization leases", () => {
     await vi.advanceTimersByTimeAsync(10);
     expect(f.host.inspect(f.ticket, state.leaseId)).toBeNull();
     expect(f.surfaces[0]!.calls).toHaveBeenCalledWith("retire");
+  });
+  it("keeps generated source identity beyond five minutes and retires only its offscreen owner", async () => {
+    vi.useFakeTimers();
+    const f = await fixture();
+    const state = await f.open();
+    const generation = f.host.inspect(f.ticket, state.leaseId)!.documentGeneration;
+    expect(state.expiresAtMs).toBeNull();
+    expect(f.host.capabilities()).toMatchObject({ generatedLifecycle: "visible" });
+    await f.host.update(f.window, {
+      leaseId: state.leaseId,
+      bounds,
+      visible: true,
+      appearance: "dark",
+    });
+    await vi.advanceTimersByTimeAsync(VISUALIZATION_HOST_ACTIVE_MS * 2);
+    expect(
+      (
+        await f.host.update(f.window, {
+          leaseId: state.leaseId,
+          bounds,
+          clipBounds: { ...bounds, height: 40 },
+          visible: true,
+          appearance: "dark",
+        })
+      ).state,
+    ).toBe("active");
+    expect(f.host.inspect(f.ticket, state.leaseId)).toMatchObject({
+      documentGeneration: generation,
+      expiresAtMs: null,
+    });
+    expect(await f.host.capture(f.window, state.leaseId)).not.toBeNull();
+    expect(f.surfaces).toHaveLength(1);
+    expect(f.surfaces[0]!.calls).not.toHaveBeenCalledWith("retire");
+    expect(
+      (
+        await f.host.update(f.window, {
+          leaseId: state.leaseId,
+          bounds,
+          visible: false,
+          appearance: "dark",
+        })
+      ).state,
+    ).toBe("retired");
+    expect(f.host.inspect(f.ticket, state.leaseId)).toBeNull();
+  });
+  it("retires an uncommitted generated document at the original absolute startup budget", async () => {
+    vi.useFakeTimers();
+    const f = await fixture();
+    const state = await f.open();
+    await vi.advanceTimersByTimeAsync(VISUALIZATION_HOST_PREVIEW_MS - 1);
+    expect(f.host.inspect(f.ticket, state.leaseId)).not.toBeNull();
+    await vi.advanceTimersByTimeAsync(1);
+    expect(f.host.inspect(f.ticket, state.leaseId)).toBeNull();
+    expect(f.surfaces[0]!.calls).toHaveBeenCalledWith("retire");
+    expect(
+      (
+        await f.host.update(f.window, {
+          leaseId: state.leaseId,
+          bounds,
+          visible: true,
+          appearance: "dark",
+        })
+      ).state,
+    ).toBe("blocked");
+  });
+  it("rejects late first presentation without waiting for the cleanup timer to run", async () => {
+    let now = 0;
+    const f = await fixture({ now: () => now });
+    const state = await f.open();
+    now = VISUALIZATION_HOST_PREVIEW_MS;
+    expect(
+      (
+        await f.host.update(f.window, {
+          leaseId: state.leaseId,
+          bounds,
+          visible: true,
+          appearance: "dark",
+        })
+      ).state,
+    ).toBe("retired");
+    expect(f.surfaces[0]!.calls).not.toHaveBeenCalledWith("update");
+    expect(f.surfaces[0]!.calls).toHaveBeenCalledWith("retire");
+    expect(f.host.inspect(f.ticket, state.leaseId)).toBeNull();
+  });
+  it("reobserves pending generated source membership, owner and absolute budget before parsing", async () => {
+    let now = 0,
+      entered!: () => void,
+      release!: () => void;
+    const installing = new Promise<void>((resolve) => {
+      entered = resolve;
+    });
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const f = await fixture({
+      now: () => now,
+      installSource: async () => {
+        entered();
+        await held;
+      },
+    });
+    const opening = f.open();
+    await installing;
+    const admit = f.callbacks[0]!.admitGeneratedSource!;
+    expect(admit()).toBe(true);
+    const frame = f.window.webContents.mainFrame as unknown as { frameToken: string; url: string };
+    frame.frameToken = "replacement";
+    expect(admit()).toBe(false);
+    frame.frameToken = "trusted-document";
+    frame.url = "cafecode://app/replacement";
+    expect(admit()).toBe(false);
+    frame.url = "cafecode://app/chat";
+    expect(admit()).toBe(true);
+    // Advance the injected monotonic observation without running timer cleanup.
+    // Loaded fonts still cannot authorize parsing at this exact spent deadline.
+    now = VISUALIZATION_HOST_PREVIEW_MS;
+    expect(admit()).toBe(false);
+    release();
+    expect(await opening).toMatchObject({ state: "blocked", reason: "timeout" });
+    expect(admit()).toBe(false);
+    expect(f.surfaces[0]!.calls).toHaveBeenCalledWith("retire");
+  });
+  it("never retains pending generated font authority after revocation or quarantine", async () => {
+    let entered!: () => void, release!: () => void;
+    const installing = new Promise<void>((resolve) => {
+      entered = resolve;
+    });
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const f = await fixture({
+      retire: false,
+      installSource: async () => {
+        entered();
+        await held;
+      },
+    });
+    const opening = f.open();
+    await installing;
+    const admit = f.callbacks[0]!.admitGeneratedSource!;
+    expect(admit()).toBe(true);
+    f.callbacks[0]!.onRevoked();
+    expect(admit()).toBe(false);
+    release();
+    await opening;
+    expect(admit()).toBe(false);
+    expect(f.host.capabilities()).toMatchObject({ available: false, reason: "quarantined" });
+    const app = await fixture({ kind: "mcp-app" });
+    await app.open();
+    expect(app.callbacks[0]!.admitGeneratedSource).toBeUndefined();
+  });
+  it.each(["initialize", "installSource"] as const)(
+    "rejects a %s acknowledgement after the absolute startup origin",
+    async (phase) => {
+      let now = 0;
+      const f = await fixture({
+        now: () => now,
+        [phase]: async () => {
+          now = VISUALIZATION_HOST_PREVIEW_MS + 1;
+        },
+      });
+      expect(await f.open()).toMatchObject({
+        state: "blocked",
+        reason: "timeout",
+        expiresAtMs: null,
+      });
+      expect(f.surfaces[0]!.calls).toHaveBeenCalledWith("retire");
+      expect(f.surfaces[0]!.calls).toHaveBeenCalledTimes(phase === "initialize" ? 1 : 2);
+    },
+  );
+  it("does not return late pixels after a finite App or uncommitted startup deadline", async () => {
+    for (const kind of ["generated", "mcp-app"] as const) {
+      let now = 0;
+      const f = await fixture({ now: () => now, kind });
+      const state = await f.open();
+      const capture = vi.fn(async () => {
+        now = kind === "generated" ? VISUALIZATION_HOST_PREVIEW_MS : VISUALIZATION_HOST_ACTIVE_MS;
+        return { png: new Uint8Array([1, 2, 3]), width: 400, height: 200 };
+      });
+      f.surfaces[0]!.capture = capture;
+      expect(await f.host.capture(f.window, state.leaseId)).toBeNull();
+      expect(capture).toHaveBeenCalledOnce();
+      expect(await f.host.capture(f.window, state.leaseId)).toBeNull();
+      expect(capture).toHaveBeenCalledOnce();
+    }
+  });
+  it("hides only exact generated presentation and denies capture/focus without renewing authority", async () => {
+    const f = await fixture();
+    const state = await f.open();
+    f.surfaces[0]!.hidePresentation = vi.fn(() => true);
+    f.surfaces[0]!.focus = vi.fn(() => true);
+    const generation = f.host.inspect(f.ticket, state.leaseId)!.documentGeneration;
+    const input = {
+      leaseId: state.leaseId,
+      bounds,
+      visible: true,
+      appearance: "dark" as const,
+      presentationHidden: true,
+    };
+    expect((await f.host.update(windowFixture(), input)).state).toBe("blocked");
+    expect((await f.host.update(f.window, input)).state).toBe("active");
+    expect(f.host.inspect(f.ticket, state.leaseId)).toMatchObject({
+      state: "suspended",
+      expiresAtMs: null,
+      documentGeneration: generation,
+    });
+    expect(await f.host.capture(f.window, state.leaseId)).toBeNull();
+    expect(f.host.focus(f.window, state.leaseId)).toBe(false);
+    expect((await f.host.update(f.window, { ...input, presentationHidden: false })).state).toBe(
+      "active",
+    );
+    expect(f.host.inspect(f.ticket, state.leaseId)).toMatchObject({
+      state: "active",
+      documentGeneration: generation,
+    });
+    const app = await fixture({ kind: "mcp-app" });
+    const appState = await app.open();
+    app.surfaces[0]!.hidePresentation = vi.fn(() => true);
+    expect((await app.host.update(app.window, { ...input, leaseId: appState.leaseId })).state).toBe(
+      "retired",
+    );
+    expect(app.surfaces[0]!.hidePresentation).not.toHaveBeenCalled();
   });
   it("refuses actions from a same-URL replacement document", async () => {
     const f = await fixture();
@@ -445,7 +701,7 @@ describe("main-owned visualization leases", () => {
     expect(before).toMatchObject({
       activeCount: 0,
       pendingViewerCount: 1,
-      retainedInputBytes: Buffer.byteLength(document.html),
+      retainedInputBytes: Buffer.byteLength(JSON.stringify(f.input), "utf8"),
     });
     const state = await f.open();
     expect(f.host.diagnostics().activeCount).toBe(1);

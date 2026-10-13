@@ -18,6 +18,10 @@ describe("bounded native visualization diagnostics", () => {
       retirementCount: 0,
       lastRetirementReason: "none",
       native: null,
+      viewerCount: 0,
+      previewCount: 0,
+      nativeWorkCount: 0,
+      continuationCount: 0,
     };
     const first = registerVisualizationDiagnostics(() => {
       calls += 1;
@@ -50,6 +54,10 @@ describe("bounded native visualization diagnostics", () => {
       retirementCount: 0,
       lastRetirementReason: "none",
       native: null,
+      viewerCount: 0,
+      previewCount: 0,
+      nativeWorkCount: 0,
+      continuationCount: 0,
       source: "private source sentinel",
       token: "private bearer",
     }));

@@ -86,7 +86,7 @@ export async function readVisualizationHost(stateDirectory: string): Promise<Con
 /** Strictly local authenticated broker transport with bounded response copies and no redirects. */
 export async function requestVisualizationHost(
   connection: Connection,
-  method: "preview" | "prepareViewer" | "inspectViewer" | "revoke",
+  method: "preview" | "prepareViewer" | "inspectViewer" | "discardPrepared" | "revoke",
   payload: unknown,
   signal?: AbortSignal,
 ): Promise<unknown> {

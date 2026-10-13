@@ -1,11 +1,16 @@
 import * as Electron from "electron";
 import { randomUUID } from "node:crypto";
+import { readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { DesktopVisualizationHost } from "./DesktopVisualizationHost.ts";
+import { VISUALIZATION_FLUID_DIAGNOSTIC_COUNTER_MAX } from "@cafecode/shared/visualizationFluidRuntime";
+import { ElectronVisualizationSurface } from "./ElectronVisualizationSurface.ts";
 import { VISUALIZATION_SCHEME, VISUALIZATION_EVENT_CHANNEL } from "./visualizationHostPolicy.ts";
 import type {
   VisualizationHostEvent,
   VisualizationHostPresentation,
+  VisualizationHostDocument,
+  VisualizationHostLayout,
 } from "@cafecode/contracts/visualizationHost";
 
 /** Bounded fixture observation only; production adds no polling or transcript. */
@@ -24,6 +29,7 @@ async function observedNativeDom(
   classification: string,
 ): Promise<void> {
   const until = performance.now() + 5_000;
+  let fluidDiagnostic = "";
   while (true) {
     let timer: ReturnType<typeof setTimeout> | undefined;
     const ready = await Promise.race([
@@ -35,10 +41,202 @@ async function observedNativeDom(
       if (timer) clearTimeout(timer);
     });
     if (ready === true) return;
-    if (performance.now() >= until)
+    if (
+      [
+        "actual fluid static resources",
+        "sustained swirl midpoint",
+        "representative chart fluid",
+      ].includes(classification) &&
+      ready &&
+      typeof ready === "object"
+    ) {
+      const value = ready as Record<string, unknown>;
+      if (value.fluidReady === true) return;
+      const finite = (key: string, max: number) =>
+        typeof value[key] === "number" &&
+        Number.isInteger(value[key]) &&
+        (value[key] as number) >= 0 &&
+        (value[key] as number) <= max
+          ? value[key]
+          : null;
+      const flag = (key: string) => (typeof value[key] === "boolean" ? value[key] : null);
+      const scalar = (key: string, max: number) =>
+        typeof value[key] === "number" &&
+        Number.isFinite(value[key]) &&
+        (value[key] as number) >= 0 &&
+        (value[key] as number) <= max
+          ? value[key]
+          : null;
+      const state =
+        typeof value.state === "string" &&
+        [
+          "running",
+          "waiting",
+          "paused",
+          "static",
+          "idle",
+          "context-lost",
+          "unsupported",
+          "disposed",
+        ].includes(value.state)
+          ? value.state
+          : "unknown";
+      fluidDiagnostic = JSON.stringify({
+        state,
+        frames: finite("frames", VISUALIZATION_FLUID_DIAGNOSTIC_COUNTER_MAX),
+        textures: finite("textures", 8),
+        programs: finite("programs", 10),
+        buffers: finite("buffers", 2),
+        textureBytes: finite("textureBytes", 16 * 1024 * 1024),
+        canvasWidth: finite("canvasWidth", 512),
+        canvasHeight: finite("canvasHeight", 512),
+        raf: flag("raf"),
+        nativeVisible: flag("nativeVisible"),
+        nativeReduced: flag("nativeReduced"),
+        documentHidden: flag("documentHidden"),
+        rejectedWidth: scalar("rejectedWidth", 4000),
+        rejectedHeight: scalar("rejectedHeight", 4000),
+        rejectedDpr: scalar("rejectedDpr", 16),
+      });
+    }
+    if (performance.now() >= until) {
+      if (fluidDiagnostic) process.stderr.write(`Native fixture fluid state: ${fluidDiagnostic}\n`);
       throw new Error(`Native fixture ${classification} delivery unavailable.`);
+    }
     await new Promise<void>((resolve) => setTimeout(resolve, 10));
   }
+}
+
+/** The first hidden-bootstrap extent can precede final width layout. Consume
+ * the latest exact native scalar matching this fixed chart's natural root,
+ * instead of treating root-scroll fit in a too-large viewport as tightness. */
+async function settledChartLayout(
+  contents: Electron.WebContents,
+  latest: () => VisualizationHostLayout | undefined,
+): Promise<VisualizationHostLayout> {
+  const until = performance.now() + 5_000;
+  while (true) {
+    const before = latest();
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const extent: unknown = await Promise.race([
+      contents.executeJavaScript(
+        "(()=>{const body=document.body,unit=document.querySelector('.unit'),padding=Number.parseFloat(getComputedStyle(body).paddingBottom)||0;return Math.ceil(unit.getBoundingClientRect().bottom-body.getBoundingClientRect().top+padding)})()",
+      ),
+      new Promise<undefined>((resolve) => {
+        timer = setTimeout(() => resolve(undefined), Math.max(0, until - performance.now()));
+      }),
+    ]).finally(() => {
+      if (timer) clearTimeout(timer);
+    });
+    const after = latest();
+    if (
+      before &&
+      after &&
+      before.sequence === after.sequence &&
+      typeof extent === "number" &&
+      Number.isSafeInteger(extent) &&
+      after.height === extent &&
+      after.height > 180 &&
+      after.height < 700 &&
+      !after.constrained
+    )
+      return after;
+    if (performance.now() >= until) throw new Error("Native settled chart extent unavailable.");
+    await new Promise<void>((resolve) => setTimeout(resolve, 10));
+  }
+}
+
+function scalar(record: Record<string, unknown>, key: string, max: number, min = 0) {
+  return typeof record[key] === "number" &&
+    Number.isFinite(record[key]) &&
+    (record[key] as number) >= min &&
+    (record[key] as number) <= max
+    ? record[key]
+    : null;
+}
+
+/** One bounded synthetic snapshot at a known chart boundary. This is not a
+ * production diagnostic or trusted page lifecycle proof. Never retain text,
+ * source, identifiers, selectors supplied by a page, or a DOM/node dump. */
+async function chartSnapshot(
+  contents: Electron.WebContents,
+  boundary: "selected" | "applied" | "capture" | "color",
+  native: {
+    selectedHeight: number;
+    selectedSequence: number;
+    latestHeight: number;
+    latestSequence: number;
+    ownerZoom: number;
+    nativeWidth: number;
+    nativeHeight: number;
+  },
+): Promise<void> {
+  const raw: unknown = await contents.executeJavaScript(`(()=>{
+    const body=document.body,unit=document.querySelector('.unit'),foot=document.querySelector('.foot'),canvas=document.querySelector('canvas[data-cafe-fluid]');
+    const bodyRect=body.getBoundingClientRect(),unitRect=unit.getBoundingClientRect(),footRect=foot.getBoundingClientRect(),canvasRect=canvas.getBoundingClientRect();
+    const padding=Number.parseFloat(getComputedStyle(body).paddingBottom)||0;
+    let rootNodes=0,elementExtent=0,textExtent=0,node=body.firstChild;
+    for(;node&&rootNodes<128;node=node.nextSibling){rootNodes++;let bottom,margin=0;
+      if(node.nodeType===1){const style=getComputedStyle(node);if(style.display==='none'||style.position==='fixed'||style.position==='absolute')continue;bottom=node.getBoundingClientRect().bottom;margin=Number.parseFloat(style.marginBottom)||0;elementExtent=Math.max(elementExtent,bottom-bodyRect.top+Math.max(0,margin));}
+      else if(node.nodeType===3){const range=document.createRange();range.selectNodeContents(node);bottom=range.getBoundingClientRect().bottom;textExtent=Math.max(textExtent,bottom-bodyRect.top);} }
+    return {innerWidth,innerHeight,rootScrollHeight:document.scrollingElement.scrollHeight,bodyTop:bodyRect.top,bodyHeight:bodyRect.height,bodyBottom:bodyRect.bottom,paddingBottom:padding,unitHeight:unitRect.height,unitBottom:unitRect.bottom,footerBottom:footRect.bottom,rootNodes,rootLimited:node!==null,elementExtent,textExtent,naturalHeight:Math.ceil(Math.max(elementExtent,textExtent)+padding),canvasCSSWidth:canvasRect.width,canvasCSSHeight:canvasRect.height,canvasWidth:canvas.width,canvasHeight:canvas.height,state:canvas.dataset.cafeFluidState,frames:Number(canvas.dataset.cafeFluidFrames),textures:Number(canvas.dataset.cafeFluidTextures),programs:Number(canvas.dataset.cafeFluidPrograms),buffers:Number(canvas.dataset.cafeFluidBuffers),textureBytes:Number(canvas.dataset.cafeFluidTextureBytes),raf:canvas.dataset.cafeFluidRaf==='true',nativeVisible:document.documentElement.dataset.cafeVisible==='true',nativeReduced:document.documentElement.dataset.cafeReducedMotion==='true',documentHidden:document.hidden};
+  })()`);
+  const value = typeof raw === "object" && raw !== null ? (raw as Record<string, unknown>) : {};
+  const flag = (key: string) => (typeof value[key] === "boolean" ? value[key] : null);
+  const state =
+    typeof value.state === "string" &&
+    [
+      "running",
+      "waiting",
+      "paused",
+      "static",
+      "idle",
+      "context-lost",
+      "unsupported",
+      "disposed",
+    ].includes(value.state)
+      ? value.state
+      : "unknown";
+  const snapshot = {
+    boundary,
+    selectedHeight: scalar(native, "selectedHeight", 2000),
+    selectedSequence: scalar(native, "selectedSequence", 100000),
+    latestHeight: scalar(native, "latestHeight", 2000),
+    latestSequence: scalar(native, "latestSequence", 100000),
+    ownerZoom: scalar(native, "ownerZoom", 16),
+    nativeWidth: scalar(native, "nativeWidth", 1600),
+    nativeHeight: scalar(native, "nativeHeight", 2000),
+    innerWidth: scalar(value, "innerWidth", 2000),
+    innerHeight: scalar(value, "innerHeight", 2000),
+    rootScrollHeight: scalar(value, "rootScrollHeight", 4000),
+    bodyTop: scalar(value, "bodyTop", 4000, -4000),
+    bodyHeight: scalar(value, "bodyHeight", 4000),
+    bodyBottom: scalar(value, "bodyBottom", 4000, -4000),
+    paddingBottom: scalar(value, "paddingBottom", 4000),
+    unitHeight: scalar(value, "unitHeight", 4000),
+    unitBottom: scalar(value, "unitBottom", 4000, -4000),
+    footerBottom: scalar(value, "footerBottom", 4000, -4000),
+    rootNodes: scalar(value, "rootNodes", 128),
+    rootLimited: flag("rootLimited"),
+    elementExtent: scalar(value, "elementExtent", 4000),
+    textExtent: scalar(value, "textExtent", 4000),
+    naturalHeight: scalar(value, "naturalHeight", 4000),
+    canvasCSSWidth: scalar(value, "canvasCSSWidth", 1600),
+    canvasCSSHeight: scalar(value, "canvasCSSHeight", 2000),
+    canvasWidth: scalar(value, "canvasWidth", 512),
+    canvasHeight: scalar(value, "canvasHeight", 512),
+    state,
+    frames: scalar(value, "frames", VISUALIZATION_FLUID_DIAGNOSTIC_COUNTER_MAX),
+    textures: scalar(value, "textures", 8),
+    programs: scalar(value, "programs", 10),
+    buffers: scalar(value, "buffers", 2),
+    textureBytes: scalar(value, "textureBytes", 16 * 1024 * 1024),
+    raf: flag("raf"),
+    nativeVisible: flag("nativeVisible"),
+    nativeReduced: flag("nativeReduced"),
+    documentHidden: flag("documentHidden"),
+  };
+  process.stderr.write(`Native fixture chart snapshot: ${JSON.stringify(snapshot)}\n`);
 }
 
 const presentation: VisualizationHostPresentation = {
@@ -74,6 +272,39 @@ function hasFixtureColor(png: Uint8Array, red: number, green: number, blue: numb
     bitmap[offset + 3] === 255
   );
 }
+/** Colour variation is read from real native PNG samples, not a source claim. */
+function hasFixtureSwirl(png: Uint8Array): boolean {
+  const image = Electron.nativeImage.createFromBuffer(Buffer.from(png));
+  if (image.isEmpty()) return false;
+  const size = image.getSize(),
+    bitmap = image.toBitmap();
+  // The real fluid has dark negative space, unlike an all-screen polar shader.
+  // Bound actual capture samples and require many vivid, spatially different
+  // pixels; caption/veil text alone cannot satisfy this decoration assertion.
+  const colors: number[][] = [];
+  for (let y = 2; y < 10; y++)
+    for (let x = 1; x < 20; x++) {
+      const offset =
+        (Math.floor((size.height * y) / 10) * size.width + Math.floor((size.width * x) / 20)) * 4;
+      const color = [
+        bitmap[offset]!,
+        bitmap[offset + 1]!,
+        bitmap[offset + 2]!,
+        bitmap[offset + 3]!,
+      ];
+      if (
+        color[3] === 255 &&
+        Math.max(...color.slice(0, 3)) - Math.min(...color.slice(0, 3)) > 20 &&
+        Math.max(...color.slice(0, 3)) > 60
+      )
+        colors.push(color);
+    }
+  return (
+    colors.length > 20 &&
+    Math.max(...colors.map((color) => color[0]!)) - Math.min(...colors.map((color) => color[0]!)) >
+      20
+  );
+}
 
 /** Fixed phase markers preserve timeout evidence without source/event data. */
 function phase(value: string): void {
@@ -95,6 +326,30 @@ window.addEventListener('message',event=>{
 });
 window.parent.postMessage({jsonrpc:'2.0',id:1,method:'ui/initialize',params:{protocolVersion:'2026-01-26',appCapabilities:{},appInfo:{name:'fixture',version:'1'}}},'*');
 </script>`;
+
+// The actual supplied licensed fluid runtime is bundled by the generated-only
+// production wrapper. This fixture contributes only its single marker, local
+// frosted veil, readable chart text and an unprivileged context-loss trigger.
+// No approximation, copied second solver or native authority is exposed here.
+const webglSource = `<style>html,body{height:100%;background:#04070f!important}canvas{position:fixed;inset:0;display:block;width:100%;height:100%}#veil{position:fixed;inset:0;pointer-events:none;background:linear-gradient(120deg,rgba(255,255,255,.18),rgba(240,242,255,.06))}#caption{position:fixed;left:12px;top:12px;color:#fff;font:600 14px system-ui;pointer-events:none}#fallback{position:fixed;bottom:12px;left:12px;color:#fff;margin:0;font:12px system-ui}</style>
+<canvas data-cafe-fluid aria-hidden="true"></canvas><div id="veil" aria-hidden="true"></div><span id="caption">Chart accent</span><p id="fallback">Fluid chart background</p><script>
+window.fixtureLoseContext=()=>{const canvas=document.querySelector('canvas[data-cafe-fluid]');const gl=canvas.getContext('webgl2')||canvas.getContext('webgl');gl?.getExtension('WEBGL_lose_context')?.loseContext();};
+</script>`;
+
+/** Only this fixture's known native view hierarchy is inspected, never user
+ * windows, desktop thumbnails, screen recording or ordinary Cafe UI. */
+function fixtureView(
+  window: Electron.BrowserWindow,
+  generation: string,
+): Electron.WebContentsView | undefined {
+  return window.contentView.children
+    .flatMap((child) => [child, ...child.children])
+    .find(
+      (child): child is Electron.WebContentsView =>
+        child instanceof Electron.WebContentsView &&
+        child.webContents.getURL() === `${VISUALIZATION_SCHEME}://${generation}/bootstrap`,
+    );
+}
 
 // This is the official transport's relevant source===parent/JSON-RPC listener
 // behavior, independently authored for the fixture. No SDK is installed. A real
@@ -163,6 +418,15 @@ async function qualify(): Promise<void> {
       contextIsolation: true,
     },
   });
+  const layoutEvents: VisualizationHostEvent[] = [];
+  const layoutNativeSend = window.webContents.send.bind(window.webContents);
+  window.webContents.send = (channel: string, ...args: unknown[]) => {
+    if (channel === VISUALIZATION_EVENT_CHANNEL) {
+      const event = args[0] as VisualizationHostEvent;
+      if (event.state === "layout" && layoutEvents.length < 128) layoutEvents.push(event);
+    }
+    layoutNativeSend(channel, ...args);
+  };
   // Native macOS occlusion can emit `hide` even while isVisible() remains
   // true. Keep only this synthetic owner at the ordinary floating level so
   // unrelated foreground windows do not invalidate the compositing fixture.
@@ -238,9 +502,59 @@ async function qualify(): Promise<void> {
   Electron.app.focus({ steal: true });
   window.focus();
   await observed(() => window.isFocused());
+  let poolViewerPids: number[] = [];
+  let poolPreviewPid = 0;
+  let poolFluidPreview = false;
   const host = new DesktopVisualizationHost({
     stateDirectory: directory,
     preloadPath: join(directory, "visualizationPreload.cjs"),
+    // Use the production surface unchanged. The private capture wrapper reads
+    // only the exact newly created fixture generation while four known viewers
+    // are live, proving the fifth renderer is actually distinct before pixels.
+    createSurface: (options) => {
+      const surface = new ElectronVisualizationSurface(options);
+      if (options.window === null) {
+        const capture = surface.capture.bind(surface);
+        surface.capture = async () => {
+          const contents = Electron.webContents
+            .getAllWebContents()
+            .find(
+              (value) =>
+                value.getURL() === `${VISUALIZATION_SCHEME}://${surface.generation}/bootstrap`,
+            );
+          // Before any fluid poster, observe the exact fixed helper's solved
+          // state/resources on this synthetic source, not merely fallback CSS.
+          if (options.document.html.includes("data-cafe-fluid")) {
+            if (!contents) throw new Error("Native fluid preview owner missing.");
+            await observedNativeDom(
+              contents,
+              "(()=>{const c=document.querySelector('canvas[data-cafe-fluid]');return c?.dataset.cafeFluidTextures==='8'&&c.dataset.cafeFluidFrames==='12'&&c.dataset.cafeFluidRaf==='false'})()",
+              "actual fluid static preview",
+            );
+          }
+          if (poolViewerPids.length === 4) {
+            const pid = contents?.getOSProcessId() ?? 0;
+            if (
+              !contents ||
+              pid <= 0 ||
+              poolViewerPids.includes(pid) ||
+              contents.mainFrame.framesInSubtree.length !== 1 ||
+              !surface.diagnostics().exclusiveProcess
+            )
+              throw new Error("Native fifth preview renderer is not exclusive.");
+            poolPreviewPid = pid;
+            if (options.document.html.includes("data-cafe-fluid")) {
+              poolFluidPreview =
+                (await contents.executeJavaScript(
+                  "(()=>{const c=document.querySelector('canvas[data-cafe-fluid]');return c?.dataset.cafeFluidTextures==='8'&&c.dataset.cafeFluidFrames==='12'&&c.dataset.cafeFluidRaf==='false'})()",
+                )) === true;
+            }
+          }
+          return capture();
+        };
+      }
+      return surface;
+    },
   });
   await host.listen(false);
   const owner = {
@@ -297,12 +611,9 @@ async function qualify(): Promise<void> {
       appearance: "light",
     });
     const pendingIdentity = host.inspect(pendingTicket, pending.leaseId);
-    const pendingView = window.contentView.children.find(
-      (child): child is Electron.WebContentsView =>
-        child instanceof Electron.WebContentsView &&
-        child.webContents.getURL() ===
-          `${VISUALIZATION_SCHEME}://${pendingIdentity?.documentGeneration}/bootstrap`,
-    );
+    const pendingView = pendingIdentity
+      ? fixtureView(window, pendingIdentity.documentGeneration)
+      : undefined;
     if (pending.state !== "active" || !pendingView || pendingView.getVisible())
       throw new Error("Native pending open exposed source before visibility commit.");
     if ((await host.retire(window, pending.leaseId)).state !== "retired")
@@ -316,7 +627,7 @@ async function qualify(): Promise<void> {
           appearance: "light",
         })
       ).state !== "blocked" ||
-      window.contentView.children.includes(pendingView)
+      window.contentView.children.some((child) => child.children.includes(pendingView))
     )
       throw new Error("Native revoked pending open accepted delayed visibility.");
     phase("uncommitted-viewer-retired");
@@ -340,12 +651,7 @@ async function qualify(): Promise<void> {
       throw new Error(`Native viewer gate: ${state.state}/${state.reason}`);
     const inspected = host.inspect(ticket, state.leaseId);
     if (!inspected) throw new Error("Native identity unavailable.");
-    const view = window.contentView.children.find(
-      (child): child is Electron.WebContentsView =>
-        child instanceof Electron.WebContentsView &&
-        child.webContents.getURL() ===
-          `${VISUALIZATION_SCHEME}://${inspected.documentGeneration}/bootstrap`,
-    );
+    const view = fixtureView(window, inspected.documentGeneration);
     if (!view || view.getVisible())
       throw new Error("Native open exposed source before trusted visibility commit.");
     // Qualification must outlive the3s watchdog: a short successful open does
@@ -375,6 +681,80 @@ async function qualify(): Promise<void> {
           `${VISUALIZATION_SCHEME}://${inspected.documentGeneration}/bootstrap`,
       );
     if (!contents) throw new Error("Native fixture renderer missing.");
+    // A sub-mask positive crop is still geometrically intersecting. Preserve
+    // this exact document while hiding both native layers, and prove ordinary
+    // page execution/heartbeat was not replaced with a debugger freeze. This
+    // synthetic marker/counter is never accepted as production ownership.
+    await contents.executeJavaScript(
+      "(()=>{window.__nativeRetainedMarker='same-visible-document';window.__nativeRetainedTicks=0;window.__nativeRetainedTimer=setInterval(()=>{window.__nativeRetainedTicks=Math.min(1000000,window.__nativeRetainedTicks+1)},25)})()",
+    );
+    const tiny = await host.update(window, {
+      leaseId: state.leaseId,
+      bounds: { x: 0, y: 0, width: 400, height: 200 },
+      clipBounds: { x: 0, y: 0, width: 400, height: 20 },
+      visible: true,
+      appearance: "light",
+    });
+    if (
+      tiny.state !== "active" ||
+      view.getVisible() ||
+      host.inspect(ticket, state.leaseId)?.documentGeneration !== inspected.documentGeneration ||
+      host.focus(window, state.leaseId) ||
+      (await host.capture(window, state.leaseId)) !== null
+    )
+      throw new Error("Native tiny positive crop did not retain hidden exact ownership.");
+    await observedNativeDom(
+      contents,
+      "window.__nativeRetainedMarker==='same-visible-document'&&window.__nativeRetainedTicks>=2&&!document.hidden&&document.documentElement.dataset.cafeVisible==='true'&&document.documentElement.dataset.cafePresentationVisible==='false'",
+      "retained hidden document progress",
+    );
+    const restored = await host.update(window, {
+      leaseId: state.leaseId,
+      bounds: { x: 0, y: 0, width: 400, height: 200 },
+      visible: true,
+      appearance: "light",
+    });
+    if (
+      restored.state !== "active" ||
+      !view.getVisible() ||
+      host.inspect(ticket, state.leaseId)?.documentGeneration !== inspected.documentGeneration
+    )
+      throw new Error("Native tiny crop restore replaced its exact document.");
+    await observedNativeDom(
+      contents,
+      "window.__nativeRetainedMarker==='same-visible-document'&&!document.hidden&&document.documentElement.dataset.cafeVisible==='true'&&document.documentElement.dataset.cafePresentationVisible==='true'",
+      "retained document visible restore",
+    );
+    const hiddenMenu = await host.update(window, {
+      leaseId: state.leaseId,
+      bounds: { x: 0, y: 0, width: 400, height: 200 },
+      visible: true,
+      presentationHidden: true,
+      appearance: "light",
+    });
+    if (hiddenMenu.state !== "active" || view.getVisible())
+      throw new Error("Native generated menu presentation hide refused.");
+    await observedNativeDom(
+      contents,
+      "window.__nativeRetainedMarker==='same-visible-document'&&!document.hidden&&document.documentElement.dataset.cafeVisible==='true'&&document.documentElement.dataset.cafePresentationVisible==='false'",
+      "retained menu presentation hide",
+    );
+    const menuReturn = await host.update(window, {
+      leaseId: state.leaseId,
+      bounds: { x: 0, y: 0, width: 400, height: 200 },
+      visible: true,
+      presentationHidden: false,
+      appearance: "light",
+    });
+    if (
+      menuReturn.state !== "active" ||
+      !view.getVisible() ||
+      state.expiresAtMs !== null ||
+      host.inspect(ticket, state.leaseId)?.documentGeneration !== inspected.documentGeneration
+    )
+      throw new Error("Native generated menu return changed its visibility-owned document.");
+    await contents.executeJavaScript("clearInterval(window.__nativeRetainedTimer)");
+    phase("native-generated-tinycrop-menu-same-document");
     // These controls act only on this exact freshly admitted synthetic native
     // view. They are fixture APIs, never production source/renderer capability.
     // The heartbeat observation intentionally waits without retaining global
@@ -390,7 +770,9 @@ async function qualify(): Promise<void> {
     )
       throw new Error("Native fixture input owner was revoked.");
     if (!window.isFocused()) throw new Error("Native fixture owner lost focus.");
-    contents.focus();
+    // The exact shell keyboard-entry method targets only this native lease,
+    // not every guest when the composer receives a Tab key.
+    if (!host.focus(window, state.leaseId)) throw new Error("Native exact keyboard entry refused.");
     await observed(() => contents.isFocused());
     phase("native-view-focused");
     const inputBounds = (await contents.executeJavaScript(
@@ -493,11 +875,736 @@ async function qualify(): Promise<void> {
       );
     }
     phase("viewer-capture-pixels");
+    // A native capture of the guest qualifies unchanged full page pixels/state,
+    // not the window compositor's parent mask. The supported parent/child View
+    // observations below separately qualify actual geometry and ownership.
+    const clippingView = window.contentView.children.find((child) => child.children.includes(view));
+    if (!clippingView) throw new Error("Native clipping parent absent.");
+    const viewport = { x: 20, y: -100, width: 600, height: 400 };
+    const clipBounds = { x: 20, y: 40, width: 500, height: 200 };
+    await contents.executeJavaScript(
+      "window.fixtureViewportState={count:7};document.body.style.minHeight='1200px';window.scrollTo(0,123)",
+    );
+    await observedNativeDom(contents, "scrollY===123", "full viewport scroll state");
+    const rendererPid = contents.getOSProcessId();
+    for (const zoom of [0.8, 1.3]) {
+      window.webContents.setZoomFactor(zoom);
+      const changed = await host.update(window, {
+        leaseId: state.leaseId,
+        bounds: viewport,
+        clipBounds,
+        visible: true,
+        appearance: "dark",
+      });
+      if (changed.state !== "active") throw new Error("Native zoom geometry refused.");
+      const child = view.getBounds(),
+        parent = clippingView.getBounds();
+      const ownerSize = window.getContentSize();
+      await observedNativeDom(
+        contents,
+        `innerWidth===${Math.round(600 * zoom)}&&innerHeight===${Math.round(400 * zoom)}`,
+        "native zoom viewport",
+      );
+      const actual = (await contents.executeJavaScript(
+        "({width:innerWidth,height:innerHeight,count:window.fixtureViewportState.count,scroll:scrollY})",
+      )) as { width: number; height: number; count: number; scroll: number };
+      if (
+        parent.x !== Math.ceil(20 * zoom) ||
+        parent.y !== Math.ceil(40 * zoom) ||
+        parent.width !== Math.min(ownerSize[0]!, Math.floor(520 * zoom)) - parent.x ||
+        parent.height !== Math.min(ownerSize[1]!, Math.floor(240 * zoom)) - parent.y ||
+        child.x !== Math.floor(20 * zoom) - parent.x ||
+        child.y !== Math.floor(-100 * zoom) - parent.y ||
+        child.width !== Math.round(600 * zoom) ||
+        child.height !== Math.round(400 * zoom) ||
+        actual.width !== child.width ||
+        actual.height !== child.height ||
+        actual.count !== 7 ||
+        actual.scroll !== 123 ||
+        contents.getOSProcessId() !== rendererPid ||
+        host.inspect(ticket, state.leaseId)?.documentGeneration !== inspected.documentGeneration
+      )
+        throw new Error("Native full viewport or exact clipped document changed.");
+      const fullCapture = await host.capture(window, state.leaseId);
+      if (
+        !fullCapture ||
+        fullCapture.width !== child.width ||
+        fullCapture.height !== child.height ||
+        !hasFixtureColor(fullCapture.png, 0, 0, 0)
+      )
+        throw new Error("Native full clipped viewport capture unavailable.");
+    }
+    window.webContents.setZoomFactor(1);
+    phase("native-clipped-full-viewport-zoom");
     if (
       (await host.retire(window, state.leaseId)).state !== "retired" ||
       host.inspect(ticket, state.leaseId) !== null
     )
       throw new Error("Native retirement unproven.");
+    const shaderPreview = await host.preview(
+      { ...owner, operationId: randomUUID() },
+      { ...document, html: webglSource },
+    );
+    if (shaderPreview.status === "ready")
+      await writeFile(
+        join(directory, "native-fluid-preview.png"),
+        Buffer.from(shaderPreview.png, "base64"),
+        { flag: "wx", mode: 0o600 },
+      );
+    if (
+      shaderPreview.status !== "ready" ||
+      !hasFixtureSwirl(Buffer.from(shaderPreview.png, "base64"))
+    )
+      throw new Error("Native finite WebGL preview pixels unavailable.");
+    const shaderTicket = "f".repeat(64);
+    if (
+      host.prepare({
+        ticket: shaderTicket,
+        owner: { ...owner, operationId: randomUUID() },
+        document: { ...document, html: webglSource },
+      }).status !== "ready"
+    )
+      throw new Error("Native shader preparation refused.");
+    const shader = await host.open(window, {
+      ticket: shaderTicket,
+      bounds: { x: 0, y: 0, width: 400, height: 200 },
+      appearance: "light",
+      presentation: { ...presentation, reducedMotion: true },
+    });
+    const shaderIdentity = host.inspect(shaderTicket, shader.leaseId);
+    const shaderView = shaderIdentity
+      ? fixtureView(window, shaderIdentity.documentGeneration)
+      : undefined;
+    if (shader.state !== "active" || !shaderView)
+      throw new Error("Native shader admission refused.");
+    // Viewer admission is deliberately hidden until its exact acknowledged
+    // lease receives trusted visible geometry. The fixture must exercise that
+    // production visibility commit, not capture an uncommitted hidden view.
+    const shaderCommitted = await host.update(window, {
+      leaseId: shader.leaseId,
+      bounds: { x: 0, y: 0, width: 400, height: 200 },
+      visible: true,
+      appearance: "light",
+      presentation: { ...presentation, reducedMotion: true },
+    });
+    if (
+      shaderCommitted.state !== "active" ||
+      host.inspect(shaderTicket, shader.leaseId)?.documentGeneration !==
+        shaderIdentity!.documentGeneration ||
+      !shaderView.getVisible()
+    )
+      throw new Error("Native shader visibility commit refused.");
+    const shaderContents = shaderView.webContents;
+    await observedNativeDom(
+      shaderContents,
+      "(()=>{const c=document.querySelector('canvas[data-cafe-fluid]');return {fluidReady:c.dataset.cafeFluidFrames==='12'&&c.dataset.cafeFluidState==='static'&&c.dataset.cafeFluidRaf==='false'&&c.dataset.cafeFluidTextures==='8'&&c.dataset.cafeFluidPrograms==='10'&&c.dataset.cafeFluidBuffers==='2'&&Number(c.dataset.cafeFluidTextureBytes)<=16*1024*1024&&Math.max(c.width,c.height)<=512,state:c.dataset.cafeFluidState,frames:Number(c.dataset.cafeFluidFrames),textures:Number(c.dataset.cafeFluidTextures),programs:Number(c.dataset.cafeFluidPrograms),buffers:Number(c.dataset.cafeFluidBuffers),textureBytes:Number(c.dataset.cafeFluidTextureBytes),canvasWidth:c.width,canvasHeight:c.height,raf:c.dataset.cafeFluidRaf==='true',nativeVisible:document.documentElement.dataset.cafeVisible==='true',nativeReduced:document.documentElement.dataset.cafeReducedMotion==='true',documentHidden:document.hidden,rejectedWidth:Number(c.dataset.cafeFluidRejectedWidth),rejectedHeight:Number(c.dataset.cafeFluidRejectedHeight),rejectedDpr:Number(c.dataset.cafeFluidRejectedDpr)}})()",
+      "actual fluid static resources",
+    );
+    const shaderCapture = await host.capture(window, shader.leaseId);
+    if (shaderCapture)
+      await writeFile(join(directory, "native-fluid-viewer.png"), shaderCapture.png, {
+        flag: "wx",
+        mode: 0o600,
+      });
+    if (!shaderCapture || !hasFixtureSwirl(shaderCapture.png))
+      throw new Error("Native finite WebGL capture pixels unavailable.");
+    await host.update(window, {
+      leaseId: shader.leaseId,
+      bounds: { x: 0, y: 0, width: 400, height: 200 },
+      visible: true,
+      appearance: "light",
+      presentation: { ...presentation, reducedMotion: false },
+    });
+    await observedNativeDom(
+      shaderContents,
+      "Number(document.querySelector('canvas[data-cafe-fluid]').dataset.cafeFluidFrames)>=18",
+      "finite swirl motion",
+    );
+    if (!host.beginTransition(window, shader.leaseId))
+      throw new Error("Native swirl offscreen transition refused.");
+    await observedNativeDom(
+      shaderContents,
+      "(()=>{const c=document.querySelector('canvas[data-cafe-fluid]');return document.documentElement.dataset.cafeVisible==='false'&&c.dataset.cafeFluidState==='paused'&&c.dataset.cafeFluidRaf==='false'})()",
+      "offscreen swirl stop",
+    );
+    await host.update(window, {
+      leaseId: shader.leaseId,
+      bounds: { x: 0, y: 0, width: 400, height: 200 },
+      visible: true,
+      appearance: "light",
+      presentation: { ...presentation, reducedMotion: false },
+    });
+    await observedNativeDom(
+      shaderContents,
+      "Number(document.querySelector('canvas[data-cafe-fluid]').dataset.cafeFluidFrames)>=96",
+      "actual fluid sustained first checkpoint",
+    );
+    // Thirty fps is a ceiling, not a minimum throughput promise. Each unchanged
+    // five-second observation adds at most eighty steps; the final beyond-360
+    // pixel/pointer proof and whole-child deadline remain mandatory.
+    await observedNativeDom(
+      shaderContents,
+      "Number(document.querySelector('canvas[data-cafe-fluid]').dataset.cafeFluidFrames)>=176",
+      "actual fluid sustained second checkpoint",
+    );
+    await observedNativeDom(
+      shaderContents,
+      "(()=>{const c=document.querySelector('canvas[data-cafe-fluid]');return {fluidReady:Number(c.dataset.cafeFluidFrames)>=240,state:c.dataset.cafeFluidState,frames:Number(c.dataset.cafeFluidFrames),textures:Number(c.dataset.cafeFluidTextures),programs:Number(c.dataset.cafeFluidPrograms),buffers:Number(c.dataset.cafeFluidBuffers),textureBytes:Number(c.dataset.cafeFluidTextureBytes),canvasWidth:c.width,canvasHeight:c.height,raf:c.dataset.cafeFluidRaf==='true',nativeVisible:document.documentElement.dataset.cafeVisible==='true',nativeReduced:document.documentElement.dataset.cafeReducedMotion==='true',documentHidden:document.hidden}})()",
+      "sustained swirl midpoint",
+    );
+    await observedNativeDom(
+      shaderContents,
+      "Number(document.querySelector('canvas[data-cafe-fluid]').dataset.cafeFluidFrames)>=300",
+      "actual fluid sustained fourth checkpoint",
+    );
+    await observedNativeDom(
+      shaderContents,
+      "(()=>{const c=document.querySelector('canvas[data-cafe-fluid]');return Number(c.dataset.cafeFluidFrames)>360&&c.dataset.cafeFluidState==='running'&&c.dataset.cafeFluidRaf==='true'})()",
+      "sustained swirl beyond old frame allowance",
+    );
+    for (let interaction = 0; interaction < 8; interaction++) {
+      shaderContents.sendInputEvent({
+        type: "mouseMove",
+        x: 30 + interaction * 12,
+        y: 70 + interaction * 3,
+      });
+      await observedNativeDom(
+        shaderContents,
+        `Number(document.querySelector('canvas[data-cafe-fluid]').dataset.cafeFluidPointerInputs)>=${interaction + 1}`,
+        "sustained passive trusted pointer",
+      );
+    }
+    const settledCapture = await host.capture(window, shader.leaseId);
+    if (
+      !settledCapture ||
+      !hasFixtureSwirl(settledCapture.png) ||
+      Buffer.from(settledCapture.png).equals(Buffer.from(shaderCapture!.png)) ||
+      (await shaderContents.executeJavaScript(
+        "Number(document.querySelector('canvas[data-cafe-fluid]').dataset.cafeFluidFrames)",
+      )) <= 360
+    )
+      throw new Error("Native sustained swirl pixels unavailable.");
+    await shaderContents.executeJavaScript("window.fixtureLoseContext()");
+    await observedNativeDom(
+      shaderContents,
+      "(()=>{const fallback=document.getElementById('fallback'),canvas=document.querySelector('canvas[data-cafe-fluid]'),rect=fallback.getBoundingClientRect(),style=getComputedStyle(fallback);return canvas.dataset.cafeFluidState==='context-lost'&&canvas.dataset.cafeFluidRaf==='false'&&canvas.dataset.cafeFluidTextureBytes==='0'&&canvas.dataset.cafeFluidTextures==='0'&&canvas.dataset.cafeFluidPrograms==='0'&&canvas.dataset.cafeFluidBuffers==='0'&&style.display!=='none'&&style.visibility==='visible'&&rect.width>0&&rect.height>0&&rect.top>=0&&rect.bottom<=innerHeight})()",
+      "context-loss fallback",
+    );
+    if ((await host.retire(window, shader.leaseId)).state !== "retired")
+      throw new Error("Native shader retirement unproven.");
+    phase("native-bounded-webgl-context-loss-retired");
+    // A checked-in explicit derivative of the supplied chart is copied into
+    // this fixture's private namespace. The original and immutable artifacts
+    // are not read, rewritten or published by the native execution path.
+    const naturalHtml = await readFile(join(directory, "natural-chart.html"), "utf8");
+    if (Buffer.byteLength(naturalHtml) > 32 * 1024)
+      throw new Error("Natural chart fixture refused.");
+    const naturalTicket = randomUUID().replaceAll("-", "").repeat(2);
+    if (
+      host.prepare({ ticket: naturalTicket, owner, document: { ...document, html: naturalHtml } })
+        .status !== "ready"
+    )
+      throw new Error("Native natural chart preparation refused.");
+    const natural = await host.open(window, {
+      ticket: naturalTicket,
+      bounds: { x: 0, y: 0, width: 600, height: 180 },
+      appearance: "light",
+      presentation: { ...presentation, reducedMotion: true },
+    });
+    const naturalIdentity = host.inspect(naturalTicket, natural.leaseId);
+    const naturalView = naturalIdentity
+      ? fixtureView(window, naturalIdentity.documentGeneration)
+      : undefined;
+    if (natural.state !== "active" || !naturalView)
+      throw new Error("Native natural chart admission refused.");
+    await host.update(window, {
+      leaseId: natural.leaseId,
+      bounds: { x: 0, y: 0, width: 600, height: 180 },
+      visible: true,
+      appearance: "light",
+      presentation: { ...presentation, reducedMotion: true },
+    });
+    await observed(() =>
+      layoutEvents.some(
+        (event) =>
+          event.leaseId === natural.leaseId &&
+          event.layout &&
+          event.layout.height > 180 &&
+          event.layout.height < 700 &&
+          !event.layout.constrained,
+      ),
+    );
+    let naturalLayout = layoutEvents.findLast(
+      (event) => event.leaseId === natural.leaseId,
+    )!.layout!;
+    const snapshotChart = async (boundary: "selected" | "applied" | "capture" | "color") => {
+      const latest = layoutEvents.findLast((event) => event.leaseId === natural.leaseId)!.layout!;
+      const bounds = naturalView.getBounds();
+      await chartSnapshot(naturalView.webContents, boundary, {
+        selectedHeight: naturalLayout.height,
+        selectedSequence: naturalLayout.sequence,
+        latestHeight: latest.height,
+        latestSequence: latest.sequence,
+        ownerZoom: window.webContents.getZoomFactor(),
+        nativeWidth: bounds.width,
+        nativeHeight: bounds.height,
+      });
+    };
+    await snapshotChart("selected");
+    naturalLayout = await settledChartLayout(
+      naturalView.webContents,
+      () => layoutEvents.findLast((event) => event.leaseId === natural.leaseId)?.layout,
+    );
+    await host.update(window, {
+      leaseId: natural.leaseId,
+      bounds: { x: 0, y: 0, width: 600, height: naturalLayout.height },
+      visible: true,
+      appearance: "light",
+    });
+    await observedNativeDom(
+      naturalView.webContents,
+      "(()=>{const root=document.scrollingElement,unit=document.querySelector('.unit').getBoundingClientRect(),foot=document.querySelector('.foot').getBoundingClientRect();return root.scrollHeight<=innerHeight+1&&foot.bottom<=innerHeight+1&&unit.bottom<=innerHeight&&innerHeight-unit.bottom<=1})()",
+      "natural chart root flow",
+    );
+    await snapshotChart("applied");
+    if (
+      host.inspect(naturalTicket, natural.leaseId)?.documentGeneration !==
+      naturalIdentity!.documentGeneration
+    )
+      throw new Error("Native natural chart document changed.");
+    await snapshotChart("capture");
+    const naturalCapture = await host.capture(window, natural.leaseId);
+    if (!naturalCapture) throw new Error("Native natural chart capture unavailable.");
+    await writeFile(join(directory, "native-inline-chart.png"), naturalCapture.png, {
+      flag: "wx",
+      mode: 0o600,
+    });
+    // Keep the original monochrome/reduced-motion sample separate. A finite
+    // representative theme does not rewrite this exact derivative's source,
+    // change its lease/geometry, or imply readiness from another guest canvas.
+    const chartPresentation: VisualizationHostPresentation = {
+      ...presentation,
+      reducedMotion: true,
+      colors: {
+        background: "#15171c",
+        foreground: "#e8edf5",
+        muted: "#94a3b8",
+        accent: "#619cff",
+        accentForeground: "#15171c",
+        chart1: "#22d3ee",
+        chart2: "#619cff",
+        chart3: "#ae88ff",
+        chart4: "#ec4899",
+        chart5: "#38bdf8",
+        chart6: "#a78bfa",
+      },
+    };
+    await host.update(window, {
+      leaseId: natural.leaseId,
+      bounds: { x: 0, y: 0, width: 600, height: naturalLayout.height },
+      visible: true,
+      appearance: "dark",
+      presentation: chartPresentation,
+    });
+    await observedNativeDom(
+      naturalView.webContents,
+      `(()=>{const c=document.querySelector('canvas[data-cafe-fluid]'),r=c.getBoundingClientRect(),d=c.dataset,frames=Number(d.cafeFluidFrames),scale=Math.min(devicePixelRatio,512/Math.max(r.width,r.height));return {fluidReady:d.cafeFluidState==='static'&&frames>=12&&frames<=96&&frames%12===0&&Number(d.cafeFluidTextures)===8&&Number(d.cafeFluidPrograms)===10&&Number(d.cafeFluidBuffers)===2&&d.cafeFluidRaf==='false'&&r.width>0&&r.height>0&&c.width===Math.max(1,Math.floor(r.width*scale))&&c.height===Math.max(1,Math.floor(r.height*scale)), state:d.cafeFluidState,frames,textures:Number(d.cafeFluidTextures),programs:Number(d.cafeFluidPrograms),buffers:Number(d.cafeFluidBuffers),textureBytes:Number(d.cafeFluidTextureBytes),canvasWidth:c.width,canvasHeight:c.height,raf:d.cafeFluidRaf==='true',nativeVisible:document.documentElement.dataset.cafeVisible==='true',nativeReduced:document.documentElement.dataset.cafeReducedMotion==='true',documentHidden:document.hidden}})()`,
+      "representative chart fluid",
+    );
+    await snapshotChart("color");
+    const colorCapture = await host.capture(window, natural.leaseId);
+    if (!colorCapture) throw new Error("Native representative chart capture unavailable.");
+    await writeFile(join(directory, "native-inline-chart-color.png"), colorCapture.png, {
+      flag: "wx",
+      mode: 0o600,
+    });
+    // Qualify the same authored chart's normal presentation independently of
+    // its reduced-motion image. Do not fake media, replace source, reset its
+    // consumed frames, or borrow progress from another native fluid context.
+    const motionStart: unknown = await naturalView.webContents.executeJavaScript(
+      "Number(document.querySelector('canvas[data-cafe-fluid]').dataset.cafeFluidFrames)",
+    );
+    if (
+      !Number.isSafeInteger(motionStart) ||
+      (motionStart as number) < 12 ||
+      (motionStart as number) > VISUALIZATION_FLUID_DIAGNOSTIC_COUNTER_MAX - 6
+    )
+      throw new Error("Native chart motion allowance unavailable.");
+    await host.update(window, {
+      leaseId: natural.leaseId,
+      bounds: { x: 0, y: 0, width: 600, height: naturalLayout.height },
+      visible: true,
+      appearance: "dark",
+      presentation: { ...chartPresentation, reducedMotion: false },
+    });
+    await observedNativeDom(
+      naturalView.webContents,
+      `(()=>{const c=document.querySelector('canvas[data-cafe-fluid]'),d=c.dataset;return d.cafeFluidState==='running'&&d.cafeFluidRaf==='true'&&Number(d.cafeFluidFrames)>=${(motionStart as number) + 6}&&getComputedStyle(c).filter==='blur(9px)'&&document.documentElement.dataset.cafeVisible==='true'&&document.documentElement.dataset.cafeReducedMotion==='false'&&!document.hidden})()`,
+      "normal chart own fluid motion and frost",
+    );
+    const motionCapture = await host.capture(window, natural.leaseId);
+    if (
+      !motionCapture ||
+      motionCapture.width !== colorCapture.width ||
+      motionCapture.height !== colorCapture.height ||
+      Buffer.from(motionCapture.png).equals(Buffer.from(colorCapture.png))
+    )
+      throw new Error("Native normal chart pixels unavailable.");
+    await writeFile(join(directory, "native-inline-chart-motion.png"), motionCapture.png, {
+      flag: "wx",
+      mode: 0o600,
+    });
+    await host.update(window, {
+      leaseId: natural.leaseId,
+      bounds: { x: 0, y: 0, width: 600, height: naturalLayout.height },
+      visible: true,
+      appearance: "dark",
+      presentation: chartPresentation,
+    });
+    await observedNativeDom(
+      naturalView.webContents,
+      "(()=>{const d=document.querySelector('canvas[data-cafe-fluid]').dataset;return d.cafeFluidState==='static'&&d.cafeFluidRaf==='false'&&document.documentElement.dataset.cafeReducedMotion==='true'})()",
+      "normal chart reduced-motion restoration",
+    );
+    if (
+      host.inspect(naturalTicket, natural.leaseId)?.documentGeneration !==
+      naturalIdentity!.documentGeneration
+    )
+      throw new Error("Native normal chart document changed.");
+    phase("native-generated-normal-motion-frost-capture");
+    await host.update(window, {
+      leaseId: natural.leaseId,
+      bounds: { x: 0, y: 0, width: 320, height: naturalLayout.height },
+      visible: true,
+      appearance: "dark",
+    });
+    await observed(() =>
+      layoutEvents.some(
+        (event) =>
+          event.leaseId === natural.leaseId &&
+          event.layout &&
+          event.layout.sequence > naturalLayout.sequence &&
+          event.layout.height !== naturalLayout.height,
+      ),
+    );
+    const narrowLayout = await settledChartLayout(
+      naturalView.webContents,
+      () => layoutEvents.findLast((event) => event.leaseId === natural.leaseId)?.layout,
+    );
+    await host.update(window, {
+      leaseId: natural.leaseId,
+      bounds: { x: 0, y: 0, width: 320, height: narrowLayout.height },
+      visible: true,
+      appearance: "dark",
+    });
+    await observedNativeDom(
+      naturalView.webContents,
+      "(()=>{const unit=document.querySelector('.unit').getBoundingClientRect();return document.scrollingElement.scrollHeight<=innerHeight+1&&unit.bottom<=innerHeight&&innerHeight-unit.bottom<=1})()",
+      "narrow natural chart root flow",
+    );
+    if ((await host.retire(window, natural.leaseId)).state !== "retired")
+      throw new Error("Native natural chart retirement unproven.");
+    phase("native-generated-natural-height-same-document");
+    const transparent = await host.preview(
+      { ...owner, operationId: randomUUID() },
+      {
+        ...document,
+        html: "<style>html,body{background:transparent!important}</style><p>Transparent fragment</p>",
+      },
+    );
+    if (transparent.status !== "ready")
+      throw new Error("Native transparent fragment preview unavailable.");
+    const transparentImage = Electron.nativeImage.createFromBuffer(
+      Buffer.from(transparent.png, "base64"),
+    );
+    const transparentSize = transparentImage.getSize(),
+      transparentBitmap = transparentImage.toBitmap();
+    if (
+      transparentImage.isEmpty() ||
+      transparentBitmap[
+        ((transparentSize.height - 10) * transparentSize.width + transparentSize.width - 10) * 4 + 3
+      ] !== 0
+    )
+      throw new Error("Native generated transparent backing unavailable.");
+    phase("native-generated-transparent-capture");
+    // Four source-bearing viewers and one independent preview use actual
+    // distinct renderer identities. Auto source cannot take composer focus;
+    // only a real trusted native edge-wheel can request bounded chat scrolling.
+    const poolHtml = `<style>html,body{height:100%;background:#000!important;color:#fff}canvas{position:fixed;inset:0;width:100%;height:100%;pointer-events:none}input,.inner{position:relative}.inner{height:60px;overflow:auto}.long{height:300px}</style><canvas data-cafe-fluid aria-hidden="true"></canvas><input id="pool-input" autofocus><div class="inner"><div class="long">Internal scroll</div></div><script>window.fixtureCount=7;window.focus();window.fixtureStall=()=>{while(true){}};addEventListener('wheel',event=>{document.body.dataset.wheelTrusted=String(event.isTrusted);document.body.dataset.wheelDelta=String(event.deltaY)},{capture:true})</script>`;
+    const poolInputs: {
+      ticket: string;
+      owner: typeof owner;
+      document: VisualizationHostDocument;
+    }[] = Array.from({ length: 4 }, () => ({
+      ticket: randomUUID().replaceAll("-", "").repeat(2),
+      owner: { ...owner, operationId: randomUUID() },
+      document: {
+        ...document,
+        kind: "generated" as const,
+        html: poolHtml,
+      },
+    }));
+    for (const input of poolInputs)
+      if (host.prepare(input).status !== "ready")
+        throw new Error("Native pool preparation refused.");
+    Electron.app.focus({ steal: true });
+    window.focus();
+    await observed(() => window.isFocused());
+    window.webContents.focus();
+    await observed(() => window.webContents.isFocused());
+    const poolStates = await Promise.all(
+      poolInputs.map((input, index) =>
+        host.open(window, {
+          ticket: input.ticket,
+          bounds: { x: (index % 2) * 300, y: Math.floor(index / 2) * 180, width: 300, height: 180 },
+          appearance: "light",
+          presentation,
+        }),
+      ),
+    );
+    const poolViews = poolStates.map((state, index) => {
+      const identity = host.inspect(poolInputs[index]!.ticket, state.leaseId);
+      const view = identity ? fixtureView(window, identity.documentGeneration) : undefined;
+      if (state.state !== "active" || !view)
+        throw new Error("Native pool viewer admission refused.");
+      return view;
+    });
+    const focusEvidence = () =>
+      JSON.stringify({
+        ownerWindowFocused: window.isFocused(),
+        ownerRootFocused: window.webContents.isFocused(),
+        appActive: Electron.app.isActive(),
+        guestFocused: poolViews.map((view) => view.webContents.isFocused()),
+      });
+    if (!window.webContents.isFocused())
+      throw new Error(`Automatic native chart stole composer focus: ${focusEvidence()}`);
+    for (let index = 0; index < 4; index += 1) {
+      const update = await host.update(window, {
+        leaseId: poolStates[index]!.leaseId,
+        bounds: { x: (index % 2) * 300, y: Math.floor(index / 2) * 180, width: 300, height: 180 },
+        visible: true,
+        appearance: "light",
+      });
+      if (update.state !== "active" || !poolViews[index]!.getVisible())
+        throw new Error("Native pool visible commit refused.");
+    }
+    if (!window.webContents.isFocused())
+      throw new Error(`Automatic native chart commit stole composer focus: ${focusEvidence()}`);
+    poolViewerPids = poolViews.map((view) => view.webContents.getOSProcessId());
+    for (const view of poolViews)
+      await observedNativeDom(
+        view.webContents,
+        `(()=>{const c=document.querySelector('canvas[data-cafe-fluid]');return c.dataset.cafeFluidTextures==='8'&&Number(c.dataset.cafeFluidFrames)>=12&&Number(c.dataset.cafeFluidFrames)<=${VISUALIZATION_FLUID_DIAGNOSTIC_COUNTER_MAX}&&Number(c.dataset.cafeFluidTextureBytes)<=16*1024*1024})()`,
+        "four actual fluid contexts",
+      );
+    if (
+      poolViewerPids.some((pid) => pid <= 0) ||
+      new Set(poolViewerPids).size !== 4 ||
+      host.capacity().viewerCount !== 4
+    )
+      throw new Error("Native pool renderers are not separately owned.");
+    const fifth = { ...poolInputs[0]!, ticket: randomUUID().replaceAll("-", "").repeat(2) };
+    if (
+      host.prepare(fifth).status !== "ready" ||
+      (
+        await host.open(window, {
+          ticket: fifth.ticket,
+          bounds: { x: 0, y: 0, width: 300, height: 180 },
+          appearance: "light",
+        })
+      ).reason !== "busy"
+    )
+      throw new Error("Native fifth viewer was not refused.");
+    const parallelPreview = await host.preview({ ...owner, operationId: randomUUID() }, document);
+    if (
+      parallelPreview.status !== "ready" ||
+      poolPreviewPid <= 0 ||
+      !hasFixtureColor(Buffer.from(parallelPreview.png, "base64"), 0, 0, 0) ||
+      poolViews.some((view, index) => view.webContents.getOSProcessId() !== poolViewerPids[index])
+    )
+      throw new Error("Native preview did not preserve four exclusive viewers.");
+    const fifthFluid = await host.preview(
+      { ...owner, operationId: randomUUID() },
+      { ...document, html: webglSource },
+    );
+    if (
+      fifthFluid.status !== "ready" ||
+      !poolFluidPreview ||
+      !hasFixtureSwirl(Buffer.from(fifthFluid.png, "base64")) ||
+      poolViews.some((view, index) => view.webContents.getOSProcessId() !== poolViewerPids[index])
+    )
+      throw new Error("Native fifth fluid preview did not preserve four helper contexts.");
+    poolViewerPids = [];
+    host.discardPrepared(fifth.ticket);
+    phase("native-four-viewers-fifth-preview-autofocus");
+    // Manual App admission is separate from automatic generated focus proof.
+    // It consumes an existing viewer slot, never a fifth viewer/sixth source.
+    if ((await host.retire(window, poolStates[3]!.leaseId)).state !== "retired")
+      throw new Error("Native generated slot retirement refused.");
+    poolInputs[3] = {
+      ...poolInputs[3]!,
+      ticket: randomUUID().replaceAll("-", "").repeat(2),
+      document: { ...document, kind: "mcp-app", html: "<p>Manual App slot</p>" },
+    };
+    if (host.prepare(poolInputs[3]).status !== "ready")
+      throw new Error("Native manual App slot preparation refused.");
+    poolStates[3] = await host.open(window, {
+      ticket: poolInputs[3].ticket,
+      bounds: { x: 300, y: 180, width: 300, height: 180 },
+      appearance: "light",
+    });
+    const manualIdentity = host.inspect(poolInputs[3].ticket, poolStates[3].leaseId);
+    const manualView = manualIdentity
+      ? fixtureView(window, manualIdentity.documentGeneration)
+      : undefined;
+    if (poolStates[3].state !== "active" || !manualView)
+      throw new Error("Native manual App slot admission refused.");
+    poolViews[3] = manualView;
+    if (
+      (
+        await host.update(window, {
+          leaseId: poolStates[3].leaseId,
+          bounds: { x: 300, y: 180, width: 300, height: 180 },
+          visible: true,
+          appearance: "light",
+        })
+      ).state !== "active"
+    )
+      throw new Error("Native manual App visibility commit refused.");
+    const wheelEvents: VisualizationHostEvent[] = [];
+    const nativeSend = window.webContents.send.bind(window.webContents);
+    window.webContents.send = (channel: string, ...args: unknown[]) => {
+      if (channel === VISUALIZATION_EVENT_CHANNEL) {
+        const event = args[0] as VisualizationHostEvent;
+        if (event.state === "wheel" && wheelEvents.length < 8) wheelEvents.push(event);
+      }
+      nativeSend(channel, ...args);
+    };
+    const wheelContents = poolViews[1]!.webContents;
+    wheelContents.sendInputEvent({
+      type: "mouseWheel",
+      x: 270,
+      y: 150,
+      deltaY: -60,
+      canScroll: true,
+      hasPreciseScrollingDeltas: true,
+    });
+    await observed(() => wheelEvents.length === 1);
+    const delta = (await wheelContents.executeJavaScript(
+      "({trusted:document.body.dataset.wheelTrusted,delta:Number(document.body.dataset.wheelDelta)})",
+    )) as { trusted: string; delta: number };
+    if (
+      wheelEvents[0]?.leaseId !== poolStates[1]!.leaseId ||
+      delta.trusted !== "true" ||
+      wheelEvents[0].wheel?.deltaY !== delta.delta ||
+      !Number.isFinite(delta.delta)
+    )
+      throw new Error("Native wheel handoff lost its exact trusted gesture.");
+    const inner = (await wheelContents.executeJavaScript(
+      "(()=>{const r=document.querySelector('.inner').getBoundingClientRect();return {x:Math.round(r.x+20),y:Math.round(r.y+20)}})()",
+    )) as { x: number; y: number };
+    wheelContents.sendInputEvent({
+      type: "mouseWheel",
+      ...inner,
+      deltaY: -60,
+      canScroll: true,
+      hasPreciseScrollingDeltas: true,
+    });
+    await observedNativeDom(
+      wheelContents,
+      "document.querySelector('.inner').scrollTop>0",
+      "local inner wheel",
+    );
+    wheelContents.sendInputEvent({
+      type: "mouseWheel",
+      x: 270,
+      y: 150,
+      deltaY: -60,
+      modifiers: ["alt"],
+      canScroll: true,
+      hasPreciseScrollingDeltas: true,
+    });
+    await wheelContents.executeJavaScript(
+      "dispatchEvent(new WheelEvent('wheel',{deltaY:60,cancelable:true}))",
+    );
+    if (wheelEvents.length !== 1) throw new Error("Modified or synthetic wheel escaped its guest.");
+    window.webContents.send = nativeSend;
+    phase("native-trusted-wheel-inner-scroll-modified-refusal");
+    void poolViews[2]!.webContents
+      .executeJavaScript("window.fixtureStall()")
+      .catch(() => undefined);
+    await observed(
+      () =>
+        host.inspect(poolInputs[2]!.ticket, poolStates[2]!.leaseId) === null &&
+        host.capacity().viewerCount === 3,
+    );
+    for (const index of [0, 1, 3])
+      if (!host.inspect(poolInputs[index]!.ticket, poolStates[index]!.leaseId))
+        throw new Error("Hostile native chart retired a healthy sibling.");
+    const secondApp = { ...poolInputs[3]!, ticket: randomUUID().replaceAll("-", "").repeat(2) };
+    if (
+      host.prepare(secondApp).status !== "ready" ||
+      (
+        await host.open(window, {
+          ticket: secondApp.ticket,
+          bounds: { x: 0, y: 0, width: 300, height: 180 },
+          appearance: "light",
+        })
+      ).reason !== "busy"
+    )
+      throw new Error("Native pool admitted a second manual App.");
+    host.discardPrepared(secondApp.ticket);
+    const yielded = await host.yield(window, poolStates[1]!.leaseId);
+    if (yielded.state !== "retired" || !yielded.continuation)
+      throw new Error("Native exact continuation was unavailable.");
+    if (
+      (await host.retire(window, poolStates[3]!.leaseId)).state !== "retired" ||
+      !host.beginTransition(window, poolStates[0]!.leaseId) ||
+      poolViews[0]!.getVisible()
+    )
+      throw new Error("Native expansion did not hide old inline pixels.");
+    const selectedPid = poolViews[0]!.webContents.getOSProcessId();
+    if (
+      (
+        await host.update(window, {
+          leaseId: poolStates[0]!.leaseId,
+          bounds: { x: 0, y: 0, width: 600, height: 400 },
+          visible: true,
+          appearance: "light",
+          displayMode: "fullscreen",
+        })
+      ).state !== "active" ||
+      poolViews[0]!.webContents.getOSProcessId() !== selectedPid ||
+      !poolViews[0]!.getVisible() ||
+      (await poolViews[0]!.webContents.executeJavaScript("window.fixtureCount")) !== 7
+    )
+      throw new Error("Native selected expansion lost its exact DOM.");
+    const resumedInput = { ...poolInputs[1]!, ticket: randomUUID().replaceAll("-", "").repeat(2) };
+    if (host.prepare(resumedInput).status !== "ready")
+      throw new Error("Native continuation preparation refused.");
+    const resumed = await host.open(window, {
+      ticket: resumedInput.ticket,
+      bounds: { x: 0, y: 0, width: 300, height: 180 },
+      appearance: "light",
+      continuation: yielded.continuation,
+    });
+    if (
+      resumed.state !== "active" ||
+      resumed.expiresAtMs !== poolStates[1]!.expiresAtMs ||
+      resumed.leaseId === poolStates[1]!.leaseId
+    )
+      throw new Error("Native continuation renewed its original deadline.");
+    const retiredPool = await Promise.all([
+      host.retire(window, poolStates[0]!.leaseId),
+      host.retire(window, resumed.leaseId),
+    ]);
+    if (
+      retiredPool.some((value) => value.state !== "retired") ||
+      !host.capabilities().available ||
+      host.capacity().viewerCount !== 0
+    )
+      throw new Error("Native simultaneous sibling retirement was inconclusive.");
+    phase("native-hostile-sibling-continuation-expansion-retired");
     // Independent watchdog cases precede intentional owner loss. Reusing a
     // deliberately hidden owner would couple CPU qualification to restoration
     // of native window/application visibility rather than the execution host.
@@ -691,7 +1798,7 @@ async function qualify(): Promise<void> {
     phase("app-sdk-context-csp-consent-owner-hide-retired");
     window.webContents.send = send;
     process.stdout.write(
-      `${JSON.stringify({ electron: process.versions.electron, electronNode: process.versions.node, electronAbi: process.versions.modules, platform: process.platform, arch: process.arch, preview: "passed", appPreviewReplay: "passed", viewer: "passed", visibilityCommit: "passed", nativeInput: "passed", semanticAccessibility: "passed", sameDocument: "passed", capture: "passed", retirement: "passed", ownerHide: "passed", appTransport: "passed", context: "passed", csp: "passed", consent: "passed", watchdog: "passed" })}\n`,
+      `${JSON.stringify({ electron: process.versions.electron, electronNode: process.versions.node, electronAbi: process.versions.modules, platform: process.platform, arch: process.arch, preview: "passed", appPreviewReplay: "passed", viewer: "passed", visibilityCommit: "passed", nativeInput: "passed", semanticAccessibility: "passed", sameDocument: "passed", capture: "passed", clippingGeometry: "passed", ownerZoom: "passed", boundedWebGL: "passed", sustainedFluid: "passed", naturalHeight: "passed", normalMotionChart: "passed", viewerPool: "passed", automaticFocus: "passed", wheelHandoff: "passed", continuation: "passed", retirement: "passed", ownerHide: "passed", appTransport: "passed", context: "passed", csp: "passed", consent: "passed", watchdog: "passed" })}\n`,
     );
   } catch (error) {
     process.stderr.write(`Native fixture owned status: ${JSON.stringify(host.diagnostics())}\n`);

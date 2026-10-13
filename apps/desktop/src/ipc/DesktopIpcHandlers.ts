@@ -3,6 +3,11 @@ import * as Effect from "effect/Effect";
 import * as DesktopIpc from "./DesktopIpc.ts";
 import {
   getVisualizationHostCapabilities,
+  getVisualizationHostCapacity,
+  observeVisualizationCapacity,
+  yieldVisualization,
+  beginVisualizationTransition,
+  focusVisualization,
   openVisualization,
   updateVisualization,
   retireVisualization,
@@ -55,6 +60,11 @@ export const installDesktopIpcHandlers = Effect.gen(function* () {
   yield* ipc.handleSync(getAppBranding);
   yield* ipc.handleSync(getLocalEnvironmentBootstrap);
   yield* ipc.handle(getVisualizationHostCapabilities);
+  yield* ipc.handle(getVisualizationHostCapacity);
+  yield* ipc.handle(observeVisualizationCapacity);
+  yield* ipc.handle(yieldVisualization);
+  yield* ipc.handle(beginVisualizationTransition);
+  yield* ipc.handle(focusVisualization);
   yield* ipc.handle(openVisualization);
   yield* ipc.handle(updateVisualization);
   yield* ipc.handle(retireVisualization);

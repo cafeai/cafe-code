@@ -25,7 +25,7 @@ const peer = vi.hoisted(() => ({
   generation: "00000000-0000-4000-8000-000000000003",
   documentGeneration: "00000000-0000-4000-8000-000000000004",
   leaseId: "00000000-0000-4000-8000-000000000005",
-  expiresAtMs: 0,
+  expiresAtMs: 0 as number | null,
   active: true,
   toolCalls: 0,
   contextCalls: 0,
@@ -345,6 +345,8 @@ it.layer(TestSqliteClient.layerMemory())("exact MCP App consent broker", (it) =>
       );
       assert.equal(peer.toolCalls, 0);
       peer.expiresAtMs = Date.now() - 1;
+      assert.equal((yield* Effect.exit(service.prepare(request("ping", {}))))._tag, "Failure");
+      peer.expiresAtMs = null;
       assert.equal((yield* Effect.exit(service.prepare(request("ping", {}))))._tag, "Failure");
     }),
   );

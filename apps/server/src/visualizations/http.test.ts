@@ -86,6 +86,7 @@ async function generatedHttpFixture() {
     details: refuseUnexpected,
     poster: refuseUnexpected,
     viewerTicket: refuseUnexpected,
+    discardViewerTicket: refuseUnexpected,
     readViewerTicket: refuseUnexpected,
     exportHtml: refuseUnexpected,
     sweep: unexpected,

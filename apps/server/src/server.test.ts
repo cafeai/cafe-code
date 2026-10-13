@@ -55,7 +55,6 @@ import * as Path from "effect/Path";
 import * as PubSub from "effect/PubSub";
 import * as Ref from "effect/Ref";
 import * as Stream from "effect/Stream";
-import * as TestClock from "effect/testing/TestClock";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
 import { ChildProcessSpawner } from "effect/unstable/process";
 import {
@@ -3988,50 +3987,83 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
     "keeps private reads available after the socket upgrade token expires while its parent stays active",
     () =>
       Effect.gen(function* () {
-        let calls = 0;
-        yield* buildAppUnderTest({
-          layers: {
-            projectionSnapshotQuery: {
-              getThreadActivityDiagnostic: (input) =>
-                Effect.sync(() => {
-                  calls += 1;
-                  return { ...input, diagnostic: null };
-                }),
+        const liveClock = yield* Clock.Clock;
+        let now = TEST_EPOCH.epochMilliseconds;
+        const admissionClock: Clock.Clock = {
+          currentTimeMillisUnsafe: () => now,
+          currentTimeMillis: Effect.sync(() => now),
+          currentTimeNanosUnsafe: () => BigInt(now) * 1_000_000n,
+          currentTimeNanos: Effect.sync(() => BigInt(now) * 1_000_000n),
+          // Advancing all sleeps also advances the RPC client's five-second
+          // heartbeat before native Pong I/O can settle, risking a reconnect.
+          // Change only auth observation time; retain real socket sleeps and
+          // the existing test deadline, as in the parent-expiry fixture above.
+          sleep: (duration) => liveClock.sleep(duration),
+        };
+        yield* Effect.gen(function* () {
+          let calls = 0;
+          yield* buildAppUnderTest({
+            layers: {
+              projectionSnapshotQuery: {
+                getThreadActivityDiagnostic: (input) =>
+                  Effect.sync(() => {
+                    calls += 1;
+                    return { ...input, diagnostic: null };
+                  }),
+              },
             },
-          },
-        });
-        const ownerToken = yield* getAuthenticatedBearerSessionToken();
-        const issued = yield* HttpClient.post("/api/auth/ws-token", {
-          headers: { authorization: `Bearer ${ownerToken}` },
-        });
-        assert.equal(issued.status, 200);
-        const upgrade = (yield* issued.json) as { readonly token: string };
-        const wsUrl = `${yield* getWsServerUrl("/ws", { authenticated: false })}?wsToken=${encodeURIComponent(upgrade.token)}`;
-        yield* Effect.scoped(
-          withWsRpcClient(wsUrl, (client) =>
-            Effect.gen(function* () {
-              const input = {
-                threadId: ThreadId.make("active-parent-diagnostic-thread"),
-                turnId: null,
-                activityId: EventId.make("active-parent-diagnostic-activity"),
-              };
-              assert.deepEqual(
-                yield* client[ORCHESTRATION_WS_METHODS.getThreadActivityDiagnostic](input),
-                { ...input, diagnostic: null },
-              );
-              // The dedicated upgrade token lasts five minutes, whereas the
-              // parent session lasts 30 days. Reuse the same admitted socket so
-              // token replay cannot masquerade as current parent validation.
-              yield* TestClock.adjust(Duration.minutes(6));
-              assert.deepEqual(
-                yield* client[ORCHESTRATION_WS_METHODS.getThreadActivityDiagnostic](input),
-                { ...input, diagnostic: null },
-              );
-              assert.equal(calls, 2);
-            }),
-          ),
-        );
-      }).pipe(Effect.provide(Layer.merge(makeProductionHttpServerTestLayer(), TestClock.layer()))),
+          });
+          const owner = yield* bootstrapBearerSession();
+          assert.equal(owner.response.status, 200);
+          const ownerToken = owner.body.sessionToken ?? "";
+          assert.isNotEmpty(ownerToken);
+          const parentExpiresAt = Date.parse(owner.body.expiresAt);
+          assert.isTrue(Number.isFinite(parentExpiresAt));
+          const issued = yield* HttpClient.post("/api/auth/ws-token", {
+            headers: { authorization: `Bearer ${ownerToken}` },
+          });
+          assert.equal(issued.status, 200);
+          const upgrade = (yield* issued.json) as {
+            readonly token: string;
+            readonly expiresAt: string;
+          };
+          const upgradeExpiresAt = Date.parse(upgrade.expiresAt);
+          assert.isTrue(Number.isFinite(upgradeExpiresAt));
+          assert.isAbove(upgradeExpiresAt, now);
+          assert.isAbove(parentExpiresAt, upgradeExpiresAt);
+          const wsUrl = `${yield* getWsServerUrl("/ws", { authenticated: false })}?wsToken=${encodeURIComponent(upgrade.token)}`;
+          yield* Effect.scoped(
+            withWsRpcClient(wsUrl, (client) =>
+              Effect.gen(function* () {
+                const input = {
+                  threadId: ThreadId.make("active-parent-diagnostic-thread"),
+                  turnId: null,
+                  activityId: EventId.make("active-parent-diagnostic-activity"),
+                };
+                // A returned private RPC proves this actual WebSocket was
+                // upgraded and authenticated before the controlled expiry.
+                assert.deepEqual(
+                  yield* client[ORCHESTRATION_WS_METHODS.getThreadActivityDiagnostic](input),
+                  { ...input, diagnostic: null },
+                );
+                assert.equal(calls, 1);
+                // Expire at the exact server-minted boundary, not a guessed
+                // TTL. A new native upgrade must refuse the same credential,
+                // while this already-admitted socket validates its live parent.
+                now = upgradeExpiresAt;
+                const refusedUpgrade = yield* getWebSocketUpgradeResponseHeaders(wsUrl);
+                assert.match(refusedUpgrade[":status"] ?? "", /^HTTP\/1\.1 401\b/u);
+                assert.equal(calls, 1);
+                assert.deepEqual(
+                  yield* client[ORCHESTRATION_WS_METHODS.getThreadActivityDiagnostic](input),
+                  { ...input, diagnostic: null },
+                );
+                assert.equal(calls, 2);
+              }),
+            ),
+          );
+        }).pipe(Effect.provideService(Clock.Clock, admissionClock));
+      }).pipe(Effect.provide(makeProductionHttpServerTestLayer())),
   );
 
   it.effect("orders the hard-delete RPC across provider, ingestion, and engine barriers", () =>

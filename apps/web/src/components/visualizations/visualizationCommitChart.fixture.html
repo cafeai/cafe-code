@@ -1,0 +1,599 @@
+<!-- Corrected deterministic chart replay, independently authored presentation only.
+Supplied source SHA-256: 28a4a10c6858187984529872cc2101d0683d2e3a86e3df72af8af3be9c18a73a.
+Daily JSON SHA-256: 6bce2a6d2eb947a4680da26b1d8ae0507882cd23408324ad81b0d030e0ecf3dc.
+Exact removed final old-helper suffix SHA-256: 6d3d79257302a024e19b0b63758b068552dafe2073accb50fe2df1bda8b405a8.
+No Downloads filesystem dependency exists when this fixture executes.
+The shared licensed fluid library is appended separately by the native host.
+-->
+<style>
+  /* This fragment inherits Cafe's theme; it owns only chart presentation. */
+  :root {
+    --ink: var(--foreground, #e8edf5);
+    --muted: var(--muted-foreground, #94a3b8);
+    --base: var(--background, #15171c);
+    --cyan: var(--chart-1, #22d3ee);
+    --blue: var(--chart-2, #619cff);
+    --violet: var(--chart-3, #ae88ff);
+  }
+  * {
+    box-sizing: border-box;
+  }
+  body {
+    margin: 0;
+    background: transparent;
+    color: var(--ink);
+    /* Cooperative chart source uses the host's exact chat family. The host
+     loads the fixed offline faces before this source can execute; declaring a
+     family here alone would not establish that its glyphs are available. */
+    font-size: calc(14px * var(--cafe-interface-scale, 1));
+    line-height: 1.45;
+    font-family: var(
+      --font-sans,
+      "DM Sans Variable",
+      "DM Sans",
+      -apple-system,
+      BlinkMacSystemFont,
+      "Segoe UI",
+      system-ui,
+      sans-serif
+    );
+  }
+  .unit {
+    position: relative;
+    isolation: isolate;
+    padding: 18px 20px 14px;
+    min-width: 0;
+    overflow: hidden;
+  }
+  .unit > canvas {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    pointer-events: none;
+    filter: blur(9px);
+    opacity: 0.8;
+    z-index: -2;
+  }
+  .veil {
+    position: absolute;
+    inset: 0;
+    pointer-events: none;
+    background: color-mix(in srgb, var(--base) 50%, transparent);
+    z-index: -1;
+  }
+  .head {
+    display: flex;
+    align-items: start;
+    justify-content: space-between;
+    gap: 16px;
+    flex-wrap: wrap;
+  }
+  h2 {
+    font-size: 17px;
+    letter-spacing: -0.35px;
+    margin: 0 0 4px;
+    font-weight: 650;
+  }
+  .sub {
+    font-size: 11px;
+    color: var(--muted);
+  }
+  .controls {
+    display: flex;
+    gap: 4px;
+  }
+  .controls button {
+    font: inherit;
+    font-size: 11px;
+    padding: 6px 12px;
+    border: 1px solid color-mix(in srgb, var(--ink) 15%, transparent);
+    border-radius: 6px;
+    color: var(--ink);
+    background: color-mix(in srgb, var(--base) 70%, transparent);
+    cursor: pointer;
+  }
+  .controls button[aria-pressed="true"] {
+    color: var(--base);
+    background: var(--blue);
+    border-color: var(--blue);
+    font-weight: 650;
+  }
+  .controls button:hover {
+    border-color: var(--cyan);
+  }
+  button:focus-visible,
+  [tabindex]:focus-visible {
+    outline: 2px solid var(--cyan);
+    outline-offset: 3px;
+  }
+  .stats {
+    display: flex;
+    gap: 25px;
+    margin: 16px 0 10px;
+    flex-wrap: wrap;
+  }
+  .stat {
+    display: flex;
+    gap: 8px;
+    align-items: baseline;
+  }
+  .stat b {
+    font-size: 25px;
+    letter-spacing: -1px;
+    font-variant-numeric: tabular-nums;
+    font-weight: 650;
+  }
+  .stat:first-child b {
+    color: var(--blue);
+  }
+  .stat span {
+    font-size: 11px;
+    color: var(--muted);
+  }
+  svg {
+    display: block;
+    width: 100%;
+    height: 240px;
+    overflow: visible;
+  }
+  .grid {
+    stroke: color-mix(in srgb, var(--ink) 12%, transparent);
+    stroke-dasharray: 3 5;
+    stroke-width: 1;
+  }
+  .axis {
+    fill: var(--muted);
+    font-size: 10px;
+    font-family: inherit;
+  }
+  .hit {
+    fill: transparent;
+    cursor: crosshair;
+  }
+  .hit:hover,
+  .hit:focus {
+    fill: color-mix(in srgb, var(--blue) 12%, transparent);
+  }
+  .foot {
+    display: flex;
+    justify-content: space-between;
+    gap: 12px;
+    margin-top: 8px;
+    font-size: 10px;
+    color: var(--muted);
+    flex-wrap: wrap;
+  }
+  .legend {
+    display: flex;
+    align-items: center;
+    gap: 7px;
+  }
+  .line-key {
+    width: 18px;
+    height: 3px;
+    border-radius: 2px;
+    background: var(--blue);
+  }
+  .tooltip {
+    position: fixed;
+    padding: 9px 12px;
+    border-radius: 7px;
+    background: var(--ink);
+    color: var(--base);
+    font-size: 11px;
+    white-space: pre-line;
+    pointer-events: none;
+    z-index: 5;
+    box-shadow: 0 3px 16px #0002;
+  }
+  .tooltip[hidden] {
+    display: none;
+  }
+  @media (max-width: 460px) {
+    .unit {
+      padding: 15px 12px;
+    }
+    .stats {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 9px 17px;
+    }
+    .stat {
+      gap: 5px;
+    }
+    .stat b {
+      font-size: 22px;
+    }
+    .stat span {
+      font-size: 10px;
+    }
+    svg {
+      height: 190px;
+    }
+    .controls button {
+      padding: 5px 10px;
+    }
+    .foot {
+      font-size: 9px;
+    }
+  }
+  /* Fluid decoration has a static fallback in unsupported hosts. The data marks
+   remain fully drawn when the host is hidden or requests reduced motion. */
+  @media (prefers-reduced-motion: reduce) {
+    .unit > canvas {
+      filter: none;
+    }
+  }
+  html[data-cafe-reduced-motion="true"] .unit > canvas {
+    filter: none;
+  }
+</style>
+<section class="unit" aria-label="Cafe Code commit activity">
+  <canvas data-cafe-fluid aria-hidden="true"></canvas>
+  <div class="veil" aria-hidden="true"></div>
+  <div class="head">
+    <div>
+      <h2>Cafe Code · Commit activity</h2>
+      <div class="sub" id="range"></div>
+    </div>
+    <div class="controls" aria-label="Activity range">
+      <button data-days="7" aria-pressed="false">7 days</button
+      ><button data-days="30" aria-pressed="true">30 days</button
+      ><button data-days="90" aria-pressed="false">90 days</button>
+    </div>
+  </div>
+  <div class="stats" aria-live="polite">
+    <div class="stat"><b id="total"></b><span>commits</span></div>
+    <div class="stat"><b id="average"></b><span>per day</span></div>
+    <div class="stat"><b id="active"></b><span>active days</span></div>
+    <div class="stat"><b id="peak"></b><span>peak day</span></div>
+  </div>
+  <svg id="chart" role="img" aria-label="Daily commit activity area chart"></svg>
+  <div class="foot">
+    <span class="legend"
+      ><i class="line-key"></i>Commits / day · hover or focus for exact values</span
+    ><span id="provenance"></span>
+  </div>
+</section>
+<div id="tip" class="tooltip" role="tooltip" hidden></div>
+<!-- prettier-ignore -->
+<script type="application/json" id="data">{"head":"35537d0a6c61fed838d5412f8abf58e471b5137a","end":"2026-10-12","daily":[["2026-07-15",1],["2026-07-16",2],["2026-07-17",1],["2026-07-18",3],["2026-07-19",10],["2026-07-20",0],["2026-07-21",12],["2026-07-22",6],["2026-07-23",0],["2026-07-24",0],["2026-07-25",0],["2026-07-26",3],["2026-07-27",3],["2026-07-28",0],["2026-07-29",3],["2026-07-30",0],["2026-07-31",0],["2026-08-01",0],["2026-08-02",0],["2026-08-03",0],["2026-08-04",0],["2026-08-05",0],["2026-08-06",0],["2026-08-07",0],["2026-08-08",4],["2026-08-09",1],["2026-08-10",1],["2026-08-11",0],["2026-08-12",3],["2026-08-13",0],["2026-08-14",5],["2026-08-15",0],["2026-08-16",0],["2026-08-17",0],["2026-08-18",1],["2026-08-19",0],["2026-08-20",1],["2026-08-21",2],["2026-08-22",0],["2026-08-23",0],["2026-08-24",19],["2026-08-25",14],["2026-08-26",1],["2026-08-27",9],["2026-08-28",0],["2026-08-29",1],["2026-08-30",2],["2026-08-31",8],["2026-09-01",3],["2026-09-02",3],["2026-09-03",1],["2026-09-04",2],["2026-09-05",9],["2026-09-06",3],["2026-09-07",0],["2026-09-08",0],["2026-09-09",1],["2026-09-10",1],["2026-09-11",0],["2026-09-12",0],["2026-09-13",0],["2026-09-14",2],["2026-09-15",0],["2026-09-16",3],["2026-09-17",2],["2026-09-18",1],["2026-09-19",0],["2026-09-20",0],["2026-09-21",0],["2026-09-22",1],["2026-09-23",3],["2026-09-24",0],["2026-09-25",1],["2026-09-26",0],["2026-09-27",4],["2026-09-28",2],["2026-09-29",6],["2026-09-30",8],["2026-10-01",3],["2026-10-02",16],["2026-10-03",16],["2026-10-04",13],["2026-10-05",7],["2026-10-06",8],["2026-10-07",17],["2026-10-08",2],["2026-10-09",10],["2026-10-10",14],["2026-10-11",9],["2026-10-12",6]]}</script>
+<script>
+  "use strict";
+  // This corrected replay preserves the exact supplied daily-count JSON. Only
+  // chart layout/finite transitions and local decorative opacity are changed.
+  // The host supplies the fixed fluid helper once; this document contains no
+  // engine copy, network dependency, parent access or executable native bridge.
+  (() => {
+    const data = JSON.parse(document.getElementById("data").textContent);
+    const byId = (id) => document.getElementById(id);
+    const chart = byId("chart");
+    const stats = document.querySelector(".stats");
+    const tip = byId("tip");
+    const reduced = matchMedia("(prefers-reduced-motion: reduce)");
+    const lifetime = new AbortController();
+    const options = { signal: lifetime.signal };
+    let markLifetime = new AbortController();
+    const samples = 90;
+    let days = 30;
+    let frame = 0;
+    let entered = false;
+    let disposed = false;
+    let size = null;
+    let marks = null;
+    let current = null;
+    let target = null;
+    let animationStart = null;
+    let lastFrame = null;
+    const visible = () =>
+      document.documentElement.dataset.cafeVisible === "true" && !document.hidden;
+    const quiet = () =>
+      reduced.matches || document.documentElement.dataset.cafeReducedMotion === "true";
+    const svg = (tag, attributes = {}) => {
+      const node = document.createElementNS("http://www.w3.org/2000/svg", tag);
+      for (const [name, value] of Object.entries(attributes))
+        node.setAttribute(name, String(value));
+      return node;
+    };
+    const date = (value) =>
+      new Date(value + "T00:00:00Z").toLocaleDateString("en-US", {
+        month: "short",
+        day: "numeric",
+        timeZone: "UTC",
+      });
+    const hideTip = () => {
+      tip.hidden = true;
+    };
+    function cancel() {
+      if (frame) cancelAnimationFrame(frame);
+      frame = 0;
+    }
+    function showTip(day, count, event, node) {
+      tip.textContent = day + " · UTC\n" + count + (count === 1 ? " commit" : " commits");
+      tip.hidden = false;
+      const rectangle = node.getBoundingClientRect();
+      const x = event ? event.clientX : rectangle.left + rectangle.width / 2;
+      const y = event ? event.clientY : rectangle.top;
+      tip.style.left = Math.max(8, Math.min(innerWidth - tip.offsetWidth - 8, x + 12)) + "px";
+      tip.style.top = Math.max(8, Math.min(innerHeight - tip.offsetHeight - 8, y + 12)) + "px";
+    }
+    function summary(values) {
+      const total = values.reduce((sum, value) => sum + value, 0);
+      return {
+        total,
+        average: total / values.length,
+        active: values.filter((value) => value > 0).length,
+        peak: Math.max(...values),
+        days: values.length,
+      };
+    }
+    function draw(value) {
+      if (!marks || !size) return;
+      const points = value.points.map((point, index) => [
+        size.left + (index / (samples - 1)) * size.width,
+        size.bottom - point * size.height,
+      ]);
+      const path = points.map(([x, y], index) => (index ? "L" : "M") + x + " " + y).join(" ");
+      marks.line.setAttribute("d", path);
+      marks.area.setAttribute(
+        "d",
+        path + " L" + size.right + " " + size.bottom + " L" + size.left + " " + size.bottom + " Z",
+      );
+      byId("total").textContent = String(Math.round(value.stats.total));
+      byId("average").textContent = value.stats.average.toFixed(1);
+      byId("active").textContent =
+        Math.round(value.stats.active) + "/" + Math.round(value.stats.days);
+      byId("peak").textContent = String(Math.round(value.stats.peak));
+      current = value;
+    }
+    function finish() {
+      cancel();
+      if (target) draw(target);
+      stats.setAttribute("aria-live", "polite");
+      chart.dataset.animation = "settled";
+    }
+    // Exactly one finite, 650ms, at-most-30fps path/KPI interpolation. Re-entrant
+    // range changes start from the displayed sample rather than allocating a
+    // queue or resetting a perpetual animation loop. Visibility loss settles.
+    function transition(from) {
+      cancel();
+      if (!target || !visible() || quiet() || disposed) {
+        finish();
+        return;
+      }
+      const destination = target;
+      animationStart = null;
+      lastFrame = null;
+      stats.setAttribute("aria-live", "off");
+      chart.dataset.animation = "moving";
+      draw(from);
+      const tick = (time) => {
+        frame = 0;
+        if (disposed || !visible() || quiet() || destination !== target) {
+          finish();
+          return;
+        }
+        if (animationStart === null) animationStart = time;
+        const elapsed = time - animationStart;
+        if (elapsed >= 650) {
+          finish();
+          return;
+        }
+        if (lastFrame === null || time - lastFrame >= 1000 / 30) {
+          const eased = 1 - Math.pow(1 - Math.min(1, elapsed / 650), 3);
+          const nextStats = {};
+          for (const key of ["total", "average", "active", "peak", "days"]) {
+            nextStats[key] = from.stats[key] + (destination.stats[key] - from.stats[key]) * eased;
+          }
+          draw({
+            points: from.points.map(
+              (point, index) => point + (destination.points[index] - point) * eased,
+            ),
+            stats: nextStats,
+          });
+          lastFrame = time;
+        }
+        frame = requestAnimationFrame(tick);
+      };
+      frame = requestAnimationFrame(tick);
+    }
+    function baseline() {
+      return {
+        points: Array(samples).fill(0),
+        stats: { total: 0, average: 0, active: 0, peak: 0, days },
+      };
+    }
+    function render(animate) {
+      if (disposed) return;
+      const rectangle = chart.getBoundingClientRect();
+      if (
+        !Number.isFinite(rectangle.width) ||
+        !Number.isFinite(rectangle.height) ||
+        rectangle.width <= 0 ||
+        rectangle.height <= 0 ||
+        rectangle.width > 1600 ||
+        rectangle.height > 2000
+      )
+        return;
+      const previous = current;
+      cancel();
+      hideTip();
+      const rows = data.daily.slice(-days);
+      const values = rows.map((row) => row[1]);
+      const nextStats = summary(values);
+      const maximum = Math.max(4, Math.ceil(nextStats.peak / 4) * 4);
+      // ViewBox dimensions are the real CSS dimensions. The SVG's default
+      // uniform aspect-ratio transform keeps glyphs and strokes undistorted,
+      // including below the original 780px design width and at interface zoom.
+      chart.setAttribute("viewBox", "0 0 " + rectangle.width + " " + rectangle.height);
+      chart.setAttribute("preserveAspectRatio", "xMidYMid meet");
+      chart.setAttribute(
+        "aria-label",
+        nextStats.total +
+          " commits over " +
+          days +
+          " days. Peak " +
+          nextStats.peak +
+          " commits in a day.",
+      );
+      chart.dataset.days = String(days);
+      size = {
+        left: 32,
+        right: rectangle.width - 12,
+        top: 16,
+        bottom: rectangle.height - 27,
+        width: rectangle.width - 44,
+        height: rectangle.height - 43,
+        cssWidth: rectangle.width,
+        cssHeight: rectangle.height,
+      };
+      const x = (index) => size.left + (index / (rows.length - 1)) * size.width;
+      const y = (value) => size.bottom - (value / maximum) * size.height;
+      target = {
+        points: Array.from({ length: samples }, (_, index) => {
+          const position = (index / (samples - 1)) * (values.length - 1);
+          const left = Math.floor(position);
+          const right = Math.min(values.length - 1, left + 1);
+          return (values[left] + (values[right] - values[left]) * (position - left)) / maximum;
+        }),
+        stats: nextStats,
+      };
+      byId("range").textContent =
+        date(rows[0][0]) + " – " + date(rows.at(-1)[0]) + " · UTC · final day partial";
+      byId("provenance").textContent = "Snapshot " + data.head.slice(0, 8) + " · " + data.end;
+      for (const button of document.querySelectorAll("[data-days]")) {
+        button.setAttribute("aria-pressed", String(Number(button.dataset.days) === days));
+      }
+      markLifetime.abort();
+      markLifetime = new AbortController();
+      chart.replaceChildren();
+      const definitions = svg("defs");
+      const gradient = svg("linearGradient", {
+        id: "area-gradient",
+        x1: "0%",
+        y1: "0%",
+        x2: "0%",
+        y2: "100%",
+      });
+      gradient.append(
+        svg("stop", { offset: "0%", "stop-color": "var(--cyan)", "stop-opacity": ".48" }),
+        svg("stop", { offset: "65%", "stop-color": "var(--blue)", "stop-opacity": ".22" }),
+        svg("stop", { offset: "100%", "stop-color": "var(--violet)", "stop-opacity": ".06" }),
+      );
+      definitions.append(gradient);
+      chart.append(definitions);
+      for (let index = 0; index <= 4; index += 1) {
+        const value = (maximum * index) / 4;
+        const vertical = y(value);
+        const label = svg("text", {
+          x: size.left - 8,
+          y: vertical + 3,
+          "text-anchor": "end",
+          class: "axis",
+        });
+        label.textContent = String(value);
+        chart.append(
+          svg("line", { x1: size.left, y1: vertical, x2: size.right, y2: vertical, class: "grid" }),
+          label,
+        );
+      }
+      const area = svg("path", { fill: "url(#area-gradient)", "data-chart-area": "" });
+      const line = svg("path", {
+        fill: "none",
+        stroke: "var(--blue)",
+        "stroke-width": 2.6,
+        "stroke-linejoin": "round",
+        "stroke-linecap": "round",
+        "data-chart-line": "",
+      });
+      chart.append(area, line);
+      marks = { area, line };
+      for (const index of [0, Math.floor((rows.length - 1) / 2), rows.length - 1]) {
+        const label = svg("text", {
+          x: x(index),
+          y: rectangle.height - 5,
+          class: "axis",
+          "text-anchor": index === 0 ? "start" : index === rows.length - 1 ? "end" : "middle",
+        });
+        label.textContent = date(rows[index][0]);
+        chart.append(label);
+      }
+      const step = size.width / (rows.length - 1);
+      rows.forEach(([day, count], index) => {
+        const hit = svg("rect", {
+          x: Math.max(size.left, x(index) - step / 2),
+          y: size.top,
+          width: index === 0 || index === rows.length - 1 ? step / 2 : step,
+          height: size.height,
+          class: "hit",
+          tabindex: 0,
+          "aria-label": day + ": " + count + " commits",
+        });
+        const enter = (event) => showTip(day, count, event.type === "focus" ? null : event, hit);
+        const markOptions = { signal: markLifetime.signal };
+        hit.addEventListener("pointerenter", enter, markOptions);
+        hit.addEventListener("focus", enter, markOptions);
+        hit.addEventListener("pointerleave", hideTip, markOptions);
+        hit.addEventListener("blur", hideTip, markOptions);
+        chart.append(hit);
+      });
+      if (animate && visible() && !quiet()) {
+        entered = true;
+        transition(previous || baseline());
+      } else finish();
+    }
+    function presentation() {
+      if (disposed) return;
+      if (!visible() || quiet()) {
+        finish();
+        hideTip();
+        return;
+      }
+      if (!entered && target) {
+        entered = true;
+        transition(baseline());
+      }
+    }
+    function dispose() {
+      if (disposed) return;
+      finish();
+      disposed = true;
+      hideTip();
+      resize.disconnect();
+      presentationObserver.disconnect();
+      markLifetime.abort();
+      lifetime.abort();
+      chart.dataset.animation = "disposed";
+    }
+    const presentationObserver = new MutationObserver(presentation);
+    presentationObserver.observe(document.documentElement, {
+      attributes: true,
+      attributeFilter: ["data-cafe-visible", "data-cafe-reduced-motion"],
+    });
+    const resize = new ResizeObserver(() => {
+      const rectangle = chart.getBoundingClientRect();
+      if (!size || rectangle.width !== size.cssWidth || rectangle.height !== size.cssHeight)
+        render(false);
+    });
+    resize.observe(chart);
+    window.addEventListener("cafe-visibility-changed", presentation, options);
+    document.addEventListener("visibilitychange", presentation, options);
+    reduced.addEventListener("change", presentation, options);
+    window.addEventListener("pagehide", dispose, { ...options, once: true });
+    for (const button of document.querySelectorAll("[data-days]")) {
+      button.addEventListener(
+        "click",
+        () => {
+          const next = Number(button.dataset.days);
+          if (!disposed && [7, 30, 90].includes(next) && next !== days) {
+            days = next;
+            render(true);
+          }
+        },
+        options,
+      );
+    }
+    render(true);
+  })();
+</script>

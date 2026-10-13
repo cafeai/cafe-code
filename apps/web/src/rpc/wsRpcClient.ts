@@ -58,6 +58,9 @@ export interface WsRpcClient {
     readonly list: RpcUnaryMethod<typeof WS_METHODS.visualizationsList>;
     readonly details: RpcUnaryMethod<typeof WS_METHODS.visualizationsDetails>;
     readonly viewerTicket: RpcUnaryMethod<typeof WS_METHODS.visualizationsViewerTicket>;
+    readonly discardViewerTicket: RpcUnaryMethod<
+      typeof WS_METHODS.visualizationsDiscardViewerTicket
+    >;
     readonly exportHtml: RpcUnaryMethod<typeof WS_METHODS.visualizationsExportHtml>;
   };
   readonly dispose: () => Promise<void>;
@@ -400,6 +403,8 @@ export function createWsRpcClient(transport: WsTransport): WsRpcClient {
         transport.request((client) => client[WS_METHODS.visualizationsDetails](input)),
       viewerTicket: (input) =>
         transport.request((client) => client[WS_METHODS.visualizationsViewerTicket](input)),
+      discardViewerTicket: (input) =>
+        transport.request((client) => client[WS_METHODS.visualizationsDiscardViewerTicket](input)),
       exportHtml: (input) =>
         transport.request((client) => client[WS_METHODS.visualizationsExportHtml](input)),
     },

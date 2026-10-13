@@ -35,6 +35,9 @@ type TimelineEntries = TimelineProps["timelineEntries"];
 
 const CREATED_AT = "2026-09-20T12:00:00.000Z";
 const EMPTY_REVERT_COUNTS = new Map<MessageId, number>();
+const decodeGeneratedVisualizationReference = Schema.decodeUnknownSync(
+  GeneratedVisualizationReference,
+);
 const ignore = () => undefined;
 
 function messages(scope: string, count = 40): TimelineEntries {
@@ -249,6 +252,47 @@ describe("MessagesTimeline with real LegendList", () => {
       );
       for (let frame = 0; frame < 4; frame += 1)
         await new Promise<void>((resolve) => window.requestAnimationFrame(() => resolve()));
+      // A finite wheel traversal can stop between cards even after all mounted
+      // rows have real measurements. Establish the fully-contained precondition
+      // with one measured native gesture, rather than waiting for a stationary
+      // partial row to somehow become a valid preservation anchor.
+      const viewportBeforeAlignment = scroller.getBoundingClientRect();
+      const mountedOverlap = Array.from(
+        host.querySelectorAll<HTMLElement>("[data-visualization-card]"),
+      ).filter((row) => {
+        const bounds = row.getBoundingClientRect();
+        return (
+          bounds.height > 0 &&
+          bounds.height < viewportBeforeAlignment.height &&
+          bounds.bottom > viewportBeforeAlignment.top &&
+          bounds.top < viewportBeforeAlignment.bottom
+        );
+      });
+      expect(mountedOverlap.length).toBeGreaterThan(0);
+      if (
+        !mountedOverlap.some((row) => {
+          const bounds = row.getBoundingClientRect();
+          return (
+            bounds.top >= viewportBeforeAlignment.top &&
+            bounds.bottom <= viewportBeforeAlignment.bottom
+          );
+        })
+      ) {
+        const center = (viewportBeforeAlignment.top + viewportBeforeAlignment.bottom) / 2;
+        const candidate = mountedOverlap.toSorted((left, right) => {
+          const leftBounds = left.getBoundingClientRect();
+          const rightBounds = right.getBoundingClientRect();
+          return (
+            Math.abs((leftBounds.top + leftBounds.bottom) / 2 - center) -
+            Math.abs((rightBounds.top + rightBounds.bottom) / 2 - center)
+          );
+        })[0]!;
+        const bounds = candidate.getBoundingClientRect();
+        const margin = (viewportBeforeAlignment.height - bounds.height) / 2;
+        const delta = bounds.top - viewportBeforeAlignment.top - margin;
+        expect(Math.abs(delta)).toBeLessThanOrEqual(viewportBeforeAlignment.height);
+        await reviewWithNativeWheel(scroller, delta);
+      }
       let anchor: HTMLElement | undefined;
       await vi.waitFor(() => {
         const viewport = scroller.getBoundingClientRect();
@@ -368,7 +412,7 @@ describe("MessagesTimeline with real LegendList", () => {
                 ...value,
                 visualization: {
                   ...value.visualization,
-                  reference: Schema.decodeUnknownSync(GeneratedVisualizationReference)({
+                  reference: decodeGeneratedVisualizationReference({
                     ...value.visualization.reference,
                     poster: { id: "945c84d1-2b36-4ff2-a6e5-554fa5df36cd", width: 640, height: 120 },
                   }),

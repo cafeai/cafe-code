@@ -4,956 +4,958 @@ import {
   useCallback,
   useEffect,
   useLayoutEffect,
+  useMemo,
   useRef,
   useState,
+  useSyncExternalStore,
   type ReactNode,
 } from "react";
 import type { DesktopBridge, EnvironmentId, ThreadId } from "@cafecode/contracts";
 import { VisualizationViewerTicketResult } from "@cafecode/contracts/visualizationApi";
 import {
-  McpAppPrepareResult,
-  McpAppReply,
-  type VisualizationReference,
-} from "@cafecode/contracts/mcpApps";
-import {
-  VisualizationHostState,
-  type VisualizationHostBounds,
-  type VisualizationHostEvent,
+  VisualizationHostCapacity,
+  VisualizationHostCapabilities,
+  type VisualizationHostCapacity as Capacity,
+  type VisualizationHostCapabilities as Capabilities,
 } from "@cafecode/contracts/visualizationHost";
 import * as Schema from "effect/Schema";
-import { uiText } from "@cafecode/shared/i18n";
-import { useUiLocale } from "~/i18n";
-import { useTheme } from "../../hooks/useTheme";
-import { readLocalApi } from "../../localApi";
-import { isWindowsPlatform } from "../../lib/utils";
-import { Button } from "../ui/button";
-import { Dialog, DialogPopup, DialogTitle } from "../ui/dialog";
 import { observeVisualizationOwner } from "./visualizationOwner";
-import { visualizationPresentation } from "./visualizationPresentation";
-import { VisualizationPrivateText } from "./VisualizationPrivateText";
+import { visualizationGeometry } from "./visualizationGeometry";
+import {
+  createVisualizationPane,
+  createVisualizationViewportEpochs,
+  type VisualizationPane,
+} from "./visualizationViewportEpochs";
+import {
+  VisualizationViewerSlot,
+  visualizationBindingKey as legacyBindingKey,
+  type VisualizationBinding,
+  type VisualizationPreparedViewer,
+  type VisualizationSlotController,
+  type ViewerSnapshot,
+} from "./VisualizationViewerSlot";
 
-export interface VisualizationBinding {
-  readonly environmentId: EnvironmentId;
-  readonly threadId: ThreadId;
-  readonly reference: VisualizationReference;
-  readonly entryKey: string;
-  readonly anchorId: string;
-  readonly anchor: HTMLElement;
-  readonly opener: HTMLElement;
+export type { VisualizationBinding } from "./VisualizationViewerSlot";
+export { visualizationBindingKey } from "./VisualizationViewerSlot";
+export type { VisualizationPane } from "./visualizationViewportEpochs";
+const decodeTicket = Schema.decodeUnknownSync(VisualizationViewerTicketResult);
+const decodeCapacity = Schema.decodeUnknownSync(VisualizationHostCapacity);
+const decodeCapabilities = Schema.decodeUnknownSync(VisualizationHostCapabilities);
+const MAX_REGISTERED = 128;
+const MAX_PREPARING = 2;
+const MAX_VIEWERS = 4;
+const MAX_PANES = 16;
+const paneIds = new WeakMap<object, number>();
+let nextPaneId = 0;
+function paneId(pane: object) {
+  let id = paneIds.get(pane);
+  if (id === undefined) {
+    id = ++nextPaneId;
+    paneIds.set(pane, id);
+  }
+  return id;
 }
-export function visualizationBindingKey(
-  binding: Pick<
-    VisualizationBinding,
-    "environmentId" | "threadId" | "reference" | "entryKey" | "anchorId"
-  >,
-) {
-  return JSON.stringify([
-    binding.environmentId,
-    binding.threadId,
-    binding.entryKey,
-    binding.anchorId,
-    binding.reference.artifactId,
-    binding.reference.revisionId,
-  ]);
+interface PaneRecord {
+  admitted: boolean;
+  priority: boolean;
+  environmentId?: EnvironmentId;
+  threadId?: ThreadId;
+  epochs: ReturnType<typeof createVisualizationViewportEpochs>;
 }
-type ViewerStatus = "starting" | "active" | "stopping" | "stopped" | "unavailable" | "quarantined";
-interface ViewerSnapshot {
+interface RecordEntry {
   key: string;
-  status: ViewerStatus;
-  expanded: boolean;
-  expiresAtMs: number | null;
-}
-interface ActiveViewer {
-  binding: Pick<
-    VisualizationBinding,
-    "environmentId" | "threadId" | "reference" | "entryKey" | "anchorId"
-  >;
-  // A recycled row may have private inspector descendants. Weak DOM handles
-  // prevent a long-lived fullscreen owner from retaining that detached tree.
-  anchor: WeakRef<HTMLElement>;
-  opener: WeakRef<HTMLElement>;
-  bridge: DesktopBridge;
-  leaseId: string | null;
-  ticket: string | null;
-  openStarted: boolean;
-  revoked: boolean;
-  owner: ReturnType<typeof observeVisualizationOwner>;
-  consent: { operationId: string; method: string; name?: string; deadline: number } | null;
-  requestBusy: boolean;
-  queuedMessages: string[];
-  earlyMessages: { leaseId: string; json: string }[];
-  earlyStates: VisualizationHostEvent[];
+  pane: VisualizationPane;
+  binding: VisualizationBinding | null;
+  mount: object | null;
+  near: boolean;
+  visible: boolean;
+  eligible: boolean;
+  requested: boolean;
+  /** Monotonic for this exact record; presentation/cache state is not authority. */
+  authorityAttempted: boolean;
+  sequence: number;
+  serial: number;
+  preparing: boolean;
+  prepared: VisualizationPreparedViewer | null;
+  continuation: { continuation: string; expiresAtMs: number | null } | null;
+  snapshot: ViewerSnapshot | null;
 }
 interface ViewerContext {
-  snapshot: ViewerSnapshot | null;
+  automatic: boolean;
+  defaultPane: VisualizationPane;
+  key: (
+    pane: VisualizationPane,
+    binding: Pick<VisualizationBinding, "environmentId" | "threadId" | "reference" | "entryKey">,
+  ) => string;
+  subscribe: (key: string, listener: () => void) => () => void;
+  snapshot: (key: string) => ViewerSnapshot | null;
+  register: (binding: VisualizationBinding) => () => void;
+  observe: (
+    key: string,
+    anchorId: string,
+    near: boolean,
+    visible: boolean,
+    actual: boolean,
+  ) => void;
   run: (binding: VisualizationBinding) => void;
-  stop: () => void;
+  stop: (key: string) => void;
   expand: (key: string, expanded: boolean) => void;
+  focus: (key: string) => void;
   detach: (key: string) => void;
-  retireScope: (environmentId: EnvironmentId, threadId: ThreadId) => void;
+  scope: (
+    pane: VisualizationPane,
+    environmentId: EnvironmentId,
+    threadId: ThreadId,
+    admitted: boolean,
+    priority: boolean,
+  ) => void;
+  closePane: (pane: VisualizationPane) => void;
+  availability: () => number;
+  manualAllowed: () => boolean;
   capture: (key: string, signal: AbortSignal) => Promise<Blob>;
+  /** Current generated-only policy, never inferred from an old pooled host. */
+  visibleLifetime: () => boolean;
+  presentationOverlay: (key: string, hidden: boolean) => Promise<boolean>;
 }
 const ViewerContext = createContext<ViewerContext | null>(null);
-const decodeState = Schema.decodeUnknownSync(VisualizationHostState);
-const decodeTicket = Schema.decodeUnknownSync(VisualizationViewerTicketResult);
-const decodeApp = Schema.decodeUnknownSync(McpAppPrepareResult);
-const decodeReply = Schema.decodeUnknownSync(McpAppReply);
-const MAX_PENDING_MESSAGES = 8;
-
-/** Only the two exact viewer-owned dialogs may retain this document's authority. */
-function hasBlockingVisualizationOverlay() {
-  return Boolean(
-    document.querySelector(
-      '[role="dialog"]:not([data-visualization-viewer]):not([data-visualization-consent]), [role="alertdialog"]',
-    ),
-  );
-}
-
+const AutomaticContext = createContext(false);
 export function useVisualizationViewer() {
   return use(ViewerContext);
 }
-
-/** Finite trusted-shell geometry, never a guest-provided size or CSS selector. */
-export function visualizationBounds(element: HTMLElement): VisualizationHostBounds | null {
-  const rect = element.getBoundingClientRect();
-  const x = Math.max(0, Math.ceil(rect.x)),
-    y = Math.max(0, Math.ceil(rect.y));
-  const width = Math.min(1600, Math.floor(Math.min(rect.right, window.innerWidth) - x));
-  const height = Math.min(2000, Math.floor(Math.min(rect.bottom, window.innerHeight) - y));
-  if (![x, y, width, height].every(Number.isFinite) || width < 1 || height < 1) return null;
-  return { x, y, width, height };
+export function useAutomaticVisualization() {
+  return use(AutomaticContext);
+}
+export function useVisualizationAvailability() {
+  const viewer = useVisualizationViewer();
+  const subscribe = useCallback(
+    (listener: () => void) => viewer?.subscribe("$pool", listener) ?? (() => undefined),
+    [viewer],
+  );
+  // The subscribed value participates directly in render decisions. An
+  // ignored wake-up revision would let compiled React cache an imperative
+  // manualAllowed() call against an otherwise stable context object.
+  const read = useCallback(() => viewer?.manualAllowed() ?? false, [viewer]);
+  return useSyncExternalStore(subscribe, read, read);
+}
+export function useVisualizationSnapshot(key: string) {
+  const viewer = useVisualizationViewer();
+  const subscribe = useCallback(
+    (listener: () => void) => viewer?.subscribe(key, listener) ?? (() => undefined),
+    [viewer, key],
+  );
+  const read = useCallback(() => viewer?.snapshot(key) ?? null, [viewer, key]);
+  return useSyncExternalStore(subscribe, read, read);
 }
 
 /**
- * This owner is above the recycled timeline. Cards contain only inert posters
- * and a geometry anchor; changing inline/fullscreen bounds never recreates the
- * native document. Native retirement is authoritative: a failed/uncertain stop
- * leaves this slot occupied and disables new admission instead of guessing.
+ * Window-owned scheduler above recycled rows. Native main alone owns the global
+ * reservation count. Capacity observations are hints; exact lease ACKs and
+ * retirement decide lifecycle. At most two private ticket requests and four
+ * local controllers exist. No polling, source strings or history scan occurs.
  */
 export function VisualizationViewerProvider({ children }: { children: ReactNode }) {
-  const uiLocale = useUiLocale();
-  const { resolvedTheme } = useTheme();
-  const appearance = useRef(resolvedTheme);
-  const locale = useRef(uiLocale);
-  locale.current = uiLocale;
-  appearance.current = resolvedTheme;
-  const [snapshot, setSnapshot] = useState<ViewerSnapshot | null>(null);
-  const snapshotRef = useRef(snapshot);
-  snapshotRef.current = snapshot;
-  const active = useRef<ActiveViewer | null>(null);
-  // The dialog portal mounts after its owner's first layout pass. Observing a
-  // ref only once can therefore leave the live native view at inline bounds.
-  // The callback ref re-runs geometry ownership on the actual portal mount;
-  // this is the one stable shell surface, never a recycled timeline row.
-  const [expandedAnchor, setExpandedAnchor] = useState<HTMLDivElement | null>(null);
-  const restoreFocus = useRef<{
-    key: string;
-    anchor: WeakRef<HTMLElement>;
-    opener: WeakRef<HTMLElement>;
-  } | null>(null);
-  const [consent, setConsent] = useState<ActiveViewer["consent"]>(null);
-  const [consentPrivate, setConsentPrivate] = useState<string | null>(null);
-  const [consentExpanded, setConsentExpanded] = useState(false);
-  const [consentRemaining, setConsentRemaining] = useState(0);
-  const [feedback, setFeedback] = useState(false);
-  const messageHandler = useRef<(viewer: ActiveViewer, json: string) => void>(() => undefined);
-  const reserveNativeTitlebar =
-    window.desktopBridge !== undefined && isWindowsPlatform(navigator.platform);
-
-  const publish = useCallback((viewer: ActiveViewer, status: ViewerStatus) => {
-    if (active.current !== viewer) return;
-    setSnapshot((old) => ({
-      key: visualizationBindingKey(viewer.binding),
-      status,
-      expanded: old?.key === visualizationBindingKey(viewer.binding) && old.expanded,
-      expiresAtMs: old?.expiresAtMs ?? null,
-    }));
-  }, []);
-  const retire = useCallback(
-    async (viewer: ActiveViewer) => {
-      if (active.current !== viewer) return;
-      viewer.revoked = true;
-      viewer.queuedMessages.length = 0;
-      viewer.earlyMessages.length = 0;
-      viewer.earlyStates.length = 0;
-      viewer.ticket = null;
-      viewer.consent = null;
-      setConsent(null);
-      setConsentPrivate(null);
-      setConsentExpanded(false);
-      publish(viewer, "stopping");
-      if (!viewer.leaseId) {
-        // If native open has begun, a lost acknowledgement cannot prove that no
-        // renderer exists. Keep this owner occupied until its exact lease is known.
-        if (viewer.openStarted) publish(viewer, "quarantined");
-        return;
-      }
-      try {
-        const result = decodeState(
-          await viewer.bridge.retireVisualization?.({ leaseId: viewer.leaseId }),
-        );
-        if (active.current !== viewer || result.leaseId !== viewer.leaseId) return;
-        if (result.state === "retired") {
-          restoreFocus.current = {
-            key: visualizationBindingKey(viewer.binding),
-            anchor: viewer.anchor,
-            opener: viewer.opener,
-          };
-          viewer.owner.dispose();
-          active.current = null;
-          publish(viewer, "stopped");
-          setSnapshot((old) =>
-            old?.key === visualizationBindingKey(viewer.binding)
-              ? { ...old, status: "stopped", expanded: false }
-              : old,
-          );
-        } else publish(viewer, "quarantined");
-      } catch {
-        publish(viewer, "quarantined");
-      }
-    },
-    [publish],
+  const defaultPane = useRef(createVisualizationPane()).current;
+  const records = useRef(new Map<string, RecordEntry>());
+  const panes = useRef(
+    new Map<VisualizationPane, PaneRecord>([
+      [
+        defaultPane,
+        { admitted: true, priority: false, epochs: createVisualizationViewportEpochs() },
+      ],
+    ]),
   );
-  const stop = useCallback(() => {
-    const viewer = active.current;
-    if (viewer) void retire(viewer);
-  }, [retire]);
-  const stillCurrent = useCallback(
-    (viewer: ActiveViewer) =>
-      active.current === viewer &&
-      !viewer.revoked &&
-      viewer.owner.current() &&
-      window.desktopBridge === viewer.bridge &&
-      document.visibilityState === "visible" &&
-      !hasBlockingVisualizationOverlay(),
+  const listeners = useRef(new Map<string, Set<() => void>>());
+  const controllers = useRef(new Map<string, VisualizationSlotController>());
+  const slots = useRef(new Set<string>());
+  const [slotKeys, setSlotKeys] = useState<string[]>([]);
+  const [automatic, setAutomatic] = useState(false);
+  const automaticRef = useRef(false);
+  const visibleLifetimeRef = useRef(false);
+  const capacity = useRef<Capacity | null>(null);
+  const capacitySequence = useRef(-1);
+  const bridgeRef = useRef<DesktopBridge | undefined>(undefined);
+  const preparationCount = useRef(0);
+  const sequence = useRef(0);
+  const overlay = useRef<string | null>(null);
+  const overlayGeneration = useRef(0);
+  const priorityAdmissions = useRef(0);
+  const availability = useRef(0);
+  const capabilitiesPromise = useRef<Promise<Capabilities> | null>(null);
+  const readCapabilities = useCallback(
+    () => capabilitiesPromise.current ?? Promise.reject(new Error("unavailable")),
     [],
   );
-
-  const run = useCallback(
-    (binding: VisualizationBinding) => {
-      if (
-        active.current ||
-        !binding.anchor.isConnected ||
-        document.visibilityState !== "visible" ||
-        hasBlockingVisualizationOverlay()
-      )
-        return;
-      const bridge = window.desktopBridge;
-      if (
-        !bridge?.openVisualization ||
-        !bridge.updateVisualization ||
-        !bridge.retireVisualization ||
-        !bridge.getVisualizationHostCapabilities ||
-        !bridge.onVisualizationHostEvent
-      ) {
-        setSnapshot({
-          key: visualizationBindingKey(binding),
-          status: "unavailable",
-          expanded: false,
-          expiresAtMs: null,
-        });
-        return;
-      }
-      const bounds = visualizationBounds(binding.anchor);
-      if (!bounds) return;
-      let viewer: ActiveViewer;
-      const owner = observeVisualizationOwner(binding.environmentId, () => {
-        if (viewer) void retire(viewer);
-      });
-      viewer = {
-        binding: {
-          environmentId: binding.environmentId,
+  const changedAvailability = useCallback(() => {
+    availability.current += 1;
+    for (const listener of listeners.current.get("$pool") ?? []) listener();
+  }, []);
+  const pendingPump = useRef(false);
+  const mounted = useRef(true);
+  const pump = useRef<() => void>(() => undefined);
+  const notify = useCallback((record: RecordEntry, snapshot: ViewerSnapshot | null) => {
+    const layout = snapshot?.layout ?? record.snapshot?.layout;
+    record.snapshot = snapshot && layout ? { ...snapshot, layout } : snapshot;
+    for (const listener of listeners.current.get(record.key) ?? []) listener();
+  }, []);
+  const schedule = useCallback(() => {
+    if (pendingPump.current || !mounted.current) return;
+    pendingPump.current = true;
+    queueMicrotask(() => {
+      pendingPump.current = false;
+      if (mounted.current) pump.current();
+    });
+  }, []);
+  const discard = useCallback((record: RecordEntry, prepared: VisualizationPreparedViewer) => {
+    const binding = record.binding;
+    if (binding)
+      void prepared.owner.api?.visualizations
+        ?.discardViewerTicket?.({
           threadId: binding.threadId,
-          reference: binding.reference,
-          entryKey: binding.entryKey,
-          anchorId: binding.anchorId,
-        },
-        anchor: new WeakRef(binding.anchor),
-        opener: new WeakRef(binding.opener),
-        bridge,
-        owner,
-        leaseId: null,
-        ticket: null,
-        openStarted: false,
-        revoked: false,
-        consent: null,
-        requestBusy: false,
-        queuedMessages: [],
-        earlyMessages: [],
-        earlyStates: [],
-      };
-      active.current = viewer;
-      setSnapshot({
-        key: visualizationBindingKey(binding),
-        status: "starting",
+          artifactId: binding.reference.artifactId,
+          revisionId: binding.reference.revisionId,
+          ticket: prepared.ticket.ticket,
+        })
+        .catch(() => undefined);
+    prepared.owner.dispose();
+  }, []);
+  const cancel = useCallback(
+    (record: RecordEntry, terminal: boolean) => {
+      if (terminal) record.authorityAttempted = true;
+      const attempted =
+        record.prepared !== null ||
+        record.preparing ||
+        record.requested ||
+        record.snapshot !== null;
+      record.serial += 1;
+      if (record.prepared) {
+        discard(record, record.prepared);
+        record.prepared = null;
+      }
+      record.continuation = null;
+      record.requested = false;
+      if (terminal) {
+        panes.current.get(record.pane)?.epochs.terminal(record.key);
+        record.eligible = false;
+      }
+      const controller = controllers.current.get(record.key);
+      if (controller) controller.stop();
+      else if (!slots.current.has(record.key) && (attempted || automaticRef.current))
+        notify(record, {
+          key: record.key,
+          status: "stopped",
+          expanded: false,
+          expiresAtMs: record.snapshot?.expiresAtMs ?? null,
+        });
+    },
+    [discard, notify],
+  );
+  const removeSlot = useCallback(
+    (key: string) => {
+      if (slots.current.delete(key)) {
+        setSlotKeys([...slots.current]);
+        changedAvailability();
+      }
+      controllers.current.delete(key);
+    },
+    [changedAvailability],
+  );
+  const restorePresentations = useCallback(async (generation: number) => {
+    // Snapshot the at-most-four entries before awaiting. Each ACK publishes a
+    // new Slot snapshot, whose controller effect deletes/reinserts its key; a
+    // live Map iterator would revisit that key indefinitely and starve timers.
+    if (controllers.current.size > MAX_VIEWERS) return false;
+    const admittedControllers = [...controllers.current];
+    for (const [key, admitted] of admittedControllers) {
+      if (overlay.current !== null || overlayGeneration.current !== generation || !mounted.current)
+        return false;
+      const controller = controllers.current.get(key);
+      if (
+        controller?.leaseId === admitted.leaseId &&
+        records.current.get(key)?.binding?.reference.purpose === "generated-visualization" &&
+        controller.snapshot?.status === "active"
+      )
+        await controller.presentationHidden(false);
+    }
+    return true;
+  }, []);
+  const onSnapshot = useCallback(
+    (key: string, snapshot: ViewerSnapshot | null) => {
+      const record = records.current.get(key);
+      if (!record || !snapshot) return;
+      if (snapshot.layout)
+        panes.current.get(record.pane)?.epochs.rememberLayout(key, snapshot.layout);
+      notify(record, snapshot);
+      schedule();
+      if (["stopped", "unavailable", "quarantined"].includes(snapshot.status)) {
+        panes.current.get(record.pane)?.epochs.terminal(key);
+        record.eligible = false;
+        record.requested = false;
+        // Terminal source ownership is not proof that its host-owned menu or
+        // private/HTML inspector has finished closing. Keep that exact overlay
+        // fence until the Card releases it after portal exit or unmount; only
+        // surviving active siblings may then restore their native pixels.
+        if (snapshot.status !== "quarantined") removeSlot(key);
+        if (!record.binding && !record.preparing && snapshot.status !== "quarantined")
+          records.current.delete(key);
+        schedule();
+      }
+    },
+    [notify, removeSlot, schedule, restorePresentations],
+  );
+  const onController = useCallback(
+    (key: string, controller: VisualizationSlotController | null) => {
+      if (controller) controllers.current.set(key, controller);
+      else controllers.current.delete(key);
+      schedule();
+    },
+    [schedule],
+  );
+  const beforeOverlay = useCallback(
+    async (key: string, transition = true) => {
+      if (overlay.current && overlay.current !== key) return false;
+      if (overlay.current === key) return false;
+      overlay.current = key;
+      const generation = ++overlayGeneration.current;
+      let ready = false;
+      try {
+        const selected = controllers.current.get(key);
+        if (!selected?.snapshot || selected.snapshot.status !== "active" || !selected.leaseId)
+          return false;
+        const lease = selected.leaseId;
+        for (const other of [...slots.current].filter((value) => value !== key)) {
+          const record = records.current.get(other),
+            controller = controllers.current.get(other);
+          if (!record || !controller) return false;
+          if (record.binding?.reference.purpose === "mcp-app") {
+            if (!(await controller.stopAndWait())) return false;
+          } else {
+            const continuation = await controller.yield();
+            if (!continuation) return false;
+            record.continuation = continuation;
+            removeSlot(other);
+          }
+          if (
+            overlay.current !== key ||
+            overlayGeneration.current !== generation ||
+            !mounted.current
+          )
+            return false;
+        }
+        // The selected view hides before its portal mounts; only exact geometry
+        // commit may expose this same document again, within its original budget.
+        if (
+          transition &&
+          automaticRef.current &&
+          !(await bridgeRef.current?.beginVisualizationTransition?.({ leaseId: lease }))
+        ) {
+          selected.stop();
+          return false;
+        }
+        ready =
+          overlay.current === key &&
+          overlayGeneration.current === generation &&
+          mounted.current &&
+          controllers.current.get(key)?.leaseId === lease &&
+          controllers.current.get(key)?.snapshot?.status === "active";
+        return ready;
+      } catch {
+        controllers.current.get(key)?.stop();
+        return false;
+      } finally {
+        if (!ready && overlay.current === key && overlayGeneration.current === generation) {
+          overlay.current = null;
+          schedule();
+        }
+      }
+    },
+    [removeSlot, schedule],
+  );
+  const afterOverlay = useCallback(
+    (key: string) => {
+      if (overlay.current === key) {
+        overlay.current = null;
+        schedule();
+      }
+    },
+    [schedule],
+  );
+
+  const prepare = useCallback(
+    (record: RecordEntry) => {
+      const binding = record.binding;
+      if (!binding || record.preparing || preparationCount.current >= MAX_PREPARING) return;
+      const serial = record.serial;
+      // Latch before any private owner observation/ticket request. Cleanup may
+      // never reinterpret a begun attempt as an untouched React registration.
+      record.authorityAttempted = true;
+      record.preparing = true;
+      preparationCount.current += 1;
+      let owner: ReturnType<typeof observeVisualizationOwner>;
+      owner = observeVisualizationOwner(binding.environmentId, () => cancel(record, true));
+      notify(record, {
+        key: record.key,
+        status: "preparing",
         expanded: false,
-        expiresAtMs: null,
+        expiresAtMs: record.continuation?.expiresAtMs ?? null,
       });
       void (async () => {
+        let prepared: VisualizationPreparedViewer | null = null;
         try {
-          const capabilities = await bridge.getVisualizationHostCapabilities!();
-          if (!stillCurrent(viewer) || !capabilities.available || !owner.api?.visualizations)
+          if (!owner.current() || !owner.api?.visualizations?.discardViewerTicket)
             throw new Error("unavailable");
-          const result = decodeTicket(
+          const ticket = decodeTicket(
             await owner.api.visualizations.viewerTicket({
               threadId: binding.threadId,
               artifactId: binding.reference.artifactId,
               revisionId: binding.reference.revisionId,
             }),
           );
+          prepared = {
+            owner,
+            ticket,
+            automatic: binding.reference.purpose === "generated-visualization",
+            ...(record.continuation ?? {}),
+          };
           if (
-            !stillCurrent(viewer) ||
-            result.threadId !== binding.threadId ||
-            result.artifactId !== binding.reference.artifactId ||
-            result.revisionId !== binding.reference.revisionId ||
-            !binding.anchor.isConnected
+            ticket.threadId !== binding.threadId ||
+            ticket.artifactId !== binding.reference.artifactId ||
+            ticket.revisionId !== binding.reference.revisionId ||
+            !mounted.current ||
+            serial !== record.serial ||
+            record.binding !== binding ||
+            !record.near ||
+            !owner.current()
           )
             throw new Error("stale");
-          viewer.ticket = result.ticket;
-          viewer.openStarted = true;
-          const opened = decodeState(
-            await bridge.openVisualization!({
-              ticket: result.ticket,
-              bounds,
-              appearance: appearance.current,
-              displayMode: "inline",
-              presentation: visualizationPresentation(locale.current),
-            }),
-          );
-          viewer.leaseId = opened.leaseId;
-          // Native open is initially hidden. Only a still-current exact lease
-          // reaches the geometry effect's first visible update; a modal or Stop
-          // during any awaited startup phase must retire this ACK, not expose it.
-          if (!stillCurrent(viewer)) {
-            await retire(viewer);
-            return;
-          }
-          const earlyStates = viewer.earlyStates
-            .splice(0)
-            .filter((event) => event.leaseId === opened.leaseId);
-          if (earlyStates.some((event) => event.state === "retired")) {
-            viewer.revoked = true;
-            viewer.owner.dispose();
-            active.current = null;
-            setSnapshot({
-              key: visualizationBindingKey(binding),
-              status: "stopped",
-              expanded: false,
-              expiresAtMs: opened.expiresAtMs,
-            });
-            return;
-          }
-          if (earlyStates.some((event) => event.state === "quarantined")) {
-            viewer.revoked = true;
-            publish(viewer, "quarantined");
-            return;
-          }
-          if (opened.state !== "active") {
-            if (opened.state === "quarantined") publish(viewer, "quarantined");
-            else {
-              owner.dispose();
-              active.current = null;
-              setSnapshot({
-                key: visualizationBindingKey(binding),
-                status: "unavailable",
-                expanded: false,
-                expiresAtMs: null,
-              });
-            }
-            return;
-          }
-          setSnapshot({
-            key: visualizationBindingKey(binding),
-            status: "active",
+          record.prepared = prepared;
+          notify(record, {
+            key: record.key,
+            status: "waiting",
             expanded: false,
-            expiresAtMs: opened.expiresAtMs,
+            expiresAtMs: record.continuation?.expiresAtMs ?? null,
           });
-          // Guest initialization can race the open IPC response. Only after the
-          // exact native lease is known may an early message reach the broker.
-          const early = viewer.earlyMessages.splice(0);
-          for (const message of early)
-            if (message.leaseId === viewer.leaseId) messageHandler.current(viewer, message.json);
         } catch {
-          if (active.current !== viewer) return;
-          if (viewer.leaseId) await retire(viewer);
-          else if (viewer.openStarted) {
-            viewer.revoked = true;
-            viewer.ticket = null;
-            viewer.queuedMessages.length = 0;
-            viewer.earlyMessages.length = 0;
-            viewer.earlyStates.length = 0;
-            publish(viewer, "quarantined");
-          } else {
-            owner.dispose();
-            active.current = null;
-            setSnapshot({
-              key: visualizationBindingKey(binding),
+          if (prepared) discard({ ...record, binding }, prepared);
+          else owner.dispose();
+          if (serial === record.serial) {
+            panes.current.get(record.pane)?.epochs.terminal(record.key);
+            record.eligible = false;
+            notify(record, {
+              key: record.key,
               status: "unavailable",
               expanded: false,
               expiresAtMs: null,
             });
           }
+        } finally {
+          record.preparing = false;
+          preparationCount.current -= 1;
+          if (!record.binding && !slots.current.has(record.key)) records.current.delete(record.key);
+          schedule();
         }
       })();
     },
-    [publish, retire, stillCurrent],
+    [cancel, discard, notify, schedule],
   );
 
-  const expand = useCallback(
-    (key: string, expanded: boolean) => {
-      const viewer = active.current;
-      if (
-        !viewer ||
-        visualizationBindingKey(viewer.binding) !== key ||
-        viewer.revoked ||
-        viewer.consent
-      )
-        return;
-      if (!expanded && !viewer.anchor.deref()?.isConnected) {
-        void retire(viewer);
-        return;
+  pump.current = () => {
+    if (
+      !mounted.current ||
+      overlay.current ||
+      document.visibilityState !== "visible" ||
+      document.querySelector('[role="dialog"], [role="alertdialog"]')
+    )
+      return;
+    const cap = capacity.current;
+    if (
+      automaticRef.current &&
+      (!cap?.available ||
+        [...records.current.values()].some((record) => record.snapshot?.status === "quarantined"))
+    )
+      return;
+    const candidates = [...records.current.values()].filter(
+      (record) =>
+        record.binding &&
+        panes.current.get(record.pane)?.admitted &&
+        record.eligible &&
+        ((automaticRef.current && record.binding.reference.purpose === "generated-visualization") ||
+          record.requested),
+    );
+    const order = (left: RecordEntry, right: RecordEntry) => {
+      // Stable live slots never get preempted. Focus wins a bounded two-admit
+      // burst, then oldest FIFO wins so an inactive visible pane cannot starve.
+      if (priorityAdmissions.current < 2) {
+        const priority =
+          Number(panes.current.get(right.pane)?.priority ?? false) -
+          Number(panes.current.get(left.pane)?.priority ?? false);
+        if (priority) return priority;
       }
-      setSnapshot((old) => (old?.key === key ? { ...old, expanded } : old));
-    },
-    [retire],
-  );
-  const detach = useCallback(
-    (key: string) => {
-      const viewer = active.current;
+      return left.sequence - right.sequence;
+    };
+    while (candidates.length) {
+      // Re-evaluate after each admission, not only once per pump: a four-slot
+      // burst must actually include its FIFO turn rather than starving a pane.
+      candidates.sort(order);
+      const record = candidates.shift()!;
+      const binding = record.binding!;
+      if (slots.current.has(record.key)) {
+        const controller = controllers.current.get(record.key);
+        if (controller && !controller.snapshot) {
+          const prepared = record.prepared ?? undefined;
+          record.prepared = null;
+          controller.run(binding, prepared);
+        }
+        continue;
+      }
+      if (!record.near) continue;
       if (
-        viewer &&
-        visualizationBindingKey(viewer.binding) === key &&
-        !snapshotRef.current?.expanded
-      )
-        void retire(viewer);
-    },
-    [retire],
-  );
-  const retireScope = useCallback(
-    (environmentId: EnvironmentId, threadId: ThreadId) => {
-      const viewer = active.current;
-      if (viewer?.binding.environmentId === environmentId && viewer.binding.threadId === threadId)
-        void retire(viewer);
-    },
-    [retire],
-  );
-  const capture = useCallback(
-    async (key: string, signal: AbortSignal) => {
-      const viewer = active.current;
+        record.continuation &&
+        record.continuation.expiresAtMs !== null &&
+        record.continuation.expiresAtMs <= Date.now()
+      ) {
+        cancel(record, true);
+        continue;
+      }
+      if (record.prepared && record.prepared.ticket.expiresAtMs <= Date.now()) {
+        cancel(record, true);
+        continue;
+      }
       if (
-        !viewer?.leaseId ||
-        visualizationBindingKey(viewer.binding) !== key ||
-        !stillCurrent(viewer) ||
-        viewer.consent
+        automaticRef.current &&
+        !record.prepared &&
+        !record.preparing &&
+        preparationCount.current < MAX_PREPARING &&
+        (cap?.freePreparations ?? 0) > preparationCount.current
       )
-        throw new Error("capture-unavailable");
-      signal.throwIfAborted();
-      const frame = await viewer.bridge.captureVisualization?.({ leaseId: viewer.leaseId });
-      signal.throwIfAborted();
-      if (!frame || !stillCurrent(viewer)) throw new Error("capture-unavailable");
-      return new Blob([frame.png as Uint8Array<ArrayBuffer>], { type: "image/png" });
-    },
-    [stillCurrent],
-  );
+        prepare(record);
+      if (!record.visible || !visualizationGeometry(binding.anchor)) continue;
+      const max = automaticRef.current ? MAX_VIEWERS : 1;
+      if (slots.current.size >= max) continue;
+      const pendingNative = [...slots.current].filter(
+        (key) => !controllers.current.get(key)?.leaseId,
+      ).length;
+      if (
+        automaticRef.current &&
+        (!record.prepared ||
+          !cap ||
+          cap.freeViewers <= pendingNative ||
+          (binding.reference.purpose === "mcp-app" &&
+            (!cap.mcpAppAvailable ||
+              [...slots.current].some(
+                (key) => records.current.get(key)?.binding?.reference.purpose === "mcp-app",
+              ))))
+      )
+        continue;
+      record.authorityAttempted = true;
+      slots.current.add(record.key);
+      changedAvailability();
+      priorityAdmissions.current =
+        priorityAdmissions.current < 2 && panes.current.get(record.pane)?.priority
+          ? priorityAdmissions.current + 1
+          : 0;
+      notify(record, {
+        key: record.key,
+        status: "starting",
+        expanded: false,
+        expiresAtMs: record.continuation?.expiresAtMs ?? null,
+        visible: false,
+      });
+      setSlotKeys([...slots.current]);
+    }
+  };
 
   useEffect(() => {
+    mounted.current = true;
     const bridge = window.desktopBridge;
-    const off = bridge?.onVisualizationHostEvent?.((event) => {
-      const viewer = active.current;
-      if (!viewer || viewer.bridge !== bridge) return;
-      if (viewer.leaseId === null) {
-        if (event.state === "retired" || event.state === "quarantined") {
-          if (viewer.earlyStates.length >= MAX_PENDING_MESSAGES) {
-            void retire(viewer);
-            return;
-          }
-          viewer.earlyStates.push(event);
-        }
-        if (
-          event.state === "message" &&
-          event.json &&
-          event.json.length <= 128 * 1024 &&
-          stillCurrent(viewer)
-        ) {
-          if (viewer.earlyMessages.length >= MAX_PENDING_MESSAGES) {
-            void retire(viewer);
-            return;
-          }
-          viewer.earlyMessages.push({ leaseId: event.leaseId, json: event.json });
-        }
-        return;
+    bridgeRef.current = bridge;
+    let disposed = false;
+    const accept = (raw: unknown) => {
+      if (disposed || bridge !== window.desktopBridge) return;
+      try {
+        const value = decodeCapacity(raw);
+        if (value.sequence <= capacitySequence.current) return;
+        capacitySequence.current = value.sequence;
+        capacity.current = value;
+        changedAvailability();
+        schedule();
+      } catch {
+        capacity.current = null;
       }
-      if (event.leaseId !== viewer.leaseId) return;
-      if (event.state === "message" && event.json && stillCurrent(viewer) && !viewer.consent)
-        messageHandler.current(viewer, event.json);
-      else if (event.state === "retired") {
-        restoreFocus.current = {
-          key: visualizationBindingKey(viewer.binding),
-          anchor: viewer.anchor,
-          opener: viewer.opener,
-        };
-        viewer.revoked = true;
-        viewer.owner.dispose();
-        active.current = null;
-        viewer.consent = null;
-        viewer.queuedMessages.length = 0;
-        viewer.ticket = null;
-        setConsent(null);
-        setConsentPrivate(null);
-        setConsentExpanded(false);
-        setSnapshot((old) => (old ? { ...old, status: "stopped", expanded: false } : old));
-      } else if (event.state === "quarantined") {
-        viewer.revoked = true;
-        viewer.consent = null;
-        viewer.queuedMessages.length = 0;
-        viewer.ticket = null;
-        setConsent(null);
-        setConsentPrivate(null);
-        setConsentExpanded(false);
-        publish(viewer, "quarantined");
-      }
-    });
+    };
+    const off = bridge?.onVisualizationCapacityChanged?.(accept);
+    capabilitiesPromise.current =
+      bridge?.getVisualizationHostCapabilities?.().then(decodeCapabilities) ??
+      Promise.reject(new Error("unavailable"));
+    void capabilitiesPromise.current
+      .then((caps) => {
+        if (disposed || bridge !== window.desktopBridge) return;
+        const supported =
+          "poolVersion" in caps &&
+          caps.available &&
+          caps.autoGenerated &&
+          Boolean(
+            bridge?.getVisualizationHostCapacity &&
+            bridge.onVisualizationCapacityChanged &&
+            bridge.yieldVisualization &&
+            bridge.beginVisualizationTransition,
+          );
+        automaticRef.current = supported;
+        visibleLifetimeRef.current =
+          supported && "generatedLifecycle" in caps && caps.generatedLifecycle === "visible";
+        setAutomatic(supported);
+        if (supported)
+          for (const record of records.current.values()) {
+            if (!record.eligible && !record.snapshot)
+              notify(record, {
+                key: record.key,
+                status: "stopped",
+                expanded: false,
+                expiresAtMs: null,
+              });
+          }
+        if (supported)
+          void bridge!.getVisualizationHostCapacity!()
+            .then(accept)
+            .catch(() => {
+              capacity.current = null;
+            });
+        schedule();
+      })
+      .catch(() => undefined);
     const hidden = () => {
-      if (document.visibilityState !== "visible") stop();
+      if (document.visibilityState !== "visible")
+        for (const record of records.current.values()) cancel(record, true);
     };
     const overlays = new MutationObserver(() => {
-      // This guard owns starting as well as active/suspended documents. Revoke
-      // in the observer delivery, not a later animation frame: closing a modal
-      // again cannot revive the operation while a capability/ticket/ACK waits.
-      if (active.current && !active.current.revoked && hasBlockingVisualizationOverlay()) stop();
+      if (
+        document.querySelector(
+          '[role="dialog"]:not([data-visualization-viewer]):not([data-visualization-consent]):not([data-visualization-inspection]), [role="alertdialog"]',
+        )
+      )
+        for (const record of records.current.values()) cancel(record, true);
+      schedule();
     });
     overlays.observe(document.body, {
       childList: true,
       subtree: true,
       attributes: true,
-      attributeFilter: ["role", "aria-modal", "inert"],
+      attributeFilter: ["role", "aria-modal", "inert", "aria-hidden", "hidden"],
     });
     document.addEventListener("visibilitychange", hidden);
     return () => {
+      disposed = true;
+      mounted.current = false;
       off?.();
       overlays.disconnect();
       document.removeEventListener("visibilitychange", hidden);
-      stop();
+      for (const record of records.current.values()) cancel(record, true);
     };
-  }, [publish, stop, retire, stillCurrent]);
+  }, [cancel, schedule, changedAvailability, notify]);
+  const knownSiblingLease = useCallback(
+    (key: string, leaseId: string) =>
+      [...controllers.current].some(
+        ([other, controller]) => other !== key && controller.leaseId === leaseId,
+      ),
+    [],
+  );
 
-  useLayoutEffect(() => {
-    const pending = restoreFocus.current;
-    if (
-      !pending ||
-      active.current ||
-      snapshot?.key !== pending.key ||
-      snapshot.status !== "stopped"
-    )
-      return;
-    restoreFocus.current = null;
-    // The running toolbar replaces Run with Stop, so the old opener may have
-    // been removed. Resolve only within the exact still-connected card after
-    // React commits its replacement control; never steal focus from a new host.
-    const opener = pending.opener.deref();
-    const target = opener?.isConnected
-      ? opener
-      : pending.anchor
-          .deref()
-          ?.closest("[data-visualization-card]")
-          ?.querySelector<HTMLElement>("[data-visualization-run]");
-    if (target?.isConnected) target.focus({ preventScroll: true });
-  }, [snapshot]);
-
-  // Geometry updates are coalesced and have one pending IPC plus one trailing
-  // sample. An unrelated modal/approval must never sit underneath native pixels.
-  useLayoutEffect(() => {
-    const viewer = active.current;
-    if (!viewer?.leaseId || snapshot?.status !== "active" || viewer.consent) return;
-    const element = snapshot.expanded ? expandedAnchor : viewer.anchor.deref();
-    if (!element) return;
-    let disposed = false,
-      frame = 0,
-      busy = false,
-      trailing = false;
-    let previous = "";
-    const update = () => {
-      frame = 0;
-      if (disposed || !stillCurrent(viewer) || !element.isConnected) {
-        void retire(viewer);
-        return;
-      }
-      const bounds = visualizationBounds(element);
-      if (!bounds) {
-        void retire(viewer);
-        return;
-      }
-      if (busy) {
-        trailing = true;
-        return;
-      }
-      const presentation = visualizationPresentation(locale.current);
-      const displayMode = snapshot.expanded ? "fullscreen" : "inline";
-      const value = JSON.stringify([bounds, appearance.current, displayMode, presentation]);
-      if (value === previous) return;
-      previous = value;
-      busy = true;
-      void viewer.bridge.updateVisualization!({
-        leaseId: viewer.leaseId!,
-        bounds,
-        visible: true,
-        appearance: appearance.current,
-        displayMode,
-        presentation,
-      })
-        .then((raw) => {
-          const result = decodeState(raw);
-          if (
-            active.current === viewer &&
-            result.leaseId === viewer.leaseId &&
-            result.state !== "active"
-          )
-            void retire(viewer);
-        })
-        .catch(() => {
-          void retire(viewer);
-        })
-        .finally(() => {
-          busy = false;
-          if (trailing && !disposed) {
-            trailing = false;
-            schedule();
-          }
-        });
-    };
-    const schedule = () => {
-      if (!frame && !disposed) frame = requestAnimationFrame(update);
-    };
-    const resize = new ResizeObserver(schedule);
-    resize.observe(element);
-    const intersect = new IntersectionObserver(
-      (entries) => {
-        if (!snapshot.expanded && entries[0]?.isIntersecting === false) void retire(viewer);
+  const context = useMemo<ViewerContext>(
+    () => ({
+      get automatic() {
+        return automaticRef.current;
       },
-      { threshold: 0 },
-    );
-    intersect.observe(element);
-    const overlay = new MutationObserver(schedule);
-    overlay.observe(document.body, {
-      childList: true,
-      subtree: true,
-      attributes: true,
-      attributeFilter: ["role", "aria-modal", "inert"],
-    });
-    const theme = new MutationObserver(schedule);
-    theme.observe(document.documentElement, {
-      attributes: true,
-      attributeFilter: ["class", "style"],
-    });
-    const motion = matchMedia("(prefers-reduced-motion: reduce)");
-    motion.addEventListener("change", schedule);
-    window.addEventListener("resize", schedule);
-    document.addEventListener("scroll", schedule, true);
-    schedule();
-    return () => {
-      disposed = true;
-      if (frame) cancelAnimationFrame(frame);
-      resize.disconnect();
-      intersect.disconnect();
-      overlay.disconnect();
-      theme.disconnect();
-      motion.removeEventListener("change", schedule);
-      window.removeEventListener("resize", schedule);
-      document.removeEventListener("scroll", schedule, true);
-    };
-  }, [
-    snapshot?.status,
-    snapshot?.expanded,
-    expandedAnchor,
-    resolvedTheme,
-    uiLocale,
-    retire,
-    consent,
-    stillCurrent,
-  ]);
-
-  const forward = useCallback(
-    async (viewer: ActiveViewer, json: string, messages?: readonly string[]) => {
-      for (const payload of [...(json ? [json] : []), ...(messages ?? [])]) {
-        if (!stillCurrent(viewer) || !viewer.leaseId) return;
-        if (
-          !(await viewer.bridge.sendVisualizationMessage?.({
-            leaseId: viewer.leaseId,
-            json: payload,
-          }))
-        )
-          throw new Error("message-unavailable");
-      }
-    },
-    [stillCurrent],
-  );
-  messageHandler.current = (viewer, json) => {
-    if (
-      viewer.binding.reference.purpose !== "mcp-app" ||
-      !viewer.owner.api?.mcpApps ||
-      !viewer.ticket ||
-      json.length > 128 * 1024
-    )
-      return;
-    if (viewer.requestBusy) {
-      if (viewer.queuedMessages.length >= MAX_PENDING_MESSAGES) {
-        void retire(viewer);
-        return;
-      }
-      viewer.queuedMessages.push(json);
-      return;
-    }
-    viewer.requestBusy = true;
-    void (async () => {
-      try {
-        const result = decodeApp(
-          await viewer.owner.api!.mcpApps!.prepare({
-            threadId: viewer.binding.threadId,
-            artifactId: viewer.binding.reference.artifactId,
-            revisionId: viewer.binding.reference.revisionId,
-            leaseId: viewer.leaseId!,
-            ticket: viewer.ticket!,
-            requestJson: json,
-          }),
-        );
-        if (!stillCurrent(viewer)) return;
-        if (result.kind === "reply") {
-          if (result.displayMode)
-            expand(visualizationBindingKey(viewer.binding), result.displayMode === "fullscreen");
-          await forward(viewer, result.json, result.messages);
-        } else {
-          // Consent is a special nonrenewable native suspension, not an ordinary
-          // hidden background view. Main drops guest actions and keeps the exact
-          // document/lease only long enough to resolve this one operation.
-          if (!viewer.bridge.suspendVisualization || !viewer.leaseId)
-            throw new Error("consent-unavailable");
-          viewer.consent = {
-            operationId: result.operationId,
-            method: result.method,
-            ...(result.name ? { name: result.name } : {}),
-            deadline: Date.now() + 30_000,
-          };
-          const suspended = await viewer.bridge.suspendVisualization({
-            leaseId: viewer.leaseId,
-            consentId: result.operationId,
-            suspended: true,
-          });
-          if (!stillCurrent(viewer) || suspended !== true) throw new Error("consent-unavailable");
-          viewer.queuedMessages.length = 0;
-          setConsentExpanded(false);
-          setConsentPrivate(null);
-          setConsent(viewer.consent);
-          setFeedback(false);
-        }
-      } catch {
-        if (active.current === viewer) void retire(viewer);
-      } finally {
-        viewer.requestBusy = false;
-        const next = viewer.queuedMessages.shift();
-        if (next && stillCurrent(viewer) && !viewer.consent) messageHandler.current(viewer, next);
-      }
-    })();
-  };
-
-  const resolveConsent = useCallback(
-    async (decision: "approve" | "deny") => {
-      const viewer = active.current,
-        pending = viewer?.consent;
-      if (viewer?.requestBusy) return;
-      if (
-        !viewer ||
-        !pending ||
-        !stillCurrent(viewer) ||
-        Date.now() >= pending.deadline ||
-        !viewer.owner.api?.mcpApps ||
-        !viewer.leaseId
-      ) {
-        if (viewer) void retire(viewer);
-        return;
-      }
-      viewer.requestBusy = true;
-      setConsentPrivate(null);
-      setConsentExpanded(false);
-      try {
-        const reply = decodeReply(
-          await viewer.owner.api.mcpApps.resolve({ operationId: pending.operationId, decision }),
-        );
-        if (!stillCurrent(viewer) || viewer.consent !== pending || Date.now() >= pending.deadline)
-          throw new Error("stale");
-        const resumed = await viewer.bridge.suspendVisualization!({
-          leaseId: viewer.leaseId,
-          consentId: pending.operationId,
-          suspended: false,
-        });
-        if (!stillCurrent(viewer) || resumed !== true) throw new Error("stale");
-        viewer.consent = null;
-        setConsent(null);
-        await forward(viewer, reply.json);
-        if (reply.openUrl && stillCurrent(viewer)) {
-          const url = new URL(reply.openUrl);
+      visibleLifetime: () => visibleLifetimeRef.current,
+      presentationOverlay: async (key, hidden) => {
+        if (!visibleLifetimeRef.current) return false;
+        if (hidden) {
+          if (controllers.current.size > MAX_VIEWERS) return false;
+          const selected = records.current.get(key);
           if (
-            (url.protocol !== "http:" && url.protocol !== "https:") ||
-            url.username ||
-            url.password
+            !selected?.binding ||
+            selected.binding.reference.purpose !== "generated-visualization"
           )
-            throw new Error("link-unavailable");
-          const local = readLocalApi();
-          if (!local) throw new Error("link-unavailable");
-          await local.shell.openExternal(reply.openUrl);
+            return false;
+          if (overlay.current && overlay.current !== key) return false;
+          overlay.current = key;
+          const generation = ++overlayGeneration.current;
+          // At most four exact controllers exist. Hide every generated native
+          // surface before a portal can overlap its pixels, preserving each
+          // document rather than using destructive expansion continuations.
+          // Manual Apps retain their existing overlay retirement policy.
+          // Use one finite admission snapshot here for the same delete/reinsert
+          // reason as restorePresentations. Re-resolve only the exact same
+          // native lease before each step; never adopt a replacement document.
+          const admittedControllers = [...controllers.current];
+          for (const [other, admitted] of admittedControllers) {
+            const record = records.current.get(other);
+            const controller = controllers.current.get(other);
+            if (!record || !controller || controller.leaseId !== admitted.leaseId) continue;
+            const starting =
+              controller.snapshot?.status === "starting" || record.snapshot?.status === "starting";
+            if (!starting && controller.snapshot?.status !== "active") continue;
+            const accepted =
+              !starting && record.binding?.reference.purpose === "generated-visualization"
+                ? await controller.presentationHidden(true)
+                : await controller.stopAndWait(false);
+            if (
+              !accepted ||
+              overlay.current !== key ||
+              overlayGeneration.current !== generation ||
+              !mounted.current
+            ) {
+              if (overlay.current === key && overlayGeneration.current === generation) {
+                overlay.current = null;
+                ++overlayGeneration.current;
+                await restorePresentations(overlayGeneration.current);
+              }
+              schedule();
+              return false;
+            }
+          }
+          return (
+            overlay.current === key && overlayGeneration.current === generation && mounted.current
+          );
         }
-      } catch {
-        void retire(viewer);
-      } finally {
-        viewer.requestBusy = false;
-      }
-    },
-    [retire, stillCurrent, forward],
+        if (overlay.current !== key) return true;
+        overlay.current = null;
+        ++overlayGeneration.current;
+        // A close is presentation only. Each controller rechecks its current
+        // connected anchor, exact owner and lease; terminal state is never
+        // reopened and a genuinely offscreen document is retired instead.
+        const restored = await restorePresentations(overlayGeneration.current);
+        schedule();
+        return restored;
+      },
+      defaultPane,
+      availability: () => availability.current,
+      manualAllowed: () =>
+        automaticRef.current ? capacity.current?.available === true : slots.current.size === 0,
+      key: (pane, binding) =>
+        JSON.stringify([
+          paneId(pane),
+          binding.environmentId,
+          binding.threadId,
+          binding.entryKey,
+          binding.reference.artifactId,
+          binding.reference.revisionId,
+        ]),
+      subscribe: (key, listener) => {
+        let set = listeners.current.get(key);
+        if (!set) {
+          set = new Set();
+          listeners.current.set(key, set);
+        }
+        set.add(listener);
+        return () => {
+          set!.delete(listener);
+          if (!set!.size) listeners.current.delete(key);
+        };
+      },
+      snapshot: (key) => records.current.get(key)?.snapshot ?? null,
+      register: (binding) => {
+        const pane = binding.pane ?? defaultPane;
+        const key = binding.poolKey ?? legacyBindingKey(binding);
+        if (!panes.current.has(pane)) {
+          if (panes.current.size >= MAX_PANES) return () => undefined;
+          panes.current.set(pane, {
+            admitted: true,
+            priority: false,
+            epochs: createVisualizationViewportEpochs(),
+          });
+        }
+        let record = records.current.get(key);
+        const created = record === undefined;
+        if (!record) {
+          if (records.current.size >= MAX_REGISTERED) return () => undefined;
+          const epochs = panes.current.get(pane)!.epochs;
+          const layout = epochs.layout(key);
+          const terminal = epochs.has(key) && !epochs.allowed(key);
+          record = {
+            key,
+            pane,
+            binding: null,
+            mount: null,
+            near: false,
+            visible: false,
+            eligible: true,
+            requested: false,
+            authorityAttempted: terminal,
+            sequence: ++sequence.current,
+            serial: 0,
+            preparing: false,
+            prepared: null,
+            continuation: null,
+            snapshot:
+              terminal || layout
+                ? {
+                    key,
+                    status: terminal ? "stopped" : "waiting",
+                    expanded: false,
+                    expiresAtMs: null,
+                    ...(layout ? { layout } : {}),
+                  }
+                : null,
+          };
+          records.current.set(key, record);
+        }
+        const mount = Object.freeze({});
+        record.binding = binding;
+        record.mount = mount;
+        controllers.current.get(key)?.attach(binding);
+        // A poster card may already be subscribed while list readiness defers
+        // registration. Restoring a cached stopped/waiting snapshot after its
+        // render therefore needs an exact keyed notification; terminal records
+        // intentionally have no later native event to wake that subscriber.
+        // Publish only after installing this binding/mount. This is cached
+        // presentation, not a new visibility epoch or execution admission.
+        if (created && record.snapshot !== null) notify(record, record.snapshot);
+        return () => {
+          if (record!.mount !== mount) return;
+          if (record!.snapshot?.expanded) {
+            record!.mount = null;
+            record!.binding = null;
+            return;
+          }
+          const presentationOnly =
+            record!.snapshot === null ||
+            (record!.snapshot.status === "waiting" &&
+              record!.snapshot.expiresAtMs === null &&
+              !record!.snapshot.visible &&
+              !record!.snapshot.expanded);
+          const untouchedRegistration =
+            !record!.authorityAttempted &&
+            !record!.requested &&
+            !record!.preparing &&
+            record!.prepared === null &&
+            record!.continuation === null &&
+            !slots.current.has(key) &&
+            !controllers.current.has(key) &&
+            presentationOnly;
+          if (untouchedRegistration) {
+            // StrictMode may replay a wholly unattempted registration. Revoke
+            // its exact local serial/binding, but do not invent terminal native
+            // authority that never existed. No epoch is cleared or restarted.
+            record!.serial += 1;
+          } else cancel(record!, true);
+          record!.binding = null;
+          record!.mount = null;
+          record!.near = false;
+          record!.visible = false;
+          if (!slots.current.has(key) && !record!.preparing) records.current.delete(key);
+        };
+      },
+      observe: (key, anchorId, near, visible, actual) => {
+        const record = records.current.get(key);
+        if (!record?.binding || record.binding.anchorId !== anchorId) return;
+        record.near = near;
+        record.visible = visible;
+        const pane = panes.current.get(record.pane);
+        if (actual)
+          record.eligible = (pane?.epochs.observe(key, visible) ?? false) || record.requested;
+        else if (pane?.epochs.has(key) && !pane.epochs.allowed(key)) record.eligible = false;
+        if (!record.eligible && !record.snapshot && automaticRef.current)
+          notify(record, { key, status: "stopped", expanded: false, expiresAtMs: null });
+        if (!visible && actual && !record.snapshot?.expanded && slots.current.has(key))
+          cancel(record, false);
+        if (!near && record.prepared) {
+          discard(record, record.prepared);
+          record.prepared = null;
+          record.serial += 1;
+        }
+        schedule();
+      },
+      run: (binding) => {
+        const record = records.current.get(binding.poolKey ?? legacyBindingKey(binding));
+        if (!record || !record.binding || slots.current.has(record.key)) return;
+        if (
+          record.binding.anchorId !== binding.anchorId ||
+          record.binding.anchor !== binding.anchor
+        )
+          return;
+        // Preserve the actual deliberate Run/Restart opener for exact focus
+        // restoration; registration's inert anchor is not that gesture target.
+        record.binding = binding;
+        const epochs = panes.current.get(record.pane)?.epochs;
+        if (!record.eligible) epochs?.restart(record.key);
+        record.eligible = true;
+        record.authorityAttempted = true;
+        record.requested = true;
+        record.near = true;
+        record.visible = true;
+        record.sequence = ++sequence.current;
+        schedule();
+      },
+      stop: (key) => {
+        const record = records.current.get(key);
+        if (record) cancel(record, true);
+      },
+      expand: (key, expanded) => controllers.current.get(key)?.expand(key, expanded),
+      focus: (key) => controllers.current.get(key)?.focus(key),
+      detach: (key) => controllers.current.get(key)?.detach(key),
+      scope: (pane, environmentId, threadId, admitted, priority) => {
+        let value = panes.current.get(pane);
+        if (!value) {
+          if (panes.current.size >= MAX_PANES) return;
+          value = { admitted, priority, epochs: createVisualizationViewportEpochs() };
+          panes.current.set(pane, value);
+        }
+        if (
+          value.environmentId !== undefined &&
+          (value.environmentId !== environmentId || value.threadId !== threadId)
+        ) {
+          for (const record of records.current.values())
+            if (record.pane === pane) cancel(record, true);
+          value.epochs.clear();
+        }
+        Object.assign(value, { environmentId, threadId, admitted, priority });
+        if (!admitted)
+          for (const record of records.current.values())
+            if (record.pane === pane) cancel(record, true);
+        schedule();
+      },
+      closePane: (pane) => {
+        for (const record of records.current.values())
+          if (record.pane === pane) cancel(record, true);
+        panes.current.delete(pane);
+      },
+      capture: (key, signal) =>
+        controllers.current.get(key)?.capture(key, signal) ??
+        Promise.reject(new Error("capture-unavailable")),
+    }),
+    [defaultPane, cancel, discard, notify, schedule, restorePresentations],
   );
-
-  useEffect(() => {
-    if (!consent) return;
-    const tick = () => {
-      const remaining = Math.max(0, Math.ceil((consent.deadline - Date.now()) / 1000));
-      setConsentRemaining(remaining);
-      if (!remaining) {
-        const viewer = active.current;
-        if (viewer?.consent === consent) void retire(viewer);
-      }
-    };
-    tick();
-    const timer = setInterval(tick, 1_000);
-    return () => clearInterval(timer);
-  }, [consent, retire]);
-  useEffect(() => {
-    setConsentPrivate(null);
-    const viewer = active.current;
-    if (!consentExpanded || !consent || !viewer || !viewer.owner.api?.mcpApps) return;
-    let cancelled = false;
-    void viewer.owner.api.mcpApps
-      .details({ operationId: consent.operationId })
-      .then((raw) => {
-        if (!cancelled && stillCurrent(viewer) && viewer.consent === consent)
-          setConsentPrivate(decodeReply(raw).json);
-      })
-      .catch(() => {
-        if (!cancelled) setFeedback(true);
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [consentExpanded, consent, stillCurrent]);
-
   return (
-    <ViewerContext value={{ snapshot, run, stop, expand, detach, retireScope, capture }}>
-      {children}
-      <Dialog
-        open={snapshot?.expanded === true}
-        onOpenChange={(open) => {
-          if (!open && snapshot) expand(snapshot.key, false);
-        }}
-      >
-        <DialogPopup
-          data-visualization-viewer="true"
-          showCloseButton={false}
-          bottomStickOnMobile={false}
-          className={`fixed bottom-6 left-1/2 top-6 h-auto w-[calc(100vw-3rem)] max-w-[1600px] -translate-x-1/2 translate-y-0 scale-100 transition-none data-starting-style:translate-y-0 data-starting-style:scale-100 data-starting-style:opacity-100 [app-region:no-drag] ${reserveNativeTitlebar ? "wco:[--cafe-visualization-titlebar-inset:calc(env(titlebar-area-y,0px)+env(titlebar-area-height,40px))] wco:top-[calc(var(--cafe-visualization-titlebar-inset)+1.5rem)]" : ""}`}
-        >
-          <div className="flex shrink-0 items-center justify-between gap-3 border-b border-border-subtle p-3">
-            <DialogTitle className="truncate text-sm">
-              {active.current?.binding.reference.title ??
-                uiText("Visualization", undefined, undefined, uiLocale)}
-            </DialogTitle>
-            <div className="flex gap-2">
-              <Button
-                size="sm"
-                variant="outline"
-                onClick={() => snapshot && expand(snapshot.key, false)}
-              >
-                {uiText("Back to chat", undefined, undefined, uiLocale)}
-              </Button>
-              <Button size="sm" variant="outline" onClick={stop}>
-                {uiText("Stop", undefined, undefined, uiLocale)}
-              </Button>
-            </div>
-          </div>
-          <div
-            ref={setExpandedAnchor}
-            className="min-h-0 flex-1 bg-background"
-            data-visualization-native-surface="expanded"
-          />
-        </DialogPopup>
-      </Dialog>
-      <Dialog
-        open={consent !== null}
-        onOpenChange={(open) => {
-          if (!open) void resolveConsent("deny");
-        }}
-      >
-        <DialogPopup
-          data-visualization-consent="true"
-          showCloseButton={false}
-          className="[app-region:no-drag]"
-        >
-          <div className="space-y-3 p-5">
-            <DialogTitle>{uiText("App permission", undefined, undefined, uiLocale)}</DialogTitle>
-            <p className="text-sm">
-              {uiText("Allow this one App operation?", undefined, undefined, uiLocale)}
-            </p>
-            <p className="text-sm text-muted-foreground">
-              {consent?.method}
-              {consent?.name ? ` · ${consent.name}` : ""}
-            </p>
-            <p className="text-xs text-muted-foreground">
-              {uiText(
-                "Permission expires in {seconds}s",
-                { seconds: consentRemaining },
-                undefined,
-                uiLocale,
-              )}
-            </p>
-            <Button
-              size="sm"
-              variant="ghost"
-              onClick={() => setConsentExpanded((old) => !old)}
-              aria-expanded={consentExpanded}
-            >
-              {uiText("Private details", undefined, undefined, uiLocale)}
-            </Button>
-            {consentExpanded ? (
-              <VisualizationPrivateText
-                value={consentPrivate ?? uiText("Loading…", undefined, undefined, uiLocale)}
-              />
-            ) : null}
-            {feedback ? (
-              <p role="status" className="text-xs">
-                {uiText("Private details unavailable.", undefined, undefined, uiLocale)}
-              </p>
-            ) : null}
-            <div className="flex justify-end gap-2">
-              <Button autoFocus variant="outline" onClick={() => void resolveConsent("deny")}>
-                {uiText("Deny", undefined, undefined, uiLocale)}
-              </Button>
-              <Button onClick={() => void resolveConsent("approve")}>
-                {uiText("Allow once", undefined, undefined, uiLocale)}
-              </Button>
-            </div>
-          </div>
-        </DialogPopup>
-      </Dialog>
+    <ViewerContext value={context}>
+      <AutomaticContext value={automatic}>{children}</AutomaticContext>
+      {slotKeys.map((key) => (
+        <VisualizationViewerSlot
+          key={key}
+          slotKey={key}
+          onController={onController}
+          onSnapshot={onSnapshot}
+          beforeOverlay={beforeOverlay}
+          afterOverlay={afterOverlay}
+          readCapabilities={readCapabilities}
+          knownSiblingLease={knownSiblingLease}
+        />
+      ))}
     </ViewerContext>
   );
 }
 
-/** Pane ownership is exact; the queue fallback owner never controls a viewer. */
+/** A pane survives row recycling and is independent of the selected/focused pane. */
 export function useVisualizationScope(
   environmentId: EnvironmentId,
   threadId: ThreadId,
   admitted: boolean,
+  priority = true,
 ) {
   const viewer = useVisualizationViewer();
-  const retireScope = viewer?.retireScope;
-  useEffect(() => {
-    if (!admitted) retireScope?.(environmentId, threadId);
-    return () => retireScope?.(environmentId, threadId);
-  }, [environmentId, threadId, admitted, retireScope]);
+  const pane = useRef(createVisualizationPane()).current;
+  useLayoutEffect(() => {
+    viewer?.scope(pane, environmentId, threadId, admitted, priority);
+  }, [viewer, pane, environmentId, threadId, admitted, priority]);
+  const close = viewer?.closePane;
+  useEffect(() => () => close?.(pane), [close, pane]);
+  return pane;
 }

@@ -135,11 +135,16 @@ export const makeMcpAppsService = Effect.gen(function* () {
       if (
         Result.isFailure(observed) ||
         observed.success.leaseId !== input.leaseId ||
+        // Visibility-owned generated documents never acquire external App
+        // action authority through a nullable inspection lifetime.
+        observed.success.expiresAtMs === null ||
         observed.success.expiresAtMs <= Date.now() ||
         (!allowSuspended && observed.success.state !== "active")
       )
         return yield* visualizationDenied();
-      return observed.success;
+      // Carry the positively narrowed finite App lifetime in the returned
+      // value; a nullable generated inspection cannot enter Session expiry.
+      return { ...observed.success, expiresAtMs: observed.success.expiresAtMs };
     });
   const alive = (session: Session, allowSuspended = false) =>
     inspect(session.input, allowSuspended).pipe(

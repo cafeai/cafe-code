@@ -22,6 +22,26 @@ describe("sandboxed desktop preload bundle", () => {
     );
   });
 
+  it.each(["crypto", "node:crypto"])(
+    "rejects an emitted Node cryptographic import %s without expanding sandbox authority",
+    (specifier) => {
+      assert.throws(
+        () =>
+          assertSandboxedPreloadSource(
+            `const { randomUUID } = require("${specifier}");`,
+            "preload.cjs",
+          ),
+        /unavailable to Electron's sandboxed preload/u,
+      );
+      assert.doesNotThrow(() =>
+        assertSandboxedPreloadSource(
+          "const bytes = globalThis.crypto.getRandomValues(new Uint8Array(16));",
+          "preload.cjs",
+        ),
+      );
+    },
+  );
+
   it("rejects dynamic or non-literal imports that cannot run in the sandbox", () => {
     assert.throws(
       () => assertSandboxedPreloadSource("const channels = require(path);", "preload.cjs"),

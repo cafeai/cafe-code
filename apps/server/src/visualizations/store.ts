@@ -7,6 +7,7 @@ import {
   GeneratedVisualizationNativeWitness,
   VisualizationApiError,
   VisualizationDetailsResult,
+  VisualizationDiscardViewerTicketInput,
   VisualizationTimelineEntry,
   VISUALIZATION_LIST_PAGE_SIZE,
   type VisualizationDetailsInput,
@@ -29,7 +30,9 @@ import { PngBytesSchema } from "@cafecode/contracts";
 import {
   VisualizationHostPreview,
   VisualizationHostPrepared,
+  VisualizationHostDiscardResult,
   VISUALIZATION_HOST_ACTIVE_MS,
+  type VisualizationHostConnection,
   type VisualizationHostDocument,
   type VisualizationHostOwner,
 } from "@cafecode/contracts/visualizationHost";
@@ -49,7 +52,7 @@ import {
   visualizationDenied,
   type VisualizationSessionAuthority,
 } from "./sessionRuntime.ts";
-import { embedStaticVisualizationAssets } from "./offlineHtml.ts";
+import { exportGeneratedVisualizationHtml } from "./offlineHtml.ts";
 
 export const VISUALIZATION_STORE_MAX_BYTES = 256 * 1024 * 1024;
 export const VISUALIZATION_THREAD_MAX_BYTES = 64 * 1024 * 1024;
@@ -60,6 +63,8 @@ const decodeReference = Schema.decodeUnknownResult(VisualizationReference);
 const decodeDetails = Schema.decodeUnknownResult(VisualizationDetailsResult);
 const decodePreview = Schema.decodeUnknownResult(VisualizationHostPreview);
 const decodePrepared = Schema.decodeUnknownResult(VisualizationHostPrepared);
+const decodeDiscard = Schema.decodeUnknownResult(VisualizationHostDiscardResult);
+const decodeDiscardInput = Schema.decodeUnknownResult(VisualizationDiscardViewerTicketInput);
 const decodeWitness = Schema.decodeUnknownResult(GeneratedVisualizationNativeWitness);
 const decodeAppWitness = Schema.decodeUnknownResult(
   Schema.Struct({
@@ -76,6 +81,20 @@ const proofDigest = (proof: string) => sha("cafe-visual-invocation-v1", proof);
 const failure = () =>
   new VisualizationApiError({
     message: "Visualization could not be completed. Inspect its work-log entry.",
+  });
+/** A captured connection is generation-authenticated. Failed preparation is
+ * cleaned up only on that peer with this exact minted ticket, even if its
+ * acknowledgement was interrupted. Native false never retires a viewer. */
+const discardPrepared = (host: VisualizationHostConnection, ticket: string) =>
+  Effect.tryPromise({
+    try: async (signal) => {
+      const response = decodeDiscard(
+        await requestVisualizationHost(host, "discardPrepared", { ticket }, signal),
+      );
+      if (Result.isFailure(response)) throw failure();
+      return response.success.discarded;
+    },
+    catch: () => failure(),
   });
 const bytes = (value: string) => Buffer.byteLength(value, "utf8");
 /** Corrupt private storage must not turn JSON parser messages into diagnostic
@@ -402,7 +421,8 @@ export const makeVisualizationArtifactService = () =>
     const requireOwned = (input: VisualizationDetailsInput) =>
       Effect.gen(function* () {
         const rows =
-          yield* sql`SELECT 1 FROM visualization_history WHERE thread_id = ${input.threadId} AND revision_id = ${input.revisionId}
+          yield* sql`SELECT 1 FROM visualization_history h JOIN visualization_artifacts a ON a.revision_id = h.revision_id
+      WHERE h.thread_id = ${input.threadId} AND h.revision_id = ${input.revisionId} AND a.artifact_id = ${input.artifactId}
       AND NOT EXISTS(SELECT 1 FROM hard_deleted_threads WHERE thread_id = ${input.threadId}) LIMIT 1`;
         if (!rows.length) return yield* failure();
       });
@@ -882,56 +902,103 @@ export const makeVisualizationArtifactService = () =>
           return row.poster;
         }),
       );
+    const requireTicketCapacity = (input: VisualizationDetailsInput) =>
+      Effect.gen(function* () {
+        yield* requireOwned(input);
+        const count = yield* sql<{
+          count: number;
+        }>`SELECT COUNT(*) AS count FROM visualization_viewer_tickets WHERE thread_id = ${input.threadId}`;
+        if ((count[0]?.count ?? 0) >= 32) return yield* failure();
+      });
+    const removeTicketLedger = (
+      input: VisualizationDetailsInput,
+      ticket: string,
+      hostGeneration: string,
+    ) =>
+      sql`DELETE FROM visualization_viewer_tickets WHERE ticket_digest = ${sha("cafe-visual-viewer-ticket-v1", ticket)} AND thread_id = ${input.threadId} AND revision_id = ${input.revisionId} AND host_generation = ${hostGeneration}`;
     const viewerTicket = (input: VisualizationDetailsInput) =>
       bounded(
-        Effect.gen(function* () {
-          if (config.mode !== "desktop") return yield* visualizationDenied();
-          yield* sweep;
-          const row = yield* read(input);
-          const reference = parseReference(row.referenceJson);
+        Effect.suspend(() => {
           const ticket = randomBytes(32).toString("hex");
-          const document: VisualizationHostDocument = {
-            kind: row.kind === "mcp-app" ? "mcp-app" : "generated",
-            html: row.source,
-            assets: parsePrivateJson(row.assetsJson) as VisualizationHostDocument["assets"],
-            width: reference.width,
-            height: reference.height,
-            appearance: "dark",
-          };
-          const prepared = yield* Effect.tryPromise({
-            try: async (signal) => {
-              const host = await readVisualizationHost(config.stateDir);
-              if (!host) throw visualizationDenied();
-              const response = decodePrepared(
-                await requestVisualizationHost(
-                  host,
-                  "prepareViewer",
-                  { ticket, owner: owner(input.threadId, input.revisionId), document },
-                  signal,
-                ),
-              );
-              if (
-                Result.isFailure(response) ||
-                response.success.ticket !== ticket ||
-                !Number.isSafeInteger(response.success.expiresAtMs)
-              )
-                throw failure();
-              return { ...response.success, hostGeneration: host.generation };
-            },
-            catch: () => failure(),
-          });
-          yield* sql.withTransaction(
-            Effect.gen(function* () {
-              yield* requireOwned(input);
-              const count = yield* sql<{
-                count: number;
-              }>`SELECT COUNT(*) AS count FROM visualization_viewer_tickets WHERE thread_id = ${input.threadId}`;
-              if ((count[0]?.count ?? 0) >= 32) return yield* failure();
-              yield* sql`INSERT INTO visualization_viewer_tickets(ticket_digest,thread_id,revision_id,host_generation,expires_at)
+          let capturedHost: VisualizationHostConnection | undefined;
+          let transferred = false;
+          return Effect.gen(function* () {
+            if (config.mode !== "desktop") return yield* visualizationDenied();
+            yield* sweep;
+            // This early check avoids unnecessary private source copies/native
+            // preparation. It does not replace the atomic final ownership quota.
+            yield* sql.withTransaction(requireTicketCapacity(input));
+            const row = yield* read(input);
+            const reference = parseReference(row.referenceJson);
+            const document: VisualizationHostDocument = {
+              kind: row.kind === "mcp-app" ? "mcp-app" : "generated",
+              html: row.source,
+              assets: parsePrivateJson(row.assetsJson) as VisualizationHostDocument["assets"],
+              width: reference.width,
+              height: reference.height,
+              appearance: "dark",
+            };
+            const prepared = yield* Effect.tryPromise({
+              try: async (signal) => {
+                const host = await readVisualizationHost(config.stateDir);
+                if (!host) throw visualizationDenied();
+                capturedHost = host;
+                const response = decodePrepared(
+                  await requestVisualizationHost(
+                    host,
+                    "prepareViewer",
+                    { ticket, owner: owner(input.threadId, input.revisionId), document },
+                    signal,
+                  ),
+                );
+                if (
+                  Result.isFailure(response) ||
+                  response.success.ticket !== ticket ||
+                  !Number.isSafeInteger(response.success.expiresAtMs)
+                )
+                  throw failure();
+                return { ...response.success, hostGeneration: host.generation };
+              },
+              catch: () => failure(),
+            });
+            const currentHost = yield* Effect.tryPromise({
+              try: () => readVisualizationHost(config.stateDir),
+              catch: () => failure(),
+            });
+            if (!currentHost || currentHost.generation !== prepared.hostGeneration)
+              return yield* failure();
+            yield* sql.withTransaction(
+              Effect.gen(function* () {
+                yield* requireTicketCapacity(input);
+                yield* sql`INSERT INTO visualization_viewer_tickets(ticket_digest,thread_id,revision_id,host_generation,expires_at)
         VALUES(${sha("cafe-visual-viewer-ticket-v1", ticket)},${input.threadId},${input.revisionId},${prepared.hostGeneration},${prepared.expiresAtMs + VISUALIZATION_HOST_ACTIVE_MS})`;
-            }),
+                // This compact finite ledger gates cancellation/external Apps,
+                // not an admitted generated viewer's visibility-owned lifetime.
+                // Native exact owner/frame/lease checks remain authoritative;
+                // keeping generated ticket metadata forever would fill quotas.
+              }),
+            );
+            transferred = true;
+            return { ...input, ticket, expiresAtMs: prepared.expiresAtMs };
+          }).pipe(
+            Effect.mapError(() => failure()),
+            Effect.ensuring(
+              Effect.suspend(() => {
+                if (transferred || !capturedHost) return Effect.void;
+                const host = capturedHost;
+                // No retry, fresh-peer fallback or revision-wide revoke. Keep the
+                // ledger if native state is active, unknown, or cannot be proved.
+                return discardPrepared(host, ticket).pipe(
+                  Effect.flatMap((discarded) =>
+                    discarded
+                      ? removeTicketLedger(input, ticket, host.generation).pipe(Effect.asVoid)
+                      : Effect.void,
+                  ),
+                  Effect.ignoreCause({ log: false }),
+                );
+              }),
+            ),
           );
-          return { ...input, ticket, expiresAtMs: prepared.expiresAtMs };
         }),
       );
     const readViewerTicket = (input: VisualizationDetailsInput, ticket: string) =>
@@ -945,6 +1012,41 @@ export const makeVisualizationArtifactService = () =>
         if (!rows[0]) return yield* failure();
         return rows[0];
       });
+    const discardViewerTicket = (input: VisualizationDiscardViewerTicketInput) =>
+      bounded(
+        Effect.gen(function* () {
+          if (config.mode !== "desktop") return yield* visualizationDenied();
+          const admitted = decodeDiscardInput(input);
+          if (Result.isFailure(admitted)) return yield* failure();
+          const owned = admitted.success;
+          // This reads only the compact ownership ledger, not source or posters.
+          const ledger = yield* readViewerTicket(owned, owned.ticket);
+          const host = yield* Effect.tryPromise({
+            try: () => readVisualizationHost(config.stateDir),
+            catch: () => failure(),
+          });
+          if (!host || host.generation !== ledger.hostGeneration) return yield* failure();
+          const discarded = yield* discardPrepared(host, owned.ticket);
+          const current = yield* Effect.tryPromise({
+            try: () => readVisualizationHost(config.stateDir),
+            catch: () => failure(),
+          });
+          if (!current || current.generation !== host.generation) return yield* failure();
+          yield* sql.withTransaction(
+            Effect.gen(function* () {
+              yield* requireOwned(owned);
+              // Spent/active/unknown native tickets retain the active SQL lifetime.
+              if (discarded) yield* removeTicketLedger(owned, owned.ticket, host.generation);
+            }),
+          );
+          return {
+            threadId: owned.threadId,
+            artifactId: owned.artifactId,
+            revisionId: owned.revisionId,
+            discarded,
+          };
+        }).pipe(Effect.mapError(() => failure())),
+      );
     const exportHtml = (input: VisualizationDetailsInput) =>
       bounded(
         Effect.gen(function* () {
@@ -952,7 +1054,7 @@ export const makeVisualizationArtifactService = () =>
           if (row.kind !== "generated-visualization") return yield* failure();
           const assets = parsePrivateJson(row.assetsJson) as VisualizationHostDocument["assets"];
           const html = yield* Effect.try({
-            try: () => embedStaticVisualizationAssets(row.source, assets),
+            try: () => exportGeneratedVisualizationHtml(row.source, assets),
             catch: () => failure(),
           });
           if (bytes(html) > 16 * 1024 * 1024) return yield* failure();
@@ -995,6 +1097,7 @@ export const makeVisualizationArtifactService = () =>
       details,
       poster,
       viewerTicket,
+      discardViewerTicket,
       readViewerTicket,
       exportHtml,
       sweep,

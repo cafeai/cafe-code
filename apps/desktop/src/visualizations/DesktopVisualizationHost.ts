@@ -1,7 +1,7 @@
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import * as fs from "node:fs/promises";
 import { join } from "node:path";
-import { randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
+import { createHash, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import type * as Electron from "electron";
 import * as Result from "effect/Result";
 import * as Schema from "effect/Schema";
@@ -16,10 +16,13 @@ import {
   VISUALIZATION_HOST_PREVIEW_MS,
   VISUALIZATION_HOST_SUSPEND_MS,
   VISUALIZATION_HOST_TICKET_MS,
+  VISUALIZATION_HOST_MAX_VIEWERS,
+  VISUALIZATION_HOST_MAX_INPUT_BYTES,
   VisualizationHostPrepareInput,
   VisualizationHostPreviewInput,
   VisualizationHostInspectInput,
   VisualizationHostRevokeInput,
+  VisualizationHostDiscardInput,
   type VisualizationHostBlocked,
   type VisualizationHostBounds,
   type VisualizationHostCapabilities,
@@ -36,6 +39,9 @@ import {
   type VisualizationHostUpdateInput,
   type VisualizationHostPresentation,
   type VisualizationHostDisplayMode,
+  type VisualizationHostCapacity,
+  type VisualizationHostYieldResult,
+  type VisualizationHostLayout,
 } from "@cafecode/contracts/visualizationHost";
 import {
   ElectronVisualizationSurface,
@@ -56,6 +62,7 @@ const decodePrepare = Schema.decodeUnknownResult(VisualizationHostPrepareInput);
 const decodePreview = Schema.decodeUnknownResult(VisualizationHostPreviewInput);
 const decodeInspect = Schema.decodeUnknownResult(VisualizationHostInspectInput);
 const decodeRevoke = Schema.decodeUnknownResult(VisualizationHostRevokeInput);
+const decodeDiscard = Schema.decodeUnknownResult(VisualizationHostDiscardInput);
 const blocked = (reason: VisualizationHostReason): VisualizationHostBlocked => ({
   status: "blocked",
   reason,
@@ -64,9 +71,21 @@ const owns = (left: VisualizationHostOwner, right: VisualizationHostOwner) =>
   left.environmentId === right.environmentId &&
   left.threadId === right.threadId &&
   left.operationId === right.operationId;
-const documentBytes = (document: VisualizationHostDocument) =>
-  Buffer.byteLength(document.html, "utf8") +
-  document.assets.reduce((total, asset) => total + Math.floor(asset.base64.length / 4) * 3, 0);
+// Count the actual retained encoded envelope, including escaped source/base64
+// and private replay strings. This is not native, decoded-image or GPU memory.
+const inputBytes = (input: unknown) => Buffer.byteLength(JSON.stringify(input), "utf8");
+const sourceCommitment = (document: VisualizationHostDocument) =>
+  createHash("sha256")
+    .update(
+      JSON.stringify({
+        kind: document.kind,
+        html: document.html,
+        assets: document.assets,
+        width: document.width,
+        height: document.height,
+      }),
+    )
+    .digest("hex");
 
 interface Prepared {
   readonly ticket: string;
@@ -83,11 +102,13 @@ interface Active {
   readonly window: Electron.BrowserWindow | null;
   readonly frameToken: string;
   readonly frameUrl: string;
-  readonly expires: number;
-  readonly expiresAtMs: number;
+  readonly expires: number | null;
+  readonly expiresAtMs: number | null;
   readonly inputBytes: number;
-  readonly timer: ReturnType<typeof setTimeout>;
+  readonly timer: ReturnType<typeof setTimeout> | undefined;
   readonly messages: string[];
+  layout: VisualizationHostLayout | undefined;
+  pendingLayout: VisualizationHostLayout | undefined;
   surface?: VisualizationSurface;
   state: "preparing" | "active" | "retiring" | "quarantined";
   suspended: boolean;
@@ -95,6 +116,11 @@ interface Active {
   suspendedConsentId: string | undefined;
   suspensionTimer?: ReturnType<typeof setTimeout>;
   capturePending: boolean;
+  transitioning: boolean;
+  presentationHidden: boolean;
+  presentationCommitted: boolean;
+  readonly presentationDeadline: number | null;
+  transitionTimer?: ReturnType<typeof setTimeout>;
   retirement?: Promise<boolean>;
 }
 interface PreviewJob {
@@ -106,13 +132,31 @@ interface PreviewJob {
   readonly timer: ReturnType<typeof setTimeout>;
   readonly resolve: (value: VisualizationHostPreview | VisualizationHostBlocked) => void;
 }
+interface Continuation {
+  readonly window: Electron.BrowserWindow;
+  readonly frameToken: string;
+  readonly frameUrl: string;
+  readonly owner: VisualizationHostOwner;
+  readonly commitment: string;
+  readonly expires: number;
+  readonly expiresAtMs: null;
+  readonly timer: ReturnType<typeof setTimeout>;
+}
+interface NativeJob {
+  readonly record: Active;
+  readonly run: () => Promise<unknown>;
+  readonly resolve: (value: unknown) => void;
+  readonly reject: (error: Error) => void;
+  readonly done: Promise<void>;
+  readonly complete: () => void;
+}
 
 /**
  * Electron main owns all execution leases. Backend authentication admits source;
  * a one-use backend ticket admits its exact viewer to one trusted native window.
  * Renderer counters, booleans, PIDs and JSON never prove retirement. The native
  * surface returns observed exit/destruction; uncertainty permanently quarantines
- * this app-session lane. Main timers are outside page JS, not main-stall or hard
+ * this app-session pool. Main timers are outside page JS, not main-stall or hard
  * system-memory protection. No provider, OS helper or browser is installed here.
  */
 export class DesktopVisualizationHost {
@@ -125,7 +169,40 @@ export class DesktopVisualizationHost {
   private readonly server = createServer((request, response) => {
     void this.handle(request, response);
   });
-  private active: Active | undefined;
+  private readonly viewers = new Map<string, Active>();
+  private previewActive: Active | undefined;
+  private quarantined = false;
+  private readonly continuations = new Map<string, Continuation>();
+  private continuationReservations = 0;
+  private readonly yielding = new Map<
+    string,
+    { owner: VisualizationHostOwner; revoked: boolean }
+  >();
+  private readonly trustedFocus = new WeakMap<Electron.BrowserWindow, string>();
+  private readonly capacityOwners = new Map<
+    Electron.BrowserWindow,
+    {
+      frameToken: string;
+      frameUrl: string;
+      observerId: string;
+      observerSequence: number;
+      cleanup: () => void;
+    }
+  >();
+  private readonly capacityWatermarks = new WeakMap<
+    Electron.BrowserWindow,
+    {
+      frameToken: string;
+      frameUrl: string;
+      observerId: string;
+      sequence: number;
+      observing: boolean;
+    }
+  >();
+  private capacitySequence = 0;
+  private nativeActive: NativeJob | undefined;
+  private nativeRetirements = 0;
+  private readonly nativeQueue: NativeJob[] = [];
   private closed = false;
   private listening = false;
   private inFlight = 0;
@@ -221,13 +298,14 @@ export class DesktopVisualizationHost {
   capabilities(): VisualizationHostCapabilities {
     const unavailable = this.closed || !this.listening;
     return {
-      available: !unavailable && this.active?.state !== "quarantined",
-      reason: unavailable
-        ? "unavailable"
-        : this.active?.state === "quarantined"
-          ? "quarantined"
-          : "ready",
-      maxActive: 1,
+      available: !unavailable && !this.quarantined,
+      reason: unavailable ? "unavailable" : this.quarantined ? "quarantined" : "ready",
+      poolVersion: 1,
+      autoGenerated: true,
+      generatedLifecycle: "visible",
+      maxActive: VISUALIZATION_HOST_MAX_VIEWERS,
+      maxMcpApps: 1,
+      maxPreviews: 1,
       activeLeaseMs: VISUALIZATION_HOST_ACTIVE_MS,
     };
   }
@@ -237,50 +315,273 @@ export class DesktopVisualizationHost {
     return {
       available: capability.available,
       status: capability.reason,
-      activeCount: this.active ? 1 : 0,
+      activeCount: this.viewers.size + (this.previewActive ? 1 : 0),
       pendingViewerCount: this.prepared.size,
       pendingPreviewCount: this.queue.length,
-      retainedInputBytes:
-        (this.active?.inputBytes ?? 0) +
-        [...this.prepared.values()].reduce((sum, value) => sum + value.inputBytes, 0) +
-        this.queue.reduce((sum, value) => sum + value.inputBytes, 0),
+      retainedInputBytes: this.retainedInputBytes(),
       retirementCount: this.retirementCount,
       lastRetirementReason: this.lastRetirementReason,
-      native: this.active?.surface?.diagnostics?.() ?? this.lastNative,
+      native: this.previewActive?.surface?.diagnostics?.() ?? this.lastNative,
+      viewerCount: this.viewers.size,
+      previewCount: this.previewActive ? 1 : 0,
+      nativeWorkCount: this.nativeQueue.length + (this.nativeActive ? 1 : 0),
+      continuationCount: this.continuations.size,
     };
+  }
+
+  private records(): Active[] {
+    return [...this.viewers.values(), ...(this.previewActive ? [this.previewActive] : [])];
+  }
+  private contains(record: Active): boolean {
+    return record.window
+      ? this.viewers.get(record.leaseId) === record
+      : this.previewActive === record;
+  }
+  /** Generated viewers have no clock maximum. Every native operation still
+   * receives its own finite budget; previews and Apps retain absolute expiry. */
+  private expired(record: Active): boolean {
+    const now = this.now();
+    return (
+      (record.expires !== null && record.expires <= now) ||
+      (!record.presentationCommitted &&
+        record.presentationDeadline !== null &&
+        record.presentationDeadline <= now)
+    );
+  }
+  private remaining(record: Active, budget: number): number {
+    const deadline =
+      record.expires ?? (!record.presentationCommitted ? record.presentationDeadline : null);
+    return deadline === null ? budget : Math.max(0, Math.min(budget, deadline - this.now()));
+  }
+  private retainedInputBytes(): number {
+    return (
+      this.records().reduce((sum, value) => sum + value.inputBytes, 0) +
+      [...this.prepared.values()].reduce((sum, value) => sum + value.inputBytes, 0) +
+      this.queue.reduce((sum, value) => sum + value.inputBytes, 0)
+    );
+  }
+  capacity(): VisualizationHostCapacity {
+    const available = this.capabilities().available;
+    return {
+      poolVersion: 1,
+      sequence: this.capacitySequence,
+      available,
+      viewerCount: this.viewers.size,
+      freeViewers: available ? VISUALIZATION_HOST_MAX_VIEWERS - this.viewers.size : 0,
+      preparedCount: this.prepared.size,
+      freePreparations: available ? VISUALIZATION_HOST_MAX_VIEWERS - this.prepared.size : 0,
+      mcpAppAvailable:
+        available &&
+        this.viewers.size < VISUALIZATION_HOST_MAX_VIEWERS &&
+        ![...this.viewers.values()].some((record) => record.document.kind === "mcp-app"),
+      previewBusy: !!this.previewActive,
+    };
+  }
+  /** One bounded observation per actual native window/document, not renderer IDs. */
+  observeCapacity(
+    window: Electron.BrowserWindow,
+    observing: boolean,
+    observerId: string,
+    sequence: number,
+  ): boolean {
+    const previous = this.capacityOwners.get(window);
+    try {
+      if (window.isDestroyed() || window.webContents.isDestroyed()) return false;
+      const frame = window.webContents.mainFrame;
+      const watermark = this.capacityWatermarks.get(window);
+      const sameFrame =
+        watermark?.frameToken === frame.frameToken && watermark.frameUrl === frame.url;
+      if (
+        sameFrame &&
+        (sequence < watermark.sequence ||
+          (sequence === watermark.sequence &&
+            (observerId !== watermark.observerId || (observing && !watermark.observing))))
+      )
+        return false;
+      if (!observing) {
+        if (!sameFrame || watermark.sequence !== sequence || watermark.observerId !== observerId)
+          return false;
+        watermark.observing = false;
+        previous?.cleanup();
+        return true;
+      }
+      if (
+        previous?.frameToken === frame.frameToken &&
+        previous.frameUrl === frame.url &&
+        previous.observerId === observerId &&
+        previous.observerSequence === sequence
+      )
+        return true;
+      previous?.cleanup();
+      if (this.capacityOwners.size >= 32) return false;
+      const cleanup = () => {
+        if (this.capacityOwners.get(window)?.cleanup !== cleanup) return;
+        this.capacityOwners.delete(window);
+        window.removeListener("closed", cleanup);
+        window.webContents.removeListener("did-start-navigation", cleanup);
+        window.webContents.removeListener("render-process-gone", cleanup);
+      };
+      this.capacityOwners.set(window, {
+        frameToken: frame.frameToken,
+        frameUrl: frame.url,
+        observerId,
+        observerSequence: sequence,
+        cleanup,
+      });
+      this.capacityWatermarks.set(window, {
+        frameToken: frame.frameToken,
+        frameUrl: frame.url,
+        observerId,
+        sequence,
+        observing: true,
+      });
+      window.once("closed", cleanup);
+      window.webContents.on("did-start-navigation", cleanup);
+      window.webContents.on("render-process-gone", cleanup);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+  private changed(): void {
+    this.capacitySequence += 1;
+    const capacity = this.capacity();
+    for (const [window, owner] of this.capacityOwners) {
+      try {
+        if (
+          window.isDestroyed() ||
+          window.webContents.isDestroyed() ||
+          window.webContents.mainFrame.frameToken !== owner.frameToken ||
+          window.webContents.mainFrame.url !== owner.frameUrl
+        ) {
+          owner.cleanup();
+          continue;
+        }
+        window.webContents.send("desktop:visualization-capacity-changed", capacity);
+      } catch {
+        owner.cleanup();
+      }
+    }
+  }
+  private quarantine(): void {
+    if (this.quarantined) return;
+    this.quarantined = true;
+    this.prepared.clear();
+    for (const value of this.continuations.values()) clearTimeout(value.timer);
+    this.continuations.clear();
+    for (const job of this.queue.splice(0)) {
+      clearTimeout(job.timer);
+      job.resolve(blocked("retirement-uncertain"));
+    }
+    for (const job of this.nativeQueue.splice(0)) {
+      job.reject(new Error("Visualization native work was refused."));
+      job.complete();
+    }
+    this.changed();
+  }
+  /** A finite global queue serializes setup and raster work across all five surfaces. */
+  private nativeWork<T>(record: Active, run: () => Promise<T>): Promise<T> {
+    if (this.quarantined || this.closed || this.nativeQueue.length >= 5 || !this.contains(record))
+      return Promise.reject(new Error("Visualization native work was refused."));
+    return new Promise<T>((resolve, reject) => {
+      let complete!: () => void;
+      const done = new Promise<void>((resolveDone) => {
+        complete = resolveDone;
+      });
+      this.nativeQueue.push({
+        record,
+        run,
+        resolve: (value) => resolve(value as T),
+        reject,
+        done,
+        complete,
+      });
+      this.drainNative();
+    });
+  }
+  private drainNative(): void {
+    if (this.nativeActive || this.nativeRetirements || this.closed || this.quarantined) return;
+    const job = this.nativeQueue.shift();
+    if (!job) return;
+    if (
+      !this.contains(job.record) ||
+      !["preparing", "active"].includes(job.record.state) ||
+      this.expired(job.record)
+    ) {
+      job.reject(new Error("Visualization native work was refused."));
+      job.complete();
+      this.drainNative();
+      return;
+    }
+    this.nativeActive = job;
+    void job
+      .run()
+      .then(job.resolve, () => job.reject(new Error("Visualization native work was refused.")))
+      .finally(() => {
+        if (this.nativeActive === job) this.nativeActive = undefined;
+        job.complete();
+        this.drainNative();
+      });
   }
 
   private expirePrepared(): void {
     const now = this.now();
+    let changed = false;
     for (const [ticket, value] of this.prepared)
-      if (value.expires <= now) this.prepared.delete(ticket);
+      if (value.expires <= now) {
+        this.prepared.delete(ticket);
+        changed = true;
+      }
+    if (changed) this.changed();
+    this.armPreparedExpiry();
+  }
+  private armPreparedExpiry(): void {
+    if (this.preparedTimer) clearTimeout(this.preparedTimer);
+    this.preparedTimer = undefined;
+    if (!this.prepared.size || this.closed) return;
+    const earliest = Math.min(...[...this.prepared.values()].map((value) => value.expires));
+    this.preparedTimer = setTimeout(
+      () => this.expirePrepared(),
+      Math.max(0, earliest - this.now()),
+    );
   }
   prepare(
     input: typeof VisualizationHostPrepareInput.Type,
   ): VisualizationHostPrepared | VisualizationHostBlocked {
     if (!this.capabilities().available) return blocked("unavailable");
     this.expirePrepared();
-    // One private pending viewer is enough for this one-active-view lane. Refuse
-    // duplicate tickets/content rather than silently replacing immutable bytes.
+    // Preparation is inert and independently bounded. Duplicates never replace
+    // immutable bytes, and saturation does not grant a competing native slot.
+    const bytes = inputBytes(input);
     if (
       this.prepared.has(input.ticket) ||
       this.spentTickets.has(input.ticket) ||
-      this.prepared.size >= 1 ||
-      this.spentTickets.size >= 4096
+      this.prepared.size >= VISUALIZATION_HOST_MAX_VIEWERS ||
+      this.spentTickets.size >= 4096 ||
+      this.retainedInputBytes() + bytes > VISUALIZATION_HOST_MAX_INPUT_BYTES
     )
       return blocked("busy");
     this.prepared.set(input.ticket, {
       ...input,
-      inputBytes: documentBytes(input.document),
+      inputBytes: bytes,
       expires: this.now() + VISUALIZATION_HOST_TICKET_MS,
     });
-    if (this.preparedTimer) clearTimeout(this.preparedTimer);
-    this.preparedTimer = setTimeout(() => this.expirePrepared(), VISUALIZATION_HOST_TICKET_MS);
+    this.changed();
+    this.armPreparedExpiry();
     return {
       status: "ready",
       ticket: input.ticket,
       expiresAtMs: this.wallNow() + VISUALIZATION_HOST_TICKET_MS,
     };
+  }
+  discardPrepared(ticket: string): { discarded: boolean } {
+    this.expirePrepared();
+    const discarded = this.prepared.delete(ticket);
+    if (discarded) {
+      this.armPreparedExpiry();
+      this.changed();
+    }
+    return { discarded };
   }
 
   private state(
@@ -297,9 +598,11 @@ export class DesktopVisualizationHost {
   }
   private emit(
     record: Active,
-    state: "active" | "retired" | "quarantined" | "message",
+    state: "active" | "retired" | "quarantined" | "message" | "wheel" | "layout",
     json?: string,
     reason?: VisualizationHostReason,
+    wheel?: { deltaX: number; deltaY: number },
+    layout?: VisualizationHostLayout,
   ): void {
     try {
       if (!record.window || record.window.isDestroyed() || record.window.webContents.isDestroyed())
@@ -308,9 +611,12 @@ export class DesktopVisualizationHost {
       if (frame.frameToken !== record.frameToken || frame.url !== record.frameUrl) return;
       record.window.webContents.send(VISUALIZATION_EVENT_CHANNEL, {
         leaseId: record.leaseId,
+        ...(record.ticket ? { openingTicket: record.ticket } : {}),
         state,
         ...(json !== undefined ? { json } : {}),
         ...(reason !== undefined ? { reason } : {}),
+        ...(wheel ? { wheel } : {}),
+        ...(layout ? { layout } : {}),
       });
     } catch {
       // A renderer disappearing between native checks and IPC delivery cannot
@@ -320,7 +626,7 @@ export class DesktopVisualizationHost {
   private matches(record: Active, window: Electron.BrowserWindow, leaseId: string): boolean {
     try {
       return (
-        this.active === record &&
+        this.contains(record) &&
         record.leaseId === leaseId &&
         record.window === window &&
         !window.isDestroyed() &&
@@ -337,13 +643,15 @@ export class DesktopVisualizationHost {
     prepared: Omit<Prepared, "expires" | "inputBytes">,
     window: Electron.BrowserWindow | null,
     bounds: VisualizationHostBounds,
-    duration: number,
+    duration: number | null,
     presentation?: VisualizationHostPresentation,
     displayMode?: VisualizationHostDisplayMode,
     privatePreviewMessage?: (record: Active, json: string) => void,
     privateInputBytes?: number,
+    clipBounds?: VisualizationHostBounds,
   ): Active {
     const leaseId = randomUUID();
+    const admittedAt = this.now();
     const record: Active = {
       leaseId,
       ticket: prepared.ticket || null,
@@ -352,49 +660,145 @@ export class DesktopVisualizationHost {
       window,
       frameToken: window?.webContents.mainFrame.frameToken ?? "",
       frameUrl: window?.webContents.mainFrame.url ?? "",
-      expires: this.now() + duration,
-      expiresAtMs: this.wallNow() + duration,
-      inputBytes: privateInputBytes ?? documentBytes(prepared.document),
+      expires: duration === null ? null : admittedAt + duration,
+      expiresAtMs: duration === null ? null : this.wallNow() + duration,
+      inputBytes: privateInputBytes ?? inputBytes(prepared),
+      // A generated viewer still has the original absolute startup budget
+      // through its first exact trusted presentation commit. This timer is
+      // cleared once, never rearmed as a live document/session lifetime.
       timer: setTimeout(() => {
         void this.retireRecord(record, "timeout");
-      }, duration),
+      }, duration ?? VISUALIZATION_HOST_PREVIEW_MS),
       messages: [],
+      layout: undefined,
+      pendingLayout: undefined,
       state: "preparing",
       suspended: false,
       spentConsents: new Set(),
       suspendedConsentId: undefined,
       capturePending: false,
+      transitioning: false,
+      presentationHidden: false,
+      presentationCommitted: false,
+      // The callback is cleanup, not admission authority: a delayed main timer
+      // must not let a late first geometry commit clear an already-spent budget.
+      presentationDeadline: duration === null ? admittedAt + VISUALIZATION_HOST_PREVIEW_MS : null,
     };
-    this.active = record;
+    // Membership is reserved synchronously before constructor/startup awaits.
+    if (window) this.viewers.set(leaseId, record);
+    else this.previewActive = record;
+    this.changed();
     const create =
       this.options.createSurface ?? ((options) => new ElectronVisualizationSurface(options));
-    record.surface = create({
-      document: prepared.document,
-      window,
-      bounds,
-      preloadPath: this.options.preloadPath,
-      ...(presentation ? { presentation } : {}),
-      ...(displayMode ? { displayMode } : {}),
-      onRevoked: () => {
-        void this.retireRecord(record, "owner-revoked");
-      },
-      onMessage: (json) => {
-        if (
-          record.document.kind !== "mcp-app" ||
-          !isVisualizationMessage(json) ||
-          this.active !== record ||
-          record.suspended ||
-          record.state === "retiring" ||
-          record.state === "quarantined"
-        )
-          return;
-        if (record.state === "preparing") {
-          if (record.messages.length < 8) record.messages.push(json);
-          else void this.retireRecord(record, "resource-denied");
-        } else if (privatePreviewMessage) privatePreviewMessage(record, json);
-        else this.emit(record, "message", json);
-      },
-    });
+    try {
+      record.surface = create({
+        document: prepared.document,
+        window,
+        bounds,
+        ...(clipBounds ? { clipBounds } : {}),
+        preloadPath: this.options.preloadPath,
+        ...(presentation ? { presentation } : {}),
+        ...(displayMode ? { displayMode } : {}),
+        ...(prepared.document.kind === "generated"
+          ? {
+              admitGeneratedSource: () =>
+                this.contains(record) &&
+                !this.quarantined &&
+                record.state === "preparing" &&
+                !this.expired(record) &&
+                (!record.window || this.matches(record, record.window, record.leaseId)),
+            }
+          : {}),
+        onRevoked: () => {
+          void this.retireRecord(record, "owner-revoked");
+        },
+        onTrustedFocus: () => {
+          if (
+            record.window &&
+            this.matches(record, record.window, record.leaseId) &&
+            record.state === "active"
+          )
+            this.trustedFocus.set(record.window, record.leaseId);
+        },
+        onOwnerFocused: () => {
+          if (record.window) this.trustedFocus.delete(record.window);
+        },
+        onFocusDenied: () => {
+          if (!record.window || record.window.isDestroyed() || !record.window.isFocused()) return;
+          const trusted = this.viewers.get(this.trustedFocus.get(record.window) ?? "");
+          if (trusted && trusted !== record && this.focus(record.window, trusted.leaseId)) return;
+          if (!record.window.webContents.isDestroyed()) record.window.webContents.focus();
+        },
+        onWheel: (wheel) => {
+          if (
+            record.document.kind === "generated" &&
+            record.window &&
+            this.contains(record) &&
+            record.state === "active" &&
+            !record.suspended &&
+            !record.transitioning &&
+            !record.presentationHidden &&
+            !this.expired(record)
+          )
+            this.emit(record, "wheel", undefined, undefined, wheel);
+        },
+        onLayout: (layout) => {
+          if (
+            record.document.kind !== "generated" ||
+            !record.window ||
+            !this.matches(record, record.window, record.leaseId) ||
+            !["preparing", "active"].includes(record.state) ||
+            record.suspended ||
+            record.transitioning ||
+            record.presentationHidden ||
+            this.expired(record) ||
+            !Number.isSafeInteger(layout.height) ||
+            layout.height < 80 ||
+            layout.height > 2000 ||
+            typeof layout.constrained !== "boolean" ||
+            !Number.isSafeInteger(layout.sequence) ||
+            layout.sequence <= (record.layout?.sequence ?? 0) ||
+            layout.sequence > 100000
+          )
+            return;
+          // Retain one source-free latest scalar through the exact open ACK;
+          // no stream/history buffer or source-selected lease is introduced.
+          record.layout = {
+            height: layout.height,
+            constrained: layout.constrained,
+            sequence: layout.sequence,
+          };
+          if (record.state === "preparing") record.pendingLayout = record.layout;
+          else {
+            record.pendingLayout = undefined;
+            this.emit(record, "layout", undefined, undefined, undefined, record.layout);
+          }
+        },
+        onMessage: (json) => {
+          if (
+            record.document.kind !== "mcp-app" ||
+            !isVisualizationMessage(json) ||
+            !this.contains(record) ||
+            record.suspended ||
+            record.transitioning ||
+            record.state === "retiring" ||
+            record.state === "quarantined"
+          )
+            return;
+          if (record.state === "preparing") {
+            if (record.messages.length < 8) record.messages.push(json);
+            else void this.retireRecord(record, "resource-denied");
+          } else if (privatePreviewMessage) privatePreviewMessage(record, json);
+          else this.emit(record, "message", json);
+        },
+      });
+    } catch {
+      // An inconclusive native constructor is never proof that it created no
+      // resources. Retain this exact occupied reservation and quarantine all
+      // further admission, rather than adopting another map record as cleanup.
+      record.state = "quarantined";
+      this.quarantine();
+    }
     return record;
   }
 
@@ -402,22 +806,33 @@ export class DesktopVisualizationHost {
     let timer: ReturnType<typeof setTimeout> | undefined;
     try {
       const completed = await Promise.race([
-        (async () => {
+        this.nativeWork(record, async () => {
+          if (!this.contains(record) || this.quarantined || record.state !== "preparing")
+            return false;
           await record.surface!.initialize();
+          if (
+            !this.contains(record) ||
+            this.quarantined ||
+            record.state !== "preparing" ||
+            this.expired(record)
+          )
+            return false;
           await record.surface!.installSource();
           return true;
-        })(),
+        }),
         new Promise<false>((resolve) => {
           timer = setTimeout(
             () => resolve(false),
-            Math.max(0, Math.min(VISUALIZATION_HOST_PREVIEW_MS, record.expires - this.now())),
+            this.remaining(record, VISUALIZATION_HOST_PREVIEW_MS),
           );
         }),
       ]);
       if (
         !completed ||
-        this.active !== record ||
+        !this.contains(record) ||
+        this.quarantined ||
         record.state !== "preparing" ||
+        this.expired(record) ||
         !record.surface?.isCurrent()
       )
         return false;
@@ -445,23 +860,55 @@ export class DesktopVisualizationHost {
     if (!this.capabilities().available) return refused("unavailable");
     if (!value) return refused("expired");
     if (
-      this.active ||
-      this.queue.length > 0 ||
+      this.viewers.size >= VISUALIZATION_HOST_MAX_VIEWERS ||
+      (value.document.kind === "mcp-app" &&
+        [...this.viewers.values()].some((record) => record.document.kind === "mcp-app")) ||
       window.isDestroyed() ||
       window.webContents.isDestroyed()
     )
       return refused("busy");
+    let continuation: Continuation | undefined;
+    if (input.continuation !== undefined) {
+      continuation = this.continuations.get(input.continuation);
+      if (
+        !continuation ||
+        value.document.kind !== "generated" ||
+        continuation.window !== window ||
+        continuation.expires <= this.now() ||
+        continuation.frameToken !== window.webContents.mainFrame.frameToken ||
+        continuation.frameUrl !== window.webContents.mainFrame.url ||
+        !owns(continuation.owner, value.owner) ||
+        continuation.commitment !== sourceCommitment(value.document)
+      )
+        return refused("owner-revoked");
+      // Spend before native setup. Lost ACK, failure and modal changes cannot
+      // replay this exact source/window/frame continuation after it is spent.
+      this.continuations.delete(input.continuation);
+      clearTimeout(continuation.timer);
+    }
+    const viewerDocument = { ...value.document, appearance: input.appearance };
+    const bytes = inputBytes({
+      ticket: value.ticket,
+      owner: value.owner,
+      document: viewerDocument,
+    });
+    if (this.retainedInputBytes() - value.inputBytes + bytes > VISUALIZATION_HOST_MAX_INPUT_BYTES)
+      return refused("busy");
     this.prepared.delete(input.ticket); // A lost acknowledgement is not replay authority.
+    this.armPreparedExpiry();
     this.spentTickets.add(input.ticket);
     let record: Active | undefined;
     try {
       record = this.createRecord(
-        { ...value, document: { ...value.document, appearance: input.appearance } },
+        { ...value, document: viewerDocument },
         window,
         input.bounds,
-        VISUALIZATION_HOST_ACTIVE_MS,
+        viewerDocument.kind === "generated" ? null : VISUALIZATION_HOST_ACTIVE_MS,
         input.presentation,
         input.displayMode,
+        undefined,
+        bytes,
+        input.clipBounds,
       );
       if (!(await this.start(record))) {
         const retired = await this.retireRecord(record, "timeout");
@@ -474,17 +921,19 @@ export class DesktopVisualizationHost {
       this.emit(record, "active");
       const admitted = record;
       setTimeout(() => {
-        if (this.active === admitted && admitted.state === "active") {
+        if (this.contains(admitted) && admitted.state === "active") {
           for (const json of admitted.messages.splice(0)) this.emit(admitted, "message", json);
+          if (admitted.pendingLayout && !this.expired(admitted))
+            this.emit(admitted, "layout", undefined, undefined, undefined, admitted.pendingLayout);
+          admitted.pendingLayout = undefined;
         }
       }, 0);
       return this.state(record);
     } catch {
-      const current = record ?? this.active;
-      if (current) {
-        const retired = await this.retireRecord(current, "unavailable");
+      if (record) {
+        const retired = await this.retireRecord(record, "unavailable");
         return this.state(
-          current,
+          record,
           retired ? "blocked" : "quarantined",
           retired ? "unavailable" : "retirement-uncertain",
         );
@@ -494,13 +943,13 @@ export class DesktopVisualizationHost {
   }
 
   inspect(ticket: string, leaseId: string): VisualizationHostInspection | null {
-    const record = this.active;
+    const record = this.viewers.get(leaseId);
     if (
       !record ||
       record.ticket !== ticket ||
       record.leaseId !== leaseId ||
       record.state !== "active" ||
-      record.expires <= this.now() ||
+      this.expired(record) ||
       !record.surface?.isCurrent()
     )
       return null;
@@ -508,7 +957,10 @@ export class DesktopVisualizationHost {
       leaseId,
       documentGeneration: record.surface.generation,
       expiresAtMs: record.expiresAtMs,
-      state: record.suspended ? "suspended" : "active",
+      state:
+        record.suspended || record.transitioning || record.presentationHidden
+          ? "suspended"
+          : "active",
     };
   }
 
@@ -516,7 +968,7 @@ export class DesktopVisualizationHost {
     window: Electron.BrowserWindow,
     input: VisualizationHostUpdateInput,
   ): Promise<VisualizationHostState> {
-    const record = this.active;
+    const record = this.viewers.get(input.leaseId);
     if (!record || !this.matches(record, window, input.leaseId) || record.state !== "active")
       return {
         leaseId: input.leaseId,
@@ -524,18 +976,86 @@ export class DesktopVisualizationHost {
         expiresAtMs: this.wallNow(),
         reason: "owner-revoked",
       };
-    if (
-      !input.visible ||
-      !record.surface?.update(input.bounds, input.appearance, input.presentation, input.displayMode)
-    ) {
-      const retired = await this.retireRecord(record, "owner-revoked");
+    if (this.expired(record)) {
+      const retired = await this.retireRecord(record, "timeout");
       return this.state(record, retired ? "retired" : "quarantined");
+    }
+    let updated = false;
+    let updateFailure: "owner-revoked" | "unavailable" = "owner-revoked";
+    try {
+      updated =
+        input.visible &&
+        (input.presentationHidden === true
+          ? record.document.kind === "generated" &&
+            !!record.surface?.hidePresentation?.(input.bounds, input.clipBounds)
+          : !!record.surface?.update(
+              input.bounds,
+              input.appearance,
+              input.presentation,
+              input.displayMode,
+              input.clipBounds,
+              input.focus === true && input.displayMode === "fullscreen",
+            ));
+    } catch {
+      updateFailure = "unavailable";
+    }
+    if (!updated) {
+      const retired = await this.retireRecord(record, updateFailure);
+      return this.state(record, retired ? "retired" : "quarantined");
+    }
+    if (this.expired(record)) {
+      const retired = await this.retireRecord(record, "timeout");
+      return this.state(record, retired ? "retired" : "quarantined");
+    }
+    record.presentationHidden =
+      input.presentationHidden === true || record.surface?.isPresentationHidden?.() === true;
+    if (!record.presentationCommitted) {
+      record.presentationCommitted = true;
+      if (record.expires === null && record.timer) clearTimeout(record.timer);
+    }
+    if (record.transitioning) {
+      let resumed = false;
+      try {
+        resumed = record.surface!.suspend(false);
+      } catch {
+        /* Native uncertainty retires the exact owner. */
+      }
+      if (!resumed) {
+        const retired = await this.retireRecord(record, "owner-revoked");
+        return this.state(record, retired ? "retired" : "quarantined");
+      }
+      record.transitioning = false;
+      if (record.transitionTimer) clearTimeout(record.transitionTimer);
     }
     return this.state(record);
   }
 
+  /** A short same-document geometry transition hides old native pixels before
+   * a host popup appears. It cannot be renewed or become a hidden live epoch. */
+  beginTransition(window: Electron.BrowserWindow, leaseId: string): boolean {
+    const record = this.viewers.get(leaseId);
+    if (
+      !record ||
+      !this.matches(record, window, leaseId) ||
+      record.state !== "active" ||
+      record.transitioning ||
+      record.suspended ||
+      this.expired(record) ||
+      !record.surface?.suspend(true)
+    )
+      return false;
+    record.transitioning = true;
+    record.transitionTimer = setTimeout(
+      () => {
+        void this.retireRecord(record, "timeout");
+      },
+      this.remaining(record, 5_000),
+    );
+    return true;
+  }
+
   async retire(window: Electron.BrowserWindow, leaseId: string): Promise<VisualizationHostState> {
-    const record = this.active;
+    const record = this.viewers.get(leaseId);
     if (!record || !this.matches(record, window, leaseId))
       return { leaseId, state: "blocked", expiresAtMs: this.wallNow(), reason: "owner-revoked" };
     return this.state(
@@ -544,46 +1064,180 @@ export class DesktopVisualizationHost {
     );
   }
 
+  focus(window: Electron.BrowserWindow, leaseId: string): boolean {
+    const record = this.viewers.get(leaseId);
+    return (
+      !!record &&
+      this.matches(record, window, leaseId) &&
+      record.state === "active" &&
+      !record.suspended &&
+      !record.transitioning &&
+      !record.presentationHidden &&
+      !this.expired(record) &&
+      !!record.surface?.focus?.()
+    );
+  }
+
   private async retireRecord(record: Active, reason: VisualizationHostReason): Promise<boolean> {
     if (record.retirement) return record.retirement;
+    if (record.state === "quarantined" && !record.surface) return false;
+    const retirementDeadline = this.now() + 5_000;
+    this.nativeRetirements += 1;
     record.state = "retiring";
     record.messages.length = 0;
-    clearTimeout(record.timer);
+    record.layout = undefined;
+    record.pendingLayout = undefined;
+    if (record.timer) clearTimeout(record.timer);
     if (record.suspensionTimer) clearTimeout(record.suspensionTimer);
+    if (record.transitionTimer) clearTimeout(record.transitionTimer);
+    for (let index = this.nativeQueue.length - 1; index >= 0; index -= 1) {
+      if (this.nativeQueue[index]?.record === record) {
+        const job = this.nativeQueue.splice(index, 1)[0]!;
+        job.reject(new Error("Visualization native work was refused."));
+        job.complete();
+      }
+    }
     record.retirement = (async () => {
       let retired = false;
       try {
-        retired = record.surface ? await record.surface.retire() : true;
+        const peerWork = this.nativeActive?.record !== record ? this.nativeActive : undefined;
+        if (peerWork) {
+          let timer: ReturnType<typeof setTimeout> | undefined;
+          const settled = await Promise.race([
+            peerWork.done.then(() => true),
+            new Promise<false>((resolve) => {
+              timer = setTimeout(
+                () => resolve(false),
+                Math.max(0, retirementDeadline - this.now()),
+              );
+            }),
+          ]).finally(() => {
+            if (timer) clearTimeout(timer);
+          });
+          if (!settled) throw new Error("Visualization native retirement was refused.");
+        }
+        retired = record.surface
+          ? await record.surface.retire(Math.max(0, retirementDeadline - this.now()))
+          : true;
+        // Native capture/setup may still own a raster or source continuation.
+        // Exact renderer death alone cannot release global expensive-work
+        // serialization while that trusted operation remains inconclusive.
+        const work = this.nativeActive?.record === record ? this.nativeActive : undefined;
+        if (retired && work) {
+          let timer: ReturnType<typeof setTimeout> | undefined;
+          retired = await Promise.race([
+            work.done.then(() => true),
+            new Promise<false>((resolve) => {
+              timer = setTimeout(
+                () => resolve(false),
+                Math.max(0, retirementDeadline - this.now()),
+              );
+            }),
+          ]).finally(() => {
+            if (timer) clearTimeout(timer);
+          });
+        }
       } catch {
         retired = false;
+      } finally {
+        this.nativeRetirements -= 1;
       }
       this.retirementCount += 1;
       this.lastRetirementReason = retired ? reason : "retirement-uncertain";
       this.lastNative = record.surface?.diagnostics?.() ?? null;
       if (!retired) {
         record.state = "quarantined";
+        this.quarantine();
         this.emit(record, "quarantined", undefined, "retirement-uncertain");
       } else {
-        if (this.active === record) this.active = undefined;
+        if (record.window) {
+          if (this.viewers.get(record.leaseId) === record) this.viewers.delete(record.leaseId);
+        } else if (this.previewActive === record) this.previewActive = undefined;
         this.emit(record, "retired", undefined, reason);
+        this.changed();
         this.drain();
       }
+      this.drainNative();
       return retired;
     })();
     return record.retirement;
+  }
+
+  /** Expansion yields source bytes only after exact native retirement. The
+   * bounded continuation retains a commitment/window/finite token deadline, never the HTML,
+   * assets, mutable DOM state or renderer-created timeout. */
+  async yield(
+    window: Electron.BrowserWindow,
+    leaseId: string,
+  ): Promise<VisualizationHostYieldResult> {
+    const record = this.viewers.get(leaseId);
+    if (
+      !record ||
+      !this.matches(record, window, leaseId) ||
+      record.state !== "active" ||
+      record.document.kind !== "generated" ||
+      this.expired(record) ||
+      !record.surface?.isCurrent() ||
+      this.continuations.size + this.continuationReservations >= VISUALIZATION_HOST_MAX_VIEWERS
+    )
+      return { leaseId, state: "blocked", expiresAtMs: this.wallNow(), reason: "owner-revoked" };
+    this.continuationReservations += 1;
+    const pending = { owner: record.owner, revoked: false };
+    this.yielding.set(leaseId, pending);
+    try {
+      const commitment = sourceCommitment(record.document);
+      const retired = await this.retireRecord(record, "owner-revoked");
+      if (!retired) return this.state(record, "quarantined", "retirement-uncertain");
+      if (
+        this.closed ||
+        pending.revoked ||
+        this.quarantined ||
+        this.expired(record) ||
+        window.isDestroyed() ||
+        window.webContents.isDestroyed() ||
+        window.webContents.mainFrame.frameToken !== record.frameToken ||
+        window.webContents.mainFrame.url !== record.frameUrl
+      )
+        return this.state(record, "retired", "expired");
+      const token = randomBytes(32).toString("hex");
+      // A continuation is finite one-use metadata, not the generated document's
+      // visibility lifetime. No hidden source bytes or live DOM are retained.
+      const expires = this.now() + VISUALIZATION_HOST_TICKET_MS;
+      const timer = setTimeout(
+        () => this.continuations.delete(token),
+        VISUALIZATION_HOST_TICKET_MS,
+      );
+      this.continuations.set(token, {
+        window,
+        frameToken: record.frameToken,
+        frameUrl: record.frameUrl,
+        owner: record.owner,
+        commitment,
+        expires,
+        expiresAtMs: null,
+        timer,
+      });
+      return { ...this.state(record, "retired"), continuation: token };
+    } finally {
+      this.continuationReservations -= 1;
+      this.yielding.delete(leaseId);
+    }
   }
 
   async capture(
     window: Electron.BrowserWindow,
     leaseId: string,
   ): Promise<VisualizationHostCapture | null> {
-    const record = this.active;
+    const record = this.viewers.get(leaseId);
     if (
       !record ||
       !this.matches(record, window, leaseId) ||
       record.state !== "active" ||
       record.suspended ||
+      record.transitioning ||
+      record.presentationHidden ||
       record.capturePending ||
+      this.expired(record) ||
       !record.surface?.isCurrent()
     )
       return null;
@@ -591,12 +1245,9 @@ export class DesktopVisualizationHost {
     let timer: ReturnType<typeof setTimeout> | undefined;
     try {
       const value = await Promise.race([
-        record.surface.capture(),
+        this.nativeWork(record, () => record.surface!.capture()),
         new Promise<null>((resolve) => {
-          timer = setTimeout(
-            () => resolve(null),
-            Math.min(5_000, Math.max(0, record.expires - this.now())),
-          );
+          timer = setTimeout(() => resolve(null), this.remaining(record, 5_000));
         }),
       ]);
       if (!value) await this.retireRecord(record, "capture-failed");
@@ -604,6 +1255,9 @@ export class DesktopVisualizationHost {
         this.matches(record, window, leaseId) &&
         record.state === "active" &&
         !record.suspended &&
+        !record.transitioning &&
+        !record.presentationHidden &&
+        !this.expired(record) &&
         record.surface.isCurrent()
         ? value
         : null;
@@ -617,14 +1271,15 @@ export class DesktopVisualizationHost {
   }
 
   send(window: Electron.BrowserWindow, leaseId: string, json: string): boolean {
-    const record = this.active;
+    const record = this.viewers.get(leaseId);
     return (
       !!record &&
       this.matches(record, window, leaseId) &&
       record.state === "active" &&
       !record.suspended &&
+      !record.transitioning &&
       record.document.kind === "mcp-app" &&
-      record.expires > this.now() &&
+      !this.expired(record) &&
       isVisualizationMessage(json) &&
       !!record.surface?.send(json)
     );
@@ -636,12 +1291,13 @@ export class DesktopVisualizationHost {
     suspended: boolean,
     consentId: string,
   ): boolean {
-    const record = this.active;
+    const record = this.viewers.get(leaseId);
     if (
       !record ||
       !this.matches(record, window, leaseId) ||
       record.state !== "active" ||
-      record.document.kind !== "mcp-app"
+      record.document.kind !== "mcp-app" ||
+      record.transitioning
     )
       return false;
     if (suspended) {
@@ -649,7 +1305,7 @@ export class DesktopVisualizationHost {
         record.suspended ||
         record.spentConsents.has(consentId) ||
         record.spentConsents.size >= 256 ||
-        record.expires <= this.now() ||
+        this.expired(record) ||
         !record.surface?.isCurrent() ||
         !record.surface.suspend(true)
       )
@@ -664,7 +1320,7 @@ export class DesktopVisualizationHost {
       if (
         !record.suspended ||
         record.suspendedConsentId !== consentId ||
-        record.expires <= this.now() ||
+        this.expired(record) ||
         !record.surface?.isCurrent() ||
         !record.surface.suspend(false)
       )
@@ -683,20 +1339,19 @@ export class DesktopVisualizationHost {
   ): Promise<VisualizationHostPreview | VisualizationHostBlocked> {
     if ((document.kind === "mcp-app") !== (previewReplay !== undefined))
       return Promise.resolve(blocked("invalid"));
-    if (!this.capabilities().available || this.active?.state === "quarantined")
-      return Promise.resolve(blocked("unavailable"));
-    if (this.active?.window || this.queue.length >= 2) return Promise.resolve(blocked("busy"));
+    if (!this.capabilities().available) return Promise.resolve(blocked("unavailable"));
+    const bytes = inputBytes({ owner, document, ...(previewReplay ? { previewReplay } : {}) });
+    if (
+      this.queue.length >= 2 ||
+      this.retainedInputBytes() + bytes > VISUALIZATION_HOST_MAX_INPUT_BYTES
+    )
+      return Promise.resolve(blocked("busy"));
     return new Promise((resolve) => {
       const job: PreviewJob = {
         owner,
         document,
         ...(previewReplay ? { previewReplay } : {}),
-        inputBytes:
-          documentBytes(document) +
-          (previewReplay
-            ? Buffer.byteLength(previewReplay.originalInputJson, "utf8") +
-              Buffer.byteLength(previewReplay.originalResultJson, "utf8")
-            : 0),
+        inputBytes: bytes,
         deadline: this.now() + VISUALIZATION_HOST_PREVIEW_MS,
         resolve,
         timer: setTimeout(() => {
@@ -712,7 +1367,7 @@ export class DesktopVisualizationHost {
     });
   }
   private drain(): void {
-    if (this.active || this.closed) return;
+    if (this.previewActive || this.closed || this.quarantined) return;
     const job = this.queue.shift();
     if (!job) return;
     clearTimeout(job.timer);
@@ -733,7 +1388,7 @@ export class DesktopVisualizationHost {
       replayResolve = resolve;
     });
     const relayPreview = (current: Active, json: string): void => {
-      if (!protocol || current.state !== "active" || this.active !== current) return;
+      if (!protocol || current.state !== "active" || this.previewActive !== current) return;
       for (const message of protocol.receive(json)) {
         if (!current.surface?.send(message)) {
           replayResolve?.(false);
@@ -771,18 +1426,18 @@ export class DesktopVisualizationHost {
             }),
           ]);
           if (captureTimer) clearTimeout(captureTimer);
-          if (!replayed || this.active !== record || record.state !== "active")
+          if (!replayed || this.previewActive !== record || record.state !== "active")
             throw new Error("Visualization preview replay was unavailable.");
         }
         const capture = await Promise.race([
-          record.surface!.capture(),
+          this.nativeWork(record, () => record!.surface!.capture()),
           new Promise<null>((resolve) => {
             captureTimer = setTimeout(() => resolve(null), Math.max(0, job.deadline - this.now()));
           }),
         ]);
         if (
           capture &&
-          this.active === record &&
+          this.previewActive === record &&
           record.state === "active" &&
           record.surface!.isCurrent()
         )
@@ -801,14 +1456,15 @@ export class DesktopVisualizationHost {
       if (captureTimer) clearTimeout(captureTimer);
       protocol?.close();
     }
-    const current = record ?? this.active;
-    if (current && !(await this.retireRecord(current, "owner-revoked")))
+    if (record && !(await this.retireRecord(record, "owner-revoked")))
       result = blocked("retirement-uncertain");
     job.resolve(result);
     this.drain();
   }
 
   async revoke(owner: VisualizationHostOwner): Promise<void> {
+    for (const pending of this.yielding.values())
+      if (owns(pending.owner, owner)) pending.revoked = true;
     for (const [ticket, value] of this.prepared)
       if (owns(value.owner, owner)) this.prepared.delete(ticket);
     for (let index = this.queue.length - 1; index >= 0; index -= 1) {
@@ -819,8 +1475,16 @@ export class DesktopVisualizationHost {
         job.resolve(blocked("owner-revoked"));
       }
     }
-    if (this.active && owns(this.active.owner, owner))
-      await this.retireRecord(this.active, "owner-revoked");
+    for (const [token, value] of this.continuations)
+      if (owns(value.owner, owner)) {
+        clearTimeout(value.timer);
+        this.continuations.delete(token);
+      }
+    await Promise.all(
+      this.records()
+        .filter((record) => owns(record.owner, owner))
+        .map((record) => this.retireRecord(record, "owner-revoked")),
+    );
   }
 
   private async handle(request: IncomingMessage, response: ServerResponse): Promise<void> {
@@ -901,6 +1565,11 @@ export class DesktopVisualizationHost {
             ? null
             : this.inspect(value.success.ticket, value.success.leaseId),
         );
+      } else if (envelope.method === "discardPrepared") {
+        const value = decodeDiscard(envelope.payload);
+        reply(
+          Result.isFailure(value) ? blocked("invalid") : this.discardPrepared(value.success.ticket),
+        );
       } else if (envelope.method === "revoke") {
         const value = decodeRevoke(envelope.payload);
         if (Result.isSuccess(value)) await this.revoke(value.success.owner);
@@ -916,13 +1585,17 @@ export class DesktopVisualizationHost {
   async close(): Promise<void> {
     if (this.closed) return;
     this.closed = true;
+    for (const pending of this.yielding.values()) pending.revoked = true;
     if (this.preparedTimer) clearTimeout(this.preparedTimer);
     this.prepared.clear();
     for (const job of this.queue.splice(0)) {
       clearTimeout(job.timer);
       job.resolve(blocked("owner-revoked"));
     }
-    if (this.active) await this.retireRecord(this.active, "owner-revoked");
+    for (const value of this.continuations.values()) clearTimeout(value.timer);
+    this.continuations.clear();
+    for (const value of this.capacityOwners.values()) value.cleanup();
+    await Promise.all(this.records().map((record) => this.retireRecord(record, "owner-revoked")));
     this.server.closeAllConnections();
     await new Promise<void>((resolve) => this.server.close(() => resolve()));
     // Keep the closed generation's private marker. unlink-after-lstat is not an

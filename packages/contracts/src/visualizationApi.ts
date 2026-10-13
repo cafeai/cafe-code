@@ -93,6 +93,20 @@ export const VisualizationViewerTicketResult = Schema.Struct({
   expiresAtMs: Schema.Int.check(Schema.isBetween({ minimum: 1, maximum: Number.MAX_SAFE_INTEGER })),
 }).annotate(strict);
 export type VisualizationViewerTicketResult = typeof VisualizationViewerTicketResult.Type;
+/** Cancellation targets one unused native preparation, never an artifact or
+ * active viewer. A false result retains the active/private ownership ledger. */
+export const VisualizationDiscardViewerTicketInput = Schema.Struct({
+  ...VisualizationDetailsInput.fields,
+  ticket: token,
+}).annotate(strict);
+export type VisualizationDiscardViewerTicketInput =
+  typeof VisualizationDiscardViewerTicketInput.Type;
+export const VisualizationDiscardViewerTicketResult = Schema.Struct({
+  ...VisualizationDetailsInput.fields,
+  discarded: Schema.Boolean,
+}).annotate(strict);
+export type VisualizationDiscardViewerTicketResult =
+  typeof VisualizationDiscardViewerTicketResult.Type;
 export const VisualizationExportHtmlResult = Schema.Struct({
   ...VisualizationDetailsInput.fields,
   html: Schema.String.check(Schema.isMaxLength(16 * 1024 * 1024)),

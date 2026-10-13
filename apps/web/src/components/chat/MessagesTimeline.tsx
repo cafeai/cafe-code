@@ -1,4 +1,5 @@
 import { useUiLocale, useUiPresentation } from "~/i18n";
+import { flushSync } from "react-dom";
 import { uiText, type UiLocale } from "@cafecode/shared/i18n";
 import { UiMessage } from "~/i18n";
 import { FileAttachmentPill } from "./FileAttachmentPill";
@@ -92,6 +93,8 @@ import {
 } from "@cafecode/contracts/settings";
 import { formatTimestamp } from "../../timestampFormat";
 import { VisualizationCard } from "../visualizations/VisualizationCard";
+import type { VisualizationPane } from "../visualizations/VisualizationViewerProvider";
+import { createVisualizationTimelineScrollOwner } from "../visualizations/visualizationTimelineScroll";
 import { hasOnScreenKeyboard } from "../../hooks/useMediaQuery";
 import {
   isWholeMessageSelection,
@@ -151,6 +154,10 @@ export {
 // ---------------------------------------------------------------------------
 
 interface TimelineRowSharedState {
+  visualizationPane?: VisualizationPane;
+  generatedVisualizationAdmissionReady: boolean;
+  onVisualizationScrollIntent: (deltaY: number) => boolean | void;
+  onVisualizationLayoutIntent: (anchor: HTMLElement, height: number) => (() => void) | undefined;
   subagentRuntimeSession: SubagentRuntimeContext | null;
   timestampFormat: TimestampFormat;
   activeProvider: ProviderDriverKind | null;
@@ -277,6 +284,7 @@ const TIMELINE_REVIEW_VISIBLE_CONTENT_POSITION = {
 // ---------------------------------------------------------------------------
 
 interface MessagesTimelineProps {
+  visualizationPane?: VisualizationPane;
   /** Explicit selected-message native fork. Omitted for unsupported providers. */
   onForkMessage?: ((messageId: MessageId) => void) | undefined;
   messageForkDisabled?: boolean;
@@ -330,6 +338,7 @@ interface MessagesTimelineProps {
 // ---------------------------------------------------------------------------
 
 export const MessagesTimeline = memo(function MessagesTimeline({
+  visualizationPane,
   onForkMessage,
   messageForkDisabled = false,
   scheduledFollowups,
@@ -520,6 +529,39 @@ export const MessagesTimeline = memo(function MessagesTimeline({
     };
   }, [activeThreadEnvironmentId, activeThreadId, rows, selectedSubagent, subagentRuntimeSession]);
   const isSubagentDetailOpen = resolvedSelectedSubagent !== null;
+  // This is the exhaustive branch shared by both empty/loading returns below.
+  // Removing that list is a real lifetime change even in the same Cafe chat;
+  // keeping the caller's ref object does not preserve its initial-load proof.
+  const willRenderTimelineList = rows.length > 0 || isWorking || isSubagentDetailOpen;
+  // The virtualizer retains its legitimate initial target until public onLoad.
+  // Do not admit native input during that unfinished bootstrap or fight it with
+  // forced offsets. An absent->present list gets a new token; streamed rows,
+  // presentation and height updates of the same present list do not reset it.
+  const visualizationAdmissionScope = useMemo(
+    () =>
+      Object.freeze({
+        environmentId: activeThreadEnvironmentId,
+        threadId: activeThreadId,
+        listRef,
+        present: willRenderTimelineList,
+      }),
+    [activeThreadEnvironmentId, activeThreadId, listRef, willRenderTimelineList],
+  );
+  const currentVisualizationAdmissionScope = useRef<object | null>(null);
+  const [loadedVisualizationAdmissionScope, setLoadedVisualizationAdmissionScope] = useState<
+    object | null
+  >(null);
+  const generatedVisualizationAdmissionReady =
+    willRenderTimelineList && loadedVisualizationAdmissionScope === visualizationAdmissionScope;
+  useLayoutEffect(() => {
+    currentVisualizationAdmissionScope.current = willRenderTimelineList
+      ? visualizationAdmissionScope
+      : null;
+    return () => {
+      if (currentVisualizationAdmissionScope.current === visualizationAdmissionScope)
+        currentVisualizationAdmissionScope.current = null;
+    };
+  }, [visualizationAdmissionScope, willRenderTimelineList]);
   // Returning from a subagent detail slides the (still mounted) timeline back
   // in from the start edge. Adjusting state during render restarts the CSS
   // animation exactly once per open→closed transition.
@@ -534,6 +576,35 @@ export const MessagesTimeline = memo(function MessagesTimeline({
   const tailFollowItemLayoutRepinFrameRef = useRef<number | null>(null);
   const autoFollowTailRef = useRef(autoFollowTail);
   autoFollowTailRef.current = autoFollowTail;
+  const visualizationScrollOwnerRef = useRef<ReturnType<
+    typeof createVisualizationTimelineScrollOwner
+  > | null>(null);
+  const visualizationScrollOwner = useMemo(
+    () => ({
+      scroll: (deltaY: number, beforeScroll?: () => void) =>
+        visualizationScrollOwnerRef.current?.scroll(deltaY, beforeScroll) ?? false,
+      preserve: (anchor: HTMLElement, height: number) =>
+        visualizationScrollOwnerRef.current?.preserve(anchor, height),
+      interrupt: () => visualizationScrollOwnerRef.current?.interrupt(),
+      observeScroll: () => visualizationScrollOwnerRef.current?.observeScroll(),
+    }),
+    [],
+  );
+  useLayoutEffect(() => {
+    // Each committed effect setup owns a fresh lifetime. The committed ref,
+    // rather than mutable locals inside a compiler-memoized object, forwards
+    // callbacks to only that live owner. StrictMode cleanup never reopens an
+    // old instance and scope loss permanently closes the exact prior owner.
+    const owner = createVisualizationTimelineScrollOwner({
+      readList: () => listRef.current,
+      following: () => autoFollowTailRef.current,
+    });
+    visualizationScrollOwnerRef.current = owner;
+    return () => {
+      if (visualizationScrollOwnerRef.current === owner) visualizationScrollOwnerRef.current = null;
+      owner.close();
+    };
+  }, [activeThreadId, activeThreadEnvironmentId, listRef]);
   const forcedScrollGenerationRef = useRef(0);
   const touchStartYRef = useRef<number | null>(null);
   const touchReviewIntentReportedRef = useRef(false);
@@ -724,6 +795,25 @@ export const MessagesTimeline = memo(function MessagesTimeline({
     // deliberately scrolled away. Coalescing covers item and footer changes.
     scheduleTailFollowItemLayoutRepin();
   }, [scheduleTailFollowItemLayoutRepin]);
+  const handleInitialListLoad = useCallback(() => {
+    // Only completion from this exact committed list scope may admit generated
+    // cards. Old callbacks cannot unset or grant a newer scope. Once complete,
+    // streamed rows, theme and height changes never revoke/reset readiness.
+    if (currentVisualizationAdmissionScope.current !== visualizationAdmissionScope) {
+      emitScrollDebugEvent("initial-list-load-rejected", {
+        details: {
+          currentPresent: currentVisualizationAdmissionScope.current !== null,
+          observedPresent: visualizationAdmissionScope.present,
+        },
+      });
+      return;
+    }
+    setLoadedVisualizationAdmissionScope(visualizationAdmissionScope);
+    // Finite source-free breadcrumb; no transcript or private source bytes.
+    emitScrollDebugEvent("initial-list-load", {
+      state: onDebugScrollEvent ? (listRef.current?.getState?.() ?? null) : null,
+    });
+  }, [emitScrollDebugEvent, listRef, onDebugScrollEvent, visualizationAdmissionScope]);
   const cancelSubmitStickToEnd = useCallback(() => {
     // Invalidate every already-scheduled initial/submit hard-scroll callback.
     // Clearing only the deadline is insufficient because the animation-frame
@@ -784,6 +874,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
 
   const handleUserScrollIntent = useCallback(
     (event?: { readonly type?: string }) => {
+      visualizationScrollOwner.interrupt();
       emitScrollDebugEvent("user-scroll-intent", {
         state: onDebugScrollEvent ? (listRef.current?.getState?.() ?? null) : null,
         details: {
@@ -793,10 +884,18 @@ export const MessagesTimeline = memo(function MessagesTimeline({
       cancelSubmitStickToEnd();
       onUserScrollIntent();
     },
-    [cancelSubmitStickToEnd, emitScrollDebugEvent, listRef, onDebugScrollEvent, onUserScrollIntent],
+    [
+      cancelSubmitStickToEnd,
+      emitScrollDebugEvent,
+      listRef,
+      onDebugScrollEvent,
+      onUserScrollIntent,
+      visualizationScrollOwner,
+    ],
   );
 
   const handleScroll = useCallback(() => {
+    visualizationScrollOwner.observeScroll();
     if (Date.now() <= stickToEndDeadlineMsRef.current) {
       const state = listRef.current?.getState?.() ?? null;
       const shouldRepin = state === null || !isTimelineScrolledToEnd(state);
@@ -850,19 +949,48 @@ export const MessagesTimeline = memo(function MessagesTimeline({
     scheduleSubmitStickScrollEventRepin,
     viewPositionCache,
     viewPositionKey,
+    visualizationScrollOwner,
   ]);
   const handleWheel = useCallback(
     (event: ReactWheelEvent<HTMLElement>) => {
+      // Even downward input can supersede an outstanding chart-only resize
+      // correction, without otherwise changing follow/review policy.
+      visualizationScrollOwner.interrupt();
       if (event.deltaY < 0) {
         handleUserScrollIntent(event);
       }
     },
-    [handleUserScrollIntent],
+    [handleUserScrollIntent, visualizationScrollOwner],
   );
-  const handleTouchStart = useCallback((event: ReactTouchEvent<HTMLElement>) => {
-    touchStartYRef.current = event.touches.item(0)?.clientY ?? null;
-    touchReviewIntentReportedRef.current = false;
-  }, []);
+  const handleVisualizationScrollIntent = useCallback(
+    (deltaY: number) => {
+      visualizationScrollOwner.interrupt();
+      if (deltaY >= 0) return false;
+      // This originates only from the exact native-owned chart input relay. Enter
+      // review before applying its scroll, so a queued tail correction cannot
+      // race the native gesture. No synthetic DOM event or sibling list is used.
+      // This native relay is outside React's DOM event boundary. Commit its
+      // existing parent review-mode update before the caller performs scrollBy:
+      // otherwise React may batch it with a simultaneously growing chart/turn,
+      // leaving LegendList's committed maintain-at-end policy active during
+      // that measurement. Only this authenticated upward intent is synchronous;
+      // ordinary browser wheel/touch and all streaming/follow policies remain.
+      return visualizationScrollOwner.scroll(deltaY, () => {
+        autoFollowTailRef.current = false;
+        cancelTailFollowItemLayoutRepin();
+        flushSync(() => handleUserScrollIntent({ type: "native-chart-wheel" }));
+      });
+    },
+    [cancelTailFollowItemLayoutRepin, handleUserScrollIntent, visualizationScrollOwner],
+  );
+  const handleTouchStart = useCallback(
+    (event: ReactTouchEvent<HTMLElement>) => {
+      visualizationScrollOwner.interrupt();
+      touchStartYRef.current = event.touches.item(0)?.clientY ?? null;
+      touchReviewIntentReportedRef.current = false;
+    },
+    [visualizationScrollOwner],
+  );
   const handleTouchMove = useCallback(
     (event: ReactTouchEvent<HTMLElement>) => {
       const startY = touchStartYRef.current;
@@ -914,6 +1042,8 @@ export const MessagesTimeline = memo(function MessagesTimeline({
   }, []);
   const handleKeyDown = useCallback(
     (event: ReactKeyboardEvent<HTMLElement>) => {
+      if (["ArrowUp", "ArrowDown", "PageUp", "PageDown", "Home", "End", " "].includes(event.key))
+        visualizationScrollOwner.interrupt();
       if (
         event.key === "ArrowUp" ||
         event.key === "PageUp" ||
@@ -931,7 +1061,14 @@ export const MessagesTimeline = memo(function MessagesTimeline({
         onUserScrollIntent();
       }
     },
-    [cancelSubmitStickToEnd, emitScrollDebugEvent, listRef, onDebugScrollEvent, onUserScrollIntent],
+    [
+      cancelSubmitStickToEnd,
+      emitScrollDebugEvent,
+      listRef,
+      onDebugScrollEvent,
+      onUserScrollIntent,
+      visualizationScrollOwner,
+    ],
   );
 
   const previousRowCountRef = useRef(0);
@@ -1064,6 +1201,10 @@ export const MessagesTimeline = memo(function MessagesTimeline({
 
   const sharedState = useMemo<TimelineRowSharedState>(
     () => ({
+      ...(visualizationPane ? { visualizationPane } : {}),
+      generatedVisualizationAdmissionReady,
+      onVisualizationScrollIntent: handleVisualizationScrollIntent,
+      onVisualizationLayoutIntent: visualizationScrollOwner.preserve,
       timestampFormat,
       markdownCwd,
       additionalWorkspaceRoots,
@@ -1081,6 +1222,10 @@ export const MessagesTimeline = memo(function MessagesTimeline({
       rowEntrances,
     }),
     [
+      visualizationPane,
+      generatedVisualizationAdmissionReady,
+      handleVisualizationScrollIntent,
+      visualizationScrollOwner,
       timestampFormat,
       markdownCwd,
       additionalWorkspaceRoots,
@@ -1118,7 +1263,16 @@ export const MessagesTimeline = memo(function MessagesTimeline({
   // from TimelineRowCtx, which propagates through LegendList's memo.
   const renderItem = useCallback(
     ({ item }: { item: MessagesTimelineRow }) => (
-      <div className="mx-auto w-full min-w-0 max-w-3xl overflow-x-clip" data-timeline-root="true">
+      <div
+        className={cn(
+          "mx-auto w-full min-w-0 overflow-x-clip",
+          item.kind === "visualization" &&
+            item.visualization.reference.purpose === "generated-visualization"
+            ? "max-w-[1600px]"
+            : "max-w-3xl",
+        )}
+        data-timeline-root="true"
+      >
         <TimelineRowContent row={item} />
       </div>
     ),
@@ -1142,16 +1296,11 @@ export const MessagesTimeline = memo(function MessagesTimeline({
     [isSubagentDetailOpen, scheduledFollowups],
   );
 
-  if (
-    rows.length === 0 &&
-    !isWorking &&
-    resolvedSelectedSubagent === null &&
-    isThreadHistoryHydrating
-  ) {
+  if (!willRenderTimelineList && isThreadHistoryHydrating) {
     return <ThreadHistoryLoadingState />;
   }
 
-  if (rows.length === 0 && !isWorking && resolvedSelectedSubagent === null) {
+  if (!willRenderTimelineList) {
     return (
       <div className="flex h-full min-w-0 flex-col overflow-y-auto px-3 sm:px-5 animate-enter-fade">
         <div className="flex min-h-40 flex-1 shrink-0 items-center justify-center">
@@ -1198,6 +1347,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
                   : TIMELINE_REVIEW_VISIBLE_CONTENT_POSITION
               }
               onItemSizeChanged={handleItemSizeChanged}
+              onLoad={handleInitialListLoad}
               {...(scheduledFollowups ? { onMetricsChange: handleItemSizeChanged } : {})}
               onScroll={handleScroll}
               onWheel={handleWheel}
@@ -1410,6 +1560,10 @@ function VisualizationTimelineRow({
       threadId={ctx.activeThreadId}
       entry={row.visualization}
       timestampFormat={ctx.timestampFormat}
+      {...(ctx.visualizationPane ? { pane: ctx.visualizationPane } : {})}
+      onScrollIntent={ctx.onVisualizationScrollIntent}
+      onLayoutIntent={ctx.onVisualizationLayoutIntent}
+      generatedAdmissionReady={ctx.generatedVisualizationAdmissionReady}
     />
   ) : null;
 }

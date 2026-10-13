@@ -30,6 +30,8 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  vi.restoreAllMocks();
+  vi.unstubAllGlobals();
   // Node does not normally define this Electron-only property. Restore the
   // actual host descriptor instead of leaving the fixture on the test runner.
   if (originalMainFrameDescriptor) {
@@ -44,6 +46,109 @@ function setMainFrameIdentity(value: boolean | undefined): void {
 }
 
 describe("desktop preload capability boundary", () => {
+  it("keeps duplicate capacity listeners independently subscribed and fences late observation ACKs", async () => {
+    setMainFrameIdentity(true);
+    // Spy on the real host WebCrypto method, not deterministic replacement
+    // randomness, to qualify the exact sandbox-compatible primitive and size.
+    const random = vi.spyOn(globalThis.crypto, "getRandomValues");
+    let resolve!: (value: unknown) => void;
+    const late = new Promise((done) => {
+      resolve = done;
+    });
+    electron.invoke.mockReturnValueOnce(late).mockResolvedValue(null);
+    await import("./preload.ts");
+    const [, bridge] = electron.exposeInMainWorld.mock.calls[0] as [string, DesktopBridge];
+    const listener = vi.fn(),
+      first = bridge.onVisualizationCapacityChanged!(listener),
+      second = bridge.onVisualizationCapacityChanged!(listener);
+    expect(electron.invoke).toHaveBeenCalledOnce();
+    const [channel, deliver] = electron.on.mock.calls.at(-1)!;
+    const value = {
+      poolVersion: 1,
+      sequence: 2,
+      available: true,
+      viewerCount: 1,
+      freeViewers: 3,
+      preparedCount: 0,
+      freePreparations: 4,
+      mcpAppAvailable: true,
+      previewBusy: false,
+    };
+    deliver({}, value);
+    expect(listener).toHaveBeenCalledTimes(2);
+    first();
+    deliver({}, { ...value, sequence: 3 });
+    expect(listener).toHaveBeenCalledTimes(3);
+    expect(electron.removeListener).not.toHaveBeenCalled();
+    second();
+    expect(electron.removeListener).toHaveBeenCalledWith(channel, deliver);
+    const third = bridge.onVisualizationCapacityChanged!(listener);
+    resolve(value);
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(listener).toHaveBeenCalledTimes(3);
+    const observations = electron.invoke.mock.calls
+      .filter(([channel]) => channel === IpcChannels.VISUALIZATION_CAPACITY_OBSERVE_CHANNEL)
+      .map(([, input]) => input);
+    expect(observations[0]).toMatchObject({ observing: true, sequence: 1 });
+    expect(observations[1]).toMatchObject({ observing: false, sequence: 1 });
+    expect(observations[2]).toMatchObject({ observing: true, sequence: 3 });
+    expect(random).toHaveBeenCalledTimes(2);
+    for (const [bytes] of random.mock.calls) {
+      expect(bytes).toBeInstanceOf(Uint8Array);
+      expect(bytes!.byteLength).toBe(16);
+    }
+    expect(observations[0].observerId).toMatch(
+      /^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/,
+    );
+    expect(observations[1].observerId).toBe(observations[0].observerId);
+    expect(observations[2].observerId).toMatch(
+      /^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/,
+    );
+    expect(observations[0].observerId).not.toBe(observations[2].observerId);
+    third();
+  });
+  it.each(["absent", "throws"])(
+    "refuses capacity observation without retaining listeners when WebCrypto %s",
+    async (failure) => {
+      setMainFrameIdentity(true);
+      const crypto = globalThis.crypto;
+      vi.stubGlobal(
+        "crypto",
+        failure === "absent"
+          ? undefined
+          : {
+              getRandomValues: () => {
+                throw new Error("Private cryptographic diagnostic.");
+              },
+            },
+      );
+      electron.invoke.mockResolvedValue(null);
+      await import("./preload.ts");
+      const [, bridge] = electron.exposeInMainWorld.mock.calls[0] as [string, DesktopBridge];
+      const listener = vi.fn();
+      const refused = bridge.onVisualizationCapacityChanged!(listener);
+      refused();
+      refused();
+      expect(electron.invoke).not.toHaveBeenCalled();
+      expect(electron.on).not.toHaveBeenCalled();
+      expect(electron.removeListener).not.toHaveBeenCalled();
+      expect(listener).not.toHaveBeenCalled();
+      // Restoring the real primitive admits one fresh first observer, proving
+      // the refusal did not retain an inaccessible registration or epoch.
+      vi.stubGlobal("crypto", crypto);
+      const admitted = bridge.onVisualizationCapacityChanged!(listener);
+      expect(electron.invoke).toHaveBeenCalledExactlyOnceWith(
+        IpcChannels.VISUALIZATION_CAPACITY_OBSERVE_CHANNEL,
+        expect.objectContaining({ observing: true, sequence: 1 }),
+      );
+      admitted();
+      expect(electron.invoke).toHaveBeenLastCalledWith(
+        IpcChannels.VISUALIZATION_CAPACITY_OBSERVE_CHANNEL,
+        expect.objectContaining({ observing: false, sequence: 1 }),
+      );
+    },
+  );
   it("delivers only bounded visualization host metadata and exact subscriptions", async () => {
     setMainFrameIdentity(true);
     await import("./preload.ts");

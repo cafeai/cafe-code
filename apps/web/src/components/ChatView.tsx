@@ -2684,13 +2684,14 @@ export default function ChatView(props: ChatViewProps) {
   const visualizations = useThreadVisualizations(
     environmentId,
     routeKind === "server" ? threadId : null,
-    pane.active && pane.visible,
+    pane.visible,
     `${activeLatestTurn?.turnId ?? ""}:${threadActivities.at(-1)?.id ?? ""}`,
   );
-  useVisualizationScope(
+  const visualizationPane = useVisualizationScope(
     environmentId,
     threadId,
-    pane.active && pane.visible && pendingApprovals.length === 0 && pendingUserInputs.length === 0,
+    pane.visible && pendingApprovals.length === 0 && pendingUserInputs.length === 0,
+    pane.active,
   );
   const timelineEntries = useMemo(
     () =>
@@ -8330,6 +8331,7 @@ export default function ChatView(props: ChatViewProps) {
             ) : null}
             {/* Messages — LegendList handles virtualization and scrolling internally */}
             <MessagesTimeline
+              visualizationPane={visualizationPane}
               key={activeThread.id}
               {...(pane.visible && scheduledFollowupsContext
                 ? { scheduledFollowups: scheduledFollowupsContext }
