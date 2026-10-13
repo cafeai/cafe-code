@@ -68,6 +68,21 @@ it("reads byte-identified raster files inside the workspace and explicit additio
   expect((await readWorkspaceImage(extraImage, [root, extra])).bytes).toEqual(png);
 });
 
+it("keeps Windows native paths separate from their Markdown URI identifiers", () => {
+  expect(markdownImageSources("![Chart](<C:\\workspace\\chart with spaces.png>)")).toEqual([
+    {
+      source: "C:%5Cworkspace%5Cchart%20with%20spaces.png",
+      path: "C:\\workspace\\chart with spaces.png",
+    },
+  ]);
+  expect(markdownImageSources("![Chart](<C:/workspace/chart with spaces.png>)")).toEqual([
+    {
+      source: "C:/workspace/chart%20with%20spaces.png",
+      path: "C:/workspace/chart with spaces.png",
+    },
+  ]);
+});
+
 it("rejects outside roots, sibling prefixes, directories, executable content and oversized images", async () => {
   const { root, directory } = await fixture();
   const outside = join(directory, "outside.png");

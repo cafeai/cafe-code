@@ -20,6 +20,11 @@ ownership must not replace the long-running session's existing cleanup policy.
   protocol peer into a scoped directory with spaces/metacharacters. They assert
   literal arguments, synthetic home/cwd/environment and retirement of the exact
   owned child, including a deliberate client construction failure.
+- The command-backed initialization-only case uses the current pinned Node
+  executable with the same isolated peer, home, cwd, environment and exact
+  child-retirement assertions. It does not repeat executable-copy admission;
+  both literal-argv and construction-failure cases still use copied spaced
+  executables. Keep the existing per-host test deadlines unchanged.
 - The separate typed initialization/account/skills test launches the current
   pinned Node executable directly with a scoped synthetic peer and the same
   isolated home/environment. It exercises real subprocess protocol I/O without

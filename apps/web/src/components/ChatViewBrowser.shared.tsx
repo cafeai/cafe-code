@@ -5353,7 +5353,7 @@ describe(`ChatView full app (${chatViewBrowserPart})`, () => {
             expect(useComposerDraftStore.getState().getComposerDraft(THREAD_REF)?.prompt).toBe(
               messageText,
             );
-            expect(document.body.textContent).toContain(repeatedFailure);
+            expect(document.body.textContent).toContain("Failed to send message.");
             expect(findSendFailureToastTitle()).not.toBeNull();
             expect(document.body.textContent).not.toContain(privateRequestId);
             expect(
@@ -5418,7 +5418,7 @@ describe(`ChatView full app (${chatViewBrowserPart})`, () => {
             expect(dispatchedMessageTexts).toEqual([messageText, messageText, messageText]);
             expect(findSendFailureToastTitle()).toBeNull();
             expect(document.querySelector('button[aria-label="Dismiss error"]')).toBeNull();
-            expect(document.body.textContent).not.toContain(repeatedFailure);
+            expect(document.body.textContent).not.toContain("Failed to send message.");
           },
           // The toast manager's normal auto-dismiss is much longer than this
           // bound. Passing here therefore proves the successful dispatch

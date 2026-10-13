@@ -332,7 +332,12 @@ vi.mock("../../environmentApi", () => ({
     return read ? { orchestration: { getThreadTurnSubagentDetail: read } } : undefined;
   },
 }));
-vi.mock("../../localApi", () => ({ readLocalApi: () => undefined }));
+vi.mock("../../localApi", () => ({
+  readLocalApi: () => undefined,
+  ensureLocalApi: () => {
+    throw new Error("No local API is admitted by the Atrium fixture.");
+  },
+}));
 // Worker details render real Markdown, whose workspace selector must use
 // this fixture's exact environment without importing saved-host bootstrap or
 // native persistence. Detail retrieval still uses the exact environment API

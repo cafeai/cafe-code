@@ -4,7 +4,12 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { render } from "vitest-browser-react";
 
 // No links are activated and no backend/provider exists in this fixture.
-vi.mock("../localApi", () => ({ readLocalApi: () => undefined }));
+vi.mock("../localApi", () => ({
+  readLocalApi: () => undefined,
+  ensureLocalApi: () => {
+    throw new Error("No local API is admitted by the Markdown whitespace fixture.");
+  },
+}));
 // Whitespace rendering has no workspace owner. Stop at the selector boundary
 // rather than importing workspace bootstrap and its native persistence graph.
 // Markdown parsing, streamed rendering and link construction remain real.

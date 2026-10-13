@@ -24,7 +24,9 @@ it.each(["codex", "claudeAgent"] as const)(
   async (provider) => {
     const directory = await mkdtemp(join(tmpdir(), "cafe-chat-image-db-"));
     const imagePath = join(directory, "chart with spaces.png");
-    const source = imagePath.replaceAll(" ", "%20");
+    // Markdown URI identifiers encode native Windows separators as well as
+    // spaces. Keep the filesystem path and the exact published identifier distinct.
+    const source = imagePath.replaceAll("\\", "%5C").replaceAll(" ", "%20");
     const layer = NodeSqliteClient.layer({ filename: join(directory, "test.sqlite") });
     const run = <A, E, R>(effect: Effect.Effect<A, E, R>) =>
       Effect.runPromise(

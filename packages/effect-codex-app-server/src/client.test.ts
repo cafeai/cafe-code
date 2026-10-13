@@ -851,7 +851,11 @@ it.layer(NodeServices.layer)("effect-codex-app-server client", (it) => {
     ({ echo, failDuringBuild }) =>
       Effect.gen(function* () {
         const realSpawner = yield* ChildProcessSpawner.ChildProcessSpawner;
-        const { fixtureRoot, executable, peer, fixtureEnv } = yield* makeNativePeerFixture();
+        // Initialization exercises command-backed IPC, not executable-copy
+        // admission. Keep spaced copied binaries for both literal-argv cases.
+        const { fixtureRoot, executable, peer, fixtureEnv } = yield* makeNativePeerFixture(
+          echo ? "copied" : "current",
+        );
         const args = [peer, ...(echo ? ["--echo-argv", ...literalCommandArgs] : [])];
         const handles: Array<ChildProcessSpawner.ChildProcessHandle> = [];
         const isolatedSpawner = ChildProcessSpawner.make((observed) => {

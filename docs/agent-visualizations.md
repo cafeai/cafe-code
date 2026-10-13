@@ -332,6 +332,11 @@ owner-hide retirement and startup/active page-loop watchdog retirement. It
 preserves the original budgets and uses isolated synthetic data only. Linux CI
 uses its existing `xvfb-run` display fixture; it must fail rather than install a
 runtime or disable the sandbox when the required host capability is absent.
+On disposable GitHub-hosted Linux runners, CI validates the already-installed
+Electron `chrome-sandbox` as a regular non-symlink file, prepares its required
+root ownership and `4755` mode, then verifies them before native qualification.
+This changes only hosted fixture setup, never renderer sandbox flags, installed
+user-machine permissions, or macOS/Windows runtime policy.
 
 See the [foundation decision](decisions/agent-visualization-foundations.md) and
 [execution-host decision](decisions/agent-visualization-execution-host.md) for

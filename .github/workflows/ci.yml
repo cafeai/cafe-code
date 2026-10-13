@@ -221,6 +221,31 @@ jobs:
           CAFE_CODE_VISUALIZATION_E2E: "1"
         run: corepack yarn workspace @cafecode/desktop test src/visualizations/NativeVisualizationElectron.e2e.test.ts
 
+      - name: Prepare installed Electron sandbox helper (Linux)
+        # The pinned Electron runtime was already qualified above. Prepare its
+        # existing helper on the disposable hosted runner; never disable the
+        # renderer sandbox or change a user's machine as a test workaround.
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          test "$RUNNER_ENVIRONMENT" = "github-hosted"
+          cafe_electron_sandbox=$(node -e '
+            const fs = require("node:fs");
+            const path = require("node:path");
+            const helper = path.join(path.dirname(require("electron")), "chrome-sandbox");
+            const stat = fs.lstatSync(helper);
+            if (!stat.isFile() || stat.isSymbolicLink()) throw new Error("Expected the installed regular sandbox helper.");
+            process.stdout.write(helper);
+          ')
+          sudo chown root:root -- "$cafe_electron_sandbox"
+          sudo chmod 4755 -- "$cafe_electron_sandbox"
+          node -e '
+            const fs = require("node:fs");
+            const stat = fs.lstatSync(process.argv[1]);
+            if (!stat.isFile() || stat.isSymbolicLink() || stat.uid !== 0 || stat.gid !== 0 || (stat.mode & 0o7777) !== 0o4755)
+              throw new Error("Installed Electron sandbox helper qualification failed.");
+          ' "$cafe_electron_sandbox"
+
       - name: Isolated native visualization host qualification (Linux)
         # Use the hosted image's existing display fixture; absence is a failure,
         # not permission to install software or disable Electron's sandbox.

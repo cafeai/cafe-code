@@ -114,7 +114,57 @@ async function generatedHttpFixture() {
       { scope },
     ),
   );
-  const server = http.createServer(handler);
+  type HeldCompletion = {
+    response: http.ServerResponse;
+    complete: () => void;
+  };
+  let nextHold = 0;
+  const completionHolds = new Map<
+    string,
+    ReturnType<typeof Promise.withResolvers<HeldCompletion>>
+  >();
+  const prepareCompletionHold = () => {
+    const id = String(++nextHold);
+    const completion = Promise.withResolvers<HeldCompletion>();
+    // Fixture cleanup may reject a hold before its client receives headers.
+    // Observe that rejection immediately without swallowing the awaited result.
+    void completion.promise.catch(() => {});
+    completionHolds.set(id, completion);
+    return { id, completion: completion.promise };
+  };
+  const server = http.createServer((incoming, outgoing) => {
+    const id = incoming.headers["x-cafe-fixture-completion"];
+    const hold = typeof id === "string" ? completionHolds.get(id) : undefined;
+    if (hold && typeof id === "string") {
+      // Control only the final native end on this fixture-owned response. All
+      // routing, SDK framing, stream writes and client reads remain real. A
+      // paused TCP client is not proof that Node still has pending output:
+      // Windows can buffer the complete admitted body before that observation.
+      const nativeEnd = outgoing.end;
+      let captured = false;
+      outgoing.end = ((...args: unknown[]) => {
+        if (captured) throw new Error("Fixture response completion was requested twice.");
+        captured = true;
+        completionHolds.delete(id);
+        let completed = false;
+        hold.resolve({
+          response: outgoing,
+          complete: () => {
+            if (completed || outgoing.destroyed) return;
+            completed = true;
+            outgoing.end = nativeEnd;
+            Reflect.apply(nativeEnd, outgoing, args);
+          },
+        });
+        return outgoing;
+      }) as http.ServerResponse["end"];
+      outgoing.once("close", () => {
+        completionHolds.delete(id);
+        hold.reject(new Error("Fixture response retired before completion could be held."));
+      });
+    }
+    handler(incoming, outgoing);
+  });
   try {
     await new Promise<void>((resolve, reject) => {
       server.once("error", reject);
@@ -170,8 +220,12 @@ async function generatedHttpFixture() {
     authority,
     preview,
     send,
+    prepareCompletionHold,
     close: async () => {
       uninstall();
+      for (const hold of completionHolds.values())
+        hold.reject(new Error("Fixture response completion was retired."));
+      completionHolds.clear();
       server.closeAllConnections();
       await new Promise<void>((resolve, reject) =>
         server.close((error) => (error ? reject(error) : resolve())),
@@ -200,11 +254,17 @@ const smallGeneratedRequest = new TextEncoder().encode(
     params: { name: "preview_visualization", arguments: smallGeneratedInput },
   }),
 );
-/** Pause a real client after headers so the native server encounters downstream
- * backpressure. The large fixture payload is only an opaque HTTP transport
- * value; this test neither decodes it nor qualifies native image rendering. */
-const pausedGeneratedResponse = (fixture: Awaited<ReturnType<typeof generatedHttpFixture>>) =>
-  new Promise<{ client: http.ClientRequest; response: http.IncomingMessage }>((resolve, reject) => {
+/** Drain the real bounded payload, then await the controlled native completion
+ * boundary. No kernel socket-buffer size or client pause proves that boundary.
+ * The opaque payload qualifies transport only, never native image rendering. */
+const heldGeneratedResponse = (fixture: Awaited<ReturnType<typeof generatedHttpFixture>>) => {
+  const hold = fixture.prepareCompletionHold();
+  return new Promise<{
+    client: http.ClientRequest;
+    response: http.IncomingMessage;
+    nativeResponse: http.ServerResponse;
+    complete: () => void;
+  }>((resolve, reject) => {
     const client = http.request(
       fixture.url,
       {
@@ -213,19 +273,32 @@ const pausedGeneratedResponse = (fixture: Awaited<ReturnType<typeof generatedHtt
           authorization: `Bearer ${fixture.token}`,
           "content-type": "application/json",
           accept: "application/json, text/event-stream",
+          "x-cafe-fixture-completion": hold.id,
         },
       },
       (response) => {
-        response.pause();
+        let receivedBytes = 0;
+        response.on("data", (chunk: Buffer) => {
+          receivedBytes += chunk.byteLength;
+          if (receivedBytes > VISUALIZATION_MCP_MAX_RESPONSE_BYTES)
+            response.destroy(new Error("Fixture response exceeds the admitted transport bound."));
+        });
         // These are deliberately retired fixture-owned sockets. Their opaque
         // native cancellation errors are not provider diagnostics or test data.
         response.on("error", () => {});
-        resolve({ client, response });
+        void hold.completion
+          .then(({ response: nativeResponse, complete }) => {
+            expect(nativeResponse.writableFinished).toBe(false);
+            expect(nativeResponse.destroyed).toBe(false);
+            resolve({ client, response, nativeResponse, complete });
+          }, reject)
+          .catch(reject);
       },
     );
     client.once("error", reject);
     client.end(smallGeneratedRequest);
   });
+};
 const largeTransportPreview = {
   status: "ready" as const,
   // Equal to the admitted maximum PNG's encoded size, without introducing a
@@ -312,13 +385,13 @@ describe("private visualization HTTP audience", () => {
   });
   it("holds four native response leases until downstream completion and refuses a fifth without dispatch", async () => {
     const fixture = await generatedHttpFixture();
-    const paused: Awaited<ReturnType<typeof pausedGeneratedResponse>>[] = [];
+    const held: Awaited<ReturnType<typeof heldGeneratedResponse>>[] = [];
     try {
       fixture.preview.mockReturnValue(Effect.succeed(largeTransportPreview));
       for (let index = 0; index < 4; index++) {
-        const connection = await pausedGeneratedResponse(fixture);
+        const connection = await heldGeneratedResponse(fixture);
         expect(connection.response.statusCode).toBe(200);
-        paused.push(connection);
+        held.push(connection);
       }
       expect(visualizationMcpRequestCount()).toBe(4);
       // Leave the fifth body incomplete: saturation must refuse before parsing
@@ -329,8 +402,8 @@ describe("private visualization HTTP audience", () => {
       expect(refused.text).toBe('{"error":"Visualization request failed."}');
       expect(fixture.preview).toHaveBeenCalledTimes(4);
 
-      paused[0]!.response.destroy();
-      paused[0]!.client.destroy();
+      held[0]!.response.destroy();
+      held[0]!.client.destroy();
       await vi.waitFor(() => expect(visualizationMcpRequestCount()).toBe(3));
       fixture.preview.mockReturnValueOnce(
         Effect.succeed({ ...largeTransportPreview, png: "c3ludGhldGlj" }),
@@ -339,7 +412,7 @@ describe("private visualization HTTP audience", () => {
       await vi.waitFor(() => expect(visualizationMcpRequestCount()).toBe(3));
       expect(fixture.preview).toHaveBeenCalledTimes(5);
     } finally {
-      for (const connection of paused) {
+      for (const connection of held) {
         connection.response.destroy();
         connection.client.destroy();
       }
@@ -350,24 +423,47 @@ describe("private visualization HTTP audience", () => {
     // removal from the server's connection inventory.
     await vi.waitFor(() => expect(visualizationMcpRequestCount()).toBe(0));
   });
+  it("releases a held response only when its exact native finish completes", async () => {
+    const fixture = await generatedHttpFixture();
+    let held: Awaited<ReturnType<typeof heldGeneratedResponse>> | undefined;
+    try {
+      held = await heldGeneratedResponse(fixture);
+      expect(visualizationMcpRequestCount()).toBe(1);
+      const ended = new Promise<void>((resolve) => held!.response.once("end", resolve));
+      held.complete();
+      await ended;
+      expect(held.nativeResponse.writableFinished).toBe(true);
+      expect(visualizationMcpRequestCount()).toBe(0);
+      expect(fixture.preview).toHaveBeenCalledExactlyOnceWith(
+        fixture.authority,
+        smallGeneratedInput,
+      );
+    } finally {
+      held?.response.destroy();
+      held?.client.destroy();
+      await fixture.close();
+    }
+  });
   it("retires only the stalled response at an absolute output deadline despite later received bytes", async () => {
     const fixture = await generatedHttpFixture();
-    let paused: Awaited<ReturnType<typeof pausedGeneratedResponse>> | undefined;
+    let held: Awaited<ReturnType<typeof heldGeneratedResponse>> | undefined;
     vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
     try {
       fixture.preview.mockReturnValue(Effect.succeed(largeTransportPreview));
-      paused = await pausedGeneratedResponse(fixture);
+      held = await heldGeneratedResponse(fixture);
       expect(visualizationMcpRequestCount()).toBe(1);
       await vi.advanceTimersByTimeAsync(VISUALIZATION_MCP_RESPONSE_MS - 1);
       expect(visualizationMcpRequestCount()).toBe(1);
-      const response = paused.response;
+      const response = held.response;
       const received = new Promise<void>((resolve) =>
         response.once("data", () => {
           response.pause();
           resolve();
         }),
       );
-      response.resume();
+      // This bounded trailing JSON whitespace travels through the real native
+      // response and client after handoff. It must not renew the fixed deadline.
+      held.nativeResponse.write(" ");
       await received;
       expect(visualizationMcpRequestCount()).toBe(1);
       await vi.advanceTimersByTimeAsync(1);
@@ -378,8 +474,8 @@ describe("private visualization HTTP audience", () => {
       );
     } finally {
       vi.useRealTimers();
-      paused?.response.destroy();
-      paused?.client.destroy();
+      held?.response.destroy();
+      held?.client.destroy();
       await fixture.close();
     }
   });
