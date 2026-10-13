@@ -186,7 +186,7 @@ describe("visualization native reduced-motion presentation", () => {
       fixture.dispose();
     }
   });
-  it("renders a finite fluid poster and never schedules motion in the native reduced-motion context", async () => {
+  it("renders finite static fluid and never schedules motion in the native reduced-motion context", async () => {
     expect(matchMedia("(prefers-reduced-motion: reduce)").matches).toBe(true);
     const fixture = await createFluidFixture({ visible: true });
     try {
@@ -266,18 +266,20 @@ describe("visualization native reduced-motion presentation", () => {
         }}
       />,
     );
-    const trigger = page.getByRole("button", { name: "Private source and JSON", exact: true });
-    trigger.element().focus();
+    const trigger = page.getByRole("button", { name: "Visualization actions", exact: true });
+    const triggerElement = trigger.element();
+    triggerElement.focus();
     expect(details).not.toHaveBeenCalled();
     await userEvent.keyboard("{Enter}");
+    const inspection = page.getByRole("menuitem", { name: "Private source and JSON", exact: true });
+    await expect.element(inspection).toBeVisible();
+    inspection.element().focus();
+    await userEvent.keyboard("{Enter}");
     await expect.element(page.getByText("private-motion-source", { exact: true })).toBeVisible();
-    const panel = document.querySelector<HTMLElement>(
-      '[data-visualization-card] [data-slot="collapsible-panel"]',
-    )!;
+    const panel = document.querySelector<HTMLElement>("[data-visualization-inspection]")!;
     expect(getComputedStyle(panel).transitionDuration).toBe("0s");
-    expect(getComputedStyle(trigger.element().querySelector("svg")!).transitionDuration).toBe("0s");
-    trigger.element().focus();
-    await userEvent.keyboard(" ");
+    expect(getComputedStyle(triggerElement.querySelector("svg")!).transitionDuration).toBe("0s");
+    await userEvent.keyboard("{Escape}");
     await expect.element(trigger).toHaveAttribute("aria-expanded", "false");
     expect(document.body.textContent).not.toContain("private-motion-json");
   });

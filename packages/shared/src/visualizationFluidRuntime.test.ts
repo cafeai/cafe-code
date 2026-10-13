@@ -18,6 +18,9 @@ function fixture(
     initialZero?: boolean;
     presentationVisible?: "true" | "false";
     counterLimit?: number;
+    authoredOpacity?: string;
+    width?: number;
+    height?: number;
   } = {},
 ) {
   const listeners = new Map<object, Map<string, Set<(event?: unknown) => void>>>();
@@ -150,7 +153,14 @@ function fixture(
     height = 150;
     isConnected = true;
     parentNode = {};
-    rect = { left: 0, top: 0, right: 320, bottom: 180, width: 320, height: 180 };
+    rect = {
+      left: 0,
+      top: 0,
+      right: options.width ?? 320,
+      bottom: options.height ?? 180,
+      width: options.width ?? 320,
+      height: options.height ?? 180,
+    };
     getBoundingClientRect() {
       return this.rect;
     }
@@ -161,6 +171,15 @@ function fixture(
     }
   }
   const canvas = events(new Canvas());
+  // Keep style priority observable independently of the helper's own state;
+  // these bounded ordinary DOM scalars do not emulate GPU/native ownership.
+  const stylePriorities = new Map<string, string>();
+  Object.assign(canvas.style, {
+    setProperty(name: string, value: string, priority: string) {
+      canvas.style[name] = value;
+      stylePriorities.set(name, priority);
+    },
+  });
   if (options.initialZero)
     canvas.rect = { left: 0, top: 0, right: 0, bottom: 0, width: 0, height: 0 };
   const document = events({
@@ -205,6 +224,7 @@ function fixture(
     document,
     window,
     HTMLCanvasElement: Canvas,
+    getComputedStyle: () => ({ opacity: options.authoredOpacity ?? "1" }),
     matchMedia: () => motion,
     ResizeObserver: Observer,
     MutationObserver: Observer,
@@ -212,12 +232,12 @@ function fixture(
     // An instrumented, smaller diagnostic saturation point makes the otherwise
     // unreachable MAX_SAFE_INTEGER boundary testable without a mutable helper
     // API. Numeric validity and resource admissions use the real Number APIs.
-    Number: {
+    Number: Object.assign((value: unknown) => Number(value), {
       isFinite: Number.isFinite,
       isInteger: Number.isInteger,
       isSafeInteger: Number.isSafeInteger,
       MAX_SAFE_INTEGER: options.counterLimit ?? Number.MAX_SAFE_INTEGER,
-    },
+    }),
     // Stable instrumentation functions avoid creating a new closure for every
     // sample in the real long-run phase-wrap case. They retain actual trig math
     // and record only one bounded maximum, not a lifetime list of arguments.
@@ -257,6 +277,7 @@ function fixture(
   return {
     context,
     canvas,
+    stylePriorities,
     document,
     window,
     motion,
@@ -378,7 +399,7 @@ describe("fixed generated fluid library", () => {
   });
   it("keeps invalid positive layout terminal after pending startup", () => {
     const value = fixture({ initialZero: true });
-    value.canvas.rect = { left: 0, top: 0, right: 1601, bottom: 180, width: 1601, height: 180 };
+    value.canvas.rect = { left: 0, top: 0, right: 4097, bottom: 180, width: 4097, height: 180 };
     value.observers[0]!();
     expect(value.canvas.dataset.cafeFluidState).toBe("unsupported");
     expect(value.contextCalls()).toBe(0);
@@ -417,26 +438,54 @@ describe("fixed generated fluid library", () => {
       16 * 1024 * 1024,
     );
   });
-  it("boosts both final display paths without altering solver resources or equations", () => {
+  it("uses original display plus ten percent without altering solver resources or equations", () => {
     const value = fixture();
-    // The supplied solver already contains ordinary 2.0 constants. Select only
+    // The supplied solver already contains ordinary numeric constants. Select only
     // the two final presentation expressions, never count unrelated equations.
     const gainShaders = value.shaderSources.filter(
       (source) =>
-        source.includes("texture2D(uTexture, vUv).rgb * 2.0") ||
-        source.includes("C.rgb *= diffuse * 2.0"),
+        source.includes("texture2D(uTexture, vUv).rgb * 1.1") ||
+        source.includes("C.rgb *= diffuse * 1.1"),
     );
     expect(gainShaders).toHaveLength(2);
     expect(
-      gainShaders.some((source) => source.includes("texture2D(uTexture, vUv).rgb * 2.0")),
+      gainShaders.some((source) => source.includes("texture2D(uTexture, vUv).rgb * 1.1")),
     ).toBe(true);
-    expect(gainShaders.some((source) => source.includes("C.rgb *= diffuse * 2.0"))).toBe(true);
+    expect(gainShaders.some((source) => source.includes("C.rgb *= diffuse * 1.1"))).toBe(true);
     expect(value.canvas.style.background).toBe(
-      "linear-gradient(135deg,rgba(0,190,255,.24),rgba(123,44,255,.24),rgba(255,40,180,.24))",
+      "linear-gradient(135deg,rgba(0,190,255,.132),rgba(123,44,255,.132),rgba(255,40,180,.132))",
     );
     expect(value.owned.programs.size).toBe(10);
     expect(value.owned.shaders.size).toBe(12);
     expect(value.owned.buffers.size).toBe(2);
+  });
+  it.each([
+    ["1", "0.15"],
+    ["0.8", "0.15"],
+    ["0.15", "0.15"],
+    ["0.05", "0.05"],
+    ["0", "0"],
+    ["unknown", "0.15"],
+    ["-1", "0.15"],
+    ["2", "0.15"],
+  ])("caps only decorative opacity %s at %s and preserves quieter source", (authored, expected) => {
+    const value = fixture({ authoredOpacity: authored });
+    expect(value.canvas.style.opacity).toBe(expected);
+    expect(value.stylePriorities.get("opacity")).toBe("important");
+    expect(value.stylePriorities.size).toBe(1);
+    expect(value.canvas.style.pointerEvents).toBe("none");
+    expect(value.owned.textures.size).toBe(8);
+    expect(value.owned.programs.size).toBe(10);
+    expect(value.owned.shaders.size).toBe(12);
+    expect(value.owned.buffers.size).toBe(2);
+  });
+  it.each([0, 2])("leaves decoration styles untouched when marker count is %s", (markers) => {
+    const value = fixture({ markers });
+    expect(value.canvas.style.opacity).toBeUndefined();
+    expect(value.canvas.style.background).toBeUndefined();
+    expect(value.stylePriorities.size).toBe(0);
+    expect(value.contextCalls()).toBe(0);
+    expect(value.rafs.size).toBe(0);
   });
   it("accounts actual RGBA half-float fallback and deletes old targets before resize allocation", () => {
     const value = fixture({ rgbaFallback: true });
@@ -460,6 +509,71 @@ describe("fixed generated fluid library", () => {
     expect(Number(value.canvas.dataset.cafeFluidTextureBytes)).toBeLessThanOrEqual(
       16 * 1024 * 1024,
     );
+  });
+  it.each([
+    [1601, 320],
+    [4096, 2000],
+    [4096, 1],
+  ])(
+    "fills logical %sx%s while preserving every GPU, cadence and pointer bound",
+    (width, height) => {
+      const value = fixture({ width, height, rgbaFallback: true });
+      expect(value.canvas.dataset.cafeFluidState).toBe("paused");
+      expect(value.canvas.width).toBeLessThanOrEqual(512);
+      expect(value.canvas.height).toBeLessThanOrEqual(512);
+      expect(value.canvas.width).toBeGreaterThanOrEqual(1);
+      expect(value.canvas.height).toBeGreaterThanOrEqual(1);
+      if (height === 1) {
+        expect(value.canvas.width).toBe(512);
+        expect(value.canvas.height).toBe(1);
+      }
+      expect(
+        value.allocations.every(
+          (target) =>
+            target.width >= 1 &&
+            target.width <= 1024 &&
+            target.height >= 1 &&
+            target.height <= 1024,
+        ),
+      ).toBe(true);
+      expect(Number(value.canvas.dataset.cafeFluidTextureBytes)).toBeLessThanOrEqual(
+        16 * 1024 * 1024,
+      );
+      expect(value.owned.textures.size).toBe(8);
+      expect(value.owned.framebuffers.size).toBe(8);
+      expect(value.owned.programs.size).toBe(10);
+      expect(value.owned.shaders.size).toBe(12);
+      expect(value.owned.buffers.size).toBe(2);
+      const allocations = value.allocations.length;
+      value.document.documentElement.dataset.cafeVisible = "true";
+      value.fire(value.window, "cafe-visibility-changed");
+      value.fire(value.window, "pointermove", {
+        isTrusted: true,
+        clientX: width / 2,
+        clientY: height / 2,
+      });
+      value.tick();
+      expect(value.canvas.dataset.cafeFluidState).toBe("running");
+      expect(value.canvas.dataset.cafeFluidPointerInputs).toBe("1");
+      expect(value.canvas.dataset.cafeFluidFrames).toBe("13");
+      expect(value.rafs.size).toBe(1);
+      expect(value.allocations).toHaveLength(allocations);
+      value.fire(value.window, "pagehide");
+      for (const set of Object.values(value.owned)) expect(set.size).toBe(0);
+      expect(value.rafs.size).toBe(0);
+      expect(value.liveListeners()).toBe(0);
+    },
+  );
+  it.each([
+    [4097, 200],
+    [4096, 2001],
+  ])("refuses logical %sx%s before creating a GL context", (width, height) => {
+    const value = fixture({ width, height });
+    expect(value.canvas.dataset.cafeFluidState).toBe("unsupported");
+    expect(value.contextCalls()).toBe(0);
+    expect(value.rafs.size).toBe(0);
+    expect(value.allocations).toHaveLength(0);
+    expect(value.liveListeners()).toBe(0);
   });
   it("pauses on both actual document and native presentation visibility without budget renewal", () => {
     const value = fixture();
@@ -803,7 +917,7 @@ describe("fixed generated fluid library", () => {
     const value = fixture({ unsupported: true });
     expect(value.canvas.dataset.cafeFluidState).toBe("unsupported");
     expect(value.canvas.style.background).toBe(
-      "linear-gradient(135deg,rgba(0,190,255,.24),rgba(123,44,255,.24),rgba(255,40,180,.24))",
+      "linear-gradient(135deg,rgba(0,190,255,.132),rgba(123,44,255,.132),rgba(255,40,180,.132))",
     );
     expect(value.rafs.size).toBe(0);
     expect(value.liveListeners()).toBe(0);

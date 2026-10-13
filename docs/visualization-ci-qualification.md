@@ -1,143 +1,95 @@
 # Visualization CI qualification
 
-Status: Implemented; native multi-platform delivery requires the exact hosted run
+Status: Qualification procedure for the current Full-access browser path
 Created: 2026-10-13 18:22:30 JST (UTC+0900)
-Last updated: 2026-10-13 20:17:09 JST (UTC+0900)
+Last updated: 2026-10-13 23:38:27 JST (UTC+0900)
 
-These checks qualify committed synthetic fixtures using the repository's pinned
-Node, Corepack/Yarn, Chromium and existing Electron. They do not install a runtime,
-open providers or a user profile, or establish live account capacity. Keep the
-ordinary desktop launch and the [execution host](decisions/agent-visualization-execution-host.md)
-security policy separate from disposable hosted test infrastructure.
+The current feature executes ordinary same-origin browser frames, not a separate
+native source host. CI selects real browser input/layout/lifecycle/App protocol
+and inert current-frame PNG fixtures. Earlier native-host checks remain historical
+and are not release evidence for this architecture. The user explicitly replaced
+that architecture; its helper setup and active-host qualification steps are removed
+from Quality. This does not disable Electron's ordinary application policies or
+change provider permissions, unrelated browser contexts or artifact qualification.
 
-## Exact checks, not equivalent-looking measurements
+## Reproducible local checks
 
-The four offline chat font faces retain complete byte equality, fixed independent
-digests, headers, descriptor limits and their full license. Native byte comparison
-avoids traversing every byte as a test-framework object; first/middle/last-byte
-changes and truncated/extended buffers still fail. The fixed fluid library runs
-inside a fresh ordinary Node VM realm only in its deterministic test harness.
-This VM is not a security boundary for untrusted source. All original frames,
-resource counters, phase limits and disposal checks remain enforced.
-
-SVG advance (`getComputedTextLength`) is not the painted glyph's ink bounds.
-The chart fixture instead verifies each label's identity transform and compares
-local ink bounds with screen ink bounds, independently preserving root aspect,
-font size, layout and overflow checks. Deliberate nonuniform label scaling and
-`textLength`/`lengthAdjust` distortion must fail rather than being hidden by a
-larger comparison tolerance.
-
-Mermaid caches only immutable escaped bundle text, not documents or runtime
-state. Every render retains a fresh nonce, opaque iframe, restrictive CSP and
-one-use port. The family probes use an absolute ten-second observation allowance,
-clean up every settlement/error path, refuse malformed matching replies, and
-record only finite code-owned phases. A missing reply does not identify an engine
-phase or prove that an unsafe graph was admitted. Graph-security admission uses
-that same strict probe transport and exact sentinel/refusal validation, with
-the real pinned parser and only the final layout replaced by its fixed sentinel.
-Malformed matching output cannot qualify a negative security result.
-
-Localized diagnostic-copy fixtures wait for the disclosure's actual measured
-layout and bind each native click to exactly one fresh clipboard invocation.
-The indexed invocation must retain the current locale heading and unchanged
-private JSON. A previous successful locale's payload is not evidence that the
-new gesture reached its current handler; no production locale or input policy
-is changed by this fixture qualification.
-
-Manual generated Run also waits for the timeline's accepted public initial-load
-admission, just as the exact native binding does. Painting a title is not proof
-that registration has committed. The connection-loss fixture observes the real
-list completion and positive native geometry before its gesture, then retains
-the same late-acknowledgement retirement and no-visible-commit assertions. A
-separate controlled-admission case proves an early disabled gesture prepares no
-private ticket or host, while the admitted gesture starts exactly once. No
-forced scrolling, media override, retry or deadline expansion supplies readiness.
-
-The comprehensive native fixture also qualifies partial startup on the same
-host: a subminimum initial mask is refused before child allocation, then a
-single failure injected only into its exact synthetic parent's native mask
-attachment occurs after real child allocation and before bootstrap/source.
-Both operations must leave the owner alive and the host available; the allocated
-child must have positively observed destruction. A real minimal SVG then must
-preview at its exact dimensions with verified pixels on that same host. The
-`partialStartupRecovery` report and finite
-`native-partial-startup-same-host-preview` phase establish this sequence, not a
-live user's historical failure cause or permission to reset a quarantined host.
-Synthetic unit cases independently retain non-destruction/shared-renderer
-refusals, reentrant cancellation, private-window uncertainty and opaque diagnostic
-projection. Existing mask, sandbox, process identity and deadline bounds remain
-unchanged.
-
-## GPU-less Linux runner
-
-`nativeVisualizationFixturePolicy.ts` selects the pinned full GLES SwiftShader
-driver only for the comprehensive, synthetic ranked-bar and font entrypoints on
-Linux. An exact retained private bar replay and every other host retain their
-ordinary driver. Conflicting switches, unsafe WebGL fallback, disabled GPU or
-renderer sandboxing, in-process GPU and late configuration are refused.
-
-Before source execution the fixture must observe the native GPU process's exact
-driver tuple, `sandboxed: true` and `inProcessGpu: false`. Requested switches and
-page-owned canvas properties are not substitutes for that observation. This CPU
-JIT graphics path is confined to trusted committed fixtures; it adds no production
-graphics fallback or new permission. The existing Linux sandbox-helper setup is
-confined to the disposable hosted runner, never a user's machine.
-
-Preserve bounded raw child stdout/stderr before diagnosing failures. Only exactly
-qualified native diagnostics may be classified as expected; SSL/GPU/unknown
-errors remain failures. Pinned Linux Chromium logs its exact “Crashing because
-hung” FATAL when Electron deliberately retires an exclusive renderer. Bar/font
-fixtures may classify that message only once for each positively observed exact
-native crash-request PID followed by successful same-generation retirement and
-actual gone/destroyed state. Merely matching a message, an early crash, a foreign
-PID, a duplicate, or a missing/uncertain witness never qualifies. The observer
-preserves the original native call, receiver, arguments, errors and retirement
-Promise; it does not request a crash or alter production process policy.
-
-Clipped-capture failures retain a finite tuple describing
-the exact zoom/DPR, expected/reported/encoded dimensions, sample channels and
-capture outcome, plus the exact synthetic guest PNG when available. An absent
-image or unobserved phase is not evidence of a particular cause.
-
-The deliberate scrolling fixture verifies three fixed lower interior content
-points, complete bitmap length and exact opaque-black channels. Native scrollbar
-gutters are not authored page pixels; sampling a gutter cannot qualify or reject
-the page's content. Exact viewport/document identity, zoom and physical dimensions
-remain independently required, and all other native colour checks are unchanged.
-On a failed normal-motion observation only, the ranked-bar fixture records the
-native system reduced-motion boolean and its last actual frame boolean, or null
-when unobserved. This diagnostic neither changes native preferences nor supplies
-a successful animation observation; the original five-second check remains.
-
-## Replay and delivery boundaries
-
-Use existing dependencies, with the repository-pinned standalone Node on PATH:
+Use the repository-pinned Node and Corepack Yarn; do not resolve another runtime
+or install dependencies as a workaround. Runtime/lock/action pins are unchanged.
+With that runtime already on PATH:
 
 ```sh
-corepack yarn workspace @cafecode/shared test src/visualizationFonts.test.ts src/visualizationFluidRuntime.test.ts
-corepack yarn workspace @cafecode/web test:browser src/components/visualizations/VisualizationCommitChart.browser.tsx src/components/MermaidFamilies.browser.tsx
-corepack yarn workspace @cafecode/desktop test src/visualizations/nativeVisualizationFixturePolicy.test.ts src/visualizations/NativeVisualizationElectron.e2e.test.ts
-corepack yarn workspace @cafecode/desktop test src/visualizations/ElectronVisualizationSurface.test.ts src/visualizations/DesktopVisualizationHost.test.ts src/visualizations/visualizationDiagnostics.test.ts src/visualizations/DesktopVisualizationPool.test.ts
-corepack yarn workspace @cafecode/desktop test src/visualizations/nativeVisualizationFixturePixels.test.ts
-corepack yarn workspace @cafecode/web test:browser src/components/chat/ProviderDiagnosticWorkEntry.browser.tsx src/components/MermaidSecurity.browser.tsx src/components/MermaidFamilies.browser.tsx
-CAFE_CODE_VISUALIZATION_E2E=1 corepack yarn workspace @cafecode/desktop test src/visualizations/NativeVisualizationElectron.e2e.test.ts
-CAFE_CODE_VISUALIZATION_E2E=1 CAFE_CODE_VISUALIZATION_FONT_REPLAY=1 corepack yarn workspace @cafecode/desktop test src/visualizations/NativeVisualizationElectron.e2e.test.ts
+corepack yarn fmt
+corepack yarn i18n:extract
+corepack yarn fmt:check
+corepack yarn lint
+corepack yarn audit:repository
+NODE_OPTIONS=--max-old-space-size=4096 corepack yarn typecheck --force --concurrency=1 --continue=always
+corepack yarn test --force
+corepack yarn workspace @cafecode/web test:browser
+corepack yarn workspace @cafeai/cafe-code build:bundle
+CAFE_CODE_MCP_BRIDGE_E2E=1 corepack yarn workspace @cafeai/cafe-code exec vitest run --config vitest.e2e.config.ts integration/CafeMcpBridge.e2e.test.ts
+corepack yarn build:desktop --force
 ```
 
-Linux runs the opt-in native commands under the workflow's existing Xvfb runner.
-Do not copy that hosted OS setup to a developer machine. Full formatting, lint,
-typecheck, default and browser suites, the copied MCP bridges and the final forced
-desktop build remain required; focused tests do not replace those gates.
+The forced desktop build is last, after all tests on unchanged source. Preserve
+exact working-tree inputs, commands, toolchain identity, byte counts and hashes
+of private logs. A changed source/environment reopens affected gates. Default
+tests do not launch live providers or read real accounts/profiles.
 
-Failure artifacts contain only the two named synthetic browser fixture screenshot
-directories and allowlisted synthetic native guest PNGs in exclusively prepared
-runner-temp directories. They exclude the user chart replay, source/JSON, profiles
-and parent screen, have seven-day retention, and never qualify a release.
+The build still validates the emitted ordinary application and global dictation
+preloads against Electron's supported sandbox-preload module set. Both artifacts
+are required; a missing file, shared relative chunk, unsupported module or dynamic
+import fails the build. There is no visualization preload in the current inline
+design. Removing that retired artifact does not relax these application checks.
 
-Bind delivery to the exact push event, `dev` head and run. All three platform
-Quality jobs, native artifact targets, Linux AppImage qualification and the four
-nonempty unexpired matching release artifacts must pass. Local macOS evidence
-does not qualify Windows/Linux or manual parent-compositor and original
-publication phases. Preserve raw failures and their byte counts/SHA-256 before
-diagnosis; do not guess a production fix or weaken deadlines, workers, assertions
-or sandbox permissions to turn an incomplete observation into a pass.
+The serial uncached typecheck uses the pinned Turbo diagnostic policy to finish
+every package after a failure; it still exits unsuccessfully if any package
+fails. This is not a retry or permission to proceed to publication with errors.
+
+## Browser assertions
+
+Current visualization files exercise Full-access denial/late responses, actual
+clickable source frames, full-width/natural-height flow, multiple visible units,
+stable partial-scroll document identity, true offscreen teardown, quiet menu,
+private disclosure and owner loss. The App bridge uses actual WindowProxy messages
+and registers before parsing so SDK initialization cannot be lost. Consent is
+one-use and private JSON remains deliberate; backend independently tests exact
+configured-server and current-policy admission.
+
+Current PNG fixtures verify real SVG gradients, HTML/chart text, actual canvas/
+image/WebGL pixels, explicit abort/decode/serialization limits, owner/document
+replacement and omission/refusal of active or unreadable content. Arbitrary WebGL
+that does not preserve its drawing buffer may not retain pixels at export time;
+the bundled decorative helper preserves its buffer. No saved preview substitutes.
+
+Font checks retain complete fixed-byte equality, independent digests, headers,
+descriptor limits and OFL notice. Fluid checks preserve the actual supplied
+solver, allocation/resource identity, static/reduced-motion/context-loss handling,
+pointer progress and exact cleanup. Actual glyph ink bounds must remain uniformly
+scaled, not merely an SVG advance or family-name assertion.
+
+Linux retains the complete browser suite. Windows/macOS use the existing focused
+subset plus current history/owner/App/capture fixtures, with original worker caps,
+deadlines and provider-owned input/reduced-motion contexts. No raw CDP mutations,
+media mocks, forced hover CSS or retries substitute for input qualification.
+Mermaid remains a separate inert renderer and its admission/export tests remain.
+
+## Native artifacts and failure evidence
+
+Copied MCP bridge artifacts run as independent bundles in private synthetic
+directories with the existing native executable and temporary test credentials.
+They qualify audience/endpoint/transport construction, not a real provider.
+Every applicable Quality/native-artifact/Linux AppImage job and nonempty unexpired
+exact-run/head release artifact must pass before claiming hosted delivery.
+Diagnostic ZIPs never qualify a release; dev push does not authorize tag publication.
+
+Preserve raw failed-job logs privately with byte count/SHA-256 before diagnosis.
+Only exact synthetic fixture screenshots are uploaded; no user source, retained
+chart, profile or whole attachment/temporary tree is published. Missing pixels
+or unobserved phases are not evidence of a cause.
+
+Local fixtures do not prove user-owned rebuilt app adoption, installed IME/
+screen-reader/native dialog delivery, physical memory accounting, or native
+Windows/Linux outcomes from a Mac. Same-origin Full-access source remains
+privileged even when every data/protocol/lifecycle assertion passes.

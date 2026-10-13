@@ -91,6 +91,11 @@ import {
   type SchedulingSessionBinding,
   type SchedulingSessionBroker,
 } from "../../scheduledFollowups/sessionRuntime.ts";
+import {
+  installVisualizationSessionRuntime,
+  type VisualizationSessionBroker,
+} from "../../visualizations/sessionRuntime.ts";
+import { VisualizationGenerationId } from "@cafecode/contracts/visualizations";
 const decodeCodexSettings = Schema.decodeSync(CodexSettings);
 const decodeMessageId = Schema.decodeUnknownSync(MessageId);
 const decodeNativeNotification = Schema.decodeUnknownSync(EffectCodexSchema.ServerNotification);
@@ -8828,6 +8833,71 @@ function schedulingCase(
     ),
   );
 }
+
+it.effect("registers visualization MCP only for the actual Codex Full-access launch", () =>
+  schedulingCase(({ createAdapter }) =>
+    Effect.gen(function* () {
+      const instance = ProviderInstanceId.make("codex-inline-fixture");
+      const generation = VisualizationGenerationId.make("00000000-0000-4000-8000-000000000001");
+      const launch = { command: process.execPath, args: [], env: { ELECTRON_RUN_AS_NODE: "1" } };
+      const activate = vi.fn(async () => {});
+      const dispose = vi.fn(async () => {});
+      const bind = vi.fn<VisualizationSessionBroker["bind"]>(async (identity) => ({
+        name: "cafe-visualizations-fixture",
+        launch,
+        authority: {
+          threadId: identity.threadId,
+          providerInstanceId: instance,
+          sessionGeneration: generation,
+          runtimeGeneration: generation,
+          tokenDigest: "a".repeat(64),
+          serverName: "cafe-visualizations-fixture",
+        },
+        activate,
+        dispose,
+        claimNativeCompletion: async () => undefined,
+      }));
+      const uninstall = installVisualizationSessionRuntime({
+        bind,
+        authorize: async () => {
+          throw new Error("Fixture has no HTTP capability.");
+        },
+        close: async () => {},
+      });
+      yield* Effect.addFinalizer(() => Effect.sync(uninstall));
+      const factory = makeRuntimeFactory();
+      const adapter = yield* createAdapter(instance, factory.factory);
+      const restricted = asThreadId("visualization-restricted");
+      const full = asThreadId("visualization-full");
+      yield* adapter.startSession({ threadId: restricted, runtimeMode: "approval-required" });
+      assert.equal(bind.mock.calls.length, 0);
+      assert.equal(factory.runtimes[0]!.options.visualizationMcp, undefined);
+      yield* adapter.startSession({ threadId: full, runtimeMode: "full-access" });
+      assert.deepEqual(
+        bind.mock.calls.map(([identity]) => identity),
+        [
+          {
+            threadId: full,
+            providerInstanceId: instance,
+            provider: "codex",
+            runtimeMode: "full-access",
+          },
+        ],
+      );
+      assert.deepEqual(factory.runtimes[1]!.options.visualizationMcp, {
+        name: "cafe-visualizations-fixture",
+        launch,
+      });
+      assert.equal(activate.mock.calls.length, 1);
+      yield* adapter.stopSession(restricted);
+      assert.equal(dispose.mock.calls.length, 0);
+      yield* adapter.stopSession(full);
+      // Explicit retirement and the existing adapter scope finalizer both
+      // request exact-binding cleanup; the production binding is idempotent.
+      assert.equal(dispose.mock.calls.length, 2);
+    }),
+  ),
+);
 
 it.effect(
   "isolates scheduling by Codex chat, account and runtime generation while preserving resume",

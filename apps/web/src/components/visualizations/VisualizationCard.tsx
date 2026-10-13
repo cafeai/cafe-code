@@ -1,16 +1,12 @@
 import { memo, useCallback, useEffect, useId, useLayoutEffect, useRef, useState } from "react";
-import {
-  ChartNoAxesCombinedIcon,
-  ChevronRightIcon,
-  EllipsisIcon,
-  PlayIcon,
-  SquareIcon,
-} from "lucide-react";
-import type { EnvironmentId, ThreadId } from "@cafecode/contracts";
+import { ChartNoAxesCombinedIcon, EllipsisIcon, PlayIcon, SquareIcon } from "lucide-react";
+import type { EnvironmentId, RuntimeMode, ThreadId } from "@cafecode/contracts";
 import type { TimestampFormat } from "@cafecode/contracts/settings";
 import {
   VisualizationDetailsResult,
   VisualizationExportHtmlResult,
+  VisualizationInlineResult,
+  VisualizationInlineFrameResult,
   type VisualizationTimelineEntry,
 } from "@cafecode/contracts/visualizationApi";
 import * as Schema from "effect/Schema";
@@ -19,9 +15,9 @@ import { useUiLocale } from "~/i18n";
 import { formatDiagnosticTimestamp } from "../../timestampFormat";
 import { copyTextToClipboard } from "../../lib/copyToClipboard";
 import { copyPngToClipboard, savePngToDisk } from "../../lib/imageExport";
+import { useDelayedFlag } from "../../hooks/useDelayedFlag";
 import { SubagentAvatar } from "../subagents/SubagentAvatar";
 import { Button } from "../ui/button";
-import { Collapsible, CollapsiblePanel, CollapsibleTrigger } from "../ui/collapsible";
 import { Dialog, DialogPopup, DialogTitle } from "../ui/dialog";
 import {
   Menu,
@@ -35,27 +31,34 @@ import {
 import { Tooltip, TooltipTrigger, TooltipPopup } from "../ui/tooltip";
 import { downloadPortableVisualization } from "./visualizationDownload";
 import { observeVisualizationOwner } from "./visualizationOwner";
-import { acquireVisualizationPoster } from "./visualizationPoster";
 import {
-  useAutomaticVisualization,
-  useVisualizationAvailability,
-  useVisualizationSnapshot,
+  useVisualizationReservation,
   useVisualizationViewer,
-  visualizationBindingKey,
   type VisualizationPane,
 } from "./VisualizationViewerProvider";
 import { VisualizationPrivateText } from "./VisualizationPrivateText";
 import { visualizationEntryIdentity } from "./visualizationEntryIdentity";
-import { visualizationClippingAncestors, visualizationInlineHeight } from "./visualizationGeometry";
+import { visualizationClippingAncestors, visualizationGeometry } from "./visualizationGeometry";
+import { visualizationPresentation } from "./visualizationPresentation";
+import {
+  createInlineVisualizationDocument,
+  inlineVisualizationColors,
+  measureInlineVisualization,
+} from "./inlineVisualizationDocument";
+import { captureInlineVisualization } from "./visualizationInlineCapture";
+import { InlineMcpAppBridge } from "./InlineMcpAppBridge";
 
 const decodeDetails = Schema.decodeUnknownSync(VisualizationDetailsResult);
 const decodeHtml = Schema.decodeUnknownSync(VisualizationExportHtmlResult);
+const decodeInline = Schema.decodeUnknownSync(VisualizationInlineResult);
+const decodeTouch = Schema.decodeUnknownSync(VisualizationInlineFrameResult);
 
 /**
- * The row owns an inert poster/anchor. Generated execution is admitted by the
- * bounded viewport pool; external Apps still require a deliberate Run gesture.
- * Source/private JSON is absent from props, collapsed DOM, tooltips and history
- * projections. Collapse, recycling or owner-generation loss erases reader bytes.
+ * A Full-access visualization executes in an ordinary same-origin iframe.
+ * There is deliberately no Electron viewer or sandbox claim. Source is never
+ * injected into Cafe's parent DOM, but this unsandboxed document CAN use its
+ * parent's authority; authoritative backend permission is therefore mandatory.
+ * Offscreen ownership releases the actual frame, not a saved preview bitmap.
  */
 export const VisualizationCard = memo(function VisualizationCard({
   environmentId,
@@ -66,6 +69,7 @@ export const VisualizationCard = memo(function VisualizationCard({
   onScrollIntent,
   onLayoutIntent,
   generatedAdmissionReady = true,
+  runtimeMode = null,
 }: {
   environmentId: EnvironmentId;
   threadId: ThreadId;
@@ -74,235 +78,120 @@ export const VisualizationCard = memo(function VisualizationCard({
   pane?: VisualizationPane;
   onScrollIntent?: (deltaY: number) => boolean | void;
   onLayoutIntent?: (anchor: HTMLElement, height: number) => (() => void) | undefined;
-  /** A real virtualized timeline admits generated execution only after its
-   * public initial-load completion. Standalone cards have no such bootstrap. */
   generatedAdmissionReady?: boolean;
+  /** Received exact-thread policy only. A composer draft/default is not authority. */
+  runtimeMode?: RuntimeMode | null;
 }) {
-  const uiLocale = useUiLocale();
-  const viewer = useVisualizationViewer();
-  const automatic = useAutomaticVisualization();
-  const manualAllowed = useVisualizationAvailability();
-  const reference = entry.reference;
-  const admissionReady = reference.purpose !== "generated-visualization" || generatedAdmissionReady;
-  // One immutable revision may appear in several invocations or panes. Neither
-  // another card's controls nor its recycling may acquire/revoke this anchor.
+  const uiLocale = useUiLocale(),
+    viewer = useVisualizationViewer(),
+    reference = entry.reference;
   const anchorId = useId();
-  const entryKey = visualizationEntryIdentity(entry);
-  const ownerPane = pane ?? viewer?.defaultPane;
-  const key =
-    ownerPane && viewer
-      ? viewer.key(ownerPane, { environmentId, threadId, reference, entryKey })
-      : visualizationBindingKey({ environmentId, threadId, reference, entryKey, anchorId });
+  const key = JSON.stringify([
+    environmentId,
+    threadId,
+    visualizationEntryIdentity(entry),
+    anchorId,
+  ]);
   const anchor = useRef<HTMLDivElement | null>(null);
+  const frameRef = useRef<HTMLIFrameElement | null>(null);
+  const [frame, setFrame] = useState<HTMLIFrameElement | null>(null);
   const [visible, setVisible] = useState(false);
-  const [inlineHeight, setInlineHeight] = useState(700);
-  const [poster, setPoster] = useState<{ key: string; url: string; blob: Blob } | null>(null);
-  const [posterFailure, setPosterFailure] = useState(false);
+  const [paused, setPaused] = useState<string | null>(null);
+  const [failed, setFailed] = useState<string | null>(null);
   const [attempt, setAttempt] = useState(0);
-  const [expanded, setExpanded] = useState({ key, value: false });
-  const open = expanded.key === key && expanded.value;
+  const [height, setHeight] = useState({
+    key,
+    value: Math.max(80, Math.min(2000, reference.height)),
+    constrained: false,
+  });
+  const [installed, setInstalled] = useState<{
+    key: string;
+    payload: VisualizationInlineResult;
+    html: string;
+  } | null>(null);
+  const [loaded, setLoaded] = useState<Document | null>(null);
+  const [appReady, setAppReady] = useState<string | null>(null);
+  const [detailAttempt, setDetailAttempt] = useState(0);
+  const [expanded, setExpanded] = useState(false);
+  const [inspection, setInspection] = useState<string | null>(null);
   const [details, setDetails] = useState<{ key: string; value: VisualizationDetailsResult } | null>(
     null,
   );
   const [detailFailure, setDetailFailure] = useState(false);
-  const [feedback, setExportOutcome] = useState<
+  const [htmlConsent, setHtmlConsent] = useState<string | null>(null);
+  const [exportOutcome, setExportOutcome] = useState<
     "copied" | "saved" | "downloaded" | "failed" | null
   >(null);
-  const [htmlConsent, setHtmlConsent] = useState<string | null>(null);
-  const htmlConsentOwned = useRef<() => boolean>(() => false);
-  const downloadRelease = useRef<(() => void) | null>(null);
-  const committed = useRef(key);
-  const generation = useRef(0);
-  const privateOwned = useRef<() => boolean>(() => false);
-  const posterOwned = useRef<() => boolean>(() => false);
-  const exportAbort = useRef<AbortController | null>(null);
-  const active = useVisualizationSnapshot(key);
-  const live = active?.status === "active" && active.visible !== false;
-  const running = active?.status === "active";
-  const quiet =
-    reference.purpose === "generated-visualization" &&
-    automatic &&
-    viewer?.visibleLifetime() === true;
-  const [menu, setMenu] = useState({ key, value: false });
-  const menuOpen = menu.key === key && menu.value;
-  const menuGeneration = useRef(0);
-  const menuPresented = useRef(false);
-  const [menuExiting, setMenuExiting] = useState(false);
-  const [inspectionExiting, setInspectionExiting] = useState(false);
-  const [consentExiting, setConsentExiting] = useState(false);
-  const menuClosure = useRef<{
-    key: string;
-    promise: Promise<void>;
-    resolve: () => void;
-  } | null>(null);
-  const scrollIntent = useRef(onScrollIntent);
-  const layoutIntent = useRef(onLayoutIntent);
-  useLayoutEffect(() => {
-    scrollIntent.current = onScrollIntent;
-    layoutIntent.current = onLayoutIntent;
-  }, [onScrollIntent, onLayoutIntent]);
-  // Callback replacement is presentation, not anchor ownership. A streaming
-  // timeline can publish a fresh callback on every render; unregistering this
-  // same card for that change would retire its viewer and latch a terminal
-  // epoch. Forward only the newest committed callback through a stable handle.
-  const forwardScrollIntent = useCallback((deltaY: number) => {
-    return scrollIntent.current?.(deltaY);
-  }, []);
-  const forwardLayoutIntent = useCallback((element: HTMLElement, height: number) => {
-    return layoutIntent.current?.(element, height);
-  }, []);
-  useEffect(() => {
-    if (
-      quiet &&
-      !menuOpen &&
-      !menuExiting &&
-      !open &&
-      !inspectionExiting &&
-      htmlConsent !== key &&
-      !consentExiting
-    )
-      void viewer?.presentationOverlay(key, false);
-  }, [
-    quiet,
-    menu,
-    menuOpen,
-    menuExiting,
-    open,
-    inspectionExiting,
-    htmlConsent,
-    consentExiting,
+  const committed = useRef({
     key,
-    viewer,
-  ]);
-  useEffect(
-    () => () => {
-      menuGeneration.current += 1;
-      menuClosure.current?.resolve();
-      menuClosure.current = null;
-      menuPresented.current = false;
-      // Source inspectors/menu portals must never leave hidden sibling pixels
-      // stranded when a recycled row or exact owner disappears mid-open.
-      void viewer?.presentationOverlay(key, false);
-    },
-    [key, viewer],
-  );
-  const changeMenu = (value: boolean) => {
-    const generation = ++menuGeneration.current;
-    if (!value) {
-      setMenu({ key, value: false });
-      if (!menuPresented.current) {
-        // An interrupted hide request may never have mounted a popup, so no
-        // exit-completion event will arrive. Release that exact pending overlay
-        // directly; its late ACK cannot reopen the cancelled menu generation.
-        menuClosure.current?.resolve();
-        menuClosure.current = null;
-        void viewer?.presentationOverlay(key, false);
-      }
-      return;
-    }
-    menuClosure.current?.resolve();
-    let resolve!: () => void;
-    const promise = new Promise<void>((complete) => {
-      resolve = complete;
-    });
-    menuClosure.current = { key, promise, resolve };
-    void viewer?.presentationOverlay(key, true).then((accepted) => {
-      if (generation !== menuGeneration.current || committed.current !== key) return;
-      if (accepted) {
-        menuPresented.current = true;
-        setMenuExiting(true);
-        setMenu({ key, value: true });
-      } else {
-        menuClosure.current?.resolve();
-        menuClosure.current = null;
-        setExportOutcome("failed");
-      }
-    });
-  };
-  const afterMenuClosed = () => {
-    const closure = menuClosure.current?.key === key ? menuClosure.current : null;
-    return (closure?.promise ?? Promise.resolve()).then(() => {
-      // A quick reopen replaces the closure identity. A queued capture/expand
-      // must not restore native pixels through the newer popup or pending hide.
-      if (menuPresented.current || (menuClosure.current && menuClosure.current !== closure))
-        throw new Error("menu-still-presented");
-    });
-  };
-  const closeInspection = () => {
-    setExpanded({ key, value: false });
-    generation.current += 1;
-    setDetails(null);
-    setExportOutcome(null);
-    privateOwned.current = () => false;
-  };
+    fullAccess: runtimeMode === "full-access",
+    wanted: false,
+    uiLocale,
+  });
+  const readEpoch = useRef(0),
+    privateEpoch = useRef(0);
+  const exportAbort = useRef<AbortController | null>(null);
+  const downloadRelease = useRef<(() => void) | null>(null);
+  const privateOwned = useRef<() => boolean>(() => false);
+  const sourceOwned = useRef<() => boolean>(() => false);
+  const scrollIntent = useRef(onScrollIntent),
+    layoutIntent = useRef(onLayoutIntent);
+  const currentPermission = runtimeMode === "full-access";
+  const wanted =
+    currentPermission && generatedAdmissionReady && visible && paused !== key && failed !== key;
+  const granted = useVisualizationReservation(key, pane, wanted);
+  const running = wanted && granted && installed?.key === key;
+  const loading = useDelayedFlag(wanted && granted && installed?.key !== key);
+  const inlineHeight =
+    height.key === key ? height.value : Math.max(80, Math.min(2000, reference.height));
 
   useLayoutEffect(() => {
-    committed.current = key;
-    setMenuExiting(false);
-    setInspectionExiting(false);
-    setConsentExiting(false);
-    setDetails(null);
-    setExportOutcome(null);
-    setPoster(null);
-    return () => {
-      generation.current += 1;
-      privateOwned.current = () => false;
-      posterOwned.current = () => false;
-      exportAbort.current?.abort();
-      downloadRelease.current?.();
+    committed.current = {
+      key,
+      fullAccess: currentPermission,
+      wanted: wanted && granted,
+      uiLocale,
     };
-  }, [key]);
-  const register = viewer?.register;
-  useLayoutEffect(() => {
-    const element = anchor.current;
-    if (!admissionReady || !element || !register || !ownerPane) return;
-    return register({
-      environmentId,
-      threadId,
-      reference,
-      entryKey,
-      anchorId,
-      anchor: element,
-      opener: element,
-      pane: ownerPane,
-      poolKey: key,
-      onScrollIntent: forwardScrollIntent,
-      onLayoutIntent: forwardLayoutIntent,
-    });
-  }, [
-    register,
-    key,
-    environmentId,
-    threadId,
-    reference.artifactId,
-    reference.revisionId,
-    reference.purpose,
-    entryKey,
-    anchorId,
-    ownerPane,
-    forwardScrollIntent,
-    forwardLayoutIntent,
-    admissionReady,
-  ]);
-  useLayoutEffect(() => {
+    scrollIntent.current = onScrollIntent;
+    layoutIntent.current = onLayoutIntent;
+  }, [key, currentPermission, wanted, granted, uiLocale, onScrollIntent, onLayoutIntent]);
+  const bindFrame = useCallback(
+    (element: HTMLIFrameElement | null) => {
+      frameRef.current = element;
+      viewer?.frameMounted(key, element !== null);
+      setFrame(element);
+    },
+    [viewer, key],
+  );
+  useEffect(() => {
     const element = anchor.current;
     if (!element) return;
-    let frame = 0;
-    const measure = () => {
-      frame = 0;
-      const height = visualizationInlineHeight(element);
-      if (height !== null) setInlineHeight(height);
+    let intersecting = false;
+    const sample = () => {
+      // Ordinary DOM modals can paint above an iframe without tearing down its
+      // document. Inertness is not an offscreen transition: private inspectors
+      // and an App's own consent must not reset the still-visible chart.
+      const actuallyVisible =
+        intersecting &&
+        document.visibilityState === "visible" &&
+        visualizationGeometry(element, true) !== null;
+      setVisible(actuallyVisible);
     };
-    const schedule = () => {
-      if (!frame) frame = requestAnimationFrame(measure);
-    };
-    // Mounted, recycled cards alone observe their bounded shell ancestry. The
-    // passive poster and active host use exactly the same reserved dimensions.
-    const resize = new ResizeObserver(schedule);
-    for (const ancestor of visualizationClippingAncestors(element) ?? []) resize.observe(ancestor);
-    const visibility = new MutationObserver(schedule);
-    // Observe only the bounded exact ancestry, not history descendants. This
-    // restores a deferred size observation after a modal removes inertness.
+    const intersection = new IntersectionObserver(
+      (entries) => {
+        intersecting = entries[0]?.isIntersecting ?? false;
+        // A real offscreen sample permits a later new document. Theme, resize,
+        // hidden modals and component callback replacement are not restart intent.
+        if (!intersecting && visualizationClippingAncestors(element) !== null) {
+          setPaused(null);
+          setFailed(null);
+        }
+        sample();
+      },
+      { threshold: 0 },
+    );
+    intersection.observe(element);
+    const visibility = new MutationObserver(sample);
     let ancestor: HTMLElement | null = element;
     for (let count = 0; ancestor && count < 128; count += 1) {
       visibility.observe(ancestor, {
@@ -311,120 +200,294 @@ export const VisualizationCard = memo(function VisualizationCard({
       });
       ancestor = ancestor.parentElement;
     }
-    window.addEventListener("resize", schedule);
-    measure();
+    document.addEventListener("visibilitychange", sample);
+    window.addEventListener("resize", sample);
     return () => {
-      if (frame) cancelAnimationFrame(frame);
-      resize.disconnect();
+      intersection.disconnect();
       visibility.disconnect();
-      window.removeEventListener("resize", schedule);
+      document.removeEventListener("visibilitychange", sample);
+      window.removeEventListener("resize", sample);
     };
   }, [key]);
+
   useEffect(() => {
-    const element = anchor.current;
-    if (!element) return;
-    let near = false,
-      actualVisible = false;
-    // A nearby observer delivery is not an actual visibility sample. In
-    // particular, its initial false value on a recycled mount must not invent
-    // an offscreen epoch for a previously stopped, still-visible invocation.
-    const observe = (actualSample: boolean) => {
-      // Passive bitmap visibility is independent of native admission. Waiting
-      // for a timeline's public load must keep its inert saved poster available
-      // without registering a native binding or preparing a private ticket.
-      if (!admissionReady) return;
-      viewer?.observe(
-        key,
-        anchorId,
-        near,
-        actualVisible,
-        actualSample &&
-          document.visibilityState === "visible" &&
-          !document.querySelector('[role="dialog"], [role="alertdialog"]') &&
-          visualizationClippingAncestors(element) !== null,
-      );
-    };
-    const observer = new IntersectionObserver(
-      (entries) => {
-        actualVisible = entries[0]?.isIntersecting ?? false;
-        setVisible(actualVisible);
-        observe(true);
-      },
-      { rootMargin: "0px" },
-    );
-    observer.observe(element);
-    const nearby = admissionReady
-      ? new IntersectionObserver(
-          (entries) => {
-            near = entries[0]?.isIntersecting ?? false;
-            observe(false);
-          },
-          { root: visualizationClippingAncestors(element)?.[0] ?? null, rootMargin: "300px" },
-        )
-      : null;
-    nearby?.observe(element);
-    return () => {
-      observer.disconnect();
-      nearby?.disconnect();
-    };
-  }, [key, viewer, anchorId, admissionReady]);
-  useEffect(() => {
-    if (!visible || !reference.poster) {
-      setPoster(null);
-      return;
-    }
-    let disposed = false;
-    let acquired: Awaited<ReturnType<typeof acquireVisualizationPoster>> | null = null;
+    const token = ++readEpoch.current;
+    setInstalled(null);
+    setLoaded(null);
+    setAppReady(null);
+    sourceOwned.current = () => false;
+    if (!wanted || !granted || !viewer) return;
     const abort = new AbortController();
+    let disposed = false,
+      payload: VisualizationInlineResult | null = null;
+    let timer: ReturnType<typeof setTimeout> | undefined;
     const owner = observeVisualizationOwner(environmentId, () => {
       abort.abort();
-      acquired?.release();
-      acquired = null;
-      posterOwned.current = () => false;
-      setPoster(null);
-      setPosterFailure(true);
+      exportAbort.current?.abort();
+      sourceOwned.current = () => false;
+      setInstalled(null);
+      setLoaded(null);
+      setFailed(key);
     });
     const current = () =>
-      !disposed && !abort.signal.aborted && committed.current === key && owner.current();
-    posterOwned.current = current;
-    setPosterFailure(false);
-    void acquireVisualizationPoster(environmentId, threadId, reference, abort.signal)
-      .then((result) => {
+      !disposed &&
+      !abort.signal.aborted &&
+      token === readEpoch.current &&
+      committed.current.key === key &&
+      committed.current.fullAccess &&
+      committed.current.wanted &&
+      owner.current();
+    sourceOwned.current = current;
+    const tuple = { threadId, artifactId: reference.artifactId, revisionId: reference.revisionId };
+    const retire = (value: VisualizationInlineResult) => {
+      void owner.api?.visualizations
+        ?.retireInlineFrame?.({ ...tuple, frameId: value.frameId, ticket: value.ticket })
+        .catch(() => undefined);
+    };
+    const touch = async () => {
+      if (!current() || !payload) return;
+      try {
+        const value = decodeTouch(
+          await owner.api!.visualizations!.touchInlineFrame!({
+            ...tuple,
+            frameId: payload.frameId,
+            ticket: payload.ticket,
+          }),
+        );
+        if (!current()) return;
+        if (
+          value.threadId !== threadId ||
+          value.artifactId !== reference.artifactId ||
+          value.revisionId !== reference.revisionId ||
+          value.frameId !== payload.frameId ||
+          value.expiresAtMs <= Date.now()
+        )
+          throw new Error("visualization-grant-invalid");
+        timer = setTimeout(() => void touch(), 10_000);
+      } catch {
+        if (!current()) return;
+        setFailed(key);
+        setInstalled(null);
+      }
+    };
+    void viewer
+      .read(async () => {
+        if (
+          !current() ||
+          !owner.api?.visualizations?.inline ||
+          !owner.api.visualizations.touchInlineFrame ||
+          !owner.api.visualizations.retireInlineFrame
+        )
+          throw new Error("visualization-unavailable");
+        return decodeInline(await owner.api.visualizations.inline(tuple));
+      }, abort.signal)
+      .then((value) => {
+        // Received purpose/fullAccess and exact tuple are checked before source
+        // becomes iframe srcdoc. A late reply's backend action grant is retired,
+        // never installed under a newer permission, owner or recycled anchor.
+        if (
+          value.threadId !== threadId ||
+          value.artifactId !== reference.artifactId ||
+          value.revisionId !== reference.revisionId ||
+          value.purpose !== reference.purpose ||
+          value.fullAccess !== true ||
+          value.expiresAtMs <= Date.now()
+        ) {
+          retire(value);
+          throw new Error("visualization-inline-invalid");
+        }
         if (!current()) {
-          result.release();
+          retire(value);
           return;
         }
-        acquired = result;
-        setPoster({ key, url: result.url, blob: result.blob });
+        payload = value;
+        const html = createInlineVisualizationDocument(
+          value.html,
+          // Source may settle after an interface-language change. Read only
+          // the latest committed presentation instead of the request's stale
+          // closure; changing language never restarts the exact owned read.
+          visualizationPresentation(committed.current.uiLocale),
+          document.documentElement.classList.contains("dark"),
+          value.frameId,
+          reference.purpose === "generated-visualization",
+        );
+        if (!current()) {
+          retire(value);
+          payload = null;
+          return;
+        }
+        setInstalled({ key, payload: value, html });
+        timer = setTimeout(() => void touch(), 10_000);
       })
       .catch(() => {
-        if (current()) setPosterFailure(true);
+        if (current()) {
+          setFailed(key);
+          setInstalled(null);
+        }
       });
     return () => {
       disposed = true;
       abort.abort();
+      sourceOwned.current = () => false;
+      if (timer) clearTimeout(timer);
+      if (payload) retire(payload);
       owner.dispose();
-      acquired?.release();
-      posterOwned.current = () => false;
     };
-  }, [environmentId, threadId, key, reference, visible, attempt]);
+    // Presentation and callback changes never replace an admitted document.
+    // Their current values are applied through the exact loaded frame below.
+  }, [
+    environmentId,
+    threadId,
+    key,
+    reference.artifactId,
+    reference.revisionId,
+    reference.purpose,
+    wanted,
+    granted,
+    viewer,
+    attempt,
+  ]);
+
+  const frameCurrent = useCallback(
+    () =>
+      Boolean(
+        running &&
+        sourceOwned.current() &&
+        frameRef.current?.isConnected &&
+        frameRef.current === frame,
+      ),
+    [running, frame],
+  );
+  useLayoutEffect(() => {
+    if (!frame || !loaded || !running || frame.contentDocument !== loaded) return;
+    let disposed = false,
+      timer: ReturnType<typeof setTimeout> | undefined;
+    let layoutCancel: (() => void) | undefined;
+    const measure = () => {
+      timer = undefined;
+      if (
+        disposed ||
+        !sourceOwned.current() ||
+        frameRef.current !== frame ||
+        frame.contentDocument !== loaded
+      )
+        return;
+      const layout = measureInlineVisualization(loaded);
+      if (!layout) return;
+      const element = anchor.current;
+      if (element && element.getBoundingClientRect().height !== layout.height) {
+        layoutCancel?.();
+        layoutCancel = layoutIntent.current?.(element, layout.height);
+      }
+      setHeight((old) =>
+        old.key === key && old.value === layout.height && old.constrained === layout.constrained
+          ? old
+          : { key, value: layout.height, constrained: layout.constrained },
+      );
+    };
+    const schedule = () => {
+      if (!disposed && !timer) timer = setTimeout(measure, 250);
+    };
+    const resize = new ResizeObserver(schedule);
+    const mutation = new MutationObserver(schedule);
+    resize.observe(loaded.body);
+    mutation.observe(loaded.body, {
+      childList: true,
+      subtree: true,
+      characterData: true,
+      attributes: true,
+      attributeFilter: ["style", "class", "hidden", "open", "width", "height"],
+    });
+    const wheel = (event: WheelEvent) => {
+      if (
+        !event.isTrusted ||
+        !sourceOwned.current() ||
+        event.deltaMode !== 0 ||
+        !Number.isFinite(event.deltaY) ||
+        Math.abs(event.deltaY) > 10_000
+      )
+        return;
+      // Prevent the browser's chain only when this exact owning timeline really
+      // applied the delta. Otherwise ordinary browser scrolling remains native.
+      if (scrollIntent.current?.(event.deltaY) === true) event.preventDefault();
+    };
+    loaded.addEventListener("wheel", wheel, { passive: false });
+    void loaded.fonts.ready.then(schedule);
+    measure();
+    return () => {
+      disposed = true;
+      if (timer) clearTimeout(timer);
+      resize.disconnect();
+      mutation.disconnect();
+      loaded.removeEventListener("wheel", wheel);
+      layoutCancel?.();
+    };
+  }, [frame, loaded, running, key]);
+  useEffect(() => {
+    if (!loaded || !running) return;
+    const update = () => {
+      if (!sourceOwned.current() || frameRef.current?.contentDocument !== loaded) return;
+      const presentation = visualizationPresentation(uiLocale),
+        root = loaded.documentElement;
+      root.classList.toggle("dark", document.documentElement.classList.contains("dark"));
+      root.style.colorScheme = document.documentElement.classList.contains("dark")
+        ? "dark"
+        : "light";
+      root.lang = uiLocale;
+      root.dataset.cafeReducedMotion = String(presentation.reducedMotion);
+      root.style.setProperty("--cafe-interface-scale", String(presentation.scale));
+      for (const [name, value] of inlineVisualizationColors(presentation))
+        root.style.setProperty(name, value);
+      loaded.defaultView?.dispatchEvent(new Event("cafe-presentation-changed"));
+    };
+    const theme = new MutationObserver(update);
+    theme.observe(document.documentElement, {
+      attributes: true,
+      attributeFilter: ["class", "style"],
+    });
+    const motion = matchMedia("(prefers-reduced-motion: reduce)");
+    motion.addEventListener("change", update);
+    update();
+    return () => {
+      theme.disconnect();
+      motion.removeEventListener("change", update);
+    };
+  }, [loaded, running, uiLocale]);
+  useEffect(() => {
+    const changed = () => setExpanded(document.fullscreenElement === anchor.current);
+    document.addEventListener("fullscreenchange", changed);
+    return () => document.removeEventListener("fullscreenchange", changed);
+  }, []);
+  const changeDisplayMode = useCallback(async (mode: "inline" | "fullscreen") => {
+    try {
+      if (!sourceOwned.current() || !anchor.current) return false;
+      if (mode === "fullscreen") await anchor.current.requestFullscreen();
+      else if (document.fullscreenElement === anchor.current) await document.exitFullscreen();
+      return mode === "fullscreen"
+        ? document.fullscreenElement === anchor.current
+        : document.fullscreenElement !== anchor.current;
+    } catch {
+      return false;
+    }
+  }, []);
 
   useEffect(() => {
+    const token = ++privateEpoch.current;
+    privateOwned.current = () => false;
     setDetails(null);
     setDetailFailure(false);
-    setExportOutcome(null);
-    privateOwned.current = () => false;
-    if (!open) return;
+    if (inspection !== key) return;
     let disposed = false;
-    const token = ++generation.current;
     const owner = observeVisualizationOwner(environmentId, () => {
       privateOwned.current = () => false;
       setDetails(null);
       setDetailFailure(true);
-      exportAbort.current?.abort();
     });
     const current = () =>
-      !disposed && token === generation.current && committed.current === key && owner.current();
+      !disposed &&
+      token === privateEpoch.current &&
+      committed.current.key === key &&
+      owner.current();
     privateOwned.current = current;
     if (!owner.current() || !owner.api?.visualizations) setDetailFailure(true);
     else
@@ -432,32 +495,29 @@ export const VisualizationCard = memo(function VisualizationCard({
         .details({ threadId, artifactId: reference.artifactId, revisionId: reference.revisionId })
         .then((raw) => {
           if (!current()) return;
-          const result = decodeDetails(raw);
+          const value = decodeDetails(raw);
           if (
-            result.threadId !== threadId ||
-            result.artifactId !== reference.artifactId ||
-            result.revisionId !== reference.revisionId ||
-            result.source.artifactId !== reference.artifactId ||
-            result.source.revisionId !== reference.revisionId ||
-            result.diagnostics.artifactId !== reference.artifactId ||
-            result.diagnostics.revisionId !== reference.revisionId ||
-            result.source.purpose !== reference.purpose
+            value.threadId !== threadId ||
+            value.artifactId !== reference.artifactId ||
+            value.revisionId !== reference.revisionId ||
+            value.source.artifactId !== reference.artifactId ||
+            value.source.revisionId !== reference.revisionId ||
+            value.source.purpose !== reference.purpose ||
+            value.diagnostics.artifactId !== reference.artifactId ||
+            value.diagnostics.revisionId !== reference.revisionId ||
+            new TextEncoder().encode(JSON.stringify(value)).byteLength > 4 * 1024 * 1024
           )
-            throw new Error("details-stale");
-          // Bound the complete private reader allocation, not each field separately.
-          if (new TextEncoder().encode(JSON.stringify(result)).byteLength > 4 * 1024 * 1024)
-            throw new Error("details-too-large");
-          setDetails({ key, value: result });
+            throw new Error("visualization-details-invalid");
+          setDetails({ key, value });
         })
         .catch(() => {
           if (current()) setDetailFailure(true);
         });
     return () => {
       disposed = true;
-      generation.current += 1;
-      owner.dispose();
+      privateEpoch.current += 1;
       privateOwned.current = () => false;
-      exportAbort.current?.abort();
+      owner.dispose();
     };
   }, [
     environmentId,
@@ -466,10 +526,19 @@ export const VisualizationCard = memo(function VisualizationCard({
     reference.artifactId,
     reference.revisionId,
     reference.purpose,
-    open,
-    attempt,
+    inspection,
+    detailAttempt,
   ]);
-
+  useEffect(
+    () => () => {
+      exportAbort.current?.abort();
+      downloadRelease.current?.();
+    },
+    [key],
+  );
+  useLayoutEffect(() => {
+    if (!running) exportAbort.current?.abort();
+  }, [running]);
   const copy = async (value: string) => {
     if (!privateOwned.current()) return;
     try {
@@ -480,50 +549,47 @@ export const VisualizationCard = memo(function VisualizationCard({
     }
   };
   const exportPng = (action: "copy" | "save") => {
-    if (exportAbort.current) return;
+    const target = frameRef.current;
+    if (!target || !frameCurrent() || exportAbort.current) return;
     const abort = new AbortController();
     exportAbort.current = abort;
-    setExportOutcome(null);
-    const png =
-      running && viewer
-        ? (quiet
-            ? afterMenuClosed().then(() => viewer.presentationOverlay(key, false))
-            : Promise.resolve(true)
-          ).then((accepted) => {
-            if (!accepted || committed.current !== key) throw new Error("capture-unavailable");
-            return viewer.capture(key, abort.signal);
-          })
-        : poster?.key === key && posterOwned.current()
-          ? Promise.resolve(poster.blob)
-          : Promise.reject(new Error("poster-unavailable"));
-    const operation =
+    const png = captureInlineVisualization(
+      target,
+      abort.signal,
+      () => frameCurrent() && frameRef.current?.contentDocument === loaded,
+    );
+    void (
       action === "copy"
         ? copyPngToClipboard(png, abort.signal)
-        : savePngToDisk(png, "visualization.png", abort.signal);
-    void operation
+        : savePngToDisk(png, "visualization.png", abort.signal)
+    )
       .then((result) => {
-        if (!abort.signal.aborted && committed.current === key && result !== "cancelled")
+        if (!abort.signal.aborted && committed.current.key === key && result !== "cancelled")
           setExportOutcome(action === "copy" ? "copied" : "saved");
       })
       .catch(() => {
-        if (!abort.signal.aborted && committed.current === key) setExportOutcome("failed");
+        if (!abort.signal.aborted && committed.current.key === key) setExportOutcome("failed");
       })
       .finally(() => {
         if (exportAbort.current === abort) exportAbort.current = null;
       });
   };
   const exportHtml = () => {
-    if (htmlConsent !== key || !htmlConsentOwned.current()) return;
+    if (
+      htmlConsent !== key ||
+      reference.purpose !== "generated-visualization" ||
+      exportAbort.current
+    )
+      return;
     setHtmlConsent(null);
-    if (reference.purpose !== "generated-visualization" || exportAbort.current) return;
-    const abort = new AbortController();
+    const abort = new AbortController(),
+      owner = observeVisualizationOwner(environmentId, () => {
+        abort.abort();
+        downloadRelease.current?.();
+      });
     exportAbort.current = abort;
-    const owner = observeVisualizationOwner(environmentId, () => {
-      abort.abort();
-      downloadRelease.current?.();
-    });
-    const current = () => !abort.signal.aborted && committed.current === key && owner.current();
-    if (!owner.api?.visualizations?.exportHtml || !current()) {
+    const current = () => !abort.signal.aborted && committed.current.key === key && owner.current();
+    if (!current() || !owner.api?.visualizations?.exportHtml) {
       owner.dispose();
       exportAbort.current = null;
       setExportOutcome("failed");
@@ -539,7 +605,7 @@ export const VisualizationCard = memo(function VisualizationCard({
           result.artifactId !== reference.artifactId ||
           result.revisionId !== reference.revisionId
         )
-          throw new Error("export-stale");
+          throw new Error("visualization-export-invalid");
         downloadRelease.current = downloadPortableVisualization(result.html);
         setExportOutcome("downloaded");
       })
@@ -551,561 +617,310 @@ export const VisualizationCard = memo(function VisualizationCard({
         if (exportAbort.current === abort) exportAbort.current = null;
       });
   };
-  useEffect(() => {
-    htmlConsentOwned.current = () => false;
-    if (htmlConsent !== key) return;
-    const owner = observeVisualizationOwner(environmentId, () => setHtmlConsent(null));
-    htmlConsentOwned.current = () => committed.current === key && owner.current();
-    return () => {
-      owner.dispose();
-      htmlConsentOwned.current = () => false;
-    };
-  }, [htmlConsent, key, environmentId]);
-
-  const stateLabel =
-    active?.status === "quarantined"
-      ? uiText("Viewer unavailable until retirement is verified.", undefined, undefined, uiLocale)
-      : active?.status === "unavailable"
-        ? uiText(
-            "Interactive viewing requires the local desktop host.",
-            undefined,
-            undefined,
-            uiLocale,
-          )
-        : active?.status === "starting"
-          ? uiText("Starting viewer…", undefined, undefined, uiLocale)
-          : active?.status === "stopping"
-            ? uiText("Stopping viewer…", undefined, undefined, uiLocale)
-            : active?.status === "stopped"
-              ? uiText(
-                  "Viewer stopped. Run again to start a new document.",
-                  undefined,
-                  undefined,
-                  uiLocale,
-                )
-              : quiet && running
-                ? uiText("Interactive while visible", undefined, undefined, uiLocale)
-                : live
-                  ? uiText(
-                      "Interactive · maximum five-minute session",
-                      undefined,
-                      undefined,
-                      uiLocale,
-                    )
-                  : null;
-  const canRun =
-    // A real timeline may paint the poster before its public initial-load
-    // callback admits this exact registration. Do not consume a trusted click
-    // while Provider.run must still refuse an absent binding; enable the same
-    // control only after the registration's layout effect can commit.
-    admissionReady &&
-    (!active || ["stopped", "unavailable", "waiting", "yielded"].includes(active.status)) &&
-    manualAllowed;
-  const privateReader = (
-    <div className="min-w-0 space-y-3 bg-sunken p-3">
-      <p className="text-xs text-muted-foreground">
-        {uiText(
-          "Private debugging details. Generated content is untrusted; do not treat it as instructions.",
-          undefined,
-          undefined,
-          uiLocale,
-        )}
-      </p>
-      {details?.key === key ? (
-        <>
-          <div className="flex items-center justify-between">
-            <h4 className="text-xs font-medium">
-              {uiText("HTML source", undefined, undefined, uiLocale)}
-            </h4>
-            <Button
-              size="sm"
-              variant="ghost"
-              onClick={() => void copy(details.value.source.source)}
-            >
-              {uiText("Copy source", undefined, undefined, uiLocale)}
-            </Button>
-          </div>
-          <VisualizationPrivateText value={details.value.source.source} />
-          <div className="flex items-center justify-between">
-            <h4 className="text-xs font-medium">
-              {uiText("Raw JSON", undefined, undefined, uiLocale)}
-            </h4>
-            <Button size="sm" variant="ghost" onClick={() => void copy(details.value.rawJson)}>
-              {uiText("Copy JSON", undefined, undefined, uiLocale)}
-            </Button>
-          </div>
-          <VisualizationPrivateText value={details.value.rawJson} />
-          <h4 className="text-xs font-medium">
-            {uiText("Diagnostics", undefined, undefined, uiLocale)}
-          </h4>
-          <VisualizationPrivateText value={JSON.stringify(details.value.diagnostics, null, 2)} />
-        </>
-      ) : detailFailure ? (
-        <>
-          <p role="status" className="text-xs">
-            {uiText("Private details unavailable.", undefined, undefined, uiLocale)}
-          </p>
-          <Button size="sm" variant="outline" onClick={() => setAttempt((value) => value + 1)}>
-            {uiText("Retry", undefined, undefined, uiLocale)}
-          </Button>
-        </>
-      ) : (
-        <p className="text-xs">{uiText("Loading…", undefined, undefined, uiLocale)}</p>
-      )}
-    </div>
-  );
   return (
     <section
-      className="group/visualization my-3 min-w-0 w-full"
+      className="group/visualization my-3 w-full min-w-0"
       data-visualization-card={reference.artifactId}
     >
       <div
         ref={anchor}
-        data-visualization-native-surface="inline"
-        tabIndex={live ? 0 : undefined}
-        role="group"
-        aria-label={uiText(
-          "Interactive visualization: {title}. Press Enter to interact.",
-          { title: reference.title },
-          undefined,
-          uiLocale,
-        )}
-        onKeyDown={(event) => {
-          if (
-            live &&
-            event.isTrusted &&
-            event.target === event.currentTarget &&
-            (event.key === "Enter" || event.key === " ")
-          ) {
-            event.preventDefault();
-            viewer?.focus(key);
-          }
-        }}
-        className="relative flex w-full items-center justify-center overflow-hidden focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring"
-        style={{
-          ...(active?.layout && reference.purpose === "generated-visualization"
-            ? { height: active.layout.height }
-            : { aspectRatio: `${reference.width} / ${reference.height}`, maxHeight: inlineHeight }),
-          minHeight: 80,
-        }}
+        data-visualization-inline-surface="inline"
+        data-visualization-inline-frame="true"
+        className="relative w-full min-w-0 overflow-hidden bg-transparent [&:fullscreen]:h-screen [&:fullscreen]:w-screen [&:fullscreen]:overflow-auto [&:fullscreen]:bg-background"
+        style={{ minHeight: 80, height: expanded ? undefined : inlineHeight }}
       >
-        {poster?.key === key ? (
-          <img
-            src={poster.url}
-            alt={uiText(
-              "Saved preview of {title}",
-              { title: reference.title },
-              undefined,
-              uiLocale,
-            )}
-            className="size-full object-contain"
-            draggable={false}
+        {running ? (
+          <iframe
+            ref={bindFrame}
+            title={reference.title}
+            srcDoc={
+              reference.purpose === "mcp-app" && appReady !== installed.payload.frameId
+                ? undefined
+                : installed.html
+            }
+            className="block w-full border-0 bg-transparent"
+            style={{ height: inlineHeight }}
+            allow="fullscreen"
+            referrerPolicy="no-referrer"
+            onLoad={(event) => {
+              const target = event.currentTarget,
+                document = target.contentDocument;
+              if (reference.purpose === "mcp-app" && appReady !== installed.payload.frameId) return;
+              if (
+                !sourceOwned.current() ||
+                target !== frameRef.current ||
+                !document ||
+                document.documentElement.dataset.cafeInlineFrame !== installed.payload.frameId
+              ) {
+                setFailed(key);
+                setInstalled(null);
+                return;
+              }
+              setLoaded(document);
+            }}
           />
         ) : (
-          <p className="p-4 text-xs text-muted-foreground">
-            {posterFailure
-              ? uiText("Saved preview unavailable.", undefined, undefined, uiLocale)
-              : reference.poster
-                ? uiText("Loading preview…", undefined, undefined, uiLocale)
-                : uiText("No saved preview.", undefined, undefined, uiLocale)}
-          </p>
+          <div
+            role={visible ? "status" : undefined}
+            className="flex h-full items-center justify-center p-4 text-xs text-muted-foreground"
+          >
+            {!currentPermission
+              ? uiText("Visualizations require Full access.", undefined, undefined, uiLocale)
+              : failed === key
+                ? uiText("Visualization unavailable.", undefined, undefined, uiLocale)
+                : paused === key
+                  ? uiText(
+                      "Viewer stopped. Run again to start a new document.",
+                      undefined,
+                      undefined,
+                      uiLocale,
+                    )
+                  : loading
+                    ? uiText("Starting viewer…", undefined, undefined, uiLocale)
+                    : null}
+          </div>
         )}
+        {expanded ? (
+          <Button
+            className="absolute right-2 top-2"
+            size="sm"
+            variant="outline"
+            onClick={() => void changeDisplayMode("inline")}
+          >
+            {uiText("Back to chat", undefined, undefined, uiLocale)}
+          </Button>
+        ) : null}
       </div>
-      {quiet ? (
-        <>
-          {/* A native top-frame surface paints above the DOM. The small sibling
-            strip is deliberately outside its pixels, with a stable reserved
-            height so hover/focus never moves chat history. Touch stays visible. */}
-          <div className="flex h-6 min-w-0 justify-end" data-visualization-controls="quiet">
-            <Menu
-              key={key}
-              open={menuOpen}
-              onOpenChange={changeMenu}
-              onOpenChangeComplete={(value) => {
-                if (value || menuOpen) return;
-                menuPresented.current = false;
-                menuClosure.current?.resolve();
-                menuClosure.current = null;
-                setMenuExiting(false);
-              }}
-            >
-              <Tooltip>
-                <TooltipTrigger
+      {running && frame && reference.purpose === "mcp-app" ? (
+        <InlineMcpAppBridge
+          environmentId={environmentId}
+          threadId={threadId}
+          reference={reference}
+          payload={installed.payload}
+          frame={frame}
+          current={frameCurrent}
+          onDisplayMode={changeDisplayMode}
+          onClose={() => setPaused(key)}
+          onReady={() => setAppReady(installed.payload.frameId)}
+        />
+      ) : null}
+      <div className="flex h-6 min-w-0 justify-end" data-visualization-controls="quiet">
+        <Menu>
+          <Tooltip>
+            <TooltipTrigger
+              render={
+                <MenuTrigger
                   render={
-                    <MenuTrigger
-                      onKeyDown={(event) => {
-                        if (event.key === "Escape" && !menuOpen) changeMenu(false);
-                      }}
-                      render={
-                        <Button
-                          size="icon-xs"
-                          variant="ghost"
-                          className="text-muted-foreground transition-opacity duration-(--duration-fast) [@media(hover:hover)]:opacity-0 [@media(hover:hover)]:group-hover/visualization:opacity-100 [@media(hover:hover)]:group-focus-within/visualization:opacity-100 data-[popup-open]:opacity-100 focus-visible:opacity-100"
-                          aria-label={uiText(
-                            "Visualization actions",
-                            undefined,
-                            undefined,
-                            uiLocale,
-                          )}
-                          data-visualization-run="true"
-                        />
-                      }
+                    <Button
+                      size="icon-xs"
+                      variant="ghost"
+                      className="text-muted-foreground transition-opacity duration-(--duration-fast) [@media(hover:hover)]:opacity-0 [@media(hover:hover)]:group-hover/visualization:opacity-100 [@media(hover:hover)]:group-focus-within/visualization:opacity-100 data-[popup-open]:opacity-100 focus-visible:opacity-100"
+                      aria-label={uiText("Visualization actions", undefined, undefined, uiLocale)}
+                      data-visualization-run="true"
                     />
                   }
-                >
-                  <EllipsisIcon className="size-4" aria-hidden />
-                </TooltipTrigger>
-                <TooltipPopup>
-                  {uiText("Visualization actions", undefined, undefined, uiLocale)}
-                </TooltipPopup>
-              </Tooltip>
-              <MenuPopup
-                align="end"
-                className="max-w-[min(28rem,calc(100vw-2rem))]"
-                data-visualization-menu="true"
-              >
-                <MenuGroup>
-                  <MenuGroupLabel className="space-y-1">
-                    <div className="flex min-w-0 items-center gap-2">
-                      {entry.actor.type === "child" ? (
-                        <SubagentAvatar
-                          seed={entry.actor.id}
-                          label={
-                            entry.actor.label ?? uiText("Subagent", undefined, undefined, uiLocale)
-                          }
-                          className="size-4 shrink-0"
-                        />
-                      ) : (
-                        <ChartNoAxesCombinedIcon className="size-3.5 shrink-0" aria-hidden />
-                      )}
-                      <span className="min-w-0 [overflow-wrap:anywhere]">{reference.title}</span>
-                    </div>
-                    <div className="font-normal [overflow-wrap:anywhere]">
-                      {entry.actor.type === "root"
-                        ? uiText("Root", undefined, undefined, uiLocale)
-                        : (entry.actor.label ??
-                          uiText("Subagent", undefined, undefined, uiLocale))}{" "}
-                      ·{" "}
-                      <time dateTime={entry.occurredAt}>
-                        {formatDiagnosticTimestamp(entry.occurredAt, timestampFormat, uiLocale)}
-                      </time>
-                    </div>
-                    {stateLabel ? (
-                      <div role="status" className="font-normal">
-                        {stateLabel}
-                      </div>
-                    ) : null}
-                    {active?.layout?.constrained ? (
-                      <div role="status" className="font-normal">
-                        {uiText(
-                          "Inline content limit reached. Expand to inspect.",
-                          undefined,
-                          undefined,
-                          uiLocale,
-                        )}
-                      </div>
-                    ) : null}
-                  </MenuGroupLabel>
-                  <MenuSeparator />
-                  {running ? (
-                    <>
-                      <MenuItem onClick={() => viewer?.stop(key)}>
-                        <SquareIcon />
-                        {uiText("Stop", undefined, undefined, uiLocale)}
-                      </MenuItem>
-                      <MenuItem
-                        onClick={() => {
-                          void afterMenuClosed()
-                            .then(() => viewer?.presentationOverlay(key, false))
-                            .then((accepted) => {
-                              if (accepted && committed.current === key) viewer?.expand(key, true);
-                            })
-                            .catch(() => {
-                              if (committed.current === key) setExportOutcome("failed");
-                            });
-                        }}
-                      >
-                        {uiText("Expand", undefined, undefined, uiLocale)}
-                      </MenuItem>
-                    </>
-                  ) : canRun ? (
-                    <MenuItem
-                      onClick={(event) => {
-                        if (anchor.current)
-                          viewer?.run({
-                            environmentId,
-                            threadId,
-                            reference,
-                            entryKey,
-                            anchorId,
-                            anchor: anchor.current,
-                            opener: event.currentTarget,
-                            ...(ownerPane ? { pane: ownerPane } : {}),
-                            poolKey: key,
-                            onScrollIntent: forwardScrollIntent,
-                            onLayoutIntent: forwardLayoutIntent,
-                          });
-                      }}
-                    >
-                      <PlayIcon />
-                      {uiText("Restart", undefined, undefined, uiLocale)}
-                    </MenuItem>
-                  ) : null}
-                  {active?.status === "quarantined" ? (
-                    <MenuItem onClick={() => viewer?.stop(key)}>
-                      {uiText("Stop", undefined, undefined, uiLocale)}
-                    </MenuItem>
-                  ) : null}
-                  <MenuItem
-                    disabled={!running && poster?.key !== key}
-                    onClick={() => exportPng("copy")}
-                  >
-                    {running
-                      ? uiText("Copy current PNG", undefined, undefined, uiLocale)
-                      : uiText("Copy saved preview", undefined, undefined, uiLocale)}
-                  </MenuItem>
-                  <MenuItem
-                    disabled={!running && poster?.key !== key}
-                    onClick={() => exportPng("save")}
-                  >
-                    {running
-                      ? uiText("Save current PNG", undefined, undefined, uiLocale)
-                      : uiText("Save saved preview", undefined, undefined, uiLocale)}
-                  </MenuItem>
-                  <MenuItem
-                    onClick={() => {
-                      setConsentExiting(true);
-                      setHtmlConsent(key);
-                    }}
-                  >
-                    {uiText("Export HTML…", undefined, undefined, uiLocale)}
-                  </MenuItem>
-                  {posterFailure ? (
-                    <MenuItem onClick={() => setAttempt((value) => value + 1)}>
-                      {uiText("Retry preview", undefined, undefined, uiLocale)}
-                    </MenuItem>
-                  ) : null}
-                  <MenuSeparator />
-                  <MenuItem
-                    onClick={() => {
-                      setInspectionExiting(true);
-                      setExpanded({ key, value: true });
-                    }}
-                  >
-                    {uiText("Private source and JSON", undefined, undefined, uiLocale)}
-                  </MenuItem>
-                  {feedback ? (
-                    <div role="status" className="px-2 py-1.5 text-xs text-muted-foreground">
-                      {feedback === "failed"
-                        ? uiText("Export unavailable.", undefined, undefined, uiLocale)
-                        : feedback === "copied"
-                          ? uiText("Copied", undefined, undefined, uiLocale)
-                          : feedback === "downloaded"
-                            ? uiText("Download started", undefined, undefined, uiLocale)
-                            : uiText("Saved", undefined, undefined, uiLocale)}
-                    </div>
-                  ) : null}
-                </MenuGroup>
-              </MenuPopup>
-            </Menu>
-          </div>
-          <Dialog
-            key={key}
-            open={open}
-            onOpenChange={(value) => {
-              if (!value) closeInspection();
-            }}
-            onOpenChangeComplete={(value) => {
-              if (!value && !open) setInspectionExiting(false);
-            }}
-          >
-            <DialogPopup
-              data-visualization-inspection="true"
-              className="max-w-[min(60rem,calc(100vw-2rem))]"
-            >
-              <DialogTitle className="px-3 pt-3">
-                {uiText("Private source and JSON", undefined, undefined, uiLocale)} ·{" "}
-                {reference.title}
-              </DialogTitle>
-              <div className="min-h-0 overflow-y-auto">{open ? privateReader : null}</div>
-            </DialogPopup>
-          </Dialog>
-        </>
-      ) : (
-        <>
-          {/* The content belongs in the conversation, not inside another app shell.
-          Keep public attribution once in a quiet footer; private readers remain
-          collapsed and none of this presentation rewrites immutable source. */}
-          <div className="flex min-w-0 flex-wrap items-center gap-2 pt-2 text-xs text-muted-foreground">
-            {entry.actor.type === "child" ? (
-              <SubagentAvatar
-                seed={entry.actor.id}
-                label={entry.actor.label ?? uiText("Subagent", undefined, undefined, uiLocale)}
-                className="size-4 shrink-0"
-              />
-            ) : (
-              <ChartNoAxesCombinedIcon className="size-3.5 shrink-0" aria-hidden />
-            )}
-            <h3 className="min-w-0 flex-1 truncate text-xs font-medium">{reference.title}</h3>
-            <span className="min-w-0 max-w-full truncate">
-              {entry.actor.type === "root"
-                ? uiText("Root", undefined, undefined, uiLocale)
-                : (entry.actor.label ?? uiText("Subagent", undefined, undefined, uiLocale))}
-            </span>
-            <time
-              className="min-w-0 max-w-full [overflow-wrap:anywhere]"
-              dateTime={entry.occurredAt}
-            >
-              {formatDiagnosticTimestamp(entry.occurredAt, timestampFormat, uiLocale)}
-            </time>
-            {reference.purpose === "mcp-app" ? (
-              <span className="min-w-0 max-w-full truncate">
-                {uiText("App · {server}", { server: reference.serverLabel }, undefined, uiLocale)}
-              </span>
-            ) : null}
-          </div>
-          <div className="flex min-w-0 flex-wrap items-center gap-2 py-1 [&>button]:min-w-0 [&>button]:max-w-full [&>button]:whitespace-normal [&>button]:[overflow-wrap:anywhere]">
-            {live ? (
-              <>
-                <Button size="sm" variant="ghost" onClick={() => viewer?.stop(key)}>
-                  <SquareIcon className="size-3" />
-                  {uiText("Stop", undefined, undefined, uiLocale)}
-                </Button>
-                <Button size="sm" variant="ghost" onClick={() => viewer?.expand(key, true)}>
-                  {uiText("Expand", undefined, undefined, uiLocale)}
-                </Button>
-              </>
-            ) : reference.purpose === "mcp-app" ||
-              !automatic ||
-              active?.status === "stopped" ||
-              active?.status === "unavailable" ? (
-              <Button
-                data-visualization-run="true"
-                size="sm"
-                variant="ghost"
-                disabled={!viewer || !canRun}
-                onClick={(event) => {
-                  if (anchor.current)
-                    viewer?.run({
-                      environmentId,
-                      threadId,
-                      reference,
-                      entryKey,
-                      anchorId,
-                      anchor: anchor.current,
-                      opener: event.currentTarget,
-                      ...(ownerPane ? { pane: ownerPane } : {}),
-                      poolKey: key,
-                      onScrollIntent: forwardScrollIntent,
-                      onLayoutIntent: forwardLayoutIntent,
-                    });
-                }}
-              >
-                <PlayIcon className="size-3" />
-                {automatic && reference.purpose === "generated-visualization"
-                  ? uiText("Restart", undefined, undefined, uiLocale)
-                  : uiText("Run", undefined, undefined, uiLocale)}
-              </Button>
-            ) : null}
-            {active?.status === "quarantined" ? (
-              <Button size="sm" variant="outline" onClick={() => viewer?.stop(key)}>
-                {uiText("Stop", undefined, undefined, uiLocale)}
-              </Button>
-            ) : null}
-            <Button
-              size="sm"
-              variant="ghost"
-              disabled={!live && poster?.key !== key}
-              onClick={() => exportPng("copy")}
-            >
-              {live
-                ? uiText("Copy current PNG", undefined, undefined, uiLocale)
-                : uiText("Copy saved preview", undefined, undefined, uiLocale)}
-            </Button>
-            <Button
-              size="sm"
-              variant="ghost"
-              disabled={!live && poster?.key !== key}
-              onClick={() => exportPng("save")}
-            >
-              {live
-                ? uiText("Save current PNG", undefined, undefined, uiLocale)
-                : uiText("Save saved preview", undefined, undefined, uiLocale)}
-            </Button>
-            {reference.purpose === "generated-visualization" ? (
-              <Button size="sm" variant="ghost" onClick={() => setHtmlConsent(key)}>
-                {uiText("Export HTML…", undefined, undefined, uiLocale)}
-              </Button>
-            ) : null}
-            {posterFailure ? (
-              <Button size="sm" variant="ghost" onClick={() => setAttempt((value) => value + 1)}>
-                {uiText("Retry preview", undefined, undefined, uiLocale)}
-              </Button>
-            ) : null}
-          </div>
-          {stateLabel ? (
-            <p role="status" className="px-3 pb-2 text-xs text-muted-foreground">
-              {stateLabel}
-              {live && active?.expiresAtMs
-                ? ` · ${formatDiagnosticTimestamp(new Date(active.expiresAtMs).toISOString(), timestampFormat, uiLocale)}`
-                : ""}
-            </p>
-          ) : null}
-          {reference.purpose === "generated-visualization" && active?.layout?.constrained ? (
-            <p role="status" className="px-3 pb-2 text-xs text-muted-foreground">
-              {uiText(
-                "Inline content limit reached. Expand to inspect.",
-                undefined,
-                undefined,
-                uiLocale,
-              )}
-            </p>
-          ) : null}
-          <Collapsible
-            open={open}
-            onOpenChange={(value) => {
-              setExpanded({ key, value });
-              if (!value) {
-                generation.current += 1;
-                setDetails(null);
-                setExportOutcome(null);
-                privateOwned.current = () => false;
+                />
               }
-            }}
-            className="border-t border-border-subtle"
+            >
+              <EllipsisIcon className="size-4" aria-hidden />
+            </TooltipTrigger>
+            <TooltipPopup>
+              {uiText("Visualization actions", undefined, undefined, uiLocale)}
+            </TooltipPopup>
+          </Tooltip>
+          <MenuPopup
+            align="end"
+            className="max-w-[min(28rem,calc(100vw-2rem))] motion-reduce:transition-none motion-reduce:duration-0"
+            data-visualization-menu="true"
           >
-            <CollapsibleTrigger className="focus-ring group flex w-full items-center gap-2 px-3 py-2 text-left text-xs text-muted-foreground">
-              <ChevronRightIcon className="size-3 transition-transform duration-(--duration-fast) motion-reduce:transition-none motion-reduce:duration-0 group-data-[panel-open]:rotate-90" />
-              {uiText("Private source and JSON", undefined, undefined, uiLocale)}
-            </CollapsibleTrigger>
-            <CollapsiblePanel className="motion-reduce:transition-none motion-reduce:duration-0">
-              {open ? privateReader : null}
-            </CollapsiblePanel>
-          </Collapsible>
-          {feedback ? (
-            <p role="status" className="px-3 py-2 text-xs text-muted-foreground">
-              {feedback === "failed"
-                ? uiText("Export unavailable.", undefined, undefined, uiLocale)
-                : feedback === "copied"
-                  ? uiText("Copied", undefined, undefined, uiLocale)
-                  : feedback === "downloaded"
-                    ? uiText("Download started", undefined, undefined, uiLocale)
-                    : uiText("Saved", undefined, undefined, uiLocale)}
-            </p>
-          ) : null}
-        </>
-      )}
+            <MenuGroup>
+              <MenuGroupLabel className="space-y-1">
+                <div className="flex min-w-0 items-center gap-2">
+                  {entry.actor.type === "child" ? (
+                    <SubagentAvatar
+                      seed={entry.actor.id}
+                      label={
+                        entry.actor.label ?? uiText("Subagent", undefined, undefined, uiLocale)
+                      }
+                      className="size-4 shrink-0"
+                    />
+                  ) : (
+                    <ChartNoAxesCombinedIcon className="size-3.5 shrink-0" aria-hidden />
+                  )}
+                  <span className="min-w-0 [overflow-wrap:anywhere]">{reference.title}</span>
+                </div>
+                <div className="font-normal [overflow-wrap:anywhere]">
+                  {entry.actor.type === "root"
+                    ? uiText("Root", undefined, undefined, uiLocale)
+                    : (entry.actor.label ??
+                      uiText("Subagent", undefined, undefined, uiLocale))}{" "}
+                  ·{" "}
+                  <time dateTime={entry.occurredAt}>
+                    {formatDiagnosticTimestamp(entry.occurredAt, timestampFormat, uiLocale)}
+                  </time>
+                </div>
+                {height.constrained ? (
+                  <div role="status" className="font-normal">
+                    {uiText(
+                      "Inline content limit reached. Expand to inspect.",
+                      undefined,
+                      undefined,
+                      uiLocale,
+                    )}
+                  </div>
+                ) : null}
+              </MenuGroupLabel>
+              <MenuSeparator />
+              {running ? (
+                <>
+                  <MenuItem onClick={() => setPaused(key)}>
+                    <SquareIcon />
+                    {uiText("Stop", undefined, undefined, uiLocale)}
+                  </MenuItem>
+                  <MenuItem
+                    onClick={() =>
+                      void changeDisplayMode("fullscreen").then((accepted) => {
+                        if (!accepted) setExportOutcome("failed");
+                      })
+                    }
+                  >
+                    {uiText("Expand", undefined, undefined, uiLocale)}
+                  </MenuItem>
+                </>
+              ) : (
+                <MenuItem
+                  disabled={!currentPermission || !generatedAdmissionReady}
+                  onClick={() => {
+                    setPaused(null);
+                    setFailed(null);
+                    setAttempt((value) => value + 1);
+                  }}
+                >
+                  <PlayIcon />
+                  {uiText("Restart", undefined, undefined, uiLocale)}
+                </MenuItem>
+              )}
+              <MenuItem disabled={!running || !loaded} onClick={() => exportPng("copy")}>
+                {uiText("Copy current PNG", undefined, undefined, uiLocale)}
+              </MenuItem>
+              <MenuItem disabled={!running || !loaded} onClick={() => exportPng("save")}>
+                {uiText("Save current PNG", undefined, undefined, uiLocale)}
+              </MenuItem>
+              {reference.purpose === "generated-visualization" ? (
+                <MenuItem onClick={() => setHtmlConsent(key)}>
+                  {uiText("Export HTML…", undefined, undefined, uiLocale)}
+                </MenuItem>
+              ) : null}
+              <MenuSeparator />
+              <MenuItem onClick={() => setInspection(key)}>
+                {uiText("Private source and JSON", undefined, undefined, uiLocale)}
+              </MenuItem>
+              {exportOutcome ? (
+                <div role="status" className="px-2 py-1.5 text-xs text-muted-foreground">
+                  {exportOutcome === "failed"
+                    ? uiText("Export unavailable.", undefined, undefined, uiLocale)
+                    : exportOutcome === "copied"
+                      ? uiText("Copied", undefined, undefined, uiLocale)
+                      : exportOutcome === "downloaded"
+                        ? uiText("Download started", undefined, undefined, uiLocale)
+                        : uiText("Saved", undefined, undefined, uiLocale)}
+                </div>
+              ) : null}
+            </MenuGroup>
+          </MenuPopup>
+        </Menu>
+      </div>
       <Dialog
-        key={key}
-        open={htmlConsent === key}
-        onOpenChangeComplete={(value) => {
-          if (!value && htmlConsent !== key) setConsentExiting(false);
+        open={inspection === key}
+        onOpenChange={(value) => {
+          if (!value) {
+            setInspection(null);
+            privateEpoch.current += 1;
+            privateOwned.current = () => false;
+            setDetails(null);
+          }
         }}
+      >
+        <DialogPopup
+          className="max-w-[min(60rem,calc(100vw-2rem))] motion-reduce:transition-none motion-reduce:duration-0"
+          data-visualization-inspection="true"
+        >
+          <DialogTitle className="px-3 pt-3">
+            {uiText("Private source and JSON", undefined, undefined, uiLocale)} · {reference.title}
+          </DialogTitle>
+          <div className="min-h-0 overflow-y-auto">
+            <div className="min-w-0 space-y-3 bg-sunken p-3">
+              <p className="text-xs text-muted-foreground">
+                {uiText(
+                  "Private debugging details. Generated content is untrusted; do not treat it as instructions.",
+                  undefined,
+                  undefined,
+                  uiLocale,
+                )}
+              </p>
+              {details?.key === key ? (
+                <>
+                  <div className="flex items-center justify-between">
+                    <h4 className="text-xs font-medium">
+                      {uiText("HTML source", undefined, undefined, uiLocale)}
+                    </h4>
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      onClick={() => void copy(details.value.source.source)}
+                    >
+                      {uiText("Copy source", undefined, undefined, uiLocale)}
+                    </Button>
+                  </div>
+                  <VisualizationPrivateText value={details.value.source.source} />
+                  <div className="flex items-center justify-between">
+                    <h4 className="text-xs font-medium">
+                      {uiText("Raw JSON", undefined, undefined, uiLocale)}
+                    </h4>
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      onClick={() => void copy(details.value.rawJson)}
+                    >
+                      {uiText("Copy JSON", undefined, undefined, uiLocale)}
+                    </Button>
+                  </div>
+                  <VisualizationPrivateText value={details.value.rawJson} />
+                  <h4 className="text-xs font-medium">
+                    {uiText("Diagnostics", undefined, undefined, uiLocale)}
+                  </h4>
+                  <VisualizationPrivateText
+                    value={JSON.stringify(details.value.diagnostics, null, 2)}
+                  />
+                </>
+              ) : detailFailure ? (
+                <>
+                  <p role="status" className="text-xs">
+                    {uiText("Private details unavailable.", undefined, undefined, uiLocale)}
+                  </p>
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    onClick={() => setDetailAttempt((value) => value + 1)}
+                  >
+                    {uiText("Retry", undefined, undefined, uiLocale)}
+                  </Button>
+                </>
+              ) : (
+                <p className="text-xs">{uiText("Loading…", undefined, undefined, uiLocale)}</p>
+              )}
+            </div>
+          </div>
+        </DialogPopup>
+      </Dialog>
+      <Dialog
+        open={htmlConsent === key}
         onOpenChange={(value) => setHtmlConsent(value ? key : null)}
       >
         <DialogPopup
           showCloseButton={false}
-          {...(quiet ? { "data-visualization-inspection": "true" } : {})}
+          data-visualization-consent="true"
+          className="motion-reduce:transition-none motion-reduce:duration-0"
         >
           <div className="space-y-3 p-5">
             <DialogTitle>
@@ -1114,7 +929,7 @@ export const VisualizationCard = memo(function VisualizationCard({
             </DialogTitle>
             <p className="text-sm text-muted-foreground">
               {uiText(
-                "This downloads the original document with its declared assets, not the current interactive state. Opening it outside Cafe runs untrusted JavaScript without Cafe’s isolation. Network access and behavior then depend on your browser. App tools and permissions are not exported.",
+                "This downloads the document with its declared assets, not the current interactive state. Inline visualizations already run unsandboxed under Full access. Opening this file uses your browser’s authority. App tools and permissions are not exported.",
                 undefined,
                 undefined,
                 uiLocale,

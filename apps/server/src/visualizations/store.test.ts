@@ -27,6 +27,7 @@ import * as Deferred from "effect/Deferred";
 import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
+import { vi } from "vitest";
 import { ServerConfig } from "../config.ts";
 import { ServerEnvironment } from "../environment/Services/ServerEnvironment.ts";
 import { runMigrations } from "../persistence/Migrations.ts";
@@ -45,6 +46,11 @@ import { VISUALIZATION_FONT_LICENSE } from "@cafecode/shared/visualizationFontDa
 import { GENERATED_VISUALIZATION_FONT_APPENDIX } from "@cafecode/shared/visualizationFonts";
 import { exportGeneratedVisualizationHtml } from "./offlineHtml.ts";
 
+// Vitest's pass-through module spies keep real filesystem behavior and allow
+// observation of this exact fixture's host-marker reads without mutating Node's
+// non-configurable native ESM namespace exports.
+vi.mock("node:fs/promises", { spy: true });
+
 function pngChunk(name: string, data: Buffer) {
   const type = Buffer.from(name);
   const header = Buffer.alloc(4);
@@ -53,8 +59,6 @@ function pngChunk(name: string, data: Buffer) {
   checksum.writeUInt32BE(crc32(Buffer.concat([type, data])));
   return Buffer.concat([header, type, data, checksum]);
 }
-const noCaptureHook = async () => undefined;
-const noPrepareHook = async (_ticket: string) => undefined;
 // A real synthetically encoded PNG, not a successful-looking empty image.
 function png(width: number, height: number) {
   const header = Buffer.alloc(13);
@@ -76,86 +80,26 @@ const fixture = Effect.gen(function* () {
   const config = { ...originalConfig, mode: "desktop" as const };
   const token = "a".repeat(64);
   const generation = randomUUID();
+  let nativeRequests = 0;
   let captures = 0;
   let lastPreviewPayload: unknown;
-  let lastViewerPayload: unknown;
-  let captureFailure = false;
-  let captureHook: () => Promise<void> = noCaptureHook;
-  let prepareHook: (ticket: string) => Promise<void> = noPrepareHook;
-  const preparedTickets = new Set<string>();
-  const spentTickets = new Set<string>();
-  const discardedTickets: string[] = [];
-  let preparations = 0;
-  let unexpectedMethods = 0;
-  let prepareFailures = 0;
   const server = http.createServer((request, response) => {
     const chunks: Buffer[] = [];
     request.on("data", (value: Buffer) => chunks.push(value));
-    request.on("end", async () => {
+    request.on("end", () => {
+      nativeRequests++;
       const input = JSON.parse(Buffer.concat(chunks).toString("utf8")) as {
-        generation: string;
-        method: string;
-        payload: { ticket?: string; document: { width: number; height: number } };
+        method?: string;
+        payload?: unknown;
       };
-      if (request.headers.authorization !== `Bearer ${token}` || input.generation !== generation) {
-        response.writeHead(403);
-        response.end();
-        return;
-      }
-      response.setHeader("content-type", "application/json");
-      if (input.method === "prepareViewer") {
-        lastViewerPayload = input.payload;
-        const ticket = input.payload.ticket!;
-        preparedTickets.add(ticket);
-        preparations++;
-        try {
-          await prepareHook(ticket);
-        } catch {
-          prepareFailures++;
-          response.writeHead(503);
-          response.end(JSON.stringify({ error: "Synthetic preparation failed." }));
-          return;
-        }
-        response.end(
-          JSON.stringify({
-            status: "ready",
-            ticket: input.payload.ticket,
-            expiresAtMs: Date.now() + 60000,
-          }),
-        );
-      } else if (input.method === "discardPrepared") {
-        assert.deepEqual(Object.keys(input.payload), ["ticket"]);
-        const ticket = input.payload.ticket!;
-        discardedTickets.push(ticket);
-        response.end(
-          JSON.stringify({
-            discarded: !spentTickets.has(ticket) && preparedTickets.delete(ticket),
-          }),
-        );
-      } else if (input.method === "preview") {
-        lastPreviewPayload = input.payload;
+      if (input.method === "preview") {
         captures++;
-        await captureHook();
-        if (captureFailure) {
-          response.writeHead(503);
-          response.end(JSON.stringify({ error: "Synthetic unavailable host" }));
-          return;
-        }
-        const document = input.payload.document;
-        response.end(
-          JSON.stringify({
-            status: "ready",
-            png: png(document.width, document.height).toString("base64"),
-            width: document.width,
-            height: document.height,
-            diagnostics: [],
-          }),
-        );
-      } else {
-        unexpectedMethods++;
-        response.writeHead(403);
-        response.end();
+        lastPreviewPayload = input.payload;
       }
+      // Historical marker points to a refusal-only trap. A regression may not
+      // obtain native preparation/capture success from this current fixture.
+      response.writeHead(403);
+      response.end();
     });
   });
   yield* Effect.promise(
@@ -197,7 +141,11 @@ const fixture = Effect.gen(function* () {
     providerInstanceId: ProviderInstanceId.make("codex_fixture"),
     provider: "codex" as const,
   };
-  const binding = yield* Effect.promise(() => runtime.bind(identity));
+  const occurredAt = new Date().toISOString();
+  yield* sql`INSERT INTO projection_threads(thread_id,project_id,title,runtime_mode,created_at,updated_at) VALUES(${identity.threadId},NULL,'Isolated visualization fixture','full-access',${occurredAt},${occurredAt})`;
+  const binding = yield* Effect.promise(() =>
+    runtime.bind({ ...identity, runtimeMode: "full-access" }),
+  );
   if (!binding) throw new Error("Expected isolated fixture binding.");
   yield* Effect.promise(binding.activate);
   const service = yield* makeVisualizationArtifactService().pipe(
@@ -229,9 +177,8 @@ const fixture = Effect.gen(function* () {
     actor: { type: "root" },
     messageId: MessageId.make("visual-fixture-message"),
     turnId: TurnId.make("canonical-fixture-turn"),
-    occurredAt: new Date().toISOString(),
+    occurredAt,
   };
-  yield* sql`INSERT INTO projection_threads(thread_id,project_id,title,created_at,updated_at) VALUES(${identity.threadId},NULL,'Isolated visualization fixture',${witness.occurredAt},${witness.occurredAt})`;
   yield* sql`INSERT INTO projection_turns(thread_id,turn_id,state,requested_at,checkpoint_turn_count,checkpoint_files_json) VALUES(${identity.threadId},${witness.turnId},'completed',${witness.occurredAt},1,'[]')`;
   return {
     sql,
@@ -242,24 +189,9 @@ const fixture = Effect.gen(function* () {
     config,
     captures: () => captures,
     lastPreviewPayload: () => lastPreviewPayload,
-    lastViewerPayload: () => lastViewerPayload,
     hostPath,
     generation,
-    preparations: () => preparations,
-    preparedTickets,
-    spentTickets,
-    discardedTickets,
-    unexpectedMethods: () => unexpectedMethods,
-    prepareFailures: () => prepareFailures,
-    setPrepareHook: (hook: (ticket: string) => Promise<void>) => {
-      prepareHook = hook;
-    },
-    setCaptureFailure: (value: boolean) => {
-      captureFailure = value;
-    },
-    setCaptureHook: (hook: () => Promise<void>) => {
-      captureHook = hook;
-    },
+    nativeRequests: () => nativeRequests,
   };
 });
 const services = Layer.mergeAll(
@@ -281,6 +213,29 @@ const ownedVisualization = (context: Effect.Success<typeof fixture>) =>
       revisionId: receipt.reference.revisionId,
     };
   });
+/** External Apps retain their separately witnessed immutable replay tuple,
+ * without executing content or admitting a private capture dependency. */
+const appPublication = (context: Pick<Effect.Success<typeof fixture>, "input" | "witness">) => {
+  const input = {
+    source: context.input.source,
+    title: context.input.title,
+    originalInputJson: '{"fixture":"input"}',
+    originalResultJson: '{"fixture":"result"}',
+    serverName: "fixture-external-app",
+    originCallId: "fixture-app-call",
+    resourceUri: "ui://fixture/exact.html",
+    resourceMetaJson: '{"ui":true}',
+  };
+  return {
+    input,
+    witness: {
+      ...context.witness,
+      nativeItemId: input.originCallId,
+      serverName: input.serverName,
+      toolName: "fixture_chart",
+    },
+  };
+};
 const fillTicketLedger = (
   context: Effect.Success<typeof fixture>,
   tuple: Effect.Success<ReturnType<typeof ownedVisualization>>,
@@ -298,238 +253,291 @@ const fillTicketLedger = (
 
 it.layer(services)("immutable private visualization store", (it) => {
   it.effect(
-    "discards only the exact unused ticket and retains spent or unknown native ownership",
+    "publishes without execution and loads owned Full-access history without an active provider",
     () =>
       Effect.gen(function* () {
         const context = yield* fixture;
         const tuple = yield* ownedVisualization(context);
-        const first = yield* context.service.viewerTicket(tuple);
-        const sibling = yield* context.service.viewerTicket(tuple);
-        assert.deepEqual(
-          yield* context.service.discardViewerTicket({ ...tuple, ticket: first.ticket }),
-          { ...tuple, discarded: true },
-        );
-        assert.equal(context.preparedTickets.has(first.ticket), false);
-        assert.equal(context.preparedTickets.has(sibling.ticket), true);
+        assert.equal(context.captures(), 0);
+        yield* Effect.promise(context.binding.dispose);
+        const inline = yield* context.service.inline(tuple);
+        assert.equal(inline.fullAccess, true);
+        assert.equal(inline.purpose, "generated-visualization");
+        assert.ok(inline.html.includes(context.input.source));
+        assert.equal(inline.html.match(/@font-face\{/g)?.length, 4);
+        assert.ok(inline.html.indexOf("@font-face{") < inline.html.indexOf(context.input.source));
+        assert.equal(Object.hasOwn(inline, "rawJson"), false);
+        assert.equal(Object.hasOwn(inline, "diagnostics"), false);
+        assert.equal(Object.hasOwn(inline, "receipt"), false);
+        assert.equal(Object.hasOwn(inline, "poster"), false);
+        const grant = { ...tuple, frameId: inline.frameId, ticket: inline.ticket };
+        const lookup = { ...grant, leaseId: grant.frameId };
         assert.equal(
-          (yield* Effect.exit(context.service.readViewerTicket(tuple, first.ticket)))._tag,
-          "Failure",
+          (yield* context.service.readInlineFrame(lookup)).documentGeneration,
+          grant.frameId,
         );
-        assert.ok(yield* context.service.readViewerTicket(tuple, sibling.ticket));
-        context.spentTickets.add(sibling.ticket);
-        assert.deepEqual(
-          yield* context.service.discardViewerTicket({ ...tuple, ticket: sibling.ticket }),
-          { ...tuple, discarded: false },
-        );
-        assert.ok(yield* context.service.readViewerTicket(tuple, sibling.ticket));
-        context.spentTickets.delete(sibling.ticket);
-        context.preparedTickets.delete(sibling.ticket);
-        assert.equal(
-          (yield* context.service.discardViewerTicket({ ...tuple, ticket: sibling.ticket }))
-            .discarded,
-          false,
-        );
-        assert.ok(yield* context.service.readViewerTicket(tuple, sibling.ticket));
-        assert.deepEqual(context.discardedTickets, [first.ticket, sibling.ticket, sibling.ticket]);
-        assert.equal(context.unexpectedMethods(), 0);
+        assert.equal(context.service.inlineFrameDeadline(lookup), inline.expiresAtMs);
+        for (const patch of [
+          { threadId: ThreadId.make("foreign-chat") },
+          { artifactId: VisualizationArtifactId.make(randomUUID()) },
+          { revisionId: VisualizationRevisionId.make(randomUUID()) },
+          { ticket: "0".repeat(64) },
+          { frameId: randomUUID() },
+        ])
+          assert.equal(
+            (yield* Effect.exit(context.service.touchInlineFrame({ ...grant, ...patch })))._tag,
+            "Failure",
+          );
+        yield* context.sql`UPDATE projection_threads SET runtime_mode='approval-required' WHERE thread_id=${tuple.threadId}`;
+        assert.equal((yield* Effect.exit(context.service.inline(tuple)))._tag, "Failure");
+        assert.equal((yield* Effect.exit(context.service.touchInlineFrame(grant)))._tag, "Failure");
+        assert.equal((yield* Effect.exit(context.service.readInlineFrame(lookup)))._tag, "Failure");
+        assert.equal((yield* context.service.retireInlineFrame(grant)).retired, true);
+        assert.equal((yield* context.service.retireInlineFrame(grant)).retired, false);
+        assert.equal(context.service.inlineFrameDeadline(lookup), undefined);
       }),
   );
   it.effect(
-    "refuses foreign tuples, tokens and a replaced host before unused-ticket dispatch",
+    "keeps inline grants finite, expiring and exact without deleting replacement frames",
     () =>
       Effect.gen(function* () {
         const context = yield* fixture;
         const tuple = yield* ownedVisualization(context);
-        const ticket = yield* context.service.viewerTicket(tuple);
-        // Schema-valid unrelated IDs must be refused before the native broker sees
-        // a token; UUID shape alone never contributes native ownership.
-        for (const attack of [
-          { ...tuple, threadId: ThreadId.make("foreign-chat"), ticket: ticket.ticket },
-          {
-            ...tuple,
-            artifactId: VisualizationArtifactId.make("00000000-0000-4000-8000-000000000000"),
-            ticket: ticket.ticket,
-          },
-          {
-            ...tuple,
-            revisionId: VisualizationRevisionId.make("00000000-0000-4000-8000-000000000000"),
-            ticket: ticket.ticket,
-          },
-          { ...tuple, ticket: "b".repeat(64) },
-          { ...tuple, ticket: `${ticket.ticket}/other` },
-        ])
-          assert.equal(
-            (yield* Effect.exit(context.service.discardViewerTicket(attack)))._tag,
-            "Failure",
-          );
-        assert.equal(context.discardedTickets.length, 0);
-        const host = JSON.parse(
-          yield* Effect.promise(() => fs.readFile(context.hostPath, "utf8")),
-        ) as Record<string, unknown>;
-        yield* Effect.promise(() =>
-          fs.writeFile(context.hostPath, JSON.stringify({ ...host, generation: randomUUID() }), {
-            mode: 0o600,
-          }),
+        const now = Date.now();
+        const clock = vi.spyOn(Date, "now").mockReturnValue(now);
+        yield* Effect.addFinalizer(() => Effect.sync(() => clock.mockRestore()));
+        const first = yield* context.service.inline(tuple);
+        const grant = { ...tuple, frameId: first.frameId, ticket: first.ticket };
+        for (let index = 1; index < 32; index++) yield* context.service.inline(tuple);
+        assert.equal((yield* Effect.exit(context.service.inline(tuple)))._tag, "Failure");
+        clock.mockReturnValue(now + 10_000);
+        assert.equal((yield* context.service.touchInlineFrame(grant)).expiresAtMs, now + 40_000);
+        assert.equal(
+          (yield* context.service.retireInlineFrame({ ...grant, ticket: "0".repeat(64) })).retired,
+          false,
         );
         assert.equal(
+          (yield* context.service.readInlineFrame({ ...grant, leaseId: grant.frameId }))
+            .documentGeneration,
+          first.frameId,
+        );
+        clock.mockReturnValue(now + 30_000);
+        const replacement = yield* context.service.inline(tuple);
+        assert.notEqual(replacement.frameId, first.frameId);
+        assert.equal((yield* context.service.retireInlineFrame(grant)).retired, true);
+        assert.equal(
+          (yield* context.service.readInlineFrame({
+            ...tuple,
+            leaseId: replacement.frameId,
+            ticket: replacement.ticket,
+          })).documentGeneration,
+          replacement.frameId,
+        );
+        clock.mockReturnValue(now + 60_000);
+        assert.equal(
           (yield* Effect.exit(
-            context.service.discardViewerTicket({ ...tuple, ticket: ticket.ticket }),
+            context.service.touchInlineFrame({
+              ...tuple,
+              frameId: replacement.frameId,
+              ticket: replacement.ticket,
+            }),
           ))._tag,
           "Failure",
         );
-        assert.equal(context.discardedTickets.length, 0);
-        assert.ok(yield* context.service.readViewerTicket(tuple, ticket.ticket));
-      }),
-  );
-  it.effect("preflights the unchanged ticket quota without preparing native private bytes", () =>
-    Effect.gen(function* () {
-      const context = yield* fixture;
-      const tuple = yield* ownedVisualization(context);
-      yield* fillTicketLedger(context, tuple, 32);
-      assert.equal((yield* Effect.exit(context.service.viewerTicket(tuple)))._tag, "Failure");
-      assert.equal(context.preparations(), 0);
-      assert.deepEqual(context.discardedTickets, []);
-    }),
-  );
-  it.effect(
-    "cleans up only on the captured generation if host publication changes after preparation",
-    () =>
-      Effect.gen(function* () {
-        const context = yield* fixture;
-        const tuple = yield* ownedVisualization(context);
-        const sibling = yield* context.service.viewerTicket(tuple);
-        const host = JSON.parse(
-          yield* Effect.promise(() => fs.readFile(context.hostPath, "utf8")),
-        ) as Record<string, unknown>;
-        context.setPrepareHook(() =>
-          fs.writeFile(context.hostPath, JSON.stringify({ ...host, generation: randomUUID() }), {
-            mode: 0o600,
+        assert.equal(
+          context.service.inlineFrameDeadline({
+            ...tuple,
+            leaseId: replacement.frameId,
+            ticket: replacement.ticket,
           }),
+          undefined,
         );
-        assert.equal((yield* Effect.exit(context.service.viewerTicket(tuple)))._tag, "Failure");
-        assert.equal(context.discardedTickets.length, 1);
-        assert.notEqual(context.discardedTickets[0], sibling.ticket);
-        assert.deepEqual([...context.preparedTickets], [sibling.ticket]);
-        assert.ok(yield* context.service.readViewerTicket(tuple, sibling.ticket));
-        assert.equal(context.prepareFailures(), 0);
-        assert.equal(context.unexpectedMethods(), 0);
       }),
   );
-  it.effect("cleans up exact preparation when competing SQL tickets exhaust final capacity", () =>
-    Effect.gen(function* () {
-      const context = yield* fixture;
-      const tuple = yield* ownedVisualization(context);
-      const sibling = yield* context.service.viewerTicket(tuple);
-      context.setPrepareHook(() => Effect.runPromise(fillTicketLedger(context, tuple, 31)));
-      assert.equal((yield* Effect.exit(context.service.viewerTicket(tuple)))._tag, "Failure");
-      assert.equal(context.discardedTickets.length, 1);
-      assert.notEqual(context.discardedTickets[0], sibling.ticket);
-      assert.deepEqual([...context.preparedTickets], [sibling.ticket]);
-      assert.ok(yield* context.service.readViewerTicket(tuple, sibling.ticket));
-      assert.equal(context.unexpectedMethods(), 0);
-      assert.equal(context.prepareFailures(), 0);
-    }),
-  );
   it.effect(
-    "cleans up prepared bytes after tombstone ownership loss without revision-wide revoke",
+    "keeps all retired native ticket endpoints opaque and inert for owned or foreign tuples",
     () =>
       Effect.gen(function* () {
         const context = yield* fixture;
         const tuple = yield* ownedVisualization(context);
-        const sibling = yield* context.service.viewerTicket(tuple);
-        context.setPrepareHook(() =>
-          Effect.runPromise(
-            context.sql`INSERT INTO hard_deleted_threads(thread_id,deleted_at) VALUES(${tuple.threadId},${new Date().toISOString()})`,
-          ).then(() => undefined),
+        const input = { ...tuple, ticket: "a".repeat(64) };
+        for (const candidate of [
+          input,
+          { ...input, threadId: ThreadId.make("foreign-chat") },
+          { ...input, artifactId: VisualizationArtifactId.make(randomUUID()) },
+          { ...input, revisionId: VisualizationRevisionId.make(randomUUID()) },
+          { ...input, ticket: "invalid-private-ticket-marker" },
+        ]) {
+          const failures = [
+            yield* Effect.exit(context.service.viewerTicket(candidate)),
+            yield* Effect.exit(context.service.readViewerTicket(candidate, candidate.ticket)),
+            yield* Effect.exit(context.service.discardViewerTicket(candidate)),
+          ];
+          for (const result of failures) {
+            assert.equal(result._tag, "Failure");
+            const json = JSON.stringify(result);
+            assert.equal(json.includes("private-source-marker"), false);
+            assert.equal(json.includes(candidate.ticket), false);
+            assert.equal(json.includes(context.hostPath), false);
+          }
+        }
+        assert.equal(context.nativeRequests(), 0);
+        assert.equal(
+          (yield* context.sql`SELECT 1 FROM visualization_viewer_tickets WHERE thread_id=${tuple.threadId}`)
+            .length,
+          0,
         );
-        assert.equal((yield* Effect.exit(context.service.viewerTicket(tuple)))._tag, "Failure");
-        assert.equal(context.discardedTickets.length, 1);
-        assert.notEqual(context.discardedTickets[0], sibling.ticket);
-        assert.deepEqual([...context.preparedTickets], [sibling.ticket]);
-        assert.equal(context.unexpectedMethods(), 0);
+        assert.equal((yield* context.service.details(tuple)).source.source, context.input.source);
+        assert.equal((yield* context.service.inline(tuple)).fullAccess, true);
       }),
   );
-  it.effect("cleans up one uncommitted preparation after a private SQL failure", () =>
-    Effect.gen(function* () {
-      const context = yield* fixture;
-      const tuple = yield* ownedVisualization(context);
-      const sibling = yield* context.service.viewerTicket(tuple);
-      yield* Effect.addFinalizer(() =>
-        context.sql`DROP TRIGGER IF EXISTS synthetic_ticket_refusal`.pipe(
-          Effect.asVoid,
-          Effect.orDie,
-        ),
-      );
-      yield* context.sql`CREATE TRIGGER synthetic_ticket_refusal BEFORE INSERT ON visualization_viewer_tickets BEGIN SELECT RAISE(ABORT,'private-sql-marker'); END`;
-      const failed = yield* Effect.exit(context.service.viewerTicket(tuple));
-      assert.equal(failed._tag, "Failure");
-      assert.equal(JSON.stringify(failed).includes("private-sql-marker"), false);
-      assert.equal(context.discardedTickets.length, 1);
-      assert.notEqual(context.discardedTickets[0], sibling.ticket);
-      assert.deepEqual([...context.preparedTickets], [sibling.ticket]);
-      assert.ok(yield* context.service.readViewerTicket(tuple, sibling.ticket));
-    }),
-  );
-  it.effect("cleans up exact prepared state after interrupted acknowledgement", () =>
-    Effect.gen(function* () {
-      const context = yield* fixture;
-      const tuple = yield* ownedVisualization(context);
-      const entered = yield* Deferred.make<string>();
-      const release = yield* Deferred.make<void>();
-      context.setPrepareHook(async (ticket) => {
-        await Effect.runPromise(Deferred.succeed(entered, ticket));
-        await Effect.runPromise(Deferred.await(release));
-      });
-      yield* Effect.addFinalizer(() => Deferred.succeed(release, undefined));
-      const fiber = yield* context.service.viewerTicket(tuple).pipe(Effect.forkScoped);
-      const ticket = yield* Deferred.await(entered);
-      assert.equal(context.preparedTickets.has(ticket), true);
-      yield* Fiber.interrupt(fiber);
-      assert.deepEqual(context.discardedTickets, [ticket]);
-      assert.equal(context.preparedTickets.size, 0);
-      assert.equal(
-        (yield* Effect.exit(context.service.readViewerTicket(tuple, ticket)))._tag,
-        "Failure",
-      );
-      yield* Deferred.succeed(release, undefined);
-      assert.equal(context.unexpectedMethods(), 0);
-    }),
+  it.effect(
+    "never reads a native host marker or private source when an old client requests native tickets",
+    () =>
+      Effect.gen(function* () {
+        const context = yield* fixture;
+        const tuple = yield* ownedVisualization(context);
+        const readFile = vi.spyOn(fs, "readFile");
+        // Pass-through module spying begins at import. Exclude only the real
+        // fixture setup reads completed before these retired calls are made.
+        readFile.mockClear();
+        yield* Effect.addFinalizer(() => Effect.sync(() => readFile.mockRestore()));
+        for (const operation of [
+          context.service.viewerTicket(tuple),
+          context.service.readViewerTicket(tuple, "a".repeat(64)),
+          context.service.discardViewerTicket({ ...tuple, ticket: "a".repeat(64) }),
+        ])
+          assert.equal((yield* Effect.exit(operation))._tag, "Failure");
+        assert.equal(readFile.mock.calls.length, 0);
+        assert.equal(context.nativeRequests(), 0);
+        assert.equal((yield* context.service.list({ threadId: tuple.threadId })).entries.length, 1);
+      }),
   );
   it.effect(
-    "retains three backend work slots through cancellation and releases only exact preparations",
+    "ignores inert historical ticket ledgers for current inline grants and preserves legacy evidence",
+    () =>
+      Effect.gen(function* () {
+        const context = yield* fixture;
+        const tuple = yield* ownedVisualization(context);
+        yield* fillTicketLedger(context, tuple, 32);
+        const inline = yield* context.service.inline(tuple);
+        const grant = { ...tuple, frameId: inline.frameId, ticket: inline.ticket };
+        assert.equal(
+          (yield* context.service.readInlineFrame({ ...grant, leaseId: grant.frameId }))
+            .documentGeneration,
+          grant.frameId,
+        );
+        assert.equal((yield* Effect.exit(context.service.viewerTicket(tuple)))._tag, "Failure");
+        assert.equal(
+          (yield* Effect.exit(
+            context.service.discardViewerTicket({ ...tuple, ticket: inline.ticket }),
+          ))._tag,
+          "Failure",
+        );
+        assert.equal(
+          (yield* context.sql`SELECT 1 FROM visualization_viewer_tickets WHERE thread_id=${tuple.threadId}`)
+            .length,
+          32,
+        );
+        assert.equal(context.nativeRequests(), 0);
+        assert.equal((yield* context.service.retireInlineFrame(grant)).retired, true);
+      }),
+  );
+  it.effect(
+    "retains the current global inline-frame quota independently from retired ticket state",
+    () =>
+      Effect.gen(function* () {
+        const context = yield* fixture;
+        const tuple = yield* ownedVisualization(context);
+        const tuples = [tuple];
+        for (let index = 1; index < 5; index++) {
+          const threadId = ThreadId.make(`inline-quota-${randomUUID()}`);
+          const time = new Date().toISOString();
+          yield* context.sql`INSERT INTO projection_threads(thread_id,project_id,title,runtime_mode,created_at,updated_at) VALUES(${threadId},NULL,'Isolated fork','full-access',${time},${time})`;
+          yield* context.sql`INSERT INTO projection_turns(thread_id,turn_id,state,requested_at,checkpoint_turn_count,checkpoint_files_json) VALUES(${threadId},${`copy:${threadId}:${context.witness.turnId}`},'completed',${time},1,'[]')`;
+          yield* context.sql.withTransaction(
+            copyVisualizationHistory(context.sql, {
+              sourceThreadId: tuple.threadId,
+              targetThreadId: threadId,
+              completeTurnsOnly: true,
+            }),
+          );
+          tuples.push({ ...tuple, threadId });
+        }
+        const grants = [];
+        for (const owned of tuples.slice(0, 4))
+          for (let index = 0; index < 32; index++)
+            grants.push(yield* context.service.inline(owned));
+        assert.equal(grants.length, 128);
+        assert.equal((yield* Effect.exit(context.service.inline(tuples[4]!)))._tag, "Failure");
+        const first = grants[0]!;
+        assert.equal(
+          (yield* context.service.retireInlineFrame({
+            ...tuple,
+            frameId: first.frameId,
+            ticket: first.ticket,
+          })).retired,
+          true,
+        );
+        const replacement = yield* context.service.inline(tuples[4]!);
+        assert.equal(replacement.threadId, tuples[4]!.threadId);
+        assert.equal(context.nativeRequests(), 0);
+      }),
+  );
+  it.effect(
+    "retains three current inline-load work slots through cancellation without native preparation",
     () =>
       Effect.gen(function* () {
         const context = yield* fixture;
         const tuple = yield* ownedVisualization(context);
         const entered = yield* Deferred.make<void>();
         const release = yield* Deferred.make<void>();
-        let entries = 0;
-        context.setPrepareHook(async () => {
-          if (++entries === 3) await Effect.runPromise(Deferred.succeed(entered, undefined));
-          await Effect.runPromise(Deferred.await(release));
+        let hold = false;
+        let arrivals = 0;
+        // Hold only this fixture's incoming transaction admission, before the
+        // real SQLite writer lock. No SQL behavior, source bytes or native work is
+        // stubbed: releasing the gate executes the original owned transaction.
+        const controlledSql = new Proxy(context.sql, {
+          get(target, property, receiver) {
+            if (property !== "withTransaction") return Reflect.get(target, property, receiver);
+            return (work: Parameters<typeof target.withTransaction>[0]) =>
+              Effect.suspend(() => {
+                if (!hold) return target.withTransaction(work);
+                return Effect.gen(function* () {
+                  arrivals++;
+                  if (arrivals === 3) yield* Deferred.succeed(entered, undefined);
+                  yield* Deferred.await(release);
+                  return yield* target.withTransaction(work);
+                });
+              });
+          },
         });
+        const service = yield* makeVisualizationArtifactService().pipe(
+          Effect.provideService(SqlClient.SqlClient, controlledSql),
+          Effect.provideService(ServerConfig, context.config),
+        );
+        hold = true;
         yield* Effect.addFinalizer(() => Deferred.succeed(release, undefined));
         const fibers = [];
         for (let index = 0; index < 3; index++)
-          fibers.push(yield* context.service.viewerTicket(tuple).pipe(Effect.forkScoped));
+          fibers.push(yield* service.inline(tuple).pipe(Effect.forkScoped));
         yield* Deferred.await(entered);
-        const prepared = [...context.preparedTickets].toSorted();
-        assert.equal(prepared.length, 3);
-        assert.equal((yield* Effect.exit(context.service.viewerTicket(tuple)))._tag, "Failure");
-        assert.equal(context.preparations(), 3);
+        assert.equal((yield* Effect.exit(service.inline(tuple)))._tag, "Failure");
+        assert.equal(arrivals, 3);
         for (const fiber of fibers) yield* Fiber.interrupt(fiber);
-        assert.deepEqual(context.discardedTickets.toSorted(), prepared);
-        assert.equal(context.preparedTickets.size, 0);
+        hold = false;
         yield* Deferred.succeed(release, undefined);
-        context.setPrepareHook(noPrepareHook);
-        const next = yield* context.service.viewerTicket(tuple);
-        assert.equal(context.preparations(), 4);
+        const next = yield* service.inline(tuple);
+        assert.equal(next.fullAccess, true);
         assert.equal(
-          (yield* context.service.discardViewerTicket({ ...tuple, ticket: next.ticket })).discarded,
+          (yield* service.retireInlineFrame({
+            ...tuple,
+            frameId: next.frameId,
+            ticket: next.ticket,
+          })).retired,
           true,
         );
-        assert.equal(context.unexpectedMethods(), 0);
-        assert.equal(context.prepareFailures(), 0);
+        assert.equal(context.nativeRequests(), 0);
       }),
   );
   it.effect(
@@ -538,11 +546,12 @@ it.layer(services)("immutable private visualization store", (it) => {
       Effect.gen(function* () {
         const { service, binding, input, witness, captures, lastPreviewPayload } = yield* fixture;
         const first = yield* service.publish(binding.authority, input);
-        assert.equal(Object.hasOwn(lastPreviewPayload() as object, "previewReplay"), false);
+        assert.equal(lastPreviewPayload(), undefined);
         const second = yield* service.publish(binding.authority, input);
         assert.deepEqual(first.reference, second.reference);
         assert.notEqual(first.proof, second.proof);
-        assert.equal(captures(), 1);
+        assert.equal(captures(), 0);
+        assert.equal(Object.hasOwn(first.reference, "poster"), false);
         assert.equal((yield* service.list({ threadId: witness.threadId })).entries.length, 0);
         for (const forged of [
           { ...witness, inputSha256: "0".repeat(64) },
@@ -615,21 +624,22 @@ it.layer(services)("immutable private visualization store", (it) => {
           ))._tag,
           "Failure",
         );
-        const ticket = yield* service.viewerTicket(tuple);
-        assert.ok(/^[a-f0-9]{64}$/.test(ticket.ticket));
-        const ledger = yield* service.readViewerTicket(tuple, ticket.ticket);
-        assert.ok(ledger.expiresAtMs > ticket.expiresAtMs);
+        const inline = yield* service.inline(tuple);
+        assert.ok(/^[a-f0-9]{64}$/.test(inline.ticket));
+        const grant = { ...tuple, frameId: inline.frameId, ticket: inline.ticket };
+        const frame = yield* service.readInlineFrame({ ...grant, leaseId: grant.frameId });
+        assert.equal(frame.expiresAtMs, inline.expiresAtMs);
         assert.equal(
           (yield* Effect.exit(
-            service.readViewerTicket(
-              { ...tuple, threadId: ThreadId.make("other-chat") },
-              ticket.ticket,
-            ),
+            service.readInlineFrame({
+              ...grant,
+              threadId: ThreadId.make("other-chat"),
+              leaseId: grant.frameId,
+            }),
           ))._tag,
           "Failure",
         );
-        const poster = yield* service.poster(tuple);
-        assert.ok(poster.length > 33);
+        assert.equal((yield* Effect.exit(service.poster(tuple)))._tag, "Failure");
         const quota = (yield* sql<{
           bytes: number;
         }>`SELECT bytes FROM visualization_storage_quota WHERE singleton=1`)[0]!;
@@ -719,63 +729,66 @@ it.layer(services)("immutable private visualization store", (it) => {
       assert.equal((yield* Effect.exit(service.publish(binding.authority, input)))._tag, "Failure");
     }),
   );
-  it.effect("retains fixed failure diagnostics without admitting pending private source", () =>
+  it.effect(
+    "publishes external Apps without preview capture and retains exact replay privately",
+    () =>
+      Effect.gen(function* () {
+        const { sql, service, binding, input, witness, captures } = yield* fixture;
+        const app = appPublication({ input, witness });
+        const entry = yield* service.publishMcpApp(binding.authority, app.input, app.witness);
+        assert.equal(captures(), 0);
+        assert.equal(Object.hasOwn(entry.reference, "poster"), false);
+        const debug = yield* service.debug(witness.threadId);
+        assert.equal(debug.pendingCount, 0);
+        assert.equal(debug.failedCaptureCount, 0);
+        assert.equal(debug.readyCount, 1);
+        assert.equal(debug.executionMode, "inline-browser");
+        assert.equal(debug.fullAccess, true);
+        assert.equal(debug.frameCount, 0);
+        assert.equal(debug.frameLimit, 32);
+        assert.ok(debug.storedBytes > 0);
+        assert.equal(JSON.stringify(debug).includes("private-source-marker"), false);
+        assert.equal((yield* service.list({ threadId: witness.threadId })).entries.length, 1);
+        assert.equal(
+          (yield* sql`SELECT 1 FROM visualization_invocations WHERE thread_id=${witness.threadId}`)
+            .length,
+          0,
+        );
+        const tuple = {
+          threadId: witness.threadId,
+          artifactId: entry.reference.artifactId,
+          revisionId: entry.reference.revisionId,
+        };
+        assert.equal((yield* service.inline(tuple)).purpose, "mcp-app");
+        assert.deepEqual(JSON.parse((yield* service.readMcpAppSnapshot(tuple)).privateJson), {
+          input: app.input,
+          witness: app.witness,
+        });
+        yield* sql`UPDATE projection_threads SET runtime_mode='approval-required' WHERE thread_id=${witness.threadId}`;
+        assert.equal((yield* Effect.exit(service.inline(tuple)))._tag, "Failure");
+      }),
+  );
+  it.effect("refuses external App publication after its exact provider generation retires", () =>
     Effect.gen(function* () {
-      const { sql, service, binding, input, witness, setCaptureFailure } = yield* fixture;
-      setCaptureFailure(true);
-      assert.equal((yield* Effect.exit(service.publish(binding.authority, input)))._tag, "Failure");
-      const debug = yield* service.debug(witness.threadId);
-      assert.deepEqual(debug, {
-        pendingCount: 1,
-        failedCaptureCount: 1,
-        readyCount: 0,
-        reason: "capture-unavailable",
-      });
-      assert.equal(JSON.stringify(debug).includes("private-source-marker"), false);
+      const { sql, service, binding, input, witness } = yield* fixture;
+      yield* Effect.promise(binding.dispose);
+      const app = appPublication({ input, witness });
+      assert.equal(
+        (yield* Effect.exit(service.publishMcpApp(binding.authority, app.input, app.witness)))._tag,
+        "Failure",
+      );
       assert.equal((yield* service.list({ threadId: witness.threadId })).entries.length, 0);
       assert.equal(
         (yield* sql`SELECT 1 FROM visualization_invocations WHERE thread_id=${witness.threadId}`)
           .length,
         0,
       );
-      const pending = (yield* sql<{
-        artifactId: string;
-        revisionId: string;
-      }>`SELECT artifact_id AS "artifactId",revision_id AS "revisionId" FROM visualization_artifacts WHERE thread_id=${witness.threadId}`)[0]!;
       assert.equal(
-        (yield* Effect.exit(
-          service.details({
-            threadId: witness.threadId,
-            artifactId: pending.artifactId as never,
-            revisionId: pending.revisionId as never,
-          }),
-        ))._tag,
-        "Failure",
+        (yield* sql`SELECT 1 FROM visualization_artifacts WHERE thread_id=${witness.threadId} AND state='ready'`)
+          .length,
+        0,
       );
     }),
-  );
-  it.effect(
-    "refuses publication if its exact generation retires while native capture is in flight",
-    () =>
-      Effect.gen(function* () {
-        const { sql, service, binding, input, witness, setCaptureHook } = yield* fixture;
-        setCaptureHook(binding.dispose);
-        assert.equal(
-          (yield* Effect.exit(service.publish(binding.authority, input)))._tag,
-          "Failure",
-        );
-        assert.equal((yield* service.list({ threadId: witness.threadId })).entries.length, 0);
-        assert.equal(
-          (yield* sql`SELECT 1 FROM visualization_invocations WHERE thread_id=${witness.threadId}`)
-            .length,
-          0,
-        );
-        assert.equal(
-          (yield* sql`SELECT 1 FROM visualization_artifacts WHERE thread_id=${witness.threadId} AND state='ready'`)
-            .length,
-          0,
-        );
-      }),
   );
   it.effect(
     "snapshots only exact owned raster commitments and refuses altered or foreign originals",
@@ -836,6 +849,37 @@ it.layer(services)("immutable private visualization store", (it) => {
           ))._tag,
           "Failure",
         );
+      }),
+  );
+  it.effect(
+    "refuses malformed and oversized committed raster headers before browser execution",
+    () =>
+      Effect.gen(function* () {
+        const { sql, service, binding, input, witness, config } = yield* fixture;
+        for (const width of [0, 4097, 4000]) {
+          const id = createAttachmentId(witness.threadId)!;
+          const header = Buffer.alloc(33);
+          Buffer.from("89504e470d0a1a0a", "hex").copy(header);
+          header.writeUInt32BE(13, 8);
+          header.write("IHDR", 12, "ascii");
+          header.writeUInt32BE(width, 16);
+          header.writeUInt32BE(4000, 20);
+          const filename = path.join(config.attachmentsDir, `${id}.png`);
+          yield* Effect.promise(() => fs.writeFile(filename, header, { mode: 0o600 }));
+          yield* Effect.addFinalizer(() => Effect.promise(() => fs.unlink(filename)));
+          yield* sql`INSERT INTO attachment_content_commitments(attachment_id,thread_id,content_sha256,size_bytes) VALUES(${id},${witness.threadId},${createHash("sha256").update(header).digest("hex")},${header.length})`;
+          assert.equal(
+            (yield* Effect.exit(
+              service.publish(binding.authority, {
+                ...input,
+                requestId: randomUUID(),
+                assets: [{ assetId: "oversized", attachmentId: id }],
+              }),
+            ))._tag,
+            "Failure",
+          );
+        }
+        assert.equal((yield* service.list({ threadId: witness.threadId })).entries.length, 0);
       }),
   );
   it.effect(
@@ -922,7 +966,7 @@ it.layer(services)("immutable private visualization store", (it) => {
     "stores native App ownership privately without giving forks or strangers action authority",
     () =>
       Effect.gen(function* () {
-        const { service, binding, input, witness, lastPreviewPayload, lastViewerPayload } =
+        const { service, binding, input, witness, lastPreviewPayload, nativeRequests } =
           yield* fixture;
         const appInput = {
           source: input.source,
@@ -941,10 +985,7 @@ it.layer(services)("immutable private visualization store", (it) => {
           toolName: "fixture_chart",
         };
         const entry = yield* service.publishMcpApp(binding.authority, appInput, appWitness);
-        assert.deepEqual((lastPreviewPayload() as { previewReplay: unknown }).previewReplay, {
-          originalInputJson: appInput.originalInputJson,
-          originalResultJson: appInput.originalResultJson,
-        });
+        assert.equal(lastPreviewPayload(), undefined);
         assert.equal(entry.reference.purpose, "mcp-app");
         assert.equal(
           JSON.stringify(yield* service.list({ threadId: witness.threadId })).includes(
@@ -959,10 +1000,12 @@ it.layer(services)("immutable private visualization store", (it) => {
         };
         const row = yield* service.readMcpAppSnapshot(tuple);
         assert.deepEqual(JSON.parse(row.privateJson), { input: appInput, witness: appWitness });
-        yield* service.viewerTicket(tuple);
-        // Replay belongs only to automatic private poster capture. Opening a
-        // viewer still needs its separately authenticated live protocol broker.
-        assert.equal(Object.hasOwn(lastViewerPayload() as object, "previewReplay"), false);
+        const inline = yield* service.inline(tuple);
+        assert.equal(inline.purpose, "mcp-app");
+        assert.equal(Object.hasOwn(inline, "previewReplay"), false);
+        assert.equal(Object.hasOwn(inline, "rawJson"), false);
+        assert.equal((yield* Effect.exit(service.viewerTicket(tuple)))._tag, "Failure");
+        assert.equal(nativeRequests(), 0);
         assert.equal(
           (yield* Effect.exit(
             service.readMcpAppSnapshot({ ...tuple, threadId: ThreadId.make("stranger") }),
@@ -996,14 +1039,29 @@ it.layer(services)("immutable private visualization store", (it) => {
         yield* Effect.addFinalizer(() => Effect.promise(() => client.close()));
         const tools = yield* Effect.promise(() => client.listTools());
         assert.deepEqual(tools.tools.map((tool) => tool.name).toSorted(), [
-          "preview_visualization",
           "publish_visualization",
         ]);
         // Discovery must carry the same authoring and privacy guidance as the
         // supported provider instruction channels, without a divergent copy.
         assert.deepEqual(
           tools.tools.map((tool) => tool.description),
-          [GENERATED_VISUALIZATION_INSTRUCTIONS, GENERATED_VISUALIZATION_INSTRUCTIONS],
+          [GENERATED_VISUALIZATION_INSTRUCTIONS],
+        );
+        assert.ok(
+          GENERATED_VISUALIZATION_INSTRUCTIONS.includes(
+            "setting html[data-cafe-visible=true] before authored source runs",
+          ),
+        );
+        assert.equal(GENERATED_VISUALIZATION_INSTRUCTIONS.includes("initial hint is false"), false);
+        assert.ok(
+          GENERATED_VISUALIZATION_INSTRUCTIONS.includes(
+            "External MCP Apps also load automatically while visible",
+          ),
+        );
+        assert.ok(GENERATED_VISUALIZATION_INSTRUCTIONS.includes("exact-operation consent"));
+        assert.equal(
+          GENERATED_VISUALIZATION_INSTRUCTIONS.includes("still require explicit activation"),
+          false,
         );
         // The supplied solver is a fixed generated-document helper, not engine
         // source duplicated in provider context or a new external-App ability.
@@ -1022,11 +1080,11 @@ it.layer(services)("immutable private visualization store", (it) => {
         );
         assert.equal(GENERATED_VISUALIZATION_INSTRUCTIONS.includes("512x512"), false);
         assert.ok(GENERATED_VISUALIZATION_INSTRUCTIONS.includes("no more than 30fps"));
-        assert.ok(GENERATED_VISUALIZATION_INSTRUCTIONS.includes("display-only 2.0 color gain"));
+        assert.ok(GENERATED_VISUALIZATION_INSTRUCTIONS.includes("display-only 1.1 color gain"));
         assert.ok(
-          GENERATED_VISUALIZATION_INSTRUCTIONS.includes("canvas opacity between 0.8 and 1.0"),
+          GENERATED_VISUALIZATION_INSTRUCTIONS.includes("decorative canvas opacity at 0.15"),
         );
-        assert.ok(GENERATED_VISUALIZATION_INSTRUCTIONS.includes("local veil using 60–70%"));
+        assert.ok(GENERATED_VISUALIZATION_INSTRUCTIONS.includes("local veil with 65%"));
         assert.ok(
           GENERATED_VISUALIZATION_INSTRUCTIONS.includes(
             "existing received source is not rewritten",
@@ -1069,7 +1127,7 @@ it.layer(services)("immutable private visualization store", (it) => {
         assert.ok(GENERATED_VISUALIZATION_INSTRUCTIONS.includes("await document.fonts.ready"));
         assert.ok(
           GENERATED_VISUALIZATION_INSTRUCTIONS.includes(
-            "actual four fixed binary faces before parsing source",
+            "same actual four fixed binary faces and full license",
           ),
         );
         assert.equal(
@@ -1079,7 +1137,7 @@ it.layer(services)("immutable private visualization store", (it) => {
         const preview = yield* Effect.promise(() =>
           client.callTool({ name: "preview_visualization", arguments: input }),
         );
-        assert.notEqual(preview.isError, true);
+        assert.equal(preview.isError, true);
         assert.equal(JSON.stringify(preview).includes("private-source-marker"), false);
         const published = yield* Effect.promise(() =>
           client.callTool({ name: "publish_visualization", arguments: input }),

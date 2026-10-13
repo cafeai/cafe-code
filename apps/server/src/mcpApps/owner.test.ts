@@ -13,7 +13,11 @@ import {
   type McpAppOwnerOperation,
 } from "./owner.ts";
 
-const observed = vi.hoisted(() => ({ published: [] as unknown[][], current: true }));
+const observed = vi.hoisted(() => ({
+  published: [] as unknown[][],
+  current: true,
+  admission: undefined as (() => Promise<void>) | undefined,
+}));
 vi.mock("../visualizations/service.ts", async () => {
   const E = await import("effect/Effect");
   return {
@@ -21,7 +25,8 @@ vi.mock("../visualizations/service.ts", async () => {
       run: E.runPromise,
       service: {
         requireActiveSession: () =>
-          E.sync(() => {
+          E.promise(async () => {
+            await observed.admission?.();
             if (!observed.current) throw new Error("Synthetic generation revoked.");
           }),
         publishMcpApp: (...args: unknown[]) =>
@@ -39,10 +44,12 @@ const context = (text: string) => ({
 afterEach(() => {
   for (const close of retire.splice(0)) close();
   observed.published.length = 0;
+  observed.admission = undefined;
 });
 
-function fixture() {
+function fixture(run: Parameters<typeof registerMcpAppOwner>[2] = Effect.runPromise) {
   observed.current = true;
+  observed.admission = undefined;
   const generation = VisualizationGenerationId.make(randomUUID());
   const authority = {
     threadId: ThreadId.make(`app-${randomUUID()}`),
@@ -101,7 +108,7 @@ function fixture() {
   // This peer implements only controlled MCP calls. It has no provider binary,
   // credentials, process scope, real profile or ability to run inference.
   const runtime = { mcpApps: { catalog, resource, tool } } as unknown as CodexSessionRuntimeShape;
-  const owner = registerMcpAppOwner(binding, runtime, Effect.runPromise);
+  const owner = registerMcpAppOwner(binding, runtime, run);
   if (!owner) throw new Error("Expected synthetic owner.");
   retire.push(owner.close);
   const witness = {
@@ -140,6 +147,9 @@ function fixture() {
     originCallId: item.id,
     method,
     requestJson: JSON.stringify(params),
+    ...(method === "resource" || method === "tool"
+      ? { consentExpiresAtMs: Date.now() + 30_000 }
+      : {}),
   });
   return {
     binding,
@@ -325,6 +335,93 @@ describe("actual adapter-owned MCP App transport", () => {
     await expect(dispatchMcpAppOwnerOperation(peer.operation("catalog"))).rejects.toThrow(
       "unavailable",
     );
+  });
+  it.each(["resource", "tool"] as const)(
+    "refuses %s consent that expires during asynchronous owner admission without accepting a caller's renewal",
+    async (method) => {
+      let clock = Date.now();
+      const date = vi.spyOn(Date, "now").mockImplementation(() => clock);
+      let release!: () => void;
+      let entered!: () => void;
+      const gate = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      const admitted = new Promise<void>((resolve) => {
+        entered = resolve;
+      });
+      try {
+        const peer = fixture();
+        observed.admission = async () => {
+          entered();
+          await gate;
+        };
+        const input = peer.operation(
+          method,
+          method === "resource" ? { uri: "ui://owned" } : { name: "act", arguments: {} },
+        );
+        const deadline = input.consentExpiresAtMs!;
+        const rejection = expect(dispatchMcpAppOwnerOperation(input)).rejects.toThrow(
+          "unavailable",
+        );
+        await admitted;
+        clock = deadline;
+        // The decoded request is mutable in this isolated injected-peer case;
+        // its original absolute spending deadline must remain immutable.
+        Object.assign(input, { consentExpiresAtMs: deadline + 30_000 });
+        release();
+        await rejection;
+        expect(peer.resource).not.toHaveBeenCalled();
+        expect(peer.tool).not.toHaveBeenCalled();
+      } finally {
+        release();
+        date.mockRestore();
+      }
+    },
+  );
+  it.each(["resource", "tool"] as const)(
+    "rechecks %s consent when the real transport effect is evaluated, not only when admission completes",
+    async (method) => {
+      let clock = Date.now();
+      const date = vi.spyOn(Date, "now").mockImplementation(() => clock);
+      const deadline = clock + 30_000;
+      try {
+        const peer = fixture((work) => {
+          // This runner advances the controlled wall clock only after current
+          // owner admission, immediately before evaluating the real effect.
+          clock = deadline;
+          return Effect.runPromise(work);
+        });
+        await expect(
+          dispatchMcpAppOwnerOperation(
+            peer.operation(
+              method,
+              method === "resource" ? { uri: "ui://owned" } : { name: "act", arguments: {} },
+            ),
+          ),
+        ).rejects.toThrow("unavailable");
+        expect(peer.resource).not.toHaveBeenCalled();
+        expect(peer.tool).not.toHaveBeenCalled();
+      } finally {
+        date.mockRestore();
+      }
+    },
+  );
+  it("requires finite unexpired consent only for resource/tool calls", async () => {
+    const peer = fixture();
+    for (const method of ["resource", "tool"] as const) {
+      const params = method === "resource" ? { uri: "ui://owned" } : { name: "act", arguments: {} };
+      const { consentExpiresAtMs: _deadline, ...withoutConsent } = peer.operation(method, params);
+      await expect(dispatchMcpAppOwnerOperation(withoutConsent)).rejects.toThrow("unavailable");
+      for (const deadline of [Date.now(), 0, Number.NaN, Number.POSITIVE_INFINITY, 1.5])
+        await expect(
+          dispatchMcpAppOwnerOperation({ ...withoutConsent, consentExpiresAtMs: deadline }),
+        ).rejects.toThrow("unavailable");
+    }
+    expect(peer.resource).not.toHaveBeenCalled();
+    expect(peer.tool).not.toHaveBeenCalled();
+    await dispatchMcpAppOwnerOperation(peer.operation("catalog"));
+    await dispatchMcpAppOwnerOperation(peer.operation("context", context("untrusted fixture")));
+    expect(peer.catalog).toHaveBeenCalledTimes(2);
   });
   it("keeps replace-only bounded child model context out of the root", async () => {
     const peer = fixture();

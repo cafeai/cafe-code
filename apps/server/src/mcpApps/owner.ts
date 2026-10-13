@@ -74,6 +74,12 @@ export const McpAppOwnerOperation = Schema.Struct({
   originCallId: identifier,
   method: Schema.Literals(["catalog", "resource", "tool", "context"]),
   requestJson: Schema.String.check(Schema.isMaxLength(MCP_APP_MAX_MESSAGE_BYTES)),
+  // Resource/tool calls spend a server-minted one-use consent. Its original
+  // absolute deadline crosses daemon I/O unchanged; owner admission must never
+  // restart or renew that allowance. Catalogue/context calls spend no consent.
+  consentExpiresAtMs: Schema.optionalKey(
+    Schema.Int.check(Schema.isBetween({ minimum: 1, maximum: Number.MAX_SAFE_INTEGER })),
+  ),
 }).annotate(strict);
 export type McpAppOwnerOperation = typeof McpAppOwnerOperation.Type;
 const unavailable = () => new Error("MCP App owner is unavailable.");
@@ -329,46 +335,72 @@ export async function dispatchMcpAppOwnerOperation(input: McpAppOwnerOperation):
   const parsed = readBoundedMcpAppJson(input.requestJson);
   const params = parsed.ok ? ownRecord(parsed.value) : undefined;
   if (!params) throw unavailable();
+  // Snapshot the deadline before any await. Even an injected caller that later
+  // mutates its decoded input cannot extend an already admitted operation.
+  const { consentExpiresAtMs, method, nativeThreadId, serverName, originCallId } = input;
+  const requiresConsent = method === "resource" || method === "tool";
+  const requireUnexpiredConsent = () => {
+    if (owner.closed) throw unavailable();
+    if (
+      requiresConsent &&
+      (typeof consentExpiresAtMs !== "number" ||
+        !Number.isSafeInteger(consentExpiresAtMs) ||
+        consentExpiresAtMs <= 0 ||
+        Date.now() >= consentExpiresAtMs)
+    )
+      throw unavailable();
+  };
+  requireUnexpiredConsent();
   owner.pending += 1;
   try {
     await current(owner);
-    if (input.method === "context") {
+    // Current-session admission itself performs asynchronous authority I/O.
+    // Refuse expired consent before constructing a native transport request.
+    requireUnexpiredConsent();
+    if (method === "context") {
       // This is a Cafe-owned operation, not an external MCP tool with a magic
       // name. It cannot cause inference or acquire provider tool authority.
       if (typeof params.json !== "string" || !readBoundedMcpAppJson(params.json, 16 * 1024).ok)
         throw unavailable();
-      await owner.run(owner.runtime.mcpApps.catalog(input.nativeThreadId, input.serverName));
+      await owner.run(owner.runtime.mcpApps.catalog(nativeThreadId, serverName));
       await current(owner);
-      if (!owner.modelContexts.has(input.nativeThreadId)) {
+      if (!owner.modelContexts.has(nativeThreadId)) {
         if (modelContextCount >= 128 || owner.modelContexts.size >= 16) throw unavailable();
         modelContextCount += 1;
       }
-      owner.modelContexts.set(input.nativeThreadId, params.json);
+      owner.modelContexts.set(nativeThreadId, params.json);
       return "{}";
     }
     const transport = owner.runtime.mcpApps;
     const result =
-      input.method === "catalog"
-        ? await owner.run(transport.catalog(input.nativeThreadId, input.serverName))
-        : input.method === "resource" && typeof params.uri === "string"
+      method === "catalog"
+        ? await owner.run(transport.catalog(nativeThreadId, serverName))
+        : method === "resource" && typeof params.uri === "string"
           ? await owner.run(
-              transport.resource(
-                input.nativeThreadId,
-                input.serverName,
-                input.originCallId,
-                params.uri,
-              ),
+              Effect.suspend(() => {
+                // A runner may defer effect evaluation after admission. Keep
+                // the deadline check adjacent to the actual transport factory,
+                // rather than checking only when an unevaluated effect is built.
+                requireUnexpiredConsent();
+                return transport.resource(
+                  nativeThreadId,
+                  serverName,
+                  originCallId,
+                  params.uri as string,
+                );
+              }),
             )
-          : input.method === "tool" &&
-              typeof params.name === "string" &&
-              ownRecord(params.arguments)
+          : method === "tool" && typeof params.name === "string" && ownRecord(params.arguments)
             ? await owner.run(
-                transport.tool(
-                  input.nativeThreadId,
-                  input.serverName,
-                  params.name,
-                  ownRecord(params.arguments)!,
-                ),
+                Effect.suspend(() => {
+                  requireUnexpiredConsent();
+                  return transport.tool(
+                    nativeThreadId,
+                    serverName,
+                    params.name as string,
+                    ownRecord(params.arguments)!,
+                  );
+                }),
               )
             : undefined;
     if (owner.closed || result === undefined) throw unavailable();

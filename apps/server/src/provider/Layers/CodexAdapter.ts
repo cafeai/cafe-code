@@ -5436,7 +5436,8 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
               disposeSchedulingSession,
             ).pipe(Effect.provideService(Scope.Scope, sessionScope))
           : undefined;
-        const visualizationBroker = readVisualizationSessionBroker();
+        const visualizationBroker =
+          input.runtimeMode === "full-access" ? readVisualizationSessionBroker() : undefined;
         const visualizationBinding = visualizationBroker
           ? yield* Effect.acquireRelease(
               Effect.tryPromise({
@@ -5445,6 +5446,7 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
                     threadId: input.threadId,
                     providerInstanceId: boundInstanceId,
                     provider: "codex",
+                    runtimeMode: input.runtimeMode,
                   }),
                 catch: () =>
                   new ProviderAdapterProcessError({

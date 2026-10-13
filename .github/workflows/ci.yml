@@ -220,79 +220,14 @@ jobs:
           CAFE_CODE_MCP_BRIDGE_E2E: "1"
         run: corepack yarn workspace @cafeai/cafe-code exec vitest run --config vitest.e2e.config.ts integration/CafeMcpBridge.e2e.test.ts
 
-      - name: Prepare synthetic native visualization evidence directories
-        # Only fixed synthetic fixture captures are published below, never a
-        # retained private chart, user profile, source, JSON or parent screen.
-        # Exclusive scoped directories also keep font and comprehensive runs
-        # from replacing another invocation's evidence. No OS setup or runtime
-        # installation is performed here.
-        run: |
-          node -e 'const fs = require("node:fs"); const path = require("node:path"); const root = process.env.RUNNER_TEMP; if (!root || !path.isAbsolute(root)) throw new Error("Runner temporary directory unavailable"); for (const name of ["cafe-visualization-comprehensive", "cafe-visualization-font"]) fs.mkdirSync(path.join(root, name), { mode: 0o700 });'
-
-      - name: Isolated native visualization host qualification
-        # Existing Electron only, with a fresh synthetic profile/view. Real
-        # source isolation, replay pixels, semantic input and owned retirement
-        # are distinct from browser fixtures and installed screen-reader/IME UX.
+      - name: Full-access inline visualization browser qualification
+        # Ordinary srcdoc frames are the current source execution path. These
+        # fixtures exercise real frame input, natural layout, exact SDK messages,
+        # visibility teardown and bounded current-frame PNG capture. Linux's
+        # complete suite already includes them; keep the native input projects,
+        # worker caps and deadlines unchanged.
         if: runner.os != 'Linux'
-        env:
-          CAFE_CODE_VISUALIZATION_E2E: "1"
-          CAFE_CODE_VISUALIZATION_E2E_CAPTURE_DIR: ${{ runner.temp }}/cafe-visualization-comprehensive
-        run: corepack yarn workspace @cafecode/desktop test src/visualizations/NativeVisualizationElectron.e2e.test.ts
-
-      - name: Prepare installed Electron sandbox helper (Linux)
-        # The pinned Electron runtime was already qualified above. Prepare its
-        # existing helper on the disposable hosted runner; never disable the
-        # renderer sandbox or change a user's machine as a test workaround.
-        if: runner.os == 'Linux'
-        shell: bash
-        run: |
-          test "$RUNNER_ENVIRONMENT" = "github-hosted"
-          cafe_electron_sandbox=$(node -e '
-            const fs = require("node:fs");
-            const path = require("node:path");
-            const helper = path.join(path.dirname(require("electron")), "chrome-sandbox");
-            const stat = fs.lstatSync(helper);
-            if (!stat.isFile() || stat.isSymbolicLink()) throw new Error("Expected the installed regular sandbox helper.");
-            process.stdout.write(helper);
-          ')
-          sudo chown root:root -- "$cafe_electron_sandbox"
-          sudo chmod 4755 -- "$cafe_electron_sandbox"
-          node -e '
-            const fs = require("node:fs");
-            const stat = fs.lstatSync(process.argv[1]);
-            if (!stat.isFile() || stat.isSymbolicLink() || stat.uid !== 0 || stat.gid !== 0 || (stat.mode & 0o7777) !== 0o4755)
-              throw new Error("Installed Electron sandbox helper qualification failed.");
-          ' "$cafe_electron_sandbox"
-
-      - name: Isolated native visualization host qualification (Linux)
-        # Use the hosted image's existing display fixture; absence is a failure,
-        # not permission to install software or disable Electron's sandbox.
-        if: runner.os == 'Linux'
-        env:
-          CAFE_CODE_VISUALIZATION_E2E: "1"
-          CAFE_CODE_VISUALIZATION_E2E_CAPTURE_DIR: ${{ runner.temp }}/cafe-visualization-comprehensive
-        run: xvfb-run --auto-servernum corepack yarn workspace @cafecode/desktop test src/visualizations/NativeVisualizationElectron.e2e.test.ts
-
-      - name: Isolated native visualization chat font qualification
-        # The same sandbox admits only the bundled binary faces, before source
-        # parsing. This checks real font-set sharing/user-origin precedence;
-        # browser family declarations alone do not establish native loading.
-        if: runner.os != 'Linux'
-        env:
-          CAFE_CODE_VISUALIZATION_E2E: "1"
-          CAFE_CODE_VISUALIZATION_FONT_REPLAY: "1"
-          CAFE_CODE_VISUALIZATION_E2E_CAPTURE_DIR: ${{ runner.temp }}/cafe-visualization-font
-        run: corepack yarn workspace @cafecode/desktop test src/visualizations/NativeVisualizationElectron.e2e.test.ts
-
-      - name: Isolated native visualization chat font qualification (Linux)
-        # Keep the existing display fixture and sandbox. No font fetch, runtime
-        # installation or deadline expansion is introduced by this check.
-        if: runner.os == 'Linux'
-        env:
-          CAFE_CODE_VISUALIZATION_E2E: "1"
-          CAFE_CODE_VISUALIZATION_FONT_REPLAY: "1"
-          CAFE_CODE_VISUALIZATION_E2E_CAPTURE_DIR: ${{ runner.temp }}/cafe-visualization-font
-        run: xvfb-run --auto-servernum corepack yarn workspace @cafecode/desktop test src/visualizations/NativeVisualizationElectron.e2e.test.ts
+        run: corepack yarn workspace @cafecode/web test:browser src/components/visualizations/VisualizationHistory.browser.tsx src/components/visualizations/VisualizationOwner.browser.tsx src/components/visualizations/InlineMcpAppBridge.browser.tsx src/components/visualizations/VisualizationInlineCapture.browser.tsx --maxWorkers=2
 
       - name: Final forced desktop verification
         # The earlier bundle supplies the isolated MCP bridge fixture. Rebuild
@@ -325,8 +260,12 @@ jobs:
           path: |
             apps/web/.vitest/attachments/failure-screenshots/VisualizationCommitChart.browser.tsx/
             apps/web/.vitest/attachments/failure-screenshots/MermaidFamilies.browser.tsx/
-            ${{ runner.temp }}/cafe-visualization-comprehensive/*.png
-            ${{ runner.temp }}/cafe-visualization-font/*.png
+            apps/web/.vitest/attachments/failure-screenshots/Visualizations.browser.tsx/
+            apps/web/.vitest/attachments/failure-screenshots/VisualizationFluid.browser.tsx/
+            apps/web/.vitest/attachments/failure-screenshots/VisualizationHistory.browser.tsx/
+            apps/web/.vitest/attachments/failure-screenshots/VisualizationOwner.browser.tsx/
+            apps/web/.vitest/attachments/failure-screenshots/InlineMcpAppBridge.browser.tsx/
+            apps/web/.vitest/attachments/failure-screenshots/VisualizationInlineCapture.browser.tsx/
           include-hidden-files: true
           if-no-files-found: ignore
           retention-days: 7

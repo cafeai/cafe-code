@@ -18,9 +18,14 @@ const identity = {
   threadId: ThreadId.make("visual-fixture"),
   providerInstanceId: ProviderInstanceId.make("codex_fixture"),
   provider: "codex" as const,
+  runtimeMode: "full-access" as const,
 };
 const fixture = Effect.gen(function* () {
   yield* runMigrations();
+  const sql = yield* SqlClient.SqlClient;
+  yield* sql`INSERT INTO projection_threads(thread_id,project_id,title,runtime_mode,created_at,updated_at)
+    VALUES(${identity.threadId},NULL,'Isolated Full-access policy','full-access','2026-10-13T00:00:00.000Z','2026-10-13T00:00:00.000Z')
+    ON CONFLICT(thread_id) DO UPDATE SET runtime_mode='full-access'`;
   const root = yield* Effect.promise(() =>
     fs.mkdtemp(path.join(os.tmpdir(), "cafe-visual-session-fixture-")),
   );
@@ -92,7 +97,7 @@ it.layer(TestSqliteClient.layerMemory())("private visualization generations", (i
         );
       }),
   );
-  it.effect("does not advertise unsupported provenance or an absent qualified host", () =>
+  it.effect("does not advertise unsupported provenance or unavailable runtime policy", () =>
     Effect.gen(function* () {
       const { runtime, options } = yield* fixture;
       assert.equal(
@@ -106,6 +111,46 @@ it.layer(TestSqliteClient.layerMemory())("private visualization generations", (i
       yield* Effect.addFinalizer(() => Effect.promise(unavailable.close));
       assert.equal(yield* Effect.promise(() => unavailable.bind(identity)), undefined);
     }),
+  );
+  it.effect(
+    "requires both trusted Full-access launch policy and current persisted thread policy",
+    () =>
+      Effect.gen(function* () {
+        const { runtime, sql } = yield* fixture;
+        assert.equal(
+          yield* Effect.promise(() =>
+            runtime.bind({ ...identity, runtimeMode: "approval-required" }),
+          ),
+          undefined,
+        );
+        yield* sql`UPDATE projection_threads SET runtime_mode='approval-required' WHERE thread_id=${identity.threadId}`;
+        assert.equal(
+          (yield* Effect.exit(Effect.tryPromise(() => runtime.bind(identity))))._tag,
+          "Failure",
+        );
+        yield* sql`UPDATE projection_threads SET runtime_mode='full-access' WHERE thread_id=${identity.threadId}`;
+        const binding = yield* Effect.promise(() => runtime.bind(identity));
+        if (!binding) throw new Error("Expected Full-access fixture binding.");
+        const { token } = yield* tokenFor(binding);
+        yield* Effect.promise(binding.activate);
+        yield* sql.withTransaction(requireVisualizationSessionAuthority(sql, binding.authority));
+        yield* sql`UPDATE projection_threads SET runtime_mode='approval-required' WHERE thread_id=${identity.threadId}`;
+        assert.equal(
+          (yield* Effect.exit(Effect.tryPromise(() => runtime.authorize(token))))._tag,
+          "Failure",
+        );
+        assert.equal(
+          (yield* Effect.exit(
+            sql.withTransaction(requireVisualizationSessionAuthority(sql, binding.authority)),
+          ))._tag,
+          "Failure",
+        );
+        yield* sql`DELETE FROM projection_threads WHERE thread_id=${identity.threadId}`;
+        assert.equal(
+          (yield* Effect.exit(Effect.tryPromise(() => runtime.authorize(token))))._tag,
+          "Failure",
+        );
+      }),
   );
   it.effect("rejects stale activation and old-owner close without revoking the replacement", () =>
     Effect.gen(function* () {

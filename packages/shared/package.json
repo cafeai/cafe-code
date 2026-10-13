@@ -4,6 +4,10 @@
   "license": "AGPL-3.0-or-later",
   "type": "module",
   "exports": {
+    "./visualizationRasterPolicy": {
+      "types": "./src/visualizationRasterPolicy.ts",
+      "import": "./src/visualizationRasterPolicy.ts"
+    },
     "./chatTypography": {
       "types": "./src/chatTypography.ts",
       "import": "./src/chatTypography.ts"

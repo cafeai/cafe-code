@@ -3,7 +3,7 @@
 // @effect-diagnostics globalDateInEffect:off
 // @effect-diagnostics globalConsoleInEffect:off
 // @effect-diagnostics globalTimers:off
-import { readVisualizationDiagnostics } from "../visualizations/visualizationDiagnostics.ts";
+import { readInlineVisualizationDiagnostics } from "./inlineVisualizationDiagnostics.ts";
 import {
   DICTATION_OPENAI_REQUEST_ID_MAX_CHARS,
   DICTATION_PROVIDER_ERROR_CODES,
@@ -1687,7 +1687,7 @@ function buildCompactDebugSnapshot(): Record<string, unknown> {
     process: summarizeProcessForCompactDebug(),
     providerDaemon: summarizeProviderDaemonForCompactDebug(),
     globalDictationShortcut: state.globalDictationShortcut,
-    visualizations: readVisualizationDiagnostics(),
+    visualizations: readInlineVisualizationDiagnostics(state.rendererSnapshot),
     renderer: summarizeRendererForCompactDebug(),
     freshness: buildProviderRendererFreshnessDiagnostic(),
   };
@@ -1783,7 +1783,7 @@ function buildFullDebugSnapshot(): Record<string, unknown> {
             snapshot: state.providerDaemonSnapshot,
           },
     globalDictationShortcut: state.globalDictationShortcut,
-    visualizations: readVisualizationDiagnostics(),
+    visualizations: readInlineVisualizationDiagnostics(state.rendererSnapshot),
     renderer:
       state.rendererSnapshot === null
         ? {

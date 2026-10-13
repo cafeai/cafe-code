@@ -1,13 +1,18 @@
-import type { VisualizationHostBounds } from "@cafecode/contracts/visualizationHost";
-
 const MAX_ANCESTORS = 128;
+const MAX_GEOMETRY_EXTENT = 32768;
 const CLIPPED_OVERFLOW = new Set(["auto", "scroll", "hidden", "clip"]);
+interface InlineBounds {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
 
 /**
- * Only trusted shell ancestors supply geometry. A native surface is above the
- * DOM compositor, so CSS overflow on the chat/card does not clip it by itself.
- * Keep this walk finite and refuse hidden/inert or unexpectedly deep trees;
- * neither a source document nor an arbitrary selector participates in it.
+ * Only the parent shell's exact frame anchor and ancestors supply geometry.
+ * Ordinary browser clipping owns the inline frame's visible region; this walk
+ * observes that region without inspecting the authored child document. Keep
+ * the walk finite and refuse actual hidden styles or unexpectedly deep trees.
  */
 export function visualizationClippingAncestors(
   element: HTMLElement,
@@ -54,35 +59,37 @@ function clientBox(element: HTMLElement) {
 }
 
 /**
- * Full page bounds and its visible crop are separate CSS-coordinate values.
- * Scrolling changes only the crop/offset, not the guest's responsive viewport.
- * Main owns CSS-to-DIP conversion and its qualified minimum clipping size; a
- * renderer cannot infer that size from CSS pixels or mutate guest zoom to fit.
+ * The complete actual DOM rectangle and its visible crop are distinct finite
+ * CSS-coordinate values. Never truncate to a former native surface's prefix:
+ * a wide or transformed/tall frame can expose only its far edge and still be
+ * visible. Refuse unreasonable geometry explicitly rather than misclassifying
+ * that edge as offscreen or changing the child document's responsive viewport.
  */
 export function visualizationGeometry(
   element: HTMLElement,
   inspectionHidden = false,
 ): {
-  bounds: VisualizationHostBounds;
-  clipBounds: VisualizationHostBounds;
+  bounds: InlineBounds;
+  clipBounds: InlineBounds;
 } | null {
-  // Only an already presentation-hidden exact generated viewer uses this
-  // narrow mode while its trusted inspector makes the background inert. Real
-  // hidden styles, disconnects and finite clipping still fail; this cannot
-  // expose native pixels or admit a new source from an inert ancestor.
+  // Ordinary DOM modals may make their background inert without moving this
+  // frame out of view. This mode preserves that existing frame's identity;
+  // actual hidden styles, disconnection and finite clipping still deny it.
   const ancestors = visualizationClippingAncestors(element, inspectionHidden);
   if (!ancestors) return null;
   const rect = element.getBoundingClientRect();
   const x = Math.ceil(rect.left),
     y = Math.ceil(rect.top);
-  const width = Math.min(1600, Math.floor(rect.right) - x);
-  const height = Math.min(2000, Math.floor(rect.bottom) - y);
+  const width = Math.floor(rect.right) - x;
+  const height = Math.floor(rect.bottom) - y;
   if (
     ![x, y, width, height, window.innerWidth, window.innerHeight].every(Number.isFinite) ||
-    Math.abs(x) > 32768 ||
-    Math.abs(y) > 32768 ||
+    Math.abs(x) > MAX_GEOMETRY_EXTENT ||
+    Math.abs(y) > MAX_GEOMETRY_EXTENT ||
     width < 1 ||
-    height < 1
+    height < 1 ||
+    width > MAX_GEOMETRY_EXTENT ||
+    height > MAX_GEOMETRY_EXTENT
   )
     return null;
   let left = Math.max(0, x),
@@ -112,28 +119,4 @@ export function visualizationGeometry(
     bounds: { x, y, width, height },
     clipBounds: { x: clipX, y: clipY, width: clipWidth, height: clipHeight },
   };
-}
-
-/**
- * Reserve one passive/active slot from the actual chat viewport, not the whole
- * desktop window. Scroll never changes this height: only ancestor/window size
- * changes do, so starting/stopping the native document does not shift history.
- */
-export function visualizationInlineHeight(element: HTMLElement): number | null {
-  const ancestors = visualizationClippingAncestors(element);
-  // A modal makes the original chat inert. Keep its last reserved slot rather
-  // than measuring a broader window fallback while that owner is unavailable.
-  if (!ancestors) return null;
-  let viewportHeight = window.innerHeight;
-  for (const ancestor of ancestors) {
-    const style = getComputedStyle(ancestor);
-    if (CLIPPED_OVERFLOW.has(style.overflowY) || /\b(paint|strict|content)\b/.test(style.contain)) {
-      const box = clientBox(ancestor);
-      viewportHeight = Math.min(viewportHeight, box.bottom - box.top);
-    }
-  }
-  return Math.max(
-    80,
-    Math.min(700, Math.floor(viewportHeight * 0.65), Math.floor(viewportHeight - 100)),
-  );
 }

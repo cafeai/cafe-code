@@ -66,6 +66,66 @@ export const VisualizationDetailsInput = Schema.Struct({
   revisionId: VisualizationRevisionId,
 }).annotate(strict);
 export type VisualizationDetailsInput = typeof VisualizationDetailsInput.Type;
+
+/** Executable inline content has its own explicit read boundary. It is not a
+ * private diagnostic response and carries no raw request JSON, receipt proof,
+ * provider capability or source-selected permission selector. The server must
+ * authenticate this exact stored tuple and current persisted Full access policy
+ * before returning it; the literal below is an admission result, not authority
+ * supplied by a renderer or an arbitrary received document. */
+export const VisualizationInlineInput = VisualizationDetailsInput;
+export type VisualizationInlineInput = typeof VisualizationInlineInput.Type;
+const inlineHtmlWithinUtf8Bound = (value: string) => {
+  const maximum = 16 * 1024 * 1024;
+  // Refuse before allocating an encoder-sized copy. Count exact scalar bytes
+  // and reject invalid UTF-16 rather than silently changing immutable content.
+  if (value.length < 1 || value.length > maximum) return false;
+  let length = 0;
+  for (let index = 0; index < value.length; index++) {
+    const unit = value.charCodeAt(index);
+    if (unit <= 0x7f) length += 1;
+    else if (unit <= 0x7ff) length += 2;
+    else if (unit >= 0xd800 && unit <= 0xdbff) {
+      const next = value.charCodeAt(index + 1);
+      if (!(next >= 0xdc00 && next <= 0xdfff)) return false;
+      index++;
+      length += 4;
+    } else if (unit >= 0xdc00 && unit <= 0xdfff) return false;
+    else length += 3;
+    if (length > maximum) return false;
+  }
+  return true;
+};
+export const VisualizationInlineResult = Schema.Struct({
+  ...VisualizationDetailsInput.fields,
+  purpose: Schema.Literals(["generated-visualization", "mcp-app"]),
+  fullAccess: Schema.Literal(true),
+  html: Schema.String.check(Schema.makeFilter(inlineHtmlWithinUtf8Bound)),
+  // This short renewable grant admits exact backend App actions only. It does
+  // not isolate same-origin source or claim that its browser execution expires.
+  frameId: Schema.String.check(Schema.isUUID()),
+  ticket: token,
+  expiresAtMs: Schema.Int.check(Schema.isBetween({ minimum: 1, maximum: Number.MAX_SAFE_INTEGER })),
+}).annotate(strict);
+export type VisualizationInlineResult = typeof VisualizationInlineResult.Type;
+export const VisualizationInlineFrameInput = Schema.Struct({
+  ...VisualizationDetailsInput.fields,
+  frameId: VisualizationInlineResult.fields.frameId,
+  ticket: token,
+}).annotate(strict);
+export type VisualizationInlineFrameInput = typeof VisualizationInlineFrameInput.Type;
+export const VisualizationInlineFrameResult = Schema.Struct({
+  ...VisualizationDetailsInput.fields,
+  frameId: VisualizationInlineResult.fields.frameId,
+  expiresAtMs: VisualizationInlineResult.fields.expiresAtMs,
+}).annotate(strict);
+export type VisualizationInlineFrameResult = typeof VisualizationInlineFrameResult.Type;
+export const VisualizationInlineFrameRetireResult = Schema.Struct({
+  ...VisualizationDetailsInput.fields,
+  frameId: VisualizationInlineResult.fields.frameId,
+  retired: Schema.Boolean,
+}).annotate(strict);
+export type VisualizationInlineFrameRetireResult = typeof VisualizationInlineFrameRetireResult.Type;
 export const VisualizationPrivateSource = Schema.Struct({
   ...GeneratedVisualizationSource.fields,
   purpose: Schema.Literals(["generated-visualization", "mcp-app"]),

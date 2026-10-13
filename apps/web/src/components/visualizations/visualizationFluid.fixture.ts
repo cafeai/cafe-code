@@ -183,6 +183,7 @@ export async function createFluidFixture(
     failSecondBuffer?: boolean;
     width?: number;
     height?: number;
+    authoredOpacity?: number;
   } = {},
 ): Promise<FluidFixture> {
   const frame = document.createElement("iframe");
@@ -197,7 +198,8 @@ export async function createFluidFixture(
   const markerCount = options.markerCount ?? 1;
   const markers = Array.from(
     { length: markerCount },
-    () => `<canvas data-cafe-fluid style="width:${width}px;height:${height}px"></canvas>`,
+    () =>
+      `<canvas data-cafe-fluid style="width:${width}px;height:${height}px;opacity:${options.authoredOpacity ?? 1}!important"></canvas>`,
   ).join("");
   const presentationVisible =
     options.presentationVisible === undefined

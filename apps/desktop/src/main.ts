@@ -40,7 +40,6 @@ import * as DesktopRemoteCertificates from "./settings/DesktopRemoteCertificates
 import * as DesktopAppSettings from "./settings/DesktopAppSettings.ts";
 import * as DesktopShellEnvironment from "./shell/DesktopShellEnvironment.ts";
 import * as DesktopState from "./app/DesktopState.ts";
-import * as DesktopVisualizations from "./visualizations/DesktopVisualizations.ts";
 import * as DesktopUpdates from "./updates/DesktopUpdates.ts";
 import * as DesktopSourceUpdates from "./updates/DesktopSourceUpdates.ts";
 import * as DesktopWindow from "./window/DesktopWindow.ts";
@@ -109,7 +108,6 @@ const desktopFoundationLayer = Layer.mergeAll(
   DesktopAssets.layer,
   DesktopObservability.layer,
   DesktopPowerSaveBlocker.layer,
-  DesktopVisualizations.layer,
 ).pipe(Layer.provideMerge(desktopEnvironmentLayer));
 
 const desktopLocalizedFoundationLayer = DesktopUiLocale.layer.pipe(

@@ -86,16 +86,16 @@ describe("generated fluid decoration lifecycle", () => {
       // every solver/equation/shading statement remains independently bound.
       if (name === "displayShader") {
         const gainComment =
-          "// Final presentation only: retain the supplied dye/solver state, // but double its colour presence without changing simulation state. ";
+          "// Final presentation only: retain the supplied dye/solver state, // with ten percent more colour than the original display baseline. ";
         expect(body).toContain(gainComment);
         // Remove only these exact reviewed explanatory lines. Arbitrary shader
         // comments/bytes remain in the original complete-body hash witness.
         body = body.replace(gainComment, "");
-        expect(body).toContain("texture2D(uTexture, vUv).rgb * 2.0;");
-        body = body.replace("texture2D(uTexture, vUv).rgb * 2.0;", "texture2D(uTexture, vUv).rgb;");
+        expect(body).toContain("texture2D(uTexture, vUv).rgb * 1.1;");
+        body = body.replace("texture2D(uTexture, vUv).rgb * 1.1;", "texture2D(uTexture, vUv).rgb;");
       } else if (name === "displayShadingShader") {
-        expect(body).toContain("C.rgb *= diffuse * 2.0;");
-        body = body.replace("C.rgb *= diffuse * 2.0;", "C.rgb *= diffuse;");
+        expect(body).toContain("C.rgb *= diffuse * 1.1;");
+        body = body.replace("C.rgb *= diffuse * 1.1;", "C.rgb *= diffuse;");
       }
       const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(body));
       const hex = Array.from(new Uint8Array(digest), (value) =>
@@ -104,6 +104,26 @@ describe("generated fluid decoration lifecycle", () => {
       expect(hex, name).toBe(expected);
     }
   });
+
+  it.each([1, 0.8, 0.15, 0.05, 0])(
+    "caps the actual decorative opacity without brightening quieter authored opacity %s",
+    async (authoredOpacity) => {
+      const value = await fixture({ authoredOpacity });
+      const canvas = value.canvas();
+      expect(value.window.getComputedStyle(canvas).opacity).toBe(
+        String(Math.min(0.15, authoredOpacity)),
+      );
+      expect(canvas.style.getPropertyPriority("opacity")).toBe("important");
+      expect(value.document.querySelector("p")?.style.opacity).toBe("");
+      expect(value.recorder.summary()).toMatchObject({
+        textures: 8,
+        programs: 10,
+        shaders: 12,
+        buffers: 2,
+        maxPending: 0,
+      });
+    },
+  );
 
   it("requires exactly one marker and creates no idle resources without it", async () => {
     for (const markerCount of [0, 2]) {
@@ -340,7 +360,7 @@ describe("generated fluid decoration lifecycle", () => {
   });
 
   it("bounds extreme aspect ratios and refuses invalid size before context allocation", async () => {
-    const wide = await fixture({ width: 1600, height: 1 });
+    const wide = await fixture({ width: 4096, height: 1 });
     expect(wide.canvas().width).toBe(512);
     expect(wide.canvas().height).toBe(1);
     expect(
@@ -351,11 +371,45 @@ describe("generated fluid decoration lifecycle", () => {
         ),
     ).toBe(true);
     expect(wide.recorder.summary().peakTextureBytes).toBeLessThanOrEqual(16 * 1024 * 1024);
-    const rejected = await fixture({ width: 1601, height: 200 });
+    const rejected = await fixture({ width: 4097, height: 200 });
     expect(rejected.canvas().dataset.cafeFluidState).toBe("unsupported");
     expect(rejected.recorder.summary().contextRequests).toBe(0);
     expect(rejected.recorder.pending()).toBe(0);
   });
+
+  it.each([1601, 4096])(
+    "runs at logical width %s without increasing physical resource or frame quotas",
+    async (width) => {
+      const value = await fixture({ width, height: 320, visible: true });
+      expect(value.canvas().getBoundingClientRect().width).toBe(width);
+      expect(value.canvas().width).toBeLessThanOrEqual(512);
+      expect(value.canvas().height).toBeLessThanOrEqual(512);
+      value.recorder.flush(40);
+      expect(value.canvas().dataset.cafeFluidState).toBe("running");
+      expect(frames(value)).toBe(13);
+      expect(value.recorder.pending()).toBe(1);
+      expect(value.recorder.summary()).toMatchObject({
+        textures: 8,
+        framebuffers: 8,
+        programs: 10,
+        shaders: 12,
+        buffers: 2,
+        maxPending: 1,
+      });
+      expect(value.recorder.summary().peakTextureBytes).toBeLessThanOrEqual(16 * 1024 * 1024);
+      expect(
+        value.recorder
+          .summary()
+          .textureSizes.every(([w, h]) => w >= 1 && w <= 1024 && h >= 1 && h <= 1024),
+      ).toBe(true);
+      const resources = value.recorder.summary().createdTextures;
+      value.recorder.flush(41);
+      expect(frames(value)).toBe(13);
+      expect(value.recorder.summary().createdTextures).toBe(resources);
+      value.visible(false);
+      expect(value.recorder.pending()).toBe(0);
+    },
+  );
 
   it("waits at zero initial layout without GL or RAF until a genuine resize provides valid geometry", async () => {
     const value = await fixture({ width: 0, height: 0, visible: true });
@@ -424,7 +478,7 @@ describe("generated fluid decoration lifecycle", () => {
   it("refuses an invalid positive startup layout permanently before GL allocation", async () => {
     const value = await fixture({ width: 0, height: 0, visible: true });
     expect(value.canvas().dataset.cafeFluidState).toBe("waiting");
-    value.canvas().style.width = "1601px";
+    value.canvas().style.width = "4097px";
     value.canvas().style.height = "200px";
     await expect.poll(() => value.canvas().dataset.cafeFluidState).toBe("unsupported");
     expect(value.recorder.summary()).toMatchObject({

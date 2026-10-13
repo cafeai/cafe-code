@@ -9863,7 +9863,8 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         );
       }
 
-      const visualizationBroker = readVisualizationSessionBroker();
+      const visualizationBroker =
+        input.runtimeMode === "full-access" ? readVisualizationSessionBroker() : undefined;
       if (visualizationBroker)
         yield* Effect.uninterruptible(
           Effect.tryPromise({
@@ -9872,6 +9873,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
                 threadId,
                 providerInstanceId: boundInstanceId,
                 provider: "claudeAgent",
+                runtimeMode: input.runtimeMode,
               });
               await visualizationBinding?.activate();
             },

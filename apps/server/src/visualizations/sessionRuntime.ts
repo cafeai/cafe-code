@@ -1,7 +1,12 @@
 // @effect-diagnostics nodeBuiltinImport:off
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { fileURLToPath } from "node:url";
-import { ProviderInstanceId, ThreadId, type ProviderDaemonClientConfig } from "@cafecode/contracts";
+import {
+  ProviderInstanceId,
+  ThreadId,
+  type ProviderDaemonClientConfig,
+  type RuntimeMode,
+} from "@cafecode/contracts";
 import {
   GeneratedVisualizationNativeWitness,
   VisualizationApiError,
@@ -9,7 +14,6 @@ import {
 } from "@cafecode/contracts/visualizationApi";
 import { VisualizationGenerationId } from "@cafecode/contracts/visualizations";
 import { requestProviderDaemonJson } from "@cafecode/shared/providerDaemonHttp";
-import { readVisualizationHost } from "@cafecode/shared/visualizationHostClient";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Result from "effect/Result";
@@ -64,6 +68,8 @@ export interface VisualizationSessionBroker {
     readonly threadId: ThreadId;
     readonly providerInstanceId: ProviderInstanceId;
     readonly provider: "codex" | "claudeAgent" | "grok";
+    /** Actual trusted provider-launch policy, never a renderer preference. */
+    readonly runtimeMode: RuntimeMode;
   }) => Promise<VisualizationSessionBinding | undefined>;
 }
 export interface VisualizationSessionRuntime extends VisualizationSessionBroker {
@@ -94,8 +100,22 @@ export const requireVisualizationSessionAuthority = (
       AND session_generation = ${authority.sessionGeneration} AND runtime_generation = ${authority.runtimeGeneration}
       AND token_digest = ${authority.tokenDigest} AND server_name = ${authority.serverName} AND active = 1
       AND runtime_generation = (SELECT generation FROM visualization_session_runtime WHERE singleton = 1)
+      AND EXISTS(SELECT 1 FROM projection_threads WHERE thread_id = ${authority.threadId} AND runtime_mode = 'full-access')
       AND NOT EXISTS(SELECT 1 FROM hard_deleted_threads WHERE thread_id = ${authority.threadId})
     RETURNING thread_id`;
+    if (rows.length !== 1) return yield* visualizationDenied();
+  }).pipe(Effect.mapError(() => visualizationDenied()));
+
+/** Stored executable history requires the exact current persisted thread
+ * policy, not a composer draft, an implicit default or a historical launch.
+ * Use within the caller's writer transaction whenever minting publication or
+ * source admission. A policy downgrade immediately refuses later reads even
+ * while an already launched provider still holds its old private MCP token. */
+export const requireVisualizationFullAccess = (sql: SqlClient.SqlClient, threadId: ThreadId) =>
+  Effect.gen(function* () {
+    const rows = yield* sql`SELECT 1 FROM projection_threads
+      WHERE thread_id = ${threadId} AND runtime_mode = 'full-access'
+        AND NOT EXISTS(SELECT 1 FROM hard_deleted_threads WHERE thread_id = ${threadId})`;
     if (rows.length !== 1) return yield* visualizationDenied();
   }).pipe(Effect.mapError(() => visualizationDenied()));
 
@@ -164,7 +184,7 @@ export const makeVisualizationSessionRuntime = (options: {
       bind: (input) =>
         serialized(
           Effect.gen(function* () {
-            if (input.provider === "grok") return undefined;
+            if (input.provider === "grok" || input.runtimeMode !== "full-access") return undefined;
             if (
               options.available &&
               !(yield* Effect.tryPromise({
@@ -178,6 +198,7 @@ export const makeVisualizationSessionRuntime = (options: {
             const predecessor = yield* sql.withTransaction(
               Effect.gen(function* () {
                 yield* currentOwner;
+                yield* requireVisualizationFullAccess(sql, input.threadId);
                 const retired =
                   yield* sql`SELECT 1 FROM hard_deleted_threads WHERE thread_id = ${input.threadId}`;
                 if (retired.length) return yield* visualizationDenied();
@@ -236,6 +257,7 @@ export const makeVisualizationSessionRuntime = (options: {
                     yield* sql.withTransaction(
                       Effect.gen(function* () {
                         yield* currentOwner;
+                        yield* requireVisualizationFullAccess(sql, input.threadId);
                         if (candidate.active)
                           return yield* requireVisualizationSessionAuthority(sql, authority);
                         const previous = yield* sql<{
@@ -288,7 +310,12 @@ export const makeVisualizationSessionRuntime = (options: {
             const candidate = candidates.get(digest(token));
             if (!candidate || candidate.revoked || candidate.disposed)
               return yield* visualizationDenied();
-            yield* currentOwner;
+            yield* sql.withTransaction(
+              Effect.gen(function* () {
+                yield* currentOwner;
+                yield* requireVisualizationFullAccess(sql, candidate.authority.threadId);
+              }),
+            );
             return candidate.authority;
           }),
         ),
@@ -371,7 +398,6 @@ export const VisualizationSessionRuntimeLive = Layer.effectDiscard(
       return;
     }
     const runtime = yield* makeVisualizationSessionRuntime({
-      available: () => readVisualizationHost(config.stateDir).then((host) => host !== null),
       mcpPort: config.cafeMcpPort ?? config.port,
       executable:
         process.platform === "linux" && process.env.APPIMAGE

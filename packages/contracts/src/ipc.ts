@@ -34,6 +34,11 @@ import type {
   VisualizationListResult,
   VisualizationDetailsInput,
   VisualizationDetailsResult,
+  VisualizationInlineInput,
+  VisualizationInlineResult,
+  VisualizationInlineFrameInput,
+  VisualizationInlineFrameResult,
+  VisualizationInlineFrameRetireResult,
   VisualizationViewerInput,
   VisualizationViewerTicketResult,
   VisualizationDiscardViewerTicketInput,
@@ -588,6 +593,14 @@ export interface EnvironmentApi {
   visualizations?: {
     list: (input: VisualizationListInput) => Promise<VisualizationListResult>;
     details: (input: VisualizationDetailsInput) => Promise<VisualizationDetailsResult>;
+    /** Missing on older backends; never emulate executable reads via Details. */
+    inline?: (input: VisualizationInlineInput) => Promise<VisualizationInlineResult>;
+    touchInlineFrame?: (
+      input: VisualizationInlineFrameInput,
+    ) => Promise<VisualizationInlineFrameResult>;
+    retireInlineFrame?: (
+      input: VisualizationInlineFrameInput,
+    ) => Promise<VisualizationInlineFrameRetireResult>;
     viewerTicket: (input: VisualizationViewerInput) => Promise<VisualizationViewerTicketResult>;
     /** Old backends cannot safely emulate exact unused-ticket cancellation. */
     discardViewerTicket?: (

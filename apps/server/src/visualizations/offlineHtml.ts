@@ -9,8 +9,9 @@ const urlAttributes = new Set(["src", "href", "poster"]);
 
 /** A bounded, non-evaluating rewriter for the declared static raster spelling.
  * It does not pretend to compile JavaScript, CSS, srcset or dynamic URLs. Those
- * must be self-contained in the authored page. Exported executable HTML runs
- * outside Cafe's network/sandbox policy after explicit user disclosure. */
+ * must be self-contained in the authored page. Exported executable HTML carries
+ * no Cafe action grant or offline-policy wrapper. Inline consumers add only a
+ * best-effort offline hint, not same-origin browser containment. */
 export function embedStaticVisualizationAssets(
   source: string,
   assets: VisualizationHostDocument["assets"],
@@ -24,8 +25,8 @@ export function embedStaticVisualizationAssets(
  * authored fluid canvas opts into the same fixed licensed fluid helper. Append
  * these after authored content, preserving the original
  * doctype, comments and raw-text bytes. This does not compile dynamic markup.
- * Without Cafe's native presentation hint it renders only its bounded static
- * initial frame; no native bootstrap, permission or live lease is exported. */
+ * Without Cafe's live visible presentation hint it renders only its bounded
+ * static initial frame; no action grant or live frame ownership is exported. */
 export function exportGeneratedVisualizationHtml(
   source: string,
   assets: VisualizationHostDocument["assets"],
@@ -43,6 +44,21 @@ export function exportGeneratedVisualizationHtml(
   // replacement and chunk join, so final concatenation remains within 16 MiB.
   // Private source, commitments, assets and admission receipts are unchanged.
   return html + appendix;
+}
+
+/** The inline derivative registers fixed local faces before any authored script
+ * can inspect document.fonts. Stored source/commitments and portable export
+ * order remain unchanged. No renderer-private raw JSON or authority is added;
+ * the owning frame supplies its finite theme/visible presentation prefix. */
+export function createInlineGeneratedVisualizationHtml(
+  source: string,
+  assets: VisualizationHostDocument["assets"],
+): string {
+  const scanned = embedStaticAssets(source, [], MAX_PORTABLE_HTML_BYTES);
+  const helper = scanned.hasFluidMarker ? `\n${visualizationFluidScript("generated")}` : "";
+  const extraBytes = Buffer.byteLength(GENERATED_VISUALIZATION_FONT_APPENDIX + helper, "utf8");
+  const { html } = embedStaticAssets(source, assets, MAX_PORTABLE_HTML_BYTES - extraBytes);
+  return GENERATED_VISUALIZATION_FONT_APPENDIX + html + helper;
 }
 
 function embedStaticAssets(

@@ -81,7 +81,10 @@ import { getWorkspaceServerConfig } from "../environments/workspaceApi";
 import { MessageForkDialog } from "./chat/MessageForkDialog";
 import { Button } from "./ui/button";
 import { useThreadVisualizations } from "./visualizations/useThreadVisualizations";
-import { useVisualizationScope } from "./visualizations/VisualizationViewerProvider";
+import {
+  readInlineVisualizationPoolDiagnostics,
+  useVisualizationScope,
+} from "./visualizations/VisualizationViewerProvider";
 import { isElectron } from "../env";
 import { useMacDesktopTitlebar } from "../hooks/useMacDesktopTitlebar";
 import { readLocalApi } from "../localApi";
@@ -3388,6 +3391,7 @@ export default function ChatView(props: ChatViewProps) {
       debugSnapshotVersion: DEBUG_SNAPSHOT_VERSION,
       source: "ChatView",
       capturedAt,
+      visualizations: readInlineVisualizationPoolDiagnostics(),
       debugPublisher: {
         heartbeatIntervalMs: DEBUG_RENDERER_HEARTBEAT_INTERVAL_MS,
         minSnapshotIntervalMs: DEBUG_RENDERER_SNAPSHOT_MIN_INTERVAL_MS,
@@ -8338,6 +8342,7 @@ export default function ChatView(props: ChatViewProps) {
             {/* Messages — LegendList handles virtualization and scrolling internally */}
             <MessagesTimeline
               visualizationPane={visualizationPane}
+              visualizationRuntimeMode={isServerThread ? serverThread.runtimeMode : null}
               key={activeThread.id}
               {...(pane.visible && scheduledFollowupsContext
                 ? { scheduledFollowups: scheduledFollowupsContext }

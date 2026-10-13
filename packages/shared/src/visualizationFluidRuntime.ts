@@ -46,7 +46,14 @@ export const VISUALIZATION_FLUID_RUNTIME_SOURCE = `    /*
     if (!(canvas instanceof HTMLCanvasElement)) return;
     canvas.style.pointerEvents = 'none';
     canvas.setAttribute('aria-hidden', 'true');
-    canvas.style.background = 'linear-gradient(135deg,rgba(0,190,255,.24),rgba(123,44,255,.24),rgba(255,40,180,.24))';
+    // Normalize only this opted-in decoration, never chart marks or text. An
+    // older author may already use a quieter opacity: preserve that value and
+    // cap brighter decoration once rather than watching or rewriting source.
+    // This presentation scalar is not a resource or execution-security limit.
+    const authoredOpacity=Number(getComputedStyle(canvas).opacity);
+    const decorativeOpacity=Number.isFinite(authoredOpacity)&&authoredOpacity>=0&&authoredOpacity<=1?Math.min(.15,authoredOpacity):.15;
+    canvas.style.setProperty('opacity',String(decorativeOpacity),'important');
+    canvas.style.background = 'linear-gradient(135deg,rgba(0,190,255,.132),rgba(123,44,255,.132),rgba(255,40,180,.132))';
     let gl, ext, density, velocity, divergence, curl, pressure;
     let clearProgram,displayProgram,displayShadingProgram,splatProgram,advectionProgram,divergenceProgram,curlProgram,vorticityProgram,pressureProgram,gradienSubtractProgram,blit;
     let simWidth=0,simHeight=0,dyeWidth=0,dyeHeight=0;
@@ -90,7 +97,10 @@ export const VISUALIZATION_FLUID_RUNTIME_SOURCE = `    /*
     function createFBO(w,h,internalFormat,format,type,param){const bytes=w*h*channels(format)*2;if(!Number.isSafeInteger(bytes)||w<1||h<1||Math.max(w,h)>1024||textures.length>=8||textureBytes+bytes>16*1024*1024)throw Error('Fluid unavailable');gl.activeTexture(gl.TEXTURE0);const texture=gl.createTexture();if(!texture)throw Error('Fluid unavailable');textures.push(texture);textureBytes+=bytes;gl.bindTexture(gl.TEXTURE_2D,texture);gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MIN_FILTER,param);gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MAG_FILTER,param);gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_WRAP_S,gl.CLAMP_TO_EDGE);gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_WRAP_T,gl.CLAMP_TO_EDGE);gl.texImage2D(gl.TEXTURE_2D,0,internalFormat,w,h,0,format,type,null);const fbo=gl.createFramebuffer();if(!fbo)throw Error('Fluid unavailable');framebuffers.push(fbo);gl.bindFramebuffer(gl.FRAMEBUFFER,fbo);gl.framebufferTexture2D(gl.FRAMEBUFFER,gl.COLOR_ATTACHMENT0,gl.TEXTURE_2D,texture,0);if(gl.checkFramebufferStatus(gl.FRAMEBUFFER)!==gl.FRAMEBUFFER_COMPLETE)throw Error('Fluid unavailable');gl.viewport(0,0,w,h);gl.clear(gl.COLOR_BUFFER_BIT);return {texture,fbo,width:w,height:h,attach(id){gl.activeTexture(gl.TEXTURE0+id);gl.bindTexture(gl.TEXTURE_2D,texture);return id;}};}
     function createDoubleFBO(...args){let a=createFBO(...args),b=createFBO(...args);return {get read(){return a},get write(){return b},swap(){const old=a;a=b;b=old}};}
     function initFramebuffers(){const sim=resolution(200,400),dye=resolution(512,1024);simWidth=sim.width;simHeight=sim.height;dyeWidth=dye.width;dyeHeight=dye.height;const rgba=ext.formatRGBA,rg=ext.formatRG,r=ext.formatR,type=ext.halfFloatTexType,filter=ext.supportLinearFiltering?gl.LINEAR:gl.NEAREST;const bytes=2*dyeWidth*dyeHeight*channels(rgba.format)*2+2*simWidth*simHeight*channels(rg.format)*2+4*simWidth*simHeight*channels(r.format)*2;const maxTexture=gl.getParameter(gl.MAX_TEXTURE_SIZE);if(!Number.isSafeInteger(bytes)||bytes>16*1024*1024||!Number.isFinite(maxTexture)||maxTexture<Math.max(dyeWidth,dyeHeight,simWidth,simHeight))throw Error('Fluid unavailable');clearTargets();density=createDoubleFBO(dyeWidth,dyeHeight,rgba.internalFormat,rgba.format,type,filter);velocity=createDoubleFBO(simWidth,simHeight,rg.internalFormat,rg.format,type,filter);divergence=createFBO(simWidth,simHeight,r.internalFormat,r.format,type,gl.NEAREST);curl=createFBO(simWidth,simHeight,r.internalFormat,r.format,type,gl.NEAREST);pressure=createDoubleFBO(simWidth,simHeight,r.internalFormat,r.format,type,gl.NEAREST);counters();}
-    function resizeCanvas(){const rect=canvas.getBoundingClientRect(),dpr=window.devicePixelRatio;if(!Number.isFinite(dpr)||dpr<=0||!Number.isFinite(rect.width)||!Number.isFinite(rect.height)||rect.width<=0||rect.height<=0||rect.width>1600||rect.height>2000){const scalar=(value,max)=>Number.isFinite(value)&&value>=0&&value<=max?String(value):'unknown';canvas.dataset.cafeFluidRejectedWidth=scalar(rect.width,4000);canvas.dataset.cafeFluidRejectedHeight=scalar(rect.height,4000);canvas.dataset.cafeFluidRejectedDpr=scalar(dpr,16);throw Error('Fluid unavailable');}const scale=Math.min(dpr,512/Math.max(rect.width,rect.height)),w=Math.max(1,Math.floor(rect.width*scale)),h=Math.max(1,Math.floor(rect.height*scale));if(canvas.width===w&&canvas.height===h&&density)return false;if(++resizeCount>8)throw Error('Fluid unavailable');clearTargets();canvas.width=w;canvas.height=h;if(ext)initFramebuffers();return true;}
+    // CSS can fill a wide chat column without purchasing more GPU work: both
+    // drawing-buffer axes remain 1..512 and every solver/texture quota above is
+    // unchanged. Even extreme logical aspects use that finite physical ratio.
+    function resizeCanvas(){const rect=canvas.getBoundingClientRect(),dpr=window.devicePixelRatio;if(!Number.isFinite(dpr)||dpr<=0||!Number.isFinite(rect.width)||!Number.isFinite(rect.height)||rect.width<=0||rect.height<=0||rect.width>4096||rect.height>2000){const scalar=(value,max)=>Number.isFinite(value)&&value>=0&&value<=max?String(value):'unknown';canvas.dataset.cafeFluidRejectedWidth=scalar(rect.width,4096);canvas.dataset.cafeFluidRejectedHeight=scalar(rect.height,4000);canvas.dataset.cafeFluidRejectedDpr=scalar(dpr,16);throw Error('Fluid unavailable');}const scale=Math.min(dpr,512/Math.max(rect.width,rect.height)),w=Math.max(1,Math.floor(rect.width*scale)),h=Math.max(1,Math.floor(rect.height*scale));if(canvas.width===w&&canvas.height===h&&density)return false;if(++resizeCount>8)throw Error('Fluid unavailable');clearTargets();canvas.width=w;canvas.height=h;if(ext)initFramebuffers();return true;}
     function render(){gl.disable(gl.BLEND);gl.bindFramebuffer(gl.FRAMEBUFFER,null);gl.viewport(0,0,gl.drawingBufferWidth,gl.drawingBufferHeight);gl.clearColor(0,0,0,0);gl.clear(gl.COLOR_BUFFER_BIT);gl.blendFunc(gl.ONE,gl.ONE_MINUS_SRC_ALPHA);gl.enable(gl.BLEND);const program=config.SHADING?displayShadingProgram:displayProgram;program.bind();if(config.SHADING)gl.uniform2f(program.uniforms.texelSize,1/gl.drawingBufferWidth,1/gl.drawingBufferHeight);gl.uniform1i(program.uniforms.uTexture,density.read.attach(0));blit(null);}
     function pointerPos(clientX,clientY){const rect=canvas.getBoundingClientRect();if(clientX<rect.left||clientY<rect.top||clientX>rect.right||clientY>rect.bottom)return null;return {x:(clientX-rect.left)*canvas.width/rect.width,y:(clientY-rect.top)*canvas.height/rect.height};}
     // Real passive pointer input is one latest scalar pair, consumed at most
@@ -280,7 +290,7 @@ export const VISUALIZATION_FLUID_RUNTIME_SOURCE = `    /*
       // while its pixels remain uncommitted. Wait only before any GPU work;
       // positive invalid layouts and every GPU failure stay terminal. Native
       // cues are presentation, not authority or a refreshed execution budget.
-      if(Number.isFinite(dpr)&&dpr>0&&Number.isFinite(rect.width)&&Number.isFinite(rect.height)&&rect.width>=0&&rect.height>=0&&rect.width<=1600&&rect.height<=2000&&(rect.width===0||rect.height===0)){
+      if(Number.isFinite(dpr)&&dpr>0&&Number.isFinite(rect.width)&&Number.isFinite(rect.height)&&rect.width>=0&&rect.height>=0&&rect.width<=4096&&rect.height<=2000&&(rect.width===0||rect.height===0)){
         canvas.dataset.cafeFluidLayoutObservations=String(++zeroLayouts);
         if(zeroLayouts>=8){initialized=true;stopWaiting();fail();return;}
         state('waiting');counters();
@@ -338,8 +348,8 @@ export const VISUALIZATION_FLUID_RUNTIME_SOURCE = `    /*
         uniform sampler2D uTexture;
         void main () {
             // Final presentation only: retain the supplied dye/solver state,
-            // but double its colour presence without changing simulation state.
-            vec3 C = texture2D(uTexture, vUv).rgb * 2.0;
+            // with ten percent more colour than the original display baseline.
+            vec3 C = texture2D(uTexture, vUv).rgb * 1.1;
             float a = max(C.r, max(C.g, C.b));
             gl_FragColor = vec4(C, a);
         }
@@ -366,7 +376,7 @@ export const VISUALIZATION_FLUID_RUNTIME_SOURCE = `    /*
             vec3 n = normalize(vec3(dx, dy, length(texelSize)));
             vec3 l = vec3(0.0, 0.0, 1.0);
             float diffuse = clamp(dot(n, l) + 0.7, 0.7, 1.0);
-            C.rgb *= diffuse * 2.0;
+            C.rgb *= diffuse * 1.1;
             float a = max(C.r, max(C.g, C.b));
             gl_FragColor = vec4(C, a);
         }

@@ -57,6 +57,9 @@ export interface WsRpcClient {
   readonly visualizations: {
     readonly list: RpcUnaryMethod<typeof WS_METHODS.visualizationsList>;
     readonly details: RpcUnaryMethod<typeof WS_METHODS.visualizationsDetails>;
+    readonly inline: RpcUnaryMethod<typeof WS_METHODS.visualizationsInline>;
+    readonly touchInlineFrame: RpcUnaryMethod<typeof WS_METHODS.visualizationsTouchInlineFrame>;
+    readonly retireInlineFrame: RpcUnaryMethod<typeof WS_METHODS.visualizationsRetireInlineFrame>;
     readonly viewerTicket: RpcUnaryMethod<typeof WS_METHODS.visualizationsViewerTicket>;
     readonly discardViewerTicket: RpcUnaryMethod<
       typeof WS_METHODS.visualizationsDiscardViewerTicket
@@ -401,6 +404,12 @@ export function createWsRpcClient(transport: WsTransport): WsRpcClient {
       list: (input) => transport.request((client) => client[WS_METHODS.visualizationsList](input)),
       details: (input) =>
         transport.request((client) => client[WS_METHODS.visualizationsDetails](input)),
+      inline: (input) =>
+        transport.request((client) => client[WS_METHODS.visualizationsInline](input)),
+      touchInlineFrame: (input) =>
+        transport.request((client) => client[WS_METHODS.visualizationsTouchInlineFrame](input)),
+      retireInlineFrame: (input) =>
+        transport.request((client) => client[WS_METHODS.visualizationsRetireInlineFrame](input)),
       viewerTicket: (input) =>
         transport.request((client) => client[WS_METHODS.visualizationsViewerTicket](input)),
       discardViewerTicket: (input) =>

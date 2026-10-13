@@ -118,20 +118,24 @@ describe("qualified major Actions and Ubuntu runner boundaries", () => {
     });
   });
 
-  it("retains only the four reviewed synthetic visualization and Mermaid failure paths", () => {
+  it("retains only the eight reviewed synthetic visualization and Mermaid failure paths", () => {
     const steps = readWorkflow("ci.yml").jobs.quality?.steps ?? [];
     const retention = steps.filter(
       (step) => step.name === "Retain synthetic visualization and Mermaid failure evidence",
     );
     expect(retention).toHaveLength(1);
-    // Literal block equality preserves exactly four paths, including their
+    // Literal block equality preserves exactly eight paths, including their
     // fixture-specific hidden directories. No profile/source/JSON/temp-tree
     // glob, successful-run upload, override or longer retention is admitted.
     const paths = [
       "apps/web/.vitest/attachments/failure-screenshots/VisualizationCommitChart.browser.tsx/",
       "apps/web/.vitest/attachments/failure-screenshots/MermaidFamilies.browser.tsx/",
-      "${{ runner.temp }}/cafe-visualization-comprehensive/*.png",
-      "${{ runner.temp }}/cafe-visualization-font/*.png",
+      "apps/web/.vitest/attachments/failure-screenshots/Visualizations.browser.tsx/",
+      "apps/web/.vitest/attachments/failure-screenshots/VisualizationFluid.browser.tsx/",
+      "apps/web/.vitest/attachments/failure-screenshots/VisualizationHistory.browser.tsx/",
+      "apps/web/.vitest/attachments/failure-screenshots/VisualizationOwner.browser.tsx/",
+      "apps/web/.vitest/attachments/failure-screenshots/InlineMcpAppBridge.browser.tsx/",
+      "apps/web/.vitest/attachments/failure-screenshots/VisualizationInlineCapture.browser.tsx/",
     ];
     expect(retention[0]).toEqual({
       name: "Retain synthetic visualization and Mermaid failure evidence",
@@ -147,85 +151,90 @@ describe("qualified major Actions and Ubuntu runner boundaries", () => {
     });
   });
 
-  it("prepares exclusive synthetic capture directories and binds each native lane without private replay", () => {
+  it("binds current inline browser qualification without retired execution lanes or private replay", () => {
     const workflow = readWorkflow("ci.yml");
     const quality = workflow.jobs.quality!;
     const steps = quality.steps ?? [];
-    const preparation = steps.filter(
-      (step) => step.name === "Prepare synthetic native visualization evidence directories",
+    const inline = {
+      name: "Full-access inline visualization browser qualification",
+      if: "runner.os != 'Linux'",
+      run: "corepack yarn workspace @cafecode/web test:browser src/components/visualizations/VisualizationHistory.browser.tsx src/components/visualizations/VisualizationOwner.browser.tsx src/components/visualizations/InlineMcpAppBridge.browser.tsx src/components/visualizations/VisualizationInlineCapture.browser.tsx --maxWorkers=2",
+    };
+    // The approved execution path is an ordinary browser frame. Whole-step
+    // equality preserves its exact fixtures/two workers with no per-step
+    // deadline, environment override or failure bypass; it is not native-host
+    // isolation evidence. Linux retains the complete browser suite instead.
+    expect(steps.filter((step) => step.name === inline.name)).toEqual([inline]);
+    expect(steps.filter((step) => step.name === "Browser tests")).toEqual([
+      {
+        name: "Browser tests",
+        if: "runner.os == 'Linux'",
+        run: "corepack yarn workspace @cafecode/web test:browser",
+      },
+    ]);
+
+    const shared = steps.filter(
+      (step) =>
+        step.name === "Cross-platform Markdown, timeline, menus and file action browser tests",
     );
-    expect(preparation).toHaveLength(1);
-    // mkdirSync's non-recursive default refuses an existing entry. Keep the
-    // complete Node command exact so replacement, permissive modes, broader
-    // directories or shell-selected destinations require a separate review.
-    expect(preparation[0]).toEqual({
-      name: "Prepare synthetic native visualization evidence directories",
-      run:
-        'node -e \'const fs = require("node:fs"); const path = require("node:path"); ' +
-        "const root = process.env.RUNNER_TEMP; if (!root || !path.isAbsolute(root)) " +
-        'throw new Error("Runner temporary directory unavailable"); ' +
-        'for (const name of ["cafe-visualization-comprehensive", "cafe-visualization-font"]) ' +
-        "fs.mkdirSync(path.join(root, name), { mode: 0o700 });'\n",
-    });
-    const command =
-      "corepack yarn workspace @cafecode/desktop test src/visualizations/NativeVisualizationElectron.e2e.test.ts";
-    const lanes = [
-      {
-        name: "Isolated native visualization host qualification",
-        if: "runner.os != 'Linux'",
-        env: {
-          CAFE_CODE_VISUALIZATION_E2E: "1",
-          CAFE_CODE_VISUALIZATION_E2E_CAPTURE_DIR:
-            "${{ runner.temp }}/cafe-visualization-comprehensive",
-        },
-        run: command,
-      },
-      {
-        name: "Isolated native visualization host qualification (Linux)",
-        if: "runner.os == 'Linux'",
-        env: {
-          CAFE_CODE_VISUALIZATION_E2E: "1",
-          CAFE_CODE_VISUALIZATION_E2E_CAPTURE_DIR:
-            "${{ runner.temp }}/cafe-visualization-comprehensive",
-        },
-        run: `xvfb-run --auto-servernum ${command}`,
-      },
-      {
-        name: "Isolated native visualization chat font qualification",
-        if: "runner.os != 'Linux'",
-        env: {
-          CAFE_CODE_VISUALIZATION_E2E: "1",
-          CAFE_CODE_VISUALIZATION_FONT_REPLAY: "1",
-          CAFE_CODE_VISUALIZATION_E2E_CAPTURE_DIR: "${{ runner.temp }}/cafe-visualization-font",
-        },
-        run: command,
-      },
-      {
-        name: "Isolated native visualization chat font qualification (Linux)",
-        if: "runner.os == 'Linux'",
-        env: {
-          CAFE_CODE_VISUALIZATION_E2E: "1",
-          CAFE_CODE_VISUALIZATION_FONT_REPLAY: "1",
-          CAFE_CODE_VISUALIZATION_E2E_CAPTURE_DIR: "${{ runner.temp }}/cafe-visualization-font",
-        },
-        run: `xvfb-run --auto-servernum ${command}`,
-      },
+    expect(shared).toHaveLength(1);
+    expect(shared[0]!.if).toBe("runner.os != 'Linux'");
+    const sharedArguments = shared[0]!.run!.split(/\s+/);
+    expect(sharedArguments.slice(0, 5)).toEqual([
+      "corepack",
+      "yarn",
+      "workspace",
+      "@cafecode/web",
+      "test:browser",
+    ]);
+    expect(sharedArguments.slice(5, -1)).toEqual(
+      expect.arrayContaining([
+        "src/components/visualizations/Visualizations.browser.tsx",
+        "src/components/visualizations/VisualizationFluid.browser.tsx",
+        "src/components/visualizations/Visualizations.motion.browser.tsx",
+      ]),
+    );
+    // The real fixed-font, WebGL/fluid and reduced-motion fixtures run in the
+    // inherited native browser projects. Only literal component file selectors
+    // may precede the unchanged worker cap: no retry/deadline/input CLI override.
+    for (const argument of sharedArguments.slice(5, -1))
+      expect(argument).toMatch(/^src\/components\/[^\s]+\.browser\.tsx$/);
+    expect(sharedArguments.at(-1)).toBe("--maxWorkers=2");
+    expect(shared[0]!.env).toBeUndefined();
+    expect(shared[0]!["timeout-minutes"]).toBeUndefined();
+    expect(shared[0]!["continue-on-error"]).toBeUndefined();
+
+    const retiredStepNames = [
+      "Prepare synthetic native visualization evidence directories",
+      "Prepare installed Electron sandbox helper (Linux)",
+      "Isolated native visualization host qualification",
+      "Isolated native visualization host qualification (Linux)",
+      "Isolated native visualization chat font qualification",
+      "Isolated native visualization chat font qualification (Linux)",
     ];
-    for (const lane of lanes) {
-      const selected = steps.filter((step) => step.name === lane.name);
-      // Whole-step equality also refuses timeout, worker, environment and
-      // continue-on-error overrides on the unchanged native test invocation.
-      expect(selected, lane.name).toEqual([lane]);
-      expect(steps.indexOf(selected[0]!)).toBeGreaterThan(steps.indexOf(preparation[0]!));
+    const allSteps = Object.values(workflow.jobs).flatMap((job) => job.steps ?? []);
+    for (const name of retiredStepNames)
+      expect(
+        allSteps.filter((step) => step.name === name),
+        name,
+      ).toEqual([]);
+    for (const step of allSteps) {
+      expect(step.run ?? "").not.toContain("NativeVisualizationElectron.e2e.test.ts");
+      expect(step.run ?? "").not.toContain("chrome-sandbox");
+      expect(step.run ?? "").not.toContain("cafe-visualization-comprehensive");
+      expect(step.run ?? "").not.toContain("cafe-visualization-font");
     }
     const privateReplayKeys = [
+      "CAFE_CODE_VISUALIZATION_E2E",
+      "CAFE_CODE_VISUALIZATION_E2E_CAPTURE_DIR",
+      "CAFE_CODE_VISUALIZATION_FONT_REPLAY",
       "CAFE_CODE_VISUALIZATION_BAR_REPLAY",
       "CAFE_CODE_VISUALIZATION_BAR_SOURCE",
       "CAFE_CODE_VISUALIZATION_BAR_SOURCE_SHA256",
       "CAFE_CODE_VISUALIZATION_BAR_SOURCE_BYTES",
     ];
-    // Shared workflow/job environments are inherited by steps: checking only
-    // the four local lane maps could accidentally publish a private replay.
+    // Shared workflow/job environments are inherited by steps. Refuse both a
+    // private replay and accidental reactivation of the retired native host.
     const environments = [
       workflow.env,
       ...Object.values(workflow.jobs).flatMap((job) => [
@@ -237,6 +246,14 @@ describe("qualified major Actions and Ubuntu runner boundaries", () => {
       for (const key of privateReplayKeys) expect(environment ?? {}).not.toHaveProperty(key);
     expect(quality["timeout-minutes"]).toBe(45);
     expect(quality["continue-on-error"]).toBeUndefined();
+    // The initial bundle supplies copied bridge fixtures; the uncached desktop
+    // build must remain the final executable check, after every browser lane.
+    const final = {
+      name: "Final forced desktop verification",
+      run: "corepack yarn build:desktop --force",
+    };
+    expect(steps.filter((step) => step.name === final.name)).toEqual([final]);
+    expect(steps.filter((step) => step.run !== undefined).at(-1)).toEqual(final);
   });
 
   it("keeps visualization and Mermaid browser qualification on the original worker and deadline bounds", () => {

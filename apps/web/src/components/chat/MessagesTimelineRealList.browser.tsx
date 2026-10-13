@@ -393,19 +393,18 @@ describe("MessagesTimeline with real LegendList", () => {
         const lastCard = host.querySelector<HTMLElement>(
           '[data-visualization-card="00000000-0000-4000-8000-000000001000"]',
         )!;
-        const surface = lastCard.querySelector<HTMLElement>("[data-visualization-native-surface]")!;
+        const surface = lastCard.querySelector<HTMLElement>("[data-visualization-inline-surface]")!;
         const reservedHeight = surface.getBoundingClientRect().height;
         const reservedWidth = surface.getBoundingClientRect().width;
         expect(reservedWidth).toBeGreaterThan(200);
-        // The actual desktop-project viewport may be narrower than this host's
-        // 760px maximum. Its intentional 80px minimum is still reserved geometry.
-        expect(reservedHeight).toBeCloseTo(
-          Math.max(80, Math.min(innerHeight * 0.7, 700, (reservedWidth * 120) / 640)),
-          1,
-        );
-        // Late poster metadata has the same admitted dimensions. Its image
-        // transport is unavailable in this isolated real-list fixture; the
-        // reserved box must not collapse or cause a layout-driven tail jump.
+        // Compact history has no Full-access/source grant in this fixture.
+        // Its public 120px extent reserves flow until an actual admitted frame
+        // reports natural height; width and old bitmap aspect ratio do not
+        // determine the current live-only reservation.
+        expect(reservedHeight).toBe(120);
+        // Legacy immutable poster metadata is inert and ignored by current
+        // charts. Its arrival cannot fetch a preview, collapse the reservation,
+        // or take over the actual list's physical tail/review ownership.
         entries = entries.map((value) =>
           value.kind === "visualization" && value.id === `visualization:${scope}:999`
             ? {

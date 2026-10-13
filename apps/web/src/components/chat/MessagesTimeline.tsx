@@ -155,6 +155,7 @@ export {
 
 interface TimelineRowSharedState {
   visualizationPane?: VisualizationPane;
+  visualizationRuntimeMode: import("@cafecode/contracts").RuntimeMode | null;
   generatedVisualizationAdmissionReady: boolean;
   onVisualizationScrollIntent: (deltaY: number) => boolean | void;
   onVisualizationLayoutIntent: (anchor: HTMLElement, height: number) => (() => void) | undefined;
@@ -285,6 +286,8 @@ const TIMELINE_REVIEW_VISIBLE_CONTENT_POSITION = {
 
 interface MessagesTimelineProps {
   visualizationPane?: VisualizationPane;
+  /** Canonical received exact-thread policy, never the editable composer draft. */
+  visualizationRuntimeMode?: import("@cafecode/contracts").RuntimeMode | null;
   /** Explicit selected-message native fork. Omitted for unsupported providers. */
   onForkMessage?: ((messageId: MessageId) => void) | undefined;
   messageForkDisabled?: boolean;
@@ -339,6 +342,7 @@ interface MessagesTimelineProps {
 
 export const MessagesTimeline = memo(function MessagesTimeline({
   visualizationPane,
+  visualizationRuntimeMode = null,
   onForkMessage,
   messageForkDisabled = false,
   scheduledFollowups,
@@ -966,10 +970,10 @@ export const MessagesTimeline = memo(function MessagesTimeline({
     (deltaY: number) => {
       visualizationScrollOwner.interrupt();
       if (deltaY >= 0) return false;
-      // This originates only from the exact native-owned chart input relay. Enter
+      // This originates from trusted wheel input in the exact visible chart frame. Enter
       // review before applying its scroll, so a queued tail correction cannot
       // race the native gesture. No synthetic DOM event or sibling list is used.
-      // This native relay is outside React's DOM event boundary. Commit its
+      // The child frame is outside React's parent DOM event boundary. Commit its
       // existing parent review-mode update before the caller performs scrollBy:
       // otherwise React may batch it with a simultaneously growing chart/turn,
       // leaving LegendList's committed maintain-at-end policy active during
@@ -978,7 +982,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
       return visualizationScrollOwner.scroll(deltaY, () => {
         autoFollowTailRef.current = false;
         cancelTailFollowItemLayoutRepin();
-        flushSync(() => handleUserScrollIntent({ type: "native-chart-wheel" }));
+        flushSync(() => handleUserScrollIntent({ type: "inline-chart-wheel" }));
       });
     },
     [cancelTailFollowItemLayoutRepin, handleUserScrollIntent, visualizationScrollOwner],
@@ -1202,6 +1206,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
   const sharedState = useMemo<TimelineRowSharedState>(
     () => ({
       ...(visualizationPane ? { visualizationPane } : {}),
+      visualizationRuntimeMode,
       generatedVisualizationAdmissionReady,
       onVisualizationScrollIntent: handleVisualizationScrollIntent,
       onVisualizationLayoutIntent: visualizationScrollOwner.preserve,
@@ -1223,6 +1228,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
     }),
     [
       visualizationPane,
+      visualizationRuntimeMode,
       generatedVisualizationAdmissionReady,
       handleVisualizationScrollIntent,
       visualizationScrollOwner,
@@ -1266,10 +1272,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
       <div
         className={cn(
           "mx-auto w-full min-w-0 overflow-x-clip",
-          item.kind === "visualization" &&
-            item.visualization.reference.purpose === "generated-visualization"
-            ? "max-w-[1600px]"
-            : "max-w-3xl",
+          item.kind === "visualization" ? "max-w-none" : "max-w-3xl",
         )}
         data-timeline-root="true"
       >
@@ -1564,6 +1567,7 @@ function VisualizationTimelineRow({
       onScrollIntent={ctx.onVisualizationScrollIntent}
       onLayoutIntent={ctx.onVisualizationLayoutIntent}
       generatedAdmissionReady={ctx.generatedVisualizationAdmissionReady}
+      runtimeMode={ctx.visualizationRuntimeMode}
     />
   ) : null;
 }
