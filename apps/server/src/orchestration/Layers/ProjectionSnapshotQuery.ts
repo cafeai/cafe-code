@@ -704,13 +704,19 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
   const historicalWorkLogActivityPredicate = sql.and([
     "kind != 'context-window.updated'",
     "kind != 'checkpoint.captured'",
-    "kind != 'task.started'",
+    // Guardian approval reviews already have a public live Work Log start.
+    // Preserve that exact exception in historical discovery without admitting
+    // ordinary starts, ambient work, reserved workflow metadata or collab rows.
+    // The shared subagent predicate below remains independently fail-closed.
+    "(kind != 'task.started' OR (json_type(payload_json, '$.taskType') = 'text' AND json_extract(payload_json, '$.taskType') = 'approval-review' AND COALESCE(json_extract(payload_json, '$.visibility'), '') != 'ambient' AND json_type(payload_json, '$.workflow') IS NULL AND COALESCE(json_extract(payload_json, '$.itemType'), '') != 'collab_agent_tool_call'))",
     "kind != 'provider.async-questions'",
     "summary != 'Checkpoint captured'",
     "(kind != 'tool.started' OR json_extract(payload_json, '$.itemType') = 'context_compaction' OR (json_extract(payload_json, '$.itemType') = 'command_execution' AND json_extract(payload_json, '$.data.toolName') = 'Bash' AND json_type(payload_json, '$.data.commandInspectionVersion') IN ('integer', 'real') AND json_extract(payload_json, '$.data.commandInspectionVersion') = 1 AND json_extract(payload_json, '$.data.inspectionProvider') = 'claudeAgent'))",
     `(kind != 'reasoning.summary' OR (json_type(payload_json, '$.summaryVersion') IN ('integer', 'real') AND json_extract(payload_json, '$.summaryVersion') = 1 AND json_extract(payload_json, '$.provider') = 'claudeAgent' AND json_extract(payload_json, '$.streamKind') = 'reasoning_summary_text' AND json_type(payload_json, '$.itemId') = 'text' AND length(trim(json_extract(payload_json, '$.itemId'), ${ecmaTrimCharacters})) > 0 AND json_type(payload_json, '$.detail') = 'text' AND length(trim(${summaryDetail}, ${ecmaTrimCharacters})) > 0 AND instr(${summaryDetail},char(0)) = 0 AND ${summaryDetail} NOT GLOB ${unsafeSummaryPattern} AND ${summaryUtf16Bound} AND json_type(payload_json, '$.truncated') IN ('true', 'false') AND json_extract(payload_json, '$.status') IN ('inProgress', 'completed', 'failed')))`,
     "NOT (kind IN ('task.started', 'task.progress', 'task.completed') AND json_type(payload_json, '$.subagent') IS NOT NULL)",
-    "NOT (kind IN ('tool.updated', 'tool.completed') AND COALESCE(json_extract(payload_json, '$.detail'), '') LIKE 'ExitPlanMode:%')",
+    // GLOB is case-sensitive, matching the renderer's exact startsWith check.
+    // SQLite LIKE would also hide ordinary lower/mixed-case provider output.
+    "NOT (kind IN ('tool.updated', 'tool.completed') AND COALESCE(json_extract(payload_json, '$.detail'), '') GLOB 'ExitPlanMode:*')",
     "NOT (kind = 'provider.turn.steer.failed' AND COALESCE(json_extract(payload_json, '$.retryableFollowUp'), 0) = 1)",
     // The server-authored acceptance receipt is an outcome of one exact steer
     // intent, not a periodic observation. Keep it beside the attempted receipt

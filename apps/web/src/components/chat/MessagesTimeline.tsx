@@ -7,6 +7,7 @@ import { TurnConfigurationWorkEntry } from "./TurnConfigurationWorkEntry";
 import { ClaudeCommandWorkEntry, ClaudeSummaryWorkEntry } from "./ProviderOperationWorkEntry";
 import { ProviderDiagnosticWorkEntry } from "./ProviderDiagnosticWorkEntry";
 import {
+  OrchestrationThreadTurnActivityPage,
   type EnvironmentId,
   type EditorId,
   type MessageId,
@@ -17,6 +18,7 @@ import {
   type ThreadId,
   type TurnId,
 } from "@cafecode/contracts";
+import { Schema } from "effect";
 import {
   createContext,
   memo,
@@ -128,6 +130,7 @@ import {
 import { useHistoricalWorkLogPresence } from "./useHistoricalWorkLogPresence";
 import {
   activityCursor,
+  compareActivityCursors,
   cursorKey,
   deriveEarlierWorkLogEntries,
   EARLIER_WORK_LOG_RETAINED_LIMIT,
@@ -2437,6 +2440,48 @@ const EarlierWorkLogSection = memo(function EarlierWorkLogSection({
 
 type HistoricalWorkLogError = "disconnected" | "initial" | "older" | "all";
 
+const isHistoricalWorkLogPage = Schema.is(OrchestrationThreadTurnActivityPage);
+
+/** Offset history has no cursor echo, but must still bind every received row
+ * to the requested exact chat/turn and finite page before private details can
+ * enter the reader. Count and page use the same authenticated server query. */
+function validateHistoricalWorkLogPage(input: {
+  readonly page: OrchestrationThreadTurnActivityPage;
+  readonly threadId: ThreadId;
+  readonly turnId: TurnId;
+  readonly offset: number;
+  readonly limit: number;
+}): void {
+  const { page, threadId, turnId, offset, limit } = input;
+  if (
+    !isHistoricalWorkLogPage(page) ||
+    page.threadId !== threadId ||
+    page.turnId !== turnId ||
+    page.offset !== offset ||
+    page.limit !== limit ||
+    page.before !== undefined ||
+    !Number.isSafeInteger(page.totalCount) ||
+    page.totalCount < 0 ||
+    page.activities.length !== Math.min(limit, Math.max(0, page.totalCount - offset))
+  )
+    throw new Error("Invalid historical work page");
+  const ids = new Set<string>();
+  let previous: OrchestrationThreadActivityCursor | undefined;
+  for (const activity of page.activities) {
+    const cursor = activityCursor(activity);
+    if (
+      activity.turnId !== turnId ||
+      ids.has(activity.id) ||
+      (activity.sequence !== undefined &&
+        (!Number.isSafeInteger(activity.sequence) || activity.sequence < 0)) ||
+      (previous && compareActivityCursors(previous, cursor) >= 0)
+    )
+      throw new Error("Invalid historical work order");
+    ids.add(activity.id);
+    previous = cursor;
+  }
+}
+
 /** Keep the failed operation's finite identity, not its startup-language copy. */
 function formatHistoricalWorkLogError(error: HistoricalWorkLogError, locale: UiLocale): string {
   switch (error) {
@@ -2451,9 +2496,22 @@ function formatHistoricalWorkLogError(error: HistoricalWorkLogError, locale: UiL
   }
 }
 
-/** Owns its own expand/collapse state so toggling re-renders only this row.
- *  State resets on unmount which is fine — work groups start collapsed. */
 const HistoricalWorkLogSection = memo(function HistoricalWorkLogSection({
+  row,
+}: {
+  row: Extract<MessagesTimelineRow, { kind: "historical-work" }>;
+}) {
+  const ctx = use(TimelineRowCtx);
+  // Turn IDs and chat IDs can legitimately repeat on another environment.
+  // Remount the whole private reader before paint instead of resetting its
+  // arrays in an effect which could briefly reveal the previous owner's page.
+  const owner = JSON.stringify([ctx.activeThreadEnvironmentId, ctx.activeThreadId, row.turnId]);
+  return <HistoricalWorkLogReader key={owner} row={row} />;
+});
+
+/** Owns its expansion/page state for exactly one environment/chat/turn.
+ * Collapsing keeps completed pages but retires any still-pending read. */
+const HistoricalWorkLogReader = memo(function HistoricalWorkLogReader({
   row,
 }: {
   row: Extract<MessagesTimelineRow, { kind: "historical-work" }>;
@@ -2471,33 +2529,72 @@ const HistoricalWorkLogSection = memo(function HistoricalWorkLogSection({
   const [isLoading, setIsLoading] = useState(false);
   const [isLoadingOlder, setIsLoadingOlder] = useState(false);
   const [loadErrorCode, setLoadErrorCode] = useState<HistoricalWorkLogError | null>(null);
+  const mountedRef = useRef(false);
+  const expandedRef = useRef(false);
+  const generationRef = useRef(0);
+  const pendingGenerationRef = useRef<number | null>(null);
+
+  useLayoutEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      expandedRef.current = false;
+      generationRef.current++;
+      pendingGenerationRef.current = null;
+    };
+  }, []);
+  const beginRequest = useCallback((): number | null => {
+    if (!mountedRef.current || !expandedRef.current || pendingGenerationRef.current !== null)
+      return null;
+    const generation = ++generationRef.current;
+    pendingGenerationRef.current = generation;
+    return generation;
+  }, []);
+  const ownsRequest = useCallback(
+    (generation: number): boolean =>
+      mountedRef.current &&
+      expandedRef.current &&
+      generationRef.current === generation &&
+      pendingGenerationRef.current === generation,
+    [],
+  );
 
   useEffect(() => {
     if (!isExpanded || initialPageLoaded) {
       return;
     }
+    const generation = beginRequest();
+    if (generation === null) return;
+    const stillOwned = () => ownsRequest(generation);
     const api = readEnvironmentApi(ctx.activeThreadEnvironmentId);
     const activeThreadId = ctx.activeThreadId;
     if (!api || activeThreadId === null) {
-      setInitialPageLoaded(true);
+      // No page was admitted. Keep explicit close/reopen retry available after
+      // reconnect rather than permanently treating absence as loaded history.
       setLoadErrorCode("disconnected");
+      pendingGenerationRef.current = null;
       return;
     }
 
-    let cancelled = false;
     const loadInitialPage = async () => {
       setIsLoading(true);
       setLoadErrorCode(null);
       try {
-        const knownTotal = (
-          await api.orchestration.getThreadTurnActivityPage({
-            threadId: activeThreadId,
-            turnId: row.turnId,
-            offset: 0,
-            limit: 1,
-          })
-        ).totalCount;
-        if (cancelled) return;
+        const countPage = await api.orchestration.getThreadTurnActivityPage({
+          threadId: activeThreadId,
+          turnId: row.turnId,
+          offset: 0,
+          limit: 1,
+        });
+        if (!stillOwned()) return;
+        validateHistoricalWorkLogPage({
+          page: countPage,
+          threadId: activeThreadId,
+          turnId: row.turnId,
+          offset: 0,
+          limit: 1,
+        });
+        const knownTotal = countPage.totalCount;
         setTotalCount(knownTotal);
         if (knownTotal <= 0) {
           setActivityRows([]);
@@ -2513,32 +2610,45 @@ const HistoricalWorkLogSection = memo(function HistoricalWorkLogSection({
           offset,
           limit,
         });
-        if (cancelled) return;
+        if (!stillOwned()) return;
+        validateHistoricalWorkLogPage({
+          page,
+          threadId: activeThreadId,
+          turnId: row.turnId,
+          offset,
+          limit,
+        });
         setTotalCount(page.totalCount);
         setActivityRows(page.activities);
         setLoadedOffset(page.offset);
         setInitialPageLoaded(true);
       } catch {
-        if (!cancelled) {
+        if (stillOwned()) {
           setLoadErrorCode("initial");
         }
       } finally {
-        if (!cancelled) {
+        if (stillOwned()) {
           setIsLoading(false);
+          pendingGenerationRef.current = null;
         }
       }
     };
 
     void loadInitialPage();
     return () => {
-      cancelled = true;
+      if (pendingGenerationRef.current === generation) {
+        generationRef.current++;
+        pendingGenerationRef.current = null;
+      }
     };
   }, [
     ctx.activeThreadEnvironmentId,
     ctx.activeThreadId,
+    beginRequest,
     initialPageLoaded,
     isExpanded,
     onHistoricalWorkLogPresenceResolved,
+    ownsRequest,
     row.turnId,
   ]);
 
@@ -2620,6 +2730,9 @@ const HistoricalWorkLogSection = memo(function HistoricalWorkLogSection({
       setLoadErrorCode("disconnected");
       return;
     }
+    const generation = beginRequest();
+    if (generation === null) return;
+    const stillOwned = () => ownsRequest(generation);
     const nextOffset = Math.max(0, loadedOffset - HISTORICAL_WORK_LOG_PAGE_SIZE);
     const limit = loadedOffset - nextOffset;
     setIsLoadingOlder(true);
@@ -2631,15 +2744,38 @@ const HistoricalWorkLogSection = memo(function HistoricalWorkLogSection({
         offset: nextOffset,
         limit,
       });
+      if (!stillOwned()) return;
+      validateHistoricalWorkLogPage({
+        page,
+        threadId: activeThreadId,
+        turnId: row.turnId,
+        offset: nextOffset,
+        limit,
+      });
       setTotalCount(page.totalCount);
-      setActivityRows((current) => mergeHistoricalActivityRows([...page.activities, ...current]));
+      setActivityRows((current) =>
+        mountedRef.current && expandedRef.current && generationRef.current === generation
+          ? mergeHistoricalActivityRows([...page.activities, ...current])
+          : current,
+      );
       setLoadedOffset(page.offset);
     } catch {
-      setLoadErrorCode("older");
+      if (stillOwned()) setLoadErrorCode("older");
     } finally {
-      setIsLoadingOlder(false);
+      if (stillOwned()) {
+        setIsLoadingOlder(false);
+        pendingGenerationRef.current = null;
+      }
     }
-  }, [ctx.activeThreadEnvironmentId, ctx.activeThreadId, isLoadingOlder, loadedOffset, row.turnId]);
+  }, [
+    beginRequest,
+    ctx.activeThreadEnvironmentId,
+    ctx.activeThreadId,
+    isLoadingOlder,
+    loadedOffset,
+    ownsRequest,
+    row.turnId,
+  ]);
 
   const loadAllPages = useCallback(async () => {
     if (totalCount === null || totalCount <= 0 || totalCount > HISTORICAL_WORK_LOG_SHOW_ALL_LIMIT) {
@@ -2651,6 +2787,9 @@ const HistoricalWorkLogSection = memo(function HistoricalWorkLogSection({
       setLoadErrorCode("disconnected");
       return;
     }
+    const generation = beginRequest();
+    if (generation === null) return;
+    const stillOwned = () => ownsRequest(generation);
     setIsLoadingOlder(true);
     setLoadErrorCode(null);
     try {
@@ -2660,15 +2799,33 @@ const HistoricalWorkLogSection = memo(function HistoricalWorkLogSection({
         offset: 0,
         limit: totalCount,
       });
+      if (!stillOwned()) return;
+      validateHistoricalWorkLogPage({
+        page,
+        threadId: activeThreadId,
+        turnId: row.turnId,
+        offset: 0,
+        limit: totalCount,
+      });
       setTotalCount(page.totalCount);
       setActivityRows(page.activities);
       setLoadedOffset(page.offset);
     } catch {
-      setLoadErrorCode("all");
+      if (stillOwned()) setLoadErrorCode("all");
     } finally {
-      setIsLoadingOlder(false);
+      if (stillOwned()) {
+        setIsLoadingOlder(false);
+        pendingGenerationRef.current = null;
+      }
     }
-  }, [ctx.activeThreadEnvironmentId, ctx.activeThreadId, row.turnId, totalCount]);
+  }, [
+    beginRequest,
+    ctx.activeThreadEnvironmentId,
+    ctx.activeThreadId,
+    ownsRequest,
+    row.turnId,
+    totalCount,
+  ]);
 
   // `totalCount` and `loadedOffset` describe raw activities, including the
   // independently rendered subagent lifecycle. Only a complete scan plus an
@@ -2695,7 +2852,20 @@ const HistoricalWorkLogSection = memo(function HistoricalWorkLogSection({
             type="button"
             className="focus-ring flex min-w-0 flex-1 items-center gap-1.5 rounded-xl px-2.5 py-1.5 text-left text-2xs text-subtle-foreground transition-colors duration-(--duration-fast) hover:text-foreground"
             aria-expanded={isExpanded}
-            onClick={() => setIsExpanded((value) => !value)}
+            onClick={() => {
+              const expanded = !expandedRef.current;
+              expandedRef.current = expanded;
+              if (!expanded) {
+                // Retire the exact unfinished read synchronously. Its late
+                // success, error and finalizer cannot affect a reopened read;
+                // completed pages and their explicit paging position remain.
+                generationRef.current++;
+                pendingGenerationRef.current = null;
+                setIsLoading(false);
+                setIsLoadingOlder(false);
+              }
+              setIsExpanded(expanded);
+            }}
           >
             <ChevronRightIcon
               aria-hidden="true"

@@ -129,6 +129,367 @@ import { getUiLocale, setUiLocale } from "@cafecode/shared/i18n";
 
 const MESSAGE_CREATED_AT = "2026-04-13T12:00:00.000Z";
 
+type HistoryPageInput = Parameters<EnvironmentApi["orchestration"]["getThreadTurnActivityPage"]>[0];
+type HistoryPage = Awaited<
+  ReturnType<EnvironmentApi["orchestration"]["getThreadTurnActivityPage"]>
+>;
+
+function historicalOwnerFixture(owner: string) {
+  // Deliberately reuse both IDs across environments: native/catalog IDs alone
+  // cannot confer authority to show another environment's retained details.
+  const threadId = ThreadId.make("history-reused-thread");
+  const turnId = TurnId.make("history-reused-turn");
+  const environmentId = EnvironmentId.make(`history-environment-${owner}`);
+  const activities = Array.from({ length: 30 }, (_, index) => ({
+    id: EventId.make(`history-${owner}-${index + 1}`),
+    sequence: index + 1,
+    turnId,
+    createdAt: `2026-04-13T12:00:${String(index + 1).padStart(2, "0")}.000Z`,
+    kind: "tool.completed",
+    summary: `${owner} received command ${index + 1}`,
+    tone: "tool" as const,
+    payload: {},
+  }));
+  const response = (input: HistoryPageInput): HistoryPage => ({
+    threadId,
+    turnId,
+    offset: input.offset,
+    limit: input.limit,
+    totalCount: activities.length,
+    activities: activities.slice(input.offset, input.offset + input.limit),
+  });
+  const props = {
+    ...buildProps(),
+    activeThreadId: threadId,
+    activeThreadEnvironmentId: environmentId,
+    timelineEntries: [buildAssistantTimelineEntry({ turnId, text: "Retained final answer." })],
+    historicalWorkLogSummariesByTurnId: new Map([
+      [turnId, { turnId, previewEntries: [], snapshotEntryCount: activities.length }],
+    ]),
+  };
+  return { environmentId, props, response };
+}
+
+function deferredHistoryPage() {
+  let resolve!: (page: HistoryPage) => void;
+  let reject!: (error: Error) => void;
+  const promise = new Promise<HistoryPage>((success, failure) => {
+    resolve = success;
+    reject = failure;
+  });
+  return { promise, resolve, reject };
+}
+
+it.each([
+  ["older", "success", "B"],
+  ["older", "error", "B"],
+  ["all", "success", "B"],
+  ["all", "error", "B"],
+  ["older", "success", "A"],
+  ["older", "error", "A"],
+  ["all", "success", "A"],
+  ["all", "error", "A"],
+] as const)(
+  "binds loaded history and late %s %s after a switch to %s",
+  async (operation, outcome, settleOwner) => {
+    const a = historicalOwnerFixture("A");
+    const b = historicalOwnerFixture("B");
+    const held = deferredHistoryPage();
+    let heldInput: HistoryPageInput | undefined;
+    const getA = vi.fn(async (input: HistoryPageInput) => {
+      if (input.limit > 6 && heldInput === undefined) {
+        heldInput = input;
+        return held.promise;
+      }
+      return a.response(input);
+    });
+    const getB = vi.fn(async (input: HistoryPageInput) => b.response(input));
+    for (const [owner, getThreadTurnActivityPage] of [
+      [a, getA],
+      [b, getB],
+    ] as const) {
+      __setEnvironmentApiOverrideForTests(owner.environmentId, {
+        orchestration: { getThreadTurnActivityPage },
+      } as unknown as EnvironmentApi);
+    }
+    const screen = await render(<MessagesTimeline {...a.props} />);
+    try {
+      const header = page.getByRole("button", { name: /Work log/ });
+      await header.click();
+      await expect.element(page.getByText("A received command 25", { exact: true })).toBeVisible();
+      expect(getA).toHaveBeenCalledTimes(2);
+      await page
+        .getByRole("button", {
+          name: operation === "older" ? "Show older" : "Show all",
+          exact: true,
+        })
+        .click();
+      expect(heldInput).toEqual({
+        threadId: a.props.activeThreadId,
+        turnId: a.props.timelineEntries[0]!.message.turnId,
+        offset: 0,
+        limit: operation === "older" ? 24 : 30,
+      });
+      await screen.rerender(<MessagesTimeline {...b.props} />);
+      await expect.element(header).toHaveAttribute("aria-expanded", "false");
+      expect(document.body.textContent).not.toContain("A received command");
+      expect(getB).not.toHaveBeenCalled();
+      await header.click();
+      await expect.element(page.getByText("B received command 25", { exact: true })).toBeVisible();
+      if (settleOwner === "A") {
+        await screen.rerender(<MessagesTimeline {...a.props} />);
+        await expect.element(header).toHaveAttribute("aria-expanded", "false");
+        expect(document.body.textContent).not.toContain("B received command");
+        await header.click();
+        await expect
+          .element(page.getByText("A received command 25", { exact: true }))
+          .toBeVisible();
+      }
+      if (outcome === "success") held.resolve(a.response(heldInput!));
+      else held.reject(new Error("private older-owner transport error"));
+      await held.promise.catch(() => undefined);
+      await expect
+        .element(page.getByRole("button", { name: "Show older", exact: true }))
+        .toBeEnabled();
+      await expect
+        .element(page.getByRole("button", { name: "Show all", exact: true }))
+        .toBeEnabled();
+      expect(document.body.textContent).not.toContain(
+        `${settleOwner === "A" ? "B" : "A"} received command`,
+      );
+      await expect
+        .element(page.getByText(`${settleOwner} received command 25`, { exact: true }))
+        .toBeVisible();
+      // An old complete page must not claim the new reader has reached offset0.
+      await expect
+        .element(page.getByText(`${settleOwner} received command 1`, { exact: true }))
+        .not.toBeInTheDocument();
+      expect(document.body.textContent).not.toContain("Couldn’t load");
+      expect(document.body.textContent).not.toContain("private older-owner");
+      expect(getB).toHaveBeenCalledTimes(2);
+      // Return to identical IDs on A: the former mounted generation must not
+      // survive either an owner round-trip or a virtualizer remount.
+      if (settleOwner === "B") {
+        await screen.rerender(<MessagesTimeline {...a.props} />);
+        await expect.element(header).toHaveAttribute("aria-expanded", "false");
+        expect(document.body.textContent).not.toContain("B received command");
+        await header.click();
+        await expect
+          .element(page.getByText("A received command 25", { exact: true }))
+          .toBeVisible();
+      }
+      expect(getA).toHaveBeenCalledTimes(5);
+    } finally {
+      await screen.unmount();
+      __resetEnvironmentApiOverridesForTests();
+    }
+  },
+);
+
+it("preserves completed history on collapse and admits a new older page without an old finalizer", async () => {
+  const a = historicalOwnerFixture("A");
+  const old = deferredHistoryPage();
+  const current = deferredHistoryPage();
+  let olderCount = 0;
+  let olderInput: HistoryPageInput | undefined;
+  const getThreadTurnActivityPage = vi.fn(async (input: HistoryPageInput) => {
+    if (input.limit > 6) {
+      olderInput = input;
+      return ++olderCount === 1 ? old.promise : current.promise;
+    }
+    return a.response(input);
+  });
+  __setEnvironmentApiOverrideForTests(a.environmentId, {
+    orchestration: { getThreadTurnActivityPage },
+  } as unknown as EnvironmentApi);
+  const screen = await render(<MessagesTimeline {...a.props} />);
+  try {
+    const header = page.getByRole("button", { name: /Work log/ });
+    await header.click();
+    await expect.element(page.getByText("A received command 25", { exact: true })).toBeVisible();
+    await page.getByRole("button", { name: "Show older", exact: true }).click();
+    await header.click();
+    expect(document.body.textContent).not.toContain("A received command");
+    await header.click();
+    await expect.element(page.getByText("A received command 25", { exact: true })).toBeVisible();
+    expect(getThreadTurnActivityPage).toHaveBeenCalledTimes(3);
+    await page.getByRole("button", { name: "Show older", exact: true }).click();
+    old.reject(new Error("private superseded read error"));
+    await old.promise.catch(() => undefined);
+    await expect
+      .element(page.getByRole("button", { name: "Loading…", exact: true }))
+      .toBeDisabled();
+    await expect
+      .element(page.getByRole("button", { name: "Show all", exact: true }))
+      .toBeDisabled();
+    expect(document.body.textContent).not.toContain("Couldn’t load");
+    current.resolve(a.response(olderInput!));
+    await expect.element(page.getByText("A received command 1", { exact: true })).toBeVisible();
+    await expect.element(page.getByText("A received command 30", { exact: true })).toBeVisible();
+    for (let index = 1; index <= 30; index++) {
+      await expect
+        .element(page.getByText(`A received command ${index}`, { exact: true }))
+        .toBeVisible();
+    }
+    await expect
+      .element(page.getByRole("button", { name: "Show older", exact: true }))
+      .not.toBeInTheDocument();
+    expect(getThreadTurnActivityPage).toHaveBeenCalledTimes(4);
+  } finally {
+    await screen.unmount();
+    __resetEnvironmentApiOverridesForTests();
+  }
+});
+
+it.each(["count", "preview"] as const)(
+  "retires a late initial %s on collapse without an eager reload",
+  async (phase) => {
+    const a = historicalOwnerFixture("A");
+    const held = deferredHistoryPage();
+    let heldInput: HistoryPageInput | undefined;
+    const getThreadTurnActivityPage = vi.fn(async (input: HistoryPageInput) => {
+      if (heldInput === undefined && (phase === "count" ? input.limit === 1 : input.limit === 6)) {
+        heldInput = input;
+        return held.promise;
+      }
+      return a.response(input);
+    });
+    __setEnvironmentApiOverrideForTests(a.environmentId, {
+      orchestration: { getThreadTurnActivityPage },
+    } as unknown as EnvironmentApi);
+    const screen = await render(<MessagesTimeline {...a.props} />);
+    try {
+      const header = page.getByRole("button", { name: /Work log/ });
+      await header.click();
+      await vi.waitFor(() => expect(heldInput).toBeDefined());
+      await header.click();
+      held.resolve(a.response(heldInput!));
+      await held.promise;
+      await expect.element(header).toHaveAttribute("aria-expanded", "false");
+      expect(document.body.textContent).not.toContain("A received command");
+      expect(getThreadTurnActivityPage).toHaveBeenCalledTimes(phase === "count" ? 1 : 2);
+      await header.click();
+      await expect.element(page.getByText("A received command 25", { exact: true })).toBeVisible();
+      expect(getThreadTurnActivityPage).toHaveBeenCalledTimes(phase === "count" ? 3 : 4);
+    } finally {
+      await screen.unmount();
+      __resetEnvironmentApiOverridesForTests();
+    }
+  },
+);
+
+it.each([
+  "thread",
+  "turn",
+  "offset",
+  "limit",
+  "count",
+  "order",
+  "duplicate",
+  "row-turn",
+  "before",
+] as const)(
+  "refuses historical page %s drift before exposing its retained content",
+  async (drift) => {
+    const a = historicalOwnerFixture("A");
+    const getThreadTurnActivityPage = vi.fn(async (input: HistoryPageInput) => {
+      const response = a.response(input);
+      if (["order", "duplicate", "row-turn"].includes(drift) && input.limit === 1) return response;
+      switch (drift) {
+        case "thread":
+          return { ...response, threadId: ThreadId.make("foreign-history-thread") };
+        case "turn":
+          return { ...response, turnId: TurnId.make("foreign-history-turn") };
+        case "offset":
+          return { ...response, offset: input.offset + 1 };
+        case "limit":
+          return { ...response, limit: input.limit + 1 };
+        case "count":
+          return { ...response, totalCount: 0 };
+        case "order":
+          return { ...response, activities: response.activities.toReversed() };
+        case "duplicate":
+          return {
+            ...response,
+            activities: response.activities.map((activity) => ({
+              ...activity,
+              id: response.activities[0]!.id,
+            })),
+          };
+        case "row-turn":
+          return {
+            ...response,
+            activities: response.activities.map((activity) => ({
+              ...activity,
+              turnId: TurnId.make("foreign-row-turn"),
+            })),
+          };
+        case "before":
+          return {
+            ...response,
+            before: {
+              activityId: response.activities[0]!.id,
+              sequence: 1,
+              createdAt: response.activities[0]!.createdAt,
+            },
+          };
+      }
+    });
+    __setEnvironmentApiOverrideForTests(a.environmentId, {
+      orchestration: { getThreadTurnActivityPage },
+    } as unknown as EnvironmentApi);
+    const screen = await render(<MessagesTimeline {...a.props} />);
+    try {
+      await page.getByRole("button", { name: /Work log/ }).click();
+      await expect
+        .element(page.getByText("Couldn’t load the work log.", { exact: true }))
+        .toBeVisible();
+      expect(getThreadTurnActivityPage).toHaveBeenCalledTimes(
+        ["order", "duplicate", "row-turn"].includes(drift) ? 2 : 1,
+      );
+      expect(document.body.textContent).not.toContain("A received command");
+      expect(document.body.textContent).not.toContain("foreign-history");
+      await expect.element(page.getByText("Retained final answer.", { exact: true })).toBeVisible();
+    } finally {
+      await screen.unmount();
+      __resetEnvironmentApiOverridesForTests();
+    }
+  },
+);
+
+it("allows explicit historical close/reopen after reconnect without eagerly restarting the owner query", async () => {
+  const owner = historicalOwnerFixture("disconnected");
+  const getThreadTurnActivityPage = vi.fn(async (input: HistoryPageInput) => owner.response(input));
+  // This synthetic environment has no connection/override until the user has
+  // seen the fixed unavailable state. There is no live transport in this case.
+  const screen = await render(<MessagesTimeline {...owner.props} />);
+  try {
+    const header = page.getByRole("button", { name: /Work log/ });
+    await header.click();
+    await expect
+      .element(page.getByText("Work log unavailable while disconnected.", { exact: true }))
+      .toBeVisible();
+    __setEnvironmentApiOverrideForTests(owner.environmentId, {
+      orchestration: { getThreadTurnActivityPage },
+    } as unknown as EnvironmentApi);
+    await screen.rerender(<MessagesTimeline {...owner.props} />);
+    await expect.element(header).toHaveAttribute("aria-expanded", "true");
+    expect(getThreadTurnActivityPage).not.toHaveBeenCalled();
+    await header.click();
+    await header.click();
+    await expect
+      .element(page.getByText("Disconnected received command 25", { exact: true }))
+      .toBeVisible();
+    await expect
+      .element(page.getByText("Work log unavailable while disconnected.", { exact: true }))
+      .not.toBeInTheDocument();
+    expect(getThreadTurnActivityPage).toHaveBeenCalledTimes(2);
+  } finally {
+    await screen.unmount();
+    __resetEnvironmentApiOverridesForTests();
+  }
+});
+
 it("keeps a retained provider failure discoverable while historical work and private diagnostics are collapsed", async () => {
   const threadId = ThreadId.make("diagnostic-historical-chat");
   const turnId = TurnId.make("diagnostic-historical-turn");
