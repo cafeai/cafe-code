@@ -493,11 +493,11 @@ export interface CodexSessionRuntimeOptions {
   readonly serviceTier?: CodexServiceTier | undefined;
   readonly additionalDirectories?: ReadonlyArray<string> | undefined;
   readonly resumeCursor?: CodexResumeCursor;
-  // Optional per-provider-instance override for
-  // `model_auto_compact_token_limit`. When absent, app-server owns threshold
-  // resolution exactly as it does for the official Codex CUI.
+  // Optional per-provider-instance `model_auto_compact_token_limit` request.
+  // This explicit choice wins over a companion nominal context request; when
+  // neither is present, native baseline/model policy remains untouched.
   readonly autoCompactTokenLimit?: number | undefined;
-  /** Explicit Cafe chat override only; absent keeps native config/catalog policy. */
+  /** Resolved numeric Cafe chat/account request; absence keeps native context policy. */
   readonly codexContextWindowOverride?: number | undefined;
 }
 
@@ -1635,16 +1635,18 @@ function buildThreadStartParams(input: {
     cwd: input.cwd,
     additionalDirectories: input.additionalDirectories,
   });
-  // Codex rust-v0.146.0 derives an absent auto-compaction threshold as 90% of
-  // the resolved raw model context window, clamps explicit overrides to that
-  // ceiling, and defaults its accounting scope to `total`. Do not duplicate
-  // those defaults here: model metadata changes independently of Cafe, and an
-  // injected limit caused Cafe sessions to compact earlier than the CUI.
+  // Codex 0.162.1 (092d3acd6bec3e3a14bdc7e7a2810ab628ab759d) can retain a
+  // lower fixed auto-compaction threshold when only the context window changes.
+  // Pair explicit context intent with the same nominal request unless a separate
+  // Cafe compaction setting wins. Never calculate an effective threshold here:
+  // native ModelInfo/context_window policy owns model maxima, default-total
+  // ceilings, user-selected body-after-prefix accounting, buffers and full caps.
+  // With neither request, preserve native baseline/model defaults by omission.
   // Do not override `features.remote_compaction_v2`. Codex 0.155 removed that
   // compatibility flag and always streams remote compaction when supported;
   // older supported releases enabled it by default. Keep context, retention,
   // and tool-output budgets provider-owned so resumed/forked sessions preserve
-  // upstream's recorded truncation budgets without Cafe forcing extra compacts.
+  // upstream's recorded truncation budgets. Accounting scope stays omitted too.
   const threadConfig: Record<string, unknown> = {};
   if (input.codexContextWindowOverride !== undefined) {
     // 0.162.1 config_manager.rs loads baseline config plus these overrides.
@@ -1653,10 +1655,12 @@ function buildThreadStartParams(input: {
     // Native ModelInfo still owns capacity clamps, headroom and compaction.
     threadConfig.model_context_window = input.codexContextWindowOverride;
   }
-  if (input.autoCompactTokenLimit !== undefined) {
-    // This is an explicit user override. App-server still applies its upstream
-    // context-window clamp and the user's upstream scope configuration.
-    threadConfig.model_auto_compact_token_limit = input.autoCompactTokenLimit;
+  const autoCompactTokenLimit = input.autoCompactTokenLimit ?? input.codexContextWindowOverride;
+  if (autoCompactTokenLimit !== undefined) {
+    // This is request intent, not measured usable capacity or a resolved native
+    // trigger. Passing the nominal value leaves scope-specific native policy
+    // authoritative and does not rewrite the user's provider configuration.
+    threadConfig.model_auto_compact_token_limit = autoCompactTokenLimit;
   }
   if (input.runtimeMode === "auto-accept-edits" && input.additionalDirectories?.length) {
     threadConfig.sandbox_workspace_write = {

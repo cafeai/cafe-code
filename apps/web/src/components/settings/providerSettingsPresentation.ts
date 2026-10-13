@@ -89,7 +89,12 @@ const CodexSettingsCopy: Readonly<Record<string, DisplayMetadata>> = {
       return uiText("Auto-compact override");
     },
     get description() {
-      return uiText("Token count that triggers compaction. Blank: Codex's per-model default.");
+      return uiText("Requested compaction threshold. An explicit value takes precedence.");
+    },
+    get detail() {
+      return uiText(
+        "Blank follows an active context-window override; otherwise Codex configuration and model defaults apply. Native limits still apply.",
+      );
     },
   },
 };

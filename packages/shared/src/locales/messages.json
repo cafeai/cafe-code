@@ -674,7 +674,7 @@
   },
   "Additional CLI arguments passed on session start.": {
     "message": "Additional CLI arguments passed on session start.",
-    "locations": ["apps/web/src/components/settings/providerSettingsPresentation.ts:178"]
+    "locations": ["apps/web/src/components/settings/providerSettingsPresentation.ts:183"]
   },
   "Additional directories": {
     "message": "Additional directories",
@@ -749,7 +749,7 @@
   },
   "Agent-tool concurrency limit": {
     "message": "Agent-tool concurrency limit",
-    "locations": ["apps/web/src/components/settings/providerSettingsPresentation.ts:141"]
+    "locations": ["apps/web/src/components/settings/providerSettingsPresentation.ts:146"]
   },
   "Agents can propose follow-ups in any chat; you approve them in Tasks.": {
     "message": "Agents can propose follow-ups in any chat; you approve them in Tasks.",
@@ -1325,15 +1325,19 @@
   "Binary path": {
     "message": "Binary path",
     "locations": [
-      "apps/web/src/components/settings/providerSettingsPresentation.ts:100",
-      "apps/web/src/components/settings/providerSettingsPresentation.ts:189",
+      "apps/web/src/components/settings/providerSettingsPresentation.ts:105",
+      "apps/web/src/components/settings/providerSettingsPresentation.ts:194",
       "apps/web/src/components/settings/providerSettingsPresentation.ts:20",
-      "apps/web/src/components/settings/providerSettingsPresentation.ts:211"
+      "apps/web/src/components/settings/providerSettingsPresentation.ts:216"
     ]
   },
   "Bitbucket pull request": {
     "message": "Bitbucket pull request",
     "locations": ["apps/web/src/sourceControlPresentation.ts:49"]
+  },
+  "Blank follows an active context-window override; otherwise Codex configuration and model defaults apply. Native limits still apply.": {
+    "message": "Blank follows an active context-window override; otherwise Codex configuration and model defaults apply. Native limits still apply.",
+    "locations": ["apps/web/src/components/settings/providerSettingsPresentation.ts:95"]
   },
   "Blank follows your Codex settings and model defaults.": {
     "message": "Blank follows your Codex settings and model defaults.",
@@ -1341,7 +1345,7 @@
   },
   "Blank reuses your existing grok login.": {
     "message": "Blank reuses your existing grok login.",
-    "locations": ["apps/web/src/components/settings/providerSettingsPresentation.ts:197"]
+    "locations": ["apps/web/src/components/settings/providerSettingsPresentation.ts:202"]
   },
   "Blank uses the model, backend and config defaults: without an override, V2 models allow 3 spawned agents and V1 models allow 6.": {
     "message": "Blank uses the model, backend and config defaults: without an override, V2 models allow 3 spawned agents and V1 models allow 6.",
@@ -1349,7 +1353,7 @@
   },
   "Blank: Cafe Code starts a local OpenCode server.": {
     "message": "Blank: Cafe Code starts a local OpenCode server.",
-    "locations": ["apps/web/src/components/settings/providerSettingsPresentation.ts:219"]
+    "locations": ["apps/web/src/components/settings/providerSettingsPresentation.ts:224"]
   },
   "Blocked": {
     "message": "Blocked",
@@ -1418,7 +1422,7 @@
   "Bundled runtime": {
     "message": "Bundled runtime",
     "locations": [
-      "apps/web/src/components/settings/providerSettingsPresentation.ts:120",
+      "apps/web/src/components/settings/providerSettingsPresentation.ts:125",
       "apps/web/src/components/settings/providerSettingsPresentation.ts:40"
     ]
   },
@@ -1623,7 +1627,7 @@
   },
   "Cafe supports 1–128,000 response tokens. Blank: inherited or model default.": {
     "message": "Cafe supports 1–128,000 response tokens. Blank: inherited or model default.",
-    "locations": ["apps/web/src/components/settings/providerSettingsPresentation.ts:162"]
+    "locations": ["apps/web/src/components/settings/providerSettingsPresentation.ts:167"]
   },
   "Cafe will copy the visible conversation into a new chat using the same selected account. On your next explicit message, a bounded excerpt of recent visible messages will provide context to a fresh Codex session; hidden native history is not copied.": {
     "message": "Cafe will copy the visible conversation into a new chat using the same selected account. On your next explicit message, a bounded excerpt of recent visible messages will provide context to a fresh Codex session; hidden native history is not copied.",
@@ -2037,7 +2041,7 @@
   },
   "Claude home folder": {
     "message": "Claude home folder",
-    "locations": ["apps/web/src/components/settings/providerSettingsPresentation.ts:130"]
+    "locations": ["apps/web/src/components/settings/providerSettingsPresentation.ts:135"]
   },
   "Claude limits Agent-tool admission, not all running work. Resumes, manual forks, Ultracode and teams have different limits.": {
     "message": "Claude limits Agent-tool admission, not all running work. Resumes, manual forks, Ultracode and teams have different limits.",
@@ -3752,7 +3756,7 @@
   },
   "Default Grok home": {
     "message": "Default Grok home",
-    "locations": ["apps/web/src/components/settings/providerSettingsPresentation.ts:203"]
+    "locations": ["apps/web/src/components/settings/providerSettingsPresentation.ts:208"]
   },
   "Default chat workspace": {
     "message": "Default chat workspace",
@@ -5483,7 +5487,7 @@
   },
   "Grok home folder": {
     "message": "Grok home folder",
-    "locations": ["apps/web/src/components/settings/providerSettingsPresentation.ts:194"]
+    "locations": ["apps/web/src/components/settings/providerSettingsPresentation.ts:199"]
   },
   "Grok''s sandbox cannot start with a symlinked container-runtime socket.": {
     "message": "Grok''s sandbox cannot start with a symlinked container-runtime socket.",
@@ -5724,11 +5728,11 @@
   },
   "Inherited / model default": {
     "message": "Inherited / model default",
-    "locations": ["apps/web/src/components/settings/providerSettingsPresentation.ts:170"]
+    "locations": ["apps/web/src/components/settings/providerSettingsPresentation.ts:175"]
   },
   "Inherited / provider default": {
     "message": "Inherited / provider default",
-    "locations": ["apps/web/src/components/settings/providerSettingsPresentation.ts:154"]
+    "locations": ["apps/web/src/components/settings/providerSettingsPresentation.ts:159"]
   },
   "Inline content limit reached. Expand to inspect.": {
     "message": "Inline content limit reached. Expand to inspect.",
@@ -6017,7 +6021,7 @@
   },
   "Keeps this account's Claude sign-in and settings separate.": {
     "message": "Keeps this account's Claude sign-in and settings separate.",
-    "locations": ["apps/web/src/components/settings/providerSettingsPresentation.ts:133"]
+    "locations": ["apps/web/src/components/settings/providerSettingsPresentation.ts:138"]
   },
   "Key removed.": {
     "message": "Key removed.",
@@ -6136,7 +6140,7 @@
   },
   "Launch arguments": {
     "message": "Launch arguments",
-    "locations": ["apps/web/src/components/settings/providerSettingsPresentation.ts:175"]
+    "locations": ["apps/web/src/components/settings/providerSettingsPresentation.ts:180"]
   },
   "Layer": {
     "message": "Layer",
@@ -6447,7 +6451,7 @@
   },
   "Max Agent-tool subagents, 1–64. Blank: inherited or 20. Change between sessions.": {
     "message": "Max Agent-tool subagents, 1–64. Blank: inherited or 20. Change between sessions.",
-    "locations": ["apps/web/src/components/settings/providerSettingsPresentation.ts:144"]
+    "locations": ["apps/web/src/components/settings/providerSettingsPresentation.ts:149"]
   },
   "Max memory": {
     "message": "Max memory",
@@ -6462,7 +6466,7 @@
   },
   "Maximum response tokens": {
     "message": "Maximum response tokens",
-    "locations": ["apps/web/src/components/settings/providerSettingsPresentation.ts:159"]
+    "locations": ["apps/web/src/components/settings/providerSettingsPresentation.ts:164"]
   },
   "Maximum runs": {
     "message": "Maximum runs",
@@ -7583,7 +7587,7 @@
   },
   "Only needed for an external server.": {
     "message": "Only needed for an external server.",
-    "locations": ["apps/web/src/components/settings/providerSettingsPresentation.ts:227"]
+    "locations": ["apps/web/src/components/settings/providerSettingsPresentation.ts:232"]
   },
   "Only the owner can manage pairing and paired devices.": {
     "message": "Only the owner can manage pairing and paired devices.",
@@ -7799,7 +7803,7 @@
   },
   "Optional": {
     "message": "Optional",
-    "locations": ["apps/web/src/components/settings/providerSettingsPresentation.ts:230"]
+    "locations": ["apps/web/src/components/settings/providerSettingsPresentation.ts:235"]
   },
   "Optional. Each started run may use paid tokens.": {
     "message": "Optional. Each started run may use paid tokens.",
@@ -9250,6 +9254,10 @@
     "message": "Request failures",
     "locations": ["apps/web/src/components/settings/DiagnosticsSettings.tsx:2069"]
   },
+  "Requested compaction threshold. An explicit value takes precedence.": {
+    "message": "Requested compaction threshold. An explicit value takes precedence.",
+    "locations": ["apps/web/src/components/settings/providerSettingsPresentation.ts:92"]
+  },
   "Requeued": {
     "message": "Requeued",
     "locations": ["apps/web/src/components/chat/ChatComposer.tsx:495"]
@@ -9678,7 +9686,7 @@
   "Runtime": {
     "message": "Runtime",
     "locations": [
-      "apps/web/src/components/settings/providerSettingsPresentation.ts:105",
+      "apps/web/src/components/settings/providerSettingsPresentation.ts:110",
       "apps/web/src/components/settings/providerSettingsPresentation.ts:25"
     ]
   },
@@ -10198,7 +10206,7 @@
   },
   "Server URL": {
     "message": "Server URL",
-    "locations": ["apps/web/src/components/settings/providerSettingsPresentation.ts:216"]
+    "locations": ["apps/web/src/components/settings/providerSettingsPresentation.ts:221"]
   },
   "Server environment": {
     "message": "Server environment",
@@ -10206,7 +10214,7 @@
   },
   "Server password": {
     "message": "Server password",
-    "locations": ["apps/web/src/components/settings/providerSettingsPresentation.ts:224"]
+    "locations": ["apps/web/src/components/settings/providerSettingsPresentation.ts:229"]
   },
   "Service tier": {
     "message": "Service tier",
@@ -10272,11 +10280,11 @@
   },
   "Sets CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS (Claude Code 2.1.217+). Saving reloads this account. Limits Agent-tool spawning, not all running work: resumes and manual forks can exceed it, ultracode is exempt, and workflows/teams use separate limits.": {
     "message": "Sets CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS (Claude Code 2.1.217+). Saving reloads this account. Limits Agent-tool spawning, not all running work: resumes and manual forks can exceed it, ultracode is exempt, and workflows/teams use separate limits.",
-    "locations": ["apps/web/src/components/settings/providerSettingsPresentation.ts:149"]
+    "locations": ["apps/web/src/components/settings/providerSettingsPresentation.ts:154"]
   },
   "Sets CLAUDE_CODE_MAX_OUTPUT_TOKENS for new chat queries, subject to the model's ceiling. Larger budgets can increase output cost and reduce context room before compaction. Saving reloads this account: change between sessions. Metadata helpers and login/health checks keep their existing output policy.": {
     "message": "Sets CLAUDE_CODE_MAX_OUTPUT_TOKENS for new chat queries, subject to the model's ceiling. Larger budgets can increase output cost and reduce context room before compaction. Saving reloads this account: change between sessions. Metadata helpers and login/health checks keep their existing output policy.",
-    "locations": ["apps/web/src/components/settings/providerSettingsPresentation.ts:165"]
+    "locations": ["apps/web/src/components/settings/providerSettingsPresentation.ts:170"]
   },
   "Sets CODEX_HOME, the folder for Codex config, sign-in and history.": {
     "message": "Sets CODEX_HOME, the folder for Codex config, sign-in and history.",
@@ -10284,11 +10292,11 @@
   },
   "Sets GROK_HOME for this account.": {
     "message": "Sets GROK_HOME for this account.",
-    "locations": ["apps/web/src/components/settings/providerSettingsPresentation.ts:200"]
+    "locations": ["apps/web/src/components/settings/providerSettingsPresentation.ts:205"]
   },
   "Sets HOME when running Claude, so its .claude.json and .claude live here.": {
     "message": "Sets HOME when running Claude, so its .claude.json and .claude live here.",
-    "locations": ["apps/web/src/components/settings/providerSettingsPresentation.ts:136"]
+    "locations": ["apps/web/src/components/settings/providerSettingsPresentation.ts:141"]
   },
   "Settings": {
     "message": "Settings",
@@ -11180,7 +11188,7 @@
   "System CLI": {
     "message": "System CLI",
     "locations": [
-      "apps/web/src/components/settings/providerSettingsPresentation.ts:111",
+      "apps/web/src/components/settings/providerSettingsPresentation.ts:116",
       "apps/web/src/components/settings/providerSettingsPresentation.ts:31"
     ]
   },
@@ -12049,10 +12057,6 @@
     "message": "Token budget",
     "locations": ["apps/web/src/components/chat/ThreadGoalControl.tsx:366"]
   },
-  "Token count that triggers compaction. Blank: Codex's per-model default.": {
-    "message": "Token count that triggers compaction. Blank: Codex's per-model default.",
-    "locations": ["apps/web/src/components/settings/providerSettingsPresentation.ts:92"]
-  },
   "Tokens": {
     "message": "Tokens",
     "locations": [
@@ -12710,7 +12714,7 @@
   "Use Cafe Code's managed Windows runtime and provider install.": {
     "message": "Use Cafe Code's managed Windows runtime and provider install.",
     "locations": [
-      "apps/web/src/components/settings/providerSettingsPresentation.ts:123",
+      "apps/web/src/components/settings/providerSettingsPresentation.ts:128",
       "apps/web/src/components/settings/providerSettingsPresentation.ts:43"
     ]
   },
@@ -12764,7 +12768,7 @@
   "Use the provider CLI from PATH or the configured binary path.": {
     "message": "Use the provider CLI from PATH or the configured binary path.",
     "locations": [
-      "apps/web/src/components/settings/providerSettingsPresentation.ts:114",
+      "apps/web/src/components/settings/providerSettingsPresentation.ts:119",
       "apps/web/src/components/settings/providerSettingsPresentation.ts:34"
     ]
   },
@@ -13581,7 +13585,7 @@
   },
   "e.g. {arguments}": {
     "message": "e.g. {arguments}",
-    "locations": ["apps/web/src/components/settings/providerSettingsPresentation.ts:181"]
+    "locations": ["apps/web/src/components/settings/providerSettingsPresentation.ts:186"]
   },
   "fetch interval": {
     "message": "fetch interval",

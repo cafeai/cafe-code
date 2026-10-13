@@ -8436,6 +8436,13 @@ describe("openCodexThread", () => {
           Reflect.get(Reflect.get(calls[0]!.payload as object, "config"), "model_context_window"),
           128_000,
         );
+        assert.equal(
+          Reflect.get(
+            Reflect.get(calls[0]!.payload as object, "config"),
+            "model_auto_compact_token_limit",
+          ),
+          128_000,
+        );
         assert.equal(Reflect.has(calls[0]!.payload as object, "input"), false);
       }
     },
@@ -8709,7 +8716,7 @@ describe("openCodexThread", () => {
     }
   });
 
-  it("translates an explicit nominal context override on start/resume and omits it on inheritance", async () => {
+  it("pairs nominal context on start/resume, preserves explicit compaction precedence and omits inherited keys", async () => {
     const calls: Array<{ method: "thread/start" | "thread/resume"; payload: unknown }> = [];
     const client = {
       raw: {
@@ -8720,7 +8727,46 @@ describe("openCodexThread", () => {
       },
     };
     for (const resumeThreadId of [undefined, "existing-thread"]) {
-      for (const codexContextWindowOverride of [500_000, undefined]) {
+      // Open with context first, then without either setting, to prove a later
+      // native-inheritance/reset request cannot retain its predecessor's keys.
+      for (const scenario of [
+        {
+          codexContextWindowOverride: 800_000,
+          autoCompactTokenLimit: undefined,
+          expectedConfig: {
+            model_context_window: 800_000,
+            model_auto_compact_token_limit: 800_000,
+          },
+        },
+        {
+          codexContextWindowOverride: undefined,
+          autoCompactTokenLimit: undefined,
+          expectedConfig: {},
+        },
+        {
+          codexContextWindowOverride: undefined,
+          autoCompactTokenLimit: 150_000,
+          expectedConfig: { model_auto_compact_token_limit: 150_000 },
+        },
+        {
+          codexContextWindowOverride: 800_000,
+          autoCompactTokenLimit: 150_000,
+          expectedConfig: {
+            model_context_window: 800_000,
+            model_auto_compact_token_limit: 150_000,
+          },
+        },
+        {
+          // This is an admitted nominal integer, not a model-capacity claim.
+          // No Cafe ratio/rounding may change either structured request value.
+          codexContextWindowOverride: Number.MAX_SAFE_INTEGER,
+          autoCompactTokenLimit: undefined,
+          expectedConfig: {
+            model_context_window: Number.MAX_SAFE_INTEGER,
+            model_auto_compact_token_limit: Number.MAX_SAFE_INTEGER,
+          },
+        },
+      ]) {
         await Effect.runPromise(
           openCodexThread({
             client,
@@ -8730,22 +8776,87 @@ describe("openCodexThread", () => {
             requestedModel: "gpt-6.1-sol",
             serviceTier: undefined,
             resumeThreadId,
-            ...(codexContextWindowOverride !== undefined ? { codexContextWindowOverride } : {}),
+            ...(scenario.codexContextWindowOverride !== undefined
+              ? { codexContextWindowOverride: scenario.codexContextWindowOverride }
+              : {}),
+            ...(scenario.autoCompactTokenLimit !== undefined
+              ? { autoCompactTokenLimit: scenario.autoCompactTokenLimit }
+              : {}),
           }),
         );
         const config = (calls.at(-1)!.payload as { config: Record<string, unknown> }).config;
-        assert.deepEqual(
-          config,
-          codexContextWindowOverride === undefined ? {} : { model_context_window: 500_000 },
-        );
-        assert.equal("model_auto_compact_token_limit" in config, false);
+        assert.deepEqual(config, scenario.expectedConfig);
+        assert.equal("model_auto_compact_token_limit_scope" in config, false);
       }
     }
     assert.deepEqual(
       calls.map((call) => call.method),
-      ["thread/start", "thread/start", "thread/resume", "thread/resume"],
+      [
+        "thread/start",
+        "thread/start",
+        "thread/start",
+        "thread/start",
+        "thread/start",
+        "thread/resume",
+        "thread/resume",
+        "thread/resume",
+        "thread/resume",
+        "thread/resume",
+      ],
     );
   });
+
+  it.each([undefined, 150_000])(
+    "retains paired context and explicit compaction intent through recoverable resume fallback (%s)",
+    async (autoCompactTokenLimit) => {
+      const calls: Array<{ method: "thread/start" | "thread/resume"; payload: unknown }> = [];
+      const client = {
+        raw: {
+          request: (method: "thread/start" | "thread/resume", payload: unknown) => {
+            calls.push({ method, payload });
+            return method === "thread/resume"
+              ? Effect.fail(
+                  new CodexErrors.CodexAppServerRequestError({
+                    code: -32603,
+                    errorMessage: "thread not found",
+                  }),
+                )
+              : Effect.succeed(makeThreadOpenResponse("fresh-context-thread"));
+          },
+        },
+      };
+
+      const opened = await Effect.runPromise(
+        openCodexThread({
+          client,
+          threadId: ThreadId.make("context-thread"),
+          runtimeMode: "full-access",
+          cwd: process.cwd(),
+          requestedModel: "gpt-6.1-sol",
+          serviceTier: undefined,
+          resumeThreadId: "stale-context-thread",
+          codexContextWindowOverride: 800_000,
+          ...(autoCompactTokenLimit !== undefined ? { autoCompactTokenLimit } : {}),
+        }),
+      );
+
+      assert.equal(opened.thread.id, "fresh-context-thread");
+      assert.deepEqual(
+        calls.map((call) => call.method),
+        ["thread/resume", "thread/start"],
+      );
+      for (const call of calls) {
+        const config = (call.payload as { config: Record<string, unknown> }).config;
+        assert.deepEqual(config, {
+          model_context_window: 800_000,
+          model_auto_compact_token_limit: autoCompactTokenLimit ?? 800_000,
+        });
+        assert.equal("model_auto_compact_token_limit_scope" in config, false);
+      }
+      assert.equal(Reflect.get(calls[0]!.payload as object, "threadId"), "stale-context-thread");
+      assert.equal(Reflect.has(calls[1]!.payload as object, "threadId"), false);
+    },
+  );
 
   it("propagates non-recoverable resume failures", async () => {
     const client = {

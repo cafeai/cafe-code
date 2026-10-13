@@ -1481,6 +1481,9 @@ it.effect(
       });
       assert.equal(initial.codexContextWindowOverride, 500_000);
       assert.equal(factory.lastRuntime?.options.codexContextWindowOverride, 500_000);
+      // Runtime opening derives the companion request. Adapter options/usage
+      // must not manufacture a separately configured threshold from context.
+      assert.equal(factory.lastRuntime?.options.autoCompactTokenLimit, undefined);
       const original = factory.lastRuntime!;
       original.closeIfIdleImpl.mockResolvedValue(false);
       const denied = yield* adapter
@@ -2598,6 +2601,108 @@ sessionErrorLayer("CodexAdapterLive session errors", (it) => {
       }).pipe(Effect.provide(customLayer));
     },
   );
+
+  for (const autoCompactTokenLimit of [150_000, undefined]) {
+    it.effect(
+      `keeps native usage capacity authoritative for an 800K context request with ${
+        autoCompactTokenLimit === undefined
+          ? "no separate compaction setting"
+          : "explicit compaction"
+      }`,
+      () => {
+        const customRuntimeFactory = makeRuntimeFactory();
+        const customLayer = Layer.effect(
+          CodexAdapter,
+          Effect.gen(function* () {
+            const codexConfig = decodeCodexSettings({
+              ...(autoCompactTokenLimit !== undefined ? { autoCompactTokenLimit } : {}),
+            });
+            return yield* makeCodexAdapter(codexConfig, {
+              makeRuntime: customRuntimeFactory.factory,
+              getCodexContextWindowSupport: () => true,
+            });
+          }),
+        ).pipe(
+          Layer.provideMerge(ServerConfig.layerTest(process.cwd(), process.cwd())),
+          Layer.provideMerge(ServerSettingsService.layerTest()),
+          Layer.provideMerge(providerSessionDirectoryTestLayer),
+          Layer.provideMerge(NodeServices.layer),
+        );
+
+        return Effect.gen(function* () {
+          const adapter = yield* CodexAdapter;
+          const threadId = asThreadId("sess-context-native-usage");
+          const session = yield* adapter.startSession({
+            provider: ProviderDriverKind.make("codex"),
+            threadId,
+            runtimeMode: "full-access",
+            codexContextWindowOverride: 800_000,
+          });
+          const runtime = customRuntimeFactory.lastRuntime;
+          assert.ok(runtime);
+          assert.equal(session.codexContextWindowOverride, 800_000);
+          assert.equal(runtime.options.codexContextWindowOverride, 800_000);
+          assert.equal(runtime.options.autoCompactTokenLimit, autoCompactTokenLimit);
+          assert.equal(
+            "autoCompactTokenLimit" in runtime.options,
+            autoCompactTokenLimit !== undefined,
+          );
+
+          const firstEventFiber = yield* Stream.runHead(adapter.streamEvents).pipe(
+            Effect.forkChild,
+          );
+          yield* runtime.emit({
+            id: asEventId("evt-context-native-usage"),
+            kind: "notification",
+            provider: ProviderDriverKind.make("codex"),
+            threadId,
+            turnId: asTurnId("turn-context-native-usage"),
+            createdAt: "2026-01-01T00:00:00.000Z",
+            method: "thread/tokenUsage/updated",
+            payload: {
+              threadId: "sess-context-native-usage",
+              turnId: "turn-context-native-usage",
+              tokenUsage: {
+                total: {
+                  inputTokens: 100,
+                  cachedInputTokens: 0,
+                  outputTokens: 6,
+                  reasoningOutputTokens: 0,
+                  totalTokens: 106,
+                },
+                last: {
+                  inputTokens: 100,
+                  cachedInputTokens: 0,
+                  outputTokens: 6,
+                  reasoningOutputTokens: 0,
+                  totalTokens: 106,
+                },
+                // Received native usable capacity deliberately differs from
+                // the nominal request. It is not a compaction-threshold event.
+                modelContextWindow: 760_000,
+              },
+            },
+          } satisfies ProviderEvent);
+
+          const firstEvent = yield* Fiber.join(firstEventFiber);
+          assert.equal(firstEvent._tag, "Some");
+          if (firstEvent._tag !== "Some") {
+            return;
+          }
+          assert.equal(firstEvent.value.type, "thread.token-usage.updated");
+          if (firstEvent.value.type !== "thread.token-usage.updated") {
+            return;
+          }
+          const usage = firstEvent.value.payload.usage;
+          assert.equal(usage.maxTokens, 760_000);
+          assert.equal(usage.usedTokens, 106);
+          assert.equal(usage.compactsAutomatically, true);
+          assert.equal(usage.autoCompactTokenLimit, autoCompactTokenLimit);
+          assert.equal("autoCompactTokenLimit" in usage, autoCompactTokenLimit !== undefined);
+        }).pipe(Effect.provide(customLayer));
+      },
+    );
+  }
 });
 
 const lifecycleRuntimeFactory = makeRuntimeFactory();
