@@ -9,7 +9,13 @@ import type {
   VisualizationHostPresentation,
 } from "@cafecode/contracts/visualizationHost";
 import { DesktopVisualizationHost } from "./DesktopVisualizationHost.ts";
+import { ElectronVisualizationSurface } from "./ElectronVisualizationSurface.ts";
 import { VISUALIZATION_EVENT_CHANNEL, VISUALIZATION_SCHEME } from "./visualizationHostPolicy.ts";
+import {
+  configureNativeVisualizationFixtureDriver,
+  isSandboxedNativeFixtureDriver,
+} from "./nativeVisualizationFixturePolicy.ts";
+import { NativeFixtureRetirementRecorder } from "./nativeVisualizationFixtureRetirement.ts";
 
 /** Only fixture-authored classifications may be printed; an authored guest's
  * thrown error/source/stack never becomes a successful or failed native log. */
@@ -109,12 +115,25 @@ process.on("uncaughtException", () => {
 async function qualify(): Promise<void> {
   const directory = process.argv[2];
   if (!directory) throw new NativeBarFailure("Native bar fixture directory refused.");
+  // The wrapper binds this marker to its admitted source choice. A missing or
+  // unknown marker fails rather than treating private replay bytes as synthetic.
+  const sourceMode = process.argv[3];
+  if (sourceMode !== "synthetic" && sourceMode !== "exact-local")
+    throw new NativeBarFailure("Native bar fixture source mode refused.");
+  const softwareDriver = configureNativeVisualizationFixtureDriver(
+    Electron.app,
+    process.platform,
+    sourceMode === "synthetic" ? "synthetic-bar" : "exact-bar",
+  );
   Electron.app.setPath("userData", join(directory, "profile"));
   Electron.app.setPath("sessionData", join(directory, "session"));
   Electron.protocol.registerSchemesAsPrivileged([
     { scheme: VISUALIZATION_SCHEME, privileges: { standard: true, secure: true } },
   ]);
   await Electron.app.whenReady();
+  if (softwareDriver && !isSandboxedNativeFixtureDriver(await Electron.app.getGPUInfo("complete")))
+    throw new NativeBarFailure("Native bar fixture sandboxed graphics mode unavailable.");
+  const graphics = softwareDriver ? "sandboxed-swiftshader" : "native-default";
   if (process.platform === "darwin") Electron.app.setActivationPolicy("accessory");
   const window = new Electron.BrowserWindow({
     show: false,
@@ -140,9 +159,22 @@ async function qualify(): Promise<void> {
       layouts.push(value);
     send(channel, ...args);
   };
+  const retirement = new NativeFixtureRetirementRecorder(process.platform, 1);
   const host = new DesktopVisualizationHost({
     stateDirectory: directory,
     preloadPath: join(directory, "visualizationPreload.cjs"),
+    createSurface: (options) => {
+      const surface = new ElectronVisualizationSurface(options);
+      retirement.observe(surface, () =>
+        Electron.webContents
+          .getAllWebContents()
+          .find(
+            (contents) =>
+              contents.getURL() === `${VISUALIZATION_SCHEME}://${surface.generation}/bootstrap`,
+          ),
+      );
+      return surface;
+    },
   });
   await host.listen(false);
   const ticket = randomUUID().replaceAll("-", "").repeat(2);
@@ -377,8 +409,11 @@ async function qualify(): Promise<void> {
     const native = host.diagnostics().native;
     if (!native?.gone || !native.destroyed)
       throw new NativeBarFailure("Native bar fixture exact exit unavailable.");
+    const retirementCrashPids = retirement.pids();
+    if (retirementCrashPids.length !== (process.platform === "linux" ? 1 : 0))
+      throw new NativeBarFailure("Native bar fixture owned retirement witness unavailable.");
     process.stdout.write(
-      `${JSON.stringify({ electron: process.versions.electron, electronNode: process.versions.node, electronAbi: process.versions.modules, platform: process.platform, arch: process.arch, bars: "passed", naturalHeight: "passed", horizontalFit: "passed", darkTooltip: "passed", partialContinuity: "passed", menuContinuity: "passed", tinyCropContinuity: "passed", offscreenRetirement: "passed", topFiveHeight, topTenHeight, narrowHeight, genuineVisibilityReplay: "authored" })}\n`,
+      `${JSON.stringify({ electron: process.versions.electron, electronNode: process.versions.node, electronAbi: process.versions.modules, platform: process.platform, arch: process.arch, graphics, retirementCrashPids, bars: "passed", naturalHeight: "passed", horizontalFit: "passed", darkTooltip: "passed", partialContinuity: "passed", menuContinuity: "passed", tinyCropContinuity: "passed", offscreenRetirement: "passed", topFiveHeight, topTenHeight, narrowHeight, genuineVisibilityReplay: "authored" })}\n`,
     );
   } finally {
     await host.close();

@@ -34,6 +34,7 @@ interface Step {
 }
 
 interface Workflow {
+  readonly env?: Readonly<Record<string, string>>;
   readonly jobs: Readonly<
     Record<
       string,
@@ -41,6 +42,7 @@ interface Workflow {
         readonly "runs-on"?: string;
         readonly "timeout-minutes"?: number;
         readonly "continue-on-error"?: boolean;
+        readonly env?: Readonly<Record<string, string>>;
         readonly strategy?: {
           readonly matrix?: {
             readonly os?: ReadonlyArray<string>;
@@ -64,10 +66,10 @@ describe("qualified major Actions and Ubuntu runner boundaries", () => {
         .flatMap((job) => job.steps ?? [])
         .filter((step) => step.uses?.startsWith("actions/")),
     );
-    // The new failure-only synthetic fixture upload reuses the independently
-    // reviewed artifact Action. Keep the exact total and qualify that extra
-    // publication boundary below, rather than admitting arbitrary new steps.
-    expect(actions).toHaveLength(35);
+    // The Desk and visualization/Mermaid failure-only synthetic uploads reuse
+    // the independently reviewed artifact Action. Keep the exact total and
+    // qualify both publication boundaries below, not arbitrary new steps.
+    expect(actions).toHaveLength(36);
     for (const step of actions) {
       const [action, commit] = step.uses!.split("@");
       expect(commit, step.uses).toBe(qualifiedActionPins[action!]);
@@ -114,6 +116,151 @@ describe("qualified major Actions and Ubuntu runner boundaries", () => {
         "retention-days": 7,
       },
     });
+  });
+
+  it("retains only the four reviewed synthetic visualization and Mermaid failure paths", () => {
+    const steps = readWorkflow("ci.yml").jobs.quality?.steps ?? [];
+    const retention = steps.filter(
+      (step) => step.name === "Retain synthetic visualization and Mermaid failure evidence",
+    );
+    expect(retention).toHaveLength(1);
+    // Literal block equality preserves exactly four paths, including their
+    // fixture-specific hidden directories. No profile/source/JSON/temp-tree
+    // glob, successful-run upload, override or longer retention is admitted.
+    const paths = [
+      "apps/web/.vitest/attachments/failure-screenshots/VisualizationCommitChart.browser.tsx/",
+      "apps/web/.vitest/attachments/failure-screenshots/MermaidFamilies.browser.tsx/",
+      "${{ runner.temp }}/cafe-visualization-comprehensive/*.png",
+      "${{ runner.temp }}/cafe-visualization-font/*.png",
+    ];
+    expect(retention[0]).toEqual({
+      name: "Retain synthetic visualization and Mermaid failure evidence",
+      if: "failure()",
+      uses: `actions/upload-artifact@${qualifiedActionPins["actions/upload-artifact"]}`,
+      with: {
+        name: "visualization-qualification-failure-${{ matrix.os }}-${{ github.run_attempt }}",
+        path: `${paths.join("\n")}\n`,
+        "include-hidden-files": true,
+        "if-no-files-found": "ignore",
+        "retention-days": 7,
+      },
+    });
+  });
+
+  it("prepares exclusive synthetic capture directories and binds each native lane without private replay", () => {
+    const workflow = readWorkflow("ci.yml");
+    const quality = workflow.jobs.quality!;
+    const steps = quality.steps ?? [];
+    const preparation = steps.filter(
+      (step) => step.name === "Prepare synthetic native visualization evidence directories",
+    );
+    expect(preparation).toHaveLength(1);
+    // mkdirSync's non-recursive default refuses an existing entry. Keep the
+    // complete Node command exact so replacement, permissive modes, broader
+    // directories or shell-selected destinations require a separate review.
+    expect(preparation[0]).toEqual({
+      name: "Prepare synthetic native visualization evidence directories",
+      run:
+        'node -e \'const fs = require("node:fs"); const path = require("node:path"); ' +
+        "const root = process.env.RUNNER_TEMP; if (!root || !path.isAbsolute(root)) " +
+        'throw new Error("Runner temporary directory unavailable"); ' +
+        'for (const name of ["cafe-visualization-comprehensive", "cafe-visualization-font"]) ' +
+        "fs.mkdirSync(path.join(root, name), { mode: 0o700 });'\n",
+    });
+    const command =
+      "corepack yarn workspace @cafecode/desktop test src/visualizations/NativeVisualizationElectron.e2e.test.ts";
+    const lanes = [
+      {
+        name: "Isolated native visualization host qualification",
+        if: "runner.os != 'Linux'",
+        env: {
+          CAFE_CODE_VISUALIZATION_E2E: "1",
+          CAFE_CODE_VISUALIZATION_E2E_CAPTURE_DIR:
+            "${{ runner.temp }}/cafe-visualization-comprehensive",
+        },
+        run: command,
+      },
+      {
+        name: "Isolated native visualization host qualification (Linux)",
+        if: "runner.os == 'Linux'",
+        env: {
+          CAFE_CODE_VISUALIZATION_E2E: "1",
+          CAFE_CODE_VISUALIZATION_E2E_CAPTURE_DIR:
+            "${{ runner.temp }}/cafe-visualization-comprehensive",
+        },
+        run: `xvfb-run --auto-servernum ${command}`,
+      },
+      {
+        name: "Isolated native visualization chat font qualification",
+        if: "runner.os != 'Linux'",
+        env: {
+          CAFE_CODE_VISUALIZATION_E2E: "1",
+          CAFE_CODE_VISUALIZATION_FONT_REPLAY: "1",
+          CAFE_CODE_VISUALIZATION_E2E_CAPTURE_DIR: "${{ runner.temp }}/cafe-visualization-font",
+        },
+        run: command,
+      },
+      {
+        name: "Isolated native visualization chat font qualification (Linux)",
+        if: "runner.os == 'Linux'",
+        env: {
+          CAFE_CODE_VISUALIZATION_E2E: "1",
+          CAFE_CODE_VISUALIZATION_FONT_REPLAY: "1",
+          CAFE_CODE_VISUALIZATION_E2E_CAPTURE_DIR: "${{ runner.temp }}/cafe-visualization-font",
+        },
+        run: `xvfb-run --auto-servernum ${command}`,
+      },
+    ];
+    for (const lane of lanes) {
+      const selected = steps.filter((step) => step.name === lane.name);
+      // Whole-step equality also refuses timeout, worker, environment and
+      // continue-on-error overrides on the unchanged native test invocation.
+      expect(selected, lane.name).toEqual([lane]);
+      expect(steps.indexOf(selected[0]!)).toBeGreaterThan(steps.indexOf(preparation[0]!));
+    }
+    const privateReplayKeys = [
+      "CAFE_CODE_VISUALIZATION_BAR_REPLAY",
+      "CAFE_CODE_VISUALIZATION_BAR_SOURCE",
+      "CAFE_CODE_VISUALIZATION_BAR_SOURCE_SHA256",
+      "CAFE_CODE_VISUALIZATION_BAR_SOURCE_BYTES",
+    ];
+    // Shared workflow/job environments are inherited by steps: checking only
+    // the four local lane maps could accidentally publish a private replay.
+    const environments = [
+      workflow.env,
+      ...Object.values(workflow.jobs).flatMap((job) => [
+        job.env,
+        ...(job.steps ?? []).map((step) => step.env),
+      ]),
+    ];
+    for (const environment of environments)
+      for (const key of privateReplayKeys) expect(environment ?? {}).not.toHaveProperty(key);
+    expect(quality["timeout-minutes"]).toBe(45);
+    expect(quality["continue-on-error"]).toBeUndefined();
+  });
+
+  it("keeps visualization and Mermaid browser qualification on the original worker and deadline bounds", () => {
+    const steps = readWorkflow("ci.yml").jobs.quality?.steps ?? [];
+    for (const expected of [
+      {
+        name: "Browser tests",
+        if: "runner.os == 'Linux'",
+        run: "corepack yarn workspace @cafecode/web test:browser",
+      },
+      {
+        name: "Generated chart layout and range animation browser qualification",
+        if: "runner.os != 'Linux'",
+        run: "corepack yarn workspace @cafecode/web test:browser src/components/visualizations/VisualizationCommitChart.browser.tsx --maxWorkers=2",
+      },
+      {
+        name: "Additional Mermaid family browser qualification",
+        if: "runner.os != 'Linux'",
+        run: "corepack yarn workspace @cafecode/web test:browser src/components/MermaidFamilies.browser.tsx --maxWorkers=2",
+      },
+    ])
+      // Exact steps preserve Linux's complete suite, focused native-host files,
+      // two workers and the absence of per-step timeout/failure bypasses.
+      expect(steps.filter((step) => step.name === expected.name)).toEqual([expected]);
   });
 
   it("keeps the published Linux artifact on Ubuntu 24 while qualifying Ubuntu 26", () => {

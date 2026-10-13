@@ -594,6 +594,11 @@ export const VisualizationCard = memo(function VisualizationCard({
                     )
                   : null;
   const canRun =
+    // A real timeline may paint the poster before its public initial-load
+    // callback admits this exact registration. Do not consume a trusted click
+    // while Provider.run must still refuse an absent binding; enable the same
+    // control only after the registration's layout effect can commit.
+    admissionReady &&
     (!active || ["stopped", "unavailable", "waiting", "yielded"].includes(active.status)) &&
     manualAllowed;
   const privateReader = (

@@ -130,6 +130,35 @@ function expectSummary(value: ChartFixture, days: number) {
   expect(text(value, "peak")).toBe(String(Math.max(...counts)));
   expect(value.chart.dataset.days).toBe(String(days));
 }
+function expectUndistortedLabel(label: SVGTextElement) {
+  // SVG text advance is not its ink-inclusive bounding width. In the pinned
+  // Chromium 149.0.7827.55, InlineSize measures advance while ObjectBoundingBox
+  // unions the text rectangle with font ink; platform glyph overhang can make
+  // those different even under an identity transform:
+  // https://chromium.googlesource.com/chromium/src/+/refs/tags/149.0.7827.55/third_party/blink/renderer/core/layout/svg/svg_text_query.cc#123
+  // https://chromium.googlesource.com/chromium/src/+/refs/tags/149.0.7827.55/third_party/blink/renderer/core/layout/inline/fragment_item.cc#401
+  // https://svgwg.org/svg2-draft/text.html#InterfaceSVGTextContentElement
+  // Compare like-for-like local/screen bounds at the original precision, and
+  // independently reject label transforms and authored glyph-length changes.
+  // No OS/font-specific rounding allowance replaces the geometry invariant.
+  const transform = label.getScreenCTM();
+  expect(transform).not.toBeNull();
+  expect(transform!.a).toBeCloseTo(1, 5);
+  expect(transform!.d).toBeCloseTo(1, 5);
+  expect(transform!.b).toBe(0);
+  expect(transform!.c).toBe(0);
+  expect(label.hasAttribute("textLength")).toBe(false);
+  expect(label.hasAttribute("lengthAdjust")).toBe(false);
+  const advance = label.getComputedTextLength();
+  expect(Number.isFinite(advance)).toBe(true);
+  expect(advance).toBeGreaterThan(0);
+  const local = label.getBBox();
+  const screen = label.getBoundingClientRect();
+  expect(local.width).toBeGreaterThan(0);
+  expect(local.height).toBeGreaterThan(0);
+  expect(local.width).toBeCloseTo(screen.width, 3);
+  expect(local.height).toBeCloseTo(screen.height, 3);
+}
 function expectResponsive(value: ChartFixture) {
   const rectangle = value.chart.getBoundingClientRect();
   const box = value.chart.viewBox.baseVal;
@@ -146,10 +175,7 @@ function expectResponsive(value: ChartFixture) {
     expect(bounds.left).toBeGreaterThanOrEqual(rectangle.left - 1);
     expect(bounds.right).toBeLessThanOrEqual(rectangle.right + 1);
     expect(value.window.getComputedStyle(label).fontSize).toBe("10px");
-    // The loaded proportional chat face is measured in actual CSS units. The
-    // existing identity CTM plus glyph-length equality rejects nonuniform SVG
-    // stretching without substituting a guessed screenshot/font declaration.
-    expect(label.getComputedTextLength()).toBeCloseTo(bounds.width, 3);
+    expectUndistortedLabel(label);
   }
   expect(value.document.documentElement.scrollWidth).toBe(value.frame.clientWidth);
   const unit = value.document.querySelector<HTMLElement>(".unit")!;
@@ -257,6 +283,49 @@ describe("responsive exact-data chart replay", () => {
       }
     },
   );
+
+  it("rejects deliberate nonuniform label scaling without changing the root SVG transform", async () => {
+    const value = await fixture();
+    settled(value);
+    expectResponsive(value);
+    const label = value.chart.querySelector<SVGTextElement>("text")!;
+    label.setAttribute("transform", "scale(1.5 0.75)");
+    try {
+      // The root alone still looks correct. The per-label invariant must catch
+      // real descendant distortion, not depend on a containment side effect.
+      expect(value.chart.getScreenCTM()!.a).toBeCloseTo(1, 5);
+      expect(value.chart.getScreenCTM()!.d).toBeCloseTo(1, 5);
+      expect(label.getScreenCTM()!.a).toBeCloseTo(1.5, 5);
+      expect(label.getScreenCTM()!.d).toBeCloseTo(0.75, 5);
+      expect(() => expectUndistortedLabel(label)).toThrow();
+    } finally {
+      label.removeAttribute("transform");
+    }
+    expectResponsive(value);
+  });
+
+  it("rejects deliberate spacingAndGlyphs adjustment despite an identity label transform", async () => {
+    const value = await fixture();
+    settled(value);
+    expectResponsive(value);
+    const label = value.chart.querySelector<SVGTextElement>("text")!;
+    const advance = label.getComputedTextLength();
+    label.setAttribute("textLength", String(advance * 1.5));
+    label.setAttribute("lengthAdjust", "spacingAndGlyphs");
+    try {
+      // textLength/lengthAdjust can stretch the glyphs without a nonuniform
+      // getScreenCTM, so matching outer rectangles alone is not sufficient.
+      expect(label.getScreenCTM()!.a).toBeCloseTo(1, 5);
+      expect(label.getScreenCTM()!.d).toBeCloseTo(1, 5);
+      expect(label.lengthAdjust.baseVal).toBe(label.LENGTHADJUST_SPACINGANDGLYPHS);
+      expect(label.getComputedTextLength()).toBeGreaterThan(advance);
+      expect(() => expectUndistortedLabel(label)).toThrow();
+    } finally {
+      label.removeAttribute("textLength");
+      label.removeAttribute("lengthAdjust");
+    }
+    expectResponsive(value);
+  });
 
   it("preserves semantic code subtrees and states the browser author-origin priority boundary", async () => {
     const value = await fixture();

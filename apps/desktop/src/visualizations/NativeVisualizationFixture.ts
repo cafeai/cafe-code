@@ -6,6 +6,11 @@ import { DesktopVisualizationHost } from "./DesktopVisualizationHost.ts";
 import { VISUALIZATION_FLUID_DIAGNOSTIC_COUNTER_MAX } from "@cafecode/shared/visualizationFluidRuntime";
 import { ElectronVisualizationSurface } from "./ElectronVisualizationSurface.ts";
 import { VISUALIZATION_SCHEME, VISUALIZATION_EVENT_CHANNEL } from "./visualizationHostPolicy.ts";
+import {
+  configureNativeVisualizationFixtureDriver,
+  isSandboxedNativeFixtureDriver,
+  nativeFixtureClippedCaptureObservation,
+} from "./nativeVisualizationFixturePolicy.ts";
 import type {
   VisualizationHostEvent,
   VisualizationHostPresentation,
@@ -396,12 +401,20 @@ process.on("uncaughtException", (error: Error) => {
 async function qualify(): Promise<void> {
   const directory = process.argv[2];
   if (!directory) throw new Error("Isolated fixture directory is required.");
+  const softwareDriver = configureNativeVisualizationFixtureDriver(
+    Electron.app,
+    process.platform,
+    "comprehensive",
+  );
   Electron.app.setPath("userData", join(directory, "profile"));
   Electron.app.setPath("sessionData", join(directory, "session"));
   Electron.protocol.registerSchemesAsPrivileged([
     { scheme: VISUALIZATION_SCHEME, privileges: { standard: true, secure: true } },
   ]);
   await Electron.app.whenReady();
+  if (softwareDriver && !isSandboxedNativeFixtureDriver(await Electron.app.getGPUInfo("complete")))
+    throw new Error("Native fixture sandboxed graphics mode unavailable.");
+  const graphics = softwareDriver ? "sandboxed-swiftshader" : "native-default";
   // Use one supported synthetic-app activation policy before constructing any
   // windows. Unlike legacy repeated DockHide/TransformProcessType transitions,
   // accessory explicitly permits visible, programmatically activated windows
@@ -505,6 +518,11 @@ async function qualify(): Promise<void> {
   let poolViewerPids: number[] = [];
   let poolPreviewPid = 0;
   let poolFluidPreview = false;
+  // One fixture-owned reference supplies generation-bound failure evidence.
+  // Host.diagnostics().native can intentionally describe the last retirement;
+  // it is not evidence about a currently active capture. No map or native
+  // ownership capability is exposed or retained beyond this bounded fixture.
+  let latestViewerSurface: ElectronVisualizationSurface | undefined;
   const host = new DesktopVisualizationHost({
     stateDirectory: directory,
     preloadPath: join(directory, "visualizationPreload.cjs"),
@@ -513,6 +531,7 @@ async function qualify(): Promise<void> {
     // are live, proving the fifth renderer is actually distinct before pixels.
     createSurface: (options) => {
       const surface = new ElectronVisualizationSurface(options);
+      if (options.window === window) latestViewerSurface = surface;
       if (options.window === null) {
         const capture = surface.capture.bind(surface);
         surface.capture = async () => {
@@ -931,8 +950,57 @@ async function qualify(): Promise<void> {
         fullCapture.width !== child.width ||
         fullCapture.height !== child.height ||
         !hasFixtureColor(fullCapture.png, 0, 0, 0)
-      )
+      ) {
+        // Electron 42.10.0 CapturePage requests the child DIP rectangle, scales
+        // its temporary bitmap by the native display DPR above one, and wraps
+        // that bitmap as a 1x NativeImage. The production surface independently
+        // preflights that tuple and normalizes it to the same child DIP width/
+        // height before PNG encoding. These assertions therefore keep their
+        // exact units. No latest-Electron DIP-image semantics are substituted.
+        // The old Linux failure did not reveal which clause failed: preserve a
+        // fixed finite tuple (and any real PNG) without guessing a cause or
+        // relaxing dimensions, opaque invariant-black RGBA, or ownership.
+        // https://github.com/electron/electron/blob/v42.10.0/shell/browser/api/electron_api_web_contents.cc#L3854
+        const image = fullCapture
+          ? Electron.nativeImage.createFromBuffer(Buffer.from(fullCapture.png))
+          : null;
+        const size = image && !image.isEmpty() ? image.getSize() : undefined;
+        const bitmap = size ? image!.toBitmap() : undefined;
+        const offset = size ? ((size.height - 10) * size.width + size.width - 10) * 4 : -1;
+        const observation = nativeFixtureClippedCaptureObservation({
+          ownerZoom: zoom,
+          displayDpr: Electron.screen.getDisplayMatching(window.getBounds()).scaleFactor,
+          expectedWidth: child.width,
+          expectedHeight: child.height,
+          capturePresent: fullCapture !== null,
+          reportedWidth: fullCapture?.width,
+          reportedHeight: fullCapture?.height,
+          encodedWidth: size?.width,
+          encodedHeight: size?.height,
+          sampleBgra:
+            bitmap && offset >= 0 && offset + 4 <= bitmap.length
+              ? Array.from(bitmap.subarray(offset, offset + 4))
+              : undefined,
+          captureOutcome:
+            latestViewerSurface?.generation === inspected.documentGeneration
+              ? latestViewerSurface.diagnostics().captureOutcome
+              : undefined,
+        });
+        process.stderr.write(`Native fixture clipped capture: ${JSON.stringify(observation)}\n`);
+        if (fullCapture) {
+          try {
+            await writeFile(join(directory, "native-clipped-capture-failed.png"), fullCapture.png, {
+              flag: "wx",
+              mode: 0o600,
+            });
+          } catch {
+            // Retaining a secondary image must not replace the primary exact
+            // assertion failure or disclose an arbitrary filesystem error.
+            process.stderr.write("Native fixture clipped capture retention: refused\n");
+          }
+        }
         throw new Error("Native full clipped viewport capture unavailable.");
+      }
     }
     window.webContents.setZoomFactor(1);
     phase("native-clipped-full-viewport-zoom");
@@ -1798,7 +1866,7 @@ async function qualify(): Promise<void> {
     phase("app-sdk-context-csp-consent-owner-hide-retired");
     window.webContents.send = send;
     process.stdout.write(
-      `${JSON.stringify({ electron: process.versions.electron, electronNode: process.versions.node, electronAbi: process.versions.modules, platform: process.platform, arch: process.arch, preview: "passed", appPreviewReplay: "passed", viewer: "passed", visibilityCommit: "passed", nativeInput: "passed", semanticAccessibility: "passed", sameDocument: "passed", capture: "passed", clippingGeometry: "passed", ownerZoom: "passed", boundedWebGL: "passed", sustainedFluid: "passed", naturalHeight: "passed", normalMotionChart: "passed", viewerPool: "passed", automaticFocus: "passed", wheelHandoff: "passed", continuation: "passed", retirement: "passed", ownerHide: "passed", appTransport: "passed", context: "passed", csp: "passed", consent: "passed", watchdog: "passed" })}\n`,
+      `${JSON.stringify({ electron: process.versions.electron, electronNode: process.versions.node, electronAbi: process.versions.modules, platform: process.platform, arch: process.arch, graphics, preview: "passed", appPreviewReplay: "passed", viewer: "passed", visibilityCommit: "passed", nativeInput: "passed", semanticAccessibility: "passed", sameDocument: "passed", capture: "passed", clippingGeometry: "passed", ownerZoom: "passed", boundedWebGL: "passed", sustainedFluid: "passed", naturalHeight: "passed", normalMotionChart: "passed", viewerPool: "passed", automaticFocus: "passed", wheelHandoff: "passed", continuation: "passed", retirement: "passed", ownerHide: "passed", appTransport: "passed", context: "passed", csp: "passed", consent: "passed", watchdog: "passed" })}\n`,
     );
   } catch (error) {
     process.stderr.write(`Native fixture owned status: ${JSON.stringify(host.diagnostics())}\n`);

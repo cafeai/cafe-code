@@ -279,7 +279,7 @@ function installRegisteredConnection(
   return { connection, peer, unsubscribe };
 }
 
-function RegisteredHistoryFixture() {
+function RegisteredHistoryFixture({ onInitialLoad }: { onInitialLoad?: () => void } = {}) {
   const history = useThreadVisualizations(environmentId, threadId, true, "native-completion");
   const listRef = useRef<LegendListRef | null>(null);
   const rows = deriveTimelineEntries([], [], [], history.entries);
@@ -301,6 +301,10 @@ function RegisteredHistoryFixture() {
           listRef={listRef}
           markdownCwd={undefined}
           onImageExpand={() => undefined}
+          onDebugScrollEvent={(event) => {
+            if (event.reason === "initial-list-load" && event.activeThreadId === threadId)
+              onInitialLoad?.();
+          }}
           onIsAtEndChange={() => undefined}
           onRevertUserMessage={() => undefined}
           onUserScrollIntent={() => undefined}
@@ -3422,6 +3426,43 @@ describe("visibility-owned seamless generated cards", () => {
 });
 
 describe("registered visualization connection ownership", () => {
+  it("keeps manual generated Run disabled until its exact layout admission commits", async () => {
+    const api = installApi();
+    const bridge = installBridge();
+    function ManualAdmissionFixture() {
+      const [ready, setReady] = useState(false);
+      return (
+        <VisualizationViewerProvider>
+          <button onClick={() => setReady(true)}>Complete exact chart layout</button>
+          <VisualizationCard
+            environmentId={environmentId}
+            threadId={threadId}
+            entry={entry}
+            generatedAdmissionReady={ready}
+            timestampFormat="24-hour"
+          />
+        </VisualizationViewerProvider>
+      );
+    }
+    const view = await render(<ManualAdmissionFixture />);
+    try {
+      const run = page.getByRole("button", { name: "Run", exact: true });
+      await expect.element(run).toBeDisabled();
+      // Native disabled-button semantics, not a mocked event or timing sleep,
+      // prove an early gesture cannot prepare private source or start a host.
+      (run.element() as HTMLButtonElement).click();
+      expect(api.viewerTicket).not.toHaveBeenCalled();
+      expect(bridge.open).not.toHaveBeenCalled();
+      await userEvent.click(page.getByRole("button", { name: "Complete exact chart layout" }));
+      await expect.element(run).toBeEnabled();
+      await userEvent.click(run);
+      await vi.waitFor(() => expect(bridge.open).toHaveBeenCalledOnce());
+      expect(api.viewerTicket).toHaveBeenCalledOnce();
+    } finally {
+      await view.unmount();
+    }
+  });
+
   it("loads registered-connection history into the real timeline without an API override", async () => {
     const api = installApi(undefined, false);
     installRegisteredConnection(api);
@@ -3520,9 +3561,22 @@ describe("registered visualization connection ownership", () => {
     const pending =
       deferred<Awaited<ReturnType<NonNullable<DesktopBridge["openVisualization"]>>>>();
     bridge.open.mockImplementation(() => pending.promise);
-    const view = await render(<RegisteredHistoryFixture />);
+    let loaded = false;
+    const view = await render(<RegisteredHistoryFixture onInitialLoad={() => (loaded = true)} />);
     try {
       await expect.element(page.getByText(entry.reference.title)).toBeVisible();
+      // Title paint is not the virtualizer's accepted initial layout. Preserve
+      // the real list completion and exact positive native geometry before the
+      // deliberate gesture, without scrolling, media overrides or more time.
+      await vi.waitFor(() => {
+        expect(loaded).toBe(true);
+        const anchor = document.querySelector<HTMLElement>(
+          '[data-visualization-native-surface="inline"]',
+        );
+        expect(anchor).not.toBeNull();
+        expect(visualizationGeometry(anchor!)).not.toBeNull();
+      });
+      await expect.element(page.getByRole("button", { name: "Run", exact: true })).toBeEnabled();
       await userEvent.click(page.getByRole("button", { name: "Run", exact: true }));
       await vi.waitFor(() => expect(bridge.open).toHaveBeenCalledOnce());
       recordWsConnectionClosed();

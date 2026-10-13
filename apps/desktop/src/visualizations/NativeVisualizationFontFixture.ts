@@ -10,6 +10,11 @@ import type {
 import { DesktopVisualizationHost } from "./DesktopVisualizationHost.ts";
 import { ElectronVisualizationSurface } from "./ElectronVisualizationSurface.ts";
 import {
+  configureNativeVisualizationFixtureDriver,
+  isSandboxedNativeFixtureDriver,
+} from "./nativeVisualizationFixturePolicy.ts";
+import { NativeFixtureRetirementRecorder } from "./nativeVisualizationFixtureRetirement.ts";
+import {
   VISUALIZATION_CSP,
   VISUALIZATION_EVENT_CHANNEL,
   VISUALIZATION_SCHEME,
@@ -93,12 +98,20 @@ async function qualify(): Promise<void> {
   const directory = process.argv[2];
   if (!directory || !VISUALIZATION_CSP.includes("font-src 'none'"))
     throw new NativeFontFailure("Native font fixture policy refused.");
+  const softwareDriver = configureNativeVisualizationFixtureDriver(
+    Electron.app,
+    process.platform,
+    "font",
+  );
   Electron.app.setPath("userData", join(directory, "profile"));
   Electron.app.setPath("sessionData", join(directory, "session"));
   Electron.protocol.registerSchemesAsPrivileged([
     { scheme: VISUALIZATION_SCHEME, privileges: { standard: true, secure: true } },
   ]);
   await Electron.app.whenReady();
+  if (softwareDriver && !isSandboxedNativeFixtureDriver(await Electron.app.getGPUInfo("complete")))
+    throw new NativeFontFailure("Native font fixture sandboxed graphics mode unavailable.");
+  const graphics = softwareDriver ? "sandboxed-swiftshader" : "native-default";
   if (process.platform === "darwin") Electron.app.setActivationPolicy("accessory");
   const window = new Electron.BrowserWindow({
     show: false,
@@ -123,11 +136,20 @@ async function qualify(): Promise<void> {
   };
   let generatedPreview = false,
     appPreview = false;
+  const retirement = new NativeFixtureRetirementRecorder(process.platform, 3);
   const host = new DesktopVisualizationHost({
     stateDirectory: directory,
     preloadPath: join(directory, "visualizationPreload.cjs"),
     createSurface: (options) => {
       const surface = new ElectronVisualizationSurface(options);
+      retirement.observe(surface, () =>
+        Electron.webContents
+          .getAllWebContents()
+          .find(
+            (contents) =>
+              contents.getURL() === `${VISUALIZATION_SCHEME}://${surface.generation}/bootstrap`,
+          ),
+      );
       const install = surface.installSource.bind(surface);
       surface.installSource = async () => {
         try {
@@ -293,8 +315,11 @@ async function qualify(): Promise<void> {
     const native = host.diagnostics().native;
     if (!native?.gone || !native.destroyed)
       throw new NativeFontFailure("Native font fixture exact exit unavailable.");
+    const retirementCrashPids = retirement.pids();
+    if (retirementCrashPids.length !== (process.platform === "linux" ? 3 : 0))
+      throw new NativeFontFailure("Native font fixture owned retirement witness unavailable.");
     process.stdout.write(
-      `${JSON.stringify({ electron: process.versions.electron, electronNode: process.versions.node, electronAbi: process.versions.modules, platform: process.platform, arch: process.arch, binaryFaces: "passed", parseReady: "passed", userOriginPolicy: "passed", authoredMetrics: "passed", semanticMono: "passed", generatedPreview: "passed", appExclusion: "passed", naturalFit: "passed", fontReadyCapture: "passed", retirement: "passed", fullHeight, narrowHeight })}\n`,
+      `${JSON.stringify({ electron: process.versions.electron, electronNode: process.versions.node, electronAbi: process.versions.modules, platform: process.platform, arch: process.arch, graphics, retirementCrashPids, binaryFaces: "passed", parseReady: "passed", userOriginPolicy: "passed", authoredMetrics: "passed", semanticMono: "passed", generatedPreview: "passed", appExclusion: "passed", naturalFit: "passed", fontReadyCapture: "passed", retirement: "passed", fullHeight, narrowHeight })}\n`,
     );
   } finally {
     await host.close();

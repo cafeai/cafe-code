@@ -220,6 +220,15 @@ jobs:
           CAFE_CODE_MCP_BRIDGE_E2E: "1"
         run: corepack yarn workspace @cafeai/cafe-code exec vitest run --config vitest.e2e.config.ts integration/CafeMcpBridge.e2e.test.ts
 
+      - name: Prepare synthetic native visualization evidence directories
+        # Only fixed synthetic fixture captures are published below, never a
+        # retained private chart, user profile, source, JSON or parent screen.
+        # Exclusive scoped directories also keep font and comprehensive runs
+        # from replacing another invocation's evidence. No OS setup or runtime
+        # installation is performed here.
+        run: |
+          node -e 'const fs = require("node:fs"); const path = require("node:path"); const root = process.env.RUNNER_TEMP; if (!root || !path.isAbsolute(root)) throw new Error("Runner temporary directory unavailable"); for (const name of ["cafe-visualization-comprehensive", "cafe-visualization-font"]) fs.mkdirSync(path.join(root, name), { mode: 0o700 });'
+
       - name: Isolated native visualization host qualification
         # Existing Electron only, with a fresh synthetic profile/view. Real
         # source isolation, replay pixels, semantic input and owned retirement
@@ -227,6 +236,7 @@ jobs:
         if: runner.os != 'Linux'
         env:
           CAFE_CODE_VISUALIZATION_E2E: "1"
+          CAFE_CODE_VISUALIZATION_E2E_CAPTURE_DIR: ${{ runner.temp }}/cafe-visualization-comprehensive
         run: corepack yarn workspace @cafecode/desktop test src/visualizations/NativeVisualizationElectron.e2e.test.ts
 
       - name: Prepare installed Electron sandbox helper (Linux)
@@ -260,6 +270,7 @@ jobs:
         if: runner.os == 'Linux'
         env:
           CAFE_CODE_VISUALIZATION_E2E: "1"
+          CAFE_CODE_VISUALIZATION_E2E_CAPTURE_DIR: ${{ runner.temp }}/cafe-visualization-comprehensive
         run: xvfb-run --auto-servernum corepack yarn workspace @cafecode/desktop test src/visualizations/NativeVisualizationElectron.e2e.test.ts
 
       - name: Isolated native visualization chat font qualification
@@ -270,6 +281,7 @@ jobs:
         env:
           CAFE_CODE_VISUALIZATION_E2E: "1"
           CAFE_CODE_VISUALIZATION_FONT_REPLAY: "1"
+          CAFE_CODE_VISUALIZATION_E2E_CAPTURE_DIR: ${{ runner.temp }}/cafe-visualization-font
         run: corepack yarn workspace @cafecode/desktop test src/visualizations/NativeVisualizationElectron.e2e.test.ts
 
       - name: Isolated native visualization chat font qualification (Linux)
@@ -279,6 +291,7 @@ jobs:
         env:
           CAFE_CODE_VISUALIZATION_E2E: "1"
           CAFE_CODE_VISUALIZATION_FONT_REPLAY: "1"
+          CAFE_CODE_VISUALIZATION_E2E_CAPTURE_DIR: ${{ runner.temp }}/cafe-visualization-font
         run: xvfb-run --auto-servernum corepack yarn workspace @cafecode/desktop test src/visualizations/NativeVisualizationElectron.e2e.test.ts
 
       - name: Final forced desktop verification
@@ -298,6 +311,22 @@ jobs:
           path: apps/web/.vitest/attachments/failure-screenshots/DeskSidebar.browser.tsx/
           # The explicit synthetic-only path sits under the hidden .vitest
           # directory. Never broaden this to a workspace/root hidden-file glob.
+          include-hidden-files: true
+          if-no-files-found: ignore
+          retention-days: 7
+
+      - name: Retain synthetic visualization and Mermaid failure evidence
+        # Exact synthetic-only paths, not the whole attachment or temp tree.
+        # Diagnostic artifacts never qualify as a native release artifact.
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: visualization-qualification-failure-${{ matrix.os }}-${{ github.run_attempt }}
+          path: |
+            apps/web/.vitest/attachments/failure-screenshots/VisualizationCommitChart.browser.tsx/
+            apps/web/.vitest/attachments/failure-screenshots/MermaidFamilies.browser.tsx/
+            ${{ runner.temp }}/cafe-visualization-comprehensive/*.png
+            ${{ runner.temp }}/cafe-visualization-font/*.png
           include-hidden-files: true
           if-no-files-found: ignore
           retention-days: 7

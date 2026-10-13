@@ -1,4 +1,4 @@
-import { Script } from "node:vm";
+import { constants as vmConstants, createContext, Script } from "node:vm";
 import { describe, expect, it } from "vitest";
 import {
   VISUALIZATION_FLUID_DIAGNOSTIC_COUNTER_MAX,
@@ -194,7 +194,14 @@ function fixture(
       observers.splice(observers.indexOf(this.callback), 1);
     }
   }
-  new Script(VISUALIZATION_FLUID_RUNTIME_SOURCE).runInNewContext({
+  // Node24's ordinary VM global avoids a proxy lookup on every fixed-library
+  // global access during the genuine30,000-frame phase-wrap regression. Keep a
+  // fresh realm and the exact same synthetic APIs for EVERY fixture, never a
+  // shared realm, main-realm execution, fewer frames or a larger timeout.
+  // https://github.com/nodejs/node/blob/v24.21.0/doc/api/vm.md#vmconstantsdont_contextify
+  // Neither VM mode is a security boundary: this fixture executes only Cafe's
+  // committed fixed helper, never received HTML or other untrusted source.
+  const context = Object.assign(createContext(vmConstants.DONT_CONTEXTIFY), {
     document,
     window,
     HTMLCanvasElement: Canvas,
@@ -237,6 +244,7 @@ function fixture(
       rafs.delete(id);
     },
   });
+  new Script(VISUALIZATION_FLUID_RUNTIME_SOURCE).runInContext(context);
   const fire = (target: object, type: string, event?: unknown) => {
     for (const callback of listeners.get(target)?.get(type) ?? []) callback(event);
   };
@@ -247,6 +255,7 @@ function fixture(
     for (const callback of callbacks) callback(now);
   };
   return {
+    context,
     canvas,
     document,
     window,
@@ -273,6 +282,36 @@ function fixture(
 }
 
 describe("fixed generated fluid library", () => {
+  it("keeps each ordinary VM global fresh without ambient Node globals or shared intrinsics", () => {
+    const first = fixture();
+    const second = fixture();
+    const probe = new Script(
+      "({global:globalThis,array:Array,node:typeof process,loader:typeof require})",
+    );
+    const a = probe.runInContext(first.context);
+    const b = probe.runInContext(second.context);
+    expect(a.global).toBe(first.context);
+    expect(b.global).toBe(second.context);
+    expect(a.array).not.toBe(Array);
+    expect(b.array).not.toBe(a.array);
+    expect(a.node).toBe("undefined");
+    expect(b.node).toBe("undefined");
+    expect(a.loader).toBe("undefined");
+    expect(b.loader).toBe("undefined");
+    first.document.documentElement.dataset.cafeVisible = "true";
+    first.fire(first.window, "cafe-visibility-changed");
+    first.tick();
+    expect(first.canvas.dataset.cafeFluidFrames).toBe("13");
+    expect(second.canvas.dataset.cafeFluidFrames).toBe("12");
+    expect(second.rafs.size).toBe(0);
+    for (const value of [first, second]) {
+      value.fire(value.window, "pagehide");
+      for (const resources of Object.values(value.owned)) expect(resources.size).toBe(0);
+      expect(value.rafs.size).toBe(0);
+      expect(value.liveListeners()).toBe(0);
+      expect(value.observers).toHaveLength(0);
+    }
+  });
   it("embeds a bounded licensed ordinary-page constant only for generated documents", () => {
     expect(VISUALIZATION_FLUID_DIAGNOSTIC_COUNTER_MAX).toBe(Number.MAX_SAFE_INTEGER);
     expect(VISUALIZATION_FLUID_RUNTIME_SOURCE).toContain(

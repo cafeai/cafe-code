@@ -11,11 +11,15 @@ import { build } from "tsdown";
 import { expect, it, vi } from "vitest";
 import { VISUALIZATION_FLUID_DIAGNOSTIC_COUNTER_MAX } from "@cafecode/shared/visualizationFluidRuntime";
 import { VISUALIZATION_FONT_LICENSE } from "@cafecode/shared/visualizationFontData";
+import {
+  hasOnlyKnownNativeFixtureDiagnostics,
+  nativeVisualizationFixtureDriver,
+} from "./nativeVisualizationFixturePolicy.ts";
 
 const execFileAsync = promisify(execFile);
 const require = createRequire(import.meta.url);
 
-/** Explicit synthetic-artifact opt-in only. These five PNGs are captured from
+/** Explicit synthetic-artifact opt-in only. These allowlisted PNGs are captured from
  * exact generated guest documents, never a screen/parent/user window. Unknown
  * paths, replacement entries and unbounded bytes do not become output targets. */
 async function retainFluidCaptures(directory: string): Promise<void> {
@@ -31,6 +35,7 @@ async function retainFluidCaptures(directory: string): Promise<void> {
     "native-inline-chart.png",
     "native-inline-chart-color.png",
     "native-inline-chart-motion.png",
+    "native-clipped-capture-failed.png",
     "native-bar-top5.png",
     "native-bar-top10.png",
     "native-bar-narrow.png",
@@ -73,11 +78,13 @@ async function retainAfterOutcome(
 }
 
 /** Preserve a completed child's bounded raw stream even when validation, not
- * execFile, is the primary failure. Called only from the failed bar lane; a
- * successful run still publishes solely the fixed source-free report. */
+ * execFile, is the primary failure. The lane label is a trusted finite scalar,
+ * never a received source string. Completed successful stderr is separately
+ * retained below; an admitted benign diagnostic must not erase raw evidence. */
 function retainBarPrimaryStreams(
   error: unknown,
   completed?: { stdout: string; stderr: string },
+  lane: "bar" | "font" | "fixture" = "bar",
 ): void {
   const candidate = completed ?? error;
   if (typeof candidate !== "object" || candidate === null) return;
@@ -89,11 +96,45 @@ function retainBarPrimaryStreams(
       value.length <= 65536 &&
       Buffer.byteLength(value) <= 65536
     ) {
-      process.stderr.write(`Native bar primary ${key}:\n`);
+      process.stderr.write(`Native ${lane} primary ${key}:\n`);
       process.stderr.write(value);
     }
   }
 }
+
+/** The explicit child buffer already bounds the stream. Keep the same UTF-8
+ * bound here, retain it verbatim rather than projecting away native warnings,
+ * and never grant success from a string in this diagnostic channel. Bar/font
+ * callers first admit only the exact native diagnostics policy; comprehensive
+ * callers retain their original fixed phase/assertion contract unchanged. */
+function retainCompletedNativeDiagnostics(stderr: string, lane: "bar" | "font" | "fixture"): void {
+  if (stderr.length === 0) return;
+  if (stderr.length > 65_536 || Buffer.byteLength(stderr) > 65_536)
+    throw new Error("Native fixture diagnostic bytes refused.");
+  process.stderr.write(`Native ${lane} raw stderr:\n`);
+  process.stderr.write(stderr);
+}
+
+it("retains completed native stderr exactly without accepting unknown diagnostics", () => {
+  const write = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+  try {
+    const raw = "fixed fixture phase\r\nunknown native error\n";
+    retainCompletedNativeDiagnostics(raw, "fixture");
+    expect(write.mock.calls).toEqual([["Native fixture raw stderr:\n"], [raw]]);
+    write.mockClear();
+    retainCompletedNativeDiagnostics("", "bar");
+    expect(write).not.toHaveBeenCalled();
+    expect(() => retainCompletedNativeDiagnostics("x".repeat(65_537), "font")).toThrow(
+      "bytes refused",
+    );
+    expect(() => retainCompletedNativeDiagnostics("界".repeat(30_000), "font")).toThrow(
+      "bytes refused",
+    );
+    expect(write).not.toHaveBeenCalled();
+  } finally {
+    write.mockRestore();
+  }
+});
 
 it("retains bounded completed bar streams on validation failures and exec failures", () => {
   const write = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
@@ -465,6 +506,7 @@ it.runIf(
   async () => {
     const directory = await mkdtemp(join(tmpdir(), "cafe-native-visualization-"));
     let primaryFailed = false;
+    let completed: { stdout: string; stderr: string } | undefined;
     try {
       await writeFile(
         join(directory, "natural-chart.html"),
@@ -518,17 +560,22 @@ it.runIf(
       env.TMPDIR = directory;
       env.TEMP = directory;
       env.TMP = directory;
-      const { stdout, stderr } = await execFileAsync(
+      completed = await execFileAsync(
         require("electron") as string,
         [join(directory, "NativeVisualizationFixture.cjs"), directory],
         { env, timeout: 45_000, killSignal: "SIGKILL", maxBuffer: 65_536, windowsHide: true },
       );
-      process.stderr.write(fixtureObservations(stderr));
+      const { stdout, stderr } = completed;
+      retainCompletedNativeDiagnostics(stderr, "fixture");
       const report = JSON.parse(stdout.trim()) as Record<string, unknown>;
       expect(report).toMatchObject({
         electron: "42.10.0",
         platform: process.platform,
         arch: process.arch,
+        graphics:
+          nativeVisualizationFixtureDriver(process.platform, "comprehensive").length > 0
+            ? "sandboxed-swiftshader"
+            : "native-default",
         preview: "passed",
         appPreviewReplay: "passed",
         viewer: "passed",
@@ -565,15 +612,7 @@ it.runIf(
       // This exact synthetic child has a scrubbed environment/private profile
       // and bounded fixed fixtures. Preserve its admitted raw command streams
       // before any capture finalizer can throw, not merely after interpretation.
-      if (typeof error === "object" && error !== null) {
-        for (const key of ["stderr", "stdout"] as const) {
-          const value = Reflect.get(error, key);
-          if (typeof value === "string" && value.length > 0 && value.length <= 65536) {
-            process.stderr.write(`Native fixture primary ${key}:\n`);
-            process.stderr.write(value);
-          }
-        }
-      }
+      retainBarPrimaryStreams(error, completed, "fixture");
       throw error;
     } finally {
       try {
@@ -655,14 +694,24 @@ it.runIf(
       env.TMP = directory;
       completed = await execFileAsync(
         require("electron") as string,
-        [join(directory, "NativeVisualizationBarFixture.cjs"), directory],
+        [
+          join(directory, "NativeVisualizationBarFixture.cjs"),
+          directory,
+          exact ? "exact-local" : "synthetic",
+        ],
         { env, timeout: 45_000, killSignal: "SIGKILL", maxBuffer: 65_536, windowsHide: true },
       );
       const { stdout, stderr } = completed;
-      // No arbitrary child strings are published on successful runs. Retain the
-      // actual raw child stream only when the isolated primary outcome failed.
-      if (stderr.trim().length > 0) throw new Error("Native bar fixture unexpected diagnostics.");
+      // Exact preserved D-Bus diagnostics and an exact positively witnessed
+      // owned Linux retirement message may coexist with a successful report.
+      // Foreign/unwitnessed/duplicate crashes and SSL/GPU/unknown errors remain
+      // failures; neither admitted nor rejected raw stderr is discarded.
       const report = JSON.parse(stdout.trim()) as Record<string, unknown>;
+      if (
+        !hasOnlyKnownNativeFixtureDiagnostics(stderr, process.platform, report.retirementCrashPids)
+      )
+        throw new Error("Native bar fixture unexpected diagnostics.");
+      retainCompletedNativeDiagnostics(stderr, "bar");
       expect(Object.keys(report).sort()).toEqual(
         [
           "electron",
@@ -670,6 +719,8 @@ it.runIf(
           "electronAbi",
           "platform",
           "arch",
+          "graphics",
+          "retirementCrashPids",
           "bars",
           "naturalHeight",
           "horizontalFit",
@@ -689,6 +740,11 @@ it.runIf(
         electronAbi: "146",
         platform: process.platform,
         arch: process.arch,
+        graphics:
+          nativeVisualizationFixtureDriver(process.platform, exact ? "exact-bar" : "synthetic-bar")
+            .length > 0
+            ? "sandboxed-swiftshader"
+            : "native-default",
         bars: "passed",
         naturalHeight: "passed",
         horizontalFit: "passed",
@@ -700,6 +756,9 @@ it.runIf(
         genuineVisibilityReplay: "authored",
       });
       expect(report.electronNode).toMatch(/^\d+\.\d+\.\d+$/);
+      expect((report.retirementCrashPids as number[]).length).toBe(
+        process.platform === "linux" ? 1 : 0,
+      );
       for (const key of ["topFiveHeight", "topTenHeight", "narrowHeight"])
         expect(
           Number.isSafeInteger(report[key]) &&
@@ -789,9 +848,16 @@ it.runIf(
         [join(directory, "NativeVisualizationFontFixture.cjs"), directory],
         { env, timeout: 45_000, killSignal: "SIGKILL", maxBuffer: 65_536, windowsHide: true },
       );
-      if (completed.stderr.trim().length > 0)
-        throw new Error("Native font fixture unexpected diagnostics.");
       const report = JSON.parse(completed.stdout.trim()) as Record<string, unknown>;
+      if (
+        !hasOnlyKnownNativeFixtureDiagnostics(
+          completed.stderr,
+          process.platform,
+          report.retirementCrashPids,
+        )
+      )
+        throw new Error("Native font fixture unexpected diagnostics.");
+      retainCompletedNativeDiagnostics(completed.stderr, "font");
       expect(Object.keys(report).sort()).toEqual(
         [
           "electron",
@@ -799,6 +865,8 @@ it.runIf(
           "electronAbi",
           "platform",
           "arch",
+          "graphics",
+          "retirementCrashPids",
           "binaryFaces",
           "parseReady",
           "userOriginPolicy",
@@ -818,6 +886,10 @@ it.runIf(
         electronAbi: "146",
         platform: process.platform,
         arch: process.arch,
+        graphics:
+          nativeVisualizationFixtureDriver(process.platform, "font").length > 0
+            ? "sandboxed-swiftshader"
+            : "native-default",
         binaryFaces: "passed",
         parseReady: "passed",
         userOriginPolicy: "passed",
@@ -830,6 +902,9 @@ it.runIf(
         retirement: "passed",
       });
       expect(report.electronNode).toMatch(/^\d+\.\d+\.\d+$/);
+      expect((report.retirementCrashPids as number[]).length).toBe(
+        process.platform === "linux" ? 3 : 0,
+      );
       for (const key of ["fullHeight", "narrowHeight"])
         expect(
           Number.isSafeInteger(report[key]) &&
@@ -840,7 +915,7 @@ it.runIf(
       process.stdout.write(`Native font qualification: ${JSON.stringify(report)}\n`);
     } catch (error) {
       primaryFailed = true;
-      retainBarPrimaryStreams(error, completed);
+      retainBarPrimaryStreams(error, completed, "font");
       throw error;
     } finally {
       try {

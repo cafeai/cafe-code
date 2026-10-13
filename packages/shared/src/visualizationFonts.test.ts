@@ -27,6 +27,18 @@ const installed = (name: string) =>
 const unavailable = "Generated visualization typography is unavailable.";
 afterEach(() => vi.unstubAllGlobals());
 
+/** Compare every byte (including length) using Node's native binary comparator.
+ * A structural assertion enumerates hundreds of thousands of numeric object
+ * properties across these fixtures; under the full hosted suite that overhead
+ * can exhaust the unchanged five-second budget. This is exact byte equality,
+ * not a hash-only substitute, sampled prefix, rounding or timeout allowance.
+ * The independent fixed SHA/header/license assertions remain below. */
+function expectExactBytes(actual: Uint8Array, expected: Uint8Array) {
+  expect(Buffer.from(actual.buffer, actual.byteOffset, actual.byteLength).equals(expected)).toBe(
+    true,
+  );
+}
+
 describe("committed offline chat typography", () => {
   it("matches the exact existing package, four byte commitments and full readable OFL", () => {
     const packageJson = JSON.parse(readFileSync(installed("package.json"), "utf8")) as {
@@ -62,7 +74,7 @@ describe("committed offline chat typography", () => {
     ]);
     for (const face of VISUALIZATION_FONT_DATA) {
       const bytes = readFileSync(installed(`files/${face.filename}`));
-      expect(Buffer.from(face.base64, "base64")).toEqual(bytes);
+      expectExactBytes(Buffer.from(face.base64, "base64"), bytes);
       expect(bytes.byteLength).toBe(face.byteLength);
       expect(hash(bytes)).toBe(face.sha256);
       expect(bytes.subarray(0, 4).toString("ascii")).toBe("wOF2");
@@ -85,6 +97,18 @@ describe("committed offline chat typography", () => {
       "6fbd040a29c2037a765dfb9f2561e9965b5c95c6dcb5dce516089d63d5f17af7",
     );
     expect(VISUALIZATION_FONT_LICENSE).toContain("SIL OPEN FONT LICENSE Version 1.1");
+  });
+
+  it("rejects first, middle, last and length mutations in the exact binary comparator", () => {
+    const original = Buffer.from(VISUALIZATION_FONT_DATA[0]!.base64, "base64");
+    expectExactBytes(original, Buffer.from(original));
+    for (const index of [0, Math.floor(original.byteLength / 2), original.byteLength - 1]) {
+      const changed = Buffer.from(original);
+      changed[index] = changed[index]! ^ 1;
+      expect(() => expectExactBytes(changed, original)).toThrow();
+    }
+    expect(() => expectExactBytes(original.subarray(0, -1), original)).toThrow();
+    expect(() => expectExactBytes(Buffer.concat([original, Buffer.from([0])]), original)).toThrow();
   });
 
   it("copies existing normal/italic variable descriptors and Latin/extended ranges exactly", () => {
@@ -155,7 +179,7 @@ describe("bounded binary generated-only font admission", () => {
     for (const face of VISUALIZATION_FONT_DATA) {
       const bytes = await decodeVisualizationFontBytes(face.base64, face);
       expect(bytes).toBeInstanceOf(ArrayBuffer);
-      expect(Buffer.from(bytes)).toEqual(readFileSync(installed(`files/${face.filename}`)));
+      expectExactBytes(Buffer.from(bytes), readFileSync(installed(`files/${face.filename}`)));
     }
   });
 
@@ -250,7 +274,8 @@ describe("bounded binary generated-only font admission", () => {
       })),
     );
     inputs.forEach((input, index) =>
-      expect(Buffer.from(input.bytes)).toEqual(
+      expectExactBytes(
+        Buffer.from(input.bytes),
         Buffer.from(VISUALIZATION_FONT_DATA[index]!.base64, "base64"),
       ),
     );
