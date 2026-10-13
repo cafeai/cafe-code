@@ -11,6 +11,8 @@ export interface CodexContextWindowPresentation {
   readonly configured: number | null | undefined;
   readonly pending: boolean;
   readonly source: "Chat override" | "Account default" | "Codex default";
+  /** Exact selected account's saved request, never a resolved native threshold. */
+  readonly requestedAutoCompactTokenLimit?: number;
 }
 
 /** Only the exact enabled Codex account may supply a live inherited numeric preference. */
@@ -31,6 +33,25 @@ export function inheritedCodexContextWindowOverride(
   return typeof value === "number" && validCodexContextWindowOverride(value) ? value : undefined;
 }
 
+/** Driver config is opaque at the envelope boundary. Read only an own numeric
+ * data property from the exact enabled Codex account, never a sibling/global
+ * default or an accessor with side effects. This helper has no launch authority. */
+export function requestedCodexAutoCompactTokenLimit(
+  settings: ServerSettings,
+  instanceId: ProviderInstanceId,
+  provider: string,
+): number | undefined {
+  const instances = settings.providerInstances;
+  if (provider !== "codex" || !instances || !Object.hasOwn(instances, instanceId)) return undefined;
+  const instance = instances[instanceId];
+  if (!instance || instance.driver !== "codex" || instance.enabled === false) return undefined;
+  const config = instance.config;
+  if (config === null || typeof config !== "object" || Array.isArray(config)) return undefined;
+  const descriptor = Object.getOwnPropertyDescriptor(config, "autoCompactTokenLimit");
+  const value: unknown = descriptor && "value" in descriptor ? descriptor.value : undefined;
+  return typeof value === "number" && validCodexContextWindowOverride(value) ? value : undefined;
+}
+
 export function codexContextWindowSourceLabel(source: CodexContextWindowPresentation["source"]) {
   switch (source) {
     case "Chat override":
@@ -46,6 +67,7 @@ export function deriveCodexContextWindowPresentation(input: {
   readonly requested: number | null | undefined;
   readonly configured: number | null | undefined;
   readonly inherited?: number | undefined;
+  readonly requestedAutoCompactTokenLimit?: number | undefined;
 }): CodexContextWindowPresentation {
   const override =
     typeof input.requested === "number" && validCodexContextWindowOverride(input.requested)
@@ -62,6 +84,11 @@ export function deriveCodexContextWindowPresentation(input: {
       : typeof input.configured === "number" && validCodexContextWindowOverride(input.configured)
         ? input.configured
         : undefined;
+  const requestedAutoCompactTokenLimit =
+    typeof input.requestedAutoCompactTokenLimit === "number" &&
+    validCodexContextWindowOverride(input.requestedAutoCompactTokenLimit)
+      ? input.requestedAutoCompactTokenLimit
+      : undefined;
   return {
     requested,
     configured,
@@ -72,7 +99,42 @@ export function deriveCodexContextWindowPresentation(input: {
         : inherited !== null
           ? "Account default"
           : "Codex default",
+    // Preserve legacy absent-key/null/current-to-saved semantics. This separate
+    // request exists only when its exact account actually supplied a valid value.
+    ...(requestedAutoCompactTokenLimit !== undefined ? { requestedAutoCompactTokenLimit } : {}),
   };
+}
+
+/** Presentation-only default-total-scope estimate from the reviewed immutable
+ * native policy. Never write this ratio to config, usage, capabilities or saved
+ * metadata: native model caps, accounting scope and buffers remain authoritative. */
+export function estimateCodexContextCompactionThreshold(
+  presentation: CodexContextWindowPresentation | null | undefined,
+): number | null {
+  const requested = presentation?.requested;
+  if (typeof requested !== "number" || !validCodexContextWindowOverride(requested)) return null;
+  // Integer arithmetic retains floor(9*n/10) even at the admitted safe-integer
+  // boundary, without a floating-point product rounding across a token boundary.
+  const ceiling = Number((BigInt(requested) * 9n) / 10n);
+  const explicit = presentation?.requestedAutoCompactTokenLimit;
+  return typeof explicit === "number" && validCodexContextWindowOverride(explicit)
+    ? Math.min(ceiling, explicit)
+    : ceiling;
+}
+
+export function formatCodexContextCompactionEstimate(
+  presentation: CodexContextWindowPresentation | null | undefined,
+  locale: UiLocale,
+): string | null {
+  const estimate = estimateCodexContextCompactionThreshold(presentation);
+  return estimate === null
+    ? null
+    : uiText(
+        "(~{tokens} compaction)",
+        { tokens: formatCodexContextWindowTokens(estimate, locale) },
+        undefined,
+        locale,
+      );
 }
 
 /** Compact numbers follow the viewer's language; raw requested counts stay exact in the editor. */

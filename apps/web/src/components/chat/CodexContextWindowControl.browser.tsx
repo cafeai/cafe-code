@@ -9,6 +9,7 @@ import { applyInterfaceScalePercent } from "../../interfaceScale";
 import {
   deriveCodexContextWindowPresentation,
   formatCodexContextWindowTokens,
+  formatCodexContextCompactionEstimate,
 } from "../../codexContextWindow";
 import { MenuItem } from "../ui/menu";
 import { CompactComposerControlsMenu } from "./CompactComposerControlsMenu";
@@ -19,6 +20,7 @@ function Harness(props: {
   override?: number | null;
   configured?: number | null;
   inherited?: number;
+  requestedAutoCompactTokenLimit?: number;
   supported?: boolean;
   provider?: "codex" | "claudeAgent";
 }) {
@@ -29,6 +31,7 @@ function Harness(props: {
     requested: props.override,
     configured: props.configured,
     inherited: props.inherited,
+    requestedAutoCompactTokenLimit: props.requestedAutoCompactTokenLimit,
   });
   return (
     <>
@@ -231,6 +234,64 @@ describe("Codex context-window editor", () => {
     expect(onChange).toHaveBeenCalledExactlyOnceWith(null);
   });
 
+  it("keeps compaction estimates beside exact saved/pending labels and explains the safe opening rather than applied usage", async () => {
+    const onChange = vi.fn(async () => {});
+    mounted = await render(
+      <Harness
+        onChange={onChange}
+        override={800_000}
+        configured={500_000}
+        requestedAutoCompactTokenLimit={150_000}
+      />,
+    );
+    await openEditor();
+    await expect
+      .element(page.getByText("Context override: 500K → 800K when idle", { exact: true }))
+      .toBeVisible();
+    await expect.element(page.getByText("(~150K compaction)", { exact: true })).toBeVisible();
+    page
+      .getByRole("spinbutton", { name: "Context window (tokens)", exact: true })
+      .element()
+      .focus();
+    await userEvent.keyboard("{Tab}");
+    await expect.element(page.getByText("Source: Chat override.", { exact: true })).toBeVisible();
+    expect(document.body.textContent).toContain("next safe opening");
+    expect(document.body.textContent).toContain(
+      "not a currently applied or native-reported threshold",
+    );
+    expect(document.body.textContent).toContain("default total-scope 90% ceiling");
+    expect(document.body.textContent).toContain(
+      "model caps, accounting scope and buffers may differ",
+    );
+    await mounted.rerender(
+      <Harness onChange={onChange} override={800_000} requestedAutoCompactTokenLimit={900_000} />,
+    );
+    await expect
+      .element(page.getByText("Context override: 800K · saved", { exact: true }))
+      .toBeVisible();
+    await expect.element(page.getByText("(~720K compaction)", { exact: true })).toBeVisible();
+    await mounted.rerender(
+      <Harness onChange={onChange} override={null} configured={800_000} inherited={600_000} />,
+    );
+    await expect
+      .element(page.getByText("Context override: 800K → 600K when idle", { exact: true }))
+      .toBeVisible();
+    await expect.element(page.getByText("(~540K compaction)", { exact: true })).toBeVisible();
+    await mounted.rerender(
+      <Harness
+        onChange={onChange}
+        override={null}
+        configured={800_000}
+        requestedAutoCompactTokenLimit={150_000}
+      />,
+    );
+    await expect
+      .element(page.getByText("Context override: 800K → Codex default when idle", { exact: true }))
+      .toBeVisible();
+    expect(document.querySelector("[data-codex-context-compaction-estimate]")).toBeNull();
+    expect(onChange).not.toHaveBeenCalled();
+  });
+
   it.each([
     { dark: false, scale: 80, locale: "ja" as const },
     { dark: true, scale: 130, locale: "ko" as const },
@@ -268,6 +329,22 @@ describe("Codex context-window editor", () => {
       expect(document.body.textContent).toContain(
         formatCodexContextWindowTokens(1_000_000, locale),
       );
+      const estimate = page.getByText(
+        formatCodexContextCompactionEstimate(
+          deriveCodexContextWindowPresentation({ requested: 1_000_000, configured: 500_000 }),
+          locale,
+        )!,
+        { exact: true },
+      );
+      await expect.element(estimate).toBeVisible();
+      const summary = estimate
+        .element()
+        .closest<HTMLElement>("[data-codex-context-window-details]")!;
+      const estimateStyle = getComputedStyle(estimate.element());
+      expect(estimateStyle.color).not.toBe(getComputedStyle(summary.querySelector("span")!).color);
+      expect(summary.scrollWidth).toBeLessThanOrEqual(summary.clientWidth + 1);
+      expect(summary.getBoundingClientRect().left).toBeGreaterThanOrEqual(bounds.left);
+      expect(summary.getBoundingClientRect().right).toBeLessThanOrEqual(bounds.right);
       await expect
         .element(
           page.getByRole("button", {

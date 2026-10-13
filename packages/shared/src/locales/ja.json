@@ -3199,5 +3199,7 @@
   "Loading image…": "画像を読み込み中…",
   "Preparing image…": "画像を準備中…",
   "When custom instructions apply": "カスタム指示の適用タイミング",
-  "{alt} · Image unavailable": "{alt} · 画像を表示できません"
+  "{alt} · Image unavailable": "{alt} · 画像を表示できません",
+  "(~{tokens} compaction)": "(約{tokens}で圧縮)",
+  "Estimate for the saved effective context choice at the next safe opening, not a currently applied or native-reported threshold. Uses the reviewed default total-scope 90% ceiling and any lower explicit compaction request. Actual model caps, accounting scope and buffers may differ.": "保存された実効コンテキスト設定を次の安全な開始時点で適用する場合の推定値です。現在適用中の値やネイティブから報告されたしきい値ではありません。確認済みの既定の合計スコープの90%上限と、それより低い明示的な圧縮設定を使用します。実際のモデル上限、計算スコープ、バッファーは異なる場合があります。"
 }

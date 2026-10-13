@@ -3199,5 +3199,7 @@
   "Loading image…": "이미지 로드 중…",
   "Preparing image…": "이미지 준비 중…",
   "When custom instructions apply": "사용자 지정 지침이 적용되는 시점",
-  "{alt} · Image unavailable": "{alt} · 이미지를 사용할 수 없음"
+  "{alt} · Image unavailable": "{alt} · 이미지를 사용할 수 없음",
+  "(~{tokens} compaction)": "(약 {tokens}에서 압축)",
+  "Estimate for the saved effective context choice at the next safe opening, not a currently applied or native-reported threshold. Uses the reviewed default total-scope 90% ceiling and any lower explicit compaction request. Actual model caps, accounting scope and buffers may differ.": "저장된 유효 컨텍스트 설정을 다음 안전한 시작 시점에 적용할 때의 추정치이며, 현재 적용된 값이나 네이티브가 보고한 임계값이 아닙니다. 검토된 기본 전체 범위의 90% 상한과 그보다 낮은 명시적 압축 설정을 사용합니다. 실제 모델 상한, 계산 범위 및 버퍼는 다를 수 있습니다."
 }

@@ -2,7 +2,7 @@
 
 Decision status: Accepted
 Created: 2026-10-13 15:54:01 JST (UTC+0900)
-Last updated: 2026-10-13 15:59:19 JST (UTC+0900)
+Last updated: 2026-10-13 18:28:32 JST (UTC+0900)
 Decision authority: User requested diagnosis, any necessary fix, tests and this
 context/compaction changeset's push to dev.
 Implementation status: Implemented; synthetic fixtures below, hosted release qualification separate
@@ -82,6 +82,24 @@ auto-compaction threshold; do not echo the paired nominal request into received
 usage as though it were a measured threshold. Existing explicit-provider request
 evidence remains separate. Normal rebuilt daemon/session adoption is required;
 the fix does not reconfigure an already running native session.
+
+### Explicitly requested presentation estimate
+
+On 2026-10-13 18:28:32 JST (UTC+0900), the user additionally requested a muted
+approximate compaction amount beside the saved context override, in the current
+CI repair changeset. This does not supersede the native request or usage policy.
+For the saved effective nominal context, the presentation computes
+`min(floor(9 × nominal / 10), valid explicit exact-account compaction request)`;
+without that explicit request it displays only the first term. Integer arithmetic
+preserves the floor at the safe-integer boundary. Account lookup never borrows a
+sibling/global preference or evaluates a config accessor.
+
+Use an approximate parenthetical, for example `(~720K compaction)`, not a received
+threshold or an applied-state label. Its tooltip states the reviewed default
+total-scope assumption and unknown native caps/scope/buffers. Pending intent is an
+estimate for the next safe opening; clearing the final saved context choice omits
+the estimate. Do not infer a threshold from an old active context or substitute
+this presentation result into any native usage/configuration field.
 
 ## Verification and preserved decisions
 

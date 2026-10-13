@@ -108,6 +108,7 @@ import {
   buildCodexContextWindowEditorKey,
   deriveCodexContextWindowPresentation,
   inheritedCodexContextWindowOverride,
+  requestedCodexAutoCompactTokenLimit,
   type CodexContextWindowPresentation,
 } from "../../codexContextWindow";
 import {
@@ -1577,6 +1578,11 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
       ? deriveCodexContextWindowPresentation({
           requested: desiredContextOverride,
           inherited: inheritedCodexContextWindowOverride(
+            settings,
+            selectedInstanceId,
+            selectedProvider,
+          ),
+          requestedAutoCompactTokenLimit: requestedCodexAutoCompactTokenLimit(
             settings,
             selectedInstanceId,
             selectedProvider,

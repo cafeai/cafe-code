@@ -65,6 +65,7 @@ import {
 import {
   deriveCodexContextWindowPresentation,
   inheritedCodexContextWindowOverride,
+  requestedCodexAutoCompactTokenLimit,
 } from "../codexContextWindow";
 import { useDesktopDebugEnabled } from "~/lib/desktopDebugState";
 import { useWorkspaceProjects, useWorkspaceThreads } from "../environments/workspaceData";
@@ -8159,6 +8160,11 @@ export default function ChatView(props: ChatViewProps) {
               ? composerContextOverride
               : activeThread.codexContextWindowOverride,
           inherited: inheritedCodexContextWindowOverride(
+            settings,
+            subagentPolicyInstanceId,
+            subagentPolicyDriver,
+          ),
+          requestedAutoCompactTokenLimit: requestedCodexAutoCompactTokenLimit(
             settings,
             subagentPolicyInstanceId,
             subagentPolicyDriver,

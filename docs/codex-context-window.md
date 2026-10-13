@@ -2,7 +2,7 @@
 
 Status: Implemented; native account capacity and hosted release qualification are separate
 Created: 2026-10-12 11:10:24 JST (UTC+0900)
-Last updated: 2026-10-13 15:54:01 JST (UTC+0900)
+Last updated: 2026-10-13 18:28:32 JST (UTC+0900)
 
 For Codex chats, use **More composer controls → Context window…** beneath
 Subagent limit… to save a custom token count. Blank or Reset removes the chat's
@@ -22,6 +22,22 @@ label shows a pending change when recorded session configuration is known; unkno
 configuration is marked saved. Clearing a choice still retains a known current
 override while a return to inheritance is pending. Further source/configuration
 details live in the information tooltip rather than extra status rows.
+
+The usage percentage, total processed and automatic-compaction description form
+one compact related-fact group, matching the Primary Window's tighter spacing.
+Beside a saved effective context override, a muted parenthetical estimates the
+reviewed default total-scope compaction base: for example,
+`Context override: 800K (~720K compaction)`. A lower explicit compaction request
+from the same selected enabled Codex account lowers the estimate. Pending labels
+still show current → saved; the parenthetical describes the saved value for the
+next safe opening, not the currently running session. It disappears when the
+final saved context choice is cleared, even if an old active value remains.
+
+The information tooltip explains the approximation: native model caps, accounting
+scope and buffers can differ. This is presentation only; it never changes the
+native usage event, meter, provider request or saved preference. The same summary
+is available in Tasks/context details, the pinned rail and context controls, with
+viewer-language compact numbers.
 
 Saving never interrupts current work. Changed configuration waits for a subsequent
 send at a safe native idle boundary, including running agents and received events.

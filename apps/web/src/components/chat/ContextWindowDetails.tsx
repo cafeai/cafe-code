@@ -93,80 +93,92 @@ export function ContextWindowDetails(props: {
         <UsageMeterBar percent={normalizedPercentage} testId="context" />
       ) : null}
 
-      {hasUsage && usage.maxTokens !== null && usedPercentage ? (
-        <div
-          className={cn(
-            "text-foreground",
-            layout === "panel"
-              ? "text-ui font-medium tabular-nums"
-              : "whitespace-nowrap text-xs font-medium tabular-nums",
-          )}
-        >
-          <UiMessage
-            message={
-              "<percentage></percentage><separator></separator><used></used><divider></divider><capacity>{maximum} context used</capacity>"
-            }
-            values={{
-              maximum: formatContextWindowTokens(usage.maxTokens ?? null),
-              capacity: renderContextCapacity,
-            }}
-            slots={{
-              percentage: <span>{usedPercentage}</span>,
-              separator: <span className="mx-1">⋅</span>,
-              used: <span>{formatContextWindowTokens(usage.usedTokens)}</span>,
-              divider: <span>/</span>,
-            }}
-          />
-        </div>
-      ) : hasUsage ? (
-        <div
-          className={
-            layout === "panel" ? "text-ui text-foreground tabular-nums" : "text-sm text-foreground"
-          }
-        >
-          {uiText(
-            "{tokens} tokens used so far",
-            {
-              tokens: formatContextWindowTokens(usage.usedTokens),
-            },
-            undefined,
-            uiLocale,
-          )}
-        </div>
-      ) : null}
-
-      {hasUsage &&
-      (usage.totalProcessedTokens ?? null) !== null &&
-      (usage.totalProcessedTokens ?? 0) > usage.usedTokens ? (
-        <div className="text-xs text-muted-foreground">
-          {uiText(
-            "Total processed: {tokens} tokens",
-            {
-              tokens: formatContextWindowTokens(usage.totalProcessedTokens ?? null),
-            },
-            undefined,
-            uiLocale,
-          )}
-        </div>
-      ) : null}
-
-      {hasUsage && usage.compactsAutomatically ? (
-        <div className="text-xs text-muted-foreground">
-          {usage.autoCompactTokenLimit
-            ? uiText(
-                "Automatically compacts around {value0} tokens.",
+      {/* Usage, total and compaction are one related fact group, matching the
+          primary quota window's gap-1 density without changing the heading,
+          meter, quota divider or policy-section boundaries. */}
+      {hasUsage ? (
+        <div data-context-window-facts className="flex min-w-0 flex-col gap-1 leading-tight">
+          {hasUsage && usage.maxTokens !== null && usedPercentage ? (
+            <div
+              className={cn(
+                "text-foreground",
+                layout === "panel"
+                  ? "text-ui font-medium tabular-nums"
+                  : "whitespace-nowrap text-xs font-medium tabular-nums",
+                // Font-size utilities also carry a line-height. Keep the density
+                // override last so class merging cannot discard it in popovers.
+                "leading-tight",
+              )}
+            >
+              <UiMessage
+                message={
+                  "<percentage></percentage><separator></separator><used></used><divider></divider><capacity>{maximum} context used</capacity>"
+                }
+                values={{
+                  maximum: formatContextWindowTokens(usage.maxTokens ?? null),
+                  capacity: renderContextCapacity,
+                }}
+                slots={{
+                  percentage: <span>{usedPercentage}</span>,
+                  separator: <span className="mx-1">⋅</span>,
+                  used: <span>{formatContextWindowTokens(usage.usedTokens)}</span>,
+                  divider: <span>/</span>,
+                }}
+              />
+            </div>
+          ) : hasUsage ? (
+            <div
+              className={
+                layout === "panel"
+                  ? "text-ui leading-tight text-foreground tabular-nums"
+                  : "text-sm leading-tight text-foreground"
+              }
+            >
+              {uiText(
+                "{tokens} tokens used so far",
                 {
-                  value0: formatContextWindowTokens(usage.autoCompactTokenLimit),
+                  tokens: formatContextWindowTokens(usage.usedTokens),
                 },
                 undefined,
                 uiLocale,
-              )
-            : uiText(
-                "Automatically compacts its context when needed.",
-                undefined,
+              )}
+            </div>
+          ) : null}
+
+          {hasUsage &&
+          (usage.totalProcessedTokens ?? null) !== null &&
+          (usage.totalProcessedTokens ?? 0) > usage.usedTokens ? (
+            <div className="text-xs leading-tight text-muted-foreground">
+              {uiText(
+                "Total processed: {tokens} tokens",
+                {
+                  tokens: formatContextWindowTokens(usage.totalProcessedTokens ?? null),
+                },
                 undefined,
                 uiLocale,
               )}
+            </div>
+          ) : null}
+
+          {hasUsage && usage.compactsAutomatically ? (
+            <div className="text-xs leading-tight text-muted-foreground">
+              {usage.autoCompactTokenLimit
+                ? uiText(
+                    "Automatically compacts around {value0} tokens.",
+                    {
+                      value0: formatContextWindowTokens(usage.autoCompactTokenLimit),
+                    },
+                    undefined,
+                    uiLocale,
+                  )
+                : uiText(
+                    "Automatically compacts its context when needed.",
+                    undefined,
+                    undefined,
+                    uiLocale,
+                  )}
+            </div>
+          ) : null}
         </div>
       ) : null}
 
