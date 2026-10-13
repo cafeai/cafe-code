@@ -1,7 +1,7 @@
 # Agent visualizations and MCP Apps
 
 Status: automatic multi-view, visibility-owned generated lifetime, stable partial-scroll presentation, full-width natural inline flow, quiet controls, stronger supplied fluid and exact chat typography are implemented and locally test-qualified. Current isolated native, default, browser and copied-bridge tests pass. Mandatory final forced-build evidence is recorded separately for each resulting changeset; actual parent-compositor, installed OS and native-platform/hosted release qualification remain separate.
-Last updated: 2026-10-13 13:40:12 JST (UTC+0900)
+Last updated: 2026-10-13 20:17:09 JST (UTC+0900)
 
 Cafe has separate paths for agent-authored pages and external MCP Apps. Both
 produce immutable private artifacts and inert posters. Authenticated generated
@@ -594,6 +594,31 @@ tokens, native IDs, paths, image
 buffers or exception causes. Debug availability cannot grant pending-source read
 authority.
 
+Native startup is allocation-one-shot and preflights the current owner crop
+before allocating a viewer session or child. Exact child destruction/renderer
+exit observers are attached before visibility, mask or parent setters. A native
+setter failure, or synchronous destruction during a setter, cannot continue
+source installation or hide the evidence needed for retirement. Hide/detach
+failures do not skip the independent exact-child close. Session-only and partial
+preview-window setup also retire only their admitted private objects; refused
+persistent/preload-bearing sessions are never cleared. Successful close requests
+are not destruction evidence, and uncertain cleanup still quarantines the pool.
+
+`failureCount` and `lastFailure` classify only a finite lane (`viewer`/`preview`),
+stage (`create`/`initialize`/`install`/`capture`/`retire`), outcome
+(`exception`/`deadline`/`refused`) and observed monotonic `allowanceSpent` boolean.
+An exception before the original deadline is unavailable, not a fabricated
+timeout; late preview pixels at exact deadline equality are refused. `quarantine`
+preserves the first quarantining record's fixed reason/failure/native snapshot,
+even if a sibling later retires. Top-level `native` observes that exact occupied
+record while quarantined, not an unrelated last retirement. All nested diagnostic
+tuples are independently copied through own data descriptors; malformed values,
+getters and serializers are refused without exposing exception text, source,
+JSON, native identities or paths. These observations grant no cleanup authority,
+new sampler/history or automatic recovery. An already-quarantined application
+generation remains refused; adopting a rebuilt application is an ordinary user
+restart, never a debug-endpoint reset.
+
 Capacity observation in the ordinary sandboxed desktop preload uses browser
 WebCrypto, not an unavailable Node crypto import. Each first registration gets a
 fresh cryptographic UUID; unavailable randomness refuses observation before
@@ -617,6 +642,7 @@ corepack yarn workspace @cafecode/contracts test src/visualizations.test.ts
 corepack yarn workspace @cafecode/shared test src/visualizationJson.test.ts src/visualizationExecutionLane.test.ts src/mcpAppJson.test.ts src/mcpAppProtocol.test.ts src/mcpAppToolSchema.test.ts src/visualizationHostClient.test.ts
 corepack yarn workspace @cafecode/shared test src/visualizationFonts.test.ts
 corepack yarn workspace @cafecode/desktop test src/visualizations/visualizationFontInstallation.test.ts
+corepack yarn workspace @cafecode/desktop test src/visualizations/ElectronVisualizationSurface.test.ts src/visualizations/DesktopVisualizationHost.test.ts src/visualizations/visualizationDiagnostics.test.ts src/visualizations/DesktopVisualizationPool.test.ts
 corepack yarn workspace @cafeai/cafe-code test --config vitest.config.ts src/visualizations src/mcpApps
 corepack yarn workspace @cafecode/web test:browser src/components/visualizations
 CAFE_CODE_VISUALIZATION_E2E=1 corepack yarn workspace @cafecode/desktop test src/visualizations/NativeVisualizationElectron.e2e.test.ts

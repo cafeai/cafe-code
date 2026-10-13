@@ -14,6 +14,7 @@ import type {
   VisualizationSurface,
   VisualizationSurfaceOptions,
 } from "./ElectronVisualizationSurface.ts";
+import type { VisualizationSurfaceDiagnostics } from "./visualizationDiagnostics.ts";
 
 vi.mock("electron", () => ({}));
 const document: VisualizationHostDocument = {
@@ -32,6 +33,40 @@ const owner: VisualizationHostOwner = {
 const consentId = randomUUID();
 const bounds = { x: 10, y: 30, width: 400, height: 200 };
 const hosts: DesktopVisualizationHost[] = [];
+const nativeSnapshot = (
+  phase: VisualizationSurfaceDiagnostics["phase"],
+): VisualizationSurfaceDiagnostics => ({
+  phase,
+  rejection: "none",
+  exclusiveProcess: true,
+  frameCount: 1,
+  rendererCount: 1,
+  gone: false,
+  destroyed: false,
+  watchdogArmed: false,
+  heartbeatMissed: false,
+  assetBytes: 0,
+  requestCount: 1,
+  servedBytes: 68,
+  captureOutcome: "not-attempted",
+  captureWidth: 0,
+  captureHeight: 0,
+  geometryOutcome: "full",
+  viewportWidth: 400,
+  viewportHeight: 200,
+  clipWidth: 400,
+  clipHeight: 200,
+  ownerZoom: 1,
+  nativeVisibility: "hidden",
+  visibilityHintSent: "not-sent",
+  visibilityCommitted: false,
+  layoutHeight: 0,
+  layoutConstrained: false,
+  layoutSequence: 0,
+  layoutPublications: 0,
+  layoutRefusals: 0,
+  layoutRefusal: "none",
+});
 afterEach(async () => {
   for (const host of hosts.splice(0)) await host.close();
   vi.useRealTimers();
@@ -54,6 +89,8 @@ async function fixture(options?: {
   installSource?: () => Promise<void>;
   now?: () => number;
   kind?: "generated" | "mcp-app";
+  createFailureAt?: number;
+  capture?: VisualizationSurface["capture"];
 }) {
   const surfaces: (VisualizationSurface & { calls: ReturnType<typeof vi.fn> })[] = [];
   const callbacks: VisualizationSurfaceOptions[] = [];
@@ -63,6 +100,8 @@ async function fixture(options?: {
     ...(options?.now ? { now: options.now } : {}),
     createSurface: (input) => {
       callbacks.push(input);
+      if (callbacks.length === options?.createFailureAt)
+        throw new Error("private constructor source sentinel");
       let current = true;
       const calls = vi.fn();
       const surface: VisualizationSurface & { calls: ReturnType<typeof vi.fn> } = {
@@ -74,7 +113,9 @@ async function fixture(options?: {
           await options?.installSource?.();
         },
         isCurrent: () => current,
-        capture: async () => ({ png: new Uint8Array([1, 2, 3]), width: 400, height: 200 }),
+        capture:
+          options?.capture ??
+          (async () => ({ png: new Uint8Array([1, 2, 3]), width: 400, height: 200 })),
         update: () => {
           calls("update");
           return current;
@@ -110,6 +151,259 @@ async function fixture(options?: {
 }
 
 describe("main-owned visualization leases", () => {
+  it.each(["initialize", "installSource"] as const)(
+    "classifies a synchronous %s rejection separately from an unspent deadline",
+    async (stage) => {
+      let inspected = 0;
+      const opaque = new Error("private startup source sentinel");
+      Object.defineProperty(opaque, "toJSON", {
+        get: () => {
+          inspected += 1;
+          throw opaque;
+        },
+      });
+      const f = await fixture({
+        [stage]: async () => {
+          throw opaque;
+        },
+      });
+      expect(await f.open()).toMatchObject({
+        state: "blocked",
+        reason: "unavailable",
+        expiresAtMs: null,
+      });
+      expect(f.host.diagnostics()).toMatchObject({
+        failureCount: 1,
+        lastFailure: {
+          lane: "viewer",
+          stage: stage === "installSource" ? "install" : stage,
+          outcome: "exception",
+          allowanceSpent: false,
+        },
+        retirementCount: 1,
+        lastRetirementReason: "unavailable",
+        quarantine: null,
+      });
+      expect(inspected).toBe(0);
+      expect(JSON.stringify(f.host.diagnostics())).not.toMatch(
+        /private|sentinel|fixture-thread|trusted-document/,
+      );
+      expect(f.host.capabilities()).toMatchObject({ available: true, reason: "ready" });
+    },
+  );
+  it.each(["initialize", "installSource"] as const)(
+    "preserves exact monotonic deadline equality after a %s exception",
+    async (stage) => {
+      let now = 0;
+      const f = await fixture({
+        now: () => now,
+        [stage]: async () => {
+          now = VISUALIZATION_HOST_PREVIEW_MS;
+          throw new Error("private late exception sentinel");
+        },
+      });
+      expect(await f.open()).toMatchObject({ state: "blocked", reason: "timeout" });
+      expect(f.host.diagnostics()).toMatchObject({
+        failureCount: 1,
+        lastFailure: {
+          stage: stage === "installSource" ? "install" : stage,
+          outcome: "exception",
+          allowanceSpent: true,
+        },
+        lastRetirementReason: "timeout",
+        quarantine: null,
+      });
+    },
+  );
+  it("preserves a constructor quarantine after a healthy sibling later retires", async () => {
+    const f = await fixture({ createFailureAt: 2 });
+    const sibling = await f.open();
+    f.surfaces[0]!.diagnostics = () => nativeSnapshot("retired");
+    const nextTicket = "b".repeat(64);
+    expect(
+      f.host.prepare({
+        ...f.input,
+        ticket: nextTicket,
+        owner: { ...owner, operationId: randomUUID() },
+      }).status,
+    ).toBe("ready");
+    expect(
+      await f.host.open(f.window, { ticket: nextTicket, bounds, appearance: "dark" }),
+    ).toMatchObject({ state: "quarantined", reason: "retirement-uncertain" });
+    const first = f.host.diagnostics();
+    expect(first.quarantine).toEqual({
+      stage: "create",
+      reason: "create-failed",
+      failure: { lane: "viewer", stage: "create", outcome: "exception", allowanceSpent: false },
+      native: null,
+    });
+    expect(first).toMatchObject({
+      activeCount: 2,
+      viewerCount: 2,
+      failureCount: 1,
+      retirementCount: 0,
+      native: null,
+    });
+    expect((await f.host.retire(f.window, sibling.leaseId)).state).toBe("retired");
+    expect(f.host.diagnostics()).toMatchObject({
+      activeCount: 1,
+      viewerCount: 1,
+      retirementCount: 1,
+      lastRetirementReason: "owner-revoked",
+      quarantine: first.quarantine,
+      native: null,
+    });
+    expect(f.host.capabilities()).toMatchObject({ available: false, reason: "quarantined" });
+    expect(JSON.stringify(f.host.diagnostics())).not.toMatch(
+      /private|sentinel|fixture-thread|trusted-document/,
+    );
+  });
+  it("preserves replaced-owner truth when a startup exception also reaches its old deadline", async () => {
+    let now = 0;
+    let frame: { frameToken: string };
+    const f = await fixture({
+      now: () => now,
+      initialize: async () => {
+        frame.frameToken = "replacement-owner";
+        now = VISUALIZATION_HOST_PREVIEW_MS;
+        throw new Error("private stale owner sentinel");
+      },
+    });
+    frame = f.window.webContents.mainFrame as unknown as { frameToken: string };
+    expect(await f.open()).toMatchObject({ state: "blocked", reason: "owner-revoked" });
+    expect(f.host.diagnostics()).toMatchObject({
+      failureCount: 0,
+      lastFailure: null,
+      quarantine: null,
+      lastRetirementReason: "owner-revoked",
+    });
+    expect(JSON.stringify(f.host.diagnostics())).not.toContain("sentinel");
+  });
+  it("shows the exact quarantined viewer now while preserving its first scalar snapshot", async () => {
+    const f = await fixture();
+    const first = await f.open();
+    const nextTicket = "b".repeat(64);
+    expect(
+      f.host.prepare({
+        ...f.input,
+        ticket: nextTicket,
+        owner: { ...owner, operationId: randomUUID() },
+      }).status,
+    ).toBe("ready");
+    const sibling = await f.host.open(f.window, { ticket: nextTicket, bounds, appearance: "dark" });
+    let phase: VisualizationSurfaceDiagnostics["phase"] = "quarantined";
+    f.surfaces[0]!.diagnostics = () => nativeSnapshot(phase);
+    f.surfaces[1]!.diagnostics = () => ({
+      ...nativeSnapshot("retired"),
+      captureOutcome: "ready",
+      captureWidth: 100,
+      captureHeight: 80,
+    });
+    f.surfaces[0]!.retire = async () => false;
+    expect((await f.host.retire(f.window, first.leaseId)).state).toBe("quarantined");
+    const frozen = f.host.diagnostics().quarantine!;
+    expect(frozen).toMatchObject({
+      stage: "retire",
+      reason: "retirement-uncertain",
+      failure: { lane: "viewer", stage: "retire", outcome: "refused", allowanceSpent: false },
+      native: { phase: "quarantined" },
+    });
+    phase = "retiring";
+    expect((await f.host.retire(f.window, sibling.leaseId)).state).toBe("retired");
+    expect(f.host.diagnostics()).toMatchObject({
+      native: { phase: "retiring", captureOutcome: "not-attempted" },
+      quarantine: frozen,
+      lastRetirementReason: "owner-revoked",
+      failureCount: 1,
+    });
+    Object.assign(frozen.native!, { phase: "active" });
+    Object.assign(frozen.failure, { stage: "capture" });
+    expect(f.host.diagnostics().quarantine).toMatchObject({
+      failure: { stage: "retire" },
+      native: { phase: "quarantined" },
+    });
+    expect(f.host.capabilities()).toMatchObject({ available: false, reason: "quarantined" });
+  });
+  it("classifies viewer capture exceptions without preserving opaque native causes", async () => {
+    const f = await fixture();
+    const state = await f.open();
+    f.surfaces[0]!.capture = async () => {
+      throw new Error("private capture source sentinel");
+    };
+    expect(await f.host.capture(f.window, state.leaseId)).toBeNull();
+    expect(f.host.diagnostics()).toMatchObject({
+      failureCount: 1,
+      lastFailure: {
+        lane: "viewer",
+        stage: "capture",
+        outcome: "exception",
+        allowanceSpent: false,
+      },
+      quarantine: null,
+    });
+    expect(JSON.stringify(f.host.diagnostics())).not.toContain("sentinel");
+  });
+  it.each(["initialize", "installSource", "capture"] as const)(
+    "classifies a private preview %s exception without claiming an elapsed deadline",
+    async (stage) => {
+      const f = await fixture({
+        [stage]: async () => {
+          throw new Error("private preview source sentinel");
+        },
+      });
+      expect(await f.host.preview(owner, document)).toEqual({
+        status: "blocked",
+        reason: "unavailable",
+      });
+      expect(f.host.diagnostics()).toMatchObject({
+        failureCount: 1,
+        lastFailure: {
+          lane: "preview",
+          stage: stage === "installSource" ? "install" : stage,
+          outcome: "exception",
+          allowanceSpent: false,
+        },
+        quarantine: null,
+      });
+      expect(f.host.capabilities()).toMatchObject({ available: true, reason: "ready" });
+      expect(JSON.stringify(f.host.diagnostics())).not.toContain("sentinel");
+    },
+  );
+  it("rejects preview pixels exactly at the original monotonic deadline", async () => {
+    let now = 0;
+    const f = await fixture({
+      now: () => now,
+      capture: async () => {
+        now = VISUALIZATION_HOST_PREVIEW_MS;
+        return { png: new Uint8Array([1, 2, 3]), width: 400, height: 200 };
+      },
+    });
+    expect(await f.host.preview(owner, document)).toEqual({ status: "blocked", reason: "timeout" });
+    expect(f.host.diagnostics()).toMatchObject({
+      failureCount: 1,
+      lastFailure: { lane: "preview", stage: "capture", outcome: "deadline", allowanceSpent: true },
+      quarantine: null,
+    });
+  });
+  it("classifies an opaque retirement exception while preserving quarantine authority", async () => {
+    const f = await fixture();
+    const state = await f.open();
+    f.surfaces[0]!.retire = async () => {
+      throw new Error("private retirement source sentinel");
+    };
+    expect((await f.host.retire(f.window, state.leaseId)).state).toBe("quarantined");
+    expect(f.host.diagnostics()).toMatchObject({
+      failureCount: 1,
+      lastFailure: { lane: "viewer", stage: "retire", outcome: "exception", allowanceSpent: false },
+      quarantine: {
+        stage: "retire",
+        reason: "retirement-uncertain",
+        failure: { stage: "retire", outcome: "exception" },
+      },
+    });
+    expect(f.host.capabilities()).toMatchObject({ available: false, reason: "quarantined" });
+    expect(JSON.stringify(f.host.diagnostics())).not.toContain("sentinel");
+  });
   it("passes full CSS viewport and separate visible clip only to the exact admitted surface", async () => {
     const f = await fixture();
     const clipBounds = { x: 10, y: 60, width: 300, height: 100 };

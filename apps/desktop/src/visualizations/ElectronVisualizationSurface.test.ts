@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import type * as Electron from "electron";
+import { EventEmitter } from "node:events";
 import { VISUALIZATION_FLUID_RUNTIME_SOURCE } from "@cafecode/shared/visualizationFluidRuntime";
 import { GENERATED_VISUALIZATION_FONT_FAMILY_STYLE } from "@cafecode/shared/chatTypography";
 import {
@@ -12,11 +13,369 @@ import {
   type VisualizationSurfaceOptions,
 } from "./ElectronVisualizationSurface.ts";
 
-const native = vi.hoisted(() => ({ inventory: vi.fn(), display: vi.fn() }));
+const native = vi.hoisted(() => ({
+  inventory: vi.fn(),
+  display: vi.fn(),
+  hasSwitch: vi.fn(() => false),
+  partition: vi.fn(),
+  createView: vi.fn(),
+  createClip: vi.fn(),
+  createWindow: vi.fn(),
+}));
 vi.mock("electron", () => ({
+  app: { commandLine: { hasSwitch: native.hasSwitch } },
+  session: { fromPartition: native.partition },
+  WebContentsView: function (_options: unknown) {
+    return native.createView(_options);
+  },
+  View: function () {
+    return native.createClip();
+  },
+  BrowserWindow: function (_options: unknown) {
+    return native.createWindow(_options);
+  },
   webContents: { getAllWebContents: native.inventory },
   screen: { getDisplayMatching: native.display },
 }));
+
+/** Exact synthetic native handles exercise production creation/retirement, not
+ * a mocked createNativeSurface or inferred process exit. None launches Electron
+ * or reads a profile. Each close emits the same handle's actual destroyed event. */
+function startupFixture() {
+  const contents = Object.assign(new EventEmitter(), {
+    ipc: new EventEmitter(),
+    isDestroyed: vi.fn(() => destroyed),
+    close: vi.fn(() => {
+      destroyed = true;
+      contents.emit("destroyed");
+    }),
+    forcefullyCrashRenderer: vi.fn(),
+    setWindowOpenHandler: vi.fn(),
+    loadURL: vi.fn(async () => {
+      throw new Error("synthetic bootstrap refusal");
+    }),
+    getZoomFactor: vi.fn(() => 1),
+  });
+  let destroyed = false;
+  let windowDestroyed = false;
+  let clipBounds = { x: 0, y: 0, width: 400, height: 200 };
+  const clip = {
+    setVisible: vi.fn(),
+    setBounds: vi.fn((bounds: typeof clipBounds) => {
+      clipBounds = bounds;
+    }),
+    getBounds: vi.fn(() => clipBounds),
+    setBorderRadius: vi.fn(),
+    addChildView: vi.fn(),
+    removeChildView: vi.fn(),
+  };
+  const view = {
+    webContents: contents,
+    setVisible: vi.fn(),
+    setBackgroundColor: vi.fn(),
+    setBounds: vi.fn(),
+  };
+  const window = Object.assign(new EventEmitter(), {
+    webContents: contents,
+    isDestroyed: vi.fn(() => windowDestroyed),
+    destroy: vi.fn(() => {
+      windowDestroyed = true;
+      window.emit("closed");
+    }),
+    getContentSize: vi.fn(() => [400, 200]),
+    contentView: { addChildView: vi.fn(), removeChildView: vi.fn() },
+  });
+  const session = Object.assign(new EventEmitter(), {
+    isPersistent: vi.fn(() => false),
+    getPreloadScripts: vi.fn(() => []),
+    setPermissionRequestHandler: vi.fn(),
+    setPermissionCheckHandler: vi.fn(),
+    setDevicePermissionHandler: vi.fn(),
+    setDisplayMediaRequestHandler: vi.fn(),
+    setCertificateVerifyProc: vi.fn(),
+    webRequest: { onBeforeRequest: vi.fn() },
+    protocol: { handle: vi.fn(), unhandle: vi.fn() },
+    clearStorageData: vi.fn(async () => {}),
+  });
+  native.hasSwitch.mockReturnValue(false);
+  native.partition.mockReturnValue(session);
+  native.createView.mockReturnValue(view);
+  native.createClip.mockReturnValue(clip);
+  native.createWindow.mockReturnValue(window);
+  native.partition.mockClear();
+  native.createView.mockClear();
+  native.createClip.mockClear();
+  native.createWindow.mockClear();
+  const create = (preview = false, clipHeight = 200) =>
+    new ElectronVisualizationSurface({
+      document: {
+        kind: "generated",
+        html: "<svg><rect width='10' height='10'/></svg>",
+        assets: [],
+        width: 400,
+        height: 200,
+        appearance: "light",
+      },
+      preloadPath: "unlaunched synthetic preload",
+      window: preview ? null : (window as unknown as Electron.BrowserWindow),
+      bounds: { x: 0, y: 0, width: 400, height: 200 },
+      clipBounds: { x: 0, y: 0, width: 400, height: clipHeight },
+      onMessage: () => {},
+      onRevoked: vi.fn(),
+    });
+  return { create, contents, clip, view, window, session };
+}
+
+describe("native visualization partial startup retirement", () => {
+  it("refuses a sub-minimum initial mask before allocating a session or child", async () => {
+    const f = startupFixture(),
+      surface = f.create(false, 31);
+    await expect(surface.initialize()).rejects.toThrow("Visualization bounds were refused.");
+    expect(native.partition).not.toHaveBeenCalled();
+    expect(native.createView).not.toHaveBeenCalled();
+    expect(native.createClip).not.toHaveBeenCalled();
+    expect(await surface.retire(0)).toBe(true);
+    expect(f.contents.close).not.toHaveBeenCalled();
+    expect(f.window.destroy).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    "child-visibility",
+    "clip-creation",
+    "mask-bounds",
+    "mask-attachment",
+    "policy-handler",
+  ] as const)(
+    "observes exact child destruction after a %s failure without quarantining the healthy owner",
+    async (boundary) => {
+      const f = startupFixture(),
+        surface = f.create();
+      const refuse = () => {
+        throw new Error("synthetic partial setup refusal");
+      };
+      if (boundary === "child-visibility") f.view.setVisible.mockImplementationOnce(refuse);
+      if (boundary === "clip-creation") native.createClip.mockImplementationOnce(refuse);
+      if (boundary === "mask-bounds") f.clip.setBounds.mockImplementationOnce(refuse);
+      if (boundary === "mask-attachment")
+        f.window.contentView.addChildView.mockImplementationOnce(refuse);
+      if (boundary === "policy-handler")
+        f.session.setPermissionRequestHandler.mockImplementationOnce(refuse);
+      await expect(surface.initialize()).rejects.toThrow();
+      expect(await surface.retire(0)).toBe(true);
+      expect(surface.diagnostics()).toMatchObject({ phase: "retired", destroyed: true });
+      expect(f.contents.close).toHaveBeenCalledExactlyOnceWith({ waitForBeforeUnload: false });
+      expect(f.contents.forcefullyCrashRenderer).not.toHaveBeenCalled();
+      expect(f.window.destroy).not.toHaveBeenCalled();
+      expect(f.session.clearStorageData).toHaveBeenCalledOnce();
+      expect(Reflect.get(surface, "sourceDocument")).toBeUndefined();
+      expect(Reflect.get(surface, "callbacks")).toBeUndefined();
+    },
+  );
+
+  it("still closes the exact child when native detachment throws", async () => {
+    const f = startupFixture(),
+      surface = f.create();
+    await expect(surface.initialize()).rejects.toThrow("synthetic bootstrap refusal");
+    f.clip.removeChildView.mockImplementationOnce(() => {
+      throw new Error("synthetic detach refusal");
+    });
+    expect(await surface.retire(0)).toBe(true);
+    expect(f.contents.close).toHaveBeenCalledOnce();
+    expect(f.window.destroy).not.toHaveBeenCalled();
+  });
+
+  it("clears only a qualified private session and preview window when child allocation fails", async () => {
+    const f = startupFixture(),
+      surface = f.create(true);
+    native.createView.mockImplementationOnce(() => {
+      throw new Error("synthetic allocation refusal");
+    });
+    await expect(surface.initialize()).rejects.toThrow("synthetic allocation refusal");
+    expect(await surface.retire(0)).toBe(true);
+    expect(f.window.destroy).toHaveBeenCalledOnce();
+    expect(f.session.clearStorageData).toHaveBeenCalledOnce();
+    expect(f.contents.close).not.toHaveBeenCalled();
+  });
+
+  it("does not claim a private preview window retired when its exact native destroy failed", async () => {
+    const f = startupFixture(),
+      surface = f.create(true);
+    native.createView.mockImplementationOnce(() => {
+      throw new Error("synthetic allocation refusal");
+    });
+    await expect(surface.initialize()).rejects.toThrow("synthetic allocation refusal");
+    f.window.destroy.mockImplementationOnce(() => {
+      throw new Error("synthetic native destroy refusal");
+    });
+    expect(await surface.retire(0)).toBe(false);
+    expect(surface.diagnostics().phase).toBe("quarantined");
+    expect(f.session.clearStorageData).not.toHaveBeenCalled();
+    expect(Reflect.get(surface, "sourceDocument")).toBeDefined();
+  });
+
+  it("does not clear storage in a refused persistent session", async () => {
+    const f = startupFixture(),
+      surface = f.create(true);
+    f.session.isPersistent.mockReturnValue(true);
+    await expect(surface.initialize()).rejects.toThrow("Visualization execution is unavailable.");
+    expect(await surface.retire(0)).toBe(true);
+    expect(f.session.clearStorageData).not.toHaveBeenCalled();
+    expect(native.createWindow).not.toHaveBeenCalled();
+  });
+
+  it("quarantines an unobserved child close rather than treating a request as destruction", async () => {
+    const f = startupFixture(),
+      surface = f.create();
+    f.clip.setBounds.mockImplementationOnce(() => {
+      throw new Error("synthetic partial setup refusal");
+    });
+    await expect(surface.initialize()).rejects.toThrow();
+    f.contents.close.mockImplementation(() => {});
+    expect(await surface.retire(0)).toBe(false);
+    expect(surface.diagnostics()).toMatchObject({ phase: "quarantined", destroyed: false });
+    expect(f.session.clearStorageData).not.toHaveBeenCalled();
+    expect(Reflect.get(surface, "sourceDocument")).toBeDefined();
+    expect(f.contents.forcefullyCrashRenderer).not.toHaveBeenCalled();
+  });
+
+  it("never crashes or closes an admitted renderer without current exclusive-process proof", async () => {
+    const f = startupFixture(),
+      surface = f.create();
+    await expect(surface.initialize()).rejects.toThrow("synthetic bootstrap refusal");
+    Reflect.set(surface, "rendererPid", 123);
+    const internals = surface as unknown as { processesAreExclusive(retirement: boolean): boolean };
+    const exclusive = vi.spyOn(internals, "processesAreExclusive").mockReturnValue(false);
+    expect(await surface.retire(0)).toBe(false);
+    expect(exclusive).toHaveBeenCalledExactlyOnceWith(true);
+    expect(f.contents.close).not.toHaveBeenCalled();
+    expect(f.contents.forcefullyCrashRenderer).not.toHaveBeenCalled();
+    expect(f.session.clearStorageData).not.toHaveBeenCalled();
+    expect(surface.diagnostics().phase).toBe("quarantined");
+  });
+
+  it("never allocates another child when initialize repeats or cancellation wins first", async () => {
+    const f = startupFixture(),
+      surface = f.create();
+    await expect(surface.initialize()).rejects.toThrow("synthetic bootstrap refusal");
+    await expect(surface.initialize()).rejects.toThrow("Visualization execution was refused.");
+    expect(native.createView).toHaveBeenCalledOnce();
+    expect(await surface.retire(0)).toBe(true);
+    const cancelled = f.create();
+    expect(await cancelled.retire(0)).toBe(true);
+    await expect(cancelled.initialize()).rejects.toThrow("Visualization execution was refused.");
+    expect(native.createView).toHaveBeenCalledOnce();
+  });
+
+  it("stops startup when exact child destruction reentrantly retires its first native setter", async () => {
+    const f = startupFixture(),
+      surface = f.create();
+    const callbacks = Reflect.get(surface, "callbacks");
+    let retirement: Promise<boolean> | undefined;
+    Reflect.set(callbacks, "onRevoked", () => {
+      retirement = surface.retire(0);
+    });
+    f.view.setVisible.mockImplementationOnce(() => {
+      f.contents.close();
+    });
+    await expect(surface.initialize()).rejects.toThrow("Visualization execution was refused.");
+    expect(await retirement).toBe(true);
+    expect(native.createClip).not.toHaveBeenCalled();
+    expect(f.window.contentView.addChildView).not.toHaveBeenCalled();
+    expect(f.contents.loadURL).not.toHaveBeenCalled();
+    expect(surface.diagnostics()).toMatchObject({ phase: "retired", destroyed: true });
+    expect(Reflect.get(surface, "sourceDocument")).toBeUndefined();
+    expect(f.window.destroy).not.toHaveBeenCalled();
+  });
+
+  it("cannot register protocol or owner observers after a policy setter reentrantly retires its exact child", async () => {
+    const f = startupFixture(),
+      surface = f.create();
+    const callbacks = Reflect.get(surface, "callbacks");
+    let retirement: Promise<boolean> | undefined;
+    Reflect.set(callbacks, "onRevoked", () => {
+      retirement = surface.retire(0);
+    });
+    f.session.setPermissionRequestHandler.mockImplementationOnce(() => {
+      f.contents.close();
+    });
+    await expect(surface.initialize()).rejects.toThrow("Visualization execution was refused.");
+    expect(await retirement).toBe(true);
+    expect(f.session.protocol.handle).not.toHaveBeenCalled();
+    expect(f.session.setPermissionCheckHandler).not.toHaveBeenCalled();
+    expect(f.window.listenerCount("closed")).toBe(0);
+    expect(f.window.listenerCount("hide")).toBe(0);
+    expect(f.window.listenerCount("minimize")).toBe(0);
+    expect(f.contents.listenerCount("did-start-navigation")).toBe(0);
+    expect(f.contents.listenerCount("focus")).toBe(0);
+    expect(f.contents.loadURL).not.toHaveBeenCalled();
+    expect(surface.diagnostics()).toMatchObject({ phase: "retired", destroyed: true });
+    expect(Reflect.get(surface, "sourceDocument")).toBeUndefined();
+    expect(Reflect.get(surface, "callbacks")).toBeUndefined();
+    expect(f.window.destroy).not.toHaveBeenCalled();
+  });
+
+  it.each([false, true])(
+    "rolls back a protocol registration which completes after reentrant retirement (native throw: %s)",
+    async (throws) => {
+      const f = startupFixture(),
+        surface = f.create();
+      let registered = false;
+      const callbacks = Reflect.get(surface, "callbacks");
+      let retirement: Promise<boolean> | undefined;
+      Reflect.set(callbacks, "onRevoked", () => {
+        retirement = surface.retire(0);
+      });
+      f.session.protocol.unhandle.mockImplementation(() => {
+        registered = false;
+      });
+      f.session.protocol.handle.mockImplementationOnce(() => {
+        // The call is still in flight when exact teardown runs. Finish its
+        // owned registration afterwards to prove late rollback, not a guessed
+        // success from the retirement promise or an unrelated protocol owner.
+        f.contents.close();
+        registered = true;
+        if (throws) throw new Error("synthetic post-registration refusal");
+      });
+      await expect(surface.initialize()).rejects.toThrow();
+      expect(await retirement).toBe(true);
+      expect(registered).toBe(false);
+      expect(f.session.protocol.unhandle).toHaveBeenCalledTimes(2);
+      expect(Reflect.get(surface, "protocolRegistered")).toBe(false);
+      expect(f.window.listenerCount("closed")).toBe(0);
+      expect(f.window.listenerCount("hide")).toBe(0);
+      expect(f.contents.loadURL).not.toHaveBeenCalled();
+      expect(surface.diagnostics()).toMatchObject({ phase: "retired", destroyed: true });
+      expect(f.session.clearStorageData).toHaveBeenCalledOnce();
+    },
+  );
+
+  it("removes an exact owner observer which finishes registering after reentrant retirement", async () => {
+    const f = startupFixture(),
+      surface = f.create();
+    const callbacks = Reflect.get(surface, "callbacks");
+    let retirement: Promise<boolean> | undefined;
+    Reflect.set(callbacks, "onRevoked", () => {
+      retirement = surface.retire(0);
+    });
+    const on = f.window.on;
+    let destroyedDuringHide = false;
+    vi.spyOn(f.window, "on").mockImplementation((event, listener) => {
+      if (event === "hide" && !destroyedDuringHide) {
+        destroyedDuringHide = true;
+        f.contents.close();
+      }
+      return on.call(f.window, event, listener);
+    });
+    await expect(surface.initialize()).rejects.toThrow("Visualization execution was refused.");
+    expect(await retirement).toBe(true);
+    expect(destroyedDuringHide).toBe(true);
+    for (const event of ["closed", "hide", "minimize"])
+      expect(f.window.listenerCount(event)).toBe(0);
+    expect(f.contents.loadURL).not.toHaveBeenCalled();
+    expect(f.session.clearStorageData).toHaveBeenCalledOnce();
+    expect(surface.diagnostics()).toMatchObject({ phase: "retired", destroyed: true });
+  });
+});
 
 function exclusive(peer: object) {
   const source = {
@@ -339,7 +698,7 @@ function visibilityFixture(preview = false) {
     isVisible: () => true,
     isMinimized: () => false,
     getContentSize: () => [640, 480],
-    webContents: { getZoomFactor: () => ownerZoom },
+    webContents: { getZoomFactor: () => ownerZoom, isDestroyed: () => false },
   });
   const internals = surface as unknown as {
     createNativeSurface(): void;

@@ -124,6 +124,11 @@ export class ElectronVisualizationSurface implements VisualizationSurface {
     | "admitGeneratedSource"
   >;
   private sourceDocument: VisualizationHostDocument | undefined;
+  // Construction is inert. Mark native startup only immediately before its
+  // first allocation so a failed owner-geometry preflight owns no resources,
+  // while a partial native attempt can never overwrite its cleanup handles.
+  private nativeCreationStarted = false;
+  private sessionOwned = false;
   private protocolRegistered = false;
   private callbacks:
     | Pick<
@@ -241,7 +246,8 @@ export class ElectronVisualizationSurface implements VisualizationSurface {
   }
 
   private createNativeSurface(): void {
-    if (this.revoked) throw new Error("Visualization execution was refused.");
+    if (this.revoked || this.nativeCreationStarted)
+      throw new Error("Visualization execution was refused.");
     // Unsafe global Chromium modes invalidate per-view isolation. Do not try to
     // repair them or run private bytes under an application-wide override.
     if (
@@ -256,11 +262,23 @@ export class ElectronVisualizationSurface implements VisualizationSurface {
     const options = this.options;
     const document = this.sourceDocument;
     if (!document) throw new Error("Visualization execution was refused.");
+    if (options.window) {
+      this.window = options.window;
+      // Automatic cards can reach startup with only a tiny positive visible
+      // crop. Refuse that unsafe mask before allocating an ephemeral session or
+      // child; a refusal must not poison otherwise healthy preview admission.
+      if (!this.readGeometry(options.bounds, options.clipBounds))
+        throw new Error("Visualization bounds were refused.");
+    }
+    this.nativeCreationStarted = true;
     this.session = Electron.session.fromPartition(`visualization-${this.generation}`, {
       cache: false,
     });
     if (this.session.isPersistent() || this.session.getPreloadScripts().length !== 0)
       throw new Error("Visualization execution is unavailable.");
+    // Never clear storage from a session which failed this ownership admission,
+    // even if native unexpectedly returned a persistent or preload-bearing one.
+    this.sessionOwned = true;
     this.window =
       options.window ??
       new Electron.BrowserWindow({
@@ -279,6 +297,8 @@ export class ElectronVisualizationSurface implements VisualizationSurface {
           devTools: false,
         },
       });
+    if (!this.readGeometry(options.bounds, options.clipBounds))
+      throw new Error("Visualization bounds were refused.");
     this.view = new Electron.WebContentsView({
       webPreferences: {
         session: this.session,
@@ -302,21 +322,40 @@ export class ElectronVisualizationSurface implements VisualizationSurface {
         offscreen: this.previewWindow,
       },
     });
+    // Every subsequent native setter/allocation can throw. Observe this exact
+    // newly owned child before touching visibility, masking or parent views so
+    // partial startup can still prove destruction without adopting another PID.
+    this.installNativeLifecycle();
     this.view.setVisible(false);
+    this.assertStartupUnrevoked();
     // The wrapper retains themed defaults; explicit transparent author CSS may
     // reveal the host without the native view's usual opaque white backing.
     if (document.kind === "generated") this.view.setBackgroundColor("#00000000");
+    this.assertStartupUnrevoked();
     // A native child sits above Cafe's DOM, so CSS overflow is not its clip.
     // Use a native parent mask without resizing the child document to whatever
     // sliver of its card currently remains inside the timeline's scroll area.
     this.clippingView = new Electron.View();
+    this.assertStartupUnrevoked();
     this.clippingView.setVisible(false);
+    this.assertStartupUnrevoked();
     this.window.contentView.addChildView(this.clippingView);
+    this.assertStartupUnrevoked();
     if (!this.applyGeometry(options.bounds, options.clipBounds, true))
       throw new Error("Visualization bounds were refused.");
+    this.assertStartupUnrevoked();
     this.clippingView.addChildView(this.view);
+    this.assertStartupUnrevoked();
     this.installNativePolicy();
+    this.assertStartupUnrevoked();
     this.phase = "bootstrap";
+  }
+
+  /** Native setters can synchronously emit lifecycle events. A revocation may
+   * retire this exact child reentrantly, so later startup must not allocate a
+   * new mask, reattach pixels or publish bootstrap after that terminal boundary. */
+  private assertStartupUnrevoked(): void {
+    if (this.revoked) throw new Error("Visualization execution was refused.");
   }
 
   private deny = (): void => {
@@ -324,8 +363,7 @@ export class ElectronVisualizationSurface implements VisualizationSurface {
     if (this.rejection === "none") this.rejection = "native-policy";
     this.cancelPendingGeneratedInstallation();
     this.revoked = true;
-    this.view.setVisible(false);
-    this.clippingView?.setVisible(false);
+    this.hideNativePresentation();
     this.notifyVisibility();
     this.callbacks?.onRevoked();
   };
@@ -374,197 +412,10 @@ export class ElectronVisualizationSurface implements VisualizationSurface {
     this.deny();
   };
 
-  private installNativePolicy(): void {
+  /** Exact native observations remain installed through partial policy setup.
+   * A successful close request is never itself evidence of child destruction. */
+  private installNativeLifecycle(): void {
     const contents = this.view.webContents;
-    contents.ipc.on(GENERATED_VISUALIZATION_FONTS_READY_CHANNEL, (event, raw: unknown) => {
-      this.receiveGeneratedFontReadiness(event.senderFrame, raw);
-    });
-    contents.ipc.on(VISUALIZATION_INSTALLED_CHANNEL, (event, succeeded: unknown) => {
-      this.receiveInstallationAcknowledgement(event.senderFrame, succeeded);
-    });
-    contents.ipc.on(VISUALIZATION_FRAME_CHANNEL, (event, token: unknown) => {
-      const pending = this.frameObservation;
-      if (
-        !pending ||
-        token !== pending.token ||
-        event.senderFrame !== contents.mainFrame ||
-        !this.isCurrent()
-      )
-        return;
-      this.frameObservation = undefined;
-      pending.resolve();
-    });
-    contents.ipc.on(VISUALIZATION_HEARTBEAT_CHANNEL, (event, sequence: unknown) => {
-      if (
-        event.senderFrame !== contents.mainFrame ||
-        !Number.isSafeInteger(sequence) ||
-        sequence !== this.heartbeatSequence + 1
-      ) {
-        if (this.rejection === "none")
-          this.rejection =
-            event.senderFrame !== contents.mainFrame ? "heartbeat-frame" : "heartbeat-sequence";
-        this.deny();
-        return;
-      }
-      this.heartbeatSequence = sequence as number;
-      this.lastHeartbeat = performance.now();
-    });
-    this.session.setPermissionRequestHandler(denyPermission);
-    this.session.setPermissionCheckHandler(refusePermission);
-    this.session.setDevicePermissionHandler(refusePermission);
-    this.session.setDisplayMediaRequestHandler(denyDisplay);
-    this.session.on("will-download", this.downloadDenied);
-    this.session.setCertificateVerifyProc(denyCertificate);
-    this.session.webRequest.onBeforeRequest((details, callback) => {
-      const url = details.url;
-      const bootstrap = url === `${this.namespace}/bootstrap` && !this.admitted;
-      const asset =
-        url.startsWith(`${this.namespace}/asset/`) && this.resources.has(url) && this.admitted;
-      const own = details.webContentsId === contents.id;
-      const allowed = !this.revoked && own && (bootstrap || asset) && ++this.requests <= 256;
-      callback({ cancel: !allowed });
-      if (!allowed && !this.revoked) {
-        this.rejection = "resource-request";
-        this.deny();
-      }
-    });
-    this.session.protocol.handle(VISUALIZATION_SCHEME, (request) => {
-      if (this.revoked || request.method !== "GET") return new Response(null, { status: 403 });
-      let bytes: Buffer;
-      let mime = "text/html; charset=utf-8";
-      const csp = VISUALIZATION_CSP;
-      if (request.url === `${this.namespace}/bootstrap` && !this.admitted) {
-        // Admit this sole inert native top-frame process before source reaches
-        // its isolated preload loader. No iframe/OOPIF is granted.
-        bytes = Buffer.from(
-          "<!doctype html><html><head><meta charset=utf-8></head><body></body></html>",
-        );
-      } else {
-        const resource = this.resources.get(request.url);
-        if (!this.admitted || !resource) return new Response(null, { status: 403 });
-        bytes = resource;
-        mime = "image/png";
-      }
-      this.requestedBytes += bytes.length;
-      if (this.requestedBytes > 24 * 1024 * 1024) {
-        this.deny();
-        return new Response(null, { status: 403 });
-      }
-      return new Response(new Uint8Array(bytes).buffer, {
-        headers: {
-          "Content-Type": mime,
-          "Content-Security-Policy": csp,
-          "Cache-Control": "no-store",
-          "X-Content-Type-Options": "nosniff",
-          "Referrer-Policy": "no-referrer",
-          "Permissions-Policy":
-            "camera=(), microphone=(), geolocation=(), clipboard-read=(), clipboard-write=(), usb=(), serial=(), hid=(), fullscreen=()",
-        },
-      });
-    });
-    contents.setWindowOpenHandler(() => {
-      this.deny();
-      return { action: "deny" };
-    });
-    contents.on("will-frame-navigate", (event) => {
-      event.preventDefault();
-      if (this.rejection === "none") this.rejection = "page-navigation";
-      this.deny();
-    });
-    contents.on("will-redirect", (event) => {
-      event.preventDefault();
-      this.deny();
-    });
-    contents.on("will-attach-webview", (event) => {
-      event.preventDefault();
-      this.deny();
-    });
-    contents.on("login", (event, _details, _authInfo, callback) => {
-      event.preventDefault();
-      callback();
-      this.deny();
-    });
-    contents.on("frame-created", () => {
-      if (this.admitted) {
-        if (this.rejection === "none") this.rejection = "child-frame";
-        this.deny();
-      }
-    });
-    contents.on("before-mouse-event", (_event, input) => {
-      if (
-        input.type === "mouseDown" &&
-        this.visibilityCommitted &&
-        !this.suspended &&
-        !this.revoked
-      ) {
-        this.focusAllowedUntil = performance.now() + 500;
-        this.callbacks?.onTrustedFocus?.();
-      }
-    });
-    contents.on("blur", () => {
-      this.focusAllowedUntil = 0;
-    });
-    contents.on("focus", () => {
-      // Generated autofocus/window.focus is not a user interaction. Never
-      // activate an app/window; restore only the already focused exact Cafe
-      // owner when source attempted to take keyboard focus without native input.
-      if (
-        this.sourceDocument?.kind === "generated" &&
-        !this.previewWindow &&
-        performance.now() > this.focusAllowedUntil &&
-        !this.window.isDestroyed() &&
-        this.window.isFocused() &&
-        !this.window.webContents.isDestroyed()
-      ) {
-        const now = performance.now();
-        if (now - this.focusEpoch >= 1000) {
-          this.focusEpoch = now;
-          this.focusAttempts = 0;
-        }
-        this.callbacks?.onFocusDenied?.();
-        if (++this.focusAttempts > 2) this.deny();
-      }
-    });
-    contents.ipc.on("cafe-visualization:wheel", (event, raw: unknown) => {
-      if (
-        this.sourceDocument?.kind !== "generated" ||
-        this.previewWindow ||
-        event.senderFrame !== contents.mainFrame ||
-        !this.isCurrent() ||
-        typeof raw !== "object" ||
-        raw === null
-      )
-        return;
-      const value = raw as { sequence?: unknown; deltaX?: unknown; deltaY?: unknown };
-      if (
-        Object.keys(value).length !== 3 ||
-        value.sequence !== this.wheelSequence + 1 ||
-        typeof value.deltaX !== "number" ||
-        typeof value.deltaY !== "number" ||
-        !Number.isFinite(value.deltaX) ||
-        !Number.isFinite(value.deltaY) ||
-        Math.abs(value.deltaX) > 2048 ||
-        Math.abs(value.deltaY) > 2048
-      ) {
-        this.deny();
-        return;
-      }
-      this.wheelSequence += 1;
-      const now = performance.now();
-      if (now - this.messageEpoch >= 1000) {
-        this.messageEpoch = now;
-        this.messages = 0;
-      }
-      if (++this.messages > 30) return;
-      if (!this.visibilityCommitted || this.suspended) return;
-      this.callbacks?.onWheel?.({ deltaX: value.deltaX, deltaY: value.deltaY });
-    });
-    contents.ipc.on("cafe-visualization:layout", (event, raw: unknown) => {
-      this.receiveLayout(event.senderFrame, raw);
-    });
-    contents.on("did-start-navigation", (event) => {
-      if (this.admitted && !event.isSameDocument) this.deny();
-    });
     contents.on("render-process-gone", () => {
       this.gone = true;
       if (!this.retiring) {
@@ -572,44 +423,320 @@ export class ElectronVisualizationSurface implements VisualizationSurface {
         this.deny();
       }
     });
-    contents.on("destroyed", () => {
+    contents.once("destroyed", () => {
       this.destroyed = true;
       if (!this.retiring) this.deny();
     });
-    contents.ipc.on(VISUALIZATION_PAGE_CHANNEL, (event, raw: unknown) => {
-      if (
-        !this.isCurrent() ||
-        this.sourceDocument?.kind !== "mcp-app" ||
-        event.senderFrame !== contents.mainFrame ||
-        typeof raw !== "object" ||
-        raw === null
-      )
-        return;
-      const message = raw as { sequence?: unknown; json?: unknown };
-      if (message.sequence !== this.sequence + 1 || !isVisualizationMessage(message.json)) {
+  }
+
+  /** Native hiding failure cannot skip the independent exact-child teardown.
+   * It grants no visibility, process authority or permission to resume source. */
+  private hideNativePresentation(): void {
+    try {
+      this.view?.setVisible(false);
+    } catch {
+      /* Retirement still needs positive native destruction. */
+    }
+    try {
+      this.clippingView?.setVisible(false);
+    } catch {
+      /* Retain the original refusal while observing exact-child teardown. */
+    }
+  }
+
+  private installNativePolicy(): void {
+    let protocolAttempted = false;
+    try {
+      const contents = this.view.webContents;
+      contents.ipc.on(GENERATED_VISUALIZATION_FONTS_READY_CHANNEL, (event, raw: unknown) => {
+        this.receiveGeneratedFontReadiness(event.senderFrame, raw);
+      });
+      this.assertStartupUnrevoked();
+      contents.ipc.on(VISUALIZATION_INSTALLED_CHANNEL, (event, succeeded: unknown) => {
+        this.receiveInstallationAcknowledgement(event.senderFrame, succeeded);
+      });
+      this.assertStartupUnrevoked();
+      contents.ipc.on(VISUALIZATION_FRAME_CHANNEL, (event, token: unknown) => {
+        const pending = this.frameObservation;
+        if (
+          !pending ||
+          token !== pending.token ||
+          event.senderFrame !== contents.mainFrame ||
+          !this.isCurrent()
+        )
+          return;
+        this.frameObservation = undefined;
+        pending.resolve();
+      });
+      this.assertStartupUnrevoked();
+      contents.ipc.on(VISUALIZATION_HEARTBEAT_CHANNEL, (event, sequence: unknown) => {
+        if (
+          event.senderFrame !== contents.mainFrame ||
+          !Number.isSafeInteger(sequence) ||
+          sequence !== this.heartbeatSequence + 1
+        ) {
+          if (this.rejection === "none")
+            this.rejection =
+              event.senderFrame !== contents.mainFrame ? "heartbeat-frame" : "heartbeat-sequence";
+          this.deny();
+          return;
+        }
+        this.heartbeatSequence = sequence as number;
+        this.lastHeartbeat = performance.now();
+      });
+      this.assertStartupUnrevoked();
+      this.session.setPermissionRequestHandler(denyPermission);
+      this.assertStartupUnrevoked();
+      this.session.setPermissionCheckHandler(refusePermission);
+      this.assertStartupUnrevoked();
+      this.session.setDevicePermissionHandler(refusePermission);
+      this.assertStartupUnrevoked();
+      this.session.setDisplayMediaRequestHandler(denyDisplay);
+      this.assertStartupUnrevoked();
+      this.session.on("will-download", this.downloadDenied);
+      this.assertStartupUnrevoked();
+      this.session.setCertificateVerifyProc(denyCertificate);
+      this.assertStartupUnrevoked();
+      this.session.webRequest.onBeforeRequest((details, callback) => {
+        const url = details.url;
+        const bootstrap = url === `${this.namespace}/bootstrap` && !this.admitted;
+        const asset =
+          url.startsWith(`${this.namespace}/asset/`) && this.resources.has(url) && this.admitted;
+        const own = details.webContentsId === contents.id;
+        const allowed = !this.revoked && own && (bootstrap || asset) && ++this.requests <= 256;
+        callback({ cancel: !allowed });
+        if (!allowed && !this.revoked) {
+          this.rejection = "resource-request";
+          this.deny();
+        }
+      });
+      this.assertStartupUnrevoked();
+      // The exact fresh session/scheme belongs only to this surface. Record the
+      // attempted registration before the native call: a synchronous revocation
+      // can retire us inside that call, or it can throw after partially binding.
+      // Both paths still require cleanup of this exact scheme, not a new owner.
+      protocolAttempted = true;
+      this.protocolRegistered = true;
+      this.session.protocol.handle(VISUALIZATION_SCHEME, (request) => {
+        if (this.revoked || request.method !== "GET") return new Response(null, { status: 403 });
+        let bytes: Buffer;
+        let mime = "text/html; charset=utf-8";
+        const csp = VISUALIZATION_CSP;
+        if (request.url === `${this.namespace}/bootstrap` && !this.admitted) {
+          // Admit this sole inert native top-frame process before source reaches
+          // its isolated preload loader. No iframe/OOPIF is granted.
+          bytes = Buffer.from(
+            "<!doctype html><html><head><meta charset=utf-8></head><body></body></html>",
+          );
+        } else {
+          const resource = this.resources.get(request.url);
+          if (!this.admitted || !resource) return new Response(null, { status: 403 });
+          bytes = resource;
+          mime = "image/png";
+        }
+        this.requestedBytes += bytes.length;
+        if (this.requestedBytes > 24 * 1024 * 1024) {
+          this.deny();
+          return new Response(null, { status: 403 });
+        }
+        return new Response(new Uint8Array(bytes).buffer, {
+          headers: {
+            "Content-Type": mime,
+            "Content-Security-Policy": csp,
+            "Cache-Control": "no-store",
+            "X-Content-Type-Options": "nosniff",
+            "Referrer-Policy": "no-referrer",
+            "Permissions-Policy":
+              "camera=(), microphone=(), geolocation=(), clipboard-read=(), clipboard-write=(), usb=(), serial=(), hid=(), fullscreen=()",
+          },
+        });
+      });
+      this.assertStartupUnrevoked();
+      contents.setWindowOpenHandler(() => {
         this.deny();
-        return;
-      }
-      const now = performance.now();
-      if (now - this.messageEpoch >= 1000) {
-        this.messageEpoch = now;
-        this.messages = 0;
-      }
-      if (++this.messages > 30) {
+        return { action: "deny" };
+      });
+      this.assertStartupUnrevoked();
+      contents.on("will-frame-navigate", (event) => {
+        event.preventDefault();
+        if (this.rejection === "none") this.rejection = "page-navigation";
         this.deny();
-        return;
+      });
+      this.assertStartupUnrevoked();
+      contents.on("will-redirect", (event) => {
+        event.preventDefault();
+        this.deny();
+      });
+      this.assertStartupUnrevoked();
+      contents.on("will-attach-webview", (event) => {
+        event.preventDefault();
+        this.deny();
+      });
+      this.assertStartupUnrevoked();
+      contents.on("login", (event, _details, _authInfo, callback) => {
+        event.preventDefault();
+        callback();
+        this.deny();
+      });
+      this.assertStartupUnrevoked();
+      contents.on("frame-created", () => {
+        if (this.admitted) {
+          if (this.rejection === "none") this.rejection = "child-frame";
+          this.deny();
+        }
+      });
+      this.assertStartupUnrevoked();
+      contents.on("before-mouse-event", (_event, input) => {
+        if (
+          input.type === "mouseDown" &&
+          this.visibilityCommitted &&
+          !this.suspended &&
+          !this.revoked
+        ) {
+          this.focusAllowedUntil = performance.now() + 500;
+          this.callbacks?.onTrustedFocus?.();
+        }
+      });
+      this.assertStartupUnrevoked();
+      contents.on("blur", () => {
+        this.focusAllowedUntil = 0;
+      });
+      this.assertStartupUnrevoked();
+      contents.on("focus", () => {
+        // Generated autofocus/window.focus is not a user interaction. Never
+        // activate an app/window; restore only the already focused exact Cafe
+        // owner when source attempted to take keyboard focus without native input.
+        if (
+          this.sourceDocument?.kind === "generated" &&
+          !this.previewWindow &&
+          performance.now() > this.focusAllowedUntil &&
+          !this.window.isDestroyed() &&
+          this.window.isFocused() &&
+          !this.window.webContents.isDestroyed()
+        ) {
+          const now = performance.now();
+          if (now - this.focusEpoch >= 1000) {
+            this.focusEpoch = now;
+            this.focusAttempts = 0;
+          }
+          this.callbacks?.onFocusDenied?.();
+          if (++this.focusAttempts > 2) this.deny();
+        }
+      });
+      this.assertStartupUnrevoked();
+      contents.ipc.on("cafe-visualization:wheel", (event, raw: unknown) => {
+        if (
+          this.sourceDocument?.kind !== "generated" ||
+          this.previewWindow ||
+          event.senderFrame !== contents.mainFrame ||
+          !this.isCurrent() ||
+          typeof raw !== "object" ||
+          raw === null
+        )
+          return;
+        const value = raw as { sequence?: unknown; deltaX?: unknown; deltaY?: unknown };
+        if (
+          Object.keys(value).length !== 3 ||
+          value.sequence !== this.wheelSequence + 1 ||
+          typeof value.deltaX !== "number" ||
+          typeof value.deltaY !== "number" ||
+          !Number.isFinite(value.deltaX) ||
+          !Number.isFinite(value.deltaY) ||
+          Math.abs(value.deltaX) > 2048 ||
+          Math.abs(value.deltaY) > 2048
+        ) {
+          this.deny();
+          return;
+        }
+        this.wheelSequence += 1;
+        const now = performance.now();
+        if (now - this.messageEpoch >= 1000) {
+          this.messageEpoch = now;
+          this.messages = 0;
+        }
+        if (++this.messages > 30) return;
+        if (!this.visibilityCommitted || this.suspended) return;
+        this.callbacks?.onWheel?.({ deltaX: value.deltaX, deltaY: value.deltaY });
+      });
+      this.assertStartupUnrevoked();
+      contents.ipc.on("cafe-visualization:layout", (event, raw: unknown) => {
+        this.receiveLayout(event.senderFrame, raw);
+      });
+      this.assertStartupUnrevoked();
+      contents.on("did-start-navigation", (event) => {
+        if (this.admitted && !event.isSameDocument) this.deny();
+      });
+      this.assertStartupUnrevoked();
+      contents.ipc.on(VISUALIZATION_PAGE_CHANNEL, (event, raw: unknown) => {
+        if (
+          !this.isCurrent() ||
+          this.sourceDocument?.kind !== "mcp-app" ||
+          event.senderFrame !== contents.mainFrame ||
+          typeof raw !== "object" ||
+          raw === null
+        )
+          return;
+        const message = raw as { sequence?: unknown; json?: unknown };
+        if (message.sequence !== this.sequence + 1 || !isVisualizationMessage(message.json)) {
+          this.deny();
+          return;
+        }
+        const now = performance.now();
+        if (now - this.messageEpoch >= 1000) {
+          this.messageEpoch = now;
+          this.messages = 0;
+        }
+        if (++this.messages > 30) {
+          this.deny();
+          return;
+        }
+        this.sequence += 1;
+        if (this.suspended) return;
+        this.callbacks?.onMessage(message.json);
+      });
+      this.assertStartupUnrevoked();
+      this.window.once("closed", this.ownerWindowRevoked);
+      this.assertStartupUnrevoked();
+      this.window.on("hide", this.ownerWindowRevoked);
+      this.assertStartupUnrevoked();
+      this.window.on("minimize", this.ownerWindowRevoked);
+      this.assertStartupUnrevoked();
+      this.window.webContents.on("did-start-navigation", this.ownerNavigationRevoked);
+      this.assertStartupUnrevoked();
+      this.window.webContents.on("render-process-gone", this.ownerNavigationRevoked);
+      this.assertStartupUnrevoked();
+      this.window.webContents.on("focus", this.ownerFocused);
+      this.assertStartupUnrevoked();
+    } finally {
+      // Retirement can finish reentrantly inside a native registration call.
+      // Its cached promise cannot undo a registration which completes later;
+      // explicitly remove only our own late session/owner closures here.
+      if (this.revoked) this.rollbackLateNativePolicy(protocolAttempted);
+    }
+  }
+
+  private rollbackLateNativePolicy(protocolAttempted: boolean): void {
+    if (this.sessionOwned) {
+      if (protocolAttempted || this.protocolRegistered) {
+        try {
+          this.session.protocol.unhandle(VISUALIZATION_SCHEME);
+          this.protocolRegistered = false;
+        } catch {
+          /* Revoked source/cleared resources remain unavailable on this exact scheme. */
+        }
       }
-      this.sequence += 1;
-      if (this.suspended) return;
-      this.callbacks?.onMessage(message.json);
-    });
-    this.protocolRegistered = true;
-    this.window.once("closed", this.ownerWindowRevoked);
-    this.window.on("hide", this.ownerWindowRevoked);
-    this.window.on("minimize", this.ownerWindowRevoked);
-    this.window.webContents.on("did-start-navigation", this.ownerNavigationRevoked);
-    this.window.webContents.on("render-process-gone", this.ownerNavigationRevoked);
-    this.window.webContents.on("focus", this.ownerFocused);
+      try {
+        this.session.webRequest.onBeforeRequest(denyNetwork);
+      } catch {
+        /* This retired unique partition cannot be reused for new source. */
+      }
+      try {
+        this.session.removeListener("will-download", this.downloadDenied);
+      } catch {
+        /* Native failure grants neither a new viewer nor a source reference. */
+      }
+    }
+    this.removeOwnerObservers();
   }
 
   /** Loaded bytes cannot authorize private parsing. Reobserve the exact pending
@@ -887,6 +1014,7 @@ export class ElectronVisualizationSurface implements VisualizationSurface {
       this.resources.set(`${this.namespace}/asset/${asset.id}`, png);
     }
     this.assetBytes = assetBytes;
+    this.assertStartupUnrevoked();
     await this.view.webContents.loadURL(`${this.namespace}/bootstrap`);
     if (this.revoked || !this.processesAreExclusive()) {
       if (!this.revoked) this.rejection = "renderer-separation";
@@ -1239,13 +1367,7 @@ export class ElectronVisualizationSurface implements VisualizationSurface {
     initialize = false,
   ): boolean {
     try {
-      const size = this.window.getContentSize();
-      const admitted = admitVisualizationGeometry(
-        bounds,
-        clipBounds,
-        [size[0]!, size[1]!],
-        this.window.webContents.getZoomFactor(),
-      );
+      const admitted = this.readGeometry(bounds, clipBounds);
       if (!admitted) {
         this.geometryOutcome = "refused";
         return false;
@@ -1277,6 +1399,33 @@ export class ElectronVisualizationSurface implements VisualizationSurface {
     } catch {
       this.geometryOutcome = "refused";
       return false;
+    }
+  }
+
+  /** Reobserve the exact owner for both allocation preflight and the later mask
+   * commit. The preflight snapshot is never cached as permission to install a
+   * stale native crop after owner size/zoom changes. */
+  private readGeometry(
+    bounds: VisualizationHostBounds,
+    clipBounds?: VisualizationHostBounds,
+  ): VisualizationGeometry | null {
+    try {
+      if (this.window.isDestroyed() || this.window.webContents.isDestroyed()) {
+        this.geometryOutcome = "refused";
+        return null;
+      }
+      const size = this.window.getContentSize();
+      const admitted = admitVisualizationGeometry(
+        bounds,
+        clipBounds,
+        [size[0]!, size[1]!],
+        this.window.webContents.getZoomFactor(),
+      );
+      if (!admitted) this.geometryOutcome = "refused";
+      return admitted;
+    } catch {
+      this.geometryOutcome = "refused";
+      return null;
     }
   }
 
@@ -1382,15 +1531,18 @@ export class ElectronVisualizationSurface implements VisualizationSurface {
     this.phase = "retiring";
     if (this.watchdog) clearInterval(this.watchdog);
     if (!this.view) {
-      if (this.previewWindow && this.window && !this.window.isDestroyed()) this.window.destroy();
-      this.retiring = Promise.resolve(true);
-      this.sourceDocument = undefined;
-      this.callbacks = undefined;
-      this.phase = "retired";
+      try {
+        if (this.previewWindow && this.window && !this.window.isDestroyed()) this.window.destroy();
+      } catch {
+        /* A destroy request alone is not private-window retirement evidence. */
+      }
+      const retired = this.privateWindowRetired();
+      this.retiring = Promise.resolve(retired);
+      if (retired) this.clearRetiredResources();
+      this.phase = retired ? "retired" : "quarantined";
       return this.retiring;
     }
-    this.view.setVisible(false);
-    this.clippingView?.setVisible(false);
+    this.hideNativePresentation();
     this.notifyVisibility();
     const contents = this.view.webContents;
     const needsRendererExit = this.rendererPid > 0;
@@ -1410,7 +1562,7 @@ export class ElectronVisualizationSurface implements VisualizationSurface {
             /* Observe destruction rather than infer it from a close call. */
           }
         }
-        if (this.destroyed && (!needsRendererExit || this.gone)) {
+        if (this.destroyed && (!needsRendererExit || this.gone) && this.privateWindowRetired()) {
           finish(true);
           return;
         }
@@ -1422,36 +1574,21 @@ export class ElectronVisualizationSurface implements VisualizationSurface {
       };
       const finish = (retired: boolean) => {
         this.phase = retired ? "retired" : "quarantined";
-        if (retired) {
-          this.resources.clear();
-          if (this.protocolRegistered) this.session.protocol.unhandle(VISUALIZATION_SCHEME);
-          this.session.webRequest.onBeforeRequest(denyNetwork);
-          this.session.removeListener("will-download", this.downloadDenied);
-          this.session.on("will-download", denyDownload);
-          this.sourceDocument = undefined;
-          this.callbacks = undefined;
-          // Clearing this fresh in-memory session cannot clear ordinary app data.
-          void this.session.clearStorageData().catch(() => undefined);
-        }
-        this.window.removeListener("closed", this.ownerWindowRevoked);
-        this.window.removeListener("hide", this.ownerWindowRevoked);
-        this.window.removeListener("minimize", this.ownerWindowRevoked);
-        if (!this.window.isDestroyed() && !this.window.webContents.isDestroyed()) {
-          this.window.webContents.removeListener(
-            "did-start-navigation",
-            this.ownerNavigationRevoked,
-          );
-          this.window.webContents.removeListener(
-            "render-process-gone",
-            this.ownerNavigationRevoked,
-          );
-          this.window.webContents.removeListener("focus", this.ownerFocused);
-        }
+        if (retired) this.clearRetiredResources();
+        this.removeOwnerObservers();
         resolve(retired);
       };
       try {
         this.clippingView?.removeChildView(this.view);
+      } catch {
+        /* A failed detach cannot suppress an independent exact close request. */
+      }
+      try {
         if (this.clippingView) this.window.contentView.removeChildView(this.clippingView);
+      } catch {
+        /* The exact child's observed destruction still owns completion. */
+      }
+      try {
         if (!contents.isDestroyed()) {
           // Never crash a renderer that became shared. A missing proof leaves
           // this slot quarantined, not permission to terminate Cafe's UI.
@@ -1462,13 +1599,77 @@ export class ElectronVisualizationSurface implements VisualizationSurface {
             contents.close({ waitForBeforeUnload: false });
           }
         }
-        if (this.previewWindow && !this.window.isDestroyed()) this.window.destroy();
       } catch {
         /* Native uncertainty is reported by the finite observation below. */
+      }
+      try {
+        if (this.previewWindow && !this.window.isDestroyed()) this.window.destroy();
+      } catch {
+        /* Keep a failed private-window destroy inconclusive, not successful. */
       }
       tick();
     });
     return this.retiring;
+  }
+
+  /** Only the allocated private preview window belongs to this surface. An
+   * ordinary Cafe owner must remain alive and must never be destroyed here. */
+  private privateWindowRetired(): boolean {
+    if (!this.previewWindow || !this.window) return true;
+    try {
+      return this.window.isDestroyed();
+    } catch {
+      return false;
+    }
+  }
+
+  /** Cleanup follows positive exact-native teardown, including session-only
+   * and no-view startup. The admitted ephemeral partition is never reused; a
+   * clear failure cannot authorize later source or touch an ordinary profile. */
+  private clearRetiredResources(): void {
+    this.resources.clear();
+    this.sourceDocument = undefined;
+    this.callbacks = undefined;
+    if (!this.sessionOwned) return;
+    if (this.protocolRegistered) {
+      try {
+        this.session.protocol.unhandle(VISUALIZATION_SCHEME);
+        this.protocolRegistered = false;
+      } catch {
+        /* Retired source/resources stay unavailable even if native unregister fails. */
+      }
+    }
+    try {
+      this.session.webRequest.onBeforeRequest(denyNetwork);
+    } catch {
+      /* This unique retired partition cannot gain another execution owner. */
+    }
+    try {
+      this.session.removeListener("will-download", this.downloadDenied);
+      this.session.on("will-download", denyDownload);
+    } catch {
+      /* No live owned WebContents remains after successful native teardown. */
+    }
+    try {
+      void this.session.clearStorageData().catch(() => undefined);
+    } catch {
+      /* Never replace original destruction evidence with storage-cleanup failure. */
+    }
+  }
+
+  private removeOwnerObservers(): void {
+    try {
+      this.window.removeListener("closed", this.ownerWindowRevoked);
+      this.window.removeListener("hide", this.ownerWindowRevoked);
+      this.window.removeListener("minimize", this.ownerWindowRevoked);
+      if (!this.window.isDestroyed() && !this.window.webContents.isDestroyed()) {
+        this.window.webContents.removeListener("did-start-navigation", this.ownerNavigationRevoked);
+        this.window.webContents.removeListener("render-process-gone", this.ownerNavigationRevoked);
+        this.window.webContents.removeListener("focus", this.ownerFocused);
+      }
+    } catch {
+      /* Failed observer removal grants neither native ownership nor source authority. */
+    }
   }
 
   diagnostics(): VisualizationSurfaceDiagnostics {

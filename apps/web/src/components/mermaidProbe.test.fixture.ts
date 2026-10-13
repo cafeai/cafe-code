@@ -36,7 +36,7 @@ interface MermaidProbeOptions<T> {
   readonly documentSource: string;
   readonly source: string;
   readonly theme: "light" | "dark";
-  readonly kind: "Family admission probe" | "Native diagram-output probe";
+  readonly kind: "Graph admission probe" | "Family admission probe" | "Native diagram-output probe";
   readonly invocation: ProbeInvocation;
   readonly readResult: (data: Record<string, unknown>) => T;
 }

@@ -180,6 +180,7 @@ it("does not mask the primary synthetic outcome with a secondary capture failure
 });
 
 const phases = new Set([
+  "native-partial-startup-same-host-preview",
   "generated-preview-pixels",
   "app-preview-replay-pixels",
   "uncommitted-viewer-retired",
@@ -576,6 +577,7 @@ it.runIf(
           nativeVisualizationFixtureDriver(process.platform, "comprehensive").length > 0
             ? "sandboxed-swiftshader"
             : "native-default",
+        partialStartupRecovery: "passed",
         preview: "passed",
         appPreviewReplay: "passed",
         viewer: "passed",

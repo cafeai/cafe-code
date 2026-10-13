@@ -53,9 +53,11 @@ import {
   hasBoundedVisualizationJson,
   isVisualizationMessage,
 } from "./visualizationHostPolicy.ts";
-import type {
-  VisualizationHostDiagnostics,
-  VisualizationSurfaceDiagnostics,
+import {
+  copyVisualizationSurfaceDiagnostics,
+  type VisualizationFailureDiagnostics,
+  type VisualizationHostDiagnostics,
+  type VisualizationSurfaceDiagnostics,
 } from "./visualizationDiagnostics.ts";
 
 const decodePrepare = Schema.decodeUnknownResult(VisualizationHostPrepareInput);
@@ -122,6 +124,9 @@ interface Active {
   readonly presentationDeadline: number | null;
   transitionTimer?: ReturnType<typeof setTimeout>;
   retirement?: Promise<boolean>;
+  /** Finite operational classification only; no exception or native identity is retained. */
+  diagnosticStage: VisualizationFailureDiagnostics["stage"];
+  firstFailure?: VisualizationFailureDiagnostics;
 }
 interface PreviewJob {
   readonly owner: VisualizationHostOwner;
@@ -210,6 +215,12 @@ export class DesktopVisualizationHost {
   private retirementCount = 0;
   private lastRetirementReason: VisualizationHostDiagnostics["lastRetirementReason"] = "none";
   private lastNative: VisualizationSurfaceDiagnostics | null = null;
+  private failureCount = 0;
+  private lastFailure: VisualizationFailureDiagnostics | null = null;
+  private quarantineDiagnostics: VisualizationHostDiagnostics["quarantine"] = null;
+  // This is the exact already-occupied record, not an additional viewer/source
+  // reservation. Its current scalar observation takes precedence over siblings.
+  private quarantiningRecord: Active | undefined;
   private readonly options: {
     readonly stateDirectory: string;
     readonly preloadPath: string;
@@ -321,12 +332,70 @@ export class DesktopVisualizationHost {
       retainedInputBytes: this.retainedInputBytes(),
       retirementCount: this.retirementCount,
       lastRetirementReason: this.lastRetirementReason,
-      native: this.previewActive?.surface?.diagnostics?.() ?? this.lastNative,
+      native: this.quarantiningRecord
+        ? this.nativeDiagnostics(this.quarantiningRecord)
+        : this.previewActive
+          ? this.nativeDiagnostics(this.previewActive)
+          : copyVisualizationSurfaceDiagnostics(this.lastNative),
       viewerCount: this.viewers.size,
       previewCount: this.previewActive ? 1 : 0,
       nativeWorkCount: this.nativeQueue.length + (this.nativeActive ? 1 : 0),
       continuationCount: this.continuations.size,
+      failureCount: this.failureCount,
+      lastFailure: this.lastFailure ? { ...this.lastFailure } : null,
+      // Never return the retained frozen objects by reference. A debug consumer
+      // must not be able to rewrite historical truth or a later native reading.
+      quarantine: this.quarantineDiagnostics
+        ? {
+            ...this.quarantineDiagnostics,
+            failure: { ...this.quarantineDiagnostics.failure },
+            native: copyVisualizationSurfaceDiagnostics(this.quarantineDiagnostics.native),
+          }
+        : null,
     };
+  }
+
+  private nativeDiagnostics(record: Active): VisualizationSurfaceDiagnostics | null {
+    try {
+      return copyVisualizationSurfaceDiagnostics(record.surface?.diagnostics?.());
+    } catch {
+      return null;
+    }
+  }
+
+  /** Freeze the first failed phase of one exact record. Healthy cleanup must
+   * not replace an initialization failure with a misleading retirement label. */
+  private noteFailure(
+    record: Active,
+    stage: VisualizationFailureDiagnostics["stage"],
+    outcome: VisualizationFailureDiagnostics["outcome"],
+    allowanceSpent = this.expired(record),
+  ): void {
+    if (record.firstFailure) return;
+    record.firstFailure = Object.freeze({
+      lane: record.window ? "viewer" : "preview",
+      stage,
+      outcome,
+      allowanceSpent,
+    });
+    this.failureCount = Math.min(Number.MAX_SAFE_INTEGER, this.failureCount + 1);
+    this.lastFailure = record.firstFailure;
+  }
+
+  private startupRefusal(record: Active): VisualizationHostReason {
+    // Owner/cancellation truth has priority over an old elapsed allowance. It
+    // cannot diagnose an innocent replacement document as a failed startup.
+    if (
+      this.closed ||
+      !this.contains(record) ||
+      record.state === "retiring" ||
+      (record.window && !this.matches(record, record.window, record.leaseId))
+    )
+      return "owner-revoked";
+    // For a still-owned operation, real monotonic equality owns the deadline
+    // even when an exception arrives afterwards. A timer alone is not proof.
+    if (this.expired(record)) return "timeout";
+    return "unavailable";
   }
 
   private records(): Active[] {
@@ -463,8 +532,17 @@ export class DesktopVisualizationHost {
       }
     }
   }
-  private quarantine(): void {
+  private quarantine(record: Active, stage: "create" | "retire"): void {
     if (this.quarantined) return;
+    this.noteFailure(record, stage, "refused");
+    const native = this.nativeDiagnostics(record);
+    this.quarantiningRecord = record;
+    this.quarantineDiagnostics = Object.freeze({
+      stage,
+      reason: stage === "create" ? "create-failed" : "retirement-uncertain",
+      failure: record.firstFailure!,
+      native: native ? Object.freeze(native) : null,
+    });
     this.quarantined = true;
     this.prepared.clear();
     for (const value of this.continuations.values()) clearTimeout(value.timer);
@@ -683,6 +761,7 @@ export class DesktopVisualizationHost {
       // The callback is cleanup, not admission authority: a delayed main timer
       // must not let a late first geometry commit clear an already-spent budget.
       presentationDeadline: duration === null ? admittedAt + VISUALIZATION_HOST_PREVIEW_MS : null,
+      diagnosticStage: "create",
     };
     // Membership is reserved synchronously before constructor/startup awaits.
     if (window) this.viewers.set(leaseId, record);
@@ -797,18 +876,21 @@ export class DesktopVisualizationHost {
       // resources. Retain this exact occupied reservation and quarantine all
       // further admission, rather than adopting another map record as cleanup.
       record.state = "quarantined";
-      this.quarantine();
+      this.noteFailure(record, "create", "exception");
+      this.quarantine(record, "create");
     }
     return record;
   }
 
-  private async start(record: Active): Promise<boolean> {
+  private async start(record: Active): Promise<VisualizationHostReason | null> {
     let timer: ReturnType<typeof setTimeout> | undefined;
+    let stage: VisualizationFailureDiagnostics["stage"] = "initialize";
     try {
       const completed = await Promise.race([
         this.nativeWork(record, async () => {
           if (!this.contains(record) || this.quarantined || record.state !== "preparing")
             return false;
+          record.diagnosticStage = stage = "initialize";
           await record.surface!.initialize();
           if (
             !this.contains(record) ||
@@ -817,6 +899,7 @@ export class DesktopVisualizationHost {
             this.expired(record)
           )
             return false;
+          record.diagnosticStage = stage = "install";
           await record.surface!.installSource();
           return true;
         }),
@@ -834,12 +917,18 @@ export class DesktopVisualizationHost {
         record.state !== "preparing" ||
         this.expired(record) ||
         !record.surface?.isCurrent()
-      )
-        return false;
+      ) {
+        const refusal = this.startupRefusal(record);
+        if (refusal !== "owner-revoked")
+          this.noteFailure(record, stage, refusal === "timeout" ? "deadline" : "refused");
+        return refusal;
+      }
       record.state = "active";
-      return true;
+      return null;
     } catch {
-      return false;
+      const refusal = this.startupRefusal(record);
+      if (refusal !== "owner-revoked") this.noteFailure(record, stage, "exception");
+      return refusal;
     } finally {
       if (timer) clearTimeout(timer);
     }
@@ -910,12 +999,13 @@ export class DesktopVisualizationHost {
         bytes,
         input.clipBounds,
       );
-      if (!(await this.start(record))) {
-        const retired = await this.retireRecord(record, "timeout");
+      const startupFailure = await this.start(record);
+      if (startupFailure) {
+        const retired = await this.retireRecord(record, startupFailure);
         return this.state(
           record,
           retired ? "blocked" : "quarantined",
-          retired ? "timeout" : "retirement-uncertain",
+          retired ? startupFailure : "retirement-uncertain",
         );
       }
       this.emit(record, "active");
@@ -1081,8 +1171,16 @@ export class DesktopVisualizationHost {
   private async retireRecord(record: Active, reason: VisualizationHostReason): Promise<boolean> {
     if (record.retirement) return record.retirement;
     if (record.state === "quarantined" && !record.surface) return false;
+    if (reason === "timeout" && this.expired(record))
+      this.noteFailure(
+        record,
+        record.state === "preparing" ? record.diagnosticStage : "retire",
+        "deadline",
+        true,
+      );
     const retirementDeadline = this.now() + 5_000;
     this.nativeRetirements += 1;
+    record.diagnosticStage = "retire";
     record.state = "retiring";
     record.messages.length = 0;
     record.layout = undefined;
@@ -1139,15 +1237,22 @@ export class DesktopVisualizationHost {
         }
       } catch {
         retired = false;
+        this.noteFailure(record, "retire", "exception", this.now() >= retirementDeadline);
       } finally {
         this.nativeRetirements -= 1;
       }
-      this.retirementCount += 1;
+      this.retirementCount = Math.min(Number.MAX_SAFE_INTEGER, this.retirementCount + 1);
       this.lastRetirementReason = retired ? reason : "retirement-uncertain";
-      this.lastNative = record.surface?.diagnostics?.() ?? null;
+      this.lastNative = this.nativeDiagnostics(record);
       if (!retired) {
+        this.noteFailure(
+          record,
+          "retire",
+          this.now() >= retirementDeadline ? "deadline" : "refused",
+          this.now() >= retirementDeadline,
+        );
         record.state = "quarantined";
-        this.quarantine();
+        this.quarantine(record, "retire");
         this.emit(record, "quarantined", undefined, "retirement-uncertain");
       } else {
         if (record.window) {
@@ -1242,6 +1347,8 @@ export class DesktopVisualizationHost {
     )
       return null;
     record.capturePending = true;
+    record.diagnosticStage = "capture";
+    const captureDeadline = this.now() + this.remaining(record, 5_000);
     let timer: ReturnType<typeof setTimeout> | undefined;
     try {
       const value = await Promise.race([
@@ -1250,7 +1357,13 @@ export class DesktopVisualizationHost {
           timer = setTimeout(() => resolve(null), this.remaining(record, 5_000));
         }),
       ]);
-      if (!value) await this.retireRecord(record, "capture-failed");
+      if (!value) {
+        const spent = this.now() >= captureDeadline || this.expired(record);
+        this.noteFailure(record, "capture", spent ? "deadline" : "refused", spent);
+        await this.retireRecord(record, "capture-failed");
+      } else if (this.expired(record)) {
+        this.noteFailure(record, "capture", "deadline", true);
+      }
       return value &&
         this.matches(record, window, leaseId) &&
         record.state === "active" &&
@@ -1262,6 +1375,12 @@ export class DesktopVisualizationHost {
         ? value
         : null;
     } catch {
+      this.noteFailure(
+        record,
+        "capture",
+        "exception",
+        this.now() >= captureDeadline || this.expired(record),
+      );
       await this.retireRecord(record, "capture-failed");
       return null;
     } finally {
@@ -1409,7 +1528,8 @@ export class DesktopVisualizationHost {
         protocol ? relayPreview : undefined,
         job.inputBytes,
       );
-      if (!(await this.start(record))) result = blocked("timeout");
+      const startupFailure = await this.start(record);
+      if (startupFailure) result = blocked(startupFailure);
       else {
         // No UI window or action broker participates in poster preparation.
         // Buffered SDK initialization is answered privately; only initialized
@@ -1429,6 +1549,7 @@ export class DesktopVisualizationHost {
           if (!replayed || this.previewActive !== record || record.state !== "active")
             throw new Error("Visualization preview replay was unavailable.");
         }
+        record.diagnosticStage = "capture";
         const capture = await Promise.race([
           this.nativeWork(record, () => record!.surface!.capture()),
           new Promise<null>((resolve) => {
@@ -1437,6 +1558,7 @@ export class DesktopVisualizationHost {
         ]);
         if (
           capture &&
+          this.now() < job.deadline &&
           this.previewActive === record &&
           record.state === "active" &&
           record.surface!.isCurrent()
@@ -1448,10 +1570,16 @@ export class DesktopVisualizationHost {
             height: capture.height,
             diagnostics: [],
           };
-        else result = blocked("timeout");
+        else {
+          const spent = this.now() >= job.deadline;
+          this.noteFailure(record, "capture", spent ? "deadline" : "refused", spent);
+          result = blocked(spent ? "timeout" : "unavailable");
+        }
       }
     } catch {
-      result = blocked("unavailable");
+      if (record)
+        this.noteFailure(record, record.diagnosticStage, "exception", this.now() >= job.deadline);
+      result = blocked(this.now() >= job.deadline ? "timeout" : "unavailable");
     } finally {
       if (captureTimer) clearTimeout(captureTimer);
       protocol?.close();

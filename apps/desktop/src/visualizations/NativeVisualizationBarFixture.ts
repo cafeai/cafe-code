@@ -30,19 +30,38 @@ async function observe(
   label: string,
 ): Promise<void> {
   const deadline = performance.now() + 5_000;
+  // A timer settlement is not an observed media preference. Retain only the
+  // exact boolean returned by this fixed synthetic-frame expression, never
+  // a guest object/error or an additional query outside the original budget.
+  const timedOut = Symbol("fixture-observation-deadline");
+  let observedBoolean: boolean | null = null;
   while (true) {
     let timer: ReturnType<typeof setTimeout> | undefined;
     const value = await Promise.race([
       contents.executeJavaScript(expression),
-      new Promise<false>((resolve) => {
-        timer = setTimeout(() => resolve(false), Math.max(0, deadline - performance.now()));
+      new Promise<symbol>((resolve) => {
+        timer = setTimeout(() => resolve(timedOut), Math.max(0, deadline - performance.now()));
       }),
     ]).finally(() => {
       if (timer) clearTimeout(timer);
     });
+    if (typeof value === "boolean") observedBoolean = value;
     if (value === true) return;
-    if (performance.now() >= deadline)
+    if (performance.now() >= deadline) {
+      if (label === "normal native motion") {
+        let systemReducedMotion: boolean | null = null;
+        try {
+          const observed = Electron.systemPreferences.getAnimationSettings().prefersReducedMotion;
+          if (typeof observed === "boolean") systemReducedMotion = observed;
+        } catch {
+          /* Missing native preference evidence is unknown, never a default. */
+        }
+        process.stderr.write(
+          `Native bar fixture motion: ${JSON.stringify({ systemReducedMotion, frameNormalMotion: observedBoolean })}\n`,
+        );
+      }
       throw new NativeBarFailure(`Native bar fixture ${label} unavailable.`);
+    }
     await new Promise<void>((resolve) => setTimeout(resolve, 10));
   }
 }

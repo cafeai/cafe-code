@@ -11,6 +11,10 @@ import {
   isSandboxedNativeFixtureDriver,
   nativeFixtureClippedCaptureObservation,
 } from "./nativeVisualizationFixturePolicy.ts";
+import {
+  hasNativeFixtureClippedBlackContent,
+  nativeFixtureClippedSampleOffsets,
+} from "./nativeVisualizationFixturePixels.ts";
 import type {
   VisualizationHostEvent,
   VisualizationHostPresentation,
@@ -277,6 +281,16 @@ function hasFixtureColor(png: Uint8Array, red: number, green: number, blue: numb
     bitmap[offset + 3] === 255
   );
 }
+
+/** The deliberate scrolling case includes a native legacy scrollbar on some
+ * hosts. Keep its exact viewport and compare independently known page-content
+ * points, never the scrollbar gutter or a requested DOM colour alone. */
+function hasClippedFixtureContent(png: Uint8Array): boolean {
+  const image = Electron.nativeImage.createFromBuffer(Buffer.from(png));
+  if (image.isEmpty()) return false;
+  const size = image.getSize();
+  return hasNativeFixtureClippedBlackContent(image.toBitmap(), size.width, size.height);
+}
 /** Colour variation is read from real native PNG samples, not a source claim. */
 function hasFixtureSwirl(png: Uint8Array): boolean {
   const image = Electron.nativeImage.createFromBuffer(Buffer.from(png));
@@ -518,6 +532,7 @@ async function qualify(): Promise<void> {
   let poolViewerPids: number[] = [];
   let poolPreviewPid = 0;
   let poolFluidPreview = false;
+  let refuseNextMaskAttachment = false;
   // One fixture-owned reference supplies generation-bound failure evidence.
   // Host.diagnostics().native can intentionally describe the last retirement;
   // it is not evidence about a currently active capture. No map or native
@@ -532,6 +547,25 @@ async function qualify(): Promise<void> {
     createSurface: (options) => {
       const surface = new ElectronVisualizationSurface(options);
       if (options.window === window) latestViewerSurface = surface;
+      if (options.window === window && refuseNextMaskAttachment) {
+        refuseNextMaskAttachment = false;
+        const initialize = surface.initialize.bind(surface);
+        surface.initialize = async () => {
+          // Scope a single controlled failure to this fixture's exact native
+          // parent, after real child allocation and before bootstrap/source.
+          // The production lifecycle/retirement methods remain unchanged.
+          const parent = window.contentView;
+          const add = parent.addChildView;
+          parent.addChildView = () => {
+            throw new Error("Native synthetic mask attachment refusal.");
+          };
+          try {
+            await initialize();
+          } finally {
+            parent.addChildView = add;
+          }
+        };
+      }
       if (options.window === null) {
         const capture = surface.capture.bind(surface);
         surface.capture = async () => {
@@ -590,6 +624,56 @@ async function qualify(): Promise<void> {
     appearance: "light" as const,
   };
   try {
+    // One refused automatic crop must not disable unrelated previews. First
+    // refuse below the unchanged native32-DIP minimum without child allocation;
+    // then exercise a real allocated child's early native setup failure.
+    const cropTicket = "1".repeat(64);
+    if (host.prepare({ ticket: cropTicket, owner, document }).status !== "ready")
+      throw new Error("Native initial crop preparation refused.");
+    const crop = await host.open(window, {
+      ticket: cropTicket,
+      bounds: { x: 0, y: 0, width: 400, height: 200 },
+      clipBounds: { x: 0, y: 0, width: 400, height: 31 },
+      appearance: "light",
+    });
+    if (
+      crop.state !== "blocked" ||
+      !host.capabilities().available ||
+      host.diagnostics().activeCount !== 0 ||
+      window.isDestroyed()
+    )
+      throw new Error("Native refused initial crop quarantined a healthy host.");
+    const partialTicket = "2".repeat(64);
+    refuseNextMaskAttachment = true;
+    if (host.prepare({ ticket: partialTicket, owner, document }).status !== "ready")
+      throw new Error("Native partial startup preparation refused.");
+    const partial = await host.open(window, {
+      ticket: partialTicket,
+      bounds: { x: 0, y: 0, width: 400, height: 200 },
+      appearance: "light",
+    });
+    if (
+      partial.state !== "blocked" ||
+      !host.capabilities().available ||
+      host.diagnostics().activeCount !== 0 ||
+      host.diagnostics().native?.phase !== "retired" ||
+      host.diagnostics().native?.destroyed !== true ||
+      window.isDestroyed()
+    )
+      throw new Error("Native partial startup destruction was inconclusive.");
+    const minimal = await host.preview(owner, {
+      ...document,
+      html: '<svg xmlns="http://www.w3.org/2000/svg" width="400" height="200"><rect width="400" height="200" fill="#000000"/></svg>',
+    });
+    if (
+      minimal.status !== "ready" ||
+      minimal.width !== 400 ||
+      minimal.height !== 200 ||
+      !hasFixtureColor(Buffer.from(minimal.png, "base64"), 0, 0, 0) ||
+      !host.capabilities().available
+    )
+      throw new Error("Native minimal SVG preview after refused startup unavailable.");
+    phase("native-partial-startup-same-host-preview");
     const preview = await host.preview(owner, document);
     if (preview.status !== "ready")
       throw new Error(
@@ -949,7 +1033,7 @@ async function qualify(): Promise<void> {
         !fullCapture ||
         fullCapture.width !== child.width ||
         fullCapture.height !== child.height ||
-        !hasFixtureColor(fullCapture.png, 0, 0, 0)
+        !hasClippedFixtureContent(fullCapture.png)
       ) {
         // Electron 42.10.0 CapturePage requests the child DIP rectangle, scales
         // its temporary bitmap by the native display DPR above one, and wraps
@@ -966,7 +1050,9 @@ async function qualify(): Promise<void> {
           : null;
         const size = image && !image.isEmpty() ? image.getSize() : undefined;
         const bitmap = size ? image!.toBitmap() : undefined;
-        const offset = size ? ((size.height - 10) * size.width + size.width - 10) * 4 : -1;
+        const offset = size
+          ? (nativeFixtureClippedSampleOffsets(size.width, size.height)?.[0] ?? -1)
+          : -1;
         const observation = nativeFixtureClippedCaptureObservation({
           ownerZoom: zoom,
           displayDpr: Electron.screen.getDisplayMatching(window.getBounds()).scaleFactor,
@@ -1866,7 +1952,7 @@ async function qualify(): Promise<void> {
     phase("app-sdk-context-csp-consent-owner-hide-retired");
     window.webContents.send = send;
     process.stdout.write(
-      `${JSON.stringify({ electron: process.versions.electron, electronNode: process.versions.node, electronAbi: process.versions.modules, platform: process.platform, arch: process.arch, graphics, preview: "passed", appPreviewReplay: "passed", viewer: "passed", visibilityCommit: "passed", nativeInput: "passed", semanticAccessibility: "passed", sameDocument: "passed", capture: "passed", clippingGeometry: "passed", ownerZoom: "passed", boundedWebGL: "passed", sustainedFluid: "passed", naturalHeight: "passed", normalMotionChart: "passed", viewerPool: "passed", automaticFocus: "passed", wheelHandoff: "passed", continuation: "passed", retirement: "passed", ownerHide: "passed", appTransport: "passed", context: "passed", csp: "passed", consent: "passed", watchdog: "passed" })}\n`,
+      `${JSON.stringify({ electron: process.versions.electron, electronNode: process.versions.node, electronAbi: process.versions.modules, platform: process.platform, arch: process.arch, graphics, partialStartupRecovery: "passed", preview: "passed", appPreviewReplay: "passed", viewer: "passed", visibilityCommit: "passed", nativeInput: "passed", semanticAccessibility: "passed", sameDocument: "passed", capture: "passed", clippingGeometry: "passed", ownerZoom: "passed", boundedWebGL: "passed", sustainedFluid: "passed", naturalHeight: "passed", normalMotionChart: "passed", viewerPool: "passed", automaticFocus: "passed", wheelHandoff: "passed", continuation: "passed", retirement: "passed", ownerHide: "passed", appTransport: "passed", context: "passed", csp: "passed", consent: "passed", watchdog: "passed" })}\n`,
     );
   } catch (error) {
     process.stderr.write(`Native fixture owned status: ${JSON.stringify(host.diagnostics())}\n`);

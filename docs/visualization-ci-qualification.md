@@ -2,7 +2,7 @@
 
 Status: Implemented; native multi-platform delivery requires the exact hosted run
 Created: 2026-10-13 18:22:30 JST (UTC+0900)
-Last updated: 2026-10-13 19:03:42 JST (UTC+0900)
+Last updated: 2026-10-13 20:17:09 JST (UTC+0900)
 
 These checks qualify committed synthetic fixtures using the repository's pinned
 Node, Corepack/Yarn, Chromium and existing Electron. They do not install a runtime,
@@ -32,7 +32,17 @@ state. Every render retains a fresh nonce, opaque iframe, restrictive CSP and
 one-use port. The family probes use an absolute ten-second observation allowance,
 clean up every settlement/error path, refuse malformed matching replies, and
 record only finite code-owned phases. A missing reply does not identify an engine
-phase or prove that an unsafe graph was admitted.
+phase or prove that an unsafe graph was admitted. Graph-security admission uses
+that same strict probe transport and exact sentinel/refusal validation, with
+the real pinned parser and only the final layout replaced by its fixed sentinel.
+Malformed matching output cannot qualify a negative security result.
+
+Localized diagnostic-copy fixtures wait for the disclosure's actual measured
+layout and bind each native click to exactly one fresh clipboard invocation.
+The indexed invocation must retain the current locale heading and unchanged
+private JSON. A previous successful locale's payload is not evidence that the
+new gesture reached its current handler; no production locale or input policy
+is changed by this fixture qualification.
 
 Manual generated Run also waits for the timeline's accepted public initial-load
 admission, just as the exact native binding does. Painting a title is not proof
@@ -42,6 +52,21 @@ the same late-acknowledgement retirement and no-visible-commit assertions. A
 separate controlled-admission case proves an early disabled gesture prepares no
 private ticket or host, while the admitted gesture starts exactly once. No
 forced scrolling, media override, retry or deadline expansion supplies readiness.
+
+The comprehensive native fixture also qualifies partial startup on the same
+host: a subminimum initial mask is refused before child allocation, then a
+single failure injected only into its exact synthetic parent's native mask
+attachment occurs after real child allocation and before bootstrap/source.
+Both operations must leave the owner alive and the host available; the allocated
+child must have positively observed destruction. A real minimal SVG then must
+preview at its exact dimensions with verified pixels on that same host. The
+`partialStartupRecovery` report and finite
+`native-partial-startup-same-host-preview` phase establish this sequence, not a
+live user's historical failure cause or permission to reset a quarantined host.
+Synthetic unit cases independently retain non-destruction/shared-renderer
+refusals, reentrant cancellation, private-window uncertainty and opaque diagnostic
+projection. Existing mask, sandbox, process identity and deadline bounds remain
+unchanged.
 
 ## GPU-less Linux runner
 
@@ -74,6 +99,16 @@ the exact zoom/DPR, expected/reported/encoded dimensions, sample channels and
 capture outcome, plus the exact synthetic guest PNG when available. An absent
 image or unobserved phase is not evidence of a particular cause.
 
+The deliberate scrolling fixture verifies three fixed lower interior content
+points, complete bitmap length and exact opaque-black channels. Native scrollbar
+gutters are not authored page pixels; sampling a gutter cannot qualify or reject
+the page's content. Exact viewport/document identity, zoom and physical dimensions
+remain independently required, and all other native colour checks are unchanged.
+On a failed normal-motion observation only, the ranked-bar fixture records the
+native system reduced-motion boolean and its last actual frame boolean, or null
+when unobserved. This diagnostic neither changes native preferences nor supplies
+a successful animation observation; the original five-second check remains.
+
 ## Replay and delivery boundaries
 
 Use existing dependencies, with the repository-pinned standalone Node on PATH:
@@ -82,6 +117,9 @@ Use existing dependencies, with the repository-pinned standalone Node on PATH:
 corepack yarn workspace @cafecode/shared test src/visualizationFonts.test.ts src/visualizationFluidRuntime.test.ts
 corepack yarn workspace @cafecode/web test:browser src/components/visualizations/VisualizationCommitChart.browser.tsx src/components/MermaidFamilies.browser.tsx
 corepack yarn workspace @cafecode/desktop test src/visualizations/nativeVisualizationFixturePolicy.test.ts src/visualizations/NativeVisualizationElectron.e2e.test.ts
+corepack yarn workspace @cafecode/desktop test src/visualizations/ElectronVisualizationSurface.test.ts src/visualizations/DesktopVisualizationHost.test.ts src/visualizations/visualizationDiagnostics.test.ts src/visualizations/DesktopVisualizationPool.test.ts
+corepack yarn workspace @cafecode/desktop test src/visualizations/nativeVisualizationFixturePixels.test.ts
+corepack yarn workspace @cafecode/web test:browser src/components/chat/ProviderDiagnosticWorkEntry.browser.tsx src/components/MermaidSecurity.browser.tsx src/components/MermaidFamilies.browser.tsx
 CAFE_CODE_VISUALIZATION_E2E=1 corepack yarn workspace @cafecode/desktop test src/visualizations/NativeVisualizationElectron.e2e.test.ts
 CAFE_CODE_VISUALIZATION_E2E=1 CAFE_CODE_VISUALIZATION_FONT_REPLAY=1 corepack yarn workspace @cafecode/desktop test src/visualizations/NativeVisualizationElectron.e2e.test.ts
 ```
