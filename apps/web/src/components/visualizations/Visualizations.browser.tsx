@@ -651,8 +651,34 @@ describe("Full-access live inline visualizations", () => {
             `[data-chat-copy-message-id="${image.id}"] span[style]`,
           )!,
         );
+        // Holding a manifest keeps metadata unknown, not the delayed loading
+        // label absent. Before that label appears the border-box reserves 64px;
+        // its real 64px flow child subsequently adds the two native borders.
+        // Observe that exact owned loading phase before capturing a baseline,
+        // instead of making runner speed choose between those valid layouts.
+        // Keep the original 64px reservation assertion on the actual child and
+        // independently bind its parent's precise border-inclusive geometry.
+        await vi.waitFor(() => {
+          for (const host of hosts) {
+            const loadingChild = host.querySelector<HTMLSpanElement>(":scope > span");
+            expect(host.isConnected).toBe(true);
+            expect(host.style.aspectRatio).toBe("");
+            expect(host.style.minHeight).toBe("4rem");
+            expect(loadingChild).not.toBeNull();
+            expect(loadingChild!.textContent).toBe(uiText("Loading image…"));
+            expect(loadingChild!.getBoundingClientRect().height).toBe(64);
+            const style = getComputedStyle(host);
+            expect(style.boxSizing).toBe("border-box");
+            expect(Number.parseFloat(style.borderTopWidth)).toBe(1);
+            expect(Number.parseFloat(style.borderBottomWidth)).toBe(1);
+            expect(host.getBoundingClientRect().height).toBe(
+              loadingChild!.getBoundingClientRect().height +
+                Number.parseFloat(style.borderTopWidth) +
+                Number.parseFloat(style.borderBottomWidth),
+            );
+          }
+        });
         const initialImageHeights = hosts.map((host) => host.getBoundingClientRect().height);
-        expect(initialImageHeights).toEqual([64, 64]);
         const expectSharedWidth = () => {
           const style = getComputedStyle(scroller);
           const available =

@@ -139,6 +139,23 @@ This is fixture precondition qualification, not evidence that the original
 missing-row failure was caused by a particular timing phase. It does not change
 production timeline anchoring, chart access or resource policies.
 
+## Held image loading geometry
+
+The combined image/chart real-list fixture holds each message's exact manifest
+and binary reply independently. A held manifest leaves metadata unknown, but
+does not suppress the production delayed loading label. The empty host's
+border-box minimum and the later loading child's flow height are distinct
+phases: the child retains the original 64px extent, and the host additionally
+contains its two native borders. Before capturing the initial image baseline,
+observe both owned loading children, exact text, absent aspect ratio, unchanged
+minimum and precise border-inclusive geometry. Do not accept an arbitrary
+height range, release transport early, force CSS, sleep or extend deadlines.
+
+Keep all subsequent metadata growth, decoded image, full-width chart, native
+wheel, exact document/anchor, tail and review assertions. This corrects a
+fixture assumption; it does not change production image layout or establish a
+timeline ownership defect from a failure before those later checks.
+
 ## Native drag finalization and bounded diagnostics
 
 A fixture owns cleanup as soon as it attempts its native pointer press. A failed
