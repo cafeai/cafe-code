@@ -6,22 +6,29 @@ files. CDP device/touch emulation targets that outer page, not the disposable
 iframe; an iframe reset is therefore not an input-policy ownership boundary.
 
 Use native Playwright context options for fixtures requiring a different device
-policy. `apps/web/vitest.browser.config.ts` has two explicit projects:
+or motion policy. `apps/web/vitest.browser.config.ts` has four explicit projects:
 
-- `chromium` retains ordinary desktop input and every existing browser file
-  except the exact touch fixture.
+- `chromium` retains ordinary desktop input and the remaining browser files,
+  excluding the exact touch, fluid-lifecycle and reduced-motion fixtures below.
 - `chromium-touch` includes only `MessagesTimeline.touch.browser.tsx`, with a
   native mobile/touch context and the existing 430×932 viewport. Vitest owns and
   disposes the context; no desktop fixture can reuse it.
+- `chromium-visualization-fluid-motion` includes the complete
+  `VisualizationFluid.browser.tsx` file in its own native `no-preference` motion
+  context, retaining ordinary mouse input and all lifecycle/resource assertions.
+- `chromium-context-reduced-motion` includes the complete context-dialog,
+  diagnostic-work-entry and visualization reduced-motion files in their own
+  native `reduce` context. Production still honors that actual preference.
 
-The desktop group executes before the touch group using Vitest's supported
-`sequence.groupOrder`. This preserves the existing aggregate active test-worker
+The desktop, touch, ordinary-motion fluid and reduced-motion groups execute
+sequentially in that order using Vitest's supported `sequence.groupOrder`.
+This preserves the existing aggregate active test-worker
 limit, including the native-host `--maxWorkers=2` policy. Providers may prewarm
 their browser processes before execution; sequential groups do not promise a
 single browser process. Existing 30-second test and hook deadlines, locator
 matching policy, cache boundaries, assertions and CI permissions are unchanged.
 Root include/browser arrays remain absent because inherited array merging would
-otherwise include unrelated files in the touch project.
+otherwise include unrelated files in the specialized projects.
 
 The touch fixture retains the original message-action opacity, positioning,
 containment and accessible-control assertions. It additionally observes native
@@ -43,7 +50,11 @@ corepack yarn workspace @cafecode/web test:browser src/components/desk/DeskSideb
 Run the full suite with `corepack yarn workspace @cafecode/web test:browser`.
 The existing macOS/Windows CI subset explicitly includes both timeline files;
 Linux retains the complete suite. A file inventory must assign each browser file
-exactly once, with only the touch file in the touch project.
+exactly once, with only the corresponding exact files in each specialized
+project. Node qualification reads the actual configuration's syntax tree and
+scoped browser-file inventory without starting a provider or importing Vite's
+application configuration; real browser assertions separately observe native
+owning-document and fixture-document media.
 
 The motivating Linux failure delivered real trusted mouse input and DOM hover,
 but native media reported neither hover nor fine/coarse pointer capability.
@@ -55,6 +66,27 @@ boundary without claiming that unobserved platform-specific origin is proven.
 Local Mac passes do not qualify Linux or Windows; hosted native checks remain
 required. This test-only policy changes no production CSS, provider lifecycle,
 permissions, credentials or live user session.
+
+## Ordinary-motion fluid lifecycle ownership
+
+The full-motion fluid suite requires native ordinary motion before testing
+continuous RAF, pause/resume, bounded resource replacement and passive pointer
+delivery. In failed native macOS and Windows runs, its actual fixture document
+reported `prefers-reduced-motion: reduce`. Static output and twelve warm-up
+frames therefore matched the runtime's intended accessibility behavior, not a
+demonstrated animation or GPU defect. The logs do not identify which earlier
+media operation or platform preference supplied that state.
+
+The dedicated provider-owned context binds the full-motion precondition at
+native context construction. Every fixture observes real ordinary motion and
+desktop hover/fine-pointer media in both owning and child documents. Keep the
+complete lifecycle file exactly once, the existing native-host selectors,
+sequential groups, worker caps, deadlines, recorder assertions and independent
+reduced-motion tests. Do not repair inherited media by mocking it, forcing CSS,
+issuing raw CDP resets on a reused worker page, changing OS preferences or
+altering the production static branch. This qualifies synthetic lifecycle and
+input accounting, not physical GPU pixels/memory or live user preferences;
+native hosted delivery remains required after local checks.
 
 ## Native-host Mermaid security scheduling
 

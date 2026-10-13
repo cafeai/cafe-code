@@ -8,8 +8,18 @@ import { createFluidFixture, type FluidFixture } from "./visualizationFluid.fixt
 
 const fixtures: FluidFixture[] = [];
 async function fixture(options: Parameters<typeof createFluidFixture>[0] = {}) {
+  // Native context policy is a precondition, not a request to change the
+  // user's preference or bypass the runtime's static accessibility branch.
+  // Observe both owning and fixture documents; replacing the fixture iframe
+  // alone never proves independence from a previous page-level media override.
+  expect(window.matchMedia("(prefers-reduced-motion: reduce)").matches).toBe(false);
+  expect(window.matchMedia("(hover: hover)").matches).toBe(true);
+  expect(window.matchMedia("(pointer: fine)").matches).toBe(true);
   const value = await createFluidFixture(options);
   fixtures.push(value);
+  expect(value.window.matchMedia("(prefers-reduced-motion: reduce)").matches).toBe(false);
+  expect(value.window.matchMedia("(hover: hover)").matches).toBe(true);
+  expect(value.window.matchMedia("(pointer: fine)").matches).toBe(true);
   return value;
 }
 
