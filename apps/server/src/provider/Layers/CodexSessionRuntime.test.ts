@@ -40,6 +40,7 @@ import * as EffectCodexSchema from "effect-codex-app-server/schema";
 import {
   CODEX_DEFAULT_MODE_DEVELOPER_INSTRUCTIONS,
   CODEX_PLAN_MODE_DEVELOPER_INSTRUCTIONS,
+  CODEX_VISUALIZATION_DISCOVERY_INSTRUCTIONS,
 } from "../CodexDeveloperInstructions.ts";
 import { GENERATED_VISUALIZATION_INSTRUCTIONS } from "../../visualizations/mcp.ts";
 import {
@@ -5868,12 +5869,13 @@ function makeThreadOpenResponse(
 
 describe("buildTurnStartParams", () => {
   it.each(["default", "plan"] as const)(
-    "appends conditional visualization guidance without replacing %s mode or turn authority",
+    "appends conditional visualization discovery without replacing %s mode or turn authority",
     (interactionMode) => {
       const input = {
         threadId: "synthetic-visualization-native-thread",
         runtimeMode: "approval-required" as const,
-        prompt: "The exact user prompt remains user input.",
+        prompt: "Use colorful animated charts with a subtle frosted WebGL background.",
+        attachments: [{ type: "image" as const, url: "https://example.invalid/reference.png" }],
         model: "gpt-6.1-sol",
         serviceTier: "fast" as const,
         effort: "high" as const,
@@ -5886,10 +5888,11 @@ describe("buildTurnStartParams", () => {
           : CODEX_DEFAULT_MODE_DEVELOPER_INSTRUCTIONS;
       assert.equal(baseline.collaborationMode?.settings.developer_instructions, modeInstructions);
       assert.equal(JSON.stringify(baseline).includes("preview_visualization"), false);
-      assert.deepEqual(
-        Effect.runSync(buildTurnStartParams({ ...input, visualizationInstructions: false })),
-        baseline,
-      );
+      // The exact optional contract admits false or an omitted property, not
+      // an explicitly present undefined value. Exercise both valid requests.
+      for (const nonvisualizationInput of [input, { ...input, visualizationInstructions: false }]) {
+        assert.deepEqual(Effect.runSync(buildTurnStartParams(nonvisualizationInput)), baseline);
+      }
       const admitted = Effect.runSync(
         buildTurnStartParams({ ...input, visualizationInstructions: true }),
       );
@@ -5899,7 +5902,7 @@ describe("buildTurnStartParams", () => {
           ...baseline.collaborationMode,
           settings: {
             ...baseline.collaborationMode!.settings,
-            developer_instructions: `${modeInstructions}\n\n${GENERATED_VISUALIZATION_INSTRUCTIONS}`,
+            developer_instructions: `${modeInstructions}\n\n${CODEX_VISUALIZATION_DISCOVERY_INSTRUCTIONS}`,
           },
         },
       });
@@ -5907,8 +5910,35 @@ describe("buildTurnStartParams", () => {
       // prompt, model selection, native effort, approval or sandbox settings.
       assert.deepEqual(admitted.input, baseline.input);
       assert.equal(admitted.collaborationMode?.mode, interactionMode);
+      assert.equal(
+        admitted.collaborationMode?.settings.developer_instructions?.includes(
+          GENERATED_VISUALIZATION_INSTRUCTIONS,
+        ),
+        false,
+      );
+      assert.equal(admitted.model, input.model);
+      assert.equal(admitted.serviceTier, input.serviceTier);
+      assert.equal(admitted.collaborationMode?.settings.reasoning_effort, input.effort);
+      assert.equal(admitted.approvalPolicy, baseline.approvalPolicy);
+      assert.deepEqual(admitted.sandboxPolicy, baseline.sandboxPolicy);
     },
   );
+  it("does not add collaboration or user instructions when the caller omits interaction mode", () => {
+    const input = {
+      threadId: "synthetic-visualization-native-thread",
+      runtimeMode: "full-access" as const,
+      prompt: "The user's content stays exact.",
+      model: "gpt-6.1-sol",
+      serviceTier: "fast" as const,
+      effort: "high" as const,
+    };
+    const baseline = Effect.runSync(buildTurnStartParams(input));
+    assert.equal(baseline.collaborationMode, undefined);
+    assert.deepEqual(
+      Effect.runSync(buildTurnStartParams({ ...input, visualizationInstructions: true })),
+      baseline,
+    );
+  });
   it.each(["standard", "daybreakBlue", "daybreakRed"] as const)(
     "preserves explicit %s cyber treatment through experimental request decoding",
     (cyberAccessProgram) => {

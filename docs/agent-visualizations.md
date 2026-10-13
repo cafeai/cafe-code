@@ -1,7 +1,7 @@
 # Agent visualizations and MCP Apps
 
 Status: Full-access inline-browser implementation
-Last updated: 2026-10-13 22:28:00 JST (UTC+0900)
+Last updated: 2026-10-14 03:54:42 JST (UTC+0900)
 
 Visualizations are live, ordinary same-origin browser documents embedded in the
 conversation. They are not image previews. They fill the available chat width,
@@ -65,6 +65,19 @@ the same document, so it does not replay an entrance animation. Fully leaving
 view removes the frame; returning creates a new document and arbitrary page state
 is not persisted automatically.
 
+Actual clipped geometry is the viewport admission truth. Threshold-zero
+intersection notifications only wake sampling: an edge or fractional crop can
+be intersecting without yet having usable pixels. Owning scroll and bounded
+anchor/ancestor resize observations resample at most once per animation frame,
+so moving inward cannot leave that chart stuck outside admission. Partial scroll
+still retains the same document; sampling never adds frame/read capacity.
+
+While an actually visible unit waits for admission, source or document readiness,
+a delayed small loading sparkle and status identify pending work. Ready charts
+remain interactive without an overlay; paused, failed, offscreen and revoked
+units are not advertised as loading. Reduced motion keeps the indicator static.
+This is not a preview image or permission to execute outside the viewport.
+
 There is no five-minute execution limit. The built-in fluid pauses when hidden,
 and removing the frame terminates its document. Arbitrary privileged code can
 ignore cooperative animation hints. A 30-second renewable server action grant is
@@ -78,6 +91,13 @@ Use one unit per independent chart/KPI strip/table so the conversation stays
 readable. Prefer responsive actual-width chart coordinates, uniformly scaled
 text and finite animated data/filter/KPI transitions. Run an entrance once per
 document, not on every scroll, theme or resize event. Respect reduced motion.
+
+Codex's collaboration fragment carries a compact reminder to discover/read the
+complete publisher description before authoring. The full generation guidance
+remains the actual `publish_visualization` tool metadata, including deferred
+discovery and Code Mode. User visual requirements and access policy are unchanged;
+removing the duplicate fragment is not a measured per-turn billing claim. See
+[the provider review](provider-updates-2026-10-14.md).
 
 Generated documents receive the actual bundled DM Sans Variable faces used by
 chat, with semantic code left monospace. Font bytes, descriptors and OFL notice

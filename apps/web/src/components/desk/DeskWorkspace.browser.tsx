@@ -356,6 +356,7 @@ async function dragPointer(
   const end = browserPoint(destination);
   const input: CDPSession = cdp();
   let releasePoint = end;
+  let releaseRequired = false;
   const moveTo = async (point: { x: number; y: number }) => {
     releasePoint = browserPoint(point);
     await input.send("Input.dispatchMouseEvent", {
@@ -367,17 +368,22 @@ async function dragPointer(
     await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
   };
   await input.send("Input.dispatchMouseEvent", { type: "mouseMoved", ...start });
-  await input.send("Input.dispatchMouseEvent", {
-    type: "mousePressed",
-    ...start,
-    button: "left",
-    buttons: 1,
-    clickCount: 1,
-  });
-  // Pointer down can activate the source pane. Let that ordinary React update
-  // settle before crossing the activation threshold, as a physical drag does.
-  await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
   try {
+    // Acquire cleanup responsibility before awaiting this fixture's native
+    // press: a failed response does not prove Chromium never applied it.
+    // Press preparation and its first frame must therefore share the same
+    // finalizer as the subsequent movement and assertions.
+    releaseRequired = true;
+    await input.send("Input.dispatchMouseEvent", {
+      type: "mousePressed",
+      ...start,
+      button: "left",
+      buttons: 1,
+      clickCount: 1,
+    });
+    // Pointer down can activate the source pane. Let that ordinary React update
+    // settle before crossing the activation threshold, as a physical drag does.
+    await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
     for (let step = 1; step <= 8; step += 1) {
       await input.send("Input.dispatchMouseEvent", {
         type: "mouseMoved",
@@ -390,33 +396,140 @@ async function dragPointer(
     }
     await whileDragging?.(moveTo);
   } finally {
-    await input.send("Input.dispatchMouseEvent", {
-      type: "mouseReleased",
-      ...releasePoint,
-      button: "left",
-      buttons: 0,
-      clickCount: 1,
-    });
-    // dnd-kit intentionally suppresses clicks for 50ms after pointer release.
-    // Let that documented sensor teardown finish before the next interaction
-    // or test, instead of falsely treating the suppressed click as a UI bug.
-    await new Promise<void>((resolve) => setTimeout(resolve, 75));
+    if (releaseRequired) {
+      await input.send("Input.dispatchMouseEvent", {
+        type: "mouseReleased",
+        ...releasePoint,
+        button: "left",
+        buttons: 0,
+        clickCount: 1,
+      });
+      // dnd-kit intentionally suppresses clicks for 50ms after pointer release.
+      // Let that documented sensor teardown finish before the next interaction
+      // or test, instead of falsely treating the suppressed click as a UI bug.
+      await new Promise<void>((resolve) => setTimeout(resolve, 75));
+    }
   }
 }
 
-function expectInsertionSlot(host: HTMLElement, strip: Element, index: number) {
+/**
+ * A fixed edge pointer can outlive the intended tab while native auto-scroll
+ * changes its viewport. Retain only 32 content-free observations of this exact
+ * fixture's 12 cells; these diagnose an assertion, never change input, scrolling,
+ * sampling requirements or which insertion index is accepted.
+ */
+function observeClippedDrag(host: HTMLElement, strip: HTMLElement, cells: readonly Element[]) {
+  let ownedPointerId: number | null = null;
+  let pointer: { x: number | null; y: number | null; buttons: number; trusted: boolean } | null =
+    null;
+  const finite = (value: number) => (Number.isFinite(value) ? value : null);
+  const bounds = (element: Element) => {
+    const rect = element.getBoundingClientRect();
+    return [finite(rect.left), finite(rect.top), finite(rect.width), finite(rect.height)];
+  };
+  const witness = (phase: string) => {
+    const markers = strip.querySelectorAll<HTMLElement>(":scope > [data-desk-insertion-index]");
+    return {
+      phase,
+      connected: host.isConnected && strip.isConnected,
+      scrollLeft: finite(strip.scrollLeft),
+      scrollWidth: finite(strip.scrollWidth),
+      clientWidth: finite(strip.clientWidth),
+      strip: bounds(strip),
+      pointer: pointer ? { ...pointer } : null,
+      cells: cells
+        .slice(0, 12)
+        .map((cell) => ({ connected: cell.isConnected, bounds: bounds(cell) })),
+      markerCount: markers.length,
+      markers: Array.from(markers)
+        .slice(0, 2)
+        .map((marker) => {
+          const index = Number(marker.dataset.deskInsertionIndex);
+          return {
+            contained: strip.contains(marker),
+            index: Number.isSafeInteger(index) && index >= 0 && index <= 12 ? index : null,
+            bounds: bounds(marker),
+          };
+        }),
+    };
+  };
+  const samples: ReturnType<typeof witness>[] = [];
+  const sample = (phase: string) => {
+    if (samples.length === 32) samples.shift();
+    samples.push(witness(phase));
+  };
+  const observePointer = (event: PointerEvent) => {
+    if (event.type === "pointerdown") {
+      if (
+        !event.isTrusted ||
+        event.button !== 0 ||
+        !(event.target instanceof Node) ||
+        !host.contains(event.target)
+      )
+        return;
+      ownedPointerId = event.pointerId;
+    }
+    // PointerSensor itself listens on the owner document. A dragged overlay
+    // may be portalled outside the host, so follow only the native pointer
+    // admitted by this exact host's down, not arbitrary document movement.
+    if (event.pointerId !== ownedPointerId) return;
+    pointer = {
+      x: finite(event.clientX),
+      y: finite(event.clientY),
+      buttons: event.buttons,
+      trusted: event.isTrusted,
+    };
+    sample(event.type);
+    if (event.type === "pointerup" || event.type === "pointercancel") ownedPointerId = null;
+  };
+  const observeScroll = (event: Event) => {
+    if (event.target === strip) sample("strip scroll");
+  };
+  const observeMarker = new MutationObserver(() => sample("marker mutation"));
+  // The real strip has exactly these finite cells plus its zero-width marker.
+  // Observe marker insertion/removal and index updates without reading labels,
+  // chat IDs, model/source text or any other fixture's DOM.
+  observeMarker.observe(strip, {
+    childList: true,
+    attributes: true,
+    attributeFilter: ["data-desk-insertion-index"],
+    subtree: true,
+  });
+  const pointerEvents = ["pointerdown", "pointermove", "pointerup", "pointercancel"] as const;
+  for (const name of pointerEvents)
+    document.addEventListener(name, observePointer, { capture: true, passive: true });
+  strip.addEventListener("scroll", observeScroll, { passive: true });
+  sample("attached");
+  return {
+    sample,
+    message: () => JSON.stringify({ samples }),
+    dispose: () => {
+      observeMarker.disconnect();
+      strip.removeEventListener("scroll", observeScroll);
+      for (const name of pointerEvents) document.removeEventListener(name, observePointer, true);
+      ownedPointerId = null;
+    },
+  };
+}
+
+function expectInsertionSlot(
+  host: HTMLElement,
+  strip: Element,
+  index: number,
+  diagnostic?: string,
+) {
   const markers = host.querySelectorAll<HTMLElement>("[data-desk-insertion-index]");
-  expect(markers).toHaveLength(1);
+  expect(markers, diagnostic).toHaveLength(1);
   const marker = markers[0]!;
-  expect(strip.contains(marker)).toBe(true);
-  expect(marker.dataset.deskInsertionIndex).toBe(String(index));
+  expect(strip.contains(marker), diagnostic).toBe(true);
+  expect(marker.dataset.deskInsertionIndex, diagnostic).toBe(String(index));
   // Reordering is distinct from moving/splitting a pane. Assert the feedback
   // before release: checking only final order missed the misleading rectangle.
-  expect(host.querySelector(".desk-drop-hint")).toBeNull();
+  expect(host.querySelector(".desk-drop-hint"), diagnostic).toBeNull();
   const markerBounds = marker.getBoundingClientRect();
   const stripBounds = strip.getBoundingClientRect();
-  expect(markerBounds.left).toBeGreaterThanOrEqual(stripBounds.left - 2);
-  expect(markerBounds.right).toBeLessThanOrEqual(stripBounds.right + 2);
+  expect(markerBounds.left, diagnostic).toBeGreaterThanOrEqual(stripBounds.left - 2);
+  expect(markerBounds.right, diagnostic).toBeLessThanOrEqual(stripBounds.right + 2);
 }
 
 function rootDeskSplit() {
@@ -1100,6 +1213,7 @@ describe("Desk workspace navigation chrome", () => {
         ids.map((id) => [id, { id, archivedAt: null }]),
       );
       const { screen, host, cleanup } = await setup(ids);
+      let diagnostics: ReturnType<typeof observeClippedDrag> | undefined;
       try {
         host.style.width = "680px";
         const strip = screen.getByRole("tablist", { name: "Main tabs" }).element() as HTMLElement;
@@ -1110,6 +1224,13 @@ describe("Desk workspace navigation chrome", () => {
           expect(bounds.left).toBeGreaterThanOrEqual(viewport.left);
           expect(bounds.right).toBeLessThanOrEqual(viewport.right);
         });
+        const cells = ids.map((id) =>
+          screen
+            .getByRole("tab", { name: `Chat ${id}`, exact: true })
+            .element()
+            .closest(".desk-tab-cell")!,
+        );
+        diagnostics = observeClippedDrag(host, strip, cells);
         const pane = screen
           .getByRole("region", { name: "Main chat group" })
           .element()
@@ -1134,13 +1255,17 @@ describe("Desk workspace navigation chrome", () => {
               side === "left"
                 ? viewport.left - original.width * 0.25
                 : viewport.right - original.width * 0.75;
+            diagnostics!.sample("before clip assignment");
             strip.scrollLeft += original.left - desiredLeft;
             await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+            diagnostics!.sample("after clip frame");
             const clipped = cell.getBoundingClientRect();
-            if (side === "left") expect(clipped.left).toBeLessThan(viewport.left);
-            else expect(clipped.right).toBeGreaterThan(viewport.right);
+            if (side === "left")
+              expect(clipped.left, diagnostics!.message()).toBeLessThan(viewport.left);
+            else expect(clipped.right, diagnostics!.message()).toBeGreaterThan(viewport.right);
             const stablePosition = clipped.left - viewport.left + strip.scrollLeft;
             const expectedIndex = targetIndex + (side === "right" ? 1 : 0);
+            diagnostics!.sample("before edge move");
             await moveTo({
               x:
                 side === "left"
@@ -1148,44 +1273,66 @@ describe("Desk workspace navigation chrome", () => {
                   : viewport.right - clipped.width * 0.1,
               y: clipped.top + clipped.height / 2,
             });
-            await vi.waitFor(() => expectInsertionSlot(host, strip, expectedIndex));
+            diagnostics!.sample("after edge move");
+            await vi.waitFor(() =>
+              expectInsertionSlot(host, strip, expectedIndex, diagnostics!.message()),
+            );
             // The sensor deliberately auto-scrolls near an edge. Restore the
             // exact partial clip after its target-change effects settle, then
             // inspect sticky CSS synchronously before the next scroll tick.
             // The pointer remains over the same visible half of this tab.
             strip.scrollLeft += cell.getBoundingClientRect().left - desiredLeft;
             {
-              expectInsertionSlot(host, strip, expectedIndex);
+              diagnostics!.sample("restored clip inspection");
+              expectInsertionSlot(host, strip, expectedIndex, diagnostics!.message());
               const marker = host.querySelector<HTMLElement>("[data-desk-insertion-index]")!;
               const bounds = marker.getBoundingClientRect();
               const currentViewport = strip.getBoundingClientRect();
               const currentCell = cell.getBoundingClientRect();
               const paintedWidth = Number.parseFloat(getComputedStyle(marker, "::before").width);
-              expect(paintedWidth).toBe(2);
+              expect(paintedWidth, diagnostics!.message()).toBe(2);
               // The overflow edge fade would hide a marker held at the edge.
-              expect(getComputedStyle(strip).maskImage).toBe("none");
-              expect(bounds.left).toBeGreaterThanOrEqual(currentViewport.left);
-              expect(bounds.left + paintedWidth).toBeLessThanOrEqual(currentViewport.right + 0.5);
-              if (side === "left") expect(currentCell.left).toBeLessThan(currentViewport.left);
-              else expect(currentCell.right).toBeGreaterThan(currentViewport.right);
+              expect(getComputedStyle(strip).maskImage, diagnostics!.message()).toBe("none");
+              expect(bounds.left, diagnostics!.message()).toBeGreaterThanOrEqual(
+                currentViewport.left,
+              );
+              expect(bounds.left + paintedWidth, diagnostics!.message()).toBeLessThanOrEqual(
+                currentViewport.right + 0.5,
+              );
+              if (side === "left")
+                expect(currentCell.left, diagnostics!.message()).toBeLessThan(currentViewport.left);
+              else
+                expect(currentCell.right, diagnostics!.message()).toBeGreaterThan(
+                  currentViewport.right,
+                );
               // Auto-scroll may move the viewport, but introducing feedback must
               // not move or resize the underlying tab in strip-content space.
-              expect(Math.abs(currentCell.width - clipped.width)).toBeLessThan(1);
+              expect(
+                Math.abs(currentCell.width - clipped.width),
+                diagnostics!.message(),
+              ).toBeLessThan(1);
               expect(
                 Math.abs(
                   currentCell.left - currentViewport.left + strip.scrollLeft - stablePosition,
                 ),
+                diagnostics!.message(),
               ).toBeLessThan(1);
             }
             await userEvent.keyboard("{Escape}");
             await vi.waitFor(() =>
-              expect(host.querySelector("[data-desk-insertion-index]")).toBeNull(),
+              expect(
+                host.querySelector("[data-desk-insertion-index]"),
+                diagnostics!.message(),
+              ).toBeNull(),
             );
           },
         );
-        expect(useDeskStore.getState().desk.groups.g1?.tabs).toEqual(before);
-        expect(deskGroupIds(useDeskStore.getState().desk.layout)).toEqual(["g1"]);
+        expect(useDeskStore.getState().desk.groups.g1?.tabs, diagnostics.message()).toEqual(before);
+        expect(deskGroupIds(useDeskStore.getState().desk.layout), diagnostics.message()).toEqual([
+          "g1",
+        ]);
       } finally {
+        diagnostics?.dispose();
         await cleanup();
       }
     },

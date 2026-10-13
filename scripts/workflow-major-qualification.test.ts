@@ -118,18 +118,19 @@ describe("qualified major Actions and Ubuntu runner boundaries", () => {
     });
   });
 
-  it("retains only the eight reviewed synthetic visualization and Mermaid failure paths", () => {
+  it("retains only the nine reviewed synthetic visualization and Mermaid failure paths", () => {
     const steps = readWorkflow("ci.yml").jobs.quality?.steps ?? [];
     const retention = steps.filter(
       (step) => step.name === "Retain synthetic visualization and Mermaid failure evidence",
     );
     expect(retention).toHaveLength(1);
-    // Literal block equality preserves exactly eight paths, including their
+    // Literal block equality preserves exactly nine paths, including their
     // fixture-specific hidden directories. No profile/source/JSON/temp-tree
     // glob, successful-run upload, override or longer retention is admitted.
     const paths = [
       "apps/web/.vitest/attachments/failure-screenshots/VisualizationCommitChart.browser.tsx/",
       "apps/web/.vitest/attachments/failure-screenshots/MermaidFamilies.browser.tsx/",
+      "apps/web/.vitest/attachments/failure-screenshots/MermaidSecurity.browser.tsx/",
       "apps/web/.vitest/attachments/failure-screenshots/Visualizations.browser.tsx/",
       "apps/web/.vitest/attachments/failure-screenshots/VisualizationFluid.browser.tsx/",
       "apps/web/.vitest/attachments/failure-screenshots/VisualizationHistory.browser.tsx/",
@@ -189,6 +190,7 @@ describe("qualified major Actions and Ubuntu runner boundaries", () => {
     ]);
     expect(sharedArguments.slice(5, -1)).toEqual(
       expect.arrayContaining([
+        "src/components/WorkspaceEnvironment.browser.tsx",
         "src/components/visualizations/Visualizations.browser.tsx",
         "src/components/visualizations/VisualizationFluid.browser.tsx",
         "src/components/visualizations/Visualizations.motion.browser.tsx",
@@ -200,6 +202,14 @@ describe("qualified major Actions and Ubuntu runner boundaries", () => {
     for (const argument of sharedArguments.slice(5, -1))
       expect(argument).toMatch(/^src\/components\/[^\s]+\.browser\.tsx$/);
     expect(sharedArguments.at(-1)).toBe("--maxWorkers=2");
+    // Keyboard popup readiness also requires native qualification on the
+    // other hosts. Preserve the complete file exactly once in this same
+    // subset; Linux still owns its unchanged complete suite.
+    expect(
+      sharedArguments.filter(
+        (argument) => argument === "src/components/WorkspaceEnvironment.browser.tsx",
+      ),
+    ).toHaveLength(1);
     expect(shared[0]!.env).toBeUndefined();
     expect(shared[0]!["timeout-minutes"]).toBeUndefined();
     expect(shared[0]!["continue-on-error"]).toBeUndefined();
@@ -256,6 +266,54 @@ describe("qualified major Actions and Ubuntu runner boundaries", () => {
     expect(steps.filter((step) => step.run !== undefined).at(-1)).toEqual(final);
   });
 
+  it("runs Mermaid security exactly once in a dedicated sequential native-host step", () => {
+    const steps = readWorkflow("ci.yml").jobs.quality?.steps ?? [];
+    const selector = "src/components/MermaidSecurity.browser.tsx";
+    const dedicated = {
+      name: "Mermaid source and parsed-graph security browser qualification",
+      if: "runner.os != 'Linux'",
+      run: `corepack yarn workspace @cafecode/web test:browser ${selector} --maxWorkers=2`,
+    };
+    // Whole-step equality admits only this complete file with its existing
+    // native-host worker bound: no environment, timeout, failure bypass, retry
+    // or input override may be attached to the scheduling partition.
+    expect(steps.filter((step) => step.name === dedicated.name)).toEqual([dedicated]);
+    const selectedSteps = steps.filter((step) => step.run?.split(/\s+/).includes(selector));
+    expect(selectedSteps).toEqual([dedicated]);
+    expect(
+      selectedSteps[0]!.run!.split(/\s+/).filter((argument) => argument === selector),
+    ).toHaveLength(1);
+
+    const broadIndex = steps.findIndex(
+      (step) =>
+        step.name === "Cross-platform Markdown, timeline, menus and file action browser tests",
+    );
+    const dedicatedIndex = steps.findIndex((step) => step.name === dedicated.name);
+    expect(broadIndex).toBeGreaterThanOrEqual(0);
+    // Job steps are sequential. Keep the security file outside the broad
+    // invocation and immediately after it, before the remaining qualifications
+    // and required final forced desktop build, rather than silently dropping it.
+    expect(dedicatedIndex).toBe(broadIndex + 1);
+    expect(steps[broadIndex]!.run!.split(/\s+/)).not.toContain(selector);
+    for (const laterName of [
+      "Generated chart layout and range animation browser qualification",
+      "Additional Mermaid family browser qualification",
+      "Full-access inline visualization browser qualification",
+      "Final forced desktop verification",
+    ])
+      expect(steps.findIndex((step) => step.name === laterName)).toBeGreaterThan(dedicatedIndex);
+
+    // The complete Linux invocation still owns coverage of this file and every
+    // other browser test, with no selector or scheduling-policy substitution.
+    expect(steps.filter((step) => step.name === "Browser tests")).toEqual([
+      {
+        name: "Browser tests",
+        if: "runner.os == 'Linux'",
+        run: "corepack yarn workspace @cafecode/web test:browser",
+      },
+    ]);
+  });
+
   it("keeps visualization and Mermaid browser qualification on the original worker and deadline bounds", () => {
     const steps = readWorkflow("ci.yml").jobs.quality?.steps ?? [];
     for (const expected of [
@@ -263,6 +321,11 @@ describe("qualified major Actions and Ubuntu runner boundaries", () => {
         name: "Browser tests",
         if: "runner.os == 'Linux'",
         run: "corepack yarn workspace @cafecode/web test:browser",
+      },
+      {
+        name: "Mermaid source and parsed-graph security browser qualification",
+        if: "runner.os != 'Linux'",
+        run: "corepack yarn workspace @cafecode/web test:browser src/components/MermaidSecurity.browser.tsx --maxWorkers=2",
       },
       {
         name: "Generated chart layout and range animation browser qualification",

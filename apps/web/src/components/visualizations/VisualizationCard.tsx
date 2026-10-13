@@ -1,5 +1,11 @@
 import { memo, useCallback, useEffect, useId, useLayoutEffect, useRef, useState } from "react";
-import { ChartNoAxesCombinedIcon, EllipsisIcon, PlayIcon, SquareIcon } from "lucide-react";
+import {
+  ChartNoAxesCombinedIcon,
+  EllipsisIcon,
+  PlayIcon,
+  SparklesIcon,
+  SquareIcon,
+} from "lucide-react";
 import type { EnvironmentId, RuntimeMode, ThreadId } from "@cafecode/contracts";
 import type { TimestampFormat } from "@cafecode/contracts/settings";
 import {
@@ -141,7 +147,15 @@ export const VisualizationCard = memo(function VisualizationCard({
     currentPermission && generatedAdmissionReady && visible && paused !== key && failed !== key;
   const granted = useVisualizationReservation(key, pane, wanted);
   const running = wanted && granted && installed?.key === key;
-  const loading = useDelayedFlag(wanted && granted && installed?.key !== key);
+  // A reservation, source reply and iframe insertion are distinct readiness
+  // stages. In particular, installing srcdoc does not mean its actual document
+  // has loaded. Keep the indicator through that last browser-owned transition,
+  // and include the finite FIFO wait without granting another frame or read.
+  const pending =
+    wanted &&
+    viewer !== null &&
+    (!granted || !running || !loaded || loaded !== frame?.contentDocument);
+  const loading = useDelayedFlag(pending);
   const inlineHeight =
     height.key === key ? height.value : Math.max(80, Math.min(2000, reference.height));
 
@@ -166,23 +180,48 @@ export const VisualizationCard = memo(function VisualizationCard({
   useEffect(() => {
     const element = anchor.current;
     if (!element) return;
-    let intersecting = false;
+    let scheduled: number | null = null;
     const sample = () => {
       // Ordinary DOM modals can paint above an iframe without tearing down its
       // document. Inertness is not an offscreen transition: private inspectors
       // and an App's own consent must not reset the still-visible chart.
       const actuallyVisible =
-        intersecting &&
-        document.visibilityState === "visible" &&
-        visualizationGeometry(element, true) !== null;
+        document.visibilityState === "visible" && visualizationGeometry(element, true) !== null;
+      // Threshold-zero IO may report intersecting at a touching edge or for a
+      // subpixel crop that our finite geometry correctly refuses. Its bucket
+      // need not change when scrolling inward. Fresh clipped geometry, never
+      // a cached IO flag, therefore owns admission and offscreen retirement.
       setVisible(actuallyVisible);
+    };
+    const schedule = () => {
+      if (scheduled !== null) return;
+      scheduled = requestAnimationFrame(() => {
+        scheduled = null;
+        sample();
+      });
+    };
+    const scroll = (event: Event) => {
+      // Capture observes only the parent document's owning scroll chain. An
+      // unrelated scroller or a child iframe cannot trigger extra geometry
+      // walks; rapid owning scroll/resize events share one pending RAF.
+      const target = event.target;
+      if (
+        target === document ||
+        target === window ||
+        (target instanceof HTMLElement && target.contains(element))
+      )
+        schedule();
     };
     const intersection = new IntersectionObserver(
       (entries) => {
-        intersecting = entries[0]?.isIntersecting ?? false;
-        // A real offscreen sample permits a later new document. Theme, resize,
-        // hidden modals and component callback replacement are not restart intent.
-        if (!intersecting && visualizationClippingAncestors(element) !== null) {
+        // Geometry refusal can also mean unsupported bounds, not scroll-out.
+        // Only a real nonintersecting IO observation under visible valid styles
+        // clears terminal Stop/error intent for a later new viewport admission.
+        if (
+          entries.some((entry) => entry.target === element && !entry.isIntersecting) &&
+          document.visibilityState === "visible" &&
+          visualizationClippingAncestors(element) !== null
+        ) {
           setPaused(null);
           setFailed(null);
         }
@@ -192,21 +231,30 @@ export const VisualizationCard = memo(function VisualizationCard({
     );
     intersection.observe(element);
     const visibility = new MutationObserver(sample);
+    const resize = new ResizeObserver(schedule);
     let ancestor: HTMLElement | null = element;
     for (let count = 0; ancestor && count < 128; count += 1) {
       visibility.observe(ancestor, {
         attributes: true,
         attributeFilter: ["inert", "aria-hidden", "hidden", "class", "style"],
       });
+      // The existing finite owner chain also supplies resize wakeups: a
+      // clipping parent may grow without changing this anchor's own size.
+      resize.observe(ancestor);
       ancestor = ancestor.parentElement;
     }
+    sample();
     document.addEventListener("visibilitychange", sample);
     window.addEventListener("resize", sample);
+    window.addEventListener("scroll", scroll, { capture: true, passive: true });
     return () => {
+      if (scheduled !== null) cancelAnimationFrame(scheduled);
       intersection.disconnect();
       visibility.disconnect();
+      resize.disconnect();
       document.removeEventListener("visibilitychange", sample);
       window.removeEventListener("resize", sample);
+      window.removeEventListener("scroll", scroll, true);
     };
   }, [key]);
 
@@ -675,11 +723,22 @@ export const VisualizationCard = memo(function VisualizationCard({
                       undefined,
                       uiLocale,
                     )
-                  : loading
-                    ? uiText("Starting viewer…", undefined, undefined, uiLocale)
-                    : null}
+                  : null}
           </div>
         )}
+        {pending && loading ? (
+          <div
+            role="status"
+            data-visualization-loading="true"
+            className="pointer-events-none absolute left-4 top-4 flex items-center gap-2 text-xs text-muted-foreground"
+          >
+            <SparklesIcon
+              aria-hidden
+              className="size-3.5 shrink-0 animate-pulse text-status-running motion-reduce:animate-none"
+            />
+            <span>{uiText("Loading visualization…", undefined, undefined, uiLocale)}</span>
+          </div>
+        ) : null}
         {expanded ? (
           <Button
             className="absolute right-2 top-2"

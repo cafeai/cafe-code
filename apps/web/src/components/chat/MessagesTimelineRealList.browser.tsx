@@ -382,7 +382,10 @@ describe("MessagesTimeline with real LegendList", () => {
           await new Promise<void>((resolve) => window.requestAnimationFrame(() => resolve()));
         }
         const scroller = readScroller(listRef);
-        scroller.scrollTop = scroller.scrollHeight;
+        // Complete the list's supported end preparation, including any
+        // data/MVCP settlement, rather than only changing native pixels while
+        // an earlier imperative end operation may still be queued.
+        await listRef.current!.scrollToEnd({ animated: false });
         await vi.waitFor(() => expect(Math.abs(tailDistance(scroller))).toBeLessThanOrEqual(2));
         const mountedCards = host.querySelectorAll("[data-visualization-card]").length;
         expect(mountedCards).toBeGreaterThan(0);
@@ -425,26 +428,78 @@ describe("MessagesTimeline with real LegendList", () => {
         );
         await expectTail(host, listRef, `${scope}-message-39`, "late poster metadata");
         if (!following) {
-          await reviewWithNativeWheel(scroller);
-          await vi.waitFor(() => {
-            expect(host.querySelector('[data-real-list-following="false"]')).not.toBeNull();
-            expect(tailDistance(scroller)).toBeGreaterThan(400);
-          });
-          // Let the real browser scroll event and recycled-row measurements
-          // commit before choosing the review anchor; follow-mode state alone
-          // is synchronous and does not attest the virtualizer's new viewport.
-          for (let frame = 0; frame < 4; frame += 1) {
-            await new Promise<void>((resolve) => window.requestAnimationFrame(() => resolve()));
+          // Preserve the automatic late-metadata follow assertion above before
+          // completing initial tail preparation for the separate review gesture.
+          await listRef.current!.scrollToEnd({ animated: false });
+          await vi.waitFor(() => expect(Math.abs(tailDistance(scroller))).toBeLessThanOrEqual(2));
+          let completedReviewScroll = false;
+          const observeReviewScrollEnd = (event: Event) => {
+            if (event.isTrusted && event.target === scroller && tailDistance(scroller) > 400)
+              completedReviewScroll = true;
+          };
+          // Visibility/follow intent and a fixed number of frames do not
+          // attest that a native gesture has completed. Observe this exact
+          // scroller's genuine completion before capturing its review anchor;
+          // this strengthens readiness, not a claim about the old failure's
+          // unobserved origin or permission to change production scrolling.
+          scroller.addEventListener("scrollend", observeReviewScrollEnd);
+          try {
+            await reviewWithNativeWheel(scroller);
+            await vi.waitFor(() => {
+              expect(host.querySelector('[data-real-list-following="false"]')).not.toBeNull();
+              expect(tailDistance(scroller)).toBeGreaterThan(400);
+              expect(completedReviewScroll).toBe(true);
+            });
+          } finally {
+            scroller.removeEventListener("scrollend", observeReviewScrollEnd);
           }
         }
-        const viewport = scroller.getBoundingClientRect();
-        const anchor = Array.from(
-          host.querySelectorAll<HTMLElement>("[data-message-id], [data-visualization-card]"),
-        ).find((row) => {
-          const bounds = row.getBoundingClientRect();
-          return bounds.top >= viewport.top && bounds.bottom <= viewport.bottom;
+        let anchor: HTMLElement | undefined;
+        await vi.waitFor(() => {
+          const viewport = scroller.getBoundingClientRect(),
+            state = listRef.current!.getState();
+          // Native review pixels can move before the public recycled slice and
+          // its ResizeObserver measurements commit. The review append must start
+          // from an exact visible, measured logical row, not a transient occupant.
+          // Programmatic tail mode retains its existing physical-layout proof:
+          // the public end target need not equal the native clamped scroll offset.
+          if (!following) {
+            expect(state.scroll).toBe(scroller.scrollTop);
+            expect(state.start).toBeGreaterThanOrEqual(0);
+            expect(state.end).toBeGreaterThanOrEqual(state.start);
+            expect(state.end).toBeLessThan(state.data.length);
+          }
+          anchor = Array.from(
+            host.querySelectorAll<HTMLElement>("[data-message-id], [data-visualization-card]"),
+          ).find((row) => {
+            const bounds = row.getBoundingClientRect();
+            if (
+              bounds.width <= 0 ||
+              bounds.height <= 0 ||
+              bounds.top < viewport.top ||
+              bounds.bottom > viewport.bottom
+            )
+              return false;
+            if (following) return true;
+            for (let index = state.start; index <= state.end; index += 1) {
+              const fullRow = state.elementAtIndex(index);
+              if (!fullRow?.contains(row)) continue;
+              expect(
+                row.closest<HTMLElement>("[data-timeline-row-id]")?.dataset.timelineRowId,
+              ).toBe(state.data[index].id);
+              // The public size measures the whole row container, including
+              // parent padding; an inner chart's reserved height is not enough.
+              // Pinned LegendList stores Math.round(size), so require that
+              // exact measured quantization rather than an arbitrary tolerance.
+              const fullRowHeight = fullRow.getBoundingClientRect().height;
+              expect(fullRowHeight).toBeGreaterThan(0);
+              expect(state.sizeAtIndex(index)).toBe(Math.round(fullRowHeight));
+              return true;
+            }
+            return false;
+          });
+          expect(anchor).toBeDefined();
         });
-        expect(anchor).toBeDefined();
         const anchorSelector = anchor!.dataset.messageId
           ? `[data-message-id="${anchor!.dataset.messageId}"]`
           : `[data-visualization-card="${anchor!.dataset.visualizationCard}"]`;

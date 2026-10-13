@@ -32,7 +32,7 @@
   "Raw JSON": "원본 JSON",
   "Save current PNG": "현재 PNG 저장",
   "Saved": "저장됨",
-  "Starting viewer…": "뷰어 시작 중…",
+  "Loading visualization…": "시각화 불러오는 중…",
   "Viewer stopped. Run again to start a new document.": "뷰어가 중지되었습니다. 다시 실행하면 새 문서를 시작합니다.",
   "Visualization history could not refresh.": "시각화 기록을 새로고침할 수 없었습니다.",
   "Agent not recorded": "에이전트 미기록",

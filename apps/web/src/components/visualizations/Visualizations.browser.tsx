@@ -26,7 +26,7 @@ import { GENERATED_VISUALIZATION_FONT_APPENDIX } from "@cafecode/shared/visualiz
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { cdp, page, userEvent } from "vitest/browser";
 import { render } from "vitest-browser-react";
-import { StrictMode, useRef, useState } from "react";
+import { StrictMode, useLayoutEffect, useRef, useState } from "react";
 import {
   __resetEnvironmentApiOverridesForTests,
   __setEnvironmentApiOverrideForTests,
@@ -39,7 +39,7 @@ import { VisualizationCard } from "./VisualizationCard";
 import { VisualizationViewerProvider, useVisualizationScope } from "./VisualizationViewerProvider";
 import { fileRequest } from "../../attachments/fileAttachments";
 import { readVisualizationPosterAccounting } from "./visualizationPoster";
-import { visualizationClippingAncestors } from "./visualizationGeometry";
+import { visualizationClippingAncestors, visualizationGeometry } from "./visualizationGeometry";
 import { readInlineVisualizationPoolDiagnostics } from "./VisualizationViewerProvider";
 
 vi.mock("../../attachments/fileAttachments", async (original) => ({
@@ -209,6 +209,37 @@ function Fixture({
             ))
           : null}
         {scroll ? <div style={{ height: 900 }} /> : null}
+      </div>
+    </VisualizationViewerProvider>
+  );
+}
+/** The real anchor begins in IO's threshold-zero intersecting bucket, but its
+ * fractional crop contains no admitted whole CSS pixel. Native scrolling or
+ * resizing the clipping parent must wake fresh geometry within that bucket. */
+function FractionalEdgeFixture() {
+  const scroller = useRef<HTMLDivElement | null>(null);
+  useLayoutEffect(() => {
+    const parent = scroller.current!,
+      spacer = parent.querySelector<HTMLElement>("[data-edge-spacer]")!,
+      anchor = parent.querySelector<HTMLElement>("[data-visualization-inline-surface]")!;
+    spacer.style.height = `${spacer.getBoundingClientRect().height + parent.getBoundingClientRect().bottom - 0.25 - anchor.getBoundingClientRect().top}px`;
+  }, []);
+  return (
+    <VisualizationViewerProvider>
+      <div
+        ref={scroller}
+        data-fractional-edge
+        style={{ width: 700, maxWidth: "100%", height: 200, overflow: "auto" }}
+      >
+        <div data-edge-spacer style={{ height: 180 }} />
+        <VisualizationCard
+          environmentId={environmentId}
+          threadId={threadId}
+          entry={entry}
+          timestampFormat="24-hour"
+          runtimeMode="full-access"
+        />
+        <div style={{ height: 600 }} />
       </div>
     </VisualizationViewerProvider>
   );
@@ -738,6 +769,31 @@ describe("Full-access live inline visualizations", () => {
         // observe both legitimate surfaces without altering input handlers.
         expect(frameDocument).not.toBeNull();
         const timeline = scroller.closest<HTMLElement>("[data-pool-timeline]")!;
+        const expectOriginalOwner = (phase: string) => {
+          const geometry = visualizationGeometry(anchor, true);
+          // Do not adopt a replacement after metadata/measurement or native
+          // pointer preparation. These content-free witnesses localize an
+          // ownership transition while preserving the original document proof.
+          const witness = {
+            phase,
+            scrollerConnected: scroller.isConnected,
+            currentFrame: frameElement() === frame,
+            currentDocument: frame.contentDocument === frameDocument,
+            clipWidth: geometry?.clipBounds.width ?? null,
+            clipHeight: geometry?.clipBounds.height ?? null,
+            inlineReads: api.inline.mock.calls.length,
+            retireCalls: api.retireInlineFrame.mock.calls.length,
+          };
+          const diagnostic = JSON.stringify(witness);
+          expect(witness.scrollerConnected, diagnostic).toBe(true);
+          expect(witness.currentFrame, diagnostic).toBe(true);
+          expect(witness.currentDocument, diagnostic).toBe(true);
+          expect(geometry, diagnostic).not.toBeNull();
+          expect(geometry!.clipBounds.width, diagnostic).toBeGreaterThan(0);
+          expect(geometry!.clipBounds.height, diagnostic).toBeGreaterThan(0);
+          expect(api.inline, diagnostic).toHaveBeenCalledOnce();
+          expect(api.retireInlineFrame, diagnostic).not.toHaveBeenCalled();
+        };
         let wheelCount = 0;
         let admission:
           | {
@@ -746,27 +802,37 @@ describe("Full-access live inline visualizations", () => {
               deltaMode: number;
               following: boolean;
               exactOwner: boolean;
+              scrollerConnected: boolean;
+              currentFrame: boolean;
+              currentDocument: boolean;
+              currentEventTarget: boolean;
             }
           | undefined;
         const observeWheel = (event: WheelEvent) => {
           wheelCount += 1;
           if (admission) return;
+          const owner = {
+            scrollerConnected: scroller.isConnected,
+            currentFrame: frameElement() === frame,
+            currentDocument: frame.contentDocument === frameDocument,
+            currentEventTarget:
+              event.currentTarget === scroller || event.currentTarget === frameDocument,
+          };
           admission = {
             trusted: event.isTrusted,
             deltaY: event.deltaY,
             deltaMode: event.deltaMode,
             following: timeline.dataset.following === "true",
-            exactOwner:
-              scroller.isConnected &&
-              frameElement() === frame &&
-              frame.contentDocument === frameDocument &&
-              (event.currentTarget === scroller || event.currentTarget === frameDocument),
+            ...owner,
+            exactOwner: Object.values(owner).every((value) => value),
           };
         };
         scroller.addEventListener("wheel", observeWheel, { capture: true, passive: true });
         frameDocument!.addEventListener("wheel", observeWheel, { capture: true, passive: true });
         try {
+          expectOriginalOwner("before native pointer preparation");
           const wheelPosition = await prepareVisualizationScrollerWheel(scroller);
+          expectOriginalOwner("after native pointer preparation");
           const beforeWheel = scroller.scrollTop;
           expect(Number.isFinite(beforeWheel)).toBe(true);
           expect(timeline.dataset.following).toBe("true");
@@ -778,7 +844,12 @@ describe("Full-access live inline visualizations", () => {
             expect(admission!.deltaY).toBe(-64);
             expect(admission!.deltaMode).toBe(0);
             expect(admission!.following).toBe(true);
-            expect(admission!.exactOwner).toBe(true);
+            const diagnostic = JSON.stringify(admission);
+            expect(admission!.scrollerConnected, diagnostic).toBe(true);
+            expect(admission!.currentFrame, diagnostic).toBe(true);
+            expect(admission!.currentDocument, diagnostic).toBe(true);
+            expect(admission!.currentEventTarget, diagnostic).toBe(true);
+            expect(admission!.exactOwner, diagnostic).toBe(true);
             expect(
               document.querySelector('[data-pool-timeline][data-following="false"]'),
             ).not.toBeNull();
@@ -933,6 +1004,7 @@ describe("Full-access live inline visualizations", () => {
       expect(api.inline).not.toHaveBeenCalled();
       expect(frameElement()).toBeNull();
       expect(fileRequest).not.toHaveBeenCalled();
+      expect(document.querySelector("[data-visualization-loading]")).toBeNull();
     },
   );
   it("runs automatically in an ordinary browser, has no saved poster, and accepts real chart input", async () => {
@@ -962,10 +1034,239 @@ describe("Full-access live inline visualizations", () => {
     expect(api.inline).not.toHaveBeenCalled();
     expect(frameElement()).toBeNull();
     expect(fileRequest).not.toHaveBeenCalled();
+    expect(document.querySelector("[data-visualization-loading]")).toBeNull();
     actions.complete?.();
     await loadedFrame();
     expect(api.inline).toHaveBeenCalledOnce();
   });
+  it("does not claim pending work without an actual viewer reservation provider", async () => {
+    const api = installApi();
+    await render(
+      <VisualizationCard
+        environmentId={environmentId}
+        threadId={threadId}
+        entry={entry}
+        timestampFormat="24-hour"
+        runtimeMode="full-access"
+      />,
+    );
+    expect(api.inline).not.toHaveBeenCalled();
+    expect(frameElement()).toBeNull();
+    expect(document.querySelector("[data-visualization-loading]")).toBeNull();
+    expect(fileRequest).not.toHaveBeenCalled();
+  });
+  it.each(["scroll", "resize"] as const)(
+    "admits a genuine fractional edge crop after owning %s without an IO threshold transition",
+    async (wake) => {
+      const api = installApi();
+      const view = await render(<FractionalEdgeFixture />);
+      const scroller = document.querySelector<HTMLElement>("[data-fractional-edge]")!,
+        anchor = scroller.querySelector<HTMLElement>("[data-visualization-inline-surface]")!;
+      const samples: IntersectionObserverEntry[] = [];
+      let resizeStyle: HTMLStyleElement | null = null;
+      const observer = new IntersectionObserver((entries) => samples.push(...entries), {
+        threshold: 0,
+      });
+      observer.observe(anchor);
+      try {
+        await vi.waitFor(() => expect(samples).toHaveLength(1));
+        expect(samples[0]!.isIntersecting).toBe(true);
+        expect(samples[0]!.intersectionRect.height).toBeCloseTo(0.25, 2);
+        expect(visualizationGeometry(anchor, true)).toBeNull();
+        expect(api.inline).not.toHaveBeenCalled();
+        expect(frameElement()).toBeNull();
+        expect(document.querySelector("[data-visualization-loading]")).toBeNull();
+        if (wake === "scroll") {
+          const point = await prepareVisualizationScrollerWheel(scroller);
+          await wheelVisualizationScroller(point, 2);
+          await vi.waitFor(() => expect(scroller.scrollTop).toBe(2));
+        } else {
+          // A real stylesheet layout change has no owner-chain attribute
+          // mutation. Only actual resize/geometry delivery can wake this crop.
+          resizeStyle = document.createElement("style");
+          resizeStyle.textContent = "[data-fractional-edge]{height:202px!important}";
+          document.head.append(resizeStyle);
+        }
+        const frame = await loadedFrame(),
+          documentAtEntry = frame.contentDocument;
+        expect(visualizationGeometry(anchor, true)!.clipBounds.height).toBeGreaterThanOrEqual(1);
+        // Independent native IO evidence: positive finite geometry was admitted
+        // without another threshold-zero notification, not via widened margins.
+        expect(samples).toHaveLength(1);
+        expect(api.inline).toHaveBeenCalledOnce();
+        const point = await prepareVisualizationScrollerWheel(scroller);
+        await wheelVisualizationScroller(point, 100);
+        await vi.waitFor(() => expect(scroller.scrollTop).toBe(wake === "scroll" ? 102 : 100));
+        expect(frameElement()).toBe(frame);
+        expect(frame.contentDocument).toBe(documentAtEntry);
+        await userEvent.click(
+          page
+            .frameLocator(page.elementLocator(frame))
+            .getByRole("button", { name: "Change range", exact: true }),
+        );
+        expect(frame.contentDocument!.getElementById("count")!.textContent).toBe("1");
+        expect(api.inline).toHaveBeenCalledOnce();
+        expect(api.retireInlineFrame).not.toHaveBeenCalled();
+        expect(document.querySelector("[data-visualization-loading]")).toBeNull();
+        await wheelVisualizationScroller(await prepareVisualizationScrollerWheel(scroller), 600);
+        await vi.waitFor(() => expect(frameElement()).toBeNull());
+        expect(document.querySelector("[data-visualization-loading]")).toBeNull();
+        expect(api.retireInlineFrame).toHaveBeenCalledOnce();
+        await wheelVisualizationScroller(await prepareVisualizationScrollerWheel(scroller), -600);
+        const replacement = await loadedFrame();
+        expect(replacement).not.toBe(frame);
+        expect(replacement.contentDocument).not.toBe(documentAtEntry);
+        expect(replacement.contentDocument!.getElementById("count")!.textContent).toBe("0");
+        expect(api.inline).toHaveBeenCalledTimes(2);
+        expect(fileRequest).not.toHaveBeenCalled();
+      } finally {
+        observer.disconnect();
+        resizeStyle?.remove();
+        await view.unmount();
+      }
+    },
+  );
+  it("keeps genuine source and parser readiness pending, then removes the sparkle for the interactive actual document", async () => {
+    const api = installApi(),
+      read = api.inline.getMockImplementation()!,
+      request = deferred<VisualizationInlineResult>();
+    api.inline.mockImplementationOnce(() => request.promise);
+    await render(<Fixture />);
+    await expect.element(page.getByText("Loading visualization…", { exact: true })).toBeVisible();
+    const status = document.querySelector<HTMLElement>("[data-visualization-loading]")!;
+    expect(status.getAttribute("role")).toBe("status");
+    expect(getComputedStyle(status).pointerEvents).toBe("none");
+    expect(frameElement()).toBeNull();
+    expect(api.inline).toHaveBeenCalledOnce();
+    const observations: { installed: boolean; ready: boolean; pending: boolean }[] = [];
+    const observer = new MutationObserver(() => {
+      const frame = frameElement();
+      observations.push({
+        installed: !!frame,
+        ready: !!frame?.contentDocument?.documentElement.dataset.cafeInlineFrame,
+        pending: !!document.querySelector("[data-visualization-loading]"),
+      });
+    });
+    observer.observe(document.querySelector("[data-visualization-inline-surface]")!, {
+      childList: true,
+    });
+    try {
+      const result = await read({ threadId, artifactId, revisionId });
+      request.resolve({
+        ...result,
+        html: `<script>document.documentElement.dataset.firstScriptSawPending=String(!!parent.document.querySelector('[data-visualization-loading]'));</script>${source}`,
+      });
+      const frame = await loadedFrame();
+      expect(
+        observations.some((sample) => sample.installed && !sample.ready && sample.pending),
+      ).toBe(true);
+      // This is real authored parser execution before the browser's own load
+      // event, not a synthetic load callback or a fabricated ready document.
+      expect(frame.contentDocument!.documentElement.dataset.firstScriptSawPending).toBe("true");
+      await vi.waitFor(() =>
+        expect(document.querySelector("[data-visualization-loading]")).toBeNull(),
+      );
+      await userEvent.click(
+        page
+          .frameLocator(page.elementLocator(frame))
+          .getByRole("button", { name: "Change range", exact: true }),
+      );
+      expect(frame.contentDocument!.getElementById("count")!.textContent).toBe("1");
+      expect(api.inline).toHaveBeenCalledOnce();
+      expect(api.retireInlineFrame).not.toHaveBeenCalled();
+      expect(fileRequest).not.toHaveBeenCalled();
+    } finally {
+      observer.disconnect();
+    }
+  });
+  it("does not treat unsupported visible geometry as a scroll-out that clears Stop intent", async () => {
+    const api = installApi();
+    await render(<Fixture />);
+    await loadedFrame();
+    await openMenu();
+    await userEvent.click(page.getByRole("menuitem", { name: "Stop", exact: true }));
+    await vi.waitFor(() => expect(frameElement()).toBeNull());
+    const anchor = document.querySelector<HTMLElement>("[data-visualization-inline-surface]")!;
+    const observations: IntersectionObserverEntry[] = [];
+    const observer = new IntersectionObserver((entries) => observations.push(...entries), {
+      threshold: 0,
+    });
+    observer.observe(anchor);
+    try {
+      await vi.waitFor(() => expect(observations).toHaveLength(1));
+      expect(observations[0]!.isIntersecting).toBe(true);
+      anchor.style.width = "32769px";
+      expect(anchor.getBoundingClientRect().width).toBe(32769);
+      expect(visualizationGeometry(anchor, true)).toBeNull();
+      // Native owner-page frames deliver actual resize/IO observation without
+      // inventing callbacks, retrying work or changing geometry limits.
+      await new Promise<void>((resolve) =>
+        requestAnimationFrame(() => requestAnimationFrame(() => resolve())),
+      );
+      expect(observations).toHaveLength(1);
+      anchor.style.width = "100%";
+      await vi.waitFor(() => expect(visualizationGeometry(anchor, true)).not.toBeNull());
+      await expect
+        .element(
+          page.getByText("Viewer stopped. Run again to start a new document.", { exact: true }),
+        )
+        .toBeVisible();
+      expect(frameElement()).toBeNull();
+      expect(document.querySelector("[data-visualization-loading]")).toBeNull();
+      expect(api.inline).toHaveBeenCalledOnce();
+      expect(api.retireInlineFrame).toHaveBeenCalledOnce();
+    } finally {
+      observer.disconnect();
+    }
+  });
+  it.each(["failure", "permission", "offscreen"] as const)(
+    "removes pending presentation immediately on %s and never installs a stale source reply",
+    async (outcome) => {
+      const api = installApi(),
+        read = api.inline.getMockImplementation()!,
+        request = deferred<VisualizationInlineResult>(),
+        actions: Parameters<typeof Fixture>[0]["actions"] = {};
+      api.inline.mockImplementationOnce(() => request.promise);
+      await render(<Fixture scroll actions={actions} />);
+      await expect.element(page.getByText("Loading visualization…", { exact: true })).toBeVisible();
+      expect(api.inline).toHaveBeenCalledOnce();
+      if (outcome === "failure")
+        request.reject(new Error("private-source-error-must-not-be-presented"));
+      else if (outcome === "permission") actions.changePermission?.("approval-required");
+      else {
+        const scroller = document.querySelector<HTMLElement>("[data-inline-fixture]")!;
+        const expectedScroll = Math.min(700, scroller.scrollHeight - scroller.clientHeight);
+        await wheelVisualizationScroller(await prepareVisualizationScrollerWheel(scroller), 700);
+        await vi.waitFor(() => expect(scroller.scrollTop).toBe(expectedScroll));
+      }
+      await vi.waitFor(() =>
+        expect(document.querySelector("[data-visualization-loading]")).toBeNull(),
+      );
+      expect(frameElement()).toBeNull();
+      expect(document.body.textContent).not.toContain("private-source-error-must-not-be-presented");
+      if (outcome === "failure") {
+        await expect
+          .element(page.getByText("Visualization unavailable.", { exact: true }))
+          .toBeVisible();
+        expect(api.retireInlineFrame).not.toHaveBeenCalled();
+      } else {
+        const late = await read({ threadId, artifactId, revisionId });
+        request.resolve(late);
+        await vi.waitFor(() =>
+          expect(api.retireInlineFrame).toHaveBeenCalledExactlyOnceWith({
+            threadId,
+            artifactId,
+            revisionId,
+            frameId: late.frameId,
+            ticket: late.ticket,
+          }),
+        );
+        expect(frameElement()).toBeNull();
+        expect(api.inline).toHaveBeenCalledOnce();
+      }
+      expect(fileRequest).not.toHaveBeenCalled();
+    },
+  );
   it("bounds actual concurrent source reads to two and live frames to four, then admits the oldest waiting unit", async () => {
     const api = installApi(),
       read = api.inline.getMockImplementation()!;
@@ -994,6 +1295,9 @@ describe("Full-access live inline visualizations", () => {
     try {
       await vi.waitFor(() => expect(pending).toHaveLength(2));
       expect(document.querySelectorAll("[data-visualization-card] iframe")).toHaveLength(0);
+      await vi.waitFor(() =>
+        expect(document.querySelectorAll("[data-visualization-loading]")).toHaveLength(5),
+      );
       for (let index = 0; index < 4; index++) {
         await vi.waitFor(() => expect(pending.length).toBeGreaterThan(index));
         pending[index]!.request.resolve(await pending[index]!.value);
@@ -1002,6 +1306,12 @@ describe("Full-access live inline visualizations", () => {
         expect(document.querySelectorAll("[data-visualization-card] iframe")).toHaveLength(4),
       );
       expect(api.inline).toHaveBeenCalledTimes(4);
+      await vi.waitFor(() =>
+        expect(document.querySelectorAll("[data-visualization-loading]")).toHaveLength(1),
+      );
+      const waitingCard = document.querySelectorAll<HTMLElement>("[data-visualization-card]")[4]!;
+      expect(waitingCard.querySelector("[data-visualization-loading]")).not.toBeNull();
+      expect(waitingCard.querySelector("iframe")).toBeNull();
       expect(maximum).toBe(2);
       expect(readInlineVisualizationPoolDiagnostics()).toMatchObject({
         mode: "inline-browser",

@@ -32,7 +32,7 @@
   "Raw JSON": "生のJSON",
   "Save current PNG": "現在のPNGを保存",
   "Saved": "保存済み",
-  "Starting viewer…": "ビューアを起動中…",
+  "Loading visualization…": "ビジュアライゼーションを読み込み中…",
   "Viewer stopped. Run again to start a new document.": "ビューアは停止しました。再実行すると新しいドキュメントを開始します。",
   "Visualization history could not refresh.": "可視化の履歴を更新できませんでした。",
   "Agent not recorded": "エージェント未記録",

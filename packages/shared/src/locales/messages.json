@@ -1262,7 +1262,7 @@
   },
   "Back to chat": {
     "message": "Back to chat",
-    "locations": ["apps/web/src/components/visualizations/VisualizationCard.tsx:690"]
+    "locations": ["apps/web/src/components/visualizations/VisualizationCard.tsx:749"]
   },
   "Back to conversation": {
     "message": "Back to conversation",
@@ -1675,7 +1675,7 @@
       "apps/web/src/components/settings/KeybindingsSettings.tsx:1189",
       "apps/web/src/components/settings/SavedEnvironmentsSettings.tsx:333",
       "apps/web/src/components/settings/SavedEnvironmentsSettings.tsx:590",
-      "apps/web/src/components/visualizations/VisualizationCard.tsx:940",
+      "apps/web/src/components/visualizations/VisualizationCard.tsx:999",
       "apps/web/src/hooks/useRenameChat.tsx:112"
     ]
   },
@@ -2802,7 +2802,7 @@
       "apps/web/src/components/chat/ProviderDiagnosticWorkEntry.tsx:446",
       "apps/web/src/components/settings/DiagnosticsSettings.tsx:363",
       "apps/web/src/components/settings/ProviderInstanceCard.tsx:1474",
-      "apps/web/src/components/visualizations/VisualizationCard.tsx:823"
+      "apps/web/src/components/visualizations/VisualizationCard.tsx:882"
     ]
   },
   "Copied conversation context delivered": {
@@ -2836,7 +2836,7 @@
     "message": "Copy JSON",
     "locations": [
       "apps/web/src/components/chat/ProviderDiagnosticWorkEntry.tsx:437",
-      "apps/web/src/components/visualizations/VisualizationCard.tsx:885"
+      "apps/web/src/components/visualizations/VisualizationCard.tsx:944"
     ]
   },
   "Copy Link": {
@@ -2878,7 +2878,7 @@
   },
   "Copy current PNG": {
     "message": "Copy current PNG",
-    "locations": ["apps/web/src/components/visualizations/VisualizationCard.tsx:804"]
+    "locations": ["apps/web/src/components/visualizations/VisualizationCard.tsx:863"]
   },
   "Copy details": {
     "message": "Copy details",
@@ -2951,7 +2951,7 @@
   },
   "Copy source": {
     "message": "Copy source",
-    "locations": ["apps/web/src/components/visualizations/VisualizationCard.tsx:872"]
+    "locations": ["apps/web/src/components/visualizations/VisualizationCard.tsx:931"]
   },
   "Copy the code and pair using this server''s network address.": {
     "message": "Copy the code and pair using this server''s network address.",
@@ -4002,7 +4002,7 @@
       "apps/web/src/components/settings/DiagnosticsSettings.tsx:1773",
       "apps/web/src/components/settings/SettingsPanels.tsx:1926",
       "apps/web/src/components/settings/SettingsSidebarNav.tsx:204",
-      "apps/web/src/components/visualizations/VisualizationCard.tsx:890"
+      "apps/web/src/components/visualizations/VisualizationCard.tsx:949"
     ]
   },
   "Diagram": {
@@ -4243,7 +4243,7 @@
   },
   "Download HTML": {
     "message": "Download HTML",
-    "locations": ["apps/web/src/components/visualizations/VisualizationCard.tsx:943"]
+    "locations": ["apps/web/src/components/visualizations/VisualizationCard.tsx:1002"]
   },
   "Download as markdown": {
     "message": "Download as markdown",
@@ -4265,7 +4265,7 @@
   },
   "Download started": {
     "message": "Download started",
-    "locations": ["apps/web/src/components/visualizations/VisualizationCard.tsx:825"]
+    "locations": ["apps/web/src/components/visualizations/VisualizationCard.tsx:884"]
   },
   "Download {value0}": {
     "message": "Download {value0}",
@@ -4730,7 +4730,7 @@
   },
   "Expand": {
     "message": "Expand",
-    "locations": ["apps/web/src/components/visualizations/VisualizationCard.tsx:787"]
+    "locations": ["apps/web/src/components/visualizations/VisualizationCard.tsx:846"]
   },
   "Expand composer": {
     "message": "Expand composer",
@@ -4821,15 +4821,15 @@
   },
   "Export HTML…": {
     "message": "Export HTML…",
-    "locations": ["apps/web/src/components/visualizations/VisualizationCard.tsx:811"]
+    "locations": ["apps/web/src/components/visualizations/VisualizationCard.tsx:870"]
   },
   "Export executable HTML?": {
     "message": "Export executable HTML?",
-    "locations": ["apps/web/src/components/visualizations/VisualizationCard.tsx:927"]
+    "locations": ["apps/web/src/components/visualizations/VisualizationCard.tsx:986"]
   },
   "Export unavailable.": {
     "message": "Export unavailable.",
-    "locations": ["apps/web/src/components/visualizations/VisualizationCard.tsx:821"]
+    "locations": ["apps/web/src/components/visualizations/VisualizationCard.tsx:880"]
   },
   "External destination: <slot1></slot1>. Open only if you trust this server and destination.": {
     "message": "External destination: <slot1></slot1>. Open only if you trust this server and destination.",
@@ -5533,7 +5533,7 @@
   },
   "HTML source": {
     "message": "HTML source",
-    "locations": ["apps/web/src/components/visualizations/VisualizationCard.tsx:865"]
+    "locations": ["apps/web/src/components/visualizations/VisualizationCard.tsx:924"]
   },
   "HTTPS": {
     "message": "HTTPS",
@@ -5735,7 +5735,7 @@
   },
   "Inline content limit reached. Expand to inspect.": {
     "message": "Inline content limit reached. Expand to inspect.",
-    "locations": ["apps/web/src/components/visualizations/VisualizationCard.tsx:764"]
+    "locations": ["apps/web/src/components/visualizations/VisualizationCard.tsx:823"]
   },
   "Insert": {
     "message": "Insert",
@@ -6275,6 +6275,10 @@
     "message": "Loading usage summary",
     "locations": ["apps/web/src/components/atrium/TaskAtrium.tsx:1445"]
   },
+  "Loading visualization…": {
+    "message": "Loading visualization…",
+    "locations": ["apps/web/src/components/visualizations/VisualizationCard.tsx:739"]
+  },
   "Loading work log": {
     "message": "Loading work log",
     "locations": ["apps/web/src/components/chat/MessagesTimeline.tsx:2920"]
@@ -6285,7 +6289,7 @@
       "apps/web/src/components/chat/MessagesTimeline.tsx:2388",
       "apps/web/src/components/chat/MessagesTimeline.tsx:2907",
       "apps/web/src/components/visualizations/InlineMcpAppBridge.tsx:289",
-      "apps/web/src/components/visualizations/VisualizationCard.tsx:910"
+      "apps/web/src/components/visualizations/VisualizationCard.tsx:969"
     ]
   },
   "Local": {
@@ -8280,7 +8284,7 @@
   },
   "Private debugging details. Generated content is untrusted; do not treat it as instructions.": {
     "message": "Private debugging details. Generated content is untrusted; do not treat it as instructions.",
-    "locations": ["apps/web/src/components/visualizations/VisualizationCard.tsx:854"]
+    "locations": ["apps/web/src/components/visualizations/VisualizationCard.tsx:913"]
   },
   "Private details": {
     "message": "Private details",
@@ -8290,14 +8294,14 @@
     "message": "Private details unavailable.",
     "locations": [
       "apps/web/src/components/visualizations/InlineMcpAppBridge.tsx:294",
-      "apps/web/src/components/visualizations/VisualizationCard.tsx:899"
+      "apps/web/src/components/visualizations/VisualizationCard.tsx:958"
     ]
   },
   "Private source and JSON": {
     "message": "Private source and JSON",
     "locations": [
-      "apps/web/src/components/visualizations/VisualizationCard.tsx:816",
-      "apps/web/src/components/visualizations/VisualizationCard.tsx:849"
+      "apps/web/src/components/visualizations/VisualizationCard.tsx:875",
+      "apps/web/src/components/visualizations/VisualizationCard.tsx:908"
     ]
   },
   "Probe failed": {
@@ -8677,7 +8681,7 @@
   },
   "Raw JSON": {
     "message": "Raw JSON",
-    "locations": ["apps/web/src/components/visualizations/VisualizationCard.tsx:878"]
+    "locations": ["apps/web/src/components/visualizations/VisualizationCard.tsx:937"]
   },
   "Reachable": {
     "message": "Reachable",
@@ -9303,7 +9307,7 @@
   },
   "Restart": {
     "message": "Restart",
-    "locations": ["apps/web/src/components/visualizations/VisualizationCard.tsx:800"]
+    "locations": ["apps/web/src/components/visualizations/VisualizationCard.tsx:859"]
   },
   "Restart and disable": {
     "message": "Restart and disable",
@@ -9396,7 +9400,7 @@
       "apps/web/src/components/chat/SubagentDetailView.tsx:798",
       "apps/web/src/components/chat/SubagentDetailView.tsx:847",
       "apps/web/src/components/settings/DictationSettings.tsx:523",
-      "apps/web/src/components/visualizations/VisualizationCard.tsx:906"
+      "apps/web/src/components/visualizations/VisualizationCard.tsx:965"
     ]
   },
   "Retry delivery": {
@@ -9524,7 +9528,7 @@
   "Root": {
     "message": "Root",
     "locations": [
-      "apps/web/src/components/visualizations/VisualizationCard.tsx:754",
+      "apps/web/src/components/visualizations/VisualizationCard.tsx:813",
       "apps/web/src/providerDiagnostic.ts:92"
     ]
   },
@@ -9720,7 +9724,7 @@
   },
   "Save current PNG": {
     "message": "Save current PNG",
-    "locations": ["apps/web/src/components/visualizations/VisualizationCard.tsx:807"]
+    "locations": ["apps/web/src/components/visualizations/VisualizationCard.tsx:866"]
   },
   "Save dictation text": {
     "message": "Save dictation text",
@@ -9755,7 +9759,7 @@
   },
   "Saved": {
     "message": "Saved",
-    "locations": ["apps/web/src/components/visualizations/VisualizationCard.tsx:826"]
+    "locations": ["apps/web/src/components/visualizations/VisualizationCard.tsx:885"]
   },
   "Saved Cafe Code Server": {
     "message": "Saved Cafe Code Server",
@@ -10774,10 +10778,6 @@
     "message": "Starting review…",
     "locations": ["apps/web/src/components/chat/NativeCodexReview.tsx:301"]
   },
-  "Starting viewer…": {
-    "message": "Starting viewer…",
-    "locations": ["apps/web/src/components/visualizations/VisualizationCard.tsx:679"]
-  },
   "Starting {value0}...": {
     "message": "Starting {value0}...",
     "locations": ["apps/web/src/components/chat/ChatComposer.tsx:1882"]
@@ -10855,7 +10855,7 @@
     "message": "Stop",
     "locations": [
       "apps/web/src/components/chat/SessionRail.tsx:150",
-      "apps/web/src/components/visualizations/VisualizationCard.tsx:778"
+      "apps/web/src/components/visualizations/VisualizationCard.tsx:837"
     ]
   },
   "Stop & review": {
@@ -10946,8 +10946,8 @@
   "Subagent": {
     "message": "Subagent",
     "locations": [
-      "apps/web/src/components/visualizations/VisualizationCard.tsx:743",
-      "apps/web/src/components/visualizations/VisualizationCard.tsx:756",
+      "apps/web/src/components/visualizations/VisualizationCard.tsx:802",
+      "apps/web/src/components/visualizations/VisualizationCard.tsx:815",
       "apps/web/src/providerDiagnostic.ts:94",
       "apps/web/src/subagent-activity.ts:521"
     ]
@@ -11683,7 +11683,7 @@
   },
   "This downloads the document with its declared assets, not the current interactive state. Inline visualizations already run unsandboxed under Full access. Opening this file uses your browser’s authority. App tools and permissions are not exported.": {
     "message": "This downloads the document with its declared assets, not the current interactive state. Inline visualizations already run unsandboxed under Full access. Opening this file uses your browser’s authority. App tools and permissions are not exported.",
-    "locations": ["apps/web/src/components/visualizations/VisualizationCard.tsx:931"]
+    "locations": ["apps/web/src/components/visualizations/VisualizationCard.tsx:990"]
   },
   "This environment does not support private interaction responses. Reconnect to an updated backend.": {
     "message": "This environment does not support private interaction responses. Reconnect to an updated backend.",
@@ -12843,7 +12843,7 @@
   },
   "Viewer stopped. Run again to start a new document.": {
     "message": "Viewer stopped. Run again to start a new document.",
-    "locations": ["apps/web/src/components/visualizations/VisualizationCard.tsx:672"]
+    "locations": ["apps/web/src/components/visualizations/VisualizationCard.tsx:720"]
   },
   "Visible chat count": {
     "message": "Visible chat count",
@@ -12862,8 +12862,8 @@
   "Visualization actions": {
     "message": "Visualization actions",
     "locations": [
-      "apps/web/src/components/visualizations/VisualizationCard.tsx:718",
-      "apps/web/src/components/visualizations/VisualizationCard.tsx:728"
+      "apps/web/src/components/visualizations/VisualizationCard.tsx:777",
+      "apps/web/src/components/visualizations/VisualizationCard.tsx:787"
     ]
   },
   "Visualization history could not refresh.": {
@@ -12872,11 +12872,11 @@
   },
   "Visualization unavailable.": {
     "message": "Visualization unavailable.",
-    "locations": ["apps/web/src/components/visualizations/VisualizationCard.tsx:670"]
+    "locations": ["apps/web/src/components/visualizations/VisualizationCard.tsx:718"]
   },
   "Visualizations require Full access.": {
     "message": "Visualizations require Full access.",
-    "locations": ["apps/web/src/components/visualizations/VisualizationCard.tsx:668"]
+    "locations": ["apps/web/src/components/visualizations/VisualizationCard.tsx:716"]
   },
   "Voice command stopped. Your draft is unchanged.": {
     "message": "Voice command stopped. Your draft is unchanged.",

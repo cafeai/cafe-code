@@ -112,8 +112,8 @@ import {
   buildCafeCodexDeveloperInstructions,
   CODEX_DEFAULT_MODE_DEVELOPER_INSTRUCTIONS,
   CODEX_PLAN_MODE_DEVELOPER_INSTRUCTIONS,
+  CODEX_VISUALIZATION_DISCOVERY_INSTRUCTIONS,
 } from "../CodexDeveloperInstructions.ts";
-import { GENERATED_VISUALIZATION_INSTRUCTIONS } from "../../visualizations/mcp.ts";
 import {
   isDiagnosticsQueryProcess,
   readProcessRows,
@@ -1732,7 +1732,9 @@ function buildCodexCollaborationMode(input: {
         (mode === "plan"
           ? CODEX_PLAN_MODE_DEVELOPER_INSTRUCTIONS
           : CODEX_DEFAULT_MODE_DEVELOPER_INSTRUCTIONS) +
-        (input.visualizationInstructions ? `\n\n${GENERATED_VISUALIZATION_INSTRUCTIONS}` : ""),
+        (input.visualizationInstructions
+          ? `\n\n${CODEX_VISUALIZATION_DISCOVERY_INSTRUCTIONS}`
+          : ""),
     },
   };
 }
