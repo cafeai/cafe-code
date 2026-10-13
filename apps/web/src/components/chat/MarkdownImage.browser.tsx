@@ -15,17 +15,22 @@ vi.mock("../../attachments/fileAttachments", async (importOriginal) => ({
 
 let image: Uint8Array;
 let fetcher: Mock<(url: string | URL, init?: RequestInit) => Promise<Response>>;
-beforeEach(() => {
-  setUiLocale("en");
+
+function pngBytes(width: number, height: number, color: string): Uint8Array {
   const canvas = document.createElement("canvas");
-  canvas.width = 320;
-  canvas.height = 160;
+  canvas.width = width;
+  canvas.height = height;
   const context = canvas.getContext("2d")!;
-  context.fillStyle = "#408060";
-  context.fillRect(0, 0, 320, 160);
-  image = Uint8Array.from(atob(canvas.toDataURL("image/png").split(",")[1]!), (character) =>
+  context.fillStyle = color;
+  context.fillRect(0, 0, width, height);
+  return Uint8Array.from(atob(canvas.toDataURL("image/png").split(",")[1]!), (character) =>
     character.charCodeAt(0),
   );
+}
+
+beforeEach(() => {
+  setUiLocale("en");
+  image = pngBytes(320, 160, "#408060");
 
   fetcher = vi.fn(async (url: string | URL, _init?: RequestInit) => {
     const parsed = new URL(url);
@@ -98,6 +103,221 @@ function fixture(
     />
   );
 }
+
+interface ImageOwner {
+  environment: string;
+  threadId: string;
+  messageId: string;
+  source: string;
+}
+
+const originalOwner: ImageOwner = {
+  environment: "remote",
+  threadId: "chat",
+  messageId: "assistant-a",
+  source: "/repo/owner-one.png",
+};
+
+const ownerChanges = [
+  { field: "environment", owner: { ...originalOwner, environment: "primary" } },
+  { field: "thread", owner: { ...originalOwner, threadId: "chat-b" } },
+  { field: "message", owner: { ...originalOwner, messageId: "assistant-b" } },
+  { field: "source", owner: { ...originalOwner, source: "/repo/owner-two.png" } },
+] as const;
+
+function ownerFixture(owner: ImageOwner, onImageExpand = vi.fn(), explanation = "") {
+  return (
+    <ChatMarkdown
+      text={`![Chart](<${owner.source}>)${explanation}`}
+      cwd="/repo"
+      // These are deliberately fresh presentation inputs on every rerender.
+      // They must not become new React component types for an existing image.
+      additionalWorkspaceRoots={[]}
+      skills={[]}
+      imageContext={{
+        environmentId: EnvironmentId.make(owner.environment),
+        threadId: owner.threadId,
+        messageId: owner.messageId,
+        isStreaming: false,
+        onImageExpand,
+      }}
+    />
+  );
+}
+
+function manifestResponse(owner: ImageOwner, bytes: Uint8Array, width: number, height: number) {
+  return new Response(
+    JSON.stringify([
+      { source: owner.source, mimeType: "image/png", width, height, sizeBytes: bytes.length },
+    ]),
+  );
+}
+
+function assertOwnerRequests(owner: ImageOwner, offset: number) {
+  // Inspect the actual transport arguments outside its mock implementation:
+  // production's opaque error handler must not swallow a routing assertion.
+  for (const [index, source] of [null, owner.source].entries()) {
+    const call = fetcher.mock.calls[offset + index]!;
+    const url = new URL(call[0]);
+    expect(url.origin).toBe(`https://${owner.environment}.example`);
+    expect(url.pathname).toBe("/api/chat-images");
+    expect(url.searchParams.get("threadId")).toBe(owner.threadId);
+    expect(url.searchParams.get("messageId")).toBe(owner.messageId);
+    expect(url.searchParams.get("source")).toBe(source);
+    expect([...url.searchParams.keys()].sort()).toEqual(
+      source === null ? ["messageId", "threadId"] : ["messageId", "source", "threadId"],
+    );
+    expect(call[1]?.signal).toBeInstanceOf(AbortSignal);
+  }
+}
+
+it("retains an image across fresh presentation inputs and uses the latest expansion callback", async () => {
+  fetcher.mockImplementation(async (url) =>
+    new URL(url).searchParams.has("source")
+      ? new Response(new Uint8Array(image), { headers: { "content-type": "image/png" } })
+      : manifestResponse(originalOwner, image, 320, 160),
+  );
+  const previousExpand = vi.fn();
+  const currentExpand = vi.fn();
+  const revoked = vi.spyOn(URL, "revokeObjectURL");
+  const screen = await render(ownerFixture(originalOwner, previousExpand));
+  try {
+    await expect.element(page.getByRole("img", { name: "Chart" })).toBeVisible();
+    const element = page.getByRole("img", { name: "Chart" }).element() as HTMLImageElement;
+    await expect.poll(() => element.naturalWidth).toBe(320);
+    const source = element.getAttribute("src");
+    expect(source).toMatch(/^blob:/);
+    assertOwnerRequests(originalOwner, 0);
+    expect(fetcher).toHaveBeenCalledTimes(2);
+
+    await screen.rerender(ownerFixture(originalOwner, currentExpand, " Updated explanation."));
+    setUiLocale("ja");
+    await expect
+      .element(page.getByRole("button", { name: "Chart を拡大", exact: true }))
+      .toBeVisible();
+    await page.getByRole("button", { name: "Chart を拡大", exact: true }).click();
+    expect(page.getByRole("img", { name: "Chart" }).element()).toBe(element);
+    expect(element.getAttribute("src")).toBe(source);
+    expect(fetcher).toHaveBeenCalledTimes(2);
+    expect(revoked).not.toHaveBeenCalled();
+    expect(previousExpand).not.toHaveBeenCalled();
+    expect(currentExpand).toHaveBeenCalledExactlyOnceWith({
+      images: [{ src: source, name: "Chart" }],
+      index: 0,
+    });
+  } finally {
+    await screen.unmount();
+  }
+});
+
+it.each(ownerChanges)(
+  "cancels pending old bytes when the image $field changes and rejects their late reply",
+  async ({ owner }) => {
+    const nextImage = pngBytes(96, 48, "#804060");
+    let phase: "old" | "new" = "old";
+    let deliverOld!: (response: Response) => void;
+    const pendingOld = new Promise<Response>((resolve) => {
+      deliverOld = resolve;
+    });
+    const oldReply = new Response(new Uint8Array(image), {
+      headers: { "content-type": "image/png" },
+    });
+    fetcher.mockImplementation(async (url) => {
+      const binary = new URL(url).searchParams.has("source");
+      if (phase === "old")
+        return binary ? pendingOld : manifestResponse(originalOwner, image, 320, 160);
+      return binary
+        ? new Response(new Uint8Array(nextImage), { headers: { "content-type": "image/png" } })
+        : manifestResponse(owner, nextImage, 96, 48);
+    });
+    const created = vi.spyOn(URL, "createObjectURL");
+    const screen = await render(ownerFixture(originalOwner));
+    try {
+      await expect.poll(() => fetcher.mock.calls.length).toBe(2);
+      assertOwnerRequests(originalOwner, 0);
+      const oldSignal = fetcher.mock.calls[1]![1]!.signal as AbortSignal;
+      expect(oldSignal.aborted).toBe(false);
+      expect(page.getByRole("img", { name: "Chart" }).elements()).toHaveLength(0);
+      expect(created).not.toHaveBeenCalled();
+
+      phase = "new";
+      await screen.rerender(ownerFixture(owner));
+      expect(oldSignal.aborted).toBe(true);
+      await expect.element(page.getByRole("img", { name: "Chart" })).toBeVisible();
+      const element = page.getByRole("img", { name: "Chart" }).element() as HTMLImageElement;
+      await expect.poll(() => element.naturalWidth).toBe(96);
+      const source = element.getAttribute("src");
+      expect(source).toMatch(/^blob:/);
+      expect(fetcher).toHaveBeenCalledTimes(4);
+      assertOwnerRequests(owner, 2);
+      expect(created).toHaveBeenCalledTimes(1);
+
+      // Simulate a transport that ignores cancellation and still delivers the
+      // old body. The real reader may consume it, but cannot publish its Blob.
+      deliverOld(oldReply);
+      await expect.poll(() => oldReply.bodyUsed).toBe(true);
+      for (let frame = 0; frame < 2; frame++)
+        await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+      expect(page.getByRole("img", { name: "Chart" }).element()).toBe(element);
+      expect(element.getAttribute("src")).toBe(source);
+      expect(element.naturalWidth).toBe(96);
+      expect(created).toHaveBeenCalledTimes(1);
+      expect(fetcher).toHaveBeenCalledTimes(4);
+    } finally {
+      deliverOld(oldReply);
+      await screen.unmount();
+    }
+  },
+);
+
+it.each(ownerChanges)(
+  "revokes loaded old bytes and routes a changed image $field to its current owner",
+  async ({ owner }) => {
+    const nextImage = pngBytes(96, 48, "#804060");
+    let phase: "old" | "new" = "old";
+    fetcher.mockImplementation(async (url) => {
+      const binary = new URL(url).searchParams.has("source");
+      const currentOwner = phase === "old" ? originalOwner : owner;
+      const bytes = phase === "old" ? image : nextImage;
+      return binary
+        ? new Response(new Uint8Array(bytes), { headers: { "content-type": "image/png" } })
+        : manifestResponse(
+            currentOwner,
+            bytes,
+            phase === "old" ? 320 : 96,
+            phase === "old" ? 160 : 48,
+          );
+    });
+    const revoked = vi.spyOn(URL, "revokeObjectURL");
+    const screen = await render(ownerFixture(originalOwner));
+    let currentSource: string | null = null;
+    try {
+      await expect.element(page.getByRole("img", { name: "Chart" })).toBeVisible();
+      const oldElement = page.getByRole("img", { name: "Chart" }).element() as HTMLImageElement;
+      await expect.poll(() => oldElement.naturalWidth).toBe(320);
+      const oldSource = oldElement.getAttribute("src");
+      expect(oldSource).toMatch(/^blob:/);
+      expect(fetcher).toHaveBeenCalledTimes(2);
+      assertOwnerRequests(originalOwner, 0);
+
+      phase = "new";
+      await screen.rerender(ownerFixture(owner));
+      expect(revoked).toHaveBeenCalledExactlyOnceWith(oldSource);
+      await expect.element(page.getByRole("img", { name: "Chart" })).toBeVisible();
+      const currentElement = page.getByRole("img", { name: "Chart" }).element() as HTMLImageElement;
+      await expect.poll(() => currentElement.naturalWidth).toBe(96);
+      currentSource = currentElement.getAttribute("src");
+      expect(currentSource).toMatch(/^blob:/);
+      expect(currentSource).not.toBe(oldSource);
+      expect(fetcher).toHaveBeenCalledTimes(4);
+      assertOwnerRequests(owner, 2);
+    } finally {
+      await screen.unmount();
+    }
+    expect(revoked).toHaveBeenCalledTimes(2);
+    expect(revoked).toHaveBeenLastCalledWith(currentSource);
+  },
+);
 
 it.each(["primary", "remote"])(
   "renders and enlarges saved images from the selected %s server",

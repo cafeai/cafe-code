@@ -9,7 +9,7 @@
   },
   " (outside workspace)": {
     "message": " (outside workspace)",
-    "locations": ["apps/web/src/components/ChatMarkdown.tsx:756"]
+    "locations": ["apps/web/src/components/ChatMarkdown.tsx:788"]
   },
   " (pending)": {
     "message": " (pending)",
@@ -871,9 +871,9 @@
     "message": "An error occurred.",
     "locations": [
       "apps/web/src/components/BranchToolbarBranchSelector.tsx:66",
-      "apps/web/src/components/ChatMarkdown.tsx:563",
-      "apps/web/src/components/ChatMarkdown.tsx:613",
-      "apps/web/src/components/ChatMarkdown.tsx:661",
+      "apps/web/src/components/ChatMarkdown.tsx:595",
+      "apps/web/src/components/ChatMarkdown.tsx:645",
+      "apps/web/src/components/ChatMarkdown.tsx:693",
       "apps/web/src/components/PlanSidebar.tsx:95",
       "apps/web/src/components/Sidebar.tsx:2720",
       "apps/web/src/components/settings/SettingsPanels.tsx:2702",
@@ -2872,7 +2872,7 @@
   },
   "Copy full path": {
     "message": "Copy full path",
-    "locations": ["apps/web/src/components/ChatMarkdown.tsx:689"]
+    "locations": ["apps/web/src/components/ChatMarkdown.tsx:721"]
   },
   "Copy full trace ID": {
     "message": "Copy full trace ID",
@@ -2925,7 +2925,7 @@
   },
   "Copy relative path": {
     "message": "Copy relative path",
-    "locations": ["apps/web/src/components/ChatMarkdown.tsx:687"]
+    "locations": ["apps/web/src/components/ChatMarkdown.tsx:719"]
   },
   "Copy saved preview": {
     "message": "Copy saved preview",
@@ -4901,11 +4901,11 @@
   },
   "Failed to copy full path": {
     "message": "Failed to copy full path",
-    "locations": ["apps/web/src/components/ChatMarkdown.tsx:558"]
+    "locations": ["apps/web/src/components/ChatMarkdown.tsx:590"]
   },
   "Failed to copy relative path": {
     "message": "Failed to copy relative path",
-    "locations": ["apps/web/src/components/ChatMarkdown.tsx:559"]
+    "locations": ["apps/web/src/components/ChatMarkdown.tsx:591"]
   },
   "Failed to create and switch ref.": {
     "message": "Failed to create and switch ref.",
@@ -5380,7 +5380,7 @@
   },
   "Full path copied": {
     "message": "Full path copied",
-    "locations": ["apps/web/src/components/ChatMarkdown.tsx:548"]
+    "locations": ["apps/web/src/components/ChatMarkdown.tsx:580"]
   },
   "Full plan": {
     "message": "Full plan",
@@ -7629,13 +7629,13 @@
   "Open file": {
     "message": "Open file",
     "locations": [
-      "apps/web/src/components/ChatMarkdown.tsx:679",
+      "apps/web/src/components/ChatMarkdown.tsx:711",
       "apps/web/src/components/settings/SettingsPanels.tsx:1679"
     ]
   },
   "Open file is unavailable": {
     "message": "Open file is unavailable",
-    "locations": ["apps/web/src/components/ChatMarkdown.tsx:582"]
+    "locations": ["apps/web/src/components/ChatMarkdown.tsx:614"]
   },
   "Open goal": {
     "message": "Open goal",
@@ -7643,11 +7643,11 @@
   },
   "Open in {fileManager}": {
     "message": "Open in {fileManager}",
-    "locations": ["apps/web/src/components/ChatMarkdown.tsx:453"]
+    "locations": ["apps/web/src/components/ChatMarkdown.tsx:485"]
   },
   "Open in {fileManager} is unavailable": {
     "message": "Open in {fileManager} is unavailable",
-    "locations": ["apps/web/src/components/ChatMarkdown.tsx:630"]
+    "locations": ["apps/web/src/components/ChatMarkdown.tsx:662"]
   },
   "Open in {value0}": {
     "message": "Open in {value0}",
@@ -8973,7 +8973,7 @@
   },
   "Relative path copied": {
     "message": "Relative path copied",
-    "locations": ["apps/web/src/components/ChatMarkdown.tsx:549"]
+    "locations": ["apps/web/src/components/ChatMarkdown.tsx:581"]
   },
   "Relative paths require an active project.": {
     "message": "Relative paths require an active project.",
@@ -11758,11 +11758,11 @@
   },
   "This file is outside the current workspace:\n\n{value0}\n\nOpen it anyway?": {
     "message": "This file is outside the current workspace:\n\n{value0}\n\nOpen it anyway?",
-    "locations": ["apps/web/src/components/ChatMarkdown.tsx:590"]
+    "locations": ["apps/web/src/components/ChatMarkdown.tsx:622"]
   },
   "This file is outside the current workspace:\n\n{value0}\n\nReveal it anyway?": {
     "message": "This file is outside the current workspace:\n\n{value0}\n\nReveal it anyway?",
-    "locations": ["apps/web/src/components/ChatMarkdown.tsx:638"]
+    "locations": ["apps/web/src/components/ChatMarkdown.tsx:670"]
   },
   "This file was removed before its upload finished.": {
     "message": "This file was removed before its upload finished.",
@@ -12257,7 +12257,7 @@
   },
   "Unable to open file": {
     "message": "Unable to open file",
-    "locations": ["apps/web/src/components/ChatMarkdown.tsx:609"]
+    "locations": ["apps/web/src/components/ChatMarkdown.tsx:641"]
   },
   "Unable to open file.": {
     "message": "Unable to open file.",
@@ -12265,7 +12265,7 @@
   },
   "Unable to open in {fileManager}": {
     "message": "Unable to open in {fileManager}",
-    "locations": ["apps/web/src/components/ChatMarkdown.tsx:657"]
+    "locations": ["apps/web/src/components/ChatMarkdown.tsx:689"]
   },
   "Unable to open keybindings file": {
     "message": "Unable to open keybindings file",

@@ -1,6 +1,7 @@
 import "../../index.css";
 import {
   EnvironmentId,
+  CHAT_IMAGES_PATH,
   MessageId,
   ProviderDriverKind,
   ThreadId,
@@ -54,6 +55,8 @@ import { appAtomRegistry } from "../../rpc/atomRegistry";
 import type { WsRpcClient } from "../../rpc/wsRpcClient";
 import { deriveTimelineEntries } from "../../session-logic";
 import { MessagesTimeline } from "../chat/MessagesTimeline";
+import { ExpandedImageDialog } from "../chat/ExpandedImageDialog";
+import type { ExpandedImagePreview } from "../chat/ExpandedImagePreview";
 import type { TimelineScrollDebugEventInput } from "../chat/timelineScrollDebug";
 import { observeVisualizationOwner } from "./visualizationOwner";
 import { formatDiagnosticTimestamp } from "../../timestampFormat";
@@ -693,6 +696,14 @@ function InlineFlowFixture({ actions }: { actions: { rerender?: () => void; inte
     </div>
   );
 }
+interface PoolInlineImage {
+  id: string;
+  source: string;
+  name: string;
+  width: number;
+  height: number;
+}
+
 /** Real list/layout; only the native edge-wheel sender is a synthetic peer. */
 function PoolTimelineFixture({
   actions,
@@ -700,17 +711,22 @@ function PoolTimelineFixture({
   empty,
   invocation = 0,
   width = 700,
+  provider = "codex",
+  inlineImages = [],
 }: {
   actions: { grow?: () => void; trace?: (event: TimelineScrollDebugEventInput) => void };
   scopeThread?: ThreadId;
   empty?: "loading" | "blank";
   invocation?: number;
   width?: number;
+  provider?: "codex" | "claudeAgent";
+  inlineImages?: readonly PoolInlineImage[];
 }) {
   const pane = useVisualizationScope(environmentId, scopeThread, true);
   const listRef = useRef<LegendListRef | null>(null);
   const [following, setFollowing] = useState(true);
   const [growth, setGrowth] = useState(0);
+  const [expandedImage, setExpandedImage] = useState<ExpandedImagePreview | null>(null);
   actions.grow = () => setGrowth((old) => old + 1);
   const messages = Array.from({ length: 40 }, (_, index) => ({
     id: `pool-chat-${index}`,
@@ -745,7 +761,7 @@ function PoolTimelineFixture({
       <MessagesTimeline
         activeThreadId={scopeThread}
         activeThreadEnvironmentId={environmentId}
-        activeProvider={ProviderDriverKind.make("codex")}
+        activeProvider={ProviderDriverKind.make(provider)}
         activeTurnId={null}
         activeTurnInProgress={!empty}
         activeTurnStartedAt={null}
@@ -757,7 +773,7 @@ function PoolTimelineFixture({
         isThreadHistoryHydrating={empty === "loading"}
         listRef={listRef}
         markdownCwd={undefined}
-        onImageExpand={() => undefined}
+        onImageExpand={inlineImages.length ? setExpandedImage : () => undefined}
         onIsAtEndChange={() => undefined}
         onRevertUserMessage={() => undefined}
         onUserScrollIntent={() => setFollowing(false)}
@@ -767,14 +783,135 @@ function PoolTimelineFixture({
         timelineEntries={
           empty
             ? []
-            : [...messages, ...deriveTimelineEntries([], [], [], [poolEntry(invocation)]), last]
+            : [
+                ...messages,
+                ...deriveTimelineEntries([], [], [], [poolEntry(invocation)]),
+                ...inlineImages.map((image) => ({
+                  id: image.id,
+                  kind: "message" as const,
+                  createdAt: entry.occurredAt,
+                  message: {
+                    id: MessageId.make(image.id),
+                    role: "assistant" as const,
+                    createdAt: entry.occurredAt,
+                    text: `![${image.name}](<${image.source}>)`,
+                    streaming: false,
+                  },
+                })),
+                last,
+              ]
         }
         timestampFormat="24-hour"
         workspaceRoot={undefined}
         visualizationPane={pane}
       />
+      {expandedImage ? (
+        <ExpandedImageDialog preview={expandedImage} onClose={() => setExpandedImage(null)} />
+      ) : null}
     </div>
   );
+}
+
+/**
+ * Hold only the authenticated response boundary. Both metadata-driven flow and
+ * binary decoding use the production MarkdownImage path, with real scoped PNGs
+ * and exact message/source routing; no browser fetch or provider is contacted.
+ */
+interface PoolImageTransfer {
+  messageId: string;
+  kind: "manifest" | "bytes";
+  signal: AbortSignal;
+  outcome: "pending" | "response" | "aborted";
+}
+async function installPoolInlineImagePeer(images: readonly PoolInlineImage[]) {
+  const transfers: PoolImageTransfer[] = [];
+  const peers = await Promise.all(
+    images.map(async (image) => {
+      const canvas = document.createElement("canvas");
+      canvas.width = image.width;
+      canvas.height = image.height;
+      canvas.getContext("2d")!.fillRect(0, 0, image.width, image.height);
+      const blob = await new Promise<Blob>((resolve, reject) =>
+        canvas.toBlob(
+          (value) => (value ? resolve(value) : reject(new Error("fixture-png-unavailable"))),
+          "image/png",
+        ),
+      );
+      const png = new Uint8Array(await blob.arrayBuffer());
+      const manifest = deferred<void>();
+      const bytes = deferred<void>();
+      return {
+        image,
+        manifest,
+        bytes,
+        // Readiness is shared, never a one-use Response body. Initial list
+        // measurement can cancel a row and then admit its current replacement.
+        // Every actual request must receive its own fresh bounded body.
+        manifestResponse: () =>
+          new Response(
+            JSON.stringify([
+              {
+                source: image.source,
+                mimeType: "image/png",
+                width: image.width,
+                height: image.height,
+                sizeBytes: png.length,
+              },
+            ]),
+          ),
+        bytesResponse: () =>
+          new Response(png.slice().buffer, { headers: { "content-type": "image/png" } }),
+        releaseManifest: () => manifest.resolve(undefined),
+        releaseBytes: () => bytes.resolve(undefined),
+      };
+    }),
+  );
+  vi.mocked(fileRequest).mockImplementation(async (owner, path, init, query) => {
+    expect(owner).toBe(environmentId);
+    expect(path).toBe(CHAT_IMAGES_PATH);
+    expect(init?.signal).toBeInstanceOf(AbortSignal);
+    const peer = peers.find((candidate) => candidate.image.id === query?.messageId);
+    if (!peer) throw new Error("fixture-image-owner-mismatch");
+    expect(query).toEqual({
+      threadId,
+      messageId: peer.image.id,
+      ...(query?.source === undefined ? {} : { source: peer.image.source }),
+    });
+    // This finite fixture must fail on an unbounded refetch, not mask it in
+    // a flexible count. The post-admission baselines below are stricter still.
+    expect(transfers.length).toBeLessThan(8);
+    const signal = init!.signal!;
+    const kind = query?.source === undefined ? "manifest" : "bytes";
+    const transfer: PoolImageTransfer = {
+      messageId: peer.image.id,
+      kind,
+      signal,
+      outcome: "pending",
+    };
+    transfers.push(transfer);
+    if (signal.aborted) throw new Error("fixture-image-cancelled");
+    return new Promise<Response>((resolve, reject) => {
+      const abort = () => {
+        if (transfer.outcome !== "pending") return;
+        transfer.outcome = "aborted";
+        reject(new Error("fixture-image-cancelled"));
+      };
+      signal.addEventListener("abort", abort, { once: true });
+      void (kind === "manifest" ? peer.manifest.promise : peer.bytes.promise).then(
+        () => {
+          signal.removeEventListener("abort", abort);
+          if (transfer.outcome !== "pending") return;
+          transfer.outcome = "response";
+          resolve(kind === "manifest" ? peer.manifestResponse() : peer.bytesResponse());
+        },
+        (error: Error) => {
+          signal.removeEventListener("abort", abort);
+          reject(error);
+        },
+      );
+    });
+  });
+  return { peers, transfers };
 }
 /** The timeline component and ref survive both real absent-list branches. */
 function SameChatListLifetimeFixture({
@@ -2038,6 +2175,296 @@ describe("automatic visualization viewport pool", () => {
     expect(bridge.open).toHaveBeenCalledOnce();
     expect(bridge.live.get(id)?.expiresAtMs).toBe(owned.expiresAtMs);
   });
+  it.each(["codex", "claudeAgent"] as const)(
+    "keeps %s image growth and full-width chart layout in one real list without losing tail or review ownership",
+    async (provider) => {
+      setUiLocale("en");
+      const images: readonly PoolInlineImage[] = [
+        {
+          id: "pool-image-tail",
+          source: "/repo/pool-follow-tail.png",
+          name: "Tail image",
+          width: 640,
+          height: 128,
+        },
+        {
+          id: "pool-image-review",
+          source: "/repo/pool-review.png",
+          name: "Review image",
+          width: 640,
+          height: 96,
+        },
+      ];
+      const { peers, transfers } = await installPoolInlineImagePeer(images);
+      const api = installApi(),
+        bridge = installPoolBridge(api, true),
+        actions: { grow?: () => void } = {};
+      const originalViewport = { width: window.innerWidth, height: window.innerHeight };
+      let view: Awaited<ReturnType<typeof render>> | undefined;
+      try {
+        // This case deliberately contrasts full-pane charts with capped prose.
+        // Use the runner's supported viewport API, not CSS/media overrides, and
+        // restore its exact incoming dimensions even if render/assertion fails.
+        await page.viewport(1200, 900);
+        view = await render(
+          <VisualizationViewerProvider>
+            <PoolTimelineFixture
+              actions={actions}
+              provider={provider}
+              inlineImages={images}
+              width={1100}
+            />
+          </VisualizationViewerProvider>,
+        );
+        await vi.waitFor(() => expect(bridge.live.size).toBe(1));
+        // Two independent completed messages have exact separate manifests.
+        // Keep both binary replies held so metadata, not image load timing,
+        // is what reserves the first larger row in the real virtualized list.
+        const [id, owned] = [...bridge.live][0]!;
+        expect(owned.expiresAtMs).toBeNull();
+        await vi.waitFor(() =>
+          expect(bridge.update).toHaveBeenCalledWith(
+            expect.objectContaining({ leaseId: id, visible: true }),
+          ),
+        );
+        await vi.waitFor(() => {
+          const current = transfers.filter((transfer) => transfer.outcome === "pending");
+          expect(current.map((transfer) => transfer.messageId).sort()).toEqual(
+            images.map((image) => image.id).sort(),
+          );
+          expect(
+            current.every((transfer) => transfer.kind === "manifest" && !transfer.signal.aborted),
+          ).toBe(true);
+          expect(transfers.filter((transfer) => transfer.kind === "bytes")).toHaveLength(0);
+          for (const transfer of transfers.filter((transfer) => transfer.outcome !== "pending")) {
+            expect(transfer.outcome).toBe("aborted");
+            expect(transfer.signal.aborted).toBe(true);
+          }
+        });
+        const startupRequests = transfers.length;
+        expect(fileRequest).toHaveBeenCalledTimes(startupRequests);
+        const anchor = document.querySelector<HTMLElement>(
+          '[data-pool-timeline] [data-visualization-native-surface="inline"]',
+        )!;
+        const scroller = visualizationClippingAncestors(anchor)!.find(
+          (element) =>
+            /auto|scroll/.test(getComputedStyle(element).overflowY) &&
+            element.scrollHeight > element.clientHeight,
+        )!;
+        const hosts = images.map((image) =>
+          document.querySelector<HTMLElement>(
+            `[data-chat-copy-message-id="${image.id}"] span[style]`,
+          )!,
+        );
+        const initialImageHeights = hosts.map((host) => host.getBoundingClientRect().height);
+        expect(initialImageHeights).toEqual([64, 64]);
+        const expectSharedWidth = () => {
+          const style = getComputedStyle(scroller);
+          const available =
+            scroller.clientWidth -
+            Number.parseFloat(style.paddingLeft) -
+            Number.parseFloat(style.paddingRight);
+          expect(
+            Math.abs(anchor.getBoundingClientRect().width - Math.min(1600, available)),
+          ).toBeLessThanOrEqual(1);
+          expect(anchor.getBoundingClientRect().width).toBeGreaterThan(768);
+          expect(scroller.scrollWidth).toBe(scroller.clientWidth);
+          expect(anchor.scrollWidth).toBe(anchor.clientWidth);
+          for (const host of hosts) {
+            const proseWidth = host
+              .closest<HTMLElement>('[data-timeline-row-kind="message"]')!
+              .getBoundingClientRect().width;
+            expect(proseWidth).toBeLessThanOrEqual(768);
+            expect(host.getBoundingClientRect().width).toBeLessThanOrEqual(proseWidth);
+            // Unknown metadata cannot establish a 640px natural-width cap.
+            // Once the real manifest supplies aspect ratio, retain that exact
+            // image cap in addition to the unchanged prose/overflow bounds.
+            if (host.style.aspectRatio)
+              expect(host.getBoundingClientRect().width).toBeLessThanOrEqual(640);
+            expect(host.scrollWidth).toBe(host.clientWidth);
+          }
+        };
+        expectSharedWidth();
+        peers[0]!.releaseManifest();
+        bridge.emit({
+          leaseId: id,
+          state: "layout",
+          layout: { height: 180, constrained: false, sequence: 1 },
+        });
+        await vi.waitFor(() => {
+          expect(hosts[0]!.getBoundingClientRect().height).toBeGreaterThan(initialImageHeights[0]!);
+          expect(hosts[0]!.style.aspectRatio).toBe("640 / 128");
+          expect(anchor.getBoundingClientRect().height).toBe(180);
+          expect(scroller.scrollHeight - scroller.clientHeight - scroller.scrollTop).toBeLessThan(
+            1,
+          );
+          expect(fileRequest).toHaveBeenCalledTimes(startupRequests + 1);
+        });
+        expect(
+          document.querySelector('[data-pool-timeline][data-following="true"]'),
+        ).not.toBeNull();
+        peers[0]!.releaseBytes();
+        const firstImage = page.getByRole("img", { name: "Tail image", exact: true });
+        await vi.waitFor(() =>
+          expect((firstImage.element() as HTMLImageElement).naturalWidth).toBe(640),
+        );
+        const imageNode = firstImage.element();
+        const imageSource = imageNode.getAttribute("src");
+        expect(imageSource).toMatch(/^blob:/);
+        const beforeWheel = scroller.scrollTop;
+        bridge.emit({ leaseId: id, state: "wheel", wheel: { deltaX: 0, deltaY: -64 } });
+        await vi.waitFor(() => {
+          expect(
+            document.querySelector('[data-pool-timeline][data-following="false"]'),
+          ).not.toBeNull();
+          expect(scroller.scrollTop).toBeCloseTo(beforeWheel - 64, 0);
+        });
+        const reviewTop = scroller.scrollTop;
+        const anchorTop = anchor.getBoundingClientRect().top;
+        // New image metadata and a native intrinsic-height update arrive after
+        // real review intent. Neither may take over the user's scroll owner,
+        // rebuild the already decoded first image, or replace the chart lease.
+        peers[1]!.releaseManifest();
+        bridge.emit({
+          leaseId: id,
+          state: "layout",
+          layout: { height: 240, constrained: false, sequence: 2 },
+        });
+        actions.grow?.();
+        await vi.waitFor(() => {
+          expect(hosts[1]!.getBoundingClientRect().height).toBeGreaterThan(initialImageHeights[1]!);
+          expect(hosts[1]!.style.aspectRatio).toBe("640 / 96");
+          expect(anchor.getBoundingClientRect().height).toBe(240);
+          expect(fileRequest).toHaveBeenCalledTimes(startupRequests + 2);
+        });
+        peers[1]!.releaseBytes();
+        await vi.waitFor(() =>
+          expect(
+            (
+              page
+                .getByRole("img", { name: "Review image", exact: true })
+                .element() as HTMLImageElement
+            ).naturalWidth,
+          ).toBe(640),
+        );
+        for (let frame = 0; frame < 6; frame += 1)
+          await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+        expect(scroller.scrollTop).toBeCloseTo(reviewTop, 0);
+        expect(anchor.getBoundingClientRect().top).toBeCloseTo(anchorTop, 0);
+        expect(firstImage.element()).toBe(imageNode);
+        expect(firstImage.element().getAttribute("src")).toBe(imageSource);
+        expectSharedWidth();
+        expect(fileRequest).toHaveBeenCalledTimes(startupRequests + 2);
+        expect(bridge.open).toHaveBeenCalledOnce();
+        expect(bridge.retire).not.toHaveBeenCalled();
+        expect([...bridge.live.keys()]).toEqual([id]);
+        expect(api.details).not.toHaveBeenCalled();
+      } finally {
+        try {
+          await view?.unmount();
+        } finally {
+          await page.viewport(originalViewport.width, originalViewport.height);
+        }
+      }
+    },
+  );
+  it.each(["codex", "claudeAgent"] as const)(
+    "retires the exact %s chart when its real Markdown image opens the existing preview dialog without later revival",
+    async (provider) => {
+      setUiLocale("en");
+      const images: readonly PoolInlineImage[] = [
+        {
+          id: "pool-image-dialog",
+          source: "/repo/pool-dialog.png",
+          name: "Dialog image",
+          width: 640,
+          height: 128,
+        },
+      ];
+      const {
+        peers: [peer],
+        transfers,
+      } = await installPoolInlineImagePeer(images);
+      peer!.releaseManifest();
+      peer!.releaseBytes();
+      const api = installApi(),
+        bridge = installPoolBridge(api, true),
+        actions: { grow?: () => void } = {};
+      const view = await render(
+        <VisualizationViewerProvider>
+          <PoolTimelineFixture actions={actions} provider={provider} inlineImages={images} />
+        </VisualizationViewerProvider>,
+      );
+      try {
+        await vi.waitFor(() => expect(bridge.live.size).toBe(1));
+        const id = [...bridge.live.keys()][0]!;
+        await vi.waitFor(() =>
+          expect(bridge.update).toHaveBeenCalledWith(
+            expect.objectContaining({ leaseId: id, visible: true }),
+          ),
+        );
+        const image = page.getByRole("img", { name: "Dialog image", exact: true });
+        await vi.waitFor(() =>
+          expect((image.element() as HTMLImageElement).naturalWidth).toBe(640),
+        );
+        const imageNode = image.element();
+        const source = imageNode.getAttribute("src");
+        expect(source).toMatch(/^blob:/);
+        const currentBytes = transfers.filter(
+          (transfer) => transfer.kind === "bytes" && !transfer.signal.aborted,
+        );
+        expect(currentBytes).toHaveLength(1);
+        expect(currentBytes[0]!.messageId).toBe(images[0]!.id);
+        expect(currentBytes[0]!.outcome).toBe("response");
+        expect(transfers.filter((transfer) => transfer.outcome === "pending")).toHaveLength(0);
+        for (const transfer of transfers.filter((transfer) => transfer.outcome === "aborted"))
+          expect(transfer.signal.aborted).toBe(true);
+        const decodedRequests = transfers.length;
+        expect(fileRequest).toHaveBeenCalledTimes(decodedRequests);
+        await userEvent.click(
+          page.getByRole("button", { name: "Enlarge Dialog image", exact: true }),
+        );
+        const dialog = page.getByRole("dialog", { name: "Expanded image preview", exact: true });
+        await expect.element(dialog).toBeVisible();
+        expect(dialog.element().parentElement).toBe(document.body);
+        expect(dialog.element().querySelector("img")!.getAttribute("src")).toBe(source);
+        await vi.waitFor(() => {
+          expect(bridge.retire).toHaveBeenCalledOnce();
+          expect(bridge.retire).toHaveBeenCalledWith({ leaseId: id });
+          expect(bridge.live.size).toBe(0);
+        });
+        const terminalUpdates = bridge.update.mock.calls.length;
+        // Actual image preview is an unrelated modal, not a generated private
+        // inspector. Closing it or receiving stale layout must not revive the
+        // retired native generation while ordinary image ownership survives.
+        await userEvent.click(
+          page.getByRole("button", { name: "Close image preview", exact: true }).last(),
+        );
+        await expect.element(dialog).not.toBeInTheDocument();
+        bridge.emit({
+          leaseId: id,
+          state: "layout",
+          layout: { height: 300, constrained: false, sequence: 1 },
+        });
+        actions.grow?.();
+        for (let frame = 0; frame < 6; frame += 1)
+          await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+        expect(
+          bridge.update.mock.calls.slice(terminalUpdates).filter(([input]) => input.visible),
+        ).toEqual([]);
+        expect(bridge.open).toHaveBeenCalledOnce();
+        expect(bridge.retire).toHaveBeenCalledOnce();
+        expect(bridge.retire).toHaveBeenCalledWith({ leaseId: id });
+        expect(bridge.live.size).toBe(0);
+        expect(fileRequest).toHaveBeenCalledTimes(decodedRequests);
+        expect(image.element()).toBe(imageNode);
+        expect(image.element().getAttribute("src")).toBe(source);
+        expect(api.details).not.toHaveBeenCalled();
+      } finally {
+        await view.unmount();
+      }
+    },
+  );
   async function checkRapidNativeChartDeltas(strict: boolean) {
     const api = installApi(),
       bridge = installPoolBridge(api),

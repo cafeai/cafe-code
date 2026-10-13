@@ -323,9 +323,41 @@ interface MarkdownRenderingContextValue {
   resolvedTheme: "dark" | "light";
   isStreaming: boolean;
   skills: NonNullable<ChatMarkdownProps["skills"]>;
+  imageContext: MarkdownImageContext | undefined;
 }
 
 const MarkdownRenderingContext = createContext<MarkdownRenderingContextValue | null>(null);
+
+function MarkdownParagraph({ node: _node, children, ...props }: ComponentProps<"p"> & ExtraProps) {
+  const rendering = useContext(MarkdownRenderingContext);
+  // A changing renderer function is a new React component type. Keep both the
+  // paragraph ancestor and its image child stable when workspace metadata,
+  // theme, skills or a preview callback changes. Otherwise an ordinary dialog
+  // rerender discards the loaded image and starts another authenticated read.
+  return (
+    <p {...props}>
+      {renderSkillInlineMarkdownChildren(children, rendering?.skills ?? EMPTY_MARKDOWN_SKILLS)}
+    </p>
+  );
+}
+
+function MarkdownImageNode({
+  node: _node,
+  src,
+  alt,
+  ...props
+}: ComponentProps<"img"> & ExtraProps) {
+  const imageContext = useContext(MarkdownRenderingContext)?.imageContext;
+  const source = typeof src === "string" ? src : "";
+  // Stable presentation identity is not an image capability cache. The current
+  // exact owner/source tuple still reaches MarkdownImage, whose effect cancels
+  // old transfers and revokes old object URLs when that authority changes.
+  return imageContext && (source.startsWith("/") || /^[A-Za-z]:[\\/]/u.test(source)) ? (
+    <MarkdownImage source={source} alt={alt ?? ""} context={imageContext} />
+  ) : (
+    <img {...props} src={src} alt={alt ?? ""} loading="lazy" />
+  );
+}
 
 function MarkdownPre({ node: _node, children, ...props }: ComponentProps<"pre"> & ExtraProps) {
   const rendering = useContext(MarkdownRenderingContext);
@@ -789,8 +821,8 @@ function ChatMarkdown({
   const { resolvedTheme } = useTheme();
   const diffThemeName = resolveDiffThemeName(resolvedTheme);
   const renderingContext = useMemo(
-    () => ({ diffThemeName, resolvedTheme, isStreaming, skills }),
-    [diffThemeName, resolvedTheme, isStreaming, skills],
+    () => ({ diffThemeName, resolvedTheme, isStreaming, skills, imageContext }),
+    [diffThemeName, resolvedTheme, isStreaming, skills, imageContext],
   );
   const normalizedText = useMemo(() => {
     // The optional final result footer is scheduler metadata, not transcript
@@ -840,18 +872,9 @@ function ChatMarkdown({
   );
   const markdownComponents = useMemo<Components>(
     () => ({
-      p({ node: _node, children, ...props }) {
-        return <p {...props}>{renderSkillInlineMarkdownChildren(children, skills)}</p>;
-      },
+      p: MarkdownParagraph,
       li: MarkdownListItem,
-      img({ node: _node, src, alt, ...props }) {
-        const source = typeof src === "string" ? src : "";
-        return imageContext && (source.startsWith("/") || /^[A-Za-z]:[\\/]/u.test(source)) ? (
-          <MarkdownImage source={source} alt={alt ?? ""} context={imageContext} />
-        ) : (
-          <img {...props} src={src} alt={alt ?? ""} loading="lazy" />
-        );
-      },
+      img: MarkdownImageNode,
       a({ node: _node, href, ...props }) {
         const fileLinkMeta = href
           ? resolveMarkdownFileLinkMeta(href, cwd, additionalWorkspaceRoots)
@@ -893,14 +916,7 @@ function ChatMarkdown({
       pre: MarkdownPre,
       table: MarkdownTable,
     }),
-    [
-      additionalWorkspaceRoots,
-      cwd,
-      fileLinkParentSuffixByPath,
-      imageContext,
-      resolvedTheme,
-      skills,
-    ],
+    [additionalWorkspaceRoots, cwd, fileLinkParentSuffixByPath, resolvedTheme],
   );
 
   return (

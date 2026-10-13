@@ -98,6 +98,21 @@ drawing; CSS cannot universally replace text already drawn by arbitrary Canvas
 or WebGL code. No stored source or drawing API is rewritten. See the
 [chat-typography decision](decisions/agent-visualization-chat-typography.md).
 
+Ordinary [inline assistant images](inline-images.md) remain a separate, inert
+message feature. Their authenticated metadata reserves the image aspect ratio
+while bytes load, without changing a neighboring chart's native lease or the
+reader's timeline scroll ownership. Charts may fill the available conversation
+width while prose and inline images retain their own readable width. Opening
+the ordinary image preview is an unrelated dialog and retires native charts;
+closing it cannot revive a retired chart generation.
+This does not grant images active HTML execution or chart-private inspection
+semantics.
+Stable Markdown paragraph/image component identities preserve decoded images
+through same-owner workspace metadata, theme and preview-callback rerenders.
+An actual owner/source change still cancels transfers and releases old image
+object URLs through the existing exact-tuple image lifecycle; presentation
+stability is not an authorization or persistent image-cache shortcut.
+
 The user-selected fluid treatment reuses the actual supplied WebGL fluid solver,
 shaders, shading, electric cyan-to-blue-to-violet-to-magenta palette and virtual
 orbit. It is not a substitute polar-wave shader or a request for an agent to
@@ -646,12 +661,14 @@ finite prepared/continuation tokens, watchdog and retirement budgets remain.
 The [chat-typography addition](decisions/agent-visualization-chat-typography.md)
 replaces only the generated system-font default with exact offline chat faces,
 preserving the external-App, CSP, immutable-source and finite startup boundaries.
-The typography implementation, separate isolated macOS font replay and current
-integrated static/default/browser/export tests are qualified. Current browser
-tests pass 2,091 cases and default tests pass 8,967 with the existing 12 skips
-and one expected failure; four copied-bridge tests also pass. Final forced
-desktop build, live/manual and hosted evidence are separate, never inferred
-from historical suite counts or acceptance of a decision.
+The pre-rebase typography implementation and separate isolated macOS font replay
+were qualified on October 13, 2026: browser tests passed 2,091 cases and default
+tests passed 8,967 with the existing 12 skips and one expected failure; four
+copied-bridge tests also passed. Those counts are historical evidence, not a
+qualification of a subsequently reconciled tree. Every resulting changeset
+requires fresh integrated checks and a final forced desktop build on unchanged
+source. Live/manual and exact-head hosted evidence remain separate, never
+inferred from historical suite counts or acceptance of a decision.
 Hosting, store and protocol modules remain independently authored. The narrow
 fluid helper adapts the user-supplied MIT implementation, retaining its notice;
 it introduces no third-party runtime installation.
