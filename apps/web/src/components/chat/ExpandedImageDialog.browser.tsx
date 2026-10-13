@@ -2,7 +2,7 @@ import "../../index.css";
 import "../desk/desk.css";
 
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { page, userEvent } from "vitest/browser";
+import { cdp, page, userEvent } from "vitest/browser";
 import { render } from "vitest-browser-react";
 import { ChatPaneContext } from "../../chatPaneContext";
 import { applyInterfaceScalePercent } from "../../interfaceScale";
@@ -17,6 +17,62 @@ function image(width: number, height: number, name: string) {
 const landscape = image(6000, 1800, "wide screenshot.png");
 const portrait = image(1800, 6000, `${"Long image name ".repeat(20)}.png`);
 const preview = { images: [landscape, portrait], index: 0 };
+
+function inspectionBoard() {
+  const swatches = [
+    "#bec1bd",
+    "#9ea4a3",
+    "#667978",
+    "#8ca55c",
+    "#c9c8b2",
+    "#a05945",
+    "#e4c796",
+    "#775238",
+    "#58736f",
+    "#8b283b",
+  ];
+  const tiles = swatches
+    .map((color, index) => {
+      const x = 50 + (index % 5) * 300;
+      const y = 150 + Math.floor(index / 5) * 400;
+      return `<g transform="translate(${x} ${y})"><text y="0" font-family="sans-serif" font-size="22" fill="#e4e6eb">${String(index + 1).padStart(2, "0")}  Material study</text><rect y="25" width="265" height="300" fill="${color}"/><rect y="25" width="265" height="300" fill="url(#grid)"/><text y="355" font-family="sans-serif" font-size="18" fill="#a9b2bc">Original / replacement</text></g>`;
+    })
+    .join("");
+  const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="1000"><defs><pattern id="grid" width="40" height="40" patternUnits="userSpaceOnUse"><path d="M40 0H0V40" fill="none" stroke="#ffffff" stroke-opacity=".18" stroke-width="1"/></pattern></defs><rect width="1600" height="1000" fill="#141b23"/><text x="50" y="65" font-family="sans-serif" font-size="34" font-weight="bold" fill="#e4e6eb">MATERIAL COMPARISON</text><text x="50" y="105" font-family="sans-serif" font-size="20" fill="#a9b2bc">Synthetic image for viewer inspection</text>${tiles}</svg>`;
+  return { src: `data:image/svg+xml,${encodeURIComponent(svg)}`, name: "material-comparison.png" };
+}
+
+// Real pointer/wheel input uses the top-level browser's coordinates; Vitest's
+// tester iframe may be scaled and offset within that native page.
+function browserPoint(point: { x: number; y: number }) {
+  let { x, y } = point;
+  let frame = window.frameElement;
+  while (frame) {
+    const element = frame as HTMLElement;
+    const bounds = element.getBoundingClientRect();
+    x = bounds.left + (x + element.clientLeft) * (bounds.width / element.offsetWidth);
+    y = bounds.top + (y + element.clientTop) * (bounds.height / element.offsetHeight);
+    frame = frame.ownerDocument.defaultView?.frameElement ?? null;
+  }
+  return { x, y };
+}
+
+function imageViewport() {
+  return page
+    .getByRole("region", { name: "Expanded image; scroll to zoom or drag to pan", exact: true })
+    .element() as HTMLElement;
+}
+
+async function expectFitted(name: string) {
+  await expectImageFits(name);
+  const viewport = imageViewport();
+  await vi.waitFor(() => {
+    expect(viewport.scrollWidth).toBeLessThanOrEqual(viewport.clientWidth + 1);
+    expect(viewport.scrollHeight).toBeLessThanOrEqual(viewport.clientHeight + 1);
+    expect(viewport.scrollLeft).toBe(0);
+    expect(viewport.scrollTop).toBe(0);
+  });
+}
 
 function PreviewInPane({
   current = preview,
@@ -72,10 +128,10 @@ async function expectImageFits(name: string) {
     const bounds = img.getBoundingClientRect();
     // Geometry alone misses a correctly sized image clipped by its chat pane.
     for (const [x, y] of [
-      [bounds.left + 2, bounds.top + bounds.height / 2],
-      [bounds.right - 2, bounds.top + bounds.height / 2],
-      [bounds.left + bounds.width / 2, bounds.top + 2],
-      [bounds.left + bounds.width / 2, bounds.bottom - 2],
+      [bounds.left + Math.min(2, bounds.width / 2), bounds.top + bounds.height / 2],
+      [bounds.right - Math.min(2, bounds.width / 2), bounds.top + bounds.height / 2],
+      [bounds.left + bounds.width / 2, bounds.top + Math.min(2, bounds.height / 2)],
+      [bounds.left + bounds.width / 2, bounds.bottom - Math.min(2, bounds.height / 2)],
     ]) {
       const hit = document.elementFromPoint(x!, y!);
       const control = hit?.closest("button[data-slot=button]");
@@ -90,27 +146,72 @@ async function expectImageFits(name: string) {
 
 afterEach(() => {
   applyInterfaceScalePercent(100);
+  document.documentElement.classList.remove("dark");
 });
 
 describe("expanded chat images", () => {
   it.each([
-    { width: 1440, height: 900, scale: 80 },
-    { width: 1440, height: 900, scale: 130 },
-    { width: 900, height: 320, scale: 80 },
-    { width: 900, height: 320, scale: 130 },
-    { width: 390, height: 700, scale: 80 },
-    { width: 390, height: 700, scale: 130 },
+    { width: 1100, height: 800, scale: 80, dark: false },
+    { width: 1100, height: 800, scale: 130, dark: true },
+    { width: 390, height: 700, scale: 80, dark: true },
+    { width: 390, height: 700, scale: 130, dark: false },
   ])(
-    "fits both image orientations at $width × $height and $scale% scale",
-    async ({ width, height, scale }) => {
+    "keeps inspection controls visible while zoomed at $width and $scale% (dark: $dark)",
+    async ({ width, height, scale, dark }) => {
       await page.viewport(width, height);
       applyInterfaceScalePercent(scale);
+      document.documentElement.classList.toggle("dark", dark);
+      const item = inspectionBoard();
+      const view = await render(
+        <PreviewInPane current={{ images: [item], index: 0 }} onClose={vi.fn()} />,
+      );
+      try {
+        await expectFitted(item.name);
+        const capture = async (state: string) => {
+          if (import.meta.env.VITE_IMAGE_VIEWER_SCREENSHOTS !== "1") return;
+          const dialog = page.getByRole("dialog", { name: "Expanded image preview" }).element();
+          await Promise.all(
+            dialog.getAnimations({ subtree: true }).map((animation) => animation.finished),
+          );
+          await page.screenshot({
+            path: `../../../../../.explorations/image-viewer/${width}-${scale}-${dark ? "dark" : "light"}-${state}.png`,
+          });
+        };
+        await capture("fit");
+        await page.getByRole("button", { name: "Original size", exact: true }).click();
+        await page.getByRole("button", { name: "Zoom in", exact: true }).click();
+        const toolbar = page
+          .getByRole("group", { name: "Image zoom controls", exact: true })
+          .element();
+        for (const button of toolbar.querySelectorAll("button")) expectInsideWindow(button);
+        expect(imageViewport().scrollWidth).toBeGreaterThan(imageViewport().clientWidth);
+        await capture("zoom");
+        await page.getByRole("button", { name: "Fit", exact: true }).click();
+        await expectFitted(item.name);
+      } finally {
+        await view.unmount();
+      }
+    },
+  );
+  it.each([
+    { width: 1440, height: 900, scale: 80, dark: false },
+    { width: 1440, height: 900, scale: 130, dark: true },
+    { width: 900, height: 320, scale: 80, dark: true },
+    { width: 900, height: 320, scale: 130, dark: false },
+    { width: 390, height: 700, scale: 80, dark: false },
+    { width: 390, height: 700, scale: 130, dark: true },
+  ])(
+    "fits both image orientations at $width × $height and $scale% scale (dark: $dark)",
+    async ({ width, height, scale, dark }) => {
+      await page.viewport(width, height);
+      applyInterfaceScalePercent(scale);
+      document.documentElement.classList.toggle("dark", dark);
       const onClose = vi.fn();
       const view = await render(<PreviewInPane onClose={onClose} />);
       try {
-        await expectImageFits(landscape.name);
+        await expectFitted(landscape.name);
         await page.getByRole("button", { name: "Next image", exact: true }).click();
-        await expectImageFits(portrait.name);
+        await expectFitted(portrait.name);
         await expect
           .element(page.getByText(`${portrait.name} (2/2)`, { exact: true }))
           .toBeVisible();
@@ -123,6 +224,201 @@ describe("expanded chat images", () => {
       }
     },
   );
+
+  it("zooms to original pixels, pans with captured pointer input and keyboard, then fits again", async () => {
+    await page.viewport(1100, 800);
+    const onClose = vi.fn();
+    const view = await render(<PreviewInPane onClose={onClose} />);
+    try {
+      await expectFitted(landscape.name);
+      await page.getByRole("button", { name: "Original size", exact: true }).click();
+      const img = page.getByRole("img", { name: landscape.name, exact: true }).element();
+      const viewport = imageViewport();
+      await vi.waitFor(() => {
+        expect(img.getBoundingClientRect().width).toBe(6000);
+        expect(img.getBoundingClientRect().height).toBe(1800);
+        expect(viewport.scrollLeft).toBeGreaterThan(0);
+        expect(viewport.scrollTop).toBeGreaterThan(0);
+      });
+      await page.getByRole("button", { name: "Zoom in", exact: true }).click();
+      expect(
+        page.getByRole("status", { name: "Zoom level", exact: true }).element().textContent,
+      ).toBe("125%");
+      expect(img.getBoundingClientRect().width).toBe(7500);
+      await page.getByRole("button", { name: "Zoom out", exact: true }).click();
+      expect(img.getBoundingClientRect().width).toBe(6000);
+      viewport.focus();
+      const beforeKey = viewport.scrollLeft;
+      await userEvent.keyboard("{ArrowRight}");
+      await vi.waitFor(() => expect(viewport.scrollLeft).toBeGreaterThan(beforeKey));
+      await expect
+        .element(page.getByRole("img", { name: landscape.name, exact: true }))
+        .toBeInTheDocument();
+      viewport.scrollTo(200, 200);
+      const bounds = viewport.getBoundingClientRect();
+      const start = browserPoint({
+        x: bounds.left + bounds.width / 2,
+        y: bounds.top + bounds.height / 2,
+      });
+      // Pointer capture must retain the drag even over the dismissing backdrop.
+      const end = browserPoint({ x: bounds.left - 20, y: bounds.top - 20 });
+      const input = cdp();
+      await input.send("Input.dispatchMouseEvent", { type: "mouseMoved", ...start });
+      await input.send("Input.dispatchMouseEvent", {
+        type: "mousePressed",
+        ...start,
+        button: "left",
+        buttons: 1,
+        clickCount: 1,
+      });
+      try {
+        await input.send("Input.dispatchMouseEvent", {
+          type: "mouseMoved",
+          ...end,
+          button: "left",
+          buttons: 1,
+        });
+        await vi.waitFor(() => {
+          expect(viewport.scrollLeft).toBeGreaterThan(250);
+          expect(viewport.scrollTop).toBeGreaterThan(240);
+          expect(getComputedStyle(viewport).cursor).toBe("grabbing");
+        });
+      } finally {
+        await input.send("Input.dispatchMouseEvent", {
+          type: "mouseReleased",
+          ...end,
+          button: "left",
+          buttons: 0,
+          clickCount: 1,
+        });
+      }
+      expect(getComputedStyle(viewport).cursor).toBe("grab");
+      expect(onClose).not.toHaveBeenCalled();
+      await userEvent.keyboard("-1");
+      expect(img.getBoundingClientRect().width).toBe(6000);
+      await userEvent.keyboard("0");
+      await expectFitted(landscape.name);
+      await page.getByRole("button", { name: "Original size", exact: true }).click();
+      await page.getByRole("button", { name: "Fit", exact: true }).click();
+      await expectFitted(landscape.name);
+    } finally {
+      await view.unmount();
+    }
+  });
+
+  it("anchors real wheel and trackpad pinch zoom at the cursor without zooming the app", async () => {
+    await page.viewport(1100, 800);
+    const view = await render(<PreviewInPane onClose={vi.fn()} />);
+    try {
+      await expectFitted(landscape.name);
+      await page.getByRole("button", { name: "Original size", exact: true }).click();
+      const viewport = imageViewport();
+      const img = page
+        .getByRole("img", { name: landscape.name, exact: true })
+        .element() as HTMLImageElement;
+      const bounds = viewport.getBoundingClientRect();
+      const point = { x: bounds.left + bounds.width * 0.65, y: bounds.top + bounds.height * 0.6 };
+      const original = img.getBoundingClientRect();
+      const imagePoint = { x: point.x - original.left, y: point.y - original.top };
+      const input = cdp();
+      const nativePoint = browserPoint(point);
+      const appScale = window.visualViewport?.scale;
+      await input.send("Input.dispatchMouseEvent", { type: "mouseMoved", ...nativePoint });
+      for (const modifiers of [0, 2]) {
+        const previousWidth = img.getBoundingClientRect().width;
+        await input.send("Input.dispatchMouseEvent", {
+          type: "mouseWheel",
+          ...nativePoint,
+          deltaX: 0,
+          deltaY: -40,
+          modifiers,
+        });
+        await vi.waitFor(() => {
+          const current = img.getBoundingClientRect();
+          expect(current.width).toBeGreaterThan(previousWidth);
+          const scale = current.width / img.naturalWidth;
+          expect(Math.abs(current.left + imagePoint.x * scale - point.x)).toBeLessThan(2);
+          expect(Math.abs(current.top + imagePoint.y * scale - point.y)).toBeLessThan(2);
+          expect(window.visualViewport?.scale).toBe(appScale);
+        });
+      }
+      await input.send("Input.dispatchMouseEvent", {
+        type: "mouseWheel",
+        ...nativePoint,
+        deltaX: 0,
+        deltaY: 1000,
+      });
+      await vi.waitFor(() => expect(img.getBoundingClientRect().width).toBeLessThan(6000));
+      await page.getByRole("button", { name: "Fit", exact: true }).click();
+      await expectFitted(landscape.name);
+    } finally {
+      await view.unmount();
+    }
+  });
+
+  it("toggles fit and original size on double click and resets when selecting or replacing an image", async () => {
+    await page.viewport(1100, 800);
+    const onClose = vi.fn();
+    const view = await render(<PreviewInPane onClose={onClose} />);
+    try {
+      await expectFitted(landscape.name);
+      await page.getByRole("img", { name: landscape.name, exact: true }).dblClick();
+      expect(
+        page.getByRole("status", { name: "Zoom level", exact: true }).element().textContent,
+      ).toBe("100%");
+      // The image is larger than its viewport; double-click a visible region.
+      await page
+        .getByRole("region", { name: "Expanded image; scroll to zoom or drag to pan", exact: true })
+        .dblClick();
+      await expectFitted(landscape.name);
+      await page.getByRole("button", { name: "Original size", exact: true }).click();
+      await page.getByRole("button", { name: "Next image", exact: true }).click();
+      await expectFitted(portrait.name);
+      await page.getByRole("button", { name: "Original size", exact: true }).click();
+      await view.rerender(
+        <PreviewInPane
+          current={{ images: [image(80, 40, "small.png")], index: 0 }}
+          onClose={onClose}
+        />,
+      );
+      await expectFitted("small.png");
+      const small = page.getByRole("img", { name: "small.png", exact: true }).element();
+      expect(small.getBoundingClientRect().width).toBe(80);
+      expect(small.getBoundingClientRect().height).toBe(40);
+    } finally {
+      await view.unmount();
+    }
+  });
+
+  it("bounds repeated zooming and keeps Fit reachable on extreme image dimensions", async () => {
+    await page.viewport(390, 320);
+    applyInterfaceScalePercent(130);
+    const item = image(100, 16384, "tall.png");
+    const view = await render(
+      <PreviewInPane current={{ images: [item], index: 0 }} onClose={vi.fn()} />,
+    );
+    try {
+      await expectFitted(item.name);
+      await expect
+        .element(page.getByRole("button", { name: "Zoom out", exact: true }))
+        .toBeDisabled();
+      await page.getByRole("button", { name: "Original size", exact: true }).click();
+      for (let step = 0; step < 10; step++) {
+        const zoomIn = page.getByRole("button", { name: "Zoom in", exact: true });
+        if (!(zoomIn.element() as HTMLButtonElement).disabled) await zoomIn.click();
+      }
+      await expect
+        .element(page.getByRole("button", { name: "Zoom in", exact: true }))
+        .toBeDisabled();
+      expect(
+        page.getByRole("status", { name: "Zoom level", exact: true }).element().textContent,
+      ).toBe("800%");
+      await page.getByRole("button", { name: "Fit", exact: true }).click();
+      await expectFitted(item.name);
+    } finally {
+      await view.unmount();
+    }
+  });
 
   it("refits an open image when the window shrinks and supports gallery keys and Escape", async () => {
     await page.viewport(1440, 900);

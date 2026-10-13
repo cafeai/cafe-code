@@ -2206,8 +2206,8 @@
   "Close image preview": {
     "message": "Close image preview",
     "locations": [
-      "apps/web/src/components/chat/ExpandedImageDialog.tsx:103",
-      "apps/web/src/components/chat/ExpandedImageDialog.tsx:80"
+      "apps/web/src/components/chat/ExpandedImageDialog.tsx:84",
+      "apps/web/src/components/chat/ExpandedImageViewer.tsx:212"
     ]
   },
   "Close other tabs": {
@@ -4751,7 +4751,11 @@
   },
   "Expanded image preview": {
     "message": "Expanded image preview",
-    "locations": ["apps/web/src/components/chat/ExpandedImageDialog.tsx:75"]
+    "locations": ["apps/web/src/components/chat/ExpandedImageDialog.tsx:79"]
+  },
+  "Expanded image; scroll to zoom or drag to pan": {
+    "message": "Expanded image; scroll to zoom or drag to pan",
+    "locations": ["apps/web/src/components/chat/ExpandedImageViewer.tsx:221"]
   },
   "Expanded table": {
     "message": "Expanded table",
@@ -5251,7 +5255,8 @@
     "message": "Fit",
     "locations": [
       "apps/web/src/components/MarkdownTableViewer.tsx:186",
-      "apps/web/src/components/MermaidBlock.tsx:151"
+      "apps/web/src/components/MermaidBlock.tsx:151",
+      "apps/web/src/components/chat/ExpandedImageViewer.tsx:172"
     ]
   },
   "Fix the expression above to continue editing visually.": {
@@ -5658,6 +5663,10 @@
   "Image unavailable": {
     "message": "Image unavailable",
     "locations": ["apps/web/src/components/chat/MarkdownImage.tsx:179"]
+  },
+  "Image zoom controls": {
+    "message": "Image zoom controls",
+    "locations": ["apps/web/src/components/chat/ExpandedImageViewer.tsx:169"]
   },
   "Image-only follow-up": {
     "message": "Image-only follow-up",
@@ -6960,7 +6969,7 @@
   },
   "Next image": {
     "message": "Next image",
-    "locations": ["apps/web/src/components/chat/ExpandedImageDialog.tsx:127"]
+    "locations": ["apps/web/src/components/chat/ExpandedImageDialog.tsx:112"]
   },
   "Next question": {
     "message": "Next question",
@@ -7799,6 +7808,10 @@
     "message": "Original / reset",
     "locations": ["apps/web/src/components/global-dictation/GlobalDictationOverlay.tsx:744"]
   },
+  "Original size": {
+    "message": "Original size",
+    "locations": ["apps/web/src/components/chat/ExpandedImageViewer.tsx:177"]
+  },
   "Original stays unchanged; workspace files are shared, not rewound.": {
     "message": "Original stays unchanged; workspace files are shared, not rewound.",
     "locations": ["apps/web/src/components/chat/MessageForkDialog.tsx:74"]
@@ -8222,7 +8235,7 @@
   },
   "Previous image": {
     "message": "Previous image",
-    "locations": ["apps/web/src/components/chat/ExpandedImageDialog.tsx:89"]
+    "locations": ["apps/web/src/components/chat/ExpandedImageDialog.tsx:97"]
   },
   "Previous question": {
     "message": "Previous question",
@@ -9939,6 +9952,10 @@
   "Scroll to bottom": {
     "message": "Scroll to bottom",
     "locations": ["apps/web/src/components/ChatView.tsx:8396"]
+  },
+  "Scroll to zoom. Drag to pan.": {
+    "message": "Scroll to zoom. Drag to pan.",
+    "locations": ["apps/web/src/components/chat/ExpandedImageDialog.tsx:120"]
   },
   "Search": {
     "message": "Search",
@@ -13312,21 +13329,24 @@
     "message": "Zoom in",
     "locations": [
       "apps/web/src/components/MarkdownTableViewer.tsx:209",
-      "apps/web/src/components/MermaidBlock.tsx:174"
+      "apps/web/src/components/MermaidBlock.tsx:174",
+      "apps/web/src/components/chat/ExpandedImageViewer.tsx:201"
     ]
   },
   "Zoom level": {
     "message": "Zoom level",
     "locations": [
       "apps/web/src/components/MarkdownTableViewer.tsx:202",
-      "apps/web/src/components/MermaidBlock.tsx:167"
+      "apps/web/src/components/MermaidBlock.tsx:167",
+      "apps/web/src/components/chat/ExpandedImageViewer.tsx:194"
     ]
   },
   "Zoom out": {
     "message": "Zoom out",
     "locations": [
       "apps/web/src/components/MarkdownTableViewer.tsx:194",
-      "apps/web/src/components/MermaidBlock.tsx:159"
+      "apps/web/src/components/MermaidBlock.tsx:159",
+      "apps/web/src/components/chat/ExpandedImageViewer.tsx:186"
     ]
   },
   "Zoom to inspect. Scroll or drag empty space to pan.": {

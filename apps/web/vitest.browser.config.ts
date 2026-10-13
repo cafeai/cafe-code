@@ -9,6 +9,7 @@ const touchTimelineFile = "src/components/chat/MessagesTimeline.touch.browser.ts
 const contextMotionFile = "src/components/chat/CodexContextWindowControl.motion.browser.tsx";
 const diagnosticMotionFile = "src/components/chat/ProviderDiagnosticWorkEntry.motion.browser.tsx";
 const visualizationMotionFile = "src/components/visualizations/Visualizations.motion.browser.tsx";
+const imageMotionFile = "src/components/chat/ExpandedImageDialog.motion.browser.tsx";
 const touchViewport = { width: 430, height: 932 };
 const browserOptions = {
   enabled: true,
@@ -112,6 +113,7 @@ export default mergeConfig(
               contextMotionFile,
               diagnosticMotionFile,
               visualizationMotionFile,
+              imageMotionFile,
             ],
             sequence: { groupOrder: 0 },
             browser: {
@@ -154,7 +156,12 @@ export default mergeConfig(
           extends: true,
           test: {
             name: "context-reduced-motion",
-            include: [contextMotionFile, diagnosticMotionFile, visualizationMotionFile],
+            include: [
+              contextMotionFile,
+              diagnosticMotionFile,
+              visualizationMotionFile,
+              imageMotionFile,
+            ],
             // Qualify the inherited dialog's real reduced-motion behavior in
             // its own native context, after both existing project groups.
             // Original worker caps and test/hook deadlines remain inherited.
