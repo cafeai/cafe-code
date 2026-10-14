@@ -160,7 +160,7 @@ import { CodexRecoveryNotice, SessionRail } from "./chat/SessionRail";
 import { deriveCodexRecoveryPresentation } from "../codexRecovery";
 import { ComposerAsyncQuestionsPanel } from "./chat/ComposerAsyncQuestionsPanel";
 import { persistExactAsyncQuestionAnswer, type AsyncQuestion } from "./chat/asyncQuestions";
-import { ChevronDownIcon, TriangleAlertIcon } from "lucide-react";
+import { TriangleAlertIcon } from "lucide-react";
 import { cn } from "~/lib/utils";
 import { stackedThreadToast, toastManager } from "./ui/toast";
 import { newCommandId, newDraftId, newMessageId, newThreadId } from "~/lib/utils";
@@ -228,6 +228,8 @@ import {
 import { ExpandedImageDialog } from "./chat/ExpandedImageDialog";
 import { PullRequestThreadDialog } from "./PullRequestThreadDialog";
 import { MessagesTimeline } from "./chat/MessagesTimeline";
+import { ScrollToBottomControl } from "./chat/ScrollToBottomControl";
+import { useScrollToBottomDismissal } from "./chat/useScrollToBottomDismissal";
 import type { SubagentDetailSelection } from "./chat/SubagentDetailView";
 import { useTaskAtriumStore } from "./atrium/taskAtriumStore";
 import {
@@ -1005,6 +1007,7 @@ export default function ChatView(props: ChatViewProps) {
     [environmentId, threadId],
   );
   const routeThreadKey = useMemo(() => scopedThreadKey(routeThreadRef), [routeThreadRef]);
+  const scrollControlDismissal = useScrollToBottomDismissal(routeThreadKey);
   const timelineViews = useChatPaneResource(
     "timeline-views",
     () => new Map<string, TimelineViewPosition>(),
@@ -8468,6 +8471,11 @@ export default function ChatView(props: ChatViewProps) {
               viewPositionCache={timelineViews}
               viewPositionKey={routeThreadKey}
               onIsAtEndChange={onIsAtEndChange}
+              onObservedBottom={
+                pane.visible && scrollControlDismissal.dismissed
+                  ? scrollControlDismissal.observeBottom
+                  : undefined
+              }
               onUserScrollIntent={onTimelineUserScrollIntent}
               selectedSubagent={selectedSubagent}
               onOpenSubagentDetail={openSubagentDetail}
@@ -8478,18 +8486,12 @@ export default function ChatView(props: ChatViewProps) {
             />
 
             {/* scroll to bottom pill — shown when user has scrolled away from the bottom */}
-            {showScrollToBottom && (
+            {showScrollToBottom && !scrollControlDismissal.dismissed && (
               <div className="pointer-events-none absolute bottom-1 left-1/2 z-30 flex -translate-x-1/2 justify-center py-1.5">
-                <button
-                  type="button"
-                  onClick={() => scrollToEnd(true)}
-                  // The rise lives on the button, not the wrapper: the wrapper's
-                  // -translate-x-1/2 centring uses the same `translate` property.
-                  className="pointer-events-auto flex items-center gap-1.5 rounded-full border border-border bg-raised px-3 py-1 text-muted-foreground text-xs shadow-sm transition-colors duration-(--duration-fast) hover:border-border-strong hover:text-foreground hover:cursor-pointer animate-enter-rise"
-                >
-                  <ChevronDownIcon className="size-3.5" />
-                  {uiText("Scroll to bottom", undefined, undefined, uiLocale)}
-                </button>
+                <ScrollToBottomControl
+                  onScrollToBottom={() => scrollToEnd(true)}
+                  onHideUntilBottom={scrollControlDismissal.hideUntilBottom}
+                />
               </div>
             )}
           </div>

@@ -12510,6 +12510,16 @@ describe(`ChatView full app (${chatViewBrowserPart})`, () => {
         await vi.waitFor(() => expect(document.body.textContent).toContain("Scroll to bottom"));
         const reviewOffset = scroller.scrollTop;
         expect(reviewOffset).toBeLessThan(scroller.scrollHeight - scroller.clientHeight - 100);
+        const scrollControl = page.getByRole("button", { name: "Scroll to bottom", exact: true });
+        await scrollControl.hover();
+        const hideScrollControl = page.getByRole("button", {
+          name: "Hide until bottom",
+          exact: true,
+        });
+        await expect.element(hideScrollControl).toBeVisible();
+        await hideScrollControl.click();
+        await expect.element(scrollControl).not.toBeInTheDocument();
+        expect(scroller.scrollTop).toBe(reviewOffset);
         useDeskStore.getState().dispatch({ type: "open", target: secondTarget });
         await vi.waitFor(() => expect(scroller.isConnected).toBe(false));
         const secondScroller = document
@@ -12530,6 +12540,7 @@ describe(`ChatView full app (${chatViewBrowserPart})`, () => {
         expect(restored.scrollTop).toBeLessThan(
           restored.scrollHeight - restored.clientHeight - 100,
         );
+        await expect.element(scrollControl).not.toBeInTheDocument();
       } finally {
         await mounted.cleanup();
       }

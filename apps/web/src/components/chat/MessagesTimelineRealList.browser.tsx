@@ -20,7 +20,7 @@ import * as Schema from "effect/Schema";
 import type { LegendListRef } from "@legendapp/list/react";
 import { createRef, useCallback, useState, type ComponentProps } from "react";
 import { describe, expect, it, vi } from "vitest";
-import { cdp } from "vitest/browser";
+import { cdp, page } from "vitest/browser";
 import { render } from "vitest-browser-react";
 
 import {
@@ -28,6 +28,8 @@ import {
   __setEnvironmentApiOverrideForTests,
 } from "../../environmentApi";
 import { MessagesTimeline } from "./MessagesTimeline";
+import { ScrollToBottomControl } from "./ScrollToBottomControl";
+import { useScrollToBottomDismissal } from "./useScrollToBottomDismissal";
 import { refreshScheduledFollowups } from "./scheduledFollowupsResource";
 
 type TimelineProps = ComponentProps<typeof MessagesTimeline>;
@@ -105,17 +107,43 @@ function TimelineFixture({
   listRef,
   scope,
   scheduledFollowups,
+  scrollControl = false,
+  stickRevision = 0,
+  onBottomObservation,
+  onEndChange,
+  hydrating = false,
 }: {
   entries: TimelineEntries;
   listRef: TimelineProps["listRef"];
   scope: string;
   scheduledFollowups?: TimelineProps["scheduledFollowups"];
+  scrollControl?: boolean;
+  stickRevision?: number;
+  onBottomObservation?: () => void;
+  onEndChange?: (atEnd: boolean) => void;
+  hydrating?: boolean;
 }) {
   const [following, setFollowing] = useState(true);
   const stopFollowing = useCallback(() => setFollowing(false), []);
+  const dismissal = useScrollToBottomDismissal(`real-list:${scope}`);
+  const observeBottom = useCallback(() => {
+    dismissal.observeBottom();
+    onBottomObservation?.();
+  }, [dismissal.observeBottom, onBottomObservation]);
+  const observeEndChange = useCallback(
+    (atEnd: boolean) => {
+      onEndChange?.(atEnd);
+      if (scrollControl) setFollowing(atEnd);
+    },
+    [onEndChange, scrollControl],
+  );
 
   return (
-    <div className="h-full min-h-0" data-real-list-following={following}>
+    <div
+      className="relative h-full min-h-0"
+      data-real-list-following={following}
+      data-scroll-control-dismissed={dismissal.dismissed}
+    >
       <MessagesTimeline
         activeThreadId={ThreadId.make(scope)}
         activeThreadEnvironmentId={EnvironmentId.make("real-list-fixture")}
@@ -127,20 +155,30 @@ function TimelineFixture({
         completionDividerAfterEntryId={null}
         completionSummary={null}
         isRevertingCheckpoint={false}
+        isThreadHistoryHydrating={hydrating}
         isWorking={false}
         listRef={listRef}
         markdownCwd={undefined}
         onImageExpand={ignore}
-        onIsAtEndChange={ignore}
+        onIsAtEndChange={observeEndChange}
+        onObservedBottom={scrollControl || onBottomObservation ? observeBottom : undefined}
         onRevertUserMessage={ignore}
         onUserScrollIntent={stopFollowing}
         revertTurnCountByUserMessageId={EMPTY_REVERT_COUNTS}
         {...(scheduledFollowups ? { scheduledFollowups } : {})}
-        stickToEndRevision={0}
+        stickToEndRevision={stickRevision}
         timelineEntries={entries}
         timestampFormat="24-hour"
         workspaceRoot={undefined}
       />
+      {scrollControl && !following && !dismissal.dismissed ? (
+        <div className="pointer-events-none absolute bottom-1 left-1/2 -translate-x-1/2">
+          <ScrollToBottomControl
+            onScrollToBottom={() => void listRef.current?.scrollToEnd({ animated: true })}
+            onHideUntilBottom={dismissal.hideUntilBottom}
+          />
+        </div>
+      ) : null}
     </div>
   );
 }
@@ -222,6 +260,146 @@ async function expectTail(
 }
 
 describe("MessagesTimeline with real LegendList", () => {
+  it("hides the scroll control without moving review and restores it only after native bottom then review", async () => {
+    const scope = "scroll-control-review";
+    const host = createHost();
+    const listRef = createRef<LegendListRef>();
+    const view = await render(
+      <TimelineFixture entries={messages(scope)} listRef={listRef} scope={scope} scrollControl />,
+      { container: host },
+    );
+    try {
+      await expectTail(host, listRef, `${scope}-message-39`);
+      await listRef.current!.scrollToEnd({ animated: false });
+      const scroller = readScroller(listRef);
+      await vi.waitFor(() => expect(Math.abs(tailDistance(scroller))).toBeLessThanOrEqual(8));
+      await reviewWithNativeWheel(scroller);
+      await vi.waitFor(() => expect(tailDistance(scroller)).toBeGreaterThan(100));
+      const jump = page.getByRole("button", { name: "Scroll to bottom", exact: true });
+      await expect.element(jump).toBeVisible();
+      await jump.hover();
+      const hide = page.getByRole("button", { name: "Hide until bottom", exact: true });
+      await expect.element(hide).toBeVisible();
+      const reviewOffset = scroller.scrollTop;
+      await hide.click();
+      await vi.waitFor(() =>
+        expect(host.querySelector("[data-scroll-control-dismissed=true]")).not.toBeNull(),
+      );
+      await expect.element(jump).not.toBeInTheDocument();
+      expect(scroller.scrollTop).toBe(reviewOffset);
+      expect(host.querySelector("[data-real-list-following=false]")).not.toBeNull();
+      const grown = growLastMessage(messages(scope, 41));
+      await view.rerender(
+        <TimelineFixture entries={grown} listRef={listRef} scope={scope} scrollControl />,
+      );
+      await vi.waitFor(() => expect(listRef.current!.getState().data.length).toBe(41));
+      expect(host.querySelector("[data-scroll-control-dismissed=true]")).not.toBeNull();
+      expect(scroller.scrollTop).toBe(reviewOffset);
+      expect(host.querySelector("[data-real-list-following=false]")).not.toBeNull();
+      // Physical native movement is the reset witness, not an appended message
+      // or optimistic isAtEnd request. Returning to review exposes the control.
+      // Traverse the measured tail in ordinary finite wheel steps. A single
+      // estimated-content jump is not proof that newly visible rows have
+      // finished measuring, just as in the longer artifact review fixture.
+      for (let gesture = 0; gesture < 4; gesture += 1) {
+        await reviewWithNativeWheel(scroller, 300);
+        await new Promise<void>((resolve) => window.requestAnimationFrame(() => resolve()));
+      }
+      await vi.waitFor(() => {
+        expect(Math.abs(tailDistance(scroller))).toBeLessThanOrEqual(8);
+        expect(host.querySelector("[data-scroll-control-dismissed=false]")).not.toBeNull();
+      });
+      await reviewWithNativeWheel(scroller);
+      await vi.waitFor(() => expect(tailDistance(scroller)).toBeGreaterThan(100));
+      await expect.element(jump).toBeVisible();
+      await jump.hover();
+      await expect.element(hide).toBeVisible();
+      await hide.click();
+      await vi.waitFor(() =>
+        expect(host.querySelector("[data-scroll-control-dismissed=true]")).not.toBeNull(),
+      );
+      // A real content shrink can reach bottom without another wheel event.
+      // Observe the native clamp; do not manufacture a bottom flag or scroll.
+      await view.rerender(
+        <TimelineFixture
+          entries={messages(scope, 3)}
+          listRef={listRef}
+          scope={scope}
+          scrollControl
+          hydrating
+        />,
+      );
+      await vi.waitFor(() => {
+        expect(listRef.current!.getState().data.length).toBe(3);
+        expect(Math.abs(tailDistance(scroller))).toBeLessThanOrEqual(8);
+      });
+      // An intermediate short/empty hydration projection is not a completed
+      // view. It cannot consume the exact chat's dismissal while loading.
+      expect(host.querySelector("[data-scroll-control-dismissed=true]")).not.toBeNull();
+      await view.rerender(
+        <TimelineFixture
+          entries={messages(scope, 3)}
+          listRef={listRef}
+          scope={scope}
+          scrollControl
+        />,
+      );
+      await vi.waitFor(() => {
+        expect(Math.abs(tailDistance(scroller))).toBeLessThanOrEqual(8);
+        expect(host.querySelector("[data-scroll-control-dismissed=false]")).not.toBeNull();
+      });
+    } finally {
+      await view.unmount();
+      host.remove();
+    }
+  });
+
+  it("keeps submit-time optimistic end signals separate from actual native-bottom observations", async () => {
+    const scope = "scroll-control-submit";
+    const host = createHost();
+    const listRef = createRef<LegendListRef>();
+    let bottoms = 0;
+    const optimistic: Array<{ gap: number; observed: number }> = [];
+    const onBottomObservation = () => {
+      bottoms += 1;
+    };
+    const onEndChange = (atEnd: boolean) => {
+      if (atEnd && listRef.current)
+        optimistic.push({ gap: tailDistance(readScroller(listRef)), observed: bottoms });
+    };
+    const fixture = (stickRevision: number) => (
+      <TimelineFixture
+        entries={messages(scope)}
+        listRef={listRef}
+        scope={scope}
+        stickRevision={stickRevision}
+        onBottomObservation={onBottomObservation}
+        onEndChange={onEndChange}
+      />
+    );
+    const view = await render(fixture(0), { container: host });
+    try {
+      await expectTail(host, listRef, `${scope}-message-39`);
+      await listRef.current!.scrollToEnd({ animated: false });
+      const scroller = readScroller(listRef);
+      await reviewWithNativeWheel(scroller);
+      await vi.waitFor(() => expect(tailDistance(scroller)).toBeGreaterThan(100));
+      bottoms = 0;
+      optimistic.length = 0;
+      await view.rerender(fixture(1));
+      await vi.waitFor(() =>
+        expect(optimistic.some((value) => value.gap > 100 && value.observed === 0)).toBe(true),
+      );
+      await vi.waitFor(() => {
+        expect(Math.abs(tailDistance(scroller))).toBeLessThanOrEqual(8);
+        expect(bottoms).toBeGreaterThan(0);
+      });
+    } finally {
+      await view.unmount();
+      host.remove();
+    }
+  });
+
   it("preserves an exact overlap anchor when older review slides the 1,000-artifact window", async () => {
     const scope = "artifact-sliding-review";
     const host = createHost();

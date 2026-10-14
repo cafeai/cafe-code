@@ -9,6 +9,7 @@ const touchTimelineFile = "src/components/chat/MessagesTimeline.touch.browser.ts
 const contextMotionFile = "src/components/chat/CodexContextWindowControl.motion.browser.tsx";
 const diagnosticMotionFile = "src/components/chat/ProviderDiagnosticWorkEntry.motion.browser.tsx";
 const visualizationMotionFile = "src/components/visualizations/Visualizations.motion.browser.tsx";
+const scrollToBottomMotionFile = "src/components/chat/ScrollToBottomControl.motion.browser.tsx";
 const visualizationFluidFile = "src/components/visualizations/VisualizationFluid.browser.tsx";
 const touchViewport = { width: 430, height: 932 };
 const browserOptions = {
@@ -47,6 +48,7 @@ export default mergeConfig(
         // before collection: late discovery reloads that test iframe and is
         // not an assertion or browser-input policy failure.
         "@base-ui/react/collapsible",
+        "@base-ui/react/popover",
         "@base-ui/react/toast",
         "@effect/atom-react",
         "@tanstack/react-query",
@@ -113,6 +115,7 @@ export default mergeConfig(
               contextMotionFile,
               diagnosticMotionFile,
               visualizationMotionFile,
+              scrollToBottomMotionFile,
               visualizationFluidFile,
             ],
             sequence: { groupOrder: 0 },
@@ -177,7 +180,12 @@ export default mergeConfig(
           extends: true,
           test: {
             name: "context-reduced-motion",
-            include: [contextMotionFile, diagnosticMotionFile, visualizationMotionFile],
+            include: [
+              contextMotionFile,
+              diagnosticMotionFile,
+              visualizationMotionFile,
+              scrollToBottomMotionFile,
+            ],
             // Qualify the inherited dialog's real reduced-motion behavior in
             // its own native context, after the ordinary-motion lifecycle
             // group as well as the existing desktop/touch groups.

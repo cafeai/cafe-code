@@ -1,11 +1,21 @@
 # Desk and chat tabs
 
-Last updated: 2026-10-09 14:03:31 JST (UTC+0900)
+Last updated: 2026-10-14 13:20:45 JST (UTC+0900)
 
 Use **Projects** to browse the saved project/chat catalog, including the separate
 **Chats** section for conversations without a project. Use **Desk** to
 show only your open chats, grouped the way you are working. Atrium, Settings,
 project actions and the chat composer stay in their usual places.
+
+While reviewing earlier messages, hover or focus **Scroll to bottom** to reveal
+its compact options popout. Choose **Hide until bottom** to dismiss the button
+without moving the chat or changing review mode. The options chevron also works
+with a click, keyboard or touch. Reaching the actual bottom automatically clears
+the choice, so the button returns on your next scroll up. The temporary choice
+follows that exact chat across tabs in the current layout (including another
+view of the same chat), never another environment's chat. It is not saved across
+app restarts; incoming messages and a requested-but-unfinished scroll do not
+clear it. Remembered choices are bounded like the existing review-position cache.
 
 The tabs now occupy the top window bar, with a taller row instead of a separate
 chat header above them. Native window controls retain their own space. Project

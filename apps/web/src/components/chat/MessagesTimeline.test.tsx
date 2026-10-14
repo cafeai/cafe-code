@@ -224,6 +224,39 @@ describe("MessagesTimeline file open helpers", () => {
     DYNAMIC_IMPORT_TEST_TIMEOUT_MS,
   );
 
+  it(
+    "requires finite physical bottom geometry rather than optimistic list state",
+    async () => {
+      const { isTimelinePhysicallyAtEnd } = await import("./MessagesTimeline.helpers");
+      const measured = { scrollHeight: 2_000, clientHeight: 500, scrollTop: 1_500 };
+      expect(isTimelinePhysicallyAtEnd(measured)).toBe(true);
+      expect(isTimelinePhysicallyAtEnd({ ...measured, scrollTop: 1_492 })).toBe(true);
+      expect(isTimelinePhysicallyAtEnd({ ...measured, scrollTop: 1_491 })).toBe(false);
+      expect(isTimelinePhysicallyAtEnd({ ...measured, scrollTop: 1_509 })).toBe(false);
+      expect(isTimelinePhysicallyAtEnd({ ...measured, scrollTop: -1 })).toBe(false);
+      expect(isTimelinePhysicallyAtEnd({ ...measured, scrollHeight: 0 })).toBe(false);
+      expect(isTimelinePhysicallyAtEnd({ ...measured, clientHeight: 0 })).toBe(false);
+      for (const field of ["scrollHeight", "clientHeight", "scrollTop"] as const) {
+        for (const value of [Number.NaN, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY]) {
+          expect(isTimelinePhysicallyAtEnd({ ...measured, [field]: value })).toBe(false);
+        }
+      }
+      // Shrinking real content below a positive viewport genuinely reaches bottom.
+      expect(
+        isTimelinePhysicallyAtEnd({ scrollHeight: 100, clientHeight: 500, scrollTop: 0 }),
+      ).toBe(true);
+      // A virtualizer flag cannot override the actual pixels while submit is pending.
+      expect(
+        isTimelinePhysicallyAtEnd({
+          ...measured,
+          scrollTop: 300,
+          isAtEnd: true,
+        } as typeof measured),
+      ).toBe(false);
+    },
+    DYNAMIC_IMPORT_TEST_TIMEOUT_MS,
+  );
+
   it("preserves an upward review gesture while stale at-bottom reports settle", async () => {
     const { shouldPreserveTimelineScrollReviewIntent } = await import("./MessagesTimeline.helpers");
 

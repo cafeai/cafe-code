@@ -14,6 +14,7 @@ const reducedFiles = [
   "src/components/chat/CodexContextWindowControl.motion.browser.tsx",
   "src/components/chat/ProviderDiagnosticWorkEntry.motion.browser.tsx",
   "src/components/visualizations/Visualizations.motion.browser.tsx",
+  "src/components/chat/ScrollToBottomControl.motion.browser.tsx",
 ];
 
 interface ProjectPolicy {
@@ -85,6 +86,7 @@ function readProjects(source: string): readonly ProjectPolicy[] {
       "browserOptions",
       "contextMotionFile",
       "diagnosticMotionFile",
+      "scrollToBottomMotionFile",
       "srcPath",
       "touchTimelineFile",
       "touchViewport",

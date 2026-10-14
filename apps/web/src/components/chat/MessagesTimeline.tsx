@@ -113,6 +113,7 @@ import { useSettings } from "../../hooks/useSettings";
 import { useServerAvailableEditors } from "../../rpc/serverState";
 import {
   extractOpenablePathTokens,
+  isTimelinePhysicallyAtEnd,
   isTimelineScrolledToEnd,
   resolveFileOpenEditor,
   resolveWorkspaceFilePath,
@@ -332,6 +333,8 @@ interface MessagesTimelineProps {
   viewPositionCache?: Map<string, TimelineViewPosition>;
   viewPositionKey?: string;
   onIsAtEndChange: (isAtEnd: boolean) => void;
+  /** Fresh loaded-list native geometry only, not optimistic follow/submit state. */
+  onObservedBottom?: (() => void) | undefined;
   onUserScrollIntent: () => void;
   onDebugScrollEvent?: (event: TimelineScrollDebugEventInput) => void;
   selectedSubagent?: SubagentDetailSelection | null;
@@ -380,6 +383,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
   viewPositionCache,
   viewPositionKey,
   onIsAtEndChange,
+  onObservedBottom,
   onUserScrollIntent,
   onDebugScrollEvent,
   selectedSubagent: controlledSelectedSubagent,
@@ -796,12 +800,74 @@ export const MessagesTimeline = memo(function MessagesTimeline({
       forceScrollToEnd(rows.length, "tail-follow-item-layout-repin");
     });
   }, [forceScrollToEnd, rows.length]);
+  const bottomObservationFrameRef = useRef<number | null>(null);
+  const bottomObserverLifetime = useMemo(
+    () =>
+      Object.freeze({
+        ready: generatedVisualizationAdmissionReady,
+        detailOpen: isSubagentDetailOpen,
+        hydrating: isThreadHistoryHydrating,
+        observe: onObservedBottom,
+        scope: visualizationAdmissionScope,
+      }),
+    [
+      generatedVisualizationAdmissionReady,
+      isSubagentDetailOpen,
+      isThreadHistoryHydrating,
+      onObservedBottom,
+      visualizationAdmissionScope,
+    ],
+  );
+  const currentBottomObserverLifetime = useRef<object | null>(null);
+  useLayoutEffect(() => {
+    currentBottomObserverLifetime.current = bottomObserverLifetime;
+    return () => {
+      if (currentBottomObserverLifetime.current === bottomObserverLifetime) {
+        currentBottomObserverLifetime.current = null;
+      }
+    };
+  }, [bottomObserverLifetime]);
+  const observePhysicalBottom = useCallback(() => {
+    if (
+      currentBottomObserverLifetime.current !== bottomObserverLifetime ||
+      !bottomObserverLifetime.observe ||
+      !bottomObserverLifetime.ready ||
+      bottomObserverLifetime.hydrating ||
+      bottomObserverLifetime.detailOpen ||
+      currentVisualizationAdmissionScope.current !== bottomObserverLifetime.scope
+    )
+      return;
+    // The public list ref exposes the actual owning scroll node. Its geometry
+    // cannot be replaced by LegendList's isAtEnd flag: submit pinning reports
+    // that flag before native movement, and hidden/unloaded lists are not proof.
+    const node = listRef.current?.getScrollableNode?.();
+    if (node?.isConnected && isTimelinePhysicallyAtEnd(node)) bottomObserverLifetime.observe();
+  }, [bottomObserverLifetime, listRef]);
+  const schedulePhysicalBottomObservation = useCallback(() => {
+    if (!onObservedBottom || bottomObservationFrameRef.current !== null) return;
+    bottomObservationFrameRef.current = window.requestAnimationFrame(() => {
+      bottomObservationFrameRef.current = null;
+      observePhysicalBottom();
+    });
+  }, [observePhysicalBottom, onObservedBottom]);
+  useEffect(() => {
+    // Also covers content shrink/initial restored geometry without requiring a
+    // native scroll event. One read per layout, with no polling or scroll write.
+    if (rows.length > 0) schedulePhysicalBottomObservation();
+    return () => {
+      if (bottomObservationFrameRef.current !== null) {
+        window.cancelAnimationFrame(bottomObservationFrameRef.current);
+        bottomObservationFrameRef.current = null;
+      }
+    };
+  }, [rows.length, schedulePhysicalBottomObservation]);
   const handleItemSizeChanged = useCallback(() => {
     // Footer metrics use this same follow-only path: delayed proposals can
     // grow after the initial scroll settles, but must never move a reader who
     // deliberately scrolled away. Coalescing covers item and footer changes.
     scheduleTailFollowItemLayoutRepin();
-  }, [scheduleTailFollowItemLayoutRepin]);
+    schedulePhysicalBottomObservation();
+  }, [schedulePhysicalBottomObservation, scheduleTailFollowItemLayoutRepin]);
   const handleInitialListLoad = useCallback(() => {
     // Only completion from this exact committed list scope may admit generated
     // cards. Old callbacks cannot unset or grant a newer scope. Once complete,
@@ -903,6 +969,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
 
   const handleScroll = useCallback(() => {
     visualizationScrollOwner.observeScroll();
+    observePhysicalBottom();
     if (Date.now() <= stickToEndDeadlineMsRef.current) {
       const state = listRef.current?.getState?.() ?? null;
       const shouldRepin = state === null || !isTimelineScrolledToEnd(state);
@@ -953,6 +1020,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
     handleUserScrollIntent,
     listRef,
     onIsAtEndChange,
+    observePhysicalBottom,
     scheduleSubmitStickScrollEventRepin,
     viewPositionCache,
     viewPositionKey,

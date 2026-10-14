@@ -109,6 +109,17 @@ not qualify native release artifacts. Native hosted results remain required.
 
 ## Keyboard popup readiness
 
+The scroll-to-bottom hover options use ordinary native mouse/keyboard input in
+`ScrollToBottomControl.browser.tsx`, actual mobile touch events in the existing
+touch timeline context, and `ScrollToBottomControl.motion.browser.tsx` in the
+existing provider-owned reduced-motion context. The current macOS/Windows subset
+selects these files plus `ChatPaneRuntime.browser.tsx`; Linux retains all cases.
+No extra contexts, worker limits, deadlines or device/media mutations are added.
+`MessagesTimelineRealList.browser.tsx` observes actual native wheel movement,
+unchanged review geometry while hidden, actual bottom re-enabling and content
+shrink. Hook-only owner/remount tests and the synthetic full-app Desk review
+fixture are distinct from that physical-scroll proof.
+
 Base UI queues initial item focus and Home/End navigation focus asynchronously.
 A visible menu or listbox is not yet proof that it owns native keyboard input.
 Keyboard fixtures must observe actual initial item focus before sending popup
