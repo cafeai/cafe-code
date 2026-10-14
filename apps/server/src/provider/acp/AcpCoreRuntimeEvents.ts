@@ -107,6 +107,7 @@ export function makeAcpRequestOpenedEvent(input: {
   readonly source: AcpAdapterRawSource;
   readonly method: string;
   readonly rawPayload: unknown;
+  readonly suppressAlwaysAllowRule?: boolean;
 }): ProviderRuntimeEvent {
   return {
     type: "request.opened",
@@ -119,6 +120,7 @@ export function makeAcpRequestOpenedEvent(input: {
       requestType: canonicalRequestTypeFromAcpKind(input.permissionRequest.kind),
       detail: input.detail,
       args: input.args,
+      ...(input.suppressAlwaysAllowRule === true ? { suppressAlwaysAllowRule: true } : {}),
     },
     raw: {
       source: input.source,

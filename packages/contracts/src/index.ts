@@ -45,3 +45,5 @@ export * from "./mcp.ts";
 export * from "./providerCompaction.ts";
 export * from "./codexReview.ts";
 export * from "./scheduledFollowups.ts";
+
+export * from "./providerSecurity.ts";

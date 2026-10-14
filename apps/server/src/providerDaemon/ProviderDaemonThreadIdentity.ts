@@ -15,6 +15,8 @@ export function providerDaemonRequestThreadIds(
     case "startSession":
     case "sendTurn":
     case "steerTurn":
+    case "readSecurity":
+    case "refreshSecurity":
     case "controlTask":
     case "interruptTurn":
     case "respondToRequest":
@@ -41,6 +43,7 @@ export function providerDaemonRequestThreadIds(
       // Cafe identities. Its response/request body is therefore private state
       // owned by both conversations, just like fork creation itself.
       return [request.payload.fork.sourceThreadId, request.payload.fork.targetThreadId];
+    case "loginProvider":
     case "restartProviderRuntime":
     case "listSessions":
     case "getCapabilities":

@@ -1,3 +1,9 @@
+import { axiomConfigurationKey } from "./provider/acp/AxiomAcpSupport.ts";
+import {
+  readOwnedProviderSecurity,
+  subscribeProviderSecurity,
+} from "./provider/providerSecuritySubscription.ts";
+import type { ProviderSecurityInput } from "@cafecode/contracts";
 import * as Crypto from "node:crypto";
 
 import * as Cause from "effect/Cause";
@@ -30,6 +36,7 @@ import {
   FilesystemBrowseError,
   ThreadId,
   ServerProviderRuntimeRestartError,
+  ServerProviderLoginError,
   DictationError,
   ProviderInteractionError,
   type ProviderSkillsInput,
@@ -809,6 +816,38 @@ const makeWsRpcLayer = (
           .refreshStatus(cwd)
           .pipe(Effect.ignoreCause({ log: true }), Effect.forkDetach, Effect.asVoid);
 
+      const resolveSecurityAuthority = (input: ProviderSecurityInput) =>
+        Effect.gen(function* () {
+          const found = yield* projectionSnapshotQuery.getThreadShellById(input.threadId);
+          if (Option.isNone(found)) return undefined;
+          const thread = found.value;
+          const settings = yield* serverSettings.getSettings;
+          const instance = settings.providerInstances[input.instanceId];
+          if (
+            !instance ||
+            instance.driver !== "axiom" ||
+            instance.enabled === false ||
+            thread.archivedAt !== null ||
+            thread.deletedAt !== null ||
+            thread.modelSelection.instanceId !== input.instanceId ||
+            thread.modelSelection.model !== input.modelId ||
+            thread.session?.providerName !== "axiom" ||
+            thread.session.providerInstanceId !== input.instanceId ||
+            thread.session.subagentRuntimeId !== input.runtimeId ||
+            thread.session.status === "stopped"
+          )
+            return undefined;
+          // This comparison commitment remains private, including configured environment
+          // values. It is never logged, serialized as report data or given to the UI.
+          return {
+            key: JSON.stringify([
+              instance,
+              thread.session.subagentRuntimeId,
+              thread.modelSelection,
+            ]),
+            configuration: axiomConfigurationKey(instance.config ?? {}, instance.environment ?? []),
+          };
+        }).pipe(Effect.catchCause(() => Effect.succeed(undefined)));
       return WsRpcGroup.of({
         [WS_METHODS.visualizationsList]: (input) =>
           privateVisualizationRead(withVisualizations((service) => service.list(input))),
@@ -1346,6 +1385,45 @@ const makeWsRpcLayer = (
             const found = yield* projectionSnapshotQuery.getThreadShellById(input.threadId);
             if (Option.isNone(found)) return undefined;
             const thread = found.value;
+            if (thread.session?.providerName === "axiom") {
+              const settings = yield* serverSettings.getSettings;
+              const instance = settings.providerInstances[input.instanceId];
+              if (
+                !instance ||
+                instance.driver !== "axiom" ||
+                instance.enabled === false ||
+                thread.archivedAt !== null ||
+                thread.deletedAt !== null ||
+                thread.modelSelection.instanceId !== input.instanceId ||
+                thread.session.providerInstanceId !== input.instanceId ||
+                thread.session.subagentRuntimeId !== input.runtimeId ||
+                thread.session.status === "stopped" ||
+                thread.session.status === "error"
+              )
+                return undefined;
+              const project =
+                thread.projectId === null
+                  ? undefined
+                  : Option.getOrUndefined(
+                      yield* projectionSnapshotQuery.getProjectShellById(thread.projectId),
+                    );
+              const cwd =
+                thread.projectId === null
+                  ? yield* standaloneWorkspaces.readExisting(thread.id)
+                  : project
+                    ? (thread.worktreePath ?? project.workspaceRoot)
+                    : undefined;
+              return cwd
+                ? {
+                    cwd,
+                    driver: "axiom" as const,
+                    configuration: axiomConfigurationKey(
+                      instance.config ?? {},
+                      instance.environment ?? [],
+                    ),
+                  }
+                : undefined;
+            }
             if (
               thread.archivedAt !== null ||
               thread.deletedAt !== null ||
@@ -1418,6 +1496,81 @@ const makeWsRpcLayer = (
             { "rpc.aggregate": "server" },
           );
         },
+        [WS_METHODS.serverSubscribeProviderSecurity]: (input) => {
+          if (currentSession.role !== "owner" || !secureSecretTransport)
+            return Stream.concat(Stream.make({ report: null }), Stream.never);
+          const authority = resolveSecurityAuthority(input);
+          return subscribeProviderSecurity(
+            readOwnedProviderSecurity(input, authority, (configurationKey) =>
+              providerService.readSecurity
+                ? providerService
+                    .readSecurity({ ...input, configurationKey })
+                    .pipe(Effect.catchCause(() => Effect.succeed({ report: null })))
+                : Effect.succeed({ report: null }),
+            ),
+            [
+              providerService.streamEvents.pipe(
+                Stream.filter(
+                  (event) =>
+                    event.threadId === input.threadId &&
+                    ((event.type === "session.configured" &&
+                      event.payload.securityReportChanged === true) ||
+                      [
+                        "session.started",
+                        "session.exited",
+                        "turn.started",
+                        "turn.completed",
+                      ].includes(event.type)),
+                ),
+              ),
+              serverSettings.streamChanges,
+              orchestrationEngine.streamDomainEvents.pipe(
+                Stream.filter(
+                  (event) =>
+                    event.aggregateId === input.threadId &&
+                    [
+                      "thread.archived",
+                      "thread.deleted",
+                      "thread.session-set",
+                      "thread.meta-updated",
+                    ].includes(event.type),
+                ),
+              ),
+            ],
+          );
+        },
+        [WS_METHODS.serverRefreshProviderSecurity]: (input) =>
+          Effect.gen(function* () {
+            if (
+              currentSession.role !== "owner" ||
+              !secureSecretTransport ||
+              !providerService.refreshSecurity
+            )
+              return yield* new OrchestrationGetSnapshotError({
+                message:
+                  "Verification requires an owner connection over HTTPS or the same machine.",
+              });
+            const authority = resolveSecurityAuthority(input);
+            const before = yield* authority;
+            if (!before)
+              return yield* new OrchestrationGetSnapshotError({
+                message: "The selected Axiom session changed.",
+              });
+            const result = yield* providerService
+              .refreshSecurity({ ...input, configurationKey: before.configuration })
+              .pipe(
+                Effect.mapError(
+                  () =>
+                    new OrchestrationGetSnapshotError({
+                      message: "Axiom could not refresh verification for this session.",
+                    }),
+                ),
+              );
+            const after = yield* authority;
+            if (!after || after.key !== before.key || after.configuration !== before.configuration)
+              return { report: null };
+            return result;
+          }),
         [WS_METHODS.serverSubscribeProviderQuota]: (input) => {
           if (currentSession.role !== "owner") return unavailableProviderQuotaStream();
           const resolveAuthority = Effect.gen(function* () {
@@ -1600,7 +1753,42 @@ const makeWsRpcLayer = (
         [WS_METHODS.serverLoginProvider]: (input) =>
           observeRpcEffect(
             WS_METHODS.serverLoginProvider,
-            ProviderLoginLauncher.loginProvider(input),
+            Effect.gen(function* () {
+              const settings = yield* serverSettings.getSettings;
+              const instance = settings.providerInstances[input.instanceId];
+              if (instance?.driver !== "axiom")
+                return yield* ProviderLoginLauncher.loginProvider(input);
+              if (
+                currentSession.role !== "owner" ||
+                !secureSecretTransport ||
+                instance.enabled === false ||
+                !providerService.loginProvider
+              )
+                return yield* new ServerProviderLoginError({
+                  instanceId: input.instanceId,
+                  reason:
+                    "Axiom sign-in requires the enabled account and an owner connection over HTTPS or the same machine.",
+                });
+              return yield* providerService.loginProvider(input).pipe(
+                Effect.mapError(
+                  () =>
+                    new ServerProviderLoginError({
+                      instanceId: input.instanceId,
+                      reason:
+                        "Could not open native Axiom sign-in. Close Axiom chats and try again.",
+                    }),
+                ),
+              );
+            }).pipe(
+              Effect.mapError((error) =>
+                error instanceof ServerProviderLoginError
+                  ? error
+                  : new ServerProviderLoginError({
+                      instanceId: input.instanceId,
+                      reason: "Could not read the selected provider settings.",
+                    }),
+              ),
+            ),
             {
               "rpc.aggregate": "server",
             },

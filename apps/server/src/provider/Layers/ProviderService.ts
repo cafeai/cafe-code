@@ -3964,6 +3964,35 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
     });
 
   return {
+    loginProvider: (input) =>
+      Effect.gen(function* () {
+        const adapter = yield* registry.getByInstance(input.instanceId);
+        if (!adapter.login)
+          return yield* new ProviderAdapterValidationError({
+            provider: adapter.provider,
+            operation: "loginProvider",
+            issue: "Native account login is unavailable for this provider.",
+          });
+        yield* adapter.login();
+        return {
+          instanceId: input.instanceId,
+          provider: adapter.provider,
+          command: "axiomcli native sign-in",
+          message: "Opened Axiom native sign-in in your browser.",
+        };
+      }),
+    readSecurity: (input) =>
+      Effect.gen(function* () {
+        const adapter = yield* registry.getByInstance(input.instanceId);
+        return adapter.readSecurity ? yield* adapter.readSecurity(input) : { report: null };
+      }),
+    refreshSecurity: (input) =>
+      Effect.gen(function* () {
+        const adapter = yield* registry.getByInstance(input.instanceId);
+        if (!adapter.refreshSecurity || !(yield* adapter.hasSession(input.threadId)))
+          return { report: null };
+        return yield* adapter.refreshSecurity(input);
+      }),
     controlTask,
     prepareConversationRollback,
     commitConversationRollback,

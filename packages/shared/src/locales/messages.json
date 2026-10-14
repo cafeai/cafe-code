@@ -13,7 +13,7 @@
   },
   " (pending)": {
     "message": " (pending)",
-    "locations": ["apps/web/src/components/chat/ChatComposer.tsx:1539"]
+    "locations": ["apps/web/src/components/chat/ChatComposer.tsx:1554"]
   },
   " (required)": {
     "message": " (required)",
@@ -105,7 +105,7 @@
   },
   "''{name}'' exceeds the {limit} attachment limit.": {
     "message": "''{name}'' exceeds the {limit} attachment limit.",
-    "locations": ["apps/web/src/components/chat/ChatComposer.tsx:3228"]
+    "locations": ["apps/web/src/components/chat/ChatComposer.tsx:3244"]
   },
   "'<1m'": {
     "message": "'<1m'",
@@ -137,27 +137,27 @@
   },
   "/compact": {
     "message": "/compact",
-    "locations": ["apps/web/src/components/chat/ChatComposer.tsx:2033"]
+    "locations": ["apps/web/src/components/chat/ChatComposer.tsx:2049"]
   },
   "/default": {
     "message": "/default",
-    "locations": ["apps/web/src/components/chat/ChatComposer.tsx:2024"]
+    "locations": ["apps/web/src/components/chat/ChatComposer.tsx:2040"]
   },
   "/goal": {
     "message": "/goal",
-    "locations": ["apps/web/src/components/chat/ChatComposer.tsx:2049"]
+    "locations": ["apps/web/src/components/chat/ChatComposer.tsx:2065"]
   },
   "/model": {
     "message": "/model",
-    "locations": ["apps/web/src/components/chat/ChatComposer.tsx:2010"]
+    "locations": ["apps/web/src/components/chat/ChatComposer.tsx:2026"]
   },
   "/plan": {
     "message": "/plan",
-    "locations": ["apps/web/src/components/chat/ChatComposer.tsx:2017"]
+    "locations": ["apps/web/src/components/chat/ChatComposer.tsx:2033"]
   },
   "1 follow-up requeued": {
     "message": "1 follow-up requeued",
-    "locations": ["apps/web/src/components/chat/ChatComposer.tsx:464"]
+    "locations": ["apps/web/src/components/chat/ChatComposer.tsx:465"]
   },
   "1 of <slot1></slot1>": {
     "message": "1 of <slot1></slot1>",
@@ -165,15 +165,15 @@
   },
   "1 steer needs attention": {
     "message": "1 steer needs attention",
-    "locations": ["apps/web/src/components/chat/ChatComposer.tsx:458"]
+    "locations": ["apps/web/src/components/chat/ChatComposer.tsx:459"]
   },
   "1 steer waiting for compact": {
     "message": "1 steer waiting for compact",
-    "locations": ["apps/web/src/components/chat/ChatComposer.tsx:461"]
+    "locations": ["apps/web/src/components/chat/ChatComposer.tsx:462"]
   },
   "1 steer waiting for review": {
     "message": "1 steer waiting for review",
-    "locations": ["apps/web/src/components/chat/ChatComposer.tsx:463"]
+    "locations": ["apps/web/src/components/chat/ChatComposer.tsx:464"]
   },
   "12-hour": {
     "message": "12-hour",
@@ -452,12 +452,20 @@
     "message": "Accent color ",
     "locations": ["apps/web/src/components/settings/AddProviderInstanceDialog.tsx:378"]
   },
+  "Accept Intel OutOfDate for this NEAR provider until AxiomCLI restarts. All other verification checks remain required.": {
+    "message": "Accept Intel OutOfDate for this NEAR provider until AxiomCLI restarts. All other verification checks remain required.",
+    "locations": ["apps/web/src/components/chat/AxiomSecurityControl.tsx:309"]
+  },
   "Accept edits": {
     "message": "Accept edits",
     "locations": [
       "apps/web/src/components/chat/claudePermissionMode.ts:43",
       "apps/web/src/components/chat/claudePermissionMode.ts:86"
     ]
+  },
+  "Accept outdated TEE": {
+    "message": "Accept outdated TEE",
+    "locations": ["apps/web/src/components/chat/AxiomSecurityControl.tsx:347"]
   },
   "Accepted": {
     "message": "Accepted",
@@ -618,7 +626,7 @@
   },
   "Add feedback, or leave blank to implement": {
     "message": "Add feedback, or leave blank to implement",
-    "locations": ["apps/web/src/components/chat/ChatComposer.tsx:4150"]
+    "locations": ["apps/web/src/components/chat/ChatComposer.tsx:4190"]
   },
   "Add keybinding": {
     "message": "Add keybinding",
@@ -992,7 +1000,7 @@
   },
   "Approve or decline to continue": {
     "message": "Approve or decline to continue",
-    "locations": ["apps/web/src/components/chat/ChatComposer.tsx:4146"]
+    "locations": ["apps/web/src/components/chat/ChatComposer.tsx:4186"]
   },
   "Approximate active CPU time for the Cafe Code server root process and its descendants during the selected window. It grows only while sampled processes use CPU and older samples leave as the window moves.": {
     "message": "Approximate active CPU time for the Cafe Code server root process and its descendants during the selected window. It grows only while sampled processes use CPU and older samples leave as the window moves.",
@@ -1047,15 +1055,15 @@
   },
   "Ask anything · @ files · $ skills · / commands": {
     "message": "Ask anything · @ files · $ skills · / commands",
-    "locations": ["apps/web/src/components/chat/ChatComposer.tsx:4172"]
+    "locations": ["apps/web/src/components/chat/ChatComposer.tsx:4212"]
   },
   "Ask anything · @ files · / commands": {
     "message": "Ask anything · @ files · / commands",
-    "locations": ["apps/web/src/components/chat/ChatComposer.tsx:4178"]
+    "locations": ["apps/web/src/components/chat/ChatComposer.tsx:4218"]
   },
   "Ask anything…": {
     "message": "Ask anything…",
-    "locations": ["apps/web/src/components/chat/ChatComposer.tsx:3875"]
+    "locations": ["apps/web/src/components/chat/ChatComposer.tsx:3915"]
   },
   "Ask before commands and file changes.": {
     "message": "Ask before commands and file changes.",
@@ -1067,7 +1075,7 @@
   },
   "Ask for follow-up changes…": {
     "message": "Ask for follow-up changes…",
-    "locations": ["apps/web/src/components/chat/ChatComposer.tsx:4170"]
+    "locations": ["apps/web/src/components/chat/ChatComposer.tsx:4210"]
   },
   "Ask permissions": {
     "message": "Ask permissions",
@@ -1094,7 +1102,7 @@
   },
   "Attach files after answering plan questions.": {
     "message": "Attach files after answering plan questions.",
-    "locations": ["apps/web/src/components/chat/ChatComposer.tsx:3204"]
+    "locations": ["apps/web/src/components/chat/ChatComposer.tsx:3220"]
   },
   "Attach files or images": {
     "message": "Attach files or images",
@@ -1107,6 +1115,22 @@
   "Attempt repair from provider history": {
     "message": "Attempt repair from provider history",
     "locations": ["apps/web/src/components/Sidebar.logic.ts:69"]
+  },
+  "Attestation check failed": {
+    "message": "Attestation check failed",
+    "locations": ["apps/web/src/components/chat/AxiomSecurityControl.tsx:38"]
+  },
+  "Attestation needs review": {
+    "message": "Attestation needs review",
+    "locations": ["apps/web/src/components/chat/AxiomSecurityControl.tsx:34"]
+  },
+  "Attestation not verified": {
+    "message": "Attestation not verified",
+    "locations": ["apps/web/src/components/chat/AxiomSecurityControl.tsx:39"]
+  },
+  "Attestation verified": {
+    "message": "Attestation verified",
+    "locations": ["apps/web/src/components/chat/AxiomSecurityControl.tsx:36"]
   },
   "Aug": {
     "message": "Aug",
@@ -1238,6 +1262,10 @@
   "Awaiting input": {
     "message": "Awaiting input",
     "locations": ["apps/web/src/components/atrium/TaskAtrium.tsx:141"]
+  },
+  "Axiom verification": {
+    "message": "Axiom verification",
+    "locations": ["apps/web/src/components/chat/AxiomSecurityControl.tsx:216"]
   },
   "Azure DevOps pull request": {
     "message": "Azure DevOps pull request",
@@ -1457,6 +1485,10 @@
   "Cache writes": {
     "message": "Cache writes",
     "locations": ["apps/web/src/components/settings/UsageCostSection.tsx:661"]
+  },
+  "Cached attestation report": {
+    "message": "Cached attestation report",
+    "locations": ["apps/web/src/components/chat/AxiomSecurityControl.tsx:247"]
   },
   "Cached input": {
     "message": "Cached input",
@@ -1678,7 +1710,7 @@
   },
   "Cancel editing": {
     "message": "Cancel editing",
-    "locations": ["apps/web/src/components/chat/ChatComposer.tsx:3983"]
+    "locations": ["apps/web/src/components/chat/ChatComposer.tsx:4023"]
   },
   "Cancel new keybinding": {
     "message": "Cancel new keybinding",
@@ -2029,11 +2061,11 @@
   },
   "Claude commands load once this chat connects.": {
     "message": "Claude commands load once this chat connects.",
-    "locations": ["apps/web/src/components/chat/ChatComposer.tsx:3931"]
+    "locations": ["apps/web/src/components/chat/ChatComposer.tsx:3971"]
   },
   "Claude commands unavailable. Reopen to retry, or type one.": {
     "message": "Claude commands unavailable. Reopen to retry, or type one.",
-    "locations": ["apps/web/src/components/chat/ChatComposer.tsx:3940"]
+    "locations": ["apps/web/src/components/chat/ChatComposer.tsx:3980"]
   },
   "Claude home folder": {
     "message": "Claude home folder",
@@ -2073,7 +2105,7 @@
   "Clear": {
     "message": "Clear",
     "locations": [
-      "apps/web/src/components/chat/ChatComposer.tsx:572",
+      "apps/web/src/components/chat/ChatComposer.tsx:573",
       "apps/web/src/components/chat/ThreadGoalControl.tsx:433",
       "apps/web/src/components/settings/ProviderInstanceCard.tsx:304"
     ]
@@ -2257,11 +2289,11 @@
   },
   "Code review": {
     "message": "Code review",
-    "locations": ["apps/web/src/components/chat/ChatComposer.tsx:3622"]
+    "locations": ["apps/web/src/components/chat/ChatComposer.tsx:3662"]
   },
   "Code review is unavailable in this view.": {
     "message": "Code review is unavailable in this view.",
-    "locations": ["apps/web/src/components/chat/ChatComposer.tsx:1276"]
+    "locations": ["apps/web/src/components/chat/ChatComposer.tsx:1291"]
   },
   "Codex": {
     "message": "Codex",
@@ -2294,11 +2326,11 @@
   },
   "Codex is compacting the active turn; Cafe Code will retry this steer automatically when compaction finishes.": {
     "message": "Codex is compacting the active turn; Cafe Code will retry this steer automatically when compaction finishes.",
-    "locations": ["apps/web/src/components/chat/ChatComposer.tsx:509"]
+    "locations": ["apps/web/src/components/chat/ChatComposer.tsx:510"]
   },
   "Codex is reviewing the active turn; Cafe Code will send this follow-up automatically when the active turn is ready.": {
     "message": "Codex is reviewing the active turn; Cafe Code will send this follow-up automatically when the active turn is ready.",
-    "locations": ["apps/web/src/components/chat/ChatComposer.tsx:518"]
+    "locations": ["apps/web/src/components/chat/ChatComposer.tsx:519"]
   },
   "Codex limits spawned agents that stay open.": {
     "message": "Codex limits spawned agents that stay open.",
@@ -2310,11 +2342,11 @@
   },
   "Codex received your message and hasn''t picked it up yet.": {
     "message": "Codex received your message and hasn''t picked it up yet.",
-    "locations": ["apps/web/src/components/chat/ChatComposer.tsx:433"]
+    "locations": ["apps/web/src/components/chat/ChatComposer.tsx:434"]
   },
   "Codex received your message. Waiting for it to pick it up.": {
     "message": "Codex received your message. Waiting for it to pick it up.",
-    "locations": ["apps/web/src/components/chat/ChatComposer.tsx:425"]
+    "locations": ["apps/web/src/components/chat/ChatComposer.tsx:426"]
   },
   "Codex recovery cancelled": {
     "message": "Codex recovery cancelled",
@@ -2330,7 +2362,7 @@
   },
   "Codex review": {
     "message": "Codex review",
-    "locations": ["apps/web/src/components/chat/ChatComposer.tsx:1307"]
+    "locations": ["apps/web/src/components/chat/ChatComposer.tsx:1322"]
   },
   "Codex reviews code for bugs and risks; findings appear in this chat.": {
     "message": "Codex reviews code for bugs and risks; findings appear in this chat.",
@@ -2346,7 +2378,7 @@
   },
   "Collapse queued message": {
     "message": "Collapse queued message",
-    "locations": ["apps/web/src/components/chat/ChatComposer.tsx:642"]
+    "locations": ["apps/web/src/components/chat/ChatComposer.tsx:643"]
   },
   "Collapse {value0}": {
     "message": "Collapse {value0}",
@@ -2369,7 +2401,7 @@
   },
   "Combined attachments exceed the 80MB limit.": {
     "message": "Combined attachments exceed the 80MB limit.",
-    "locations": ["apps/web/src/components/chat/ChatComposer.tsx:3251"]
+    "locations": ["apps/web/src/components/chat/ChatComposer.tsx:3267"]
   },
   "Command": {
     "message": "Command",
@@ -2433,7 +2465,7 @@
   },
   "Compact conversation context (between turns)": {
     "message": "Compact conversation context (between turns)",
-    "locations": ["apps/web/src/components/chat/ChatComposer.tsx:2034"]
+    "locations": ["apps/web/src/components/chat/ChatComposer.tsx:2050"]
   },
   "Compacted": {
     "message": "Compacted",
@@ -2509,7 +2541,7 @@
   },
   "Composer tools": {
     "message": "Composer tools",
-    "locations": ["apps/web/src/components/chat/ChatComposer.tsx:3595"]
+    "locations": ["apps/web/src/components/chat/ChatComposer.tsx:3611"]
   },
   "Composer: Steer Active Turn": {
     "message": "Composer: Steer Active Turn",
@@ -2719,7 +2751,7 @@
   },
   "Context window…": {
     "message": "Context window…",
-    "locations": ["apps/web/src/components/chat/ChatComposer.tsx:1611"]
+    "locations": ["apps/web/src/components/chat/ChatComposer.tsx:1626"]
   },
   "Continue": {
     "message": "Continue",
@@ -2918,6 +2950,10 @@
       "apps/web/src/components/Sidebar.logic.ts:62",
       "apps/web/src/components/settings/SettingsPanels.tsx:1680"
     ]
+  },
+  "Copy public report": {
+    "message": "Copy public report",
+    "locations": ["apps/web/src/components/chat/AxiomSecurityControl.tsx:365"]
   },
   "Copy relative path": {
     "message": "Copy relative path",
@@ -3802,6 +3838,10 @@
     "message": "Degraded",
     "locations": ["apps/web/src/components/settings/diagnosticsRuntimeViewModel.ts:38"]
   },
+  "Degraded attestation": {
+    "message": "Degraded attestation",
+    "locations": ["apps/web/src/components/chat/AxiomSecurityControl.tsx:33"]
+  },
   "Delete": {
     "message": "Delete",
     "locations": [
@@ -3886,7 +3926,7 @@
   },
   "Delivery paused": {
     "message": "Delivery paused",
-    "locations": ["apps/web/src/components/chat/ChatComposer.tsx:485"]
+    "locations": ["apps/web/src/components/chat/ChatComposer.tsx:486"]
   },
   "Delivery paused. Your message and attachments are preserved. You can retry delivery.": {
     "message": "Delivery paused. Your message and attachments are preserved. You can retry delivery.",
@@ -4263,11 +4303,11 @@
   },
   "Draft attachment could not be saved locally and may be lost on navigation.": {
     "message": "Draft attachment could not be saved locally and may be lost on navigation.",
-    "locations": ["apps/web/src/components/chat/ChatComposer.tsx:4099"]
+    "locations": ["apps/web/src/components/chat/ChatComposer.tsx:4139"]
   },
   "Draft attachment may not persist": {
     "message": "Draft attachment may not persist",
-    "locations": ["apps/web/src/components/chat/ChatComposer.tsx:4083"]
+    "locations": ["apps/web/src/components/chat/ChatComposer.tsx:4123"]
   },
   "Drag to resize sidebar": {
     "message": "Drag to resize sidebar",
@@ -4307,7 +4347,7 @@
   },
   "Early Access": {
     "message": "Early Access",
-    "locations": ["apps/web/src/components/settings/providerDriverMeta.ts:56"]
+    "locations": ["apps/web/src/components/settings/providerDriverMeta.ts:58"]
   },
   "Edit": {
     "message": "Edit",
@@ -4332,7 +4372,7 @@
   },
   "Edit queued message": {
     "message": "Edit queued message",
-    "locations": ["apps/web/src/components/chat/ChatComposer.tsx:716"]
+    "locations": ["apps/web/src/components/chat/ChatComposer.tsx:717"]
   },
   "Edit shortcut for {value0}": {
     "message": "Edit shortcut for {value0}",
@@ -4359,7 +4399,7 @@
   },
   "Editing queued message. Your draft is saved.": {
     "message": "Editing queued message. Your draft is saved.",
-    "locations": ["apps/web/src/components/chat/ChatComposer.tsx:3959"]
+    "locations": ["apps/web/src/components/chat/ChatComposer.tsx:3999"]
   },
   "Editor: Open Favorite": {
     "message": "Editor: Open Favorite",
@@ -4423,7 +4463,7 @@
   },
   "Enable and sign in to this Codex account to discover skills.": {
     "message": "Enable and sign in to this Codex account to discover skills.",
-    "locations": ["apps/web/src/components/chat/ChatComposer.tsx:2220"]
+    "locations": ["apps/web/src/components/chat/ChatComposer.tsx:2236"]
   },
   "Enable chat completion notifications": {
     "message": "Enable chat completion notifications",
@@ -4451,6 +4491,10 @@
   "Enable {value0}": {
     "message": "Enable {value0}",
     "locations": ["apps/web/src/components/settings/ProviderInstanceCard.tsx:1633"]
+  },
+  "Encryption protocol": {
+    "message": "Encryption protocol",
+    "locations": ["apps/web/src/components/chat/AxiomSecurityControl.tsx:263"]
   },
   "End at": {
     "message": "End at",
@@ -4712,11 +4756,11 @@
   },
   "Expand composer": {
     "message": "Expand composer",
-    "locations": ["apps/web/src/components/chat/ChatComposer.tsx:3870"]
+    "locations": ["apps/web/src/components/chat/ChatComposer.tsx:3910"]
   },
   "Expand composer tools": {
     "message": "Expand composer tools",
-    "locations": ["apps/web/src/components/chat/ChatComposer.tsx:3596"]
+    "locations": ["apps/web/src/components/chat/ChatComposer.tsx:3612"]
   },
   "Expand diagram": {
     "message": "Expand diagram",
@@ -4728,7 +4772,7 @@
   },
   "Expand queued message": {
     "message": "Expand queued message",
-    "locations": ["apps/web/src/components/chat/ChatComposer.tsx:643"]
+    "locations": ["apps/web/src/components/chat/ChatComposer.tsx:644"]
   },
   "Expand table": {
     "message": "Expand table",
@@ -4768,6 +4812,10 @@
   "Expires <slot1></slot1>": {
     "message": "Expires <slot1></slot1>",
     "locations": ["apps/web/src/components/settings/ConnectionsSettings.tsx:643"]
+  },
+  "Expires at": {
+    "message": "Expires at",
+    "locations": ["apps/web/src/components/chat/AxiomSecurityControl.tsx:261"]
   },
   "Expires in a moment": {
     "message": "Expires in a moment",
@@ -5279,7 +5327,7 @@
   },
   "Follow-up requeued after provider steer rejection": {
     "message": "Follow-up requeued after provider steer rejection",
-    "locations": ["apps/web/src/components/chat/ChatComposer.tsx:494"]
+    "locations": ["apps/web/src/components/chat/ChatComposer.tsx:495"]
   },
   "Follow-up saved.": {
     "message": "Follow-up saved.",
@@ -5287,7 +5335,7 @@
   },
   "Follow-up steering into active turn": {
     "message": "Follow-up steering into active turn",
-    "locations": ["apps/web/src/components/chat/ChatComposer.tsx:585"]
+    "locations": ["apps/web/src/components/chat/ChatComposer.tsx:586"]
   },
   "For a secure connection, install Cafe Code''s certificate on this device, then open the secure site.": {
     "message": "For a secure connection, install Cafe Code''s certificate on this device, then open the secure site.",
@@ -6096,6 +6144,10 @@
     "message": "Latest persisted orchestration sequence minus the slowest projector cursor.",
     "locations": ["apps/web/src/components/settings/DiagnosticsSettings.tsx:1802"]
   },
+  "Latest reply verification": {
+    "message": "Latest reply verification",
+    "locations": ["apps/web/src/components/chat/AxiomSecurityControl.tsx:229"]
+  },
   "Lattice": {
     "message": "Lattice",
     "locations": ["apps/web/src/ambiance/ambianceEffects.ts:88"]
@@ -6523,7 +6575,7 @@
   },
   "Minimize composer tools": {
     "message": "Minimize composer tools",
-    "locations": ["apps/web/src/components/chat/ChatComposer.tsx:3597"]
+    "locations": ["apps/web/src/components/chat/ChatComposer.tsx:3613"]
   },
   "Mobile": {
     "message": "Mobile",
@@ -6540,6 +6592,7 @@
   "Model": {
     "message": "Model",
     "locations": [
+      "apps/web/src/components/chat/AxiomSecurityControl.tsx:257",
       "apps/web/src/components/chat/ScheduledFollowupEditor.tsx:707",
       "apps/web/src/components/chat/ScheduledFollowupNotices.tsx:332",
       "apps/web/src/components/settings/UsageCostSection.tsx:907"
@@ -7133,7 +7186,7 @@
   "No matching command.": {
     "message": "No matching command.",
     "locations": [
-      "apps/web/src/components/chat/ChatComposer.tsx:2235",
+      "apps/web/src/components/chat/ChatComposer.tsx:2251",
       "apps/web/src/components/chat/ComposerCommandMenu.tsx:211"
     ]
   },
@@ -7144,7 +7197,7 @@
   "No matching files or folders.": {
     "message": "No matching files or folders.",
     "locations": [
-      "apps/web/src/components/chat/ChatComposer.tsx:2234",
+      "apps/web/src/components/chat/ChatComposer.tsx:2250",
       "apps/web/src/components/chat/ComposerCommandMenu.tsx:210"
     ]
   },
@@ -7228,6 +7281,10 @@
     "message": "No repeated failures found.",
     "locations": ["apps/web/src/components/settings/DiagnosticsSettings.tsx:2622"]
   },
+  "No reply verification is available for this session.": {
+    "message": "No reply verification is available for this session.",
+    "locations": ["apps/web/src/components/chat/AxiomSecurityControl.tsx:233"]
+  },
   "No runs yet.": {
     "message": "No runs yet.",
     "locations": ["apps/web/src/components/chat/ScheduledFollowups.tsx:248"]
@@ -7255,7 +7312,7 @@
   "No skills found. Try / to browse provider commands.": {
     "message": "No skills found. Try / to browse provider commands.",
     "locations": [
-      "apps/web/src/components/chat/ChatComposer.tsx:2226",
+      "apps/web/src/components/chat/ChatComposer.tsx:2242",
       "apps/web/src/components/chat/ComposerCommandMenu.tsx:196"
     ]
   },
@@ -8154,7 +8211,7 @@
   },
   "Preparing worktree...": {
     "message": "Preparing worktree...",
-    "locations": ["apps/web/src/components/chat/ChatComposer.tsx:1851"]
+    "locations": ["apps/web/src/components/chat/ChatComposer.tsx:1866"]
   },
   "Press Enter to create this folder and add it as a project.": {
     "message": "Press Enter to create this folder and add it as a project.",
@@ -8193,7 +8250,7 @@
   },
   "Preview queued image {value0}": {
     "message": "Preview queued image {value0}",
-    "locations": ["apps/web/src/components/chat/ChatComposer.tsx:759"]
+    "locations": ["apps/web/src/components/chat/ChatComposer.tsx:760"]
   },
   "Preview temporarily, or keep each chat open as a tab.": {
     "message": "Preview temporarily, or keep each chat open as a tab.",
@@ -8202,7 +8259,7 @@
   "Preview {value0}": {
     "message": "Preview {value0}",
     "locations": [
-      "apps/web/src/components/chat/ChatComposer.tsx:4054",
+      "apps/web/src/components/chat/ChatComposer.tsx:4094",
       "apps/web/src/components/chat/MessagesTimeline.tsx:1442"
     ]
   },
@@ -8413,6 +8470,7 @@
     "message": "Provider",
     "locations": [
       "apps/web/src/components/atrium/TaskAtrium.tsx:255",
+      "apps/web/src/components/chat/AxiomSecurityControl.tsx:255",
       "apps/web/src/components/chat/ComposerCommandMenu.tsx:103",
       "apps/web/src/components/settings/AddProviderInstanceDialog.tsx:155",
       "apps/web/src/components/settings/AddProviderInstanceDialog.tsx:293"
@@ -8591,6 +8649,10 @@
       "apps/web/src/components/settings/SettingsSidebarNav.tsx:127"
     ]
   },
+  "Public evidence details": {
+    "message": "Public evidence details",
+    "locations": ["apps/web/src/components/chat/AxiomSecurityControl.tsx:282"]
+  },
   "Published standard API rates, or your custom rates if set. Excludes long-context and speed-tier adjustments; not your subscription bill.": {
     "message": "Published standard API rates, or your custom rates if set. Excludes long-context and speed-tier adjustments; not your subscription bill.",
     "locations": ["apps/web/src/components/settings/UsageCostSection.tsx:743"]
@@ -8628,7 +8690,7 @@
   },
   "Queued message prompt": {
     "message": "Queued message prompt",
-    "locations": ["apps/web/src/components/chat/ChatComposer.tsx:790"]
+    "locations": ["apps/web/src/components/chat/ChatComposer.tsx:791"]
   },
   "Queued message was not sent, but its paused state could not be saved": {
     "message": "Queued message was not sent, but its paused state could not be saved",
@@ -8636,11 +8698,11 @@
   },
   "Queued steer waiting for Codex context compaction": {
     "message": "Queued steer waiting for Codex context compaction",
-    "locations": ["apps/web/src/components/chat/ChatComposer.tsx:507"]
+    "locations": ["apps/web/src/components/chat/ChatComposer.tsx:508"]
   },
   "Queued steer waiting for Codex review": {
     "message": "Queued steer waiting for Codex review",
-    "locations": ["apps/web/src/components/chat/ChatComposer.tsx:516"]
+    "locations": ["apps/web/src/components/chat/ChatComposer.tsx:517"]
   },
   "Quit": {
     "message": "Quit",
@@ -8714,7 +8776,7 @@
   },
   "Received": {
     "message": "Received",
-    "locations": ["apps/web/src/components/chat/ChatComposer.tsx:422"]
+    "locations": ["apps/web/src/components/chat/ChatComposer.tsx:423"]
   },
   "Received output": {
     "message": "Received output",
@@ -8800,7 +8862,7 @@
   },
   "Reconnect to this server before starting a review.": {
     "message": "Reconnect to this server before starting a review.",
-    "locations": ["apps/web/src/components/chat/ChatComposer.tsx:1267"]
+    "locations": ["apps/web/src/components/chat/ChatComposer.tsx:1282"]
   },
   "Reconnect with owner access to use attachments.": {
     "message": "Reconnect with owner access to use attachments.",
@@ -8890,6 +8952,10 @@
     "message": "Refresh MCP status",
     "locations": ["apps/web/src/components/settings/McpSettings.tsx:271"]
   },
+  "Refresh attestation": {
+    "message": "Refresh attestation",
+    "locations": ["apps/web/src/components/chat/AxiomSecurityControl.tsx:337"]
+  },
   "Refresh process diagnostics": {
     "message": "Refresh process diagnostics",
     "locations": ["apps/web/src/components/settings/DiagnosticsSettings.tsx:2288"]
@@ -8923,7 +8989,7 @@
   },
   "Refreshing Claude commands…": {
     "message": "Refreshing Claude commands…",
-    "locations": ["apps/web/src/components/chat/ChatComposer.tsx:3938"]
+    "locations": ["apps/web/src/components/chat/ChatComposer.tsx:3978"]
   },
   "Reinstall": {
     "message": "Reinstall",
@@ -9046,7 +9112,7 @@
   },
   "Remove queued message": {
     "message": "Remove queued message",
-    "locations": ["apps/web/src/components/chat/ChatComposer.tsx:729"]
+    "locations": ["apps/web/src/components/chat/ChatComposer.tsx:730"]
   },
   "Remove saved environment": {
     "message": "Remove saved environment",
@@ -9064,7 +9130,7 @@
     "message": "Remove {value0}",
     "locations": [
       "apps/web/src/components/Sidebar.tsx:3316",
-      "apps/web/src/components/chat/ChatComposer.tsx:4113",
+      "apps/web/src/components/chat/ChatComposer.tsx:4153",
       "apps/web/src/components/chat/FileAttachmentPill.tsx:115",
       "apps/web/src/components/chat/FileAttachmentPill.tsx:215",
       "apps/web/src/components/settings/ProviderModelsSection.tsx:424",
@@ -9196,6 +9262,22 @@
     "message": "Replay ring",
     "locations": ["apps/web/src/components/settings/DiagnosticsSettings.tsx:2167"]
   },
+  "Reply check failed": {
+    "message": "Reply check failed",
+    "locations": ["apps/web/src/components/chat/AxiomSecurityControl.tsx:30"]
+  },
+  "Reply incomplete": {
+    "message": "Reply incomplete",
+    "locations": ["apps/web/src/components/chat/AxiomSecurityControl.tsx:29"]
+  },
+  "Reply verified": {
+    "message": "Reply verified",
+    "locations": ["apps/web/src/components/chat/AxiomSecurityControl.tsx:28"]
+  },
+  "Report needs refresh": {
+    "message": "Report needs refresh",
+    "locations": ["apps/web/src/components/chat/AxiomSecurityControl.tsx:32"]
+  },
   "Repository": {
     "message": "Repository",
     "locations": ["apps/web/src/components/CommandPalette.tsx:1729"]
@@ -9214,7 +9296,7 @@
   },
   "Requeued": {
     "message": "Requeued",
-    "locations": ["apps/web/src/components/chat/ChatComposer.tsx:495"]
+    "locations": ["apps/web/src/components/chat/ChatComposer.tsx:496"]
   },
   "Rescan Git and hosting integrations": {
     "message": "Rescan Git and hosting integrations",
@@ -9380,11 +9462,11 @@
   },
   "Retry delivery": {
     "message": "Retry delivery",
-    "locations": ["apps/web/src/components/chat/ChatComposer.tsx:687"]
+    "locations": ["apps/web/src/components/chat/ChatComposer.tsx:688"]
   },
   "Retry delivery of this exact message and its attachments.": {
     "message": "Retry delivery of this exact message and its attachments.",
-    "locations": ["apps/web/src/components/chat/ChatComposer.tsx:678"]
+    "locations": ["apps/web/src/components/chat/ChatComposer.tsx:679"]
   },
   "Retry details": {
     "message": "Retry details",
@@ -9432,7 +9514,7 @@
   },
   "Review code with Codex<slot1></slot1>": {
     "message": "Review code with Codex<slot1></slot1>",
-    "locations": ["apps/web/src/components/chat/ChatComposer.tsx:3630"]
+    "locations": ["apps/web/src/components/chat/ChatComposer.tsx:3670"]
   },
   "Review effort, then send from the composer.": {
     "message": "Review effort, then send from the composer.",
@@ -9574,11 +9656,11 @@
   },
   "Run provider command": {
     "message": "Run provider command",
-    "locations": ["apps/web/src/components/chat/ChatComposer.tsx:2077"]
+    "locations": ["apps/web/src/components/chat/ChatComposer.tsx:2093"]
   },
   "Run provider skill": {
     "message": "Run provider skill",
-    "locations": ["apps/web/src/components/chat/ChatComposer.tsx:2098"]
+    "locations": ["apps/web/src/components/chat/ChatComposer.tsx:2114"]
   },
   "Run requested. It will wait if this chat is busy.": {
     "message": "Run requested. It will wait if this chat is busy.",
@@ -9735,7 +9817,7 @@
   },
   "Save to queue": {
     "message": "Save to queue",
-    "locations": ["apps/web/src/components/chat/ChatComposer.tsx:3974"]
+    "locations": ["apps/web/src/components/chat/ChatComposer.tsx:4014"]
   },
   "Save to workspace": {
     "message": "Save to workspace",
@@ -10070,7 +10152,7 @@
   },
   "Send a message to start a Codex session before reviewing code.": {
     "message": "Send a message to start a Codex session before reviewing code.",
-    "locations": ["apps/web/src/components/chat/ChatComposer.tsx:1269"]
+    "locations": ["apps/web/src/components/chat/ChatComposer.tsx:1284"]
   },
   "Send a message to start the conversation.": {
     "message": "Send a message to start the conversation.",
@@ -10094,13 +10176,13 @@
   "Sending": {
     "message": "Sending",
     "locations": [
-      "apps/web/src/components/chat/ChatComposer.tsx:414",
+      "apps/web/src/components/chat/ChatComposer.tsx:415",
       "apps/web/src/components/chat/ComposerPrimaryActions.tsx:283"
     ]
   },
   "Sending your message. Waiting for Codex to confirm receipt.": {
     "message": "Sending your message. Waiting for Codex to confirm receipt.",
-    "locations": ["apps/web/src/components/chat/ChatComposer.tsx:417"]
+    "locations": ["apps/web/src/components/chat/ChatComposer.tsx:418"]
   },
   "Sending…": {
     "message": "Sending…",
@@ -10554,11 +10636,11 @@
   },
   "Skills are available once this chat's workspace has been created.": {
     "message": "Skills are available once this chat's workspace has been created.",
-    "locations": ["apps/web/src/components/chat/ChatComposer.tsx:2206"]
+    "locations": ["apps/web/src/components/chat/ChatComposer.tsx:2222"]
   },
   "Skills unavailable. Close and reopen the picker to retry.": {
     "message": "Skills unavailable. Close and reopen the picker to retry.",
-    "locations": ["apps/web/src/components/chat/ChatComposer.tsx:2213"]
+    "locations": ["apps/web/src/components/chat/ChatComposer.tsx:2229"]
   },
   "Skip": {
     "message": "Skip",
@@ -10739,7 +10821,7 @@
   },
   "Start a Codex session with the selected account before reviewing code.": {
     "message": "Start a Codex session with the selected account before reviewing code.",
-    "locations": ["apps/web/src/components/chat/ChatComposer.tsx:1285"]
+    "locations": ["apps/web/src/components/chat/ChatComposer.tsx:1300"]
   },
   "Start a conversation with the selected provider before compacting.": {
     "message": "Start a conversation with the selected provider before compacting.",
@@ -10779,7 +10861,7 @@
   },
   "Starting {value0}...": {
     "message": "Starting {value0}...",
-    "locations": ["apps/web/src/components/chat/ChatComposer.tsx:1855"]
+    "locations": ["apps/web/src/components/chat/ChatComposer.tsx:1870"]
   },
   "Starting…": {
     "message": "Starting…",
@@ -10820,7 +10902,7 @@
   },
   "Steer delivery paused": {
     "message": "Steer delivery paused",
-    "locations": ["apps/web/src/components/chat/ChatComposer.tsx:484"]
+    "locations": ["apps/web/src/components/chat/ChatComposer.tsx:485"]
   },
   "Steer retried as next turn": {
     "message": "Steer retried as next turn",
@@ -10832,7 +10914,7 @@
   },
   "Steering": {
     "message": "Steering",
-    "locations": ["apps/web/src/components/chat/ChatComposer.tsx:438"]
+    "locations": ["apps/web/src/components/chat/ChatComposer.tsx:439"]
   },
   "Step <slot1></slot1>": {
     "message": "Step <slot1></slot1>",
@@ -10986,7 +11068,7 @@
   },
   "Subagent limit…": {
     "message": "Subagent limit…",
-    "locations": ["apps/web/src/components/chat/ChatComposer.tsx:1538"]
+    "locations": ["apps/web/src/components/chat/ChatComposer.tsx:1553"]
   },
   "Subagent pages for {value0}": {
     "message": "Subagent pages for {value0}",
@@ -11030,7 +11112,7 @@
   },
   "Submitting prompt...": {
     "message": "Submitting prompt...",
-    "locations": ["apps/web/src/components/chat/ChatComposer.tsx:1853"]
+    "locations": ["apps/web/src/components/chat/ChatComposer.tsx:1868"]
   },
   "Submitting…": {
     "message": "Submitting…",
@@ -11086,15 +11168,15 @@
   },
   "Switch back to Build": {
     "message": "Switch back to Build",
-    "locations": ["apps/web/src/components/chat/ChatComposer.tsx:2025"]
+    "locations": ["apps/web/src/components/chat/ChatComposer.tsx:2041"]
   },
   "Switch the model for this chat": {
     "message": "Switch the model for this chat",
-    "locations": ["apps/web/src/components/chat/ChatComposer.tsx:2011"]
+    "locations": ["apps/web/src/components/chat/ChatComposer.tsx:2027"]
   },
   "Switch to Plan": {
     "message": "Switch to Plan",
-    "locations": ["apps/web/src/components/chat/ChatComposer.tsx:2018"]
+    "locations": ["apps/web/src/components/chat/ChatComposer.tsx:2034"]
   },
   "Switched from {from} to {to}{hasModel, select, yes { · {model}} other {}}": {
     "message": "Switched from {from} to {to}{hasModel, select, yes { · {model}} other {}}",
@@ -11401,7 +11483,7 @@
   },
   "The provider did not accept this live steer. Cafe Code preserved it and will send it automatically when the active turn is ready.": {
     "message": "The provider did not accept this live steer. Cafe Code preserved it and will send it automatically when the active turn is ready.",
-    "locations": ["apps/web/src/components/chat/ChatComposer.tsx:496"]
+    "locations": ["apps/web/src/components/chat/ChatComposer.tsx:497"]
   },
   "The provider didn't report which model served these tokens. They're counted but not priced.": {
     "message": "The provider didn't report which model served these tokens. They're counted but not priced.",
@@ -11449,6 +11531,10 @@
   "The repair request failed.": {
     "message": "The repair request failed.",
     "locations": ["apps/web/src/components/Sidebar.tsx:2911"]
+  },
+  "The report describes the provider checks shown above. Local chat storage and external tools are outside inference encryption.": {
+    "message": "The report describes the provider checks shown above. Local chat storage and external tools are outside inference encryption.",
+    "locations": ["apps/web/src/components/chat/AxiomSecurityControl.tsx:292"]
   },
   "The reset result could not be confirmed. Retry this same reset safely; an already redeemed reset will not be spent again.": {
     "message": "The reset result could not be confirmed. Retry this same reset safely; an already redeemed reset will not be spent again.",
@@ -11573,7 +11659,7 @@
   },
   "These file handles could not be saved in browser storage. Keep this page open and free storage before reloading.": {
     "message": "These file handles could not be saved in browser storage. Keep this page open and free storage before reloading.",
-    "locations": ["apps/web/src/components/chat/ChatComposer.tsx:4030"]
+    "locations": ["apps/web/src/components/chat/ChatComposer.tsx:4070"]
   },
   "They need a new pairing link to reconnect.": {
     "message": "They need a new pairing link to reconnect.",
@@ -11732,7 +11818,7 @@
   },
   "This provider runtime cannot apply a numeric subagent limit. An existing chat override can still be reset.": {
     "message": "This provider runtime cannot apply a numeric subagent limit. An existing chat override can still be reset.",
-    "locations": ["apps/web/src/components/chat/ChatComposer.tsx:1528"]
+    "locations": ["apps/web/src/components/chat/ChatComposer.tsx:1543"]
   },
   "This provider runtime does not support the account subagent limit. Clear it in account settings or use a supported runtime before sending.": {
     "message": "This provider runtime does not support the account subagent limit. Clear it in account settings or use a supported runtime before sending.",
@@ -12135,7 +12221,7 @@
   },
   "Type an answer, or leave blank to use the selection": {
     "message": "Type an answer, or leave blank to use the selection",
-    "locations": ["apps/web/src/components/chat/ChatComposer.tsx:190"]
+    "locations": ["apps/web/src/components/chat/ChatComposer.tsx:191"]
   },
   "URL": {
     "message": "URL",
@@ -12553,7 +12639,7 @@
   },
   "Upload failed. Retry, or remove this file before sending.": {
     "message": "Upload failed. Retry, or remove this file before sending.",
-    "locations": ["apps/web/src/components/chat/ChatComposer.tsx:3176"]
+    "locations": ["apps/web/src/components/chat/ChatComposer.tsx:3192"]
   },
   "Upload not completed. Remove this file and select it again.": {
     "message": "Upload not completed. Remove this file and select it again.",
@@ -12561,11 +12647,11 @@
   },
   "Uploaded file copies": {
     "message": "Uploaded file copies",
-    "locations": ["apps/web/src/components/chat/ChatComposer.tsx:3991"]
+    "locations": ["apps/web/src/components/chat/ChatComposer.tsx:4031"]
   },
   "Uploaded to another destination. Remove and select again.": {
     "message": "Uploaded to another destination. Remove and select again.",
-    "locations": ["apps/web/src/components/chat/ChatComposer.tsx:4011"]
+    "locations": ["apps/web/src/components/chat/ChatComposer.tsx:4051"]
   },
   "Uploading copy…": {
     "message": "Uploading copy…",
@@ -12788,6 +12874,30 @@
     "message": "Value",
     "locations": ["apps/web/src/components/settings/ProviderInstanceCard.tsx:434"]
   },
+  "Verification could not be refreshed. Check this session and try again.": {
+    "message": "Verification could not be refreshed. Check this session and try again.",
+    "locations": ["apps/web/src/components/chat/AxiomSecurityControl.tsx:320"]
+  },
+  "Verification unavailable": {
+    "message": "Verification unavailable",
+    "locations": ["apps/web/src/components/chat/AxiomSecurityControl.tsx:26"]
+  },
+  "Verified at": {
+    "message": "Verified at",
+    "locations": ["apps/web/src/components/chat/AxiomSecurityControl.tsx:259"]
+  },
+  "Verified by local AxiomCLI. Attestation and reply authentication are separate checks.": {
+    "message": "Verified by local AxiomCLI. Attestation and reply authentication are separate checks.",
+    "locations": ["apps/web/src/components/chat/AxiomSecurityControl.tsx:218"]
+  },
+  "Verifying attestation": {
+    "message": "Verifying attestation",
+    "locations": ["apps/web/src/components/chat/AxiomSecurityControl.tsx:37"]
+  },
+  "Verifying reply": {
+    "message": "Verifying reply",
+    "locations": ["apps/web/src/components/chat/AxiomSecurityControl.tsx:27"]
+  },
   "Version": {
     "message": "Version",
     "locations": ["apps/web/src/components/settings/SettingsPanels.tsx:383"]
@@ -12833,7 +12943,7 @@
   },
   "View or update the Codex goal": {
     "message": "View or update the Codex goal",
-    "locations": ["apps/web/src/components/chat/ChatComposer.tsx:2050"]
+    "locations": ["apps/web/src/components/chat/ChatComposer.tsx:2066"]
   },
   "View {value0} activity": {
     "message": "View {value0} activity",
@@ -12895,7 +13005,7 @@
   },
   "Wait for the current submission before adding more files.": {
     "message": "Wait for the current submission before adding more files.",
-    "locations": ["apps/web/src/components/chat/ChatComposer.tsx:3192"]
+    "locations": ["apps/web/src/components/chat/ChatComposer.tsx:3208"]
   },
   "Wait for the current turn to finish before compacting.": {
     "message": "Wait for the current turn to finish before compacting.",
@@ -12903,14 +13013,14 @@
   },
   "Wait for the current work to finish and the Codex session to be ready.": {
     "message": "Wait for the current work to finish and the Codex session to be ready.",
-    "locations": ["apps/web/src/components/chat/ChatComposer.tsx:1292"]
+    "locations": ["apps/web/src/components/chat/ChatComposer.tsx:1307"]
   },
   "Waiting": {
     "message": "Waiting",
     "locations": [
       "apps/web/src/components/atrium/TaskAtrium.tsx:694",
       "apps/web/src/components/atrium/taskAtriumData.ts:251",
-      "apps/web/src/components/chat/ChatComposer.tsx:430",
+      "apps/web/src/components/chat/ChatComposer.tsx:431",
       "apps/web/src/components/chat/SubagentDetailView.tsx:134",
       "apps/web/src/components/chat/WorkflowTasks.tsx:15",
       "apps/web/src/components/subagents/SubagentRosterRow.tsx:22",
@@ -12935,7 +13045,7 @@
   },
   "Waiting for compact": {
     "message": "Waiting for compact",
-    "locations": ["apps/web/src/components/chat/ChatComposer.tsx:508"]
+    "locations": ["apps/web/src/components/chat/ChatComposer.tsx:509"]
   },
   "Waiting for network.": {
     "message": "Waiting for network.",
@@ -12943,15 +13053,15 @@
   },
   "Waiting for review": {
     "message": "Waiting for review",
-    "locations": ["apps/web/src/components/chat/ChatComposer.tsx:517"]
+    "locations": ["apps/web/src/components/chat/ChatComposer.tsx:518"]
   },
   "Waiting for the provider to pick up your message.": {
     "message": "Waiting for the provider to pick up your message.",
-    "locations": ["apps/web/src/components/chat/ChatComposer.tsx:441"]
+    "locations": ["apps/web/src/components/chat/ChatComposer.tsx:442"]
   },
   "Waiting for the selected Codex account’s provider information.": {
     "message": "Waiting for the selected Codex account’s provider information.",
-    "locations": ["apps/web/src/components/chat/ChatComposer.tsx:1278"]
+    "locations": ["apps/web/src/components/chat/ChatComposer.tsx:1293"]
   },
   "Waiting for the workspace to respond.": {
     "message": "Waiting for the workspace to respond.",
@@ -13204,8 +13314,8 @@
   "Write custom answer": {
     "message": "Write custom answer",
     "locations": [
-      "apps/web/src/components/chat/ChatComposer.tsx:3822",
-      "apps/web/src/components/chat/ChatComposer.tsx:3825"
+      "apps/web/src/components/chat/ChatComposer.tsx:3862",
+      "apps/web/src/components/chat/ChatComposer.tsx:3865"
     ]
   },
   "Writes chat titles and branch names.": {
@@ -13231,7 +13341,7 @@
   },
   "You can attach up to {limit} files or images per message.": {
     "message": "You can attach up to {limit} files or images per message.",
-    "locations": ["apps/web/src/components/chat/ChatComposer.tsx:3240"]
+    "locations": ["apps/web/src/components/chat/ChatComposer.tsx:3256"]
   },
   "You can install it with <slot1></slot1>": {
     "message": "You can install it with <slot1></slot1>",
@@ -13271,7 +13381,7 @@
   },
   "Your message and attachments are preserved. Review the delivery error before retrying.": {
     "message": "Your message and attachments are preserved. Review the delivery error before retrying.",
-    "locations": ["apps/web/src/components/chat/ChatComposer.tsx:486"]
+    "locations": ["apps/web/src/components/chat/ChatComposer.tsx:487"]
   },
   "Your original chat and workspace files remain unchanged. No prompt is sent automatically, and your current draft stays in the original chat.": {
     "message": "Your original chat and workspace files remain unchanged. No prompt is sent automatically, and your current draft stays in the original chat.",
@@ -13748,7 +13858,7 @@
   },
   "this Codex account": {
     "message": "this Codex account",
-    "locations": ["apps/web/src/components/chat/ChatComposer.tsx:4419"]
+    "locations": ["apps/web/src/components/chat/ChatComposer.tsx:4459"]
   },
   "this chat": {
     "message": "this chat",
@@ -13845,11 +13955,11 @@
   },
   "{count, plural, one {# attachment} other {# attachments}}": {
     "message": "{count, plural, one {# attachment} other {# attachments}}",
-    "locations": ["apps/web/src/components/chat/ChatComposer.tsx:3896"]
+    "locations": ["apps/web/src/components/chat/ChatComposer.tsx:3936"]
   },
   "{count, plural, one {# attachment} other {# attachments}} attached — expand composer": {
     "message": "{count, plural, one {# attachment} other {# attachments}} attached — expand composer",
-    "locations": ["apps/web/src/components/chat/ChatComposer.tsx:3886"]
+    "locations": ["apps/web/src/components/chat/ChatComposer.tsx:3926"]
   },
   "{count, plural, one {# chat stopped on an error. Open one to see why.} other {# chats stopped on an error. Open one to see why.}}": {
     "message": "{count, plural, one {# chat stopped on an error. Open one to see why.} other {# chats stopped on an error. Open one to see why.}}",
@@ -13861,11 +13971,11 @@
   },
   "{count, plural, one {# message queued} other {# messages queued}}": {
     "message": "{count, plural, one {# message queued} other {# messages queued}}",
-    "locations": ["apps/web/src/components/chat/ChatComposer.tsx:448"]
+    "locations": ["apps/web/src/components/chat/ChatComposer.tsx:449"]
   },
   "{count, plural, one {# message steering} other {# messages steering}}": {
     "message": "{count, plural, one {# message steering} other {# messages steering}}",
-    "locations": ["apps/web/src/components/chat/ChatComposer.tsx:474"]
+    "locations": ["apps/web/src/components/chat/ChatComposer.tsx:475"]
   },
   "{count, plural, one {# more changed file} other {# more changed files}}": {
     "message": "{count, plural, one {# more changed file} other {# more changed files}}",
@@ -13893,7 +14003,7 @@
   },
   "{count, plural, one {# steer waiting} other {# steers waiting}}": {
     "message": "{count, plural, one {# steer waiting} other {# steers waiting}}",
-    "locations": ["apps/web/src/components/chat/ChatComposer.tsx:467"]
+    "locations": ["apps/web/src/components/chat/ChatComposer.tsx:468"]
   },
   "{count, plural, one {# subagent} other {# subagents}}": {
     "message": "{count, plural, one {# subagent} other {# subagents}}",
@@ -14298,7 +14408,7 @@
   },
   "{state, select, connecting {{environment} is connecting} other {{environment} is disconnected}}": {
     "message": "{state, select, connecting {{environment} is connecting} other {{environment} is disconnected}}",
-    "locations": ["apps/web/src/components/chat/ChatComposer.tsx:4157"]
+    "locations": ["apps/web/src/components/chat/ChatComposer.tsx:4197"]
   },
   "{timestamp} • {duration}": {
     "message": "{timestamp} • {duration}",
@@ -14448,7 +14558,7 @@
   },
   "{value0} skill": {
     "message": "{value0} skill",
-    "locations": ["apps/web/src/components/chat/ChatComposer.tsx:2097"]
+    "locations": ["apps/web/src/components/chat/ChatComposer.tsx:2113"]
   },
   "{value0} tab actions": {
     "message": "{value0} tab actions",
@@ -14496,7 +14606,7 @@
   },
   "{value0}MB": {
     "message": "{value0}MB",
-    "locations": ["apps/web/src/components/chat/ChatComposer.tsx:183"]
+    "locations": ["apps/web/src/components/chat/ChatComposer.tsx:184"]
   },
   "{value0}_work": {
     "message": "{value0}_work",

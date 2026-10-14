@@ -1,3 +1,8 @@
+import {
+  ProviderSecurityInput,
+  ProviderSecurityRefreshInput,
+  ProviderSecurityResult,
+} from "./providerSecurity.ts";
 import * as Schema from "effect/Schema";
 import {
   VisualizationApiError,
@@ -196,6 +201,8 @@ export const WS_METHODS = {
   serverRefreshProviders: "server.refreshProviders",
   serverListProviderSkills: "server.listProviderSkills",
   serverSubscribeProviderCommands: "server.subscribeProviderCommands",
+  serverSubscribeProviderSecurity: "server.subscribeProviderSecurity",
+  serverRefreshProviderSecurity: "server.refreshProviderSecurity",
   serverSubscribeProviderQuota: "server.subscribeProviderQuota",
   serverUsageReset: "server.usageReset",
   serverLoginProvider: "server.loginProvider",
@@ -304,6 +311,19 @@ export const WsServerSubscribeProviderCommandsRpc = Rpc.make(
     payload: ProviderCommandsInput,
     success: ProviderCommandCatalog,
     stream: true,
+  },
+);
+
+export const WsServerSubscribeProviderSecurityRpc = Rpc.make(
+  WS_METHODS.serverSubscribeProviderSecurity,
+  { payload: ProviderSecurityInput, success: ProviderSecurityResult, stream: true },
+);
+export const WsServerRefreshProviderSecurityRpc = Rpc.make(
+  WS_METHODS.serverRefreshProviderSecurity,
+  {
+    payload: ProviderSecurityRefreshInput,
+    success: ProviderSecurityResult,
+    error: OrchestrationGetSnapshotError,
   },
 );
 
@@ -777,6 +797,8 @@ export const WsRpcGroup = RpcGroup.make(
   WsServerListProviderSkillsRpc,
   WsServerSubscribeProviderCommandsRpc,
   WsServerSubscribeProviderQuotaRpc,
+  WsServerSubscribeProviderSecurityRpc,
+  WsServerRefreshProviderSecurityRpc,
   WsServerUsageResetRpc,
   WsServerLoginProviderRpc,
   WsServerUpdateProviderRpc,

@@ -123,6 +123,9 @@ function canonicalSelectionsToLegacyObject(
 }
 
 export const ModelCapabilities = Schema.Struct({
+  fileMimeTypes: Schema.optional(
+    Schema.Array(Schema.String.check(Schema.isMaxLength(100))).check(Schema.isMaxLength(128)),
+  ),
   optionDescriptors: Schema.optional(Schema.Array(ProviderOptionDescriptor)),
   inputModalities: Schema.optional(Schema.Array(Schema.Literals(["text", "image"]))),
   supportsAutoMode: Schema.optional(Schema.Boolean),

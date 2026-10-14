@@ -84,6 +84,7 @@ import { ComposerPendingApprovalActions } from "./ComposerPendingApprovalActions
 import { CompactComposerControlsMenu } from "./CompactComposerControlsMenu";
 import { NativeCodexReview } from "./NativeCodexReview";
 import { ClaudeDeliveryPriorityPicker } from "./ClaudeDeliveryPriorityPicker";
+import { AxiomSecurityControl } from "./AxiomSecurityControl";
 import { ComposerTab } from "./ComposerTab";
 import { useUiStateStore } from "../../uiStateStore";
 import { ComposerAttachImageButton } from "./ComposerAttachImageButton";
@@ -1260,7 +1261,21 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
   // Provider-owned controls stay discoverable while their actions are blocked.
   // Eligibility still binds dispatch to the exact account and session above.
   const showNativeReviewControl = selectedProvider === "codex";
-  const hasComposerTab = showNativeReviewControl;
+  const showAxiomSecurityControl = selectedProvider === "axiom";
+  const axiomInspectorKey = JSON.stringify([
+    environmentId,
+    activeThreadId,
+    selectedInstanceId,
+    selectedModel,
+    activeThread?.session?.subagentRuntimeId,
+  ]);
+  const [axiomInspectorState, setAxiomInspectorState] = useState({
+    key: axiomInspectorKey,
+    open: false,
+  });
+  const axiomInspectorOpen =
+    axiomInspectorState.key === axiomInspectorKey && axiomInspectorState.open;
+  const hasComposerTab = showNativeReviewControl || showAxiomSecurityControl;
   const nativeReviewControlDisabled = !nativeReviewAvailable || nativeReviewDisabled;
   const nativeReviewDisabledReason =
     environmentUnavailable !== null || isConnecting
@@ -1920,7 +1935,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
   const commandsRuntimeId = activeThread?.session?.subagentRuntimeId;
   const commandsInput = useMemo<ProviderCommandsInput | null>(
     () =>
-      selectedProvider === "claudeAgent" &&
+      (selectedProvider === "claudeAgent" || selectedProvider === "axiom") &&
       isServerThread &&
       activeThreadId &&
       commandsRuntimeId &&
@@ -1948,7 +1963,8 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
   const discoveredCommands = useProviderCommands(
     environmentId,
     commandsInput,
-    composerTriggerKind === "slash-command" && selectedProvider === "claudeAgent",
+    composerTriggerKind === "slash-command" &&
+      (selectedProvider === "claudeAgent" || selectedProvider === "axiom"),
     commandsScopeRevision,
     commandsConnected,
   );
@@ -1967,7 +1983,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
         }
       : undefined;
   const selectedProviderCommands =
-    selectedProvider === "claudeAgent"
+    selectedProvider === "claudeAgent" || selectedProvider === "axiom"
       ? discoveredCommands.commands
       : (selectedProviderStatus?.slashCommands ?? []);
   const pathTriggerQuery = composerTrigger?.kind === "path" ? composerTrigger.query : "";
@@ -3596,9 +3612,33 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
               expandLabel={uiText("Expand composer tools", undefined, undefined, uiLocale)}
               minimizeLabel={uiText("Minimize composer tools", undefined, undefined, uiLocale)}
               collapsed={composerTabCollapsed}
-              active={nativeReviewOpen}
+              active={nativeReviewOpen || axiomInspectorOpen}
               onCollapsedChange={useUiStateStore.getState().setComposerTabCollapsed}
             >
+              {showAxiomSecurityControl ? (
+                <AxiomSecurityControl
+                  key={axiomInspectorKey}
+                  environmentId={environmentId}
+                  onOpenChange={(open) => setAxiomInspectorState({ key: axiomInspectorKey, open })}
+                  connected={environmentUnavailable === null && !isConnecting}
+                  idle={phase !== "running" && !isSendBusy}
+                  input={
+                    isServerThread &&
+                    activeThreadId &&
+                    activeThread?.session?.provider === "axiom" &&
+                    activeThread.session.providerInstanceId === selectedInstanceId &&
+                    activeThread.session.subagentRuntimeId &&
+                    activeThread.modelSelection.model === selectedModel
+                      ? {
+                          instanceId: selectedInstanceId,
+                          threadId: activeThreadId,
+                          runtimeId: activeThread.session.subagentRuntimeId,
+                          modelId: selectedModel,
+                        }
+                      : null
+                  }
+                />
+              ) : null}
               {showNativeReviewControl ? (
                 <Tooltip>
                   <TooltipTrigger

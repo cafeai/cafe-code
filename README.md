@@ -20,6 +20,8 @@ No terminal drawer. No pretend IDE. No giant dashboard wearing a useful-looking 
   <img src="./docs/images/cafe-code-character.png" alt="Cafe Code character" width="360" />
 </p>
 
+Axiom is available through its native ACP runtime, with verification details in the composer tools tab. See [Axiom setup and verification](docs/axiom-provider.md).
+
 ## Why Fork?
 
 Because the app should stay small, fast, and predictable.

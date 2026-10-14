@@ -16,6 +16,9 @@ import type {
   ProviderDriverKind,
   ProviderUserInputAnswers,
   ProviderRuntimeEvent,
+  ProviderSecurityReadInput,
+  ProviderSecurityNativeRefreshInput,
+  ProviderSecurityResult,
   ProviderSendTurnInput,
   ProviderSession,
   ProviderSessionForkInput,
@@ -132,6 +135,13 @@ export interface ProviderSubagentDetail {
 }
 
 export interface ProviderAdapterShape<TError> {
+  readonly login?: () => Effect.Effect<void, TError>;
+  readonly readSecurity?: (
+    input: ProviderSecurityReadInput,
+  ) => Effect.Effect<ProviderSecurityResult, TError>;
+  readonly refreshSecurity?: (
+    input: ProviderSecurityNativeRefreshInput,
+  ) => Effect.Effect<ProviderSecurityResult, TError>;
   readonly controlTask?: (
     input: ProviderTaskControlInput,
   ) => Effect.Effect<ProviderTaskControlResult, TError>;

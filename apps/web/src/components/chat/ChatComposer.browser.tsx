@@ -60,7 +60,7 @@ const environmentId = EnvironmentId.make("composer-test-environment");
 const createdAt = "2026-10-07T00:00:00.000Z";
 
 function provider(
-  driver: "codex" | "claudeAgent" | "grok",
+  driver: "codex" | "claudeAgent" | "grok" | "axiom",
   id: string,
   label: string,
 ): ServerProvider {
@@ -306,6 +306,54 @@ async function waitForTabEntrance() {
 }
 
 describe("provider-specific composer menu actions", () => {
+  it("uses the existing composer tab for Axiom and clears its inspector when the selected model changes", async () => {
+    const axiom: ServerProvider = {
+      ...provider("axiom", "axiom-personal", "Axiom personal"),
+      models: [
+        {
+          slug: "axiom-model",
+          name: "Axiom model",
+          isCustom: false,
+          capabilities: createModelCapabilities({ optionDescriptors: [] }),
+        },
+        {
+          slug: "axiom-other",
+          name: "Axiom other model",
+          isCustom: false,
+          capabilities: createModelCapabilities({ optionDescriptors: [] }),
+        },
+      ],
+    };
+    const activeThread = thread();
+    activeThread.modelSelection = createModelSelection(axiom.instanceId, "axiom-model");
+    activeThread.session = {
+      ...activeThread.session!,
+      provider: ProviderDriverKind.make("axiom"),
+      providerInstanceId: axiom.instanceId,
+    };
+    await using fixture = await mountComposer(860, {
+      providerStatuses: [...providers, axiom],
+      activeThread,
+      activeThreadModelSelection: activeThread.modelSelection,
+    });
+    await waitForTabEntrance();
+    const tab = document.querySelector<HTMLElement>(".cafe-composer-tab")!;
+    await expect.element(page.elementLocator(tab)).toHaveAttribute("data-popup-open", "false");
+    await page.getByRole("button", { name: "Verification unavailable", exact: true }).click();
+    await expect.element(page.getByRole("dialog", { name: "Axiom verification" })).toBeVisible();
+    await expect.element(page.elementLocator(tab)).toHaveAttribute("data-popup-open", "true");
+    useComposerDraftStore
+      .getState()
+      .setModelSelection(
+        fixture.props.composerDraftTarget,
+        createModelSelection(axiom.instanceId, "axiom-other"),
+      );
+    await expect
+      .element(page.getByRole("dialog", { name: "Axiom verification" }))
+      .not.toBeInTheDocument();
+    await expect.element(page.elementLocator(tab)).toHaveAttribute("data-popup-open", "false");
+    expect(fixture.onSend).not.toHaveBeenCalled();
+  });
   afterEach(() => {
     useUiStateStore.setState({ composerTabCollapsed: false });
     applyInterfaceScalePercent(100);

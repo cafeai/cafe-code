@@ -80,7 +80,14 @@ export interface AcpSessionRuntimeOptions {
     | string
     | ((
         initializeResult: EffectAcpSchema.InitializeResponse,
-      ) => Effect.Effect<string, EffectAcpErrors.AcpError>);
+      ) => Effect.Effect<string | undefined, EffectAcpErrors.AcpError>);
+  /** Extension-owned authentication executes before any native conversation is loaded. */
+  readonly beforeSession?: (
+    initializeResult: EffectAcpSchema.InitializeResponse,
+    request: (method: string, payload: unknown) => Effect.Effect<unknown, EffectAcpErrors.AcpError>,
+  ) => Effect.Effect<void, EffectAcpErrors.AcpError>;
+  /** Providers with a native completion fence keep the prompt RPC until cancellation settles. */
+  readonly cancelPromptLocally?: boolean;
   readonly mcpServers?: ReadonlyArray<EffectAcpSchema.McpServer>;
   readonly requestLogger?: (event: AcpSessionRequestLogEvent) => Effect.Effect<void, never>;
   readonly protocolLogging?: {
@@ -197,6 +204,8 @@ export class AcpSessionRuntime extends Context.Service<
      * Initializes the ACP connection, authenticates, and loads, resumes, or creates the session.
      * Concurrent calls share the same in-flight startup and a failed startup may be retried.
      */
+    /** Observation of this exact owned child, never a PID-based liveness guess. */
+    readonly awaitExit?: Effect.Effect<number, EffectAcpErrors.AcpError>;
     readonly start: () => Effect.Effect<AcpSessionRuntimeStartResult, EffectAcpErrors.AcpError>;
     /** Stream of parsed ACP session events emitted after startup. */
     readonly getEvents: () => Stream.Stream<AcpSessionRuntimeEvent, never>;
@@ -628,15 +637,18 @@ export const make = (
           ? options.authMethodId
           : yield* options.authMethodId(initializeResult);
 
-      const authenticatePayload = {
-        methodId: authMethodId,
-      } satisfies EffectAcpSchema.AuthenticateRequest;
+      if (authMethodId !== undefined) {
+        const authenticatePayload = {
+          methodId: authMethodId,
+        } satisfies EffectAcpSchema.AuthenticateRequest;
 
-      yield* runLoggedRequest(
-        "authenticate",
-        authenticatePayload,
-        acp.agent.authenticate(authenticatePayload),
-      );
+        yield* runLoggedRequest(
+          "authenticate",
+          authenticatePayload,
+          acp.agent.authenticate(authenticatePayload),
+        );
+      }
+      if (options.beforeSession) yield* options.beforeSession(initializeResult, acp.raw.request);
 
       let sessionId: string;
       let sessionSetupResult:
@@ -916,10 +928,20 @@ export const make = (
             // reported the turn as stopped.
             yield* acp.agent.cancel({ sessionId: started.sessionId });
             const activePromptFiber = yield* Ref.get(activePromptFiberRef);
-            if (Option.isSome(activePromptFiber)) {
+            if (options.cancelPromptLocally !== false && Option.isSome(activePromptFiber)) {
               yield* Fiber.interrupt(activePromptFiber.value).pipe(Effect.ignore);
             }
           }),
+        ),
+      ),
+      awaitExit: child.exitCode.pipe(
+        Effect.map((code) => Number(code)),
+        Effect.mapError(
+          (cause) =>
+            new EffectAcpErrors.AcpTransportError({
+              detail: "Could not observe the owned ACP child.",
+              cause,
+            }),
         ),
       ),
       setMode: (modeId) =>

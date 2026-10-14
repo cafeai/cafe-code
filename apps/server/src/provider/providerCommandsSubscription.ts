@@ -10,6 +10,7 @@ import { UNAVAILABLE_COMMAND_CATALOG } from "./claudeCommands.ts";
 
 export interface ProviderCommandsAuthority {
   readonly cwd: string;
+  readonly driver?: "claudeAgent" | "axiom";
   /** Private admitted settings commitment, never returned by the picker API. */
   readonly configuration: string;
 }
@@ -26,13 +27,18 @@ export const readBoundProviderCommands = (
     if (!before) return UNAVAILABLE_COMMAND_CATALOG;
     const sessions = yield* readSessions;
     const after = yield* resolveAuthority;
-    if (!after || after.cwd !== before.cwd || after.configuration !== before.configuration)
+    if (
+      !after ||
+      after.cwd !== before.cwd ||
+      after.configuration !== before.configuration ||
+      after.driver !== before.driver
+    )
       return UNAVAILABLE_COMMAND_CATALOG;
     const matching = sessions.filter(
       (session) =>
         session.threadId === input.threadId &&
         session.providerInstanceId === input.instanceId &&
-        session.provider === "claudeAgent" &&
+        session.provider === (before.driver ?? "claudeAgent") &&
         session.subagentRuntimeId === input.runtimeId &&
         session.commandCatalogConfigurationKey === before.configuration &&
         session.cwd === before.cwd &&

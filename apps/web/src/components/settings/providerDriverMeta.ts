@@ -1,5 +1,6 @@
 import { uiText } from "@cafecode/shared/i18n";
 import {
+  AxiomSettings,
   ClaudeSettings,
   CodexSettings,
   GrokSettings,
@@ -7,6 +8,7 @@ import {
   ProviderDriverKind,
 } from "@cafecode/contracts";
 import type * as Schema from "effect/Schema";
+import { ShieldCheckIcon } from "lucide-react";
 import { ClaudeAI, GrokIcon, type Icon, OpenAI, OpenCodeIcon } from "../Icons";
 
 type ProviderSettingsSchema = {
@@ -61,6 +63,12 @@ export const PROVIDER_CLIENT_DEFINITIONS: readonly ProviderClientDefinition[] = 
     label: "OpenCode",
     icon: OpenCodeIcon,
     settingsSchema: OpenCodeSettings,
+  },
+  {
+    value: ProviderDriverKind.make("axiom"),
+    label: "Axiom",
+    icon: ShieldCheckIcon,
+    settingsSchema: AxiomSettings,
   },
 ];
 
