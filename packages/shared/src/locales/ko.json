@@ -1,6 +1,7 @@
 {
   "Accept Intel OutOfDate for this NEAR provider until AxiomCLI restarts. All other verification checks remain required.": "AxiomCLI가 다시 시작될 때까지 이 NEAR 제공자의 Intel OutOfDate 상태를 허용합니다. 그 밖의 모든 검증 요건은 계속 적용됩니다.",
   "Accept outdated TEE": "오래된 TEE 허용",
+  "Allow web search for this message.": "이 메시지에 웹 검색을 허용합니다.",
   "Attestation check failed": "실행 환경 증명 검증 실패",
   "Attestation needs review": "실행 환경 증명 검토 필요",
   "Attestation not verified": "실행 환경 증명 미검증",
@@ -101,6 +102,7 @@
   "Some fields were omitted from this diagnostic copy.": "이 진단용 사본에서는 일부 필드가 생략되었습니다.",
   "Time not recorded": "시각 미기록",
   "Truncated": "잘림",
+  "Web search": "웹 검색",
   "{count, plural, one {Provider error} other {Provider errors}} · {count}": "{count, plural, one {제공자 오류} other {제공자 오류}} · {count}",
   "About context-window overrides": "컨텍스트 창 재정의 정보",
   "About the default context window": "기본 컨텍스트 창 정보",

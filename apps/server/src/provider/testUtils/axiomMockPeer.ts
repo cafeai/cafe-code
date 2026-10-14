@@ -32,7 +32,9 @@ let thinking = "medium";
 let mode = "confirm";
 let turn = 0;
 let lastNativeTurn = "";
-let pending: { id: string | number; prompt: string; nativeTurn: string } | undefined;
+let pending:
+  | { id: string | number; prompt: string; nativeTurn: string; webEnabled: boolean }
+  | undefined;
 let questionId: number | undefined;
 let approvalId: number | undefined;
 const write = (value: unknown) => process.stdout.write(`${JSON.stringify(value)}\n`);
@@ -306,7 +308,7 @@ createInterface({ input: process.stdin }).on("line", (line) => {
       if (
         desktop &&
         (params._meta?.axiom?.agentRevision !== agent.revision ||
-          params._meta?.axiom?.webEnabled !== false)
+          typeof params._meta?.axiom?.webEnabled !== "boolean")
       ) {
         reject(id, "Prompt requires exact Agent revision and web consent");
         break;
@@ -316,7 +318,7 @@ createInterface({ input: process.stdin }).on("line", (line) => {
       turn++;
       const nativeTurn = randomUUID();
       lastNativeTurn = nativeTurn;
-      pending = { id, prompt, nativeTurn };
+      pending = { id, prompt, nativeTurn, webEnabled: params._meta?.axiom?.webEnabled === true };
       activity({ kind: "active_turn_changed", turnId: nativeTurn });
       notify("session/update", {
         sessionId,
@@ -411,7 +413,10 @@ createInterface({ input: process.stdin }).on("line", (line) => {
       }
       break;
     case "_axiom/turn/steer":
-      if (desktop && (params.agentRevision !== agent.revision || params.webEnabled !== false)) {
+      if (
+        desktop &&
+        (params.agentRevision !== agent.revision || params.webEnabled !== pending?.webEnabled)
+      ) {
         reject(id, "Steering requires exact Agent revision and web consent");
         break;
       }

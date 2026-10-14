@@ -72,8 +72,14 @@ contract is available; integer microUSD is displayed without decimal rounding.
   bounded native-to-Cafe turn associations for explicit native history reads.
   Wrong-account resume fails before loading history. Desktop v2 cursors additionally
   retain the exact native working-directory spelling and Agent revision for load.
-- Desktop prompts explicitly set `webEnabled: false`, which the native desktop
-  frontend enforces per message. A browsing toggle is not implemented.
+- Web search is a globe toggle inside the composer, immediately to the right of
+  the thinking control. It starts off and applies to the current message only.
+  Sending or queueing clears the next draft's consent; account changes also clear
+  it. Unsubmitted consent is not a sticky account preference and is not restored
+  after reload. Queue entries retain their exact setting through editing, claims
+  and reload. Native prompts receive explicit `webEnabled` plus Agent revision.
+  A steer must match the active turn's web setting; changed consent is queued for
+  the next turn. This toggle does not stop web work already admitted by a turn.
 - Native steering binds the exact active turn and stable message correlation;
   steering is text-only and limited to 64 KiB. Manual compaction uses the native
   extension and requires idle work.
@@ -131,6 +137,7 @@ or TLS binding failures and other verification failures are not overridable.
 
 Inference encryption does not encrypt Cafe's or Axiom's local conversation
 databases, workspace files, clipboard/exports or external tool traffic.
+Enabled web searches use external tools; their queries are outside inference encryption.
 
 ## Protocol provenance and qualification
 

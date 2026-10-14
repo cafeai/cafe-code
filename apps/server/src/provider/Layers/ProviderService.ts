@@ -2461,6 +2461,11 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
         ...(input.modelSelection?.model ? { "provider.model": input.modelSelection.model } : {}),
       });
       const hasImages = input.attachments.some((attachment) => attachment.type === "image");
+      if (input.axiomWebEnabled === true && routed.adapter.provider !== "axiom")
+        return yield* toValidationError(
+          "ProviderService.sendTurn",
+          "Web consent belongs to the selected Axiom provider.",
+        );
       const inspectLiveSession =
         hasImages ||
         input.expectedSubagentPolicySession !== undefined ||
@@ -2550,6 +2555,9 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
             );
           const turn = yield* routed.adapter.steerTurn({
             threadId: input.threadId,
+            ...(input.axiomWebEnabled !== undefined
+              ? { axiomWebEnabled: input.axiomWebEnabled }
+              : {}),
             ...(input.expectedSubagentPolicySession !== undefined
               ? { expectedSubagentPolicySession: input.expectedSubagentPolicySession }
               : {}),
@@ -2753,6 +2761,11 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
           input.deliveryPriority === undefined && input.expectedSubagentPolicySession === undefined,
       });
       metricProvider = routed.adapter.provider;
+      if (input.axiomWebEnabled === true && routed.adapter.provider !== "axiom")
+        return yield* toValidationError(
+          "ProviderService.steerTurn",
+          "Web consent belongs to the selected Axiom provider.",
+        );
       if (input.expectedSubagentPolicySession !== undefined) {
         yield* assertSubagentPolicyContinuation({
           operation: "ProviderService.steerTurn",

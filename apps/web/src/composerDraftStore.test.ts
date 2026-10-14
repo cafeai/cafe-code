@@ -171,6 +171,50 @@ describe("composer file and queue edit durability", () => {
   };
   beforeEach(resetComposerDraftStore);
 
+  it("keeps web consent in the current message and account without making it sticky", () => {
+    const store = useComposerDraftStore.getState();
+    const account = ProviderInstanceId.make("axiom-personal");
+    store.setModelSelection(ref, createModelSelection(account, "native-model"));
+    store.setAxiomWebEnabled(ref, true, account);
+    expect(store.getComposerDraft(ref)?.axiomWebEnabled).toBe(true);
+    const other = scopeThreadRef(TEST_ENVIRONMENT_ID, ThreadId.make("other-web-draft"));
+    store.applyStickyState(other);
+    expect(store.getComposerDraft(other)?.axiomWebEnabled).not.toBe(true);
+    store.clearComposerContent(ref);
+    expect(store.getComposerDraft(ref)?.axiomWebEnabled).not.toBe(true);
+    store.setAxiomWebEnabled(ref, true, account);
+    store.setModelSelection(
+      ref,
+      createModelSelection(account, "native-model", [{ id: "thinkingLevel", value: "high" }]),
+    );
+    expect(store.getComposerDraft(ref)?.axiomWebEnabled).toBe(true);
+    store.setModelSelection(
+      ref,
+      createModelSelection(ProviderInstanceId.make("axiom-work"), "native-model"),
+    );
+    expect(store.getComposerDraft(ref)?.axiomWebEnabled).not.toBe(true);
+  });
+
+  it("edits queued web consent independently and restores the original draft", () => {
+    const store = useComposerDraftStore.getState();
+    store.setPrompt(ref, "Original draft");
+    expect(
+      store.beginQueueEdit(ref, "web-queue", {
+        ...edit,
+        modelSelection: createModelSelection(
+          ProviderInstanceId.make("axiom-personal"),
+          "native-model",
+        ),
+        axiomWebEnabled: true,
+      }),
+    ).toBe(true);
+    expect(store.getComposerDraft(ref)?.axiomWebEnabled).toBe(true);
+    store.setAxiomWebEnabled(ref, false);
+    store.finishQueueEdit(ref);
+    expect(store.getComposerDraft(ref)?.prompt).toBe("Original draft");
+    expect(store.getComposerDraft(ref)?.axiomWebEnabled).not.toBe(true);
+  });
+
   it("retains file-only drafts and never overwrites a newer file-only draft on rejection", () => {
     const store = useComposerDraftStore.getState();
     store.setFiles(ref, [file]);

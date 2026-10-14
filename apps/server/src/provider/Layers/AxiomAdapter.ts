@@ -34,6 +34,7 @@ import { readStoredFileAttachment } from "../../fileAttachmentStore.ts";
 import { resolveAttachmentPath } from "../../attachmentStore.ts";
 import {
   ProviderAdapterSessionNotFoundError,
+  ProviderAdapterRequestError,
   ProviderAdapterValidationError,
   type ProviderAdapterError,
 } from "../Errors.ts";
@@ -210,6 +211,7 @@ interface SessionContext {
   identity: AxiomSessionIdentity;
   nativeCwd: string;
   agentRevision: number;
+  webEnabled: boolean;
   models: readonly AxiomModel[];
   sequence: number;
   nativeTurn: string | undefined;
@@ -1058,6 +1060,7 @@ export const makeAxiomAdapter = Effect.fn("makeAxiomAdapter")(function* (
             identity,
             nativeCwd: desktopAgent.workingDirectory,
             agentRevision: desktopAgent.revision,
+            webEnabled: false,
             nativeId: started.sessionId,
             models: modelList.models,
             sequence: 0,
@@ -1382,6 +1385,8 @@ export const makeAxiomAdapter = Effect.fn("makeAxiomAdapter")(function* (
           ctx.agentRevision = agent.revision;
           ctx.nativeCwd = agent.workingDirectory;
           ctx.session = { ...ctx.session, resumeCursor: resumeCursor(ctx) };
+          const webEnabled = input.axiomWebEnabled === true;
+          ctx.webEnabled = webEnabled;
           const turn = TurnId.make(randomUUID());
           ctx.cancelRequested = false;
           ctx.completion = yield* Deferred.make<void>();
@@ -1440,7 +1445,7 @@ export const makeAxiomAdapter = Effect.fn("makeAxiomAdapter")(function* (
                   axiom: {
                     clientItemId,
                     attachments,
-                    webEnabled: false,
+                    webEnabled,
                     agentRevision: ctx.agentRevision,
                   },
                 },
@@ -1484,6 +1489,12 @@ export const makeAxiomAdapter = Effect.fn("makeAxiomAdapter")(function* (
             "steerTurn",
             "The exact active Axiom turn and text guidance are required.",
           );
+        if ((input.axiomWebEnabled === true) !== ctx.webEnabled)
+          return yield* new ProviderAdapterRequestError({
+            provider: PROVIDER,
+            method: "_axiom/turn/steer",
+            detail: "Axiom web consent changed; deliver as a new turn.",
+          });
         const turn = ctx.turn;
         const nativeTurn = ctx.nativeTurn;
         const clientItemId = createHash("sha256")
@@ -1498,7 +1509,7 @@ export const makeAxiomAdapter = Effect.fn("makeAxiomAdapter")(function* (
               expectedTurnId: nativeTurn,
               clientItemId,
               text: input.input,
-              webEnabled: false,
+              webEnabled: ctx.webEnabled,
               agentRevision: ctx.agentRevision,
             })
             .pipe(Effect.flatMap((value) => decodeAxiom(SteerResult, value))),

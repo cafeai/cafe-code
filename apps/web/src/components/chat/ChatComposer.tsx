@@ -85,6 +85,7 @@ import { CompactComposerControlsMenu } from "./CompactComposerControlsMenu";
 import { NativeCodexReview } from "./NativeCodexReview";
 import { ClaudeDeliveryPriorityPicker } from "./ClaudeDeliveryPriorityPicker";
 import { AxiomSecurityControl } from "./AxiomSecurityControl";
+import { AxiomWebSearchControl } from "./AxiomWebSearchControl";
 import { ComposerTab } from "./ComposerTab";
 import { useUiStateStore } from "../../uiStateStore";
 import { ComposerAttachImageButton } from "./ComposerAttachImageButton";
@@ -376,6 +377,7 @@ export interface ChatComposerHandle {
     subagentLimits?: SubagentLimits;
     codexContextWindowOverride?: number | null;
     deliveryPriority?: ProviderDeliveryPriority;
+    axiomWebEnabled?: boolean;
   };
 }
 
@@ -3507,6 +3509,13 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
         selectedProvider,
         selectedModel,
         selectedProviderModels,
+        ...(selectedProvider === "axiom"
+          ? {
+              axiomWebEnabled:
+                useComposerDraftStore.getState().getComposerDraft(composerDraftTarget)
+                  ?.axiomWebEnabled === true,
+            }
+          : {}),
         ...(desiredSubagentLimits !== undefined ? { subagentLimits: desiredSubagentLimits } : {}),
         // Existing chats consume current durable intent on every send. Only a
         // first local bootstrap carries the unsent draft's optional override.
@@ -4375,6 +4384,23 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                   onRuntimeModeChange={handleRuntimeModeChange}
                   onOpenGoal={onOpenGoalDialog}
                 />
+                {selectedProvider === "axiom" ? (
+                  <AxiomWebSearchControl
+                    enabled={composerDraft.axiomWebEnabled === true}
+                    disabled={
+                      pendingUserInputs.length > 0 ||
+                      isConnecting ||
+                      environmentUnavailable !== null ||
+                      isSendBusy
+                    }
+                    compact={isComposerFooterCompact}
+                    onChange={(enabled) =>
+                      useComposerDraftStore
+                        .getState()
+                        .setAxiomWebEnabled(composerDraftTarget, enabled, selectedInstanceId)
+                    }
+                  />
+                ) : null}
               </div>
 
               {/* Keep task progress outside the horizontally scrolling provider

@@ -1,6 +1,7 @@
 {
   "Accept Intel OutOfDate for this NEAR provider until AxiomCLI restarts. All other verification checks remain required.": "AxiomCLI が再起動するまで、この NEAR プロバイダーの Intel OutOfDate 状態を許可します。その他の検証要件は引き続き適用されます。",
   "Accept outdated TEE": "古い TEE を許可",
+  "Allow web search for this message.": "このメッセージでウェブ検索を許可します。",
   "Attestation check failed": "アテステーションの検証に失敗",
   "Attestation needs review": "アテステーションの確認が必要",
   "Attestation not verified": "アテステーションは未検証",
@@ -101,6 +102,7 @@
   "Some fields were omitted from this diagnostic copy.": "この診断用コピーでは一部のフィールドが省略されています。",
   "Time not recorded": "日時未記録",
   "Truncated": "切り詰め",
+  "Web search": "ウェブ検索",
   "{count, plural, one {Provider error} other {Provider errors}} · {count}": "{count, plural, one {プロバイダーのエラー} other {プロバイダーのエラー}} · {count}",
   "About context-window overrides": "コンテキストウィンドウの上書き設定について",
   "About the default context window": "既定のコンテキストウィンドウについて",

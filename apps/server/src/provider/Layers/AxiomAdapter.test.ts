@@ -122,6 +122,57 @@ const setup = setupWith();
 
 describe("Axiom scoped ACP adapter", () => {
   it.effect(
+    "sends explicit message web consent and only steers with the active turn's setting",
+    () =>
+      Effect.gen(function* () {
+        const { adapter, events, active, complete } = yield* setup;
+        const turn = yield* adapter.sendTurn({
+          threadId,
+          input: "hold configuration fixture",
+          axiomWebEnabled: true,
+        });
+        yield* Deferred.await(active);
+        const delta = events.find((event) => event.type === "content.delta");
+        if (delta?.type !== "content.delta")
+          return yield* Effect.die("Missing native consent observation");
+        expect(JSON.parse(delta.payload.delta)).toMatchObject({
+          webEnabled: true,
+          agentRevision: 1,
+        });
+        const changed = yield* adapter
+          .steerTurn({
+            threadId,
+            expectedTurnId: turn.turnId,
+            input: "Changed consent",
+            axiomWebEnabled: false,
+          })
+          .pipe(Effect.result);
+        expect(changed._tag).toBe("Failure");
+        const steered = yield* adapter.steerTurn({
+          threadId,
+          expectedTurnId: turn.turnId,
+          input: "Keep current consent",
+          axiomWebEnabled: true,
+        });
+        expect(steered.turnId).toBe(turn.turnId);
+        yield* adapter.interruptTurn(threadId, turn.turnId);
+        yield* Deferred.await(complete);
+        const nextContent = yield* Deferred.make<ProviderRuntimeEvent>();
+        yield* Stream.runForEach(adapter.streamEvents, (event) =>
+          event.type === "content.delta" ? Deferred.succeed(nextContent, event) : Effect.void,
+        ).pipe(Effect.forkScoped({ startImmediately: true }));
+        const next = yield* adapter.sendTurn({ threadId, input: "hold configuration fixture" });
+        const nextDelta = yield* Deferred.await(nextContent);
+        if (nextDelta.type !== "content.delta")
+          return yield* Effect.die("Missing next native consent observation");
+        expect(JSON.parse(nextDelta.payload.delta)).toMatchObject({
+          webEnabled: false,
+          agentRevision: 1,
+        });
+        yield* adapter.interruptTurn(threadId, next.turnId);
+      }).pipe(Effect.provide(layer), Effect.scoped),
+  );
+  it.effect(
     "binds a desktop Agent to Cafe's project and retains its revision on unchanged turns",
     () =>
       Effect.gen(function* () {

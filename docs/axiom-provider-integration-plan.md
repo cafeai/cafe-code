@@ -52,7 +52,9 @@ Negotiate additional capabilities only when Cafe implements their full contract.
      and full access to Agent permissions; disable Agent for plan mode. Validate
      the returned thread/workspace/revision before admitting tools or prompts.
    - Preserve session grants on unchanged configuration. Bind every prompt and
-     steer to its approved Agent revision and explicit `webEnabled: false`.
+     steer to its approved Agent revision and explicit message web consent (off
+     by default). Place the Web search toggle inside the composer after thinking;
+     retain message consent in queued/editable input and clear the next draft.
    - Store desktop v2 resume identities with native cwd and Agent revision. No
      existing CLI chats require migration; helpers explicitly retain CLI/None.
    - Implement create/load, effective model/thinking/mode selection, streamed

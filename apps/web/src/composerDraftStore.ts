@@ -114,6 +114,7 @@ const PersistedComposerThreadDraftState = Schema.Struct({
   attachments: Schema.Array(PersistedComposerImageAttachment),
   files: Schema.optionalKey(Schema.Array(PersistedComposerFileAttachment)),
   queueEditingItemId: Schema.optionalKey(Schema.String),
+  axiomWebEnabled: Schema.optionalKey(Schema.Boolean),
   // Keyed by `ProviderInstanceId` (open branded slug) so custom provider
   // instances (e.g. `codex_personal`) round-trip alongside the built-in
   // `codex` / `claudeAgent` / ... entries. Every prior `ProviderDriverKind`
@@ -232,6 +233,8 @@ const PersistedComposerDraftStoreStorage = Schema.Struct({
  */
 export interface ComposerThreadDraftState {
   prompt: string;
+  /** Message consent, never a sticky provider preference. */
+  axiomWebEnabled?: boolean | undefined;
   images: ComposerImageAttachment[];
   files: ComposerFileAttachment[];
   queueEditingItemId?: string;
@@ -420,6 +423,11 @@ interface ComposerDraftStoreState {
   clearDraftThread: (threadRef: ComposerThreadTarget) => void;
   setStickyModelSelection: (modelSelection: ModelSelection | null | undefined) => void;
   setPrompt: (threadRef: ComposerThreadTarget, prompt: string) => void;
+  setAxiomWebEnabled: (
+    threadRef: ComposerThreadTarget,
+    enabled: boolean,
+    instanceId?: ProviderInstanceId,
+  ) => void;
   setModelSelection: (
     threadRef: ComposerThreadTarget,
     modelSelection: ModelSelection | null | undefined,
@@ -486,6 +494,7 @@ interface ComposerDraftStoreState {
       modelSelection: ModelSelection;
       runtimeMode: RuntimeMode;
       interactionMode: ProviderInteractionMode;
+      axiomWebEnabled?: boolean;
     },
   ) => boolean;
   finishQueueEdit: (threadRef: ComposerThreadTarget, retainImages?: boolean) => void;
@@ -505,6 +514,8 @@ interface ComposerDraftStoreState {
       prompt: string;
       images: ComposerImageAttachment[];
       files?: ComposerFileAttachment[];
+      axiomWebEnabled?: boolean;
+      axiomWebInstanceId?: ProviderInstanceId;
     },
   ) => boolean;
   clearComposerContent: (threadRef: ComposerThreadTarget) => void;
@@ -718,7 +729,8 @@ function shouldRemoveDraft(draft: ComposerThreadDraftState): boolean {
     draft.runtimeMode === null &&
     draft.interactionMode === null &&
     draft.subagentLimits === undefined &&
-    draft.codexContextWindowOverride === undefined
+    draft.codexContextWindowOverride === undefined &&
+    draft.axiomWebEnabled !== true
   );
 }
 
@@ -1713,6 +1725,9 @@ function normalizePersistedDraftsByThreadId(
       ...(typeof draftCandidate.queueEditingItemId === "string"
         ? { queueEditingItemId: draftCandidate.queueEditingItemId }
         : {}),
+      ...(draftCandidate.queueEditingItemId && typeof draftCandidate.axiomWebEnabled === "boolean"
+        ? { axiomWebEnabled: draftCandidate.axiomWebEnabled }
+        : {}),
       ...(hasModelData
         ? {
             modelSelectionByProvider: compactModelSelectionByProvider(modelSelectionByProvider),
@@ -1810,6 +1825,9 @@ function partializeComposerDraftStoreState(
       attachments: draft.persistedAttachments,
       files: draft.files.map(persistComposerFile),
       ...(draft.queueEditingItemId ? { queueEditingItemId: draft.queueEditingItemId } : {}),
+      ...(draft.queueEditingItemId && draft.axiomWebEnabled !== undefined
+        ? { axiomWebEnabled: draft.axiomWebEnabled }
+        : {}),
       ...(hasModelData
         ? {
             modelSelectionByProvider: compactModelSelectionByProvider(
@@ -2047,6 +2065,9 @@ function toHydratedThreadDraft(
     }),
     ...(persistedDraft.queueEditingItemId
       ? { queueEditingItemId: persistedDraft.queueEditingItemId }
+      : {}),
+    ...(persistedDraft.queueEditingItemId && persistedDraft.axiomWebEnabled !== undefined
+      ? { axiomWebEnabled: persistedDraft.axiomWebEnabled }
       : {}),
     nonPersistedImageIds: [],
     persistedAttachments: [...persistedDraft.attachments],
@@ -2531,6 +2552,24 @@ const composerDraftStore = create<ComposerDraftStoreState>()(
             return { draftsByThreadKey: nextDraftsByThreadKey };
           });
         },
+        setAxiomWebEnabled: (threadRef, enabled, instanceId) => {
+          const threadKey = resolveComposerDraftKey(get(), threadRef);
+          if (!threadKey) return;
+          set((state) => {
+            const current = state.draftsByThreadKey[threadKey] ?? createEmptyThreadDraft();
+            if ((current.axiomWebEnabled === true) === enabled) return state;
+            return {
+              draftsByThreadKey: {
+                ...state.draftsByThreadKey,
+                [threadKey]: {
+                  ...current,
+                  axiomWebEnabled: enabled,
+                  ...(instanceId ? { activeProvider: instanceId } : {}),
+                },
+              },
+            };
+          });
+        },
         setPrompt: (threadRef, prompt) => {
           const threadKey = resolveComposerDraftKey(get(), threadRef) ?? "";
           if (threadKey.length === 0) {
@@ -2589,6 +2628,7 @@ const composerDraftStore = create<ComposerDraftStoreState>()(
               ...base,
               modelSelectionByProvider: nextMap,
               activeProvider: nextActiveProvider,
+              ...(nextActiveProvider !== base.activeProvider ? { axiomWebEnabled: undefined } : {}),
             };
             const nextDraftsByThreadKey = { ...state.draftsByThreadKey };
             if (shouldRemoveDraft(nextDraft)) {
@@ -2901,6 +2941,7 @@ const composerDraftStore = create<ComposerDraftStoreState>()(
                 [threadKey]: {
                   ...existing,
                   prompt: content.prompt,
+                  axiomWebEnabled: content.axiomWebEnabled,
                   images: content.images,
                   files: content.files,
                   persistedAttachments: [],
@@ -3080,7 +3121,8 @@ const composerDraftStore = create<ComposerDraftStoreState>()(
               existing.images.length > 0 ||
               existing.files.length > 0 ||
               existing.nonPersistedImageIds.length > 0 ||
-              existing.persistedAttachments.length > 0
+              existing.persistedAttachments.length > 0 ||
+              existing.axiomWebEnabled === true
             ) {
               return state;
             }
@@ -3094,6 +3136,10 @@ const composerDraftStore = create<ComposerDraftStoreState>()(
                   prompt: content.prompt,
                   images: [...content.images],
                   files: [...(content.files ?? [])],
+                  axiomWebEnabled:
+                    content.axiomWebInstanceId === existing.activeProvider
+                      ? content.axiomWebEnabled
+                      : undefined,
                 },
               },
             };
@@ -3113,6 +3159,7 @@ const composerDraftStore = create<ComposerDraftStoreState>()(
             const nextDraft: ComposerThreadDraftState = {
               ...current,
               prompt: "",
+              axiomWebEnabled: undefined,
               images: [],
               files: [],
               nonPersistedImageIds: [],
