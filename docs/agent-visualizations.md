@@ -125,6 +125,16 @@ The logical texture allowance is not physical driver/RSS accounting. Pointer
 input is coalesced, reduced motion is static, and context loss/unsupported formats
 keep a readable fallback. There is no cumulative frame-count freeze.
 
+The eight lifetime physical-size admissions bound framebuffer replacement, not
+animation lifetime. After they are spent, later valid layout changes reuse the
+last completely allocated drawing buffer and solver targets. Only the decorative
+bitmap scales with its CSS box; foreground chart layout and controls remain
+natural. No new targets, allowance reset or entrance warm-up is purchased.
+Reuse requires the exact admitted physical dimensions and complete bounded
+resource accounting. Invalid geometry, replaced buffers, partial allocation,
+context loss and actual teardown still refuse or dispose. Hidden decoration
+pauses, and reduced-motion output stays static without new work after the cap.
+
 ## Quiet controls and explicit inspection
 
 A hover/focus/touch-accessible “…” menu contains Stop/Restart, Expand, Copy/Save

@@ -1,7 +1,7 @@
 # Decision: Subtle supplied fluid with bounded visible motion
 
 Decision status: Accepted current design; implemented
-Last updated: 2026-10-13 22:28:00 JST (UTC+0900)
+Last updated: 2026-10-14 22:13:47 JST (UTC+0900)
 Decision authority: the user explicitly requests direct chat embedding, enables
 visualization MCP only under Full access, asks that earlier feature decisions be
 rewritten to this model, and authorizes pushing this current changeset.
@@ -33,6 +33,31 @@ installation, OS change, provider/profile access or live runtime reset is needed
 Existing owned history remains immutable and no saved poster is deleted.
 
 ## Verification and supersession
+
+### Size-admission exhaustion clarification
+
+The eight lifetime size admissions remain unchanged. A later valid CSS size
+does not grant another allocation and does not end visible animation: retain the
+last complete admitted drawing-buffer/target generation. Its private completion
+dimensions and expected payload are minted only after all eight framebuffers
+succeed and invalidated before target retirement. Both unchanged-size and
+exhausted-budget reuse require those exact dimensions, all solver roles, eight
+textures/framebuffers and the bounded matching payload. Invalid geometry is
+validated before reuse; a replaced or incomplete buffer still fails closed.
+
+This is a resource-exhaustion handling repair within the accepted bounds, not a
+new trust boundary or increased budget. Only decorative CSS sampling can scale
+after exhaustion; authored foreground layout, source and interaction remain
+unchanged. Ordinary motion/pointer/visibility continue on retained targets;
+reduced motion keeps its solved static output without another warm-up or RAF.
+Context loss, removal and partial allocation failure retain exact cleanup.
+
+Native-click regressions retain the original first-seven replacement accounting
+and then prove no more allocation. Separately, real WebGL RGBA observations at the
+same retained canvas/context/dimensions prove continuing pixel motion after
+trusted controls; the GL recorder alone is not that proof. Synthetic Chromium
+pixels do not establish physical GPU memory, the recording's absent live flags,
+hosted platform delivery or current user-app adoption.
 
 The user explicitly replaces the prior feature architecture and requests rewriting
 these public decisions. Private historical evidence remains historical, not a

@@ -10046,6 +10046,18 @@ describe(`ChatView full app (${chatViewBrowserPart})`, () => {
           await waitForServerConfigToApply();
           useUiStateStore.getState().setSessionRailDocked(true);
           await page.getByRole("button", { name: "More composer controls", exact: true }).click();
+          // A completed native click is not the queued popup's render receipt.
+          // Observe this exact menu and its expected entries before the
+          // synchronous ordering read; never replay input to obtain readiness.
+          const controls = page.getByRole("menu");
+          await expect.element(controls).toBeVisible();
+          await expect
+            .element(controls.getByRole("menuitem", { name: "Subagent limit…", exact: true }))
+            .toBeVisible();
+          await expect
+            .element(controls.getByRole("menuitem", { name: "Context window…", exact: true }))
+            .toBeVisible();
+          await expect.element(controls.getByText("Mode", { exact: true })).toBeVisible();
           const labels = page.getByRole("menu").element().textContent!;
           expect(labels.indexOf("Subagent limit…")).toBeLessThan(labels.indexOf("Context window…"));
           expect(labels.indexOf("Context window…")).toBeLessThan(labels.indexOf("Mode"));

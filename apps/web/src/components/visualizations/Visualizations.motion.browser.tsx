@@ -217,11 +217,22 @@ describe("visualization native reduced-motion presentation", () => {
       fixture.dispose();
     }
   });
-  it("retains the eight static size admissions and permanently cleans up the ninth real resize", async () => {
+  it("retains the eighth complete static size without new work and still permanently refuses invalid geometry", async () => {
     expect(matchMedia("(prefers-reduced-motion: reduce)").matches).toBe(true);
     const fixture = await createFluidFixture({ visible: true });
+    let observedSize: readonly [number, number] | undefined;
+    // This observer belongs to the test's native owning document, not the
+    // child's GL ledger or runtime. Actual delivery proves that each later CSS
+    // size was laid out; neither a static counter nor a delay is that witness.
+    const layout = new ResizeObserver((entries) => {
+      for (const entry of entries)
+        if (entry.target === fixture.canvas())
+          observedSize = [entry.contentRect.width, entry.contentRect.height];
+    });
     try {
+      expect(fixture.window.matchMedia("(prefers-reduced-motion: reduce)").matches).toBe(true);
       const canvas = fixture.canvas();
+      const initial = fixture.recorder.summary();
       // Initial layout is admission one. Every pair has a genuinely different
       // physical common-ratio size on the unchanged provider-owned context.
       for (let index = 0; index < 7; index++) {
@@ -240,8 +251,53 @@ describe("visualization native reduced-motion presentation", () => {
         });
       }
       expect(Number(canvas.dataset.cafeFluidFrames)).toBe(96);
-      canvas.style.width = "580px";
-      canvas.style.height = "320px";
+      const retained = fixture.recorder.summary();
+      const retainedSize = [canvas.width, canvas.height];
+      expect(retained.createdTextures - initial.createdTextures).toBe(7 * 8);
+      expect(retained.deletedTextures - initial.deletedTextures).toBe(7 * 8);
+      expect(retained).toMatchObject({
+        textures: 8,
+        framebuffers: 8,
+        programs: 10,
+        shaders: 12,
+        buffers: 2,
+        peakTextures: 8,
+        maxPending: 0,
+        solverClearsAfterDraw: 0,
+      });
+      expect(retained.peakTextureBytes).toBeLessThanOrEqual(16 * 1024 * 1024);
+      layout.observe(canvas);
+      // Admission nine and another twenty-three real layouts keep precisely
+      // the last completed objects and solved static poster. No allocation,
+      // deletion, entrance warm-up, hidden RAF, or quota refill is permitted.
+      for (let index = 0; index < 24; index++) {
+        const width = 580 + index * 40;
+        const height = 320 + index * 20;
+        canvas.style.width = `${width}px`;
+        canvas.style.height = `${height}px`;
+        await expect.poll(() => observedSize).toEqual([width, height]);
+        expect(canvas.getBoundingClientRect().width).toBe(width);
+        expect(canvas.getBoundingClientRect().height).toBe(height);
+        expect(fixture.canvas()).toBe(canvas);
+        expect([canvas.width, canvas.height]).toEqual(retainedSize);
+        expect(canvas.dataset.cafeFluidState).toBe("static");
+        expect(Number(canvas.dataset.cafeFluidFrames)).toBe(96);
+        expect(fixture.recorder.summary()).toEqual(retained);
+        expect(fixture.recorder.pending()).toBe(0);
+      }
+      fixture.visible(false);
+      fixture.visible(true);
+      fixture.window.dispatchEvent(new Event("cafe-presentation-changed"));
+      for (let time = 40; time <= 400_000; time += 40) fixture.recorder.flush(time);
+      expect(canvas.dataset.cafeFluidState).toBe("static");
+      expect(Number(canvas.dataset.cafeFluidFrames)).toBe(96);
+      expect([canvas.width, canvas.height]).toEqual(retainedSize);
+      expect(fixture.recorder.summary()).toEqual(retained);
+      expect(fixture.recorder.pending()).toBe(0);
+      // The retained-size branch must never bypass the original geometry
+      // refusal. A real invalid size still disposes every exact child resource.
+      canvas.style.width = "4097px";
+      await expect.poll(() => observedSize).toEqual([4097, 780]);
       await expect.poll(() => canvas.dataset.cafeFluidState).toBe("unsupported");
       const refused = fixture.recorder.summary();
       expect(refused).toMatchObject({
@@ -269,8 +325,20 @@ describe("visualization native reduced-motion presentation", () => {
       expect(fixture.recorder.summary()).toEqual(refused);
       expect(fixture.recorder.pending()).toBe(0);
     } finally {
+      layout.disconnect();
       fixture.dispose();
     }
+    expect(fixture.recorder.summary()).toMatchObject({
+      textures: 0,
+      framebuffers: 0,
+      programs: 0,
+      shaders: 0,
+      buffers: 0,
+      textureBytes: 0,
+      listeners: 0,
+      resizeObservers: 0,
+      mutationObservers: 0,
+    });
   });
   it("renders finite static fluid and never schedules motion in the native reduced-motion context", async () => {
     expect(matchMedia("(prefers-reduced-motion: reduce)").matches).toBe(true);

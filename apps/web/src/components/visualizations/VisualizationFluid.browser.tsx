@@ -4,9 +4,15 @@ import {
 } from "@cafecode/shared/visualizationFluidRuntime";
 import { afterEach, describe, expect, it } from "vitest";
 import { userEvent } from "vitest/browser";
-import { createFluidFixture, type FluidFixture } from "./visualizationFluid.fixture";
+import {
+  createFluidFixture,
+  createNativeFluidFixture,
+  type FluidFixture,
+  type NativeFluidFixture,
+} from "./visualizationFluid.fixture";
 
 const fixtures: FluidFixture[] = [];
+const nativeFixtures: NativeFluidFixture[] = [];
 async function fixture(options: Parameters<typeof createFluidFixture>[0] = {}) {
   // Native context policy is a precondition, not a request to change the
   // user's preference or bypass the runtime's static accessibility branch.
@@ -23,19 +29,70 @@ async function fixture(options: Parameters<typeof createFluidFixture>[0] = {}) {
   return value;
 }
 
-function frames(value: FluidFixture) {
+function frames(value: Pick<FluidFixture, "canvas">) {
   return Number(value.canvas().dataset.cafeFluidFrames);
 }
 
-/** All GL resource counts and scheduling are recorded in the document-local
- * driver, not inferred from the engine's own counters. These tests qualify
- * lifecycle/accounting, not physical GPU memory, pixels or native retirement. */
+/** The browser provider delivers the click into the child document. Reading
+ * its button geometry is an observation, never a focus/input rewrite. */
+async function clickChart(
+  value: Pick<FluidFixture, "document" | "frame">,
+  choice: "a" | "b" | "same",
+) {
+  const button = value.document.querySelector<HTMLButtonElement>(
+    `[data-fluid-layout="${choice}"]`,
+  )!;
+  const rect = button.getBoundingClientRect();
+  expect(rect.width).toBeGreaterThan(0);
+  expect(rect.height).toBeGreaterThan(0);
+  const previous = Number(value.document.documentElement.dataset.fixtureTrustedClicks ?? "0");
+  await userEvent.click(value.frame, {
+    position: { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 },
+  });
+  expect(value.document.documentElement.dataset.fixtureTrustedClicks).toBe(String(previous + 1));
+  expect(value.document.documentElement.dataset.fixtureChart).toBe(choice);
+}
+
+function physicalSize(value: Pick<FluidFixture, "canvas" | "window">) {
+  const rect = value.canvas().getBoundingClientRect();
+  const scale = Math.min(value.window.devicePixelRatio, 512 / Math.max(rect.width, rect.height));
+  return [
+    Math.max(1, Math.floor(rect.width * scale)),
+    Math.max(1, Math.floor(rect.height * scale)),
+  ];
+}
+
+/** Both samples use native default-framebuffer RGBA bytes at identical retained
+ * dimensions. Frame counters alone cannot establish visible WebGL motion, and
+ * a size-changing hash alone would be a false pixel-animation witness. */
+async function nativePixelDigest(
+  canvas: HTMLCanvasElement,
+  gl: WebGLRenderingContext | WebGL2RenderingContext,
+) {
+  expect(gl.isContextLost()).toBe(false);
+  expect(gl.getError()).toBe(gl.NO_ERROR);
+  expect(canvas.width).toBeGreaterThan(0);
+  expect(canvas.height).toBeGreaterThan(0);
+  expect(Math.max(canvas.width, canvas.height)).toBeLessThanOrEqual(512);
+  const pixels = new Uint8Array(canvas.width * canvas.height * 4);
+  gl.readPixels(0, 0, canvas.width, canvas.height, gl.RGBA, gl.UNSIGNED_BYTE, pixels);
+  expect(gl.getError()).toBe(gl.NO_ERROR);
+  expect(pixels.some((byte, index) => index % 4 !== 3 && byte > 0)).toBe(true);
+  expect(pixels.some((byte, index) => index % 4 === 3 && byte > 0)).toBe(true);
+  const digest = await crypto.subtle.digest("SHA-256", pixels);
+  return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("");
+}
+
+/** Recorder cases independently qualify exact GL ownership and scheduling,
+ * not physical GPU memory or native retirement. The explicitly named native
+ * WebGL control uses an unmocked document and separately samples real pixels. */
 describe("generated fluid decoration lifecycle", () => {
   afterEach(() => {
     for (const value of fixtures.splice(0)) {
       value.dispose();
       expect(value.recorder.summary()).toMatchObject({ resizeObservers: 0, mutationObservers: 0 });
     }
+    for (const value of nativeFixtures.splice(0)) value.dispose();
   });
 
   it("embeds the complete licensed fixed library for generated documents only", () => {
@@ -351,22 +408,372 @@ describe("generated fluid decoration lifecycle", () => {
     expect(resized.buffers).toBe(2);
     expect(resized.peakTextures).toBe(8);
     expect(resized.textureBytes).toBe(4_834_304);
-    // The initial admitted size already consumed one of the finite eight sizes.
-    for (let index = 0; index < 7; index++) {
+    // The initial size plus these seven replacements exhaust the unchanged
+    // allocation cap. Later valid CSS layout retains the last complete target.
+    for (let index = 0; index < 6; index++) {
       value.canvas().style.width = `${170 + index}px`;
       value.recorder.flush(80 + index * 40);
     }
+    const retained = value.recorder.summary();
+    const size = [value.canvas().width, value.canvas().height];
+    expect(retained.createdTextures - initial.createdTextures).toBe(7 * 8);
+    expect(retained.deletedTextures - initial.deletedTextures).toBe(7 * 8);
+    value.canvas().style.width = "176px";
+    value.recorder.flush(320);
+    expect(value.canvas().getBoundingClientRect().width).toBe(176);
+    expect(value.canvas().dataset.cafeFluidState).toBe("running");
+    expect(frames(value)).toBe(20);
+    expect([value.canvas().width, value.canvas().height]).toEqual(size);
+    expect(value.recorder.pending()).toBe(1);
+    expect(value.recorder.summary()).toMatchObject({
+      textures: 8,
+      framebuffers: 8,
+      programs: 10,
+      shaders: 12,
+      buffers: 2,
+      textureBytes: retained.textureBytes,
+      createdTextures: retained.createdTextures,
+      deletedTextures: retained.deletedTextures,
+      textureIds: retained.textureIds,
+      framebufferIds: retained.framebufferIds,
+      peakTextures: 8,
+      solverClearsAfterDraw: 0,
+      maxPending: 1,
+    });
+  });
+
+  it("keeps native chart-button motion alive after eight physical-size admissions", async () => {
+    const value = await fixture({ visible: true, interactiveLayout: true });
+    const canvas = value.canvas();
+    const initial = value.recorder.summary();
+    let retained: ReturnType<FluidFixture["recorder"]["summary"]> | undefined;
+    let retainedSize: readonly [number, number] | undefined;
+    // Boot counts as admission one. A/B toggles consume the other seven; all
+    // later valid layout changes must reuse that last complete solver, rather
+    // than refill the quota or terminate the chart's ordinary animation.
+    for (let index = 0; index < 24; index++) {
+      const choice = index % 2 === 0 ? "b" : "a";
+      await clickChart(value, choice);
+      expect(canvas.getBoundingClientRect().width).toBe(choice === "a" ? 320 : 160);
+      expect(canvas.getBoundingClientRect().height).toBe(160);
+      value.recorder.flush(40 * (index + 1));
+      expect(value.canvas()).toBe(canvas);
+      // Fixed synthetic scalars retain the exact crossed boundary on failure;
+      // no authored source, received exception or user chart state is copied.
+      expect(
+        canvas.dataset.cafeFluidState,
+        JSON.stringify({
+          click: index + 1,
+          trustedClicks: value.document.documentElement.dataset.fixtureTrustedClicks,
+          logicalVisible: value.document.documentElement.dataset.cafeVisible,
+          hidden: value.document.hidden,
+          reducedMotion: value.window.matchMedia("(prefers-reduced-motion: reduce)").matches,
+          width: canvas.getBoundingClientRect().width,
+          height: canvas.getBoundingClientRect().height,
+          bufferWidth: canvas.width,
+          bufferHeight: canvas.height,
+          rejectedWidth: canvas.dataset.cafeFluidRejectedWidth ?? null,
+          rejectedHeight: canvas.dataset.cafeFluidRejectedHeight ?? null,
+          frames: frames(value),
+          textures: value.recorder.summary().textures,
+          pending: value.recorder.pending(),
+        }),
+      ).toBe("running");
+      expect(frames(value)).toBe(13 + index);
+      expect(value.recorder.pending()).toBe(1);
+      const current = value.recorder.summary();
+      expect(current).toMatchObject({
+        textures: 8,
+        framebuffers: 8,
+        programs: 10,
+        shaders: 12,
+        buffers: 2,
+        peakTextures: 8,
+        contextRequests: 1,
+        maxPending: 1,
+        solverClearsAfterDraw: 0,
+      });
+      expect(current.peakTextureBytes).toBeLessThanOrEqual(16 * 1024 * 1024);
+      expect(canvas.width).toBeLessThanOrEqual(512);
+      expect(canvas.height).toBeLessThanOrEqual(512);
+      if (index < 7) {
+        expect(current.createdTextures - initial.createdTextures).toBe(8 * (index + 1));
+        expect(current.deletedTextures - initial.deletedTextures).toBe(8 * (index + 1));
+        const scale = Math.min(
+          value.window.devicePixelRatio,
+          512 / Math.max(choice === "a" ? 320 : 160, 160),
+        );
+        expect(canvas.width).toBe(Math.floor((choice === "a" ? 320 : 160) * scale));
+        expect(canvas.height).toBe(Math.floor(160 * scale));
+        if (index === 6) {
+          retained = current;
+          retainedSize = [canvas.width, canvas.height];
+        }
+      } else {
+        expect(current.createdTextures).toBe(retained!.createdTextures);
+        expect(current.deletedTextures).toBe(retained!.deletedTextures);
+        expect(current.textureBytes).toBe(retained!.textureBytes);
+        expect(current.textureIds).toEqual(retained!.textureIds);
+        expect(current.framebufferIds).toEqual(retained!.framebufferIds);
+        expect([canvas.width, canvas.height]).toEqual(retainedSize);
+      }
+    }
+    expect(value.document.documentElement.dataset.fixtureTrustedClicks).toBe("24");
+  });
+
+  it("coalesces native chart-layout bursts and performs no allocation for unchanged controls", async () => {
+    const value = await fixture({ visible: true, interactiveLayout: true });
+    const initial = value.recorder.summary();
+    for (let index = 0; index < 20; index++) await clickChart(value, "same");
+    expect(value.canvas().getBoundingClientRect().width).toBe(320);
+    expect(frames(value)).toBe(12);
+    value.recorder.flush(40);
+    expect(frames(value)).toBe(13);
+    expect(value.recorder.summary()).toMatchObject({
+      createdTextures: initial.createdTextures,
+      deletedTextures: initial.deletedTextures,
+      textureIds: initial.textureIds,
+      framebufferIds: initial.framebufferIds,
+      solverClearsAfterDraw: 0,
+      maxPending: 1,
+    });
+    for (const choice of ["b", "a", "b", "a", "b"] as const) await clickChart(value, choice);
+    expect(value.canvas().getBoundingClientRect().width).toBe(160);
+    expect(frames(value)).toBe(13);
+    expect(value.recorder.summary().createdTextures).toBe(initial.createdTextures);
+    value.recorder.flush(80);
+    expect(frames(value)).toBe(14);
+    expect([value.canvas().width, value.canvas().height]).toEqual(physicalSize(value));
+    const changed = value.recorder.summary();
+    expect(changed.createdTextures - initial.createdTextures).toBe(8);
+    expect(changed.deletedTextures - initial.deletedTextures).toBe(8);
+    expect(changed).toMatchObject({ peakTextures: 8, maxPending: 1, solverClearsAfterDraw: 0 });
+    // More controls that leave the current physical layout unchanged never
+    // consume admission slots or schedule another simultaneous solver frame.
+    for (let index = 0; index < 20; index++) await clickChart(value, "same");
+    value.recorder.flush(120);
+    expect(frames(value)).toBe(15);
+    expect(value.recorder.summary()).toMatchObject({
+      createdTextures: changed.createdTextures,
+      deletedTextures: changed.deletedTextures,
+      textureIds: changed.textureIds,
+      framebufferIds: changed.framebufferIds,
+      contextRequests: 1,
+      maxPending: 1,
+    });
+    expect(value.document.documentElement.dataset.fixtureTrustedClicks).toBe("45");
+  });
+
+  it.each(["logical", "paint"] as const)(
+    "does no native layout work under the %s mask and adopts only its latest geometry",
+    async (cue) => {
+      const value = await fixture({ visible: true, interactiveLayout: true });
+      const initial = value.recorder.summary();
+      const mask = cue === "logical" ? value.visible : value.presentationVisible;
+      mask(false);
+      for (const choice of ["b", "a", "b", "a", "b"] as const) await clickChart(value, choice);
+      expect(value.canvas().getBoundingClientRect().width).toBe(160);
+      value.recorder.flush(40);
+      expect(frames(value)).toBe(12);
+      expect(value.recorder.pending()).toBe(0);
+      expect(value.recorder.summary()).toMatchObject({
+        draws: initial.draws,
+        createdTextures: initial.createdTextures,
+        deletedTextures: initial.deletedTextures,
+        textureIds: initial.textureIds,
+        framebufferIds: initial.framebufferIds,
+      });
+      mask(true);
+      value.recorder.flush(80);
+      expect(frames(value)).toBe(13);
+      expect(value.canvas().dataset.cafeFluidState).toBe("running");
+      expect([value.canvas().width, value.canvas().height]).toEqual(physicalSize(value));
+      expect(value.recorder.summary()).toMatchObject({
+        createdTextures: initial.createdTextures + 8,
+        deletedTextures: initial.deletedTextures + 8,
+        peakTextures: 8,
+        maxPending: 1,
+        solverClearsAfterDraw: 0,
+      });
+    },
+  );
+
+  it("never revives post-cap invalid geometry through later native chart buttons", async () => {
+    const value = await fixture({ visible: true, interactiveLayout: true });
+    for (let index = 0; index < 7; index++) {
+      await clickChart(value, index % 2 === 0 ? "b" : "a");
+      value.recorder.flush(40 * (index + 1));
+    }
+    const retained = value.recorder.summary();
+    value.document.querySelector<HTMLElement>("[data-fluid-scene]")!.style.width = "4097px";
+    value.recorder.flush(320);
     expect(value.canvas().dataset.cafeFluidState).toBe("unsupported");
-    expect(value.recorder.pending()).toBe(0);
+    expect(value.canvas().dataset.cafeFluidRejectedWidth).toBe("unknown");
     expect(value.recorder.summary()).toMatchObject({
       textures: 0,
       framebuffers: 0,
       programs: 0,
       shaders: 0,
       buffers: 0,
-      textureBytes: 0,
       listeners: 0,
+      resizeObservers: 0,
+      mutationObservers: 0,
+      createdTextures: retained.createdTextures,
+      deletedTextures: retained.deletedTextures + 8,
     });
+    await clickChart(value, "a");
+    value.visible(false);
+    value.visible(true);
+    value.recorder.flush(360);
+    expect(value.canvas().getBoundingClientRect().width).toBe(320);
+    expect(value.canvas().dataset.cafeFluidState).toBe("unsupported");
+    expect(value.recorder.pending()).toBe(0);
+    expect(value.recorder.summary().contextRequests).toBe(1);
+    expect(value.recorder.summary().createdTextures).toBe(retained.createdTextures);
+  });
+
+  it("keeps post-cap cooperative reduced-motion output static through native chart buttons", async () => {
+    const value = await fixture({ visible: true, interactiveLayout: true });
+    // This is the existing document-level cooperative cue, not a replacement
+    // for the independently observed native no-preference context. Native
+    // reduced-motion renderer qualification remains in its separate project.
+    value.document.documentElement.dataset.cafeReducedMotion = "true";
+    value.window.dispatchEvent(new Event("cafe-presentation-changed"));
+    expect(value.window.matchMedia("(prefers-reduced-motion: reduce)").matches).toBe(false);
+    for (let index = 0; index < 7; index++) {
+      await clickChart(value, index % 2 === 0 ? "b" : "a");
+      value.window.dispatchEvent(new Event("cafe-presentation-changed"));
+      expect(frames(value)).toBe(12 * (index + 2));
+      expect(value.recorder.pending()).toBe(0);
+    }
+    const retained = value.recorder.summary();
+    const size = [value.canvas().width, value.canvas().height];
+    for (let index = 0; index < 24; index++) {
+      await clickChart(value, index % 2 === 0 ? "a" : "b");
+      value.window.dispatchEvent(new Event("cafe-presentation-changed"));
+      value.recorder.flush(40 * (index + 1));
+      expect(value.canvas().dataset.cafeFluidState).toBe("static");
+      expect(frames(value)).toBe(96);
+      expect(value.recorder.pending()).toBe(0);
+      expect([value.canvas().width, value.canvas().height]).toEqual(size);
+      expect(value.recorder.summary()).toMatchObject({
+        draws: retained.draws,
+        createdTextures: retained.createdTextures,
+        deletedTextures: retained.deletedTextures,
+        textureIds: retained.textureIds,
+        framebufferIds: retained.framebufferIds,
+        contextRequests: 1,
+        solverClearsAfterDraw: 0,
+      });
+    }
+  });
+
+  it.each(["context-loss", "pagehide"] as const)(
+    "retires retained post-cap resources on %s without revival from native buttons",
+    async (reason) => {
+      const value = await fixture({ visible: true, interactiveLayout: true });
+      const canvas = value.canvas();
+      for (let index = 0; index < 7; index++) {
+        await clickChart(value, index % 2 === 0 ? "b" : "a");
+        value.recorder.flush(40 * (index + 1));
+      }
+      const retained = value.recorder.summary();
+      if (reason === "context-loss") canvas.dispatchEvent(new Event("webglcontextlost"));
+      else value.window.dispatchEvent(new PageTransitionEvent("pagehide", { persisted: false }));
+      expect(canvas.dataset.cafeFluidState).toBe(
+        reason === "context-loss" ? "context-lost" : "disposed",
+      );
+      expect(value.recorder.summary()).toMatchObject({
+        textures: 0,
+        framebuffers: 0,
+        programs: 0,
+        shaders: 0,
+        buffers: 0,
+        textureBytes: 0,
+        listeners: 0,
+        resizeObservers: 0,
+        mutationObservers: 0,
+        createdTextures: retained.createdTextures,
+        deletedTextures: retained.deletedTextures + 8,
+      });
+      await clickChart(value, "a");
+      value.visible(false);
+      value.visible(true);
+      value.window.dispatchEvent(new PageTransitionEvent("pagehide", { persisted: false }));
+      value.recorder.flush(320);
+      expect(canvas.dataset.cafeFluidState).toBe(
+        reason === "context-loss" ? "context-lost" : "disposed",
+      );
+      expect(value.recorder.pending()).toBe(0);
+      expect(value.recorder.summary().contextRequests).toBe(1);
+      expect(value.recorder.summary().createdTextures).toBe(retained.createdTextures);
+      expect(value.recorder.summary().deletedTextures).toBe(retained.deletedTextures + 8);
+    },
+  );
+
+  it("continues actual native WebGL pixels after exhausting size admissions with trusted chart buttons", async () => {
+    expect(window.matchMedia("(prefers-reduced-motion: reduce)").matches).toBe(false);
+    expect(window.matchMedia("(hover: hover)").matches).toBe(true);
+    expect(window.matchMedia("(pointer: fine)").matches).toBe(true);
+    const value = await createNativeFluidFixture();
+    nativeFixtures.push(value);
+    expect(value.window.matchMedia("(prefers-reduced-motion: reduce)").matches).toBe(false);
+    expect(value.window.matchMedia("(hover: hover)").matches).toBe(true);
+    expect(value.window.matchMedia("(pointer: fine)").matches).toBe(true);
+    expect((value.window as Window & { __fluidFixture?: unknown }).__fluidFixture).toBeUndefined();
+    const canvas = value.canvas();
+    // A native unsupported/absent driver is a qualification failure, not an
+    // excuse to use a recorder, skip this host or add permissive native flags.
+    expect(canvas.dataset.cafeFluidState).toBe("running");
+    const gl = canvas.getContext("webgl2") ?? canvas.getContext("webgl");
+    expect(gl).not.toBeNull();
+    expect(gl!.getParameter(gl!.VERSION)).toMatch(/^WebGL/);
+    await expect.poll(() => frames(value)).toBeGreaterThan(12);
+    for (let index = 0; index < 7; index++) {
+      const before = frames(value);
+      const choice = index % 2 === 0 ? "b" : "a";
+      await clickChart(value, choice);
+      expect(canvas.getBoundingClientRect().width).toBe(choice === "a" ? 320 : 160);
+      expect(canvas.getBoundingClientRect().height).toBe(160);
+      await expect.poll(() => [canvas.width, canvas.height]).toEqual(physicalSize(value));
+      await expect.poll(() => frames(value)).toBeGreaterThan(before);
+      expect(canvas.dataset.cafeFluidState).toBe("running");
+    }
+    const size = [canvas.width, canvas.height];
+    const beforeFrames = frames(value);
+    const beforePixels = await nativePixelDigest(canvas, gl!);
+    for (let index = 0; index < 24; index++) {
+      const before = frames(value);
+      const choice = index % 2 === 0 ? "a" : "b";
+      await clickChart(value, choice);
+      expect(canvas.getBoundingClientRect().width).toBe(choice === "a" ? 320 : 160);
+      await expect.poll(() => frames(value)).toBeGreaterThan(before);
+      expect(value.canvas()).toBe(canvas);
+      expect(canvas.getContext("webgl2") ?? canvas.getContext("webgl")).toBe(gl);
+      expect([canvas.width, canvas.height]).toEqual(size);
+      expect(canvas.dataset.cafeFluidState).toBe("running");
+      expect(canvas.dataset.cafeFluidTextures).toBe("8");
+      expect(canvas.dataset.cafeFluidPrograms).toBe("10");
+      expect(canvas.dataset.cafeFluidBuffers).toBe("2");
+      expect(canvas.dataset.cafeFluidRaf).toBe("true");
+      expect(Number(canvas.dataset.cafeFluidTextureBytes)).toBeLessThanOrEqual(16 * 1024 * 1024);
+    }
+    const afterPixels = await nativePixelDigest(canvas, gl!);
+    expect(frames(value)).toBeGreaterThanOrEqual(beforeFrames + 24);
+    expect(afterPixels).not.toBe(beforePixels);
+    expect(value.document.documentElement.dataset.fixtureTrustedClicks).toBe("31");
+    value.visible(false);
+    const paused = frames(value);
+    const pausedPixels = await nativePixelDigest(canvas, gl!);
+    await clickChart(value, "a");
+    expect(canvas.dataset.cafeFluidState).toBe("paused");
+    expect(canvas.dataset.cafeFluidRaf).toBe("false");
+    expect(frames(value)).toBe(paused);
+    expect(await nativePixelDigest(canvas, gl!)).toBe(pausedPixels);
+    expect([canvas.width, canvas.height]).toEqual(size);
+    value.visible(true);
+    await expect.poll(() => frames(value)).toBeGreaterThan(paused + 2);
+    expect(await nativePixelDigest(canvas, gl!)).not.toBe(pausedPixels);
   });
 
   it("bounds extreme aspect ratios and refuses invalid size before context allocation", async () => {

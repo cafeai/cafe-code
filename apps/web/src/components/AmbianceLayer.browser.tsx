@@ -1,6 +1,7 @@
 import "../index.css";
 
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { page, userEvent } from "vitest/browser";
 import { render } from "vitest-browser-react";
 
 const ambianceHarness = vi.hoisted(() => {
@@ -84,6 +85,7 @@ function selectEffect(effect: string) {
 
 afterEach(() => {
   ambianceHarness.settings.ambianceEffect = "rain";
+  ambianceHarness.settings.continueBackgroundAnimations = true;
   ambianceHarness.notify();
   document.documentElement.style.removeProperty("--cafe-ambiance-state-color");
   document.documentElement.style.removeProperty("--cafe-ambiance-composer-ring");
@@ -126,6 +128,199 @@ describe("AmbianceLayer", () => {
       );
     } finally {
       await screen.unmount();
+      host.remove();
+    }
+  });
+
+  it("keeps the original visible ambiance painting through 24 native child-frame clicks", async () => {
+    const host = document.createElement("div");
+    const parentControl = document.createElement("button");
+    const canvasHost = document.createElement("div");
+    parentControl.type = "button";
+    parentControl.textContent = "Native parent focus control";
+    const frame = document.createElement("iframe");
+    frame.title = "Native child focus fixture";
+    frame.style.cssText = "display:block;width:360px;height:100px;border:0";
+    // This fixture contains no chart store, provider, saved profile or network
+    // resource. Its ordinary same-origin srcdoc matches the focus boundary of
+    // an inline visualization without granting any production action authority.
+    const loaded = new Promise<void>((resolve) => {
+      frame.addEventListener("load", () => resolve(), { once: true });
+    });
+    frame.srcdoc = `<!doctype html><html><head><meta charset="utf-8"></head><body data-native-ambiance-child="true"><button id="native-child-control" type="button">Change range</button><output id="native-child-clicks">0</output><script>
+      const button = document.getElementById('native-child-control');
+      const output = document.getElementById('native-child-clicks');
+      let clicks = 0;
+      button.addEventListener('click', event => {
+        if (!event.isTrusted) return;
+        output.value = String(++clicks);
+        document.documentElement.dataset.nativeTrustedClicks = String(clicks);
+      });
+      document.documentElement.dataset.nativeControlReady = 'true';
+    </script></body></html>`;
+    host.append(parentControl, frame, canvasHost);
+    document.body.append(host);
+    try {
+      await loaded;
+      const childDocument = frame.contentDocument;
+      const childWindow = frame.contentWindow;
+      const childControl = childDocument?.querySelector<HTMLButtonElement>("#native-child-control");
+      expect(childDocument?.readyState).toBe("complete");
+      expect(childDocument?.body.dataset.nativeAmbianceChild).toBe("true");
+      expect(childDocument?.documentElement.dataset.nativeControlReady).toBe("true");
+      if (
+        !childDocument ||
+        !childWindow ||
+        !childControl ||
+        childControl.ownerDocument !== childDocument ||
+        childControl.localName !== "button"
+      ) {
+        throw new Error("Native child focus fixture did not complete");
+      }
+      const nativeChildControl = page
+        .frameLocator(page.elementLocator(frame))
+        .getByRole("button", { name: "Change range", exact: true });
+
+      ambianceHarness.settings.ambianceEffect = "lattice";
+      ambianceHarness.settings.continueBackgroundAnimations = false;
+      ambianceHarness.notify();
+      // This spy forwards the original synchronous native clearRect unchanged.
+      // Count only completed calls on the exact ambiance canvas, and separately
+      // verify actual painted pixels. Invocation alone is not a paint oracle.
+      const clears = vi.spyOn(CanvasRenderingContext2D.prototype, "clearRect");
+      let canvas: HTMLCanvasElement | null = null;
+      const completedFrames = (): number =>
+        clears.mock.contexts.reduce<number>(
+          (count, context, index) =>
+            count +
+            Number(
+              context instanceof CanvasRenderingContext2D &&
+                context.canvas === canvas &&
+                clears.mock.results[index]?.type === "return",
+            ),
+          0,
+        );
+      const painted = () => {
+        if (!canvas) return false;
+        const context = canvas.getContext("2d");
+        if (!context) return false;
+        const pixels = context.getImageData(0, 0, canvas.width, canvas.height).data;
+        for (let offset = 3; offset < pixels.length; offset += 4) {
+          if (pixels[offset]! > 0) return true;
+        }
+        return false;
+      };
+      const chronology: {
+        phase: string;
+        trusted: boolean;
+        focused: boolean;
+        childFocused: boolean;
+        hidden: boolean;
+        activeFrame: boolean;
+        activeChild: boolean;
+        frames: number;
+      }[] = [];
+      const observe = (phase: string, event: Event) => {
+        if (chronology.length >= 64) return;
+        chronology.push({
+          phase,
+          trusted: event.isTrusted,
+          focused: document.hasFocus(),
+          childFocused: childDocument.hasFocus(),
+          hidden: document.hidden,
+          activeFrame: document.activeElement === frame,
+          activeChild: childDocument.activeElement === childControl,
+          frames: completedFrames(),
+        });
+      };
+      const observationOwners: readonly [EventTarget, string, string][] = [
+        [window, "blur", "parent-window-blur"],
+        [window, "focus", "parent-window-focus"],
+        [document, "focusin", "parent-document-focusin"],
+        [document, "visibilitychange", "parent-visibility"],
+        [childWindow, "blur", "child-window-blur"],
+        [childWindow, "focus", "child-window-focus"],
+        [childDocument, "focusin", "child-document-focusin"],
+      ];
+      const removeObservers = observationOwners.map(([target, type, phase]) => {
+        const listener = (event: Event) => observe(phase, event);
+        target.addEventListener(type, listener);
+        return () => target.removeEventListener(type, listener);
+      });
+      let screen: Awaited<ReturnType<typeof render>> | undefined;
+      try {
+        // Initial ownership is established by real input, not element.focus(),
+        // a hasFocus stub or synthetic focus/blur delivery.
+        await userEvent.click(parentControl);
+        await expect.poll(() => document.activeElement).toBe(parentControl);
+        expect(document.hasFocus()).toBe(true);
+        expect(document.hidden).toBe(false);
+        screen = await render(<AmbianceLayer />, { container: canvasHost });
+        canvas = host.querySelector<HTMLCanvasElement>('[data-cafe-ambiance-canvas="true"]');
+        expect(canvas).toBeInstanceOf(HTMLCanvasElement);
+        expect(canvas?.dataset.cafeAmbianceEffect).toBe("lattice");
+        expect(canvas?.dataset.cafeAmbianceBackend).toBe("2d");
+        await expect.poll(completedFrames).toBeGreaterThan(1);
+        expect(painted()).toBe(true);
+        const before = completedFrames();
+        const checkpoints: { click: number; focused: boolean; hidden: boolean; frames: number }[] =
+          [];
+        for (let index = 0; index < 24; index += 1) {
+          await userEvent.click(nativeChildControl);
+          await expect
+            .poll(() => childDocument.documentElement.dataset.nativeTrustedClicks)
+            .toBe(String(index + 1));
+          // Observe native frame delivery; this does not schedule engine work,
+          // simulate a clock or treat waiting itself as proof of painted motion.
+          await new Promise<void>((resolve) => {
+            requestAnimationFrame(() => requestAnimationFrame(() => resolve()));
+          });
+          checkpoints.push({
+            click: index + 1,
+            focused: document.hasFocus(),
+            hidden: document.hidden,
+            frames: completedFrames(),
+          });
+        }
+        expect(document.hasFocus()).toBe(true);
+        expect(document.hidden).toBe(false);
+        expect(document.activeElement).toBe(frame);
+        expect(childDocument.activeElement).toBe(childControl);
+        expect(frame.contentDocument).toBe(childDocument);
+        expect(host.querySelector('[data-cafe-ambiance-canvas="true"]')).toBe(canvas);
+        expect(childDocument.documentElement.dataset.nativeTrustedClicks).toBe("24");
+        expect(painted()).toBe(true);
+        const after = completedFrames();
+        // Keep the original-source failure's evidence fixed, bounded and
+        // content-free: no received HTML, pixels, paths or user/profile data.
+        if (
+          after <= before ||
+          checkpoints.some(
+            (checkpoint, index) =>
+              checkpoint.frames <= (index === 0 ? before : checkpoints[index - 1]!.frames),
+          )
+        ) {
+          throw new Error(
+            `Native child focus stalled visible ambiance: ${JSON.stringify({
+              before,
+              after,
+              reducedMotion: matchMedia("(prefers-reduced-motion: reduce)").matches,
+              chronology,
+              checkpoints,
+            })}`,
+          );
+        }
+      } finally {
+        for (const remove of removeObservers) remove();
+        try {
+          await screen?.unmount();
+        } finally {
+          // The native call-through recorder belongs only to this fixture;
+          // later files must not accumulate its canvas calls or retain owners.
+          clears.mockRestore();
+        }
+      }
+    } finally {
       host.remove();
     }
   });

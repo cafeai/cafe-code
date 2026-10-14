@@ -402,14 +402,18 @@ function replaceOnce(source: string, before: string, after: string) {
   return source.replace(before, after);
 }
 
+const fluidSourcePath = resolve(repoRoot, "apps/web", fluidFile);
+const fluidSource = readFileSync(fluidSourcePath, "utf8");
+
 /** Count the real finite Vitest registrations without evaluating test bodies.
- * The existing five-opacity and two-width tables must remain complete; a skip,
- * dynamic registration or a smaller table is not ordinary-motion coverage. */
-function assertCompleteFluidCases() {
-  const path = resolve(repoRoot, "apps/web", fluidFile);
-  const source = readFileSync(path, "utf8");
+ * Bind all four reviewed tables, including the two literal, const-asserted
+ * lifecycle cues. A skip, dynamic registration, repeated/substituted table or
+ * smaller inventory cannot stand in for the complete ordinary-motion file. */
+function assertCompleteFluidCases(source = fluidSource) {
+  const path = fluidSourcePath;
   const file = ts.createSourceFile(path, source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
   let cases = 0;
+  const tables: (readonly (string | number)[])[] = [];
   function visit(node: ts.Node) {
     if (
       ts.isPropertyAccessExpression(node) &&
@@ -434,22 +438,43 @@ function assertCompleteFluidCases() {
         ) {
           assert.equal(table.expression.name.text, "each");
           assert.equal(table.arguments.length, 1, "one finite fluid table");
-          const values = table.arguments[0];
+          let values = table.arguments[0];
+          if (values && ts.isAsExpression(values)) {
+            assert.equal(values.type.getText(file), "const", "only a literal const assertion");
+            values = values.expression;
+          }
           assert(values && ts.isArrayLiteralExpression(values), "literal fluid case table");
-          assert(values.elements.every(ts.isNumericLiteral), "existing finite numeric fluid table");
-          const numbers = values.elements.map((value) => Number(value.getText(file)));
+          const entries = values.elements.map((value) => {
+            assert(
+              ts.isNumericLiteral(value) || ts.isStringLiteral(value),
+              "finite numeric or string fluid case",
+            );
+            return ts.isNumericLiteral(value) ? Number(value.text) : value.text;
+          });
           assert(
-            numbers.every(Number.isFinite) && new Set(numbers).size === numbers.length,
+            entries.every((value) => typeof value === "string" || Number.isFinite(value)) &&
+              new Set(entries).size === entries.length,
             "unique finite fluid cases",
           );
-          cases += numbers.length;
+          tables.push(entries);
+          cases += entries.length;
         }
       }
     }
     ts.forEachChild(node, visit);
   }
   visit(file);
-  assert.equal(cases, 25, "complete ordinary-motion fluid lifecycle coverage");
+  assert.deepEqual(
+    tables,
+    [
+      [1, 0.8, 0.15, 0.05, 0],
+      ["logical", "paint"],
+      ["context-loss", "pagehide"],
+      [1601, 4096],
+    ],
+    "exact complete fluid tables in registration order",
+  );
+  assert.equal(cases, 34, "complete ordinary-motion fluid lifecycle coverage");
 }
 
 function record(value: unknown): value is Readonly<Record<string, unknown>> {
@@ -485,6 +510,33 @@ describe("native browser project input and motion ownership", () => {
         files,
       ),
     ).toThrow(/exactly one project owner/);
+  });
+
+  it("refuses skipped, omitted, dynamic or substituted fluid registrations", () => {
+    const mutations: readonly (readonly [string, string])[] = [
+      ["it.each([1, 0.8, 0.15, 0.05, 0])", "it.each([1, 0.8, 0.15, 0.05])"],
+      ['it.each(["logical", "paint"] as const)', 'it.each(["logical"] as const)'],
+      ['it.each(["context-loss", "pagehide"] as const)', 'it.each(["logical", "paint"] as const)'],
+      ['it.each(["logical", "paint"] as const)', "it.each(getFluidCues())"],
+      ['it.each(["logical", "paint"] as const)', 'it.each(["logical", "paint"] as string[])'],
+      ['it.each(["logical", "paint"] as const)', 'it.skip.each(["logical", "paint"] as const)'],
+      ["it.each([1601, 4096])", "it.only.each([1601, 4096])"],
+    ];
+    for (const [before, after] of mutations) {
+      expect(
+        () => assertCompleteFluidCases(replaceOnce(fluidSource, before, after)),
+        before,
+      ).toThrow();
+    }
+    // Even unchanged table tuples cannot hide the omission of an ordinary
+    // single-case registration. Never evaluate a test body to obtain coverage.
+    const ordinary = /\bit\("/g;
+    const match = ordinary.exec(fluidSource);
+    assert(match, "actual ordinary fluid registration required");
+    const omitted =
+      fluidSource.slice(0, match.index) +
+      fluidSource.slice(match.index).replace(/^it\(/, "unregistered(");
+    expect(() => assertCompleteFluidCases(omitted)).toThrow(/complete ordinary-motion/);
   });
 
   it("refuses interpreted policy, inherited root selectors and local worker or deadline overrides", () => {

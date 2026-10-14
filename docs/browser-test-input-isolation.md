@@ -84,9 +84,22 @@ complete lifecycle file exactly once, the existing native-host selectors,
 sequential groups, worker caps, deadlines, recorder assertions and independent
 reduced-motion tests. Do not repair inherited media by mocking it, forcing CSS,
 issuing raw CDP resets on a reused worker page, changing OS preferences or
-altering the production static branch. This qualifies synthetic lifecycle and
-input accounting, not physical GPU pixels/memory or live user preferences;
-native hosted delivery remains required after local checks.
+altering the production static branch. Recorder cases qualify synthetic lifecycle
+and input accounting, not physical GPU pixels/memory or live user preferences.
+The finite registration guard binds all four reviewed opacity/width/lifecycle
+tables and the complete expanded case count, without evaluating fixture bodies;
+its negative controls reject omissions, substitutions, skips and dynamic tables.
+The separate native WebGL positive keeps GL, RAF and media unmocked, observes each
+of the first seven size replacements and compares nonempty RGBA SHA-256 samples
+after the eight-admission cap at identical canvas/context/buffer dimensions.
+Trusted further controls must retain motion, while pause retains exact pixels
+and resumption changes them. This qualifies that browser's real pixel behavior,
+not hardware memory, live Electron adoption or another host's graphics driver.
+The separate app-wide ambiance iframe-focus fixture keeps its existing engine
+and background-animation setting. Its native control is in the ordinary desktop
+group; it grants no special motion policy or relaxed input/deadline. Its passing
+baseline is not evidence of the recording's original stopping cause. Native
+hosted delivery remains required after local checks.
 
 ## Native-host Mermaid security scheduling
 
@@ -150,6 +163,11 @@ shrink. Hook-only owner/remount tests and the synthetic full-app Desk review
 fixture are distinct from that physical-scroll proof.
 
 Base UI queues initial item focus and Home/End navigation focus asynchronously.
+A completed native click is not itself proof of popup rendering. Full-app composer
+ordering fixtures observe the actual popup and each expected item/label before
+synchronously reading their order; they retain one click and all later metadata
+ACK, account, omission and send assertions. An absent popup snapshot alone does
+not establish its original opening or dismissal timing.
 A visible menu or listbox is not yet proof that it owns native keyboard input.
 Keyboard fixtures must observe actual initial item focus before sending popup
 navigation, then observe the exact navigation target's focus before activation

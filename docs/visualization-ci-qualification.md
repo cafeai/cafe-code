@@ -2,7 +2,7 @@
 
 Status: Qualification procedure for the current Full-access browser path
 Created: 2026-10-13 18:22:30 JST (UTC+0900)
-Last updated: 2026-10-13 23:38:27 JST (UTC+0900)
+Last updated: 2026-10-14 22:13:47 JST (UTC+0900)
 
 The current feature executes ordinary same-origin browser frames, not a separate
 native source host. CI selects real browser input/layout/lifecycle/App protocol
@@ -68,6 +68,20 @@ descriptor limits and OFL notice. Fluid checks preserve the actual supplied
 solver, allocation/resource identity, static/reduced-motion/context-loss handling,
 pointer progress and exact cleanup. Actual glyph ink bounds must remain uniformly
 scaled, not merely an SVG advance or family-name assertion.
+
+Fluid control qualification uses trusted native chart buttons and measured
+physical size changes. Initial plus seven admitted replacements retain exact
+deletion-before-allocation, eight targets, the payload/physical-side limits and
+one bounded RAF. Further valid changes keep the last complete targets without
+allocation or warm-up, while geometry and physical-buffer tampering still refuse.
+The ordinary-motion file also executes the real fixed WebGL helper without a
+GL/RAF/media recorder: both nonempty RGBA samples have identical retained
+canvas/context/dimensions and different SHA-256 digests after native input and
+actual frame progress. Pause keeps pixels stable and resumption changes them.
+That positive is separate from recorder accounting and physical-memory claims.
+An isolated app-wide lattice/iframe focus check retains the background-animation
+preference and original engine, without treating that separate passing layer as
+proof of the recording's original cause.
 
 Linux retains the complete browser suite. Windows/macOS use the existing focused
 subset plus current history/owner/App/capture fixtures, with original worker caps,

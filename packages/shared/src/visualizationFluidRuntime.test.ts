@@ -19,6 +19,7 @@ function fixture(
     presentationVisible?: "true" | "false";
     counterLimit?: number;
     authoredOpacity?: string;
+    initialBufferSize?: readonly [number, number];
     width?: number;
     height?: number;
   } = {},
@@ -149,8 +150,8 @@ function fixture(
   class Canvas {
     dataset: Record<string, string> = {};
     style: Record<string, string> = {};
-    width = 300;
-    height = 150;
+    width = options.initialBufferSize?.[0] ?? 300;
+    height = options.initialBufferSize?.[1] ?? 150;
     isConnected = true;
     parentNode = {};
     rect = {
@@ -751,7 +752,7 @@ describe("fixed generated fluid library", () => {
     expect(value.canvas.height).toBe(160);
     expect(value.rafs.size).toBe(0);
   });
-  it("retains the eight-size static cap and retires every exact resource on a ninth size", () => {
+  it("retains the eighth complete static size without allocation or warm-up on later valid layout", () => {
     const value = fixture();
     value.document.documentElement.dataset.cafeVisible = "true";
     value.document.documentElement.dataset.cafeReducedMotion = "true";
@@ -769,15 +770,255 @@ describe("fixed generated fluid library", () => {
       expect(value.owned.textures.size).toBe(8);
       expect(value.rafs.size).toBe(0);
     }
-    value.canvas.rect.width += 1;
+    const retained = Object.fromEntries(
+      Object.entries(value.owned).map(([kind, resources]) => [kind, [...resources]]),
+    );
+    const allocations = value.allocations.length;
+    const draws = value.draws();
+    const clears = value.cleared.length;
+    const size = [value.canvas.width, value.canvas.height];
+    for (let index = 0; index < 24; index++) {
+      value.canvas.rect.width = 400 + index;
+      value.canvas.rect.height = 200 + index;
+      value.fire(value.window, "cafe-presentation-changed");
+      value.observers[0]!();
+      expect(value.canvas.dataset.cafeFluidState).toBe("static");
+      expect(value.canvas.dataset.cafeFluidFrames).toBe("96");
+      expect([value.canvas.width, value.canvas.height]).toEqual(size);
+      expect(value.allocations).toHaveLength(allocations);
+      expect(value.draws()).toBe(draws);
+      expect(value.cleared).toHaveLength(clears);
+      expect(value.rafs.size).toBe(0);
+      for (const [kind, resources] of Object.entries(value.owned))
+        expect([...resources]).toEqual(retained[kind]);
+    }
+    expect(value.peakTextures()).toBe(8);
+    expect(value.contextCalls()).toBe(1);
+    expect(value.observers).toHaveLength(2);
+    expect(value.liveListeners()).toBeGreaterThan(0);
+    // Refusal still validates layout before the retained-size branch, and a
+    // terminal failure never reopens simply because a later size is valid.
+    value.canvas.rect.width = 4097;
     value.fire(value.window, "cafe-presentation-changed");
     expect(value.canvas.dataset.cafeFluidState).toBe("unsupported");
-    expect(value.canvas.dataset.cafeFluidFrames).toBe("96");
-    expect(value.peakTextures()).toBe(8);
+    value.canvas.rect.width = 320;
+    value.fire(value.window, "cafe-presentation-changed");
     for (const set of Object.values(value.owned)) expect(set.size).toBe(0);
     expect(value.rafs.size).toBe(0);
     expect(value.observers).toHaveLength(0);
     expect(value.liveListeners()).toBe(0);
+  });
+  it("continues ordinary frames on the eighth complete allocation without resetting its lifetime quota", () => {
+    const value = fixture();
+    value.document.documentElement.dataset.cafeVisible = "true";
+    value.fire(value.window, "cafe-visibility-changed");
+    for (let index = 0; index < 7; index++) {
+      value.canvas.rect.width = index % 2 === 0 ? 160 : 320;
+      value.canvas.rect.height = 160;
+      value.tick();
+    }
+    const retained = Object.fromEntries(
+      Object.entries(value.owned).map(([kind, resources]) => [kind, [...resources]]),
+    );
+    const allocations = value.allocations.length;
+    const targetClears = value.cleared.filter((target) => target !== null).length;
+    const size = [value.canvas.width, value.canvas.height];
+    for (let index = 0; index < 32; index++) {
+      value.canvas.rect.width = index % 2 === 0 ? 320 : 160;
+      value.tick();
+      expect(value.canvas.dataset.cafeFluidState).toBe("running");
+      expect(value.canvas.dataset.cafeFluidFrames).toBe(String(20 + index));
+      expect([value.canvas.width, value.canvas.height]).toEqual(size);
+      expect(value.allocations).toHaveLength(allocations);
+      expect(value.cleared.filter((target) => target !== null)).toHaveLength(targetClears);
+      expect(value.rafs.size).toBe(1);
+      for (const [kind, resources] of Object.entries(value.owned))
+        expect([...resources]).toEqual(retained[kind]);
+    }
+    expect(value.peakTextures()).toBe(8);
+    expect(Number(value.canvas.dataset.cafeFluidTextureBytes)).toBeLessThanOrEqual(
+      16 * 1024 * 1024,
+    );
+    // Logical and paint masks never refill admissions, clear the solver, or
+    // allocate while paused; restoring either resumes the same retained owner.
+    for (const cue of ["cafeVisible", "cafePresentationVisible"] as const) {
+      const event =
+        cue === "cafeVisible" ? "cafe-visibility-changed" : "cafe-presentation-visibility-changed";
+      value.document.documentElement.dataset[cue] = "false";
+      value.fire(value.window, event);
+      const pausedFrames = value.canvas.dataset.cafeFluidFrames;
+      value.canvas.rect.width = 400;
+      value.observers[0]!();
+      value.tick();
+      expect(value.canvas.dataset.cafeFluidFrames).toBe(pausedFrames);
+      expect(value.allocations).toHaveLength(allocations);
+      expect(value.rafs.size).toBe(0);
+      value.document.documentElement.dataset[cue] = "true";
+      value.fire(value.window, event);
+      value.tick();
+      expect(value.canvas.dataset.cafeFluidState).toBe("running");
+      expect(value.allocations).toHaveLength(allocations);
+      expect([value.canvas.width, value.canvas.height]).toEqual(size);
+    }
+    value.document.documentElement.dataset.cafeReducedMotion = "true";
+    value.fire(value.window, "cafe-presentation-changed");
+    const staticFrames = value.canvas.dataset.cafeFluidFrames;
+    const staticDraws = value.draws();
+    for (let index = 0; index < 20; index++) {
+      value.canvas.rect.width = 350 + index;
+      value.observers[0]!();
+      value.fire(value.window, "cafe-presentation-changed");
+      value.tick();
+    }
+    expect(value.canvas.dataset.cafeFluidState).toBe("static");
+    expect(value.canvas.dataset.cafeFluidFrames).toBe(staticFrames);
+    expect(value.draws()).toBe(staticDraws);
+    expect(value.allocations).toHaveLength(allocations);
+    expect(value.rafs.size).toBe(0);
+    value.fire(value.window, "pagehide");
+    value.fire(value.window, "pagehide");
+    for (const set of Object.values(value.owned)) expect(set.size).toBe(0);
+    expect(value.liveListeners()).toBe(0);
+    expect(value.observers).toHaveLength(0);
+    expect(value.rafs.size).toBe(0);
+  });
+  it.each([
+    ["width", 0],
+    ["width", 4097],
+    ["height", 0],
+    ["height", 2001],
+    ["width", Number.NaN],
+    ["height", Number.POSITIVE_INFINITY],
+  ] as const)(
+    "still refuses invalid %s=%s after exhausting all size admissions",
+    (axis, invalid) => {
+      const value = fixture();
+      value.document.documentElement.dataset.cafeVisible = "true";
+      value.fire(value.window, "cafe-visibility-changed");
+      for (let index = 1; index <= 7; index++) {
+        value.canvas.rect.width = 320 + index;
+        value.tick();
+      }
+      const allocations = value.allocations.length;
+      value.canvas.rect[axis] = invalid;
+      value.tick();
+      expect(value.canvas.dataset.cafeFluidState).toBe("unsupported");
+      expect(value.allocations).toHaveLength(allocations);
+      for (const resources of Object.values(value.owned)) expect(resources.size).toBe(0);
+      value.canvas.rect[axis] = 160;
+      value.fire(value.window, "cafe-visibility-changed");
+      value.tick();
+      expect(value.contextCalls()).toBe(1);
+      expect(value.rafs.size).toBe(0);
+      expect(value.liveListeners()).toBe(0);
+      expect(value.observers).toHaveLength(0);
+    },
+  );
+  it.each(["width", "height"] as const)(
+    "refuses an externally replaced retained drawing-buffer %s without purchasing new resources",
+    (axis) => {
+      const value = fixture();
+      value.document.documentElement.dataset.cafeVisible = "true";
+      value.fire(value.window, "cafe-visibility-changed");
+      for (let index = 1; index <= 7; index++) {
+        value.canvas.rect.width = 320 + index;
+        value.tick();
+      }
+      const allocations = value.allocations.length;
+      value.canvas[axis] += 1;
+      value.canvas.rect.width = 400;
+      value.tick();
+      expect(value.canvas.dataset.cafeFluidState).toBe("unsupported");
+      expect(value.allocations).toHaveLength(allocations);
+      for (const resources of Object.values(value.owned)) expect(resources.size).toBe(0);
+      expect(value.rafs.size).toBe(0);
+      expect(value.liveListeners()).toBe(0);
+      expect(value.observers).toHaveLength(0);
+    },
+  );
+  it("refuses a post-cap external buffer that exactly matches a new desired valid layout", () => {
+    const value = fixture();
+    value.document.documentElement.dataset.cafeVisible = "true";
+    value.fire(value.window, "cafe-visibility-changed");
+    for (let index = 1; index <= 7; index++) {
+      value.canvas.rect.width = 320 + index;
+      value.tick();
+    }
+    const allocations = value.allocations.length;
+    const frames = value.canvas.dataset.cafeFluidFrames;
+    const draws = value.draws();
+    // Setting native canvas dimensions clears its drawing buffer. Equality to
+    // today's desired layout is not proof that the old complete solver owns it.
+    value.canvas.rect.width = value.canvas.width = 400;
+    value.canvas.rect.height = value.canvas.height = 200;
+    value.tick();
+    expect(value.canvas.dataset.cafeFluidState).toBe("unsupported");
+    expect(value.canvas.dataset.cafeFluidFrames).toBe(frames);
+    expect(value.draws()).toBe(draws);
+    expect(value.allocations).toHaveLength(allocations);
+    for (const resources of Object.values(value.owned)) expect(resources.size).toBe(0);
+    value.fire(value.window, "cafe-presentation-changed");
+    value.fire(value.window, "cafe-visibility-changed");
+    value.tick();
+    expect(value.allocations).toHaveLength(allocations);
+    expect(value.contextCalls()).toBe(1);
+    expect(value.rafs.size).toBe(0);
+    expect(value.liveListeners()).toBe(0);
+    expect(value.observers).toHaveLength(0);
+  });
+  it("rebuilds an externally changed pre-cap buffer even when it matches desired geometry", () => {
+    const value = fixture();
+    value.document.documentElement.dataset.cafeVisible = "true";
+    value.fire(value.window, "cafe-visibility-changed");
+    const targets = new Set(value.owned.textures);
+    const allocations = value.allocations.length;
+    value.canvas.rect.width = value.canvas.width = 400;
+    value.canvas.rect.height = value.canvas.height = 200;
+    value.tick();
+    expect(value.canvas.dataset.cafeFluidState).toBe("running");
+    expect(value.canvas.dataset.cafeFluidFrames).toBe("13");
+    expect(value.allocations).toHaveLength(allocations + 8);
+    expect([...targets].some((target) => value.owned.textures.has(target))).toBe(false);
+    expect(value.owned.textures.size).toBe(8);
+    expect(value.owned.framebuffers.size).toBe(8);
+    expect(value.peakTextures()).toBe(8);
+    // That recovery uses one existing slot, not a second bootstrap or a refill.
+    for (let index = 1; index <= 6; index++) {
+      value.canvas.rect.width = 400 + index;
+      value.tick();
+    }
+    expect(value.allocations).toHaveLength(allocations + 7 * 8);
+    const retained = [...value.owned.textures];
+    value.canvas.rect.width = 407;
+    value.tick();
+    expect(value.canvas.dataset.cafeFluidState).toBe("running");
+    expect(value.allocations).toHaveLength(allocations + 7 * 8);
+    expect([...value.owned.textures]).toEqual(retained);
+  });
+  it("admits a healthy initial buffer equal to desired geometry only after allocating its complete solver", () => {
+    const value = fixture({ initialBufferSize: [320, 180] });
+    expect(value.canvas.width).toBe(320);
+    expect(value.canvas.height).toBe(180);
+    expect(value.contextCalls()).toBe(1);
+    expect(value.owned.textures.size).toBe(8);
+    expect(value.owned.framebuffers.size).toBe(8);
+    expect(value.owned.programs.size).toBe(10);
+    expect(value.owned.buffers.size).toBe(2);
+    expect(value.canvas.dataset.cafeFluidFrames).toBe("12");
+    const allocations = value.allocations.length;
+    value.document.documentElement.dataset.cafeVisible = "true";
+    value.fire(value.window, "cafe-visibility-changed");
+    for (let index = 1; index <= 7; index++) {
+      value.canvas.rect.width = 320 + index;
+      value.tick();
+    }
+    expect(value.allocations).toHaveLength(allocations + 7 * 8);
+    const retained = [...value.owned.textures];
+    value.canvas.rect.width = 328;
+    value.tick();
+    expect(value.canvas.dataset.cafeFluidState).toBe("running");
+    expect(value.allocations).toHaveLength(allocations + 7 * 8);
+    expect([...value.owned.textures]).toEqual(retained);
   });
   it("keeps a late visible static resize bounded without imposing a lifetime cutoff", () => {
     const value = fixture();

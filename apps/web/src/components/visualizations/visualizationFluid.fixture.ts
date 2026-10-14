@@ -2,7 +2,8 @@ import { VISUALIZATION_FLUID_RUNTIME_SOURCE } from "@cafecode/shared/visualizati
 
 /** This recorder belongs only to the synthetic document below. It does not
  * replace the runner's media, device, context or real browser input policy.
- * Native pixels/driver resources are qualified separately by Electron tests. */
+ * Native pixels are qualified separately by the unmocked browser control and
+ * explicit Electron tests; this ledger does not measure physical GPU memory. */
 export interface FluidFixtureRecorder {
   flush(time: number): number;
   pending(): number;
@@ -26,6 +27,9 @@ export interface FluidFixtureRecorder {
     peakObservers: number;
     maxPending: number;
     contextRequests: number;
+    /** Exact recorder-owned identities, not driver addresses or GPU memory. */
+    textureIds: readonly number[];
+    framebufferIds: readonly number[];
     textureSizes: readonly (readonly [number, number])[];
     shaderSources: readonly string[];
   };
@@ -40,6 +44,16 @@ export interface FluidFixture {
   visible(value: boolean): void;
   presentationVisible(value: boolean): void;
   dispose(): void;
+}
+
+/** Actual WebGL document: no recorder replaces GL, RAF, media or observers. */
+export type NativeFluidFixture = Omit<FluidFixture, "recorder">;
+
+function interactiveChartMarkup(markers: string, width: number, height: number): string {
+  // Native input changes the same ordinary flow that chart view/filter buttons
+  // change. Property handlers deliberately stay outside the runtime's listener
+  // ledger, and only trusted native clicks can mint this fixture's observation.
+  return `<div><button type="button" data-fluid-layout="a">Chart A</button><button type="button" data-fluid-layout="b">Chart B</button><button type="button" data-fluid-layout="same">Same chart</button></div><div data-fluid-scene style="width:${width}px;height:${height}px">${markers}</div><script>(()=>{let clicks=0;const scene=document.querySelector('[data-fluid-scene]');for(const button of document.querySelectorAll('[data-fluid-layout]'))button.onclick=event=>{if(!event.isTrusted)return;const choice=button.dataset.fluidLayout;if(choice!=='same'){scene.style.width=choice==='a'?'320px':'160px';scene.style.height='160px';}document.documentElement.dataset.fixtureTrustedClicks=String(++clicks);document.documentElement.dataset.fixtureChart=choice;};})();</script>`;
 }
 
 // Deterministic scheduling proves finite work and exact resource replacement
@@ -166,7 +180,8 @@ const RECORDER_SOURCE = String.raw`(() => {
       shaders: shaders.size, buffers: buffers.size, textureBytes: bytes(), peakTextureBytes,
       peakTextures, createdTextures, deletedTextures, draws, solverClearsAfterDraw, listeners: listeners.length,
       resizeObservers: resizeObservers.size, mutationObservers: mutationObservers.size, peakObservers,
-      maxPending, contextRequests, textureSizes: textureSizes.slice(), shaderSources: shaderSources.slice()
+      maxPending, contextRequests, textureSizes: textureSizes.slice(), shaderSources: shaderSources.slice(),
+      textureIds: [...textures.keys()].map(value => value.id), framebufferIds: [...framebuffers].map(value => value.id)
     }; }
   };
 })();`;
@@ -184,11 +199,14 @@ export async function createFluidFixture(
     width?: number;
     height?: number;
     authoredOpacity?: number;
+    /** Fixed chart controls change ordinary DOM layout through native clicks. */
+    interactiveLayout?: boolean;
   } = {},
 ): Promise<FluidFixture> {
   const frame = document.createElement("iframe");
   frame.style.width = "400px";
   frame.style.height = "240px";
+  if (options.interactiveLayout) frame.style.height = "300px";
   frame.title = "Isolated fluid runtime fixture";
   const ready = new Promise<void>((resolve) =>
     frame.addEventListener("load", () => resolve(), { once: true }),
@@ -199,13 +217,17 @@ export async function createFluidFixture(
   const markers = Array.from(
     { length: markerCount },
     () =>
-      `<canvas data-cafe-fluid style="width:${width}px;height:${height}px;opacity:${options.authoredOpacity ?? 1}!important"></canvas>`,
+      `<canvas data-cafe-fluid style="width:${options.interactiveLayout ? "100%" : `${width}px`};height:${options.interactiveLayout ? "100%" : `${height}px`};${options.interactiveLayout ? "display:block;" : ""}opacity:${options.authoredOpacity ?? 1}!important"></canvas>`,
   ).join("");
+  // This fixed helper has no provider input or scheduling API.
+  const controls = options.interactiveLayout
+    ? interactiveChartMarkup(markers, width, height)
+    : markers;
   const presentationVisible =
     options.presentationVisible === undefined
       ? ""
       : ` data-cafe-presentation-visible="${options.presentationVisible}"`;
-  frame.srcdoc = `<!doctype html><html data-cafe-visible="${options.visible === true}"${presentationVisible} data-fixture-no-webgl="${options.noWebgl === true}" data-fixture-no-formats="${options.noFormats === true}" data-fixture-fail-second-buffer="${options.failSecondBuffer === true}"><head><meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'none'"><script>${RECORDER_SOURCE}</script><script>${VISUALIZATION_FLUID_RUNTIME_SOURCE}</script></head><body>${markers}<p>Readable chart labels remain ordinary DOM.</p></body></html>`;
+  frame.srcdoc = `<!doctype html><html data-cafe-visible="${options.visible === true}"${presentationVisible} data-fixture-no-webgl="${options.noWebgl === true}" data-fixture-no-formats="${options.noFormats === true}" data-fixture-fail-second-buffer="${options.failSecondBuffer === true}"><head><meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'none'"><script>${RECORDER_SOURCE}</script><script>${VISUALIZATION_FLUID_RUNTIME_SOURCE}</script></head><body>${controls}<p>Readable chart labels remain ordinary DOM.</p></body></html>`;
   document.body.append(frame);
   await ready;
   const fixtureWindow = frame.contentWindow!;
@@ -217,6 +239,43 @@ export async function createFluidFixture(
     window: fixtureWindow,
     document: fixtureDocument,
     recorder,
+    canvas: () => fixtureDocument.querySelector<HTMLCanvasElement>("canvas")!,
+    visible(value) {
+      fixtureDocument.documentElement.dataset.cafeVisible = String(value);
+      fixtureWindow.dispatchEvent(new Event("cafe-visibility-changed"));
+    },
+    presentationVisible(value) {
+      fixtureDocument.documentElement.dataset.cafePresentationVisible = String(value);
+      fixtureWindow.dispatchEvent(new Event("cafe-presentation-visibility-changed"));
+    },
+    dispose() {
+      fixtureWindow.dispatchEvent(new PageTransitionEvent("pagehide", { persisted: false }));
+      frame.remove();
+    },
+  };
+}
+
+/** Fixed synthetic chart only; actual browser GL/RAF/media remain untouched.
+ * The real-pixel positive must fail visibly if this native driver is unavailable
+ * rather than silently substituting the resource recorder or skipping a host. */
+export async function createNativeFluidFixture(): Promise<NativeFluidFixture> {
+  const frame = document.createElement("iframe");
+  frame.style.width = "400px";
+  frame.style.height = "300px";
+  frame.title = "Native WebGL fluid runtime fixture";
+  const ready = new Promise<void>((resolve) =>
+    frame.addEventListener("load", () => resolve(), { once: true }),
+  );
+  const marker = '<canvas data-cafe-fluid style="width:100%;height:100%;display:block"></canvas>';
+  frame.srcdoc = `<!doctype html><html data-cafe-visible="true"><head><meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'none'"><script>${VISUALIZATION_FLUID_RUNTIME_SOURCE}</script></head><body>${interactiveChartMarkup(marker, 320, 160)}<p>Native pixels belong only to this fixed synthetic chart.</p></body></html>`;
+  document.body.append(frame);
+  await ready;
+  const fixtureWindow = frame.contentWindow!;
+  const fixtureDocument = frame.contentDocument!;
+  return {
+    frame,
+    window: fixtureWindow,
+    document: fixtureDocument,
     canvas: () => fixtureDocument.querySelector<HTMLCanvasElement>("canvas")!,
     visible(value) {
       fixtureDocument.documentElement.dataset.cafeVisible = String(value);
