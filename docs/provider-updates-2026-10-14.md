@@ -44,6 +44,16 @@ each Cafe continuation. Stop, new input, compaction, closed context and uncertai
 acceptance revoke or park recovery. These guards prevent duplicate submission;
 they cannot manufacture upstream model capacity.
 
+### Subsequent user-authorized session policy
+
+The later [failed-root session-restart decision](decisions/codex-failed-root-session-restart.md)
+changes Cafe's automatic continuation from retaining the failed process generation
+to atomically retiring that exact owner, including its children, and reopening the
+same native history before a fresh turn. The upstream capacity/classifier findings
+above remain unchanged. One-use attempts, exact generation transfer, capped
+backoff and Stop/newer-input priority still apply; neither this change nor the
+earlier review establishes that upstream model capacity has been repaired.
+
 ## Smaller collaboration guidance without losing chart features
 
 Codex previously received the complete visualization generation guidance both

@@ -320,6 +320,7 @@ function makeFakeCodexAdapter(provider: ProviderDriverKind = CODEX_DRIVER) {
   const adapter: ProviderAdapterShape<ProviderAdapterError> = {
     provider,
     capabilities: {
+      codexFailedRootRestart: provider === CODEX_DRIVER,
       subagentPolicyContinuation: provider === CODEX_DRIVER,
       sessionModelSwitch: "in-session",
       manualCompaction: provider === CODEX_DRIVER ? "supported" : "unsupported",
@@ -937,6 +938,182 @@ function makeReloadableProviderServiceFixture() {
   return { layer, codex, claude, replacement, replace, start };
 }
 
+for (const scenario of [
+  "running",
+  "terminal before ACK",
+  "legacy capability",
+  "missing transfer",
+  "wrong previous generation",
+  "reused generation",
+  "foreign native history",
+  "Stop before ACK",
+] as const) {
+  it.effect(
+    `ProviderService cold recovery binds only the accepted replacement owner: ${scenario}`,
+    () => {
+      const fixture = makeReloadableProviderServiceFixture();
+      return Effect.gen(function* () {
+        const provider = yield* ProviderService;
+        const directory = yield* ProviderSessionDirectory;
+        const threadId = asThreadId(`cold-service-owner-${scenario}`);
+        const failedTurnId = asTurnId("cold-service-failed-root");
+        const nextTurnId = asTurnId("cold-service-new-root");
+        const previous = SubagentRuntimeId.make("00000000-0000-4000-8000-000000000086");
+        const replacement = SubagentRuntimeId.make("00000000-0000-4000-8000-000000000087");
+        const observedAt = "2026-01-01T00:00:02.000Z";
+        const completedAt = "2026-01-01T00:00:03.000Z";
+        const providerThreadId = "unchanged-private-service-history";
+        yield* provider.startSession(threadId, {
+          provider: CODEX_DRIVER,
+          providerInstanceId: codexInstanceId,
+          threadId,
+          runtimeMode: "approval-required",
+          resumeCursor: { threadId: providerThreadId },
+        });
+        fixture.codex.updateSession(threadId, (session) => ({
+          ...session,
+          subagentRuntimeId: previous,
+          status: "ready",
+          activeTurnId: undefined,
+          codexRootTurnFailure: {
+            turnId: failedTurnId,
+            providerThreadId,
+            observedAt,
+            category: "transport",
+          },
+        }));
+        yield* directory.upsert({
+          threadId,
+          provider: CODEX_DRIVER,
+          providerInstanceId: codexInstanceId,
+          status: "error",
+          runtimePayload: {
+            subagentRuntimeId: previous,
+            activeTurnId: null,
+            lastError: "Original failure",
+          },
+        });
+        const before = Option.getOrThrow(yield* directory.getBinding(threadId));
+        if (scenario === "legacy capability")
+          Object.defineProperty(fixture.codex.adapter.capabilities, "codexFailedRootRestart", {
+            value: undefined,
+          });
+        let beforeAck = before;
+        fixture.codex.sendTurn.mockImplementationOnce(() =>
+          Effect.gen(function* () {
+            fixture.codex.updateSession(threadId, (session) => ({
+              ...session,
+              subagentRuntimeId: replacement,
+              ...(scenario === "terminal before ACK"
+                ? {
+                    status: "ready" as const,
+                    activeTurnId: undefined,
+                    codexRootTurnFailure: {
+                      turnId: nextTurnId,
+                      providerThreadId,
+                      observedAt: completedAt,
+                      category: "transport" as const,
+                    },
+                    updatedAt: completedAt,
+                  }
+                : {
+                    status: "running" as const,
+                    activeTurnId: nextTurnId,
+                    codexRootTurnFailure: undefined,
+                  }),
+            }));
+            if (scenario === "Stop before ACK")
+              yield* directory.upsert({
+                threadId,
+                provider: CODEX_DRIVER,
+                providerInstanceId: codexInstanceId,
+                status: "stopped",
+                runtimePayload: { subagentRuntimeId: replacement, activeTurnId: null },
+              });
+            beforeAck = Option.getOrThrow(yield* directory.getBinding(threadId));
+            return {
+              threadId,
+              turnId: nextTurnId,
+              ...(scenario === "missing transfer"
+                ? {}
+                : {
+                    recoverySession: {
+                      previousSubagentRuntimeId:
+                        scenario === "wrong previous generation" ? replacement : previous,
+                      subagentRuntimeId: scenario === "reused generation" ? previous : replacement,
+                      providerThreadId:
+                        scenario === "foreign native history"
+                          ? "foreign-private-history"
+                          : providerThreadId,
+                    },
+                  }),
+            };
+          }).pipe(Effect.orDie),
+        );
+        const outcome = yield* provider
+          .sendTurn({
+            threadId,
+            input: "Continue the unfinished work without repeating actions.",
+            expectedFailedRoot: {
+              turnId: failedTurnId,
+              providerThreadId,
+              subagentRuntimeId: previous,
+              providerInstanceId: codexInstanceId,
+              observedAt,
+              restartSession: true,
+            },
+          })
+          .pipe(Effect.exit);
+        assert.equal(
+          Exit.isSuccess(outcome),
+          scenario === "running" ||
+            scenario === "terminal before ACK" ||
+            scenario === "Stop before ACK",
+        );
+        assert.equal(
+          fixture.codex.sendTurn.mock.calls.length,
+          scenario === "legacy capability" ? 0 : 1,
+        );
+        assert.equal(fixture.codex.startSession.mock.calls.length, 1);
+        assert.equal(fixture.codex.steerTurn.mock.calls.length, 0);
+        const final = Option.getOrThrow(yield* directory.getBinding(threadId));
+        if (scenario === "running" || scenario === "terminal before ACK") {
+          assert.equal(
+            (final.runtimePayload as Record<string, unknown>).subagentRuntimeId,
+            replacement,
+          );
+          // The durable directory deliberately calls an available native
+          // process "running" even when its native session is ready/terminal.
+          // Root liveness comes from activeTurnId and exact native failure,
+          // not from this process-availability status scalar.
+          assert.equal(final.status, "running");
+          assert.equal(
+            (final.runtimePayload as Record<string, unknown>).activeTurnId,
+            scenario === "running" ? nextTurnId : null,
+          );
+          assert.deepEqual(final.resumeCursor, { threadId: providerThreadId });
+          if (scenario === "terminal before ACK") {
+            const native = (yield* fixture.codex.listSessions()).find(
+              (session) => session.threadId === threadId,
+            )!;
+            assert.equal(native.status, "ready");
+            assert.equal(native.activeTurnId, undefined);
+            assert.equal(native.codexRootTurnFailure?.turnId, nextTurnId);
+            assert.equal(
+              (final.runtimePayload as Record<string, unknown>).lastRuntimeEvent,
+              "turn.completed",
+            );
+            assert.equal(
+              (final.runtimePayload as Record<string, unknown>).lastRuntimeEventAt,
+              completedAt,
+            );
+          }
+        } else assert.deepEqual(final, beforeAck);
+      }).pipe(Effect.provide(fixture.layer));
+    },
+  );
+}
+
 for (const change of ["replacement", "removal", "missed-exit"] as const) {
   it.effect(`ProviderService reconciles owned orphan sessions after ${change}`, () => {
     const fixture = makeReloadableProviderServiceFixture();
@@ -1233,6 +1410,96 @@ for (const terminalBoundary of ["reload", "stop"] as const) {
         const final = Option.getOrThrow(yield* directory.getBinding(threadId));
         assert.equal(final.status, "stopped");
         assert.equal((final.runtimePayload as Record<string, unknown>).activeTurnId, null);
+      }).pipe(Effect.provide(fixture.layer));
+    },
+  );
+}
+
+for (const boundary of [
+  "replacement generation",
+  "omitted generation",
+  "different owner PID",
+  "different owner start",
+] as const) {
+  it.effect(
+    `ProviderService drops a delayed heartbeat for ${boundary} even when account and turn still match`,
+    () => {
+      const fixture = makeReloadableProviderServiceFixture();
+      return Effect.gen(function* () {
+        const provider = yield* ProviderService;
+        const directory = yield* ProviderSessionDirectory;
+        const ownerSource = asThreadId(`heartbeat-native-owner-source-${boundary}`);
+        yield* fixture.start(ownerSource);
+        const localOwner = Option.getOrThrow(yield* directory.getBinding(ownerSource));
+        const threadId = asThreadId(`heartbeat-native-replacement-${boundary}`);
+        const turnId = asTurnId("same-turn-id-in-stale-sample");
+        const previous = SubagentRuntimeId.make("00000000-0000-4000-8000-000000000084");
+        const replacement = SubagentRuntimeId.make("00000000-0000-4000-8000-000000000085");
+        yield* fixture.codex.startSession({
+          provider: CODEX_DRIVER,
+          providerInstanceId: codexInstanceId,
+          threadId,
+          runtimeMode: "full-access",
+        });
+        fixture.codex.updateSession(threadId, (session) => ({
+          ...session,
+          status: "running",
+          activeTurnId: turnId,
+          ...(boundary === "omitted generation" ? {} : { subagentRuntimeId: previous }),
+        }));
+        yield* directory.upsert({
+          threadId,
+          provider: CODEX_DRIVER,
+          providerInstanceId: codexInstanceId,
+          status: "running",
+          runtimePayload: {
+            ...(localOwner.runtimePayload as Record<string, unknown>),
+            activeTurnId: turnId,
+            subagentRuntimeId: boundary === "omitted generation" ? null : previous,
+          },
+        });
+        const sampled = yield* fixture.codex.listSessions();
+        const reached = yield* Deferred.make<void>();
+        const release = yield* Deferred.make<void>();
+        yield* Effect.addFinalizer(() => Deferred.succeed(release, undefined).pipe(Effect.asVoid));
+        fixture.codex.listSessions.mockImplementationOnce(() =>
+          Deferred.succeed(reached, undefined).pipe(
+            Effect.andThen(Deferred.await(release)),
+            Effect.as(sampled),
+          ),
+        );
+        const inventory = yield* provider.listSessions().pipe(Effect.forkChild);
+        yield* Deferred.await(reached);
+        const localPayload = localOwner.runtimePayload as Record<string, unknown>;
+        yield* directory.upsert({
+          threadId,
+          provider: CODEX_DRIVER,
+          providerInstanceId: codexInstanceId,
+          status: "running",
+          runtimePayload: {
+            ...localPayload,
+            activeTurnId: turnId,
+            subagentRuntimeId:
+              boundary === "replacement generation" || boundary === "omitted generation"
+                ? replacement
+                : previous,
+            ...(boundary === "different owner PID"
+              ? { runtimeOwnerPid: Number(localPayload.runtimeOwnerPid) + 1 }
+              : {}),
+            ...(boundary === "different owner start"
+              ? { runtimeOwnerStartedAt: "2026-01-01T00:00:01.000Z" }
+              : {}),
+          },
+        });
+        const beforeRelease = Option.getOrThrow(yield* directory.getBinding(threadId));
+        yield* Deferred.succeed(release, undefined);
+        yield* Fiber.join(inventory);
+        // Missing historical generation is uncertainty, never permission to
+        // backfill a known replacement with an older/missing native identity.
+        assert.deepEqual(Option.getOrThrow(yield* directory.getBinding(threadId)), beforeRelease);
+        assert.equal(fixture.codex.sendTurn.mock.calls.length, 1);
+        assert.equal(fixture.replacement.startSession.mock.calls.length, 0);
+        assert.equal(fixture.replacement.stopSession.mock.calls.length, 0);
       }).pipe(Effect.provide(fixture.layer));
     },
   );

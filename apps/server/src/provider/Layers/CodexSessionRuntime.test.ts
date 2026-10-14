@@ -65,6 +65,8 @@ import {
   acceptsCodexChildNotification,
   admitCodexTurnStartLifecycleBoundary,
   assertCodexFailedRootContinuationBoundary,
+  reserveCodexFailedRootRestartBoundary,
+  assertCodexRecoverySessionBoundary,
   commitCodexRootErrorLifecycleBoundary,
   reconcileCodexSystemErrorThreadStatusLifecycleBoundary,
   readCodexRootTurnFailure,
@@ -190,6 +192,17 @@ for (const request of [
   { label: "paired", context: 800_000, expected: 800_000 },
   { label: "explicit", context: 800_000, explicit: 600_000, expected: 600_000 },
   { label: "paired-resume", context: 800_000, resume: true, expected: 800_000 },
+  { label: "paired-exact-resume", context: 800_000, resume: true, exact: true, expected: 800_000 },
+  {
+    label: "failed-exact-resume",
+    resume: true,
+    exact: true,
+    failed: true,
+    recoverable: true,
+    expected: null,
+  },
+  { label: "missing-exact-resume", exact: true, missingResume: true, expected: null },
+  { label: "mismatched-exact-resume", resume: true, exact: true, mismatched: true, expected: null },
   { label: "inherited-setting", inherited: true, expected: null },
   { label: "accessor-setting", accessor: true, expected: null },
   {
@@ -209,7 +222,11 @@ for (const request of [
         // peer. No provider executable, configuration, profile or credential is
         // touched while verifying these authenticated goal-control wire shapes.
         const output = yield* Queue.unbounded<Uint8Array>();
-        const openingWillFail = "failed" in request;
+        const openingWillFail =
+          "failed" in request || "missingResume" in request || "mismatched" in request;
+        const openingWillBeRejected = "failed" in request;
+        const resumeWillFailRecoverably = "recoverable" in request;
+        const responseWillBeMismatched = "mismatched" in request;
         const calls: Array<{ method: string; params?: Record<string, unknown> }> = [];
         const nativeThreadId = "synthetic-goal-thread";
         const goal = {
@@ -281,7 +298,12 @@ for (const request of [
                             platformOs: "synthetic",
                           }
                         : request.method === "thread/start" || request.method === "thread/resume"
-                          ? opened
+                          ? responseWillBeMismatched
+                            ? {
+                                ...opened,
+                                thread: { ...opened.thread, id: "foreign-native-history" },
+                              }
+                            : opened
                           : request.method === "thread/read"
                             ? { thread }
                             : request.method === "thread/turns/list"
@@ -298,9 +320,16 @@ for (const request of [
                       encoder.encode(
                         `${JSON.stringify({
                           id: request.id,
-                          ...(openingWillFail &&
+                          ...(openingWillBeRejected &&
                           (request.method === "thread/start" || request.method === "thread/resume")
-                            ? { error: { code: -32602, message: "Synthetic opening refused" } }
+                            ? {
+                                error: {
+                                  code: -32602,
+                                  message: resumeWillFailRecoverably
+                                    ? "thread not found"
+                                    : "Synthetic opening refused",
+                                },
+                              }
                             : { result }),
                         })}\n`,
                       ),
@@ -326,6 +355,7 @@ for (const request of [
           ...("context" in request ? { codexContextWindowOverride: request.context } : {}),
           ...("explicit" in request ? { autoCompactTokenLimit: request.explicit } : {}),
           ...("resume" in request ? { resumeCursor: { threadId: nativeThreadId } } : {}),
+          ...("exact" in request ? { requireExactResume: true as const } : {}),
         } satisfies CodexSessionRuntimeOptions;
         if ("inherited" in request) {
           Object.setPrototypeOf(runtimeOptions, {
@@ -361,6 +391,22 @@ for (const request of [
             Object.hasOwn(yield* runtime.getSession, "codexAutoCompactTokenLimit"),
             false,
           );
+          if ("exact" in request) {
+            // Exercise the actual runtime-to-native opening path, not just the
+            // helper: missing cursors never initialize, and recoverable errors
+            // or changed identities cannot publish a fresh native thread.
+            assert.deepEqual(
+              calls
+                .filter((call) => call.method === "thread/start" || call.method === "thread/resume")
+                .map((call) => call.method),
+              "missingResume" in request ? [] : ["thread/resume"],
+            );
+            if ("missingResume" in request) assert.deepEqual(calls, []);
+            assert.deepEqual(
+              (yield* runtime.getSession).resumeCursor,
+              "resume" in request ? { threadId: nativeThreadId } : undefined,
+            );
+          }
           return;
         }
         yield* runtime.start();
@@ -374,6 +420,19 @@ for (const request of [
         const opening = calls.find(
           (call) => call.method === ("resume" in request ? "thread/resume" : "thread/start"),
         )!;
+        if ("exact" in request) {
+          assert.equal(
+            session.resumeCursor && Reflect.get(session.resumeCursor as object, "threadId"),
+            nativeThreadId,
+          );
+          assert.deepEqual(
+            calls
+              .filter((call) => call.method === "thread/start" || call.method === "thread/resume")
+              .map((call) => call.method),
+            ["thread/resume"],
+          );
+          assert.equal(Object.hasOwn(opening.params!, "requireExactResume"), false);
+        }
         assert.deepEqual(opening.params?.config, {
           ...("context" in request ? { model_context_window: request.context } : {}),
           ...(request.expected !== null
@@ -3652,10 +3711,384 @@ describe("Codex failed-root continuation authority", () => {
       };
     });
 
+  const makeReplacementBoundary = () =>
+    Effect.gen(function* () {
+      const boundary = yield* makeBoundary();
+      const replacement = SubagentRuntimeId.make("00000000-0000-4000-8000-000000000083");
+      yield* Ref.set(boundary.completionsRef, new Map());
+      yield* Ref.set(boundary.latestRootTurnIdRef, undefined);
+      yield* Ref.update(boundary.sessionRef, (value) => ({
+        ...value,
+        subagentRuntimeId: replacement,
+        lastError: undefined,
+      }));
+      return {
+        ...boundary,
+        historyUsable: Effect.succeed(true),
+        automaticCompactionPending: Effect.succeed(false),
+        notificationSettled: () => true,
+        expectedRecoverySession: {
+          previousSubagentRuntimeId: runtimeId,
+          subagentRuntimeId: replacement,
+          providerThreadId: "native-thread",
+        },
+      };
+    });
+
   const systemErrorNotification = {
     method: "thread/status/changed",
     params: { threadId: "native-thread", status: { type: "systemError" } },
   };
+
+  effectIt.effect("reserves only the exact failed owner once before cold teardown", () =>
+    Effect.gen(function* () {
+      const boundary = yield* makeBoundary();
+      const expected = {
+        ...expectedFailedRoot,
+        providerInstanceId: session.providerInstanceId!,
+        observedAt: completion.observedAt,
+        restartSession: true as const,
+      };
+      const input = {
+        ...boundary,
+        expectedFailedRoot: expected,
+        historyUsable: Effect.succeed(true),
+        automaticCompactionPending: Effect.succeed(false),
+        notificationSettled: () => true,
+      };
+      assert.equal(yield* reserveCodexFailedRootRestartBoundary(input), true);
+      assert.equal(yield* Ref.get(boundary.closedRef), true);
+      assert.deepEqual(yield* Ref.get(boundary.sessionRef), session);
+      assert.deepEqual(
+        yield* Ref.get(boundary.completionsRef),
+        new Map([[String(failedTurnId), completion]]),
+      );
+      // Cleanup may await notification scopes only after the native permit is
+      // released. A second reservation never grants a second retirement/open.
+      assert.equal(yield* reserveCodexFailedRootRestartBoundary(input), false);
+      assert.equal(
+        yield* boundary.semaphore.withPermits(1)(Effect.succeed("released")),
+        "released",
+      );
+    }),
+  );
+
+  effectIt.effect(
+    "cold retirement refuses uncertain, changed and revoked native authority without marking it closed",
+    () =>
+      Effect.gen(function* () {
+        for (const scenario of [
+          "unknown root",
+          "wrong root",
+          "wrong generation",
+          "wrong account",
+          "wrong history",
+          "missing timestamp",
+          "changed timestamp",
+          "active root",
+          "already closed",
+          "root start pending",
+          "manual compaction",
+          "automatic compaction",
+          "unusable history",
+          "missing context",
+          "queued native receipt",
+        ] as const) {
+          const boundary = yield* makeBoundary();
+          if (scenario === "unknown root") yield* Ref.set(boundary.latestRootTurnIdRef, undefined);
+          if (scenario === "active root")
+            yield* Ref.update(boundary.sessionRef, (value) => ({
+              ...value,
+              status: "running" as const,
+              activeTurnId: TurnId.make("new-root"),
+            }));
+          if (scenario === "already closed") yield* Ref.set(boundary.closedRef, true);
+          if (scenario === "root start pending")
+            yield* Ref.set(boundary.nativeTurnStartPendingRef, true);
+          if (scenario === "manual compaction")
+            yield* Ref.set(boundary.manualCompactionPendingRef, true);
+          const expected = {
+            ...expectedFailedRoot,
+            providerInstanceId:
+              scenario === "wrong account"
+                ? ProviderInstanceId.make("foreign-account")
+                : session.providerInstanceId!,
+            observedAt:
+              scenario === "missing timestamp"
+                ? undefined
+                : scenario === "changed timestamp"
+                  ? "2026-10-10T11:01:01.000Z"
+                  : completion.observedAt,
+            restartSession: true as const,
+            ...(scenario === "wrong root" ? { turnId: TurnId.make("foreign-root") } : {}),
+            ...(scenario === "wrong generation"
+              ? {
+                  subagentRuntimeId: SubagentRuntimeId.make("00000000-0000-4000-8000-000000000099"),
+                }
+              : {}),
+            ...(scenario === "wrong history" ? { providerThreadId: "foreign-native-history" } : {}),
+          };
+          assert.equal(
+            yield* reserveCodexFailedRootRestartBoundary({
+              ...boundary,
+              expectedFailedRoot: expected,
+              nativeContextAvailable: Effect.succeed(scenario !== "missing context"),
+              historyUsable: Effect.succeed(scenario !== "unusable history"),
+              automaticCompactionPending: Effect.succeed(scenario === "automatic compaction"),
+              notificationSettled: () => scenario !== "queued native receipt",
+            }),
+            false,
+            scenario,
+          );
+          assert.equal(yield* Ref.get(boundary.closedRef), scenario === "already closed", scenario);
+        }
+      }),
+  );
+
+  effectIt.effect(
+    "cold replacement admission requires explicit settled notification proof and preserves ordinary admission",
+    () =>
+      Effect.gen(function* () {
+        for (const proof of ["settled", "missing", "unsettled"] as const) {
+          const boundary = yield* makeReplacementBoundary();
+          const { notificationSettled: _initialProof, ...withoutProof } = boundary;
+          const outcome = yield* admitCodexTurnStartLifecycleBoundary({
+            ...withoutProof,
+            ...(proof === "settled" ? { notificationSettled: () => true } : {}),
+            ...(proof === "unsettled" ? { notificationSettled: () => false } : {}),
+          }).pipe(Effect.exit);
+          assert.equal(outcome._tag, proof === "settled" ? "Success" : "Failure", proof);
+          assert.equal(
+            yield* Ref.get(boundary.nativeTurnStartPendingRef),
+            proof === "settled",
+            proof,
+          );
+          assert.equal(
+            (yield* Ref.get(boundary.nativeTurnStartRequestRef)) !== undefined,
+            proof === "settled",
+            proof,
+          );
+        }
+        const ordinary = yield* makeBoundary();
+        const admission = yield* admitCodexTurnStartLifecycleBoundary({
+          ...ordinary,
+          notificationSettled: () => false,
+        });
+        assert.equal(yield* Ref.get(ordinary.nativeTurnStartPendingRef), true);
+        assert.equal(yield* Ref.get(ordinary.nativeTurnStartRequestRef), admission.requestToken);
+      }),
+  );
+
+  effectIt.effect(
+    "received root, compaction and history frames block cold reservation and submission before their queued projection",
+    () =>
+      Effect.gen(function* () {
+        const notifications = [
+          {
+            method: "turn/started",
+            params: {
+              threadId: "native-thread",
+              turn: { id: "new-native-root", status: "inProgress" },
+            },
+          },
+          {
+            method: "item/started",
+            params: {
+              threadId: "native-thread",
+              turnId: "native-compaction-root",
+              item: { id: "native-compaction-item", type: "contextCompaction" },
+            },
+          },
+          {
+            method: "error",
+            params: {
+              threadId: "native-thread",
+              turnId: "native-history-root",
+              error: { message: "list_turns is not supported yet" },
+              willRetry: false,
+            },
+          },
+        ] as const;
+        for (const phase of ["reservation", "submission"] as const) {
+          for (const receiptState of ["queued", "consumed"] as const) {
+            for (const awaitedCheck of ["availability", "history", "compaction"] as const) {
+              for (const notification of notifications) {
+                const label = `${phase}:${receiptState}:${awaitedCheck}:${notification.method}`;
+                const boundary = yield* makeReplacementBoundary();
+                const fence = yield* makeCodexNotificationRetirementFence({
+                  closed: boundary.closedRef,
+                  semaphore: boundary.semaphore,
+                });
+                const admission =
+                  phase === "submission"
+                    ? yield* admitCodexTurnStartLifecycleBoundary({
+                        ...boundary,
+                        notificationSettled: () => fence.isSettled(),
+                      })
+                    : undefined;
+                const queue = yield* Queue.unbounded<typeof notification>();
+                const handlerEntered = yield* Deferred.make<void>();
+                const releaseHandler = yield* Deferred.make<void>();
+                const checkEntered = yield* Deferred.make<void>();
+                const releaseCheck = yield* Deferred.make<void>();
+                yield* Effect.addFinalizer(() =>
+                  Effect.all([
+                    Deferred.succeed(releaseHandler, undefined),
+                    Deferred.succeed(releaseCheck, undefined),
+                  ]).pipe(Effect.asVoid),
+                );
+                // Use the actual wire-receipt fence and its exact owning queue.
+                // Dequeue alone does not retire a frame: the handler may await
+                // observation or the aggregate permit before writing any refs.
+                fence.observeIncomingData();
+                fence.observeReceived();
+                fence.observeIncomingDataProcessed(false);
+                yield* fence.admit(Queue.offer(queue, notification));
+                const handling =
+                  receiptState === "consumed"
+                    ? yield* fence
+                        .handle(
+                          Effect.gen(function* () {
+                            assert.equal(yield* Queue.take(queue), notification);
+                            yield* Deferred.succeed(handlerEntered, undefined);
+                            yield* Deferred.await(releaseHandler);
+                          }),
+                        )
+                        .pipe(Effect.forkChild)
+                    : undefined;
+                if (handling !== undefined) yield* Deferred.await(handlerEntered);
+                assert.equal(yield* Queue.size(queue), receiptState === "queued" ? 1 : 0, label);
+                assert.equal(yield* fence.pendingCount, 1, label);
+                const heldCheck = (value: boolean) =>
+                  Deferred.succeed(checkEntered, undefined).pipe(
+                    Effect.andThen(Deferred.await(releaseCheck)),
+                    Effect.as(value),
+                  );
+                const guarded = {
+                  ...boundary,
+                  nativeContextAvailable:
+                    awaitedCheck === "availability" ? heldCheck(true) : Effect.succeed(true),
+                  historyUsable:
+                    awaitedCheck === "history" ? heldCheck(true) : Effect.succeed(true),
+                  automaticCompactionPending:
+                    awaitedCheck === "compaction" ? heldCheck(false) : Effect.succeed(false),
+                  notificationSettled: () => fence.isSettled(),
+                };
+                let continuationRequests = 0;
+                const operation =
+                  phase === "reservation"
+                    ? admitCodexTurnStartLifecycleBoundary(guarded).pipe(Effect.asVoid)
+                    : assertCodexRecoverySessionBoundary({ ...guarded, ...admission! });
+                const submitted = yield* operation.pipe(
+                  Effect.andThen(
+                    Effect.sync(() => {
+                      continuationRequests += 1;
+                    }),
+                  ),
+                  Effect.exit,
+                  Effect.forkChild,
+                );
+                yield* Deferred.await(checkEntered);
+                // Every processed snapshot is still idle/safe. Only receipt
+                // authority can refuse the exact paused continuation here.
+                assert.equal((yield* Ref.get(boundary.sessionRef)).status, "ready", label);
+                assert.equal(yield* Ref.get(boundary.manualCompactionPendingRef), false, label);
+                assert.equal(fence.isSettled(), false, label);
+                yield* Deferred.succeed(releaseCheck, undefined);
+                assert.equal((yield* Fiber.join(submitted))._tag, "Failure", label);
+                assert.equal(continuationRequests, 0, label);
+                assert.equal(
+                  yield* Ref.get(boundary.nativeTurnStartPendingRef),
+                  phase === "submission",
+                  label,
+                );
+                assert.equal(
+                  yield* Ref.get(boundary.nativeTurnStartRequestRef),
+                  admission?.requestToken,
+                  label,
+                );
+                assert.equal(yield* fence.pendingCount, 1, label);
+                if (handling !== undefined) {
+                  yield* Deferred.succeed(releaseHandler, undefined);
+                  yield* Fiber.join(handling);
+                } else {
+                  yield* fence.handle(Queue.take(queue).pipe(Effect.asVoid));
+                }
+                assert.equal(fence.isSettled(), true, label);
+                assert.equal(yield* fence.pendingCount, 0, label);
+              }
+            }
+          }
+        }
+      }),
+  );
+
+  effectIt.effect(
+    "replacement submission guard rejects late Stop, native work and owner changes without transport I/O",
+    () =>
+      Effect.gen(function* () {
+        for (const scenario of [
+          "exact",
+          "stop",
+          "new root",
+          "new owner",
+          "different history",
+          "compaction",
+          "automatic compaction",
+          "unusable history",
+          "missing context",
+          "reused generation",
+          "missing ingress proof",
+        ] as const) {
+          const boundary = yield* makeBoundary();
+          const replacement = SubagentRuntimeId.make("00000000-0000-4000-8000-000000000083");
+          yield* Ref.set(boundary.completionsRef, new Map());
+          yield* Ref.set(boundary.latestRootTurnIdRef, undefined);
+          yield* Ref.update(boundary.sessionRef, (value) => ({
+            ...value,
+            subagentRuntimeId: replacement,
+            lastError: undefined,
+          }));
+          const admission = yield* admitCodexTurnStartLifecycleBoundary({ ...boundary });
+          if (scenario === "stop") yield* Ref.set(boundary.closedRef, true);
+          if (scenario === "new root") yield* Ref.set(boundary.rootLifecycleEpochRef, Symbol());
+          if (scenario === "new owner")
+            yield* Ref.update(boundary.sessionRef, (value) => ({
+              ...value,
+              subagentRuntimeId: runtimeId,
+            }));
+          if (scenario === "different history")
+            yield* Ref.update(boundary.sessionRef, (value) => ({
+              ...value,
+              resumeCursor: { threadId: "foreign-history" },
+            }));
+          if (scenario === "compaction") yield* Ref.set(boundary.manualCompactionPendingRef, true);
+          let nativeRequests = 0;
+          const outcome = yield* assertCodexRecoverySessionBoundary({
+            ...boundary,
+            ...admission,
+            nativeContextAvailable: Effect.succeed(scenario !== "missing context"),
+            automaticCompactionPending: Effect.succeed(scenario === "automatic compaction"),
+            historyUsable: Effect.succeed(scenario !== "unusable history"),
+            ...(scenario !== "missing ingress proof" ? { notificationSettled: () => true } : {}),
+            expectedRecoverySession: {
+              previousSubagentRuntimeId: scenario === "reused generation" ? replacement : runtimeId,
+              subagentRuntimeId: replacement,
+              providerThreadId: "native-thread",
+            },
+          }).pipe(
+            Effect.andThen(
+              Effect.sync(() => {
+                nativeRequests += 1;
+              }),
+            ),
+            Effect.exit,
+          );
+          assert.equal(outcome._tag, scenario === "exact" ? "Success" : "Failure", scenario);
+          assert.equal(nativeRequests, scenario === "exact" ? 1 : 0, scenario);
+        }
+      }),
+  );
 
   effectIt.effect(
     "raw systemError/error/failed-completion ordering preserves exact native failure availability",
@@ -8737,6 +9170,109 @@ describe("openCodexThread", () => {
       assert.deepStrictEqual(payload.runtimeWorkspaceRoots, ["/tmp/project"]);
     }
   });
+
+  it("requires the exact resumed native conversation without changing opening policy or exposing the private flag", async () => {
+    const calls: Array<{ method: string; payload: unknown }> = [];
+    const opened = await Effect.runPromise(
+      openCodexThread({
+        client: {
+          raw: {
+            request: (method, payload) => {
+              calls.push({ method, payload });
+              return Effect.succeed(makeThreadOpenResponse("exact-native-history"));
+            },
+          },
+        },
+        threadId: ThreadId.make("cold-cafe-thread"),
+        runtimeMode: "approval-required",
+        cwd: process.cwd(),
+        requestedModel: "gpt-6.1-sol",
+        serviceTier: "default",
+        resumeThreadId: "exact-native-history",
+        requireExactResume: true,
+        codexContextWindowOverride: 800_000,
+        autoCompactTokenLimit: 640_000,
+      }),
+    );
+    assert.equal(opened.thread.id, "exact-native-history");
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0]!.method, "thread/resume");
+    const payload = calls[0]!.payload as Record<string, unknown>;
+    assert.equal(payload.threadId, "exact-native-history");
+    assert.equal(payload.model, "gpt-6.1-sol");
+    assert.equal(payload.serviceTier, "default");
+    assert.deepEqual(payload.config, {
+      model_context_window: 800_000,
+      model_auto_compact_token_limit: 640_000,
+    });
+    assert.equal(payload.excludeTurns, true);
+    assert.deepEqual(payload.initialTurnsPage, {
+      itemsView: "notLoaded",
+      limit: 1,
+      sortDirection: "desc",
+    });
+    assert.equal(Object.hasOwn(payload, "requireExactResume"), false);
+    assert.equal(Object.hasOwn(payload, "input"), false);
+  });
+
+  it("propagates a recoverable exact-resume failure without creating a blank native conversation", async () => {
+    const calls: Array<{ method: string; payload: unknown }> = [];
+    const failure = CodexErrors.CodexAppServerRequestError.invalidRequest("thread not found");
+    const error = await Effect.runPromise(
+      openCodexThread({
+        client: {
+          raw: {
+            request: (method, payload) => {
+              calls.push({ method, payload });
+              return method === "thread/resume"
+                ? Effect.fail(failure)
+                : Effect.succeed(makeThreadOpenResponse("unrelated-blank-thread"));
+            },
+          },
+        },
+        threadId: ThreadId.make("cold-cafe-thread"),
+        runtimeMode: "approval-required",
+        cwd: process.cwd(),
+        requestedModel: "gpt-6.1-sol",
+        serviceTier: undefined,
+        resumeThreadId: "exact-native-history",
+        requireExactResume: true,
+      }).pipe(Effect.flip),
+    );
+    assert.equal(error, failure);
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0]!.method, "thread/resume");
+    assert.equal(Reflect.get(calls[0]!.payload as object, "threadId"), "exact-native-history");
+  });
+
+  it.each([undefined, "", "   "])(
+    "refuses a missing exact-resume cursor (%s) before any native RPC",
+    async (resumeThreadId) => {
+      const calls: Array<{ method: string; payload: unknown }> = [];
+      const error = await Effect.runPromise(
+        openCodexThread({
+          client: {
+            raw: {
+              request: (method, payload) => {
+                calls.push({ method, payload });
+                return Effect.succeed(makeThreadOpenResponse("unrelated-blank-thread"));
+              },
+            },
+          },
+          threadId: ThreadId.make("cold-cafe-thread"),
+          runtimeMode: "approval-required",
+          cwd: process.cwd(),
+          requestedModel: "gpt-6.1-sol",
+          serviceTier: undefined,
+          resumeThreadId,
+          requireExactResume: true,
+        }).pipe(Effect.flip),
+      );
+      assert.equal(error._tag, "CodexAppServerRequestError");
+      assert.equal(error.message, "The exact Codex conversation is required for recovery opening.");
+      assert.deepEqual(calls, []);
+    },
+  );
 
   it("preserves workspace-write roots without injecting Codex compaction defaults", async () => {
     const calls: Array<{ method: "thread/start" | "thread/resume"; payload: unknown }> = [];

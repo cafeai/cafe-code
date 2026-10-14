@@ -1498,6 +1498,18 @@ const ThreadSessionSetCommand = Schema.Struct({
   // engine also verifies its exact durable intent, one-use attempt and ACK.
   // This association creates a terminal error directly, never a running turn.
   codexFailedRoot: Schema.optional(CodexFailedRootAssociation),
+  // Internal positive ACK adoption. The engine joins this exact saved intent
+  // to its consumed attempt and accepted old-to-new owner receipt atomically
+  // with controls. It is neither client authority nor persisted event metadata.
+  codexRecoveryAccepted: Schema.optional(
+    Schema.Struct({
+      turnId: TurnId,
+      previousTurnId: TurnId,
+      messageId: MessageId,
+      intentSequence: PositiveInt,
+      requestedAt: IsoDateTime,
+    }),
+  ),
   // Server-only admission proof for a replacement ACK. This is deliberately
   // absent from the persisted event: the engine verifies the durable intent
   // and current projection while serializing this command with user controls.

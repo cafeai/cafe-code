@@ -2520,6 +2520,11 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
           failure?.turnId !== expected.turnId ||
           failure.category === undefined ||
           failure.providerThreadId !== expected.providerThreadId ||
+          (expected.restartSession === true &&
+            (routed.adapter.capabilities.codexFailedRootRestart !== true ||
+              expected.providerInstanceId !== routed.instanceId ||
+              expected.observedAt === undefined ||
+              failure.observedAt !== expected.observedAt)) ||
           input.codexReview !== undefined ||
           input.expectedCompletedRootTurnId !== undefined ||
           input.attachments.length !== 0 ||
@@ -2623,6 +2628,26 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
           ? { expectedCompletedRootTurnId: completedRoot.turnId }
           : {}),
       });
+      const recoverySession =
+        input.expectedFailedRoot?.restartSession === true ? turn.recoverySession : undefined;
+      if (
+        input.expectedFailedRoot?.restartSession === true &&
+        (recoverySession === undefined ||
+          recoverySession.previousSubagentRuntimeId !==
+            input.expectedFailedRoot.subagentRuntimeId ||
+          recoverySession.subagentRuntimeId === recoverySession.previousSubagentRuntimeId ||
+          recoverySession.providerThreadId !== input.expectedFailedRoot.providerThreadId ||
+          turn.threadId !== input.threadId ||
+          turn.deliveryKind === "steer" ||
+          turn.clientCorrelationId !== undefined)
+      ) {
+        // The immutable orchestration attempt is already consumed. A missing
+        // transfer is uncertainty, never permission to retry this external send.
+        return yield* toValidationError(
+          "ProviderService.sendTurn",
+          "The restarted Codex acceptance did not match the exact recovery owner.",
+        );
+      }
       if (input.expectedFailedRoot === undefined || turn.threadId === input.threadId)
         yield* persistTurnSubagentHistoryRoot({
           binding: routed.binding,
@@ -2634,6 +2659,7 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
         });
       if (input.expectedFailedRoot !== undefined) {
         const expected = input.expectedFailedRoot;
+        const acceptingRuntimeId = recoverySession?.subagentRuntimeId ?? expected.subagentRuntimeId;
         // The exported send boundary already holds the thread lifecycle stripe;
         // do not reacquire its non-reentrant permit here. Stop and canonical
         // event persistence use that same stripe. A delayed ACK is acceptance,
@@ -2648,7 +2674,7 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
           if (
             current?.provider !== "codex" ||
             current.providerInstanceId !== routed.instanceId ||
-            current.subagentRuntimeId !== expected.subagentRuntimeId ||
+            current.subagentRuntimeId !== acceptingRuntimeId ||
             (yield* registry.getByInstance(routed.instanceId)) !== routed.adapter
           )
             return;
@@ -2663,7 +2689,8 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
             payload.runtimeOwnerPid !== runtimeOwner.runtimeOwnerPid ||
             payload.runtimeOwnerStartedAt !== runtimeOwner.runtimeOwnerStartedAt ||
             (payload.subagentRuntimeId != null &&
-              payload.subagentRuntimeId !== expected.subagentRuntimeId) ||
+              payload.subagentRuntimeId !== expected.subagentRuntimeId &&
+              payload.subagentRuntimeId !== acceptingRuntimeId) ||
             (payload.activeTurnId != null &&
               payload.activeTurnId !== expected.turnId &&
               payload.activeTurnId !== turn.turnId)
@@ -3297,8 +3324,17 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
                   binding.providerInstanceId !== instanceId ||
                   !isRecord(payload) ||
                   payload.activeTurnId !== session.activeTurnId ||
+                  // The adapter and daemon can survive a cold native-session
+                  // replacement. Their identities cannot authenticate an old
+                  // sampled generation, even if native turn IDs collide.
+                  (payload.subagentRuntimeId != null &&
+                    payload.subagentRuntimeId !== session.subagentRuntimeId) ||
                   (payload.runtimeOwnerId !== undefined &&
-                    payload.runtimeOwnerId !== runtimeOwner.runtimeOwnerId)
+                    payload.runtimeOwnerId !== runtimeOwner.runtimeOwnerId) ||
+                  (payload.runtimeOwnerPid !== undefined &&
+                    payload.runtimeOwnerPid !== runtimeOwner.runtimeOwnerPid) ||
+                  (payload.runtimeOwnerStartedAt !== undefined &&
+                    payload.runtimeOwnerStartedAt !== runtimeOwner.runtimeOwnerStartedAt)
                 ) {
                   return;
                 }

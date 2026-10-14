@@ -542,17 +542,33 @@ const makeOrchestrationEngine = Effect.gen(function* () {
           }
         }
         let codexFailedRootVerified = false;
+        let codexFailedRootGenerationTransferVerified = false;
+        let codexRecoveryAcceptedVerified = false;
         if (
           envelope.command.type === "thread.session.set" &&
-          envelope.command.codexFailedRoot !== undefined
+          (envelope.command.codexFailedRoot !== undefined ||
+            envelope.command.codexRecoveryAccepted !== undefined)
         ) {
           const command = envelope.command;
-          const failed = command.codexFailedRoot!;
+          const failed = command.codexFailedRoot ?? command.codexRecoveryAccepted!;
           // Verify immutable receipt authority inside the same serial boundary
           // as the lifecycle CAS. Provider warning content, an ACK projection,
           // or a caller-selected pending message never grants this association.
-          const rows = yield* sql<{ readonly payloadJson: string }>`
-            SELECT intent.payload_json AS "payloadJson" FROM orchestration_events AS intent
+          const rows = yield* sql<{
+            readonly payloadJson: string;
+            readonly previousRuntimeId: string | null;
+            readonly conversationCommitment: string | null;
+            readonly attemptedConversationCommitment: string | null;
+            readonly attemptedInstanceId: string | null;
+            readonly attemptedRuntimeId: string | null;
+          }>`
+            SELECT intent.payload_json AS "payloadJson",
+              json_extract(receipt.payload_json, '$.activity.payload.previousSubagentRuntimeId') AS "previousRuntimeId",
+              json_extract(receipt.payload_json, '$.activity.payload.nativeConversationCommitment') AS "conversationCommitment",
+              json_extract(attempt.payload_json, '$.activity.payload.nativeConversationCommitment') AS "attemptedConversationCommitment",
+              json_extract(attempt.payload_json, '$.activity.payload.providerInstanceId') AS "attemptedInstanceId",
+              json_extract(attempt.payload_json, '$.activity.payload.subagentRuntimeId') AS "attemptedRuntimeId"
+            FROM orchestration_events AS intent
             JOIN orchestration_events AS attempt ON attempt.command_id = ${`server:runtime-recovery-attempt:${failed.intentSequence}`}
             JOIN orchestration_events AS receipt ON receipt.command_id = ${codexTransientAcceptanceCommandId(command.threadId, failed.turnId)}
             WHERE intent.sequence = ${failed.intentSequence} AND intent.aggregate_kind = 'thread'
@@ -582,6 +598,22 @@ const makeOrchestrationEngine = Effect.gen(function* () {
           if (Schema.is(ThreadTurnStartRequestedPayload)(payload)) {
             const recovery = payload.runtimeRecovery;
             const native = recovery?.codexTransientFailure;
+            const receipt = rows[0];
+            // A cold restart transfers only a positively accepted generation
+            // from this old immutable intent. Neither a new session field nor
+            // arbitrary activity JSON is independent replacement authority.
+            const transferred =
+              native !== undefined &&
+              receipt !== undefined &&
+              receipt.previousRuntimeId === native.subagentRuntimeId &&
+              native.subagentRuntimeId !== command.session.subagentRuntimeId &&
+              receipt.attemptedRuntimeId === native.subagentRuntimeId &&
+              receipt.attemptedInstanceId === native.providerInstanceId &&
+              typeof receipt.conversationCommitment === "string" &&
+              /^[0-9a-f]{64}$/.test(receipt.conversationCommitment) &&
+              receipt.conversationCommitment === receipt.attemptedConversationCommitment &&
+              (command.expectedSubagentRuntimeId === native.subagentRuntimeId ||
+                command.expectedSubagentRuntimeId === command.session.subagentRuntimeId);
             codexFailedRootVerified =
               payload.threadId === command.threadId &&
               payload.messageId === failed.messageId &&
@@ -589,12 +621,18 @@ const makeOrchestrationEngine = Effect.gen(function* () {
               recovery?.turnId === failed.previousTurnId &&
               native !== undefined &&
               native?.providerInstanceId === command.session.providerInstanceId &&
-              native?.subagentRuntimeId === command.session.subagentRuntimeId &&
+              (transferred ||
+                (receipt?.previousRuntimeId === null &&
+                  native.subagentRuntimeId === command.session.subagentRuntimeId)) &&
               (yield* readRuntimeRecoveryBarrier({
                 ...recovery!,
                 threadId: command.threadId,
                 recoveryIntentSequence: failed.intentSequence,
               }));
+            codexFailedRootGenerationTransferVerified = codexFailedRootVerified && transferred;
+            codexRecoveryAcceptedVerified =
+              command.codexRecoveryAccepted !== undefined &&
+              codexFailedRootGenerationTransferVerified;
           }
         }
         let codexRootReplacementVerified = false;
@@ -638,6 +676,8 @@ const makeOrchestrationEngine = Effect.gen(function* () {
             runtimeRecoveryBarrierVerified,
             codexRootReplacementVerified,
             codexFailedRootVerified,
+            codexFailedRootGenerationTransferVerified,
+            codexRecoveryAcceptedVerified,
             scheduledFollowUpVerified,
           });
         // Ordinary commands retain their existing decision boundary. An

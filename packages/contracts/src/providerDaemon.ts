@@ -460,6 +460,9 @@ export const ProviderDaemonAdapterCapabilities = Schema.Struct({
   // Cafe's exact existing-process/no-recovery fence, not native CLI support.
   // Older owners omit it and cannot admit this continuation exception.
   subagentPolicyContinuation: Schema.optional(Schema.Boolean),
+  // Missing on legacy owners must fail closed: silently dropping a restart
+  // guard could otherwise reuse the unhealthy session or stop newer work.
+  codexFailedRootRestart: Schema.optional(Schema.Boolean),
   sessionModelSwitch: Schema.Literals(["in-session", "restart-resume", "unsupported"]),
   liveSteer: Schema.Literals(["supported", "unsupported"]),
   // Optional on the wire so a newly built desktop can still interrogate an

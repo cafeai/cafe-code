@@ -168,6 +168,13 @@ automatic recovery. Only definitive transient failures retry indefinitely with
 capped jittered backoff, and no ambiguous submission is resent. Atrium failure
 age/dismissal cannot hide confirmed active children. See
 [persistent recovery](decisions/codex-persistent-transient-recovery.md).
+Automatic continuation now follows the explicit
+[failed-root session-restart policy](decisions/codex-failed-root-session-restart.md):
+it retires the exact failed session and its children before reopening the same
+history as a fresh native generation. Children remain visible only while their
+current owner is positively observed; the new generation cannot inherit old
+Working claims. This is failure recovery, not permission to interrupt work merely
+to apply newly saved subagent/context defaults.
 Closed, completed, failed, and stopped workers leave those active rosters.
 Atrium cards start on **Active (N)**, showing confirmed active/waiting workers.
 Choose **History (N)** to inspect completed, failed, stopped, or unverified workers.

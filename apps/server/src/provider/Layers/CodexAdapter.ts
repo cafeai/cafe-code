@@ -63,6 +63,7 @@ import {
 import * as Cause from "effect/Cause";
 import * as Data from "effect/Data";
 import * as DateTime from "effect/DateTime";
+import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
 import * as Fiber from "effect/Fiber";
@@ -87,7 +88,7 @@ import {
   makeProviderDiagnostic,
   readProviderDiagnosticSummary,
 } from "@cafecode/shared/providerDiagnostic";
-import { resolveCodexServiceTier } from "../codexServiceTier.ts";
+import { readCodexServiceTier, resolveCodexServiceTier } from "../codexServiceTier.ts";
 import { resolveCodexDaybreak } from "../codexDaybreak.ts";
 import {
   classifyCodexTransientFailure,
@@ -498,16 +499,36 @@ export interface CodexAdapterLiveOptions {
   readonly nativeEventLogger?: EventNdjsonLogger;
 }
 
+type CodexOpeningPolicy = Pick<
+  CodexSessionRuntimeOptions,
+  | "cwd"
+  | "runtimeMode"
+  | "additionalDirectories"
+  | "maxConcurrentSubagents"
+  | "codexContextWindowOverride"
+  | "autoCompactTokenLimit"
+  | "serviceTier"
+> & {
+  // Own undefined pins an observed native omission when this snapshot is
+  // spread over an opening request, instead of inheriting its older model.
+  readonly model: string | undefined;
+};
+
 interface CodexAdapterSessionContext {
   readonly startInput: Parameters<CodexAdapterShape["startSession"]>[0];
+  /** Exact actual-opening scalar policy, not later account defaults or capability files. */
+  openingPolicy: CodexOpeningPolicy;
   readonly schedulingBinding?: SchedulingSessionBinding | undefined;
   readonly visualizationBinding?: VisualizationSessionBinding | undefined;
   readonly threadId: ThreadId;
   readonly scope: Scope.Closeable;
   readonly runtime: CodexSessionRuntimeShape;
+  readonly subagentRuntimeId: ProviderSession["subagentRuntimeId"];
   readonly eventFiber: Fiber.Fiber<void, never>;
   readonly transportPolicyApplied: boolean;
   readonly activeAuthRecoveryTasksById: Map<string, TurnId | null>;
+  readonly retirementCompletion: Deferred.Deferred<Exit.Exit<void, never>>;
+  retirementStarted: boolean;
   pendingTransportPolicyRetirement?: {
     readonly fallbackEventId: string;
     readonly observedAt: string;
@@ -5257,7 +5278,13 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
       );
 
       const session = sessions.get(event.threadId);
-      if (session && !session.stopped && !session.transportPolicyApplied) {
+      if (
+        session &&
+        !session.stopped &&
+        !session.transportPolicyApplied &&
+        (session.subagentRuntimeId === undefined ||
+          session.subagentRuntimeId === event.subagentRuntimeId)
+      ) {
         // Codex should switch this in-flight app-server session to HTTP after
         // emitting the official fallback warning, but older already-running
         // sessions can still surface later reconnect warnings. Retiring only
@@ -5279,49 +5306,100 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
       }
     });
 
+  const retireSessionContext = (session: CodexAdapterSessionContext) =>
+    Effect.uninterruptibleMask((restore) =>
+      Effect.gen(function* () {
+        if (session.retirementStarted) {
+          // A bridge joining external cleanup must remain interruptible: the
+          // cleanup owner closes that bridge's scope before publishing completion.
+          const exit = yield* restore(Deferred.await(session.retirementCompletion));
+          if (Exit.isFailure(exit)) return yield* Effect.failCause(exit.cause);
+          return;
+        }
+        // Set ownership before the first await. All retirement callers share
+        // this exact completion; an old bridge never deletes a replacement row.
+        session.retirementStarted = true;
+        session.stopped = true;
+        if (sessions.get(session.threadId) === session) {
+          sessions.delete(session.threadId);
+          manualCompactions.delete(session.threadId);
+        }
+        const exit = yield* Effect.gen(function* () {
+          yield* disposeSchedulingSession(session.schedulingBinding);
+          yield* Effect.promise(
+            () => session.visualizationBinding?.dispose() ?? Promise.resolve(),
+          ).pipe(
+            Effect.catch(() =>
+              Effect.logWarning("Private visualization session cleanup remains incomplete."),
+            ),
+          );
+          yield* session.runtime.close;
+          yield* Scope.close(session.scope, Exit.void);
+        }).pipe(Effect.exit);
+        yield* Deferred.succeed(session.retirementCompletion, exit);
+        if (Exit.isFailure(exit)) return yield* Effect.failCause(exit.cause);
+      }),
+    );
+
   const retireSession = Effect.fn("CodexAdapter.retireSession")(function* (
     threadId: ThreadId,
     reason: string,
     diagnosticName: string,
+    expectedRuntimeId?: ProviderSession["subagentRuntimeId"],
+    requireExactOwner = false,
   ) {
     const session = sessions.get(threadId);
-    if (!session || session.stopped) {
+    if (
+      !session ||
+      (expectedRuntimeId !== undefined && session.subagentRuntimeId !== expectedRuntimeId) ||
+      (requireExactOwner &&
+        session.subagentRuntimeId !== undefined &&
+        session.subagentRuntimeId !== expectedRuntimeId)
+    ) {
       return;
     }
-
-    session.stopped = true;
-    // Revoke this runtime's exact authority before retiring the native process.
-    // A delayed bridge request must never inherit a replacement's generation.
-    yield* disposeSchedulingSession(session.schedulingBinding);
-    yield* Effect.promise(() => session.visualizationBinding?.dispose() ?? Promise.resolve()).pipe(
-      Effect.catch(() =>
-        Effect.logWarning("Private visualization session cleanup remains incomplete."),
-      ),
-    );
-    sessions.delete(threadId);
-    manualCompactions.delete(threadId);
+    yield* retireSessionContext(session);
     yield* Effect.logWarning(diagnosticName, {
       threadId,
       reason,
     });
 
-    yield* session.runtime.close.pipe(Effect.ignore);
-    yield* Effect.ignore(Scope.close(session.scope, Exit.void));
     yield* Effect.forkChild(
       Effect.yieldNow.pipe(Effect.andThen(Fiber.interrupt(session.eventFiber).pipe(Effect.ignore))),
     );
   });
 
-  const retireExitedSession = (threadId: ThreadId, reason: string): Effect.Effect<void> =>
-    retireSession(threadId, reason, "codex.session.retired-after-runtime-exit");
+  const retireExitedSession = (
+    threadId: ThreadId,
+    reason: string,
+    expectedRuntimeId?: ProviderSession["subagentRuntimeId"],
+  ): Effect.Effect<void> =>
+    retireSession(
+      threadId,
+      reason,
+      "codex.session.retired-after-runtime-exit",
+      expectedRuntimeId,
+      true,
+    );
 
   const retireSessionAfterTransportFallback = (
     threadId: ThreadId,
     reason: string,
+    expectedRuntimeId?: ProviderSession["subagentRuntimeId"],
   ): Effect.Effect<void> =>
-    retireSession(threadId, reason, "codex.session.retired-after-transport-fallback");
+    retireSession(
+      threadId,
+      reason,
+      "codex.session.retired-after-transport-fallback",
+      expectedRuntimeId,
+      true,
+    );
 
-  const startSession: CodexAdapterShape["startSession"] = (input) =>
+  const startSessionWithPolicy = (
+    input: Parameters<CodexAdapterShape["startSession"]>[0],
+    retainedPolicy?: CodexOpeningPolicy,
+    requireExactResume?: true,
+  ) =>
     Effect.scoped(
       Effect.gen(function* () {
         if (input.provider !== undefined && input.provider !== PROVIDER) {
@@ -5566,6 +5644,13 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
           ...(currentTransportPolicy !== undefined
             ? { transportPolicy: currentTransportPolicy }
             : {}),
+          // Guarded cold recovery pins the prior actual-opening policy. Own
+          // undefined entries preserve native omission rather than resolving
+          // an account default a second time. New MCP capabilities stay new.
+          ...(retainedPolicy ?? {}),
+          // This private cold-opening restriction is never accepted from a
+          // public start request or copied into native protocol parameters.
+          ...(requireExactResume === true ? { requireExactResume } : {}),
         };
         const createRuntime = options?.makeRuntime ?? makeCodexSessionRuntime;
         const { runtime, eventFiber, started, activeAuthRecoveryTasksById } = yield* Effect.gen(
@@ -5786,6 +5871,7 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
                 );
 
                 if (
+                  sessions.get(input.threadId)?.subagentRuntimeId === event.subagentRuntimeId &&
                   runtimeEvents.some(
                     (v) =>
                       v.threadId === input.threadId &&
@@ -5848,6 +5934,8 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
                     event.threadId,
                     "Codex reported an invalidated OAuth token; refreshed the shadow auth copy and retired the app-server so the next turn starts with current login material.",
                     "codex.session.retired-after-auth-invalidation",
+                    event.subagentRuntimeId,
+                    true,
                   );
                   return;
                 }
@@ -5858,6 +5946,7 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
                     yield* retireSessionAfterTransportFallback(
                       event.threadId,
                       `Codex Responses WebSocket fallback was observed at ${pendingRetirement.observedAt}; restarting future turns with HTTP Responses transport. Fallback event: ${pendingRetirement.fallbackEventId}.`,
+                      event.subagentRuntimeId,
                     );
                     return;
                   }
@@ -5866,6 +5955,7 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
                   yield* retireExitedSession(
                     event.threadId,
                     event.message ?? `${event.method} received from Codex runtime`,
+                    event.subagentRuntimeId,
                   );
                 }
               }).pipe(
@@ -5958,13 +6048,26 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
         sessions.set(input.threadId, {
           visualizationBinding,
           startInput: input,
+          openingPolicy: {
+            cwd: runtimeInput.cwd,
+            runtimeMode: runtimeInput.runtimeMode,
+            additionalDirectories: runtimeInput.additionalDirectories,
+            maxConcurrentSubagents: runtimeInput.maxConcurrentSubagents,
+            codexContextWindowOverride: runtimeInput.codexContextWindowOverride,
+            autoCompactTokenLimit: runtimeInput.autoCompactTokenLimit,
+            model: runtimeInput.model,
+            serviceTier: runtimeInput.serviceTier,
+          },
           schedulingBinding,
           threadId: input.threadId,
           scope: sessionScope,
           runtime,
+          subagentRuntimeId: started.subagentRuntimeId,
           eventFiber,
           transportPolicyApplied: currentTransportPolicy?.responsesWebsockets === "disabled",
           activeAuthRecoveryTasksById,
+          retirementCompletion: yield* Deferred.make<Exit.Exit<void, never>>(),
+          retirementStarted: false,
           stopped: false,
         });
         sessionScopeTransferred = true;
@@ -5972,6 +6075,8 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
         return started;
       }),
     );
+
+  const startSession: CodexAdapterShape["startSession"] = (input) => startSessionWithPolicy(input);
 
   // Codex 0.153.4 has native image inputs but no arbitrary local-file input.
   // Its normal read-only/workspace-write policies permit file reads; a bounded
@@ -6052,8 +6157,12 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
         );
 
   const sendTurn: CodexAdapterShape["sendTurn"] = Effect.fn("sendTurn")(function* (input) {
+    let restarting:
+      | { readonly context: CodexAdapterSessionContext; readonly current: ProviderSession }
+      | undefined;
     if (input.expectedFailedRoot !== undefined) {
-      const current = yield* (yield* requireSession(input.threadId)).runtime.getSession;
+      const context = yield* requireSession(input.threadId);
+      const current = yield* context.runtime.getSession;
       const failure = current.codexRootTurnFailure;
       if (
         input.codexReview !== undefined ||
@@ -6071,6 +6180,35 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
           method: "turn/start",
           detail: "The failed Codex root is no longer available in its original runtime.",
         });
+      if (input.expectedFailedRoot.restartSession === true) {
+        const expected = input.expectedFailedRoot;
+        // Validate every compound policy before destructive retirement. A
+        // cold automatic continuation cannot borrow a model edit, native
+        // review, old-process policy exception or different account/mode.
+        if (
+          expected.observedAt === undefined ||
+          expected.providerInstanceId !== boundInstanceId ||
+          failure.observedAt !== expected.observedAt ||
+          current.providerInstanceId !== boundInstanceId ||
+          current.status !== "ready" ||
+          current.activeTurnId !== undefined ||
+          current.runtimeMode !== context.openingPolicy.runtimeMode ||
+          !isCodexResumeCursorSchema(current.resumeCursor) ||
+          current.resumeCursor.threadId !== expected.providerThreadId ||
+          context.runtime.closeIfFailedRoot === undefined ||
+          input.modelSelection !== undefined ||
+          input.expectedSubagentPolicySession !== undefined ||
+          input.deliveryPriority !== undefined ||
+          (input.interactionMode !== undefined &&
+            input.interactionMode !== context.startInput.interactionMode)
+        )
+          return yield* new ProviderAdapterRequestError({
+            provider: PROVIDER,
+            method: "turn/start",
+            detail: "The exact failed Codex session cannot be safely restarted.",
+          });
+        restarting = { context, current };
+      }
     }
     if (
       input.codexReview !== undefined &&
@@ -6121,14 +6259,71 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
     const fileManifest = yield* prepareFileManifest(input, "turn/start");
     const prompt = appendFileAttachmentPrompt(input.input, fileManifest);
 
-    const session = yield* requireSession(input.threadId);
+    let session = yield* requireSession(input.threadId);
+    let recoverySession: import("@cafecode/contracts").ProviderTurnStartResult["recoverySession"];
+    if (restarting !== undefined) {
+      const { context, current } = restarting;
+      const expected = input.expectedFailedRoot!;
+      if (session !== context || sessions.get(input.threadId) !== context)
+        return yield* new ProviderAdapterRequestError({
+          provider: PROVIDER,
+          method: "turn/start",
+          detail: "The failed Codex session changed before retirement.",
+        });
+      // The immutable server attempt precedes this call. Reservation and exact
+      // cleanup are cancellation-safe; a pending Stop is delivered before the
+      // next interruptible opening, never while old teardown is unfinished.
+      yield* Effect.uninterruptible(
+        Effect.gen(function* () {
+          if (!(yield* context.runtime.closeIfFailedRoot!(expected)))
+            return yield* new ProviderAdapterRequestError({
+              provider: PROVIDER,
+              method: "turn/start",
+              detail: "The failed Codex root changed before retirement.",
+            });
+          yield* stopSessionInternal(context);
+        }),
+      );
+      const opened = yield* startSessionWithPolicy(
+        { ...context.startInput, resumeCursor: current.resumeCursor },
+        {
+          ...context.openingPolicy,
+          // Later native model selection is recorded on the live snapshot;
+          // never revert to the initial request's model during cold resume.
+          model: current.model ?? context.openingPolicy.model,
+        },
+        true,
+      );
+      session = yield* requireSession(input.threadId);
+      if (
+        opened.providerInstanceId !== boundInstanceId ||
+        opened.subagentRuntimeId === undefined ||
+        opened.subagentRuntimeId === expected.subagentRuntimeId ||
+        opened.status !== "ready" ||
+        opened.activeTurnId !== undefined ||
+        !isCodexResumeCursorSchema(opened.resumeCursor) ||
+        opened.resumeCursor.threadId !== expected.providerThreadId
+      ) {
+        yield* stopSessionInternal(session);
+        return yield* new ProviderAdapterRequestError({
+          provider: PROVIDER,
+          method: "turn/start",
+          detail: "The restarted Codex conversation needs reconciliation.",
+        });
+      }
+      recoverySession = {
+        previousSubagentRuntimeId: expected.subagentRuntimeId,
+        subagentRuntimeId: opened.subagentRuntimeId,
+        providerThreadId: expected.providerThreadId,
+      };
+    }
     if (input.expectedSubagentPolicySession !== undefined)
       yield* assertExistingSubagentPolicy(input, yield* session.runtime.getSession);
     const reasoningEffort =
       input.modelSelection?.instanceId === boundInstanceId
         ? getModelSelectionStringOptionValue(input.modelSelection, "reasoningEffort")
         : undefined;
-    return yield* session.runtime
+    const turn = yield* session.runtime
       .sendTurn({
         ...(input.expectedSubagentPolicySession !== undefined
           ? { expectedSubagentPolicySession: input.expectedSubagentPolicySession }
@@ -6142,8 +6337,11 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
         ...(input.expectedCompletedRootTurnId !== undefined
           ? { expectedCompletedRootTurnId: input.expectedCompletedRootTurnId }
           : {}),
-        ...(input.expectedFailedRoot !== undefined
+        ...(input.expectedFailedRoot !== undefined && recoverySession === undefined
           ? { expectedFailedRoot: input.expectedFailedRoot, allowActiveTurnSteerFallback: false }
+          : {}),
+        ...(recoverySession !== undefined
+          ? { expectedRecoverySession: recoverySession, allowActiveTurnSteerFallback: false }
           : {}),
         ...(prompt !== undefined ? { input: prompt } : {}),
         ...(input.codexReview === undefined && input.modelSelection?.instanceId === boundInstanceId
@@ -6172,6 +6370,18 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
           ),
         ),
       );
+    // Retain only successful native model/tier evidence for this exact owner.
+    // Saved account defaults do not mutate the scalar opening policy.
+    session.openingPolicy = {
+      ...session.openingPolicy,
+      ...(input.modelSelection?.instanceId === boundInstanceId
+        ? { model: input.modelSelection.model }
+        : {}),
+      ...(readCodexServiceTier(turn.resolvedServiceTier) !== undefined
+        ? { serviceTier: readCodexServiceTier(turn.resolvedServiceTier) }
+        : {}),
+    };
+    return { ...turn, ...(recoverySession !== undefined ? { recoverySession } : {}) };
   });
 
   const forkSession: NonNullable<CodexAdapterShape["forkSession"]> = Effect.fn("forkSession")(
@@ -6612,9 +6822,6 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
   const stopSessionInternal = Effect.fn("stopSessionInternal")(function* (
     session: CodexAdapterSessionContext,
   ) {
-    if (session.stopped) {
-      return;
-    }
     // Stop native production first, then wait for the event bridge to retire
     // before reading its mutable recovery-task set. This ordering closes the
     // narrow race where a notification already queued by app-server could add
@@ -6623,19 +6830,11 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
     // bridge can intentionally prevent a queued session/closed edge from being
     // projected. Its queue is adapter-owned, so closing the session scope does
     // not discard the resulting canonical task terminals.
-    session.stopped = true;
-    yield* disposeSchedulingSession(session.schedulingBinding);
-    yield* Effect.promise(() => session.visualizationBinding?.dispose() ?? Promise.resolve()).pipe(
-      Effect.catch(() =>
-        Effect.logWarning("Private visualization session cleanup remains incomplete."),
-      ),
-    );
-    sessions.delete(session.threadId);
-    manualCompactions.delete(session.threadId);
-    yield* session.runtime.close.pipe(Effect.ignore);
+    // A native closed event may already own cleanup. Await its exact shared
+    // completion rather than treating a stopped flag as completed retirement.
+    yield* retireSessionContext(session);
     yield* Fiber.interrupt(session.eventFiber).pipe(Effect.ignore);
     yield* terminalizeAuthRecoveryForAdapterStop(session);
-    yield* Effect.ignore(Scope.close(session.scope, Exit.void));
   });
 
   const stopSession: CodexAdapterShape["stopSession"] = (threadId) =>
@@ -6684,6 +6883,7 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
         return options?.getCodexContextWindowSupport?.() ?? false;
       },
       subagentPolicyContinuation: true,
+      codexFailedRootRestart: true,
       sessionModelSwitch: "in-session",
       liveSteer: "supported",
       manualCompaction: "supported",

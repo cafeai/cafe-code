@@ -16,6 +16,7 @@ import {
   type ProviderDaemonClientConfig,
   type ProviderCompactThreadInput,
   type ProviderSessionStartInput,
+  type ProviderSendTurnInput,
 } from "@cafecode/contracts";
 import {
   ProviderDaemonHttpStatusError,
@@ -519,6 +520,31 @@ export const guardRemoteCodexContextWindowStart = <A, E, R, E2, R2>(input: {
     return yield* input.effect;
   });
 
+/** Negotiate the exact authenticated owner's cold-recovery fence before RPC. */
+export const guardRemoteCodexFailedRootRestart = <A, E, R, E2, R2>(input: {
+  readonly request: ProviderSendTurnInput;
+  readonly readCapabilities: (
+    instanceId: ProviderInstanceId,
+  ) => Effect.Effect<ProviderAdapterCapabilities, E, R>;
+  readonly effect: Effect.Effect<A, E2, R2>;
+}): Effect.Effect<A, E | E2 | ProviderValidationError, R | R2> =>
+  Effect.gen(function* () {
+    const expected = input.request.expectedFailedRoot;
+    if (expected?.restartSession !== true) return yield* input.effect;
+    if (expected.providerInstanceId === undefined || expected.observedAt === undefined)
+      return yield* new ProviderValidationError({
+        operation: "ProviderDaemonRemoteProviderService.sendTurn",
+        issue: "Failed-root restart requires an exact owner and failure timestamp.",
+      });
+    const capabilities = yield* input.readCapabilities(expected.providerInstanceId);
+    if (capabilities.codexFailedRootRestart !== true)
+      return yield* new ProviderValidationError({
+        operation: "ProviderDaemonRemoteProviderService.sendTurn",
+        issue: "This Codex owner does not support guarded failed-root session restart.",
+      });
+    return yield* input.effect;
+  });
+
 async function readEventStream(
   daemonConfig: ProviderDaemonClientConfig,
   afterCursor: number,
@@ -866,7 +892,13 @@ const makeRemoteProviderService = Effect.gen(function* () {
       }),
     forkSession: (input) => guardedRpc({ method: "forkSession", payload: input }),
     discardSessionFork: (input) => guardedRpc({ method: "discardSessionFork", payload: input }),
-    sendTurn: (input) => guardedRpc({ method: "sendTurn", payload: input }),
+    sendTurn: (input) =>
+      guardRemoteCodexFailedRootRestart({
+        request: input,
+        readCapabilities: (instanceId) =>
+          requestProviderDaemonCapabilities(daemonConfig, instanceId),
+        effect: guardedRpc({ method: "sendTurn", payload: input }),
+      }),
     steerTurn: (input) => guardedRpc({ method: "steerTurn", payload: input }),
     controlTask: (input) => guardedRpc({ method: "controlTask", payload: input }),
     interruptTurn: (input) => guardedRpc({ method: "interruptTurn", payload: input }),

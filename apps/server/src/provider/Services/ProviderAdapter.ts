@@ -47,6 +47,8 @@ export interface ProviderAdapterCapabilities {
   readonly codexContextCompaction?: boolean;
   /** Cafe exact-process unchanged-policy delivery; never native CLI support. */
   readonly subagentPolicyContinuation?: boolean;
+  /** This Cafe owner atomically retires the exact failed root before cold resume. */
+  readonly codexFailedRootRestart?: boolean;
   /**
    * Declares how changing a model or its provider-owned traits is applied.
    * `restart-resume` preserves the native conversation while atomically

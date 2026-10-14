@@ -3,6 +3,7 @@ import {
   ProviderDaemonRpcRequest,
   ProviderInstanceId,
   ProviderDriverKind,
+  SubagentRuntimeId,
   ThreadId,
   TurnId,
   type ProviderSessionStartInput,
@@ -27,6 +28,7 @@ import {
   requestProviderDaemonConversationRollback,
   guardRemoteProviderThreadOperation,
   guardRemoteCodexContextWindowStart,
+  guardRemoteCodexFailedRootRestart,
   isRetryableProviderDaemonControlError,
   isVoidProviderDaemonRpcMethod,
   ProviderDaemonRpcResponseError,
@@ -81,6 +83,89 @@ const rewindConfig = { httpBaseUrl: "http://127.0.0.1:3774", token: "synthetic-t
 const encodeRpcRequest = Schema.encodeSync(ProviderDaemonRpcRequest);
 
 describe("RemoteProviderService", () => {
+  it.effect(
+    "cold failed-root RPC requires the exact authenticated owner capability and complete failure identity before delivery",
+    () =>
+      Effect.gen(function* () {
+        const account = ProviderInstanceId.make("exact-cold-recovery-owner");
+        const request = {
+          threadId: ThreadId.make("cold-recovery-remote-thread"),
+          input: "Continue existing work.",
+          expectedFailedRoot: {
+            turnId: TurnId.make("exact-remote-failed-root"),
+            providerThreadId: "same-private-native-history",
+            subagentRuntimeId: SubagentRuntimeId.make("00000000-0000-4000-8000-000000000088"),
+            providerInstanceId: account,
+            observedAt: "2026-10-14T06:00:00.000Z",
+            restartSession: true as const,
+          },
+        };
+        let deliveries = 0;
+        const observed: ProviderInstanceId[] = [];
+        const delivery = Effect.sync(() => ++deliveries);
+        for (const capability of [false, undefined, "true"] as const) {
+          const outcome = yield* guardRemoteCodexFailedRootRestart({
+            request,
+            readCapabilities: (owner) =>
+              Effect.sync(() => {
+                observed.push(owner);
+                return {
+                  sessionModelSwitch: "in-session" as const,
+                  liveSteer: "supported" as const,
+                  ...(capability === undefined
+                    ? {}
+                    : { codexFailedRootRestart: capability as boolean }),
+                };
+              }),
+            effect: delivery,
+          }).pipe(Effect.exit);
+          assert.equal(Exit.isFailure(outcome), true);
+          assert.equal(deliveries, 0);
+        }
+        assert.deepEqual(observed, [account, account, account]);
+        const unavailable = yield* guardRemoteCodexFailedRootRestart({
+          request,
+          readCapabilities: () => Effect.die("Synthetic authenticated-owner inventory unavailable"),
+          effect: delivery,
+        }).pipe(Effect.exit);
+        assert.equal(Exit.isFailure(unavailable), true);
+        assert.equal(deliveries, 0);
+        for (const expected of [
+          { ...request.expectedFailedRoot, providerInstanceId: undefined },
+          { ...request.expectedFailedRoot, observedAt: undefined },
+        ]) {
+          const malformed = yield* guardRemoteCodexFailedRootRestart({
+            request: { ...request, expectedFailedRoot: expected },
+            readCapabilities: () => Effect.die("An incomplete owner must not be probed"),
+            effect: delivery,
+          }).pipe(Effect.exit);
+          assert.equal(Exit.isFailure(malformed), true);
+          assert.equal(deliveries, 0);
+        }
+        yield* guardRemoteCodexFailedRootRestart({
+          request,
+          readCapabilities: (owner) =>
+            Effect.sync(() => {
+              assert.equal(owner, account);
+              return {
+                sessionModelSwitch: "in-session" as const,
+                liveSteer: "supported" as const,
+                codexFailedRootRestart: true,
+              };
+            }),
+          effect: delivery,
+        });
+        assert.equal(deliveries, 1);
+        // Legacy explicit sends without a restart request remain ordinary
+        // commands; they cannot be silently upgraded into cold recovery.
+        yield* guardRemoteCodexFailedRootRestart({
+          request: { ...request, expectedFailedRoot: undefined },
+          readCapabilities: () => Effect.die("Ordinary send must not probe restart capability"),
+          effect: delivery,
+        });
+        assert.equal(deliveries, 2);
+      }),
+  );
   it.effect(
     "requires exact authenticated context support before numeric or Reset reconfiguration delivery",
     () =>

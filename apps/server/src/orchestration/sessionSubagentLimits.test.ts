@@ -10,6 +10,32 @@ describe("materialized native subagent generation", () => {
   };
   const oldId = "00000000-0000-4000-8000-000000000001";
   const newId = "00000000-0000-4000-8000-000000000002";
+  it("never backfills a retired generation's subagent policy into a replacement", () => {
+    const previous = { ...binding, subagentRuntimeId: oldId, maxConcurrentSubagents: 8 };
+    expect(materializedSubagentLimitFields(binding, previous)).toEqual({
+      subagentRuntimeId: oldId,
+      maxConcurrentSubagents: 8,
+    });
+    expect(
+      materializedSubagentLimitFields({ ...binding, subagentRuntimeId: oldId }, previous),
+    ).toEqual({ subagentRuntimeId: oldId, maxConcurrentSubagents: 8 });
+    for (const generation of [newId, null])
+      expect(
+        materializedSubagentLimitFields({ ...binding, subagentRuntimeId: generation }, previous),
+      ).toEqual({ subagentRuntimeId: generation });
+    expect(
+      materializedSubagentLimitFields(
+        { ...binding, subagentRuntimeId: newId, maxConcurrentSubagents: null },
+        previous,
+      ),
+    ).toEqual({ subagentRuntimeId: newId, maxConcurrentSubagents: null });
+    expect(
+      materializedSubagentLimitFields(
+        { ...binding, subagentRuntimeId: newId, maxConcurrentSubagents: 4 },
+        previous,
+      ),
+    ).toEqual({ subagentRuntimeId: newId, maxConcurrentSubagents: 4 });
+  });
   it("retains only received exact-generation compaction requests and never derives legacy pairing", () => {
     const previous = {
       ...binding,

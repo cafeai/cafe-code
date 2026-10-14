@@ -91,15 +91,9 @@ export function materializedSubagentLimitFields(
   if (incoming.maxConcurrentSubagents !== undefined) {
     return { ...runtimeFields, maxConcurrentSubagents: incoming.maxConcurrentSubagents };
   }
-  if (
-    previous !== undefined &&
-    previous !== null &&
-    incoming.threadId === previous.threadId &&
-    incoming.providerName === previous.providerName &&
-    incoming.providerInstanceId != null &&
-    incoming.providerInstanceId === previous.providerInstanceId &&
-    previous.maxConcurrentSubagents !== undefined
-  ) {
+  if (previous != null && sameContextBinding && previous.maxConcurrentSubagents !== undefined) {
+    // An exact replacement generation is a new opening observation. Omitted
+    // policy there is unknown, not proof borrowed from the retired process.
     return { ...runtimeFields, maxConcurrentSubagents: previous.maxConcurrentSubagents };
   }
   return runtimeFields;

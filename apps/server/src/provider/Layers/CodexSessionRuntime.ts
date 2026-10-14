@@ -491,10 +491,12 @@ export interface CodexSessionRuntimeOptions {
   readonly maxConcurrentSubagents?: number | undefined;
   readonly cwd: string;
   readonly runtimeMode: RuntimeMode;
-  readonly model?: string;
+  readonly model?: string | undefined;
   readonly serviceTier?: CodexServiceTier | undefined;
   readonly additionalDirectories?: ReadonlyArray<string> | undefined;
   readonly resumeCursor?: CodexResumeCursor;
+  /** Private cold-recovery authority: opening must preserve the supplied native history. */
+  readonly requireExactResume?: true | undefined;
   // Optional per-provider-instance `model_auto_compact_token_limit` request.
   // This explicit choice wins over a companion nominal context request; when
   // neither is present, native baseline/model policy remains untouched.
@@ -511,6 +513,8 @@ export interface CodexSessionRuntimeSendTurnInput {
   readonly expectedCompletedRootTurnId?: TurnId | undefined;
   /** Server-only failed-root continuation proof; never an app-server parameter. */
   readonly expectedFailedRoot?: ProviderSendTurnInput["expectedFailedRoot"];
+  /** Private fresh-owner fence after cold recovery; never an app-server parameter. */
+  readonly expectedRecoverySession?: ProviderTurnStartResult["recoverySession"];
   /** False without an exact root pin admits only a currently ready native root. */
   readonly allowActiveTurnSteerFallback?: boolean | undefined;
   readonly input?: string;
@@ -776,6 +780,10 @@ export interface CodexSessionRuntimeShape {
   readonly close: Effect.Effect<void>;
   /** Atomically fences an idle root and every known descendant before teardown. */
   readonly closeIfIdle?: Effect.Effect<boolean>;
+  /** Atomically reserve retirement of precisely the allowlisted failed native root. */
+  readonly closeIfFailedRoot?: (
+    expected: NonNullable<ProviderSendTurnInput["expectedFailedRoot"]>,
+  ) => Effect.Effect<boolean>;
 }
 
 export type CodexSessionRuntimeError =
@@ -2808,11 +2816,25 @@ export const openCodexThread = (input: {
   readonly requestedModel: string | undefined;
   readonly serviceTier: CodexServiceTier | undefined;
   readonly resumeThreadId: string | undefined;
+  /** Cafe-only opening policy; never serialized into an app-server request. */
+  readonly requireExactResume?: true | undefined;
   readonly additionalDirectories?: ReadonlyArray<string> | undefined;
   readonly autoCompactTokenLimit?: number | undefined;
   readonly codexContextWindowOverride?: number | undefined;
 }): Effect.Effect<CodexThreadOpenResponse, CodexErrors.CodexAppServerError> => {
   const resumeThreadId = input.resumeThreadId;
+  // Automatic cold recovery has authority over one stored conversation only.
+  // A missing cursor cannot grant permission to create an unrelated native
+  // thread, even though ordinary/manual opening retains that fallback.
+  if (
+    input.requireExactResume === true &&
+    (resumeThreadId === undefined || resumeThreadId.trim().length === 0)
+  )
+    return Effect.fail(
+      CodexErrors.CodexAppServerRequestError.invalidRequest(
+        "The exact Codex conversation is required for recovery opening.",
+      ),
+    );
   const startParams = buildThreadStartParams({
     cwd: input.cwd,
     runtimeMode: input.runtimeMode,
@@ -2842,14 +2864,28 @@ export const openCodexThread = (input: {
       sortDirection: "desc",
     },
   }).pipe(
-    Effect.catchIf(isRecoverableThreadResumeError, (error) =>
-      Effect.logWarning("codex app-server thread resume fell back to fresh start", {
-        threadId: input.threadId,
-        requestedRuntimeMode: input.runtimeMode,
-        resumeThreadId,
-        recoverable: true,
-        cause: error.message,
-      }).pipe(Effect.andThen(requestCodexThreadOpen(input.client, "thread/start", startParams))),
+    // A resumed response is provider data, not authority to publish a different
+    // native conversation as this recovery's owner. Refuse it before start()
+    // can publish snapshots or any actual-opening policy evidence.
+    Effect.flatMap((opened) =>
+      input.requireExactResume === true && opened.thread.id !== resumeThreadId
+        ? Effect.fail(
+            CodexErrors.CodexAppServerRequestError.invalidRequest(
+              "The resumed Codex conversation did not match recovery opening.",
+            ),
+          )
+        : Effect.succeed(opened),
+    ),
+    Effect.catchIf(
+      (error) => input.requireExactResume !== true && isRecoverableThreadResumeError(error),
+      (error) =>
+        Effect.logWarning("codex app-server thread resume fell back to fresh start", {
+          threadId: input.threadId,
+          requestedRuntimeMode: input.runtimeMode,
+          resumeThreadId,
+          recoverable: true,
+          cause: error.message,
+        }).pipe(Effect.andThen(requestCodexThreadOpen(input.client, "thread/start", startParams))),
     ),
   );
 };
@@ -4145,6 +4181,133 @@ export const assertCodexFailedRootContinuationBoundary = Effect.fn(
   );
 });
 
+/**
+ * Cold recovery may retire surviving children, but never a newer root. Native
+ * receipt retirement and lifecycle state are checked together with the closed
+ * reservation: a queued root notification is not old-root authority. Cleanup
+ * must run outside the permit, since notification finalizers also acquire it.
+ */
+export const reserveCodexFailedRootRestartBoundary = Effect.fn(
+  "reserveCodexFailedRootRestartBoundary",
+)(function* (input: {
+  readonly semaphore: Semaphore.Semaphore;
+  readonly completionsRef: Ref.Ref<Map<string, CodexAggregateRootCompletion>>;
+  readonly latestRootTurnIdRef: Ref.Ref<string | undefined>;
+  readonly nativeTurnStartPendingRef: Ref.Ref<boolean>;
+  readonly manualCompactionPendingRef: Ref.Ref<boolean>;
+  readonly closedRef: Ref.Ref<boolean>;
+  readonly sessionRef: Ref.Ref<ProviderSession>;
+  readonly nativeContextAvailable: Effect.Effect<boolean>;
+  readonly historyUsable: Effect.Effect<boolean>;
+  readonly automaticCompactionPending: Effect.Effect<boolean>;
+  readonly notificationSettled: () => boolean;
+  readonly expectedFailedRoot: NonNullable<ProviderSendTurnInput["expectedFailedRoot"]>;
+}) {
+  return yield* input.semaphore.withPermits(1)(
+    Effect.uninterruptible(
+      Effect.gen(function* () {
+        const expected = input.expectedFailedRoot;
+        // Native process observation may suspend. Sample current history and
+        // compaction only after it resolves, then read the exact reservation
+        // tuple under the still-held lifecycle permit.
+        const available = yield* input.nativeContextAvailable;
+        const usableHistory = yield* input.historyUsable;
+        const automaticCompaction = yield* input.automaticCompactionPending;
+        const session = yield* Ref.get(input.sessionRef);
+        if (
+          expected.restartSession !== true ||
+          expected.observedAt === undefined ||
+          expected.providerInstanceId === undefined ||
+          session.providerInstanceId !== expected.providerInstanceId ||
+          session.subagentRuntimeId !== expected.subagentRuntimeId ||
+          !usableHistory ||
+          automaticCompaction
+        )
+          return false;
+        const failure = readCodexRootTurnFailure({
+          session,
+          completions: yield* Ref.get(input.completionsRef),
+          latestRootTurnId: yield* Ref.get(input.latestRootTurnIdRef),
+          nativeContextAvailable: available,
+          nativeTurnStartPending: yield* Ref.get(input.nativeTurnStartPendingRef),
+          manualCompactionPending: yield* Ref.get(input.manualCompactionPendingRef),
+          closed: yield* Ref.get(input.closedRef),
+        });
+        if (
+          failure?.category === undefined ||
+          failure.turnId !== expected.turnId ||
+          failure.providerThreadId !== expected.providerThreadId ||
+          failure.observedAt !== expected.observedAt
+        )
+          return false;
+        return yield* Ref.modify(input.closedRef, (closed) =>
+          closed || !input.notificationSettled()
+            ? ([false, closed] as const)
+            : ([true, true] as const),
+        );
+      }),
+    ),
+  );
+});
+
+/** The new process may not lend its paid submission to any later root or owner. */
+export const assertCodexRecoverySessionBoundary = Effect.fn("assertCodexRecoverySessionBoundary")(
+  function* (input: {
+    readonly semaphore: Semaphore.Semaphore;
+    readonly rootLifecycleEpochRef: Ref.Ref<symbol>;
+    readonly requestedRootLifecycleEpoch: symbol;
+    readonly nativeTurnStartPendingRef: Ref.Ref<boolean>;
+    readonly nativeTurnStartRequestRef: Ref.Ref<symbol | undefined>;
+    readonly requestToken: symbol;
+    readonly manualCompactionPendingRef: Ref.Ref<boolean>;
+    readonly closedRef: Ref.Ref<boolean>;
+    readonly sessionRef: Ref.Ref<ProviderSession>;
+    readonly nativeContextAvailable: Effect.Effect<boolean>;
+    readonly automaticCompactionPending?: Effect.Effect<boolean>;
+    readonly historyUsable?: Effect.Effect<boolean>;
+    /** Synchronous native receipt/ingress fence; missing proof refuses cold submission. */
+    readonly notificationSettled?: (() => boolean) | undefined;
+    readonly expectedRecoverySession: NonNullable<ProviderTurnStartResult["recoverySession"]>;
+  }) {
+    return yield* input.semaphore.withPermits(1)(
+      Effect.gen(function* () {
+        // Availability/history checks can await native state. Read the final
+        // reservation and compaction fences only afterwards under this permit.
+        const available = yield* input.nativeContextAvailable;
+        const usableHistory =
+          input.historyUsable === undefined ? false : yield* input.historyUsable;
+        const automaticCompaction =
+          input.automaticCompactionPending === undefined
+            ? true
+            : yield* input.automaticCompactionPending;
+        const session = yield* Ref.get(input.sessionRef);
+        const expected = input.expectedRecoverySession;
+        if (
+          (yield* Ref.get(input.closedRef)) ||
+          (yield* Ref.get(input.manualCompactionPendingRef)) ||
+          !available ||
+          !usableHistory ||
+          automaticCompaction ||
+          !(yield* Ref.get(input.nativeTurnStartPendingRef)) ||
+          (yield* Ref.get(input.nativeTurnStartRequestRef)) !== input.requestToken ||
+          (yield* Ref.get(input.rootLifecycleEpochRef)) !== input.requestedRootLifecycleEpoch ||
+          session.subagentRuntimeId !== expected.subagentRuntimeId ||
+          expected.subagentRuntimeId === expected.previousSubagentRuntimeId ||
+          currentProviderThreadId(session) !== expected.providerThreadId ||
+          // Native receipt is earlier than its queued lifecycle projection.
+          // Keep this synchronous check last, after every suspending read, so
+          // an already consumed but unprocessed frame cannot lend stale idle
+          // state to the immediately following continuation transport request.
+          input.notificationSettled?.() !== true
+        )
+          return yield* CodexErrors.CodexAppServerRequestError.invalidRequest(
+            "The restarted Codex session changed before continuation submission.",
+          );
+      }),
+    );
+  },
+);
+
 /** A delayed error for a retired root may be logged, but cannot mutate a newer root. */
 export const commitCodexRootErrorLifecycleBoundary = Effect.fn(
   "commitCodexRootErrorLifecycleBoundary",
@@ -4318,6 +4481,11 @@ export const admitCodexTurnStartLifecycleBoundary = Effect.fn(
   readonly serviceTierSnapshotRef?: Ref.Ref<CodexServiceTierSnapshot | undefined> | undefined;
   readonly expectedCompletedRootTurnId?: TurnId | undefined;
   readonly expectedFailedRoot?: ProviderSendTurnInput["expectedFailedRoot"];
+  readonly expectedRecoverySession?: ProviderTurnStartResult["recoverySession"];
+  readonly automaticCompactionPending?: Effect.Effect<boolean>;
+  readonly historyUsable?: Effect.Effect<boolean>;
+  /** Used only by the private cold recovery path; ordinary admission is unchanged. */
+  readonly notificationSettled?: (() => boolean) | undefined;
   readonly expectedSubagentPolicySession?: ProviderSubagentPolicySession | undefined;
   readonly latestRootTurnIdRef?: Ref.Ref<string | undefined>;
   readonly nativeContextAvailable?: Effect.Effect<boolean>;
@@ -4326,10 +4494,10 @@ export const admitCodexTurnStartLifecycleBoundary = Effect.fn(
   return yield* input.semaphore.withPermits(1)(
     Effect.uninterruptible(
       Effect.gen(function* () {
-        const session = yield* Ref.get(input.sessionRef);
-        const closed = yield* Ref.get(input.closedRef);
-        const nativeTurnStartPending = yield* Ref.get(input.nativeTurnStartPendingRef);
-        const manualCompactionPending = yield* Ref.get(input.manualCompactionPendingRef);
+        let session = yield* Ref.get(input.sessionRef);
+        let closed = yield* Ref.get(input.closedRef);
+        let nativeTurnStartPending = yield* Ref.get(input.nativeTurnStartPendingRef);
+        let manualCompactionPending = yield* Ref.get(input.manualCompactionPendingRef);
         if (closed || session.status === "closed") {
           return yield* CodexErrors.CodexAppServerRequestError.invalidRequest(
             "Cannot send a message after the Codex session has closed.",
@@ -4346,6 +4514,45 @@ export const admitCodexTurnStartLifecycleBoundary = Effect.fn(
           return yield* CodexErrors.CodexAppServerRequestError.invalidRequest(
             "Cannot send a message while another native Codex request is awaiting confirmation.",
           );
+        }
+        if (input.expectedRecoverySession !== undefined) {
+          const expected = input.expectedRecoverySession;
+          // These checks can suspend while raw native notifications are already
+          // received. Sample their final lifecycle state only afterwards, and
+          // require synchronous receipt settlement independently of projection.
+          const available =
+            input.nativeContextAvailable === undefined
+              ? false
+              : yield* input.nativeContextAvailable;
+          const usableHistory =
+            input.historyUsable === undefined ? false : yield* input.historyUsable;
+          const automaticCompaction =
+            input.automaticCompactionPending === undefined
+              ? true
+              : yield* input.automaticCompactionPending;
+          session = yield* Ref.get(input.sessionRef);
+          closed = yield* Ref.get(input.closedRef);
+          nativeTurnStartPending = yield* Ref.get(input.nativeTurnStartPendingRef);
+          manualCompactionPending = yield* Ref.get(input.manualCompactionPendingRef);
+          if (
+            closed ||
+            nativeTurnStartPending ||
+            manualCompactionPending ||
+            !available ||
+            !usableHistory ||
+            automaticCompaction ||
+            input.expectedFailedRoot !== undefined ||
+            input.expectedCompletedRootTurnId !== undefined ||
+            expected.subagentRuntimeId === expected.previousSubagentRuntimeId ||
+            session.subagentRuntimeId !== expected.subagentRuntimeId ||
+            currentProviderThreadId(session) !== expected.providerThreadId ||
+            session.status !== "ready" ||
+            session.activeTurnId !== undefined ||
+            input.notificationSettled?.() !== true
+          )
+            return yield* CodexErrors.CodexAppServerRequestError.invalidRequest(
+              "The restarted Codex session is no longer idle for its continuation.",
+            );
         }
         const completion = readCodexRootTurnCompletion({
           session,
@@ -4413,7 +4620,22 @@ export const admitCodexTurnStartLifecycleBoundary = Effect.fn(
         }
         const requestedRootLifecycleEpoch = yield* Ref.get(input.rootLifecycleEpochRef);
         const requestToken = Symbol();
-        yield* Ref.set(input.nativeTurnStartPendingRef, true);
+        if (input.expectedRecoverySession !== undefined) {
+          // Couple the last receipt check directly to the reservation mutation;
+          // neither semaphore-protected projection nor a previously observed
+          // zero queue size proves the native ingress has settled at this point.
+          const reserved = yield* Ref.modify(input.nativeTurnStartPendingRef, (pending) =>
+            pending || input.notificationSettled?.() !== true
+              ? ([false, pending] as const)
+              : ([true, true] as const),
+          );
+          if (!reserved)
+            return yield* CodexErrors.CodexAppServerRequestError.invalidRequest(
+              "The restarted Codex session is no longer idle for its continuation.",
+            );
+        } else {
+          yield* Ref.set(input.nativeTurnStartPendingRef, true);
+        }
         yield* Ref.set(input.nativeTurnStartRequestRef, requestToken);
         let reasoningEffortSnapshot: CodexReasoningEffortSnapshot | undefined;
         const providerThreadId = currentProviderThreadId(session);
@@ -8914,6 +9136,16 @@ export const makeCodexSessionRuntime = (
 
     const start = Effect.fn("CodexSessionRuntime.start")(function* () {
       const resumeThreadId = readResumeCursorThreadId(options.resumeCursor);
+      // Reject a lost private recovery cursor before initialization or any
+      // native history/opening request. The same policy is enforced again at
+      // the actual open boundary, where recoverable resume failures must escape.
+      if (
+        options.requireExactResume === true &&
+        (resumeThreadId === undefined || resumeThreadId.trim().length === 0)
+      )
+        return yield* CodexErrors.CodexAppServerRequestError.invalidRequest(
+          "The exact Codex conversation is required for recovery opening.",
+        );
       // Resume can restore a native goal or queued work, so it is not an inert
       // metadata read. A known poisoned cursor must be refused before that RPC.
       if (resumeThreadId) yield* assertHistoryUsable(resumeThreadId);
@@ -8948,6 +9180,7 @@ export const makeCodexSessionRuntime = (
         serviceTier: options.serviceTier,
         additionalDirectories: options.additionalDirectories,
         resumeThreadId,
+        requireExactResume: options.requireExactResume,
         autoCompactTokenLimit,
         customInstructions: options.customInstructions,
         codexContextWindowOverride,
@@ -9152,6 +9385,44 @@ export const makeCodexSessionRuntime = (
       yield* closeReserved;
       return true;
     });
+    const closeIfFailedRoot: NonNullable<CodexSessionRuntimeShape["closeIfFailedRoot"]> = (
+      expectedFailedRoot,
+    ) =>
+      Effect.uninterruptible(
+        Effect.gen(function* () {
+          const reserved = yield* reserveCodexFailedRootRestartBoundary({
+            semaphore: aggregateLifecycleSemaphore,
+            completionsRef: aggregateRootCompletionsRef,
+            latestRootTurnIdRef: latestHistoryRootTurnRef,
+            nativeTurnStartPendingRef,
+            manualCompactionPendingRef,
+            closedRef,
+            sessionRef,
+            nativeContextAvailable,
+            historyUsable: Effect.gen(function* () {
+              const nativeThreadId = currentProviderThreadId(yield* Ref.get(sessionRef));
+              return (
+                nativeThreadId !== undefined &&
+                !(yield* historySafety.knownBlocked(nativeThreadId)) &&
+                (yield* Ref.get(uncertainHistoryThreadRef)) !== nativeThreadId &&
+                !(yield* Ref.get(resumeChildDiscoveryUncertainRef)) &&
+                !(yield* childAdmissionFence.isIncomplete)
+              );
+            }),
+            automaticCompactionPending: Ref.get(activeContextCompactionsRef).pipe(
+              Effect.map((entries) => entries.size > 0),
+            ),
+            notificationSettled: () => notificationRetirementFence.isSettled(),
+            expectedFailedRoot,
+          });
+          if (!reserved) return false;
+          // A cancellation after reservation must complete the exact old
+          // teardown before any replacement can be opened. Never ignore an
+          // uncertain close or hold the lifecycle permit through finalizers.
+          yield* closeReserved;
+          return true;
+        }),
+      );
 
     // Parent-scope teardown is an intentional retirement too. Reserve it before
     // the command layer releases its child, so a clean daemon shutdown cannot
@@ -9160,6 +9431,7 @@ export const makeCodexSessionRuntime = (
     return {
       start,
       closeIfIdle,
+      closeIfFailedRoot,
       mcpApps: {
         catalog: (nativeThreadId, server) =>
           Effect.gen(function* () {
@@ -9394,6 +9666,15 @@ export const makeCodexSessionRuntime = (
               ? undefined
               : input.expectedCompletedRootTurnId,
             expectedFailedRoot: input.expectedFailedRoot,
+            expectedRecoverySession: input.expectedRecoverySession,
+            notificationSettled: () => notificationRetirementFence.isSettled(),
+            automaticCompactionPending: Ref.get(activeContextCompactionsRef).pipe(
+              Effect.map((entries) => entries.size > 0),
+            ),
+            historyUsable: assertHistoryUsable(providerThreadId).pipe(
+              Effect.as(true),
+              Effect.catch(() => Effect.succeed(false)),
+            ),
             expectedSubagentPolicySession: input.expectedSubagentPolicySession,
             latestRootTurnIdRef: latestHistoryRootTurnRef,
             nativeContextAvailable,
@@ -9430,6 +9711,31 @@ export const makeCodexSessionRuntime = (
             ? client.raw.request("review/start", reviewParams)
             : client.raw.request("turn/start", params!);
           const rawResponse = yield* assertHistoryUsable(providerThreadId).pipe(
+            Effect.andThen(
+              input.expectedRecoverySession === undefined
+                ? Effect.void
+                : assertCodexRecoverySessionBoundary({
+                    semaphore: aggregateLifecycleSemaphore,
+                    rootLifecycleEpochRef: rootTurnLifecycleEpochRef,
+                    requestedRootLifecycleEpoch,
+                    nativeTurnStartPendingRef,
+                    nativeTurnStartRequestRef,
+                    requestToken,
+                    manualCompactionPendingRef,
+                    closedRef,
+                    sessionRef,
+                    nativeContextAvailable,
+                    expectedRecoverySession: input.expectedRecoverySession,
+                    notificationSettled: () => notificationRetirementFence.isSettled(),
+                    automaticCompactionPending: Ref.get(activeContextCompactionsRef).pipe(
+                      Effect.map((entries) => entries.size > 0),
+                    ),
+                    historyUsable: assertHistoryUsable(providerThreadId).pipe(
+                      Effect.as(true),
+                      Effect.catch(() => Effect.succeed(false)),
+                    ),
+                  }),
+            ),
             Effect.andThen(
               input.expectedFailedRoot === undefined
                 ? Effect.void

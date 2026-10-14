@@ -1,6 +1,6 @@
 # Provider stream reconciliation
 
-Last updated: 2026-10-11 01:53:21 JST (UTC+0900)
+Last updated: 2026-10-14 15:46:27 JST (UTC+0900)
 
 ## Ownership and exact text
 
@@ -67,7 +67,14 @@ If a continuation fails before its started event, retain its exact pending input
 until a matching immutable attempt/ACK receipt and fresh same-owner proof permit
 an internal atomic failed-turn association. Do not invent a running state or
 erase observed execution timestamps; newer controls still veto the association.
-See [the persistent recovery decision](decisions/codex-persistent-transient-recovery.md).
+The user-authorized successor ends the exact failed session before automatic
+continuation, closes its surviving children, and reopens the same native history
+with a fresh generation. Atomic failed-owner retirement, one-use attempt ownership,
+explicit old-to-new acceptance binding and new-session admission precede the new
+turn. This does not clear history, replay the original request or retry uncertain
+acceptance; native warnings and permanent/unknown failures remain excluded.
+See [the session-restart decision](decisions/codex-failed-root-session-restart.md)
+and the preserved [persistent recovery rules](decisions/codex-persistent-transient-recovery.md).
 
 Remote compaction has its own finite native retry loop. Codex 0.162.1 wraps its
 exhausted stream error in the exact `Error running remote compact task: ` prefix

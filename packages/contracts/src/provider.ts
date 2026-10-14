@@ -274,6 +274,12 @@ export const ProviderSendTurnInput = Schema.Struct({
       turnId: TurnId,
       providerThreadId: TrimmedNonEmptyString,
       subagentRuntimeId: SubagentRuntimeId,
+      // Internal cold-recovery policy. Legacy callers omit it and retain the
+      // existing same-owner continuation boundary. The restart requires the
+      // exact immutable failure time as well as its root/process identity.
+      restartSession: Schema.optional(Schema.Literal(true)),
+      observedAt: Schema.optional(IsoDateTime),
+      providerInstanceId: Schema.optional(ProviderInstanceId),
     }),
   ),
   input: Schema.optional(
@@ -312,6 +318,16 @@ export type ProviderSteerTurnInput = typeof ProviderSteerTurnInput.Type;
 export const ProviderTurnStartResult = Schema.Struct({
   threadId: ThreadId,
   turnId: TurnId,
+  // Authenticated Cafe-owner evidence of one guarded cold restart. It binds
+  // the old failed generation to the new accepting generation without ever
+  // making a native conversation identifier into client authority.
+  recoverySession: Schema.optional(
+    Schema.Struct({
+      previousSubagentRuntimeId: SubagentRuntimeId,
+      subagentRuntimeId: SubagentRuntimeId,
+      providerThreadId: TrimmedNonEmptyString,
+    }),
+  ),
   // Native Codex session routing frozen at this start's admission. Optional
   // for older daemons/providers; standard must be explicit, never guessed.
   resolvedServiceTier: Schema.optional(

@@ -99,6 +99,7 @@ import {
   makeCodexTransientRecoveryChainReader,
   buildCodexTransientFailureMarkerPayload,
   codexTransientAcceptanceCommandId,
+  codexRecoveryConversationCommitment,
   codexTransientRecoveryDelayMs,
   saturateRuntimeRecoveryAttempt,
 } from "../providerRuntimeRecovery.ts";
@@ -5775,7 +5776,7 @@ const make = Effect.gen(function* () {
         role: "user",
         // Native history remains authoritative. Never replay the original
         // prompt, attachments, tool calls or saved transcript into a new root.
-        text: "The last request was interrupted by a temporary provider failure. Continue the unfinished work from the current native session. Check existing work before repeating any action.",
+        text: "The last request was interrupted by a temporary provider failure. Continue the unfinished work from the preserved conversation history in a reopened session. Check existing work before repeating any action.",
         attachments: [],
       },
       modelSelection: thread.modelSelection,
@@ -5833,6 +5834,37 @@ const make = Effect.gen(function* () {
         thread.latestTurn.state === "error";
       const thread = yield* resolveThread(threadId);
       if (!threadMatches(thread)) return;
+      if (
+        (yield* providerService.getCapabilities(transient.providerInstanceId))
+          .codexFailedRootRestart !== true
+      ) {
+        // An older authenticated owner must not silently use retained-session
+        // recovery. No provider call or immutable paid attempt is made here.
+        const stoppedAt = DateTime.formatIso(yield* DateTime.now);
+        const id = `server:codex-transient-restart-unsupported:${event.sequence}`;
+        yield* orchestrationEngine.dispatch({
+          type: "thread.activity.append",
+          commandId: CommandId.make(id),
+          threadId,
+          activity: {
+            id: EventId.make(id),
+            kind: "runtime.warning",
+            tone: "info",
+            summary: "Codex recovery requires an updated runtime",
+            turnId: recovery.turnId,
+            payload: {
+              recovery: "codex-transient-recovery-cancelled",
+              providerInstanceId: transient.providerInstanceId,
+              subagentRuntimeId: transient.subagentRuntimeId,
+              sessionUpdatedAt: recovery.sessionUpdatedAt,
+            },
+            createdAt: stoppedAt,
+          },
+          createdAt: stoppedAt,
+        });
+        transientRecoveryContexts.delete(threadId);
+        return;
+      }
       const message = thread?.messages.find((entry) => entry.id === event.payload.messageId);
       if (message?.role !== "user" || (message.attachments?.length ?? 0) !== 0) return;
       const prepared = yield* Effect.gen(function* () {
@@ -5861,10 +5893,14 @@ const make = Effect.gen(function* () {
             turnId: recovery.turnId,
             providerThreadId: proof.providerThreadId,
             subagentRuntimeId: transient.subagentRuntimeId,
+            providerInstanceId: transient.providerInstanceId,
+            observedAt: recovery.sessionUpdatedAt,
+            restartSession: true,
           },
         };
-        // No ensureSession, model switch, bootstrap or whole-tree retirement:
-        // children may still be running in this exact existing native context.
+        // Preparation only reads proof. The adapter retires exactly this old
+        // tree inside the claimed send, then reopens its original history and
+        // recorded launch policy. No generic bootstrap or saved-default adoption.
         return {
           request,
           activeTurnId: undefined,
@@ -5910,6 +5946,11 @@ const make = Effect.gen(function* () {
             providerInstanceId: transient.providerInstanceId,
             subagentRuntimeId: transient.subagentRuntimeId,
             sessionUpdatedAt: recovery.sessionUpdatedAt,
+            nativeConversationCommitment: codexRecoveryConversationCommitment({
+              threadId,
+              providerInstanceId: transient.providerInstanceId,
+              providerThreadId: prepared.request.expectedFailedRoot!.providerThreadId,
+            }),
             ...(transient.continuationOrdinal !== undefined
               ? {
                   continuationOrdinal: transient.continuationOrdinal,
@@ -5958,11 +5999,17 @@ const make = Effect.gen(function* () {
           Effect.timeout("30 seconds"),
           Effect.flatMap((turn) =>
             Effect.gen(function* () {
+              const replacement = turn.recoverySession;
               if (
                 turn.threadId !== threadId ||
                 turn.deliveryKind === "steer" ||
                 turn.clientCorrelationId !== undefined ||
-                turn.turnId === recovery.turnId
+                turn.turnId === recovery.turnId ||
+                replacement === undefined ||
+                replacement.previousSubagentRuntimeId !== transient.subagentRuntimeId ||
+                replacement.subagentRuntimeId === transient.subagentRuntimeId ||
+                replacement.providerThreadId !==
+                  prepared.request.expectedFailedRoot?.providerThreadId
               ) {
                 return yield* new ProviderAdapterRequestError({
                   provider: "Codex",
@@ -5990,7 +6037,13 @@ const make = Effect.gen(function* () {
                     recoveryIntentSequence: event.sequence,
                     attemptOwnerId,
                     providerInstanceId: transient.providerInstanceId,
-                    subagentRuntimeId: transient.subagentRuntimeId,
+                    subagentRuntimeId: replacement.subagentRuntimeId,
+                    previousSubagentRuntimeId: transient.subagentRuntimeId,
+                    nativeConversationCommitment: codexRecoveryConversationCommitment({
+                      threadId,
+                      providerInstanceId: transient.providerInstanceId,
+                      providerThreadId: replacement.providerThreadId,
+                    }),
                   },
                   createdAt: acceptedAt,
                 },
@@ -6007,26 +6060,72 @@ const make = Effect.gen(function* () {
                     : Effect.succeed(undefined),
                 ),
               );
+              // Retire old materialization evidence even when the old projection
+              // survives until this ACK. Missing new proof remains unknown;
+              // null is preserved only when the new owner actually reported it.
+              const observedSession =
+                acknowledgedLive === undefined
+                  ? undefined
+                  : {
+                      threadId,
+                      providerName: acknowledgedLive.provider,
+                      providerInstanceId: acknowledgedLive.providerInstanceId,
+                      runtimeMode: acknowledgedLive.runtimeMode,
+                      subagentRuntimeId: acknowledgedLive.subagentRuntimeId,
+                      ...(acknowledgedLive.maxConcurrentSubagents !== undefined
+                        ? { maxConcurrentSubagents: acknowledgedLive.maxConcurrentSubagents }
+                        : {}),
+                      ...(acknowledgedLive.codexContextWindowOverride !== undefined
+                        ? {
+                            codexContextWindowOverride: acknowledgedLive.codexContextWindowOverride,
+                          }
+                        : {}),
+                      ...(acknowledgedLive.codexAutoCompactTokenLimit !== undefined
+                        ? {
+                            codexAutoCompactTokenLimit: acknowledgedLive.codexAutoCompactTokenLimit,
+                          }
+                        : {}),
+                    };
               if (
                 (yield* permitted()) &&
                 acknowledgedLive?.provider === "codex" &&
                 acknowledgedLive.providerInstanceId === transient.providerInstanceId &&
-                acknowledgedLive.subagentRuntimeId === transient.subagentRuntimeId &&
+                acknowledgedLive.subagentRuntimeId === replacement.subagentRuntimeId &&
                 acknowledgedLive.status === "running" &&
                 acknowledgedLive.activeTurnId === turn.turnId &&
                 acknowledgedLive.codexRootTurnFailure?.turnId !== turn.turnId
               ) {
-                yield* reconcileAcceptedSendTurnResult({
+                const current = yield* resolveThread(threadId);
+                if (current?.session == null || observedSession === undefined) return;
+                // Receipt authentication and control ordering are repeated by
+                // the engine in the same admission worker as Stop/new input.
+                // An earlier permitted() or inventory read is not a lock.
+                yield* orchestrationEngine.dispatch({
+                  type: "thread.session.set",
+                  commandId: CommandId.make(`${receiptId}:associate-running-root`),
                   threadId,
-                  messageId: message.id,
-                  intentSequence: event.sequence,
-                  turn,
-                  intentCreatedAt: event.payload.createdAt,
+                  expectedSessionLifecycle: sessionLifecycleSnapshot(current.session),
+                  expectedSubagentRuntimeId: current.session.subagentRuntimeId ?? null,
+                  codexRecoveryAccepted: {
+                    turnId: turn.turnId,
+                    previousTurnId: recovery.turnId,
+                    messageId: message.id,
+                    intentSequence: event.sequence,
+                    requestedAt: event.payload.createdAt,
+                  },
+                  session: {
+                    ...observedSession,
+                    status: "running",
+                    activeTurnId: turn.turnId,
+                    lastError: null,
+                    updatedAt: acceptedAt,
+                  },
+                  createdAt: acceptedAt,
                 });
               } else if (
                 acknowledgedLive?.provider === "codex" &&
                 acknowledgedLive.providerInstanceId === transient.providerInstanceId &&
-                acknowledgedLive.subagentRuntimeId === transient.subagentRuntimeId &&
+                acknowledgedLive.subagentRuntimeId === replacement.subagentRuntimeId &&
                 acknowledgedLive.status === "ready" &&
                 acknowledgedLive.activeTurnId === undefined &&
                 acknowledgedLive.codexRootTurnFailure?.turnId === turn.turnId &&
@@ -6054,7 +6153,7 @@ const make = Effect.gen(function* () {
                     commandId: CommandId.make(`${receiptId}:associate-failed-root`),
                     threadId,
                     expectedSessionLifecycle: sessionLifecycleSnapshot(current.session),
-                    expectedSubagentRuntimeId: transient.subagentRuntimeId,
+                    expectedSubagentRuntimeId: current.session.subagentRuntimeId ?? null,
                     codexFailedRoot: {
                       turnId: turn.turnId,
                       previousTurnId: recovery.turnId,
@@ -6064,7 +6163,7 @@ const make = Effect.gen(function* () {
                       completedAt: proof.observedAt,
                     },
                     session: {
-                      ...current.session,
+                      ...observedSession!,
                       status: "ready",
                       activeTurnId: null,
                       lastError: "Codex continuation failed.",
@@ -6082,7 +6181,7 @@ const make = Effect.gen(function* () {
                   associated.session?.status === "ready" &&
                   associated.session.updatedAt === proof.observedAt &&
                   associated.session.providerInstanceId === transient.providerInstanceId &&
-                  associated.session.subagentRuntimeId === transient.subagentRuntimeId
+                  associated.session.subagentRuntimeId === replacement.subagentRuntimeId
                 ) {
                   yield* orchestrationEngine.dispatch({
                     type: "thread.activity.append",
@@ -6096,7 +6195,7 @@ const make = Effect.gen(function* () {
                       turnId: turn.turnId,
                       payload: buildCodexTransientFailureMarkerPayload({
                         providerInstanceId: transient.providerInstanceId,
-                        subagentRuntimeId: transient.subagentRuntimeId,
+                        subagentRuntimeId: replacement.subagentRuntimeId,
                         sessionUpdatedAt: proof.observedAt,
                       }),
                       createdAt: proof.observedAt,
@@ -6796,6 +6895,7 @@ const make = Effect.gen(function* () {
       event.type === "thread.reverted" ||
       (event.type === "thread.meta-updated" &&
         (event.payload.modelSelection !== undefined ||
+          event.payload.codexContextWindowOverride !== undefined ||
           event.payload.projectId !== undefined ||
           event.payload.branch !== undefined ||
           event.payload.worktreePath !== undefined));

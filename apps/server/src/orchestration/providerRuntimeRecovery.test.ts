@@ -8,6 +8,7 @@ import * as TestSqliteClient from "../persistence/TestSqliteClient.ts";
 import {
   buildCodexTransientFailureMarkerPayload,
   codexTransientAcceptanceCommandId,
+  codexRecoveryConversationCommitment,
   codexTransientRecoveryDelayMs,
   makeCodexTransientRecoveryChainReader,
   makeRuntimeRecoveryBarrierReader,
@@ -100,7 +101,11 @@ const setup = Effect.gen(function* () {
       `;
       return rows[0]!.sequence;
     });
-  const marker = (root = turnId, kind = "codex-transient-root-failed") =>
+  const marker = (
+    root = turnId,
+    kind = "codex-transient-root-failed",
+    owningRuntimeId = runtimeId,
+  ) =>
     append("thread.activity-appended", {
       activity: {
         kind: "runtime.warning",
@@ -108,7 +113,7 @@ const setup = Effect.gen(function* () {
         payload: {
           ...buildCodexTransientFailureMarkerPayload({
             providerInstanceId: instanceId,
-            subagentRuntimeId: runtimeId,
+            subagentRuntimeId: owningRuntimeId,
             sessionUpdatedAt: now,
           }),
           recovery: kind,
@@ -182,6 +187,140 @@ const setup = Effect.gen(function* () {
 });
 
 effectIt.layer(TestSqliteClient.layerMemory())("transient chain durability", (it) => {
+  for (const scenario of [
+    "exact replacement",
+    "missing transfer",
+    "wrong previous generation",
+    "unchanged generation",
+    "wrong accepted generation",
+    "foreign native history",
+    "malformed commitment",
+    "wrong attempted account",
+    "wrong attempted generation",
+    "wrong attempted root",
+    "wrong attempted source",
+    "wrong owner nonce",
+    "provider-authored receipt",
+    "unknown ACK",
+  ] as const) {
+    it.effect(`cold recovery chain requires the immutable old-to-new owner join: ${scenario}`, () =>
+      Effect.gen(function* () {
+        const s = yield* setup;
+        yield* s.humanStart();
+        const firstSource = yield* s.marker();
+        const first = s.recovery(firstSource, turnId, 6);
+        const nativeConversationCommitment = codexRecoveryConversationCommitment({
+          threadId,
+          providerInstanceId: instanceId,
+          providerThreadId: "same-private-native-history",
+        });
+        const intent = yield* s.append("thread.turn-start-requested", {
+          messageId: "cold-recovery-message",
+          runtimeRecovery: first,
+        });
+        yield* s.append(
+          "thread.activity-appended",
+          {
+            activity: {
+              kind: "runtime.warning",
+              turnId:
+                scenario === "wrong attempted root"
+                  ? TurnId.make("foreign-attempted-root")
+                  : turnId,
+              payload: {
+                recovery: "codex-transient-continuation-attempted",
+                sourceEventSequence:
+                  scenario === "wrong attempted source" ? firstSource + 1 : firstSource,
+                attemptOwnerId: "exact-cold-attempt-owner",
+                providerInstanceId:
+                  scenario === "wrong attempted account"
+                    ? ProviderInstanceId.make("foreign-attempted-account")
+                    : instanceId,
+                subagentRuntimeId:
+                  scenario === "wrong attempted generation"
+                    ? SubagentRuntimeId.make("00000000-0000-4000-8000-000000000199")
+                    : runtimeId,
+                nativeConversationCommitment:
+                  scenario === "malformed commitment"
+                    ? "A".repeat(64)
+                    : nativeConversationCommitment,
+              },
+            },
+          },
+          "server",
+          `server:runtime-recovery-attempt:${intent}`,
+        );
+        const replacement = SubagentRuntimeId.make("00000000-0000-4000-8000-000000000143");
+        const foreign = SubagentRuntimeId.make("00000000-0000-4000-8000-000000000144");
+        const nextRoot = TurnId.make("replacement-failed-before-start-notification");
+        const owningRuntime = scenario === "unchanged generation" ? runtimeId : replacement;
+        const source = yield* s.marker(nextRoot, "codex-transient-root-failed", owningRuntime);
+        const input = {
+          threadId,
+          turnId: nextRoot,
+          sourceEventSequence: source,
+          providerInstanceId: instanceId,
+          subagentRuntimeId: owningRuntime,
+        };
+        // No turn.started event is fabricated. A native terminal-before-ACK
+        // can continue its backoff only through this exact accepted transfer.
+        assert.deepStrictEqual(yield* s.readChain(input), { status: "pending" });
+        if (scenario !== "unknown ACK")
+          yield* s.append(
+            "thread.activity-appended",
+            {
+              activity: {
+                kind: "runtime.warning",
+                turnId: nextRoot,
+                payload: {
+                  recovery: "codex-transient-continuation-accepted",
+                  recoveryIntentSequence: intent,
+                  attemptOwnerId:
+                    scenario === "wrong owner nonce" ? "other-owner" : "exact-cold-attempt-owner",
+                  providerInstanceId: instanceId,
+                  subagentRuntimeId:
+                    scenario === "wrong accepted generation"
+                      ? foreign
+                      : scenario === "unchanged generation"
+                        ? runtimeId
+                        : replacement,
+                  ...(scenario === "missing transfer"
+                    ? {}
+                    : {
+                        previousSubagentRuntimeId:
+                          scenario === "wrong previous generation" ? foreign : runtimeId,
+                        nativeConversationCommitment:
+                          scenario === "foreign native history"
+                            ? codexRecoveryConversationCommitment({
+                                threadId,
+                                providerInstanceId: instanceId,
+                                providerThreadId: "foreign-private-native-history",
+                              })
+                            : scenario === "malformed commitment"
+                              ? "A".repeat(64)
+                              : nativeConversationCommitment,
+                      }),
+                },
+              },
+            },
+            scenario === "provider-authored receipt" ? "provider" : "server",
+            codexTransientAcceptanceCommandId(threadId, nextRoot),
+          );
+        assert.deepStrictEqual(
+          yield* s.readChain(input),
+          scenario === "exact replacement"
+            ? {
+                status: "accepted",
+                chainSourceEventSequence: firstSource,
+                retryAttempt: 7,
+                continuationOrdinal: 8,
+              }
+            : { status: "pending" },
+        );
+      }),
+    );
+  }
+
   it.effect(
     "context numeric edits and explicit Reset revoke old automatic recovery without treating title/provider text as consent",
     () =>
