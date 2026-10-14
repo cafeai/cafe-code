@@ -1,7 +1,7 @@
 # Axiom provider
 
 Cafe connects to a separately installed native AxiomCLI using
-`axiomcli acp --frontend cli`. AxiomCLI owns account credentials, its account-local
+`axiomcli acp --frontend desktop-chat` for new interactive chats. AxiomCLI owns account credentials, its account-local
 native conversation history, tool policy, provider encryption and cryptographic
 attestation/reply verification. Cafe owns the provider instance, child process
 scope, conversation presentation, approvals and its own local history.
@@ -38,9 +38,15 @@ contract is available; integer microUSD is displayed without decimal rounding.
 
 - ACP create/load, streamed text/reasoning, tool progress/diffs, plans and
   native command discovery use Cafe's existing orchestration and work log.
-- Supervised access uses Axiom's Confirm profile; Full access uses FullAccess.
-  Plan interaction uses Observe. Auto-accept edits currently retains Confirm
-  rather than granting broader native access. These are native tool policies,
+- Desktop startup negotiates bootstrap and Agent support, creates the thread
+  under Axiom's desktop chat root, then binds its Agent to Cafe's admitted project
+  directory before accepting a prompt. The process itself launches in the Cafe
+  project. Native thread IDs and account ownership stay with Axiom.
+- Supervised access enables Agent with `approve_commands`; Full access enables
+  Agent with `full_access`. Plan interaction disables Agent: desktop mode has no
+  Observe/read-only local tool profile, so planning uses supplied context and
+  conversation history without local tools. Auto-accept edits retains command
+  approval. These are native tool policies,
   not a claim of equivalent OS sandboxing on macOS, Windows and Linux.
 - Approval replies select the exact offered option identifier. Session approval
   selects only `allow_exact_session`, never a guessed prefix grant. Cancel uses
@@ -58,21 +64,34 @@ contract is available; integer microUSD is displayed without decimal rounding.
 - A native process exit settles active work, releases pending interactions and
   leaves the durable account-bound resume cursor available for recovery.
   Loading never silently starts an unrelated native conversation.
+- Desktop Agent configuration uses its native revision fence. Unchanged settings
+  are read and validated without reconfiguring or clearing session approvals.
+  Prompts and steering carry the exact approved Agent revision. A changed native
+  revision or unexpected workspace receipt fails before a new prompt is admitted.
 - Resume cursors bind native session ID and a private account commitment, with
   bounded native-to-Cafe turn associations for explicit native history reads.
-  Wrong-account resume fails before loading history.
+  Wrong-account resume fails before loading history. Desktop v2 cursors additionally
+  retain the exact native working-directory spelling and Agent revision for load.
+- Desktop prompts explicitly set `webEnabled: false`, which the native desktop
+  frontend enforces per message. A browsing toggle is not implemented.
 - Native steering binds the exact active turn and stable message correlation;
   steering is text-only and limited to 64 KiB. Manual compaction uses the native
   extension and requires idle work.
 - Context use is the native replacement report from a completed request, with
   its reported capacity. It is not a draft estimate or an invented billing total.
-- Title, branch, commit and change-request helpers use scoped ACP sessions with
-  the native None profile, a bounded deadline and no inference retries.
+- Title, branch, commit and change-request helpers explicitly keep CLI sessions
+  with the native None profile, a bounded deadline and no inference retries.
+  Desktop mode cannot select None through `session/set_mode`.
 
-Cafe transactional rewind, native conversation forks, durable thread goals,
-subagent concurrency overrides and per-session MCP injection are unavailable in
-the reviewed Axiom CLI contract. In particular Cafe's qualified provider MCP
-tools are not injected through a Desktop frontend or a rewritten user profile.
+Cafe transactional rewind, native conversation forks, durable thread goals and
+subagent concurrency overrides remain unsupported. Native prompt revision is
+not Cafe's checkpointed rewind transaction, and the reviewed contract exposes no
+native fork/goals/subagent control methods. Axiom exposes desktop MCP configuration,
+but Cafe has not integrated its separate configuration and prompt revision fences;
+Desktop MCP is not negotiated and Cafe scheduling/other MCP tools are not injected.
+Native thread list/timeline APIs exist, but importing conversations created outside
+Cafe remains an integration gap. Profile/logout and billing/payment controls likewise
+remain outside Cafe's current UI.
 Administrative native commands are filtered from discovery where they would
 take over Cafe's process, account, model or history ownership. Axiom billing and
 payment management remain in Axiom's product.
@@ -124,7 +143,8 @@ that a local source copy built a particular installed binary.
 
 Cafe negotiates ACP v1, extension family 0, account@2, modelCatalog@1,
 threadCatalog@1, timeline@2, attachments@2, activity@1, securityEvidence@4,
-steering@1 and compaction@1. Billing@4 is optional. Incompatible required versions
+steering@1 and compaction@1. New desktop sessions also require desktopChat@1,
+desktopAgent@1 and webConsent@1. Billing@4 is optional. Incompatible required versions
 fail visibly without weakening the verification policy. The upstream ACP
 runtime/package version is independent of these contract versions.
 

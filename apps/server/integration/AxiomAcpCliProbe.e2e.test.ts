@@ -25,5 +25,8 @@ it.live(
       expect(initialized.agentInfo?.name).toBe("axiomcli");
       expect(extension.features.securityEvidence).toBe(4);
       expect(extension.features.attachments).toBe(2);
+      expect(extension.features.desktopChat).toBe(1);
+      expect(extension.features.desktopAgent).toBe(1);
+      expect(extension.features.webConsent).toBe(1);
     }).pipe(Effect.timeout(15_000), Effect.provide(NodeServices.layer), Effect.scoped),
 );

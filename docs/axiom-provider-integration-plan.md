@@ -15,7 +15,8 @@ building and testing this feature.
 The reviewed protocol source is AxiomCLI 0.1.13 in the local release source copy.
 ACP v1 and Axiom extension family 0 are separate from the product version.
 Require the exact understood feature contracts, including `account@2`,
-`modelCatalog@1`, `activity@1`, `timeline@2` and `securityEvidence@4`.
+`modelCatalog@1`, `activity@1`, `timeline@2` and `securityEvidence@4`, plus
+`desktopChat@1`, `desktopAgent@1` and `webConsent@1` for interactive chats.
 Negotiate additional capabilities only when Cafe implements their full contract.
 
 ## Implementation sequence
@@ -26,7 +27,7 @@ Negotiate additional capabilities only when Cafe implements their full contract.
    - Add `AxiomSettings`, provider metadata and built-in registration.
    - Reuse `effect-acp` and shared ACP session transport. Support agents using
      extension-owned authentication without weakening existing Grok admission.
-   - Launch structured `axiomcli acp --frontend cli` arguments with the exact
+   - Launch structured `axiomcli acp --frontend desktop-chat` arguments with the exact
      server-resolved workspace and provider environment; no shell on native
      executables and no Axiom Desktop workspace takeover.
    - Bound startup/probes and protocol frames; preserve unlimited normal prompt
@@ -45,6 +46,15 @@ Negotiate additional capabilities only when Cafe implements their full contract.
      cross-account resume. Keep maintenance explicit and manually installed.
 
 3. **Sessions, turns and durable lifecycle**
+   - Bootstrap the native desktop store before new/load. New threads use its
+     desktop chat root; load uses the exact saved native workspace.
+   - Bind Agent to Cafe's project using native expected revisions. Map supervised
+     and full access to Agent permissions; disable Agent for plan mode. Validate
+     the returned thread/workspace/revision before admitting tools or prompts.
+   - Preserve session grants on unchanged configuration. Bind every prompt and
+     steer to its approved Agent revision and explicit `webEnabled: false`.
+   - Store desktop v2 resume identities with native cwd and Agent revision. No
+     existing CLI chats require migration; helpers explicitly retain CLI/None.
    - Implement create/load, effective model/thinking/mode selection, streamed
      text/reasoning, tool states/diffs, plans and native command discovery.
    - Translate approval choices using exact offered identifiers; preserve

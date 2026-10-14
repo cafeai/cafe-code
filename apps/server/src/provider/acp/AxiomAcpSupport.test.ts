@@ -4,8 +4,10 @@ import {
   type ProviderAttestationEvidence as Evidence,
 } from "@cafecode/contracts";
 import * as Schema from "effect/Schema";
+import * as Effect from "effect/Effect";
 import {
   AXIOM_CLIENT_CAPABILITIES,
+  AXIOM_CLI_CLIENT_CAPABILITIES,
   axiomAccountKey,
   axiomConfigurationKey,
   axiomCreditBalance,
@@ -52,13 +54,35 @@ describe("Axiom native protocol admission", () => {
     });
     expect(axiomSpawnInput(settings, process.cwd(), { EXAMPLE: "$(inert)" })).toEqual({
       command: settings.binaryPath,
-      args: ["acp", "--frontend", "cli"],
+      args: ["acp", "--frontend", "desktop-chat"],
       cwd: process.cwd(),
       env: { EXAMPLE: "$(inert)" },
     });
     expect(axiomAccountKey("private-account")).toMatch(/^[a-f0-9]{64}$/);
     expect(axiomAccountKey("private-account")).not.toContain("private-account");
+    expect(axiomSpawnInput(settings, process.cwd(), undefined, "cli").args).toEqual([
+      "acp",
+      "--frontend",
+      "cli",
+    ]);
   });
+  it.effect("requires desktop contracts for chats while allowing isolated CLI helpers", () =>
+    Effect.gen(function* () {
+      const response = {
+        protocolVersion: 1,
+        agentCapabilities: {
+          _meta: {
+            axiom: {
+              ...AXIOM_CLI_CLIENT_CAPABILITIES._meta.axiom,
+              runtimeInstanceId: "10000000-0000-4000-8000-000000000001",
+            },
+          },
+        },
+      };
+      expect((yield* negotiateAxiom(response).pipe(Effect.result))._tag).toBe("Failure");
+      yield* negotiateAxiom(response, "cli");
+    }),
+  );
   it("admits the actual Tinfoil scope without inventing a relay lease", () => {
     const evidence = evidenceFixture(1000);
     expect(

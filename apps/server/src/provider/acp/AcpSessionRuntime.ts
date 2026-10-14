@@ -86,6 +86,9 @@ export interface AcpSessionRuntimeOptions {
     initializeResult: EffectAcpSchema.InitializeResponse,
     request: (method: string, payload: unknown) => Effect.Effect<unknown, EffectAcpErrors.AcpError>,
   ) => Effect.Effect<void, EffectAcpErrors.AcpError>;
+  /** Native frontend bootstrap may resolve a transport cwd distinct from the
+   * child process cwd and the client's eventual tool workspace. */
+  readonly resolveSessionCwd?: () => Effect.Effect<string, EffectAcpErrors.AcpError>;
   /** Providers with a native completion fence keep the prompt RPC until cancellation settles. */
   readonly cancelPromptLocally?: boolean;
   readonly mcpServers?: ReadonlyArray<EffectAcpSchema.McpServer>;
@@ -649,6 +652,9 @@ export const make = (
         );
       }
       if (options.beforeSession) yield* options.beforeSession(initializeResult, acp.raw.request);
+      const sessionCwd = options.resolveSessionCwd
+        ? yield* options.resolveSessionCwd()
+        : options.cwd;
 
       let sessionId: string;
       let sessionSetupResult:
@@ -658,7 +664,7 @@ export const make = (
       if (options.resumeSessionId) {
         const loadPayload = {
           sessionId: options.resumeSessionId,
-          cwd: options.cwd,
+          cwd: sessionCwd,
           mcpServers: options.mcpServers ?? [],
         } satisfies EffectAcpSchema.LoadSessionRequest;
         const sessionLoadTimeout = Duration.fromInputUnsafe(
@@ -731,7 +737,7 @@ export const make = (
         }).pipe(Effect.ensuring(Ref.set(sessionLoadGateRef, Option.none())));
       } else {
         const createPayload = {
-          cwd: options.cwd,
+          cwd: sessionCwd,
           mcpServers: options.mcpServers ?? [],
         } satisfies EffectAcpSchema.NewSessionRequest;
         const created = yield* runLoggedRequest(

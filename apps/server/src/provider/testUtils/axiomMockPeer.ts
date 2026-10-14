@@ -1,10 +1,31 @@
-// Test-only ACP peer. It never reads provider configuration, credentials or
-// user files, and uses only the current pinned Node runtime and local stdio.
+// Test-only ACP peer. Desktop state stays in its fixture-owned temporary root;
+// it never reads provider configuration, credentials or user files.
 import { createInterface } from "node:readline";
 import { randomUUID } from "node:crypto";
+import { mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
 
+const frontend = process.argv[2] ?? "cli";
+const desktop = frontend === "desktop-chat";
+const fixtureRoot = process.argv[3];
+const scenario = process.argv[4];
 const runtimeInstanceId = randomUUID();
 let sessionId = randomUUID();
+let cwd = "";
+let agent = {
+  enabled: false,
+  permission: "approve_commands",
+  workingDirectory: "",
+  defaultWorkingDirectory: "",
+  usesDefaultDirectory: true,
+  revision: 0,
+};
+const persist = () => {
+  if (desktop)
+    writeFileSync(join(fixtureRoot!, sessionId + ".json"), JSON.stringify({ cwd, agent }), {
+      mode: 0o600,
+    });
+};
 let sequence = 0;
 let model = "test-model";
 let thinking = "medium";
@@ -17,6 +38,8 @@ let approvalId: number | undefined;
 const write = (value: unknown) => process.stdout.write(`${JSON.stringify(value)}\n`);
 const result = (id: string | number, value: unknown) =>
   write({ jsonrpc: "2.0", id, result: value });
+const reject = (id: string | number, message: string) =>
+  write({ jsonrpc: "2.0", id, error: { code: -32602, message } });
 const notify = (method: string, params: unknown) => write({ jsonrpc: "2.0", method, params });
 const activity = (event: unknown) =>
   notify("_axiom/event", {
@@ -131,6 +154,9 @@ createInterface({ input: process.stdin }).on("line", (line) => {
               protocolVersion: "0.2",
               runtimeInstanceId,
               features: {
+                desktopChat: desktop ? 1 : 0,
+                desktopAgent: desktop ? 1 : 0,
+                webConsent: desktop ? 1 : 0,
                 account: 2,
                 modelCatalog: 1,
                 securityEvidence: 4,
@@ -144,6 +170,17 @@ createInterface({ input: process.stdin }).on("line", (line) => {
             },
           },
         },
+      });
+      break;
+    case "_axiom/desktop/bootstrap":
+      if (!desktop) {
+        reject(id, "Desktop bootstrap requires desktop-chat");
+        break;
+      }
+      result(id, {
+        frontend,
+        chatCwd: scenario === "invalid-bootstrap" ? "relative-folder" : fixtureRoot,
+        permissionProfile: "web",
       });
       break;
     case "authenticate":
@@ -182,7 +219,30 @@ createInterface({ input: process.stdin }).on("line", (line) => {
       break;
     case "session/new":
     case "session/load":
-      if (method === "session/load") sessionId = params.sessionId;
+      if (method === "session/load") {
+        sessionId = params.sessionId;
+        if (desktop) {
+          const saved = JSON.parse(readFileSync(join(fixtureRoot!, sessionId + ".json"), "utf8"));
+          if (params.cwd !== saved.cwd) {
+            reject(id, "Desktop load requires saved native cwd");
+            break;
+          }
+          cwd = saved.cwd;
+          agent = saved.agent;
+        } else cwd = params.cwd;
+      } else if (desktop) {
+        if (params.cwd !== fixtureRoot) {
+          reject(id, "Desktop new requires bootstrap cwd");
+          break;
+        }
+        mkdirSync(join(fixtureRoot!, sessionId), { mode: 0o700 });
+        cwd = realpathSync(join(fixtureRoot!, sessionId));
+      } else cwd = params.cwd;
+      if (desktop && method === "session/new") {
+        agent.workingDirectory = cwd;
+        agent.defaultWorkingDirectory = cwd;
+        persist();
+      }
       result(id, setup());
       notify("session/update", {
         sessionId,
@@ -201,14 +261,56 @@ createInterface({ input: process.stdin }).on("line", (line) => {
       result(id, { configOptions: configs() });
       break;
     case "session/set_mode":
+      if (desktop) {
+        reject(id, "Use desktop Agent configuration");
+        break;
+      }
       mode = params.modeId;
       result(id, {});
+      break;
+    case "_axiom/desktop/agent/configure":
+      if (
+        !desktop ||
+        params.threadId !== sessionId ||
+        params.expectedRevision !== agent.revision ||
+        pending
+      ) {
+        reject(id, "Unowned or stale Agent configuration");
+        break;
+      }
+      cwd = realpathSync(params.workingDirectory);
+      agent = {
+        ...agent,
+        enabled: params.enabled,
+        permission: params.permission,
+        workingDirectory: cwd,
+        usesDefaultDirectory: cwd === agent.defaultWorkingDirectory,
+        revision: agent.revision + 1,
+      };
+      persist();
+      result(id, {
+        thread: { threadId: scenario === "wrong-thread" ? randomUUID() : sessionId, cwd },
+        agent: {
+          ...agent,
+          ...(scenario === "wrong-workspace" ? { workingDirectory: fixtureRoot } : {}),
+          ...(scenario === "wrong-revision" ? { revision: agent.revision + 1 } : {}),
+          ...(scenario === "wrong-permission" ? { permission: "full_access" } : {}),
+        },
+      });
       break;
     case "_axiom/security/prewarm":
     case "_axiom/security/verify":
       result(id, { status: { state: "verified" }, evidence: evidence() });
       break;
     case "session/prompt": {
+      if (
+        desktop &&
+        (params._meta?.axiom?.agentRevision !== agent.revision ||
+          params._meta?.axiom?.webEnabled !== false)
+      ) {
+        reject(id, "Prompt requires exact Agent revision and web consent");
+        break;
+      }
       const prompt =
         params.prompt?.map((block: { text?: string }) => block.text ?? "").join(" ") ?? "";
       turn++;
@@ -231,7 +333,14 @@ createInterface({ input: process.stdin }).on("line", (line) => {
                     subject: "feat(fixture): add example",
                     body: "Fixture body",
                   })
-                : "Fixture reply",
+                : prompt.includes("configuration fixture")
+                  ? JSON.stringify({
+                      frontend,
+                      agent,
+                      webEnabled: params._meta.axiom.webEnabled,
+                      agentRevision: params._meta.axiom.agentRevision,
+                    })
+                  : "Fixture reply",
           },
         },
       });
@@ -285,7 +394,13 @@ createInterface({ input: process.stdin }).on("line", (line) => {
             ],
           },
         });
-      } else if (!prompt.includes("hold")) finish(!prompt.includes("unverified"));
+      } else if (!prompt.includes("hold")) {
+        finish(!prompt.includes("unverified"));
+        if (desktop && prompt.includes("change agent configuration")) {
+          agent.revision++;
+          persist();
+        }
+      }
       break;
     }
     case "session/cancel":
@@ -296,11 +411,16 @@ createInterface({ input: process.stdin }).on("line", (line) => {
       }
       break;
     case "_axiom/turn/steer":
+      if (desktop && (params.agentRevision !== agent.revision || params.webEnabled !== false)) {
+        reject(id, "Steering requires exact Agent revision and web consent");
+        break;
+      }
       result(id, { turnId: params.expectedTurnId, clientItemId: params.clientItemId });
       break;
     case "_axiom/thread/timeline":
       result(id, {
-        thread: { threadId: sessionId, revision: turn, lastTimelineSequence: turn },
+        thread: { threadId: sessionId, cwd, revision: turn, lastTimelineSequence: turn },
+        ...(desktop ? { desktopAgent: agent } : {}),
         items: [
           {
             id: `assistant-${turn}`,

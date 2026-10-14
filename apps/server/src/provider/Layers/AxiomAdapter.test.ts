@@ -27,86 +27,227 @@ const layer = ServerConfig.layerTest(process.cwd(), { prefix: "cafe-axiom-test-"
 const threadId = ThreadId.make("axiom-test-thread");
 const instanceId = ProviderInstanceId.make("axiom-test-account");
 
-const setup = Effect.gen(function* () {
-  const nativeSpawner = yield* ChildProcessSpawner.ChildProcessSpawner;
-  const makeRuntime: typeof makeAxiomRuntime = (
-    settings,
-    options,
-    identity,
-    environment,
-    accountKey,
-  ) =>
-    makeAxiomRuntime(settings, options, identity, environment, accountKey).pipe(
-      Effect.provideService(
-        ChildProcessSpawner.ChildProcessSpawner,
-        ChildProcessSpawner.make(() =>
-          nativeSpawner.spawn(
-            ChildProcess.make(process.execPath, [fixturePath], {
-              shell: false,
-              extendEnv: false,
-              env: {
-                ...(process.env.SystemRoot ? { SystemRoot: process.env.SystemRoot } : {}),
-                ...(process.env.windir ? { windir: process.env.windir } : {}),
-              },
-            }),
+const setupWith = (
+  configuration: {
+    scenario?: string;
+    interactionMode?: "plan" | "default";
+    runtimeMode?: "approval-required" | "full-access";
+  } = {},
+) =>
+  Effect.gen(function* () {
+    const nativeSpawner = yield* ChildProcessSpawner.ChildProcessSpawner;
+    const config = yield* ServerConfig;
+    const makeRuntime: typeof makeAxiomRuntime = (
+      settings,
+      options,
+      identity,
+      environment,
+      accountKey,
+    ) =>
+      makeAxiomRuntime(settings, options, identity, environment, accountKey).pipe(
+        Effect.provideService(
+          ChildProcessSpawner.ChildProcessSpawner,
+          ChildProcessSpawner.make(() =>
+            nativeSpawner.spawn(
+              ChildProcess.make(
+                process.execPath,
+                [
+                  fixturePath,
+                  options.frontend ?? "desktop-chat",
+                  config.baseDir,
+                  configuration.scenario ?? "normal",
+                ],
+                {
+                  shell: false,
+                  extendEnv: false,
+                  env: {
+                    ...(process.env.SystemRoot ? { SystemRoot: process.env.SystemRoot } : {}),
+                    ...(process.env.windir ? { windir: process.env.windir } : {}),
+                  },
+                },
+              ),
+            ),
           ),
         ),
-      ),
-    );
-  const adapter = yield* makeAxiomAdapter(Schema.decodeSync(AxiomSettings)({}), {
-    instanceId,
-    makeRuntime,
-  });
-  const events: ProviderRuntimeEvent[] = [];
-  const complete = yield* Deferred.make<void>();
-  const approval = yield* Deferred.make<ProviderRuntimeEvent>();
-  const question = yield* Deferred.make<ProviderRuntimeEvent>();
-  const active = yield* Deferred.make<void>();
-  yield* Stream.runForEach(adapter.streamEvents, (event) =>
-    Effect.sync(() => events.push(event)).pipe(
-      Effect.andThen(
-        event.type === "turn.completed"
-          ? Deferred.succeed(complete, undefined)
-          : event.type === "request.opened"
-            ? Deferred.succeed(approval, event)
-            : event.type === "user-input.requested"
-              ? Deferred.succeed(question, event)
-              : event.type === "content.delta"
-                ? Deferred.succeed(active, undefined)
-                : Effect.void,
-      ),
-    ),
-  ).pipe(Effect.forkScoped({ startImmediately: true }));
-  const session = yield* adapter.startSession({
-    threadId,
-    provider: ProviderDriverKind.make("axiom"),
-    cwd: process.cwd(),
-    runtimeMode: "approval-required",
-    modelSelection: {
+      );
+    const adapter = yield* makeAxiomAdapter(Schema.decodeSync(AxiomSettings)({}), {
       instanceId,
-      model: "test-model",
-      options: [{ id: "thinkingLevel", value: "high" }],
-    },
-  });
-  const readReport = Effect.gen(function* () {
-    const current = (yield* adapter.listSessions())[0]!;
-    return (yield* adapter.readSecurity!({
-      instanceId,
+      makeRuntime,
+    });
+    const events: ProviderRuntimeEvent[] = [];
+    const complete = yield* Deferred.make<void>();
+    const approval = yield* Deferred.make<ProviderRuntimeEvent>();
+    const question = yield* Deferred.make<ProviderRuntimeEvent>();
+    const active = yield* Deferred.make<void>();
+    yield* Stream.runForEach(adapter.streamEvents, (event) =>
+      Effect.sync(() => events.push(event)).pipe(
+        Effect.andThen(
+          event.type === "turn.completed"
+            ? Deferred.succeed(complete, undefined)
+            : event.type === "request.opened"
+              ? Deferred.succeed(approval, event)
+              : event.type === "user-input.requested"
+                ? Deferred.succeed(question, event)
+                : event.type === "content.delta"
+                  ? Deferred.succeed(active, undefined)
+                  : Effect.void,
+        ),
+      ),
+    ).pipe(Effect.forkScoped({ startImmediately: true }));
+    const session = yield* adapter.startSession({
       threadId,
-      runtimeId: current.subagentRuntimeId!,
-      modelId: current.model!,
-      configurationKey: current.commandCatalogConfigurationKey!,
-    })).report;
+      provider: ProviderDriverKind.make("axiom"),
+      cwd: process.cwd(),
+      runtimeMode: configuration.runtimeMode ?? "approval-required",
+      interactionMode: configuration.interactionMode ?? "default",
+      modelSelection: {
+        instanceId,
+        model: "test-model",
+        options: [{ id: "thinkingLevel", value: "high" }],
+      },
+    });
+    const readReport = Effect.gen(function* () {
+      const current = (yield* adapter.listSessions())[0]!;
+      return (yield* adapter.readSecurity!({
+        instanceId,
+        threadId,
+        runtimeId: current.subagentRuntimeId!,
+        modelId: current.model!,
+        configurationKey: current.commandCatalogConfigurationKey!,
+      })).report;
+    });
+    return { adapter, session, events, complete, approval, question, active, readReport };
   });
-  return { adapter, session, events, complete, approval, question, active, readReport };
-});
+const setup = setupWith();
 
 describe("Axiom scoped ACP adapter", () => {
+  it.effect(
+    "binds a desktop Agent to Cafe's project and retains its revision on unchanged turns",
+    () =>
+      Effect.gen(function* () {
+        const { adapter, session, events, complete } = yield* setup;
+        yield* adapter.sendTurn({ threadId, input: "configuration fixture" });
+        yield* Deferred.await(complete);
+        const delta = events.find((event) => event.type === "content.delta");
+        if (delta?.type !== "content.delta")
+          return yield* Effect.die("Missing configuration observation");
+        expect(JSON.parse(delta.payload.delta)).toMatchObject({
+          frontend: "desktop-chat",
+          agent: {
+            enabled: true,
+            permission: "approve_commands",
+            workingDirectory: (session.resumeCursor as { nativeCwd: string }).nativeCwd,
+            revision: 1,
+          },
+          agentRevision: 1,
+          webEnabled: false,
+        });
+        expect((yield* adapter.listSessions())[0]?.resumeCursor).toMatchObject({
+          agentRevision: 1,
+        });
+      }).pipe(Effect.provide(layer), Effect.scoped),
+  );
+  it.effect("disables native Agent tools in plan mode and binds full access explicitly", () =>
+    Effect.gen(function* () {
+      const { adapter, events, complete } = yield* setupWith({
+        interactionMode: "plan",
+        runtimeMode: "full-access",
+      });
+      yield* adapter.sendTurn({ threadId, input: "configuration fixture" });
+      yield* Deferred.await(complete);
+      const delta = events.find((event) => event.type === "content.delta");
+      if (delta?.type !== "content.delta")
+        return yield* Effect.die("Missing configuration observation");
+      expect(JSON.parse(delta.payload.delta)).toMatchObject({
+        agent: { enabled: false, permission: "full_access", revision: 1 },
+        webEnabled: false,
+      });
+      expect(
+        (yield* adapter
+          .sendTurn({ threadId, input: " ", interactionMode: "default" })
+          .pipe(Effect.result))._tag,
+      ).toBe("Failure");
+      expect((yield* adapter.listSessions())[0]?.resumeCursor).toMatchObject({ agentRevision: 1 });
+      const turn = yield* adapter.sendTurn({
+        threadId,
+        input: "hold configuration fixture",
+        interactionMode: "default",
+      });
+      const current = (yield* adapter.listSessions())[0]!;
+      expect(current.resumeCursor).toMatchObject({ agentRevision: 2 });
+      yield* adapter.interruptTurn(threadId, turn.turnId);
+    }).pipe(Effect.provide(layer), Effect.scoped),
+  );
+  it.effect("carries the approved Agent revision into exact-turn steering with full access", () =>
+    Effect.gen(function* () {
+      const { adapter, events, complete, active } = yield* setupWith({
+        runtimeMode: "full-access",
+      });
+      const started = yield* adapter.sendTurn({ threadId, input: "hold configuration fixture" });
+      yield* Deferred.await(active);
+      const delta = events.find((event) => event.type === "content.delta");
+      if (delta?.type !== "content.delta")
+        return yield* Effect.die("Missing configuration observation");
+      expect(JSON.parse(delta.payload.delta)).toMatchObject({
+        agent: { enabled: true, permission: "full_access", revision: 1 },
+      });
+      const steered = yield* adapter.steerTurn({
+        threadId,
+        expectedTurnId: started.turnId,
+        input: "Use the scoped fixture",
+        attachments: [],
+      });
+      expect(steered.turnId).toBe(started.turnId);
+      yield* adapter.interruptTurn(threadId, started.turnId);
+      yield* Deferred.await(complete);
+    }).pipe(Effect.provide(layer), Effect.scoped),
+  );
+  it.effect("rejects invalid bootstrap and a configuration receipt for another workspace", () =>
+    Effect.gen(function* () {
+      for (const scenario of [
+        "invalid-bootstrap",
+        "wrong-workspace",
+        "wrong-revision",
+        "wrong-thread",
+        "wrong-permission",
+      ])
+        expect((yield* setupWith({ scenario }).pipe(Effect.result))._tag).toBe("Failure");
+    }).pipe(Effect.provide(layer), Effect.scoped),
+  );
+  it.effect(
+    "refuses changed native Agent configuration before admitting another prompt or resume",
+    () =>
+      Effect.gen(function* () {
+        const { adapter, events, complete } = yield* setup;
+        yield* adapter.sendTurn({ threadId, input: "change agent configuration" });
+        yield* Deferred.await(complete);
+        const old = (yield* adapter.listSessions())[0]!;
+        expect(
+          (yield* adapter.sendTurn({ threadId, input: "normal prompt" }).pipe(Effect.result))._tag,
+        ).toBe("Failure");
+        expect(events.filter((event) => event.type === "turn.started")).toHaveLength(1);
+        yield* adapter.stopSession(threadId);
+        expect(
+          (yield* adapter
+            .startSession({
+              threadId,
+              cwd: process.cwd(),
+              runtimeMode: "approval-required",
+              resumeCursor: old.resumeCursor,
+              modelSelection: { instanceId, model: "test-model" },
+            })
+            .pipe(Effect.result))._tag,
+        ).toBe("Failure");
+        expect(yield* adapter.listSessions()).toHaveLength(0);
+      }).pipe(Effect.provide(layer), Effect.scoped),
+  );
   it.effect("admits a turn promptly and verifies only native authenticated completion", () =>
     Effect.gen(function* () {
       const { adapter, session, events, complete, readReport } = yield* setup;
       expect(session.resumeCursor).toMatchObject({
-        schemaVersion: 1,
+        schemaVersion: 2,
+        frontend: "desktop-chat",
+        agentRevision: 1,
         accountKey: expect.stringMatching(/^[a-f0-9]{64}$/),
       });
       const turn = yield* adapter.sendTurn({ threadId, input: "normal prompt" });

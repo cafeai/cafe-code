@@ -41,6 +41,7 @@ import type { ProviderAdapterShape } from "../Services/ProviderAdapter.ts";
 import type { AcpSessionRuntime } from "../acp/AcpSessionRuntime.ts";
 import {
   applyAxiomSelection,
+  configureAxiomDesktopSession,
   AxiomAccount,
   AxiomModels,
   AxiomVerification,
@@ -104,8 +105,7 @@ const OWNED_COMMANDS = new Set([
   "usage",
 ]);
 const Identifier = Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(512));
-const Resume = Schema.Struct({
-  schemaVersion: Schema.Literal(1),
+const ResumeFields = {
   sessionId: Identifier,
   accountKey: Schema.String.check(Schema.isPattern(/^[a-f0-9]{64}$/)),
   turns: Schema.optional(
@@ -113,6 +113,17 @@ const Resume = Schema.Struct({
       Schema.isMaxLength(2000),
     ),
   ),
+};
+const Resume = Schema.Struct({
+  schemaVersion: Schema.Literal(2),
+  frontend: Schema.Literal("desktop-chat"),
+  nativeCwd: Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(8192)),
+  agentRevision: Schema.Number.check(
+    Schema.isInt(),
+    Schema.isGreaterThanOrEqualTo(0),
+    Schema.isLessThanOrEqualTo(Number.MAX_SAFE_INTEGER),
+  ),
+  ...ResumeFields,
 });
 const decodeResume = Schema.decodeUnknownEffect(Resume);
 const decodeCommandCatalog = Schema.decodeUnknownExit(ProviderCommandCatalog);
@@ -197,6 +208,8 @@ interface SessionContext {
   scope: Scope.Closeable;
   nativeId: string;
   identity: AxiomSessionIdentity;
+  nativeCwd: string;
+  agentRevision: number;
   models: readonly AxiomModel[];
   sequence: number;
   nativeTurn: string | undefined;
@@ -216,6 +229,21 @@ interface SessionContext {
   pendingItems: Set<string>;
   admittedItems: Set<string>;
 }
+
+const resumeCursor = (
+  ctx: Pick<
+    SessionContext,
+    "identity" | "nativeId" | "nativeCwd" | "agentRevision" | "nativeTurns"
+  >,
+) => ({
+  schemaVersion: 2,
+  frontend: "desktop-chat",
+  nativeCwd: ctx.nativeCwd,
+  agentRevision: ctx.agentRevision,
+  sessionId: ctx.nativeId,
+  accountKey: ctx.identity.accountKey,
+  turns: [...ctx.nativeTurns].map(([nativeId, cafeId]) => ({ nativeId, cafeId })),
+});
 
 export function selectAxiomPermissionOption(
   request: AcpSchema.RequestPermissionRequest,
@@ -634,7 +662,12 @@ export const makeAxiomAdapter = Effect.fn("makeAxiomAdapter")(function* (
           );
           const runtime = yield* factory(
             settings,
-            { cwd: input.cwd, ...(resume ? { resumeSessionId: resume.sessionId } : {}) },
+            {
+              cwd: input.cwd,
+              frontend: "desktop-chat",
+              ...(resume ? { resumeSessionId: resume.sessionId } : {}),
+              ...(resume ? { nativeResumeCwd: resume.nativeCwd } : {}),
+            },
             (value) => {
               identity = value;
             },
@@ -852,15 +885,7 @@ export const makeAxiomAdapter = Effect.fn("makeAxiomAdapter")(function* (
                     ctx.nativeTurns.delete(ctx.nativeTurns.keys().next().value!);
                   ctx.session = {
                     ...ctx.session,
-                    resumeCursor: {
-                      schemaVersion: 1,
-                      sessionId: ctx.nativeId,
-                      accountKey: ctx.identity.accountKey,
-                      turns: [...ctx.nativeTurns].map(([nativeId, cafeId]) => ({
-                        nativeId,
-                        cafeId,
-                      })),
-                    },
+                    resumeCursor: resumeCursor(ctx),
                   };
                 }
               } else if (event.event.kind === "context_usage_changed" && ctx.turn) {
@@ -945,7 +970,7 @@ export const makeAxiomAdapter = Effect.fn("makeAxiomAdapter")(function* (
               ),
             ),
           );
-          if (!identity)
+          if (!identity || identity.frontend !== "desktop-chat")
             return yield* invalid(
               "startSession",
               "Axiom did not establish native account ownership.",
@@ -961,19 +986,25 @@ export const makeAxiomAdapter = Effect.fn("makeAxiomAdapter")(function* (
               mapAcpToAdapterError(PROVIDER, input.threadId, "session/config", error),
             ),
           );
-          const mode =
-            input.interactionMode === "plan"
-              ? "observe"
-              : input.runtimeMode === "full-access"
-                ? "full_access"
-                : "confirm";
-          yield* runtime
-            .request("session/set_mode", { sessionId: started.sessionId, modeId: mode })
-            .pipe(
-              Effect.mapError((error) =>
-                mapAcpToAdapterError(PROVIDER, input.threadId, "session/set_mode", error),
+          const desktopAgent = yield* configureAxiomDesktopSession(runtime, started.sessionId, {
+            cwd: input.cwd,
+            enabled: input.interactionMode !== "plan",
+            permission: input.runtimeMode === "full-access" ? "full_access" : "approve_commands",
+            ...(resume ? { expectedRevision: resume.agentRevision } : {}),
+          }).pipe(
+            Effect.provideService(FileSystem.FileSystem, fileSystem),
+            Effect.timeout("15 seconds"),
+            Effect.catchTag("TimeoutError", () =>
+              Effect.fail(
+                AcpErrors.AcpRequestError.invalidParams(
+                  "Axiom Agent configuration did not complete.",
+                ),
               ),
-            );
+            ),
+            Effect.mapError((error) =>
+              mapAcpToAdapterError(PROVIDER, input.threadId, "desktop/agent/configure", error),
+            ),
+          );
           const configuration = yield* runtime.getConfigOptions;
           const modelOption = configuration.find((option) => option.category === "model");
           const modelId =
@@ -1001,12 +1032,15 @@ export const makeAxiomAdapter = Effect.fn("makeAxiomAdapter")(function* (
             },
             createdAt: timestamp,
             updatedAt: timestamp,
-            resumeCursor: {
-              schemaVersion: 1,
-              sessionId: started.sessionId,
-              accountKey: identity.accountKey,
-              ...(resume?.turns ? { turns: resume.turns } : {}),
-            },
+            resumeCursor: resumeCursor({
+              identity,
+              nativeId: started.sessionId,
+              nativeCwd: desktopAgent.workingDirectory,
+              agentRevision: desktopAgent.revision,
+              nativeTurns: new Map(
+                resume?.turns?.map(({ nativeId, cafeId }) => [nativeId, cafeId]),
+              ),
+            }),
             securityReport: {
               runtimeId: SubagentRuntimeId.make(identity.runtimeId),
               modelId,
@@ -1022,6 +1056,8 @@ export const makeAxiomAdapter = Effect.fn("makeAxiomAdapter")(function* (
             runtime,
             scope,
             identity,
+            nativeCwd: desktopAgent.workingDirectory,
+            agentRevision: desktopAgent.revision,
             nativeId: started.sessionId,
             models: modelList.models,
             sequence: 0,
@@ -1251,17 +1287,6 @@ export const makeAxiomAdapter = Effect.fn("makeAxiomAdapter")(function* (
           const model = ctx.models.find((entry) => entry.id === modelId);
           if (!model || !["near", "tinfoil"].includes(model.providerId))
             return yield* invalid("sendTurn", "Select a model in Axiom's current catalog.");
-          const mode =
-            (input.interactionMode ?? ctx.session.interactionMode) === "plan"
-              ? "observe"
-              : ctx.session.runtimeMode === "full-access"
-                ? "full_access"
-                : "confirm";
-          yield* native(
-            ctx,
-            "session/set_mode",
-            ctx.runtime.request("session/set_mode", { sessionId: ctx.nativeId, modeId: mode }),
-          );
           if (
             (input.attachments?.length ?? 0) > 8 ||
             (input.attachments ?? []).reduce((sum, attachment) => sum + attachment.sizeBytes, 0) >
@@ -1333,6 +1358,30 @@ export const makeAxiomAdapter = Effect.fn("makeAxiomAdapter")(function* (
           }
           if (!input.input?.trim() && attachments.length === 0)
             return yield* invalid("sendTurn", "A prompt or attachment is required.");
+          const agent = yield* native(
+            ctx,
+            "desktop/agent/configure",
+            configureAxiomDesktopSession(ctx.runtime, ctx.nativeId, {
+              cwd: ctx.session.cwd!,
+              enabled: (input.interactionMode ?? ctx.session.interactionMode) !== "plan",
+              permission:
+                ctx.session.runtimeMode === "full-access" ? "full_access" : "approve_commands",
+              expectedRevision: ctx.agentRevision,
+            }).pipe(
+              Effect.provideService(FileSystem.FileSystem, fileSystem),
+              Effect.timeout("15 seconds"),
+              Effect.catchTag("TimeoutError", () =>
+                Effect.fail(
+                  AcpErrors.AcpRequestError.invalidParams(
+                    "Axiom Agent configuration did not complete.",
+                  ),
+                ),
+              ),
+            ),
+          );
+          ctx.agentRevision = agent.revision;
+          ctx.nativeCwd = agent.workingDirectory;
+          ctx.session = { ...ctx.session, resumeCursor: resumeCursor(ctx) };
           const turn = TurnId.make(randomUUID());
           ctx.cancelRequested = false;
           ctx.completion = yield* Deferred.make<void>();
@@ -1387,7 +1436,14 @@ export const makeAxiomAdapter = Effect.fn("makeAxiomAdapter")(function* (
               "session/prompt",
               ctx.runtime.prompt({
                 prompt: input.input ? [{ type: "text", text: input.input }] : [],
-                _meta: { axiom: { clientItemId, attachments, webEnabled: false } },
+                _meta: {
+                  axiom: {
+                    clientItemId,
+                    attachments,
+                    webEnabled: false,
+                    agentRevision: ctx.agentRevision,
+                  },
+                },
               }),
             );
             yield* ctx.runtime.finishPromptEvents;
@@ -1443,6 +1499,7 @@ export const makeAxiomAdapter = Effect.fn("makeAxiomAdapter")(function* (
               clientItemId,
               text: input.input,
               webEnabled: false,
+              agentRevision: ctx.agentRevision,
             })
             .pipe(Effect.flatMap((value) => decodeAxiom(SteerResult, value))),
         );

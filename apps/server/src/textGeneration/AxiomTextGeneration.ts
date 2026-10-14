@@ -60,7 +60,7 @@ export const makeAxiomTextGeneration = Effect.fn("makeAxiomTextGeneration")(func
       const outputRef = yield* Ref.make("");
       const runtime = yield* (options.makeRuntime ?? makeAxiomRuntime)(
         axiomSettings,
-        { cwd },
+        { cwd, frontend: "cli" },
         () => {},
         environment,
       ).pipe(Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner));

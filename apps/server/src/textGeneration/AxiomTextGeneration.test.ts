@@ -29,14 +29,18 @@ it.effect(
             ChildProcessSpawner.ChildProcessSpawner,
             ChildProcessSpawner.make(() =>
               nativeSpawner.spawn(
-                ChildProcess.make(process.execPath, [fixturePath], {
-                  shell: false,
-                  extendEnv: false,
-                  env: {
-                    ...(process.env.SystemRoot ? { SystemRoot: process.env.SystemRoot } : {}),
-                    ...(process.env.windir ? { windir: process.env.windir } : {}),
+                ChildProcess.make(
+                  process.execPath,
+                  [fixturePath, options.frontend ?? "desktop-chat"],
+                  {
+                    shell: false,
+                    extendEnv: false,
+                    env: {
+                      ...(process.env.SystemRoot ? { SystemRoot: process.env.SystemRoot } : {}),
+                      ...(process.env.windir ? { windir: process.env.windir } : {}),
+                    },
                   },
-                }),
+                ),
               ),
             ),
           ),
