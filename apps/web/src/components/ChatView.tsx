@@ -3007,10 +3007,8 @@ export default function ChatView(props: ChatViewProps) {
         scopeThreadRef(pending.environmentId, pending.threadId),
       );
       if (
-        !thread ||
         hasQueuedFollowUpDispatchBeenObserved({
           messageId: pending.messageId,
-          dispatchedAt: pending.dispatchedAt,
           thread,
         })
       ) {
