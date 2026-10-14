@@ -69,6 +69,7 @@ import {
 import {
   ensurePrimaryEnvironmentReady,
   getPrimaryKnownEnvironment,
+  resolvePairingLinkAuthGateState,
   resolveInitialServerAuthGateState,
   updatePrimaryEnvironmentDescriptor,
 } from "../environments/primary";
@@ -77,6 +78,11 @@ export const Route = createRootRouteWithContext<{
   queryClient: QueryClient;
 }>()({
   beforeLoad: async () => {
+    const pairingLinkState = resolvePairingLinkAuthGateState();
+    if (pairingLinkState) {
+      return { authGateState: pairingLinkState };
+    }
+
     const [, authGateState] = await Promise.all([
       ensurePrimaryEnvironmentReady(),
       resolveInitialServerAuthGateState(),

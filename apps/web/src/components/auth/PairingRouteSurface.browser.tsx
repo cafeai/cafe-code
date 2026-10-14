@@ -73,4 +73,29 @@ describe("PairingRouteSurface", () => {
       await screen.unmount();
     }
   });
+
+  it("explains how to recover when the server does not answer", async () => {
+    submitPairingMock.mockRejectedValueOnce(
+      new DOMException("The operation was aborted.", "AbortError"),
+    );
+    const screen = await render(
+      <PairingRouteSurface auth={auth} onAuthenticated={() => undefined} />,
+    );
+
+    try {
+      await page.getByRole("button", { name: "Pairing token" }).click();
+      await page.getByLabelText("Pairing token").fill("PAIRING-TOKEN");
+      await page.getByRole("button", { name: "Continue" }).click();
+
+      await expect
+        .element(
+          page.getByText(
+            "The server did not respond. Open connection setup, and then reload the app.",
+          ),
+        )
+        .toBeInTheDocument();
+    } finally {
+      await screen.unmount();
+    }
+  });
 });

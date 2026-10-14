@@ -97,7 +97,9 @@ describe("environmentBootstrap", () => {
     ]);
 
     expect(fetchMock).toHaveBeenCalledTimes(1);
-    expect(fetchMock).toHaveBeenCalledWith("http://localhost/.well-known/cafe-code/environment");
+    expect(fetchMock).toHaveBeenCalledWith("http://localhost/.well-known/cafe-code/environment", {
+      signal: expect.any(AbortSignal),
+    });
   });
 
   it("uses https descriptor urls when the primary environment uses wss", async () => {
@@ -109,6 +111,7 @@ describe("environmentBootstrap", () => {
     await expect(resolveInitialPrimaryEnvironmentDescriptor()).resolves.toEqual(BASE_ENVIRONMENT);
     expect(fetchMock).toHaveBeenCalledWith(
       "https://remote.example.com/.well-known/cafe-code/environment",
+      { signal: expect.any(AbortSignal) },
     );
   });
 
@@ -120,6 +123,7 @@ describe("environmentBootstrap", () => {
     await expect(resolveInitialPrimaryEnvironmentDescriptor()).resolves.toEqual(BASE_ENVIRONMENT);
     expect(fetchMock).toHaveBeenCalledWith(
       "https://remote.example.com/.well-known/cafe-code/environment",
+      { signal: expect.any(AbortSignal) },
     );
     expect(getPrimaryKnownEnvironment()?.target).toEqual({
       httpBaseUrl: "https://remote.example.com/",
@@ -135,6 +139,7 @@ describe("environmentBootstrap", () => {
     await expect(resolveInitialPrimaryEnvironmentDescriptor()).resolves.toEqual(BASE_ENVIRONMENT);
     expect(fetchMock).toHaveBeenCalledWith(
       "https://remote.example.com/.well-known/cafe-code/environment",
+      { signal: expect.any(AbortSignal) },
     );
     expect(getPrimaryKnownEnvironment()?.target).toEqual({
       httpBaseUrl: "https://remote.example.com/",
@@ -150,6 +155,7 @@ describe("environmentBootstrap", () => {
     await expect(resolveInitialPrimaryEnvironmentDescriptor()).resolves.toEqual(BASE_ENVIRONMENT);
     expect(fetchMock).toHaveBeenCalledWith(
       "http://localhost:5735/.well-known/cafe-code/environment",
+      { signal: expect.any(AbortSignal) },
     );
   });
 
@@ -175,6 +181,7 @@ describe("environmentBootstrap", () => {
     await expect(resolveInitialPrimaryEnvironmentDescriptor()).resolves.toEqual(BASE_ENVIRONMENT);
     expect(fetchMock).toHaveBeenCalledWith(
       "http://127.0.0.1:5733/.well-known/cafe-code/environment",
+      { signal: expect.any(AbortSignal) },
     );
   });
 });

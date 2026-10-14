@@ -8,6 +8,7 @@ import {
   submitServerAuthCredential,
   submitServerPasswordCredential,
 } from "../../environments/primary";
+import { resolveWebUiConnectionSetupUrl } from "../../webUiConnectionSetup";
 import { Button } from "../ui/button";
 import { Input } from "../ui/input";
 
@@ -55,6 +56,7 @@ export function PairingRouteSurface({
   const [errorMessage, setErrorMessage] = useState(initialErrorMessage ?? "");
   const [isSubmitting, setIsSubmitting] = useState(false);
   const autoSubmitAttemptedRef = useRef(false);
+  const connectionSetupUrl = resolveWebUiConnectionSetupUrl(window.location);
 
   const submitCredential = useCallback(
     async (nextCredential: string) => {
@@ -230,6 +232,11 @@ export function PairingRouteSurface({
             >
               Reload app
             </Button>
+            {connectionSetupUrl ? (
+              <Button render={<a href={connectionSetupUrl} />} size="sm" variant="outline">
+                Open connection setup
+              </Button>
+            ) : null}
           </div>
         </form>
 
@@ -242,6 +249,10 @@ export function PairingRouteSurface({
 }
 
 function errorMessageFromUnknown(error: unknown): string {
+  if (error instanceof DOMException && error.name === "AbortError") {
+    return "The server did not respond. Open connection setup, and then reload the app.";
+  }
+
   if (error instanceof Error && error.message.trim().length > 0) {
     return error.message;
   }
