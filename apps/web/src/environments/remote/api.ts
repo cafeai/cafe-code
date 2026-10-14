@@ -106,14 +106,29 @@ export async function fetchRemoteEnvironmentDescriptor(input: {
 
 export async function issueRemoteWebSocketToken(input: {
   readonly httpBaseUrl: string;
-  readonly bearerToken: string;
+  readonly bearerToken?: string;
 }): Promise<AuthWebSocketTokenResult> {
   return fetchRemoteJson<AuthWebSocketTokenResult>({
     httpBaseUrl: input.httpBaseUrl,
     pathname: "/api/auth/ws-token",
     method: "POST",
-    bearerToken: input.bearerToken,
+    ...(input.bearerToken === undefined ? {} : { bearerToken: input.bearerToken }),
   });
+}
+
+export async function resolvePrimaryWebSocketConnectionUrl(input: {
+  readonly wsBaseUrl: string;
+  readonly httpBaseUrl: string;
+}): Promise<string> {
+  const url = new URL(input.wsBaseUrl, window.location.origin);
+  if (url.protocol !== "ws:" && url.protocol !== "wss:") {
+    throw new Error("Primary WebSocket URLs must use WS or WSS.");
+  }
+  url.search = "";
+  url.hash = "";
+  const issued = await issueRemoteWebSocketToken({ httpBaseUrl: input.httpBaseUrl });
+  url.searchParams.set("wsToken", issued.token);
+  return url.toString();
 }
 
 export async function resolveRemoteWebSocketConnectionUrl(input: {
