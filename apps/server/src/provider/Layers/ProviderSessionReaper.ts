@@ -1,4 +1,5 @@
 import * as Clock from "effect/Clock";
+import * as DateTime from "effect/DateTime";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
@@ -18,6 +19,12 @@ import { ProviderService } from "../Services/ProviderService.ts";
 
 const DEFAULT_INACTIVITY_THRESHOLD_MS = 30 * 60 * 1000;
 const DEFAULT_SWEEP_INTERVAL_MS = 5 * 60 * 1000;
+
+function readRuntimePayload(value: unknown | null | undefined): Record<string, unknown> {
+  return value !== null && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : {};
+}
 
 export interface ProviderSessionReaperLiveOptions {
   readonly inactivityThresholdMs?: number;
@@ -47,7 +54,74 @@ const makeProviderSessionReaper = (options?: ProviderSessionReaperLiveOptions) =
       ),
     );
 
+    const reconcileOrphanedRuntimeBindings = Effect.gen(function* () {
+      const liveSessions = yield* providerService.listSessions();
+      const liveThreadIds = new Set(liveSessions.map((session) => String(session.threadId)));
+      const bindings = yield* directory.listBindings();
+      let reconciledCount = 0;
+
+      for (const binding of bindings) {
+        const runtimePayload = readRuntimePayload(binding.runtimePayload);
+        if (
+          (binding.status !== "starting" && binding.status !== "running") ||
+          typeof runtimePayload.activeTurnId !== "string" ||
+          liveThreadIds.has(String(binding.threadId))
+        ) {
+          continue;
+        }
+
+        const thread = yield* projectionSnapshotQuery
+          .getThreadShellById(binding.threadId)
+          .pipe(Effect.map(Option.getOrUndefined));
+        if (
+          thread?.session === null ||
+          thread?.session === undefined ||
+          (thread.session.status !== "interrupted" &&
+            thread.session.status !== "error" &&
+            thread.session.status !== "stopped") ||
+          thread.session.activeTurnId !== null
+        ) {
+          continue;
+        }
+
+        const reconciledAt = DateTime.formatIso(yield* DateTime.now);
+        yield* directory.upsert({
+          threadId: binding.threadId,
+          provider: binding.provider,
+          ...(binding.providerInstanceId === undefined
+            ? {}
+            : { providerInstanceId: binding.providerInstanceId }),
+          ...(binding.adapterKey === undefined ? {} : { adapterKey: binding.adapterKey }),
+          ...(binding.runtimeMode === undefined ? {} : { runtimeMode: binding.runtimeMode }),
+          status: "stopped",
+          ...(binding.resumeCursor === undefined ? {} : { resumeCursor: binding.resumeCursor }),
+          runtimePayload: {
+            ...runtimePayload,
+            activeTurnId: null,
+            lastRuntimeEvent: "provider.runtime.orphan-reconciled",
+            lastRuntimeEventAt: reconciledAt,
+          },
+        });
+        reconciledCount += 1;
+      }
+
+      if (reconciledCount > 0) {
+        yield* Effect.logWarning("provider.session.reaper.reconciled-orphaned-runtime-bindings", {
+          reconciledCount,
+        });
+      }
+    });
+
+    const reconcileOrphanedRuntimeBindingsSafely = reconcileOrphanedRuntimeBindings.pipe(
+      Effect.catchCause((cause) =>
+        Effect.logWarning("provider.session.reaper.reconcile-orphaned-runtime-failed", {
+          cause,
+        }),
+      ),
+    );
+
     const sweep = Effect.gen(function* () {
+      yield* reconcileOrphanedRuntimeBindingsSafely;
       yield* reconcileStoppedRuntimeProjection;
 
       const bindings = yield* directory.listBindings();
@@ -164,6 +238,7 @@ const makeProviderSessionReaper = (options?: ProviderSessionReaperLiveOptions) =
         // Repair stale projection state synchronously during startup so a
         // renderer reconnect cannot observe a stopped provider process as an
         // indefinitely running turn.
+        yield* reconcileOrphanedRuntimeBindingsSafely;
         yield* reconcileStoppedRuntimeProjection;
         yield* Effect.forkScoped(
           sweep.pipe(
