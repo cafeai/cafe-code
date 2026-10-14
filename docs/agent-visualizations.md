@@ -103,6 +103,14 @@ Generated documents receive the actual bundled DM Sans Variable faces used by
 chat, with semantic code left monospace. Font bytes, descriptors and OFL notice
 are fixed and offline. External Apps retain their own typography.
 
+Generated inline native selects do not retain a pointer-only focus outline or glow
+after a choice. A finite document-owned controller suppresses only those two
+decorations without blurring, changing selection or consuming input. Actual
+keyboard navigation and focus loss restore the previous inline declarations;
+newer authored style values are not overwritten. Other editable controls and
+external Apps keep their own focus behavior. This is presentation, not an
+authority or isolation boundary, and does not replace/reload the chart.
+
 The optional `canvas[data-cafe-fluid]` uses the actual supplied fluid solver,
 not an approximate swirl. Its MIT notice and immutable provenance are retained.
 The helper is decorative and pointer-inert; foreground charts remain crisp.

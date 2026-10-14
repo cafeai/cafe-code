@@ -93,6 +93,76 @@ function documentInsertion(html: string): { index: number; missingHead: boolean 
   return rootEnd >= 0 ? { index: rootEnd, missingHead: true } : null;
 }
 
+/** Serialized into only the generated document, before authored handlers run.
+ * Keep this function self-contained: its globals resolve in the child document,
+ * not Cafe's parent. Native selects can retain a focus-visible outline after a
+ * pointer choice, and authored :focus rules can add their own persistent glow.
+ * Suppress that pointer decoration without blurring or consuming native input;
+ * a real keyboard action restores the exact authored declarations immediately.
+ * There is one retained control, no polling and no transcript-dependent work. */
+function installGeneratedSelectFocus(document: Document): void {
+  let owned: {
+    control: HTMLSelectElement;
+    declarations: { name: string; value: string; priority: string }[];
+  } | null = null;
+  const release = () => {
+    const previous = owned;
+    owned = null;
+    if (!previous) return;
+    for (const { name, value, priority } of previous.declarations) {
+      // Authored code may change its own style after pointerdown. Restore only
+      // our exact remaining override, never overwrite a newer authored value.
+      if (
+        previous.control.style.getPropertyValue(name) !== "none" ||
+        previous.control.style.getPropertyPriority(name) !== "important"
+      )
+        continue;
+      if (value) previous.control.style.setProperty(name, value, priority);
+      else previous.control.style.removeProperty(name);
+    }
+  };
+  document.addEventListener(
+    "pointerdown",
+    (event) => {
+      if (!event.isTrusted) return;
+      release();
+      if (!(event.target instanceof Element)) return;
+      const control = event.target.closest("select");
+      if (!(control instanceof HTMLSelectElement)) return;
+      owned = {
+        control,
+        // Change only the style longhand. Replacing the outline shorthand
+        // would erase separately authored width/color/priority declarations.
+        declarations: ["outline-style", "box-shadow"].map((name) => ({
+          name,
+          value: control.style.getPropertyValue(name),
+          priority: control.style.getPropertyPriority(name),
+        })),
+      };
+      for (const { name } of owned.declarations)
+        control.style.setProperty(name, "none", "important");
+    },
+    { capture: true, passive: true },
+  );
+  document.addEventListener(
+    "keydown",
+    (event) => {
+      // Modifier presses alone do not turn a pointer choice into keyboard
+      // navigation. Tab (including Shift+Tab), arrows, Enter and other real
+      // keys restore focus visibility before the browser's default action.
+      if (event.isTrusted && !["Shift", "Control", "Alt", "Meta"].includes(event.key)) release();
+    },
+    true,
+  );
+  document.addEventListener(
+    "focusout",
+    (event) => {
+      if (event.target === owned?.control) release();
+    },
+    true,
+  );
+}
+
 /** This is a best-effort offline policy for an explicitly Full-access,
  * same-origin unsandboxed document. It cannot prevent that document from using
  * its parent's authority. No sandbox, renderer separation or containment claim
@@ -127,7 +197,8 @@ export function createInlineVisualizationDocument(
     dark,
     colors: inlineVisualizationColors(presentation),
   }).replace(/[<>&]/g, (value) => `\\u${value.charCodeAt(0).toString(16).padStart(4, "0")}`);
-  const initialize = `<script>(()=>{const value=${metadata};const root=document.documentElement;root.classList.toggle("dark",value.dark);root.lang=value.locale;root.dataset.cafeInlineFrame=value.frameId;root.dataset.cafeVisible="true";root.dataset.cafePresentationVisible="true";root.dataset.cafeReducedMotion=String(value.reducedMotion);root.style.colorScheme=value.dark?"dark":"light";root.style.setProperty("--cafe-interface-scale",String(value.scale));for(const [name,color]of value.colors)root.style.setProperty(name,color);})();</script>`;
+  const selectFocus = generated ? `(${installGeneratedSelectFocus.toString()})(document);` : "";
+  const initialize = `<script>(()=>{const value=${metadata};const root=document.documentElement;root.classList.toggle("dark",value.dark);root.lang=value.locale;root.dataset.cafeInlineFrame=value.frameId;root.dataset.cafeVisible="true";root.dataset.cafePresentationVisible="true";root.dataset.cafeReducedMotion=String(value.reducedMotion);root.style.colorScheme=value.dark?"dark":"light";root.style.setProperty("--cafe-interface-scale",String(value.scale));for(const [name,color]of value.colors)root.style.setProperty(name,color);${selectFocus}})();</script>`;
   const prelude = `<meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="${INLINE_VISUALIZATION_CSP}"><meta name="viewport" content="width=device-width,initial-scale=1"><style>html,body{margin:0;width:100%!important;max-width:100%!important;min-width:0!important;height:auto!important;min-height:0!important;max-height:none!important;overflow:hidden!important}html{background:transparent;color:var(--foreground);font-size:calc(14px * var(--cafe-interface-scale));--font-sans:'DM Sans Variable',ui-sans-serif,system-ui,sans-serif}body{font-family:var(--font-sans)}*,*:before,*:after{box-sizing:border-box}svg,canvas,img{max-width:100%}pre,code,kbd,samp{font-family:ui-monospace,monospace}${tooltipStyle}</style>${fixedFonts}${initialize}`;
   const insertion = documentInsertion(source);
   // Keep the authored root/head/body attributes, style variables and node order

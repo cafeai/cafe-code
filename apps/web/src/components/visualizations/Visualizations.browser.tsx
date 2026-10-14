@@ -315,6 +315,14 @@ async function loadedFrame() {
   );
   return frameElement()!;
 }
+async function loadedSelectFrame() {
+  const frame = await loadedFrame();
+  // The first button is parsed before later selects/output and their authored
+  // handlers. These input fixtures need the actual completed document, not a
+  // lucky partial-parser snapshot of the shared chart marker.
+  await vi.waitFor(() => expect(frame.contentDocument?.readyState).toBe("complete"));
+  return frame;
+}
 async function openMenu() {
   await userEvent.click(
     page.getByRole("button", { name: uiText("Visualization actions"), exact: true }).first(),
@@ -1052,6 +1060,195 @@ describe("Full-access live inline visualizations", () => {
     );
     expect(frame.contentDocument?.getElementById("count")?.textContent).toBe("1");
     expect(document.body.textContent).not.toContain("private-json-marker");
+  });
+  it.each([
+    { dark: false, scale: 0.8 },
+    { dark: true, scale: 1.3 },
+  ])(
+    "removes pointer-select decoration without changing native selection or focus ($dark/$scale)",
+    async ({ dark, scale }) => {
+      const api = installApi(),
+        read = api.inline.getMockImplementation()!,
+        previousDark = document.documentElement.classList.contains("dark"),
+        previousScale = document.documentElement.style.getPropertyValue("font-size"),
+        previousScalePriority = document.documentElement.style.getPropertyPriority("font-size");
+      document.documentElement.classList.toggle("dark", dark);
+      document.documentElement.style.setProperty("font-size", `${scale * 100}%`);
+      api.inline.mockImplementationOnce(async (input) => ({
+        ...(await read(input)),
+        html: `<style>select{border:2px solid rgb(80,90,100)}select:focus{outline:4px solid var(--accent)!important;box-shadow:0 0 0 6px var(--accent)!important}</style><main style="height:240px;padding:16px"><button id="counter">Before controls</button><select id="metric" aria-label="Period"><option value="first">First period</option><option value="second">Second period</option></select><select id="visible-choices" size="2" aria-label="Visible choices"><option value="launch">Launch</option><option value="growth">Growth</option></select><output id="count">0</output><input aria-label="Editable name"><button>After controls</button></main><script>for(const select of document.querySelectorAll('select'))select.addEventListener('change',event=>{const output=document.getElementById('count');output.value=String(Number(output.value)+1);output.dataset.trusted=String(event.isTrusted)});</script>`,
+      }));
+      const view = await render(<Fixture width={430} />);
+      try {
+        const frame = await loadedSelectFrame(),
+          child = frame.contentDocument!,
+          dropdown = child.getElementById("metric") as HTMLSelectElement,
+          choices = child.getElementById("visible-choices") as HTMLSelectElement,
+          native = page.frameLocator(page.elementLocator(frame)),
+          output = child.getElementById("count")!;
+        expect(child.documentElement.classList.contains("dark")).toBe(dark);
+        expect(
+          Number(child.documentElement.style.getPropertyValue("--cafe-interface-scale")),
+        ).toBeCloseTo(scale);
+        expect(
+          Number.parseFloat(child.defaultView!.getComputedStyle(child.documentElement).fontSize),
+        ).toBeCloseTo(14 * scale);
+        // These are visible native option rows, not Playwright selectOptions or
+        // fabricated change events. A native OS popup's pointer completion is a
+        // separate smoke boundary; the same exact select controller owns both.
+        await userEvent.click(native.getByRole("option", { name: "Growth", exact: true }));
+        await vi.waitFor(() => expect(choices.value).toBe("growth"));
+        expect(output.textContent).toBe("1");
+        expect(output.dataset.trusted).toBe("true");
+        expect(child.activeElement).toBe(choices);
+        expect(child.defaultView!.getComputedStyle(choices).outlineStyle).toBe("none");
+        expect(child.defaultView!.getComputedStyle(choices).boxShadow).toBe("none");
+        expect(child.defaultView!.getComputedStyle(choices).borderTop).toBe(
+          "2px solid rgb(80, 90, 100)",
+        );
+        // Native pointer opening also suppresses the closed-dropdown residual
+        // outline, without changing its value or stealing its retained focus.
+        await userEvent.click(native.getByRole("combobox", { name: "Period", exact: true }));
+        expect(child.activeElement).toBe(dropdown);
+        expect(dropdown.value).toBe("first");
+        expect(child.defaultView!.getComputedStyle(dropdown).outlineStyle).toBe("none");
+        expect(child.defaultView!.getComputedStyle(dropdown).boxShadow).toBe("none");
+        expect(output.textContent).toBe("1");
+        await userEvent.keyboard("{Escape}");
+        await userEvent.click(native.getByRole("textbox", { name: "Editable name", exact: true }));
+        expect(child.defaultView!.getComputedStyle(dropdown).borderTop).toBe(
+          "2px solid rgb(80, 90, 100)",
+        );
+        expect(dropdown.style.getPropertyValue("outline")).toBe("");
+        expect(dropdown.style.getPropertyValue("box-shadow")).toBe("");
+        expect(child.querySelector("input")!.style.getPropertyValue("outline")).toBe("");
+        expect(frameElement()).toBe(frame);
+        expect(frame.contentDocument).toBe(child);
+        expect(api.inline).toHaveBeenCalledOnce();
+        expect(api.retireInlineFrame).not.toHaveBeenCalled();
+      } finally {
+        document.documentElement.classList.toggle("dark", previousDark);
+        if (previousScale)
+          document.documentElement.style.setProperty(
+            "font-size",
+            previousScale,
+            previousScalePriority,
+          );
+        else document.documentElement.style.removeProperty("font-size");
+        await view.unmount();
+      }
+    },
+  );
+  it("restores authored select focus for native keyboard navigation without blurring or replaying selection", async () => {
+    const api = installApi(),
+      read = api.inline.getMockImplementation()!;
+    api.inline.mockImplementationOnce(async (input) => ({
+      ...(await read(input)),
+      html: `<main style="height:240px;padding:16px"><button id="counter">Before controls</button><select id="metric" aria-label="Period" style="outline:5px dashed rgb(20,30,40)!important;box-shadow:inset 0 0 0 2px rgb(40,50,60)"><option value="first">First period</option><option value="second">Second period</option></select><output id="count">0</output><button id="programmatic">Authored focus</button></main><script>document.getElementById('metric').addEventListener('change',event=>{const output=document.getElementById('count');output.value=String(Number(output.value)+1);output.dataset.trusted=String(event.isTrusted)});document.getElementById('programmatic').onclick=()=>document.getElementById('metric').focus();</script>`,
+    }));
+    await render(<Fixture />);
+    const frame = await loadedSelectFrame(),
+      child = frame.contentDocument!,
+      select = child.getElementById("metric") as HTMLSelectElement,
+      originalOutline = select.style.getPropertyValue("outline"),
+      originalShadow = select.style.getPropertyValue("box-shadow"),
+      native = page.frameLocator(page.elementLocator(frame)),
+      output = child.getElementById("count")!;
+    await userEvent.click(native.getByRole("button", { name: "Before controls", exact: true }));
+    await userEvent.keyboard("{Tab}");
+    await vi.waitFor(() => expect(child.activeElement).toBe(select));
+    expect(child.defaultView!.getComputedStyle(select).outlineStyle).toBe("dashed");
+    // Real closed-select typeahead chooses the second period. This does not
+    // claim that the browser provider can dispatch keys into an OS popup.
+    await userEvent.keyboard("s");
+    await vi.waitFor(() => expect(select.value).toBe("second"));
+    expect(output.textContent).toBe("1");
+    expect(output.dataset.trusted).toBe("true");
+    expect(child.activeElement).toBe(select);
+    expect(select.style.getPropertyValue("outline")).toBe(originalOutline);
+    expect(select.style.getPropertyPriority("outline")).toBe("important");
+    expect(select.style.getPropertyValue("box-shadow")).toBe(originalShadow);
+    await userEvent.keyboard("{Shift>}{Tab}{/Shift}");
+    await vi.waitFor(() => expect(child.activeElement).toBe(child.getElementById("counter")));
+    expect(select.style.getPropertyValue("outline")).toBe(originalOutline);
+    expect(select.style.getPropertyValue("box-shadow")).toBe(originalShadow);
+    // Real authored focus reached from a different pointer target is not a
+    // direct pointer-select choice and must keep its ordinary visible outline.
+    await userEvent.click(native.getByRole("button", { name: "Authored focus", exact: true }));
+    expect(child.activeElement).toBe(select);
+    expect(child.defaultView!.getComputedStyle(select).outlineStyle).toBe("dashed");
+    expect(output.textContent).toBe("1");
+    expect(frame.contentDocument).toBe(child);
+    expect(api.inline).toHaveBeenCalledOnce();
+    expect(api.retireInlineFrame).not.toHaveBeenCalled();
+  });
+  it("restores visible keyboard focus on the same pointer-selected native control", async () => {
+    const api = installApi(),
+      read = api.inline.getMockImplementation()!;
+    api.inline.mockImplementationOnce(async (input) => ({
+      ...(await read(input)),
+      html: `<main style="height:240px;padding:16px"><button id="counter">Before controls</button><select id="choices" size="2" aria-label="Visible choices" style="outline-style:dashed;outline-width:5px!important;outline-color:rgb(20,30,40);box-shadow:inset 0 0 0 2px rgb(40,50,60)"><option value="launch">Launch</option><option value="growth">Growth</option></select><output id="count">0</output></main><script>document.getElementById('choices').addEventListener('change',event=>{const output=document.getElementById('count');output.value=String(Number(output.value)+1);output.dataset.trusted=String(event.isTrusted)});</script>`,
+    }));
+    await render(<Fixture />);
+    const frame = await loadedSelectFrame(),
+      child = frame.contentDocument!,
+      select = child.getElementById("choices") as HTMLSelectElement,
+      originalShadow = select.style.getPropertyValue("box-shadow"),
+      native = page.frameLocator(page.elementLocator(frame)),
+      output = child.getElementById("count")!;
+    await userEvent.click(native.getByRole("option", { name: "Growth", exact: true }));
+    await vi.waitFor(() => expect(select.value).toBe("growth"));
+    expect(output.textContent).toBe("1");
+    expect(output.dataset.trusted).toBe("true");
+    expect(child.activeElement).toBe(select);
+    expect(child.defaultView!.getComputedStyle(select).outlineStyle).toBe("none");
+    await userEvent.keyboard("{ArrowUp}");
+    await vi.waitFor(() => expect(select.value).toBe("launch"));
+    expect(output.textContent).toBe("2");
+    expect(output.dataset.trusted).toBe("true");
+    expect(child.activeElement).toBe(select);
+    expect(child.defaultView!.getComputedStyle(select).outlineStyle).toBe("dashed");
+    expect(select.style.getPropertyValue("outline-width")).toBe("5px");
+    expect(select.style.getPropertyPriority("outline-width")).toBe("important");
+    expect(select.style.getPropertyValue("box-shadow")).toBe(originalShadow);
+    await userEvent.keyboard("{Shift>}{Tab}{/Shift}");
+    await vi.waitFor(() => expect(child.activeElement).toBe(child.getElementById("counter")));
+    expect(output.textContent).toBe("2");
+    expect(frame.contentDocument).toBe(child);
+    expect(api.inline).toHaveBeenCalledOnce();
+    expect(api.retireInlineFrame).not.toHaveBeenCalled();
+  });
+  it("does not overwrite newer authored select styles when pointer focus is released", async () => {
+    const api = installApi(),
+      read = api.inline.getMockImplementation()!;
+    api.inline.mockImplementationOnce(async (input) => ({
+      ...(await read(input)),
+      html: `<main style="height:240px;padding:16px"><button id="counter">Before controls</button><select id="choices" size="2" aria-label="Visible choices" style="outline-width:7px!important;outline-color:rgb(30,40,50);outline-style:dashed;box-shadow:inset 0 0 0 1px rgb(10,20,30)"><option value="launch">Launch</option><option value="growth">Growth</option></select><output id="count">0</output><button>After controls</button></main><script>document.getElementById('choices').addEventListener('change',event=>{const select=event.currentTarget;select.style.setProperty('outline-style','dotted','important');select.style.setProperty('box-shadow','inset 0 0 0 3px rgb(70,80,90)');const output=document.getElementById('count');output.value=String(Number(output.value)+1);output.dataset.trusted=String(event.isTrusted)});</script>`,
+    }));
+    await render(<Fixture />);
+    const frame = await loadedSelectFrame(),
+      child = frame.contentDocument!,
+      select = child.getElementById("choices") as HTMLSelectElement,
+      native = page.frameLocator(page.elementLocator(frame)),
+      originalWidth = select.style.getPropertyValue("outline-width"),
+      originalColor = select.style.getPropertyValue("outline-color"),
+      output = child.getElementById("count")!;
+    await userEvent.click(native.getByRole("option", { name: "Growth", exact: true }));
+    await vi.waitFor(() => expect(select.value).toBe("growth"));
+    expect(output.textContent).toBe("1");
+    expect(output.dataset.trusted).toBe("true");
+    expect(select.style.getPropertyValue("outline-width")).toBe(originalWidth);
+    expect(select.style.getPropertyPriority("outline-width")).toBe("important");
+    expect(select.style.getPropertyValue("outline-color")).toBe(originalColor);
+    const newerShadow = select.style.getPropertyValue("box-shadow");
+    await userEvent.click(native.getByRole("button", { name: "After controls", exact: true }));
+    expect(select.style.getPropertyValue("outline-style")).toBe("dotted");
+    expect(select.style.getPropertyPriority("outline-style")).toBe("important");
+    expect(select.style.getPropertyValue("box-shadow")).toBe(newerShadow);
+    expect(select.style.getPropertyPriority("box-shadow")).toBe("");
+    expect(output.textContent).toBe("1");
+    expect(frame.contentDocument).toBe(child);
+    expect(api.inline).toHaveBeenCalledOnce();
   });
   it("does not read source or a preview while exact initial layout admission is pending", async () => {
     const api = installApi(),

@@ -72,6 +72,22 @@ describe("Full-access inline document presentation", () => {
     expect(html).toContain("<style>body{width:4000px;min-height:100vh}</style>");
     expect(html.endsWith("<script>window.chart=true;</script></body></html>")).toBe(true);
   });
+  it("installs pointer-select presentation before generated handlers without modifying external Apps", () => {
+    const source =
+      '<select id="metric"><option>Original option</option></select><script>window.authorSelect=true;</script>';
+    const generated = createInlineVisualizationDocument(source, presentation, true, frameId);
+    expect(generated.indexOf('"pointerdown"')).toBeGreaterThanOrEqual(0);
+    expect(generated.indexOf('"pointerdown"')).toBeLessThan(
+      generated.indexOf("window.authorSelect"),
+    );
+    expect(generated).toContain('"box-shadow"');
+    expect(generated).toContain("event.isTrusted");
+    expect(generated.endsWith(`${source}</body></html>`)).toBe(true);
+    const app = createInlineVisualizationDocument(source, presentation, true, frameId, false);
+    expect(app).not.toContain('"pointerdown"');
+    expect(app).not.toContain("installGeneratedSelectFocus");
+    expect(app.endsWith(`${source}</body></html>`)).toBe(true);
+  });
   it.each(['"><script>parent.bad=true</script>', frameId.toUpperCase(), "foreign", ""])(
     "rejects noncanonical frame display metadata %s",
     (value) => {
