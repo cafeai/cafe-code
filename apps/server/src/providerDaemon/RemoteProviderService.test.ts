@@ -83,6 +83,121 @@ const rewindConfig = { httpBaseUrl: "http://127.0.0.1:3774", token: "synthetic-t
 const encodeRpcRequest = Schema.encodeSync(ProviderDaemonRpcRequest);
 
 describe("RemoteProviderService", () => {
+  it.each(["subagent-concurrency-active", "codex-context-window-active"] as const)(
+    "preserves the finite %s refusal only for an exact startSession request error",
+    (refusal) => {
+      const response = new ProviderDaemonRpcResponseError(
+        "ProviderAdapterRequestError",
+        "Synthetic fixed refusal",
+        refusal,
+      );
+      const accepted = toRemoteRequestError("startSession", response);
+      assert.equal(accepted.remoteErrorTag, refusal);
+      assert.strictEqual(accepted.cause, response);
+      // Other methods and outer error classes cannot borrow the optional
+      // start-only admission fact, including paid turn submission and rewind.
+      for (const method of [
+        "sendTurn",
+        "steerTurn",
+        "stopSession",
+        "prepareConversationRollback",
+        "getCapabilities",
+      ]) {
+        assert.equal(
+          toRemoteRequestError(method, response).remoteErrorTag,
+          "ProviderAdapterRequestError",
+        );
+      }
+      const foreign = new ProviderDaemonRpcResponseError(
+        "ProviderUnsupportedError",
+        "Synthetic refusal",
+        refusal,
+      );
+      assert.equal(
+        toRemoteRequestError("startSession", foreign).remoteErrorTag,
+        "ProviderUnsupportedError",
+      );
+      const legacy = new ProviderDaemonRpcResponseError("ProviderAdapterRequestError", refusal);
+      assert.equal(
+        toRemoteRequestError("startSession", legacy).remoteErrorTag,
+        "ProviderAdapterRequestError",
+      );
+      for (const method of ["startSession", "sendTurn", "steerTurn", "stopSession"]) {
+        const unqualifiedOuter = new ProviderDaemonRpcResponseError(
+          refusal,
+          "Synthetic finite spelling",
+        );
+        assert.equal(
+          toRemoteRequestError(method, unqualifiedOuter).remoteErrorTag,
+          "ProviderAdapterRequestError",
+        );
+      }
+      let getterReads = 0;
+      const accessor = new ProviderDaemonRpcResponseError(
+        "ProviderAdapterRequestError",
+        "Synthetic refusal",
+      );
+      Object.defineProperty(accessor, "sessionReconfigurationRefusal", {
+        get: () => {
+          getterReads += 1;
+          return refusal;
+        },
+      });
+      assert.equal(
+        toRemoteRequestError("startSession", accessor).remoteErrorTag,
+        "ProviderAdapterRequestError",
+      );
+      const inherited = new ProviderDaemonRpcResponseError(
+        "ProviderAdapterRequestError",
+        "Synthetic refusal",
+      );
+      Object.setPrototypeOf(
+        inherited,
+        Object.create(Object.getPrototypeOf(inherited), {
+          sessionReconfigurationRefusal: { value: refusal },
+        }),
+      );
+      assert.equal(
+        toRemoteRequestError("startSession", inherited).remoteErrorTag,
+        "ProviderAdapterRequestError",
+      );
+      const outerAccessor = new ProviderDaemonRpcResponseError(
+        "ProviderAdapterRequestError",
+        "Synthetic refusal",
+        refusal,
+      );
+      Object.defineProperty(outerAccessor, "remoteErrorTag", {
+        get: () => {
+          getterReads += 1;
+          return "ProviderAdapterRequestError";
+        },
+      });
+      assert.equal(
+        toRemoteRequestError("startSession", outerAccessor).remoteErrorTag,
+        "ProviderAdapterRequestError",
+      );
+      assert.equal(getterReads, 0);
+      // A plain received error carrying similarly named fields is not an
+      // authenticated decoded RPC response and grants no semantic authority.
+      const untyped = Object.assign(new Error("Synthetic refusal"), {
+        remoteErrorTag: "ProviderAdapterRequestError",
+        sessionReconfigurationRefusal: refusal,
+      });
+      assert.equal(toRemoteRequestError("startSession", untyped).remoteErrorTag, undefined);
+      for (const malformed of ["unrecognized-refusal", "", null, true, { code: refusal }]) {
+        const malformedResponse = new ProviderDaemonRpcResponseError(
+          "ProviderAdapterRequestError",
+          "Synthetic fixed refusal",
+          malformed as never,
+        );
+        assert.equal(
+          toRemoteRequestError("startSession", malformedResponse).remoteErrorTag,
+          "ProviderAdapterRequestError",
+        );
+      }
+    },
+  );
+
   it.effect(
     "cold failed-root RPC requires the exact authenticated owner capability and complete failure identity before delivery",
     () =>

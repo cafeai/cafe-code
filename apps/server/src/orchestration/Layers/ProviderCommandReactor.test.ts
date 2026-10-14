@@ -49,6 +49,10 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { deriveServerPaths, ServerConfig } from "../../config.ts";
 import { TextGenerationError } from "@cafecode/contracts";
 import { ProviderAdapterRequestError } from "../../provider/Errors.ts";
+import {
+  ProviderDaemonRpcResponseError,
+  toRemoteRequestError,
+} from "../../providerDaemon/RemoteProviderService.ts";
 import { buildCodexSteerClientCorrelationId } from "../../provider/codexSteerCorrelation.ts";
 import {
   buildCodexTransientFailureMarkerPayload,
@@ -1411,6 +1415,36 @@ describe("ProviderCommandReactor", () => {
     beforeEach(() => {
       sendIndex = 0;
     });
+    function reconfigurationRefusal(
+      transport: "local" | "daemon",
+      code: "subagent-concurrency-active" | "codex-context-window-active",
+    ): ProviderAdapterRequestError {
+      if (transport === "local")
+        return new ProviderAdapterRequestError({
+          provider: "codex",
+          method: "session/reconfigure",
+          detail: "Synthetic native child woke before final admission.",
+          remoteErrorTag: code,
+        });
+      // Reconstruct the real client-side error: the remote envelope retains
+      // the generic adapter tag, while only its finite semantic field proves
+      // that native reconfiguration refused without retiring this process.
+      const responseError = new ProviderDaemonRpcResponseError(
+        "ProviderAdapterRequestError",
+        "Synthetic remote reconfiguration refusal.",
+        code,
+      );
+      expect(responseError.remoteErrorTag).toBe("ProviderAdapterRequestError");
+      expect(responseError.sessionReconfigurationRefusal).toBe(code);
+      const error = toRemoteRequestError("startSession", responseError);
+      expect(error).toMatchObject({
+        provider: "provider-daemon",
+        method: "startSession",
+        remoteErrorTag: code,
+      });
+      expect(error.cause).toBe(responseError);
+      return error;
+    }
     async function send(
       harness: Awaited<ReturnType<typeof createHarness>>,
       key: string,
@@ -1826,36 +1860,119 @@ describe("ProviderCommandReactor", () => {
       expect((await harness.readThreadDetail(threadId))?.subagentLimits).toBeUndefined();
     });
 
-    it("keeps an account default pending after a native child-wake refusal without retiring or replaying work", async () => {
-      const harness = await createHarness({ standalone: true });
+    it.each(["local", "daemon"] as const)(
+      "keeps an account default pending after a %s native child-wake refusal without retiring or replaying work",
+      async (transport) => {
+        const runtimeId = SubagentRuntimeId.make("00000000-0000-4000-8000-000000000028");
+        const harness = await createHarness({ standalone: true, subagentRuntimeId: runtimeId });
+        await accountDefault(harness, 15);
+        await send(harness, "account-before-child-wake");
+        await harness.markThreadReady(threadId, "2026-01-01T00:00:02.000Z");
+        await accountDefault(harness, 20);
+        const retained = harness.runtimeSessions[0]!;
+        const error = reconfigurationRefusal(transport, "subagent-concurrency-active");
+        harness.startSession.mockImplementationOnce(() => Effect.fail(error));
+        await send(harness, "account-child-woke-send");
+        expect(harness.startSession).toHaveBeenCalledTimes(2);
+        expect(harness.startSession.mock.calls[1]?.[1]).toMatchObject({
+          providerInstanceId: "codex",
+          maxConcurrentSubagents: 20,
+          requireIdleForSubagentLimitChange: true,
+        });
+        expect(harness.runtimeSessions).toHaveLength(1);
+        expect(harness.runtimeSessions[0]).toBe(retained);
+        expect(harness.runtimeSessions[0]?.subagentRuntimeId).toBe(runtimeId);
+        expect(harness.runtimeSessions[0]?.maxConcurrentSubagents).toBe(15);
+        expect(harness.sendTurn).toHaveBeenCalledTimes(2);
+        expect(harness.stopSession).not.toHaveBeenCalled();
+        expect(harness.interruptTurn).not.toHaveBeenCalled();
+        expect((await harness.readThreadDetail(threadId))?.subagentLimits).toBeUndefined();
+        expect(
+          (await Effect.runPromise(harness.serverSettings.getSettings)).providerInstances[
+            ProviderInstanceId.make("codex")
+          ]?.defaultMaxConcurrentSubagents,
+        ).toBe(20);
+        await harness.markThreadReady(threadId, "2026-01-01T00:00:04.000Z");
+        await send(harness, "account-child-idle-send");
+        expect(harness.startSession.mock.calls[2]?.[1]).toMatchObject({
+          maxConcurrentSubagents: 20,
+          requireIdleForSubagentLimitChange: true,
+        });
+        expect(harness.runtimeSessions[0]?.maxConcurrentSubagents).toBe(20);
+        expect(harness.startSession).toHaveBeenCalledTimes(3);
+        expect(harness.sendTurn).toHaveBeenCalledTimes(3);
+        expect(harness.stopSession).not.toHaveBeenCalled();
+        expect(harness.interruptTurn).not.toHaveBeenCalled();
+      },
+    );
+
+    it.each([
+      ["mixed model", "subagent-concurrency-active"],
+      ["mixed model", "codex-context-window-active"],
+      ["missing semantic", undefined],
+      ["unknown semantic", undefined],
+      ["unknown error", undefined],
+    ] as const)("does not retain policy for a %s remote refusal (%s)", async (scenario, code) => {
+      const runtimeId = SubagentRuntimeId.make("00000000-0000-4000-8000-000000000029");
+      const harness = await createHarness({
+        standalone: true,
+        subagentRuntimeId: runtimeId,
+        sessionModelSwitch: "unsupported",
+      });
       await accountDefault(harness, 15);
-      await send(harness, "account-before-child-wake");
+      await send(harness, "remote-refusal-before-change");
       await harness.markThreadReady(threadId, "2026-01-01T00:00:02.000Z");
       await accountDefault(harness, 20);
-      harness.startSession.mockImplementationOnce(() =>
-        Effect.fail(
-          new ProviderAdapterRequestError({
-            provider: "codex",
-            method: "session/reconfigure",
-            detail: "Subagent work is active.",
-            remoteErrorTag: "subagent-concurrency-active",
-          }),
-        ),
+      const retained = harness.runtimeSessions[0]!;
+      const remoteErrorTag =
+        scenario === "unknown error" ? "SyntheticUnknownRefusal" : "ProviderAdapterRequestError";
+      const responseError = new ProviderDaemonRpcResponseError(
+        remoteErrorTag,
+        // Matching prose is deliberately not semantic admission evidence.
+        "Synthetic subagent-concurrency-active and codex-context-window-active refusal.",
+        code,
       );
-      await send(harness, "account-child-woke-send");
-      expect(harness.runtimeSessions[0]?.maxConcurrentSubagents).toBe(15);
-      expect(harness.sendTurn).toHaveBeenCalledTimes(2);
-      expect(harness.stopSession).not.toHaveBeenCalled();
-      expect((await harness.readThreadDetail(threadId))?.subagentLimits).toBeUndefined();
-      await harness.markThreadReady(threadId, "2026-01-01T00:00:04.000Z");
-      await send(harness, "account-child-idle-send");
-      expect(harness.startSession.mock.calls[2]?.[1]).toMatchObject({
+      if (scenario === "unknown semantic")
+        // An unsupported own scalar on this exact synthetic received error
+        // must fail the client's finite schema gate, not become a new reason
+        // for the reactor to send with retained policy. No accessor executes.
+        Object.defineProperty(responseError, "sessionReconfigurationRefusal", {
+          value: "synthetic-unsupported-policy-active",
+          enumerable: true,
+        });
+      expect(responseError.remoteErrorTag).toBe(remoteErrorTag);
+      expect(responseError.sessionReconfigurationRefusal).toBe(
+        scenario === "unknown semantic" ? "synthetic-unsupported-policy-active" : code,
+      );
+      const error = toRemoteRequestError("startSession", responseError);
+      expect(error.remoteErrorTag).toBe(code ?? remoteErrorTag);
+      expect(error.cause).toBe(responseError);
+      harness.startSession.mockImplementationOnce(() => Effect.fail(error));
+      const replacement =
+        scenario === "mixed model"
+          ? createModelSelection(ProviderInstanceId.make("codex"), "synthetic-replacement-model")
+          : undefined;
+      await send(harness, "remote-refusal-no-fallback", true, replacement);
+      expect(harness.startSession).toHaveBeenCalledTimes(2);
+      expect(harness.startSession.mock.calls[1]?.[1]).toMatchObject({
         maxConcurrentSubagents: 20,
         requireIdleForSubagentLimitChange: true,
+        ...(replacement ? { modelSelection: replacement } : {}),
       });
-      expect(harness.runtimeSessions[0]?.maxConcurrentSubagents).toBe(20);
-      expect(harness.sendTurn).toHaveBeenCalledTimes(3);
+      expect(harness.runtimeSessions).toHaveLength(1);
+      expect(harness.runtimeSessions[0]).toBe(retained);
+      expect(harness.runtimeSessions[0]?.subagentRuntimeId).toBe(runtimeId);
+      expect(harness.runtimeSessions[0]?.maxConcurrentSubagents).toBe(15);
+      expect(harness.sendTurn).toHaveBeenCalledTimes(1);
+      expect(harness.steerTurn).not.toHaveBeenCalled();
       expect(harness.stopSession).not.toHaveBeenCalled();
+      expect(harness.interruptTurn).not.toHaveBeenCalled();
+      expect(
+        (await Effect.runPromise(harness.serverSettings.getSettings)).providerInstances[
+          ProviderInstanceId.make("codex")
+        ]?.defaultMaxConcurrentSubagents,
+      ).toBe(20);
+      expect((await harness.readThreadDetail(threadId))?.subagentLimits).toBeUndefined();
     });
 
     it("does not alter active root work on account save and applies the newest preference only after native idle", async () => {
@@ -2490,38 +2607,44 @@ describe("ProviderCommandReactor", () => {
       expect(harness.interruptTurn).not.toHaveBeenCalled();
     });
 
-    it("retains the exact legacy process when a child wakes during compaction migration admission", async () => {
-      const harness = await createHarness({ standalone: true });
-      await contextOverride(harness, "paired-child-seed", 800_000);
-      await send(harness, "paired-child-seed-send");
-      await harness.markThreadReady(threadId, "2026-01-01T00:00:02.000Z");
-      const { codexAutoCompactTokenLimit: _former, ...legacy } = harness.runtimeSessions[0]!;
-      harness.runtimeSessions[0] = legacy;
-      harness.startSession.mockImplementationOnce(() =>
-        Effect.fail(
-          new ProviderAdapterRequestError({
-            provider: "codex",
-            method: "session/reconfigure",
-            remoteErrorTag: "codex-context-window-active",
-            detail: "Synthetic native child woke before final admission.",
-          }),
-        ),
-      );
-      await send(harness, "paired-child-retained-send");
-      expect(harness.startSession.mock.calls[1]?.[1]).toMatchObject({
-        codexContextWindowOverride: 800_000,
-        requireIdleForCodexContextWindowChange: true,
-      });
-      expect(harness.runtimeSessions[0]).toBe(legacy);
-      expect(harness.runtimeSessions[0]).not.toHaveProperty("codexAutoCompactTokenLimit");
-      expect(harness.sendTurn).toHaveBeenCalledTimes(2);
-      expect(harness.stopSession).not.toHaveBeenCalled();
-      expect(harness.interruptTurn).not.toHaveBeenCalled();
-      await harness.markThreadReady(threadId, "2026-01-01T00:00:04.000Z");
-      await send(harness, "paired-child-after-idle");
-      expect(harness.runtimeSessions[0]?.codexAutoCompactTokenLimit).toBe(800_000);
-      expect(harness.sendTurn).toHaveBeenCalledTimes(3);
-    });
+    it.each(["local", "daemon"] as const)(
+      "retains the exact legacy process when a child wakes during %s compaction migration admission",
+      async (transport) => {
+        const runtimeId = SubagentRuntimeId.make("00000000-0000-4000-8000-000000000030");
+        const harness = await createHarness({ standalone: true, subagentRuntimeId: runtimeId });
+        await contextOverride(harness, "paired-child-seed", 800_000);
+        await send(harness, "paired-child-seed-send");
+        await harness.markThreadReady(threadId, "2026-01-01T00:00:02.000Z");
+        const { codexAutoCompactTokenLimit: _former, ...legacy } = harness.runtimeSessions[0]!;
+        harness.runtimeSessions[0] = legacy;
+        const error = reconfigurationRefusal(transport, "codex-context-window-active");
+        harness.startSession.mockImplementationOnce(() => Effect.fail(error));
+        await send(harness, "paired-child-retained-send");
+        expect(harness.startSession).toHaveBeenCalledTimes(2);
+        expect(harness.startSession.mock.calls[1]?.[1]).toMatchObject({
+          codexContextWindowOverride: 800_000,
+          requireIdleForCodexContextWindowChange: true,
+        });
+        expect(harness.runtimeSessions).toHaveLength(1);
+        expect(harness.runtimeSessions[0]).toBe(legacy);
+        expect(harness.runtimeSessions[0]?.subagentRuntimeId).toBe(runtimeId);
+        expect(harness.runtimeSessions[0]?.codexContextWindowOverride).toBe(800_000);
+        expect(harness.runtimeSessions[0]).not.toHaveProperty("codexAutoCompactTokenLimit");
+        expect((await harness.readThreadDetail(threadId))?.codexContextWindowOverride).toBe(
+          800_000,
+        );
+        expect(harness.sendTurn).toHaveBeenCalledTimes(2);
+        expect(harness.stopSession).not.toHaveBeenCalled();
+        expect(harness.interruptTurn).not.toHaveBeenCalled();
+        await harness.markThreadReady(threadId, "2026-01-01T00:00:04.000Z");
+        await send(harness, "paired-child-after-idle");
+        expect(harness.startSession).toHaveBeenCalledTimes(3);
+        expect(harness.runtimeSessions[0]?.codexAutoCompactTokenLimit).toBe(800_000);
+        expect(harness.sendTurn).toHaveBeenCalledTimes(3);
+        expect(harness.stopSession).not.toHaveBeenCalled();
+        expect(harness.interruptTurn).not.toHaveBeenCalled();
+      },
+    );
 
     it.each([false, "unknown"] as const)(
       "refuses %s paired-compaction owners before numeric context materialization",

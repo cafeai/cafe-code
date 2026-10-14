@@ -7,6 +7,7 @@ import {
   ApprovalRequestId,
   CODEX_MAX_CONCURRENT_SUBAGENTS,
   type CodexTransientFailureCategory,
+  type CodexCompactionObservation,
   DEFAULT_MODEL,
   validCodexContextWindowOverride,
   EventId,
@@ -18,6 +19,7 @@ import {
   type ProviderInteractionMode,
   type ProviderRequestKind,
   type ProviderSession,
+  ProviderTaskOwner,
   type ProviderSendTurnInput,
   type ProviderSubagentPolicySession,
   ProviderThreadGoal,
@@ -33,6 +35,7 @@ import {
   TurnId,
 } from "@cafecode/contracts";
 import { normalizeModelSlug } from "@cafecode/shared/model";
+import { makeCodexCompactionDiagnosticsTracker } from "@cafecode/shared/codexCompactionDiagnostics";
 import {
   classifyCodexTransientFailure,
   redactCodexFailureDiagnosticPayload,
@@ -3662,6 +3665,40 @@ export function resolveCodexChildConversationNotification(
     : undefined;
 }
 
+const isProviderTaskOwner = Schema.is(ProviderTaskOwner);
+
+/** Display-only source attribution from the same route snapshot that admitted
+ * this notification. Missing-start compatibility can still forward an unknown
+ * source, but it cannot manufacture a root or child avatar. In particular,
+ * operation receivers, native payload owner fields and Cafe's parent turn are
+ * never evidence of the actor that emitted an ordinary tool/compaction item.
+ * The caller obtains `admitted` only after the existing repeated source/native
+ * generation fences under the aggregate lifecycle permit; this function does
+ * not grant routing, liveness, task-control or provider-history authority. */
+export function readAdmittedCodexTaskOwner(input: {
+  readonly notification: CodexServerNotification;
+  readonly routes: ReadonlyMap<string, TurnId>;
+  readonly rootProviderThreadId: string | undefined;
+  readonly admitted: boolean;
+}): ProviderTaskOwner | undefined {
+  if (!input.admitted) return undefined;
+  const source = readNotificationThreadId(input.notification);
+  if (source === undefined || source.length === 0) return undefined;
+  if (source === input.rootProviderThreadId) return { type: "root" };
+  if (!input.routes.has(source)) return undefined;
+  // Preserve the exact admitted identity rather than trimming, truncating or
+  // inventing an alias. Unsupported IDs retain ordinary work with no icon.
+  const owner = { type: "child" as const, id: source };
+  if (!isProviderTaskOwner(owner)) return undefined;
+  // The existing Codex roster collapses whitespace and trims its child seed.
+  // Once the bounded owner codec has rejected controls/bidi, accept only an
+  // already-canonical spelling so both surfaces hash the same exact identity.
+  // Never use the normalized result as an owner or alter the native route: an
+  // unsupported spelling remains ordinary admitted work with a blank icon.
+  if (source.replace(/\s+/g, " ").trim() !== source) return undefined;
+  return owner;
+}
+
 export function codexChildConversationThreadIdsForTurn(
   childConversationTurns: ReadonlyMap<string, TurnId>,
   parentTurnId: TurnId,
@@ -6461,6 +6498,8 @@ export const makeCodexSessionRuntime = (
         ? contextDescriptor.value
         : undefined;
     const autoCompactTokenLimit = readCodexAutoCompactTokenLimit(options);
+    const compactionDiagnostics = makeCodexCompactionDiagnosticsTracker();
+    yield* Effect.addFinalizer(() => Effect.sync(() => compactionDiagnostics.retire()));
     const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
     const runtimeScope = yield* Scope.Scope;
     const events = yield* Queue.unbounded<ProviderEvent>();
@@ -8437,6 +8476,8 @@ export const makeCodexSessionRuntime = (
           childActivityNotifications,
           childAccounting,
           nativeNotificationAdmitted,
+          taskOwner,
+          codexCompactionObservation,
           isCurrentRootTurnCompletion,
         } = yield* aggregateLifecycleSemaphore.withPermits(1)(
           Effect.gen(function* () {
@@ -8467,6 +8508,54 @@ export const makeCodexSessionRuntime = (
                 notification,
                 collabReceiverTurns,
               );
+            const taskOwner = readAdmittedCodexTaskOwner({
+              notification,
+              routes: collabReceiverTurns,
+              rootProviderThreadId,
+              admitted: nativeNotificationAdmitted,
+            });
+            // Diagnostics share the repeated native-source admission fence.
+            // Child usage is observed here before its ordinary meter event is
+            // suppressed; it never changes root counters or provider policy.
+            let codexCompactionObservation: CodexCompactionObservation | null = null;
+            if (nativeNotificationAdmitted && taskOwner && !(yield* Ref.get(closedRef))) {
+              // Diagnostic uncertainty must never fail or change the ordinary
+              // native event path. JSON inputs are inert, but still keep an
+              // accessor/proxy descriptor failure local to this observation.
+              try {
+                const sourceId = readNotificationThreadId(notification);
+                if (sourceId) {
+                  const source = {
+                    sourceId,
+                    sourceOwner: taskOwner,
+                    observedAt,
+                    nativeTurnId: readNotificationTurnId(notification) ?? null,
+                  };
+                  if (notification.method === "thread/tokenUsage/updated") {
+                    const usageField = Object.getOwnPropertyDescriptor(payload ?? {}, "tokenUsage");
+                    compactionDiagnostics.observeUsage({
+                      ...source,
+                      tokenUsage:
+                        usageField && "value" in usageField ? usageField.value : undefined,
+                    });
+                  } else if (
+                    (notification.method === "item/started" ||
+                      notification.method === "item/completed") &&
+                    readNotificationItemType(notification) === "contextCompaction"
+                  ) {
+                    const nativeItemId = readNotificationItemId(notification);
+                    if (nativeItemId)
+                      codexCompactionObservation = compactionDiagnostics.observeCompaction({
+                        ...source,
+                        nativeItemId,
+                        phase: notification.method === "item/started" ? "started" : "completed",
+                      });
+                  }
+                }
+              } catch {
+                codexCompactionObservation = null;
+              }
+            }
             const subagentProjectionMethod = childRoute
               ? codexSubagentProjectionMethod(
                   notification,
@@ -8519,6 +8608,8 @@ export const makeCodexSessionRuntime = (
               childActivityNotifications,
               childAccounting,
               nativeNotificationAdmitted,
+              taskOwner,
+              codexCompactionObservation,
               isCurrentRootTurnCompletion,
             };
           }),
@@ -8638,6 +8729,7 @@ export const makeCodexSessionRuntime = (
                       kind: "notification",
                       threadId: options.threadId,
                       method: emittedMethod,
+                      ...(taskOwner ? { taskOwner } : {}),
                       turnId: parentTurnId,
                       ...(itemId ? { itemId } : {}),
                       ...(ownedNotification.params !== undefined
@@ -8653,6 +8745,8 @@ export const makeCodexSessionRuntime = (
                   kind: "notification",
                   threadId: options.threadId,
                   method: emittedMethod,
+                  ...(taskOwner ? { taskOwner } : {}),
+                  ...(codexCompactionObservation ? { codexCompactionObservation } : {}),
                   ...(turnId ? { turnId } : {}),
                   ...(itemId ? { itemId } : {}),
                   ...(requestId ? { requestId } : {}),
@@ -9187,6 +9281,12 @@ export const makeCodexSessionRuntime = (
       });
 
       const providerThreadId = opened.thread.id;
+      // This ACK, not settings or runtime construction, begins the exact
+      // native opening's diagnostic interval. Reset before further awaits.
+      compactionDiagnostics.setRootOpeningRequests({
+        contextWindow: codexContextWindowOverride ?? null,
+        autoCompactTokenLimit: autoCompactTokenLimit ?? codexContextWindowOverride ?? null,
+      });
       // Recheck the actual returned identity, including a newly created thread,
       // before any caller can submit into it. The resume preflight remains the
       // required gate before an existing native thread is materialized.
@@ -9324,6 +9424,7 @@ export const makeCodexSessionRuntime = (
     // the notification semaphore while closing runtimeScope would deadlock a
     // notification fiber waiting for that same permit during finalization.
     const closeReserved = Effect.gen(function* () {
+      compactionDiagnostics.retire();
       yield* settlePendingApprovals("cancel");
       yield* settlePendingUserInputs({});
       for (const pending of (yield* Ref.get(pendingInteractionsRef)).values()) {

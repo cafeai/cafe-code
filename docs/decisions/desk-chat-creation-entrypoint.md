@@ -1,8 +1,11 @@
 # Desk Chats heading and shared New chat action (superseded)
 
 Decision status: Superseded in this integration by the user's request to remove the Desk creation action.
+Latest placement successor: [adjacent Open chats action](desk-open-chats-new-action.md)
+restores only the requested heading button; this record preserves the earlier
+integration and original rationale as historical evidence.
 Created: 2026-10-09 14:03:31 JST (UTC+0900).
-Last updated: 2026-10-10.
+Last updated: 2026-10-15 00:30:16 JST (UTC+0900).
 Implementation status: The shared Projects button remains implemented; Desk has no heading creation button.
 Current placement follows [Standalone chats](standalone-chats.md); this upstream
 entrypoint proposal is historical and does not supersede that placement.

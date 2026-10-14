@@ -89,6 +89,17 @@ export type ProviderRuntimeProcessMode = typeof ProviderRuntimeProcessMode.Type;
 export const ProviderDaemonCapability = Schema.Literals(["health", "events", "rpc", "lease"]);
 export type ProviderDaemonCapability = typeof ProviderDaemonCapability.Type;
 
+/** These two refusals prove only that an attempted configuration replacement
+ * was not admitted. They never authorize replacement, a paid-input replay or
+ * generic recovery. Keep this finite semantic witness separate from the outer
+ * exception class and diagnostic prose across the authenticated daemon wire. */
+export const ProviderDaemonSessionReconfigurationRefusal = Schema.Literals([
+  "subagent-concurrency-active",
+  "codex-context-window-active",
+]);
+export type ProviderDaemonSessionReconfigurationRefusal =
+  typeof ProviderDaemonSessionReconfigurationRefusal.Type;
+
 export const ProviderDaemonCommandDiagnostic = Schema.Struct({
   commandId: Schema.String,
   method: Schema.String,
@@ -99,6 +110,7 @@ export const ProviderDaemonCommandDiagnostic = Schema.Struct({
   requestSummary: Schema.optional(Schema.Unknown),
   responseSummary: Schema.optional(Schema.Unknown),
   errorTag: Schema.optional(Schema.String),
+  sessionReconfigurationRefusal: Schema.optional(ProviderDaemonSessionReconfigurationRefusal),
   errorMessage: Schema.optional(Schema.String),
 });
 export type ProviderDaemonCommandDiagnostic = typeof ProviderDaemonCommandDiagnostic.Type;
@@ -234,6 +246,7 @@ export const ProviderDaemonRecentRpcFailure = Schema.Struct({
   durationMs: Schema.optional(Schema.Number),
   tag: Schema.String,
   message: Schema.String,
+  sessionReconfigurationRefusal: Schema.optional(ProviderDaemonSessionReconfigurationRefusal),
   diagnostics: Schema.optional(ProviderDaemonErrorDiagnostics),
 });
 export type ProviderDaemonRecentRpcFailure = typeof ProviderDaemonRecentRpcFailure.Type;
@@ -502,6 +515,7 @@ export type ProviderDaemonEventRecord = typeof ProviderDaemonEventRecord.Type;
 export const ProviderDaemonRpcError = Schema.Struct({
   tag: Schema.String,
   message: Schema.String,
+  sessionReconfigurationRefusal: Schema.optional(ProviderDaemonSessionReconfigurationRefusal),
   diagnostics: Schema.optional(ProviderDaemonErrorDiagnostics),
 });
 export type ProviderDaemonRpcError = typeof ProviderDaemonRpcError.Type;

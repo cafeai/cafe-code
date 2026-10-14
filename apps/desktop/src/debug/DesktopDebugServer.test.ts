@@ -34,6 +34,251 @@ const makeGlobalDictationShortcutSnapshot = (
   ...overrides,
 });
 
+const makeCompactionDiagnostic = () => ({
+  policy: {
+    enabled: true,
+    source: "codex-app-server",
+    thresholdResolution: "native-unreported",
+    explicitCafeOverride: 450_000,
+    usageAnnotationOrigin: "adapter-account-config",
+    usageAnnotationIsResolvedThreshold: false,
+    nominalRequestAtNativeOpening: 800_000,
+    nominalRequestEvidenceKnown: true,
+    resolvedThresholdReportedByProvider: false,
+  },
+  savedPolicy: {
+    source: "chat-override",
+    savedChatContextWindow: 800_000,
+    accountDefaultContextWindow: 900_000,
+    explicitAccountAutoCompactRequest: 450_000,
+    desiredRootContextWindowRequest: 800_000,
+    desiredRootAutoCompactRequest: 450_000,
+    selectedAccountMatchesRuntime: true,
+    comparisonKnown: true,
+    pending: true,
+    pendingCompaction: true,
+    isUnsentDraft: false,
+    isResolvedNativeThreshold: false,
+  },
+  receivedNativeEvidence: {
+    currentOwnerKnown: true,
+    activityWindowLimit: 500,
+    observationLimit: 8,
+    omittedUnqualifiedCount: 0,
+    latest: [
+      {
+        phase: "started",
+        source: "root",
+        observedAt: "2026-10-15T00:00:02.000Z",
+        order: 4,
+        startObservedAt: "2026-10-15T00:00:02.000Z",
+        rootOpeningRequests: { contextWindow: 800_000, autoCompactTokenLimit: 800_000 },
+        lastReportedUsageBeforeStart: {
+          observedAt: "2026-10-15T00:00:01.000Z",
+          order: 3,
+          usedTokens: 419_900,
+          inputTokens: 370_000,
+          cachedInputTokens: 310_000,
+          outputTokens: 49_900,
+          reasoningOutputTokens: 40_000,
+          totalProcessedTokens: 1_300_000,
+          reportedUsableContextWindow: 760_000,
+        },
+        usageEvidence: "received-before-start",
+        evictedSourceCount: 0,
+        evictedItemCount: 0,
+        triggerReason: "unreported",
+        accountingScope: "unreported",
+        resolvedThreshold: null,
+      },
+    ],
+  },
+});
+
+describe("Content-free compaction debug boundary", () => {
+  const evidenceOf = (value: unknown) => {
+    const projected = debugServer.summarizeCodexCompactionForCompactDebug(value);
+    assert.isNotNull(projected);
+    return projected!.receivedNativeEvidence as Record<string, unknown>;
+  };
+  it("independently projects finite opening, saved policy and pre-start usage without native IDs or private renderer fields", () => {
+    debugServer.reset();
+    const diagnostic = makeCompactionDiagnostic();
+    Object.assign(diagnostic, { privateProviderBody: "PRIVATE_PROVIDER_BODY" });
+    Object.assign(diagnostic.policy, { model_auto_compact_token_limit_scope: "PRIVATE_CONFIG" });
+    Object.assign(diagnostic.receivedNativeEvidence.latest[0]!, {
+      nativeItemId: "PRIVATE_ITEM",
+      nativeTurnId: "PRIVATE_TURN",
+      sourceOwner: { type: "child", id: "PRIVATE_CHILD" },
+      privatePrompt: "PRIVATE_PROMPT",
+    });
+    debugServer.publishRendererSnapshot({
+      capturedAt: "2026-10-15T00:00:04.000Z",
+      source: "fixture",
+      performance: { activeThread: { compaction: diagnostic } },
+    });
+    const renderer = debugServer.buildCompactDebugSnapshot().renderer as Record<string, unknown>;
+    const performance = renderer.performance as Record<string, unknown>;
+    const active = performance.activeThread as Record<string, unknown>;
+    const result = active.compaction as Record<string, unknown>;
+    assert.deepInclude(result.policy, {
+      thresholdResolution: "native-unreported",
+      nominalRequestAtNativeOpening: 800_000,
+      nominalRequestEvidenceKnown: true,
+      resolvedThresholdReportedByProvider: false,
+    });
+    assert.deepInclude(result.savedPolicy, {
+      explicitAccountAutoCompactRequest: 450_000,
+      pendingCompaction: true,
+    });
+    const latest = (result.receivedNativeEvidence as Record<string, unknown>).latest as Record<
+      string,
+      unknown
+    >[];
+    assert.lengthOf(latest, 1);
+    assert.deepInclude(latest[0]!.lastReportedUsageBeforeStart, {
+      usedTokens: 419_900,
+      reasoningOutputTokens: 40_000,
+      totalProcessedTokens: 1_300_000,
+    });
+    assert.notInclude(JSON.stringify(result), "PRIVATE_");
+  });
+
+  it("accepts received-order proof when clocks rewind or a duplicate start retains its first sample", () => {
+    const duplicate = makeCompactionDiagnostic();
+    Object.assign(duplicate.receivedNativeEvidence.latest[0]!, {
+      observedAt: "2026-10-15T00:00:05.000Z",
+      order: 6,
+    });
+    assert.lengthOf(evidenceOf(duplicate).latest as unknown[], 1);
+    const rewound = makeCompactionDiagnostic();
+    Object.assign(rewound.receivedNativeEvidence.latest[0]!, {
+      observedAt: "2026-10-14T23:59:59.000Z",
+      startObservedAt: "2026-10-15T00:00:00.000Z",
+    });
+    assert.lengthOf(evidenceOf(rewound).latest as unknown[], 1);
+    const completed = makeCompactionDiagnostic();
+    Object.assign(completed.receivedNativeEvidence.latest[0]!, {
+      phase: "completed",
+      startObservedAt: null,
+      lastReportedUsageBeforeStart: null,
+      usageEvidence: "start-not-observed",
+    });
+    assert.lengthOf(evidenceOf(completed).latest as unknown[], 1);
+  });
+
+  it("refuses malformed, post-edge and inconsistent samples and omits old or accessor evidence", () => {
+    const invalid = [
+      { phase: "unknown" },
+      { source: "PRIVATE_SOURCE" },
+      { triggerReason: "automatic" },
+      { resolvedThreshold: 420_000 },
+      { startObservedAt: null },
+      {
+        startObservedAt: null,
+        lastReportedUsageBeforeStart: null,
+        usageEvidence: "start-not-observed",
+      },
+      { lastReportedUsageBeforeStart: null },
+      { usageEvidence: "not-observed" },
+      { observedAt: "private-time" },
+      { order: Number.MAX_SAFE_INTEGER + 1 },
+    ];
+    for (const override of invalid) {
+      const diagnostic = makeCompactionDiagnostic();
+      Object.assign(diagnostic.receivedNativeEvidence.latest[0]!, override);
+      assert.deepEqual(evidenceOf(diagnostic).latest, []);
+    }
+    const after = makeCompactionDiagnostic();
+    after.receivedNativeEvidence.latest[0]!.lastReportedUsageBeforeStart.order = 4;
+    assert.deepEqual(evidenceOf(after).latest, []);
+    let getterReads = 0;
+    const accessor = makeCompactionDiagnostic();
+    Object.defineProperty(accessor.receivedNativeEvidence.latest[0]!, "source", {
+      get() {
+        getterReads += 1;
+        return "root";
+      },
+    });
+    assert.deepEqual(evidenceOf(accessor).latest, []);
+    const trapped = makeCompactionDiagnostic();
+    trapped.receivedNativeEvidence.latest[0] = new Proxy(
+      trapped.receivedNativeEvidence.latest[0]!,
+      {
+        getOwnPropertyDescriptor() {
+          throw new Error("PRIVATE_DESCRIPTOR_TRAP");
+        },
+      },
+    );
+    assert.deepEqual(evidenceOf(trapped).latest, []);
+    const arrayAccessor = makeCompactionDiagnostic();
+    Object.defineProperty(arrayAccessor.receivedNativeEvidence.latest, "0", {
+      get() {
+        getterReads += 1;
+        return {};
+      },
+    });
+    assert.deepEqual(evidenceOf(arrayAccessor).latest, []);
+    assert.equal(getterReads, 0);
+    const arrayGetTrap = makeCompactionDiagnostic();
+    arrayGetTrap.receivedNativeEvidence.latest = new Proxy(
+      arrayGetTrap.receivedNativeEvidence.latest,
+      {
+        get() {
+          getterReads += 1;
+          throw new Error("PRIVATE_ARRAY_GET_TRAP");
+        },
+      },
+    );
+    assert.lengthOf(evidenceOf(arrayGetTrap).latest as unknown[], 1);
+    assert.equal(getterReads, 0);
+    const revokedArray = makeCompactionDiagnostic();
+    const revocable = Proxy.revocable(revokedArray.receivedNativeEvidence.latest, {});
+    revocable.revoke();
+    revokedArray.receivedNativeEvidence.latest = revocable.proxy;
+    assert.deepEqual(evidenceOf(revokedArray).latest, []);
+    const revokedEntry = makeCompactionDiagnostic();
+    const revocableEntry = Proxy.revocable(revokedEntry.receivedNativeEvidence.latest[0]!, {});
+    revocableEntry.revoke();
+    revokedEntry.receivedNativeEvidence.latest[0] = revocableEntry.proxy;
+    assert.deepEqual(evidenceOf(revokedEntry).latest, []);
+    assert.isNull(debugServer.summarizeCodexCompactionForCompactDebug(revocableEntry.proxy));
+    assert.deepEqual(evidenceOf({ policy: {} }).latest, []);
+    const unavailable = makeCompactionDiagnostic();
+    unavailable.receivedNativeEvidence.currentOwnerKnown = false;
+    assert.deepEqual(evidenceOf(unavailable).latest, []);
+  });
+
+  it("bounds eight summaries and retains known null opening omission separately from missing or malformed legacy evidence", () => {
+    const diagnostic = makeCompactionDiagnostic();
+    diagnostic.receivedNativeEvidence.latest = Array.from(
+      { length: 20 },
+      () => diagnostic.receivedNativeEvidence.latest[0]!,
+    );
+    assert.lengthOf(evidenceOf(diagnostic).latest as unknown[], 8);
+    const knownNull = debugServer.summarizeCodexCompactionForCompactDebug({
+      policy: {
+        nominalRequestAtNativeOpening: null,
+        nominalRequestEvidenceKnown: true,
+      },
+    });
+    assert.deepInclude(knownNull!.policy, {
+      nominalRequestAtNativeOpening: null,
+      nominalRequestEvidenceKnown: true,
+    });
+    for (const policy of [
+      {},
+      { nominalRequestEvidenceKnown: true, nominalRequestAtNativeOpening: "800000" },
+      { nominalRequestEvidenceKnown: true, nominalRequestAtNativeOpening: -1 },
+    ]) {
+      assert.deepInclude(debugServer.summarizeCodexCompactionForCompactDebug({ policy })!.policy, {
+        nominalRequestEvidenceKnown: false,
+        nominalRequestAtNativeOpening: null,
+      });
+    }
+  });
+});
+
 describe("Daemon-local qualification debug summary", () => {
   it("retains only allowlisted numeric counts and keeps older owners unavailable", () => {
     debugServer.reset();

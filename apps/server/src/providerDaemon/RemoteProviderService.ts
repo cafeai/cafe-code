@@ -10,6 +10,7 @@ import {
   ProviderDaemonRpcEnvelope,
   ProviderDaemonRpcRequest,
   ProviderDaemonRpcResultByMethod,
+  ProviderDaemonSessionReconfigurationRefusal,
   type ThreadId,
   type ProviderInstanceId,
   type ProviderRuntimeEvent,
@@ -135,11 +136,19 @@ function providerDaemonUrl(config: ProviderDaemonClientConfig, path: string): UR
  */
 export class ProviderDaemonRpcResponseError extends Error {
   readonly remoteErrorTag: string;
+  readonly sessionReconfigurationRefusal?: ProviderDaemonSessionReconfigurationRefusal;
 
-  constructor(remoteErrorTag: string, message: string) {
+  constructor(
+    remoteErrorTag: string,
+    message: string,
+    sessionReconfigurationRefusal?: ProviderDaemonSessionReconfigurationRefusal,
+  ) {
     super(message);
     this.name = "ProviderDaemonRpcResponseError";
     this.remoteErrorTag = remoteErrorTag;
+    if (sessionReconfigurationRefusal !== undefined) {
+      this.sessionReconfigurationRefusal = sessionReconfigurationRefusal;
+    }
   }
 }
 
@@ -197,12 +206,47 @@ export function toRemoteRequestError(method: string, cause: unknown): ProviderAd
     addProviderBackendBridgeDiagnostics({ authenticationFailureCount: 1 });
     setProviderBackendBridgeDiagnostics({ lastAuthenticationFailureStatus: authenticationStatus });
   }
+  // A retained-policy continuation is permitted only after the authenticated
+  // daemon explicitly refuses this startSession reconfiguration. Keep older
+  // envelopes and every unrelated method/error on their original outer tag;
+  // human-readable detail and arbitrary native tags never mint this authority.
+  const outerTagDescriptor =
+    cause instanceof ProviderDaemonRpcResponseError
+      ? Object.getOwnPropertyDescriptor(cause, "remoteErrorTag")
+      : undefined;
+  const remoteErrorTag =
+    outerTagDescriptor !== undefined &&
+    "value" in outerTagDescriptor &&
+    typeof outerTagDescriptor.value === "string"
+      ? outerTagDescriptor.value
+      : undefined;
+  const refusalDescriptor =
+    cause instanceof ProviderDaemonRpcResponseError
+      ? Object.getOwnPropertyDescriptor(cause, "sessionReconfigurationRefusal")
+      : undefined;
+  const sessionReconfigurationRefusal =
+    method === "startSession" &&
+    cause instanceof ProviderDaemonRpcResponseError &&
+    remoteErrorTag === "ProviderAdapterRequestError" &&
+    refusalDescriptor !== undefined &&
+    "value" in refusalDescriptor &&
+    Schema.is(ProviderDaemonSessionReconfigurationRefusal)(refusalDescriptor.value)
+      ? refusalDescriptor.value
+      : undefined;
+  // These two reserved values are facts, never outer exception classes. A
+  // legacy/arbitrary envelope spelling one directly cannot bypass the additive
+  // witness or borrow start-only authority for another operation.
+  const genericRemoteErrorTag =
+    remoteErrorTag === undefined ||
+    Schema.is(ProviderDaemonSessionReconfigurationRefusal)(remoteErrorTag)
+      ? "ProviderAdapterRequestError"
+      : remoteErrorTag;
   return new ProviderAdapterRequestError({
     provider: "provider-daemon",
     method,
     detail: cause instanceof Error ? cause.message : String(cause),
     ...(cause instanceof ProviderDaemonRpcResponseError
-      ? { remoteErrorTag: cause.remoteErrorTag }
+      ? { remoteErrorTag: sessionReconfigurationRefusal ?? genericRemoteErrorTag }
       : {}),
     cause,
   });
@@ -448,6 +492,7 @@ const rpc = <M extends ProviderDaemonRpcRequest["method"]>(
           rootCause === undefined
             ? `${envelope.error.tag}: ${envelope.error.message}`
             : `${envelope.error.tag}: ${envelope.error.message}; caused by ${rootCause.message}`,
+          envelope.error.sessionReconfigurationRefusal,
         );
       }
       if (isVoidProviderDaemonRpcMethod(request.method)) {

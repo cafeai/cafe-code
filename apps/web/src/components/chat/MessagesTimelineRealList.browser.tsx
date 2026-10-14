@@ -111,6 +111,7 @@ function TimelineFixture({
   stickRevision = 0,
   onBottomObservation,
   onEndChange,
+  onDebugScrollEvent,
   hydrating = false,
 }: {
   entries: TimelineEntries;
@@ -121,6 +122,7 @@ function TimelineFixture({
   stickRevision?: number;
   onBottomObservation?: () => void;
   onEndChange?: (atEnd: boolean) => void;
+  onDebugScrollEvent?: TimelineProps["onDebugScrollEvent"];
   hydrating?: boolean;
 }) {
   const [following, setFollowing] = useState(true);
@@ -164,6 +166,7 @@ function TimelineFixture({
         onObservedBottom={scrollControl || onBottomObservation ? observeBottom : undefined}
         onRevertUserMessage={ignore}
         onUserScrollIntent={stopFollowing}
+        {...(onDebugScrollEvent ? { onDebugScrollEvent } : {})}
         revertTurnCountByUserMessageId={EMPTY_REVERT_COUNTS}
         {...(scheduledFollowups ? { scheduledFollowups } : {})}
         stickToEndRevision={stickRevision}
@@ -199,6 +202,96 @@ function readScroller(listRef: TimelineProps["listRef"]): HTMLElement {
 
 function tailDistance(scroller: HTMLElement): number {
   return scroller.scrollHeight - scroller.clientHeight - scroller.scrollTop;
+}
+
+/** Read only the exact list's public receipt and its actual mounted geometry.
+ * The last-known DOM offset alone does not attest completed list bootstrap or
+ * ResizeObserver/recycled-row adoption. No state is changed by this read. */
+function readProposalListObservation(
+  host: HTMLElement,
+  listRef: TimelineProps["listRef"],
+  initialLoadObserved: boolean,
+) {
+  const scroller = readScroller(listRef);
+  const state = listRef.current!.getState();
+  const viewport = scroller.getBoundingClientRect();
+  const mounted = [];
+  // This fixed forty-row fixture needs only bounded logical indices and native
+  // geometry/size receipts. Never return messages, data objects or DOM nodes.
+  for (let index = 0; index < Math.min(state.data.length, 40); index += 1) {
+    const row = state.elementAtIndex(index) as HTMLElement | undefined;
+    if (!row?.isConnected) continue;
+    const bounds = row.getBoundingClientRect();
+    const knownSize = state.sizeAtIndex(index);
+    mounted.push({
+      index,
+      rowIdentityMatches:
+        row.querySelector<HTMLElement>("[data-timeline-row-id]")?.dataset.timelineRowId ===
+          state.data[index]?.id || row.dataset.timelineRowId === state.data[index]?.id,
+      knownSize: typeof knownSize === "number" ? knownSize : null,
+      measuredSize: Math.round(bounds.height),
+      top: bounds.top,
+      bottom: bounds.bottom,
+    });
+  }
+  return {
+    initialLoadObserved,
+    nativeScroll: scroller.scrollTop,
+    publicScroll: state.scroll,
+    nativeTailDistance: tailDistance(scroller),
+    publicAtEnd: state.isAtEnd,
+    start: state.start,
+    end: state.end,
+    startBuffered: state.startBuffered,
+    endBuffered: state.endBuffered,
+    dataLength: state.data.length,
+    nativeScrollHeight: scroller.scrollHeight,
+    publicContentLength: state.contentLength,
+    nativeViewportHeight: scroller.clientHeight,
+    publicViewportHeight: state.scrollLength,
+    nativeViewportTop: viewport.top,
+    nativeViewportBottom: viewport.bottom,
+    proposalPresent: host.querySelector("[data-scheduled-followup-notices] article") !== null,
+    mounted,
+  };
+}
+
+/** Review starts only after this exact list's public load callback and native
+ * scroll/measurement receipt. Preserve LegendList's own rounded size contract;
+ * a missing size is not an estimated or tolerated successful measurement. */
+function isProposalReviewBaselineReady(
+  observation: ReturnType<typeof readProposalListObservation>,
+): boolean {
+  if (
+    !observation.initialLoadObserved ||
+    observation.publicScroll !== observation.nativeScroll ||
+    observation.publicAtEnd ||
+    observation.nativeTailDistance <= 400 ||
+    !Number.isInteger(observation.start) ||
+    !Number.isInteger(observation.end) ||
+    !Number.isInteger(observation.startBuffered) ||
+    !Number.isInteger(observation.endBuffered) ||
+    observation.startBuffered < 0 ||
+    observation.start < observation.startBuffered ||
+    observation.end < observation.start ||
+    observation.endBuffered < observation.end ||
+    observation.endBuffered >= observation.dataLength ||
+    observation.mounted.length === 0 ||
+    !observation.mounted.every(
+      (row) => row.rowIdentityMatches && row.measuredSize > 0 && row.knownSize === row.measuredSize,
+    )
+  )
+    return false;
+  for (let index = observation.startBuffered; index <= observation.endBuffered; index += 1) {
+    if (!observation.mounted.some((row) => row.index === index)) return false;
+  }
+  return observation.mounted.some(
+    (row) =>
+      row.index >= observation.start &&
+      row.index <= observation.end &&
+      row.top >= observation.nativeViewportTop &&
+      row.bottom <= observation.nativeViewportBottom,
+  );
 }
 
 /** Native wheel input only: never change a reused worker's device/media policy. */
@@ -744,12 +837,46 @@ describe("MessagesTimeline with real LegendList", () => {
       } as unknown as EnvironmentApi);
       const host = createHost();
       const listRef = createRef<LegendListRef>();
+      let initialLoadObserved = false;
+      const scrollEvents: {
+        reason: string;
+        scroll: number | null;
+        remainingScrollDistance: number | null;
+        autoFollowTail: boolean | null;
+      }[] = [];
+      const observeScrollDebug: NonNullable<TimelineProps["onDebugScrollEvent"]> = (event) => {
+        if (event.source !== "MessagesTimeline" || event.activeThreadId !== threadId) return;
+        if (event.reason === "initial-list-load") initialLoadObserved = true;
+        scrollEvents.push({
+          reason: event.reason,
+          scroll: event.metrics?.scroll ?? null,
+          remainingScrollDistance: event.metrics?.remainingScrollDistance ?? null,
+          autoFollowTail: event.metrics?.autoFollowTail ?? null,
+        });
+        if (scrollEvents.length > 32) scrollEvents.shift();
+      };
+      const observeProposalLayout = (
+        stage: "before-tail-preparation" | "before-baseline" | "before-final-assertion",
+      ) => {
+        const observation = readProposalListObservation(host, listRef, initialLoadObserved);
+        console.info(
+          "proposal-real-list-observation",
+          JSON.stringify({
+            stage,
+            following,
+            ...observation,
+            scrollEvents: [...scrollEvents],
+          }),
+        );
+        return observation;
+      };
       const view = await render(
         <TimelineFixture
           entries={messages(scope)}
           listRef={listRef}
           scope={scope}
           scheduledFollowups={context}
+          onDebugScrollEvent={observeScrollDebug}
         />,
         { container: host },
       );
@@ -759,6 +886,11 @@ describe("MessagesTimeline with real LegendList", () => {
           expect(host.querySelector("[data-scheduled-followup-notices]")).toBeNull();
         });
         await expectTail(host, listRef, `${scope}-message-39`);
+        // The original physical tail and fixed frames can precede LegendList's
+        // public bootstrap completion. A later footer must not be introduced
+        // into that initial interval and mistaken for independent review growth.
+        await vi.waitFor(() => expect(initialLoadObserved).toBe(true));
+        observeProposalLayout("before-tail-preparation");
         // Finish the initial alignment frames before exercising independent
         // footer growth, then place the real browser at the physical tail.
         for (let frame = 0; frame < 4; frame += 1) {
@@ -773,7 +905,44 @@ describe("MessagesTimeline with real LegendList", () => {
           await vi.waitFor(() => {
             expect(host.querySelector('[data-real-list-following="false"]')).not.toBeNull();
             expect(tailDistance(scroller)).toBeGreaterThan(400);
+            const observation = readProposalListObservation(host, listRef, initialLoadObserved);
+            expect(isProposalReviewBaselineReady(observation), JSON.stringify(observation)).toBe(
+              true,
+            );
           });
+        }
+        const baseline = observeProposalLayout("before-baseline");
+        if (!following) {
+          // Negative controls derive from this real native baseline, not mocked
+          // renderer/media/layout. Correct pixels cannot replace the exact load
+          // receipt, current logical range or completed known row measurements.
+          expect(isProposalReviewBaselineReady(baseline)).toBe(true);
+          expect(isProposalReviewBaselineReady({ ...baseline, initialLoadObserved: false })).toBe(
+            false,
+          );
+          expect(
+            isProposalReviewBaselineReady({ ...baseline, publicScroll: baseline.nativeScroll + 1 }),
+          ).toBe(false);
+          expect(isProposalReviewBaselineReady({ ...baseline, start: -1 })).toBe(false);
+          expect(isProposalReviewBaselineReady({ ...baseline, end: baseline.dataLength })).toBe(
+            false,
+          );
+          expect(
+            isProposalReviewBaselineReady({
+              ...baseline,
+              mounted: baseline.mounted.map((row, index) =>
+                index === 0 ? { ...row, knownSize: null } : row,
+              ),
+            }),
+          ).toBe(false);
+          expect(
+            isProposalReviewBaselineReady({
+              ...baseline,
+              mounted: baseline.mounted.map((row, index) =>
+                index === 0 ? { ...row, rowIdentityMatches: false } : row,
+              ),
+            }),
+          ).toBe(false);
         }
         const previousTop = scroller.scrollTop;
         const viewportBefore = scroller.getBoundingClientRect();
@@ -823,6 +992,7 @@ describe("MessagesTimeline with real LegendList", () => {
         for (let frame = 0; frame < 4; frame += 1) {
           await new Promise<void>((resolve) => window.requestAnimationFrame(() => resolve()));
         }
+        observeProposalLayout("before-final-assertion");
         if (following) {
           await vi.waitFor(() => {
             const viewport = scroller.getBoundingClientRect();

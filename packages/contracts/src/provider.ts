@@ -35,6 +35,8 @@ import {
 } from "./providerTaskControls.ts";
 import { ProviderCommandCatalog } from "./providerCommands.ts";
 import { ProviderSessionQuotaReport } from "./providerQuota.ts";
+import { ProviderTaskOwner } from "./providerTaskOwnership.ts";
+import { CodexCompactionObservation } from "./codexCompactionDiagnostics.ts";
 import { CodexTransientFailureCategory } from "./providerRuntime.ts";
 
 const ProviderSessionStatus = Schema.Literals([
@@ -401,6 +403,12 @@ const ProviderEventKind = Schema.Literals(["session", "notification", "request",
 export const ProviderEvent = Schema.Struct({
   id: EventId,
   subagentRuntimeId: Schema.optional(SubagentRuntimeId),
+  // Source ownership is minted by the admitted route, never native tool data.
+  // It remains optional presentation metadata and carries no task authority.
+  taskOwner: Schema.optional(ProviderTaskOwner),
+  // Only an already-admitted native compaction edge may carry this finite
+  // diagnostic witness, outside raw provider data and all paid-input contracts.
+  codexCompactionObservation: Schema.optional(CodexCompactionObservation),
   // Reserved owner-authored metadata, outside the untrusted native payload.
   // Used only on an exact terminal root publication after fresh local checks.
   nativeContextAvailable: Schema.optional(Schema.Literal(true)),

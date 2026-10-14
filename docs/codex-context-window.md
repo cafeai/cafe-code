@@ -2,7 +2,7 @@
 
 Status: Implemented; native account capacity and hosted release qualification are separate
 Created: 2026-10-12 11:10:24 JST (UTC+0900)
-Last updated: 2026-10-14 00:39:49 JST (UTC+0900)
+Last updated: 2026-10-15 03:07:23 JST (UTC+0900)
 
 For Codex chats, use **More composer controls → Context window…** beneath
 Subagent limit… to save a custom token count. Blank or Reset removes the chat's
@@ -74,12 +74,39 @@ retired/resumed only after the existing final root/children/ingress idle checks.
 Steering ongoing work retains its current policy. An incompatible or uncertain
 owner refuses new application instead of claiming success or restarting work.
 
+If a pure configuration replacement is refused at the final native idle fence,
+the existing exact owner can continue with its recorded policy while the saved
+change stays pending. The same behavior now survives the authenticated daemon
+boundary; it is not a relaxed idle guard or permission to retry paid input.
+Unrelated restart requirements and unknown evidence still refuse. See
+[finite reconfiguration refusals](decisions/provider-reconfiguration-refusal-transport.md).
+
 Codex retains its native scope, context cap, margin and buffering. In the reviewed
 version's default total scope, 800K nominal context permits a 720K base compaction
 threshold even though a 5% reserve produces a 760K usable meter. That example is
 not a measured account threshold or a universal promise about when it compacts.
 The native token event does not report the resolved compaction threshold, and
 Cafe does not substitute the requested number into the meter.
+
+### Diagnosing unexpectedly early compaction
+
+The local debug endpoint distinguishes actual-opening nominal request evidence
+from an unreported native resolved threshold. Newly observed compactions carry
+bounded same-source usage captured before their observed start, with separate
+input, cached input, output, reasoning output, last total, lifetime total and
+usable-window fields. Completion retains the original pre-start sample rather
+than substituting post-compaction usage. Root and child observations remain
+separate and require the exact current account and native runtime; older missing
+records and evicted starts remain unknown. Root request evidence never proves a
+child's effective inherited policy.
+
+Reasoning can consume context capacity, but its reported count is not added again
+to native total usage. Neither an early visible-meter value nor an 800K request
+proves a 500K/720K effective threshold. Native reason, scope and resolved trigger
+remain explicitly unreported until the provider supplies evidence. No history or
+private content is read to manufacture them. Tracing becomes available after
+normal rebuilt owner adoption; it does not retrofit old events or restart active
+work. See [the observation decision](decisions/codex-compaction-observation-diagnostics.md).
 
 Use the repository's normal rebuilt daemon/session adoption. Saving the preference
 does not upgrade/install Codex or restart an active daemon. Native availability

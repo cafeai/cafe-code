@@ -11,12 +11,94 @@ import {
   ProviderDaemonMarker,
   ProviderDaemonSubagentDetail,
   ProviderDaemonRpcRequest,
+  ProviderDaemonRpcEnvelope,
+  ProviderDaemonCommandDiagnostic,
+  ProviderDaemonRecentRpcFailure,
   ProviderDaemonRpcResultByMethod,
   WindowsProcessIdentity,
 } from "./providerDaemon.ts";
 
 const OWNERSHIP_ID = "9a90b48d-868f-4614-ae9c-66d50293d52b";
 const decodeDaemonLiveness = Schema.decodeUnknownSync(ProviderDaemonLiveness);
+
+it("retains only finite configuration-refusal evidence through current and legacy RPC codecs", () => {
+  const decode = Schema.decodeUnknownSync(ProviderDaemonRpcEnvelope);
+  const json = Schema.fromJsonString(ProviderDaemonRpcEnvelope);
+  const decodeJson = Schema.decodeUnknownSync(json);
+  const encodeJson = Schema.encodeSync(json);
+  const legacy = {
+    ok: false,
+    error: { tag: "ProviderAdapterRequestError", message: "Configuration is deferred." },
+  };
+  for (const code of [undefined, "subagent-concurrency-active", "codex-context-window-active"]) {
+    const value = {
+      ...legacy,
+      error: { ...legacy.error, ...(code ? { sessionReconfigurationRefusal: code } : {}) },
+    };
+    assert.deepEqual(decode(value), value);
+    assert.deepEqual(JSON.parse(encodeJson(decode(value))), value);
+    assert.deepEqual(decodeJson(JSON.stringify(value)), value);
+    assert.deepEqual(decodeJson(encodeJson(decode(value))), value);
+  }
+  assert.equal(
+    Object.hasOwn((decode(legacy) as typeof legacy).error, "sessionReconfigurationRefusal"),
+    false,
+  );
+  for (const code of [
+    null,
+    false,
+    17,
+    {},
+    [],
+    "unknown",
+    "codex-context-window-active ",
+    "private-untrusted-tag-sentinel",
+  ]) {
+    const value = { ...legacy, error: { ...legacy.error, sessionReconfigurationRefusal: code } };
+    assert.throws(() => decode(value));
+    assert.throws(() => decodeJson(JSON.stringify(value)));
+  }
+});
+
+it("preserves finite refusal codes through bounded command diagnostic JSON without changing legacy fields", () => {
+  const schema = Schema.fromJsonString(ProviderDaemonCommandDiagnostic);
+  const decode = Schema.decodeUnknownSync(schema);
+  const encode = Schema.encodeSync(schema);
+  const legacy = {
+    commandId: "command",
+    method: "startSession",
+    status: "failed" as const,
+    createdAt: "2026-10-14T00:00:00.000Z",
+    updatedAt: "2026-10-14T00:00:00.001Z",
+    errorTag: "ProviderAdapterRequestError",
+    errorMessage: "Configuration is deferred.",
+  };
+  for (const code of [undefined, "subagent-concurrency-active", "codex-context-window-active"]) {
+    const value = { ...legacy, ...(code ? { sessionReconfigurationRefusal: code } : {}) };
+    assert.deepEqual(decode(JSON.stringify(value)), value);
+    assert.deepEqual(JSON.parse(encode(decode(JSON.stringify(value)))), value);
+  }
+  assert.throws(() =>
+    decode(JSON.stringify({ ...legacy, sessionReconfigurationRefusal: "unknown" })),
+  );
+  const failureJson = Schema.fromJsonString(ProviderDaemonRecentRpcFailure);
+  const decodeFailure = Schema.decodeUnknownSync(failureJson);
+  const encodeFailure = Schema.encodeSync(failureJson);
+  const rpcLegacy = {
+    failedAt: legacy.updatedAt,
+    method: "startSession",
+    tag: legacy.errorTag,
+    message: legacy.errorMessage,
+  };
+  for (const code of [undefined, "subagent-concurrency-active", "codex-context-window-active"]) {
+    const value = { ...rpcLegacy, ...(code ? { sessionReconfigurationRefusal: code } : {}) };
+    assert.deepEqual(decodeFailure(JSON.stringify(value)), value);
+    assert.deepEqual(JSON.parse(encodeFailure(decodeFailure(JSON.stringify(value)))), value);
+  }
+  assert.throws(() =>
+    decodeFailure(JSON.stringify({ ...rpcLegacy, sessionReconfigurationRefusal: "unknown" })),
+  );
+});
 
 it("carries optional private history coordinates through authenticated daemon session results", () => {
   const legacy = {

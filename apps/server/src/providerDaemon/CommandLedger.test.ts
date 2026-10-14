@@ -30,6 +30,160 @@ const stopRequest = {
 } satisfies ProviderDaemonRpcRequestValue;
 
 describe("ProviderDaemonCommandLedger", () => {
+  it("binds session opening receipts in both directions and refuses missing legacy request identity", async () => {
+    await Effect.runPromise(
+      Effect.gen(function* () {
+        const ownerKey = "synthetic-opening-receipts";
+        const ledger = yield* makeProviderDaemonCommandLedger({ ownerKey });
+        const calls = yield* Ref.make(0);
+        const request = {
+          method: "startSession" as const,
+          commandId: "bound-session-start-command",
+          payload: {
+            threadId: ThreadId.make("owned-session-thread"),
+            providerInstanceId: ProviderInstanceId.make("owned-account"),
+            runtimeMode: "full-access" as const,
+            maxConcurrentSubagents: 9,
+            codexContextWindowOverride: 800000,
+            requireIdleForSubagentLimitChange: true,
+            requireIdleForCodexContextWindowChange: true,
+          },
+        };
+        const refusal = {
+          ok: false as const,
+          error: {
+            tag: "ProviderAdapterRequestError",
+            message: "Configuration is deferred.",
+            sessionReconfigurationRefusal: "codex-context-window-active" as const,
+          },
+        };
+        const execute = Ref.update(calls, (n) => n + 1).pipe(Effect.as(refusal));
+        expect(yield* ledger.runOnce(request, execute)).toEqual(refusal);
+        expect(yield* ledger.runOnce(request, execute)).toEqual(refusal);
+        expect(yield* Ref.get(calls)).toBe(1);
+        for (const changed of [
+          { ...request, payload: { ...request.payload, threadId: ThreadId.make("other-thread") } },
+          {
+            ...request,
+            payload: {
+              ...request.payload,
+              providerInstanceId: ProviderInstanceId.make("other-account"),
+            },
+          },
+          {
+            ...request,
+            payload: { ...request.payload, runtimeMode: "approval-required" as const },
+          },
+          { ...request, payload: { ...request.payload, maxConcurrentSubagents: 10 } },
+          { ...request, payload: { ...request.payload, codexContextWindowOverride: 900000 } },
+          {
+            ...request,
+            payload: { ...request.payload, requireIdleForCodexContextWindowChange: false },
+          },
+          {
+            ...stopRequest,
+            commandId: request.commandId,
+            payload: { threadId: request.payload.threadId },
+          },
+        ]) {
+          const result = yield* ledger.runOnce(changed, execute);
+          expect(result).toMatchObject({
+            ok: false,
+            error: { tag: "ProviderDaemonCommandIdentityMismatch" },
+          });
+          if (!result.ok) expect(result.error).not.toHaveProperty("sessionReconfigurationRefusal");
+        }
+        expect(yield* Ref.get(calls)).toBe(1);
+        // Reverse collisions likewise cannot certify a session opening using
+        // an unrelated method's saved outcome. Exact retry still executes once.
+        const ack = { ok: true as const, value: null };
+        const executeAck = Ref.update(calls, (n) => n + 1).pipe(Effect.as(ack));
+        expect(yield* ledger.runOnce(stopRequest, executeAck)).toEqual(ack);
+        expect(
+          yield* ledger.runOnce({ ...request, commandId: stopRequest.commandId }, execute),
+        ).toMatchObject({
+          ok: false,
+          error: { tag: "ProviderDaemonCommandIdentityMismatch" },
+        });
+        expect(yield* Ref.get(calls)).toBe(2);
+        const successful = { ...request, commandId: "successful-bound-session-start" };
+        expect(yield* ledger.runOnce(successful, executeAck)).toEqual(ack);
+        expect(yield* ledger.runOnce(successful, executeAck)).toEqual(ack);
+        expect(
+          yield* ledger.runOnce(
+            { ...successful, payload: { ...successful.payload, maxConcurrentSubagents: 12 } },
+            executeAck,
+          ),
+        ).toMatchObject({
+          ok: false,
+          error: { tag: "ProviderDaemonCommandIdentityMismatch" },
+        });
+        expect(yield* Ref.get(calls)).toBe(3);
+        // A scoped synthetic legacy row has no decodable request witness. It must not
+        // return a modern semantic refusal, reopen, or manufacture an ACK.
+        const sql = yield* SqlClient.SqlClient;
+        const storedCommandId = `${ownerKey}:${request.commandId}`;
+        // Retain SQLite's NOT NULL invariant: an empty old/corrupt envelope
+        // cannot supply request identity, without weakening the real schema.
+        yield* sql`UPDATE provider_daemon_commands SET request_json = '{}' WHERE command_id = ${storedCommandId}`;
+        expect(
+          yield* sql`SELECT command_id AS "commandId", request_json AS "requestJson"
+          FROM provider_daemon_commands WHERE command_id = ${storedCommandId}`,
+        ).toEqual([{ commandId: storedCommandId, requestJson: "{}" }]);
+        expect(yield* ledger.runOnce(request, execute)).toMatchObject({
+          ok: false,
+          error: { tag: "ProviderDaemonCommandIdentityMismatch" },
+        });
+        expect(yield* Ref.get(calls)).toBe(3);
+      }).pipe(Effect.scoped, Effect.provide(SqlitePersistenceMemory)),
+    );
+  });
+
+  it("retains finite configuration refusal diagnostics and the exact non-replaying receipt", async () => {
+    await Effect.runPromise(
+      Effect.gen(function* () {
+        const ownerKey = "synthetic-refusal-diagnostics";
+        const ledger = yield* makeProviderDaemonCommandLedger({ ownerKey });
+        const calls = yield* Ref.make(0);
+        for (const [index, code] of (
+          ["subagent-concurrency-active", "codex-context-window-active"] as const
+        ).entries()) {
+          const request = {
+            method: "startSession" as const,
+            commandId: `refusal-command-000000000000${index}`,
+            payload: {
+              threadId: ThreadId.make("refusal-thread"),
+              runtimeMode: "full-access" as const,
+            },
+          };
+          const result = {
+            ok: false as const,
+            error: {
+              tag: "ProviderAdapterRequestError",
+              message: "Configuration is deferred.",
+              sessionReconfigurationRefusal: code,
+            },
+          };
+          const execute = Ref.update(calls, (n) => n + 1).pipe(Effect.as(result));
+          expect(yield* ledger.runOnce(request, execute)).toEqual(result);
+          expect(yield* ledger.runOnce(request, execute)).toEqual(result);
+          const snapshot = yield* ledger.snapshot;
+          expect(
+            snapshot.recentFailedCommands.find(
+              (row) => row.commandId === `${ownerKey}:${request.commandId}`,
+            ),
+          ).toMatchObject({
+            errorTag: "ProviderAdapterRequestError",
+            sessionReconfigurationRefusal: code,
+            errorMessage: "Configuration is deferred.",
+          });
+          expect(snapshot.runningCommandCount).toBe(0);
+        }
+        expect(yield* Ref.get(calls)).toBe(2);
+      }).pipe(Effect.scoped, Effect.provide(SqlitePersistenceMemory)),
+    );
+  });
+
   it("deduplicates every rewind phase and binds receipts to exact thread, checkpoint and finish proof", async () => {
     await Effect.runPromise(
       Effect.gen(function* () {

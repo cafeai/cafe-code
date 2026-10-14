@@ -1,5 +1,7 @@
 # Browser test input isolation
 
+Last updated: 2026-10-15 03:07:23 JST (UTC+0900)
+
 Cafe's pinned Vitest browser runner isolates test files by replacing a tester
 iframe. Its owning Playwright page and browser context can be reused for later
 files. CDP device/touch emulation targets that outer page, not the disposable
@@ -67,6 +69,31 @@ Local Mac passes do not qualify Linux or Windows; hosted native checks remain
 required. This test-only policy changes no production CSS, provider lifecycle,
 permissions, credentials or live user session.
 
+## Real-list proposal baseline readiness
+
+The schedule-proposal fixture in `MessagesTimelineRealList.browser.tsx` must
+observe its exact committed list's `initial-list-load` callback before preparing
+the physical tail or review baseline. The existing scope-fenced debug callback
+is installed before render. DOM tail proximity, parent follow flags and four
+animation frames can all be observed while LegendList's initial bootstrap is
+still pending; they are not completion receipts.
+
+Bounded content-free native observations showed initial-load completion after
+the old baseline and proposal refresh. A later public end target can differ from
+the physically clamped scroller, so following mode keeps its original physical
+tail checks. Review baseline admission instead compares exact public/native
+scroll, a valid current range, each mounted logical row's index/identity, and
+the pinned virtualizer's known full-row size against `Math.round` of real native
+geometry. It retains the exact visible message before refresh.
+
+Keep every original proposal/request identity, original input and four-frame
+measurement steps, 2px scroll/anchor bounds, review-tail and follow-tail assertions,
+worker caps and enclosing deadlines. Negative fixture controls refuse a missing
+initial-load witness, stale scroll, unknown measurement and invalid range even
+when other geometry looks ready. Do not add sleeps, retry input, force dimensions,
+relax tolerances or change production scrolling. These observations demonstrate
+an incomplete precondition, not the precise cause of an archived 48px assertion.
+
 ## Ordinary-motion fluid lifecycle ownership
 
 The full-motion fluid suite requires native ordinary motion before testing
@@ -100,6 +127,14 @@ and background-animation setting. Its native control is in the ordinary desktop
 group; it grants no special motion policy or relaxed input/deadline. Its passing
 baseline is not evidence of the recording's original stopping cause. Native
 hosted delivery remains required after local checks.
+
+The initial-paint precondition observes both completed clears and actual nonempty
+pixels in the same original poll. A returned lifecycle clear or draw clear is not
+proof that eased drive has reached the engine's paint branch. Keep the original
+numeric clear and pixel assertions afterward, then all 24 trusted child clicks,
+frame identity, focus, continued painting and cleanup assertions. Do not replace
+real pixels with counter-only readiness, change production animation, force media
+or relax the existing input, worker or deadline policy.
 
 ## Native-host Mermaid security scheduling
 

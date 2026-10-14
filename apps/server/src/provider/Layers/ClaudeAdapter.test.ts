@@ -423,6 +423,20 @@ function isWorkflowTaskFixtureEvent(
   );
 }
 
+type ToolLifecycleFixtureEvent = Extract<
+  ProviderRuntimeEvent,
+  { readonly type: "item.started" | "item.updated" | "item.completed" }
+>;
+function isToolLifecycleFixtureEvent(
+  event: ProviderRuntimeEvent,
+): event is ToolLifecycleFixtureEvent {
+  return (
+    event.type === "item.started" ||
+    event.type === "item.updated" ||
+    event.type === "item.completed"
+  );
+}
+
 /** The .288 stream sibling is deliberately absent from SDKMessage's public
  * union. This narrow synthetic transport fixture exercises the exact received
  * extension, not a request API, native process, provider profile or journal. */
@@ -10954,6 +10968,533 @@ describe("ClaudeAdapterLive", () => {
       Effect.provide(harness.layer),
     );
   });
+
+  it.effect(
+    "retains exact root and child tool owners through input, detached native tasks and replacement",
+    () => {
+      const harness = makeHarness({ nativeVersion: "2.1.295", environment: {} });
+      return Effect.gen(function* () {
+        const adapter = yield* ClaudeAdapter;
+        const observed: ProviderRuntimeEvent[] = [];
+        const done = yield* Deferred.make<void>();
+        yield* adapter.streamEvents.pipe(
+          Stream.runForEach((event) =>
+            Effect.gen(function* () {
+              observed.push(event);
+              if (event.type === "item.completed" && event.itemId === "owner-finalized-root-tool")
+                yield* Deferred.succeed(done, undefined);
+            }),
+          ),
+          Effect.forkChild,
+        );
+        yield* adapter.startSession({ threadId: THREAD_ID, runtimeMode: "full-access" });
+        yield* adapter.sendTurn({ threadId: THREAD_ID, input: "inspect exact tool sources" });
+        emitWorkflowFixtureInit(harness.query, "2.1.295");
+        const child = {
+          task_id: "owner-child-task",
+          tool_use_id: "owner-child-parent-tool",
+          run_id: "001",
+          task_type: "local_agent",
+          description: "Source child",
+        };
+        emitWorkflowFixtureSystemMessage(harness.query, "task_started", child);
+        const start = (id: string, index: number, fields: Record<string, unknown> = {}) =>
+          harness.query.emit({
+            type: "stream_event",
+            session_id: WORKFLOW_FIXTURE_SESSION_ID,
+            parent_tool_use_id: null,
+            uuid: `owner-start-${id}`,
+            ...fields,
+            event: {
+              type: "content_block_start",
+              index,
+              content_block: { type: "tool_use", id, name: "WebFetch", input: {} },
+            },
+          } as unknown as SDKMessage);
+        const result = (id: string, fields: Record<string, unknown> = {}) =>
+          harness.query.emit({
+            type: "user",
+            session_id: WORKFLOW_FIXTURE_SESSION_ID,
+            parent_tool_use_id: null,
+            uuid: `owner-result-${id}`,
+            ...fields,
+            message: {
+              role: "user",
+              content: [{ type: "tool_result", tool_use_id: id, content: "Synthetic result" }],
+            },
+          } as unknown as SDKMessage);
+        start("owner-root-tool", 0);
+        start("owner-child-tool", 0, { parent_tool_use_id: child.tool_use_id });
+        // The SDK's own alias is explicit source metadata. It must resolve to
+        // this current task/tool incarnation, not a transcript id or root.
+        start("owner-alias-tool", 1, { agent_id: child.task_id });
+        result("owner-root-tool");
+        result("owner-alias-tool", { agent_id: child.task_id });
+        const native = {
+          task_id: "owner-native-background-task",
+          tool_use_id: "owner-child-tool",
+          run_id: "001",
+          task_type: "local_bash",
+          description: "Child-owned lookup",
+        };
+        // The system report is root-shaped. Only the exact already-captured
+        // child call may supply its ordinary native task's owner.
+        emitWorkflowFixtureSystemMessage(harness.query, "task_started", native);
+        emitWorkflowFixtureSystemMessage(harness.query, "task_notification", {
+          ...child,
+          status: "completed",
+          summary: "Source child retired",
+          output_file: "",
+        });
+        // Input completion belongs to the original call even after the source
+        // task retires. A raw input's similarly named field is not evidence.
+        harness.query.emit({
+          type: "stream_event",
+          session_id: WORKFLOW_FIXTURE_SESSION_ID,
+          parent_tool_use_id: child.tool_use_id,
+          uuid: "owner-child-input",
+          event: {
+            type: "content_block_delta",
+            index: 0,
+            delta: {
+              type: "input_json_delta",
+              partial_json:
+                '{"url":"https://fixture.invalid/","taskOwner":{"type":"child","id":"forged-input"}}',
+            },
+          },
+        } as unknown as SDKMessage);
+        result("owner-child-tool", {
+          parent_tool_use_id: child.tool_use_id,
+          tool_use_result: { detachedToolCall: true },
+        });
+        emitWorkflowFixtureSystemMessage(harness.query, "task_progress", {
+          ...native,
+          summary: "Actual native progress",
+          usage: { total_tokens: 1, tool_uses: 1, duration_ms: 1 },
+        });
+        // Retirement of the source child cannot retarget a detached call's
+        // first display witness or convert the task reporter into its actor.
+        emitWorkflowFixtureSystemMessage(harness.query, "task_notification", {
+          ...native,
+          status: "completed",
+          summary: "Native lookup completed",
+          output_file: "",
+        });
+        const replacement = { ...native, run_id: "002", tool_use_id: "owner-late-root-tool" };
+        emitWorkflowFixtureSystemMessage(harness.query, "task_started", replacement);
+        // The same native task id's replacement has no call at creation. A
+        // later real root call is not permission to backfill its missing owner.
+        start("owner-late-root-tool", 2);
+        emitWorkflowFixtureSystemMessage(harness.query, "task_progress", {
+          ...replacement,
+          summary: "Unowned replacement progress",
+          usage: { total_tokens: 2, tool_uses: 1, duration_ms: 2 },
+        });
+        emitWorkflowFixtureSystemMessage(harness.query, "task_notification", {
+          ...replacement,
+          status: "completed",
+          summary: "Unowned replacement completed",
+          output_file: "",
+        });
+        result("owner-late-root-tool");
+        start("owner-finalized-root-tool", 3);
+        harness.query.emit(makeSuccessfulClaudeResult(WORKFLOW_FIXTURE_SESSION_ID));
+        yield* Deferred.await(done);
+
+        const itemEvents = observed.filter(isToolLifecycleFixtureEvent);
+        for (const [id, count, owner] of [
+          ["owner-root-tool", 3, { type: "root" }],
+          ["owner-alias-tool", 3, { type: "child", id: child.task_id }],
+          ["owner-child-tool", 5, { type: "child", id: child.task_id }],
+          ["owner-late-root-tool", 3, { type: "root" }],
+          ["owner-finalized-root-tool", 2, { type: "root" }],
+        ] as const) {
+          const events = itemEvents.filter((event) => event.itemId === id);
+          assert.equal(events.length, count);
+          for (const event of events) assert.deepEqual(event.payload.taskOwner, owner);
+        }
+        const nativeEvents = observed
+          .filter(isWorkflowTaskFixtureEvent)
+          .filter((event) => event.payload.taskId === native.task_id);
+        assert.deepEqual(
+          nativeEvents.map((event) => event.type),
+          [
+            "task.started",
+            "task.progress",
+            "task.completed",
+            "task.started",
+            "task.progress",
+            "task.completed",
+          ],
+        );
+        for (const event of nativeEvents.slice(0, 3))
+          assert.deepEqual(event.payload.taskOwner, { type: "child", id: child.task_id });
+        for (const event of nativeEvents.slice(3)) assert.equal(event.payload.taskOwner, undefined);
+        assert.equal(harness.query.stopTaskCalls.length, 0);
+        assert.equal(harness.query.backgroundTaskCalls.length, 0);
+        assert.equal(harness.query.interruptCalls.length, 0);
+        assert.equal(new Set(observed.map((event) => event.eventId)).size, observed.length);
+      }).pipe(Effect.provide(harness.layer));
+    },
+  );
+
+  it.effect(
+    "revokes old native task ownership at a held newer run level before its exact start",
+    () => {
+      const harness = makeHarness({ nativeVersion: "2.1.295", environment: {} });
+      return Effect.gen(function* () {
+        const adapter = yield* ClaudeAdapter;
+        const observed: ProviderRuntimeEvent[] = [];
+        const heldLevel = yield* Deferred.make<WorkflowTaskFixtureEvent>();
+        const completed = yield* Deferred.make<void>();
+        const taskId = "held-owner-native-task";
+        yield* adapter.streamEvents.pipe(
+          Stream.runForEach((event) =>
+            Effect.gen(function* () {
+              observed.push(event);
+              if (
+                event.type === "task.progress" &&
+                event.payload.taskId === taskId &&
+                event.payload.description === "New run awaiting its exact start"
+              )
+                yield* Deferred.succeed(heldLevel, event);
+              if (
+                event.type === "task.completed" &&
+                event.payload.taskId === taskId &&
+                event.payload.summary === "Fresh unowned run completed"
+              )
+                yield* Deferred.succeed(completed, undefined);
+            }),
+          ),
+          Effect.forkChild,
+        );
+        yield* adapter.startSession({ threadId: THREAD_ID, runtimeMode: "full-access" });
+        yield* adapter.sendTurn({
+          threadId: THREAD_ID,
+          input: "observe exact resumed task ownership",
+        });
+        emitWorkflowFixtureInit(harness.query, "2.1.295");
+        const child = {
+          task_id: "held-owner-child",
+          tool_use_id: "held-owner-parent-tool",
+          run_id: "001",
+          task_type: "local_agent",
+          description: "Original source child",
+        };
+        emitWorkflowFixtureSystemMessage(harness.query, "task_started", child);
+        harness.query.emit({
+          type: "stream_event",
+          session_id: WORKFLOW_FIXTURE_SESSION_ID,
+          parent_tool_use_id: child.tool_use_id,
+          uuid: "held-owner-tool-start",
+          event: {
+            type: "content_block_start",
+            index: 0,
+            content_block: {
+              type: "tool_use",
+              id: "held-owner-original-call",
+              name: "WebFetch",
+              input: {},
+            },
+          },
+        } as unknown as SDKMessage);
+        const task = {
+          task_id: taskId,
+          tool_use_id: "held-owner-original-call",
+          run_id: "001",
+          task_type: "local_bash",
+          description: "Original native task",
+        };
+        emitWorkflowFixtureSystemMessage(harness.query, "task_started", task);
+        harness.query.emit({
+          type: "user",
+          session_id: WORKFLOW_FIXTURE_SESSION_ID,
+          parent_tool_use_id: child.tool_use_id,
+          uuid: "held-owner-detached-call",
+          tool_use_result: { detachedToolCall: true },
+          message: {
+            role: "user",
+            content: [
+              {
+                type: "tool_result",
+                tool_use_id: task.tool_use_id,
+                content: "Detached synthetic call",
+              },
+            ],
+          },
+        } as unknown as SDKMessage);
+        emitWorkflowFixtureSystemMessage(harness.query, "background_tasks_changed", {
+          tasks: [{ ...task, run_id: "002", description: "New run awaiting its exact start" }],
+        });
+        // Await the exact received newer-run level. Its replacement start is
+        // deliberately not emitted yet; neither mock invocation nor a clock
+        // advance can stand in for this revoked-incarnation observation.
+        const level = yield* Deferred.await(heldLevel);
+        assert.equal(level.payload.taskOwner, undefined);
+        assert.equal(level.payload.individualTaskControl, undefined);
+        assert.equal(level.payload.visibility, "visible");
+        const nativeEdges = () =>
+          observed
+            .filter(isWorkflowTaskFixtureEvent)
+            .filter((event) => event.payload.taskId === taskId);
+        assert.deepEqual(
+          nativeEdges().map((event) => event.type),
+          ["task.started", "task.progress"],
+        );
+        const first = nativeEdges()[0]!;
+        assert.deepEqual(first.payload.taskOwner, { type: "child", id: child.task_id });
+        const firstControl = first.payload.individualTaskControl;
+        assert.ok(firstControl);
+
+        // A delayed old result cannot renew the receipt or publish completion
+        // for the new run. The original call's eventual real result still
+        // retains its own immutable actor independently of native task reuse.
+        emitWorkflowFixtureSystemMessage(harness.query, "task_notification", {
+          ...task,
+          status: "completed",
+          summary: "Rejected old native run",
+          output_file: "",
+        });
+        harness.query.emit({
+          type: "user",
+          session_id: WORKFLOW_FIXTURE_SESSION_ID,
+          parent_tool_use_id: child.tool_use_id,
+          uuid: "held-owner-original-result",
+          message: {
+            role: "user",
+            content: [
+              {
+                type: "tool_result",
+                tool_use_id: task.tool_use_id,
+                content: "Original call's actual synthetic output",
+              },
+            ],
+          },
+        } as unknown as SDKMessage);
+        const fresh = { ...task, run_id: "002", tool_use_id: "held-owner-unobserved-new-call" };
+        emitWorkflowFixtureSystemMessage(harness.query, "task_started", fresh);
+        emitWorkflowFixtureSystemMessage(harness.query, "task_progress", {
+          ...fresh,
+          summary: "Fresh unowned run progress",
+          usage: { total_tokens: 1, tool_uses: 1, duration_ms: 1 },
+        });
+        emitWorkflowFixtureSystemMessage(harness.query, "task_notification", {
+          ...fresh,
+          status: "completed",
+          summary: "Fresh unowned run completed",
+          output_file: "",
+        });
+        yield* Deferred.await(completed);
+        const edges = nativeEdges();
+        assert.deepEqual(
+          edges.map((event) => event.type),
+          ["task.started", "task.progress", "task.started", "task.progress", "task.completed"],
+        );
+        for (const event of edges.slice(1)) {
+          assert.equal(event.payload.taskOwner, undefined);
+          assert.equal(event.payload.visibility, "visible");
+        }
+        const freshControl = edges[2]?.payload.individualTaskControl;
+        assert.ok(freshControl);
+        assert.notEqual(
+          freshControl.capability.taskGeneration,
+          firstControl.capability.taskGeneration,
+        );
+        assert.equal(freshControl.runtimeId, firstControl.runtimeId);
+        const calls = observed
+          .filter(isToolLifecycleFixtureEvent)
+          .filter((event) => event.itemId === task.tool_use_id);
+        assert.deepEqual(
+          calls.map((event) => event.type),
+          ["item.started", "item.updated", "item.updated", "item.updated", "item.completed"],
+        );
+        for (const event of calls)
+          assert.deepEqual(event.payload.taskOwner, { type: "child", id: child.task_id });
+        assert.deepEqual(
+          observed
+            .filter(isWorkflowTaskFixtureEvent)
+            .filter((event) => event.payload.taskId === child.task_id)
+            .map((event) => event.type),
+          ["task.started"],
+        );
+        assert.equal(harness.query.stopTaskCalls.length, 0);
+        assert.equal(harness.query.backgroundTaskCalls.length, 0);
+        assert.equal(harness.query.interruptCalls.length, 0);
+      }).pipe(Effect.provide(harness.layer));
+    },
+  );
+
+  it.effect(
+    "omits unqualified Claude tool owners without inventing root or borrowing a retired child",
+    () => {
+      const harness = makeHarness({ nativeVersion: "2.1.295", environment: {} });
+      return Effect.gen(function* () {
+        const adapter = yield* ClaudeAdapter;
+        const observed: ProviderRuntimeEvent[] = [];
+        const done = yield* Deferred.make<void>();
+        yield* adapter.streamEvents.pipe(
+          Stream.runForEach((event) =>
+            Effect.gen(function* () {
+              observed.push(event);
+              if (event.type === "item.started" && event.itemId === "owner-negative-barrier")
+                yield* Deferred.succeed(done, undefined);
+            }),
+          ),
+          Effect.forkChild,
+        );
+        yield* adapter.startSession({ threadId: THREAD_ID, runtimeMode: "full-access" });
+        yield* adapter.sendTurn({ threadId: THREAD_ID, input: "observe only admitted sources" });
+        const child = {
+          task_id: "owner-negative-child",
+          tool_use_id: "owner-negative-parent",
+          run_id: "001",
+          task_type: "local_agent",
+          description: "Known source",
+        };
+        const start = (id: string, index: number, fields: Record<string, unknown> = {}) =>
+          harness.query.emit({
+            type: "stream_event",
+            session_id: WORKFLOW_FIXTURE_SESSION_ID,
+            parent_tool_use_id: null,
+            uuid: `owner-negative-${id}`,
+            ...fields,
+            event: {
+              type: "content_block_start",
+              index,
+              content_block: {
+                type: "tool_use",
+                id,
+                name: "Read",
+                input: { taskOwner: { type: "child", id: child.task_id } },
+              },
+            },
+          } as unknown as SDKMessage);
+        start("owner-pre-init-tool", 11);
+        emitWorkflowFixtureInit(harness.query, "2.1.295");
+        emitWorkflowFixtureSystemMessage(harness.query, "task_started", child);
+        start("owner-unknown-parent", 0, { parent_tool_use_id: "unbound-parent" });
+        start("owner-malformed-parent", 1, { parent_tool_use_id: ` ${child.tool_use_id} ` });
+        start("owner-unknown-alias", 2, { agent_id: "unbound-alias" });
+        start("owner-malformed-alias", 12, { agent_id: { id: child.task_id } });
+        start("owner-foreign-alias", 3, {
+          agent_id: child.task_id,
+          session_id: "foreign-owner-session",
+        });
+        start("owner-contradictory-alias", 4, {
+          agent_id: child.task_id,
+          parent_tool_use_id: "other-parent",
+        });
+        emitWorkflowFixtureSystemMessage(harness.query, "task_started", {
+          task_id: "owner-hidden-child",
+          tool_use_id: "owner-hidden-parent",
+          run_id: "001",
+          task_type: "local_agent",
+          description: "Hidden source",
+          skip_transcript: true,
+        });
+        start("owner-hidden-tool", 15, { parent_tool_use_id: "owner-hidden-parent" });
+        start("owner-wrong-run-tool", 13, {
+          parent_tool_use_id: child.tool_use_id,
+          task_id: child.task_id,
+          run_id: "000",
+        });
+        // Two real tracked calls with the same native tool id cannot supply a
+        // unique ordinary native task actor, even if each source is qualified.
+        start("owner-ambiguous-native-tool", 14);
+        start("owner-ambiguous-native-tool", 14, { parent_tool_use_id: child.tool_use_id });
+        emitWorkflowFixtureSystemMessage(harness.query, "task_started", {
+          task_id: "owner-ambiguous-native-task",
+          tool_use_id: "owner-ambiguous-native-tool",
+          task_type: "local_bash",
+          description: "Ambiguous spawning calls",
+        });
+        // Legacy tool routing may adopt this foreign id. Its ownership capture
+        // must remain unavailable because it was foreign at actual receipt,
+        // even while the matching current child binding is otherwise healthy.
+        start("owner-foreign-parent-tool", 9, {
+          parent_tool_use_id: child.tool_use_id,
+          session_id: "foreign-owner-session",
+        });
+        emitWorkflowFixtureInit(harness.query, "2.1.295");
+        // Assistant-first recovery creates a genuinely provisional binding,
+        // not a fabricated current native task or a mocked readiness result.
+        harness.query.emit({
+          type: "assistant",
+          parent_tool_use_id: "owner-provisional-parent",
+          session_id: WORKFLOW_FIXTURE_SESSION_ID,
+          uuid: "owner-provisional-message",
+          message: {
+            id: "owner-provisional-message",
+            role: "assistant",
+            content: [{ type: "text", text: "Recovered provisional child" }],
+          },
+        } as unknown as SDKMessage);
+        start("owner-provisional-tool", 5, { parent_tool_use_id: "owner-provisional-parent" });
+        emitWorkflowFixtureSystemMessage(harness.query, "task_notification", {
+          ...child,
+          status: "completed",
+          summary: "Exact source retired",
+          output_file: "",
+        });
+        start("owner-retired-tool", 6, { parent_tool_use_id: child.tool_use_id });
+        emitWorkflowFixtureSystemMessage(harness.query, "task_started", {
+          ...child,
+          run_id: "002",
+          tool_use_id: "owner-replacement-parent",
+        });
+        start("owner-old-incarnation-tool", 7, { parent_tool_use_id: child.tool_use_id });
+        // First run-aware level changes revoke authority until its exact start.
+        emitWorkflowFixtureSystemMessage(harness.query, "background_tasks_changed", {
+          tasks: [{ ...child, run_id: "003", tool_use_id: "owner-replacement-parent" }],
+        });
+        start("owner-awaiting-run-tool", 8, { parent_tool_use_id: "owner-replacement-parent" });
+        start("owner-negative-barrier", 10);
+        yield* Deferred.await(done);
+        const itemEvents = observed.filter(isToolLifecycleFixtureEvent);
+        for (const id of [
+          "owner-pre-init-tool",
+          "owner-unknown-parent",
+          "owner-malformed-parent",
+          "owner-provisional-tool",
+          "owner-retired-tool",
+          "owner-old-incarnation-tool",
+          "owner-awaiting-run-tool",
+          "owner-wrong-run-tool",
+          "owner-foreign-parent-tool",
+        ]) {
+          const events = itemEvents.filter((event) => event.itemId === id);
+          assert.equal(events.length, 1, `Original ordinary routing is retained for ${id}`);
+          assert.equal(events[0]?.payload.taskOwner, undefined);
+        }
+        for (const id of [
+          "owner-unknown-alias",
+          "owner-malformed-alias",
+          "owner-foreign-alias",
+          "owner-contradictory-alias",
+          "owner-hidden-tool",
+        ])
+          assert.equal(
+            itemEvents.some((event) => event.itemId === id),
+            false,
+          );
+        const ambiguous = observed
+          .filter(isWorkflowTaskFixtureEvent)
+          .filter((event) => event.payload.taskId === "owner-ambiguous-native-task");
+        assert.deepEqual(
+          ambiguous.map((event) => event.type),
+          ["task.started"],
+        );
+        for (const event of ambiguous) assert.equal(event.payload.taskOwner, undefined);
+        assert.deepEqual(
+          itemEvents.find((event) => event.itemId === "owner-negative-barrier")?.payload.taskOwner,
+          { type: "root" },
+        );
+        assert.equal(harness.query.stopTaskCalls.length, 0);
+        assert.equal(harness.query.backgroundTaskCalls.length, 0);
+        assert.equal(harness.query.interruptCalls.length, 0);
+      }).pipe(Effect.provide(harness.layer));
+    },
+  );
 
   it.effect("isolates forwarded subagent text, usage, and colliding tool block indexes", () => {
     const harness = makeHarness();

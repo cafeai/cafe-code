@@ -3348,7 +3348,9 @@ export default function ChatView(props: ChatViewProps) {
       ? (lifecycleByThreadId.get(activeThread.id) ?? null)
       : null;
     const activeThreadPerformance =
-      activeThread == null ? null : summarizeDebugThreadPerformance(activeThread, capturedAtMs);
+      activeThread == null
+        ? null
+        : summarizeDebugThreadPerformance(activeThread, capturedAtMs, settings);
     const activeWaitReasons = deriveDebugWaitReasons({
       lifecycle: activeLifecycleSummary,
       performance: activeThreadPerformance,
@@ -3882,6 +3884,7 @@ export default function ChatView(props: ChatViewProps) {
     queuedFollowUpPendingDispatchByThreadId,
     routeKind,
     selectedProvider,
+    settings,
     serverAcknowledgedLocalDispatch,
     showScrollToBottom,
     steeringFollowUpViewItems,

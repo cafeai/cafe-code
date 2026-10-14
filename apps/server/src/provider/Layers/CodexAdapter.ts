@@ -41,6 +41,7 @@ import {
   type ProviderNativeRetryProgress,
   type ProviderRequestKind,
   ProviderThreadGoal,
+  ProviderTaskOwner,
   type ProviderThreadGoalSetInput,
   type ThreadTokenUsageSnapshot,
   type ProviderUserInputAnswers,
@@ -83,6 +84,7 @@ import * as CodexErrors from "effect-codex-app-server/errors";
 import * as EffectCodexSchema from "effect-codex-app-server/schema";
 
 import { getModelSelectionStringOptionValue } from "@cafecode/shared/model";
+import { readMatchingCodexCompactionObservationField } from "@cafecode/shared/codexCompactionDiagnostics";
 import { summarizeToolArguments } from "@cafecode/shared/toolActivity";
 import {
   makeProviderDiagnostic,
@@ -3486,6 +3488,8 @@ function mapCodexSubagentProjection(
   return undefined;
 }
 
+const isProviderTaskOwner = Schema.is(ProviderTaskOwner);
+
 function mapItemLifecycle(
   event: ProviderEvent,
   canonicalThreadId: ThreadId,
@@ -3495,7 +3499,7 @@ function mapItemLifecycle(
     readPayload(EffectCodexSchema.V2ItemStartedNotification, event.payload) ??
     readPayload(EffectCodexSchema.V2ItemCompletedNotification, event.payload);
   const item = payload?.item;
-  if (!item) {
+  if (!item || !payload) {
     return undefined;
   }
   const itemType = toCanonicalItemType(item.type);
@@ -3511,6 +3515,25 @@ function mapItemLifecycle(
       : lifecycle === "item.completed"
         ? "completed"
         : undefined;
+  // This finite source owner was minted outside native payloads by the
+  // admitted runtime route. Legacy/injected malformed evidence stays absent;
+  // target threads and raw tool arguments never select a matching avatar.
+  const taskOwner = isProviderTaskOwner(event.taskOwner) ? event.taskOwner : undefined;
+  // This evidence must match the actual decoded native item/turn and admitted
+  // source header. Raw item extras, receiver targets and parent routed turns
+  // cannot mint compaction provenance. Legacy missing headers remain unknown.
+  const codexCompactionObservation =
+    itemType === "context_compaction" &&
+    lifecycle !== "item.updated" &&
+    taskOwner &&
+    event.itemId === item.id
+      ? readMatchingCodexCompactionObservationField(event, {
+          phase: lifecycle === "item.started" ? "started" : "completed",
+          nativeItemId: item.id,
+          nativeTurnId: payload.turnId,
+          sourceOwner: taskOwner,
+        })
+      : null;
 
   return {
     ...runtimeEventBase(
@@ -3523,6 +3546,8 @@ function mapItemLifecycle(
     type: lifecycle,
     payload: {
       itemType,
+      ...(taskOwner ? { taskOwner } : {}),
+      ...(codexCompactionObservation ? { codexCompactionObservation } : {}),
       ...(status ? { status } : {}),
       ...(title ? { title } : {}),
       ...(detail ? { detail } : {}),
@@ -4316,6 +4341,7 @@ function mapToRuntimeEvents(
         ...runtimeEventBase(event, canonicalThreadId),
         type: "item.updated",
         payload: {
+          ...(isProviderTaskOwner(event.taskOwner) ? { taskOwner: event.taskOwner } : {}),
           itemType:
             event.method === "item/reasoning/summaryPartAdded" ? "reasoning" : "command_execution",
           ...(event.payload !== undefined ? { data: event.payload } : {}),

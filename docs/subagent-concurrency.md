@@ -52,6 +52,12 @@ The guard covers the owned bindings and frames observed by the current runtime;
 it does not prove physical idleness in unread native/OS buffers or historical
 children absent from that runtime's bounded metadata.
 
+The pure policy-change refusal preserves its finite meaning across the local
+daemon boundary, allowing the existing narrowly qualified continuation with the
+old recorded policy. Saved changes remain pending; mixed session changes and
+unqualified failures do not gain that fallback. No active chat is restarted or
+input automatically repeated. See [the transport decision](decisions/provider-reconfiguration-refusal-transport.md).
+
 Resolution is the selected driver's chat override, then the exact selected
 account's Default subagent limit, then its existing legacy runtime override,
 then native configuration/environment. New chats do not copy the default into an

@@ -1492,6 +1492,7 @@
   "New chat ({value0})": "New chat ({value0})",
   "New chat defaults": "New chat defaults",
   "New chat in <project></project>": "New chat in <project></project>",
+  "New chat in active tab group": "New chat in active tab group",
   "New chat in {value0}": "New chat in {value0}",
   "New chat in…": "New chat in…",
   "New chat workspace": "New chat workspace",

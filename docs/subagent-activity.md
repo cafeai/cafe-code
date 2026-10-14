@@ -4,6 +4,16 @@ Select a subagent in Tasks or Atrium to open its detail. Cafe shows its saved as
 progress and status, available public messages, and an **Activity** section for
 verified Codex and Claude histories.
 
+Ordinary **Provider tasks** in the Tasks popover and docked rail use the owning
+subagent's same local avatar when the admitted source and current native runtime
+are known. Root rows leave the icon slot empty. Legacy, malformed, stale or
+ambiguous ownership stays blank rather than guessing from tool names, targets,
+control IDs or history. This is decorative presentation, not a new roster,
+task-control capability or native history request. The rebuilt backend and
+renderer must be adopted normally to receive these new optional fields; an
+already-running old daemon cannot acquire new code merely from a renderer reload.
+See [source-owner icons](decisions/provider-task-owner-icons.md).
+
 Activity labels summarize command, file-read, file-edit, agent-message and other
 tool operations. Recognized file operations include their target path; commands
 include a conservative command description beneath the label. These selectable,

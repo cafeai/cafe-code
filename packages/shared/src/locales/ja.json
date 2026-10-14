@@ -1516,6 +1516,7 @@
   "New chat ({value0})": "新しいチャット（{value0}）",
   "New chat defaults": "新しいチャットの既定値",
   "New chat in <project></project>": "<project></project>で新しいチャット",
+  "New chat in active tab group": "現在のタブグループで新しいチャット",
   "New chat in {value0}": "{value0}で新しいチャット",
   "New chat in…": "新しいチャットを作成…",
   "New chat workspace": "新しいチャットのワークスペース",

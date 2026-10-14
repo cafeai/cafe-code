@@ -1516,6 +1516,7 @@
   "New chat ({value0})": "새 대화({value0})",
   "New chat defaults": "새 대화 기본값",
   "New chat in <project></project>": "<project></project>에서 새 대화",
+  "New chat in active tab group": "현재 탭 그룹에서 새 대화",
   "New chat in {value0}": "{value0}에서 새 대화",
   "New chat in…": "다음 위치에서 새 대화…",
   "New chat workspace": "새 대화 작업 공간",

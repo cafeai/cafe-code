@@ -7,11 +7,11 @@ and 75 focused browser tests on macOS. The latest pending-editor/sidebar follow-
 updated regression fixtures; test execution is deferred at the user’s request.
 Native Windows/Linux and live-provider qualification remain separate.
 Created: 2026-10-03 13:39:38 JST (UTC+0900).
-Last updated: 2026-10-09 14:03:31 JST (UTC+0900).
+Last updated: 2026-10-15 00:30:16 JST (UTC+0900).
 Supersedes: No prior decision in full. Supplements the project-only creation
 scope of [Desk tab groups](desk-tab-groups.md); all its navigation, queue,
 subscription, composer and per-group rail ownership rules remain in force.
-Partially superseded by: [Desk chat creation entrypoint](desk-chat-creation-entrypoint.md)
+Partially superseded by: [adjacent Desk Open chats action](desk-open-chats-new-action.md)
 replaces only the no-Desk-heading-button placement choice. The original decision
 below is preserved; creation, pending-editor and ownership rules remain unchanged.
 

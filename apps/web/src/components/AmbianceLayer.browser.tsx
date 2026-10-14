@@ -260,7 +260,11 @@ describe("AmbianceLayer", () => {
         expect(canvas).toBeInstanceOf(HTMLCanvasElement);
         expect(canvas?.dataset.cafeAmbianceEffect).toBe("lattice");
         expect(canvas?.dataset.cafeAmbianceBackend).toBe("2d");
-        await expect.poll(completedFrames).toBeGreaterThan(1);
+        // A completed native clear can precede the engine's first nonempty
+        // draw. Observe both prerequisites within the original single poll
+        // allowance before measuring continuity through child-frame input.
+        await expect.poll(() => completedFrames() > 1 && painted()).toBe(true);
+        expect(completedFrames()).toBeGreaterThan(1);
         expect(painted()).toBe(true);
         const before = completedFrames();
         const checkpoints: { click: number; focused: boolean; hidden: boolean; frames: number }[] =

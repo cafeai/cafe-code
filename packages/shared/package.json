@@ -68,6 +68,14 @@
       "types": "./src/liveWork.ts",
       "import": "./src/liveWork.ts"
     },
+    "./providerTaskOwnership": {
+      "types": "./src/providerTaskOwnership.ts",
+      "import": "./src/providerTaskOwnership.ts"
+    },
+    "./codexCompactionDiagnostics": {
+      "types": "./src/codexCompactionDiagnostics.ts",
+      "import": "./src/codexCompactionDiagnostics.ts"
+    },
     "./claudeResponseLimits": {
       "types": "./src/claudeResponseLimits.ts",
       "import": "./src/claudeResponseLimits.ts"

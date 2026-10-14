@@ -11530,10 +11530,12 @@ describe(`ChatView full app (${chatViewBrowserPart})`, () => {
         ]);
         await waitForStandaloneComposerText("First standalone conversation");
         await page.getByRole("button", { name: "Desk", exact: true }).click();
-        await expect
-          .element(page.getByRole("button", { name: "New chat in active tab group", exact: true }))
-          .not.toBeInTheDocument();
-        newChatShortcut();
+        const deskNewChat = page.getByRole("button", {
+          name: "New chat in active tab group",
+          exact: true,
+        });
+        await expect.element(deskNewChat).toBeVisible();
+        await deskNewChat.click();
         await waitForLayout();
         expect(mounted.router.state.location.pathname).toBe(`/draft/${draftId}`);
         expect(Object.keys(useComposerDraftStore.getState().draftThreadsByThreadKey)).toEqual([
@@ -11655,12 +11657,14 @@ describe(`ChatView full app (${chatViewBrowserPart})`, () => {
         desk.dispatch({ type: "sidebarMode", mode: "desk" });
         const capturedGroup = useDeskStore.getState().desk.activeGroupId;
         await waitForLayout();
-        // The global shortcut must capture the exact active-group owner, not
-        // the saved chat currently visible in another pane. Desk stays view-only.
-        await expect
-          .element(page.getByRole("button", { name: "New chat in active tab group", exact: true }))
-          .not.toBeInTheDocument();
-        newChatShortcut();
+        // The Desk heading uses the same pending-editor flow and captures the
+        // exact active group, not the saved chat visible in another pane.
+        const deskNewChat = page.getByRole("button", {
+          name: "New chat in active tab group",
+          exact: true,
+        });
+        await expect.element(deskNewChat).toBeVisible();
+        await deskNewChat.click();
         await vi.waitFor(() =>
           expect(mounted.router.state.location.pathname).toMatch(UUID_ROUTE_RE),
         );
@@ -11668,6 +11672,9 @@ describe(`ChatView full app (${chatViewBrowserPart})`, () => {
         const firstThreadId = draftThreadIdFor(first);
         expect(useDeskStore.getState().draftEditors[first]?.groupId).toBe(capturedGroup);
         expect(useDeskStore.getState().desk.groups[capturedGroup]?.tabs).toEqual([secondKey]);
+        expect(
+          wsRequests.some((body) => body._tag === ORCHESTRATION_WS_METHODS.dispatchCommand),
+        ).toBe(false);
         useComposerDraftStore.getState().setPrompt(first, "Send the first chat");
         await waitForStandaloneComposerText("Send the first chat");
         const firstPane = await waitForElement(

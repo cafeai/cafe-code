@@ -17,6 +17,8 @@ import {
 import { ProviderThreadGoal } from "./providerGoal.ts";
 import { ProviderInteraction, ProviderNetworkApproval } from "./providerInteraction.ts";
 import { ProviderInstanceId, ProviderDriverKind } from "./providerInstance.ts";
+import { ProviderTaskOwner } from "./providerTaskOwnership.ts";
+import { CodexCompactionObservation } from "./codexCompactionDiagnostics.ts";
 import { ProviderDiagnostic } from "./providerDiagnostic.ts";
 import {
   ProviderIndividualTaskControl,
@@ -562,6 +564,8 @@ export type TurnDiffUpdatedPayload = typeof TurnDiffUpdatedPayload.Type;
 
 export const ItemLifecyclePayload = Schema.Struct({
   individualTaskControl: Schema.optional(ProviderIndividualTaskControl),
+  taskOwner: Schema.optional(ProviderTaskOwner),
+  codexCompactionObservation: Schema.optional(CodexCompactionObservation),
   itemType: CanonicalItemType,
   status: Schema.optional(RuntimeItemStatus),
   title: Schema.optional(TrimmedNonEmptyStringSchema),
@@ -897,6 +901,7 @@ export type RuntimeWorkflowPresentation = typeof RuntimeWorkflowPresentation.Typ
 
 const TaskStartedPayload = Schema.Struct({
   individualTaskControl: Schema.optional(ProviderIndividualTaskControl),
+  taskOwner: Schema.optional(ProviderTaskOwner),
   taskId: RuntimeTaskId,
   description: Schema.optional(TrimmedNonEmptyStringSchema),
   taskType: Schema.optional(TrimmedNonEmptyStringSchema),
@@ -908,6 +913,7 @@ export type TaskStartedPayload = typeof TaskStartedPayload.Type;
 
 const TaskProgressPayload = Schema.Struct({
   individualTaskControl: Schema.optional(ProviderIndividualTaskControl),
+  taskOwner: Schema.optional(ProviderTaskOwner),
   taskId: RuntimeTaskId,
   description: TrimmedNonEmptyStringSchema,
   summary: Schema.optional(TrimmedNonEmptyStringSchema),
@@ -921,6 +927,7 @@ export type TaskProgressPayload = typeof TaskProgressPayload.Type;
 
 const TaskCompletedPayload = Schema.Struct({
   individualTaskControl: Schema.optional(ProviderIndividualTaskControl),
+  taskOwner: Schema.optional(ProviderTaskOwner),
   taskId: RuntimeTaskId,
   status: Schema.Literals(["completed", "failed", "stopped"]),
   summary: Schema.optional(TrimmedNonEmptyStringSchema),

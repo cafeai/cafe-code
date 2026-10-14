@@ -23,6 +23,8 @@ import {
   type OrchestrationThreadActivity,
   type ProviderThreadGoal,
   type ProviderRuntimeEvent,
+  ProviderInstanceId,
+  SubagentRuntimeId,
 } from "@cafecode/contracts";
 import { readCafeCodeEnv } from "@cafecode/shared/compatEnv";
 import { claudePublicSummaryDisplayText } from "../../provider/claudePublicSummary.ts";
@@ -36,6 +38,7 @@ import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Ref from "effect/Ref";
+import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
 import { makeConversationRewindStore } from "../../persistence/Layers/ConversationRewinds.ts";
@@ -87,6 +90,8 @@ import {
   type PersistedUnsettledCodexSteerIntent,
 } from "../codexSteerIntentLedger.ts";
 import { sanitizeProviderToolData } from "@cafecode/shared/activityPayloadSanitizer";
+import { readProviderTaskOwnerPayload } from "@cafecode/shared/providerTaskOwnership";
+import { readMatchingCodexCompactionObservationField } from "@cafecode/shared/codexCompactionDiagnostics";
 import { ServerSettingsService } from "../../serverSettings.ts";
 import { isSupersededSessionLifecycle, sessionLifecycleSnapshot } from "../sessionLifecycle.ts";
 import { buildCodexTransientFailureMarkerPayload } from "../providerRuntimeRecovery.ts";
@@ -573,6 +578,35 @@ function runtimeToolPresentationData(
 function runtimeEventToActivities(
   event: ProviderRuntimeEvent,
 ): ReadonlyArray<OrchestrationThreadActivity> {
+  // Decorative ownership is already stamped at the admitted native source.
+  // Reconstruct only its finite fields; never promote raw tool receivers,
+  // labels, private extra data or a control target into source ownership.
+  const taskOwner = readProviderTaskOwnerPayload(event.payload);
+  // The adapter already compared native turn coordinates (a routed child has
+  // a different Cafe parent turn). Rebind the finite evidence to this exact
+  // activity phase/item/source; never promote a tool's nested diagnostic copy.
+  const codexCompactionObservation =
+    event.provider === "codex" &&
+    Schema.is(ProviderInstanceId)(event.providerInstanceId) &&
+    Schema.is(SubagentRuntimeId)(event.subagentRuntimeId) &&
+    (event.type === "item.started" || event.type === "item.completed") &&
+    event.payload.itemType === "context_compaction" &&
+    event.itemId &&
+    taskOwner
+      ? readMatchingCodexCompactionObservationField(event.payload, {
+          phase: event.type === "item.started" ? "started" : "completed",
+          nativeItemId: event.itemId,
+          sourceOwner: taskOwner,
+        })
+      : null;
+  const compactionMetadata = codexCompactionObservation
+    ? {
+        codexCompactionObservation,
+        ...(event.providerInstanceId
+          ? { nativeWorkProviderInstanceId: event.providerInstanceId }
+          : {}),
+      }
+    : {};
   // Workflow rows cannot borrow another account/query's presentation. The
   // compact retention id is content-free and host-minted from the full exact
   // tuple; it is never a task control target or a provider transcript id.
@@ -844,6 +878,7 @@ function runtimeEventToActivities(
                   ? `${event.payload.taskType} task started`
                   : "Task started",
           payload: {
+            ...(taskOwner ? { taskOwner } : {}),
             ...(event.subagentRuntimeId ? { nativeWorkRuntimeId: event.subagentRuntimeId } : {}),
             ...(event.payload.individualTaskControl
               ? { individualTaskControl: event.payload.individualTaskControl }
@@ -872,6 +907,7 @@ function runtimeEventToActivities(
           kind: "task.progress",
           summary: event.payload.subagent ? "Subagent update" : "Reasoning update",
           payload: {
+            ...(taskOwner ? { taskOwner } : {}),
             ...(event.subagentRuntimeId ? { nativeWorkRuntimeId: event.subagentRuntimeId } : {}),
             ...(event.payload.individualTaskControl
               ? { individualTaskControl: event.payload.individualTaskControl }
@@ -911,6 +947,7 @@ function runtimeEventToActivities(
                   ? "Subagent completed"
                   : "Task completed",
           payload: {
+            ...(taskOwner ? { taskOwner } : {}),
             ...(event.subagentRuntimeId ? { nativeWorkRuntimeId: event.subagentRuntimeId } : {}),
             taskId: event.payload.taskId,
             status: event.payload.status,
@@ -1046,6 +1083,7 @@ function runtimeEventToActivities(
           kind: "tool.updated",
           summary: event.payload.title ?? "Tool updated",
           payload: {
+            ...(taskOwner ? { taskOwner } : {}),
             ...(event.subagentRuntimeId ? { nativeWorkRuntimeId: event.subagentRuntimeId } : {}),
             ...(event.payload.individualTaskControl
               ? { individualTaskControl: event.payload.individualTaskControl }
@@ -1100,6 +1138,8 @@ function runtimeEventToActivities(
           kind: "tool.completed",
           summary: itemLifecycleActivitySummary(event.payload, "completed"),
           payload: {
+            ...compactionMetadata,
+            ...(taskOwner ? { taskOwner } : {}),
             ...(event.subagentRuntimeId ? { nativeWorkRuntimeId: event.subagentRuntimeId } : {}),
             itemType: event.payload.itemType,
             ...(event.payload.status ? { status: event.payload.status } : {}),
@@ -1144,6 +1184,8 @@ function runtimeEventToActivities(
           kind: "tool.started",
           summary: itemLifecycleActivitySummary(event.payload, "started"),
           payload: {
+            ...compactionMetadata,
+            ...(taskOwner ? { taskOwner } : {}),
             ...(event.subagentRuntimeId ? { nativeWorkRuntimeId: event.subagentRuntimeId } : {}),
             ...(event.payload.individualTaskControl
               ? { individualTaskControl: event.payload.individualTaskControl }

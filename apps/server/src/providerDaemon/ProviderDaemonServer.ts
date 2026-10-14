@@ -32,6 +32,7 @@ import {
   ProviderDaemonSubagentDetail,
   type ProviderDaemonProcessDiagnostic,
   ProviderDaemonRpcRequest,
+  ProviderDaemonSessionReconfigurationRefusal,
   type ProviderDaemonCapability,
   type ProviderDaemonLeaseResponse,
   type ProviderDaemonRecentRpcFailure,
@@ -68,6 +69,7 @@ import * as Option from "effect/Option";
 import {
   isProviderSubagentDetailReadFailureReason,
   makeProviderSubagentDetailReadError,
+  ProviderAdapterRequestError,
   ProviderValidationError,
   type ProviderServiceError,
   type ProviderSubagentDetailReadFailureReason,
@@ -857,12 +859,43 @@ function toRpcError(error: unknown): Extract<ProviderDaemonRpcEnvelope, { readon
   const diagnostics = buildProviderDaemonErrorDiagnostics(error);
   const tag = typeof record._tag === "string" ? record._tag : diagnostics.tag;
   const message = summarizeProviderDaemonError(error);
+  // This finite refusal is Cafe-authored native lifecycle admission evidence,
+  // not an arbitrary provider error tag. Preserve the outer error class and
+  // diagnostics, while carrying only the two codes the reactor can safely use
+  // to retain an unchanged, still-owned process. Never infer this from prose,
+  // copy native payload fields, invoke an accessor, or promote another adapter.
+  const refusalDescriptor =
+    error instanceof ProviderAdapterRequestError
+      ? Object.getOwnPropertyDescriptor(error, "remoteErrorTag")
+      : undefined;
+  const providerDescriptor =
+    error instanceof ProviderAdapterRequestError
+      ? Object.getOwnPropertyDescriptor(error, "provider")
+      : undefined;
+  const methodDescriptor =
+    error instanceof ProviderAdapterRequestError
+      ? Object.getOwnPropertyDescriptor(error, "method")
+      : undefined;
+  const refusal =
+    error instanceof ProviderAdapterRequestError &&
+    providerDescriptor !== undefined &&
+    "value" in providerDescriptor &&
+    providerDescriptor.value === "codex" &&
+    methodDescriptor !== undefined &&
+    "value" in methodDescriptor &&
+    methodDescriptor.value === "session/reconfigure" &&
+    refusalDescriptor !== undefined &&
+    "value" in refusalDescriptor &&
+    Schema.is(ProviderDaemonSessionReconfigurationRefusal)(refusalDescriptor.value)
+      ? refusalDescriptor.value
+      : undefined;
   return {
     ok: false,
     error: {
       tag,
       message,
       diagnostics,
+      ...(refusal !== undefined ? { sessionReconfigurationRefusal: refusal } : {}),
     },
   };
 }
@@ -1925,6 +1958,9 @@ export const runProviderDaemonServer = (
               durationMs: rpcDurationMs,
               tag: envelope.error.tag,
               message: envelope.error.message,
+              ...(envelope.error.sessionReconfigurationRefusal !== undefined
+                ? { sessionReconfigurationRefusal: envelope.error.sessionReconfigurationRefusal }
+                : {}),
               ...(envelope.error.diagnostics === undefined
                 ? {}
                 : { diagnostics: envelope.error.diagnostics }),

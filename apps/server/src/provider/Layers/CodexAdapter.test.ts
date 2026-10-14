@@ -16,6 +16,7 @@ import {
   RuntimeTaskId,
   type ProviderApprovalDecision,
   type ProviderEvent,
+  type ProviderTaskOwner,
   type ProviderSession,
   type ProviderThreadGoal,
   type ProviderThreadGoalSetInput,
@@ -31,6 +32,7 @@ import {
   TurnId,
 } from "@cafecode/contracts";
 import { createModelSelection } from "@cafecode/shared/model";
+import { makeCodexCompactionDiagnosticsTracker } from "@cafecode/shared/codexCompactionDiagnostics";
 import {
   makeProviderDiagnostic,
   readProviderDiagnosticSummary,
@@ -101,6 +103,7 @@ const decodeMessageId = Schema.decodeUnknownSync(MessageId);
 const decodeNativeNotification = Schema.decodeUnknownSync(EffectCodexSchema.ServerNotification);
 const isStartedItem = Schema.is(EffectCodexSchema.V2ItemStartedNotification);
 const isCompletedItem = Schema.is(EffectCodexSchema.V2ItemCompletedNotification);
+const isTerminalInteraction = Schema.is(EffectCodexSchema.V2TerminalInteractionNotification);
 
 // Test-local service tag so the rest of the file can keep using `yield* CodexAdapter`.
 class CodexAdapter extends Context.Service<CodexAdapter, CodexAdapterShape>()(
@@ -3238,6 +3241,364 @@ function startLifecycleRuntime(subagentRuntimeId?: string) {
 }
 
 lifecycleLayer("CodexAdapterLive lifecycle", (it) => {
+  it.effect(
+    "preserves admitted ordinary task owners across item edges without trusting native owner fields",
+    () =>
+      Effect.gen(function* () {
+        const { adapter, runtime } = yield* startLifecycleRuntime();
+        const owners: readonly (ProviderTaskOwner | undefined)[] = [
+          { type: "child", id: "source-child" },
+          { type: "root" },
+          undefined,
+        ];
+        const methods = [
+          "item/started",
+          "item/commandExecution/terminalInteraction",
+          "item/completed",
+        ] as const;
+        const barrierId = asEventId("owned-item-fixture-barrier");
+        const barrierObserved = yield* Deferred.make<void>();
+        const eventsFiber = yield* adapter.streamEvents.pipe(
+          Stream.tap((event) =>
+            event.eventId === barrierId
+              ? Deferred.succeed(barrierObserved, undefined)
+              : Effect.void,
+          ),
+          Stream.takeUntil((event) => event.eventId === barrierId),
+          Stream.runCollect,
+          Effect.forkChild,
+        );
+        const originals: string[] = [];
+        const inputs: ProviderEvent[] = [];
+        for (const [index, taskOwner] of owners.entries())
+          for (const [edge, method] of methods.entries()) {
+            const itemId = asItemId(`owned-item-${index}`);
+            const event: ProviderEvent = {
+              id: asEventId(`owned-item-${index}-${edge}`),
+              kind: "notification",
+              provider: ProviderDriverKind.make("codex"),
+              createdAt: "2026-10-14T00:00:00.000Z",
+              threadId: asThreadId("thread-1"),
+              turnId: asTurnId("parent-turn"),
+              itemId,
+              method,
+              ...(taskOwner ? { taskOwner } : {}),
+              payload: {
+                threadId: taskOwner?.type === "child" ? taskOwner.id : "provider-thread-1",
+                turnId: "native-tool-turn",
+                ...(method === "item/started"
+                  ? { startedAtMs: 1 }
+                  : method === "item/completed"
+                    ? { completedAtMs: 2 }
+                    : {
+                        itemId,
+                        processId: `synthetic-process-${index}`,
+                        stdin: "Synthetic terminal input",
+                      }),
+                taskOwner: { type: "child", id: "counterfeit-native-owner" },
+                item: {
+                  id: itemId,
+                  type: "commandExecution",
+                  command: "node --version",
+                  commandActions: [],
+                  cwd: "/workspace",
+                  status: edge === 2 ? "completed" : "inProgress",
+                  taskOwner: { type: "root" },
+                  receiverThreadIds: ["receiver-child"],
+                },
+              },
+            };
+            // Native lifecycle timestamps and terminal input coordinates are
+            // required by the pinned codec. Refuse a malformed fixture before
+            // waiting for a mapped event that the adapter correctly omits.
+            assert.equal(
+              method === "item/started"
+                ? isStartedItem(event.payload)
+                : method === "item/completed"
+                  ? isCompletedItem(event.payload)
+                  : isTerminalInteraction(event.payload),
+              true,
+            );
+            inputs.push(event);
+            originals.push(JSON.stringify(event));
+            yield* runtime.emit(event);
+          }
+        // Observe this exact real mapped FIFO sentinel, not Queue.offer or a
+        // mock call. Missing item edges now fail the same strict count below
+        // instead of waiting until the enclosing unchanged test deadline.
+        yield* runtime.emit({
+          id: barrierId,
+          kind: "notification",
+          provider: ProviderDriverKind.make("codex"),
+          threadId: asThreadId("thread-1"),
+          createdAt: "2026-10-14T00:00:00.000Z",
+          method: "warning",
+          message: "Owner item fixture barrier",
+        });
+        yield* Deferred.await(barrierObserved);
+        const collected = Array.from(yield* Fiber.join(eventsFiber));
+        assert.equal(collected.at(-1)?.type, "runtime.warning");
+        const events = collected.filter((event) => event.eventId !== barrierId);
+        assert.equal(events.length, owners.length * methods.length);
+        for (const [index, event] of events.entries()) {
+          assert.equal(event.type, ["item.started", "item.updated", "item.completed"][index % 3]);
+          if (
+            event.type !== "item.started" &&
+            event.type !== "item.updated" &&
+            event.type !== "item.completed"
+          )
+            return assert.fail("Expected exact ordinary item lifecycle");
+          assert.deepEqual(event.payload.taskOwner, owners[Math.floor(index / 3)]);
+          assert.equal(event.payload.itemType, "command_execution");
+          assert.equal(event.threadId, "thread-1");
+          assert.equal(event.turnId, "parent-turn");
+          assert.equal(event.itemId, `owned-item-${Math.floor(index / 3)}`);
+          assert.equal(event.payload.individualTaskControl, undefined);
+        }
+        assert.deepEqual(
+          inputs.map((event) => JSON.stringify(event)),
+          originals,
+        );
+        assert.equal(runtime.sendTurnImpl.mock.calls.length, 0);
+        assert.equal(runtime.steerTurnImpl.mock.calls.length, 0);
+      }),
+  );
+
+  it.effect(
+    "retains exact child ownership on compaction without adopting its native target data",
+    () =>
+      Effect.gen(function* () {
+        const { adapter, runtime } = yield* startLifecycleRuntime();
+        const barrierId = asEventId("child-compaction-fixture-barrier");
+        const tracker = makeCodexCompactionDiagnosticsTracker();
+        tracker.setRootOpeningRequests({ contextWindow: 800_000, autoCompactTokenLimit: 700_000 });
+        const source = {
+          sourceId: "source-child",
+          sourceOwner: { type: "child" as const, id: "source-child" },
+          observedAt: "2026-10-14T00:00:00.000Z",
+          nativeTurnId: "child-native-turn",
+        };
+        tracker.observeUsage({
+          ...source,
+          tokenUsage: {
+            last: {
+              inputTokens: 110_000,
+              cachedInputTokens: 90_000,
+              outputTokens: 10_000,
+              reasoningOutputTokens: 5_000,
+              totalTokens: 120_000,
+            },
+            total: { totalTokens: 900_000 },
+            modelContextWindow: 760_000,
+          },
+        });
+        const expectedDiagnostics = [];
+        const barrierObserved = yield* Deferred.make<void>();
+        const eventsFiber = yield* adapter.streamEvents.pipe(
+          Stream.tap((event) =>
+            event.eventId === barrierId
+              ? Deferred.succeed(barrierObserved, undefined)
+              : Effect.void,
+          ),
+          Stream.takeUntil((event) => event.eventId === barrierId),
+          Stream.runCollect,
+          Effect.forkChild,
+        );
+        for (const method of ["item/started", "item/completed"] as const) {
+          const codexCompactionObservation = tracker.observeCompaction({
+            ...source,
+            phase: method === "item/started" ? "started" : "completed",
+            nativeItemId: "child-compaction",
+          });
+          assert.ok(codexCompactionObservation);
+          expectedDiagnostics.push(codexCompactionObservation);
+          const nativePayload = {
+            threadId: "source-child",
+            turnId: "child-native-turn",
+            taskOwner: { type: "root" },
+            item: { id: "child-compaction", type: "contextCompaction" },
+          };
+          const event: ProviderEvent = {
+            id: asEventId(`child-compaction-${method}`),
+            kind: "notification",
+            provider: ProviderDriverKind.make("codex"),
+            createdAt: "2026-10-14T00:00:00.000Z",
+            threadId: asThreadId("thread-1"),
+            turnId: asTurnId("parent-turn"),
+            itemId: asItemId("child-compaction"),
+            method,
+            taskOwner: { type: "child", id: "source-child" },
+            codexCompactionObservation,
+            payload: {
+              ...nativePayload,
+              codexCompactionObservation: {
+                ...codexCompactionObservation,
+                sourceOwner: { type: "root" },
+              },
+              ...(method === "item/started" ? { startedAtMs: 1 } : { completedAtMs: 2 }),
+            },
+          };
+          const isNativeItem = method === "item/started" ? isStartedItem : isCompletedItem;
+          assert.equal(isNativeItem(event.payload), true);
+          // Preserve the demonstrated malformed-clock boundary as an exact
+          // negative. These two timestamp-less native envelopes must map zero
+          // item edges, even with a seemingly valid outer owner witness.
+          assert.equal(isNativeItem(nativePayload), false);
+          yield* runtime.emit({
+            ...event,
+            id: asEventId(`child-compaction-missing-clock-${method}`),
+            payload: nativePayload,
+          });
+          yield* runtime.emit(event);
+        }
+        yield* runtime.emit({
+          id: barrierId,
+          kind: "notification",
+          provider: ProviderDriverKind.make("codex"),
+          threadId: asThreadId("thread-1"),
+          createdAt: "2026-10-14T00:00:00.000Z",
+          method: "warning",
+          message: "Child compaction fixture barrier",
+        });
+        yield* Deferred.await(barrierObserved);
+        const collected = Array.from(yield* Fiber.join(eventsFiber));
+        assert.equal(collected.at(-1)?.type, "runtime.warning");
+        const events = collected.filter((event) => event.eventId !== barrierId);
+        assert.deepEqual(
+          events.map((event) => event.type),
+          ["item.started", "item.completed"],
+        );
+        for (const [index, event] of events.entries()) {
+          if (event.type !== "item.started" && event.type !== "item.completed")
+            return assert.fail("Expected compaction item lifecycle");
+          assert.equal(event.payload.itemType, "context_compaction");
+          assert.deepEqual(event.payload.taskOwner, { type: "child", id: "source-child" });
+          assert.equal(event.payload.individualTaskControl, undefined);
+          assert.deepEqual(event.payload.codexCompactionObservation, expectedDiagnostics[index]);
+        }
+        assert.equal(runtime.sendTurnImpl.mock.calls.length, 0);
+      }),
+  );
+
+  it.effect(
+    "omits mismatched, legacy and native-payload-only compaction diagnostics without dropping item edges",
+    () =>
+      Effect.gen(function* () {
+        const { adapter, runtime } = yield* startLifecycleRuntime();
+        const tracker = makeCodexCompactionDiagnosticsTracker();
+        const source = {
+          sourceId: "provider-thread-1",
+          sourceOwner: { type: "root" as const },
+          observedAt: "2026-10-15T00:00:00.000Z",
+          nativeTurnId: "diagnostic-native-turn",
+        };
+        const diagnostic = tracker.observeCompaction({
+          ...source,
+          phase: "started",
+          nativeItemId: "diagnostic-item",
+        });
+        assert.ok(diagnostic);
+        const variants: readonly unknown[] = [
+          undefined,
+          { ...diagnostic, phase: "completed" },
+          { ...diagnostic, nativeItemId: "receiver-item" },
+          { ...diagnostic, nativeTurnId: "routed-parent-turn" },
+          { ...diagnostic, sourceOwner: { type: "child", id: "receiver-child" } },
+          { ...diagnostic, version: 2 },
+          { ...diagnostic, observedAt: "2026-02-30T00:00:00.000Z" },
+          { ...diagnostic, resolvedThreshold: 700_000 },
+        ];
+        const barrierId = asEventId("compaction-diagnostic-negative-barrier");
+        const observed = yield* Deferred.make<void>();
+        const collected = yield* adapter.streamEvents.pipe(
+          Stream.tap((event) =>
+            event.eventId === barrierId ? Deferred.succeed(observed, undefined) : Effect.void,
+          ),
+          Stream.takeUntil((event) => event.eventId === barrierId),
+          Stream.runCollect,
+          Effect.forkChild,
+        );
+        let getters = 0;
+        for (let index = 0; index < variants.length + 4; index++) {
+          const event: ProviderEvent = {
+            id: asEventId(`compaction-diagnostic-negative-${index}`),
+            kind: "notification",
+            provider: ProviderDriverKind.make("codex"),
+            threadId: asThreadId("thread-1"),
+            turnId: asTurnId("routed-parent-turn"),
+            itemId: asItemId("diagnostic-item"),
+            createdAt: source.observedAt,
+            method: "item/started",
+            taskOwner: source.sourceOwner,
+            payload: {
+              threadId: source.sourceId,
+              turnId: source.nativeTurnId,
+              startedAtMs: 1,
+              item: { id: "diagnostic-item", type: "contextCompaction" },
+              codexCompactionObservation: diagnostic,
+            },
+          };
+          if (index < variants.length)
+            Object.defineProperty(event, "codexCompactionObservation", { value: variants[index] });
+          else if (index === variants.length)
+            Object.defineProperty(event, "codexCompactionObservation", {
+              get() {
+                getters++;
+                throw Error("Never execute diagnostic getters");
+              },
+            });
+          else if (index === variants.length + 1)
+            Object.setPrototypeOf(event, { codexCompactionObservation: diagnostic });
+          else if (index === variants.length + 2)
+            Object.defineProperty(event, "taskOwner", { value: undefined });
+          else {
+            Object.defineProperty(event, "codexCompactionObservation", { value: diagnostic });
+            Object.defineProperty(event, "payload", {
+              value: {
+                threadId: source.sourceId,
+                turnId: source.nativeTurnId,
+                startedAtMs: 1,
+                item: {
+                  id: "diagnostic-item",
+                  type: "commandExecution",
+                  command: "node --version",
+                  commandActions: [],
+                  cwd: "/workspace",
+                  status: "inProgress",
+                },
+              },
+            });
+          }
+          assert.equal(isStartedItem(event.payload), true);
+          yield* runtime.emit(event);
+        }
+        yield* runtime.emit({
+          id: barrierId,
+          kind: "notification",
+          provider: ProviderDriverKind.make("codex"),
+          threadId: asThreadId("thread-1"),
+          createdAt: source.observedAt,
+          method: "warning",
+          message: "Diagnostic negative barrier",
+        });
+        yield* Deferred.await(observed);
+        const events = Array.from(yield* Fiber.join(collected)).filter(
+          (event) => event.eventId !== barrierId,
+        );
+        assert.equal(events.length, variants.length + 4);
+        for (const event of events) {
+          assert.equal(event.type, "item.started");
+          if (event.type !== "item.started")
+            return assert.fail("Expected original native item edge");
+          assert.equal(event.payload.codexCompactionObservation, undefined);
+          assert.equal(event.payload.individualTaskControl, undefined);
+        }
+        assert.equal(getters, 0);
+        assert.equal(runtime.sendTurnImpl.mock.calls.length, 0);
+        assert.equal(runtime.steerTurnImpl.mock.calls.length, 0);
+      }),
+  );
+
   it.effect("admits post-ACK availability confirmation only from the native runtime marker", () =>
     Effect.gen(function* () {
       const { adapter, runtime } = yield* startLifecycleRuntime(

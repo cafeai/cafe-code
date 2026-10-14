@@ -13,6 +13,7 @@ import type { ThreadRouteTarget } from "../../threadRoutes";
 import { formatRelativeTimeLabel } from "../../timestampFormat";
 import { resolveThreadRowClassName } from "../Sidebar.logic";
 import { ThreadStatusLabel } from "../ThreadStatusLabel";
+import { SidebarNewChatButton } from "../sidebar/SidebarNewChatButton";
 import { SidebarMenuSub, SidebarMenuSubButton, SidebarMenuSubItem } from "../ui/sidebar";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 import { useDeskTabMetadata } from "./useDeskTabMetadata";
@@ -515,7 +516,15 @@ const DeskSidebarGroupHeading = memo(function DeskSidebarGroupHeading({
 /** The Desk lists open views, not a second chat catalog. All chat mutations
  * continue through existing APIs; closing a view only updates local layout.
  */
-export function DeskSidebar({ onNavigate }: { onNavigate: (target: ThreadRouteTarget) => void }) {
+export function DeskSidebar({
+  onNavigate,
+  onNewChat,
+  newChatDisabled = false,
+}: {
+  onNavigate: (target: ThreadRouteTarget) => void;
+  onNewChat: () => void;
+  newChatDisabled?: boolean;
+}) {
   const uiLocale = useUiLocale();
 
   const desk = useDeskStore((state) => state.desk);
@@ -556,10 +565,17 @@ export function DeskSidebar({ onNavigate }: { onNavigate: (target: ThreadRouteTa
       aria-label={uiText("Desk open chats", undefined, undefined, uiLocale)}
       className="px-2 py-2"
     >
-      <div className="mb-1 flex items-center justify-between pl-2 pr-1.5">
+      <div className="mb-1 flex items-center gap-1.5 pl-2 pr-1.5">
         <span className="label-overline">
           {uiText("Open chats", undefined, undefined, uiLocale)}
         </span>
+        {/* Reuse Projects' pending-editor entrypoint. This heading owns no
+            environment, draft, provider or first-send lifecycle of its own. */}
+        <SidebarNewChatButton
+          label={uiText("New chat in active tab group", undefined, undefined, uiLocale)}
+          disabled={newChatDisabled}
+          onClick={onNewChat}
+        />
       </div>
       {deskGroupIds(desk.layout).map((groupId) => {
         const group = desk.groups[groupId];

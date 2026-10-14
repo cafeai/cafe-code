@@ -29,6 +29,7 @@ import {
   ProviderItemId,
   SubagentRuntimeId,
   type ProviderSession,
+  type ProviderEvent,
   type ProviderUserInputAnswers,
   ThreadId,
   TurnId,
@@ -129,6 +130,7 @@ import {
   resolveCodexSessionRuntimeSteerClientCorrelationId,
   resolveCodexThreadSettingsSessionModel,
   resolveCodexChildConversationNotification,
+  readAdmittedCodexTaskOwner,
   sanitizeCodexProtocolDiagnosticPayload,
   shouldForwardCodexRootGoalNotification,
   selectCodexActiveSnapshotTurn,
@@ -213,6 +215,13 @@ for (const request of [
     expected: 600_000,
   },
   { label: "failed-opening", context: 800_000, failed: true, expected: 800_000 },
+  {
+    label: "diagnostic-source",
+    context: 800_000,
+    explicit: 700_000,
+    expected: 700_000,
+    diagnostic: true,
+  },
 ] as const)
   effectIt.effect(
     `records ${request.label} opening request before retaining explicit goal controls`,
@@ -352,6 +361,9 @@ for (const request of [
           environment: {},
           cwd: process.cwd(),
           runtimeMode: "full-access",
+          ...("diagnostic" in request
+            ? { providerInstanceId: ProviderInstanceId.make("codex_diagnostic_test") }
+            : {}),
           ...("context" in request ? { codexContextWindowOverride: request.context } : {}),
           ...("explicit" in request ? { autoCompactTokenLimit: request.explicit } : {}),
           ...("resume" in request ? { resumeCursor: { threadId: nativeThreadId } } : {}),
@@ -439,6 +451,214 @@ for (const request of [
             ? { model_auto_compact_token_limit: request.expected }
             : {}),
         });
+        if ("diagnostic" in request) {
+          // Exercise the real runtime's typed JSONL notification admission,
+          // not merely the pure tracker. Install the exact output observer
+          // before feeding native frames; no sleeps, retry or provider calls.
+          const barrierObserved = yield* Deferred.make<void>();
+          const isBarrier = (event: ProviderEvent) =>
+            event.method === "warning" &&
+            event.payload !== null &&
+            typeof event.payload === "object" &&
+            Reflect.get(event.payload, "message") === "Diagnostic fixture barrier";
+          const notifications = yield* runtime.events.pipe(
+            Stream.tap((event) =>
+              isBarrier(event) ? Deferred.succeed(barrierObserved, undefined) : Effect.void,
+            ),
+            Stream.takeUntil(isBarrier),
+            Stream.runCollect,
+            Effect.forkChild,
+          );
+          const tokenUsage = (usedTokens: number) => ({
+            last: {
+              inputTokens: usedTokens - 20,
+              cachedInputTokens: 5,
+              outputTokens: 20,
+              reasoningOutputTokens: 10,
+              totalTokens: usedTokens,
+            },
+            total: {
+              inputTokens: 900_000,
+              cachedInputTokens: 700_000,
+              outputTokens: 80_000,
+              reasoningOutputTokens: 40_000,
+              totalTokens: 980_000,
+            },
+            modelContextWindow: 760_000,
+          });
+          const nativeUsage = (threadId: string, turnId: string, usedTokens: number) => ({
+            method: "thread/tokenUsage/updated",
+            params: { threadId, turnId, tokenUsage: tokenUsage(usedTokens) },
+          });
+          const nativeCompaction = (
+            threadId: string,
+            turnId: string,
+            id: string,
+            phase: "started" | "completed",
+          ) => ({
+            method: `item/${phase}`,
+            params: {
+              threadId,
+              turnId,
+              item: { type: "contextCompaction", id },
+              ...(phase === "started"
+                ? { startedAtMs: 1_800_000_000_000 }
+                : { completedAtMs: 1_800_000_000_001 }),
+            },
+          });
+          const frames = [
+            {
+              method: "turn/started",
+              params: {
+                threadId: nativeThreadId,
+                turn: { id: "diagnostic-parent-turn", status: "inProgress", items: [] },
+              },
+            },
+            nativeUsage(nativeThreadId, "diagnostic-parent-turn", 420_000),
+            nativeCompaction(
+              nativeThreadId,
+              "diagnostic-parent-turn",
+              "root-diagnostic-compaction",
+              "started",
+            ),
+            nativeUsage(nativeThreadId, "diagnostic-parent-turn", 15_000),
+            nativeCompaction(
+              nativeThreadId,
+              "diagnostic-parent-turn",
+              "root-diagnostic-compaction",
+              "completed",
+            ),
+            {
+              method: "item/started",
+              params: {
+                threadId: nativeThreadId,
+                turnId: "diagnostic-parent-turn",
+                startedAtMs: 1,
+                item: {
+                  type: "subAgentActivity",
+                  id: "native-child-registration",
+                  kind: "started",
+                  agentThreadId: "diagnostic-child",
+                  agentPath: "/root/diagnostic",
+                },
+              },
+            },
+            {
+              method: "turn/started",
+              params: {
+                threadId: "diagnostic-child",
+                turn: { id: "diagnostic-child-turn", status: "inProgress", items: [] },
+              },
+            },
+            nativeUsage("diagnostic-child", "diagnostic-child-turn", 120_000),
+            // A stale explicit generation is refused by the original repeated
+            // admission guard and cannot replace the child's current sample.
+            nativeUsage("diagnostic-child", "diagnostic-retired-turn", 60_000),
+            nativeCompaction(
+              "diagnostic-child",
+              "diagnostic-retired-turn",
+              "stale-compaction",
+              "started",
+            ),
+            nativeCompaction(
+              "diagnostic-child",
+              "diagnostic-child-turn",
+              "child-diagnostic-compaction",
+              "started",
+            ),
+            nativeUsage("diagnostic-child", "diagnostic-child-turn", 25_000),
+            nativeCompaction(
+              "diagnostic-child",
+              "diagnostic-child-turn",
+              "child-diagnostic-compaction",
+              "completed",
+            ),
+            // Unknown source compatibility may still forward an item; it may
+            // not fabricate a root/child owner or diagnostic source evidence.
+            nativeCompaction(
+              "unknown-diagnostic-source",
+              "unknown-turn",
+              "unknown-compaction",
+              "started",
+            ),
+            {
+              method: "warning",
+              params: { threadId: nativeThreadId, message: "Diagnostic fixture barrier" },
+            },
+          ];
+          for (const frame of frames) {
+            const admittedShape = decodeNativeNotificationForDiagnostics(frame);
+            yield* Queue.offer(output, encoder.encode(`${JSON.stringify(admittedShape)}\n`));
+          }
+          yield* Deferred.await(barrierObserved);
+          const received = Array.from(yield* Fiber.join(notifications));
+          const edges = received.filter((event) => event.codexCompactionObservation !== undefined);
+          assert.deepEqual(
+            edges.map((event) => [event.method, event.itemId]),
+            [
+              ["item/started", "root-diagnostic-compaction"],
+              ["item/completed", "root-diagnostic-compaction"],
+              ["item/started", "child-diagnostic-compaction"],
+              ["item/completed", "child-diagnostic-compaction"],
+            ],
+          );
+          for (const [index, edge] of edges.entries()) {
+            const diagnostic = edge.codexCompactionObservation!;
+            assert.deepEqual(
+              diagnostic.sourceOwner,
+              index < 2 ? { type: "root" } : { type: "child", id: "diagnostic-child" },
+            );
+            assert.equal(
+              diagnostic.nativeTurnId,
+              index < 2 ? "diagnostic-parent-turn" : "diagnostic-child-turn",
+            );
+            assert.equal(
+              diagnostic.lastReportedUsageBeforeStart?.usedTokens,
+              index < 2 ? 420_000 : 120_000,
+            );
+            assert.equal(diagnostic.lastReportedUsageBeforeStart?.reasoningOutputTokens, 10);
+            assert.equal(diagnostic.lastReportedUsageBeforeStart?.totalProcessedTokens, 980_000);
+            assert.equal(
+              diagnostic.lastReportedUsageBeforeStart?.reportedUsableContextWindow,
+              760_000,
+            );
+            assert.deepEqual(diagnostic.rootOpeningRequests, {
+              contextWindow: 800_000,
+              autoCompactTokenLimit: 700_000,
+            });
+            assert.equal(edge.providerInstanceId, "codex_diagnostic_test");
+            assert.equal(edge.turnId, "diagnostic-parent-turn");
+            assert.equal(diagnostic.resolvedThreshold, null);
+          }
+          assert.equal(
+            received.some((event) => event.itemId === "stale-compaction"),
+            false,
+          );
+          assert.equal(
+            received.find((event) => event.itemId === "unknown-compaction")
+              ?.codexCompactionObservation,
+            undefined,
+          );
+          assert.equal(
+            received.filter((event) => event.method === "thread/tokenUsage/updated").length,
+            2,
+          );
+          assert.equal(
+            received
+              .filter((event) => event.method === "thread/tokenUsage/updated")
+              .every(
+                (event) =>
+                  event.payload !== null &&
+                  typeof event.payload === "object" &&
+                  Reflect.get(event.payload, "threadId") === nativeThreadId,
+              ),
+            true,
+          );
+          assert.equal(
+            calls.some((call) => call.method === "turn/start" || call.method === "turn/steer"),
+            false,
+          );
+        }
         yield* runtime.setGoal({
           objective: "Owner edited goal",
           status: "active",
@@ -824,6 +1044,7 @@ describe("Codex bounded child route admission", () => {
         ]) {
           const admitted = yield* fence.acceptsNotification({ ...input, notification });
           assert.equal(admitted, false);
+          assert.equal(readAdmittedCodexTaskOwner({ ...input, notification, admitted }), undefined);
           // The runtime uses this boundary before callbacks, liveness, route
           // registration, private projection and ordinary publication alike.
           if (admitted) {
@@ -987,6 +1208,15 @@ describe("Codex bounded child route admission", () => {
                   rootProviderThreadId: "root",
                 })) && acceptsCodexChildNotification(currentChildren, notification, currentRoutes);
               assert.equal(admitted, false);
+              assert.equal(
+                readAdmittedCodexTaskOwner({
+                  notification,
+                  routes: currentRoutes,
+                  rootProviderThreadId: "root",
+                  admitted,
+                }),
+                undefined,
+              );
               // This is the runtime's complete mutation boundary, not a simulated
               // conditional reducer: rejection must write neither Ref nor clone.
               const committed = yield* commitCodexChildConversationNotification({
@@ -4921,6 +5151,127 @@ describe("codex elapsed watchdog scheduling", () => {
 });
 
 describe("Codex child conversation routing", () => {
+  it.each(["contextCompaction", "commandExecution", "mcpToolCall"])(
+    "attributes ordinary %s only to its admitted native source, never its receivers",
+    (itemType) => {
+      const parent = TurnId.make("task-owner-parent");
+      const routes = new Map([
+        ["source-child", parent],
+        ["receiver-child", parent],
+      ]);
+      const originalRoutes = new Map(routes);
+      const notification = {
+        method: "item/started",
+        params: {
+          threadId: "source-child",
+          turnId: "source-native-turn",
+          taskOwner: { type: "child", id: "counterfeit-native-owner" },
+          item: {
+            type: itemType,
+            id: "ordinary-source-item",
+            agentThreadId: "receiver-child",
+            senderThreadId: "receiver-child",
+            receiverThreadIds: ["receiver-child"],
+          },
+        },
+      };
+      const input = { notification, routes, rootProviderThreadId: "root", admitted: true };
+      assert.deepEqual(resolveCodexChildConversationNotification(routes, notification, "root"), {
+        parentTurnId: parent,
+        suppressLifecycle: false,
+      });
+      assert.deepEqual(readAdmittedCodexTaskOwner(input), { type: "child", id: "source-child" });
+      assert.deepEqual(
+        readAdmittedCodexTaskOwner({
+          ...input,
+          notification: { ...notification, params: { ...notification.params, threadId: "root" } },
+        }),
+        { type: "root" },
+      );
+      assert.equal(
+        readAdmittedCodexTaskOwner({
+          ...input,
+          notification: {
+            ...notification,
+            params: { ...notification.params, threadId: "unknown" },
+          },
+        }),
+        undefined,
+      );
+      const { threadId: _source, ...withoutSource } = notification.params;
+      assert.equal(
+        readAdmittedCodexTaskOwner({
+          ...input,
+          notification: { ...notification, params: withoutSource },
+        }),
+        undefined,
+      );
+      assert.equal(readAdmittedCodexTaskOwner({ ...input, admitted: false }), undefined);
+      assert.deepEqual(routes, originalRoutes);
+    },
+  );
+
+  it("omits unsupported child identities without normalizing or truncating route evidence", () => {
+    const parent = TurnId.make("task-owner-bound-parent");
+    for (const source of [
+      "x".repeat(513),
+      "child\u0000suffix",
+      "child\u202esuffix",
+      " child",
+      "child ",
+      "child  suffix",
+      "child\u00a0suffix",
+      "child\u2003suffix",
+      "\u00a0child",
+    ]) {
+      const routes = new Map([[source, parent]]);
+      const originalRoutes = new Map(routes);
+      const notification = { method: "item/completed", params: { threadId: source } };
+      assert.equal(
+        readAdmittedCodexTaskOwner({
+          notification,
+          routes,
+          rootProviderThreadId: "root",
+          admitted: true,
+        }),
+        undefined,
+      );
+      assert.deepEqual(resolveCodexChildConversationNotification(routes, notification, "root"), {
+        parentTurnId: parent,
+        suppressLifecycle: false,
+      });
+      assert.deepEqual(routes, originalRoutes);
+    }
+    for (const source of ["x".repeat(512), "child suffix"])
+      assert.deepEqual(
+        readAdmittedCodexTaskOwner({
+          notification: { method: "item/completed", params: { threadId: source } },
+          routes: new Map([[source, parent]]),
+          rootProviderThreadId: "root",
+          admitted: true,
+        }),
+        { type: "child", id: source },
+      );
+    assert.deepEqual(
+      readAdmittedCodexTaskOwner({
+        notification: { method: "item/completed", params: { threadId: " exact root " } },
+        routes: new Map(),
+        rootProviderThreadId: " exact root ",
+        admitted: true,
+      }),
+      { type: "root" },
+    );
+    assert.equal(
+      readAdmittedCodexTaskOwner({
+        notification: { method: "item/completed", params: { threadId: "root" } },
+        routes: new Map(),
+        rootProviderThreadId: undefined,
+        admitted: true,
+      }),
+      undefined,
+    );
+  });
+
   it("keeps child errors out of primary runtime error state", () => {
     assert.equal(codexAggregateNotificationMethod("error", true), "codex.subagent/error");
     assert.equal(codexAggregateNotificationMethod("error", false), "error");
@@ -5511,6 +5862,15 @@ describe("Codex child conversation routing", () => {
       };
       const admitted = acceptsCodexChildNotification(current, notification, routes);
       assert.equal(admitted, false);
+      assert.equal(
+        readAdmittedCodexTaskOwner({
+          notification,
+          routes,
+          rootProviderThreadId: "root",
+          admitted,
+        }),
+        undefined,
+      );
       // The live handler uses this exact shared predicate before remembering
       // descendants and returns before *any* canonical publication, including
       // ordinary child errors that have no private projection method.

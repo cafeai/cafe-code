@@ -1229,6 +1229,18 @@ code {
   min-width: min-content;
 }
 
+/* KaTeX anchors display tags absolutely at the right edge of a full-width
+   equation. Chat deliberately uses an intrinsic-width equation so wide math
+   stays in this display's own scroll viewport; absolute tags would therefore
+   paint over the equation's final terms. Keep only the direct display tag in
+   ordinary inline flow, with its native strut/baseline intact, so both equation
+   and label contribute to the same scrollable width. Untagged math, MathML and
+   internal equation/array positioning retain KaTeX's own layout. */
+.chat-markdown .katex-display > .katex > .katex-html > .tag {
+  position: static;
+  margin-inline-start: 1em;
+}
+
 .markdown-file-link-tooltip-scroll {
   scrollbar-width: thin;
   scrollbar-color: color-mix(in srgb, var(--border) 78%, transparent) transparent;

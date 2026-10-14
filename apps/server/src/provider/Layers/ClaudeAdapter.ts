@@ -97,6 +97,7 @@ import {
   type ThreadTokenUsageSnapshot,
   type ProviderSteerTurnInput,
   type ProviderTaskControlInput,
+  type ProviderTaskOwner,
   type ProviderUserInputAnswers,
   type ProviderElicitation,
   type RuntimeSessionState,
@@ -533,6 +534,8 @@ interface ToolInFlight {
   readonly controlId: string;
   readonly controlGeneration: string;
   readonly itemId: string;
+  /** Immutable display witness from this tool's admitted source, never a control receipt. */
+  readonly taskOwner?: ProviderTaskOwner;
   /** Response segments may advance while this exact native call is detached. */
   readonly turnId?: TurnId;
   readonly detached?: boolean;
@@ -584,6 +587,8 @@ interface ClaudeTaskVisibilityState {
 }
 
 interface ClaudeTaskBinding {
+  /** First exact spawning-tool display witness; ordinary task updates never retarget it. */
+  readonly taskOwner?: ProviderTaskOwner;
   /** Public SDK run id, compared as opaque strings, never as a timestamp. */
   readonly nativeRunId?: string | undefined;
   /** A newer level revoked the old receipt; only an explicit start may renew it. */
@@ -1040,6 +1045,7 @@ function rememberBoundedClaudeKey(keys: Set<string>, key: string, limit: number)
 function upsertClaudeTaskBinding(
   context: ClaudeSessionContext,
   input: {
+    readonly taskOwner?: ProviderTaskOwner;
     readonly retiredToolUseKeys?: ReadonlyArray<string>;
     readonly incarnationRequiresToolUseId?: boolean;
     readonly nativeRunId?: string | undefined;
@@ -1187,7 +1193,25 @@ function upsertClaudeTaskBinding(
     taskType === "local_agent" ||
     taskType === "agent" ||
     taskType === "subagent";
+  // Missing first-observation evidence is deliberately sticky. A later tool
+  // result, richer task level, or alias must not recolor an existing ordinary
+  // task. A run level can revoke the receipt before its explicit replacement
+  // start clears the maps: discard the old actor immediately in that interval,
+  // rather than letting the new run borrow its previous call's display witness.
+  const taskOwnerRevoked =
+    input.awaitingRunStart === true ||
+    previous?.awaitingRunStart === true ||
+    (previous !== undefined &&
+      input.nativeRunId !== undefined &&
+      input.nativeRunId !== previous.nativeRunId);
+  const taskOwner =
+    !isSubagent && !taskOwnerRevoked && (!previous || previous.taskId === input.taskId)
+      ? previous !== undefined
+        ? previous.taskOwner
+        : input.taskOwner
+      : undefined;
   const binding: ClaudeTaskBinding = {
+    ...(taskOwner ? { taskOwner } : {}),
     ...(input.awaitingRunStart !== undefined || previous?.awaitingRunStart !== undefined
       ? { awaitingRunStart: input.awaitingRunStart ?? previous?.awaitingRunStart }
       : {}),
@@ -1285,6 +1309,7 @@ function restoreClaudeRetainedTaskBinding(
   const toolUseKey = retained.toolUseKey ?? canonicalClaudeToolUseBindingKey(retained.toolUseId);
   return upsertClaudeTaskBinding(context, {
     taskId: retained.taskId,
+    ...(retained.taskOwner ? { taskOwner: retained.taskOwner } : {}),
     ...(retained.nativeRunId ? { nativeRunId: retained.nativeRunId } : {}),
     ...(retained.awaitingRunStart !== undefined
       ? { awaitingRunStart: retained.awaitingRunStart }
@@ -1355,8 +1380,20 @@ function bindClaudeTaskToToolUse(
   if (retained && !context.taskBindingsByTaskId.has(String(taskId)))
     restoreClaudeRetainedTaskBinding(context, retained);
   const toolUseKey = canonicalClaudeToolUseBindingKey(input.toolUseId);
+  // Only the already-tracked exact spawning call may supply an ordinary
+  // task's actor. Duplicate native tool ids are ambiguous, and an unknown
+  // first binding must never borrow a later call's evidence.
+  const canCapture =
+    !context.taskBindingsByTaskId.has(String(taskId)) &&
+    (!toolUseKey || !context.taskBindingsByToolUseId.has(toolUseKey));
+  const spawningTools =
+    canCapture && input.toolUseId
+      ? Array.from(context.inFlightTools.values()).filter((tool) => tool.itemId === input.toolUseId)
+      : [];
+  const taskOwner = spawningTools.length === 1 ? spawningTools[0]?.taskOwner : undefined;
   return upsertClaudeTaskBinding(context, {
     taskId,
+    ...(taskOwner ? { taskOwner } : {}),
     ...(input.nativeRunId ? { nativeRunId: input.nativeRunId } : {}),
     ...(input.awaitingRunStart !== undefined ? { awaitingRunStart: input.awaitingRunStart } : {}),
     ...(input.parentTaskId ? { parentTaskId: input.parentTaskId } : {}),
@@ -4446,8 +4483,26 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     // Operational raw metadata is not SDK roundtrip context. Strip opaque
     // thinking diagnostics here as well as in the native logger, including
     // older fallback paths that carry an assistant snapshot directly.
+    const taskOwner = binding?.taskOwner && !binding.isSubagent ? binding.taskOwner : undefined;
+    // Reconstruct within each discriminator's own branch so its required
+    // payload fields remain correlated with that exact event type. This adds
+    // only the existing finite display witness, never a native authority cast.
+    let sourceEvent: ProviderRuntimeEvent = event;
+    if (taskOwner) {
+      switch (event.type) {
+        case "task.started":
+          sourceEvent = { ...event, payload: { ...event.payload, taskOwner } };
+          break;
+        case "task.progress":
+          sourceEvent = { ...event, payload: { ...event.payload, taskOwner } };
+          break;
+        case "task.completed":
+          sourceEvent = { ...event, payload: { ...event.payload, taskOwner } };
+          break;
+      }
+    }
     const stamped = {
-      ...event,
+      ...sourceEvent,
       ...(event.raw?.source === "claude.sdk.message"
         ? { raw: { ...event.raw, payload: sanitizeClaudeThinkingDiagnostics(event.raw.payload) } }
         : {}),
@@ -4535,6 +4590,9 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
             ...stamped,
             payload: {
               ...event.payload,
+              ...(binding?.taskOwner && !binding.isSubagent
+                ? { taskOwner: binding.taskOwner }
+                : {}),
               ...(workflow ? { workflow } : {}),
               ...(taskControl
                 ? {
@@ -5589,6 +5647,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         itemId: asRuntimeItemId(tool.itemId),
         payload: {
           itemType: tool.itemType,
+          ...(tool.taskOwner ? { taskOwner: tool.taskOwner } : {}),
           status: status === "completed" ? "completed" : "failed",
           title: tool.title,
           ...(tool.detail ? { detail: tool.detail } : {}),
@@ -5774,11 +5833,77 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     yield* updateResumeCursor(context);
   });
 
+  /** SDK 0.3.295 streams carry parent_tool_use_id; own agent_id identifies the
+   * task rather than an Agent transcript. Capture presentation from the exact
+   * live query and admitted task/tool incarnation, not from a receiver, title
+   * or eventual replacement binding. This witness grants no native authority. */
+  const captureClaudeToolTaskOwner = (
+    context: ClaudeSessionContext,
+    message: SDKMessage,
+  ): ProviderTaskOwner | undefined => {
+    if (
+      sessions.get(context.session.threadId) !== context ||
+      !hasCurrentClaudeTaskSession(context, message)
+    )
+      return undefined;
+    if (hasExactPrimaryClaudeParent(message)) return Object.freeze({ type: "root" });
+
+    const record = message as unknown as Record<string, unknown>;
+    const agent = ownClaudeTaskIdentity(record, "agent_id");
+    const run = ownClaudeTaskIdentity(record, "run_id");
+    const parent = Object.getOwnPropertyDescriptor(record, "parent_tool_use_id");
+    if (
+      !agent.valid ||
+      !run.valid ||
+      (parent ? !("value" in parent) : "parent_tool_use_id" in record)
+    )
+      return undefined;
+    const parentValue = parent?.value;
+    const parentId = exactClaudeProviderIdentity(parentValue);
+    if (
+      (parentValue !== null && parentValue !== undefined && parentId !== parentValue) ||
+      (!parentId && agent.value === undefined)
+    )
+      return undefined;
+    const parentKey = parentId && canonicalClaudeToolUseBindingKey(parentId);
+    const agentTaskId = agent.value && canonicalClaudeTaskId(agent.value);
+    const binding = agentTaskId
+      ? (context.taskBindingsByTaskId.get(String(agentTaskId)) ??
+        context.backgroundTaskBindings.get(String(agentTaskId)))
+      : parentKey
+        ? context.taskBindingsByToolUseId.get(parentKey)
+        : undefined;
+    if (
+      !binding?.isSubagent ||
+      binding.provisionalTaskIdentity ||
+      binding.awaitingRunStart ||
+      !binding.toolUseId ||
+      !binding.toolUseKey ||
+      (parentId !== undefined && binding.toolUseId !== parentId) ||
+      (parentKey !== undefined && binding.toolUseKey !== parentKey) ||
+      (run.value !== undefined && binding.nativeRunId !== run.value) ||
+      context.taskBindingsByToolUseId.get(binding.toolUseKey) !== binding ||
+      (context.taskBindingsByTaskId.get(String(binding.taskId)) ??
+        context.backgroundTaskBindings.get(String(binding.taskId))) !== binding ||
+      binding.retiredToolUseKeys?.includes(binding.toolUseKey) ||
+      context.terminalTaskIds.has(String(binding.taskId)) ||
+      isClaudeNestedStreamHidden(context, binding.toolUseId)
+    )
+      return undefined;
+    // The roster seeds its local artwork with the canonical task identity.
+    // Never trim it, substitute the spawning tool/transcript id, or admit a
+    // control/bidi-bearing value into the separate finite display contract.
+    const id = String(binding.taskId);
+    if (id.length > 512 || exactClaudeProviderIdentity(id) !== id) return undefined;
+    return Object.freeze({ type: "child", id });
+  };
+
   const handleStreamEvent = Effect.fn("handleStreamEvent")(function* (
     context: ClaudeSessionContext,
     message: SDKMessage,
     publicSummaryAdmitted: boolean,
     primaryPresentationAdmitted: boolean,
+    taskOwner: ProviderTaskOwner | undefined,
   ) {
     if (message.type !== "stream_event") {
       return;
@@ -5968,6 +6093,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
           itemId: asRuntimeItemId(nextTool.itemId),
           payload: {
             itemType: nextTool.itemType,
+            ...(nextTool.taskOwner ? { taskOwner: nextTool.taskOwner } : {}),
             status: "inProgress",
             title: nextTool.title,
             ...(nextTool.detail ? { detail: nextTool.detail } : {}),
@@ -6054,12 +6180,12 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       const detail = summarizeToolRequest(toolName, toolInput);
       const inputFingerprint =
         Object.keys(toolInput).length > 0 ? toolInputFingerprint(toolInput) : undefined;
-
       const stamp = yield* makeEventStamp();
       const tool: ToolInFlight = {
         controlId: randomUUID(),
         controlGeneration: randomUUID(),
         itemId,
+        ...(taskOwner ? { taskOwner } : {}),
         ...(context.turnState ? { turnId: context.turnState.turnId } : {}),
         itemType,
         toolName,
@@ -6088,6 +6214,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         itemId: asRuntimeItemId(tool.itemId),
         payload: {
           itemType: tool.itemType,
+          ...(tool.taskOwner ? { taskOwner: tool.taskOwner } : {}),
           status: "inProgress",
           title: tool.title,
           ...(tool.detail ? { detail: tool.detail } : {}),
@@ -6205,6 +6332,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
           itemId: asRuntimeItemId(tool.itemId),
           payload: {
             itemType: tool.itemType,
+            ...(tool.taskOwner ? { taskOwner: tool.taskOwner } : {}),
             status: "inProgress",
             title: tool.title,
             detail: "Continuing in the background",
@@ -6264,6 +6392,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         itemId: asRuntimeItemId(tool.itemId),
         payload: {
           itemType: tool.itemType,
+          ...(tool.taskOwner ? { taskOwner: tool.taskOwner } : {}),
           status: toolResult.isError ? "failed" : "inProgress",
           title: tool.title,
           ...(tool.detail ? { detail: tool.detail } : {}),
@@ -6316,6 +6445,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         itemId: asRuntimeItemId(tool.itemId),
         payload: {
           itemType: tool.itemType,
+          ...(tool.taskOwner ? { taskOwner: tool.taskOwner } : {}),
           status: itemStatus,
           title: tool.title,
           ...(tool.detail ? { detail: tool.detail } : {}),
@@ -7777,6 +7907,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
             itemId: asRuntimeItemId(spawningTool.itemId),
             payload: {
               itemType: spawningTool.itemType,
+              ...(spawningTool.taskOwner ? { taskOwner: spawningTool.taskOwner } : {}),
               status: "inProgress",
               title: spawningTool.title,
             },
@@ -8002,6 +8133,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
               itemId: asRuntimeItemId(tool.itemId),
               payload: {
                 itemType: tool.itemType,
+                ...(tool.taskOwner ? { taskOwner: tool.taskOwner } : {}),
                 status: terminalStatus === "completed" ? "completed" : "failed",
                 title: tool.title,
                 ...(patchedSummary ? { detail: patchedSummary } : {}),
@@ -8168,6 +8300,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
             itemId: asRuntimeItemId(tool.itemId),
             payload: {
               itemType: tool.itemType,
+              ...(tool.taskOwner ? { taskOwner: tool.taskOwner } : {}),
               status: message.status === "completed" ? "completed" : "failed",
               title: tool.title,
               ...(summary ? { detail: summary } : {}),
@@ -8636,6 +8769,13 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     const privateMessage =
       context.visualizationPrivacy?.redact(stripped.message) ?? stripped.message;
     const message = context.archivedToolPrivacy?.redact(privateMessage) ?? privateMessage;
+    // Capture before the legacy ordinary-message path may adopt a session id.
+    // A foreign or pre-init tool cannot turn that later adoption into evidence
+    // that its source was already the current query/task at receipt time.
+    const toolTaskOwner =
+      message.type === "stream_event" && message.event.type === "content_block_start"
+        ? captureClaudeToolTaskOwner(context, message)
+        : undefined;
     const primaryPresentationAdmitted = isCurrentClaudePublicSummaryMessage(context, message);
     const publicSummaryAdmitted =
       primaryPresentationAdmitted && context.turnState?.publicSummaryFallbackDisabled !== true;
@@ -8863,6 +9003,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
           message,
           publicSummaryAdmitted,
           primaryPresentationAdmitted,
+          toolTaskOwner,
         );
         return;
       case "user":

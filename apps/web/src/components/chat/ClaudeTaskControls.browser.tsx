@@ -19,6 +19,7 @@ import { SubagentTaskControls } from "./SubagentTaskControls";
 import { ProviderTasks, type ProviderTasksContext } from "./ProviderTasks";
 import type { WorkLogEntry } from "../../session-logic";
 import { Menu, MenuPopup, MenuTrigger } from "../ui/menu";
+import { SubagentAvatar } from "../subagents/SubagentAvatar";
 
 const { controlTask } = vi.hoisted(() => ({ controlTask: vi.fn() }));
 vi.mock("../../environmentApi", () => ({
@@ -161,6 +162,128 @@ function PriorityHarness() {
 }
 afterEach(() => vi.clearAllMocks());
 describe("Claude priority and exact task controls", () => {
+  it("renders only current child-owner artwork while root and unknown task slots stay blank", async () => {
+    const child = "private-provider-owner-alpha";
+    const ownedActivity = (
+      index: number,
+      taskOwner: unknown,
+      nativeWorkRuntimeId: unknown = subagent.runtimeId,
+    ) => {
+      const ordinary = ordinaryTaskActivity({
+        index,
+        toolName: index === 0 ? "Agent" : "Bash",
+        detail: `Owner fixture ${index}`,
+      });
+      return {
+        ...ordinary,
+        payload: {
+          ...(ordinary.payload as Record<string, unknown>),
+          taskOwner,
+          nativeWorkRuntimeId,
+        },
+      };
+    };
+    const activities = [
+      ownedActivity(0, { type: "root" }),
+      ownedActivity(1, undefined),
+      ownedActivity(2, { type: "child", id: child }),
+      ownedActivity(3, { type: "child", id: "foreign-private-child" }, "other-runtime"),
+    ];
+    const display = (received: readonly OrchestrationThreadActivity[], referenceSeed = child) => (
+      <>
+        <SubagentAvatar seed={referenceSeed} data-owner-reference="true" />
+        <ProviderTasks context={ordinaryTaskContext(received)} />
+      </>
+    );
+    const view = await render(display(activities));
+    try {
+      const rows = document.querySelectorAll<HTMLElement>("[data-provider-task-row]");
+      expect(rows).toHaveLength(4);
+      for (const [index, row] of rows.entries()) {
+        const slot = row.querySelector<HTMLElement>("[data-provider-task-owner-slot]")!;
+        expect(slot).not.toBeNull();
+        expect(slot.getBoundingClientRect().width).toBeGreaterThan(0);
+        expect(row.querySelector("img, a, script")).toBeNull();
+        expect(row.outerHTML).not.toContain(child);
+        expect(row.outerHTML).not.toContain("foreign-private-child");
+        if (index !== 2) expect(slot.childElementCount).toBe(0);
+        else {
+          const icon = slot.querySelector<SVGElement>("[data-cafe-subagent-avatar]")!;
+          const referenceIcon = document.querySelector<SVGElement>("[data-owner-reference]")!;
+          expect(icon.innerHTML).toBe(referenceIcon.innerHTML);
+          expect(icon.dataset.palette).toBe(referenceIcon.dataset.palette);
+          expect(icon.dataset.petalShape).toBe(referenceIcon.dataset.petalShape);
+          expect(icon.getAttribute("aria-hidden")).toBe("true");
+          expect(icon.getAttribute("focusable")).toBe("false");
+          expect(icon.getBoundingClientRect().width).toBe(slot.getBoundingClientRect().width);
+        }
+      }
+      const taskRow = rows[2]!;
+      for (const owner of [
+        { type: "child", id: "private-provider-owner-beta" },
+        { type: "root" },
+        undefined,
+      ]) {
+        const update = {
+          ...ownedActivity(2, owner),
+          id: EventId.make(`owner-update-${owner?.type ?? "omitted"}`),
+          sequence: 20,
+          kind: "tool.updated",
+        };
+        await view.rerender(
+          display(
+            [activities[0]!, activities[1]!, activities[2]!, update, activities[3]!],
+            owner?.type === "child" ? owner.id : child,
+          ),
+        );
+        const current = [
+          ...document.querySelectorAll<HTMLElement>("[data-provider-task-row]"),
+        ].find(
+          (row) =>
+            row.querySelector("[data-provider-task-title]")?.textContent === "Owner fixture 2",
+        )!;
+        expect(current).toBe(taskRow);
+        const slot = current.querySelector<HTMLElement>("[data-provider-task-owner-slot]")!;
+        if (owner?.type === "child") {
+          expect(slot.querySelector("svg")!.innerHTML).toBe(
+            document.querySelector("[data-owner-reference]")!.innerHTML,
+          );
+          expect(current.outerHTML).not.toContain(owner.id);
+        } else expect(slot.childElementCount).toBe(0);
+      }
+      expect(controlTask).not.toHaveBeenCalled();
+      // Avatar metadata never changes the admitted ordinary dispatch target.
+      controlTask.mockResolvedValue({ status: "accepted" });
+      await page
+        .elementLocator(taskRow)
+        .getByRole("button", { name: "Run in background", exact: true })
+        .click();
+      expect(controlTask).toHaveBeenCalledOnce();
+      expect(controlTask.mock.calls[0]?.[0]).toMatchObject({
+        taskId: "server-task-2",
+        runtimeId: subagent.runtimeId,
+        action: "background",
+      });
+      await view.rerender(
+        <ProviderTasks
+          context={{
+            ...ordinaryTaskContext(activities),
+            runtimeSession: {
+              orchestrationStatus: "running",
+              subagentRuntimeId: "replacement-runtime",
+            },
+          }}
+        />,
+      );
+      expect(document.querySelector("[data-provider-task-row]")).toBeNull();
+      expect(document.querySelector("[data-cafe-subagent-avatar]")).toBeNull();
+      expect(controlTask).toHaveBeenCalledOnce();
+      await view.rerender(display([]));
+      expect(document.querySelector("[data-provider-task-row]")).toBeNull();
+    } finally {
+      await view.unmount();
+    }
+  });
   it("uses human task labels instead of empty tool-input previews and preserves real descriptions", async () => {
     await render(
       <ProviderTasks
