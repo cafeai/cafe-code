@@ -1,17 +1,84 @@
 /** Transport qualification only: callers construct the ordinary opaque
  * document before entering this helper, as the original ten-second probes did.
  * No renderer state, source admission or native browser context is shared. */
-const phases = [
-  "document-constructed",
-  "frame-loaded",
-  "request-sent",
+import library from "mermaid/dist/mermaid.min.js?raw";
+import runtime from "../lib/mermaid/sandboxRuntime.js?raw";
+
+const bootstrapPhases = [
+  "engine-entered",
+  "engine-returned",
+  "receiver-installed",
+  "fixture-ready",
+] as const;
+export type MermaidProbeBootstrapPhase = (typeof bootstrapPhases)[number];
+
+// These are the same memoized inert assets imported by sandboxDocument, never
+// another app-realm engine. Match their complete escaped bytes, not a generic
+// closing-script fragment that could incorrectly qualify another receiver.
+const escapedLibrary = library.replace(/<\/script/gi, "<\\/script");
+const escapedRuntime = runtime.replace(/<\/script/gi, "<\\/script");
+const bootstrapSentinel = "<!--cafe-mermaid-probe-bootstrap-v1-->";
+
+/** Add observations to one already constructed fixture document. The large
+ * instrumented script remains identical between invocations: only a separate
+ * nonce-protected metadata script carries its fresh id/nonce. Instrumentation
+ * never transfers a port or submits source: callers separately opt into using
+ * only its terminal bound readiness observation as their source gate.
+ * Every marker executes inside the script it observes, so a thrown engine,
+ * receiver-registration or fixture-override step cannot mint later readiness. */
+export function instrumentMermaidProbeBootstrap(
+  documentSource: string,
+  nonce: string,
+  id: string,
+): string {
+  if (!/^[a-f0-9-]{36}$/.test(nonce) || !/^[a-f0-9-]{36}$/.test(id))
+    throw new Error("Invalid probe bootstrap binding");
+  if (documentSource.includes(bootstrapSentinel))
+    throw new Error("Probe bootstrap document already instrumented");
+  for (const asset of [escapedLibrary, escapedRuntime]) {
+    const first = documentSource.indexOf(asset);
+    if (first < 0 || first !== documentSource.lastIndexOf(asset))
+      throw new Error("Invalid probe bootstrap asset");
+  }
+  const opening = `<script nonce="${nonce}">`;
+  const firstScript = documentSource.indexOf(opening);
+  const ending = "</script></body></html>";
+  if (firstScript < 0 || !documentSource.endsWith(ending))
+    throw new Error("Invalid probe bootstrap document");
+  const metadata = `${bootstrapSentinel}<script nonce="${nonce}">
+    const cafeMermaidProbeBootstrap = phase => parent.postMessage({
+      id: ${JSON.stringify(id)}, nonce: ${JSON.stringify(nonce)}, probeBootstrapPhase: phase
+    }, '*');
+    </script>`;
+  let observed =
+    documentSource.slice(0, firstScript) + metadata + documentSource.slice(firstScript);
+  observed = observed.replace(
+    escapedLibrary,
+    () =>
+      `cafeMermaidProbeBootstrap('engine-entered');\n${escapedLibrary}\ncafeMermaidProbeBootstrap('engine-returned');`,
+  );
+  observed = observed.replace(
+    escapedRuntime,
+    () => `${escapedRuntime}\ncafeMermaidProbeBootstrap('receiver-installed');`,
+  );
+  return (
+    observed.slice(0, -ending.length) + "\ncafeMermaidProbeBootstrap('fixture-ready');" + ending
+  );
+}
+
+const nativePhases = [
   "parser-entered",
   "parser-returned",
   "render-entered",
   "render-returned",
 ] as const;
 
-type ProbePhase = (typeof phases)[number];
+type ProbePhase =
+  | "document-constructed"
+  | "frame-loaded"
+  | "fixture-ready"
+  | "request-sent"
+  | (typeof nativePhases)[number];
 type ProbeInvocation = "baseline" | "mutation" | "parser-substitute";
 type ProbeResultFailure =
   | "received an invalid result"
@@ -39,6 +106,14 @@ interface MermaidProbeOptions<T> {
   readonly kind: "Graph admission probe" | "Family admission probe" | "Native diagram-output probe";
   readonly invocation: ProbeInvocation;
   readonly readResult: (data: Record<string, unknown>) => T;
+  readonly bootstrapObservation?: {
+    readonly nonce: string;
+    readonly onPhase?: (phase: MermaidProbeBootstrapPhase) => void;
+    // Family fixtures require their actual engine/receiver/overrides to be
+    // ready, rather than a later generic iframe-load callback. Other probes
+    // retain their original load gate. Both span the same absolute allowance.
+    readonly admitSourceOnReady?: boolean;
+  };
 }
 
 export function runMermaidProbe<T>(options: MermaidProbeOptions<T>): Promise<T> {
@@ -49,8 +124,15 @@ export function runMermaidProbe<T>(options: MermaidProbeOptions<T>): Promise<T> 
   return new Promise((resolve, reject) => {
     let settled = false;
     let phase: ProbePhase = "document-constructed";
+    let bootstrapPhase = -1;
+    let sourceReserved = false;
     const failure = (reason: string) =>
-      new Error(`${options.kind} ${reason} (${options.invocation}; phase ${phase})`);
+      new Error(
+        `${options.kind} ${reason} (${options.invocation}; phase ${phase})` +
+          (options.bootstrapObservation
+            ? ` [bootstrap ${bootstrapPhases[bootstrapPhase] ?? "not-observed"}]`
+            : ""),
+      );
     const finish = (outcome: { readonly result: T } | { readonly error: Error }) => {
       if (settled) return;
       settled = true;
@@ -62,6 +144,7 @@ export function runMermaidProbe<T>(options: MermaidProbeOptions<T>): Promise<T> 
       frame.onerror = null;
       channel.port1.onmessage = null;
       channel.port1.onmessageerror = null;
+      window.removeEventListener("message", observeBootstrap);
       channel.port1.close();
       channel.port2.close();
       frame.remove();
@@ -75,6 +158,72 @@ export function runMermaidProbe<T>(options: MermaidProbeOptions<T>): Promise<T> 
     const deadline = performance.now() + 10_000;
     const expired = () => performance.now() >= deadline;
     const timeout = setTimeout(() => finish({ error: failure("did not reply") }), 10_000);
+    const sendSource = (readyPhase: "frame-loaded" | "fixture-ready") => {
+      if (settled || sourceReserved) return;
+      if (expired()) {
+        finish({ error: failure("did not reply") });
+        return;
+      }
+      phase = readyPhase;
+      try {
+        const ownerWindow = frame.contentWindow;
+        if (!ownerWindow) {
+          finish({ error: failure("lost its frame") });
+          return;
+        }
+        // Reserve the exact one-use source/port before either transport I/O.
+        // Queued duplicate load/readiness callbacks cannot transfer again or
+        // regress a phase already observed on the original request's port.
+        sourceReserved = true;
+        frame.onload = null;
+        ownerWindow.postMessage("cafe-mermaid-render", "*", [channel.port2]);
+        if (settled) return;
+        channel.port1.postMessage({ id: options.id, source: options.source, theme: options.theme });
+        if (!settled && phase === readyPhase) phase = "request-sent";
+      } catch {
+        finish({ error: failure("send failed") });
+      }
+    };
+    function observeBootstrap(event: MessageEvent<unknown>): void {
+      const observation = options.bootstrapObservation;
+      const data = event.data;
+      if (
+        settled ||
+        !observation ||
+        event.source !== frame.contentWindow ||
+        event.origin !== "null" ||
+        event.ports.length !== 0 ||
+        !data ||
+        typeof data !== "object" ||
+        Array.isArray(data) ||
+        Object.getPrototypeOf(data) !== Object.prototype ||
+        Object.keys(data).sort().join(",") !== "id,nonce,probeBootstrapPhase" ||
+        !("id" in data) ||
+        data.id !== options.id ||
+        !("nonce" in data) ||
+        data.nonce !== observation.nonce ||
+        !("probeBootstrapPhase" in data)
+      )
+        return;
+      const next = bootstrapPhases.indexOf(data.probeBootstrapPhase as MermaidProbeBootstrapPhase);
+      if (next < 0 || next !== bootstrapPhase + 1) return;
+      // Every startup step remains inside the original allowance. Only the
+      // terminal exact marker may own Family source admission; prior/foreign
+      // observations cannot renew the timer or authorize a transferred port.
+      if (expired()) {
+        finish({ error: failure("did not reply") });
+        return;
+      }
+      bootstrapPhase = next;
+      try {
+        observation.onPhase?.(bootstrapPhases[next]!);
+        if (next === bootstrapPhases.length - 1 && observation.admitSourceOnReady)
+          sendSource("fixture-ready");
+      } catch {
+        finish({ error: failure("bootstrap observer failed") });
+      }
+    }
+    if (options.bootstrapObservation) window.addEventListener("message", observeBootstrap);
     channel.port1.onmessage = ({ data }: MessageEvent<unknown>) => {
       if (settled || !data || typeof data !== "object" || !("id" in data) || data.id !== options.id)
         return;
@@ -92,14 +241,14 @@ export function runMermaidProbe<T>(options: MermaidProbeOptions<T>): Promise<T> 
           // Only exact fixed phase scalars may cross this diagnostic boundary.
           // No source, parser error, mutation text or received object is ever
           // interpolated into a failure. Port identity/id still own the reply.
-          const next = phases.indexOf(data.probePhase as ProbePhase);
-          if (Object.keys(data).sort().join(",") !== "id,probePhase" || next < 3)
+          const next = nativePhases.indexOf(data.probePhase as (typeof nativePhases)[number]);
+          if (Object.keys(data).sort().join(",") !== "id,probePhase" || next < 0)
             throw failure("received an invalid phase");
           // These are observations, not a second parser-call policy. Native
           // paths may enter/return more than once; the callers' original exact
           // parser/state counts remain authoritative, and repeated phases
           // neither reject a valid result nor renew the absolute deadline.
-          phase = phases[next]!;
+          phase = nativePhases[next]!;
           return;
         }
         finish({ result: options.readResult(data as Record<string, unknown>) });
@@ -116,24 +265,8 @@ export function runMermaidProbe<T>(options: MermaidProbeOptions<T>): Promise<T> 
     channel.port1.onmessageerror = () => finish({ error: failure("message failed") });
     frame.onerror = () => finish({ error: failure("load failed") });
     frame.onload = () => {
-      if (settled) return;
-      if (expired()) {
-        finish({ error: failure("did not reply") });
-        return;
-      }
-      frame.onload = null;
-      phase = "frame-loaded";
-      try {
-        if (!frame.contentWindow) {
-          finish({ error: failure("lost its frame") });
-          return;
-        }
-        frame.contentWindow.postMessage("cafe-mermaid-render", "*", [channel.port2]);
-        channel.port1.postMessage({ id: options.id, source: options.source, theme: options.theme });
-        if (!settled) phase = "request-sent";
-      } catch {
-        finish({ error: failure("send failed") });
-      }
+      if (settled || sourceReserved || options.bootstrapObservation?.admitSourceOnReady) return;
+      sendSource("frame-loaded");
     };
     try {
       frame.srcdoc = options.documentSource;

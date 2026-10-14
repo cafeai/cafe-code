@@ -12,11 +12,13 @@ import { applyInterfaceScalePercent } from "../interfaceScale";
 import { MermaidBlock } from "./MermaidBlock";
 import { MERMAID_FAMILY_FIXTURES } from "./mermaidFamilies.test.fixture";
 import {
+  instrumentMermaidProbeBootstrap,
   mermaidProbePhaseScript,
   readMermaidProbeSentinel,
   readMermaidProbeSvg,
   refuseMermaidProbeResult,
   runMermaidProbe,
+  type MermaidProbeBootstrapPhase,
 } from "./mermaidProbe.test.fixture";
 
 const mocks = vi.hoisted(() => ({ copy: vi.fn<(source: string) => Promise<void>>() }));
@@ -275,6 +277,8 @@ async function admitsParsedFamily(
   parserFixtureSource?: string,
   expectedNativeStateCalls?: number,
   expectedNativeParserCalls?: number,
+  observeBootstrap?: (phase: MermaidProbeBootstrapPhase) => void,
+  admitSourceOnReady = true,
 ): Promise<boolean> {
   const nonce = crypto.randomUUID();
   const id = crypto.randomUUID();
@@ -327,10 +331,15 @@ async function admitsParsedFamily(
   );
   return runMermaidProbe({
     id,
-    documentSource,
+    documentSource: instrumentMermaidProbeBootstrap(documentSource, nonce, id),
     source,
     theme: "dark",
     kind: "Family admission probe",
+    bootstrapObservation: {
+      nonce,
+      admitSourceOnReady,
+      ...(observeBootstrap ? { onPhase: observeBootstrap } : {}),
+    },
     invocation: parsedMutation
       ? "mutation"
       : parserFixtureSource === undefined
@@ -421,10 +430,11 @@ async function renderNativeFamilyOutput(
   );
   return runMermaidProbe({
     id,
-    documentSource,
+    documentSource: instrumentMermaidProbeBootstrap(documentSource, nonce, id),
     source,
     theme: "light",
     kind: "Native diagram-output probe",
+    bootstrapObservation: { nonce, admitSourceOnReady: true },
     invocation: outputMutation ? "mutation" : "baseline",
     readResult: (data) => {
       if (typeof data.probeOutputMutationApplied !== "boolean")
@@ -452,7 +462,12 @@ const probeSentinel = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1 1"
  * oracle. Real native Mermaid parsing/layout remains in every family case
  * below. Static synthetic code uses the same opaque frame, nonce-only script
  * policy and one-use parent port without loading another engine or context. */
-function startSyntheticProbe(response: string, source = "synthetic isolated probe") {
+function startSyntheticProbe(
+  response: string,
+  source = "synthetic isolated probe",
+  observeBootstrap?: (phase: MermaidProbeBootstrapPhase) => void,
+  admitSourceOnReady = false,
+) {
   const nonce = crypto.randomUUID();
   const id = crypto.randomUUID();
   const documentSource = `<!doctype html><html><head><meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'nonce-${nonce}'; style-src 'unsafe-inline'; connect-src 'none'; img-src 'none'; font-src 'none'; object-src 'none'; frame-src 'none'; base-uri 'none'; form-action 'none'"></head><body><script nonce="${nonce}">
@@ -480,6 +495,9 @@ function startSyntheticProbe(response: string, source = "synthetic isolated prob
     theme: "dark",
     kind: "Family admission probe",
     invocation: "baseline",
+    ...(observeBootstrap
+      ? { bootstrapObservation: { nonce, onPhase: observeBootstrap, admitSourceOnReady } }
+      : {}),
     readResult: (data) => readMermaidProbeSentinel(data, [], probeSentinel),
   });
   const frame = document.querySelector<HTMLIFrameElement>(
@@ -523,6 +541,429 @@ describe("Mermaid family probe qualification", () => {
       expect(source).toContain("connect-src 'none'; img-src 'none'; font-src 'none'");
     }
     expect(() => createMermaidSandboxDocument('"; script-src *')).toThrow("Invalid renderer nonce");
+  });
+
+  it("binds bootstrap observations to the exact assets and completed fixture script", () => {
+    const nonce = crypto.randomUUID();
+    const firstId = crypto.randomUUID();
+    const secondId = crypto.randomUUID();
+    const documentSource = createMermaidSandboxDocument(nonce).replace(
+      "</script></body>",
+      `</script><script nonce="${nonce}">globalThis.fixtureOverrideInstalled = true;</script></body>`,
+    );
+    const first = instrumentMermaidProbeBootstrap(documentSource, nonce, firstId);
+    const second = instrumentMermaidProbeBootstrap(documentSource, nonce, secondId);
+    // Only the small metadata script varies. Engine/receiver bytes and every
+    // marker inside their scripts remain identical for each fresh invocation.
+    expect(first.replaceAll(firstId, secondId)).toBe(second);
+    expect(first).toContain(
+      "globalThis.fixtureOverrideInstalled = true;\ncafeMermaidProbeBootstrap('fixture-ready');</script></body></html>",
+    );
+    expect(first).toContain("connect-src 'none'; img-src 'none'; font-src 'none'");
+    expect(first.match(/<\/script/gi)).toHaveLength(3);
+    expect(() => instrumentMermaidProbeBootstrap(documentSource, "invalid-nonce", firstId)).toThrow(
+      "Invalid probe bootstrap binding",
+    );
+    expect(() => instrumentMermaidProbeBootstrap("<script></script>", nonce, firstId)).toThrow(
+      "Invalid probe bootstrap asset",
+    );
+    expect(() => instrumentMermaidProbeBootstrap(first, nonce, firstId)).toThrow(
+      "Probe bootstrap document already instrumented",
+    );
+  });
+
+  it.each([
+    {
+      name: "observes the initialized native receiver while its exact load callback is withheld",
+      admitSourceOnReady: false,
+    },
+    {
+      name: "admits the initialized native receiver without releasing its held generic load callback",
+      admitSourceOnReady: true,
+    },
+  ])("$name", async ({ admitSourceOnReady }) => {
+    const phases: MermaidProbeBootstrapPhase[] = [];
+    let markReady: (() => void) | undefined;
+    const ready = new Promise<void>((resolve) => {
+      markReady = resolve;
+    });
+    const close = vi.spyOn(MessagePort.prototype, "close");
+    const send = vi.spyOn(MessagePort.prototype, "postMessage");
+    const nativeAppend = document.body.append;
+    const held: { frame?: HTMLIFrameElement; load: HTMLIFrameElement["onload"] } = { load: null };
+    vi.spyOn(document.body, "append").mockImplementation(function (this: HTMLElement, ...nodes) {
+      for (const node of nodes) {
+        if (node instanceof HTMLIFrameElement && node.dataset.mermaidFamilySecurityFixture) {
+          expect(held.frame).toBeUndefined();
+          held.frame = node;
+          held.load = node.onload;
+          // Hold only the exact fixture's callback. Its real srcdoc, full
+          // locked engine, receiver registration and fixture overrides still
+          // initialize in their original fresh opaque native document.
+          node.onload = null;
+        }
+      }
+      nativeAppend.apply(this, nodes);
+    });
+    const fixture = MERMAID_FAMILY_FIXTURES.find((entry) => entry.family === "kanban")!;
+    const admission = admitsParsedFamily(
+      fixture.source,
+      "",
+      undefined,
+      undefined,
+      1,
+      (phase) => {
+        phases.push(phase);
+        if (phase === "fixture-ready") markReady?.();
+      },
+      admitSourceOnReady,
+    );
+    let released = false;
+    try {
+      await Promise.race([
+        ready,
+        admission.then(() => {
+          throw new Error("Native probe completed before the held load callback");
+        }),
+      ]);
+      expect(phases).toEqual([
+        "engine-entered",
+        "engine-returned",
+        "receiver-installed",
+        "fixture-ready",
+      ]);
+      expect(held.frame?.getAttribute("sandbox")).toBe("allow-scripts");
+      expect(held.load).toBeTypeOf("function");
+      if (!admitSourceOnReady) {
+        expect(held.frame?.isConnected).toBe(true);
+        expect(send).not.toHaveBeenCalled();
+        expect(close).not.toHaveBeenCalled();
+        released = true;
+        held.load?.call(held.frame!, new Event("load"));
+      }
+      // The received sentinel and original exact native parser-call oracle,
+      // not a mock invocation or bootstrap marker, prove positive admission.
+      expect(await admission).toBe(true);
+      expect(send).toHaveBeenCalledTimes(1);
+      expect(send).toHaveBeenCalledWith({
+        id: held.frame!.dataset.mermaidFamilySecurityFixture,
+        source: fixture.source,
+        theme: "dark",
+      });
+      expectRetiredProbe(held.frame!, close.mock.contexts);
+      // The ready-gated branch has already received real native admission
+      // without executing its generic callback. A queued callback after that
+      // result cannot transfer/replay source or reopen its retired exact port.
+      held.load?.call(held.frame!, new Event("load"));
+      released = true;
+      expect(send).toHaveBeenCalledTimes(1);
+      expect(close).toHaveBeenCalledTimes(2);
+    } finally {
+      if (!released) held.load?.call(held.frame!, new Event("load"));
+      await admission.catch(() => undefined);
+    }
+  });
+
+  it.each([
+    {
+      name: "ignores foreign, stale and malformed startup observations before the real load",
+      admitSourceOnReady: false,
+    },
+    {
+      name: "refuses generic load and unqualified terminal markers as Family source authority",
+      admitSourceOnReady: true,
+    },
+  ])("$name", async ({ admitSourceOnReady }) => {
+    const phases: MermaidProbeBootstrapPhase[] = [];
+    const send = vi.spyOn(MessagePort.prototype, "postMessage");
+    const close = vi.spyOn(MessagePort.prototype, "close");
+    const added = vi.spyOn(window, "addEventListener");
+    const removed = vi.spyOn(window, "removeEventListener");
+    const held: { load: HTMLIFrameElement["onload"]; event?: Event } = { load: null };
+    let resolveLoad: ((event: Event) => void) | undefined;
+    const loaded = new Promise<Event>((resolve) => {
+      resolveLoad = resolve;
+    });
+    const captureLoad = (event: Event) => {
+      held.event = event;
+      resolveLoad?.(event);
+    };
+    const nativeAppend = document.body.append;
+    vi.spyOn(document.body, "append").mockImplementation(function (this: HTMLElement, ...nodes) {
+      for (const node of nodes) {
+        if (node instanceof HTMLIFrameElement && node.dataset.mermaidFamilySecurityFixture) {
+          held.load = node.onload;
+          node.onload = null;
+          // Install the witness before native insertion. Foreign observations
+          // must not release a receiver that has not finished its own srcdoc.
+          node.addEventListener("load", captureLoad, { once: true });
+        }
+      }
+      nativeAppend.apply(this, nodes);
+    });
+    const probe = startSyntheticProbe(
+      "port.postMessage({ id, failed: true });",
+      undefined,
+      (phase) => phases.push(phase),
+      admitSourceOnReady,
+    );
+    const foreignPort = new MessageChannel();
+    const ownedWindow = probe.frame.contentWindow;
+    const observer = added.mock.calls.find(([type]) => type === "message")?.[1];
+    const marker = {
+      id: probe.id,
+      nonce: probe.nonce,
+      probeBootstrapPhase: "engine-entered",
+    };
+    try {
+      for (const [source, origin, data] of [
+        [window, "null", marker],
+        [probe.frame.contentWindow, location.origin, marker],
+        [probe.frame.contentWindow, "null", { ...marker, id: crypto.randomUUID() }],
+        [probe.frame.contentWindow, "null", { ...marker, nonce: crypto.randomUUID() }],
+        [probe.frame.contentWindow, "null", { ...marker, private: "unqualified diagnostic field" }],
+        [probe.frame.contentWindow, "null", { ...marker, probeBootstrapPhase: "fixture-ready" }],
+        [probe.frame.contentWindow, "null", { ...marker, probeBootstrapPhase: "unknown" }],
+      ] as const) {
+        window.dispatchEvent(new MessageEvent("message", { source, origin, data }));
+      }
+      expect(phases).toEqual([]);
+      expect(send).not.toHaveBeenCalled();
+      const nativeLoad = await Promise.race([
+        loaded,
+        probe.result.then(() => {
+          throw new Error("Synthetic probe completed before its exact native load");
+        }),
+      ]);
+      expect(nativeLoad.isTrusted).toBe(true);
+      expect(nativeLoad.target).toBe(probe.frame);
+      expect(phases).toEqual([]);
+      expect(send).not.toHaveBeenCalled();
+      // Correct earlier observations still confer no source authority. The
+      // real native load also cannot start the opt-in Family branch.
+      for (const phase of ["engine-entered", "engine-returned", "receiver-installed"]) {
+        window.dispatchEvent(
+          new MessageEvent("message", {
+            source: ownedWindow,
+            origin: "null",
+            data: { ...marker, probeBootstrapPhase: phase },
+          }),
+        );
+      }
+      expect(phases).toEqual(["engine-entered", "engine-returned", "receiver-installed"]);
+      if (admitSourceOnReady) held.load?.call(probe.frame, nativeLoad);
+      expect(send).not.toHaveBeenCalled();
+      const readyMarker = { ...marker, probeBootstrapPhase: "fixture-ready" };
+      for (const [source, origin, data] of [
+        [window, "null", readyMarker],
+        [ownedWindow, location.origin, readyMarker],
+        [ownedWindow, "null", { ...readyMarker, id: crypto.randomUUID() }],
+        [ownedWindow, "null", { ...readyMarker, nonce: crypto.randomUUID() }],
+        [ownedWindow, "null", { ...readyMarker, private: "unqualified diagnostic field" }],
+        [ownedWindow, "null", { id: probe.id, probeBootstrapPhase: "fixture-ready" }],
+        [ownedWindow, "null", [readyMarker]],
+        [ownedWindow, "null", null],
+      ] as const) {
+        window.dispatchEvent(new MessageEvent("message", { source, origin, data }));
+      }
+      window.dispatchEvent(
+        new MessageEvent("message", {
+          source: ownedWindow,
+          origin: "null",
+          data: readyMarker,
+          ports: [foreignPort.port1],
+        }),
+      );
+      expect(phases).toEqual(["engine-entered", "engine-returned", "receiver-installed"]);
+      expect(send).not.toHaveBeenCalled();
+      window.dispatchEvent(
+        new MessageEvent("message", { source: ownedWindow, origin: "null", data: readyMarker }),
+      );
+      if (!admitSourceOnReady) {
+        expect(send).not.toHaveBeenCalled();
+        held.load?.call(probe.frame, nativeLoad);
+      }
+      expect(send).toHaveBeenCalledTimes(1);
+      // Replayed readiness and a queued load cannot reserve a second request,
+      // even while the first exact native peer reply is still pending.
+      window.dispatchEvent(
+        new MessageEvent("message", { source: ownedWindow, origin: "null", data: readyMarker }),
+      );
+      held.load?.call(probe.frame, nativeLoad);
+      expect(send).toHaveBeenCalledTimes(1);
+      expect(await probe.result).toBe(false);
+      expectRetiredProbe(probe.frame, close.mock.contexts);
+      expect(observer).toBeTypeOf("function");
+      expect(removed).toHaveBeenCalledWith("message", observer);
+      const stale = new MessageEvent("message", {
+        source: ownedWindow,
+        origin: "null",
+        data: marker,
+      });
+      window.dispatchEvent(stale);
+      // A callback captured before retirement may itself already be queued.
+      // It must preserve the settled owner even with its original WindowProxy.
+      if (typeof observer === "function") observer.call(window, stale);
+      expect(phases).toEqual([
+        "engine-entered",
+        "engine-returned",
+        "receiver-installed",
+        "fixture-ready",
+      ]);
+      expect(send).toHaveBeenCalledTimes(1);
+      expect(close).toHaveBeenCalledTimes(2);
+    } finally {
+      probe.frame.removeEventListener("load", captureLoad);
+      if (held.event) held.load?.call(probe.frame, held.event);
+      else if (probe.frame.isConnected) probe.frame.dispatchEvent(new Event("error"));
+      await probe.result.catch(() => undefined);
+      foreignPort.port1.close();
+      foreignPort.port2.close();
+    }
+  });
+
+  it("preserves native progress across synchronous reservation and queued duplicate startup callbacks", async () => {
+    const close = vi.spyOn(MessagePort.prototype, "close");
+    const nativeSend = MessagePort.prototype.postMessage;
+    const reenter: { invoke?: () => void } = {};
+    const send = vi.spyOn(MessagePort.prototype, "postMessage").mockImplementation(function (
+      this: MessagePort,
+      message: unknown,
+    ) {
+      nativeSend.call(this, message);
+      const receive = this.onmessage;
+      const id = (message as { readonly id: string }).id;
+      // Forward the real exact source first. These controlled delivery edges
+      // qualify callback ownership and the fixed failure-phase oracle; they
+      // are not evidence of successful native parsing or admission.
+      receive?.call(
+        this,
+        new MessageEvent("message", { data: { id, probePhase: "parser-entered" } }),
+      );
+      reenter.invoke?.();
+      queueMicrotask(() => {
+        receive?.call(this, new MessageEvent("message", { data: { id, failed: false } }));
+      });
+    });
+    const probe = startSyntheticProbe(
+      "port.postMessage({ id, failed: true });",
+      undefined,
+      () => undefined,
+      true,
+    );
+    const load = probe.frame.onload;
+    const ownedWindow = probe.frame.contentWindow;
+    const marker = { id: probe.id, nonce: probe.nonce, probeBootstrapPhase: "fixture-ready" };
+    const captureLoad: { resolve?: (event: Event) => void } = {};
+    const loaded = new Promise<Event>((resolve) => {
+      captureLoad.resolve = resolve;
+    });
+    const witness = (event: Event) => captureLoad.resolve?.(event);
+    probe.frame.addEventListener("load", witness, { once: true });
+    const rejected = expect(probe.result).rejects.toThrow(
+      "received an invalid result (baseline; phase parser-entered) [bootstrap fixture-ready]",
+    );
+    try {
+      const nativeLoad = await Promise.race([
+        loaded,
+        probe.result.then(() => {
+          throw new Error("Synthetic source ownership completed before its exact native load");
+        }),
+      ]);
+      expect(nativeLoad.isTrusted).toBe(true);
+      expect(nativeLoad.target).toBe(probe.frame);
+      expect(send).not.toHaveBeenCalled();
+      reenter.invoke = () => {
+        window.dispatchEvent(
+          new MessageEvent("message", { source: ownedWindow, origin: "null", data: marker }),
+        );
+        load?.call(probe.frame, nativeLoad);
+      };
+      for (const phase of [
+        "engine-entered",
+        "engine-returned",
+        "receiver-installed",
+        "fixture-ready",
+      ]) {
+        window.dispatchEvent(
+          new MessageEvent("message", {
+            source: ownedWindow,
+            origin: "null",
+            data: { ...marker, probeBootstrapPhase: phase },
+          }),
+        );
+      }
+      await rejected;
+      expect(send).toHaveBeenCalledTimes(1);
+      expectRetiredProbe(probe.frame, close.mock.contexts);
+    } finally {
+      probe.frame.removeEventListener("load", witness);
+      if (probe.frame.isConnected) probe.frame.dispatchEvent(new Event("error"));
+      await probe.result.catch(() => undefined);
+    }
+  });
+
+  it.each([
+    {
+      name: "refuses an exact queued startup marker at the unchanged absolute deadline",
+      admitSourceOnReady: false,
+      terminal: false,
+    },
+    {
+      name: "refuses initial Family bootstrap at the unchanged absolute deadline",
+      admitSourceOnReady: true,
+      terminal: false,
+    },
+    {
+      name: "refuses terminal Family readiness at the unchanged absolute deadline",
+      admitSourceOnReady: true,
+      terminal: true,
+    },
+  ])("$name", async ({ admitSourceOnReady, terminal }) => {
+    const now = vi.spyOn(performance, "now").mockReturnValue(0);
+    const phases: MermaidProbeBootstrapPhase[] = [];
+    const close = vi.spyOn(MessagePort.prototype, "close");
+    const send = vi.spyOn(MessagePort.prototype, "postMessage");
+    const probe = startSyntheticProbe(
+      "port.postMessage({ id, failed: true });",
+      undefined,
+      (phase) => phases.push(phase),
+      admitSourceOnReady,
+    );
+    const load = probe.frame.onload;
+    probe.frame.onload = null;
+    if (terminal) {
+      for (const phase of ["engine-entered", "engine-returned", "receiver-installed"]) {
+        window.dispatchEvent(
+          new MessageEvent("message", {
+            source: probe.frame.contentWindow,
+            origin: "null",
+            data: { id: probe.id, nonce: probe.nonce, probeBootstrapPhase: phase },
+          }),
+        );
+      }
+    }
+    now.mockReturnValue(10_000);
+    window.dispatchEvent(
+      new MessageEvent("message", {
+        source: probe.frame.contentWindow,
+        origin: "null",
+        data: {
+          id: probe.id,
+          nonce: probe.nonce,
+          probeBootstrapPhase: terminal ? "fixture-ready" : "engine-entered",
+        },
+      }),
+    );
+    await expect(probe.result).rejects.toThrow(
+      `did not reply (baseline; phase document-constructed) [bootstrap ${terminal ? "receiver-installed" : "not-observed"}]`,
+    );
+    load?.call(probe.frame, new Event("load"));
+    expect(phases).toEqual(
+      terminal ? ["engine-entered", "engine-returned", "receiver-installed"] : [],
+    );
+    expect(send).not.toHaveBeenCalled();
+    expectRetiredProbe(probe.frame, close.mock.contexts);
   });
 
   it("uses fresh frames, nonces, IDs and ports for consecutive exact source requests", async () => {

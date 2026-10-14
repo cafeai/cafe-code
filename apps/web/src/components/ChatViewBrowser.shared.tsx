@@ -3001,6 +3001,84 @@ describe(`ChatView full app (${chatViewBrowserPart})`, () => {
       };
     };
 
+    const readResponseLimitCaretText = (editor: HTMLElement) => {
+      const selection = editor.ownerDocument.getSelection();
+      expect(editor.isConnected).toBe(true);
+      expect(editor.ownerDocument.activeElement).toBe(editor);
+      expect(selection?.rangeCount).toBe(1);
+      const range = selection!.getRangeAt(0);
+      expect(range.collapsed).toBe(true);
+      expect(editor.contains(range.startContainer)).toBe(true);
+      expect(editor.contains(range.endContainer)).toBe(true);
+
+      // Cloning and adjusting these detached ranges only reads the native
+      // caret's extent. Never rewrite the live Selection to manufacture the
+      // preparation readiness that the ordinary replacement needs to observe.
+      const beforeCaret = range.cloneRange();
+      beforeCaret.selectNodeContents(editor);
+      beforeCaret.setEnd(range.endContainer, range.endOffset);
+      const afterCaret = range.cloneRange();
+      afterCaret.selectNodeContents(editor);
+      afterCaret.setStart(range.endContainer, range.endOffset);
+      return { beforeCaret: beforeCaret.toString(), afterCaret: afterCaret.toString() };
+    };
+
+    const assertResponseLimitComposerReady = (editor: HTMLElement) => {
+      expect(
+        useComposerDraftStore.getState().getComposerDraft(THREAD_REF)?.prompt ?? "",
+        "Response-limit composer draft is not committed.",
+      ).toBe(CLAUDE_SHORTER_CONTINUATION_PROMPT);
+      expect(editor.textContent, "Response-limit composer DOM text is not committed.").toBe(
+        CLAUDE_SHORTER_CONTINUATION_PROMPT,
+      );
+      expect(
+        readResponseLimitCaretText(editor),
+        "Response-limit composer caret has not committed at the prepared prompt's end.",
+      ).toEqual({ beforeCaret: CLAUDE_SHORTER_CONTINUATION_PROMPT, afterCaret: "" });
+    };
+
+    it("rejects shorter-response replacement readiness before text and native end-caret commitment", async () => {
+      const mounted = await mountChatView({
+        viewport: DEFAULT_VIEWPORT,
+        snapshot: createResponseLimitSnapshot(),
+        configureFixture: configureResponseLimitFixture,
+      });
+      try {
+        const editor = await waitForComposerEditor();
+        expect(() => assertResponseLimitComposerReady(editor)).toThrow(
+          "Response-limit composer draft is not committed.",
+        );
+        const prepare = page.getByRole("button", { name: "Prepare shorter response" });
+        await expect.element(prepare).toBeEnabled();
+        await prepare.click();
+        await waitForComposerText(CLAUDE_SHORTER_CONTINUATION_PROMPT);
+        await vi.waitFor(() => assertResponseLimitComposerReady(editor));
+
+        // One real navigation action leaves the committed text and focus
+        // intact but moves the caret inside it. The readiness gate must refuse
+        // that state rather than treating activeElement as selection evidence.
+        await userEvent.keyboard("{ArrowLeft}");
+        await vi.waitFor(() =>
+          expect(readResponseLimitCaretText(editor)).toEqual({
+            beforeCaret: CLAUDE_SHORTER_CONTINUATION_PROMPT.slice(0, -1),
+            afterCaret: CLAUDE_SHORTER_CONTINUATION_PROMPT.slice(-1),
+          }),
+        );
+        expect(editor.textContent).toBe(CLAUDE_SHORTER_CONTINUATION_PROMPT);
+        expect(useComposerDraftStore.getState().getComposerDraft(THREAD_REF)?.prompt).toBe(
+          CLAUDE_SHORTER_CONTINUATION_PROMPT,
+        );
+        expect(() => assertResponseLimitComposerReady(editor)).toThrow(
+          "Response-limit composer caret has not committed at the prepared prompt's end.",
+        );
+        expect(
+          wsRequests.filter((request) => request._tag === ORCHESTRATION_WS_METHODS.dispatchCommand),
+        ).toHaveLength(0);
+      } finally {
+        await mounted.cleanup();
+      }
+    });
+
     it.each([DEFAULT_VIEWPORT, COMPACT_FOOTER_VIEWPORT])(
       "prepares an editable Claude shorter response at $name width and submits only through normal Send",
       async (viewport) => {
@@ -3018,7 +3096,11 @@ describe(`ChatView full app (${chatViewBrowserPart})`, () => {
           const settingsBefore = useComposerDraftStore.getState().getComposerDraft(THREAD_REF);
           await prepare.click();
           await waitForComposerText(CLAUDE_SHORTER_CONTINUATION_PROMPT);
-          await vi.waitFor(() => expect(editor.contains(document.activeElement)).toBe(true));
+          // Preparation writes the store before its controlled Lexical text
+          // and queued native caret commit. Playwright fill selects the DOM
+          // contents before a separate native insertText call, so mere focus
+          // cannot qualify the preceding preparation's selection ownership.
+          await vi.waitFor(() => assertResponseLimitComposerReady(editor));
           await expect.element(prepare).toBeDisabled();
           // A second stale click cannot prepare or submit another copy.
           (prepare.element() as HTMLButtonElement).click();
@@ -3043,6 +3125,15 @@ describe(`ChatView full app (${chatViewBrowserPart})`, () => {
           await page
             .getByTestId("composer-editor")
             .fill("Give a concise answer from the existing work.");
+          // Observe the exact replacement through both committed surfaces
+          // before the original Send gesture. Concatenation must fail here;
+          // never repair it with another fill, forced selection or store write.
+          await vi.waitFor(() => {
+            expect(editor.textContent).toBe("Give a concise answer from the existing work.");
+            expect(useComposerDraftStore.getState().getComposerDraft(THREAD_REF)?.prompt).toBe(
+              "Give a concise answer from the existing work.",
+            );
+          });
           (await waitForSendButton()).click();
           await vi.waitFor(() => {
             const commands = wsRequests.filter(

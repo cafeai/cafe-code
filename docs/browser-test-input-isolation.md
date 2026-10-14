@@ -107,6 +107,35 @@ contention was proven. Failure upload admits only this synthetic fixture's exact
 screenshot directory in the existing diagnostic allowlist; diagnostic ZIPs do
 not qualify native release artifacts. Native hosted results remain required.
 
+## Native Mermaid family startup readiness
+
+The additional family probes construct fresh opaque documents containing the
+complete locked engine and production receiver. Their test-only startup markers
+run inside those exact script bodies and after all fixture overrides. Only the
+two native family builders opt into transferring their source when that exact
+document reports the ordered terminal readiness marker; the generic iframe load
+callback does not grant those builders source authority. Graph-security and
+ordinary transport probes retain their original load gate.
+
+Admission binds the owning WindowProxy, opaque origin, fresh nonce and invocation
+ID, exact content-free message shape, absent transferred ports and ordered
+engine/receiver/fixture observations. Reserve the one-use source transfer before
+either transport call. Duplicate, stale, foreign, malformed or retired callbacks
+cannot send source again, regress progress or revive a settled owner. The same
+absolute ten-second allowance begins before appending the document and covers
+engine startup, parsing and reply; readiness never renews it or admits an expired
+message ahead of a delayed timer callback. Keep all original source, parsed-data,
+native parser-count and output refusal assertions unchanged.
+
+The full-engine held-load positive separately proves actual receiver readiness
+and successful native parsing without releasing the generic callback. Synthetic
+transport controls prove the ownership, expiry and one-use negatives, not native
+platform delivery. Earlier macOS failures retained only a pre-request
+`document-constructed` phase, so neither those controls nor local passes establish
+the original delay's CPU, parser or scheduling cause. Native hosted results remain
+required. This fixture-only repair changes no production renderer, CSP, network,
+accessibility, permissions, browser contexts, worker caps or deadlines.
+
 ## Keyboard popup readiness
 
 The scroll-to-bottom hover options use ordinary native mouse/keyboard input in
@@ -133,6 +162,29 @@ This strengthens fixture synchronization without changing production menus or
 selection policy. Logs without a pre-cleanup focus witness do not establish the
 precise original failure's focus state; screenshots taken after fixture teardown
 cannot supply that missing evidence.
+
+## Controlled composer replacement readiness
+
+Preparing a shorter-response draft commits its store before the controlled editor
+and queued native end-caret update necessarily finish. Playwright's ordinary
+contenteditable fill selects the current DOM contents before a separate native
+text insertion. Observe the exact preparation text in both store and editor,
+actual root focus and an editor-owned collapsed caret at the true end before
+that original fill. Read prefix/suffix extents through detached Range clones;
+never rewrite the live Selection to manufacture readiness. After filling,
+observe exact edited text through both committed surfaces before the unchanged
+Send and outgoing-command assertions.
+
+The native ArrowLeft negative keeps text and focus unchanged while moving the
+caret inside the prompt, proving those two surfaces alone cannot qualify the
+replacement precondition. Preparation still dispatches zero commands. Preserve
+owner, account/model, mode, cancellation, bounds and exact command-count/content
+assertions, original native input and deadlines. No extra fill, selection forcing,
+sleep, input replay, store correction or production-editor change is implied.
+The motivating Linux log showed the prepared text concatenated with the intended
+replacement, but did not retain the precise selection-update phase responsible.
+This readiness repair does not claim that unobserved original phase as proven;
+hosted Linux qualification remains separate from local browser evidence.
 
 ## Real-list review readiness
 
