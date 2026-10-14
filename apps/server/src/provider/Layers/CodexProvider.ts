@@ -82,6 +82,9 @@ export interface CodexAppServerProviderSnapshot {
   readonly version: string | undefined;
   readonly models: ReadonlyArray<ServerProviderModel>;
   readonly skills: ReadonlyArray<ServerProviderSkill>;
+  // A successful probe is not itself catalogue proof: unauthenticated probes
+  // return before model/list. Legacy/injected probes may omit this field.
+  readonly codexModelCatalogSource?: ServerProvider["codexModelCatalogSource"];
 }
 
 const REASONING_EFFORT_LABELS: Readonly<Record<string, string>> = {
@@ -981,6 +984,41 @@ const STATIC_CODEX_MODELS: ReadonlyArray<ServerProviderModel> = [
   },
 ];
 
+// These built-ins were retired specifically from ChatGPT-authenticated Codex
+// in the official model guide, most recently GPT-5.5 on October 14, 2026:
+// https://learn.chatgpt.com/docs/models
+// This is a finite fallback correction, not a native availability denylist or
+// a clock-driven saved-setting migration. API/unknown accounts and native
+// catalogues retain their existing rows, and explicit custom requests survive.
+const RETIRED_CHATGPT_FALLBACK_CODEX_MODELS = new Set([
+  "gpt-5.5",
+  "gpt-5.4",
+  "gpt-5.4-mini",
+  "gpt-5.3-codex-spark",
+]);
+const STATIC_CUSTOM_CODEX_MODELS: ReadonlyMap<string, ServerProviderModel> = new Map(
+  STATIC_CODEX_MODELS.map((model) => [model.slug, { ...model, isCustom: true }]),
+);
+
+function ownCodexProbeField(value: unknown, key: string): unknown {
+  try {
+    if (value === null || typeof value !== "object" || Array.isArray(value)) return undefined;
+    const descriptor = Object.getOwnPropertyDescriptor(value, key);
+    return descriptor && "value" in descriptor ? descriptor.value : undefined;
+  } catch {
+    // Diagnostic metadata cannot invoke getters or make a hostile/revoked
+    // descriptor proxy fail a provider status operation.
+    return undefined;
+  }
+}
+
+function codexModelCatalogSourceFromProbe(
+  snapshot: unknown,
+): ServerProvider["codexModelCatalogSource"] {
+  const source = ownCodexProbeField(snapshot, "codexModelCatalogSource");
+  return source === "fallback" || source === "native" ? source : undefined;
+}
+
 function parseCodexModelListResponse(
   response: CodexSchema.V2ModelListResponse,
 ): ReadonlyArray<ServerProviderModel> {
@@ -995,6 +1033,7 @@ function parseCodexModelListResponse(
 function appendCustomCodexModels(
   models: ReadonlyArray<ServerProviderModel>,
   customModels: ReadonlyArray<string>,
+  knownCustomModels: ReadonlyMap<string, ServerProviderModel> = KNOWN_CUSTOM_CODEX_MODELS,
 ): ReadonlyArray<ServerProviderModel> {
   // Filter cached rows as well as live discovery. Stored chat selections stay
   // readable, but neither a stale catalog nor a custom entry reintroduces aliases.
@@ -1012,7 +1051,7 @@ function appendCustomCodexModels(
       continue;
     }
     seen.add(slug);
-    const knownCustomModel = KNOWN_CUSTOM_CODEX_MODELS.get(slug);
+    const knownCustomModel = knownCustomModels.get(slug);
     if (knownCustomModel) {
       customEntries.push(knownCustomModel);
       continue;
@@ -1306,6 +1345,7 @@ const probeCodexAppServerProvider = Effect.fn("probeCodexAppServerProvider")(fun
       version,
       models: appendCustomCodexModels([], input.customModels ?? []),
       skills: [],
+      codexModelCatalogSource: "fallback",
     } satisfies CodexAppServerProviderSnapshot;
   }
 
@@ -1333,6 +1373,7 @@ const probeCodexAppServerProvider = Effect.fn("probeCodexAppServerProvider")(fun
     version,
     models: appendCustomCodexModels(models, input.customModels ?? []),
     skills: parseCodexSkillsListResponse(skillsResponse, input.cwd),
+    codexModelCatalogSource: "native",
   } satisfies CodexAppServerProviderSnapshot;
 });
 
@@ -1349,8 +1390,22 @@ const emptyCodexModelsFromSettings = (codexSettings: CodexSettings): ServerProvi
 
 export const fallbackCodexModelsFromSettings = (
   codexSettings: CodexSettings,
-): ServerProvider["models"] =>
-  appendCustomCodexModels(STATIC_CODEX_MODELS, codexSettings.customModels);
+  auth?: unknown,
+): ServerProvider["models"] => {
+  // Only conclusive current authentication qualifies this account-scoped
+  // fallback filter. Inherited/accessor fields and legacy unknown status do
+  // not lend ChatGPT policy to API accounts or unavailable authentication.
+  const chatGptAuthenticated =
+    ownCodexProbeField(auth, "status") === "authenticated" &&
+    ownCodexProbeField(auth, "type") === "chatgpt";
+  const models = chatGptAuthenticated
+    ? STATIC_CODEX_MODELS.filter((model) => !RETIRED_CHATGPT_FALLBACK_CODEX_MODELS.has(model.slug))
+    : STATIC_CODEX_MODELS;
+  // Reintroduce only explicitly configured custom rows, with that exact
+  // built-in's original controls rather than borrowing Astra's Low/Ultra set.
+  // Live catalogue custom supplementation deliberately keeps its old policy.
+  return appendCustomCodexModels(models, codexSettings.customModels, STATIC_CUSTOM_CODEX_MODELS);
+};
 
 export function makeCodexHealthProbeCommand(
   codexSettings: CodexSettings,
@@ -1476,6 +1531,7 @@ const makePendingCodexProvider = (
         enabled: false,
         checkedAt,
         models,
+        codexModelCatalogSource: "fallback",
         skills: [],
         probe: {
           installed: false,
@@ -1492,6 +1548,7 @@ const makePendingCodexProvider = (
       enabled: true,
       checkedAt,
       models,
+      codexModelCatalogSource: "fallback",
       skills: [],
       probe: {
         installed: false,
@@ -1560,6 +1617,7 @@ export const checkCodexProviderStatus = Effect.fn("checkCodexProviderStatus")(fu
       enabled: false,
       checkedAt,
       models: emptyModels,
+      codexModelCatalogSource: "fallback",
       skills: [],
       probe: {
         installed: false,
@@ -1595,6 +1653,7 @@ export const checkCodexProviderStatus = Effect.fn("checkCodexProviderStatus")(fu
       enabled: codexSettings.enabled,
       checkedAt,
       models: emptyModels,
+      codexModelCatalogSource: "fallback",
       skills: [],
       probe: {
         installed,
@@ -1614,6 +1673,7 @@ export const checkCodexProviderStatus = Effect.fn("checkCodexProviderStatus")(fu
       enabled: codexSettings.enabled,
       checkedAt,
       models: emptyModels,
+      codexModelCatalogSource: "fallback",
       skills: [],
       probe: {
         installed: true,
@@ -1627,12 +1687,14 @@ export const checkCodexProviderStatus = Effect.fn("checkCodexProviderStatus")(fu
 
   const snapshot = probeResult.success.value;
   const accountStatus = accountProbeStatus(snapshot.account);
+  const codexModelCatalogSource = codexModelCatalogSourceFromProbe(snapshot);
 
   return buildServerProvider({
     presentation: CODEX_PRESENTATION,
     enabled: codexSettings.enabled,
     checkedAt,
     models: snapshot.models,
+    ...(codexModelCatalogSource ? { codexModelCatalogSource } : {}),
     skills: snapshot.skills,
     probe: {
       installed: true,
@@ -1663,6 +1725,7 @@ export const checkCodexCliProviderStatus = Effect.fn("checkCodexCliProviderStatu
       enabled: false,
       checkedAt,
       models,
+      codexModelCatalogSource: "fallback",
       skills: [],
       probe: {
         installed: false,
@@ -1692,6 +1755,7 @@ export const checkCodexCliProviderStatus = Effect.fn("checkCodexCliProviderStatu
       enabled: codexSettings.enabled,
       checkedAt,
       models,
+      codexModelCatalogSource: "fallback",
       skills: [],
       probe: {
         installed: !isCommandMissingCause(error),
@@ -1715,6 +1779,7 @@ export const checkCodexCliProviderStatus = Effect.fn("checkCodexCliProviderStatu
       enabled: codexSettings.enabled,
       checkedAt,
       models,
+      codexModelCatalogSource: "fallback",
       skills: [],
       probe: {
         installed: true,
@@ -1740,6 +1805,7 @@ export const checkCodexCliProviderStatus = Effect.fn("checkCodexCliProviderStatu
       enabled: codexSettings.enabled,
       checkedAt,
       models,
+      codexModelCatalogSource: "fallback",
       skills: [],
       probe: {
         installed: true,
@@ -1777,6 +1843,7 @@ export const checkCodexCliProviderStatus = Effect.fn("checkCodexCliProviderStatu
       enabled: codexSettings.enabled,
       checkedAt,
       models,
+      codexModelCatalogSource: "fallback",
       skills: [],
       probe: {
         installed: true,
@@ -1797,6 +1864,7 @@ export const checkCodexCliProviderStatus = Effect.fn("checkCodexCliProviderStatu
       enabled: codexSettings.enabled,
       checkedAt,
       models,
+      codexModelCatalogSource: "fallback",
       skills: [],
       probe: {
         installed: true,
@@ -1837,7 +1905,8 @@ export const checkCodexCliProviderStatus = Effect.fn("checkCodexCliProviderStatu
     presentation: CODEX_PRESENTATION,
     enabled: codexSettings.enabled,
     checkedAt,
-    models,
+    models: fallbackCodexModelsFromSettings(codexSettings, accountStatus.auth),
+    codexModelCatalogSource: "fallback",
     skills: [],
     probe: {
       installed: true,

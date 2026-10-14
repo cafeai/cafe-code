@@ -262,11 +262,27 @@ export function buildServerProvider(input: {
   enabled: boolean;
   checkedAt: string;
   models: ReadonlyArray<ServerProviderModel>;
+  codexModelCatalogSource?: ServerProvider["codexModelCatalogSource"];
   slashCommands?: ReadonlyArray<ServerProviderSlashCommand>;
   skills?: ReadonlyArray<ServerProviderSkill>;
   runtimeCapabilities?: ServerProviderRuntimeCapabilities;
   probe: ProviderProbeResult;
 }): ServerProviderDraft {
+  // Origin is an explicit inert producer field. Do not invoke an accessor
+  // or accept inherited metadata merely because the remaining draft is
+  // structurally typed; malformed source alone is safe to omit.
+  const codexModelCatalogSource = (() => {
+    try {
+      const descriptor = Object.getOwnPropertyDescriptor(input, "codexModelCatalogSource");
+      return descriptor &&
+        "value" in descriptor &&
+        (descriptor.value === "fallback" || descriptor.value === "native")
+        ? (descriptor.value as ServerProvider["codexModelCatalogSource"])
+        : undefined;
+    } catch {
+      return undefined;
+    }
+  })();
   const versionAdvisory = input.driver
     ? createProviderVersionAdvisory({
         driver: input.driver,
@@ -290,6 +306,14 @@ export function buildServerProvider(input: {
     checkedAt: input.checkedAt,
     ...(input.probe.message ? { message: input.probe.message } : {}),
     models: input.models,
+    // Draft producers may omit driver until their owning instance supplies
+    // it. They must explicitly label a catalogue; neither an omitted driver,
+    // successful health nor array contents implies native discovery. An
+    // explicitly foreign driver cannot receive this Codex-only metadata.
+    ...((input.driver === undefined || input.driver === "codex") &&
+    codexModelCatalogSource !== undefined
+      ? { codexModelCatalogSource }
+      : {}),
     slashCommands: [...(input.slashCommands ?? [])],
     skills: [...(input.skills ?? [])],
     ...(input.probe.accountRateLimits ? { accountRateLimits: input.probe.accountRateLimits } : {}),

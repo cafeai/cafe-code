@@ -2,7 +2,11 @@ import { describe, expect, it } from "vitest";
 import { ProviderDriverKind, type ModelCapabilities } from "@cafecode/contracts";
 import { createModelCapabilities } from "@cafecode/shared/model";
 
-import { parseGenericCliVersion, providerModelsFromSettings } from "./providerSnapshot.ts";
+import {
+  buildServerProvider,
+  parseGenericCliVersion,
+  providerModelsFromSettings,
+} from "./providerSnapshot.ts";
 import { supportsSubagentConcurrency } from "./Drivers/SubagentConcurrency.ts";
 
 const CUSTOM_MODEL_CAPABILITIES: ModelCapabilities = createModelCapabilities({
@@ -122,5 +126,69 @@ describe("providerModelsFromSettings", () => {
         capabilities: CUSTOM_MODEL_CAPABILITIES,
       },
     ]);
+  });
+});
+
+describe("buildServerProvider catalogue provenance", () => {
+  const input = {
+    driver: ProviderDriverKind.make("codex"),
+    presentation: { displayName: "Codex" },
+    enabled: true,
+    checkedAt: "2026-04-10T00:00:00.000Z",
+    models: [],
+    probe: {
+      installed: true,
+      version: "0.162.1",
+      status: "ready" as const,
+      auth: { status: "authenticated" as const },
+    },
+  };
+
+  it("forwards explicit finite Codex provenance and does not infer it from successful health", () => {
+    expect(buildServerProvider(input)).not.toHaveProperty("codexModelCatalogSource");
+    for (const codexModelCatalogSource of ["fallback", "native"] as const) {
+      expect(
+        buildServerProvider({ ...input, codexModelCatalogSource }).codexModelCatalogSource,
+      ).toBe(codexModelCatalogSource);
+    }
+  });
+
+  it("never grants another driver Codex catalogue provenance", () => {
+    expect(
+      buildServerProvider({
+        ...input,
+        driver: ProviderDriverKind.make("claudeAgent"),
+        codexModelCatalogSource: "native",
+      }),
+    ).not.toHaveProperty("codexModelCatalogSource");
+    const { driver: _draftDriver, ...draftInput } = input;
+    const draft = buildServerProvider({
+      ...draftInput,
+      codexModelCatalogSource: "native",
+    });
+    expect(draft.codexModelCatalogSource).toBe("native");
+    expect(draft).not.toHaveProperty("versionAdvisory");
+    expect(buildServerProvider(draftInput)).not.toHaveProperty("codexModelCatalogSource");
+  });
+
+  it("requires an own inert finite origin without invoking its getter", () => {
+    const inherited = Object.assign(Object.create({ codexModelCatalogSource: "native" }), input);
+    expect(buildServerProvider(inherited)).not.toHaveProperty("codexModelCatalogSource");
+    let getterCalls = 0;
+    const accessor = Object.defineProperty({ ...input }, "codexModelCatalogSource", {
+      get() {
+        getterCalls += 1;
+        throw new Error("must not inspect producer accessors");
+      },
+    });
+    expect(buildServerProvider(accessor)).not.toHaveProperty("codexModelCatalogSource");
+    expect(getterCalls).toBe(0);
+    for (const source of [null, "assumed-native", { source: "native" }, 1]) {
+      expect(
+        buildServerProvider({ ...input, codexModelCatalogSource: source } as unknown as Parameters<
+          typeof buildServerProvider
+        >[0]),
+      ).not.toHaveProperty("codexModelCatalogSource");
+    }
   });
 });

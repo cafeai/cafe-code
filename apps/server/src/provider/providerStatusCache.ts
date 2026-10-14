@@ -71,11 +71,17 @@ export const hydrateCachedProvider = (input: {
   }
 
   const { message: _fallbackMessage, ...fallbackWithoutMessage } = input.fallbackProvider;
+  const { codexModelCatalogSource: _cachedCatalogueSource } = input.cachedProvider;
+  const historicalModels =
+    input.cachedProvider.driver === "codex" &&
+    input.cachedProvider.codexModelCatalogSource === "native"
+      ? input.cachedProvider.models
+      : mergeProviderModels(input.fallbackProvider.models, input.cachedProvider.models);
   const cachedProbeDiagnostics = input.cachedProvider.probeDiagnostics;
   const fallbackProbeDiagnostics = input.fallbackProvider.probeDiagnostics;
   const hydratedProvider: ServerProvider = {
     ...fallbackWithoutMessage,
-    models: mergeProviderModels(input.fallbackProvider.models, input.cachedProvider.models),
+    models: historicalModels,
     installed: input.cachedProvider.installed,
     version: input.cachedProvider.version,
     status: input.cachedProvider.status,
@@ -100,6 +106,17 @@ export const hydrateCachedProvider = (input: {
         }
       : {}),
   };
+
+  // Cached native rows remain exact historical presentation, including an
+  // explicitly empty catalogue. The new live scope has not discovered them:
+  // never hydrate native qualification from a reusable instance-id cache.
+  if (input.cachedProvider.driver === "codex" && _cachedCatalogueSource === "native") {
+    const { codexModelCatalogSource: _fallbackCatalogueSource, ...historicalProvider } =
+      hydratedProvider;
+    return input.cachedProvider.message
+      ? { ...historicalProvider, message: input.cachedProvider.message }
+      : historicalProvider;
+  }
 
   return input.cachedProvider.message
     ? { ...hydratedProvider, message: input.cachedProvider.message }

@@ -138,6 +138,82 @@ it.layer(NodeServices.layer)("providerStatusCache", (it) => {
     );
   });
 
+  for (const cachedModels of [
+    [],
+    [
+      {
+        slug: "native-only",
+        name: "Native only",
+        isCustom: false,
+        capabilities: emptyCapabilities,
+      },
+    ],
+  ] satisfies ReadonlyArray<ServerProvider["models"]>) {
+    it.effect(
+      `round-trips ${cachedModels.length === 0 ? "empty" : "nonempty"} native catalogue provenance but does not hydrate live qualification`,
+      () =>
+        Effect.gen(function* () {
+          const fs = yield* FileSystem.FileSystem;
+          const tempDir = yield* fs.makeTempDirectoryScoped({
+            prefix: "cafe-native-catalogue-cache-",
+          });
+          const cached = makeProvider(CODEX_DRIVER, {
+            auth: { status: "authenticated", type: "chatgpt", email: "cached@example.test" },
+            codexModelCatalogSource: "native",
+            models: cachedModels,
+          });
+          const fallback = makeProvider(CODEX_DRIVER, {
+            status: "warning",
+            auth: { status: "unknown" },
+            codexModelCatalogSource: "fallback",
+            models: [
+              {
+                slug: "static-omitted",
+                name: "Static omitted",
+                isCustom: false,
+                capabilities: emptyCapabilities,
+              },
+            ],
+          });
+          const filePath = yield* resolveProviderStatusCachePath({
+            cacheDir: tempDir,
+            instanceId: cached.instanceId,
+          });
+          yield* writeProviderStatusCache({ filePath, provider: cached });
+          const read = yield* readProviderStatusCache(filePath);
+          assert.deepStrictEqual(read, cached);
+          assert.ok(read);
+          const hydrated = hydrateCachedProvider({
+            cachedProvider: read,
+            fallbackProvider: fallback,
+          });
+          assert.deepStrictEqual(hydrated.models, cachedModels);
+          assert.deepStrictEqual(hydrated.auth, cached.auth);
+          assert.strictEqual(hydrated.codexModelCatalogSource, undefined);
+          assert.strictEqual(hydrated.checkedAt, cached.checkedAt);
+          assert.strictEqual(hydrated.status, cached.status);
+        }),
+    );
+  }
+
+  it("does not interpret foreign-driver cache metadata as native Codex catalogue proof", () => {
+    const foreign = ProviderDriverKind.make("externalDriver");
+    const fallback = makeProvider(foreign, {
+      models: [
+        { slug: "fallback", name: "Fallback", isCustom: false, capabilities: emptyCapabilities },
+      ],
+    });
+    const cached = makeProvider(foreign, {
+      codexModelCatalogSource: "native",
+      models: [
+        { slug: "cached", name: "Cached", isCustom: false, capabilities: emptyCapabilities },
+      ],
+    });
+    const hydrated = hydrateCachedProvider({ cachedProvider: cached, fallbackProvider: fallback });
+    assert.deepStrictEqual(hydrated.models, [...fallback.models, ...cached.models]);
+    assert.strictEqual(hydrated.codexModelCatalogSource, undefined);
+  });
+
   it("hydrates probe history without reviving the previous scope's schedule", () => {
     const cachedCodex = makeProvider(CODEX_DRIVER, {
       probeDiagnostics: {

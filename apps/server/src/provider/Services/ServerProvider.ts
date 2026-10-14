@@ -6,6 +6,14 @@ import type { ProviderMaintenanceCapabilities } from "../providerMaintenance.ts"
 export interface ServerProviderShape {
   readonly maintenanceCapabilities: ProviderMaintenanceCapabilities;
   readonly getSnapshot: Effect.Effect<ServerProvider>;
+  /**
+   * Read only the snapshot already owned by this exact provider scope. Unlike
+   * getSnapshot, this must not inspect settings, launch a probe, enrich metadata,
+   * or mutate state. Registry delivery uses it to avoid replaying an older
+   * direct/stream copy after a newer catalogue has already been published.
+   * Legacy providers omit it and retain their existing delivery semantics.
+   */
+  readonly getCurrentSnapshot?: Effect.Effect<ServerProvider>;
   readonly refresh: Effect.Effect<ServerProvider>;
   /**
    * Refresh account-scoped usage metadata without executing the provider's

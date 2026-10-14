@@ -3,8 +3,11 @@ import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Path from "effect/Path";
+import * as Queue from "effect/Queue";
 import * as Schema from "effect/Schema";
-import { ChildProcess } from "effect/unstable/process";
+import * as Sink from "effect/Sink";
+import * as Stream from "effect/Stream";
+import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process";
 import type * as CodexClient from "effect-codex-app-server/client";
 import type * as CodexSchema from "effect-codex-app-server/schema";
 import { describe, expect, it } from "vitest";
@@ -12,12 +15,16 @@ import { describe, expect, it } from "vitest";
 import {
   CODEX_MODEL_LIST_MAX_MODELS,
   CODEX_MODEL_LIST_MAX_PAGES,
+  checkCodexCliProviderStatus,
+  checkCodexProviderStatus,
   fallbackCodexModelsFromSettings,
   finalizeCodexModelListRefresh,
   makeCodexHealthProbeCommand,
   makeCodexModelListCommand,
+  makePendingCodexProvider,
   requestAllCodexModelsWithClient,
   readCodexUsageIdentity,
+  type CodexAppServerProviderSnapshot,
 } from "./CodexProvider.ts";
 import { terminateProbeChild } from "../providerSnapshot.ts";
 
@@ -82,6 +89,443 @@ const makeModelListClient = (
       return request(payload);
     }) as CodexClient.CodexAppServerClientShape["request"],
   }) as CodexClient.CodexAppServerClientShape;
+
+describe("Codex account-scoped fallback catalogue", () => {
+  const retired = ["gpt-5.5", "gpt-5.4", "gpt-5.4-mini", "gpt-5.3-codex-spark"];
+  const settings = decodeCodexSettings({});
+  const chatGptAuth = { status: "authenticated", type: "chatgpt" };
+
+  it("omits only retired built-ins after conclusive ChatGPT authentication", () => {
+    const baseline = fallbackCodexModelsFromSettings(settings);
+    expect(baseline.filter((row) => retired.includes(row.slug)).map((row) => row.slug)).toEqual(
+      retired,
+    );
+    expect(fallbackCodexModelsFromSettings(settings, chatGptAuth)).toEqual(
+      baseline.filter((row) => !retired.includes(row.slug)),
+    );
+    expect(fallbackCodexModelsFromSettings(settings, chatGptAuth)[0]?.slug).toBe("gpt-6-astra");
+  });
+
+  it.each([
+    undefined,
+    null,
+    { status: "unknown", type: "chatgpt" },
+    { status: "unauthenticated", type: "chatgpt" },
+    { status: "authenticated", type: "apiKey" },
+    { status: "authenticated", type: "amazonBedrock" },
+    { status: "authenticated" },
+    { type: "chatgpt" },
+    { status: "authenticated", type: "CHATGPT" },
+    [{ status: "authenticated", type: "chatgpt" }],
+  ])("keeps API and inconclusive authentication fallback unchanged (%j)", (auth) => {
+    expect(fallbackCodexModelsFromSettings(settings, auth)).toEqual(
+      fallbackCodexModelsFromSettings(settings),
+    );
+  });
+
+  it("does not invoke getters or borrow inherited/revoked-proxy authentication", () => {
+    let getterCalls = 0;
+    const accessor = Object.defineProperty({ type: "chatgpt" }, "status", {
+      get: () => {
+        getterCalls += 1;
+        return "authenticated";
+      },
+    });
+    const inherited: unknown = Object.create(chatGptAuth);
+    const revoked = Proxy.revocable(chatGptAuth, {});
+    revoked.revoke();
+    const trapped = new Proxy(chatGptAuth, {
+      getOwnPropertyDescriptor: () => {
+        throw new Error("Synthetic descriptor refusal");
+      },
+    });
+    for (const auth of [accessor, inherited, revoked.proxy, trapped]) {
+      expect(fallbackCodexModelsFromSettings(settings, auth)).toEqual(
+        fallbackCodexModelsFromSettings(settings),
+      );
+    }
+    expect(getterCalls).toBe(0);
+  });
+
+  it("retains explicit retired custom rows with their own original controls and ordering", () => {
+    const configured = decodeCodexSettings({
+      customModels: ["gpt-5.3-codex-spark", "gpt-5.5", "gpt-5.4-mini", "gpt-5.4"],
+    });
+    const baseline = fallbackCodexModelsFromSettings(settings);
+    const models = fallbackCodexModelsFromSettings(configured, chatGptAuth);
+    expect(models.slice(-4).map((row) => row.slug)).toEqual(configured.customModels);
+    for (const slug of retired) {
+      const original = baseline.find((row) => row.slug === slug);
+      expect(original).toBeDefined();
+      expect(models.filter((row) => row.slug === slug)).toEqual([{ ...original, isCustom: true }]);
+    }
+    const spark = models.find((row) => row.slug === "gpt-5.3-codex-spark");
+    expect(spark?.capabilities?.optionDescriptors).toMatchObject([
+      { id: "reasoningEffort", currentValue: "high" },
+    ]);
+    expect(spark?.capabilities?.optionDescriptors).toHaveLength(1);
+    expect(configured.customModels).toEqual([
+      "gpt-5.3-codex-spark",
+      "gpt-5.5",
+      "gpt-5.4-mini",
+      "gpt-5.4",
+    ]);
+    // Native custom supplementation retains the existing unknown-control
+    // policy; the new static filter cannot replace any authoritative row.
+    const native = [{ slug: "native", name: "Native", isCustom: false, capabilities: null }];
+    expect(finalizeCodexModelListRefresh(native, ["gpt-5.5"])?.[1]).toEqual({
+      slug: "gpt-5.5",
+      name: "gpt-5.5",
+      isCustom: true,
+      capabilities: null,
+    });
+  });
+
+  it.each([
+    { login: "Logged in using ChatGPT", auth: chatGptAuth, filtered: true },
+    {
+      login: "Logged in using an API key - synthetic",
+      auth: { status: "authenticated", type: "apiKey" },
+      filtered: false,
+    },
+    {
+      login: "Logged in using access token",
+      auth: { status: "authenticated", type: "accessToken" },
+      filtered: false,
+    },
+    {
+      login: "Unrecognized synthetic successful login",
+      auth: { status: "unknown" },
+      filtered: false,
+    },
+  ])(
+    "labels actual lightweight CLI status as fallback for $login",
+    async ({ login, auth, filtered }) => {
+      const commands: ReadonlyArray<string>[] = [];
+      let fileReads = 0;
+      const spawner = ChildProcessSpawner.make((command) => {
+        if (!ChildProcess.isStandardCommand(command)) return Effect.die("Unexpected pipeline");
+        commands.push(command.args);
+        expect(command.command).toBe("synthetic-codex");
+        expect(command.options.env).toEqual({ CAFE_TEST_ONLY: "catalogue" });
+        const stdout =
+          command.args.length === 1 && command.args[0] === "--version"
+            ? "codex-cli 0.162.1"
+            : command.args.length === 2 &&
+                command.args[0] === "login" &&
+                command.args[1] === "status"
+              ? login
+              : undefined;
+        if (stdout === undefined) return Effect.die("Unexpected provider command");
+        return Effect.succeed(
+          ChildProcessSpawner.makeHandle({
+            pid: ChildProcessSpawner.ProcessId(1),
+            exitCode: Effect.succeed(ChildProcessSpawner.ExitCode(0)),
+            isRunning: Effect.succeed(false),
+            kill: () => Effect.void,
+            unref: Effect.succeed(Effect.void),
+            stdin: Sink.drain,
+            stdout: Stream.make(new TextEncoder().encode(stdout)),
+            stderr: Stream.empty,
+            all: Stream.empty,
+            getInputFd: () => Sink.drain,
+            getOutputFd: () => Stream.empty,
+          }),
+        );
+      });
+      const snapshot = await Effect.runPromise(
+        checkCodexCliProviderStatus(
+          decodeCodexSettings({ binaryPath: "synthetic-codex", homePath: "" }),
+          { CAFE_TEST_ONLY: "catalogue" },
+        ).pipe(
+          Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
+          Effect.provideService(
+            FileSystem.FileSystem,
+            FileSystem.makeNoop({
+              readFileString: () => {
+                fileReads += 1;
+                return Effect.die("No fixture or inherited authentication home is available");
+              },
+            }),
+          ),
+          Effect.provide(Path.layer),
+        ),
+      );
+      expect(commands).toEqual([["--version"], ["login", "status"]]);
+      expect(fileReads).toBe(0);
+      expect(snapshot.auth).toMatchObject(auth);
+      expect(snapshot.codexModelCatalogSource).toBe("fallback");
+      expect(snapshot).not.toHaveProperty("versionAdvisory");
+      expect(snapshot.models).toEqual(fallbackCodexModelsFromSettings(settings, auth));
+      expect(snapshot.models.some((row) => retired.includes(row.slug))).toBe(!filtered);
+      expect(snapshot.probePhases?.map(({ phase, outcome }) => ({ phase, outcome }))).toEqual([
+        { phase: "version", outcome: "success" },
+        { phase: "login-status", outcome: "success" },
+        { phase: "account-usage", outcome: "skipped" },
+      ]);
+    },
+  );
+
+  it("marks pending and disabled static drafts fallback without borrowing future authentication", async () => {
+    for (const enabled of [true, false]) {
+      const snapshot = await Effect.runPromise(
+        makePendingCodexProvider(decodeCodexSettings({ enabled })),
+      );
+      expect(snapshot.codexModelCatalogSource).toBe("fallback");
+      expect(snapshot.models).toEqual(fallbackCodexModelsFromSettings(settings));
+      expect(snapshot.auth).toEqual({ status: "unknown" });
+      expect(snapshot).not.toHaveProperty("versionAdvisory");
+    }
+  });
+});
+
+describe("Codex catalogue producer provenance", () => {
+  const models = [{ slug: "gpt-5.5", name: "Native GPT-5.5", isCustom: false, capabilities: null }];
+  const makeSnapshot = (): CodexAppServerProviderSnapshot => ({
+    account: {
+      account: { type: "chatgpt", email: "synthetic@example.invalid", planType: "plus" },
+      requiresOpenaiAuth: true,
+    },
+    version: "0.162.1",
+    models,
+    skills: [],
+  });
+  const status = (snapshot: CodexAppServerProviderSnapshot) =>
+    Effect.runPromise(
+      checkCodexProviderStatus(decodeCodexSettings({}), () => Effect.succeed(snapshot), {}).pipe(
+        Effect.provideService(
+          ChildProcessSpawner.ChildProcessSpawner,
+          ChildProcessSpawner.make(() => Effect.die("Injected snapshot must not launch a process")),
+        ),
+      ),
+    );
+
+  it.each(["native", "fallback"] as const)(
+    "carries explicit own %s provenance without filtering native rows",
+    async (source) => {
+      const snapshot = await status({ ...makeSnapshot(), codexModelCatalogSource: source });
+      expect(snapshot.codexModelCatalogSource).toBe(source);
+      expect(snapshot.models).toEqual(models);
+      expect(snapshot).not.toHaveProperty("versionAdvisory");
+    },
+  );
+
+  it("keeps missing, inherited, accessor and malformed provenance unknown", async () => {
+    let getterCalls = 0;
+    const inherited = makeSnapshot();
+    Object.setPrototypeOf(inherited, { codexModelCatalogSource: "native" });
+    const accessor = Object.defineProperty(makeSnapshot(), "codexModelCatalogSource", {
+      get: () => {
+        getterCalls += 1;
+        return "native";
+      },
+    });
+    const malformed = Object.defineProperty(makeSnapshot(), "codexModelCatalogSource", {
+      value: "provider-defined-native",
+    });
+    for (const native of [makeSnapshot(), inherited, accessor, malformed]) {
+      const snapshot = await status(native);
+      expect(snapshot).not.toHaveProperty("codexModelCatalogSource");
+      expect(snapshot.models).toEqual(models);
+    }
+    expect(getterCalls).toBe(0);
+  });
+
+  it("marks full-status disabled custom-only fallback without executing its probe", async () => {
+    let probes = 0;
+    const snapshot = await Effect.runPromise(
+      checkCodexProviderStatus(
+        decodeCodexSettings({ enabled: false, customModels: ["gpt-5.5"] }),
+        () => {
+          probes += 1;
+          return Effect.succeed(makeSnapshot());
+        },
+        {},
+      ).pipe(
+        Effect.provideService(
+          ChildProcessSpawner.ChildProcessSpawner,
+          ChildProcessSpawner.make(() => Effect.die("Disabled status must not launch a process")),
+        ),
+      ),
+    );
+    expect(probes).toBe(0);
+    expect(snapshot.codexModelCatalogSource).toBe("fallback");
+    expect(snapshot.models).toEqual([
+      { slug: "gpt-5.5", name: "gpt-5.5", isCustom: true, capabilities: null },
+    ]);
+  });
+
+  it.each([
+    { label: "ChatGPT native", type: "chatgpt", requiresAuth: true, empty: false, failed: false },
+    { label: "API native", type: "apiKey", requiresAuth: true, empty: false, failed: false },
+    { label: "unknown native", type: "unknown", requiresAuth: false, empty: false, failed: false },
+    { label: "native empty", type: "chatgpt", requiresAuth: true, empty: true, failed: false },
+    {
+      label: "unauthenticated early return",
+      type: "unknown",
+      requiresAuth: true,
+      empty: false,
+      failed: false,
+    },
+    {
+      label: "failed model discovery",
+      type: "chatgpt",
+      requiresAuth: true,
+      empty: false,
+      failed: true,
+    },
+  ])(
+    "labels $label only after the real typed native model/list exchange",
+    async ({ type, requiresAuth, empty, failed }) => {
+      const methods: string[] = [];
+      const commands: ReadonlyArray<string>[] = [];
+      const account =
+        type === "chatgpt"
+          ? { type: "chatgpt", email: "synthetic@example.invalid", planType: "plus" }
+          : type === "apiKey"
+            ? { type: "apiKey" }
+            : null;
+      const earlyReturn = account === null && requiresAuth;
+      const snapshot = await Effect.runPromise(
+        Effect.gen(function* () {
+          // Exercise the production full probe and JSONL codec, not a callback
+          // invocation as proof. The peer owns only these finite metadata replies;
+          // no native provider, profile, filesystem, HTTP or paid turn is involved.
+          const output = yield* Queue.unbounded<Uint8Array>();
+          const decoder = new TextDecoder();
+          const encoder = new TextEncoder();
+          const decodeRequest = Schema.decodeUnknownSync(
+            Schema.Struct({
+              id: Schema.optionalKey(Schema.Union([Schema.String, Schema.Number])),
+              method: Schema.String,
+              params: Schema.optionalKey(Schema.Unknown),
+            }),
+          );
+          let pending = "";
+          const spawner = ChildProcessSpawner.make((command) => {
+            if (!ChildProcess.isStandardCommand(command)) return Effect.die("Unexpected pipeline");
+            expect(command.command).toBe("synthetic-codex");
+            commands.push(command.args);
+            return Effect.succeed(
+              ChildProcessSpawner.makeHandle({
+                pid: ChildProcessSpawner.ProcessId(1),
+                exitCode: Effect.never,
+                isRunning: Effect.succeed(false),
+                kill: () => Effect.void,
+                unref: Effect.succeed(Effect.void),
+                stdin: Sink.forEach((chunk: Uint8Array) =>
+                  Effect.gen(function* () {
+                    pending += decoder.decode(chunk, { stream: true });
+                    const lines = pending.split("\n");
+                    pending = lines.pop() ?? "";
+                    for (const line of lines) {
+                      const request = decodeRequest(JSON.parse(line));
+                      methods.push(request.method);
+                      if (request.id === undefined) {
+                        expect(request.method).toBe("initialized");
+                        continue;
+                      }
+                      let result: unknown;
+                      switch (request.method) {
+                        case "initialize":
+                          result = {
+                            userAgent: "synthetic/0.162.1",
+                            codexHome: process.cwd(),
+                            platformFamily: "synthetic",
+                            platformOs: "synthetic",
+                          };
+                          break;
+                        case "account/read":
+                          expect(request.params).toEqual({});
+                          result = { account, requiresOpenaiAuth: requiresAuth };
+                          break;
+                        case "account/rateLimits/read":
+                          result = { rateLimits: {} };
+                          break;
+                        case "skills/list":
+                          expect(request.params).toEqual({ cwds: [process.cwd()] });
+                          result = { data: [] };
+                          break;
+                        case "model/list":
+                          expect(request.params).toEqual({ limit: 100 });
+                          result = { data: empty ? [] : [makeModel("gpt-5.5")] };
+                          break;
+                        default:
+                          return yield* Effect.die("Unexpected metadata or paid request");
+                      }
+                      yield* Queue.offer(
+                        output,
+                        encoder.encode(
+                          `${JSON.stringify({
+                            id: request.id,
+                            ...(failed && request.method === "model/list"
+                              ? {
+                                  error: {
+                                    code: -32603,
+                                    message: "Synthetic model discovery refused",
+                                  },
+                                }
+                              : { result }),
+                          })}\n`,
+                        ),
+                      );
+                    }
+                  }),
+                ),
+                stdout: Stream.fromQueue(output),
+                stderr: Stream.empty,
+                all: Stream.empty,
+                getInputFd: () => Sink.drain,
+                getOutputFd: () => Stream.empty,
+              }),
+            );
+          });
+          return yield* checkCodexProviderStatus(
+            decodeCodexSettings({
+              binaryPath: "synthetic-codex",
+              homePath: "",
+              customModels: ["custom-model"],
+            }),
+            undefined,
+            { CAFE_TEST_ONLY: "native-catalogue" },
+          ).pipe(Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner));
+        }).pipe(Effect.scoped),
+      );
+      expect(commands).toEqual([["app-server"]]);
+      expect(methods.slice(0, 3)).toEqual(["initialize", "initialized", "account/read"]);
+      expect(methods.slice(3).sort()).toEqual(
+        earlyReturn
+          ? []
+          : [...(account ? ["account/rateLimits/read"] : []), "model/list", "skills/list"].sort(),
+      );
+      expect(snapshot.codexModelCatalogSource).toBe(earlyReturn || failed ? "fallback" : "native");
+      expect(snapshot.models.map((row) => row.slug)).toEqual(
+        earlyReturn || failed || empty ? ["custom-model"] : ["gpt-5.5", "custom-model"],
+      );
+      expect(snapshot.models.find((row) => row.slug === "custom-model")?.isCustom).toBe(true);
+      if (!earlyReturn && !failed && !empty) {
+        expect(snapshot.models[0]).toMatchObject({
+          slug: "gpt-5.5",
+          name: "GPT-5.5",
+          isCustom: false,
+        });
+        const options = snapshot.models[0]?.capabilities?.optionDescriptors;
+        expect(options?.find((entry) => entry.id === "reasoningEffort")).toMatchObject({
+          currentValue: "medium",
+          options: [{ id: "medium", isDefault: true }],
+        });
+        const tier = options?.find((entry) => entry.id === "serviceTier");
+        expect(tier).toMatchObject({ options: [{ id: "default", label: "Standard" }] });
+        expect(tier).not.toHaveProperty("currentValue");
+      }
+      if (earlyReturn || failed) expect(snapshot.status).toBe("error");
+      else expect(snapshot.status).toBe("ready");
+      // Only the diagnostic full catalogue can be known empty. The model-only
+      // producer's existing empty-as-inconclusive rule remains unchanged.
+      expect(finalizeCodexModelListRefresh([], ["custom-model"])).toBeUndefined();
+    },
+  );
+});
 
 describe("Codex CLI health probe command", () => {
   // These inert command spellings exercise the real factory on each CI host.

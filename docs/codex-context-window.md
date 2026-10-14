@@ -2,7 +2,7 @@
 
 Status: Implemented; native account capacity and hosted release qualification are separate
 Created: 2026-10-12 11:10:24 JST (UTC+0900)
-Last updated: 2026-10-15 03:07:23 JST (UTC+0900)
+Last updated: 2026-10-15 07:30:52 JST (UTC+0900)
 
 For Codex chats, use **More composer controls → Context window…** beneath
 Subagent limit… to save a custom token count. Blank or Reset removes the chat's
@@ -58,8 +58,9 @@ headroom. An override cannot grant capacity unsupported by the model/account;
 there is no universal 500k or 1m default.
 
 An active context override also requests an auto-compaction limit using the same
-nominal number, so a smaller fixed model/config threshold does not silently
-defeat the larger-window choice. A separate **Auto-compact override** in provider
+nominal number instead of leaving a smaller nominal configuration request in
+place. This pairs requests; it does not bypass native model maximums, accounting
+scope or the reviewed total-scope 90% clamp. A separate **Auto-compact override** in provider
 Settings takes precedence and can still compact earlier. With neither override,
 Cafe omits both requests and lets Codex configuration/model defaults decide.
 Resetting a chat still pairs an inherited provider context default; clearing the
@@ -103,10 +104,38 @@ child's effective inherited policy.
 Reasoning can consume context capacity, but its reported count is not added again
 to native total usage. Neither an early visible-meter value nor an 800K request
 proves a 500K/720K effective threshold. Native reason, scope and resolved trigger
-remain explicitly unreported until the provider supplies evidence. No history or
-private content is read to manufacture them. Tracing becomes available after
+remain explicitly unreported until the provider supplies evidence. The production
+debug trace reads no history or private content to manufacture them. Tracing becomes available after
 normal rebuilt owner adoption; it does not retrofit old events or restart active
 work. See [the observation decision](decisions/codex-compaction-observation-diagnostics.md).
+
+The last API total is not necessarily Codex's internal compaction count. At the
+[pinned native revision](https://github.com/openai/codex/blob/092d3acd6bec3e3a14bdc7e7a2810ab628ab759d/codex-rs/core/src/context_manager/history.rs#L934),
+Codex also estimates locally added items after the last model output and, under a
+separate native flag, older encrypted reasoning. The reported reasoning-output
+scalar does not reveal that older estimate. Debug's pre-start sample is therefore
+received-order API evidence, not proof of the full active trigger count. No fixed
+300K reasoning reserve was found in the reviewed threshold path. The exact branch
+and effective limit require native telemetry; possibilities are not cause proof.
+The selecting flag originates from an optional native response-header signal,
+not the app-server usage payload. In the reviewed client it starts false and a
+received signal sets it true; later absent headers do not clear it. Neither that
+header nor the flag is persisted in the ordinary turn rollout. See the
+[native response handling](https://github.com/openai/codex/blob/092d3acd6bec3e3a14bdc7e7a2810ab628ab759d/codex-rs/codex-api/src/sse/responses.rs#L54).
+
+A separately authorized October 15 forensic investigation used offline REA
+artifact metadata and scalar-only native-history inspection. It found a specific
+conditional explanation for a 458,789-token API sample: 260,191 estimated older
+encrypted-reasoning tokens plus a 10,048-token local tool-output estimate produce
+729,028 under the native branch that adds older reasoning. The captured output's
+12,000-token truncation allowance preserves both text parts. The alternative branch
+that already accounts for older reasoning produces 468,837. These are reconstructed
+persisted-history arithmetic, not an observed execution counter: the selecting
+`server_reasoning_included` flag, resolved threshold/scope and trigger reason/phase
+are not saved in the ordinary rollout. Writer timestamps are not exact execution
+boundaries. The result is consistent with the nominal ~720K example, but neither
+proves that branch nor establishes a fixed ~500K capacity or an ignored override.
+No compaction-policy change is made from this conditional evidence.
 
 Use the repository's normal rebuilt daemon/session adoption. Saving the preference
 does not upgrade/install Codex or restart an active daemon. Native availability
