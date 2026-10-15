@@ -8,6 +8,46 @@ const workflow = (name: string) =>
   parse(readFileSync(resolve(root, ".github/workflows", name), "utf8"));
 
 describe("release publication gates", () => {
+  it("keeps manual branch publication behind the complete release gates before minting its tag", () => {
+    const release = workflow("release.yml");
+    expect(release.on.workflow_dispatch.inputs.version.required).toBe(true);
+    expect(release.on.workflow_dispatch.inputs.publish_release).toEqual({
+      description: "Create the tag and publish only after all release gates pass",
+      type: "boolean",
+      default: false,
+    });
+    expect(release.jobs.publish.if).toBe(
+      "github.event_name != 'workflow_dispatch' || inputs.publish_release",
+    );
+    expect(release.jobs.publish.needs).toEqual(["prepare", "quality", "reliability", "artifacts"]);
+    expect(release.jobs.publish.env.RELEASE_TAG).toBe("${{ needs.prepare.outputs.tag }}");
+    const steps = release.jobs.publish.steps;
+    const publication = steps.findIndex(
+      (step: { name?: string }) => step.name === "Create GitHub release",
+    );
+    expect(steps[publication].run).toContain(
+      'git push origin "${RELEASE_SOURCE_SHA}:refs/tags/${RELEASE_TAG}"',
+    );
+    expect(steps[publication].run).not.toContain("--force");
+    for (const name of [
+      "Verify qualified artifact identities",
+      "Validate release manifests and checksums",
+      "Qualify candidate update feed before publication",
+    ]) {
+      expect(steps.findIndex((step: { name?: string }) => step.name === name)).toBeLessThan(
+        publication,
+      );
+    }
+    const prepare = release.jobs.prepare.steps.find(
+      (step: { id?: string }) => step.id === "release",
+    );
+    expect(prepare.env.RELEASE_TAG_INPUT).toBe(
+      "${{ github.event_name == 'workflow_dispatch' && inputs.version || github.ref_name }}",
+    );
+    expect(prepare.run).toContain('tag="${RELEASE_TAG_INPUT}"');
+    expect(prepare.run).toContain('echo "tag=${tag}"');
+  });
+
   it("scopes native sandbox and private keychain setup to their exact artifact smoke steps", () => {
     const flags = [
       "CAFE_CODE_LINUX_ARTIFACT_PREPARE_SANDBOX",

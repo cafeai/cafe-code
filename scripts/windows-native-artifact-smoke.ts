@@ -1,6 +1,6 @@
 import { spawn } from "node:child_process";
 import { existsSync } from "node:fs";
-import { mkdtemp, readdir, rm } from "node:fs/promises";
+import { mkdtemp, readFile, readdir, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
@@ -178,6 +178,30 @@ function assertSuccessful(result: ProcessResult, operation: string): void {
   throw new Error(`${operation} exited nonzero.\n${details.join("\n\n")}`);
 }
 
+export function summarizeManagedBootstrapFailure(source: string): string {
+  const receipts = source
+    .slice(-16_384)
+    .split(/\r?\n/)
+    .filter((line) =>
+      /^\[[0-9T:.+Z-]+\] Bootstrap failure phase=(?:resolve|guard|prepare|generation|settings|publication) nativeExit=(?:unknown|-?\d{1,11}) line=\d{1,6} hresult=-?\d{1,11}$/u.test(
+        line,
+      ),
+    );
+  return receipts.at(-1) ?? "No bounded bootstrap failure receipt was written.";
+}
+
+async function readManagedBootstrapFailure(): Promise<string> {
+  const path = join(process.env.LOCALAPPDATA ?? "", "CafeCode", "installer-managed-runtime.log");
+  try {
+    const info = await stat(path);
+    if (!info.isFile() || info.size > 65_536)
+      return "Installer log was absent or outside the fixture read limit.";
+    return summarizeManagedBootstrapFailure(await readFile(path, "utf8"));
+  } catch {
+    return "Installer log was unavailable.";
+  }
+}
+
 async function readUserPathRegistry(): Promise<string> {
   const result = await runProcess("reg.exe", ["query", "HKCU\\Environment", "/v", "Path"], {
     timeoutMs: 30_000,
@@ -316,6 +340,11 @@ export async function runWindowsNativeArtifactSmoke(
     const install = await runProcess(installer, ["/S", `/D=${installDir}`], {
       windowsVerbatimArguments: true,
     });
+    if (install.exitCode !== 0) {
+      throw new Error(
+        `NSIS install exited nonzero (${install.exitCode}). ${await readManagedBootstrapFailure()}`,
+      );
+    }
     assertSuccessful(install, "NSIS install");
     const installedExecutables = selectInstalledWindowsExecutables(await readdir(installDir));
     const appPath = join(installDir, installedExecutables.app);

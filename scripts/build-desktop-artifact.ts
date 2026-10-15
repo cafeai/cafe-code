@@ -765,8 +765,11 @@ const stageWindowsManagedRuntime = Effect.fn("stageWindowsManagedRuntime")(funct
     try: async () => {
       await stageManagedProviders(manifest, archive.arch, contentRoot);
     },
-    catch: () =>
-      new BuildScriptError({ message: "Failed to stage verified managed provider closure." }),
+    catch: (cause) =>
+      new BuildScriptError({
+        message: "Failed to stage verified managed provider closure.",
+        cause,
+      }),
   });
   yield* fs.copy(extractedRoot, path.join(contentRoot, "node"));
   const inventory = yield* Effect.tryPromise({
@@ -928,7 +931,12 @@ export function resolveMacDesktopBuildConfig(
         NSLocalNetworkUsageDescription: MAC_LOCAL_NETWORK_USAGE_DESCRIPTION,
       },
       ...(signed
-        ? { hardenedRuntime: true, notarize: true }
+        ? {
+            hardenedRuntime: true,
+            notarize: true,
+            entitlements: "apps/desktop/resources/entitlements.mac.plist",
+            entitlementsInherit: "apps/desktop/resources/entitlements.mac.plist",
+          }
         : {
             identity: null,
             hardenedRuntime: false,

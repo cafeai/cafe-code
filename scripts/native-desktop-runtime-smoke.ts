@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join, posix, resolve, win32 } from "node:path";
 
 import { readJsonFile } from "./json-file.ts";
+import { withIsolatedMacosArtifactKeychain } from "./macos-artifact-keychain.ts";
 
 const SELF_TEST_SWITCH = "--cafe-runtime-self-test";
 const SELF_TEST_RESULT_ENV = "CAFE_CODE_RUNTIME_SELF_TEST_RESULT";
@@ -28,6 +29,7 @@ interface RuntimeSmokeOptions {
   readonly appPath: string;
   readonly resourcesPath?: string;
   readonly environment?: NodeJS.ProcessEnv;
+  readonly macosApplicationName?: string;
 }
 
 interface RuntimeSelfTestResult {
@@ -305,6 +307,7 @@ async function makeIsolatedEnvironment(
   return {
     ...base,
     HOME: home,
+    ...(process.platform === "darwin" ? { CFFIXED_USER_HOME: home } : {}),
     USERPROFILE: home,
     APPDATA: appData,
     LOCALAPPDATA: localAppData,
@@ -470,20 +473,38 @@ export async function runNativeDesktopRuntimeSmoke(options: RuntimeSmokeOptions)
   const resourcesPath = options.resourcesPath ?? resolvePackagedResourcesPath(options.appPath);
   try {
     const environment = await makeIsolatedEnvironment(root, options.environment ?? process.env);
-    const runtime = await runPackagedRuntimeSelfTest(options.appPath, environment, root);
-    await runPackagedApplicationSmoke(options.appPath, resourcesPath, environment);
-    console.info(
-      JSON.stringify({
-        ok: true,
-        platform: runtime.platform,
-        arch: runtime.arch,
-        checks: runtime.checks,
-        backendHealth: true,
-        providerDaemonHealth: true,
-        rendererWebSocketHydration: true,
-        cleanShutdown: true,
-      }),
-    );
+    const qualify = async () => {
+      const runtime = await runPackagedRuntimeSelfTest(options.appPath, environment, root);
+      await runPackagedApplicationSmoke(options.appPath, resourcesPath, environment);
+      console.info(
+        JSON.stringify({
+          ok: true,
+          platform: runtime.platform,
+          arch: runtime.arch,
+          checks: runtime.checks,
+          backendHealth: true,
+          providerDaemonHealth: true,
+          rendererWebSocketHydration: true,
+          cleanShutdown: true,
+        }),
+      );
+    };
+    if (
+      process.platform === "darwin" &&
+      environment.CAFE_CODE_MACOS_ARTIFACT_PREPARE_KEYCHAIN === "1"
+    ) {
+      await withIsolatedMacosArtifactKeychain(
+        root,
+        environment,
+        [
+          ...(options.macosApplicationName ? [options.macosApplicationName] : []),
+          "@cafecode/desktop-runtime",
+          "Cafe Code",
+          "Chromium",
+        ],
+        qualify,
+      );
+    } else await qualify();
   } finally {
     await rm(root, { recursive: true, force: true });
   }

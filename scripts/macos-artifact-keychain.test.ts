@@ -1,4 +1,4 @@
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -6,131 +6,93 @@ import { describe, expect, it } from "vitest";
 import { withIsolatedMacosArtifactKeychain } from "./macos-artifact-keychain.ts";
 
 describe("isolated macOS artifact keychain", () => {
-  it("seeds only synthetic native safe-storage credentials in its disposable keychain", async () => {
-    const root = await mkdtemp(join(tmpdir(), "cafe-keychain-seed-"));
-    const calls: string[][] = [];
-    try {
-      await withIsolatedMacosArtifactKeychain(
-        root,
-        async () => {},
-        async (args) => {
-          calls.push([...args]);
-          if (args.length === 3 && ["default-keychain", "list-keychains"].includes(args[0]!)) {
-            return JSON.stringify(join(root, "original.keychain-db"));
-          }
-          return "";
-        },
-        ["Cafe Code", "Chromium", "Cafe Code"],
-      );
-      const seeded = calls.filter((args) => args[0] === "add-generic-password");
-      expect(seeded).toHaveLength(2);
-      for (const [index, name] of ["Cafe Code", "Chromium"].entries()) {
-        expect(seeded[index]).toEqual([
-          "add-generic-password",
-          "-A",
-          "-a",
-          name,
-          "-s",
-          `${name} Safe Storage`,
-          "-w",
-          expect.stringMatching(/^[A-Za-z0-9+/]{43}=$/u),
-          join(root, "runtime-smoke.keychain-db"),
-        ]);
+  it.each(["foreign-home", "foreign-foundation-home", "existing-preferences"])(
+    "refuses %s before any native preference mutation",
+    async (invalid) => {
+      const root = await mkdtemp(join(tmpdir(), "cafe-keychain-admission-"));
+      const home = join(root, "home");
+      await mkdir(home);
+      let commands = 0;
+      try {
+        if (invalid === "existing-preferences") await mkdir(join(home, "Library"));
+        await expect(
+          withIsolatedMacosArtifactKeychain(
+            root,
+            {
+              HOME: invalid === "foreign-home" ? tmpdir() : home,
+              CFFIXED_USER_HOME: invalid === "foreign-foundation-home" ? tmpdir() : home,
+            },
+            [],
+            async () => {},
+            async () => {
+              commands++;
+              return "";
+            },
+          ),
+        ).rejects.toThrow();
+        expect(commands).toBe(0);
+      } finally {
+        await rm(root, { recursive: true, force: true });
       }
-      expect(calls.at(-1)).toEqual(["delete-keychain", join(root, "runtime-smoke.keychain-db")]);
-    } finally {
-      await rm(root, { recursive: true, force: true });
-    }
-  });
-
-  it("refuses an existing keychain before changing native preferences", async () => {
-    const root = await mkdtemp(join(tmpdir(), "cafe-keychain-existing-"));
-    let commands = 0;
-    try {
-      await writeFile(join(root, "runtime-smoke.keychain-db"), "existing fixture");
-      await expect(
-        withIsolatedMacosArtifactKeychain(
-          root,
-          async () => {},
-          async () => {
-            commands++;
-            return "";
-          },
-        ),
-      ).rejects.toThrow("already exists");
-      expect(commands).toBe(0);
-    } finally {
-      await rm(root, { recursive: true, force: true });
-    }
-  });
+    },
+  );
 
   it.each([false, true])(
-    "restores exact original preferences after action failure=%s",
+    "binds every command to the exact launched home and deletes its keychain after failure=%s",
     async (fail) => {
       const root = await mkdtemp(join(tmpdir(), "cafe-keychain-policy-"));
-      const original = join(root, "original keychain-db");
-      const secondary = join(root, "secondary keychain-db");
+      const home = join(root, "home");
+      await mkdir(home);
+      const environment = { HOME: home, CFFIXED_USER_HOME: home };
+      const keychain = join(home, "Library", "Keychains", "runtime-smoke.keychain-db");
       const calls: string[][] = [];
       let actions = 0;
-      const security = async (args: readonly string[]) => {
-        calls.push([...args]);
-        if (args.length === 3 && args[0] === "default-keychain") return JSON.stringify(original);
-        if (args.length === 3 && args[0] === "list-keychains") {
-          return [original, secondary].map((path) => JSON.stringify(path)).join("\n");
-        }
-        return "";
-      };
       try {
         const run = withIsolatedMacosArtifactKeychain(
           root,
+          environment,
+          ["Cafe Code", "Chromium", "Cafe Code"],
           async () => {
             actions++;
-            expect(calls.at(-1)).toEqual([
-              "default-keychain",
-              "-d",
-              "user",
-              "-s",
-              join(root, "runtime-smoke.keychain-db"),
-            ]);
+            expect(calls.filter((args) => args[0] === "add-generic-password")).toHaveLength(2);
             if (fail) throw new Error("synthetic action failure");
           },
-          security,
+          async (args, suppliedEnvironment) => {
+            expect(suppliedEnvironment).toBe(environment);
+            calls.push([...args]);
+            return "";
+          },
         );
         if (fail) await expect(run).rejects.toThrow("synthetic action failure");
         else await run;
         expect(actions).toBe(1);
-        expect(calls[5]).toEqual([
-          "list-keychains",
-          "-d",
-          "user",
-          "-s",
-          join(root, "runtime-smoke.keychain-db"),
-        ]);
         expect(calls.map((args) => args[0])).toEqual([
-          "default-keychain",
-          "list-keychains",
           "create-keychain",
           "set-keychain-settings",
           "unlock-keychain",
           "list-keychains",
           "default-keychain",
-          "default-keychain",
-          "list-keychains",
+          "add-generic-password",
+          "add-generic-password",
           "delete-keychain",
         ]);
-        const password = calls[2]![2]!;
-        expect(password).toMatch(/^[a-f0-9]{64}$/);
-        expect(calls[4]).toEqual([
-          "unlock-keychain",
-          "-p",
-          password,
-          join(root, "runtime-smoke.keychain-db"),
-        ]);
-        expect(calls.slice(-3)).toEqual([
-          ["default-keychain", "-d", "user", "-s", original],
-          ["list-keychains", "-d", "user", "-s", original, secondary],
-          ["delete-keychain", join(root, "runtime-smoke.keychain-db")],
-        ]);
+        expect(calls[0]![2]).toMatch(/^[a-f0-9]{64}$/u);
+        expect(calls[3]).toEqual(["list-keychains", "-d", "user", "-s", keychain]);
+        expect(calls[4]).toEqual(["default-keychain", "-d", "user", "-s", keychain]);
+        for (const [index, name] of ["Cafe Code", "Chromium"].entries()) {
+          expect(calls[index + 5]).toEqual([
+            "add-generic-password",
+            "-A",
+            "-a",
+            name,
+            "-s",
+            `${name} Safe Storage`,
+            "-w",
+            expect.stringMatching(/^[A-Za-z0-9+/]{43}=$/u),
+            keychain,
+          ]);
+        }
+        expect(calls.at(-1)).toEqual(["delete-keychain", keychain]);
       } finally {
         await rm(root, { recursive: true, force: true });
       }

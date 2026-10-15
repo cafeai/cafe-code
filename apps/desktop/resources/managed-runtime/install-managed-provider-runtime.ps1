@@ -159,6 +159,8 @@ if (-not $Enabled) {
   exit 0
 }
 
+$script:InstallerPhase = "resolve"
+$script:PreparationExit = "unknown"
 try {
   $resolvedInstallDir = Resolve-InstallerPath -Value $InstallDir -EnvironmentName "ProgramFiles" -Description "installation directory"
   Assert-ManagedDirectory -Path $managedRoot
@@ -172,19 +174,25 @@ try {
   # Hold an OS-enforced installer guard. A dead installer releases it without
   # granting authority based on a PID or stale timestamp.
   $guardPath = Join-Path $managedRoot "installer.guard"
+  $script:InstallerPhase = "guard"
   $guard = [IO.File]::Open($guardPath, [IO.FileMode]::OpenOrCreate, [IO.FileAccess]::ReadWrite, [IO.FileShare]::None)
   try {
     [Environment]::SetEnvironmentVariable("NODE_OPTIONS", $null, "Process")
     [Environment]::SetEnvironmentVariable("NODE_PATH", $null, "Process")
+    $script:InstallerPhase = "prepare"
     $prepared = @(& $nodePath $installer --prepare $bundleSource $managedRoot)
+    $nativeExit = $ExecutionContext.SessionState.PSVariable.GetValue("LASTEXITCODE")
+    if ($nativeExit -is [int]) { $script:PreparationExit = [string]$nativeExit }
     if ($LASTEXITCODE -ne 0 -or $prepared.Count -ne 1 -or $prepared[0] -cnotmatch '^[a-f0-9]{32}$') {
       throw "Managed runtime preparation failed."
     }
     $generation = [string]$prepared[0]
+    $script:InstallerPhase = "generation"
     $generationRoot = Join-Path $managedRoot "generations\$generation"
     if (-not (Test-Path -LiteralPath $generationRoot -PathType Container)) { throw "Prepared generation is absent." }
     Assert-ManagedDirectory -Path $generationRoot
     $settingsParent = Split-Path -Parent $settingsPath
+    $script:InstallerPhase = "settings"
     Assert-ManagedDirectory -Path $settingsParent
     $settingsTemporary = Join-Path $settingsParent (".managed-settings-" + $generation + ".tmp")
     $settingsJson = @{ providers = @{ codex = @{ runtimeSource = "bundled" }; claudeAgent = @{ runtimeSource = "bundled" } } } | ConvertTo-Json -Depth 6 -Compress
@@ -192,6 +200,7 @@ try {
     $activation = $null
     $result = $null
     try {
+      $script:InstallerPhase = "publication"
       $activationJson = @{ version = 1; generation = $generation } | ConvertTo-Json -Compress
       $activation = Publish-ManagedRecord -Path (Join-Path $managedRoot "active-runtime.json") -Contents $activationJson
       $resultJson = @{
@@ -221,6 +230,11 @@ try {
   try { Write-InstallerLog "Verified managed provider generation activated." } catch { }
 
 } catch {
+  # Fixed phase and numeric metadata only: no exception text, provider output,
+  # credentials or user paths enter the persistent installer diagnostics.
+  $failureLine = [int]$_.InvocationInfo.ScriptLineNumber
+  $failureCode = [int]$_.Exception.HResult
+  try { Write-InstallerLog "Bootstrap failure phase=$script:InstallerPhase nativeExit=$script:PreparationExit line=$failureLine hresult=$failureCode" } catch { }
   try { Write-InstallerLog "Managed provider runtime bootstrap failed. Re-run the installer to repair; the prior generation is retained." } catch { }
   exit 1
 }

@@ -15,6 +15,13 @@ evidence set, merges macOS manifests and verifies updater sizes and SHA-512 dige
 candidate through a local feed before GitHub publication; the public GitHub feed is checked
 again afterward. These probes detect updates without downloading or installing them.
 
+A release branch can run the same gated workflow before its tag exists:
+`gh workflow run release.yml --ref release/0.2.0 -f version=v0.2.0 -f publish_release=true`.
+The manual run pins the branch's event commit. It creates the tag only after all quality,
+reliability, signed-artifact, checksum and candidate-feed checks succeed, then publishes the
+qualified bytes. It never force-updates an existing tag. Omitting `publish_release=true` builds
+and qualifies artifacts without creating a tag or GitHub release.
+
 If the public-feed probe fails, stop promotion and announce the affected tag through the normal
 release process. Inspect the exact version/feed/artifact evidence, then withdraw the broken
 release from the public update feed or publish a corrected higher version after all gates pass.
@@ -79,10 +86,10 @@ trip enabled. Linux opts into configuring only its private extracted
 mode `4755`, rejecting shared or symlinked
 helpers and checking inode identity afterward. Its fresh D-Bus session owns a private native
 GNOME secret service and random keyring password; its process and private files retire after
-qualification. macOS opts into a private,
-unlocked temporary keychain as its only search target for the DMG/ZIP checks,
-then restores the original
-default/search preferences and deletes that keychain on success or failure. Synthetic random
+qualification. macOS configures a private, unlocked temporary keychain inside the exact fresh
+`HOME` and `CFFIXED_USER_HOME` used by each DMG/ZIP runtime check. Both the search preferences
+and keychain live under that fixture home; existing user preferences remain untouched. The
+keychain is deleted on success or failure, followed by the owned temporary home. Synthetic random
 safe-storage keys in that disposable keychain avoid unsigned CI permission dialogs while
 retaining the real OS-backed encryption/decryption check.
 These options are scoped to their respective artifact steps; ordinary launches

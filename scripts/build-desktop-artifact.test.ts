@@ -284,9 +284,36 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
   it("requires signing, hardened runtime and notarization for signed macOS builds", () => {
     const config = resolveMacDesktopBuildConfig("dmg", true);
     assert.isTrue(config.forceCodeSigning);
-    assert.deepInclude(config.mac, { hardenedRuntime: true, notarize: true });
+    assert.deepInclude(config.mac, {
+      hardenedRuntime: true,
+      notarize: true,
+      entitlements: "apps/desktop/resources/entitlements.mac.plist",
+      entitlementsInherit: "apps/desktop/resources/entitlements.mac.plist",
+    });
     assert.notProperty(config.mac, "identity");
   });
+
+  it.effect(
+    "retains microphone access and Electron execution entitlements under hardened signing",
+    () =>
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const source = yield* fs.readFileString(
+          path.resolve(import.meta.dirname, "../apps/desktop/resources/entitlements.mac.plist"),
+        );
+        assert.deepEqual(
+          [...source.matchAll(/<key>([^<]+)<\/key>\s*<true\s*\/>/gu)].map((match) => match[1]),
+          [
+            "com.apple.security.cs.allow-jit",
+            "com.apple.security.cs.allow-unsigned-executable-memory",
+            "com.apple.security.cs.disable-library-validation",
+            "com.apple.security.device.audio-input",
+          ],
+        );
+        assert.equal([...source.matchAll(/<key>/gu)].length, 4);
+      }),
+  );
 
   it.effect("stages only reviewed locale privacy strings in a scoped native resource tree", () =>
     Effect.scoped(

@@ -6,7 +6,6 @@ import { join, resolve } from "node:path";
 import { promisify } from "node:util";
 
 import { runNativeDesktopRuntimeSmoke } from "./native-desktop-runtime-smoke.ts";
-import { withIsolatedMacosArtifactKeychain } from "./macos-artifact-keychain.ts";
 
 interface ProcessResult {
   readonly exitCode: number | null;
@@ -114,9 +113,15 @@ export async function runMacosNativeArtifactSmoke(releaseDir = resolve("release"
     if (!existsSync(join(installedApp, "Contents", "Resources", "app-update.yml"))) {
       throw new Error("Packaged macOS updater metadata is missing.");
     }
+    const { stdout } = await promisify(execFile)(
+      "/usr/libexec/PlistBuddy",
+      ["-c", "Print :CFBundleName", join(installedApp, "Contents", "Info.plist")],
+      { encoding: "utf8", timeout: 10_000, maxBuffer: 1_024 },
+    );
+    const macosApplicationName = stdout.trim();
     const qualify = async () => {
       await verifySignedApp(installedApp);
-      await runNativeDesktopRuntimeSmoke({ appPath });
+      await runNativeDesktopRuntimeSmoke({ appPath, macosApplicationName });
       assertSuccessful(
         await runProcess("ditto", ["-x", "-k", join(releaseDir, artifacts.zip), zipRoot]),
         "ZIP extraction",
@@ -126,23 +131,12 @@ export async function runMacosNativeArtifactSmoke(releaseDir = resolve("release"
       if (!existsSync(join(zipApp, "Contents", "Resources", "app-update.yml"))) {
         throw new Error("Packaged macOS ZIP updater metadata is missing.");
       }
-      await runNativeDesktopRuntimeSmoke({ appPath: await findAppExecutable(zipApp) });
+      await runNativeDesktopRuntimeSmoke({
+        appPath: await findAppExecutable(zipApp),
+        macosApplicationName,
+      });
     };
-    if (process.env.CAFE_CODE_MACOS_ARTIFACT_PREPARE_KEYCHAIN === "1") {
-      const { stdout } = await promisify(execFile)(
-        "/usr/libexec/PlistBuddy",
-        ["-c", "Print :CFBundleName", join(installedApp, "Contents", "Info.plist")],
-        { encoding: "utf8", timeout: 10_000, maxBuffer: 1_024 },
-      );
-      await withIsolatedMacosArtifactKeychain(smokeRoot, qualify, undefined, [
-        stdout.trim(),
-        "@cafecode/desktop-runtime",
-        "Cafe Code",
-        "Chromium",
-      ]);
-    } else {
-      await qualify();
-    }
+    await qualify();
     console.info("macOS DMG and ZIP runtime/updater/artifact smoke passed.");
   } finally {
     if (mounted) {

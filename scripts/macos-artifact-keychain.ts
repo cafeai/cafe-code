@@ -1,14 +1,15 @@
 import { execFile } from "node:child_process";
 import { randomBytes } from "node:crypto";
-import { lstat } from "node:fs/promises";
+import { lstat, mkdir } from "node:fs/promises";
 import { isAbsolute, join } from "node:path";
 import { promisify } from "node:util";
 
-type SecurityCommand = (args: readonly string[]) => Promise<string>;
+type SecurityCommand = (args: readonly string[], environment: NodeJS.ProcessEnv) => Promise<string>;
 
-const executeSecurity: SecurityCommand = async (args) => {
+const executeSecurity: SecurityCommand = async (args, environment) => {
   try {
     const result = await promisify(execFile)("/usr/bin/security", [...args], {
+      env: environment,
       encoding: "utf8",
       timeout: 30_000,
       maxBuffer: 16_384,
@@ -20,58 +21,48 @@ const executeSecurity: SecurityCommand = async (args) => {
   }
 };
 
-function readKeychainPaths(output: string): string[] {
-  const lines = output.trim().split(/\r?\n/).filter(Boolean);
-  if (lines.length > 32) throw new Error("Unexpected keychain search list size.");
-  return lines.map((line) => {
-    const path: unknown = JSON.parse(line.trim());
-    if (typeof path !== "string" || !isAbsolute(path) || path.includes("\0")) {
-      throw new Error("Unexpected keychain path.");
-    }
-    return path;
-  });
-}
-
-/** Explicit CI fixture only. Existing keychain contents/passwords are never
- * read; original default/search preferences are restored on failure. */
+/** Keychain preferences and the app must share the exact same fresh HOME.
+ * Apple's keychain library expands ~/Library/Preferences from HOME. Mutating
+ * the runner's search list cannot configure an app launched in another home.
+ * No existing user preferences or keychain contents participate in this scope. */
 export async function withIsolatedMacosArtifactKeychain(
   root: string,
+  environment: NodeJS.ProcessEnv,
+  applicationNames: readonly string[],
   action: () => Promise<void>,
   security: SecurityCommand = executeSecurity,
-  applicationNames: readonly string[] = [],
 ): Promise<void> {
-  if (!isAbsolute(root)) throw new Error("Expected an absolute private keychain directory.");
-  const rootInfo = await lstat(root);
-  if (!rootInfo.isDirectory() || rootInfo.isSymbolicLink()) {
-    throw new Error("Expected a real private keychain directory.");
+  const home = join(root, "home");
+  if (!isAbsolute(root) || environment.HOME !== home || environment.CFFIXED_USER_HOME !== home) {
+    throw new Error("Keychain setup requires the exact private artifact home.");
   }
-  const keychain = join(root, "runtime-smoke.keychain-db");
-  try {
-    await lstat(keychain);
-    throw new Error("Private artifact keychain already exists.");
-  } catch (error) {
-    if (!(error instanceof Error && "code" in error && error.code === "ENOENT")) throw error;
+  for (const path of [root, home]) {
+    const info = await lstat(path);
+    if (!info.isDirectory() || info.isSymbolicLink())
+      throw new Error("Expected a real private directory.");
   }
-  const originalDefault = readKeychainPaths(await security(["default-keychain", "-d", "user"]));
-  if (originalDefault.length !== 1) throw new Error("Expected one default keychain.");
-  const originalSearch = readKeychainPaths(await security(["list-keychains", "-d", "user"]));
+  // Exclusive creation proves this home has no previous keychain preferences.
+  const library = join(home, "Library");
+  await mkdir(library, { mode: 0o700 });
+  await mkdir(join(library, "Preferences"), { mode: 0o700 });
+  const directory = join(library, "Keychains");
+  await mkdir(directory, { mode: 0o700 });
+  const keychain = join(directory, "runtime-smoke.keychain-db");
   const password = randomBytes(32).toString("hex");
+  const run = (args: readonly string[]) => security(args, environment);
   try {
-    await security(["create-keychain", "-p", password, keychain]);
-    await security(["set-keychain-settings", "-u", "-t", "600", keychain]);
-    await security(["unlock-keychain", "-p", password, keychain]);
-    // The smoke must not fall through to an identically named credential in
-    // the runner's login keychain and trigger its interactive access prompt.
-    await security(["list-keychains", "-d", "user", "-s", keychain]);
-    await security(["default-keychain", "-d", "user", "-s", keychain]);
-    // Unsigned CI builds cannot establish a stable trusted-app ACL. Seed only
-    // synthetic keys in this owned disposable keychain so the real native
-    // safeStorage round trip does not wait for a desktop permission dialog.
+    await run(["create-keychain", "-p", password, keychain]);
+    await run(["set-keychain-settings", "-u", "-t", "600", keychain]);
+    await run(["unlock-keychain", "-p", password, keychain]);
+    await run(["list-keychains", "-d", "user", "-s", keychain]);
+    await run(["default-keychain", "-d", "user", "-s", keychain]);
+    // Synthetic random keys avoid unsigned CI access prompts. Only this owned
+    // disposable keychain grants access; real native encryption remains intact.
     for (const name of new Set(applicationNames)) {
       if (!name.trim() || name.length > 160 || /[\r\n\0]/u.test(name)) {
         throw new Error("Unexpected artifact application name.");
       }
-      await security([
+      await run([
         "add-generic-password",
         "-A",
         "-a",
@@ -85,18 +76,6 @@ export async function withIsolatedMacosArtifactKeychain(
     }
     await action();
   } finally {
-    const failures: unknown[] = [];
-    for (const args of [
-      ["default-keychain", "-d", "user", "-s", originalDefault[0]!],
-      ["list-keychains", "-d", "user", "-s", ...originalSearch],
-      ["delete-keychain", keychain],
-    ]) {
-      try {
-        await security(args);
-      } catch (error) {
-        failures.push(error);
-      }
-    }
-    if (failures.length !== 0) throw new Error("Isolated macOS keychain cleanup failed.");
+    await run(["delete-keychain", keychain]);
   }
 }

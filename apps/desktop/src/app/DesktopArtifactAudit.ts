@@ -35,6 +35,7 @@ const TEXT_EXTENSIONS = new Set([
   ".md",
   ".mjs",
   ".ps1",
+  ".plist",
   ".sh",
   ".strings",
   ".txt",

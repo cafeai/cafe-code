@@ -1,6 +1,16 @@
 name: Release
 
 on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Release tag to qualify (for example v0.2.0)
+        type: string
+        required: true
+      publish_release:
+        description: Create the tag and publish only after all release gates pass
+        type: boolean
+        default: false
   push:
     tags:
       - "v*.*.*"
@@ -25,6 +35,7 @@ jobs:
       prerelease: ${{ steps.release.outputs.prerelease }}
       probe-version: ${{ steps.release.outputs.probe-version }}
       version: ${{ steps.release.outputs.version }}
+      tag: ${{ steps.release.outputs.tag }}
     steps:
       - name: Checkout immutable tag source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -34,9 +45,15 @@ jobs:
       - name: Validate release tag
         id: release
         shell: bash
+        env:
+          RELEASE_TAG_INPUT: ${{ github.event_name == 'workflow_dispatch' && inputs.version || github.ref_name }}
         run: |
           set -euo pipefail
-          tag="${GITHUB_REF_NAME}"
+          tag="${RELEASE_TAG_INPUT}"
+          if [[ "${tag}" != v* ]]; then
+            echo "Release tags must start with v." >&2
+            exit 1
+          fi
           version="${tag#v}"
           if [[ "${version}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
             channel="latest"
@@ -57,6 +74,7 @@ jobs:
             echo "prerelease=${prerelease}"
             echo "probe-version=${probe_version}"
             echo "version=${version}"
+            echo "tag=${tag}"
           } >> "${GITHUB_OUTPUT}"
 
   quality:
@@ -211,6 +229,7 @@ jobs:
 
   publish:
     name: Publish qualified release
+    if: github.event_name != 'workflow_dispatch' || inputs.publish_release
     needs: [prepare, quality, reliability, artifacts]
     runs-on: ubuntu-26.04
     timeout-minutes: 20
@@ -221,6 +240,8 @@ jobs:
       RELEASE_CHANNEL: ${{ needs.prepare.outputs.channel }}
       RELEASE_VERSION: ${{ needs.prepare.outputs.version }}
       RELEASE_SOURCE_SHA: ${{ needs.prepare.outputs.source-sha }}
+      RELEASE_TAG: ${{ needs.prepare.outputs.tag }}
+      CREATE_RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.publish_release }}
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -306,22 +327,28 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          # Manual branch releases mint the tag only after native quality,
+          # reliability, signed artifacts and feed validation have succeeded.
+          # Never force an existing tag; GITHUB_TOKEN avoids a second tag run.
+          if [[ "${CREATE_RELEASE_TAG}" == "true" ]]; then
+            git push origin "${RELEASE_SOURCE_SHA}:refs/tags/${RELEASE_TAG}"
+          fi
           remote_sha=""
           while read -r candidate_sha candidate_ref; do
-            if [[ "${candidate_ref}" == "refs/tags/${GITHUB_REF_NAME}^{}" ]]; then
+            if [[ "${candidate_ref}" == "refs/tags/${RELEASE_TAG}^{}" ]]; then
               remote_sha="${candidate_sha}"
               break
             fi
-            if [[ "${candidate_ref}" == "refs/tags/${GITHUB_REF_NAME}" ]]; then
+            if [[ "${candidate_ref}" == "refs/tags/${RELEASE_TAG}" ]]; then
               remote_sha="${candidate_sha}"
             fi
-          done < <(git ls-remote --exit-code origin "refs/tags/${GITHUB_REF_NAME}" "refs/tags/${GITHUB_REF_NAME}^{}")
+          done < <(git ls-remote --exit-code origin "refs/tags/${RELEASE_TAG}" "refs/tags/${RELEASE_TAG}^{}")
           if [[ "${remote_sha}" != "${RELEASE_SOURCE_SHA}" ]]; then
             echo "Release tag no longer identifies the qualified commit." >&2
             exit 1
           fi
           args=(
-            "${GITHUB_REF_NAME}"
+            "${RELEASE_TAG}"
             release-publish/*
             --verify-tag
             --target "${RELEASE_SOURCE_SHA}"

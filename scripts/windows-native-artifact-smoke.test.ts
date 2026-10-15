@@ -9,10 +9,37 @@ import {
   removePathWithRetries,
   selectInstalledWindowsExecutables,
   selectWindowsInstaller,
+  summarizeManagedBootstrapFailure,
   waitForPathToDisappear,
 } from "./windows-native-artifact-smoke.ts";
 
 describe("Windows native artifact smoke", () => {
+  it("retains only bounded fixed bootstrap failure receipts", () => {
+    const receipt =
+      "[2026-10-15T12:00:00.0000000Z] Bootstrap failure phase=prepare nativeExit=1 line=190 hresult=-2146233087";
+    assert.equal(
+      summarizeManagedBootstrapFailure(
+        `arbitrary private output\n${receipt}\nunknown field=private`,
+      ),
+      receipt,
+    );
+    for (const invalid of [
+      receipt.replace("phase=prepare", "phase=private"),
+      `${receipt} private`,
+      receipt.replace("nativeExit=1", "nativeExit=private"),
+      "private contents",
+    ]) {
+      assert.equal(
+        summarizeManagedBootstrapFailure(invalid),
+        "No bounded bootstrap failure receipt was written.",
+      );
+    }
+    assert.equal(
+      summarizeManagedBootstrapFailure(`${receipt}\n${"x".repeat(17000)}`),
+      "No bounded bootstrap failure receipt was written.",
+    );
+  });
+
   it("selects the single x64 NSIS artifact", () => {
     assert.equal(
       selectWindowsInstaller([
