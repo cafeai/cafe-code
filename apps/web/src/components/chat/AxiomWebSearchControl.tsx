@@ -47,7 +47,12 @@ export function AxiomWebSearchControl({
         {enabled ? <CheckIcon aria-hidden="true" className="size-3" /> : null}
       </TooltipTrigger>
       <TooltipPopup role="tooltip" className="no-drag pointer-events-none">
-        {uiText("Allow web search for this message.", undefined, undefined, locale)}
+        {uiText(
+          "Allow web search in this chat. Stays on until turned off.",
+          undefined,
+          undefined,
+          locale,
+        )}
       </TooltipPopup>
     </Tooltip>
   );

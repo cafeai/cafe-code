@@ -807,8 +807,8 @@
     "message": "Allow this one App operation?",
     "locations": ["apps/web/src/components/visualizations/VisualizationViewerProvider.tsx:900"]
   },
-  "Allow web search for this message.": {
-    "message": "Allow web search for this message.",
+  "Allow web search in this chat. Stays on until turned off.": {
+    "message": "Allow web search in this chat. Stays on until turned off.",
     "locations": ["apps/web/src/components/chat/AxiomWebSearchControl.tsx:50"]
   },
   "Allowed range: <slot1></slot1> to <slot3></slot3>": {

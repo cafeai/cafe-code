@@ -5,7 +5,6 @@
   "Scroll to zoom. Drag to pan.": "스크롤로 확대·축소. 드래그하여 이동.",
   "Accept Intel OutOfDate for this NEAR provider until AxiomCLI restarts. All other verification checks remain required.": "AxiomCLI가 다시 시작될 때까지 이 NEAR 제공자의 Intel OutOfDate 상태를 허용합니다. 그 밖의 모든 검증 요건은 계속 적용됩니다.",
   "Accept outdated TEE": "오래된 TEE 허용",
-  "Allow web search for this message.": "이 메시지에 웹 검색을 허용합니다.",
   "Attestation check failed": "실행 환경 증명 검증 실패",
   "Attestation needs review": "실행 환경 증명 검토 필요",
   "Attestation not verified": "실행 환경 증명 미검증",
@@ -3242,5 +3241,6 @@
   "Axiom reports settled costs without a cache savings breakdown. Cache savings for other providers use their estimated rates.": "Axiom은 확정 비용을 보고하지만 캐시 절감액의 내역은 제공하지 않습니다. 다른 제공자의 캐시 절감액은 추정 요금을 사용합니다.",
   "Reply not verified": "응답 미검증",
   "Searched the web": "웹 검색",
-  "Opened web page": "웹 페이지 열기"
+  "Opened web page": "웹 페이지 열기",
+  "Allow web search in this chat. Stays on until turned off.": "이 채팅에서 웹 검색을 허용합니다. 끌 때까지 유지됩니다."
 }

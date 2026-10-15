@@ -181,7 +181,7 @@
   "Allow once": "Allow once",
   "Allow the agent to finish this schedule when the instructions are satisfied.": "Allow the agent to finish this schedule when the instructions are satisfied.",
   "Allow this one App operation?": "Allow this one App operation?",
-  "Allow web search for this message.": "Allow web search for this message.",
+  "Allow web search in this chat. Stays on until turned off.": "Allow web search in this chat. Stays on until turned off.",
   "Allowed range: <slot1></slot1> to <slot3></slot3>": "Allowed range: <slot1></slot1> to <slot3></slot3>",
   "Allows matching requests until the provider session ends.": "Allows matching requests until the provider session ends.",
   "Allows this network destination until the provider session ends.": "Allows this network destination until the provider session ends.",

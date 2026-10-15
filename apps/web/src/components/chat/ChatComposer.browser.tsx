@@ -390,6 +390,14 @@ describe("provider-specific composer menu actions", () => {
         path: `../../../../../.explorations/axiom/web-search-composer-${width}-${scale}-${dark ? "dark" : "light"}.png`,
       });
       useComposerDraftStore.getState().clearComposerContent(fixture.props.composerDraftTarget);
+      await expect.element(web).toHaveAttribute("aria-pressed", "true");
+      expect(fixture.composerRef.current?.getSendContext().axiomWebEnabled).toBe(true);
+      useComposerDraftStore.getState().setPrompt(fixture.props.composerDraftTarget, "Next message");
+      useComposerDraftStore.getState().clearComposerContent(fixture.props.composerDraftTarget);
+      await expect.element(web).toHaveAttribute("aria-pressed", "true");
+      expect(fixture.composerRef.current?.getSendContext().axiomWebEnabled).toBe(true);
+      await web.click();
+      useComposerDraftStore.getState().clearComposerContent(fixture.props.composerDraftTarget);
       await expect.element(web).toHaveAttribute("aria-pressed", "false");
       expect(fixture.composerRef.current?.getSendContext().axiomWebEnabled).toBe(false);
       expect(fixture.onSend).not.toHaveBeenCalled();

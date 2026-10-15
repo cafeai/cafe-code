@@ -171,7 +171,7 @@ describe("composer file and queue edit durability", () => {
   };
   beforeEach(resetComposerDraftStore);
 
-  it("keeps web consent in the current message and account without making it sticky", () => {
+  it("keeps web search across sends in the same chat without inheriting it in other chats or accounts", () => {
     const store = useComposerDraftStore.getState();
     const account = ProviderInstanceId.make("axiom-personal");
     store.setModelSelection(ref, createModelSelection(account, "native-model"));
@@ -180,9 +180,15 @@ describe("composer file and queue edit durability", () => {
     const other = scopeThreadRef(TEST_ENVIRONMENT_ID, ThreadId.make("other-web-draft"));
     store.applyStickyState(other);
     expect(store.getComposerDraft(other)?.axiomWebEnabled).not.toBe(true);
+    const remote = scopeThreadRef(OTHER_TEST_ENVIRONMENT_ID, threadId);
+    expect(store.getComposerDraft(remote)?.axiomWebEnabled).not.toBe(true);
+    store.setPrompt(ref, "First message");
     store.clearComposerContent(ref);
-    expect(store.getComposerDraft(ref)?.axiomWebEnabled).not.toBe(true);
-    store.setAxiomWebEnabled(ref, true, account);
+    expect(store.getComposerDraft(ref)?.prompt).toBe("");
+    expect(store.getComposerDraft(ref)?.axiomWebEnabled).toBe(true);
+    store.setPrompt(ref, "Second message");
+    store.clearComposerContent(ref);
+    expect(store.getComposerDraft(ref)?.axiomWebEnabled).toBe(true);
     store.setModelSelection(
       ref,
       createModelSelection(account, "native-model", [{ id: "thinkingLevel", value: "high" }]),
@@ -193,25 +199,109 @@ describe("composer file and queue edit durability", () => {
       createModelSelection(ProviderInstanceId.make("axiom-work"), "native-model"),
     );
     expect(store.getComposerDraft(ref)?.axiomWebEnabled).not.toBe(true);
+    store.setAxiomWebEnabled(ref, true, ProviderInstanceId.make("axiom-work"));
+    store.setAxiomWebEnabled(ref, false);
+    store.clearComposerContent(ref);
+    expect(store.getComposerDraft(ref)?.axiomWebEnabled).toBe(false);
   });
 
-  it("edits queued web consent independently and restores the original draft", () => {
+  it.each([false, true])(
+    "restores the chat's %s web preference after editing a queued message and reloading",
+    (enabled) => {
+      const store = useComposerDraftStore.getState();
+      const account = ProviderInstanceId.make("axiom-personal");
+      store.setAxiomWebEnabled(ref, true, account);
+      store.setAxiomWebEnabled(ref, enabled, account);
+      store.setPrompt(ref, "Original draft");
+      expect(
+        store.beginQueueEdit(ref, "web-queue", {
+          ...edit,
+          modelSelection: createModelSelection(
+            ProviderInstanceId.make("axiom-personal"),
+            "native-model",
+          ),
+          axiomWebEnabled: !enabled,
+        }),
+      ).toBe(true);
+      expect(store.getComposerDraft(ref)?.axiomWebEnabled).toBe(!enabled);
+      const options = useComposerDraftStore.persist.getOptions();
+      const persisted = options.partialize!(useComposerDraftStore.getState());
+      useComposerDraftStore.setState(
+        options.merge!(JSON.parse(JSON.stringify(persisted)), useComposerDraftStore.getState()),
+      );
+      expect(store.getComposerDraft(ref)?.axiomWebEnabled).toBe(!enabled);
+      store.finishQueueEdit(ref);
+      expect(store.getComposerDraft(ref)?.prompt).toBe("Original draft");
+      expect(store.getComposerDraft(ref)?.axiomWebEnabled).toBe(enabled);
+    },
+  );
+
+  it.each([false, true])("round-trips an empty chat's %s web preference", (enabled) => {
     const store = useComposerDraftStore.getState();
-    store.setPrompt(ref, "Original draft");
+    const account = ProviderInstanceId.make("axiom-personal");
+    store.setModelSelection(ref, createModelSelection(account, "native-model"));
+    store.setAxiomWebEnabled(ref, true, account);
+    store.setAxiomWebEnabled(ref, enabled, account);
+    store.clearComposerContent(ref);
+    const options = useComposerDraftStore.persist.getOptions();
+    const persisted = options.partialize!(useComposerDraftStore.getState());
+    useComposerDraftStore.setState(
+      options.merge!(JSON.parse(JSON.stringify(persisted)), useComposerDraftStore.getState()),
+    );
+    expect(store.getComposerDraft(ref)?.axiomWebEnabled).toBe(enabled);
+    expect(store.getComposerDraft(ref)?.activeProvider).toBe(account);
     expect(
-      store.beginQueueEdit(ref, "web-queue", {
-        ...edit,
-        modelSelection: createModelSelection(
-          ProviderInstanceId.make("axiom-personal"),
-          "native-model",
-        ),
+      store.getComposerDraft(scopeThreadRef(OTHER_TEST_ENVIRONMENT_ID, threadId))?.axiomWebEnabled,
+    ).not.toBe(true);
+    store.applyStickyState(ref, {
+      activeProvider: ProviderInstanceId.make("axiom-work"),
+      modelSelectionByProvider: {},
+    });
+    expect(store.getComposerDraft(ref)?.axiomWebEnabled).not.toBe(true);
+  });
+
+  it.each([false, true])(
+    "restores a rejected send while preserving the chat's newer %s web preference",
+    (enabled) => {
+      const store = useComposerDraftStore.getState();
+      const account = ProviderInstanceId.make("axiom-personal");
+      store.setModelSelection(ref, createModelSelection(account, "native-model"));
+      store.setAxiomWebEnabled(ref, !enabled, account);
+      store.setPrompt(ref, "Rejected message");
+      store.clearComposerContent(ref);
+      store.setAxiomWebEnabled(ref, enabled, account);
+      expect(
+        store.restoreComposerContentIfEmpty(ref, {
+          prompt: "Rejected message",
+          images: [],
+          axiomWebEnabled: !enabled,
+          axiomWebInstanceId: account,
+        }),
+      ).toBe(true);
+      expect(store.getComposerDraft(ref)?.prompt).toBe("Rejected message");
+      expect(store.getComposerDraft(ref)?.axiomWebEnabled).toBe(enabled);
+    },
+  );
+
+  it("does not restore old web consent after switching accounts away and back", () => {
+    const store = useComposerDraftStore.getState();
+    const account = ProviderInstanceId.make("axiom-personal");
+    store.setModelSelection(ref, createModelSelection(account, "native-model"));
+    store.setAxiomWebEnabled(ref, true, account);
+    store.clearComposerContent(ref);
+    store.setModelSelection(
+      ref,
+      createModelSelection(ProviderInstanceId.make("axiom-work"), "native-model"),
+    );
+    store.setModelSelection(ref, createModelSelection(account, "native-model"));
+    expect(
+      store.restoreComposerContentIfEmpty(ref, {
+        prompt: "Rejected message",
+        images: [],
         axiomWebEnabled: true,
+        axiomWebInstanceId: account,
       }),
     ).toBe(true);
-    expect(store.getComposerDraft(ref)?.axiomWebEnabled).toBe(true);
-    store.setAxiomWebEnabled(ref, false);
-    store.finishQueueEdit(ref);
-    expect(store.getComposerDraft(ref)?.prompt).toBe("Original draft");
     expect(store.getComposerDraft(ref)?.axiomWebEnabled).not.toBe(true);
   });
 
@@ -1036,6 +1126,42 @@ describe("composerDraftStore project draft thread mapping", () => {
     expect(useComposerDraftStore.getState().getDraftThread(draftId)).toBeNull();
     expect(draftByKey(draftId)).toBeUndefined();
   });
+
+  it.each([false, true])(
+    "carries web search through the first send while preserving a newer server composer: %s",
+    (newerComposer) => {
+      const store = useComposerDraftStore.getState();
+      const account = ProviderInstanceId.make("axiom-personal");
+      const ref = scopeThreadRef(TEST_ENVIRONMENT_ID, threadId);
+      store.setProjectDraftThreadId(projectRef, draftId, { threadId });
+      store.setAxiomWebEnabled(draftId, true, account);
+      store.setPrompt(draftId, "First message");
+      store.clearComposerContent(draftId);
+      if (newerComposer) {
+        useComposerDraftStore.setState((state) => ({
+          draftsByThreadKey: {
+            ...state.draftsByThreadKey,
+            [scopedThreadKey(ref)]: {
+              ...store.getComposerDraft(draftId)!,
+              prompt: "Newer draft",
+              axiomWebEnabled: false,
+            },
+          },
+        }));
+      }
+      markPromotedDraftThreadByRef(ref);
+      finalizePromotedDraftThreadByRef(ref);
+      expect(store.getDraftSession(draftId)).toBeNull();
+      expect(store.getComposerDraft(ref)?.axiomWebEnabled).toBe(!newerComposer);
+      expect(store.getComposerDraft(ref)?.prompt).toBe(newerComposer ? "Newer draft" : "");
+      expect(store.getComposerDraft(ref)?.activeProvider).toBe(account);
+      expect(
+        store.getComposerDraft(scopeThreadRef(OTHER_TEST_ENVIRONMENT_ID, threadId)),
+      ).toBeNull();
+      store.clearComposerContent(ref);
+      expect(store.getComposerDraft(ref)?.axiomWebEnabled).toBe(!newerComposer);
+    },
+  );
 
   it("updates branch context on an existing draft thread", () => {
     const store = useComposerDraftStore.getState();

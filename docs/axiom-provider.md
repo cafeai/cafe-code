@@ -76,10 +76,10 @@ contract is available; integer microUSD is displayed without decimal rounding.
   Wrong-account resume fails before loading history. Desktop v2 cursors additionally
   retain the exact native working-directory spelling and Agent revision for load.
 - Web search is a globe toggle inside the composer, immediately to the right of
-  the thinking control. It starts off and applies to the current message only.
-  Sending or queueing clears the next draft's consent; account changes also clear
-  it. Unsubmitted consent is not a sticky account preference and is not restored
-  after reload. Queue entries retain their exact setting through editing, claims
+  the thinking control. Each new chat starts off; the setting stays on across
+  sends, queueing and reloads until turned off in that chat. Account changes clear
+  it, and it is never inherited by another chat. Queue entries retain their exact
+  setting independently of later toggle changes through editing, claims
   and reload. Native prompts receive explicit `webEnabled` plus Agent revision.
   A steer must match the active turn's web setting; changed consent is queued for
   the next turn. This toggle does not stop web work already admitted by a turn.

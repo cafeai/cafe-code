@@ -240,7 +240,7 @@ const PersistedComposerDraftStoreStorage = Schema.Struct({
  */
 export interface ComposerThreadDraftState {
   prompt: string;
-  /** Message consent, never a sticky provider preference. */
+  /** Chat-local web preference; account changes clear it and new chats start off. */
   axiomWebEnabled?: boolean | undefined;
   axiomMcpRevision?: number | undefined;
   images: ComposerImageAttachment[];
@@ -1741,7 +1741,7 @@ function normalizePersistedDraftsByThreadId(
       ...(typeof draftCandidate.queueEditingItemId === "string"
         ? { queueEditingItemId: draftCandidate.queueEditingItemId }
         : {}),
-      ...(draftCandidate.queueEditingItemId && typeof draftCandidate.axiomWebEnabled === "boolean"
+      ...(typeof draftCandidate.axiomWebEnabled === "boolean"
         ? {
             axiomWebEnabled: draftCandidate.axiomWebEnabled,
           }
@@ -1849,9 +1849,7 @@ function partializeComposerDraftStoreState(
       attachments: draft.persistedAttachments,
       files: draft.files.map(persistComposerFile),
       ...(draft.queueEditingItemId ? { queueEditingItemId: draft.queueEditingItemId } : {}),
-      ...(draft.queueEditingItemId && draft.axiomWebEnabled !== undefined
-        ? { axiomWebEnabled: draft.axiomWebEnabled }
-        : {}),
+      ...(draft.axiomWebEnabled !== undefined ? { axiomWebEnabled: draft.axiomWebEnabled } : {}),
       ...(draft.queueEditingItemId && draft.axiomMcpRevision !== undefined
         ? { axiomMcpRevision: draft.axiomMcpRevision }
         : {}),
@@ -2093,7 +2091,7 @@ function toHydratedThreadDraft(
     ...(persistedDraft.queueEditingItemId
       ? { queueEditingItemId: persistedDraft.queueEditingItemId }
       : {}),
-    ...(persistedDraft.queueEditingItemId && persistedDraft.axiomWebEnabled !== undefined
+    ...(persistedDraft.axiomWebEnabled !== undefined
       ? { axiomWebEnabled: persistedDraft.axiomWebEnabled }
       : {}),
     ...(persistedDraft.queueEditingItemId && persistedDraft.axiomMcpRevision !== undefined
@@ -2473,10 +2471,26 @@ const composerDraftStore = create<ComposerDraftStoreState>()(
           }
           set((state) => {
             const existing = state.draftThreadsByThreadKey[threadKey];
-            if (!isDraftThreadPromoting(existing)) {
+            if (!existing?.promotedTo) {
               return state;
             }
-            return removeDraftThreadReferences(state, threadKey);
+            const draft = state.draftsByThreadKey[threadKey];
+            const next = removeDraftThreadReferences(state, threadKey);
+            const targetKey = scopedThreadKey(existing.promotedTo);
+            // The first send retires the draft identity. Carry its web setting
+            // into the exact server chat without replacing a newer composer.
+            if (
+              draft?.activeProvider &&
+              draft.axiomWebEnabled !== undefined &&
+              !next.draftsByThreadKey[targetKey]
+            ) {
+              next.draftsByThreadKey[targetKey] = {
+                ...createEmptyThreadDraft(),
+                activeProvider: draft.activeProvider,
+                axiomWebEnabled: draft.axiomWebEnabled,
+              };
+            }
+            return next;
           });
         },
         clearDraftThread: (threadRef) => {
@@ -2572,6 +2586,9 @@ const composerDraftStore = create<ComposerDraftStoreState>()(
               ...base,
               modelSelectionByProvider: nextMap,
               activeProvider: nextActiveProvider,
+              ...(nextActiveProvider !== base.activeProvider
+                ? { axiomWebEnabled: undefined, axiomMcpRevision: undefined }
+                : {}),
             };
             const nextDraftsByThreadKey = { ...state.draftsByThreadKey };
             if (shouldRemoveDraft(nextDraft)) {
@@ -3167,8 +3184,7 @@ const composerDraftStore = create<ComposerDraftStoreState>()(
               existing.images.length > 0 ||
               existing.files.length > 0 ||
               existing.nonPersistedImageIds.length > 0 ||
-              existing.persistedAttachments.length > 0 ||
-              existing.axiomWebEnabled === true
+              existing.persistedAttachments.length > 0
             ) {
               return state;
             }
@@ -3186,8 +3202,9 @@ const composerDraftStore = create<ComposerDraftStoreState>()(
                     content.axiomWebInstanceId === existing.activeProvider
                       ? content.axiomMcpRevision
                       : undefined,
-                  axiomWebEnabled:
-                    content.axiomWebInstanceId === existing.activeProvider
+                  axiomWebEnabled: Object.hasOwn(existing, "axiomWebEnabled")
+                    ? existing.axiomWebEnabled
+                    : content.axiomWebInstanceId === existing.activeProvider
                       ? content.axiomWebEnabled
                       : undefined,
                 },
@@ -3209,7 +3226,6 @@ const composerDraftStore = create<ComposerDraftStoreState>()(
             const nextDraft: ComposerThreadDraftState = {
               ...current,
               prompt: "",
-              axiomWebEnabled: undefined,
               images: [],
               files: [],
               nonPersistedImageIds: [],
