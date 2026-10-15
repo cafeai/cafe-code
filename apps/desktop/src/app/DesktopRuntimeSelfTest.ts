@@ -205,7 +205,31 @@ export async function collectDesktopRuntimeSelfTestResult(
 export async function runDesktopRuntimeSelfTestAndExit(): Promise<void> {
   let result: DesktopRuntimeSelfTestResult;
   try {
-    result = await collectDesktopRuntimeSelfTestResult(makeRealDependencies());
+    const dependencies = makeRealDependencies();
+    // This explicit self-test path alone reports fixed check phases. A native
+    // timeout must identify its last admitted check without logging secrets,
+    // source, profiles or changing the checks, process budget or launch policy.
+    const observe =
+      <T>(name: string, action: () => Promise<T>) =>
+      async () => {
+        console.info(`CAFE_CODE_RUNTIME_SELF_TEST_PHASE=${name}:start`);
+        try {
+          return await action();
+        } finally {
+          console.info(`CAFE_CODE_RUNTIME_SELF_TEST_PHASE=${name}:complete`);
+        }
+      };
+    result = await collectDesktopRuntimeSelfTestResult({
+      ...dependencies,
+      whenReady: observe("ready", dependencies.whenReady),
+      safeStorageRoundTrip: observe("safeStorage", dependencies.safeStorageRoundTrip),
+      sqliteRoundTrip: observe("sqlite", dependencies.sqliteRoundTrip),
+      ptyRoundTrip: observe("pty", dependencies.ptyRoundTrip),
+      packagedResourcesPresent: observe("packagedResources", dependencies.packagedResourcesPresent),
+      packagedArtifactAudit: observe("packagedArtifactAudit", dependencies.packagedArtifactAudit),
+      updateMetadataPresent: observe("updateMetadata", dependencies.updateMetadataPresent),
+      managedRuntimePresent: observe("managedRuntime", dependencies.managedRuntimePresent),
+    });
   } catch {
     result = {
       ok: false,

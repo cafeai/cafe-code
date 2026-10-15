@@ -8,9 +8,71 @@ import {
   readDebugUrl,
   resolvePackagedResourcesPath,
   summarizeDesktopDebugReadiness,
+  summarizeRuntimeSelfTestFailure,
 } from "./native-desktop-runtime-smoke.ts";
 
 describe("native desktop runtime smoke", () => {
+  it("retains only fixed runtime failure checks and bounded child stderr", () => {
+    const failure = summarizeRuntimeSelfTestFailure(
+      {
+        exitCode: 1,
+        signal: null,
+        stdout: [
+          "private-output",
+          "CAFE_CODE_RUNTIME_SELF_TEST_PHASE=ready:start",
+          "CAFE_CODE_RUNTIME_SELF_TEST_PHASE=ready:complete",
+          "CAFE_CODE_RUNTIME_SELF_TEST_PHASE=safeStorage:start",
+          "CAFE_CODE_RUNTIME_SELF_TEST_PHASE=private-output:start",
+        ].join("\n"),
+        stderr: "x".repeat(5_000),
+      },
+      {
+        checks: { safeStorage: false, sqlite: true, pty: "unknown", other: "private-check" },
+        failedChecks: ["safeStorage", "bootstrap", "private-check"],
+        other: "private-metadata",
+      },
+    );
+    assert.deepEqual(failure, {
+      exitCode: 1,
+      signal: null,
+      checks: {
+        safeStorage: false,
+        sqlite: true,
+        pty: null,
+        packagedResources: null,
+        packagedArtifactAudit: null,
+        updateMetadata: null,
+        managedRuntime: null,
+      },
+      failedChecks: ["safeStorage", "bootstrap"],
+      phases: [
+        "CAFE_CODE_RUNTIME_SELF_TEST_PHASE=ready:start",
+        "CAFE_CODE_RUNTIME_SELF_TEST_PHASE=ready:complete",
+        "CAFE_CODE_RUNTIME_SELF_TEST_PHASE=safeStorage:start",
+      ],
+      stderr: "x".repeat(4_096),
+    });
+    const missing = summarizeRuntimeSelfTestFailure(
+      { exitCode: null, signal: "SIGTRAP", stdout: "", stderr: "native startup failure" },
+      undefined,
+    );
+    assert.equal(missing.signal, "SIGTRAP");
+    assert.equal(missing.stderr, "native startup failure");
+    assert.deepEqual(missing.failedChecks, []);
+    assert.deepEqual(missing.phases, []);
+    assert.deepEqual(Object.values(missing.checks), Array(7).fill(null));
+    const repeated = summarizeRuntimeSelfTestFailure(
+      {
+        exitCode: 1,
+        signal: null,
+        stdout: "CAFE_CODE_RUNTIME_SELF_TEST_PHASE=ready:start\n".repeat(30),
+        stderr: "",
+      },
+      undefined,
+    );
+    assert.equal(repeated.phases.length, 16);
+  });
+
   it("requires exact authenticated Windows identity plus generation for new Windows artifact readiness", () => {
     const health = {
       ok: true,

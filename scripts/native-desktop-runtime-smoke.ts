@@ -8,6 +8,8 @@ import { readJsonFile } from "./json-file.ts";
 
 const SELF_TEST_SWITCH = "--cafe-runtime-self-test";
 const SELF_TEST_RESULT_ENV = "CAFE_CODE_RUNTIME_SELF_TEST_RESULT";
+const SELF_TEST_PHASE =
+  /^CAFE_CODE_RUNTIME_SELF_TEST_PHASE=(ready|safeStorage|sqlite|pty|packagedResources|packagedArtifactAudit|updateMetadata|managedRuntime):(start|complete)$/;
 const DISABLE_CHROMIUM_SANDBOX_ENV = "CAFE_CODE_NATIVE_SMOKE_DISABLE_CHROMIUM_SANDBOX";
 const ENVIRONMENT_ENDPOINT_PATH = "/.well-known/cafe-code/environment";
 const DEBUG_URL_PATTERN = /\[Cafe Code debug\]\s+(http:\/\/127\.0\.0\.1:\d+\/debug)\b/;
@@ -41,6 +43,38 @@ function appendBounded(current: string, chunk: Uint8Array | string): string {
   return next.length <= MAX_CAPTURED_OUTPUT_CHARS
     ? next
     : next.slice(next.length - MAX_CAPTURED_OUTPUT_CHARS);
+}
+
+/** Only fixed self-test check names and bounded isolated-child stderr leave
+ * this private fixture. A failing exit must retain evidence before cleanup. */
+export function summarizeRuntimeSelfTestFailure(result: ProcessResult, value: unknown) {
+  const record = readRecord(value);
+  const checks = readRecord(record?.checks);
+  const failedChecks = record?.failedChecks;
+  const names = [
+    "safeStorage",
+    "sqlite",
+    "pty",
+    "packagedResources",
+    "packagedArtifactAudit",
+    "updateMetadata",
+    "managedRuntime",
+  ] as const;
+  return {
+    exitCode: result.exitCode,
+    signal: result.signal,
+    checks: Object.fromEntries(
+      names.map((name) => [name, typeof checks?.[name] === "boolean" ? checks[name] : null]),
+    ),
+    failedChecks: Array.isArray(failedChecks)
+      ? [...names, "bootstrap", "resultFile"].filter((name) => failedChecks.includes(name))
+      : [],
+    phases: result.stdout
+      .split(/\r?\n/)
+      .filter((line) => SELF_TEST_PHASE.test(line))
+      .slice(-16),
+    stderr: result.stderr.slice(-4_096),
+  };
 }
 
 export function parseRuntimeSmokeArgs(args: readonly string[]): RuntimeSmokeOptions {
@@ -194,7 +228,11 @@ async function runProcess(
     child.once("exit", (exitCode, signal) => {
       clearTimeout(timeout);
       if (timedOut) {
-        reject(new Error(`Process timed out: ${command}`));
+        reject(
+          new Error(
+            `Process timed out: ${command}; ${JSON.stringify(summarizeRuntimeSelfTestFailure({ exitCode, signal, stdout, stderr }, undefined))}`,
+          ),
+        );
         return;
       }
       resolveProcess({ exitCode, signal, stdout, stderr });
@@ -298,7 +336,12 @@ async function runPackagedRuntimeSelfTest(
     ["--disable-gpu", ...desktopSmokeChromiumSwitches(environment), SELF_TEST_SWITCH],
     { env: { ...environment, [SELF_TEST_RESULT_ENV]: resultPath } },
   );
-  if (result.exitCode !== 0) throw new Error("Packaged desktop runtime self-test exited nonzero.");
+  if (result.exitCode !== 0) {
+    const decoded = await readJsonFile(resultPath).catch(() => undefined);
+    throw new Error(
+      `Packaged desktop runtime self-test exited nonzero: ${JSON.stringify(summarizeRuntimeSelfTestFailure(result, decoded))}`,
+    );
+  }
   const decoded = await readJsonFile(resultPath);
   return assertRuntimeSelfTestResult(decoded);
 }
