@@ -22,6 +22,13 @@ reliability, signed-artifact, checksum and candidate-feed checks succeed, then p
 qualified bytes. It never force-updates an existing tag. Omitting `publish_release=true` builds
 and qualifies artifacts without creating a tag or GitHub release.
 
+An explicitly requested build-only release adds `-f build_only=true` to that manual command.
+It skips quality/reliability workflows, native runtime/install tests and update-detection probes.
+It still builds all four targets, requires macOS signing and notarization, verifies the ZIP app's
+signature and stapled ticket, and validates exact-source artifact hashes and update manifests
+before creating the tag or publishing. Normal CI and the default gated release path are unchanged.
+Build-only publication does not establish that the skipped runtime/install checks passed.
+
 If the public-feed probe fails, stop promotion and announce the affected tag through the normal
 release process. Inspect the exact version/feed/artifact evidence, then withdraw the broken
 release from the public update feed or publish a corrected higher version after all gates pass.
@@ -59,7 +66,7 @@ one merely because the app exits.
   DMG installation. Replace Cafe Code in `/Applications` from the DMG. Squirrel.Mac requires a
   signed app. This release retains manual DMG replacement; signing alone does not change the
   app's update-install policy. Both architecture builds must pass native signature,
-  Gatekeeper and stapled-notarization checks before publication.
+  Gatekeeper and stapled-notarization checks before publication; build-only runs check the ZIP app.
 - Linux x64 AppImage: update checks run only when Cafe Code was launched from an AppImage and the
   `APPIMAGE` path is available. After an explicit download and restart confirmation, Electron
   Updater replaces the AppImage and relaunches it. The containing directory and AppImage must be
@@ -77,8 +84,9 @@ require Authenticode signing before their publisher can be authenticated. macOS 
 require the registered `MACOS_CERTIFICATE_BASE64`, `MACOS_CERTIFICATE_PASSWORD`, `APPLE_ID`,
 `APPLE_APP_SPECIFIC_PASSWORD` and `APPLE_TEAM_ID` Actions secrets. Only the macOS release build
 step receives them. The builder requires a signing identity and notarization; unsigned fallback
-is an error. Actual app signatures, Gatekeeper admission and stapled tickets are checked on both
-the DMG and ZIP copies before artifact identities are sealed.
+is an error. Actual app signatures, Gatekeeper admission and stapled tickets are checked before
+artifact identities are sealed. The default gated path checks both DMG and ZIP copies;
+the explicitly selected build-only path checks the ZIP copy without launching the app.
 
 Native CI smoke tests keep Chromium sandboxing and the real safe-storage round
 trip enabled. Linux opts into configuring only its private extracted

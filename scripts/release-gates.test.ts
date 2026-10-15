@@ -17,7 +17,7 @@ describe("release publication gates", () => {
       default: false,
     });
     expect(release.jobs.publish.if).toBe(
-      "github.event_name != 'workflow_dispatch' || inputs.publish_release",
+      "${{ !cancelled() && needs.prepare.result == 'success' && needs.artifacts.result == 'success' && (github.event_name != 'workflow_dispatch' || inputs.publish_release) && (inputs.build_only || (needs.quality.result == 'success' && needs.reliability.result == 'success')) }}",
     );
     expect(release.jobs.publish.needs).toEqual(["prepare", "quality", "reliability", "artifacts"]);
     expect(release.jobs.publish.env.RELEASE_TAG).toBe("${{ needs.prepare.outputs.tag }}");
@@ -80,14 +80,20 @@ describe("release publication gates", () => {
       expect(steps.filter((step) => step.env?.[flags[0]])).toEqual([
         expect.objectContaining({
           name: linuxName,
-          if: "runner.os == 'Linux'",
+          if:
+            name === "release.yml"
+              ? "runner.os == 'Linux' && !inputs.build_only"
+              : "runner.os == 'Linux'",
           env: { [flags[0]]: "1" },
         }),
       ]);
       expect(steps.filter((step) => step.env?.[flags[1]])).toEqual([
         expect.objectContaining({
           name: macName,
-          if: "runner.os == 'macOS'",
+          if:
+            name === "release.yml"
+              ? "runner.os == 'macOS' && !inputs.build_only"
+              : "runner.os == 'macOS'",
           env: expect.objectContaining({ [flags[1]]: "1" }),
         }),
       ]);
