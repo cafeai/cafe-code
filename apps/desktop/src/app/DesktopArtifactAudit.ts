@@ -36,6 +36,7 @@ const TEXT_EXTENSIONS = new Set([
   ".mjs",
   ".ps1",
   ".sh",
+  ".strings",
   ".txt",
   ".webmanifest",
   ".yaml",
@@ -44,7 +45,9 @@ const TEXT_EXTENSIONS = new Set([
 
 const DENIED_DEPENDENCY_PROTOCOL = /^(?:catalog|file|link|patch|portal|workspace):/iu;
 const DENIED_TOOLCHAIN_REFERENCE = new RegExp(
-  `(^|[^a-z0-9_])${RETIRED_TOOL_TOKEN}(?=$|[^a-z0-9_])`,
+  // Inspect quoted executable/module references. Minifiers can legitimately
+  // mint this three-letter identifier inside bundled renderer dependencies.
+  `["'\x60]${RETIRED_TOOL_TOKEN}(?=$|[\\s"'\x60:/\\\\])`,
   "iu",
 );
 const PRIVATE_KEY_MATERIAL = /-----BEGIN (?:EC |OPENSSH |RSA )?PRIVATE KEY-----/u;
@@ -162,7 +165,9 @@ export async function auditPackagedDesktopArtifact(
     "app.asar",
     "app.asar.unpacked",
     "app-update.yml",
-    ...(platform === "darwin" ? ["icon.icns"] : []),
+    ...(platform === "darwin"
+      ? ["icon.icns", "mac-dictation-target", "en.lproj", "ja.lproj", "ko.lproj"]
+      : []),
     ...(platform === "win32" ? ["elevate.exe", "managed-runtime"] : []),
   ]);
   if (resourceEntries.some((entry) => !expectedTopLevelEntries.has(entry.name))) return false;

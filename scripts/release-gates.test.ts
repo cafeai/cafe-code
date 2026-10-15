@@ -48,10 +48,43 @@ describe("release publication gates", () => {
         expect.objectContaining({
           name: macName,
           if: "runner.os == 'macOS'",
-          env: { [flags[1]]: "1" },
+          env: expect.objectContaining({ [flags[1]]: "1" }),
         }),
       ]);
     }
+  });
+
+  it("requires macOS signing secrets only on its release build and verifies signatures before sealing", () => {
+    const release = workflow("release.yml");
+    const steps = release.jobs.artifacts.steps;
+    const signed = steps.find(
+      (step: { name?: string }) => step.name === "Build signed and notarized macOS artifact",
+    );
+    expect(signed.if).toBe("runner.os == 'macOS'");
+    expect(signed.env).toEqual({
+      CAFE_CODE_DESKTOP_SIGNED: "true",
+      CSC_IDENTITY_AUTO_DISCOVERY: "true",
+      CSC_LINK: "${{ secrets.MACOS_CERTIFICATE_BASE64 }}",
+      CSC_KEY_PASSWORD: "${{ secrets.MACOS_CERTIFICATE_PASSWORD }}",
+      APPLE_ID: "${{ secrets.APPLE_ID }}",
+      APPLE_APP_SPECIFIC_PASSWORD: "${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}",
+      APPLE_TEAM_ID: "${{ secrets.APPLE_TEAM_ID }}",
+    });
+    expect(signed.run).toContain('if [[ -z "${!required}" ]]');
+    expect(
+      steps.filter((step: { env?: Record<string, string> }) =>
+        Object.values(step.env ?? {}).some((value) => value.includes("secrets.")),
+      ),
+    ).toEqual([signed]);
+    const native = steps.find(
+      (step: { name?: string }) => step.name === "Qualify macOS artifact and runtime",
+    );
+    expect(native.env.CAFE_CODE_MACOS_ARTIFACT_REQUIRE_SIGNED).toBe("1");
+    const unsigned = steps.find(
+      (step: { name?: string }) => step.name === "Build unsigned Windows or Linux artifact",
+    );
+    expect(unsigned.if).toBe("runner.os != 'macOS'");
+    expect(release.jobs.artifacts.env.CAFE_CODE_DESKTOP_SIGNED).toBe("false");
   });
 
   it("qualifies one selected source across every reliability job", () => {
@@ -142,7 +175,7 @@ describe("release publication gates", () => {
     for (const run of [
       "corepack yarn test:native-windows-artifact",
       "corepack yarn test:native-macos-artifact",
-      "xvfb-run -a corepack yarn test:native-linux-artifact",
+      "dbus-run-session -- xvfb-run -a corepack yarn test:native-linux-artifact",
     ]) {
       const index = artifactSteps.findIndex((step: { run?: string }) => step.run === run);
       expect(index).toBeGreaterThanOrEqual(0);

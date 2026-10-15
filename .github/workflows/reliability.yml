@@ -131,9 +131,9 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y xvfb libgtk-3-0t64 libnss3 libasound2t64 libgbm1 libxss1 libx11-xcb1
+          sudo apt-get install -y xvfb libgtk-3-0t64 libnss3 libasound2t64 libgbm1 libxss1 libx11-xcb1 gnome-keyring dbus libsecret-1-0 libglib2.0-bin
       - name: Launch Linux artifact in isolated virtual display
         if: runner.os == 'Linux'
         env:
           CAFE_CODE_LINUX_ARTIFACT_PREPARE_SANDBOX: "1"
-        run: xvfb-run -a corepack yarn ${{ matrix.smoke }}
+        run: dbus-run-session -- xvfb-run -a corepack yarn ${{ matrix.smoke }}

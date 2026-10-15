@@ -6,6 +6,43 @@ import { describe, expect, it } from "vitest";
 import { withIsolatedMacosArtifactKeychain } from "./macos-artifact-keychain.ts";
 
 describe("isolated macOS artifact keychain", () => {
+  it("seeds only synthetic native safe-storage credentials in its disposable keychain", async () => {
+    const root = await mkdtemp(join(tmpdir(), "cafe-keychain-seed-"));
+    const calls: string[][] = [];
+    try {
+      await withIsolatedMacosArtifactKeychain(
+        root,
+        async () => {},
+        async (args) => {
+          calls.push([...args]);
+          if (args.length === 3 && ["default-keychain", "list-keychains"].includes(args[0]!)) {
+            return JSON.stringify(join(root, "original.keychain-db"));
+          }
+          return "";
+        },
+        ["Cafe Code", "Chromium", "Cafe Code"],
+      );
+      const seeded = calls.filter((args) => args[0] === "add-generic-password");
+      expect(seeded).toHaveLength(2);
+      for (const [index, name] of ["Cafe Code", "Chromium"].entries()) {
+        expect(seeded[index]).toEqual([
+          "add-generic-password",
+          "-A",
+          "-a",
+          name,
+          "-s",
+          `${name} Safe Storage`,
+          "-w",
+          expect.stringMatching(/^[A-Za-z0-9+/]{43}=$/u),
+          join(root, "runtime-smoke.keychain-db"),
+        ]);
+      }
+      expect(calls.at(-1)).toEqual(["delete-keychain", join(root, "runtime-smoke.keychain-db")]);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   it("refuses an existing keychain before changing native preferences", async () => {
     const root = await mkdtemp(join(tmpdir(), "cafe-keychain-existing-"));
     let commands = 0;

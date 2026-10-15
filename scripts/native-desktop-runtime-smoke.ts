@@ -27,6 +27,7 @@ interface ProcessResult {
 interface RuntimeSmokeOptions {
   readonly appPath: string;
   readonly resourcesPath?: string;
+  readonly environment?: NodeJS.ProcessEnv;
 }
 
 interface RuntimeSelfTestResult {
@@ -287,7 +288,10 @@ async function readJsonResponse(url: string): Promise<unknown | undefined> {
   return await response.json();
 }
 
-async function makeIsolatedEnvironment(root: string): Promise<NodeJS.ProcessEnv> {
+async function makeIsolatedEnvironment(
+  root: string,
+  base: NodeJS.ProcessEnv,
+): Promise<NodeJS.ProcessEnv> {
   const home = join(root, "home");
   const appData = join(home, "AppData", "Roaming");
   const localAppData = join(home, "AppData", "Local");
@@ -299,7 +303,7 @@ async function makeIsolatedEnvironment(root: string): Promise<NodeJS.ProcessEnv>
     mkdir(xdgConfigHome, { recursive: true }),
   ]);
   return {
-    ...process.env,
+    ...base,
     HOME: home,
     USERPROFILE: home,
     APPDATA: appData,
@@ -465,7 +469,7 @@ export async function runNativeDesktopRuntimeSmoke(options: RuntimeSmokeOptions)
   const root = await mkdtemp(join(tmpdir(), "cafecode-native-runtime-smoke-"));
   const resourcesPath = options.resourcesPath ?? resolvePackagedResourcesPath(options.appPath);
   try {
-    const environment = await makeIsolatedEnvironment(root);
+    const environment = await makeIsolatedEnvironment(root, options.environment ?? process.env);
     const runtime = await runPackagedRuntimeSelfTest(options.appPath, environment, root);
     await runPackagedApplicationSmoke(options.appPath, resourcesPath, environment);
     console.info(

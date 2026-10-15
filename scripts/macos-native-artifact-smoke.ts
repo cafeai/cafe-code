@@ -1,8 +1,9 @@
-import { spawn } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import { existsSync } from "node:fs";
 import { mkdir, mkdtemp, readdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import { promisify } from "node:util";
 
 import { runNativeDesktopRuntimeSmoke } from "./native-desktop-runtime-smoke.ts";
 import { withIsolatedMacosArtifactKeychain } from "./macos-artifact-keychain.ts";
@@ -66,6 +67,17 @@ async function findAppExecutable(appBundle: string): Promise<string> {
   return join(executableDir, matches[0]!);
 }
 
+async function verifySignedApp(appBundle: string): Promise<void> {
+  if (process.env.CAFE_CODE_MACOS_ARTIFACT_REQUIRE_SIGNED !== "1") return;
+  for (const [command, args] of [
+    ["codesign", ["--verify", "--deep", "--strict", appBundle]],
+    ["spctl", ["--assess", "--type", "execute", appBundle]],
+    ["xcrun", ["stapler", "validate", appBundle]],
+  ] as const) {
+    assertSuccessful(await runProcess(command, args, 60_000), "Signed macOS artifact verification");
+  }
+}
+
 export async function runMacosNativeArtifactSmoke(releaseDir = resolve("release")): Promise<void> {
   if (process.platform !== "darwin" || (process.arch !== "arm64" && process.arch !== "x64")) {
     throw new Error("macOS native artifact smoke must run on a supported macOS architecture.");
@@ -103,19 +115,31 @@ export async function runMacosNativeArtifactSmoke(releaseDir = resolve("release"
       throw new Error("Packaged macOS updater metadata is missing.");
     }
     const qualify = async () => {
+      await verifySignedApp(installedApp);
       await runNativeDesktopRuntimeSmoke({ appPath });
       assertSuccessful(
         await runProcess("ditto", ["-x", "-k", join(releaseDir, artifacts.zip), zipRoot]),
         "ZIP extraction",
       );
       const zipApp = await findAppBundle(zipRoot);
+      await verifySignedApp(zipApp);
       if (!existsSync(join(zipApp, "Contents", "Resources", "app-update.yml"))) {
         throw new Error("Packaged macOS ZIP updater metadata is missing.");
       }
       await runNativeDesktopRuntimeSmoke({ appPath: await findAppExecutable(zipApp) });
     };
     if (process.env.CAFE_CODE_MACOS_ARTIFACT_PREPARE_KEYCHAIN === "1") {
-      await withIsolatedMacosArtifactKeychain(smokeRoot, qualify);
+      const { stdout } = await promisify(execFile)(
+        "/usr/libexec/PlistBuddy",
+        ["-c", "Print :CFBundleName", join(installedApp, "Contents", "Info.plist")],
+        { encoding: "utf8", timeout: 10_000, maxBuffer: 1_024 },
+      );
+      await withIsolatedMacosArtifactKeychain(smokeRoot, qualify, undefined, [
+        stdout.trim(),
+        "@cafecode/desktop-runtime",
+        "Cafe Code",
+        "Chromium",
+      ]);
     } else {
       await qualify();
     }

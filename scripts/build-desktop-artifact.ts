@@ -904,6 +904,7 @@ export function resolveMacDesktopBuildConfig(
   signed: boolean,
 ): Record<string, unknown> {
   return {
+    ...(signed ? { forceCodeSigning: true } : {}),
     // The AX helper cannot run from app.asar. Keep its location stable for the
     // desktop-main resolver and let electron-builder include it in the signed
     // .app Resources tree rather than loading an executable from user data.
@@ -927,7 +928,7 @@ export function resolveMacDesktopBuildConfig(
         NSLocalNetworkUsageDescription: MAC_LOCAL_NETWORK_USAGE_DESCRIPTION,
       },
       ...(signed
-        ? {}
+        ? { hardenedRuntime: true, notarize: true }
         : {
             identity: null,
             hardenedRuntime: false,

@@ -1,7 +1,11 @@
 import { assert, describe, it } from "@effect/vitest";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 import {
   containsDesktopArtifactResidue,
+  auditPackagedDesktopArtifact,
   containsDesktopArtifactSecretMaterial,
   isDesktopRuntimeManifestValid,
   isDesktopUpdateMetadataValid,
@@ -18,6 +22,37 @@ const validManifest = {
 };
 
 describe("DesktopArtifactAudit", () => {
+  it("audits actual staged files with supported macOS resources while rejecting extra files and locale secrets", async () => {
+    const root = await mkdtemp(join(tmpdir(), "cafe-artifact-audit-"));
+    const app = join(root, "app.asar");
+    try {
+      await mkdir(join(app, "apps", "desktop"), { recursive: true });
+      await writeFile(join(app, "package.json"), JSON.stringify(validManifest));
+      await writeFile(join(app, "apps", "desktop", "main.js"), "var bUn=()=>{};bUn();");
+      await writeFile(
+        join(root, "app-update.yml"),
+        "provider: github\nowner: cafeai\nrepo: cafe-code\n",
+      );
+      await writeFile(join(root, "mac-dictation-target"), "synthetic native helper");
+      for (const locale of ["en", "ja", "ko"]) {
+        await mkdir(join(root, `${locale}.lproj`));
+        await writeFile(
+          join(root, `${locale}.lproj`, "InfoPlist.strings"),
+          '"usage" = "Microphone";',
+        );
+      }
+      assert.isTrue(await auditPackagedDesktopArtifact(root, "darwin"));
+      assert.isFalse(await auditPackagedDesktopArtifact(root, "linux"));
+      await writeFile(join(root, "extra-resource.txt"), "unexpected");
+      assert.isFalse(await auditPackagedDesktopArtifact(root, "darwin"));
+      await rm(join(root, "extra-resource.txt"));
+      await writeFile(join(root, "ja.lproj", "InfoPlist.strings"), "-----BEGIN PRIVATE KEY-----");
+      assert.isFalse(await auditPackagedDesktopArtifact(root, "darwin"));
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   it("accepts only a portable, registry-resolved staged manifest", () => {
     assert.isTrue(isDesktopRuntimeManifestValid(validManifest));
     assert.isFalse(
@@ -39,6 +74,23 @@ describe("DesktopArtifactAudit", () => {
       containsDesktopArtifactResidue("dist/main.js", `const command = '${retiredTool} run app'`),
     );
     assert.isFalse(containsDesktopArtifactResidue("node_modules/vendor/package.json", "unrelated"));
+    for (const reference of [
+      `"${retiredTool}"`,
+      `'${retiredTool}:test'`,
+      `'${retiredTool} run app'`,
+    ]) {
+      assert.isTrue(containsDesktopArtifactResidue("dist/main.js", reference));
+    }
+    // Actual renderer bundles contain these generated identifiers. Their
+    // spelling is unrelated to an executable, import or packaged runtime.
+    for (const identifier of [retiredTool, "bUn", "BUn", "Bun"]) {
+      assert.isFalse(
+        containsDesktopArtifactResidue(
+          "dist/sandboxDocument.js",
+          `var ${identifier}=()=>{};${identifier}();`,
+        ),
+      );
+    }
   });
 
   it("rejects credential material without flagging ordinary syntax identifiers", () => {

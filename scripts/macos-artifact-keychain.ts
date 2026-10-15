@@ -38,6 +38,7 @@ export async function withIsolatedMacosArtifactKeychain(
   root: string,
   action: () => Promise<void>,
   security: SecurityCommand = executeSecurity,
+  applicationNames: readonly string[] = [],
 ): Promise<void> {
   if (!isAbsolute(root)) throw new Error("Expected an absolute private keychain directory.");
   const rootInfo = await lstat(root);
@@ -63,6 +64,25 @@ export async function withIsolatedMacosArtifactKeychain(
     // the runner's login keychain and trigger its interactive access prompt.
     await security(["list-keychains", "-d", "user", "-s", keychain]);
     await security(["default-keychain", "-d", "user", "-s", keychain]);
+    // Unsigned CI builds cannot establish a stable trusted-app ACL. Seed only
+    // synthetic keys in this owned disposable keychain so the real native
+    // safeStorage round trip does not wait for a desktop permission dialog.
+    for (const name of new Set(applicationNames)) {
+      if (!name.trim() || name.length > 160 || /[\r\n\0]/u.test(name)) {
+        throw new Error("Unexpected artifact application name.");
+      }
+      await security([
+        "add-generic-password",
+        "-A",
+        "-a",
+        name,
+        "-s",
+        `${name} Safe Storage`,
+        "-w",
+        randomBytes(32).toString("base64"),
+        keychain,
+      ]);
+    }
     await action();
   } finally {
     const failures: unknown[] = [];

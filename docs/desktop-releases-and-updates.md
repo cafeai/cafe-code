@@ -1,6 +1,7 @@
 # Desktop Releases And Updates
 
-Cafe Code publishes intentionally unsigned desktop artifacts from version tags. Stable tags use
+Cafe Code publishes desktop artifacts from version tags. macOS apps are Developer ID signed and
+notarized; Windows and Linux artifacts remain unsigned. Stable tags use
 `vX.Y.Z`; nightly tags use `vX.Y.Z-nightly.YYYYMMDD.N` with `N >= 1`. The release workflow builds
 Windows x64 NSIS, macOS arm64/x64 DMG plus updater ZIP, and Linux x64 AppImage. Linux formats other
 than x64 AppImage are not currently supported.
@@ -49,8 +50,9 @@ one merely because the app exits.
   Publisher or SmartScreen warnings because there is no Authenticode certificate.
 - macOS arm64/x64: Cafe Code detects the release but opens its exact GitHub release page for manual
   DMG installation. Replace Cafe Code in `/Applications` from the DMG. Squirrel.Mac requires a
-  signed app, so unsigned builds must never offer in-place restart-and-install. Gatekeeper may
-  require the user to approve the unsigned app in Privacy & Security.
+  signed app. This release retains manual DMG replacement; signing alone does not change the
+  app's update-install policy. Both architecture builds must pass native signature,
+  Gatekeeper and stapled-notarization checks before publication.
 - Linux x64 AppImage: update checks run only when Cafe Code was launched from an AppImage and the
   `APPIMAGE` path is available. After an explicit download and restart confirmation, Electron
   Updater replaces the AppImage and relaunches it. The containing directory and AppImage must be
@@ -63,19 +65,26 @@ Source checkouts use the separate Git branch update diagnostic. They compare com
 
 The feed and artifacts are delivered over GitHub HTTPS, and Electron Updater verifies the SHA-512
 digest recorded in the release manifest before using a downloaded Windows or Linux artifact. This
-detects transport corruption but does not establish publisher identity. Anyone who can publish to
-the GitHub repository can distribute an unsigned executable accepted by the updater. Adding Apple
-Developer ID signing/notarization and Windows Authenticode signing is required before describing
-these artifacts as publisher-authenticated.
+detects transport corruption but does not establish publisher identity. Windows artifacts still
+require Authenticode signing before their publisher can be authenticated. macOS release builds
+require the registered `MACOS_CERTIFICATE_BASE64`, `MACOS_CERTIFICATE_PASSWORD`, `APPLE_ID`,
+`APPLE_APP_SPECIFIC_PASSWORD` and `APPLE_TEAM_ID` Actions secrets. Only the macOS release build
+step receives them. The builder requires a signing identity and notarization; unsigned fallback
+is an error. Actual app signatures, Gatekeeper admission and stapled tickets are checked on both
+the DMG and ZIP copies before artifact identities are sealed.
 
 Native CI smoke tests keep Chromium sandboxing and the real safe-storage round
 trip enabled. Linux opts into configuring only its private extracted
 `chrome-sandbox` helper in the runner workspace's temporary area as root-owned
 mode `4755`, rejecting shared or symlinked
-helpers and checking inode identity afterward. macOS opts into a private,
+helpers and checking inode identity afterward. Its fresh D-Bus session owns a private native
+GNOME secret service and random keyring password; its process and private files retire after
+qualification. macOS opts into a private,
 unlocked temporary keychain as its only search target for the DMG/ZIP checks,
 then restores the original
-default/search preferences and deletes that keychain on success or failure.
+default/search preferences and deletes that keychain on success or failure. Synthetic random
+safe-storage keys in that disposable keychain avoid unsigned CI permission dialogs while
+retaining the real OS-backed encryption/decryption check.
 These options are scoped to their respective artifact steps; ordinary launches
 and local smoke commands retain their existing OS policy. No signing identity,
 provider account or existing keychain contents participate in this setup.

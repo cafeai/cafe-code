@@ -134,8 +134,30 @@ jobs:
       - name: Install dependencies
         run: corepack yarn install --immutable
 
-      - name: Build unsigned artifact
+      - name: Build unsigned Windows or Linux artifact
+        if: runner.os != 'macOS'
         run: corepack yarn ${{ matrix.command }}
+
+      - name: Build signed and notarized macOS artifact
+        if: runner.os == 'macOS'
+        shell: bash
+        env:
+          CAFE_CODE_DESKTOP_SIGNED: "true"
+          CSC_IDENTITY_AUTO_DISCOVERY: "true"
+          CSC_LINK: ${{ secrets.MACOS_CERTIFICATE_BASE64 }}
+          CSC_KEY_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          set -euo pipefail
+          for required in CSC_LINK CSC_KEY_PASSWORD APPLE_ID APPLE_APP_SPECIFIC_PASSWORD APPLE_TEAM_ID; do
+            if [[ -z "${!required}" ]]; then
+              echo "Missing required macOS signing secret: ${required}" >&2
+              exit 1
+            fi
+          done
+          corepack yarn ${{ matrix.command }}
 
       - name: Build lower-version AppImage probe
         if: matrix.name == 'linux-x64'
@@ -152,19 +174,20 @@ jobs:
         if: runner.os == 'macOS'
         env:
           CAFE_CODE_MACOS_ARTIFACT_PREPARE_KEYCHAIN: "1"
+          CAFE_CODE_MACOS_ARTIFACT_REQUIRE_SIGNED: "1"
         run: corepack yarn test:native-macos-artifact
 
       - name: Install Linux display runtime
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y xvfb libgtk-3-0t64 libnss3 libasound2t64 libgbm1 libxss1 libx11-xcb1
+          sudo apt-get install -y xvfb libgtk-3-0t64 libnss3 libasound2t64 libgbm1 libxss1 libx11-xcb1 gnome-keyring dbus libsecret-1-0 libglib2.0-bin
 
       - name: Qualify Linux artifact and runtime
         if: runner.os == 'Linux'
         env:
           CAFE_CODE_LINUX_ARTIFACT_PREPARE_SANDBOX: "1"
-        run: xvfb-run -a corepack yarn test:native-linux-artifact
+        run: dbus-run-session -- xvfb-run -a corepack yarn test:native-linux-artifact
 
       - name: Seal qualified artifact identities
         run: node scripts/release-artifact-evidence.ts --write release --sha "${{ needs.prepare.outputs.source-sha }}" --target "${{ matrix.name }}"
@@ -187,7 +210,7 @@ jobs:
           retention-days: 7
 
   publish:
-    name: Publish unsigned release
+    name: Publish qualified release
     needs: [prepare, quality, reliability, artifacts]
     runs-on: ubuntu-26.04
     timeout-minutes: 20
@@ -303,7 +326,7 @@ jobs:
             --verify-tag
             --target "${RELEASE_SOURCE_SHA}"
             --title "Cafe Code ${RELEASE_VERSION}"
-            --notes "Unsigned desktop release. Windows uses NSIS, macOS provides arm64/x64 DMGs, and Linux support is x64 AppImage only. Verify manual downloads with SHA256SUMS.txt."
+            --notes "macOS arm64/x64 apps are Developer ID signed and notarized, with DMG and ZIP downloads. Windows x64 uses an unsigned NSIS installer; Linux x64 uses AppImage. Verify manual downloads with SHA256SUMS.txt."
           )
           if [[ "${{ needs.prepare.outputs.prerelease }}" == "true" ]]; then
             args+=(--prerelease)

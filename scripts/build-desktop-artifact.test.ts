@@ -281,6 +281,13 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
     });
   });
 
+  it("requires signing, hardened runtime and notarization for signed macOS builds", () => {
+    const config = resolveMacDesktopBuildConfig("dmg", true);
+    assert.isTrue(config.forceCodeSigning);
+    assert.deepInclude(config.mac, { hardenedRuntime: true, notarize: true });
+    assert.notProperty(config.mac, "identity");
+  });
+
   it.effect("stages only reviewed locale privacy strings in a scoped native resource tree", () =>
     Effect.scoped(
       Effect.gen(function* () {

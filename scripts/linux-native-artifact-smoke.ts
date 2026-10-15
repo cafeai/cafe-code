@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { isAbsolute, join, resolve } from "node:path";
 
 import { runNativeDesktopRuntimeSmoke } from "./native-desktop-runtime-smoke.ts";
+import { withLinuxArtifactKeyring } from "./linux-artifact-keyring.ts";
 
 interface ProcessResult {
   readonly exitCode: number | null;
@@ -126,10 +127,14 @@ export async function runLinuxNativeArtifactSmoke(releaseDir = resolve("release"
         throw new Error("Isolated Linux sandbox identity or permissions changed unexpectedly.");
       }
     }
-    await runNativeDesktopRuntimeSmoke({
-      appPath: join(extractedRoot, "cafe-code"),
-      resourcesPath: join(extractedRoot, "resources"),
-    });
+    const qualify = (environment?: NodeJS.ProcessEnv) =>
+      runNativeDesktopRuntimeSmoke({
+        appPath: join(extractedRoot, "cafe-code"),
+        resourcesPath: join(extractedRoot, "resources"),
+        ...(environment ? { environment } : {}),
+      });
+    if (prepareSandbox) await withLinuxArtifactKeyring(smokeRoot, qualify);
+    else await qualify();
     console.info("Linux AppImage metadata/runtime/artifact smoke passed.");
   } finally {
     await rm(smokeRoot, { recursive: true, force: true });
