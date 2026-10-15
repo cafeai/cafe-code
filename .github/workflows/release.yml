@@ -150,6 +150,8 @@ jobs:
 
       - name: Qualify macOS artifact and runtime
         if: runner.os == 'macOS'
+        env:
+          CAFE_CODE_MACOS_ARTIFACT_PREPARE_KEYCHAIN: "1"
         run: corepack yarn test:native-macos-artifact
 
       - name: Install Linux display runtime
@@ -160,6 +162,8 @@ jobs:
 
       - name: Qualify Linux artifact and runtime
         if: runner.os == 'Linux'
+        env:
+          CAFE_CODE_LINUX_ARTIFACT_PREPARE_SANDBOX: "1"
         run: xvfb-run -a corepack yarn test:native-linux-artifact
 
       - name: Seal qualified artifact identities

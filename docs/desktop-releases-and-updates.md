@@ -67,3 +67,13 @@ detects transport corruption but does not establish publisher identity. Anyone w
 the GitHub repository can distribute an unsigned executable accepted by the updater. Adding Apple
 Developer ID signing/notarization and Windows Authenticode signing is required before describing
 these artifacts as publisher-authenticated.
+
+Native CI smoke tests keep Chromium sandboxing and the real safe-storage round
+trip enabled. Linux opts into configuring only its private extracted
+`chrome-sandbox` helper as root-owned mode `4755`, rejecting shared or symlinked
+helpers and checking inode identity afterward. macOS opts into a private,
+unlocked temporary keychain for the DMG/ZIP checks, then restores the original
+default/search preferences and deletes that keychain on success or failure.
+These options are scoped to their respective artifact steps; ordinary launches
+and local smoke commands retain their existing OS policy. No signing identity,
+provider account or existing keychain contents participate in this setup.

@@ -8,6 +8,52 @@ const workflow = (name: string) =>
   parse(readFileSync(resolve(root, ".github/workflows", name), "utf8"));
 
 describe("release publication gates", () => {
+  it("scopes native sandbox and private keychain setup to their exact artifact smoke steps", () => {
+    const flags = [
+      "CAFE_CODE_LINUX_ARTIFACT_PREPARE_SANDBOX",
+      "CAFE_CODE_MACOS_ARTIFACT_PREPARE_KEYCHAIN",
+    ] as const;
+    for (const [name, jobName, linuxName, macName] of [
+      [
+        "release.yml",
+        "artifacts",
+        "Qualify Linux artifact and runtime",
+        "Qualify macOS artifact and runtime",
+      ],
+      [
+        "reliability.yml",
+        "packaged-runtime",
+        "Launch Linux artifact in isolated virtual display",
+        "Launch macOS artifact with isolated keychain",
+      ],
+    ] as const) {
+      const source = workflow(name);
+      for (const flag of flags) expect(source.env ?? {}).not.toHaveProperty(flag);
+      for (const job of Object.values(source.jobs) as { env?: unknown }[]) {
+        for (const flag of flags) expect(job.env ?? {}).not.toHaveProperty(flag);
+      }
+      const steps = source.jobs[jobName].steps as {
+        name?: string;
+        if?: string;
+        env?: Record<string, string>;
+      }[];
+      expect(steps.filter((step) => step.env?.[flags[0]])).toEqual([
+        expect.objectContaining({
+          name: linuxName,
+          if: "runner.os == 'Linux'",
+          env: { [flags[0]]: "1" },
+        }),
+      ]);
+      expect(steps.filter((step) => step.env?.[flags[1]])).toEqual([
+        expect.objectContaining({
+          name: macName,
+          if: "runner.os == 'macOS'",
+          env: { [flags[1]]: "1" },
+        }),
+      ]);
+    }
+  });
+
   it("qualifies one selected source across every reliability job", () => {
     const ci = workflow("ci.yml");
     expect(ci.on.workflow_dispatch.inputs.reliability_only).toEqual({

@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
 import { runNativeDesktopRuntimeSmoke } from "./native-desktop-runtime-smoke.ts";
+import { withIsolatedMacosArtifactKeychain } from "./macos-artifact-keychain.ts";
 
 interface ProcessResult {
   readonly exitCode: number | null;
@@ -101,17 +102,23 @@ export async function runMacosNativeArtifactSmoke(releaseDir = resolve("release"
     if (!existsSync(join(installedApp, "Contents", "Resources", "app-update.yml"))) {
       throw new Error("Packaged macOS updater metadata is missing.");
     }
-    await runNativeDesktopRuntimeSmoke({ appPath });
-
-    assertSuccessful(
-      await runProcess("ditto", ["-x", "-k", join(releaseDir, artifacts.zip), zipRoot]),
-      "ZIP extraction",
-    );
-    const zipApp = await findAppBundle(zipRoot);
-    if (!existsSync(join(zipApp, "Contents", "Resources", "app-update.yml"))) {
-      throw new Error("Packaged macOS ZIP updater metadata is missing.");
+    const qualify = async () => {
+      await runNativeDesktopRuntimeSmoke({ appPath });
+      assertSuccessful(
+        await runProcess("ditto", ["-x", "-k", join(releaseDir, artifacts.zip), zipRoot]),
+        "ZIP extraction",
+      );
+      const zipApp = await findAppBundle(zipRoot);
+      if (!existsSync(join(zipApp, "Contents", "Resources", "app-update.yml"))) {
+        throw new Error("Packaged macOS ZIP updater metadata is missing.");
+      }
+      await runNativeDesktopRuntimeSmoke({ appPath: await findAppExecutable(zipApp) });
+    };
+    if (process.env.CAFE_CODE_MACOS_ARTIFACT_PREPARE_KEYCHAIN === "1") {
+      await withIsolatedMacosArtifactKeychain(smokeRoot, qualify);
+    } else {
+      await qualify();
     }
-    await runNativeDesktopRuntimeSmoke({ appPath: await findAppExecutable(zipApp) });
     console.info("macOS DMG and ZIP runtime/updater/artifact smoke passed.");
   } finally {
     if (mounted) {

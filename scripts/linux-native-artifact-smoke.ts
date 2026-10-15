@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import { mkdtemp, readFile, readdir, rm } from "node:fs/promises";
+import { lstat, mkdtemp, readFile, readdir, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
@@ -39,6 +39,21 @@ export function isLinuxReleaseMetadataValid(source: string, appImageName: string
   );
 }
 
+/** Admit only the ordinary single-link helper in this fixture's extracted
+ * directory. No symlink or shared inode may receive privileged preparation. */
+export async function resolveLinuxSandboxHelper(extractedRoot: string): Promise<string> {
+  const rootInfo = await lstat(extractedRoot);
+  if (!rootInfo.isDirectory() || rootInfo.isSymbolicLink()) {
+    throw new Error("Linux sandbox preparation requires a real extracted directory.");
+  }
+  const helper = join(await realpath(extractedRoot), "chrome-sandbox");
+  const info = await lstat(helper);
+  if (!info.isFile() || info.isSymbolicLink() || info.nlink !== 1) {
+    throw new Error("Linux sandbox preparation requires a regular unshared helper.");
+  }
+  return helper;
+}
+
 export async function runLinuxNativeArtifactSmoke(releaseDir = resolve("release")): Promise<void> {
   if (process.platform !== "linux" || process.arch !== "x64") {
     throw new Error("Linux native artifact smoke must run on Linux x64.");
@@ -53,6 +68,10 @@ export async function runLinuxNativeArtifactSmoke(releaseDir = resolve("release"
   const smokeRoot = await mkdtemp(join(tmpdir(), "cafecode-linux-artifact-smoke-"));
   try {
     const preparedExtractedRoot = process.env.CAFE_CODE_LINUX_EXTRACTED_ROOT?.trim();
+    const prepareSandbox = process.env.CAFE_CODE_LINUX_ARTIFACT_PREPARE_SANDBOX === "1";
+    if (prepareSandbox && preparedExtractedRoot) {
+      throw new Error("Privileged sandbox preparation requires this fixture's own extraction.");
+    }
     let extractedRoot: string;
     if (preparedExtractedRoot) {
       extractedRoot = resolve(preparedExtractedRoot);
@@ -66,6 +85,33 @@ export async function runLinuxNativeArtifactSmoke(releaseDir = resolve("release"
         throw new Error(`AppImage extraction exited nonzero: ${extract.stderr.trim()}`);
       }
       extractedRoot = join(smokeRoot, "squashfs-root");
+    }
+    if (prepareSandbox) {
+      // Native GitHub runners restrict unprivileged namespaces. Configure the
+      // exact extracted helper as Chromium requires, preserving the sandbox.
+      // This explicit CI-only option never changes a system binary or policy.
+      const helper = await resolveLinuxSandboxHelper(extractedRoot);
+      const original = await lstat(helper, { bigint: true });
+      for (const args of [
+        ["chown", "root:root", "--", helper],
+        ["chmod", "4755", "--", helper],
+      ]) {
+        const prepared = await runProcess("sudo", args, smokeRoot);
+        if (prepared.exitCode !== 0) {
+          throw new Error(`Isolated Linux sandbox preparation failed: ${prepared.stderr.trim()}`);
+        }
+      }
+      const admitted = await resolveLinuxSandboxHelper(extractedRoot);
+      const current = await lstat(admitted, { bigint: true });
+      if (
+        admitted !== helper ||
+        current.dev !== original.dev ||
+        current.ino !== original.ino ||
+        current.uid !== 0n ||
+        (current.mode & 0o7777n) !== 0o4755n
+      ) {
+        throw new Error("Isolated Linux sandbox identity or permissions changed unexpectedly.");
+      }
     }
     await runNativeDesktopRuntimeSmoke({
       appPath: join(extractedRoot, "cafe-code"),

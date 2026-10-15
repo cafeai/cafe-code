@@ -1,8 +1,42 @@
 import { assert, describe, it } from "@effect/vitest";
+import { link, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { expect } from "vitest";
 
-import { isLinuxReleaseMetadataValid, selectLinuxAppImage } from "./linux-native-artifact-smoke.ts";
+import {
+  isLinuxReleaseMetadataValid,
+  resolveLinuxSandboxHelper,
+  selectLinuxAppImage,
+} from "./linux-native-artifact-smoke.ts";
 
 describe("Linux native artifact smoke", () => {
+  it("admits only a regular fixture helper and refuses directory replacements", async () => {
+    const root = await mkdtemp(join(tmpdir(), "cafe-sandbox-admission-"));
+    try {
+      const helper = join(root, "chrome-sandbox");
+      await writeFile(helper, "synthetic helper");
+      expect(await resolveLinuxSandboxHelper(root)).toMatch(/chrome-sandbox$/);
+      await rm(helper);
+      await mkdir(helper);
+      await expect(resolveLinuxSandboxHelper(root)).rejects.toThrow("regular unshared helper");
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("refuses a hard-linked helper before any privileged preparation", async () => {
+    const root = await mkdtemp(join(tmpdir(), "cafe-sandbox-links-"));
+    try {
+      const original = join(root, "original");
+      await writeFile(original, "synthetic helper");
+      await link(original, join(root, "chrome-sandbox"));
+      await expect(resolveLinuxSandboxHelper(root)).rejects.toThrow("regular unshared helper");
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   it("selects one architecture-matched AppImage", () => {
     assert.equal(
       selectLinuxAppImage([
