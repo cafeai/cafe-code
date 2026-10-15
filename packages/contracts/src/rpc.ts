@@ -45,7 +45,7 @@ import {
 } from "./providerUsageReset.ts";
 import * as Rpc from "effect/unstable/rpc/Rpc";
 import * as RpcGroup from "effect/unstable/rpc/RpcGroup";
-import { CafeMcpClientUpdate, CafeMcpError, CafeMcpStatus } from "./mcp.ts";
+import { CafeMcpError, CafeMcpStatus } from "./mcp.ts";
 import {
   ProviderInteractionError,
   ProviderRespondToInteractionInput,
@@ -198,7 +198,6 @@ export const WS_METHODS = {
   // Server meta
   serverGetConfig: "server.getConfig",
   serverGetMcpStatus: "server.getMcpStatus",
-  serverUpdateMcpClient: "server.updateMcpClient",
   serverRefreshProviders: "server.refreshProviders",
   serverListProviderSkills: "server.listProviderSkills",
   serverSubscribeProviderCommands: "server.subscribeProviderCommands",
@@ -273,12 +272,6 @@ export const WsServerGetConfigRpc = Rpc.make(WS_METHODS.serverGetConfig, {
 
 export const WsServerGetMcpStatusRpc = Rpc.make(WS_METHODS.serverGetMcpStatus, {
   payload: Schema.Struct({}),
-  success: CafeMcpStatus,
-  error: CafeMcpError,
-});
-
-export const WsServerUpdateMcpClientRpc = Rpc.make(WS_METHODS.serverUpdateMcpClient, {
-  payload: CafeMcpClientUpdate,
   success: CafeMcpStatus,
   error: CafeMcpError,
 });
@@ -799,7 +792,6 @@ export const WsRpcGroup = RpcGroup.make(
   }),
   WsServerGetConfigRpc,
   WsServerGetMcpStatusRpc,
-  WsServerUpdateMcpClientRpc,
   WsServerRefreshProvidersRpc,
   WsServerListProviderSkillsRpc,
   WsServerSubscribeProviderCommandsRpc,

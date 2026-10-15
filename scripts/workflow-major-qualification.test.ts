@@ -64,10 +64,10 @@ describe("qualified major Actions and Ubuntu runner boundaries", () => {
         .flatMap((job) => job.steps ?? [])
         .filter((step) => step.uses?.startsWith("actions/")),
     );
-    // The new failure-only synthetic fixture upload reuses the independently
-    // reviewed artifact Action. Keep the exact total and qualify that extra
-    // publication boundary below, rather than admitting arbitrary new steps.
-    expect(actions).toHaveLength(35);
+    // Release quality now calls CI directly, sharing its reviewed Actions and
+    // cache instead of repeating them. Candidate preflight adds one download
+    // and preparation checks out the immutable tag to peel annotated tags.
+    expect(actions).toHaveLength(34);
     for (const step of actions) {
       const [action, commit] = step.uses!.split("@");
       expect(commit, step.uses).toBe(qualifiedActionPins[action!]);
@@ -201,7 +201,7 @@ describe("qualified major Actions and Ubuntu runner boundaries", () => {
         }
       }
     }
-    expect(caches).toBe(5);
+    expect(caches).toBe(4);
   });
 
   it("qualifies the installed fixed Electron binary on every quality host before application tests", () => {

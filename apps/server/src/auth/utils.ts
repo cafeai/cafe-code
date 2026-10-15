@@ -1,3 +1,4 @@
+import { trustedClientAddress } from "../httpTransport.ts";
 import type { AuthClientMetadata, AuthClientMetadataDeviceType } from "@cafecode/contracts/auth";
 import type * as HttpServerRequest from "effect/unstable/http/HttpServerRequest";
 import * as Crypto from "node:crypto";
@@ -122,7 +123,9 @@ export function deriveAuthClientMetadata(input: {
   readonly label?: string;
 }): AuthClientMetadata {
   const userAgent = normalizeNonEmptyString(input.request.headers["user-agent"]);
-  const ipAddress = readRemoteAddressFromSource(input.request.source);
+  const ipAddress =
+    normalizeIpAddress(trustedClientAddress(input.request)) ??
+    readRemoteAddressFromSource(input.request.source);
   const os = inferOs(userAgent);
   const browser = inferBrowser(userAgent);
   return {

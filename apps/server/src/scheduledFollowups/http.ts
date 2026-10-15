@@ -1,3 +1,4 @@
+import { boundedWebRequest, respondToHttpBodyError } from "../httpBody.ts";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
 import * as Effect from "effect/Effect";
@@ -40,7 +41,7 @@ export const handleSchedulingMcpRequest = Effect.gen(function* () {
       { status: 403 },
     );
   const service = yield* ScheduledFollowups;
-  const webRequest = yield* HttpServerRequest.toWeb(request);
+  const webRequest = yield* boundedWebRequest(request);
   return yield* Effect.tryPromise({
     try: async () => {
       const transport = new WebStandardStreamableHTTPServerTransport({ enableJsonResponse: true });
@@ -63,7 +64,7 @@ export const handleSchedulingMcpRequest = Effect.gen(function* () {
       ),
     ),
   );
-});
+}).pipe(Effect.catchTag("HttpBodyError", respondToHttpBodyError));
 
 export const schedulingMcpRouteLayer = HttpRouter.add(
   "POST",

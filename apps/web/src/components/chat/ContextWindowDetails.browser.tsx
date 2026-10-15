@@ -1,6 +1,7 @@
 import "../../index.css";
 
 import type { ServerProviderAccountRateLimits } from "@cafecode/contracts";
+import { setUiLocale, uiText } from "@cafecode/shared/i18n";
 import { page, userEvent } from "vitest/browser";
 import { afterEach, describe, expect, it } from "vitest";
 import { render } from "vitest-browser-react";
@@ -76,12 +77,33 @@ function assertSinglePolicyRow(row: HTMLElement) {
   return section;
 }
 
+function assertWrappingFacts(first: HTMLElement, second: HTMLElement, expectInline: boolean) {
+  const row = first.parentElement!;
+  expect(second.parentElement).toBe(row);
+  const style = getComputedStyle(row);
+  expect(style.display).toBe("flex");
+  expect(style.flexWrap).toBe("wrap");
+  const firstBounds = first.getBoundingClientRect();
+  const secondBounds = second.getBoundingClientRect();
+  const sameLine = Math.abs(firstBounds.top - secondBounds.top) <= 1;
+  if (expectInline || sameLine) {
+    expect(Math.abs(firstBounds.top - secondBounds.top)).toBeLessThanOrEqual(1);
+  } else {
+    expect(secondBounds.top).toBeGreaterThanOrEqual(firstBounds.bottom);
+    expect(
+      Math.abs(secondBounds.top - firstBounds.bottom - Number.parseFloat(style.rowGap)),
+    ).toBeLessThanOrEqual(1);
+  }
+  expect(row.scrollWidth).toBeLessThanOrEqual(row.clientWidth + 1);
+}
+
 describe("ContextWindowDetails reset availability", () => {
   const originalViewport = { width: window.innerWidth, height: window.innerHeight };
   const originalFontSize = document.documentElement.style.fontSize;
   const originalDark = document.documentElement.classList.contains("dark");
   let mounted: Awaited<ReturnType<typeof render>> | undefined;
   afterEach(async () => {
+    setUiLocale("en");
     await mounted?.unmount();
     mounted = undefined;
     document.documentElement.style.fontSize = originalFontSize;
@@ -284,7 +306,7 @@ describe("ContextWindowDetails reset availability", () => {
     const rail = await settledRail();
     const usage = rail.querySelector<HTMLElement>("[data-session-rail-usage]")!;
     const quotaScroll = rail.querySelector<HTMLElement>("[data-account-quota-scroll]")!;
-    const resetCount = page.getByText("Usage limit resets available: 2", { exact: true });
+    const resetCount = page.getByText("Resets: 2", { exact: true });
     await expect.element(resetCount).toBeVisible();
     expect(quotaScroll.clientHeight).toBeGreaterThan(0);
     expect(quotaScroll.scrollHeight).toBeGreaterThan(quotaScroll.clientHeight);
@@ -471,7 +493,7 @@ describe("ContextWindowDetails reset availability", () => {
       mounted = await render(
         <ContextWindowDetails usage={null} rateLimits={rateLimits} layout={layout} />,
       );
-      const count = page.getByText("Usage limit resets available: 0", { exact: true });
+      const count = page.getByText("Resets: 0", { exact: true });
       await expect.element(count).toBeVisible();
       expect(count.element().parentElement?.lastElementChild).toBe(count.element());
 
@@ -482,14 +504,14 @@ describe("ContextWindowDetails reset availability", () => {
           layout={layout}
         />,
       );
-      await expect.element(page.getByText("Usage limit resets available: 2")).toBeVisible();
+      await expect.element(page.getByText("Resets: 2")).toBeVisible();
     },
   );
 
   it("shows a known count without window usage and omits an unknown count", async () => {
     const countOnly = { ...rateLimits, rateLimits: { limitId: "codex" } };
     mounted = await render(<ContextWindowDetails usage={null} rateLimits={countOnly} />);
-    await expect.element(page.getByText("Usage limit resets available: 0")).toBeVisible();
+    await expect.element(page.getByText("Resets: 0")).toBeVisible();
 
     await mounted.rerender(
       <ContextWindowDetails
@@ -497,7 +519,7 @@ describe("ContextWindowDetails reset availability", () => {
         rateLimits={{ ...countOnly, rateLimitResetCredits: null }}
       />,
     );
-    await expect.element(page.getByText("Usage limit resets available: 0")).not.toBeInTheDocument();
+    await expect.element(page.getByText("Resets: 0")).not.toBeInTheDocument();
     await expect.element(page.getByText("Waiting for usage from this chat.")).toBeVisible();
   });
 
@@ -540,7 +562,7 @@ describe("ContextWindowDetails reset availability", () => {
       await expect.element(page.getByText(name, { exact: true })).toBeVisible();
       await expect.element(page.getByText("100% left", { exact: true })).toBeVisible();
       await expect.element(page.getByText("Credits: Unlimited", { exact: true })).toBeVisible();
-      await expect.element(page.getByText("Credits: 0 available", { exact: true })).toBeVisible();
+      await expect.element(page.getByText("Credits: 0", { exact: true })).toBeVisible();
       await expect
         .element(page.getByText("Credit balance:", { exact: false }))
         .not.toBeInTheDocument();
@@ -554,7 +576,7 @@ describe("ContextWindowDetails reset availability", () => {
       expect(quota.querySelector("img")).toBeNull();
       expect(quota.textContent).not.toContain("Weekly reset");
       expect(quota.scrollWidth).toBeLessThanOrEqual(quota.clientWidth + 1);
-      const count = page.getByText("Usage limit resets available: 0", { exact: true });
+      const count = page.getByText("Resets: 0", { exact: true });
       expect(quota.lastElementChild).toBe(count.element());
     },
   );
@@ -570,7 +592,7 @@ describe("ContextWindowDetails reset availability", () => {
       />,
     );
     await expect.element(page.getByText("Credits: Available (balance not reported)")).toBeVisible();
-    await expect.element(page.getByText("Credits: 0 available")).not.toBeInTheDocument();
+    await expect.element(page.getByText("Credits: 0")).not.toBeInTheDocument();
     await expect
       .element(page.getByText("Waiting for usage from this chat."))
       .not.toBeInTheDocument();
@@ -595,13 +617,117 @@ describe("ContextWindowDetails reset availability", () => {
       mounted = await render(
         <ContextWindowDetails usage={null} rateLimits={snapshot} layout={layout} />,
       );
-      await expect
-        .element(page.getByText("Credits: 545.03 available", { exact: true }))
-        .toBeVisible();
+      await expect.element(page.getByText("Credits: 545.03", { exact: true })).toBeVisible();
       await expect
         .element(page.getByText("545.0317780000", { exact: false }))
         .not.toBeInTheDocument();
       expect(snapshot.rateLimits.credits?.balance).toBe("545.0317780000");
     },
   );
+
+  it.each(
+    (["popover", "rail"] as const).flatMap((layout) =>
+      ["light", "dark"].flatMap((theme) =>
+        [80, 130].flatMap((scale) =>
+          ["en", "ja", "ko"].map((locale) => ({ layout, theme, scale, locale })),
+        ),
+      ),
+    ),
+  )(
+    "fits compact usage facts on shared rows in the narrow $layout $theme $scale% $locale layout",
+    async ({ layout, theme, scale, locale }) => {
+      await page.viewport(430, 680);
+      setUiLocale(locale as "en" | "ja" | "ko");
+      document.documentElement.classList.toggle("dark", theme === "dark");
+      document.documentElement.style.fontSize = `${scale}%`;
+      const usage: ContextWindowSnapshot = {
+        usedTokens: 48_000,
+        maxTokens: 258_400,
+        remainingTokens: 210_400,
+        usedPercentage: 18.6,
+        remainingPercentage: 81.4,
+        updatedAt: "2026-10-12T00:00:00.000Z",
+        compactsAutomatically: true,
+        autoCompactTokenLimit: null,
+        totalProcessedTokens: 5_000_000,
+        generationRate: { tokensPerSecond: 92.4, measuredMs: 5_000 },
+      };
+      const quota: ServerProviderAccountRateLimits = {
+        checkedAt: rateLimits.checkedAt,
+        rateLimits: {
+          primary: { usedPercent: 5, windowDurationMins: 10_080, resetsAt: 1_800_000_000 },
+          credits: { hasCredits: true, unlimited: false, balance: "62500" },
+        },
+        rateLimitResetCredits: { availableCount: 2 },
+      };
+      const rate = new Intl.NumberFormat(undefined, { maximumFractionDigits: 0 }).format(92.4);
+      mounted = await render(
+        layout === "rail" ? (
+          <div style={{ width: 280, height: 600 }}>
+            <SessionRail plan={null} usage={usage} rateLimits={quota} onShowInComposer={() => {}} />
+          </div>
+        ) : (
+          <div style={{ width: 280 }}>
+            <ContextWindowDetails usage={usage} rateLimits={quota} layout="popover" />
+          </div>
+        ),
+      );
+      if (layout === "rail") await settledRail();
+      const row = page.getByText(uiText("Speed: {rate} tok/s", { rate }), { exact: true });
+      await expect.element(row).toBeVisible();
+      const element = row.element() as HTMLElement;
+      expect(element.scrollWidth).toBeLessThanOrEqual(element.clientWidth + 1);
+      expect(element.getBoundingClientRect().right).toBeLessThanOrEqual(window.innerWidth);
+      const processed = page
+        .getByText(uiText("Processed: {tokens}", { tokens: "5m" }), { exact: true })
+        .element() as HTMLElement;
+      assertWrappingFacts(processed, element, locale === "en");
+      expect(document.body.textContent).not.toContain("Automatically compacts");
+      const credits = page
+        .getByText(uiText("{label}: {value}", { label: uiText("Credits"), value: "62,500" }), {
+          exact: true,
+        })
+        .element() as HTMLElement;
+      const resets = page
+        .getByText(uiText("Resets: {count}", { count: 2 }), { exact: true })
+        .element() as HTMLElement;
+      assertWrappingFacts(credits, resets, locale === "en");
+      expect(credits.parentElement!.matches("[data-account-quota-summary]")).toBe(true);
+      expect(resets.parentElement!.lastElementChild).toBe(resets);
+      const scroll = document.querySelector<HTMLElement>("[data-account-quota-scroll]")!;
+      expect(scroll.contains(credits)).toBe(false);
+      expect(scroll.contains(resets)).toBe(false);
+      for (const fact of [processed, element, credits, resets]) {
+        expect(fact.scrollWidth).toBeLessThanOrEqual(fact.clientWidth + 1);
+        expect(fact.getBoundingClientRect().right).toBeLessThanOrEqual(window.innerWidth);
+      }
+      const screenshotDirectory = import.meta.env.VITE_CODEX_CONTEXT_SCREENSHOT_DIR;
+      if (
+        layout === "rail" &&
+        locale === "en" &&
+        typeof screenshotDirectory === "string" &&
+        screenshotDirectory.length > 0
+      ) {
+        await page.screenshot({
+          path: `${screenshotDirectory}/compact-usage-${theme}-${scale}.png`,
+        });
+      }
+    },
+  );
+
+  it("omits the generation speed when no response was measured", async () => {
+    const usage: ContextWindowSnapshot = {
+      usedTokens: 48_000,
+      maxTokens: 258_400,
+      remainingTokens: 210_400,
+      usedPercentage: 18.6,
+      remainingPercentage: 81.4,
+      updatedAt: "2026-10-12T00:00:00.000Z",
+      compactsAutomatically: false,
+      generationRate: null,
+    };
+    mounted = await render(<ContextWindowDetails usage={usage} layout="popover" />);
+    await expect.element(page.getByText("Context window")).toBeVisible();
+    await expect.element(page.getByText("Speed:", { exact: false })).not.toBeInTheDocument();
+  });
 });

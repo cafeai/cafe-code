@@ -14,7 +14,7 @@ import * as Schema from "effect/Schema";
 import * as Semaphore from "effect/Semaphore";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
 import { ServerConfig } from "../config.ts";
-import { makeSchedulingSessionFiles, type SchedulingSessionFiles } from "./sessionFiles.ts";
+import { makeSessionMcpFiles, type SessionMcpFiles } from "../mcp/sessionFiles.ts";
 
 export const SCHEDULING_SESSION_DAEMON_PATH = "/scheduling/session/authorize";
 const tokenPattern = /^[a-f0-9]{64}$/;
@@ -90,7 +90,7 @@ interface RuntimeBinding {
   readonly authority: SchedulingSessionAuthority;
   readonly previousGeneration: string | null;
   readonly provider: "codex" | "claudeAgent" | "grok";
-  readonly files: SchedulingSessionFiles;
+  readonly files: SessionMcpFiles;
   active: boolean;
   revoked: boolean;
   disposed: boolean;
@@ -195,7 +195,7 @@ export const makeSchedulingSessionRuntime = (options: {
             };
             const files = yield* Effect.tryPromise({
               try: () =>
-                makeSchedulingSessionFiles({
+                makeSessionMcpFiles({
                   bridgeSource: options.bridgeSource,
                   port: options.mcpPort,
                   token,

@@ -716,10 +716,11 @@ describe("SessionRail", () => {
         '[data-session-rail-usage-bar="primary-window"]',
       );
       expect(contextBar).not.toBeNull();
+      expect(contextBar?.children).toHaveLength(1);
+      expect(
+        Number.parseFloat((contextBar?.firstElementChild as HTMLElement).style.width),
+      ).toBeCloseTo(82.56, 2);
       expect(primaryBar).not.toBeNull();
-      expect(getComputedStyle(contextBar?.firstElementChild as HTMLElement).backgroundColor).toBe(
-        "rgb(220, 38, 38)",
-      );
       expect(getComputedStyle(primaryBar?.firstElementChild as HTMLElement).backgroundColor).toBe(
         "rgb(220, 38, 38)",
       );
@@ -791,7 +792,7 @@ describe("SessionRail", () => {
       const rail = host.querySelector<HTMLElement>("[data-session-rail]")!;
       const usage = host.querySelector<HTMLElement>("[data-session-rail-usage]")!;
       const quotaScroll = host.querySelector<HTMLElement>("[data-account-quota-scroll]")!;
-      const count = page.getByText("Usage limit resets available: 2", { exact: true }).element();
+      const count = page.getByText("Resets: 2", { exact: true }).element();
       expect(usage.getBoundingClientRect().bottom).toBeLessThanOrEqual(
         rail.getBoundingClientRect().bottom + 1,
       );

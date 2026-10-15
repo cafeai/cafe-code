@@ -145,6 +145,162 @@ function now() {
 }
 
 describe("durable inline question handling", () => {
+  async function seedQuestions(
+    system: Pick<Awaited<ReturnType<typeof createOrchestrationSystem>>, "run" | "engine">,
+  ) {
+    const threadId = ThreadId.make("persisted-question-thread");
+    const activityId = EventId.make(`codex-async-questions:${"b".repeat(64)}`);
+    await system.run(
+      system.engine.dispatch({
+        type: "thread.create",
+        commandId: CommandId.make("persisted-question-create"),
+        threadId,
+        projectId: null,
+        title: "Question fixture",
+        modelSelection: { instanceId: ProviderInstanceId.make("codex"), model: "gpt-6-astra" },
+        runtimeMode: "full-access",
+        interactionMode: "default",
+        branch: null,
+        worktreePath: null,
+        createdAt: now(),
+      }),
+    );
+    await system.run(
+      system.engine.dispatch({
+        type: "thread.activity.append",
+        commandId: CommandId.make("persisted-question-append"),
+        threadId,
+        activity: {
+          id: activityId,
+          createdAt: now(),
+          tone: "info",
+          kind: "provider.async-questions",
+          summary: "Codex has questions",
+          turnId: null,
+          payload: {
+            itemId: "persisted-question-item",
+            questions: [
+              { title: "Which route?", options: ["A", "B"] },
+              { title: "Anything else?", options: [] },
+            ],
+          },
+        },
+        createdAt: now(),
+      }),
+    );
+    const resolution = (id: string, questionIndexes: number[]): OrchestrationCommand => ({
+      type: "thread.async-questions.resolve",
+      commandId: CommandId.make(id),
+      threadId,
+      activityId,
+      questionIndexes,
+      createdAt: now(),
+    });
+    return { threadId, activityId, resolution };
+  }
+
+  it("resolves a saved question after it leaves the 500-activity command cache", async () => {
+    const system = await createOrchestrationSystem();
+    try {
+      const { threadId, activityId, resolution } = await seedQuestions(system);
+      for (let index = 0; index < 501; index++) {
+        await system.run(
+          system.engine.dispatch({
+            type: "thread.activity.append",
+            commandId: CommandId.make(`question-tail-${index}`),
+            threadId,
+            activity: {
+              id: EventId.make(`question-tail-${index}`),
+              createdAt: now(),
+              tone: "info",
+              kind: "context-window.updated",
+              summary: "Usage fixture",
+              turnId: null,
+              payload: { usedTokens: index + 1 },
+            },
+            createdAt: now(),
+          }),
+        );
+      }
+      await system.run(system.engine.dispatch(resolution("skip-evicted-question", [1])));
+      const snapshot = await system.readModel();
+      expect(
+        snapshot.threads[0]?.activities.find((entry) => entry.id === activityId),
+      ).toMatchObject({
+        payload: { handledQuestionIndexes: [1] },
+      });
+    } finally {
+      await system.dispose();
+    }
+  });
+
+  it("merges independent clients' handling instead of overwriting their stale cached indexes", async () => {
+    const baseDir = fs.mkdtempSync(path.join(os.tmpdir(), "cafe-question-clients-"));
+    const dbPath = path.join(baseDir, "questions.sqlite");
+    const first = await createPersistentOrchestrationSystem(dbPath, baseDir);
+    let second: Awaited<ReturnType<typeof createPersistentOrchestrationSystem>> | undefined;
+    try {
+      const { activityId, resolution } = await seedQuestions(first);
+      second = await createPersistentOrchestrationSystem(dbPath, baseDir);
+      await first.run(first.engine.dispatch(resolution("first-client-skip", [0])));
+      await second.run(second.engine.dispatch(resolution("second-client-skip", [1])));
+      // The first instance still caches only index 0. Repeating an explicit
+      // resolution must preserve index 1 committed by the other instance.
+      await first.run(first.engine.dispatch(resolution("first-client-repeat", [0])));
+      const snapshot = await first.run(first.snapshotQuery.getSnapshot());
+      expect(
+        snapshot.threads[0]?.activities.find((entry) => entry.id === activityId),
+      ).toMatchObject({
+        payload: { handledQuestionIndexes: [0, 1] },
+      });
+    } finally {
+      await second?.dispose();
+      await first.dispose();
+      fs.rmSync(baseDir, { recursive: true, force: true });
+    }
+  });
+
+  it.each(["missing", "other-thread", "other-kind", "malformed", "oversized"] as const)(
+    "rejects a %s persisted question even while its valid original remains cached",
+    async (changed) => {
+      const system = await createOrchestrationSystem();
+      try {
+        const { activityId, resolution } = await seedQuestions(system);
+        if (changed === "missing")
+          await system.run(system.sql`DELETE FROM projection_thread_activities
+            WHERE activity_id = ${activityId}`);
+        else if (changed === "other-thread")
+          await system.run(system.sql`UPDATE projection_thread_activities
+            SET thread_id = 'another-thread' WHERE activity_id = ${activityId}`);
+        else if (changed === "other-kind")
+          await system.run(system.sql`UPDATE projection_thread_activities
+            SET kind = 'tool.completed' WHERE activity_id = ${activityId}`);
+        else {
+          const payload =
+            changed === "malformed"
+              ? "invalid JSON with private question text"
+              : JSON.stringify({
+                  questions: [{ title: "Which route?", options: [] }],
+                  extra: "x".repeat(1_048_576),
+                });
+          await system.run(system.sql`UPDATE projection_thread_activities
+            SET payload_json = ${payload} WHERE activity_id = ${activityId}`);
+        }
+        const command = resolution(`reject-${changed}-question`, [0]);
+        const result = await system.run(Effect.exit(system.engine.dispatch(command)));
+        expect(result._tag).toBe("Failure");
+        expect(JSON.stringify(result)).not.toContain("private question text");
+        const rows = await system.run(system.sql<{ count: number }>`
+          SELECT COUNT(*) AS count FROM orchestration_events
+          WHERE command_id = ${command.commandId}
+        `);
+        expect(rows[0]?.count).toBe(0);
+      } finally {
+        await system.dispose();
+      }
+    },
+  );
+
   it("merges clients' skips, survives restart and does not reopen on provider replay", async () => {
     const baseDir = fs.mkdtempSync(path.join(os.tmpdir(), "cafe-question-resolution-"));
     const dbPath = path.join(baseDir, "questions.sqlite");
@@ -201,7 +357,6 @@ describe("durable inline question handling", () => {
       const first = resolution("client-a-skip", [0]);
       const receipt = await system.run(system.engine.dispatch(first));
       expect(await system.run(system.engine.dispatch(first))).toEqual(receipt);
-      await system.run(system.engine.dispatch(resolution("client-b-skip", [1])));
       const invalid = await system.run(
         Effect.exit(system.engine.dispatch(resolution("invalid-skip", [2]))),
       );
@@ -210,7 +365,7 @@ describe("durable inline question handling", () => {
       expect(snapshot.threads[0]?.activities).toHaveLength(1);
       expect(snapshot.threads[0]?.activities[0]).toMatchObject({
         ...activity,
-        payload: { ...activity.payload, handledQuestionIndexes: [0, 1] },
+        payload: { ...activity.payload, handledQuestionIndexes: [0] },
       });
       await system.dispose();
       system = await createPersistentOrchestrationSystem(dbPath, baseDir);
@@ -219,6 +374,14 @@ describe("durable inline question handling", () => {
       await system.run(system.engine.dispatch(append));
       const reopened = await system.run(system.snapshotQuery.getSnapshot());
       expect(reopened.threads[0]?.activities).toEqual(snapshot.threads[0]?.activities);
+      // The transcript still offers the second question after a backend
+      // restart, while the command cache deliberately starts without activity.
+      await system.run(system.engine.dispatch(resolution("client-b-skip-after-restart", [1])));
+      const resolved = await system.run(system.snapshotQuery.getSnapshot());
+      expect(resolved.threads[0]?.activities[0]).toMatchObject({
+        ...activity,
+        payload: { ...activity.payload, handledQuestionIndexes: [0, 1] },
+      });
     } finally {
       await system?.dispose();
       fs.rmSync(baseDir, { recursive: true, force: true });

@@ -1,3 +1,4 @@
+import { readProviderMcpCredentialIssuer } from "./auth/ProviderMcpCredentialBroker.ts";
 import * as NodeHttpServer from "@effect/platform-node/NodeHttpServer";
 import * as NodeSocket from "@effect/platform-node/NodeSocket";
 import * as NodeServices from "@effect/platform-node/NodeServices";
@@ -1562,6 +1563,29 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
     }).pipe(Effect.provide(makeHttpServerTestLayer())),
   );
 
+  it.effect("rejects valid legacy installer credentials while preserving normal owner access", () =>
+    Effect.gen(function* () {
+      yield* buildAppUnderTest();
+      const issuer = readProviderMcpCredentialIssuer();
+      assert.ok(issuer);
+      const credential = yield* issuer.issue({
+        subject: "cafe-mcp-local-bridge",
+        role: "owner",
+        method: "bearer-session-token",
+      });
+      const response = yield* HttpClient.post("/mcp", {
+        headers: {
+          authorization: `Bearer ${credential.token}`,
+          accept: "application/json, text/event-stream",
+          "content-type": "application/json",
+        },
+        body: HttpBody.jsonUnsafe({ jsonrpc: "2.0", id: 1, method: "tools/list" }),
+      });
+      assert.equal(response.status, 403);
+      yield* issuer.revoke(credential.sessionId);
+    }).pipe(Effect.provide(makeHttpServerTestLayer())),
+  );
+
   it.effect("serves the authenticated stateless Cafe Code MCP endpoint", () =>
     Effect.gen(function* () {
       yield* buildAppUnderTest();
@@ -2012,20 +2036,33 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
       }).pipe(Effect.provide(makeHttpServerTestLayer())),
   );
 
-  it.effect("accepts client debug log ingestion when server debug logging is enabled", () =>
+  it.effect("requires an authenticated session for bounded debug ingestion", () =>
     Effect.gen(function* () {
       yield* buildAppUnderTest({ config: { logLevel: "Debug" } });
-
       const url = yield* getHttpServerUrl("/api/client-debug-log");
-      const response = yield* Effect.promise(() =>
-        fetch(url, {
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify({ event: "test" }),
-        }),
+      const send = (headers: Record<string, string>, body: string) =>
+        Effect.promise(() =>
+          fetch(url, {
+            method: "POST",
+            headers: { "content-type": "application/json", ...headers },
+            body,
+          }),
+        );
+      assert.equal((yield* send({}, JSON.stringify({ event: "init", seq: 1 }))).status, 401);
+      const { cookie } = yield* bootstrapBrowserSession();
+      const headers = { cookie: cookie! };
+      assert.equal(
+        (yield* send(
+          headers,
+          JSON.stringify({ event: "init", seq: 1, secret: "must-not-be-logged" }),
+        )).status,
+        204,
       );
-
-      assert.equal(response.status, 204);
+      assert.equal(
+        (yield* send(headers, JSON.stringify({ event: "private-prompt", seq: 2 }))).status,
+        400,
+      );
+      assert.equal((yield* send(headers, "x".repeat(8193))).status, 413);
     }).pipe(Effect.provide(makeHttpServerTestLayer())),
   );
 
@@ -2996,7 +3033,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
       }).pipe(Effect.provide(makeProductionHttpServerTestLayer())),
   );
 
-  it.effect("rejects MCP installation and toggling from a paired non-owner", () =>
+  it.effect("rejects management MCP toggling from a paired non-owner", () =>
     Effect.gen(function* () {
       yield* buildAppUnderTest();
       const pairing = yield* HttpClient.post("/api/auth/pairing-token", {
@@ -3013,14 +3050,6 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
           Effect.gen(function* () {
             const status = yield* client[WS_METHODS.serverGetMcpStatus]({});
             assert.isFalse(status.canManage);
-            assert.isFalse(status.canInstall);
-            assert.deepEqual(status.clients, []);
-            assert.equal(
-              (yield* Effect.exit(
-                client[WS_METHODS.serverUpdateMcpClient]({ client: "codex", operation: "install" }),
-              ))._tag,
-              "Failure",
-            );
             assert.equal(
               (yield* Effect.exit(
                 client[WS_METHODS.serverUpdateSettings]({ patch: { mcpEnabled: false } }),

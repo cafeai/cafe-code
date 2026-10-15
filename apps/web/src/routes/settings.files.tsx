@@ -1,7 +1,6 @@
-import { createFileRoute } from "@tanstack/react-router";
-
-import { FilesSettingsPanel } from "../components/settings/SettingsPanels";
-
+import { createFileRoute, redirect } from "@tanstack/react-router";
 export const Route = createFileRoute("/settings/files")({
-  component: FilesSettingsPanel,
+  beforeLoad: () => {
+    throw redirect({ to: "/settings/general", replace: true });
+  },
 });

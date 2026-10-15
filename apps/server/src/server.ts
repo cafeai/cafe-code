@@ -1,3 +1,4 @@
+import { httpSecurityLayer } from "./httpSecurity.ts";
 import { SchedulingSessionRuntimeLive } from "./scheduledFollowups/sessionRuntime.ts";
 import { VisualizationSessionRuntimeLive } from "./visualizations/sessionRuntime.ts";
 import { VisualizationArtifactsLive } from "./visualizations/service.ts";
@@ -386,7 +387,7 @@ export const makeRoutesLayer = Layer.mergeAll(
   webPushLocaleRouteLayer,
   webPushUnsubscribeRouteLayer,
   websocketRpcRouteLayer.pipe(Layer.provide(DictationLayerLive)),
-).pipe(Layer.provide(browserApiCorsLayer));
+).pipe(Layer.provide(httpSecurityLayer), Layer.provide(browserApiCorsLayer));
 
 export const makeServerLayer = Layer.unwrap(
   Effect.gen(function* () {

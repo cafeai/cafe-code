@@ -1,3 +1,4 @@
+import type { ManagementMcpBinding } from "../mcp/sessionConnection.ts";
 import { pathToFileURL } from "node:url";
 
 import type { ChatAttachment, ProviderApprovalDecision, RuntimeMode } from "@cafecode/contracts";
@@ -32,7 +33,24 @@ import { isWindowsCommandNotFound } from "../processRunner.ts";
 import { collectStreamAsString } from "./providerSnapshot.ts";
 import * as NetService from "@cafecode/shared/Net";
 const encodeUnknownJsonStringExit = Schema.encodeUnknownExit(Schema.UnknownFromJsonString);
-const OPENCODE_EMPTY_CONFIG_CONTENT = "{}";
+// Official runtime overrides: https://docs.opencode.ai/docs/config/
+// Local stdio shape: https://docs.opencode.ai/docs/mcp-servers/
+export function openCodeSessionConfig(binding?: Pick<ManagementMcpBinding, "name" | "launch">) {
+  return JSON.stringify(
+    binding
+      ? {
+          mcp: {
+            [binding.name]: {
+              type: "local",
+              command: [binding.launch.command, ...binding.launch.args],
+              environment: binding.launch.env,
+              enabled: true,
+            },
+          },
+        }
+      : {},
+  );
+}
 
 const OPENCODE_SERVER_READY_PREFIX = "opencode server listening";
 const DEFAULT_OPENCODE_SERVER_TIMEOUT_MS = 5_000;
@@ -114,6 +132,7 @@ export interface OpenCodeRuntimeShape {
    */
   readonly startOpenCodeServerProcess: (input: {
     readonly binaryPath: string;
+    readonly managementMcp?: Pick<ManagementMcpBinding, "name" | "launch">;
     readonly environment?: NodeJS.ProcessEnv;
     readonly port?: number;
     readonly hostname?: string;
@@ -127,6 +146,7 @@ export interface OpenCodeRuntimeShape {
   readonly connectToOpenCodeServer: (input: {
     readonly binaryPath: string;
     readonly serverUrl?: string | null;
+    readonly managementMcp?: Pick<ManagementMcpBinding, "name" | "launch">;
     readonly environment?: NodeJS.ProcessEnv;
     readonly port?: number;
     readonly hostname?: string;
@@ -342,7 +362,7 @@ const makeOpenCodeRuntime = Effect.gen(function* () {
             shell: process.platform === "win32",
             env: {
               ...(input.environment ?? process.env),
-              OPENCODE_CONFIG_CONTENT: OPENCODE_EMPTY_CONFIG_CONTENT,
+              OPENCODE_CONFIG_CONTENT: openCodeSessionConfig(input.managementMcp),
             },
           }),
         )
@@ -481,6 +501,7 @@ const makeOpenCodeRuntime = Effect.gen(function* () {
 
     return startOpenCodeServerProcess({
       binaryPath: input.binaryPath,
+      ...(input.managementMcp ? { managementMcp: input.managementMcp } : {}),
       ...(input.environment !== undefined ? { environment: input.environment } : {}),
       ...(input.port !== undefined ? { port: input.port } : {}),
       ...(input.hostname !== undefined ? { hostname: input.hostname } : {}),

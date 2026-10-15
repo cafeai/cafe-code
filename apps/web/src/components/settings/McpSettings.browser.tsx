@@ -37,7 +37,6 @@ import { getUiLocale, setUiLocale } from "@cafecode/shared/i18n";
 
 const harness = vi.hoisted(() => ({
   getStatus: vi.fn(),
-  updateClient: vi.fn(),
   updateSettings: vi.fn(),
   applySettings: vi.fn(),
   settings: null as ServerSettings | null,
@@ -55,7 +54,6 @@ vi.mock("~/environments/runtime", () => ({
     client: {
       server: {
         getMcpStatus: harness.getStatus,
-        updateMcpClient: harness.updateClient,
         updateSettings: harness.updateSettings,
       },
     },
@@ -69,26 +67,7 @@ vi.mock("~/rpc/serverState", async () => {
   };
 });
 
-const status: CafeMcpStatus = {
-  enabled: true,
-  canManage: true,
-  canInstall: true,
-  bridgeReady: true,
-  clients: [
-    {
-      id: "codex",
-      name: "Codex",
-      status: "not-installed",
-      detail: "Available for your user account.",
-    },
-    {
-      id: "claude",
-      name: "Claude Code",
-      status: "conflict",
-      detail: "A different registration exists.",
-    },
-  ],
-};
+const status: CafeMcpStatus = { enabled: true, canManage: true };
 let mounted: Awaited<ReturnType<typeof render>> | undefined;
 const originalBridge = window.desktopBridge;
 const originalLocale = getUiLocale();
@@ -109,10 +88,6 @@ describe("MCP settings", () => {
     harness.backendUrl = "http://127.0.0.1:3774/";
     harness.remote = false;
     harness.getStatus.mockResolvedValue(status);
-    harness.updateClient.mockResolvedValue({
-      ...status,
-      clients: [{ ...status.clients[0], status: "installed" }],
-    });
     harness.updateSettings.mockImplementation(async (patch) => {
       harness.settings = { ...harness.settings!, ...patch };
       return harness.settings;
@@ -136,152 +111,75 @@ describe("MCP settings", () => {
   it("retranslates retained access failure without repeating the security toggle", async () => {
     harness.updateSettings.mockRejectedValueOnce(new Error("private fixture details"));
     mounted = await mount();
-    const toggle = page.getByRole("switch", { name: "Enable Cafe Code MCP" });
+    const toggle = page.getByRole("switch", { name: "Enable Cafe management tools" });
     await expect.element(toggle).toBeEnabled();
     await toggle.click();
     await expect
       .element(page.getByRole("alert"))
-      .toHaveTextContent("Could not change Cafe Code MCP access. Refresh and try again.");
+      .toHaveTextContent("Could not change Cafe management access. Refresh and try again.");
     setUiLocale("ko");
     await expect
       .element(page.getByRole("alert"))
       .toHaveTextContent(
-        "Cafe Code MCP 접근 권한을 변경하지 못했습니다. 새로고침한 뒤 다시 시도하세요.",
+        "Cafe 관리 접근 권한을 변경하지 못했습니다. 새로고침한 뒤 다시 시도하세요.",
       );
     expect(harness.updateSettings).toHaveBeenCalledTimes(1);
     expect(harness.applySettings).not.toHaveBeenCalled();
     expect(harness.getStatus).toHaveBeenCalledTimes(1);
     expect(document.body.textContent).not.toContain("private fixture details");
   });
-
-  it.each(["disabled", "unavailable"] as const)(
-    "keeps automatic chat/account scheduling visible when management MCP is %s",
-    async (managementState) => {
-      harness.settings = { ...DEFAULT_SERVER_SETTINGS, mcpEnabled: false };
-      if (managementState === "unavailable") {
-        harness.getStatus.mockRejectedValue(new Error("private-management-diagnostic"));
-      } else {
-        harness.getStatus.mockResolvedValue({ ...status, enabled: false });
-      }
+  it.each([false, true])(
+    "automatically connects tools without installer controls (remote=%s)",
+    async (remote) => {
+      harness.remote = remote;
+      delete window.desktopBridge;
       mounted = await mount();
-      await expect.element(page.getByRole("heading", { name: /^Chat scheduling/ })).toBeVisible();
-      await expect.element(page.getByText("Built in", { exact: true })).toBeVisible();
       await expect
-        .element(
-          page.getByText("Agents can propose follow-ups in any chat; you approve them in Tasks.", {
-            exact: true,
-          }),
-        )
+        .element(page.getByRole("switch", { name: "Enable Cafe management tools" }))
+        .toBeEnabled();
+      await expect.element(page.getByText(/Cafe connects these tools automatically/)).toBeVisible();
+      await expect
+        .element(page.getByRole("button", { name: /Install|Remove|Reinstall/ }))
+        .not.toBeInTheDocument();
+      await page.getByRole("button", { name: "About Cafe management tools" }).hover();
+      await expect
+        .element(page.getByText(/Chat scheduling stays available separately/))
         .toBeVisible();
-      // Approval and scope details live in info tips beside each setting.
-      await page.getByRole("button", { name: "About chat scheduling" }).hover();
-      await expect
-        .element(page.getByText(/Agents can only propose, list and pause follow-ups/))
-        .toBeVisible();
-      await expect.element(page.getByText(/choose Approve & enable/)).toBeVisible();
-      await page.getByRole("button", { name: "About Cafe Code MCP" }).hover();
-      await expect.element(page.getByText(/Chat scheduling stays available/)).toBeVisible();
-      await expect.element(page.getByText(/doesn't undo work already started/)).toBeVisible();
-      await page.getByRole("button", { name: "About installing Cafe's tools" }).hover();
-      await expect.element(page.getByText(/Not needed for chat scheduling/)).toBeVisible();
-      await expect
-        .element(
-          page.getByText(
-            "Lets agents manage projects, chats, providers and settings without Cafe approval prompts.",
-            {
-              exact: true,
-            },
-          ),
-        )
-        .toBeVisible();
-      await expect
-        .element(page.getByRole("switch", { name: "Enable Cafe Code MCP" }))
-        .not.toBeChecked();
-      if (managementState === "unavailable") {
-        await expect
-          .element(page.getByRole("alert"))
-          .toHaveTextContent("Could not load MCP status. Try refreshing.");
-        await expect
-          .element(page.getByRole("switch", { name: "Enable Cafe Code MCP" }))
-          .toBeDisabled();
-        expect(document.body.textContent).not.toContain("private-management-diagnostic");
-      }
-      expect(harness.updateClient).not.toHaveBeenCalled();
       expect(harness.updateSettings).not.toHaveBeenCalled();
     },
   );
-
-  it("installs, shows backend-confirmed status, and removes a registration", async () => {
-    mounted = await mount();
-    await page.getByRole("button", { name: "Install Cafe MCP for Codex", exact: true }).click();
-    expect(harness.updateClient).toHaveBeenCalledWith({ client: "codex", operation: "install" });
-    await expect
-      .element(page.getByRole("button", { name: "Reinstall Cafe MCP for Codex" }))
-      .toBeVisible();
-    await expect
-      .element(page.getByText("Installed. Restart the agent to apply.", { exact: true }))
-      .toBeVisible();
-    await page.getByRole("button", { name: "Remove Cafe MCP from Codex" }).click();
-    expect(harness.updateClient).toHaveBeenLastCalledWith({ client: "codex", operation: "remove" });
-  });
-
-  it("keeps retired desktop controls out of the MCP tab", async () => {
-    mounted = await mount();
-    await expect.element(page.getByRole("switch", { name: "Enable Cafe Code MCP" })).toBeVisible();
-    await expect
-      .element(page.getByRole("switch", { name: "Enable desktop control" }))
-      .not.toBeInTheDocument();
-    await expect
-      .element(page.getByRole("switch", { name: "Enable local desktop control" }))
-      .not.toBeInTheDocument();
-    await expect
-      .element(page.getByText("Local desktop control", { exact: true }))
-      .not.toBeInTheDocument();
-  });
-
-  it("keeps installation unavailable for primary browser sessions", async () => {
-    delete window.desktopBridge;
+  it("disables unauthorized or unavailable management controls and sanitizes failures", async () => {
+    harness.getStatus.mockResolvedValue({ ...status, canManage: false });
     mounted = await mount();
     await expect
-      .element(page.getByRole("button", { name: "Install Cafe MCP for Codex", exact: true }))
-      .not.toBeInTheDocument();
-    await expect
-      .element(
-        page.getByText("Open this page in the local Cafe Code desktop app to install.", {
-          exact: true,
-        }),
-      )
-      .toBeVisible();
-    expect(harness.updateClient).not.toHaveBeenCalled();
-  });
-
-  it("uses the server's installation capability for saved remote owners", async () => {
-    harness.remote = true;
-    delete window.desktopBridge;
-    mounted = await mount();
-    await expect
-      .element(page.getByRole("button", { name: "Install Cafe MCP for Codex", exact: true }))
-      .toBeEnabled();
-    await mounted.unmount();
-    harness.getStatus.mockResolvedValue({ ...status, canInstall: false });
-    mounted = await mount();
-    await expect
-      .element(page.getByRole("button", { name: "Install Cafe MCP for Codex", exact: true }))
-      .not.toBeInTheDocument();
-    expect(harness.updateClient).not.toHaveBeenCalled();
-  });
-
-  it("disables conflicting installs and reports a failed toggle without displaying success", async () => {
-    harness.updateSettings.mockRejectedValue(new Error("private-error-data"));
-    mounted = await mount();
-    await expect
-      .element(page.getByRole("button", { name: "Install Cafe MCP for Claude Code" }))
+      .element(page.getByRole("switch", { name: "Enable Cafe management tools" }))
       .toBeDisabled();
-    await page.getByRole("switch", { name: "Enable Cafe Code MCP" }).click();
+    await mounted.unmount();
+    harness.getStatus.mockRejectedValue(new Error("private-management-diagnostic"));
+    mounted = await mount();
     await expect
       .element(page.getByRole("alert"))
-      .toMatchTextContent("Could not change Cafe Code MCP access");
-    expect(harness.applySettings).not.toHaveBeenCalled();
-    await expect.element(page.getByRole("switch", { name: "Enable Cafe Code MCP" })).toBeChecked();
+      .toHaveTextContent("Could not load Cafe tools status. Refresh to try again.");
+    await expect
+      .element(page.getByRole("switch", { name: "Enable Cafe management tools" }))
+      .toBeDisabled();
+    expect(document.body.textContent).not.toContain("private-management-diagnostic");
+    expect(harness.updateSettings).not.toHaveBeenCalled();
   });
+  it.each([false, true])(
+    "persists owner management access in its selected environment (remote=%s)",
+    async (remote) => {
+      harness.remote = remote;
+      mounted = await mount();
+      await expect
+        .element(page.getByRole("switch", { name: "Enable Cafe management tools" }))
+        .toBeEnabled();
+      await page.getByRole("switch", { name: "Enable Cafe management tools" }).click();
+      await vi.waitFor(() =>
+        expect(harness.updateSettings).toHaveBeenCalledWith({ mcpEnabled: false }),
+      );
+      if (!remote) expect(harness.applySettings).toHaveBeenCalled();
+      else expect(harness.applySettings).not.toHaveBeenCalled();
+    },
+  );
 });

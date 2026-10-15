@@ -1,58 +1,43 @@
 # Cafe Code MCP
 
-## Built-in chat scheduling
+## Management tools in Cafe chats
 
-Scheduling inside Cafe does **not** use the installer below. Cafe automatically gives each Codex, Claude and Grok session a private, chat-and-account-bound connection for proposing, listing and pausing follow-ups. Separate account profiles/custom homes are supported without editing saved MCP configuration. Review proposals and the paying account in **Tasks → Scheduled**, then choose **Approve & enable**. Switching accounts requires renewed review; the old session cannot target the replacement account. Normal provider tool permissions remain authoritative.
+**Settings → Cafe tools → Enable Cafe management tools** controls the backend-authoritative management endpoint. It remains enabled by default. Off rejects new management requests immediately; accepted work may finish. Only an owner connection can change it. Scheduling and visualizations retain their separate credentials, permissions and approval rules.
 
-These narrow tools are independent of the broad management toggle. Already-running old providers need normal rebuilt-runtime adoption and session restart/resume. See [scheduled follow-ups](scheduled-followups.md) and [session authority](decisions/session-scoped-scheduling-tools.md).
+Cafe supplies management MCP at launch to Codex, Claude, Grok, and local OpenCode chats it owns, including explicit account homes. There is no install/remove UI or registration RPC. Ordinary provider sessions started outside Cafe do not gain a connection. Existing Cafe sessions adopt changes through their normal stop/resume lifecycle; this change does not restart a running provider.
 
-## Built-in agent visualizations
+Codex receives a private stdio server through the existing structured app-server configuration override. Claude receives the same private stdio specification through SDK query options, preserving user/project sources and permission callbacks. Local OpenCode receives a runtime-only inline configuration override in its Cafe-owned child process. Configured external OpenCode servers are unchanged. Grok retains its existing session-scoped authenticated ACP HTTP connection. Axiom remains unavailable until its native session MCP ownership/revision contract is implemented.
 
-When a local desktop host is available, Cafe-owned Codex and Claude sessions also
-receive a **separate session-only** `visualization-mcp-bridge.mjs` connection for
-`preview_visualization` and `publish_visualization`. It is not the management
-installer or scheduling audience and does not edit provider profiles or approval
-policies. Exact active chat/account/native generation and completed native-call
-proofs govern publication; Grok is not enabled without equivalent provenance.
-Existing sessions require normal rebuilt-runtime adoption rather than a live
-retrofit. Posters/source remain inspectable on unsupported surfaces; active
-viewing and Codex external Apps have separate native/consent gates. See
-[agent visualizations and their current qualification limits](agent-visualizations.md).
+Management tools have owner authority over Cafe projects, chats, providers and settings. Cafe adds no management approval prompt and does not modify provider approval policy. This is broader than scheduling's proposal/list/pause capability; enabling management never approves a recurring task.
 
-## Optional management connection
+## Separate scheduling and visualization connections
 
-Open **Settings → MCP → Cafe Code MCP** to enable or disable Cafe's management server, registered as `cafe-code`. The existing authenticated endpoint stays on by default on upgrade. Turning it off rejects new Cafe management MCP requests, including from agents running inside Cafe. Work already started may finish.
+Cafe automatically gives each Codex, Claude and Grok session a private, chat-and-account-bound connection for proposing, listing and pausing follow-ups. Separate account profiles/custom homes are supported without editing saved MCP configuration. Review proposals and the paying account in **Tasks → Scheduled**, then choose **Approve & enable**. Switching accounts requires renewed review. These narrow tools remain independent of the management toggle. See [scheduled follow-ups](scheduled-followups.md) and [session authority](decisions/session-scoped-scheduling-tools.md).
 
-In the local desktop app, **Install** registers Cafe MCP for Codex, Claude Code, Grok, or OpenCode. It configures the provider's default user profile; it does not install the provider application. Reload MCP or restart that provider after installation. Keep Cafe Code running while using its tools. **Reinstall** repairs the registration, and **Remove** unregisters it. Custom provider homes have separate configuration. Platform-specific support restrictions are recorded in [AGENTS.md](../AGENTS.md#windows-specific-notes).
+When a local desktop host is available, Cafe-owned Codex and Claude sessions also receive a separate visualization connection. Exact active chat/account/native generation and completed native-call proofs govern publication; Grok is not enabled without equivalent provenance. Viewing and Codex external Apps retain their own native/consent gates. See [agent visualizations](agent-visualizations.md).
 
-Cafe adds no per-tool management approval prompts and leaves each provider's permission settings intact. Registration provides Cafe's existing project, conversation, provider, and settings tools. Scheduled follow-up proposals still require owner approval in Tasks before execution.
+## Credentials and compatibility retirement
 
-Cafe computer use has been removed, including desktop tools, native runtime, provider-session attachment, permission setup, UI controls and saved-observation HTTP routes. General Cafe installations continue to register only `cafe-code`; session-scoped scheduling remains independent. Historical database migrations and private tool-payload redaction remain for compatibility. Removal does not delete files, profiles, conversation history or saved screenshots.
+Each new stdio connection uses a server-minted private temporary directory, a copied independent bridge bundle, and a private connection file. The native Cafe executable runs in Node mode with structured argv. Tokens appear only in the private file and authenticated HTTP headers, never argv, provider configuration, native event logs or UI feedback. Windows retains user-owned inherited ACLs; POSIX systems retain private modes and owner checks.
 
-## Configuration and credentials
+The provider's session scope owns credential revocation, refresh and exact-file cleanup, including failed startup. Credentials last 30 days and refresh daily within seven days of expiry. Refresh first verifies the current credential; owner revocation is never repaired in the background. Ending a session revokes all of its issued credentials, including a token rotated while a request was in flight, without revoking another session. Uncertain namespace cleanup preserves replacement files while retiring authority. Grok retains its existing 24-hour credential and scope cleanup.
 
-The installer preserves unrelated provider settings and comments. It refuses invalid files, unsafe links/permissions, and an existing `cafe-code` registration belonging to another environment. Codex and Grok use user TOML; Claude uses user JSON; OpenCode uses its existing JSONC file when available. Claude's default terminal configuration and the explicit default-directory configuration are both updated to support existing launches. Cafe's default macOS Claude account prefers its previous configuration and Keychain login, falling back to the terminal environment only when local authentication checks confirm that Cafe's store has no login and the terminal store does. Explicit provider-home and authentication overrides remain authoritative. See [Claude authentication selection](claude-authentication.md).
+The bridge rereads its connection on every call, uses only the exact authenticated loopback endpoint, rejects redirects, and never retries a mutation automatically. A lost response may mean work completed. Input and output are bounded to 16 MiB with four requests in flight. Native MCP image results remain supported.
 
-Provider configs contain a local executable and structured bridge arguments, with no bearer token. The bridge is copied under the current Cafe environment's private `mcp` directory and runs through Cafe's existing executable in Node mode. Its adjacent connection file is private. Cafe republishes the current backend address on startup, reuses valid credentials, and rotates them before expiry without requiring another install. Revoked credentials remain revoked; use Reinstall to repair them or a connection that expired while Cafe was closed for a month. Never copy that connection file into project configuration or logs.
-
-The bridge reads connection details for every call, connects only to the exact loopback MCP path, rejects redirects, and never automatically retries a mutation. A lost response can mean work completed; inspect its result before repeating it. Input/output messages have a 16 MiB limit and at most four HTTP requests can be in flight. Images use native MCP image content.
-
-Install/remove operations belong to the backend scope and serialize across windows. Closing the requesting window does not cancel an admitted write. The UI reads actual configuration state; it does not claim that an already-running provider has reloaded its tools.
+On desktop upgrade, Cafe recognizes its old private connection and retires matching legacy registrations from the previous default profile locations. This is removal-only compatibility code. It compares original bytes before writing, preserves unrelated settings/comments/full-range TOML values, and refuses malformed, unsafe or conflicting entries. The HTTP endpoint rejects the old installer credential subject regardless of whether a registration can safely be removed. The old installer/renewal path cannot issue new credentials. Custom account authentication selection is unchanged; see [Claude authentication selection](claude-authentication.md).
 
 ## Qualification
 
-Default tests cover configuration preservation/conflicts, private files, bridge image forwarding, fragmented input, cancellation, bounds, credential renewal, install ownership, and endpoint access checks. Browser tests cover install/remove feedback, conflicting configs, local-environment gating, and failed toggles.
+Credential-free tests cover private publication, independent session cleanup, missing assets, rotation/revocation, namespace replacement, exact legacy registration retirement, configuration preservation, bounds, cancellation, image results, and endpoint access checks. Provider launch fixtures verify structured overrides without starting a provider or reading a real provider profile. Browser fixtures verify automatic-connection copy, owner/remote toggle authority, retained translated failures and absence of installation controls. This is source/isolated-runtime evidence, not live provider or native Windows qualification.
 
-Codex 0.153.4, Claude Code 2.1.263, and the installed Grok CLI recognized generated configurations in isolated temporary homes. OpenCode configuration follows Cafe's pinned `@opencode-ai/sdk` contract; a native OpenCode binary was not available for this check. Sources: [Codex MCP](https://learn.chatgpt.com/docs/extend/mcp?surface=cli), [Claude MCP](https://code.claude.com/docs/en/mcp), [Grok MCP](https://docs.x.ai/build/features/mcp-servers), and the pinned SDK's `Config.mcp`/`McpLocalConfig` types. No provider auth files or model calls are needed for configuration checks.
-
-The standalone artifact test is deliberately opt-in because it launches a real Electron process. It copies all four Cafe management, scheduling, and visualization bridge entrypoints individually into private empty directories, then verifies initialization, discovery, text, and image results plus exact audience/endpoint refusal. This catches missing sibling chunks that running a bridge inside `dist` would hide. Each Windows, macOS, and Linux Quality job runs this test after building. It uses a local fixture MCP server and temporary credentials, not a provider account:
+The standalone artifact test is opt-in because it launches a real Electron process. It copies each built bridge alone into a private empty directory, then verifies initialization, discovery, text/image results and exact audience/endpoint refusal. This catches uncopied sibling chunks. Quality jobs run it after building with a local fixture server and temporary credentials, without provider accounts:
 
 ```sh
 corepack yarn workspace @cafeai/cafe-code build:bundle
 CAFE_CODE_MCP_BRIDGE_E2E=1 corepack yarn workspace @cafeai/cafe-code exec vitest run --config vitest.e2e.config.ts integration/CafeMcpBridge.e2e.test.ts
-corepack yarn workspace @cafecode/web test:browser src/components/settings/McpSettings.browser.tsx
+corepack yarn workspace @cafecode/web test:browser src/components/settings/SettingsPanels.browser.tsx src/components/settings/McpSettings.browser.tsx
 ```
 
-For packaged qualification, set `CAFE_CODE_MCP_BRIDGE_DIR` to a directory containing the management and scheduling entrypoints extracted from the built app and `CAFE_CODE_MCP_BRIDGE_EXECUTABLE` to its executable or AppImage. All bridges must remain independent single-file bundles; bundling their entrypoints together can create a shared chunk that providers do not receive. The same isolated artifact test also qualifies session scheduling's separate audience.
+For packaged qualification, set `CAFE_CODE_MCP_BRIDGE_DIR` to the extracted entrypoint directory and `CAFE_CODE_MCP_BRIDGE_EXECUTABLE` to the exact native executable or AppImage. Keep the bridge entrypoints independent single-file bundles with code splitting disabled.
 
 Repository verification remains `yarn fmt`, `yarn lint`, `yarn typecheck`, and `yarn test`, followed by `yarn build:desktop --force` as the final check, using the pinned Yarn through Corepack.

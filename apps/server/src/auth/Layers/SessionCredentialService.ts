@@ -14,6 +14,7 @@ import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
 import * as Option from "effect/Option";
 
+import { withSessionAdmission } from "../sessionAdmission.ts";
 import { ServerConfig } from "../../config.ts";
 import { AuthSessionRepositoryLive } from "../../persistence/Layers/AuthSessions.ts";
 import { AuthSessionRepository } from "../../persistence/Services/AuthSessions.ts";
@@ -522,7 +523,11 @@ export const makeSessionCredentialService = Effect.gen(function* () {
         yield* emitRemoved(sessionId);
       }
       return revoked;
-    }).pipe(Effect.mapError(toSessionCredentialError("Failed to revoke session.")));
+    }).pipe(
+      Effect.mapError(toSessionCredentialError("Failed to revoke session.")),
+      Effect.uninterruptible,
+      withSessionAdmission,
+    );
 
   const revokeAllExcept: SessionCredentialServiceShape["revokeAllExcept"] = (sessionId) =>
     Effect.gen(function* () {
@@ -549,7 +554,11 @@ export const makeSessionCredentialService = Effect.gen(function* () {
         );
       }
       return revokedSessionIds.length;
-    }).pipe(Effect.mapError(toSessionCredentialError("Failed to revoke other sessions.")));
+    }).pipe(
+      Effect.mapError(toSessionCredentialError("Failed to revoke other sessions.")),
+      Effect.uninterruptible,
+      withSessionAdmission,
+    );
 
   const service: SessionCredentialServiceShape = {
     cookieName,

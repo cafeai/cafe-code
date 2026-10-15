@@ -211,7 +211,6 @@ const make = Effect.gen(function* () {
         sandbox: true,
       },
     });
-    yield* desktopIpc.trustWebContents(window.webContents);
     const unsubscribeLocale = subscribeUiLocale(() => {
       if (!window.isDestroyed()) {
         window.webContents.send(DESKTOP_UI_LOCALE_CHANGED_CHANNEL, getUiLocale());
@@ -226,6 +225,14 @@ const make = Effect.gen(function* () {
     const rendererUrl = environment.isDevelopment
       ? new URL(yield* resolveDesktopDevServerUrl(environment))
       : backendHttpUrl;
+    yield* desktopIpc.trustWebContents(window.webContents, { url: rendererUrl, role: "main" });
+    const guardNavigation = (event: { preventDefault(): void }, destination: string) => {
+      if (!DesktopIpc.isTrustedDesktopIpcFrameUrl(destination, rendererUrl)) event.preventDefault();
+    };
+    window.webContents.on("will-navigate", guardNavigation);
+    window.webContents.on("will-redirect", (event, destination, _inPlace, isMainFrame) => {
+      if (isMainFrame) guardNavigation(event, destination);
+    });
     trustAudioWebContents(window.webContents, rendererUrl);
 
     window.webContents.on("context-menu", (event, params) => {

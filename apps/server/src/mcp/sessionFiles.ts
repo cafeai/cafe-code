@@ -3,31 +3,33 @@ import { constants, type BigIntStats } from "node:fs";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import { readMcpFile, writeMcpFile } from "./privateFiles.ts";
 
 /** A server-minted temporary capability directory avoids writing into provider
  * homes or weakening the external installer's deliberately strict ancestor
  * policy. The OS chooses the namespace; no chat/profile text becomes a path. */
-export interface SchedulingSessionFiles {
+export interface SessionMcpFiles {
   readonly bridgePath: string;
   readonly connectionPath: string;
+  readonly replaceToken: (token: string) => Promise<void>;
   readonly remove: () => Promise<void>;
 }
 
 const sameFile = (a: BigIntStats, b: BigIntStats) => a.dev === b.dev && a.ino === b.ino;
-const unavailable = () => new Error("The private scheduling session files are unavailable.");
+const unavailable = () => new Error("The private MCP session files are unavailable.");
 
-export async function makeSchedulingSessionFiles(input: {
+export async function makeSessionMcpFiles(input: {
   readonly bridgeSource: string;
   readonly port: number;
   readonly token: string;
-  readonly audience?: "cafe-scheduling" | "cafe-visualizations";
-}): Promise<SchedulingSessionFiles> {
+  readonly audience?: "cafe-code" | "cafe-scheduling" | "cafe-visualizations";
+}): Promise<SessionMcpFiles> {
   if (!Number.isInteger(input.port) || input.port < 1 || input.port > 65535) throw unavailable();
   // Read the trusted bundled asset before allocating anything. Missing build
   // assets must not leave an empty capability directory on every attempted chat.
   const source = await fs.readFile(input.bridgeSource);
   if (source.length > 4 * 1024 * 1024) throw unavailable();
-  const root = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), "cafe-scheduling-")));
+  const root = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), "cafe-mcp-")));
   const rootIdentity = await fs.lstat(root, { bigint: true });
   if (
     !rootIdentity.isDirectory() ||
@@ -83,15 +85,28 @@ export async function makeSchedulingSessionFiles(input: {
   };
   try {
     const bridgePath = await publish("bridge.mjs", source);
-    const connectionPath = await publish(
-      "connection.json",
+    const connection = (token: string) =>
       JSON.stringify({
         audience: input.audience ?? "cafe-scheduling",
-        url: `http://127.0.0.1:${input.port}${input.audience === "cafe-visualizations" ? "/mcp/visualizations" : "/mcp/scheduling"}`,
-        token: input.token,
-      }),
-    );
-    return { bridgePath, connectionPath, remove };
+        url: `http://127.0.0.1:${input.port}${input.audience === "cafe-code" ? "/mcp" : input.audience === "cafe-visualizations" ? "/mcp/visualizations" : "/mcp/scheduling"}`,
+        token,
+      });
+    const connectionPath = await publish("connection.json", connection(input.token));
+    const replaceToken = async (token: string) => {
+      await assertRoot();
+      const current = await fs.lstat(connectionPath, { bigint: true });
+      if (
+        !sameFile(current, files.get(connectionPath)!) ||
+        !current.isFile() ||
+        current.isSymbolicLink()
+      )
+        throw unavailable();
+      const previous = await readMcpFile(connectionPath, { private: true, maxBytes: 16 * 1024 });
+      await writeMcpFile(connectionPath, connection(token), previous);
+      await assertRoot();
+      files.set(connectionPath, await fs.lstat(connectionPath, { bigint: true }));
+    };
+    return { bridgePath, connectionPath, replaceToken, remove };
   } catch {
     await remove().catch(() => undefined);
     throw unavailable();

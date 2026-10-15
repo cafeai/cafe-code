@@ -195,10 +195,12 @@ export function buildManagedProviderProbeEnvironment(
   managedRoot: string,
   provider: ManagedProviderSlug,
   baseEnv: NodeJS.ProcessEnv = process.env,
+  generation?: string,
 ): NodeJS.ProcessEnv {
-  const installRoot = join(managedRoot, "providers", provider, "current");
+  const selectedRoot = generation ? join(managedRoot, "generations", generation) : managedRoot;
+  const installRoot = join(selectedRoot, "providers", provider, ...(generation ? [] : ["current"]));
   const binaryDir = join(installRoot, "node_modules", ".bin");
-  const nodeDir = join(managedRoot, "node", "current");
+  const nodeDir = join(selectedRoot, "node", ...(generation ? [] : ["current"]));
 
   // Match the packaged bundled-runtime launcher: npm shims rely on managed
   // Node and their local .bin directory being ahead of the ambient user PATH.
@@ -245,8 +247,19 @@ async function assertManagedProviderRuntime(managedRoot: string): Promise<void> 
     throw new Error("Managed provider runtime installation did not complete successfully.");
   }
 
-  const nodePath = join(managedRoot, "node", "current", "node.exe");
-  const npmPath = join(managedRoot, "node", "current", "npm.cmd");
+  const active = (await readJsonFile(join(managedRoot, "active-runtime.json"))) as {
+    version?: unknown;
+    generation?: unknown;
+  };
+  if (
+    active.version !== 1 ||
+    typeof active.generation !== "string" ||
+    !/^[a-f0-9]{32}$/u.test(active.generation)
+  )
+    throw new Error("Managed activation record is invalid.");
+  const selectedRoot = join(managedRoot, "generations", active.generation);
+  const nodePath = join(selectedRoot, "node", "node.exe");
+  const npmPath = join(selectedRoot, "node", "npm.cmd");
   if (!existsSync(nodePath) || !existsSync(npmPath)) {
     throw new Error("Managed Node/npm files are missing.");
   }
@@ -260,12 +273,17 @@ async function assertManagedProviderRuntime(managedRoot: string): Promise<void> 
     ["codex", "codex.cmd"],
     ["claude", "claude.cmd"],
   ] as const) {
-    const installRoot = join(managedRoot, "providers", provider, "current");
+    const installRoot = join(selectedRoot, "providers", provider);
     const shim = join(installRoot, "node_modules", ".bin", executable);
     if (!existsSync(shim)) throw new Error(`Managed ${provider} shim is missing.`);
     const probeInvocation = buildWindowsCmdInvocation(shim, ["--version"]);
     const probe = await runProcess(probeInvocation.command, probeInvocation.args, {
-      env: buildManagedProviderProbeEnvironment(managedRoot, provider, process.env),
+      env: buildManagedProviderProbeEnvironment(
+        managedRoot,
+        provider,
+        process.env,
+        active.generation,
+      ),
       timeoutMs: 60_000,
       windowsVerbatimArguments: probeInvocation.windowsVerbatimArguments,
     });

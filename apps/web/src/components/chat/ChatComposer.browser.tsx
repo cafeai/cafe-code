@@ -512,7 +512,16 @@ describe("provider-specific composer menu actions", () => {
     async ({ width, scale, dark }) => {
       applyInterfaceScalePercent(scale);
       document.documentElement.classList.toggle("dark", dark);
-      await using fixture = await mountComposer(width);
+      await using fixture = await mountComposer(width, {
+        phase: "running",
+        activity: {
+          label: "Working…",
+          attention: false,
+          taskCount: 0,
+          agentCount: 0,
+          canInspect: false,
+        },
+      });
       const sharedTab = document.querySelector<HTMLElement>(".cafe-composer-tab")!;
       const provider = "codex";
       await waitForTabEntrance();
@@ -535,6 +544,10 @@ describe("provider-specific composer menu actions", () => {
       const initialIconY = caretIcon.getBoundingClientRect().y;
       const frame = document.querySelector('[data-chat-composer-tab="true"]')!.parentElement!;
       const initialFrameTop = frame.getBoundingClientRect().top;
+      const activity = document.querySelector<HTMLElement>("[data-composer-activity-status]")!;
+      const activityBounds = activity.getBoundingClientRect();
+      expect(Math.abs(activityBounds.bottom - initialFrameTop)).toBeLessThanOrEqual(1);
+      expect(activityBounds.right).toBeLessThanOrEqual(sharedTab.getBoundingClientRect().left);
       const expandedWidth = document
         .querySelector(".cafe-composer-tab")!
         .getBoundingClientRect().width;

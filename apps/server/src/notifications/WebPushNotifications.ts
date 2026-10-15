@@ -1,3 +1,4 @@
+import { withSessionAdmission } from "../auth/sessionAdmission.ts";
 import { uiText } from "@cafecode/shared/i18n";
 
 /**
@@ -12,6 +13,10 @@ import { uiText } from "@cafecode/shared/i18n";
  *
  * @module WebPushNotifications
  */
+import { AuthSessionId } from "@cafecode/contracts/auth";
+import { SessionCredentialService } from "../auth/Services/SessionCredentialService.ts";
+import type { AuthenticatedSession } from "../auth/Services/ServerAuth.ts";
+import { readPrivatePushState, writePrivatePushState } from "./privateState.ts";
 import { ThreadId, TurnId } from "@cafecode/contracts";
 import { ScheduledFollowups } from "../scheduledFollowups/service.ts";
 import * as Cause from "effect/Cause";
@@ -19,7 +24,6 @@ import * as Context from "effect/Context";
 import * as Data from "effect/Data";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
-import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Path from "effect/Path";
@@ -31,7 +35,6 @@ import * as Stream from "effect/Stream";
 import webpush from "web-push";
 import { fromJsonStringPretty } from "@cafecode/shared/schemaJson";
 
-import { writeFileStringAtomically } from "../atomicWrite.ts";
 import { ServerConfig } from "../config.ts";
 import { ServerEnvironment } from "../environment/Services/ServerEnvironment.ts";
 import { ProjectionSnapshotQuery } from "../orchestration/Services/ProjectionSnapshotQuery.ts";
@@ -47,11 +50,6 @@ export class WebPushNotificationsError extends Data.TaggedError("WebPushNotifica
   readonly cause?: unknown;
 }> {}
 
-class WebPushDeliveryError extends Data.TaggedError("WebPushDeliveryError")<{
-  readonly statusCode: number | null;
-  readonly cause: unknown;
-}> {}
-
 const VapidKeyPair = Schema.Struct({
   publicKey: Schema.String,
   privateKey: Schema.String,
@@ -59,17 +57,25 @@ const VapidKeyPair = Schema.Struct({
 
 export const WebPushSubscriptionInput = Schema.Struct({
   uiLocale: Schema.optionalKey(Schema.Literals(["en", "ja", "ko"])),
-  endpoint: Schema.String,
+  endpoint: Schema.String.check(Schema.isMaxLength(4096)),
   keys: Schema.Struct({
-    p256dh: Schema.String,
-    auth: Schema.String,
+    p256dh: Schema.String.check(Schema.isMaxLength(1024)),
+    auth: Schema.String.check(Schema.isMaxLength(1024)),
   }),
 });
 export type WebPushSubscriptionInput = typeof WebPushSubscriptionInput.Type;
 
+const PushOwner = Schema.Struct({
+  sessionId: AuthSessionId,
+  subject: Schema.String,
+  method: Schema.Literals(["browser-session-cookie", "bearer-session-token"]),
+  role: Schema.Literals(["owner", "client"]),
+  expiresAt: Schema.String,
+});
 const StoredWebPushSubscription = Schema.Struct({
   ...WebPushSubscriptionInput.fields,
-  label: Schema.optional(Schema.String),
+  owner: Schema.optionalKey(PushOwner),
+  label: Schema.optional(Schema.String.check(Schema.isMaxLength(256))),
   createdAt: Schema.String,
 });
 type StoredWebPushSubscription = typeof StoredWebPushSubscription.Type;
@@ -125,13 +131,18 @@ export interface WebPushNotificationsShape {
   /** VAPID public key for PushManager.subscribe; generated on first use. */
   readonly getPublicKey: () => Effect.Effect<string, WebPushNotificationsError>;
   readonly saveSubscription: (input: {
+    readonly owner: AuthenticatedSession;
     readonly subscription: WebPushSubscriptionInput;
     readonly label?: string | undefined;
   }) => Effect.Effect<void, WebPushNotificationsError>;
-  readonly removeSubscription: (endpoint: string) => Effect.Effect<void, WebPushNotificationsError>;
+  readonly removeSubscription: (
+    endpoint: string,
+    owner: AuthenticatedSession,
+  ) => Effect.Effect<void, WebPushNotificationsError>;
   /** Presentation-only update of an existing exact endpoint/key owner. */
   readonly updateSubscriptionLocale: (
     subscription: WebPushSubscriptionInput,
+    owner: AuthenticatedSession,
   ) => Effect.Effect<void, WebPushNotificationsError>;
   /** Subscribe to provider runtime events and push on turn completion. */
   readonly start: () => Effect.Effect<void, never, Scope.Scope>;
@@ -158,64 +169,92 @@ function deliveryStatusCode(cause: unknown): number | null {
   return null;
 }
 
-const make = Effect.gen(function* () {
+export const makeWebPushNotifications = Effect.gen(function* () {
   const config = yield* ServerConfig;
   const providerService = yield* ProviderService;
+  const sessions = yield* SessionCredentialService;
   const scheduledFollowups = yield* ScheduledFollowups;
   const snapshotQuery = yield* ProjectionSnapshotQuery;
   const serverEnvironment = yield* ServerEnvironment;
-  const fs = yield* FileSystem.FileSystem;
   const pathService = yield* Path.Path;
 
   const statePath = pathService.join(config.stateDir, "web-push.json");
   const stateMutex = yield* Semaphore.make(1);
 
-  const readStateFromDisk = Effect.gen(function* () {
-    const exists = yield* fs.exists(statePath);
-    if (!exists) {
-      return EMPTY_WEB_PUSH_STATE;
-    }
-    const contents = yield* fs.readFileString(statePath);
-    return yield* decodeWebPushState(contents);
+  let persisted: string | undefined;
+  const readStateFromDisk = Effect.tryPromise({
+    try: () => readPrivatePushState(statePath),
+    catch: () => new WebPushNotificationsError({ detail: "Failed to read private push state" }),
   }).pipe(
+    Effect.flatMap((contents) => {
+      persisted = contents;
+      return contents === undefined
+        ? Effect.succeed(EMPTY_WEB_PUSH_STATE)
+        : decodeWebPushState(contents);
+    }),
     Effect.mapError(
-      (cause) => new WebPushNotificationsError({ detail: `Failed to read ${statePath}`, cause }),
+      () => new WebPushNotificationsError({ detail: "Failed to decode private push state" }),
     ),
   );
-
-  const stateRef = yield* Ref.make<WebPushState>(
-    yield* readStateFromDisk.pipe(
-      Effect.catch((error) =>
-        Effect.logWarning("web push state unreadable; starting empty", {
-          detail: error.detail,
-          cause: error.cause,
-        }).pipe(Effect.as(EMPTY_WEB_PUSH_STATE)),
-      ),
-    ),
-  );
-
+  // A failed migration must preserve evidence and stop delivery, not replace it
+  // with an apparently new identity. Startup fails with a fixed safe error.
+  const initial = yield* readStateFromDisk;
+  const stateRef = yield* Ref.make<WebPushState>(initial);
   const persistState = (state: WebPushState) =>
     encodeWebPushState(state).pipe(
       Effect.flatMap((contents) =>
-        writeFileStringAtomically({ filePath: statePath, contents: `${contents}\n` }).pipe(
-          Effect.provideService(FileSystem.FileSystem, fs),
-          Effect.provideService(Path.Path, pathService),
-        ),
+        Effect.tryPromise({
+          try: async () => {
+            const serialized = `${contents}\n`;
+            await writePrivatePushState(statePath, serialized, persisted);
+            persisted = serialized;
+          },
+          catch: () =>
+            new WebPushNotificationsError({ detail: "Failed to save private push state" }),
+        }),
       ),
       Effect.mapError(
-        (cause) => new WebPushNotificationsError({ detail: `Failed to write ${statePath}`, cause }),
+        () => new WebPushNotificationsError({ detail: "Failed to save private push state" }),
       ),
     );
+
+  const identity = (subscription: StoredWebPushSubscription) => {
+    const owner = subscription.owner;
+    if (!owner) return undefined;
+    const expiresAt = DateTime.make(owner.expiresAt);
+    return Option.isSome(expiresAt) ? { ...owner, expiresAt: expiresAt.value } : undefined;
+  };
+  const isActive = (subscription: StoredWebPushSubscription) => {
+    const owner = identity(subscription);
+    return owner
+      ? sessions.validateActiveSession(owner).pipe(
+          Effect.as(true),
+          Effect.catch(() => Effect.succeed(false)),
+        )
+      : Effect.succeed(false);
+  };
+
+  const commitState = (state: WebPushState) =>
+    Effect.uninterruptible(persistState(state).pipe(Effect.andThen(Ref.set(stateRef, state))));
 
   const updateState = (update: (state: WebPushState) => WebPushState) =>
     stateMutex.withPermits(1)(
       Effect.gen(function* () {
         const next = update(yield* Ref.get(stateRef));
-        yield* persistState(next);
-        yield* Ref.set(stateRef, next);
+        yield* commitState(next);
         return next;
       }),
     );
+
+  const reconcileOwners = stateMutex.withPermits(1)(
+    Effect.gen(function* () {
+      const current = yield* Ref.get(stateRef);
+      const subscriptions = yield* Effect.filter(current.subscriptions, isActive);
+      const next = { ...current, subscriptions };
+      yield* commitState(next);
+    }),
+  );
+  yield* reconcileOwners;
 
   const getPublicKey: WebPushNotificationsShape["getPublicKey"] = Effect.fn("getPublicKey")(
     function* () {
@@ -238,65 +277,151 @@ const make = Effect.gen(function* () {
   const saveSubscription: WebPushNotificationsShape["saveSubscription"] = Effect.fn(
     "saveSubscription",
   )(function* (input) {
+    yield* sessions
+      .validateActiveSession(input.owner)
+      .pipe(
+        Effect.mapError(
+          () => new WebPushNotificationsError({ detail: "Push session is no longer active" }),
+        ),
+      );
+    if (!input.owner.expiresAt)
+      return yield* new WebPushNotificationsError({ detail: "Push session expiry required" });
     const createdAt = DateTime.formatIso(yield* DateTime.now);
     const entry: StoredWebPushSubscription = {
       ...input.subscription,
+      owner: {
+        sessionId: input.owner.sessionId,
+        subject: input.owner.subject,
+        method: input.owner.method,
+        role: input.owner.role,
+        expiresAt: DateTime.formatIso(input.owner.expiresAt),
+      },
       ...(input.label !== undefined ? { label: input.label } : {}),
       createdAt,
     };
-    yield* updateState((state) => ({
-      ...state,
-      subscriptions: [
-        ...state.subscriptions.filter(
-          (subscription) => subscription.endpoint !== input.subscription.endpoint,
-        ),
-        entry,
-      ],
-    }));
+    yield* stateMutex.withPermits(1)(
+      Effect.gen(function* () {
+        yield* sessions
+          .validateActiveSession(input.owner)
+          .pipe(
+            Effect.mapError(
+              () => new WebPushNotificationsError({ detail: "Push session is no longer active" }),
+            ),
+          );
+        const state = yield* Ref.get(stateRef);
+        const existing = state.subscriptions.find(
+          (subscription) => subscription.endpoint === entry.endpoint,
+        );
+        if (
+          (existing && existing.owner?.sessionId !== input.owner.sessionId) ||
+          (!existing && state.subscriptions.length >= 512)
+        )
+          return yield* new WebPushNotificationsError({
+            detail: "Push subscription cannot be assigned",
+          });
+        const next = {
+          ...state,
+          subscriptions: [
+            ...state.subscriptions.filter(
+              (subscription) => subscription.endpoint !== entry.endpoint,
+            ),
+            entry,
+          ],
+        };
+        yield* Effect.uninterruptible(
+          Effect.gen(function* () {
+            yield* persistState(next);
+            yield* withSessionAdmission(
+              sessions.validateActiveSession(input.owner).pipe(
+                Effect.andThen(Ref.set(stateRef, next)),
+                Effect.catch(() =>
+                  persistState(state).pipe(
+                    Effect.andThen(
+                      Effect.fail(
+                        new WebPushNotificationsError({
+                          detail: "Push session is no longer active",
+                        }),
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+            );
+          }),
+        );
+      }),
+    );
     yield* Effect.logInfo("web push subscription saved", {
       endpointHost: safeEndpointHost(input.subscription.endpoint),
-      label: input.label,
     });
   });
 
   const removeSubscription: WebPushNotificationsShape["removeSubscription"] = Effect.fn(
     "removeSubscription",
-  )(function* (endpoint) {
+  )(function* (endpoint, owner) {
     yield* updateState((state) => ({
       ...state,
       subscriptions: state.subscriptions.filter(
-        (subscription) => subscription.endpoint !== endpoint,
+        (subscription) =>
+          subscription.endpoint !== endpoint || subscription.owner?.sessionId !== owner.sessionId,
       ),
     }));
   });
 
-  const updateSubscriptionLocale: WebPushNotificationsShape["updateSubscriptionLocale"] = (input) =>
+  const updateSubscriptionLocale: WebPushNotificationsShape["updateSubscriptionLocale"] = (
+    input,
+    owner,
+  ) =>
     updateState((state) => ({
       ...state,
-      subscriptions: [...withWebPushSubscriptionLocale(state.subscriptions, input)],
+      subscriptions: state.subscriptions.map((subscription) =>
+        subscription.owner?.sessionId === owner.sessionId
+          ? withWebPushSubscriptionLocale([subscription], input)[0]!
+          : subscription,
+      ),
     }));
 
-  const pushToSubscription = (input: {
-    readonly subscription: StoredWebPushSubscription;
-    readonly vapid: { readonly publicKey: string; readonly privateKey: string };
-    readonly payload: string;
-  }) =>
-    Effect.tryPromise({
-      try: () =>
-        webpush.sendNotification(
-          { endpoint: input.subscription.endpoint, keys: input.subscription.keys },
-          input.payload,
-          {
-            TTL: PUSH_TTL_SECONDS,
-            vapidDetails: {
-              subject: VAPID_SUBJECT,
-              publicKey: input.vapid.publicKey,
-              privateKey: input.vapid.privateKey,
-            },
-          },
-        ),
-      catch: (cause) => new WebPushDeliveryError({ statusCode: deliveryStatusCode(cause), cause }),
-    });
+  const admitPush = (
+    subscription: StoredWebPushSubscription,
+    vapid: NonNullable<WebPushState["vapid"]>,
+    payload: string,
+  ) =>
+    stateMutex.withPermits(1)(
+      withSessionAdmission(
+        Effect.gen(function* () {
+          const current = yield* Ref.get(stateRef);
+          if (!current.subscriptions.includes(subscription) || !(yield* isActive(subscription)))
+            return null;
+          return yield* Effect.sync(() => {
+            try {
+              // Observe rejection immediately while the lock is still held. The
+              // returned thunk awaits the already initiated transport after release.
+              const pending = webpush
+                .sendNotification(
+                  { endpoint: subscription.endpoint, keys: subscription.keys },
+                  payload,
+                  {
+                    TTL: PUSH_TTL_SECONDS,
+                    timeout: 10_000,
+                    vapidDetails: {
+                      subject: VAPID_SUBJECT,
+                      publicKey: vapid.publicKey,
+                      privateKey: vapid.privateKey,
+                    },
+                  },
+                )
+                .then(
+                  () => ({ status: null as number | null }),
+                  (cause) => ({ status: deliveryStatusCode(cause) ?? 0 }),
+                );
+              return () => pending;
+            } catch (cause) {
+              return () => Promise.resolve({ status: deliveryStatusCode(cause) ?? 0 });
+            }
+          });
+        }),
+      ),
+    );
 
   const notifyTurnCompleted = Effect.fn("notifyTurnCompleted")(function* (threadId: ThreadId) {
     const state = yield* Ref.get(stateRef);
@@ -311,7 +436,7 @@ const make = Effect.gen(function* () {
       return;
     }
     const descriptor = yield* serverEnvironment.getDescriptor;
-    const staleEndpoints: string[] = [];
+    const staleSubscriptions = new Set<StoredWebPushSubscription>();
     yield* Effect.forEach(
       state.subscriptions,
       (subscription) =>
@@ -329,35 +454,47 @@ const make = Effect.gen(function* () {
                 new WebPushNotificationsError({ detail: "Failed to encode push payload", cause }),
             ),
           );
-          yield* pushToSubscription({ subscription, vapid, payload }).pipe(
-            Effect.catch((error) => {
-              if (error.statusCode === 404 || error.statusCode === 410) {
-                // The push service says this subscription no longer exists
-                // (browser data cleared, permission revoked) — drop it.
-                staleEndpoints.push(subscription.endpoint);
-                return Effect.void;
-              }
-              return Effect.logWarning("web push delivery failed", {
-                endpointHost: safeEndpointHost(subscription.endpoint),
-                statusCode: error.statusCode,
-              });
-            }),
-          );
+          // Final local admission immediately precedes transport initiation.
+          // Accepted remote pushes cannot be recalled after this boundary.
+          const delivery = yield* admitPush(subscription, vapid, payload);
+          if (delivery === null) {
+            staleSubscriptions.add(subscription);
+            return;
+          }
+          const result = yield* Effect.promise(delivery);
+          if (result.status === 404 || result.status === 410) staleSubscriptions.add(subscription);
+          else if (result.status !== null)
+            yield* Effect.logWarning("web push delivery failed", { statusCode: result.status });
         }),
       { concurrency: 4, discard: true },
     );
 
-    if (staleEndpoints.length > 0) {
+    if (staleSubscriptions.size > 0) {
       yield* updateState((state) => ({
         ...state,
         subscriptions: state.subscriptions.filter(
-          (subscription) => !staleEndpoints.includes(subscription.endpoint),
+          (subscription) => !staleSubscriptions.has(subscription),
         ),
       })).pipe(Effect.catch(() => Effect.void));
     }
   });
 
   const start: WebPushNotificationsShape["start"] = Effect.fn("start")(function* () {
+    yield* Effect.forkScoped(
+      Stream.runForEach(sessions.streamChanges, () =>
+        reconcileOwners.pipe(
+          Effect.catch(() => Effect.logWarning("Push owner reconciliation failed")),
+        ),
+      ),
+    );
+    yield* Effect.forkScoped(
+      Effect.forever(
+        Effect.sleep("1 minute").pipe(
+          Effect.andThen(reconcileOwners),
+          Effect.catch(() => Effect.logWarning("Push expiry reconciliation failed")),
+        ),
+      ),
+    );
     yield* Effect.forkScoped(
       Stream.runForEach(providerService.streamEvents, (event) => {
         if (event.type !== "turn.completed") {
@@ -396,7 +533,10 @@ const make = Effect.gen(function* () {
   } satisfies WebPushNotificationsShape;
 });
 
-export const WebPushNotificationsLive = Layer.effect(WebPushNotifications, make);
+export const WebPushNotificationsLive = Layer.effect(
+  WebPushNotifications,
+  makeWebPushNotifications,
+);
 
 /** Inert implementation for tests and harnesses that don't exercise push. */
 export const WebPushNotificationsTest = Layer.succeed(WebPushNotifications, {

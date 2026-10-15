@@ -31,6 +31,9 @@ describe("repository toolchain policy", () => {
     const rootPackage = readJson("package.json");
 
     expect(rootPackage.packageManager).toBe("yarn@4.17.1");
+    expect(readJson("packaging/managed-providers/manifest.json").node).toBe(
+      REPOSITORY_NODE_VERSION,
+    );
     expect(rootPackage.engines).toEqual({ node: `^${REPOSITORY_NODE_VERSION}` });
     expect(readJson("apps/server/package.json").engines).toEqual({
       node: `^${REPOSITORY_NODE_VERSION}`,
@@ -152,10 +155,11 @@ describe("repository toolchain policy", () => {
     ).toBe("42.10.0");
   });
 
-  it("retains fixed security floors in every installed URI, IP and brace-expansion branch", () => {
+  it("retains fixed security floors in every installed URI, IP, proxy and brace-expansion branch", () => {
     const resolutions = readStringMap(readJson("package.json").resolutions);
     expect(resolutions["fast-uri"]).toBe("^3.1.8");
     expect(resolutions["ip-address"]).toBe("^10.7.1");
+    expect(resolutions["proxy-addr"]).toBe("^2.0.8");
     const lock = parse(readFileSync(resolve(repoRoot, "yarn.lock"), "utf8")) as Record<
       string,
       { version?: string }
@@ -164,6 +168,7 @@ describe("repository toolchain policy", () => {
       "brace-expansion": { 1: [1, 21], 2: [1, 7], 5: [0, 12] },
       "fast-uri": { 3: [1, 8] },
       "ip-address": { 10: [7, 1] },
+      "proxy-addr": { 2: [0, 8] },
     };
     for (const [name, branches] of Object.entries(minimums)) {
       const entries = Object.entries(lock).filter(([descriptor]) =>
@@ -182,6 +187,25 @@ describe("repository toolchain policy", () => {
           descriptor,
         ).toBe(true);
       }
+    }
+  });
+
+  it("rejects spoofed IPv4 hops through short IPv6 trust subnets", () => {
+    // GHSA-jqcg-44mw-7w3h let these short IPv6 ranges trust every IPv4
+    // peer. Exercise the installed transitive implementation as well as the
+    // lockfile floor, while retaining legitimate private-subnet behavior.
+    const proxyaddr = require("proxy-addr") as {
+      compile: (subnets: string[]) => (address: string) => boolean;
+    };
+    for (const subnet of ["::ffff:10.0.0.0/8", "::/1"]) {
+      const trust = proxyaddr.compile([subnet]);
+      expect(trust("203.0.113.9"), subnet).toBe(false);
+      expect(trust("10.1.2.3"), subnet).toBe(false);
+    }
+    for (const subnet of ["::ffff:10.0.0.0/104", "10.0.0.0/8"]) {
+      const trust = proxyaddr.compile([subnet]);
+      expect(trust("203.0.113.9"), subnet).toBe(false);
+      expect(trust("10.1.2.3"), subnet).toBe(true);
     }
   });
 

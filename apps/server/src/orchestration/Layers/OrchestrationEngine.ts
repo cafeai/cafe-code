@@ -4,7 +4,11 @@ import type {
   ProjectId,
   ThreadId,
 } from "@cafecode/contracts";
-import { OrchestrationCommand, ThreadTurnStartRequestedPayload } from "@cafecode/contracts";
+import {
+  OrchestrationCommand,
+  OrchestrationThreadActivity,
+  ThreadTurnStartRequestedPayload,
+} from "@cafecode/contracts";
 import * as Cause from "effect/Cause";
 import * as Clock from "effect/Clock";
 import * as DateTime from "effect/DateTime";
@@ -81,6 +85,52 @@ type UserTurnMessageCommand =
 
 interface PersistedSequenceRow {
   readonly sequence: number;
+}
+
+const decodeQuestionActivity = Schema.decodeUnknownOption(OrchestrationThreadActivity);
+// The normalized 16-question/32-option maximum fits even with JSON escaping.
+const MAX_QUESTION_ACTIVITY_BYTES = 1_048_576;
+
+/** The command cache starts empty and its live activity tail is bounded. */
+function readPersistedQuestionActivity(
+  sql: SqlClient.SqlClient,
+  command: Extract<OrchestrationCommand, { readonly type: "thread.async-questions.resolve" }>,
+) {
+  return Effect.gen(function* () {
+    if (!/^codex-async-questions:[a-f0-9]{64}$/u.test(command.activityId)) return Option.none();
+    const [row] = yield* sql<{
+      readonly id: string;
+      readonly turnId: string | null;
+      readonly tone: string;
+      readonly kind: string;
+      readonly summary: string;
+      readonly payloadJson: string;
+      readonly sequence: number | null;
+      readonly createdAt: string;
+    }>`
+      SELECT activity_id AS id, turn_id AS "turnId", tone, kind, summary,
+        payload_json AS "payloadJson", sequence, created_at AS "createdAt"
+      FROM projection_thread_activities
+      WHERE activity_id = ${command.activityId} AND thread_id = ${command.threadId}
+        AND kind = 'provider.async-questions'
+        AND length(CAST(payload_json AS BLOB)) <= ${MAX_QUESTION_ACTIVITY_BYTES}
+      LIMIT 1
+    `;
+    if (!row) return Option.none();
+    const payload = parseRecordJson(row.payloadJson);
+    if (!payload) return Option.none();
+    // Decode without attaching private question content to an error/diagnostic.
+    return decodeQuestionActivity({
+      id: row.id,
+      turnId: row.turnId,
+      tone: row.tone,
+      kind: row.kind,
+      summary: row.summary,
+      payload,
+      ...(row.sequence !== null ? { sequence: row.sequence } : {}),
+      createdAt: row.createdAt,
+    });
+  });
 }
 
 function isUserTurnMessageCommand(
@@ -631,6 +681,8 @@ const makeOrchestrationEngine = Effect.gen(function* () {
             : undefined;
         const guardedForkCommand =
           envelope.command.type === "thread.fork.commit" ? envelope.command : undefined;
+        const questionResolutionCommand =
+          envelope.command.type === "thread.async-questions.resolve" ? envelope.command : undefined;
         const decide = (scheduledFollowUpVerified = false, readModel = commandReadModel) =>
           decideOrchestrationCommand({
             command: envelope.command,
@@ -651,13 +703,41 @@ const makeOrchestrationEngine = Effect.gen(function* () {
         const ordinaryEventBase =
           scheduledCommand === undefined &&
           guardedRevertCommand === undefined &&
-          guardedForkCommand === undefined
+          guardedForkCommand === undefined &&
+          questionResolutionCommand === undefined
             ? yield* decide()
             : undefined;
         const committedCommand = yield* sql
           .withTransaction(
             Effect.gen(function* () {
               let decisionReadModel = commandReadModel;
+              if (questionResolutionCommand !== undefined) {
+                // Acquire the writer before reading the exact saved activity.
+                // Fresh handled indexes merge even across independent clients;
+                // a cache miss or stale cache is never question availability.
+                yield* sql`UPDATE projection_threads SET updated_at = updated_at
+                  WHERE thread_id = ${questionResolutionCommand.threadId}`;
+                const activity = yield* readPersistedQuestionActivity(
+                  sql,
+                  questionResolutionCommand,
+                );
+                decisionReadModel = {
+                  ...commandReadModel,
+                  threads: commandReadModel.threads.map((thread) =>
+                    thread.id === questionResolutionCommand.threadId
+                      ? {
+                          ...thread,
+                          activities: [
+                            ...thread.activities.filter(
+                              (entry) => entry.id !== questionResolutionCommand.activityId,
+                            ),
+                            ...(Option.isSome(activity) ? [activity.value] : []),
+                          ],
+                        }
+                      : thread,
+                  ),
+                };
+              }
               if (guardedForkCommand !== undefined) {
                 // Reserve the SQLite writer before reading exact source and
                 // project authority. This closes same-thread/project races
@@ -753,7 +833,7 @@ const makeOrchestrationEngine = Effect.gen(function* () {
                 }
                 committedEvents.push(savedEvent);
               }
-              if (decisionReadModel !== commandReadModel) {
+              if (guardedForkCommand !== undefined && decisionReadModel !== commandReadModel) {
                 // The fork events affect only the target. Do not retain the
                 // temporary source body or expand every thread's startup cache.
                 nextCommandReadModel = {

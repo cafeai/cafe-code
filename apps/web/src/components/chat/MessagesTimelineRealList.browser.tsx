@@ -249,6 +249,25 @@ describe("MessagesTimeline with real LegendList", () => {
       );
       for (let frame = 0; frame < 4; frame += 1)
         await new Promise<void>((resolve) => window.requestAnimationFrame(() => resolve()));
+      // Finite wheel gestures can leave two clipped cards with neither fully
+      // visible. Align one measured card through native input before requiring
+      // a complete overlap anchor; incidental wheel phase is not list behavior.
+      const viewport = scroller.getBoundingClientRect();
+      const candidate = Array.from(
+        host.querySelectorAll<HTMLElement>("[data-visualization-card]"),
+      ).find((row) => {
+        const bounds = row.getBoundingClientRect();
+        return (
+          bounds.top >= viewport.top &&
+          bounds.top < viewport.bottom &&
+          bounds.height < viewport.height
+        );
+      });
+      expect(candidate).toBeDefined();
+      await reviewWithNativeWheel(
+        scroller,
+        candidate!.getBoundingClientRect().top - viewport.top - 16,
+      );
       let anchor: HTMLElement | undefined;
       await vi.waitFor(() => {
         const viewport = scroller.getBoundingClientRect();

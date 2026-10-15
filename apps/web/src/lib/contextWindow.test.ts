@@ -66,4 +66,22 @@ describe("contextWindow", () => {
     expect(snapshot?.usedTokens).toBe(81_659);
     expect(snapshot?.totalProcessedTokens).toBe(748_126);
   });
+
+  it("carries the chat-wide generation rate with the latest snapshot", () => {
+    const snapshot = deriveLatestContextWindowSnapshot([
+      makeActivity("activity-1", "context-window.updated", {
+        usedTokens: 2_000,
+        responseGeneration: { outputTokens: 240, durationMs: 3_000 },
+      }),
+      makeActivity("activity-2", "context-window.updated", { usedTokens: 2_400 }),
+    ]);
+
+    expect(snapshot?.usedTokens).toBe(2_400);
+    expect(snapshot?.generationRate).toEqual({ tokensPerSecond: 80, measuredMs: 3_000 });
+    expect(
+      deriveLatestContextWindowSnapshot([
+        makeActivity("activity-3", "context-window.updated", { usedTokens: 2_400 }),
+      ])?.generationRate,
+    ).toBeNull();
+  });
 });

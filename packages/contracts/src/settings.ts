@@ -45,7 +45,7 @@ export const DEFAULT_POWER_SAVE_BLOCKER_MODE: PowerSaveBlockerMode = "off";
 
 export const DEFAULT_CONTINUE_BACKGROUND_ANIMATIONS = false;
 export const DEFAULT_SHOW_SIDEBAR_SEARCH = true;
-export const DEFAULT_SHOW_SIDEBAR_MASCOT = true;
+export const DEFAULT_SHOW_SIDEBAR_MASCOT = false;
 export const DEFAULT_SHOW_SIDEBAR_ATTRIBUTION = true;
 export const DEFAULT_BRAND_WORDMARK_PREFIX = "Cafe";
 export const DEFAULT_SIDEBAR_BRAND_IMAGE_DATA_URL = "";

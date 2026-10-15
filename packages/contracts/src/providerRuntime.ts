@@ -359,6 +359,21 @@ const VcsStateChangedPayload = Schema.Struct({
 });
 export type VcsStateChangedPayload = typeof VcsStateChangedPayload.Type;
 
+/**
+ * One measured model response: the provider-reported output tokens of that
+ * response and the wall time Cafe observed while it streamed, from its first
+ * streamed output to its last output edge. Time to first token, tool
+ * execution and approval waits are excluded, so tokens / duration is decode
+ * speed rather than turn throughput. Adapters attach a sample at most once per
+ * response and only when the native stream bounds the interval; absence means
+ * "not measured", never zero speed. Display-only: never billing or liveness.
+ */
+export const ResponseGenerationSample = Schema.Struct({
+  outputTokens: PositiveInt,
+  durationMs: PositiveInt,
+});
+export type ResponseGenerationSample = typeof ResponseGenerationSample.Type;
+
 export const ThreadTokenUsageSnapshot = Schema.Struct({
   usedTokens: NonNegativeInt,
   totalProcessedTokens: Schema.optional(NonNegativeInt),
@@ -390,6 +405,8 @@ export const ThreadTokenUsageSnapshot = Schema.Struct({
   durationMs: Schema.optional(NonNegativeInt),
   compactsAutomatically: Schema.optional(Schema.Boolean),
   autoCompactTokenLimit: Schema.optional(PositiveInt),
+  // Present only on the snapshot that closes a measured response.
+  responseGeneration: Schema.optional(ResponseGenerationSample),
 });
 export type ThreadTokenUsageSnapshot = typeof ThreadTokenUsageSnapshot.Type;
 

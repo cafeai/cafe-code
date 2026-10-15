@@ -1,18 +1,15 @@
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import * as Toml from "toml";
 import { afterEach, describe, expect, it } from "vitest";
-
 import {
-  editMcpClientConfiguration,
+  removeLegacyMcpClientConfiguration,
   mcpClientConfigurations,
   readMcpClientEntry,
   type McpLaunchSpec,
 } from "./clientConfiguration.ts";
-import { makeMcpInstallationFiles } from "./McpManagement.ts";
+import { legacyMcpConfiguration } from "./fixtures/legacyConfiguration.ts";
 import { readMcpFile, writeMcpFile } from "./privateFiles.ts";
-
 const launch: McpLaunchSpec = {
   command: "/a path/Cafe",
   args: ["/private/bridge.mjs", "/private/connection.json"],
@@ -22,172 +19,82 @@ const roots: string[] = [];
 afterEach(async () => {
   await Promise.all(roots.splice(0).map((root) => fs.rm(root, { recursive: true, force: true })));
 });
-
-describe("MCP user configuration", () => {
+describe("legacy MCP configuration removal", () => {
   for (const client of mcpClientConfigurations("/test-user", {})) {
-    it(`installs and removes ${client.id} without changing other settings`, () => {
+    it(`removes ${client.id} without changing unrelated settings`, () => {
       const contents =
         client.format === "toml"
-          ? '# Keep my model\nmodel = "mine"\n[mcp_servers.other]\ncommand = "other"\n'
-          : '{\n  // Keep my model\n  "model": "mine",\n  "unrelated": { "secret": "do-not-touch" },\n}\n';
-      const installed = editMcpClientConfiguration(client, contents, launch, "install");
-      expect(installed).toContain("Keep my model");
-      expect(installed).toContain('"mine"');
-      expect(readMcpClientEntry(client, installed)).toBeDefined();
-      expect(editMcpClientConfiguration(client, installed, launch, "install")).toBe(installed);
-      const removed = editMcpClientConfiguration(client, installed, launch, "remove");
+          ? '# Preserve me\nmodel = "mine"\n[mcp_servers.other]\ncommand = "other"\n'
+          : '{\n // Preserve me\n "model": "mine", "unrelated": { "secret": "do-not-touch" }\n}\n';
+      const original = legacyMcpConfiguration(client, contents, launch);
+      const removed = removeLegacyMcpClientConfiguration(client, original, launch);
       expect(readMcpClientEntry(client, removed)).toBeUndefined();
-      expect(removed).toContain("Keep my model");
+      expect(removed).toContain("Preserve me");
+      expect(removed).toContain('"mine"');
       if (client.format === "toml") expect(removed).toBe(contents);
       else expect(removed).toContain('"secret": "do-not-touch"');
+      expect(removeLegacyMcpClientConfiguration(client, removed, launch)).toBe(removed);
     });
   }
-
   it("refuses a same-named server from another Cafe environment", () => {
     const client = mcpClientConfigurations("/test-user", {})[0]!;
-    const installed = editMcpClientConfiguration(client, "", launch, "install");
+    const original = legacyMcpConfiguration(client, "", launch);
     expect(() =>
-      editMcpClientConfiguration(
-        client,
-        installed,
-        { ...launch, args: ["/elsewhere/bridge.mjs", "/elsewhere/connection.json"] },
-        "install",
-      ),
+      removeLegacyMcpClientConfiguration(client, original, {
+        ...launch,
+        args: ["/elsewhere/bridge.mjs", "/elsewhere/connection.json"],
+      }),
     ).toThrow("different cafe-code");
     expect(() =>
-      editMcpClientConfiguration(
+      removeLegacyMcpClientConfiguration(
         client,
         '[mcp_servers.cafe-code]\nurl = "https://example.com"',
         launch,
-        "remove",
       ),
     ).toThrow("different cafe-code");
   });
-
-  it("leaves an unrelated user-configured MCP untouched", () => {
+  it("preserves full-range TOML integers, dates and unrelated tool bytes", () => {
     const client = mcpClientConfigurations("/test-user", {})[0]!;
     const contents =
-      "# Unrelated tools belong to the user, never the Cafe installer.\n" +
-      '[mcp_servers.user-tools]\ncommand = "user-bridge"\nenabled = false\n' +
-      'args = ["/private/user-session.json"]\n';
-    const original: unknown = Toml.parse(contents);
-    const installed = editMcpClientConfiguration(client, contents, launch, "install");
-    const withCafe: unknown = Toml.parse(installed);
-    expect(withCafe).toMatchObject(original as object);
-    expect(readMcpClientEntry(client, installed)).toBeDefined();
-    expect(editMcpClientConfiguration(client, installed, launch, "remove")).toBe(contents);
+      '# Preserve exactly\nlargest = 9223372036854775807\nsmallest = -9223372036854775808\nhex = 0x7fff_ffff_ffff_ffff\noctal = 0o755\nbinary = 0b1101\nsafe = 3\nfloat = 1.25\ndate = 1979-05-27\n[mcp_servers.other]\ncommand = "other"\n';
+    expect(
+      removeLegacyMcpClientConfiguration(
+        client,
+        legacyMcpConfiguration(client, contents, launch),
+        launch,
+      ),
+    ).toBe(contents);
   });
-
-  it("refuses malformed input without echoing secrets", () => {
+  it.each([
+    'private_token = "do-not-disclose',
+    "largest = 9223372036854775808\n",
+    "smallest = -9223372036854775809\n",
+    `nested = ${"[".repeat(81)}0${"]".repeat(81)}\n`,
+    "id = 1\nid = 2\n",
+  ])("rejects malformed or ambiguous TOML without exposing input (%#)", (contents) => {
     const client = mcpClientConfigurations("/test-user", {})[0]!;
-    expect(() =>
-      editMcpClientConfiguration(client, 'token = "private-secret', launch, "install"),
-    ).toThrow("configuration is invalid");
-    expect(() =>
-      editMcpClientConfiguration(client, 'token = "private-secret', launch, "install"),
-    ).not.toThrow("private-secret");
+    expect(() => removeLegacyMcpClientConfiguration(client, contents, launch)).toThrow(
+      "configuration is invalid",
+    );
+    expect(() => removeLegacyMcpClientConfiguration(client, contents, launch)).not.toThrow(
+      "do-not-disclose",
+    );
   });
-
-  it("preserves full-range TOML integers and local dates while editing only Cafe's block", () => {
-    const client = mcpClientConfigurations("/test-user", {})[0]!;
-    const contents =
-      "# Unrelated user configuration must survive byte-for-byte.\n" +
-      "largest = 9223372036854775807\nsmallest = -9223372036854775808\n" +
-      "hex = 0x7fff_ffff_ffff_ffff\noctal = 0o755\nbinary = 0b1101\n" +
-      "safe = 3\nfloat = 1.25\ndate = 1979-05-27\n" +
-      '[mcp_servers.other]\ncommand = "other"\n';
-    const original: unknown = Toml.parse(contents, { bigint: true });
-    expect(original).toMatchObject({
-      largest: 9223372036854775807n,
-      smallest: -9223372036854775808n,
-      hex: 9223372036854775807n,
-      octal: 493n,
-      binary: 13n,
-      safe: 3n,
-      float: 1.25,
-      date: "1979-05-27",
-    });
-    const installed = editMcpClientConfiguration(client, contents, launch, "install");
-    expect(installed.startsWith(contents)).toBe(true);
-    expect(Toml.parse(installed, { bigint: true })).toMatchObject(original as object);
-    expect(readMcpClientEntry(client, installed)).toBeDefined();
-    expect(editMcpClientConfiguration(client, installed, launch, "install")).toBe(installed);
-    expect(editMcpClientConfiguration(client, installed, launch, "remove")).toBe(contents);
-  });
-
-  it.each(["9223372036854775808", "-9223372036854775809"])(
-    "rejects out-of-range TOML integer %s without echoing private document content",
-    (integer) => {
-      const client = mcpClientConfigurations("/test-user", {})[0]!;
-      const contents = `private_secret = "do-not-disclose"\nid = ${integer}\n`;
-      expect(() => editMcpClientConfiguration(client, contents, launch, "install")).toThrow(
-        "configuration is invalid",
-      );
-      expect(() => editMcpClientConfiguration(client, contents, launch, "install")).not.toThrow(
-        "do-not-disclose",
-      );
-    },
-  );
-
-  it("retains bounded TOML nesting and rejects ambiguous duplicate keys", () => {
-    const client = mcpClientConfigurations("/test-user", {})[0]!;
-    for (const contents of [`nested = ${"[".repeat(81)}0${"]".repeat(81)}\n`, "id = 1\nid = 2\n"]) {
-      expect(() => editMcpClientConfiguration(client, contents, launch, "install")).toThrow(
-        "configuration is invalid",
-      );
-    }
-  });
-
-  it("refuses duplicate JSON keys instead of updating an ambiguous server map", () => {
+  it("refuses duplicate JSON keys", () => {
     const client = mcpClientConfigurations("/test-user", {})[1]!;
     expect(() =>
-      editMcpClientConfiguration(client, '{"mcpServers": {}, "mcpServers": {}}', launch, "install"),
+      removeLegacyMcpClientConfiguration(client, '{"mcpServers": {}, "mcpServers": {}}', launch),
     ).toThrow("invalid");
   });
-
-  it("installs both default Claude config locations and checks all conflicts before writing", async () => {
-    const root = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), "cafe-mcp-test-")));
-    roots.push(root);
-    const files = makeMcpInstallationFiles({
-      stateDir: path.join(root, "state"),
-      home: root,
-      env: {},
-      executable: process.execPath,
-      bridgeSource: "unused",
-      platform: process.platform,
-    });
-    const cliConfig = path.join(root, ".claude.json");
-    const cafeConfig = path.join(root, ".claude", ".claude.json");
-    await fs.mkdir(path.dirname(cafeConfig), { mode: 0o700 });
-    const conflict = '{"mcpServers":{"cafe-code":{"command":"another-server"}}}';
-    await fs.writeFile(cafeConfig, conflict);
-    await expect(files.update({ client: "claude", operation: "install" })).rejects.toThrow(
-      "different cafe-code",
-    );
-    expect(await readMcpFile(cliConfig)).toBeUndefined();
-    expect(await fs.readFile(cafeConfig, "utf8")).toBe(conflict);
-    await fs.writeFile(cafeConfig, "{}");
-    await files.update({ client: "claude", operation: "install" });
-    expect(await fs.readFile(cliConfig, "utf8")).toContain("cafe-code");
-    expect(await fs.readFile(cafeConfig, "utf8")).toContain("cafe-code");
-    await fs.writeFile(cliConfig, "{}");
-    expect((await files.list()).find((client) => client.id === "claude")?.status).toBe(
-      "needs-repair",
-    );
-    await files.update({ client: "claude", operation: "remove" });
-    expect((await files.list()).find((client) => client.id === "claude")?.status).toBe(
-      "not-installed",
-    );
-  });
-
-  it("will not delete text hidden between forged TOML markers", () => {
+  it("does not delete text between forged TOML markers", () => {
     const client = mcpClientConfigurations("/test-user", {})[0]!;
-    const original =
+    const text =
       'prompt = """\n# BEGIN Cafe Code managed MCP\nuser content\n# END Cafe Code managed MCP\n"""\n';
-    expect(() => editMcpClientConfiguration(client, original, launch, "install")).toThrow();
+    expect(removeLegacyMcpClientConfiguration(client, text, launch)).toBe(text);
+    const withRealEntry = legacyMcpConfiguration(client, text, launch);
+    expect(() => removeLegacyMcpClientConfiguration(client, withRealEntry, launch)).toThrow();
   });
-
-  it("honors explicit user configuration locations", () => {
+  it("honors explicit user configuration locations for retirement", () => {
     const clients = mcpClientConfigurations("/home/test", {
       CODEX_HOME: "/custom/codex",
       CLAUDE_CONFIG_DIR: "/custom/claude",
@@ -201,53 +108,6 @@ describe("MCP user configuration", () => {
       "/custom/opencode.jsonc",
     ]);
   });
-
-  it("installs a private bridge, detects actual config state, and supports removal", async () => {
-    const root = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), "cafe-mcp-test-")));
-    roots.push(root);
-    const source = path.join(root, "source.mjs");
-    await fs.writeFile(source, "// bridge fixture\n");
-    const files = makeMcpInstallationFiles({
-      stateDir: path.join(root, "state"),
-      home: path.join(root, "home"),
-      env: { APPIMAGE: "/apps/Cafe Code.AppImage" },
-      executable: "/temporary/mount/cafe",
-      bridgeSource: source,
-      platform: "linux",
-    });
-    expect(files.launch.command).toBe("/apps/Cafe Code.AppImage");
-    await files.prepareBridge();
-    await files.update({ client: "codex", operation: "install" });
-    expect((await files.list()).find((client) => client.id === "codex")?.status).toBe("installed");
-    const config = path.join(root, "home", ".codex", "config.toml");
-    const contents = await fs.readFile(config, "utf8");
-    expect(contents).not.toContain("token");
-    if (process.platform !== "win32") expect((await fs.stat(config)).mode & 0o777).toBe(0o600);
-    await files.update({ client: "codex", operation: "remove" });
-    expect((await files.list()).find((client) => client.id === "codex")?.status).toBe(
-      "not-installed",
-    );
-  });
-
-  it("edits an existing OpenCode JSONC file instead of creating a shadowed JSON file", async () => {
-    const root = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), "cafe-mcp-test-")));
-    roots.push(root);
-    const dir = path.join(root, ".config", "opencode");
-    await fs.mkdir(dir, { recursive: true });
-    await fs.writeFile(path.join(dir, "opencode.jsonc"), '{ // custom\n "mcp": {}\n}');
-    const files = makeMcpInstallationFiles({
-      stateDir: path.join(root, "state"),
-      home: root,
-      env: {},
-      executable: process.execPath,
-      bridgeSource: "unused",
-      platform: process.platform,
-    });
-    await files.update({ client: "opencode", operation: "install" });
-    expect(await fs.readFile(path.join(dir, "opencode.jsonc"), "utf8")).toContain("cafe-code");
-    expect(await readMcpFile(path.join(dir, "opencode.json"))).toBeUndefined();
-  });
-
   it("rejects linked files and stale writes, leaving the target intact", async () => {
     const root = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), "cafe-mcp-test-")));
     roots.push(root);

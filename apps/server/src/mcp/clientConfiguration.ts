@@ -9,12 +9,12 @@ import {
   type ParseError,
 } from "jsonc-parser";
 import * as Toml from "toml";
-import type { CafeMcpClientId } from "@cafecode/contracts";
+type CafeMcpClientId = "codex" | "claude" | "grok" | "opencode";
 
 import { McpFileError } from "./privateFiles.ts";
 
-// This installer owns only Cafe's management connection. Installing/removing
-// Cafe must preserve unrelated user-owned MCP registrations.
+// Legacy registration recognition/removal only. New chats receive a private
+// launch override and never register management tools in provider profiles.
 export const CAFE_MCP_SERVER_NAME = "cafe-code";
 const BEGIN = "# BEGIN Cafe Code managed MCP";
 const END = "# END Cafe Code managed MCP";
@@ -75,26 +75,6 @@ export function mcpClientConfigurations(
       key: "mcp",
     },
   ];
-}
-
-export function mcpClientEntry(
-  client: McpClientConfiguration,
-  launch: McpLaunchSpec,
-): Record<string, unknown> {
-  if (client.id === "opencode") {
-    return {
-      type: "local",
-      command: [launch.command, ...launch.args],
-      environment: launch.env,
-      enabled: true,
-    };
-  }
-  return {
-    ...(client.id === "claude" ? { type: "stdio" } : {}),
-    command: launch.command,
-    args: launch.args,
-    env: launch.env,
-  };
 }
 
 function record(value: unknown): Record<string, unknown> | undefined {
@@ -168,28 +148,10 @@ export function isManagedMcpEntry(entry: unknown, launch: McpLaunchSpec): boolea
   return Array.isArray(args) && isDeepStrictEqual(args, launch.args);
 }
 
-export function isMcpEntryReady(
-  client: McpClientConfiguration,
-  entry: unknown,
-  launch: McpLaunchSpec,
-): boolean {
-  const value = record(entry);
-  const expected = mcpClientEntry(client, launch);
-  const envKey = client.id === "opencode" ? "environment" : "env";
-  return (
-    value !== undefined &&
-    value.enabled !== false &&
-    isDeepStrictEqual(value.command, expected.command) &&
-    value.type === expected.type &&
-    record(value[envKey])?.ELECTRON_RUN_AS_NODE === "1"
-  );
-}
-
-export function editMcpClientConfiguration(
+export function removeLegacyMcpClientConfiguration(
   client: McpClientConfiguration,
   contents: string,
   launch: McpLaunchSpec,
-  operation: "install" | "remove",
 ): string {
   const current = readMcpClientEntry(client, contents);
   if (current !== undefined && !isManagedMcpEntry(current, launch)) {
@@ -197,15 +159,13 @@ export function editMcpClientConfiguration(
       "A different cafe-code MCP registration already exists. It was left unchanged.",
     );
   }
-  if (operation === "remove" && current === undefined) return contents;
-  const entry = operation === "install" ? mcpClientEntry(client, launch) : undefined;
-  if (isDeepStrictEqual(entry, current)) return contents;
+  if (current === undefined) return contents;
 
   let next: string;
   if (client.format === "json") {
     next = applyEdits(
       contents || "{}\n",
-      modify(contents || "{}\n", [client.key, CAFE_MCP_SERVER_NAME], entry, {
+      modify(contents || "{}\n", [client.key, CAFE_MCP_SERVER_NAME], undefined, {
         formattingOptions: {
           insertSpaces: true,
           tabSize: 2,
@@ -228,38 +188,20 @@ export function editMcpClientConfiguration(
         contents.indexOf(END, end + END.length) !== -1
       ) {
         throw new McpFileError(
-          "The Cafe MCP configuration block was edited. Restore it before reinstalling.",
+          "The Cafe MCP configuration block was edited. It was left unchanged.",
         );
       }
       base = contents.slice(0, start) + contents.slice(end + END.length).replace(/^\r?\n/, "");
     } else if (current !== undefined) {
-      throw new McpFileError(
-        "The Cafe MCP entry is managed outside Cafe. Remove it there before reinstalling.",
-      );
+      throw new McpFileError("The Cafe MCP entry is managed outside Cafe. It was left unchanged.");
     }
-    const newline = contents.includes("\r\n") ? "\r\n" : "\n";
-    const block = [
-      BEGIN,
-      `[mcp_servers.${CAFE_MCP_SERVER_NAME}]`,
-      `command = ${JSON.stringify(launch.command)}`,
-      `args = ${JSON.stringify(launch.args)}`,
-      `env = { ${Object.entries(launch.env)
-        .map(([key, value]) => `${JSON.stringify(key)} = ${JSON.stringify(value)}`)
-        .join(", ")} }`,
-      END,
-      "",
-    ].join(newline);
-    next =
-      operation === "install"
-        ? `${base}${base.endsWith("\n") || !base ? "" : newline}${block}`
-        : base;
+    next = base;
   }
   const before = parseConfiguration(client, contents);
   const after = parseConfiguration(client, next);
   const expected = { ...before, [client.key]: { ...record(before[client.key]) } };
   const servers = expected[client.key] as Record<string, unknown>;
-  if (entry === undefined) delete servers[CAFE_MCP_SERVER_NAME];
-  else servers[CAFE_MCP_SERVER_NAME] = entry;
+  delete servers[CAFE_MCP_SERVER_NAME];
   // TOML removal of the last table removes its implicit parent as well.
   if (Object.keys(servers).length === 0 && after[client.key] === undefined)
     delete expected[client.key];

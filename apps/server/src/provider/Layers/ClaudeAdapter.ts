@@ -1,3 +1,7 @@
+import {
+  makeManagementMcpSession,
+  type ManagementMcpBinding,
+} from "../../mcp/sessionConnection.ts";
 /**
  * ClaudeAdapterLive - Scoped live implementation for the Claude Agent provider adapter.
  *
@@ -65,6 +69,8 @@ import {
 import { publicClaudeCommands, UNAVAILABLE_COMMAND_CATALOG } from "../claudeCommands.ts";
 import { mapClaudeSessionQuotaReport, stripClaudeUsageReport } from "../claudeSessionQuota.ts";
 import { resolveConfiguredSubagentLimit } from "../Drivers/SubagentConcurrency.ts";
+import { observeClaudeResponseGeneration } from "../claudeResponseGeneration.ts";
+import { ResponseGenerationClock } from "../responseGenerationClock.ts";
 import {
   gateClaudeUltracodeCapabilities,
   supportsClaudeUltracode,
@@ -128,6 +134,7 @@ import {
   resolvePromptInjectedEffort,
 } from "@cafecode/shared/model";
 import * as Cause from "effect/Cause";
+import * as Clock from "effect/Clock";
 import * as DateTime from "effect/DateTime";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
@@ -670,6 +677,7 @@ interface ClaudeSessionContext {
     | undefined;
   /** Exact query-owned scheduling authority; never shared with a resumed query. */
   readonly schedulingBinding: SchedulingSessionBinding | undefined;
+  readonly managementBinding: ManagementMcpBinding | undefined;
   readonly visualizationBinding: VisualizationSessionBinding | undefined;
   readonly archivedToolPrivacy?: ArchivedToolPayloadRedactor | undefined;
   readonly visualizationPrivacy?: VisualizationNativePrivacy | undefined;
@@ -739,6 +747,8 @@ interface ClaudeSessionContext {
   lastFastModeNoticeKey: string | undefined;
   lastKnownContextWindow: number | undefined;
   lastKnownTokenUsage: ThreadTokenUsageSnapshot | undefined;
+  /** Primary-stream decode timing; display-only, see claudeResponseGeneration.ts. */
+  readonly responseGenerationClock: ResponseGenerationClock;
   /** Query-local billing epoch, independent of the resumable transcript ID. */
   usageAccounting: ClaudeUsageAccounting;
   readonly usageAccountingResetIds: Set<string>;
@@ -4628,11 +4638,20 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
             totalReasoningOutputTokens: previousTotalReasoningOutputTokens,
           }
         : usage;
-    if (sameThreadTokenUsageSnapshot(context.lastKnownTokenUsage, normalizedUsage)) {
+    // A response-generation sample belongs to exactly one emitted snapshot.
+    // Never let deduplication drop it, and never retain it in the remembered
+    // snapshot: the result path spreads that snapshot into its final usage,
+    // which would otherwise count the same response twice in the rolling
+    // tokens-per-second average.
+    const { responseGeneration, ...rememberedUsage } = normalizedUsage;
+    if (
+      responseGeneration === undefined &&
+      sameThreadTokenUsageSnapshot(context.lastKnownTokenUsage, normalizedUsage)
+    ) {
       return;
     }
 
-    context.lastKnownTokenUsage = normalizedUsage;
+    context.lastKnownTokenUsage = rememberedUsage;
     const usageStamp = yield* makeEventStamp();
     yield* offerRuntimeEvent(context, {
       type: "thread.token-usage.updated",
@@ -5827,13 +5846,22 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
           : undefined;
     }
     if (!isNestedAgentStream) {
+      // Observe timing before any content branch below can return early.
+      const responseGeneration = observeClaudeResponseGeneration(
+        context.responseGenerationClock,
+        event,
+        yield* Clock.currentTimeMillis,
+      );
       const normalizedUsage = normalizeClaudeMessageTokenUsage(
         claudeStreamEventUsagePayload(message),
         context.selectedContextWindowTokens ?? context.lastKnownContextWindow,
         { resetPerMessageCounters: event.type === "message_start" },
       );
       if (normalizedUsage) {
-        yield* emitThreadTokenUsageUpdate(context, normalizedUsage);
+        yield* emitThreadTokenUsageUpdate(
+          context,
+          responseGeneration ? { ...normalizedUsage, responseGeneration } : normalizedUsage,
+        );
       }
     }
 
@@ -9010,6 +9038,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
 
     // Revoke before any asynchronous provider teardown. Even an uncertain
     // native close must not leave a stopped query able to schedule new work.
+    yield* context.managementBinding?.dispose ?? Effect.void;
     yield* Effect.promise(() => context.schedulingBinding?.dispose() ?? Promise.resolve()).pipe(
       Effect.catchCause(() => Effect.logWarning("Claude scheduling cleanup remains pending.")),
     );
@@ -9160,6 +9189,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
 
   const startSession: ClaudeAdapterShape["startSession"] = Effect.fn("startSession")((input) => {
     let schedulingBinding: SchedulingSessionBinding | undefined;
+    let managementBinding: ManagementMcpBinding | undefined;
     let visualizationBinding: VisualizationSessionBinding | undefined;
     let startedQuery: ClaudeQueryRuntime | undefined;
     let startedContext: ClaudeSessionContext | undefined;
@@ -9838,6 +9868,24 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
           : { status: "unavailable" }
         : undefined;
 
+      yield* Effect.uninterruptible(
+        Effect.gen(function* () {
+          managementBinding = yield* makeManagementMcpSession({
+            threadId,
+            providerInstanceId: boundInstanceId,
+          }).pipe(
+            Effect.provideService(ServerConfig, serverConfig),
+            Effect.mapError(
+              () =>
+                new ProviderAdapterProcessError({
+                  provider: PROVIDER,
+                  threadId,
+                  detail: "Could not attach Cafe management tools.",
+                }),
+            ),
+          );
+        }),
+      );
       const schedulingBroker = readSchedulingSessionBroker();
       if (schedulingBroker) {
         // Install cleanup ownership before restoring interruption. The prior
@@ -9883,9 +9931,11 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
               }),
           }),
         );
-      const providerMcpBindings = [schedulingBinding, visualizationBinding].filter(
-        (binding) => binding !== undefined,
-      );
+      const providerMcpBindings = [
+        managementBinding,
+        schedulingBinding,
+        visualizationBinding,
+      ].filter((binding) => binding !== undefined);
       const queryOptions: ClaudeQueryOptions = {
         ...(input.cwd ? { cwd: input.cwd } : {}),
         ...(apiModelId ? { model: apiModelId } : {}),
@@ -10124,6 +10174,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         quotaReportPublishPending: false,
         pendingCommandCatalog: undefined,
         schedulingBinding,
+        managementBinding,
         visualizationBinding,
         archivedToolPrivacy: new ArchivedToolPayloadRedactor(),
         visualizationPrivacy: new VisualizationNativePrivacy(),
@@ -10162,6 +10213,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         lastFastModeNoticeKey: undefined,
         lastKnownContextWindow: selectedContextWindowTokens,
         lastKnownTokenUsage: undefined,
+        responseGenerationClock: new ResponseGenerationClock(),
         usageAccounting: makeClaudeUsageAccounting(randomUUID(), resumeUsageBaseline),
         usageAccountingResetIds: new Set(),
         usageAccountingResetOverflow: false,
@@ -10274,6 +10326,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         // Effect scope. Cover both synchronous SDK launch failures and
         // cancellation during publication before ownership is transferred.
         return Effect.gen(function* () {
+          yield* managementBinding?.dispose ?? Effect.void;
           yield* Effect.promise(() => schedulingBinding?.dispose() ?? Promise.resolve()).pipe(
             Effect.catchCause(() =>
               Effect.logWarning("Claude scheduling cleanup remains pending."),

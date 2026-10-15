@@ -144,7 +144,10 @@ describe("ProviderAccountQuotaDetails bounds", () => {
     mounted = await render(
       <ProviderAccountQuotaDetails sessionQuota={{ status: "unavailable", report: null }} />,
     );
-    await expect.element(page.getByText("No session quota report available.")).toBeVisible();
+    await expect.element(page.getByText("Claude limits are unavailable.")).toBeVisible();
+    expect(document.querySelector("[data-claude-session-quota]")?.textContent).toBe(
+      "Claude limits are unavailable.",
+    );
     expect(document.body.textContent).not.toContain("0% left");
     const source = { source: "claude-session" as const, observedAt: new Date().toISOString() };
     await mounted.rerender(
@@ -192,9 +195,10 @@ describe("ProviderAccountQuotaDetails bounds", () => {
         sessionQuota={{ status: "offline", report: null }}
       />,
     );
-    await expect
-      .element(page.getByText("Session report unavailable while disconnected."))
-      .toBeVisible();
+    await expect.element(page.getByText("Claude limits are unavailable.")).toBeVisible();
+    expect(document.querySelector("[data-claude-session-quota]")?.textContent).toBe(
+      "Claude limits are unavailable.",
+    );
     expect(document.body.textContent).not.toContain("5h reset:");
     expect(document.querySelector("[data-account-quota-window]")).toBeNull();
   });

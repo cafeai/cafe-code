@@ -136,6 +136,8 @@ function makeRealDependencies(): DesktopRuntimeSelfTestDependencies {
       if (!isPackaged || process.platform !== "win32") return null;
       return [
         join(managedRuntimeRoot, "install-managed-provider-runtime.ps1"),
+        join(managedRuntimeRoot, "install-runtime.mjs"),
+        join(managedRuntimeRoot, "providers", managedRuntimeArch, "inventory.json"),
         join(managedRuntimeRoot, "node", managedRuntimeArch, "node.exe"),
         join(managedRuntimeRoot, "node", managedRuntimeArch, "npm.cmd"),
       ].every(existsSync);

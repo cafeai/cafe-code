@@ -1,3 +1,4 @@
+import * as Option from "effect/Option";
 import { describe, expect, it } from "vitest";
 
 import { deriveAuthClientMetadata } from "./utils.ts";
@@ -10,6 +11,7 @@ describe("deriveAuthClientMetadata", () => {
           "user-agent":
             "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) t3code/0.0.15 Chrome/136.0.7103.93 Electron/36.3.2 Safari/537.36",
         },
+        remoteAddress: Option.some("::ffff:127.0.0.1"),
         source: {
           remoteAddress: "::ffff:127.0.0.1",
         },

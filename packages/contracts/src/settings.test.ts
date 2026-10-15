@@ -130,7 +130,8 @@ describe("client settings", () => {
     expect(decodeClientSettings({}).continueBackgroundAnimations).toBe(false);
     expect(decodeClientSettings({}).interfaceScalePercent).toBe(100);
     expect(decodeClientSettings({}).showSidebarSearch).toBe(true);
-    expect(decodeClientSettings({}).showSidebarMascot).toBe(true);
+    expect(decodeClientSettings({}).showSidebarMascot).toBe(false);
+    expect(decodeClientSettings({ showSidebarMascot: true }).showSidebarMascot).toBe(true);
     expect(decodeClientSettings({}).showSidebarAttribution).toBe(true);
     expect(decodeClientSettings({}).brandWordmarkPrefix).toBe("Cafe");
     expect(decodeClientSettings({}).sidebarBrandImage).toBeNull();

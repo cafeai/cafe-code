@@ -1,3 +1,4 @@
+import { Switch } from "./ui/switch";
 import { useUiLocale, useUiPresentation } from "~/i18n";
 import { uiText } from "@cafecode/shared/i18n";
 import { UiMessage } from "~/i18n";
@@ -620,8 +621,22 @@ function CustomizePage() {
           title={uiText("Theme", undefined, undefined, uiLocale)}
         />
         <CustomizeRow
+          index={4}
+          title={uiText("Enable sidebar image", undefined, undefined, uiLocale)}
+          description={uiText("Show an image in the sidebar.", undefined, undefined, uiLocale)}
           control={
-            <div className="flex items-center gap-2">
+            <Switch
+              checked={settings.showSidebarMascot}
+              onCheckedChange={(checked) => updateSettings({ showSidebarMascot: Boolean(checked) })}
+              aria-label={uiText("Enable sidebar image", undefined, undefined, uiLocale)}
+            />
+          }
+        />
+        <CustomizeRow
+          control={
+            <div
+              className={cn("flex items-center gap-2", !settings.showSidebarMascot && "opacity-50")}
+            >
               <img
                 alt=""
                 aria-hidden="true"
@@ -632,7 +647,7 @@ function CustomizePage() {
                 srcSet={usesDefaultImage ? DEFAULT_SIDEBAR_BRAND_IMAGE_SRC_SET : undefined}
               />
               <Button
-                disabled={imageUploading}
+                disabled={!settings.showSidebarMascot || imageUploading}
                 onClick={() => fileInputRef.current?.click()}
                 size="xs"
                 type="button"
@@ -649,6 +664,7 @@ function CustomizePage() {
               </Button>
               {usesDefaultImage ? null : (
                 <Button
+                  disabled={!settings.showSidebarMascot || imageUploading}
                   onClick={() => {
                     setImageError(null);
                     updateSettings({
@@ -668,6 +684,7 @@ function CustomizePage() {
                 className="hidden"
                 onChange={(event) => void handleImageChange(event)}
                 ref={fileInputRef}
+                disabled={!settings.showSidebarMascot || imageUploading}
                 type="file"
               />
             </div>
@@ -677,7 +694,7 @@ function CustomizePage() {
             uiText("PNG, JPEG, GIF or WebP, under 1 MB.", undefined, undefined, uiLocale)
           }
           descriptionError={Boolean(imageError)}
-          index={4}
+          index={5}
           title={uiText("Sidebar image", undefined, undefined, uiLocale)}
         />
       </ul>

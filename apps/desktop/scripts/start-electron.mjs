@@ -6,6 +6,7 @@ import { fileURLToPath } from "node:url";
 import { desktopDir, resolveElectronPath } from "./electron-launcher.mjs";
 import { ensureMacDictationHelper } from "./build-mac-dictation-helper.mjs";
 import { linuxSafeStorageElectronArgs } from "./linux-safe-storage.mjs";
+import { forwardChromiumStderr } from "./chromium-tls-log-filter.mjs";
 
 const isolateChildProcessGroup = process.platform !== "win32";
 const forcedShutdownTimeoutMs = 5_000;
@@ -105,7 +106,7 @@ function spawnLaunchPlan(plan, childEnv) {
   }
 
   return spawn(plan.command, plan.args, {
-    stdio: "inherit",
+    stdio: plan.type === "electron" ? ["inherit", "inherit", "pipe"] : "inherit",
     cwd: plan.cwd,
     env: childEnv,
     detached: isolateChildProcessGroup,
@@ -123,6 +124,12 @@ export function runStartElectron({
     ensureMacDictationHelper();
   }
   const child = spawnLaunchPlan(plan, childEnv);
+  // Preserve stdout, stdin and headless-server diagnostics. Only the source
+  // Electron child's native authority-handshake noise needs filtering. Pipeline
+  // retains backpressure; close waits for buffered final stderr before exiting.
+  const stderrDrained = child.stderr
+    ? forwardChromiumStderr(child.stderr, process.stderr)
+    : Promise.resolve(true);
 
   let shuttingDown = false;
   let forcedShutdownTimer = null;
@@ -156,7 +163,8 @@ export function runStartElectron({
     }, forcedShutdownTimeoutMs);
   }
 
-  child.on("exit", (code, signal) => {
+  child.on("close", async (code, signal) => {
+    const outputDelivered = await stderrDrained;
     if (forcedShutdownTimer !== null) {
       clearTimeout(forcedShutdownTimer);
       forcedShutdownTimer = null;
@@ -169,7 +177,7 @@ export function runStartElectron({
       process.kill(process.pid, signal);
       return;
     }
-    process.exit(code ?? 0);
+    process.exit(code === 0 && !outputDelivered ? 1 : (code ?? 0));
   });
 
   process.on("SIGINT", () => {

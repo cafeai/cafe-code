@@ -1,3 +1,4 @@
+import { boundedWebRequest, respondToHttpBodyError } from "../httpBody.ts";
 import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
 import * as Effect from "effect/Effect";
 import { HttpRouter, HttpServerRequest, HttpServerResponse } from "effect/unstable/http";
@@ -31,7 +32,7 @@ export const cafeMcpRouteLayer = HttpRouter.add(
       });
     }
     const session = yield* serverAuth.authenticateHttpRequest(request);
-    if (session.role !== "owner") {
+    if (session.role !== "owner" || session.subject === "cafe-mcp-local-bridge") {
       return yield* new AuthError({
         message: "Only owner sessions can use the Cafe Code MCP server.",
         status: 403,
@@ -49,7 +50,7 @@ export const cafeMcpRouteLayer = HttpRouter.add(
     const startup = yield* ServerRuntimeStartup;
     const workspacePaths = yield* WorkspacePaths;
     const scheduledFollowups = yield* ScheduledFollowups;
-    const webRequest = yield* HttpServerRequest.toWeb(request);
+    const webRequest = yield* boundedWebRequest(request);
 
     const webResponse = yield* Effect.tryPromise({
       try: async () => {
@@ -84,5 +85,8 @@ export const cafeMcpRouteLayer = HttpRouter.add(
         }),
     });
     return HttpServerResponse.fromWeb(webResponse);
-  }).pipe(Effect.catchTag("AuthError", respondToAuthError)),
+  }).pipe(
+    Effect.catchTag("AuthError", respondToAuthError),
+    Effect.catchTag("HttpBodyError", respondToHttpBodyError),
+  ),
 );

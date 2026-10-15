@@ -249,7 +249,7 @@ describe("shared passive quota surfaces", () => {
     );
     old(result());
     await expect
-      .element(page.getByText("No session quota report available.", { exact: true }))
+      .element(page.getByText("Claude limits are unavailable.", { exact: true }))
       .toBeVisible();
     expect(document.body.textContent).not.toContain("75% left");
     expect(document.body.textContent).not.toContain("90% left");
@@ -285,6 +285,18 @@ describe("shared passive quota surfaces", () => {
         </TooltipProvider>,
       );
       await expect.poll(() => subscribe.mock.calls.length).toBe(2);
+      for (const call of subscribe.mock.calls) call[1]({ report: null });
+      await expect
+        .element(page.getByText("Claude limits are unavailable.", { exact: true }).first())
+        .toBeVisible();
+      for (const element of document.querySelectorAll<HTMLElement>("[data-claude-session-quota]")) {
+        expect(element.textContent).toBe("Claude limits are unavailable.");
+        expect(element.scrollWidth).toBeLessThanOrEqual(element.clientWidth + 1);
+      }
+      if (import.meta.env.VITE_CAPTURE_CLAUDE_QUOTA === "1")
+        await page.screenshot({
+          path: `../../../../../.explorations/130-claude-quota/unavailable-${dark ? "dark" : "light"}-${scale}.png`,
+        });
       const report = result();
       for (const call of subscribe.mock.calls) call[1](report);
       await expect

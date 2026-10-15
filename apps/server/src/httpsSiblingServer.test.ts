@@ -8,10 +8,12 @@ import * as Https from "node:https";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
+import { isHttpsProxyRequest } from "./httpTransport.ts";
 import { HttpServer } from "effect/unstable/http";
 
 import { deriveServerPaths, ServerConfig, type ServerConfigShape } from "./config.ts";
-import { startHttpsSiblingServer } from "./httpsSiblingServer.ts";
+import { resolveHttpsProxyTarget, startHttpsSiblingServer } from "./httpsSiblingServer.ts";
 
 const EVENT_TIMEOUT_MS = 2_000;
 
@@ -45,11 +47,24 @@ const makeTestBackend = Effect.acquireRelease(
           socket.on("message", (message, isBinary) => socket.send(message, { binary: isBinary }));
         });
 
-        const server = Http.createServer((_request, response) => {
+        const authenticated = (request: Http.IncomingMessage) =>
+          isHttpsProxyRequest({
+            headers: request.headers as Record<string, string>,
+            remoteAddress: Option.fromUndefinedOr(request.socket.remoteAddress),
+          });
+        const server = Http.createServer((request, response) => {
+          if (!authenticated(request)) {
+            response.writeHead(403).end();
+            return;
+          }
           response.writeHead(200, { "content-type": "text/plain; charset=utf-8" });
           response.end("backend-ok");
         });
         server.on("upgrade", (request, socket, head) => {
+          if (!authenticated(request)) {
+            socket.end("HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n");
+            return;
+          }
           upgradeHeaders.push(request.headers);
           webSocketServer.handleUpgrade(request, socket, head, (webSocket) => {
             webSocketServer.emit("connection", webSocket, request);
@@ -80,6 +95,7 @@ const makeTestBackend = Effect.acquireRelease(
       for (const client of webSocketServer.clients) {
         client.terminate();
       }
+      server.closeAllConnections();
       await Promise.all([
         new Promise<void>((resolve) => webSocketServer.close(() => resolve())),
         closeHttpServer(server),
@@ -262,6 +278,29 @@ const reserveClosedPort = Effect.tryPromise({
 });
 
 it.layer(NodeServices.layer)("HTTPS sibling WebSocket proxy", (it) => {
+  it("uses the observed bound address instead of resolving the configured hostname again", () => {
+    assert.equal(
+      resolveHttpsProxyTarget(
+        { _tag: "TcpAddress", hostname: "192.0.2.20", port: 1234 },
+        "mutable.example",
+      ),
+      "192.0.2.20",
+    );
+    assert.equal(
+      resolveHttpsProxyTarget(
+        { _tag: "TcpAddress", hostname: "::", port: 1234 },
+        "mutable.example",
+      ),
+      "127.0.0.1",
+    );
+    assert.equal(
+      resolveHttpsProxyTarget(
+        { _tag: "TcpAddress", hostname: "::1", port: 1234 },
+        "mutable.example",
+      ),
+      "::1",
+    );
+  });
   it.effect("proxies a compressed WSS connection with auth and proxy headers intact", () =>
     Effect.scoped(
       Effect.gen(function* () {

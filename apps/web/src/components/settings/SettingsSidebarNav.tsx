@@ -8,8 +8,6 @@ import {
   BarChart3Icon,
   BellIcon,
   BotIcon,
-  CloudDrizzleIcon,
-  FileTextIcon,
   GitBranchIcon,
   KeyboardIcon,
   MessageSquareIcon,
@@ -18,7 +16,6 @@ import {
   PaletteIcon,
   PlugIcon,
   Settings2Icon,
-  Trash2Icon,
 } from "lucide-react";
 import { useNavigate } from "@tanstack/react-router";
 import { useSettingsBackNavigation } from "../../hooks/useSettingsBackNavigation";
@@ -74,18 +71,19 @@ export const SETTINGS_NAV_GROUPS: ReadonlyArray<SettingsNavGroup> = [
     items: [
       {
         get label() {
+          return uiText("General");
+        },
+        to: "/settings/general",
+        icon: Settings2Icon,
+        activePaths: ["/settings/files", "/settings/system"],
+      },
+      {
+        get label() {
           return uiText("Appearance");
         },
         to: "/settings/appearance",
         icon: PaletteIcon,
-        activePaths: ["/settings/general"],
-      },
-      {
-        get label() {
-          return uiText("Ambiance");
-        },
-        to: "/settings/ambiance",
-        icon: CloudDrizzleIcon,
+        activePaths: ["/settings/ambiance"],
       },
       {
         get label() {
@@ -100,13 +98,6 @@ export const SETTINGS_NAV_GROUPS: ReadonlyArray<SettingsNavGroup> = [
         },
         to: "/settings/notifications",
         icon: BellIcon,
-      },
-      {
-        get label() {
-          return uiText("Files");
-        },
-        to: "/settings/files",
-        icon: FileTextIcon,
       },
       {
         get label() {
@@ -131,7 +122,7 @@ export const SETTINGS_NAV_GROUPS: ReadonlyArray<SettingsNavGroup> = [
       },
       {
         get label() {
-          return uiText("MCP");
+          return uiText("Cafe tools");
         },
         to: "/settings/mcp",
         icon: PlugIcon,
@@ -145,14 +136,14 @@ export const SETTINGS_NAV_GROUPS: ReadonlyArray<SettingsNavGroup> = [
       },
       {
         get label() {
-          return uiText("Source Control");
+          return uiText("Source control");
         },
         to: "/settings/source-control",
         icon: GitBranchIcon,
       },
       {
         get label() {
-          return uiText("WebUI");
+          return uiText("Connections & remote access");
         },
         to: "/settings/connections",
         icon: MonitorSmartphoneIcon,
@@ -173,17 +164,11 @@ export const SETTINGS_NAV_GROUPS: ReadonlyArray<SettingsNavGroup> = [
       },
       {
         get label() {
-          return uiText("Archive");
+          return uiText("History");
         },
         to: "/settings/archived",
         icon: ArchiveIcon,
-      },
-      {
-        get label() {
-          return uiText("Recently Deleted");
-        },
-        to: "/settings/recently-deleted",
-        icon: Trash2Icon,
+        activePaths: ["/settings/recently-deleted"],
       },
     ],
   },
@@ -192,13 +177,6 @@ export const SETTINGS_NAV_GROUPS: ReadonlyArray<SettingsNavGroup> = [
       return uiText("Advanced");
     },
     items: [
-      {
-        get label() {
-          return uiText("System");
-        },
-        to: "/settings/system",
-        icon: Settings2Icon,
-      },
       {
         get label() {
           return uiText("Diagnostics");

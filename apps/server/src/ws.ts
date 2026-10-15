@@ -255,8 +255,6 @@ const makeWsRpcLayer = (
         normalizeDispatchCommand(command).pipe(Effect.provide(normalizationContext));
       const mcpAccess = {
         canManage: currentSession.role === "owner" && secureSecretTransport,
-        canInstall:
-          currentSession.role === "owner" && secureSecretTransport && config.mode === "desktop",
       };
       const lifecycleEvents = yield* ServerLifecycleEvents;
       const serverSettings = yield* ServerSettingsService;
@@ -1925,16 +1923,6 @@ const makeWsRpcLayer = (
             { "rpc.aggregate": "server" },
           ),
         [WS_METHODS.serverGetMcpStatus]: () => mcpManagement.status(mcpAccess),
-        [WS_METHODS.serverUpdateMcpClient]: (input) =>
-          Effect.gen(function* () {
-            if (!mcpAccess.canInstall)
-              return yield* new CafeMcpError({
-                code: "not_authorized",
-                message: "Install Cafe MCP from an owner connection in the local desktop app.",
-              });
-            yield* mcpManagement.updateClient(input);
-            return yield* mcpManagement.status(mcpAccess);
-          }),
         [WS_METHODS.serverGetSettings]: (_input) =>
           observeRpcEffect(
             WS_METHODS.serverGetSettings,

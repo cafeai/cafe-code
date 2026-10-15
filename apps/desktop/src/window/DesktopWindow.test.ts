@@ -74,6 +74,7 @@ function makeFakeBrowserWindow() {
     window: window as unknown as Electron.BrowserWindow,
     loadURL: window.loadURL,
     openDevTools: webContents.openDevTools,
+    onContents: webContents.on,
     setPermissionCheckHandler,
     setPermissionRequestHandler,
     once: window.once,
@@ -309,6 +310,30 @@ describe("DesktopWindow", () => {
         yield* desktopWindow.handleBackendReady;
         assert.equal(yield* Ref.get(createCount), 1);
         assert.deepEqual(fakeWindow.loadURL.mock.calls[0], ["http://127.0.0.1:5733/"]);
+        const navigate = fakeWindow.onContents.mock.calls.find(
+          ([name]) => name === "will-navigate",
+        )?.[1];
+        const redirect = fakeWindow.onContents.mock.calls.find(
+          ([name]) => name === "will-redirect",
+        )?.[1];
+        assert.isFunction(navigate);
+        assert.isFunction(redirect);
+        for (const destination of [
+          "http://127.0.0.1:3773/",
+          "http://localhost:5733/",
+          "file:///unrelated.html",
+          "https://evil.example/",
+        ]) {
+          const preventDefault = vi.fn();
+          navigate!({ preventDefault }, destination);
+          assert.equal(preventDefault.mock.calls.length, 1);
+          preventDefault.mockClear();
+          redirect!({ preventDefault }, destination, false, true);
+          assert.equal(preventDefault.mock.calls.length, 1);
+        }
+        const preventDefault = vi.fn();
+        navigate!({ preventDefault }, "http://127.0.0.1:5733/chat/one");
+        assert.equal(preventDefault.mock.calls.length, 0);
         assert.equal(fakeWindow.openDevTools.mock.calls.length, 1);
       }).pipe(Effect.provide(layer));
     }),

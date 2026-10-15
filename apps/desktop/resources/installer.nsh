@@ -56,10 +56,19 @@ FunctionEnd
       nsExec::ExecToLog '"$SYSDIR\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -NonInteractive -ExecutionPolicy Bypass -WindowStyle Hidden -File "$INSTDIR\resources\managed-runtime\install-managed-provider-runtime.ps1" -Enabled -InstallDir "$INSTDIR" -LocalAppData "$LOCALAPPDATA" -UserProfile "$PROFILE"'
       Pop $0
       DetailPrint "Cafe-managed runtime bootstrap exited with code $0."
+      ${If} $0 != 0
+        MessageBox MB_OK|MB_ICONSTOP "Cafe-managed provider installation failed. The previous runtime was preserved. Re-run this installer to repair, or disable managed providers."
+        SetErrorLevel 1
+        Abort
+      ${EndIf}
     ${Else}
       DetailPrint "Cafe-managed Codex and Claude runtime disabled by installer option."
       nsExec::ExecToLog '"$SYSDIR\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -NonInteractive -ExecutionPolicy Bypass -WindowStyle Hidden -File "$INSTDIR\resources\managed-runtime\install-managed-provider-runtime.ps1" -InstallDir "$INSTDIR" -LocalAppData "$LOCALAPPDATA" -UserProfile "$PROFILE"'
       Pop $0
+      ${If} $0 != 0
+        SetErrorLevel 1
+        Abort
+      ${EndIf}
     ${EndIf}
   ${EndIf}
 !macroend

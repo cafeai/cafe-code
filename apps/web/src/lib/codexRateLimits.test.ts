@@ -351,7 +351,7 @@ describe("codexRateLimits", () => {
     };
     const text = "Credits: 10,000,000,000,000,000 available";
     expect(formatCodexRateLimitPresentation(input)?.buckets[0]?.details).toEqual([
-      { label: "Credits", value: "10,000,000,000,000,000 available", text },
+      { kind: "credits", label: "Credits", value: "10,000,000,000,000,000 available", text },
     ]);
     expect(formatCodexRateLimitInlineText(input)).toBe(text);
   });

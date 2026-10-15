@@ -94,7 +94,7 @@ export const ProviderDaemonRuntimeLive = Layer.unwrap(
   Layer.provideMerge(ServerEnvironmentLive),
   Layer.provideMerge(PersistenceLayerLive),
   Layer.provideMerge(ServerSettingsLive),
-  // Grok chat sessions need an owner bearer for Cafe's authenticated /mcp
+  // Cafe-owned management MCP sessions need an owner bearer for the authenticated /mcp
   // endpoint. Provider adapters normally live in this detached process, so it
   // must issue/revoke credentials against the same SQLite + signing-secret
   // stores as the main backend rather than relying on process-global backend

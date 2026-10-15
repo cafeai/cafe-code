@@ -4,16 +4,24 @@ import { ChevronRightIcon, Clock3Icon } from "lucide-react";
 import { useCallback, useEffect, useId, useState } from "react";
 import type { ChatActivityPresentation } from "./chatActivity";
 import { Spinner } from "../ui/spinner";
+import { formatTokensPerSecond, type GenerationRate } from "~/lib/generationRate";
 import { cn } from "~/lib/utils";
 import { formatDuration } from "~/session-logic";
 
 export function ComposerActivityStatus({
   activity,
   turnStartedAt,
+  generationRate,
   onOpenTasks,
 }: {
   activity: ChatActivityPresentation;
   turnStartedAt?: string | null | undefined;
+  /**
+   * Measured output speed for this turn, shown beside the elapsed time. It
+   * changes only when a response reports usage, so it is plain React state
+   * rather than part of the per-second text-node ticker below.
+   */
+  generationRate?: GenerationRate | null | undefined;
   onOpenTasks: () => void;
 }) {
   const uiLocale = useUiLocale();
@@ -22,6 +30,7 @@ export function ComposerActivityStatus({
   const [hovered, setHovered] = useState(false);
   const [focused, setFocused] = useState(false);
   const elapsedId = useId();
+  const rateId = useId();
   // Observe the committed text node itself: inspectability can replace the
   // surrounding DOM without changing the start or retained pointer hover.
   // Node replacement renders once; ticking never publishes React state.
@@ -36,6 +45,7 @@ export function ComposerActivityStatus({
   const startedMs = turnStartedAt ? Date.parse(turnStartedAt) : Number.NaN;
   const hasTiming = Number.isFinite(startedMs);
   const revealed = hasTiming && (hovered || focused);
+  const rate = generationRate ? formatTokensPerSecond(generationRate) : null;
   // Timing is display-only and already scoped by the caller to an active root
   // or local dispatch. Never turn a timestamp into evidence of running work.
   // Clamp host-clock skew without creating negative durations or using the
@@ -89,7 +99,7 @@ export function ComposerActivityStatus({
             aria-hidden={!revealed}
             data-activity-elapsed-revealed={revealed}
           >
-            <span className="min-w-0 overflow-hidden">
+            <span className="flex min-w-0 overflow-hidden">
               <span
                 role="timer"
                 aria-label={uiText("Elapsed turn time", undefined, undefined, uiLocale)}
@@ -106,6 +116,25 @@ export function ComposerActivityStatus({
                   <span ref={setElapsedElement}>{uiPresentation.formatDuration(0)}</span>
                 </span>
               </span>
+              {rate !== null ? (
+                <span
+                  className="block whitespace-nowrap pl-2 text-subtle-foreground tabular-nums"
+                  data-activity-generation-rate="true"
+                >
+                  <span aria-hidden="true">· </span>
+                  <span aria-hidden="true">
+                    {uiText("{rate} tok/s", { rate }, undefined, uiLocale)}
+                  </span>
+                  <span id={rateId} className="sr-only">
+                    {uiText(
+                      "Generation speed: {rate} tokens per second",
+                      { rate },
+                      undefined,
+                      uiLocale,
+                    )}
+                  </span>
+                </span>
+              ) : null}
             </span>
           </span>
         ) : null}
@@ -122,7 +151,11 @@ export function ComposerActivityStatus({
   const revealProps = {
     onFocus: () => setFocused(true),
     onBlur: () => setFocused(false),
-    "aria-describedby": revealed ? elapsedId : undefined,
+    "aria-describedby": revealed
+      ? rate !== null
+        ? `${elapsedId} ${rateId}`
+        : elapsedId
+      : undefined,
   };
   return (
     <div

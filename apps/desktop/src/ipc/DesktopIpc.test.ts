@@ -1,232 +1,154 @@
 import * as Effect from "effect/Effect";
-import * as Layer from "effect/Layer";
-import { describe, expect, it, vi } from "vitest";
-
-import * as ElectronShell from "../electron/ElectronShell.ts";
-import { COPY_TEXT_CHANNEL } from "./channels.ts";
+import { describe, expect, it } from "vitest";
 import * as DesktopIpc from "./DesktopIpc.ts";
-import { copyText } from "./methods/window.ts";
 
-function makeTopFrame(url: string): DesktopIpc.DesktopIpcWebFrame {
-  const frame = {
-    url,
-    top: null,
-  } as DesktopIpc.DesktopIpcWebFrame;
-  (frame as { top: DesktopIpc.DesktopIpcWebFrame }).top = frame;
-  return frame;
+const origin = new URL("http://127.0.0.1:5733/");
+function frame(url = origin.href): DesktopIpc.DesktopIpcWebFrame {
+  const value = { url, frameToken: "initial", detached: false } as DesktopIpc.DesktopIpcWebFrame;
+  (value as { top: DesktopIpc.DesktopIpcWebFrame }).top = value;
+  return value;
 }
 
-function makeIpcMainStub() {
-  let invokeListener: DesktopIpc.DesktopIpcHandleListener | null = null;
-  let syncListener: DesktopIpc.DesktopIpcSyncListener | null = null;
-
-  return {
-    ipcMain: {
-      removeHandler: vi.fn(),
-      handle: vi.fn((_channel, listener) => {
-        invokeListener = listener;
-      }),
-      removeAllListeners: vi.fn(),
-      on: vi.fn((_channel, listener) => {
-        syncListener = listener;
-      }),
-    } satisfies DesktopIpc.DesktopIpcMain,
-    getInvokeListener: () => {
-      if (!invokeListener) throw new Error("invoke listener not registered");
-      return invokeListener;
+async function fixture(
+  task: (input: {
+    invoke: DesktopIpc.DesktopIpcHandleListener;
+    sync: DesktopIpc.DesktopIpcSyncListener;
+    sender: { mainFrame: DesktopIpc.DesktopIpcWebFrame; isDestroyed: () => boolean };
+    calls: () => number;
+  }) => Promise<void>,
+  role: "main" | "dictation" = "main",
+  pending?: () => Promise<void>,
+) {
+  let invoke!: DesktopIpc.DesktopIpcHandleListener;
+  let sync!: DesktopIpc.DesktopIpcSyncListener;
+  let calls = 0;
+  const sender = { mainFrame: frame(), isDestroyed: () => false };
+  const ipc = DesktopIpc.make({
+    handle: (_channel, listener) => {
+      invoke = listener;
     },
-    getSyncListener: () => {
-      if (!syncListener) throw new Error("sync listener not registered");
-      return syncListener;
+    on: (_channel, listener) => {
+      sync = listener;
     },
-  };
-}
-
-function makeElectronShellLayer(onCopyText: (text: string) => void) {
-  return Layer.succeed(ElectronShell.ElectronShell, {
-    openExternal: () => Effect.succeed(false),
-    openPath: () => Effect.succeed(false),
-    revealPath: () => Effect.succeed(false),
-    copyText: (text) => Effect.sync(() => onCopyText(text)),
-  } satisfies ElectronShell.ElectronShellShape);
-}
-
-describe("DesktopIpc sender validation", () => {
-  it("classifies only file and loopback renderer URLs as trusted", () => {
-    expect(DesktopIpc.isTrustedDesktopIpcFrameUrl("file:///Applications/CafeCode/index.html")).toBe(
-      true,
-    );
-    expect(DesktopIpc.isTrustedDesktopIpcFrameUrl("http://127.0.0.1:5733/")).toBe(true);
-    expect(DesktopIpc.isTrustedDesktopIpcFrameUrl("http://localhost:5733/")).toBe(true);
-    expect(DesktopIpc.isTrustedDesktopIpcFrameUrl("http://[::1]:5733/")).toBe(true);
-    expect(DesktopIpc.isTrustedDesktopIpcFrameUrl("https://example.com/")).toBe(false);
-    expect(DesktopIpc.isTrustedDesktopIpcFrameUrl("app://cafe-code/index.html")).toBe(false);
+    removeHandler: () => {},
+    removeAllListeners: () => {},
   });
-
-  it("allows invoke handlers from registered top-level production and dev frames", async () => {
-    const ipcMain = makeIpcMainStub();
-    const ipc = DesktopIpc.make(ipcMain.ipcMain);
-    const sender = { id: 7, isDestroyed: () => false };
-    let calls = 0;
-
-    await Effect.runPromise(
-      Effect.scoped(
-        Effect.gen(function* () {
-          yield* ipc.trustWebContents(sender);
-          yield* ipc.handle({
-            channel: "secure.invoke",
-            handler: (raw) =>
-              Effect.sync(() => {
-                calls += 1;
-                return raw;
-              }),
-          });
-
-          yield* Effect.promise(() =>
-            Promise.resolve(
-              ipcMain.getInvokeListener()(
-                { sender, senderFrame: makeTopFrame("file:///Applications/CafeCode/index.html") },
-                "production",
-              ),
-            ),
-          );
-          yield* Effect.promise(() =>
-            Promise.resolve(
-              ipcMain.getInvokeListener()(
-                { sender, senderFrame: makeTopFrame("http://127.0.0.1:5733/") },
-                "development",
-              ),
-            ),
-          );
-        }),
-      ),
-    );
-
-    expect(calls).toBe(2);
-  });
-
-  it("rejects invoke handlers from untrusted origins and unexpected frames", async () => {
-    const ipcMain = makeIpcMainStub();
-    const ipc = DesktopIpc.make(ipcMain.ipcMain);
-    const sender = { id: 7, isDestroyed: () => false };
-    let calls = 0;
-
-    await Effect.runPromise(
-      Effect.scoped(
-        Effect.gen(function* () {
-          yield* ipc.trustWebContents(sender);
-          yield* ipc.handle({
-            channel: "secure.invoke",
-            handler: () =>
-              Effect.sync(() => {
-                calls += 1;
-                return "handled";
-              }),
-          });
-        }),
-      ),
-    );
-
-    const listener = ipcMain.getInvokeListener();
-    const topFrame = makeTopFrame("http://127.0.0.1:5733/");
-    const childFrame = { url: "http://127.0.0.1:5733/iframe", top: topFrame };
-
-    await expect(
-      listener({ sender, senderFrame: makeTopFrame("https://evil.example/") }, "payload"),
-    ).rejects.toThrow(DesktopIpc.DesktopIpcSenderValidationError);
-    await expect(listener({ sender, senderFrame: childFrame }, "payload")).rejects.toThrow(
-      DesktopIpc.DesktopIpcSenderValidationError,
-    );
-    await expect(
-      listener({ sender: { id: 8, isDestroyed: () => false }, senderFrame: topFrame }, "payload"),
-    ).rejects.toThrow(DesktopIpc.DesktopIpcSenderValidationError);
-    await expect(listener({ sender, senderFrame: null }, "payload")).rejects.toThrow(
-      DesktopIpc.DesktopIpcSenderValidationError,
-    );
-
-    expect(calls).toBe(0);
-  });
-
-  it("does not execute sync handlers from untrusted senders", async () => {
-    const ipcMain = makeIpcMainStub();
-    const ipc = DesktopIpc.make(ipcMain.ipcMain);
-    let calls = 0;
-
-    await Effect.runPromise(
-      Effect.scoped(
-        ipc.handleSync({
-          channel: "secure.sync",
+  await Effect.runPromise(
+    Effect.scoped(
+      Effect.gen(function* () {
+        yield* ipc.trustWebContents(sender, { url: origin, role });
+        yield* ipc.handle({
+          channel: "desktop:secret",
           handler: () =>
-            Effect.sync(() => {
-              calls += 1;
+            Effect.gen(function* () {
+              calls++;
+              if (pending) yield* Effect.promise(pending);
               return "secret";
             }),
-        }),
-      ),
-    );
+        });
+        yield* ipc.handleSync({
+          channel: "desktop:get-local-environment-bootstrap",
+          handler: () =>
+            Effect.sync(() => {
+              calls++;
+              return "bootstrap";
+            }),
+        });
+        yield* Effect.promise(() => task({ invoke, sync, sender, calls: () => calls }));
+      }),
+    ),
+  );
+}
 
-    const event = {
-      returnValue: "unset",
-      sender: { id: 9, isDestroyed: () => false },
-      senderFrame: makeTopFrame("http://127.0.0.1:5733/"),
-    };
-    ipcMain.getSyncListener()(event);
-
-    expect(event.returnValue).toBeNull();
-    expect(calls).toBe(0);
+describe("desktop document authorization", () => {
+  it("allows only the exact registered HTTP origin", () => {
+    expect(DesktopIpc.isTrustedDesktopIpcFrameUrl(`${origin.origin}/chat/one`, origin)).toBe(true);
+    for (const url of [
+      "http://127.0.0.1:1/",
+      "http://localhost:5733/",
+      "http://[::1]:5733/",
+      "https://127.0.0.1:5733/",
+      "file:///Applications/CafeCode/index.html",
+      "data:text/html,hello",
+      "https://evil.example/",
+      "http://user:pass@127.0.0.1:5733/",
+      "http://127.0.0.1:5733/api/attachments/private.html",
+      "http://127.0.0.1:5733/attachments/private.svg",
+      "http://127.0.0.1:5733/%61pi/auth/session",
+      "http://127.0.0.1:5733/%2561pi/auth/session",
+      "http://127.0.0.1:5733/assets/received.html",
+    ]) {
+      expect(DesktopIpc.isTrustedDesktopIpcFrameUrl(url, origin)).toBe(false);
+    }
   });
-
-  it("decodes trusted clipboard writes and rejects invalid payloads", async () => {
-    const ipcMain = makeIpcMainStub();
-    const ipc = DesktopIpc.make(ipcMain.ipcMain);
-    const sender = { id: 10, isDestroyed: () => false };
-    const copiedTexts: string[] = [];
-    const electronShellLayer = makeElectronShellLayer((text) => copiedTexts.push(text));
-
-    await Effect.runPromise(
-      Effect.scoped(
-        Effect.gen(function* () {
-          yield* ipc.trustWebContents(sender);
-          yield* ipc.handle(copyText);
-
-          const listener = ipcMain.getInvokeListener();
-          const event = {
-            sender,
-            senderFrame: makeTopFrame("file:///Applications/CafeCode/index.html"),
-          };
-          yield* Effect.promise(() => Promise.resolve(listener(event, "clipboard text")));
-          yield* Effect.promise(() =>
-            expect(listener(event, { text: "not a string payload" })).rejects.toThrow(),
-          );
-        }),
-      ).pipe(Effect.provide(electronShellLayer)),
-    );
-
-    expect(ipcMain.ipcMain.handle).toHaveBeenCalledWith(COPY_TEXT_CHANNEL, expect.any(Function));
-    expect(copiedTexts).toEqual(["clipboard text"]);
+  it("checks the live main frame, sender, origin, and destruction before invoking", async () => {
+    await fixture(async ({ invoke, sender, calls }) => {
+      await expect(invoke({ sender, senderFrame: sender.mainFrame }, null)).resolves.toBe("secret");
+      for (const senderFrame of [
+        frame("http://127.0.0.1:1/"),
+        frame(),
+        null,
+        { ...frame(), top: sender.mainFrame },
+      ]) {
+        await expect(invoke({ sender, senderFrame }, null)).rejects.toThrow(
+          DesktopIpc.DesktopIpcSenderValidationError,
+        );
+      }
+      const original = sender.mainFrame;
+      sender.mainFrame = frame("file:///unrelated.html");
+      await expect(invoke({ sender, senderFrame: sender.mainFrame }, null)).rejects.toThrow();
+      sender.mainFrame = original;
+      sender.isDestroyed = () => true;
+      await expect(invoke({ sender, senderFrame: original }, null)).rejects.toThrow();
+      await expect(
+        invoke({ sender: { mainFrame: original }, senderFrame: original }, null),
+      ).rejects.toThrow();
+      expect(calls()).toBe(1);
+    });
   });
-
-  it("rejects clipboard writes from untrusted renderer origins", async () => {
-    const ipcMain = makeIpcMainStub();
-    const ipc = DesktopIpc.make(ipcMain.ipcMain);
-    const sender = { id: 11, isDestroyed: () => false };
-    const copiedTexts: string[] = [];
-
-    await Effect.runPromise(
-      Effect.scoped(
-        Effect.gen(function* () {
-          yield* ipc.trustWebContents(sender);
-          yield* ipc.handle(copyText);
-        }),
-      ).pipe(Effect.provide(makeElectronShellLayer((text) => copiedTexts.push(text)))),
+  it("limits dictation surfaces to their exact bootstrap document", async () => {
+    await fixture(async ({ invoke, sync, sender, calls }) => {
+      await expect(invoke({ sender, senderFrame: sender.mainFrame }, null)).rejects.toThrow();
+      const event = { sender, senderFrame: sender.mainFrame, returnValue: null as unknown };
+      sync(event);
+      expect(event.returnValue).toBe("bootstrap");
+      sender.mainFrame = frame(`${origin.origin}/other`);
+      sync({ ...event, senderFrame: sender.mainFrame });
+      expect(calls()).toBe(1);
+    }, "dictation");
+  });
+  it("withholds asynchronous results after same-URL document replacement", async () => {
+    let release!: () => void;
+    const pending = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    await fixture(
+      async ({ invoke, sender }) => {
+        const result = Promise.resolve(invoke({ sender, senderFrame: sender.mainFrame }, null));
+        const assertion = expect(result).rejects.toThrow();
+        sender.mainFrame = frame();
+        release();
+        await assertion;
+      },
+      "main",
+      () => pending,
     );
-
-    await expect(
-      ipcMain.getInvokeListener()(
-        { sender, senderFrame: makeTopFrame("https://evil.example/") },
-        "sensitive clipboard text",
-      ),
-    ).rejects.toThrow(DesktopIpc.DesktopIpcSenderValidationError);
-    expect(copiedTexts).toEqual([]);
+  });
+  it("withholds results when the native document token changes in place", async () => {
+    let release!: () => void;
+    const pending = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    await fixture(
+      async ({ invoke, sender }) => {
+        const result = Promise.resolve(invoke({ sender, senderFrame: sender.mainFrame }, null));
+        const assertion = expect(result).rejects.toThrow();
+        (sender.mainFrame as { frameToken: string }).frameToken = "replacement";
+        release();
+        await assertion;
+      },
+      "main",
+      () => pending,
+    );
   });
 });

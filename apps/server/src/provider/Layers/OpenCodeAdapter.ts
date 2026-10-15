@@ -1,3 +1,4 @@
+import { makeManagementMcpSession } from "../../mcp/sessionConnection.ts";
 import {
   EventId,
   type OpenCodeSettings,
@@ -1100,7 +1101,20 @@ export function makeOpenCodeAdapter(
               // The runtime binds the server's lifetime to the Scope.Scope
               // we provide below — closing `sessionScope` kills the child
               // process automatically. No manual `server.close()` needed.
+              const management = !serverUrl
+                ? yield* Effect.acquireRelease(
+                    makeManagementMcpSession({
+                      threadId: input.threadId,
+                      providerInstanceId: boundInstanceId,
+                    }).pipe(
+                      Effect.provideService(ServerConfig, serverConfig),
+                      Effect.mapError((cause) => toProcessError(input.threadId, cause)),
+                    ),
+                    (binding) => binding?.dispose ?? Effect.void,
+                  )
+                : undefined;
               const server = yield* openCodeRuntime.connectToOpenCodeServer({
+                ...(management ? { managementMcp: management } : {}),
                 binaryPath,
                 serverUrl,
                 ...(options?.environment ? { environment: options.environment } : {}),

@@ -323,9 +323,81 @@ interface MarkdownRenderingContextValue {
   resolvedTheme: "dark" | "light";
   isStreaming: boolean;
   skills: NonNullable<ChatMarkdownProps["skills"]>;
+  imageContext: MarkdownImageContext | undefined;
+  cwd: string | undefined;
+  additionalWorkspaceRoots: ReadonlyArray<string>;
+  fileLinkParentSuffixByPath: ReadonlyMap<string, string>;
 }
 
 const MarkdownRenderingContext = createContext<MarkdownRenderingContextValue | null>(null);
+
+function MarkdownParagraph({ node: _node, children, ...props }: ComponentProps<"p"> & ExtraProps) {
+  const rendering = useContext(MarkdownRenderingContext);
+  // Image state belongs to the mounted Markdown node. Keep both the image
+  // and its ancestors stable across appended prose, theme and metadata updates
+  // so loaded bytes and reserved geometry do not reset to a small placeholder.
+  return (
+    <p {...props}>
+      {renderSkillInlineMarkdownChildren(children, rendering?.skills ?? EMPTY_MARKDOWN_SKILLS)}
+    </p>
+  );
+}
+
+function MarkdownImageElement({
+  node: _node,
+  src,
+  alt,
+  ...props
+}: ComponentProps<"img"> & ExtraProps) {
+  const rendering = useContext(MarkdownRenderingContext);
+  const source = typeof src === "string" ? src : "";
+  return rendering?.imageContext && (source.startsWith("/") || /^[A-Za-z]:[\\/]/u.test(source)) ? (
+    <MarkdownImage source={source} alt={alt ?? ""} context={rendering.imageContext} />
+  ) : (
+    <img {...props} src={src} alt={alt ?? ""} loading="lazy" />
+  );
+}
+
+function MarkdownAnchor({ node: _node, href, ...props }: ComponentProps<"a"> & ExtraProps) {
+  const rendering = useContext(MarkdownRenderingContext);
+  const fileLinkMeta =
+    href && rendering
+      ? resolveMarkdownFileLinkMeta(href, rendering.cwd, rendering.additionalWorkspaceRoots)
+      : null;
+  if (!fileLinkMeta || !rendering) {
+    if (!href) {
+      return <span className={props.className}>{props.children}</span>;
+    }
+    if (href.startsWith("#")) {
+      return <a {...props} href={href} />;
+    }
+    return <a {...props} href={href} target="_blank" rel="noopener noreferrer" />;
+  }
+
+  const parentSuffix = rendering.fileLinkParentSuffixByPath.get(fileLinkMeta.filePath);
+  const labelParts = [fileLinkMeta.basename];
+  if (typeof parentSuffix === "string" && parentSuffix.length > 0) {
+    labelParts.push(parentSuffix);
+  }
+  if (fileLinkMeta.line) {
+    labelParts.push(
+      `L${fileLinkMeta.line}${fileLinkMeta.column ? `:C${fileLinkMeta.column}` : ""}`,
+    );
+  }
+
+  return (
+    <MarkdownFileLink
+      href={fileLinkMeta.targetPath}
+      targetPath={fileLinkMeta.targetPath}
+      displayPath={fileLinkMeta.displayPath}
+      filePath={fileLinkMeta.filePath}
+      label={labelParts.join(" · ")}
+      openPolicy={fileLinkMeta.openPolicy}
+      theme={rendering.resolvedTheme}
+      className={props.className}
+    />
+  );
+}
 
 function MarkdownPre({ node: _node, children, ...props }: ComponentProps<"pre"> & ExtraProps) {
   const rendering = useContext(MarkdownRenderingContext);
@@ -375,6 +447,15 @@ function MarkdownListItem({ node: _node, children, ...props }: ComponentProps<"l
     </li>
   );
 }
+
+const MARKDOWN_COMPONENTS: Components = {
+  p: MarkdownParagraph,
+  li: MarkdownListItem,
+  img: MarkdownImageElement,
+  a: MarkdownAnchor,
+  pre: MarkdownPre,
+  table: MarkdownTable,
+};
 
 function UncachedShikiCodeBlock({
   code,
@@ -788,10 +869,6 @@ function ChatMarkdown({
 }: ChatMarkdownProps) {
   const { resolvedTheme } = useTheme();
   const diffThemeName = resolveDiffThemeName(resolvedTheme);
-  const renderingContext = useMemo(
-    () => ({ diffThemeName, resolvedTheme, isStreaming, skills }),
-    [diffThemeName, resolvedTheme, isStreaming, skills],
-  );
   const normalizedText = useMemo(() => {
     // The optional final result footer is scheduler metadata, not transcript
     // prose. Strip only a fully validated marker from this derived rendering;
@@ -822,6 +899,28 @@ function ChatMarkdown({
     const filePaths = [...markdownFileLinkMetaByHref.values()].map((meta) => meta.filePath);
     return buildFileLinkParentSuffixByPath(filePaths);
   }, [markdownFileLinkMetaByHref]);
+  const renderingContext = useMemo(
+    () => ({
+      diffThemeName,
+      resolvedTheme,
+      isStreaming,
+      skills,
+      imageContext,
+      cwd,
+      additionalWorkspaceRoots,
+      fileLinkParentSuffixByPath,
+    }),
+    [
+      diffThemeName,
+      resolvedTheme,
+      isStreaming,
+      skills,
+      imageContext,
+      cwd,
+      additionalWorkspaceRoots,
+      fileLinkParentSuffixByPath,
+    ],
+  );
   const markdownUrlTransform = useCallback(
     (href: string, key: string) => {
       // Image paths are transported by the authenticated chat-image service;
@@ -838,70 +937,6 @@ function ChatMarkdown({
     },
     [cwd, imageContext],
   );
-  const markdownComponents = useMemo<Components>(
-    () => ({
-      p({ node: _node, children, ...props }) {
-        return <p {...props}>{renderSkillInlineMarkdownChildren(children, skills)}</p>;
-      },
-      li: MarkdownListItem,
-      img({ node: _node, src, alt, ...props }) {
-        const source = typeof src === "string" ? src : "";
-        return imageContext && (source.startsWith("/") || /^[A-Za-z]:[\\/]/u.test(source)) ? (
-          <MarkdownImage source={source} alt={alt ?? ""} context={imageContext} />
-        ) : (
-          <img {...props} src={src} alt={alt ?? ""} loading="lazy" />
-        );
-      },
-      a({ node: _node, href, ...props }) {
-        const fileLinkMeta = href
-          ? resolveMarkdownFileLinkMeta(href, cwd, additionalWorkspaceRoots)
-          : null;
-        if (!fileLinkMeta) {
-          if (!href) {
-            return <span className={props.className}>{props.children}</span>;
-          }
-          if (href.startsWith("#")) {
-            return <a {...props} href={href} />;
-          }
-          return <a {...props} href={href} target="_blank" rel="noopener noreferrer" />;
-        }
-
-        const parentSuffix = fileLinkParentSuffixByPath.get(fileLinkMeta.filePath);
-        const labelParts = [fileLinkMeta.basename];
-        if (typeof parentSuffix === "string" && parentSuffix.length > 0) {
-          labelParts.push(parentSuffix);
-        }
-        if (fileLinkMeta.line) {
-          labelParts.push(
-            `L${fileLinkMeta.line}${fileLinkMeta.column ? `:C${fileLinkMeta.column}` : ""}`,
-          );
-        }
-
-        return (
-          <MarkdownFileLink
-            href={fileLinkMeta.targetPath}
-            targetPath={fileLinkMeta.targetPath}
-            displayPath={fileLinkMeta.displayPath}
-            filePath={fileLinkMeta.filePath}
-            label={labelParts.join(" · ")}
-            openPolicy={fileLinkMeta.openPolicy}
-            theme={resolvedTheme}
-            className={props.className}
-          />
-        );
-      },
-      pre: MarkdownPre,
-      table: MarkdownTable,
-    }),
-    [
-      additionalWorkspaceRoots,
-      cwd,
-      fileLinkParentSuffixByPath,
-      imageContext,
-      resolvedTheme,
-      skills,
-    ],
-  );
 
   return (
     <div className="chat-markdown w-full min-w-0 text-sm leading-relaxed text-chat-foreground">
@@ -914,7 +949,7 @@ function ChatMarkdown({
             [remarkNativeFileDestinations, { cwd }],
           ]}
           rehypePlugins={[[rehypeKatex, { strict: false, throwOnError: false, trust: false }]]}
-          components={markdownComponents}
+          components={MARKDOWN_COMPONENTS}
           urlTransform={markdownUrlTransform}
         >
           {normalizedText}

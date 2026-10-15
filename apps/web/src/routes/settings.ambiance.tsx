@@ -1,7 +1,6 @@
-import { createFileRoute } from "@tanstack/react-router";
-
-import { AmbianceSettingsPanel } from "../components/settings/AmbianceSettings";
-
+import { createFileRoute, redirect } from "@tanstack/react-router";
 export const Route = createFileRoute("/settings/ambiance")({
-  component: AmbianceSettingsPanel,
+  beforeLoad: () => {
+    throw redirect({ to: "/settings/appearance", replace: true });
+  },
 });

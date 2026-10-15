@@ -1,3 +1,5 @@
+import { getSettingsPageReset } from "./settingsReset";
+import { AmbianceSettingsSections } from "./AmbianceSettings";
 import { useUiLocale, useUiPresentation } from "~/i18n";
 import { uiFormatList, uiText } from "@cafecode/shared/i18n";
 import {
@@ -64,7 +66,6 @@ import {
   type PowerSaveBlockerMode,
 } from "@cafecode/contracts/settings";
 import { createModelSelection } from "@cafecode/shared/model";
-import * as Duration from "effect/Duration";
 import * as Equal from "effect/Equal";
 import { APP_VERSION } from "../../branding";
 import { ProviderModelPicker } from "../chat/ProviderModelPicker";
@@ -457,9 +458,8 @@ function AboutVersionSection() {
   );
 }
 
-export function useSettingsRestore(onRestored?: () => void) {
+export function useSettingsRestore(onRestored?: () => void, pathname = "/settings/appearance") {
   const uiLocale = useUiLocale();
-
   const { theme, setTheme } = useTheme();
   const settings = useSettings();
   const { updateSettings } = useUpdateSettings();
@@ -467,198 +467,41 @@ export function useSettingsRestore(onRestored?: () => void) {
     environmentId: null,
   });
   const { updateSettings: updateLanguageSettings } = useUpdateSettings({ environmentId: null });
-
-  const isGitWritingModelDirty = !Equal.equals(
-    settings.textGenerationModelSelection ?? null,
-    DEFAULT_UNIFIED_SETTINGS.textGenerationModelSelection ?? null,
+  const reset = getSettingsPageReset(
+    pathname,
+    settings,
+    {
+      desktop: typeof window.desktopBridge?.setPowerSaveBlockerState === "function",
+    },
+    uiLocale,
   );
-
-  const changedSettingLabels = useMemo(
-    () => [
-      ...(theme !== "system" ? [uiText("Theme", undefined, undefined, uiLocale)] : []),
-      ...(languagePreference !== "system"
-        ? [uiText("Language", undefined, undefined, uiLocale)]
-        : []),
-      ...(settings.interfaceScalePercent !== DEFAULT_UNIFIED_SETTINGS.interfaceScalePercent
-        ? [uiText("Interface size", undefined, undefined, uiLocale)]
-        : []),
-      ...(settings.continueBackgroundAnimations !==
-      DEFAULT_UNIFIED_SETTINGS.continueBackgroundAnimations
-        ? [uiText("Background animations", undefined, undefined, uiLocale)]
-        : []),
-      ...(settings.showSidebarMascot !== DEFAULT_UNIFIED_SETTINGS.showSidebarMascot
-        ? [uiText("Show sidebar image", undefined, undefined, uiLocale)]
-        : []),
-      ...(settings.showSidebarSearch !== DEFAULT_UNIFIED_SETTINGS.showSidebarSearch
-        ? [uiText("Sidebar search", undefined, undefined, uiLocale)]
-        : []),
-      ...(settings.showSidebarAttribution !== DEFAULT_UNIFIED_SETTINGS.showSidebarAttribution
-        ? [uiText("Sidebar attribution", undefined, undefined, uiLocale)]
-        : []),
-      ...(settings.brandWordmarkPrefix !== DEFAULT_UNIFIED_SETTINGS.brandWordmarkPrefix
-        ? [uiText("Branding prefix", undefined, undefined, uiLocale)]
-        : []),
-      ...(settings.sidebarBrandImage !== DEFAULT_UNIFIED_SETTINGS.sidebarBrandImage
-        ? [uiText("Sidebar image", undefined, undefined, uiLocale)]
-        : []),
-      ...(settings.sidebarStarSpeed !== DEFAULT_UNIFIED_SETTINGS.sidebarStarSpeed
-        ? [uiText("Sidebar star speed", undefined, undefined, uiLocale)]
-        : []),
-      ...(settings.ambianceEnabled !== DEFAULT_UNIFIED_SETTINGS.ambianceEnabled ||
-      settings.ambianceEffect !== DEFAULT_UNIFIED_SETTINGS.ambianceEffect ||
-      settings.ambianceIntensity !== DEFAULT_UNIFIED_SETTINGS.ambianceIntensity ||
-      settings.ambianceReactMode !== DEFAULT_UNIFIED_SETTINGS.ambianceReactMode ||
-      settings.ambianceSurfaceSidebar !== DEFAULT_UNIFIED_SETTINGS.ambianceSurfaceSidebar ||
-      settings.ambianceSurfaceThread !== DEFAULT_UNIFIED_SETTINGS.ambianceSurfaceThread ||
-      settings.ambianceSurfaceComposer !== DEFAULT_UNIFIED_SETTINGS.ambianceSurfaceComposer ||
-      settings.ambianceColor !== DEFAULT_UNIFIED_SETTINGS.ambianceColor
-        ? [uiText("Ambiance", undefined, undefined, uiLocale)]
-        : []),
-      ...(settings.appAccentColor !== DEFAULT_UNIFIED_SETTINGS.appAccentColor
-        ? [uiText("Accent color", undefined, undefined, uiLocale)]
-        : []),
-      ...(settings.themeAccentColor !== DEFAULT_UNIFIED_SETTINGS.themeAccentColor
-        ? [uiText("Sidebar color", undefined, undefined, uiLocale)]
-        : []),
-      ...(settings.timestampFormat !== DEFAULT_UNIFIED_SETTINGS.timestampFormat
-        ? [uiText("Time format", undefined, undefined, uiLocale)]
-        : []),
-      ...(settings.defaultEditor !== DEFAULT_UNIFIED_SETTINGS.defaultEditor
-        ? [uiText("Default editor", undefined, undefined, uiLocale)]
-        : []),
-      ...(settings.sidebarThreadPreviewCount !== DEFAULT_UNIFIED_SETTINGS.sidebarThreadPreviewCount
-        ? [uiText("Visible chats", undefined, undefined, uiLocale)]
-        : []),
-      ...(settings.autoOpenPlanSidebar !== DEFAULT_UNIFIED_SETTINGS.autoOpenPlanSidebar
-        ? [uiText("Auto-open plan panel", undefined, undefined, uiLocale)]
-        : []),
-      ...(settings.enableAssistantStreaming !== DEFAULT_UNIFIED_SETTINGS.enableAssistantStreaming
-        ? [uiText("Assistant output", undefined, undefined, uiLocale)]
-        : []),
-      ...(Duration.toMillis(settings.automaticGitFetchInterval) !==
-      Duration.toMillis(DEFAULT_UNIFIED_SETTINGS.automaticGitFetchInterval)
-        ? [uiText("Automatic Git fetch interval", undefined, undefined, uiLocale)]
-        : []),
-      ...(settings.defaultThreadEnvMode !== DEFAULT_UNIFIED_SETTINGS.defaultThreadEnvMode
-        ? [uiText("New chat workspace", undefined, undefined, uiLocale)]
-        : []),
-      ...(settings.chatClickBehavior !== DEFAULT_UNIFIED_SETTINGS.chatClickBehavior
-        ? [uiText("Single-click behavior", undefined, undefined, uiLocale)]
-        : []),
-      ...(settings.addProjectBaseDirectory !== DEFAULT_UNIFIED_SETTINGS.addProjectBaseDirectory
-        ? [uiText("Add project starts in", undefined, undefined, uiLocale)]
-        : []),
-      ...(settings.confirmThreadArchive !== DEFAULT_UNIFIED_SETTINGS.confirmThreadArchive
-        ? [uiText("Archive confirmation", undefined, undefined, uiLocale)]
-        : []),
-      ...(settings.confirmThreadDelete !== DEFAULT_UNIFIED_SETTINGS.confirmThreadDelete
-        ? [uiText("Delete confirmation", undefined, undefined, uiLocale)]
-        : []),
-      ...(isGitWritingModelDirty
-        ? [uiText("Text generation model", undefined, undefined, uiLocale)]
-        : []),
-    ],
-    [
-      isGitWritingModelDirty,
-      settings.ambianceColor,
-      settings.ambianceEffect,
-      settings.ambianceEnabled,
-      settings.ambianceIntensity,
-      settings.ambianceReactMode,
-      settings.ambianceSurfaceComposer,
-      settings.ambianceSurfaceSidebar,
-      settings.ambianceSurfaceThread,
-      settings.autoOpenPlanSidebar,
-      settings.confirmThreadArchive,
-      settings.confirmThreadDelete,
-      settings.continueBackgroundAnimations,
-      settings.addProjectBaseDirectory,
-      settings.defaultThreadEnvMode,
-      settings.chatClickBehavior,
-      settings.defaultEditor,
-      settings.appAccentColor,
-      settings.brandWordmarkPrefix,
-      settings.showSidebarSearch,
-      settings.showSidebarMascot,
-      settings.showSidebarAttribution,
-      settings.sidebarBrandImage,
-      settings.sidebarStarSpeed,
-      settings.themeAccentColor,
-      settings.automaticGitFetchInterval,
-      settings.enableAssistantStreaming,
-      settings.interfaceScalePercent,
-      languagePreference,
-      settings.sidebarThreadPreviewCount,
-      settings.timestampFormat,
-      theme,
-      uiLocale,
-    ],
-  );
-
-  const restoreDefaults = useCallback(async () => {
-    if (changedSettingLabels.length === 0) return;
-    const api = readWorkspaceApi();
-    const confirmed = await (api ?? ensureWorkspaceApi()).dialogs.confirm(
+  const general = pathname === "/settings/general";
+  const appearance = pathname === "/settings/appearance";
+  const changedSettingLabels = [
+    ...(appearance && theme !== "system" ? [uiText("Theme", undefined, undefined, uiLocale)] : []),
+    ...(general && languagePreference !== "system"
+      ? [uiText("Language", undefined, undefined, uiLocale)]
+      : []),
+    ...reset.labels,
+  ];
+  const restoreDefaults = async () => {
+    if (!changedSettingLabels.length) return;
+    const confirmed = await (readWorkspaceApi() ?? ensureWorkspaceApi()).dialogs.confirm(
       uiText(
-        "Restore default settings?\nThis will reset: {settings}.",
-        {
-          settings: uiFormatList(changedSettingLabels, { style: "long", type: "unit" }),
-        },
+        "Reset this page to defaults?\nThis will reset: {settings}.",
+        { settings: uiFormatList(changedSettingLabels, { style: "long", type: "unit" }) },
         undefined,
         uiLocale,
       ),
     );
     if (!confirmed) return;
-
-    setTheme("system");
-    updateLanguageSettings({ languagePreference: DEFAULT_UNIFIED_SETTINGS.languagePreference });
-    updateSettings({
-      timestampFormat: DEFAULT_UNIFIED_SETTINGS.timestampFormat,
-      interfaceScalePercent: DEFAULT_UNIFIED_SETTINGS.interfaceScalePercent,
-      continueBackgroundAnimations: DEFAULT_UNIFIED_SETTINGS.continueBackgroundAnimations,
-      appAccentColor: DEFAULT_UNIFIED_SETTINGS.appAccentColor,
-      showSidebarSearch: DEFAULT_UNIFIED_SETTINGS.showSidebarSearch,
-      showSidebarMascot: DEFAULT_UNIFIED_SETTINGS.showSidebarMascot,
-      showSidebarAttribution: DEFAULT_UNIFIED_SETTINGS.showSidebarAttribution,
-      brandWordmarkPrefix: DEFAULT_UNIFIED_SETTINGS.brandWordmarkPrefix,
-      sidebarBrandImage: DEFAULT_UNIFIED_SETTINGS.sidebarBrandImage,
-      sidebarBrandImageDataUrl: "",
-      sidebarStarSpeed: DEFAULT_UNIFIED_SETTINGS.sidebarStarSpeed,
-      ambianceEnabled: DEFAULT_UNIFIED_SETTINGS.ambianceEnabled,
-      ambianceEffect: DEFAULT_UNIFIED_SETTINGS.ambianceEffect,
-      ambianceIntensity: DEFAULT_UNIFIED_SETTINGS.ambianceIntensity,
-      ambianceReactMode: DEFAULT_UNIFIED_SETTINGS.ambianceReactMode,
-      ambianceSurfaceSidebar: DEFAULT_UNIFIED_SETTINGS.ambianceSurfaceSidebar,
-      ambianceSurfaceThread: DEFAULT_UNIFIED_SETTINGS.ambianceSurfaceThread,
-      ambianceSurfaceComposer: DEFAULT_UNIFIED_SETTINGS.ambianceSurfaceComposer,
-      ambianceColor: DEFAULT_UNIFIED_SETTINGS.ambianceColor,
-      themeAccentColor: DEFAULT_UNIFIED_SETTINGS.themeAccentColor,
-      defaultEditor: DEFAULT_UNIFIED_SETTINGS.defaultEditor,
-      sidebarThreadPreviewCount: DEFAULT_UNIFIED_SETTINGS.sidebarThreadPreviewCount,
-      autoOpenPlanSidebar: DEFAULT_UNIFIED_SETTINGS.autoOpenPlanSidebar,
-      enableAssistantStreaming: DEFAULT_UNIFIED_SETTINGS.enableAssistantStreaming,
-      automaticGitFetchInterval: DEFAULT_UNIFIED_SETTINGS.automaticGitFetchInterval,
-      defaultThreadEnvMode: DEFAULT_UNIFIED_SETTINGS.defaultThreadEnvMode,
-      chatClickBehavior: DEFAULT_UNIFIED_SETTINGS.chatClickBehavior,
-      addProjectBaseDirectory: DEFAULT_UNIFIED_SETTINGS.addProjectBaseDirectory,
-      confirmThreadArchive: DEFAULT_UNIFIED_SETTINGS.confirmThreadArchive,
-      confirmThreadDelete: DEFAULT_UNIFIED_SETTINGS.confirmThreadDelete,
-      textGenerationModelSelection: DEFAULT_UNIFIED_SETTINGS.textGenerationModelSelection,
-    });
+    if (appearance) setTheme("system");
+    if (general)
+      updateLanguageSettings({ languagePreference: DEFAULT_UNIFIED_SETTINGS.languagePreference });
+    updateSettings(reset.patch);
     onRestored?.();
-  }, [
-    changedSettingLabels,
-    onRestored,
-    setTheme,
-    updateSettings,
-    updateLanguageSettings,
-    uiLocale,
-  ]);
-
-  return {
-    changedSettingLabels,
-    restoreDefaults,
   };
+  return { changedSettingLabels, restoreDefaults };
 }
 
 export function TextGenerationModelSettingsRow() {
@@ -696,12 +539,12 @@ export function TextGenerationModelSettingsRow() {
 
   return (
     <SettingsRow
-      title={uiText("Text generation model", undefined, undefined, uiLocale)}
+      title={uiText("Automatic naming model", undefined, undefined, uiLocale)}
       description={uiText("Writes chat titles and branch names.", undefined, undefined, uiLocale)}
       resetAction={
         isGitWritingModelDirty ? (
           <SettingResetButton
-            label={uiText("text generation model", undefined, undefined, uiLocale)}
+            label={uiText("automatic naming model", undefined, undefined, uiLocale)}
             onClick={() =>
               updateSettings({
                 textGenerationModelSelection: DEFAULT_UNIFIED_SETTINGS.textGenerationModelSelection,
@@ -781,7 +624,135 @@ export function TextGenerationModelSettingsRow() {
 }
 
 export function GeneralSettingsPanel() {
-  return <AppearanceSettingsPanel />;
+  const uiLocale = useUiLocale();
+  const uiPresentation = useUiPresentation(UI_PRESENTATION_SOURCES);
+  const settings = useSettings();
+  const { updateSettings } = useUpdateSettings();
+  return (
+    <SettingsPageContainer title={uiText("General", undefined, undefined, uiLocale)}>
+      <SettingsSection title={uiText("Language & time", undefined, undefined, uiLocale)}>
+        <LanguageSettingsRow />
+        <SettingsRow
+          title={uiText("Time format", undefined, undefined, uiLocale)}
+          resetAction={
+            settings.timestampFormat !== DEFAULT_UNIFIED_SETTINGS.timestampFormat ? (
+              <SettingResetButton
+                label={uiText("time format", undefined, undefined, uiLocale)}
+                onClick={() =>
+                  updateSettings({ timestampFormat: DEFAULT_UNIFIED_SETTINGS.timestampFormat })
+                }
+              />
+            ) : null
+          }
+          control={
+            <Select
+              value={settings.timestampFormat}
+              onValueChange={(value) => {
+                if (value === "locale" || value === "12-hour" || value === "24-hour") {
+                  updateSettings({ timestampFormat: value });
+                }
+              }}
+            >
+              <SelectTrigger
+                className="w-full sm:w-40"
+                aria-label={uiText("Timestamp format", undefined, undefined, uiLocale)}
+              >
+                <SelectValue>
+                  {uiPresentation.TIMESTAMP_FORMAT_LABELS[settings.timestampFormat]}
+                </SelectValue>
+              </SelectTrigger>
+              <SelectPopup align="end" alignItemWithTrigger={false}>
+                <SelectItem hideIndicator value="locale">
+                  {uiPresentation.TIMESTAMP_FORMAT_LABELS.locale}
+                </SelectItem>
+                <SelectItem hideIndicator value="12-hour">
+                  {uiPresentation.TIMESTAMP_FORMAT_LABELS["12-hour"]}
+                </SelectItem>
+                <SelectItem hideIndicator value="24-hour">
+                  {uiPresentation.TIMESTAMP_FORMAT_LABELS["24-hour"]}
+                </SelectItem>
+              </SelectPopup>
+            </Select>
+          }
+        />
+      </SettingsSection>
+      <SettingsSection title={uiText("Projects & workspaces", undefined, undefined, uiLocale)}>
+        <SettingsRow
+          title={uiText("Default project folder", undefined, undefined, uiLocale)}
+          resetAction={
+            settings.addProjectBaseDirectory !==
+            DEFAULT_UNIFIED_SETTINGS.addProjectBaseDirectory ? (
+              <SettingResetButton
+                label={uiText("add project base directory", undefined, undefined, uiLocale)}
+                onClick={() =>
+                  updateSettings({
+                    addProjectBaseDirectory: DEFAULT_UNIFIED_SETTINGS.addProjectBaseDirectory,
+                  })
+                }
+              />
+            ) : null
+          }
+          control={
+            <DraftInput
+              className="w-full sm:w-72"
+              value={settings.addProjectBaseDirectory}
+              onCommit={(next) => updateSettings({ addProjectBaseDirectory: next })}
+              placeholder="~/"
+              spellCheck={false}
+              aria-label={uiText("Add project base directory", undefined, undefined, uiLocale)}
+            />
+          }
+        />
+        <SettingsRow
+          title={uiText("New chats", undefined, undefined, uiLocale)}
+          description={uiText("Default workspace for new chats.", undefined, undefined, uiLocale)}
+          resetAction={
+            settings.defaultThreadEnvMode !== DEFAULT_UNIFIED_SETTINGS.defaultThreadEnvMode ? (
+              <SettingResetButton
+                label={uiText("new chats", undefined, undefined, uiLocale)}
+                onClick={() =>
+                  updateSettings({
+                    defaultThreadEnvMode: DEFAULT_UNIFIED_SETTINGS.defaultThreadEnvMode,
+                  })
+                }
+              />
+            ) : null
+          }
+          control={
+            <Select
+              value={settings.defaultThreadEnvMode}
+              onValueChange={(value) => {
+                if (value === "local" || value === "worktree") {
+                  updateSettings({ defaultThreadEnvMode: value });
+                }
+              }}
+            >
+              <SelectTrigger
+                className="w-full sm:w-44"
+                aria-label={uiText("Default chat workspace", undefined, undefined, uiLocale)}
+              >
+                <SelectValue>
+                  {settings.defaultThreadEnvMode === "worktree"
+                    ? uiText("New worktree", undefined, undefined, uiLocale)
+                    : uiText("Local", undefined, undefined, uiLocale)}
+                </SelectValue>
+              </SelectTrigger>
+              <SelectPopup align="end" alignItemWithTrigger={false}>
+                <SelectItem hideIndicator value="local">
+                  {uiText("Local", undefined, undefined, uiLocale)}
+                </SelectItem>
+                <SelectItem hideIndicator value="worktree">
+                  {uiText("New worktree", undefined, undefined, uiLocale)}
+                </SelectItem>
+              </SelectPopup>
+            </Select>
+          }
+        />
+      </SettingsSection>
+      <FilesSettingsSection />
+      <SystemSettingsSections />
+    </SettingsPageContainer>
+  );
 }
 
 /** Interface language belongs to the current client, even while a remote
@@ -942,8 +913,7 @@ export function AppearanceSettingsPanel() {
 
   return (
     <SettingsPageContainer title={uiText("Appearance", undefined, undefined, uiLocale)}>
-      <SettingsSection>
-        <LanguageSettingsRow />
+      <SettingsSection title={uiText("Interface", undefined, undefined, uiLocale)}>
         <SettingsRow
           title={uiText("Theme", undefined, undefined, uiLocale)}
           resetAction={
@@ -1015,6 +985,34 @@ export function AppearanceSettingsPanel() {
         />
 
         <SettingsRow
+          title={uiText("Accent color", undefined, undefined, uiLocale)}
+          description={uiText(
+            "Used for buttons, selection and focus.",
+            undefined,
+            undefined,
+            uiLocale,
+          )}
+          resetAction={
+            settings.appAccentColor !== DEFAULT_UNIFIED_SETTINGS.appAccentColor ? (
+              <SettingResetButton
+                label={uiText("accent color", undefined, undefined, uiLocale)}
+                onClick={() => updateSettings({ appAccentColor: DEFAULT_APP_ACCENT_COLOR })}
+              />
+            ) : null
+          }
+          control={
+            <ColorWheelPicker
+              value={settings.appAccentColor}
+              defaultPickerColor={DEFAULT_APP_ACCENT_PICKER_COLOR}
+              emptyValue={DEFAULT_APP_ACCENT_COLOR}
+              ariaLabel="App accent color"
+              onCommit={(value) => updateSettings({ appAccentColor: value })}
+            />
+          }
+        />
+      </SettingsSection>
+      <SettingsSection title={uiText("Sidebar", undefined, undefined, uiLocale)}>
+        <SettingsRow
           title={uiText("Branding prefix", undefined, undefined, uiLocale)}
           description={uiText("Replaces ''Cafe'' in the wordmark.", undefined, undefined, uiLocale)}
           resetAction={
@@ -1044,39 +1042,12 @@ export function AppearanceSettingsPanel() {
         />
 
         <SettingsRow
-          title={uiText("Accent color", undefined, undefined, uiLocale)}
-          description={uiText(
-            "Used for buttons, selection and focus.",
-            undefined,
-            undefined,
-            uiLocale,
-          )}
-          resetAction={
-            settings.appAccentColor !== DEFAULT_UNIFIED_SETTINGS.appAccentColor ? (
-              <SettingResetButton
-                label={uiText("accent color", undefined, undefined, uiLocale)}
-                onClick={() => updateSettings({ appAccentColor: DEFAULT_APP_ACCENT_COLOR })}
-              />
-            ) : null
-          }
-          control={
-            <ColorWheelPicker
-              value={settings.appAccentColor}
-              defaultPickerColor={DEFAULT_APP_ACCENT_PICKER_COLOR}
-              emptyValue={DEFAULT_APP_ACCENT_COLOR}
-              ariaLabel="App accent color"
-              onCommit={(value) => updateSettings({ appAccentColor: value })}
-            />
-          }
-        />
-
-        <SettingsRow
-          title={uiText("Sidebar color", undefined, undefined, uiLocale)}
+          title={uiText("Sidebar effects color", undefined, undefined, uiLocale)}
           description={uiText("Colors the sidebar stars and glow.", undefined, undefined, uiLocale)}
           resetAction={
             settings.themeAccentColor !== DEFAULT_UNIFIED_SETTINGS.themeAccentColor ? (
               <SettingResetButton
-                label={uiText("sidebar color", undefined, undefined, uiLocale)}
+                label={uiText("sidebar effects color", undefined, undefined, uiLocale)}
                 onClick={() => updateSettings({ themeAccentColor: DEFAULT_THEME_ACCENT_COLOR })}
               />
             ) : null
@@ -1093,6 +1064,45 @@ export function AppearanceSettingsPanel() {
         />
 
         <SettingsRow
+          title={uiText("Sidebar search", undefined, undefined, uiLocale)}
+          resetAction={
+            settings.showSidebarSearch !== DEFAULT_UNIFIED_SETTINGS.showSidebarSearch ? (
+              <SettingResetButton
+                label={uiText("sidebar search", undefined, undefined, uiLocale)}
+                onClick={() => updateSettings({ showSidebarSearch: DEFAULT_SHOW_SIDEBAR_SEARCH })}
+              />
+            ) : null
+          }
+          control={
+            <Switch
+              checked={settings.showSidebarSearch}
+              onCheckedChange={(checked) => updateSettings({ showSidebarSearch: Boolean(checked) })}
+              aria-label={uiText("Show sidebar search", undefined, undefined, uiLocale)}
+            />
+          }
+        />
+
+        <SettingsRow
+          title={uiText("Enable sidebar image", undefined, undefined, uiLocale)}
+          resetAction={
+            settings.showSidebarMascot !== DEFAULT_UNIFIED_SETTINGS.showSidebarMascot ? (
+              <SettingResetButton
+                label={uiText("sidebar image visibility", undefined, undefined, uiLocale)}
+                onClick={() => updateSettings({ showSidebarMascot: DEFAULT_SHOW_SIDEBAR_MASCOT })}
+              />
+            ) : null
+          }
+          control={
+            <Switch
+              checked={settings.showSidebarMascot}
+              onCheckedChange={(checked) => updateSettings({ showSidebarMascot: Boolean(checked) })}
+              aria-label={uiText("Enable sidebar image", undefined, undefined, uiLocale)}
+            />
+          }
+        />
+
+        <SettingsRow
+          className={settings.showSidebarMascot ? undefined : "opacity-50"}
           title={uiText("Sidebar image", undefined, undefined, uiLocale)}
           description={uiText(
             "PNG, JPEG, GIF or WebP, under 1 MB.",
@@ -1101,6 +1111,8 @@ export function AppearanceSettingsPanel() {
             uiLocale,
           )}
           resetAction={
+            settings.showSidebarMascot &&
+            !sidebarImageUploading &&
             settings.sidebarBrandImage !== DEFAULT_UNIFIED_SETTINGS.sidebarBrandImage ? (
               <SettingResetButton
                 label={uiText("sidebar image", undefined, undefined, uiLocale)}
@@ -1134,7 +1146,7 @@ export function AppearanceSettingsPanel() {
                 />
                 <div className="flex min-w-0 flex-1 items-center gap-2">
                   <Button
-                    disabled={sidebarImageUploading}
+                    disabled={!settings.showSidebarMascot || sidebarImageUploading}
                     size="xs"
                     variant="outline"
                     onClick={() => sidebarImageInputRef.current?.click()}
@@ -1146,7 +1158,7 @@ export function AppearanceSettingsPanel() {
                   </Button>
                   {settings.sidebarBrandImage ? (
                     <Button
-                      disabled={sidebarImageUploading}
+                      disabled={!settings.showSidebarMascot || sidebarImageUploading}
                       size="xs"
                       variant="ghost"
                       onClick={() => {
@@ -1166,6 +1178,7 @@ export function AppearanceSettingsPanel() {
               <input
                 ref={sidebarImageInputRef}
                 type="file"
+                disabled={!settings.showSidebarMascot || sidebarImageUploading}
                 accept={SIDEBAR_IMAGE_ACCEPT}
                 aria-label={uiText("Sidebar image file", undefined, undefined, uiLocale)}
                 className="sr-only"
@@ -1173,44 +1186,6 @@ export function AppearanceSettingsPanel() {
                 onChange={(event) => void handleSidebarImageChange(event)}
               />
             </div>
-          }
-        />
-
-        <SettingsRow
-          title={uiText("Sidebar search", undefined, undefined, uiLocale)}
-          resetAction={
-            settings.showSidebarSearch !== DEFAULT_UNIFIED_SETTINGS.showSidebarSearch ? (
-              <SettingResetButton
-                label={uiText("sidebar search", undefined, undefined, uiLocale)}
-                onClick={() => updateSettings({ showSidebarSearch: DEFAULT_SHOW_SIDEBAR_SEARCH })}
-              />
-            ) : null
-          }
-          control={
-            <Switch
-              checked={settings.showSidebarSearch}
-              onCheckedChange={(checked) => updateSettings({ showSidebarSearch: Boolean(checked) })}
-              aria-label={uiText("Show sidebar search", undefined, undefined, uiLocale)}
-            />
-          }
-        />
-
-        <SettingsRow
-          title={uiText("Show sidebar image", undefined, undefined, uiLocale)}
-          resetAction={
-            settings.showSidebarMascot !== DEFAULT_UNIFIED_SETTINGS.showSidebarMascot ? (
-              <SettingResetButton
-                label={uiText("show sidebar image", undefined, undefined, uiLocale)}
-                onClick={() => updateSettings({ showSidebarMascot: DEFAULT_SHOW_SIDEBAR_MASCOT })}
-              />
-            ) : null
-          }
-          control={
-            <Switch
-              checked={settings.showSidebarMascot}
-              onCheckedChange={(checked) => updateSettings({ showSidebarMascot: Boolean(checked) })}
-              aria-label={uiText("Show sidebar image", undefined, undefined, uiLocale)}
-            />
           }
         />
 
@@ -1236,9 +1211,10 @@ export function AppearanceSettingsPanel() {
             />
           }
         />
-
+      </SettingsSection>
+      <SettingsSection title={uiText("Motion", undefined, undefined, uiLocale)}>
         <SettingsRow
-          title={uiText("Background animations", undefined, undefined, uiLocale)}
+          title={uiText("Animate while unfocused", undefined, undefined, uiLocale)}
           description={uiText(
             "Keep decorations moving while Cafe is hidden or unfocused.",
             undefined,
@@ -1249,7 +1225,7 @@ export function AppearanceSettingsPanel() {
             settings.continueBackgroundAnimations !==
             DEFAULT_UNIFIED_SETTINGS.continueBackgroundAnimations ? (
               <SettingResetButton
-                label={uiText("background animations", undefined, undefined, uiLocale)}
+                label={uiText("animations while unfocused", undefined, undefined, uiLocale)}
                 onClick={() =>
                   updateSettings({
                     continueBackgroundAnimations: DEFAULT_CONTINUE_BACKGROUND_ANIMATIONS,
@@ -1330,51 +1306,8 @@ export function AppearanceSettingsPanel() {
             </div>
           }
         />
-
-        <SettingsRow
-          title={uiText("Time format", undefined, undefined, uiLocale)}
-          resetAction={
-            settings.timestampFormat !== DEFAULT_UNIFIED_SETTINGS.timestampFormat ? (
-              <SettingResetButton
-                label={uiText("time format", undefined, undefined, uiLocale)}
-                onClick={() =>
-                  updateSettings({ timestampFormat: DEFAULT_UNIFIED_SETTINGS.timestampFormat })
-                }
-              />
-            ) : null
-          }
-          control={
-            <Select
-              value={settings.timestampFormat}
-              onValueChange={(value) => {
-                if (value === "locale" || value === "12-hour" || value === "24-hour") {
-                  updateSettings({ timestampFormat: value });
-                }
-              }}
-            >
-              <SelectTrigger
-                className="w-full sm:w-40"
-                aria-label={uiText("Timestamp format", undefined, undefined, uiLocale)}
-              >
-                <SelectValue>
-                  {uiPresentation.TIMESTAMP_FORMAT_LABELS[settings.timestampFormat]}
-                </SelectValue>
-              </SelectTrigger>
-              <SelectPopup align="end" alignItemWithTrigger={false}>
-                <SelectItem hideIndicator value="locale">
-                  {uiPresentation.TIMESTAMP_FORMAT_LABELS.locale}
-                </SelectItem>
-                <SelectItem hideIndicator value="12-hour">
-                  {uiPresentation.TIMESTAMP_FORMAT_LABELS["12-hour"]}
-                </SelectItem>
-                <SelectItem hideIndicator value="24-hour">
-                  {uiPresentation.TIMESTAMP_FORMAT_LABELS["24-hour"]}
-                </SelectItem>
-              </SelectPopup>
-            </Select>
-          }
-        />
       </SettingsSection>
+      <AmbianceSettingsSections />
     </SettingsPageContainer>
   );
 }
@@ -1428,9 +1361,40 @@ export function ChatSettingsPanel() {
 
   return (
     <SettingsPageContainer title={uiText("Chats", undefined, undefined, uiLocale)}>
-      <SettingsSection>
+      <SettingsSection title={uiText("Navigation", undefined, undefined, uiLocale)}>
         <SettingsRow
-          title={uiText("Single-click behavior", undefined, undefined, uiLocale)}
+          title={uiText("Task Atrium", undefined, undefined, uiLocale)}
+          description={uiText(
+            "Adds an Atrium button above Settings: a read-only overview of chats and subagents.",
+            undefined,
+            undefined,
+            uiLocale,
+          )}
+          resetAction={
+            settings.ambianceAtriumEnabled !== DEFAULT_UNIFIED_SETTINGS.ambianceAtriumEnabled ? (
+              <SettingResetButton
+                label={uiText("task atrium", undefined, undefined, uiLocale)}
+                onClick={() =>
+                  updateSettings({
+                    ambianceAtriumEnabled: DEFAULT_UNIFIED_SETTINGS.ambianceAtriumEnabled,
+                  })
+                }
+              />
+            ) : null
+          }
+          control={
+            <Switch
+              checked={settings.ambianceAtriumEnabled}
+              onCheckedChange={(checked) =>
+                updateSettings({ ambianceAtriumEnabled: Boolean(checked) })
+              }
+              aria-label={uiText("Enable Task Atrium", undefined, undefined, uiLocale)}
+            />
+          }
+        />
+
+        <SettingsRow
+          title={uiText("Clicking a chat", undefined, undefined, uiLocale)}
           description={uiText(
             "Preview temporarily, or keep each chat open as a tab.",
             undefined,
@@ -1440,7 +1404,7 @@ export function ChatSettingsPanel() {
           resetAction={
             settings.chatClickBehavior !== DEFAULT_UNIFIED_SETTINGS.chatClickBehavior ? (
               <SettingResetButton
-                label={uiText("single-click behavior", undefined, undefined, uiLocale)}
+                label={uiText("clicking a chat", undefined, undefined, uiLocale)}
                 onClick={() =>
                   updateSettings({ chatClickBehavior: DEFAULT_UNIFIED_SETTINGS.chatClickBehavior })
                 }
@@ -1476,7 +1440,8 @@ export function ChatSettingsPanel() {
             </Select>
           }
         />
-
+      </SettingsSection>
+      <SettingsSection title={uiText("Replies", undefined, undefined, uiLocale)}>
         <SettingsRow
           title={uiText("Assistant output", undefined, undefined, uiLocale)}
           description={uiText(
@@ -1595,52 +1560,6 @@ export function ChatSettingsPanel() {
         />
 
         <SettingsRow
-          title={uiText("New chats", undefined, undefined, uiLocale)}
-          description={uiText("Default workspace for new chats.", undefined, undefined, uiLocale)}
-          resetAction={
-            settings.defaultThreadEnvMode !== DEFAULT_UNIFIED_SETTINGS.defaultThreadEnvMode ? (
-              <SettingResetButton
-                label={uiText("new chats", undefined, undefined, uiLocale)}
-                onClick={() =>
-                  updateSettings({
-                    defaultThreadEnvMode: DEFAULT_UNIFIED_SETTINGS.defaultThreadEnvMode,
-                  })
-                }
-              />
-            ) : null
-          }
-          control={
-            <Select
-              value={settings.defaultThreadEnvMode}
-              onValueChange={(value) => {
-                if (value === "local" || value === "worktree") {
-                  updateSettings({ defaultThreadEnvMode: value });
-                }
-              }}
-            >
-              <SelectTrigger
-                className="w-full sm:w-44"
-                aria-label={uiText("Default chat workspace", undefined, undefined, uiLocale)}
-              >
-                <SelectValue>
-                  {settings.defaultThreadEnvMode === "worktree"
-                    ? uiText("New worktree", undefined, undefined, uiLocale)
-                    : uiText("Local", undefined, undefined, uiLocale)}
-                </SelectValue>
-              </SelectTrigger>
-              <SelectPopup align="end" alignItemWithTrigger={false}>
-                <SelectItem hideIndicator value="local">
-                  {uiText("Local", undefined, undefined, uiLocale)}
-                </SelectItem>
-                <SelectItem hideIndicator value="worktree">
-                  {uiText("New worktree", undefined, undefined, uiLocale)}
-                </SelectItem>
-              </SelectPopup>
-            </Select>
-          }
-        />
-
-        <SettingsRow
           title={
             <span className="inline-flex items-center gap-1.5">
               {uiText("Custom instructions", undefined, undefined, uiLocale)}
@@ -1683,7 +1602,8 @@ export function ChatSettingsPanel() {
             </Button>
           }
         />
-
+      </SettingsSection>
+      <SettingsSection title={uiText("Confirmations", undefined, undefined, uiLocale)}>
         <SettingsRow
           title={uiText("Archive confirmation", undefined, undefined, uiLocale)}
           description={uiText("Click archive twice to confirm.", undefined, undefined, uiLocale)}
@@ -1740,6 +1660,10 @@ export function ChatSettingsPanel() {
 }
 
 export function FilesSettingsPanel() {
+  return <GeneralSettingsPanel />;
+}
+
+function FilesSettingsSection() {
   const uiLocale = useUiLocale();
   const uiPresentation = useUiPresentation(UI_PRESENTATION_SOURCES);
 
@@ -1760,98 +1684,73 @@ export function FilesSettingsPanel() {
       : (defaultEditorOption?.label ?? uiText("System default", undefined, undefined, uiLocale));
 
   return (
-    <SettingsPageContainer title={uiText("Files", undefined, undefined, uiLocale)}>
-      <SettingsSection>
-        <SettingsRow
-          title={uiText("Default editor", undefined, undefined, uiLocale)}
-          description={uiText("Opens file links from chats.", undefined, undefined, uiLocale)}
-          resetAction={
-            settings.defaultEditor !== DEFAULT_UNIFIED_SETTINGS.defaultEditor ? (
-              <SettingResetButton
-                label={uiText("default editor", undefined, undefined, uiLocale)}
-                onClick={() =>
-                  updateSettings({ defaultEditor: DEFAULT_UNIFIED_SETTINGS.defaultEditor })
-                }
-              />
-            ) : null
-          }
-          control={
-            <Select
-              value={settings.defaultEditor}
-              onValueChange={(value) => {
-                if (
-                  value === DEFAULT_EDITOR_SYSTEM_VALUE ||
-                  editorOptions.some((option) => option.value === value)
-                ) {
-                  updateSettings({ defaultEditor: value as DefaultEditorSelection });
-                }
-              }}
+    <SettingsSection title={uiText("Files", undefined, undefined, uiLocale)}>
+      <SettingsRow
+        title={uiText("Default editor", undefined, undefined, uiLocale)}
+        description={uiText("Opens file links from chats.", undefined, undefined, uiLocale)}
+        resetAction={
+          settings.defaultEditor !== DEFAULT_UNIFIED_SETTINGS.defaultEditor ? (
+            <SettingResetButton
+              label={uiText("default editor", undefined, undefined, uiLocale)}
+              onClick={() =>
+                updateSettings({ defaultEditor: DEFAULT_UNIFIED_SETTINGS.defaultEditor })
+              }
+            />
+          ) : null
+        }
+        control={
+          <Select
+            value={settings.defaultEditor}
+            onValueChange={(value) => {
+              if (
+                value === DEFAULT_EDITOR_SYSTEM_VALUE ||
+                editorOptions.some((option) => option.value === value)
+              ) {
+                updateSettings({ defaultEditor: value as DefaultEditorSelection });
+              }
+            }}
+          >
+            <SelectTrigger
+              className="w-full sm:w-48"
+              aria-label={uiText("Default editor", undefined, undefined, uiLocale)}
             >
-              <SelectTrigger
-                className="w-full sm:w-48"
-                aria-label={uiText("Default editor", undefined, undefined, uiLocale)}
-              >
-                <SelectValue>
+              <SelectValue>
+                <DefaultEditorOptionLabel
+                  Icon={defaultEditorOption?.Icon}
+                  label={defaultEditorLabel}
+                  testId="default-editor-selected-option"
+                />
+              </SelectValue>
+            </SelectTrigger>
+            <SelectPopup align="end" alignItemWithTrigger={false}>
+              <SelectItem hideIndicator value={DEFAULT_EDITOR_SYSTEM_VALUE}>
+                <DefaultEditorOptionLabel
+                  label={uiText("System default", undefined, undefined, uiLocale)}
+                  testId="default-editor-option-system-default"
+                />
+              </SelectItem>
+              {editorOptions.map((option) => (
+                <SelectItem hideIndicator key={option.value} value={option.value}>
                   <DefaultEditorOptionLabel
-                    Icon={defaultEditorOption?.Icon}
-                    label={defaultEditorLabel}
-                    testId="default-editor-selected-option"
-                  />
-                </SelectValue>
-              </SelectTrigger>
-              <SelectPopup align="end" alignItemWithTrigger={false}>
-                <SelectItem hideIndicator value={DEFAULT_EDITOR_SYSTEM_VALUE}>
-                  <DefaultEditorOptionLabel
-                    label={uiText("System default", undefined, undefined, uiLocale)}
-                    testId="default-editor-option-system-default"
+                    Icon={option.Icon}
+                    label={option.label}
+                    testId={`default-editor-option-${option.value}`}
                   />
                 </SelectItem>
-                {editorOptions.map((option) => (
-                  <SelectItem hideIndicator key={option.value} value={option.value}>
-                    <DefaultEditorOptionLabel
-                      Icon={option.Icon}
-                      label={option.label}
-                      testId={`default-editor-option-${option.value}`}
-                    />
-                  </SelectItem>
-                ))}
-              </SelectPopup>
-            </Select>
-          }
-        />
-
-        <SettingsRow
-          title={uiText("Add project starts in", undefined, undefined, uiLocale)}
-          resetAction={
-            settings.addProjectBaseDirectory !==
-            DEFAULT_UNIFIED_SETTINGS.addProjectBaseDirectory ? (
-              <SettingResetButton
-                label={uiText("add project base directory", undefined, undefined, uiLocale)}
-                onClick={() =>
-                  updateSettings({
-                    addProjectBaseDirectory: DEFAULT_UNIFIED_SETTINGS.addProjectBaseDirectory,
-                  })
-                }
-              />
-            ) : null
-          }
-          control={
-            <DraftInput
-              className="w-full sm:w-72"
-              value={settings.addProjectBaseDirectory}
-              onCommit={(next) => updateSettings({ addProjectBaseDirectory: next })}
-              placeholder="~/"
-              spellCheck={false}
-              aria-label={uiText("Add project base directory", undefined, undefined, uiLocale)}
-            />
-          }
-        />
-      </SettingsSection>
-    </SettingsPageContainer>
+              ))}
+            </SelectPopup>
+          </Select>
+        }
+      />
+    </SettingsSection>
   );
 }
 
 export function SystemSettingsPanel() {
+  return <GeneralSettingsPanel />;
+}
+
+function SystemSettingsSections() {
   const uiLocale = useUiLocale();
   const uiPresentation = useUiPresentation(UI_PRESENTATION_SOURCES);
 
@@ -1867,60 +1766,62 @@ export function SystemSettingsPanel() {
   });
 
   return (
-    <SettingsPageContainer title={uiText("System", undefined, undefined, uiLocale)}>
-      <SettingsSection>
-        <SettingsRow
-          title={uiText("Keep awake", undefined, undefined, uiLocale)}
-          description={uiText(
-            "Stop your computer and screen sleeping while Cafe works.",
-            undefined,
-            undefined,
-            uiLocale,
-          )}
-          resetAction={
-            settings.powerSaveBlockerMode !== DEFAULT_UNIFIED_SETTINGS.powerSaveBlockerMode ? (
-              <SettingResetButton
-                label={uiText("keep awake", undefined, undefined, uiLocale)}
-                onClick={() =>
-                  updateSettings({
-                    powerSaveBlockerMode: DEFAULT_UNIFIED_SETTINGS.powerSaveBlockerMode,
-                  })
-                }
-              />
-            ) : null
-          }
-          control={
-            <Select
-              value={settings.powerSaveBlockerMode}
-              onValueChange={(value) => {
-                if (value === "off" || value === "during-chats" || value === "always") {
-                  updateSettings({ powerSaveBlockerMode: value });
-                }
-              }}
-            >
-              <SelectTrigger
-                className="w-full sm:w-44"
-                aria-label={uiText("Keep awake", undefined, undefined, uiLocale)}
+    <>
+      {typeof window.desktopBridge?.setPowerSaveBlockerState === "function" ? (
+        <SettingsSection title={uiText("Desktop", undefined, undefined, uiLocale)}>
+          <SettingsRow
+            title={uiText("Keep awake", undefined, undefined, uiLocale)}
+            description={uiText(
+              "Stop your computer and screen sleeping while Cafe works.",
+              undefined,
+              undefined,
+              uiLocale,
+            )}
+            resetAction={
+              settings.powerSaveBlockerMode !== DEFAULT_UNIFIED_SETTINGS.powerSaveBlockerMode ? (
+                <SettingResetButton
+                  label={uiText("keep awake", undefined, undefined, uiLocale)}
+                  onClick={() =>
+                    updateSettings({
+                      powerSaveBlockerMode: DEFAULT_UNIFIED_SETTINGS.powerSaveBlockerMode,
+                    })
+                  }
+                />
+              ) : null
+            }
+            control={
+              <Select
+                value={settings.powerSaveBlockerMode}
+                onValueChange={(value) => {
+                  if (value === "off" || value === "during-chats" || value === "always") {
+                    updateSettings({ powerSaveBlockerMode: value });
+                  }
+                }}
               >
-                <SelectValue>
-                  {uiPresentation.POWER_SAVE_BLOCKER_LABELS[settings.powerSaveBlockerMode]}
-                </SelectValue>
-              </SelectTrigger>
-              <SelectPopup align="end" alignItemWithTrigger={false}>
-                <SelectItem hideIndicator value="off">
-                  {uiPresentation.POWER_SAVE_BLOCKER_LABELS.off}
-                </SelectItem>
-                <SelectItem hideIndicator value="during-chats">
-                  {uiPresentation.POWER_SAVE_BLOCKER_LABELS["during-chats"]}
-                </SelectItem>
-                <SelectItem hideIndicator value="always">
-                  {uiPresentation.POWER_SAVE_BLOCKER_LABELS.always}
-                </SelectItem>
-              </SelectPopup>
-            </Select>
-          }
-        />
-      </SettingsSection>
+                <SelectTrigger
+                  className="w-full sm:w-44"
+                  aria-label={uiText("Keep awake", undefined, undefined, uiLocale)}
+                >
+                  <SelectValue>
+                    {uiPresentation.POWER_SAVE_BLOCKER_LABELS[settings.powerSaveBlockerMode]}
+                  </SelectValue>
+                </SelectTrigger>
+                <SelectPopup align="end" alignItemWithTrigger={false}>
+                  <SelectItem hideIndicator value="off">
+                    {uiPresentation.POWER_SAVE_BLOCKER_LABELS.off}
+                  </SelectItem>
+                  <SelectItem hideIndicator value="during-chats">
+                    {uiPresentation.POWER_SAVE_BLOCKER_LABELS["during-chats"]}
+                  </SelectItem>
+                  <SelectItem hideIndicator value="always">
+                    {uiPresentation.POWER_SAVE_BLOCKER_LABELS.always}
+                  </SelectItem>
+                </SelectPopup>
+              </Select>
+            }
+          />
+        </SettingsSection>
+      ) : null}
 
       <SettingsSection title={uiText("About", undefined, undefined, uiLocale)}>
         <AboutVersionSection />
@@ -1934,7 +1835,7 @@ export function SystemSettingsPanel() {
           }
         />
       </SettingsSection>
-    </SettingsPageContainer>
+    </>
   );
 }
 
@@ -2388,6 +2289,9 @@ export function ProviderSettingsPanel() {
 
   return (
     <SettingsPageContainer title={uiText("Providers", undefined, undefined, uiLocale)}>
+      <SettingsSection title={uiText("AI defaults", undefined, undefined, uiLocale)}>
+        <TextGenerationModelSettingsRow />
+      </SettingsSection>
       <SettingsSection
         headerAction={
           <div className="flex items-center gap-1.5">
@@ -2654,6 +2558,30 @@ function ThreadHistoryEmpty({
   );
 }
 
+function HistorySettingsNavigation({ deleted }: { deleted: boolean }) {
+  const uiLocale = useUiLocale();
+  return (
+    <nav aria-label={uiText("Chat history", undefined, undefined, uiLocale)} className="flex gap-2">
+      <Button
+        render={<Link to="/settings/archived" />}
+        size="sm"
+        variant={deleted ? "ghost" : "secondary"}
+        aria-current={deleted ? undefined : "page"}
+      >
+        {uiText("Archive", undefined, undefined, uiLocale)}
+      </Button>
+      <Button
+        render={<Link to="/settings/recently-deleted" />}
+        size="sm"
+        variant={deleted ? "secondary" : "ghost"}
+        aria-current={deleted ? "page" : undefined}
+      >
+        {uiText("Recently deleted", undefined, undefined, uiLocale)}
+      </Button>
+    </nav>
+  );
+}
+
 export function ArchivedThreadsPanel() {
   const uiLocale = useUiLocale();
   const uiPresentation = useUiPresentation(UI_PRESENTATION_SOURCES);
@@ -2717,7 +2645,8 @@ export function ArchivedThreadsPanel() {
   );
 
   return (
-    <SettingsPageContainer title={uiText("Archive", undefined, undefined, uiLocale)}>
+    <SettingsPageContainer title={uiText("History", undefined, undefined, uiLocale)}>
+      <HistorySettingsNavigation deleted={false} />
       {archivedGroups.length === 0 ? (
         isLoadingArchive || showArchiveSkeleton ? (
           showArchiveSkeleton ? (
@@ -2988,7 +2917,8 @@ export function RecentlyDeletedThreadsPanel() {
     ) : null;
 
   return (
-    <SettingsPageContainer title={uiText("Recently deleted", undefined, undefined, uiLocale)}>
+    <SettingsPageContainer title={uiText("History", undefined, undefined, uiLocale)}>
+      <HistorySettingsNavigation deleted />
       {deletedGroups.length === 0 ? (
         isLoadingDeleted || showDeletedSkeleton ? (
           showDeletedSkeleton ? (

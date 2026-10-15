@@ -53,7 +53,6 @@ import {
   type Icon,
 } from "../Icons";
 import { RedactedSensitiveText } from "./RedactedSensitiveText";
-import { TextGenerationModelSettingsRow } from "./SettingsPanels";
 import { SettingResetButton, SettingsPageContainer, SettingsSection } from "./settingsLayout";
 
 const EMPTY_DISCOVERY_RESULT: SourceControlDiscoveryResult = {
@@ -533,10 +532,6 @@ export function SourceControlSettingsPanel() {
 
   return (
     <SettingsPageContainer title={uiText("Source control", undefined, undefined, uiLocale)}>
-      <SettingsSection title={uiText("Generated text", undefined, undefined, uiLocale)}>
-        <TextGenerationModelSettingsRow />
-      </SettingsSection>
-
       {isInitialScanPending || showInitialScanSkeleton ? (
         showInitialScanSkeleton ? (
           <>

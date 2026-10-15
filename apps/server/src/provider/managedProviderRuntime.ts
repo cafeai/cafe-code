@@ -1,6 +1,7 @@
 // @effect-diagnostics nodeBuiltinImport:off
 import type { ProviderCliRuntimeSource, ProviderDriverKind } from "@cafecode/contracts";
 import path from "node:path";
+import { lstatSync, readFileSync } from "node:fs";
 
 import {
   makeManualOnlyProviderMaintenanceCapabilities,
@@ -122,14 +123,37 @@ export function resolveManagedProviderRuntimeLayout(input: {
     return null;
   }
 
+  let selectedRoot = managedRoot;
+  let activeGeneration = false;
+  try {
+    const activationPath = windowsPathFromSegments(managedRoot, "active-runtime.json");
+    const entry = lstatSync(activationPath);
+    if (!entry.isFile() || entry.isSymbolicLink() || entry.size > 1024) return null;
+    const activation = JSON.parse(readFileSync(activationPath, "utf8")) as {
+      version?: unknown;
+      generation?: unknown;
+    };
+    if (
+      activation.version !== 1 ||
+      typeof activation.generation !== "string" ||
+      !/^[a-f0-9]{32}$/u.test(activation.generation)
+    )
+      return null;
+    selectedRoot = windowsPathFromSegments(managedRoot, "generations", activation.generation);
+    activeGeneration = true;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") return null;
+  }
   const nodeDir =
     readEnvValue(env, CAFE_CODE_BUNDLED_NODE_DIR_ENV) ??
-    windowsPathFromSegments(managedRoot, "node", "current");
+    windowsPathFromSegments(selectedRoot, "node", ...(activeGeneration ? [] : ["current"]));
   const npmPath =
     readEnvValue(env, CAFE_CODE_BUNDLED_NPM_PATH_ENV) ??
     windowsPathFromSegments(nodeDir, "npm.cmd");
-  const providerRoot = windowsPathFromSegments(managedRoot, "providers", metadata.slug);
-  const installRoot = windowsPathFromSegments(providerRoot, "current");
+  const providerRoot = windowsPathFromSegments(selectedRoot, "providers", metadata.slug);
+  const installRoot = activeGeneration
+    ? providerRoot
+    : windowsPathFromSegments(providerRoot, "current");
   const binaryDir = windowsPathFromSegments(installRoot, "node_modules", ".bin");
 
   return {
@@ -229,10 +253,16 @@ export function resolveProviderRuntimeEnvironment(
       npm_config_prefix: layout.npmPrefixDir,
       npm_config_cache: layout.npmCacheDir,
     },
-    maintenanceCapabilities: makeManagedProviderMaintenanceCapabilities({
-      definition: input.packageMaintenance,
-      layout,
-    }),
+    maintenanceCapabilities:
+      layout.installRoot === layout.providerRoot
+        ? makeManualOnlyProviderMaintenanceCapabilities({
+            provider: input.packageMaintenance.provider,
+            packageName: input.packageMaintenance.npmPackageName,
+          })
+        : makeManagedProviderMaintenanceCapabilities({
+            definition: input.packageMaintenance,
+            layout,
+          }),
     layout,
     unavailableReason: null,
   };

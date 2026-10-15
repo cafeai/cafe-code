@@ -1,0 +1,58 @@
+{
+  "version": 1,
+  "node": "24.21.0",
+  "providers": {
+    "codex": "0.160.0",
+    "claude": "2.1.295"
+  },
+  "packages": [
+    {
+      "name": "@openai/codex",
+      "version": "0.160.0",
+      "installPath": "@openai/codex",
+      "arch": "all",
+      "url": "https://registry.npmjs.org/@openai/codex/-/codex-0.160.0.tgz",
+      "integrity": "sha512-kEtVGzjRAYAMOwJxN39bGcna7LT3IDQgq64NNJ/dDTfu4OzZaocJcyNb5/gGJ/IVF/Vj7oK7E2m3nmTan7lpjg=="
+    },
+    {
+      "name": "@openai/codex",
+      "version": "0.160.0-win32-x64",
+      "installPath": "@openai/codex-win32-x64",
+      "arch": "x64",
+      "url": "https://registry.npmjs.org/@openai/codex/-/codex-0.160.0-win32-x64.tgz",
+      "integrity": "sha512-/gCFcuOmGlQkgGivWCtY8BNEDixh70Pue0HZOk9S8bj2vUIE1GLD9zcNB/KqqDJmn0S+lIttauLpzQnw6HOCHA=="
+    },
+    {
+      "name": "@openai/codex",
+      "version": "0.160.0-win32-arm64",
+      "installPath": "@openai/codex-win32-arm64",
+      "arch": "arm64",
+      "url": "https://registry.npmjs.org/@openai/codex/-/codex-0.160.0-win32-arm64.tgz",
+      "integrity": "sha512-tTvK9ZIGuj9WnYaYOAnfjJVSfPV7dKqWtDHqUPLf0Hadp6SgynTxx7S7iMXRieFeXVOI2XH76KxEHSOTOnz3zw=="
+    },
+    {
+      "name": "@anthropic-ai/claude-code",
+      "version": "2.1.295",
+      "installPath": "@anthropic-ai/claude-code",
+      "arch": "all",
+      "url": "https://registry.npmjs.org/@anthropic-ai/claude-code/-/claude-code-2.1.295.tgz",
+      "integrity": "sha512-PTdE5NdqwwyCmtbX/0WAuosyip8DkwC6M5mAJv+b9KGuxMFnkTJbc2b3EY6FYdo5ZTWkm6MN8reA9YWWMrLR+g=="
+    },
+    {
+      "name": "@anthropic-ai/claude-code-win32-x64",
+      "version": "2.1.295",
+      "installPath": "@anthropic-ai/claude-code-win32-x64",
+      "arch": "x64",
+      "url": "https://registry.npmjs.org/@anthropic-ai/claude-code-win32-x64/-/claude-code-win32-x64-2.1.295.tgz",
+      "integrity": "sha512-absbtyFKyhebVBSilCIj/JXVERLjXDAo4ID3nVRwNb52HCXfjd+g+b1THrq6NCNXCVcrpC+skkNfBqqy0N726A=="
+    },
+    {
+      "name": "@anthropic-ai/claude-code-win32-arm64",
+      "version": "2.1.295",
+      "installPath": "@anthropic-ai/claude-code-win32-arm64",
+      "arch": "arm64",
+      "url": "https://registry.npmjs.org/@anthropic-ai/claude-code-win32-arm64/-/claude-code-win32-arm64-2.1.295.tgz",
+      "integrity": "sha512-DOc5gff2KqGH+VPqs7J7D7iurRI0/V2OX8aIZN33bS0lOgU5IuYmWjEDoD9yFQRlOC2ebuD9ks00cYU+yI6/xQ=="
+    }
+  ]
+}

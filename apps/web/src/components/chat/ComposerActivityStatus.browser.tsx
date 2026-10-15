@@ -25,6 +25,7 @@ function Fixture(props: ComponentProps<typeof ComposerActivityStatus> & { width?
         <ComposerActivityStatus
           activity={props.activity}
           turnStartedAt={props.turnStartedAt}
+          generationRate={props.generationRate}
           onOpenTasks={props.onOpenTasks}
         />
       </div>
@@ -43,6 +44,10 @@ function elapsedWrapper(): HTMLElement {
   const element = document.querySelector<HTMLElement>("[data-activity-elapsed-revealed]");
   expect(element).not.toBeNull();
   return element!;
+}
+
+function rateElement(): HTMLElement | null {
+  return document.querySelector<HTMLElement>('[data-activity-generation-rate="true"]');
 }
 
 function elapsedTimer(): HTMLElement {
@@ -150,6 +155,59 @@ describe("composer activity hover elapsed time", () => {
     await page.getByRole("button", { name: "After activity" }).hover();
     await expectRevealed(false);
     expect(line.getAttribute("aria-describedby")).toBeNull();
+    expect(onOpenTasks).not.toHaveBeenCalled();
+  });
+
+  it("reveals the measured generation speed beside the elapsed time", async () => {
+    const onOpenTasks = vi.fn();
+    const start = new Date(Date.now() - 30_000).toISOString();
+    mounted = await render(
+      <Fixture
+        activity={WORKING}
+        turnStartedAt={start}
+        generationRate={{ tokensPerSecond: 84.4, measuredMs: 5_000 }}
+        onOpenTasks={onOpenTasks}
+      />,
+    );
+    // Viewer-native number formatting, never a hard-coded locale.
+    const whole = new Intl.NumberFormat(undefined, { maximumFractionDigits: 0 }).format(84.4);
+
+    await page.getByRole("button", { name: "Before activity" }).hover();
+    await expectRevealed(false);
+    const line = activityElement();
+    const collapsedHeight = line.getBoundingClientRect().height;
+    expect(line.getAttribute("aria-describedby")).toBeNull();
+
+    await page.getByRole("button", { name: "Running command…. Show tasks" }).hover();
+    await expectRevealed(true);
+    expect(rateElement()?.textContent).toContain(`${whole} tok/s`);
+    const describedBy = line.getAttribute("aria-describedby")?.split(" ") ?? [];
+    expect(describedBy).toHaveLength(2);
+    const rateDescription = document.getElementById(describedBy[1]!);
+    expect(rateDescription?.textContent).toBe(`Generation speed: ${whole} tokens per second`);
+    await expect
+      .element(line)
+      .toHaveAccessibleDescription(
+        new RegExp(`^Elapsed turn time: .+ Generation speed: ${whole} tokens per second$`),
+      );
+    expect(Math.abs(line.getBoundingClientRect().height - collapsedHeight)).toBeLessThanOrEqual(1);
+
+    // Slow rates keep one decimal; a missing measurement removes the segment.
+    await mounted.rerender(
+      <Fixture
+        activity={WORKING}
+        turnStartedAt={start}
+        generationRate={{ tokensPerSecond: 7.25, measuredMs: 1_200 }}
+        onOpenTasks={onOpenTasks}
+      />,
+    );
+    const slow = new Intl.NumberFormat(undefined, { maximumFractionDigits: 1 }).format(7.25);
+    expect(rateElement()?.textContent).toContain(`${slow} tok/s`);
+    await mounted.rerender(
+      <Fixture activity={WORKING} turnStartedAt={start} onOpenTasks={onOpenTasks} />,
+    );
+    expect(rateElement()).toBeNull();
+    await expectElapsedDescription();
     expect(onOpenTasks).not.toHaveBeenCalled();
   });
 

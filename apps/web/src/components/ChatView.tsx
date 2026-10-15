@@ -346,7 +346,8 @@ import {
   summarizeDebugNotableThread,
 } from "./chat/chatDebugSummary";
 
-const IMAGE_ONLY_BOOTSTRAP_PROMPT =
+// Recognize old saved messages when restoring retries; new image-only messages use empty text.
+const LEGACY_IMAGE_ONLY_BOOTSTRAP_PROMPT =
   "[User attached one or more images without additional text. Respond using the conversation context and the attached image(s).]";
 const FILE_ONLY_BOOTSTRAP_PROMPT =
   "[User attached files without additional text. Use the conversation context and the attached file copies.]";
@@ -1693,11 +1694,11 @@ export default function ChatView(props: ChatViewProps) {
               }
             : await restoreCanonicalRetryImages(candidate.message.attachments);
           const snapshot: ComposerSendSnapshot = pending?.snapshot ?? {
-            // Image-only canonical messages contain Cafe's transport bootstrap
+            // Older image-only messages contain Cafe's transport bootstrap
             // text. Restore the original empty composer text when images are
             // still present so retries do not expose or duplicate that marker.
             promptText:
-              candidate.message.text === IMAGE_ONLY_BOOTSTRAP_PROMPT &&
+              candidate.message.text === LEGACY_IMAGE_ONLY_BOOTSTRAP_PROMPT &&
               (candidate.message.attachments?.length ?? 0) > 0
                 ? ""
                 : candidate.message.text,
@@ -4752,9 +4753,7 @@ export default function ChatView(props: ChatViewProps) {
       model: snapshot.model,
       models: snapshot.providerModels,
       effort: snapshot.promptEffort,
-      text:
-        snapshot.promptText ||
-        (snapshot.files.length > 0 ? FILE_ONLY_BOOTSTRAP_PROMPT : IMAGE_ONLY_BOOTSTRAP_PROMPT),
+      text: snapshot.promptText || (snapshot.files.length > 0 ? FILE_ONLY_BOOTSTRAP_PROMPT : ""),
     });
 
   const clearActiveComposerContent = (expected: ComposerThreadDraftState | null) => {
@@ -5853,8 +5852,6 @@ export default function ChatView(props: ChatViewProps) {
       images: composerImages,
       provider: ctxSelectedProvider,
       model: ctxSelectedModel,
-      providerModels: ctxSelectedProviderModels,
-      promptEffort: ctxSelectedPromptEffort,
       modelSelection: ctxSelectedModelSelection,
     } = snapshot;
     const promptForSend = snapshot.promptText;
@@ -6127,18 +6124,9 @@ export default function ChatView(props: ChatViewProps) {
     beginLocalDispatch({ preparingWorktree: Boolean(baseBranchForWorktree) });
 
     const composerImagesSnapshot = [...composerImages];
-    const messageTextForSend = promptForSend;
     const messageIdForSend = newMessageId();
     const messageCreatedAt = new Date().toISOString();
-    const outgoingMessageText = formatOutgoingPrompt({
-      provider: ctxSelectedProvider,
-      model: ctxSelectedModel,
-      models: ctxSelectedProviderModels,
-      effort: ctxSelectedPromptEffort,
-      text:
-        messageTextForSend ||
-        (snapshot.files.length > 0 ? FILE_ONLY_BOOTSTRAP_PROMPT : IMAGE_ONLY_BOOTSTRAP_PROMPT),
-    });
+    const outgoingMessageText = outgoingTextForSnapshot(snapshot);
     const turnAttachmentsPromise = buildAttachmentsForSnapshot(snapshot);
     const optimisticAttachments = optimisticAttachmentsForSnapshot(snapshot);
     pinTimelineToEndForLocalMessage();

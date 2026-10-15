@@ -6,6 +6,7 @@ import {
   IsoDateTime,
   MessageId,
   NonNegativeInt,
+  PositiveInt,
   ProviderItemId,
   SubagentRuntimeId,
   ThreadId,
@@ -404,6 +405,10 @@ export const ProviderEvent = Schema.Struct({
   // Reserved owner-authored metadata, outside the untrusted native payload.
   // Used only on an exact terminal root publication after fresh local checks.
   nativeContextAvailable: Schema.optional(Schema.Literal(true)),
+  // Reserved owner-authored metadata: the observed streaming interval of the
+  // root response whose token usage this event reports. See
+  // ResponseGenerationSample; never derived from the untrusted native payload.
+  responseGenerationMs: Schema.optional(PositiveInt),
   kind: ProviderEventKind,
   provider: ProviderDriverKind,
   // See ProviderSession for the migration story.

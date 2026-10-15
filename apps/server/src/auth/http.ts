@@ -21,6 +21,8 @@ import {
   type SessionCredentialServiceShape,
 } from "./Services/SessionCredentialService.ts";
 import { deriveAuthClientMetadata } from "./utils.ts";
+import { isHttpsProxyRequest } from "../httpTransport.ts";
+import { readControlJson } from "../httpBody.ts";
 import { browserApiCorsHeaders } from "../httpCors.ts";
 
 export const respondToAuthError = (error: AuthError) =>
@@ -70,10 +72,6 @@ function hasRequestBody(headers: typeof PairingCredentialRequestHeaders.Type) {
   return typeof headers["transfer-encoding"] === "string";
 }
 
-const isHttpsProxyRequest = (request: HttpServerRequest.HttpServerRequest): boolean =>
-  request.headers["x-cafe-code-https-proxy"] === "1" &&
-  request.headers["x-forwarded-proto"]?.split(",", 1)[0]?.trim().toLowerCase() === "https";
-
 const browserSessionCookieOptions = (
   request: HttpServerRequest.HttpServerRequest,
   expiresAt: AuthBootstrapResult["expiresAt"],
@@ -100,7 +98,7 @@ export const authBootstrapRouteLayer = HttpRouter.add(
     const request = yield* HttpServerRequest.HttpServerRequest;
     const serverAuth = yield* ServerAuth;
     const sessions = yield* SessionCredentialService;
-    const payload = yield* HttpServerRequest.schemaBodyJson(AuthBootstrapInput).pipe(
+    const payload = yield* readControlJson(AuthBootstrapInput).pipe(
       Effect.mapError(
         (cause) =>
           new AuthError({
@@ -134,7 +132,7 @@ export const authBearerBootstrapRouteLayer = HttpRouter.add(
   Effect.gen(function* () {
     const request = yield* HttpServerRequest.HttpServerRequest;
     const serverAuth = yield* ServerAuth;
-    const payload = yield* HttpServerRequest.schemaBodyJson(AuthBootstrapInput).pipe(
+    const payload = yield* readControlJson(AuthBootstrapInput).pipe(
       Effect.mapError(
         (cause) =>
           new AuthError({
@@ -181,7 +179,7 @@ export const authPasswordBootstrapRouteLayer = HttpRouter.add(
     const request = yield* HttpServerRequest.HttpServerRequest;
     const serverAuth = yield* ServerAuth;
     const sessions = yield* SessionCredentialService;
-    const payload = yield* HttpServerRequest.schemaBodyJson(AuthPasswordBootstrapInput).pipe(
+    const payload = yield* readControlJson(AuthPasswordBootstrapInput).pipe(
       Effect.mapError(
         (cause) =>
           new AuthError({
@@ -210,7 +208,7 @@ export const authPasswordBearerBootstrapRouteLayer = HttpRouter.add(
   Effect.gen(function* () {
     const request = yield* HttpServerRequest.HttpServerRequest;
     const serverAuth = yield* ServerAuth;
-    const payload = yield* HttpServerRequest.schemaBodyJson(AuthPasswordBootstrapInput).pipe(
+    const payload = yield* readControlJson(AuthPasswordBootstrapInput).pipe(
       Effect.mapError(
         (cause) =>
           new AuthError({
@@ -270,7 +268,7 @@ export const authPairingCredentialRouteLayer = HttpRouter.add(
       ),
     );
     const payload = hasRequestBody(headers)
-      ? yield* HttpServerRequest.schemaBodyJson(AuthCreatePairingCredentialInput).pipe(
+      ? yield* readControlJson(AuthCreatePairingCredentialInput).pipe(
           Effect.mapError(
             (cause) =>
               new AuthError({
@@ -317,7 +315,7 @@ export const authAdminPasswordSetRouteLayer = HttpRouter.add(
   "/api/auth/admin-password",
   Effect.gen(function* () {
     const { serverAuth } = yield* authenticateOwnerSession;
-    const payload = yield* HttpServerRequest.schemaBodyJson(AuthSetAdminPasswordInput).pipe(
+    const payload = yield* readControlJson(AuthSetAdminPasswordInput).pipe(
       Effect.mapError(
         (cause) =>
           new AuthError({
@@ -363,7 +361,7 @@ export const authPairingLinksRevokeRouteLayer = HttpRouter.add(
   "/api/auth/pairing-links/revoke",
   Effect.gen(function* () {
     const { serverAuth } = yield* authenticateOwnerSession;
-    const payload = yield* HttpServerRequest.schemaBodyJson(AuthRevokePairingLinkInput).pipe(
+    const payload = yield* readControlJson(AuthRevokePairingLinkInput).pipe(
       Effect.mapError(
         (cause) =>
           new AuthError({
@@ -393,7 +391,7 @@ export const authClientsRevokeRouteLayer = HttpRouter.add(
   "/api/auth/clients/revoke",
   Effect.gen(function* () {
     const { serverAuth, session } = yield* authenticateOwnerSession;
-    const payload = yield* HttpServerRequest.schemaBodyJson(AuthRevokeClientSessionInput).pipe(
+    const payload = yield* readControlJson(AuthRevokeClientSessionInput).pipe(
       Effect.mapError(
         (cause) =>
           new AuthError({

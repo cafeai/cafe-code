@@ -177,7 +177,10 @@ export async function auditPackagedDesktopArtifact(
     return (
       artifactPath !== "app.asar" &&
       !artifactPath.startsWith("app.asar.unpacked/node_modules/") &&
-      !artifactPath.startsWith("managed-runtime/node/")
+      !artifactPath.startsWith("managed-runtime/node/") &&
+      !/^managed-runtime\/providers\/win-(?:x64|arm64)\/content\/(?:node\/|providers\/(?:codex|claude)\/node_modules\/)/u.test(
+        artifactPath,
+      )
     );
   });
   return await auditTextFiles(resourcesPath, externalFiles);

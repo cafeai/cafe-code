@@ -4,6 +4,11 @@ Created: 2026-07-15
 Source audit: [Cafe Code release-readiness audit](./release-readiness-audit-2026-07-15.md)
 Scope: all 42 audit findings, assigned once to a primary category
 
+Current implementation sequencing and acceptance criteria for the October 14
+P1 findings are in the [P1 release remediation plan](release-p1-remediation-plan.md).
+This historical worklist retains its original findings until each is reconciled
+with current implementation and verification evidence.
+
 The categories describe the primary nature of each finding. Some items have secondary reliability, security, or release-engineering effects. “Nice to haves” means product/release maturity work rather than an active code defect; several are still mandatory before calling the application stable.
 
 ## Nice to haves

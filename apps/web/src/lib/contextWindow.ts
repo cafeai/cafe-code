@@ -1,6 +1,8 @@
 import type { OrchestrationThreadActivity, ThreadTokenUsageSnapshot } from "@cafecode/contracts";
 import { uiText } from "@cafecode/shared/i18n";
 
+import { deriveGenerationRate, type GenerationRate } from "./generationRate";
+
 function asRecord(value: unknown): Record<string, unknown> | null {
   return value && typeof value === "object" ? (value as Record<string, unknown>) : null;
 }
@@ -24,6 +26,8 @@ export type ContextWindowSnapshot = NullableContextWindowUsage & {
   readonly usedPercentage: number | null;
   readonly remainingPercentage: number | null;
   readonly updatedAt: string;
+  /** Chat-wide average of the most recent measured decoding, when reported. */
+  readonly generationRate?: GenerationRate | null;
 };
 
 export function deriveLatestContextWindowSnapshot(
@@ -72,6 +76,7 @@ export function deriveLatestContextWindowSnapshot(
       compactsAutomatically: asBoolean(payload?.compactsAutomatically) ?? false,
       autoCompactTokenLimit: asFiniteNumber(payload?.autoCompactTokenLimit),
       updatedAt: activity.createdAt,
+      generationRate: deriveGenerationRate(activities),
     };
   }
 

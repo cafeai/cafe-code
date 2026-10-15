@@ -1,3 +1,7 @@
+import {
+  makeManagementMcpSession,
+  type ManagementMcpBinding,
+} from "../../mcp/sessionConnection.ts";
 import { isArchivedPrivateToolServer } from "../archivedToolPrivacy.ts";
 
 import {
@@ -88,6 +92,7 @@ import {
 } from "@cafecode/shared/providerDiagnostic";
 import { resolveCodexServiceTier } from "../codexServiceTier.ts";
 import { resolveCodexDaybreak } from "../codexDaybreak.ts";
+import { makeResponseGenerationSample } from "../responseGenerationClock.ts";
 import {
   classifyCodexTransientFailure,
   redactCodexFailureDiagnosticPayload,
@@ -500,6 +505,7 @@ export interface CodexAdapterLiveOptions {
 interface CodexAdapterSessionContext {
   readonly startInput: Parameters<CodexAdapterShape["startSession"]>[0];
   readonly schedulingBinding?: SchedulingSessionBinding | undefined;
+  readonly managementBinding?: ManagementMcpBinding | undefined;
   readonly visualizationBinding?: VisualizationSessionBinding | undefined;
   readonly threadId: ThreadId;
   readonly scope: Scope.Closeable;
@@ -1064,6 +1070,7 @@ function persistCodexTransportPolicy(
 function normalizeCodexTokenUsage(
   usage: EffectCodexSchema.V2ThreadTokenUsageUpdatedNotification["tokenUsage"],
   autoCompactTokenLimit: number | undefined,
+  responseGenerationMs?: number,
 ): ThreadTokenUsageSnapshot | undefined {
   const totalProcessedTokens = usage.total.totalTokens;
   const usedTokens = usage.last.totalTokens;
@@ -1079,6 +1086,9 @@ function normalizeCodexTokenUsage(
   const outputTokens = usage.last.outputTokens;
   const reasoningOutputTokens = usage.last.reasoningOutputTokens;
   const totalOutputTokens = usage.total.outputTokens;
+  // `usage.last` is exactly the response the runtime timed (see
+  // codexResponseGeneration.ts); revalidate rather than trust the pairing.
+  const responseGeneration = makeResponseGenerationSample(outputTokens, responseGenerationMs);
 
   return {
     usedTokens,
@@ -1112,6 +1122,7 @@ function normalizeCodexTokenUsage(
       : {}),
     compactsAutomatically: true,
     ...(autoCompactTokenLimit !== undefined ? { autoCompactTokenLimit } : {}),
+    ...(responseGeneration ? { responseGeneration } : {}),
   };
 }
 
@@ -3878,7 +3889,11 @@ function mapToRuntimeEvents(
       event.payload,
     );
     const normalizedUsage = payload
-      ? normalizeCodexTokenUsage(payload.tokenUsage, autoCompactTokenLimit)
+      ? normalizeCodexTokenUsage(
+          payload.tokenUsage,
+          autoCompactTokenLimit,
+          event.responseGenerationMs,
+        )
       : undefined;
     if (!normalizedUsage) {
       return [];
@@ -5287,6 +5302,7 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
     session.stopped = true;
     // Revoke this runtime's exact authority before retiring the native process.
     // A delayed bridge request must never inherit a replacement's generation.
+    yield* session.managementBinding?.dispose ?? Effect.void;
     yield* disposeSchedulingSession(session.schedulingBinding);
     yield* Effect.promise(() => session.visualizationBinding?.dispose() ?? Promise.resolve()).pipe(
       Effect.catch(() =>
@@ -5412,6 +5428,23 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
         const sessionScope = yield* Effect.acquireRelease(Scope.make("sequential"), (scope) =>
           sessionScopeTransferred ? Effect.void : Scope.close(scope, Exit.void),
         );
+        const managementBinding = yield* Effect.acquireRelease(
+          makeManagementMcpSession({
+            threadId: input.threadId,
+            providerInstanceId: boundInstanceId,
+          }).pipe(
+            Effect.provideService(ServerConfig, serverConfig),
+            Effect.mapError(
+              () =>
+                new ProviderAdapterProcessError({
+                  provider: PROVIDER,
+                  threadId: input.threadId,
+                  detail: "Could not attach Cafe management tools.",
+                }),
+            ),
+          ),
+          (binding) => binding?.dispose ?? Effect.void,
+        ).pipe(Effect.provideService(Scope.Scope, sessionScope));
         const schedulingBroker = readSchedulingSessionBroker();
         // acquireRelease registers revocation atomically with successful bind.
         // The broker creates private files asynchronously: interrupting an
@@ -5518,6 +5551,7 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
                     ),
                   ),
           },
+          ...(managementBinding ? { managementMcp: managementBinding } : {}),
           ...(schedulingBinding
             ? { schedulingMcp: { name: schedulingBinding.name, launch: schedulingBinding.launch } }
             : {}),
@@ -5954,6 +5988,7 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
           visualizationBinding,
           startInput: input,
           schedulingBinding,
+          managementBinding,
           threadId: input.threadId,
           scope: sessionScope,
           runtime,
@@ -6619,6 +6654,7 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
     // projected. Its queue is adapter-owned, so closing the session scope does
     // not discard the resulting canonical task terminals.
     session.stopped = true;
+    yield* session.managementBinding?.dispose ?? Effect.void;
     yield* disposeSchedulingSession(session.schedulingBinding);
     yield* Effect.promise(() => session.visualizationBinding?.dispose() ?? Promise.resolve()).pipe(
       Effect.catch(() =>

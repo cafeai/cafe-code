@@ -5,10 +5,37 @@ Cafe Code publishes intentionally unsigned desktop artifacts from version tags. 
 Windows x64 NSIS, macOS arm64/x64 DMG plus updater ZIP, and Linux x64 AppImage. Linux formats other
 than x64 AppImage are not currently supported.
 
-Before publication, the workflow merges the two macOS manifests and verifies every updater asset's
-size and SHA-512 digest. It also publishes `SHA256SUMS.txt` for manual downloads. After publication,
-a lower-version packaged AppImage runs a detection-only probe against the public GitHub feed and
-must report the exact released version. The probe never downloads or installs the update.
+Before publication, the exact tag commit runs the reusable native quality and reliability
+workflows, including full/focused browser coverage, the immutable release smoke, and an
+unfiltered dependency audit. Every artifact passes its native readiness/install checks before
+its source SHA and asset bytes are sealed. Publication rechecks that complete four-target
+evidence set, merges macOS manifests and verifies updater sizes and SHA-512 digests. It publishes
+`SHA256SUMS.txt` for manual downloads. A lower-version packaged AppImage must identify the exact
+candidate through a local feed before GitHub publication; the public GitHub feed is checked
+again afterward. These probes detect updates without downloading or installing them.
+
+If the public-feed probe fails, stop promotion and announce the affected tag through the normal
+release process. Inspect the exact version/feed/artifact evidence, then withdraw the broken
+release from the public update feed or publish a corrected higher version after all gates pass.
+Do not move an existing tag, replace qualified binaries silently, or bypass the failed check.
+Withdrawal/replacement is a separately authorized release action.
+
+## Windows managed providers
+
+A fresh Windows installation can use the offline, reviewed Node/Codex/Claude bundle. Package
+versions, native architecture closure and archive integrity are recorded in
+`packaging/managed-providers/manifest.json`. Installation needs no registry access and executes
+no package scripts. The hidden installer holds an OS file guard, stages an exclusive generation,
+verifies every file and exact runtime version, and publishes a single activation record.
+First-run bundled preferences publish only after successful preparation and activation; existing
+preferences remain intact. Failures return nonzero to NSIS and preserve the prior generation
+and recovery records. An interrupted preparation child cannot activate its files.
+
+Repair by rerunning the reviewed installer. Selected generations are immutable to Cafe's package
+update controls. Old `current` paths remain compatible when no activation record exists; an
+invalid activation record fails closed. Application updates retain the existing `--updated`
+exclusion from fresh provider bootstrap. Neither repair nor uninstall guesses which unselected
+or running generation can be deleted; retained user runtime/data policy is unchanged.
 
 ## Runtime Behavior
 

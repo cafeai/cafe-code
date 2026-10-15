@@ -1,3 +1,4 @@
+import * as ManagementMcp from "../../mcp/sessionConnection.ts";
 import assert from "node:assert/strict";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { it } from "@effect/vitest";
@@ -11,7 +12,7 @@ import * as Schema from "effect/Schema";
 import * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
 import * as TestClock from "effect/testing/TestClock";
-import { beforeEach } from "vitest";
+import { beforeEach, vi } from "vitest";
 
 import {
   OpenCodeSettings,
@@ -257,6 +258,52 @@ const advanceTestClock = (ms: number) =>
   TestClock.adjust(`${ms} millis`).pipe(Effect.andThen(Effect.yieldNow));
 
 it.layer(IsolatedOpenCodeAdapterTestLayer)("OpenCodeAdapterLive", (it) => {
+  it.effect(
+    "adds management MCP only to the chat-owned OpenCode server and cleans it up on stop",
+    () =>
+      Effect.gen(function* () {
+        const launch = {
+          command: process.execPath,
+          args: ["inert-bridge.mjs", "inert-connection.json"],
+          env: { ELECTRON_RUN_AS_NODE: "1" },
+        };
+        let disposed = false;
+        const binding = {
+          name: "cafe-code-fixture",
+          launch,
+          dispose: Effect.sync(() => {
+            disposed = true;
+          }),
+        };
+        const spy = vi
+          .spyOn(ManagementMcp, "makeManagementMcpSession")
+          .mockReturnValue(Effect.succeed(binding));
+        const connect = vi.spyOn(OpenCodeRuntimeTestDouble, "connectToOpenCodeServer");
+        yield* Effect.addFinalizer(() =>
+          Effect.sync(() => {
+            spy.mockRestore();
+            connect.mockRestore();
+          }),
+        );
+        const hosted = yield* OpenCodeAdapter;
+        yield* hosted.startSession({
+          threadId: asThreadId("hosted-mcp"),
+          runtimeMode: "approval-required",
+        });
+        assert.equal(spy.mock.calls.length, 0);
+        assert.equal(connect.mock.calls.at(-1)?.[0].managementMcp, undefined);
+        const local = yield* makeOpenCodeAdapter(
+          Schema.decodeSync(OpenCodeSettings)({ binaryPath: "fake-opencode" }),
+        );
+        const threadId = asThreadId("local-mcp");
+        yield* local.startSession({ threadId, runtimeMode: "approval-required" });
+        assert.equal(connect.mock.calls.at(-1)?.[0].managementMcp?.name, binding.name);
+        assert.equal(spy.mock.calls.length, 1);
+        yield* local.stopSession(threadId);
+        assert.equal(disposed, true);
+      }),
+  );
+
   it.effect(
     "uses native compaction without sending a prompt and releases admission on completion",
     () =>

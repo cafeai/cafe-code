@@ -63,6 +63,12 @@ export function ProviderAccountQuotaDetails(props: {
   // They must not reappear beneath a newly scoped unavailable/offline report.
   // Existing unscoped consumers and other provider drivers remain unchanged.
   const legacy = props.sessionQuota ? null : presentation;
+  const inlineCredits =
+    (layout === "panel" || layout === "popover") &&
+    legacy?.resetAvailability &&
+    legacy.buckets.length === 1
+      ? legacy.buckets[0]?.details.find((line) => line.kind === "credits")
+      : undefined;
   return (
     <div
       className={cn(
@@ -83,12 +89,14 @@ export function ProviderAccountQuotaDetails(props: {
           aria-label={uiText("Account usage", undefined, undefined, uiLocale)}
           data-claude-session-quota
         >
-          <div className="label-overline">
-            {uiText("Account usage", undefined, undefined, uiLocale)}
-          </div>
-          <p>{uiText("Session-reported · not account-verified", undefined, undefined, uiLocale)}</p>
           {session ? (
             <>
+              <div className="label-overline">
+                {uiText("Account usage", undefined, undefined, uiLocale)}
+              </div>
+              <p>
+                {uiText("Session-reported · not account-verified", undefined, undefined, uiLocale)}
+              </p>
               <p>
                 {uiText(
                   "{observed} · local time{stale, select, yes { · Stale reading} other {}}",
@@ -183,29 +191,22 @@ export function ProviderAccountQuotaDetails(props: {
                   </section>
                 ) : null}
               </div>
+              <p>
+                {uiText(
+                  "Request /usage in Claude to update. Opening this view does not refresh it.",
+                  undefined,
+                  undefined,
+                  uiLocale,
+                )}
+              </p>
             </>
           ) : (
             <p>
               {props.sessionQuota.status === "loading"
                 ? uiText("Loading session report…", undefined, undefined, uiLocale)
-                : props.sessionQuota.status === "offline"
-                  ? uiText(
-                      "Session report unavailable while disconnected.",
-                      undefined,
-                      undefined,
-                      uiLocale,
-                    )
-                  : uiText("No session quota report available.", undefined, undefined, uiLocale)}
+                : uiText("Claude limits are unavailable.", undefined, undefined, uiLocale)}
             </p>
           )}
-          <p>
-            {uiText(
-              "Request /usage in Claude to update. Opening this view does not refresh it.",
-              undefined,
-              undefined,
-              uiLocale,
-            )}
-          </p>
         </section>
       ) : null}
       {legacy?.buckets.length ? (
@@ -302,13 +303,25 @@ export function ProviderAccountQuotaDetails(props: {
                   ))}
                 </div>
               ) : (
-                bucket.details.map((line) => <p key={line.label}>{line.text}</p>)
+                bucket.details
+                  .filter((line) => line !== inlineCredits)
+                  .map((line) => <p key={line.label}>{line.text}</p>)
               )}
             </section>
           ))}
         </div>
       ) : null}
-      {legacy?.resetAvailability ? <p className="shrink-0">{legacy.resetAvailability}</p> : null}
+      {inlineCredits ? (
+        <div
+          className="flex min-w-0 shrink-0 flex-wrap items-baseline gap-x-3 gap-y-1"
+          data-account-quota-summary
+        >
+          <p className="min-w-0 max-w-full">{inlineCredits.text}</p>
+          <p className="min-w-0 max-w-full">{legacy?.resetAvailability}</p>
+        </div>
+      ) : legacy?.resetAvailability ? (
+        <p className="shrink-0">{legacy.resetAvailability}</p>
+      ) : null}
     </div>
   );
 }

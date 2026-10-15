@@ -16,7 +16,8 @@ import { useWorkspaceEnvironmentId } from "../environments/workspace";
 function RestoreDefaultsButton({ onRestored }: { onRestored: () => void }) {
   const uiLocale = useUiLocale();
 
-  const { changedSettingLabels, restoreDefaults } = useSettingsRestore(onRestored);
+  const pathname = useLocation({ select: (location) => location.pathname });
+  const { changedSettingLabels, restoreDefaults } = useSettingsRestore(onRestored, pathname);
 
   return (
     <Button
@@ -26,7 +27,7 @@ function RestoreDefaultsButton({ onRestored }: { onRestored: () => void }) {
       onClick={() => void restoreDefaults()}
     >
       <RotateCcwIcon className="size-3.5" />
-      {uiText("Restore defaults", undefined, undefined, uiLocale)}
+      {uiText("Reset this page", undefined, undefined, uiLocale)}
     </Button>
   );
 }
@@ -120,10 +121,8 @@ export const Route = createFileRoute("/settings")({
 
 const SETTINGS_RESTORE_DEFAULTS_PATHS = new Set([
   "/settings/appearance",
-  "/settings/ambiance",
   "/settings/chat-threads",
-  "/settings/files",
   "/settings/source-control",
-  "/settings/system",
   "/settings/general",
+  "/settings/providers",
 ]);

@@ -41,36 +41,6 @@ function Write-JsonFile {
   $Value | ConvertTo-Json -Depth 12 | Set-Content -LiteralPath $Path -Encoding UTF8
 }
 
-function Copy-DirectoryContents {
-  param(
-    [string]$Source,
-    [string]$Destination
-  )
-
-  if (-not (Test-Path -LiteralPath $Source -PathType Container)) {
-    throw "Source directory does not exist: $Source"
-  }
-
-  $parent = Split-Path -Parent $Destination
-  New-Item -ItemType Directory -Path $parent -Force | Out-Null
-  $temporaryDestination = Join-Path $parent ("current.tmp-" + [Guid]::NewGuid().ToString("N"))
-  New-Item -ItemType Directory -Path $temporaryDestination -Force | Out-Null
-
-  try {
-    Get-ChildItem -LiteralPath $Source -Force | ForEach-Object {
-      Copy-Item -LiteralPath $_.FullName -Destination $temporaryDestination -Recurse -Force
-    }
-
-    if (Test-Path -LiteralPath $Destination) {
-      Remove-Item -LiteralPath $Destination -Recurse -Force
-    }
-    Move-Item -LiteralPath $temporaryDestination -Destination $Destination -Force
-  } catch {
-    Remove-Item -LiteralPath $temporaryDestination -Recurse -Force -ErrorAction SilentlyContinue
-    throw
-  }
-}
-
 function Resolve-ManagedNodeSource {
   param([string]$InstallDir)
 
@@ -88,8 +58,7 @@ function Resolve-ManagedNodeSource {
   foreach ($candidateName in $candidateNames) {
     $candidate = Join-Path $nodeRoot $candidateName
     if (
-      (Test-Path -LiteralPath (Join-Path $candidate "node.exe") -PathType Leaf) -and
-      (Test-Path -LiteralPath (Join-Path $candidate "npm.cmd") -PathType Leaf)
+      (Test-Path -LiteralPath (Join-Path $candidate "node.exe") -PathType Leaf)
     ) {
       return $candidate
     }
@@ -98,88 +67,62 @@ function Resolve-ManagedNodeSource {
   throw "Could not find packaged managed Node runtime under $nodeRoot."
 }
 
-function Seed-FirstRunProviderSettings {
-  param([string]$UserProfile)
-
-  $settingsPath = Join-Path $UserProfile ".cafe-code\userdata\settings.json"
-  if (Test-Path -LiteralPath $settingsPath -PathType Leaf) {
-    Write-InstallerLog "Existing Cafe settings found; preserving provider runtime settings at $settingsPath."
-    return
-  }
-
-  $settings = [ordered]@{
-    providers = [ordered]@{
-      codex = [ordered]@{
-        runtimeSource = "bundled"
-      }
-      claudeAgent = [ordered]@{
-        runtimeSource = "bundled"
+function Assert-ManagedDirectory {
+  param([string]$Path)
+  $current = [IO.Path]::GetFullPath($Path)
+  while (-not [string]::IsNullOrEmpty($current)) {
+    if (Test-Path -LiteralPath $current) {
+      $entry = Get-Item -LiteralPath $current -Force
+      if (-not $entry.PSIsContainer -or ($entry.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
+        throw "Unsafe managed directory."
       }
     }
+    $parent = [IO.Path]::GetDirectoryName($current)
+    if ($parent -eq $current) { break }
+    $current = $parent
   }
-  Write-JsonFile -Path $settingsPath -Value $settings
-  Write-InstallerLog "Seeded first-run provider runtime settings at $settingsPath."
+  [IO.Directory]::CreateDirectory($Path) | Out-Null
 }
 
-function Install-ProviderPackage {
-  param(
-    [string]$Name,
-    [string]$PackageName,
-    [string]$ProviderSlug,
-    [string]$BinaryName,
-    [string]$ManagedRoot,
-    [string]$NodeTarget,
-    [string]$NpmPath,
-    [string]$NpmCache,
-    [string]$NpmUserConfig
-  )
-
-  $installRoot = Join-Path $ManagedRoot "providers\$ProviderSlug\current"
-  New-Item -ItemType Directory -Path $installRoot -Force | Out-Null
-
-  $originalPath = [Environment]::GetEnvironmentVariable("PATH", "Process")
-  [Environment]::SetEnvironmentVariable("PATH", "$NodeTarget;$originalPath", "Process")
-  [Environment]::SetEnvironmentVariable("npm_config_cache", $NpmCache, "Process")
-  [Environment]::SetEnvironmentVariable("npm_config_prefix", $installRoot, "Process")
-  [Environment]::SetEnvironmentVariable("npm_config_userconfig", $NpmUserConfig, "Process")
-  [Environment]::SetEnvironmentVariable("npm_config_update_notifier", "false", "Process")
-  [Environment]::SetEnvironmentVariable("npm_config_fund", "false", "Process")
-  [Environment]::SetEnvironmentVariable("npm_config_audit", "false", "Process")
-
-  $arguments = @(
-    "install",
-    "--prefix",
-    $installRoot,
-    "--cache",
-    $NpmCache,
-    "--no-audit",
-    "--no-fund",
-    "--loglevel",
-    "warn",
-    "$PackageName@latest"
-  )
-
-  Write-InstallerLog "Installing $Name provider package $PackageName into $installRoot."
-  $output = & $NpmPath @arguments 2>&1
-  $exitCode = $LASTEXITCODE
-  if ($null -ne $output) {
-    foreach ($line in $output) {
-      Write-InstallerLog "npm[$Name]: $line"
-    }
+function Assert-RegularRecord {
+  param([string]$Path)
+  $entry = Get-Item -LiteralPath $Path -Force
+  if ($entry.PSIsContainer -or ($entry.Attributes -band [IO.FileAttributes]::ReparsePoint) -or $entry.Length -gt 1048576) {
+    throw "Unsafe managed record."
   }
+}
 
-  $shimPath = Join-Path $installRoot "node_modules\.bin\$BinaryName.cmd"
-  $shimExists = Test-Path -LiteralPath $shimPath -PathType Leaf
-  Write-InstallerLog "Provider package install finished for $Name with exit code $exitCode; shim exists: $shimExists."
+function Write-ExclusiveUtf8 {
+  param([string]$Path, [string]$Contents)
+  $bytes = [Text.Encoding]::UTF8.GetBytes($Contents)
+  $file = [IO.File]::Open($Path, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::Read)
+  try { $file.Write($bytes, 0, $bytes.Length); $file.Flush($true) } finally { $file.Dispose() }
+}
 
-  return [ordered]@{
-    provider = $Name
-    packageName = $PackageName
-    installRoot = $installRoot
-    binaryPath = $shimPath
-    exitCode = $exitCode
-    installed = ($exitCode -eq 0 -and $shimExists)
+function Publish-ManagedRecord {
+  param([string]$Path, [string]$Contents)
+  $id = [Guid]::NewGuid().ToString("N")
+  $temporary = "$Path.$id.tmp"
+  $backup = "$Path.$id.previous"
+  Write-ExclusiveUtf8 -Path $temporary -Contents $Contents
+  $existed = Test-Path -LiteralPath $Path
+  if ($existed) {
+    Assert-RegularRecord -Path $Path
+    [IO.File]::Replace($temporary, $Path, $backup)
+  } else { [IO.File]::Move($temporary, $Path) }
+  return @{ Path = $Path; Contents = $Contents; Existed = $existed; Backup = $backup }
+}
+
+function Restore-ManagedRecord {
+  param([object]$Record)
+  if ($null -eq $Record) { return }
+  Assert-RegularRecord -Path $Record.Path
+  if ([IO.File]::ReadAllText($Record.Path) -cne $Record.Contents) {
+    throw "Managed publication changed; recovery evidence retained."
   }
+  if ($Record.Existed) {
+    [IO.File]::Replace($Record.Backup, $Record.Path, ($Record.Path + ".interrupted-" + [Guid]::NewGuid().ToString("N")))
+  } else { [IO.File]::Delete($Record.Path) }
 }
 
 $resolvedLocalAppData = Resolve-InstallerPath -Value $LocalAppData -EnvironmentName "LOCALAPPDATA" -Description "LOCALAPPDATA"
@@ -210,55 +153,68 @@ if (-not $Enabled) {
 
 try {
   $resolvedInstallDir = Resolve-InstallerPath -Value $InstallDir -EnvironmentName "ProgramFiles" -Description "installation directory"
-  New-Item -ItemType Directory -Path $managedRoot -Force | Out-Null
+  Assert-ManagedDirectory -Path $managedRoot
 
   $nodeSource = Resolve-ManagedNodeSource -InstallDir $resolvedInstallDir
-  $nodeTarget = Join-Path $managedRoot "node\current"
-  Copy-DirectoryContents -Source $nodeSource -Destination $nodeTarget
+  $architecture = Split-Path -Leaf $nodeSource
+  $bundleSource = Join-Path $resolvedInstallDir "resources\managed-runtime\providers\$architecture"
+  $nodePath = Join-Path $nodeSource "node.exe"
+  $installer = Join-Path $resolvedInstallDir "resources\managed-runtime\install-runtime.mjs"
+  $settingsPath = Join-Path $resolvedUserProfile ".cafe-code\userdata\settings.json"
+  # Hold an OS-enforced installer guard. A dead installer releases it without
+  # granting authority based on a PID or stale timestamp.
+  $guardPath = Join-Path $managedRoot "installer.guard"
+  $guard = [IO.File]::Open($guardPath, [IO.FileMode]::OpenOrCreate, [IO.FileAccess]::ReadWrite, [IO.FileShare]::None)
+  try {
+    [Environment]::SetEnvironmentVariable("NODE_OPTIONS", $null, "Process")
+    [Environment]::SetEnvironmentVariable("NODE_PATH", $null, "Process")
+    $prepared = @(& $nodePath $installer --prepare $bundleSource $managedRoot)
+    if ($LASTEXITCODE -ne 0 -or $prepared.Count -ne 1 -or $prepared[0] -cnotmatch '^[a-f0-9]{32}$') {
+      throw "Managed runtime preparation failed."
+    }
+    $generation = [string]$prepared[0]
+    $generationRoot = Join-Path $managedRoot "generations\$generation"
+    if (-not (Test-Path -LiteralPath $generationRoot -PathType Container)) { throw "Prepared generation is absent." }
+    Assert-ManagedDirectory -Path $generationRoot
+    $settingsParent = Split-Path -Parent $settingsPath
+    Assert-ManagedDirectory -Path $settingsParent
+    $settingsTemporary = Join-Path $settingsParent (".managed-settings-" + $generation + ".tmp")
+    $settingsJson = @{ providers = @{ codex = @{ runtimeSource = "bundled" }; claudeAgent = @{ runtimeSource = "bundled" } } } | ConvertTo-Json -Depth 6 -Compress
+    Write-ExclusiveUtf8 -Path $settingsTemporary -Contents $settingsJson
+    $activation = $null
+    $result = $null
+    try {
+      $activationJson = @{ version = 1; generation = $generation } | ConvertTo-Json -Compress
+      $activation = Publish-ManagedRecord -Path (Join-Path $managedRoot "active-runtime.json") -Contents $activationJson
+      $resultJson = @{
+        managedProviderRuntimeEnabled = $true
+        generation = $generation
+        nodePath = (Join-Path $generationRoot "node\node.exe")
+        providers = @(@{ provider = "Codex"; installed = $true }, @{ provider = "Claude"; installed = $true })
+      } | ConvertTo-Json -Depth 6 -Compress
+      $result = Publish-ManagedRecord -Path (Join-Path $managedRoot "install-result.json") -Contents $resultJson
+      if (Test-Path -LiteralPath $settingsPath) { Assert-RegularRecord -Path $settingsPath }
+      else {
+        try { [IO.File]::Move($settingsTemporary, $settingsPath) }
+        catch {
+          # A concurrently created valid preference wins; never overwrite it.
+          if (-not (Test-Path -LiteralPath $settingsPath)) { throw }
+          Assert-RegularRecord -Path $settingsPath
+        }
+      }
+      # Settings publication is the final fallible commit operation. Orphaned
+      # temporaries/backups are retained for repair, never blindly removed.
+    } catch {
+      Restore-ManagedRecord -Record $result
+      Restore-ManagedRecord -Record $activation
+      throw
+    }
+  } finally { $guard.Dispose() }
+  try { Write-InstallerLog "Verified managed provider generation activated." } catch { }
 
-  $nodePath = Join-Path $nodeTarget "node.exe"
-  $npmPath = Join-Path $nodeTarget "npm.cmd"
-  if (-not (Test-Path -LiteralPath $nodePath -PathType Leaf)) {
-    throw "Managed node.exe was not copied to $nodePath."
-  }
-  if (-not (Test-Path -LiteralPath $npmPath -PathType Leaf)) {
-    throw "Managed npm.cmd was not copied to $npmPath."
-  }
-  Write-InstallerLog "Copied managed Node/npm from $nodeSource to $nodeTarget."
-
-  Seed-FirstRunProviderSettings -UserProfile $resolvedUserProfile
-
-  $npmCache = Join-Path $managedRoot "npm-cache"
-  New-Item -ItemType Directory -Path $npmCache -Force | Out-Null
-  $npmUserConfig = Join-Path $managedRoot "npmrc"
-  @(
-    "audit=false",
-    "fund=false",
-    "progress=false",
-    "update-notifier=false"
-  ) | Set-Content -LiteralPath $npmUserConfig -Encoding UTF8
-
-  $results = @(
-    Install-ProviderPackage -Name "Codex" -PackageName "@openai/codex" -ProviderSlug "codex" -BinaryName "codex" -ManagedRoot $managedRoot -NodeTarget $nodeTarget -NpmPath $npmPath -NpmCache $npmCache -NpmUserConfig $npmUserConfig
-    Install-ProviderPackage -Name "Claude" -PackageName "@anthropic-ai/claude-code" -ProviderSlug "claude" -BinaryName "claude" -ManagedRoot $managedRoot -NodeTarget $nodeTarget -NpmPath $npmPath -NpmCache $npmCache -NpmUserConfig $npmUserConfig
-  )
-
-  Write-JsonFile -Path (Join-Path $managedRoot "install-result.json") -Value ([ordered]@{
-    managedProviderRuntimeEnabled = $true
-    nodePath = $nodePath
-    npmPath = $npmPath
-    updatedAt = (Get-Date).ToUniversalTime().ToString("o")
-    providers = $results
-  })
 } catch {
-  $message = $_.Exception.Message
-  Write-InstallerLog "Managed provider runtime bootstrap failed: $message"
-  Write-JsonFile -Path (Join-Path $managedRoot "install-result.json") -Value ([ordered]@{
-    managedProviderRuntimeEnabled = $true
-    failed = $true
-    error = $message
-    updatedAt = (Get-Date).ToUniversalTime().ToString("o")
-  })
+  try { Write-InstallerLog "Managed provider runtime bootstrap failed. Re-run the installer to repair; the prior generation is retained." } catch { }
+  exit 1
 }
 
 exit 0

@@ -1,6 +1,9 @@
 import type { SessionCredentialServiceShape } from "./Services/SessionCredentialService.ts";
 
-export type ProviderMcpCredentialIssuer = Pick<SessionCredentialServiceShape, "issue" | "revoke">;
+export type ProviderMcpCredentialIssuer = Pick<
+  SessionCredentialServiceShape,
+  "issue" | "revoke" | "verify"
+>;
 
 let activeIssuer: ProviderMcpCredentialIssuer | undefined;
 

@@ -1,3 +1,4 @@
+import * as ManagementMcp from "../../mcp/sessionConnection.ts";
 import { installVisualizationSessionRuntime } from "../../visualizations/sessionRuntime.ts";
 import { GENERATED_VISUALIZATION_INSTRUCTIONS } from "../../visualizations/mcp.ts";
 import { buildCafeInstructions } from "../CafeInstructions.ts";
@@ -51,7 +52,7 @@ import {
 } from "@cafecode/contracts";
 import { createModelSelection } from "@cafecode/shared/model";
 import { CLAUDE_RESPONSE_LIMIT_MESSAGE } from "@cafecode/shared/claudeResponseLimits";
-import { assert, describe, it } from "@effect/vitest";
+import { assert, describe, it, vi } from "@effect/vitest";
 import * as Context from "effect/Context";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
@@ -2166,6 +2167,22 @@ describe("ClaudeAdapterLive", () => {
         });
         return Effect.gen(function* () {
           const lifecycle: string[] = [];
+          let managementDisposed = false;
+          const management = {
+            name: "cafe-code-fixture",
+            launch: {
+              command: process.execPath,
+              args: [path.join(process.cwd(), "inert-management.mjs")],
+              env: { ELECTRON_RUN_AS_NODE: "1" },
+            },
+            dispose: Effect.sync(() => {
+              managementDisposed = true;
+            }),
+          };
+          const managerSpy = vi
+            .spyOn(ManagementMcp, "makeManagementMcpSession")
+            .mockReturnValue(Effect.succeed(management));
+          yield* Effect.addFinalizer(() => Effect.sync(() => managerSpy.mockRestore()));
           const releaseBroker = installSchedulingSessionBroker({
             bind: async (binding) => {
               assert.deepEqual(binding, {
@@ -2197,7 +2214,12 @@ describe("ClaudeAdapterLive", () => {
           yield* adapter.startSession({ threadId: THREAD_ID, runtimeMode: "approval-required" });
           const queryOptions = harness.createInputs[0]!.options;
           assert.deepEqual(lifecycle, ["bound", "active"]);
+          assert.deepEqual(managerSpy.mock.calls[0]?.[0], {
+            threadId: THREAD_ID,
+            providerInstanceId: configuredInstance ?? ProviderInstanceId.make("claudeAgent"),
+          });
           assert.deepEqual(queryOptions.mcpServers, {
+            [management.name]: { type: "stdio", ...management.launch, alwaysLoad: true },
             "cafe-scheduling": {
               type: "stdio",
               command: process.execPath,
@@ -2214,6 +2236,7 @@ describe("ClaudeAdapterLive", () => {
           yield* adapter.stopSession(THREAD_ID);
           yield* adapter.stopAll();
           assert.deepEqual(lifecycle, ["bound", "active", "disposed"]);
+          assert.equal(managementDisposed, true);
         }).pipe(Effect.provide(harness.layer));
       },
     );
@@ -4195,70 +4218,70 @@ describe("ClaudeAdapterLive", () => {
     );
   });
 
-  it.effect("embeds image attachments in Claude user messages", () => {
-    const baseDir = mkdtempSync(path.join(os.tmpdir(), "claude-attachments-"));
-    const harness = makeHarness({
-      cwd: "/tmp/project-claude-attachments",
-      baseDir,
-    });
-    return Effect.gen(function* () {
-      yield* Effect.addFinalizer(() =>
-        Effect.sync(() =>
-          rmSync(baseDir, {
-            recursive: true,
-            force: true,
-          }),
-        ),
-      );
-
-      const adapter = yield* ClaudeAdapter;
-      const { attachmentsDir } = yield* ServerConfig;
-
-      const attachment = {
-        type: "image" as const,
-        id: "thread-claude-attachment-12345678-1234-1234-1234-123456789abc",
-        name: "diagram.png",
-        mimeType: "image/png",
-        sizeBytes: 4,
-      };
-      const attachmentPath = path.join(attachmentsDir, attachmentRelativePath(attachment));
-      mkdirSync(path.dirname(attachmentPath), { recursive: true });
-      writeFileSync(attachmentPath, Uint8Array.from([1, 2, 3, 4]));
-
-      const session = yield* adapter.startSession({
-        threadId: THREAD_ID,
-        provider: ProviderDriverKind.make("claudeAgent"),
-        runtimeMode: "full-access",
+  it.effect.each(["What's in this image?", ""])(
+    "embeds image attachments in Claude user messages with text %j",
+    (text) => {
+      const baseDir = mkdtempSync(path.join(os.tmpdir(), "claude-attachments-"));
+      const harness = makeHarness({
+        cwd: "/tmp/project-claude-attachments",
+        baseDir,
       });
+      return Effect.gen(function* () {
+        yield* Effect.addFinalizer(() =>
+          Effect.sync(() =>
+            rmSync(baseDir, {
+              recursive: true,
+              force: true,
+            }),
+          ),
+        );
 
-      yield* adapter.sendTurn({
-        threadId: session.threadId,
-        input: "What's in this image?",
-        attachments: [attachment],
-      });
+        const adapter = yield* ClaudeAdapter;
+        const { attachmentsDir } = yield* ServerConfig;
 
-      const createInput = harness.getLastCreateQueryInput();
-      const promptMessage = yield* Effect.promise(() => readFirstPromptMessage(createInput));
-      assert.isDefined(promptMessage);
-      assert.deepEqual(promptMessage?.message.content, [
-        {
-          type: "text",
-          text: "What's in this image?",
-        },
-        {
-          type: "image",
-          source: {
-            type: "base64",
-            media_type: "image/png",
-            data: "AQIDBA==",
+        const attachment = {
+          type: "image" as const,
+          id: "thread-claude-attachment-12345678-1234-1234-1234-123456789abc",
+          name: "diagram.png",
+          mimeType: "image/png",
+          sizeBytes: 4,
+        };
+        const attachmentPath = path.join(attachmentsDir, attachmentRelativePath(attachment));
+        mkdirSync(path.dirname(attachmentPath), { recursive: true });
+        writeFileSync(attachmentPath, Uint8Array.from([1, 2, 3, 4]));
+
+        const session = yield* adapter.startSession({
+          threadId: THREAD_ID,
+          provider: ProviderDriverKind.make("claudeAgent"),
+          runtimeMode: "full-access",
+        });
+
+        yield* adapter.sendTurn({
+          threadId: session.threadId,
+          ...(text ? { input: text } : {}),
+          attachments: [attachment],
+        });
+
+        const createInput = harness.getLastCreateQueryInput();
+        const promptMessage = yield* Effect.promise(() => readFirstPromptMessage(createInput));
+        assert.isDefined(promptMessage);
+        assert.deepEqual(promptMessage?.message.content, [
+          ...(text ? [{ type: "text" as const, text }] : []),
+          {
+            type: "image",
+            source: {
+              type: "base64",
+              media_type: "image/png",
+              data: "AQIDBA==",
+            },
           },
-        },
-      ]);
-    }).pipe(
-      Effect.provideService(Random.Random, makeDeterministicRandomService()),
-      Effect.provide(harness.layer),
-    );
-  });
+        ]);
+      }).pipe(
+        Effect.provideService(Random.Random, makeDeterministicRandomService()),
+        Effect.provide(harness.layer),
+      );
+    },
+  );
 
   it.effect(
     "delivers file manifests on Claude sends and steers without widening permissions",
@@ -12870,6 +12893,99 @@ describe("ClaudeAdapterLive", () => {
           { outputTokens: 0, reasoningOutputTokens: 0, lastReasoningOutputTokens: 0 },
           { outputTokens: 150, reasoningOutputTokens: 60, lastReasoningOutputTokens: 60 },
         ],
+      );
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
+  it.effect("attaches one measured decode interval per primary Claude message", () => {
+    const harness = makeHarness();
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      const samples: unknown[] = [];
+      const firstDelta = yield* Deferred.make<void>();
+      const completed = yield* Deferred.make<void>();
+      yield* Stream.runForEach(adapter.streamEvents, (event) =>
+        Effect.gen(function* () {
+          if (event.type === "content.delta") yield* Deferred.succeed(firstDelta, undefined);
+          if (event.type === "thread.token-usage.updated") {
+            samples.push(event.payload.usage.responseGeneration);
+          }
+          if (event.type === "turn.completed") yield* Deferred.succeed(completed, undefined);
+        }),
+      ).pipe(Effect.forkChild);
+
+      const session = yield* adapter.startSession({
+        threadId: THREAD_ID,
+        provider: ProviderDriverKind.make("claudeAgent"),
+        runtimeMode: "full-access",
+      });
+      yield* adapter.sendTurn({
+        threadId: session.threadId,
+        input: "time this reply",
+        attachments: [],
+      });
+      const frame = (uuid: string, event: unknown, parentToolUseId: string | null = null) =>
+        ({
+          type: "stream_event",
+          session_id: "sdk-session-generation",
+          uuid,
+          parent_tool_use_id: parentToolUseId,
+          event,
+        }) as unknown as SDKMessage;
+
+      harness.query.emit(
+        frame("generation-start", {
+          type: "message_start",
+          message: { usage: { input_tokens: 10, output_tokens: 1 } },
+        }),
+      );
+      harness.query.emit(
+        frame("generation-block", {
+          type: "content_block_start",
+          index: 0,
+          content_block: { type: "text", text: "" },
+        }),
+      );
+      harness.query.emit(
+        frame("generation-delta", {
+          type: "content_block_delta",
+          index: 0,
+          delta: { type: "text_delta", text: "Hello" },
+        }),
+      );
+      // Observe the first output at t=0, then let two seconds of decoding pass.
+      yield* Deferred.await(firstDelta);
+      yield* TestClock.adjust(2_000);
+      harness.query.emit(frame("generation-stop", { type: "content_block_stop", index: 0 }));
+      harness.query.emit(
+        frame("generation-usage", {
+          type: "message_delta",
+          delta: { stop_reason: "end_turn" },
+          usage: { output_tokens: 160 },
+        }),
+      );
+      // The result spreads the remembered message snapshot into its own usage;
+      // it must not repeat the sample and double-count this response.
+      harness.query.emit({
+        type: "result",
+        subtype: "success",
+        is_error: false,
+        duration_ms: 2_100,
+        duration_api_ms: 2_050,
+        num_turns: 1,
+        result: "Hello",
+        stop_reason: "end_turn",
+        session_id: "sdk-session-generation",
+        usage: { input_tokens: 10, output_tokens: 160 },
+      } as unknown as SDKMessage);
+      yield* Deferred.await(completed);
+
+      assert.deepEqual(
+        samples.filter((sample) => sample !== undefined),
+        [{ outputTokens: 160, durationMs: 2_000 }],
       );
     }).pipe(
       Effect.provideService(Random.Random, makeDeterministicRandomService()),

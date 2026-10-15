@@ -162,6 +162,7 @@ import type {
   WorkLogEntry,
 } from "../../session-logic";
 import { deriveLatestContextWindowSnapshot } from "../../lib/contextWindow";
+import { deriveGenerationRate } from "../../lib/generationRate";
 import { shouldSurfaceProviderAccountRateLimits } from "../../lib/codexRateLimits";
 import { formatProviderSkillDisplayName } from "../../providerSkillPresentation";
 import { searchProviderSkills } from "../../providerSkillSearch";
@@ -1732,6 +1733,15 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
   const activeContextWindow = useMemo(
     () => deriveLatestContextWindowSnapshot(activeThreadActivities ?? []),
     [activeThreadActivities],
+  );
+  // The live status line shows only this turn's measured speed. Without a
+  // turn start there is no running interval, so no rate is shown at all.
+  const activityGenerationRate = useMemo(
+    () =>
+      activityStartedAt
+        ? deriveGenerationRate(activeThreadActivities ?? [], { since: activityStartedAt })
+        : null,
+    [activeThreadActivities, activityStartedAt],
   );
 
   // ------------------------------------------------------------------
@@ -3591,22 +3601,10 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
         aria-hidden="true"
         onChange={onComposerFileInputChange}
       />
-      {activity ? (
-        <div className="min-w-0 mb-1">
-          <ComposerActivityStatus
-            activity={activity}
-            turnStartedAt={activityStartedAt}
-            onOpenTasks={() => {
-              if (sessionRailVisible) onFocusSessionRail?.();
-              else setTaskPopoverOpen(true);
-            }}
-          />
-        </div>
-      ) : null}
       <div
         className={cn(
           "group relative isolate rounded-2xl p-px transition-[color,background-color,border-color] duration-(--duration-slow) motion-reduce:transition-none",
-          hasComposerTab && "mt-9 pointer-coarse:mt-12",
+          hasComposerTab ? "mt-9 pointer-coarse:mt-12" : activity ? "mt-6" : undefined,
           composerProviderState.composerFrameClassName ??
             (ambianceComposerRing ? "cafe-ambiance-composer-frame" : undefined),
         )}
@@ -3615,86 +3613,103 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
         onDragLeave={onComposerDragLeave}
         onDrop={onComposerDrop}
       >
-        {hasComposerTab ? (
+        {activity || hasComposerTab ? (
           <div
-            data-chat-composer-tab="true"
-            className="absolute inset-x-6 bottom-full -z-10 -mb-1 flex justify-end"
+            data-chat-composer-tab={hasComposerTab ? "true" : undefined}
+            className="absolute left-0 right-6 bottom-full -z-10 -mb-1 flex items-end justify-end gap-2"
           >
-            <ComposerTab
-              label={uiText("Composer tools", undefined, undefined, uiLocale)}
-              expandLabel={uiText("Expand composer tools", undefined, undefined, uiLocale)}
-              minimizeLabel={uiText("Minimize composer tools", undefined, undefined, uiLocale)}
-              collapsed={composerTabCollapsed}
-              active={nativeReviewOpen || axiomInspectorOpen}
-              onCollapsedChange={useUiStateStore.getState().setComposerTabCollapsed}
-            >
-              {showAxiomSecurityControl ? (
-                <AxiomSecurityControl
-                  key={axiomInspectorKey}
-                  environmentId={environmentId}
-                  onOpenChange={(open) => setAxiomInspectorState({ key: axiomInspectorKey, open })}
-                  connected={environmentUnavailable === null && !isConnecting}
-                  idle={phase !== "running" && !isSendBusy}
-                  input={
-                    isServerThread &&
-                    activeThreadId &&
-                    activeThread?.session?.provider === "axiom" &&
-                    activeThread.session.providerInstanceId === selectedInstanceId &&
-                    activeThread.session.subagentRuntimeId &&
-                    activeThread.modelSelection.model === selectedModel
-                      ? {
-                          instanceId: selectedInstanceId,
-                          threadId: activeThreadId,
-                          runtimeId: activeThread.session.subagentRuntimeId,
-                          modelId: selectedModel,
-                        }
-                      : null
-                  }
+            {activity ? (
+              <div className="min-w-0 flex-1 overflow-hidden pb-1">
+                <ComposerActivityStatus
+                  activity={activity}
+                  turnStartedAt={activityStartedAt}
+                  generationRate={activityGenerationRate}
+                  onOpenTasks={() => {
+                    if (sessionRailVisible) onFocusSessionRail?.();
+                    else setTaskPopoverOpen(true);
+                  }}
                 />
-              ) : null}
-              {showNativeReviewControl ? (
-                <Tooltip>
-                  <TooltipTrigger
-                    delay={250}
-                    render={
-                      <button
-                        type="button"
-                        className="cafe-composer-tab-action"
-                        aria-haspopup="dialog"
-                        aria-expanded={nativeReviewOpen}
-                        aria-disabled={nativeReviewControlDisabled}
-                        onClick={() => {
-                          if (nativeReviewControlDisabled) return;
-                          setNativeReviewState({ key: nativeReviewKey, open: true });
+              </div>
+            ) : null}
+            {hasComposerTab ? (
+              <ComposerTab
+                label={uiText("Composer tools", undefined, undefined, uiLocale)}
+                expandLabel={uiText("Expand composer tools", undefined, undefined, uiLocale)}
+                minimizeLabel={uiText("Minimize composer tools", undefined, undefined, uiLocale)}
+                collapsed={composerTabCollapsed}
+                active={nativeReviewOpen || axiomInspectorOpen}
+                onCollapsedChange={useUiStateStore.getState().setComposerTabCollapsed}
+              >
+                {showAxiomSecurityControl ? (
+                  <AxiomSecurityControl
+                    key={axiomInspectorKey}
+                    environmentId={environmentId}
+                    onOpenChange={(open) =>
+                      setAxiomInspectorState({ key: axiomInspectorKey, open })
+                    }
+                    connected={environmentUnavailable === null && !isConnecting}
+                    idle={phase !== "running" && !isSendBusy}
+                    input={
+                      isServerThread &&
+                      activeThreadId &&
+                      activeThread?.session?.provider === "axiom" &&
+                      activeThread.session.providerInstanceId === selectedInstanceId &&
+                      activeThread.session.subagentRuntimeId &&
+                      activeThread.modelSelection.model === selectedModel
+                        ? {
+                            instanceId: selectedInstanceId,
+                            threadId: activeThreadId,
+                            runtimeId: activeThread.session.subagentRuntimeId,
+                            modelId: selectedModel,
+                          }
+                        : null
+                    }
+                  />
+                ) : null}
+                {showNativeReviewControl ? (
+                  <Tooltip>
+                    <TooltipTrigger
+                      delay={250}
+                      render={
+                        <button
+                          type="button"
+                          className="cafe-composer-tab-action"
+                          aria-haspopup="dialog"
+                          aria-expanded={nativeReviewOpen}
+                          aria-disabled={nativeReviewControlDisabled}
+                          onClick={() => {
+                            if (nativeReviewControlDisabled) return;
+                            setNativeReviewState({ key: nativeReviewKey, open: true });
+                          }}
+                        />
+                      }
+                    >
+                      <FileSearchIcon aria-hidden="true" className="size-3.5 shrink-0" />
+                      <span className="truncate">
+                        {uiText("Code review", undefined, undefined, uiLocale)}
+                      </span>
+                    </TooltipTrigger>
+                    <TooltipPopup
+                      role="tooltip"
+                      side="top"
+                      className="no-drag pointer-events-none max-w-64 leading-relaxed"
+                    >
+                      <UiMessage
+                        message={"Review code with Codex<slot1></slot1>"}
+                        slots={{
+                          slot1:
+                            nativeReviewControlDisabled && nativeReviewDisabledReason ? (
+                              <span className="block text-muted-foreground">
+                                {nativeReviewDisabledReason}
+                              </span>
+                            ) : null,
                         }}
                       />
-                    }
-                  >
-                    <FileSearchIcon aria-hidden="true" className="size-3.5 shrink-0" />
-                    <span className="truncate">
-                      {uiText("Code review", undefined, undefined, uiLocale)}
-                    </span>
-                  </TooltipTrigger>
-                  <TooltipPopup
-                    role="tooltip"
-                    side="top"
-                    className="no-drag pointer-events-none max-w-64 leading-relaxed"
-                  >
-                    <UiMessage
-                      message={"Review code with Codex<slot1></slot1>"}
-                      slots={{
-                        slot1:
-                          nativeReviewControlDisabled && nativeReviewDisabledReason ? (
-                            <span className="block text-muted-foreground">
-                              {nativeReviewDisabledReason}
-                            </span>
-                          ) : null,
-                      }}
-                    />
-                  </TooltipPopup>
-                </Tooltip>
-              ) : null}
-            </ComposerTab>
+                    </TooltipPopup>
+                  </Tooltip>
+                ) : null}
+              </ComposerTab>
+            ) : null}
           </div>
         ) : null}
         <FollowUpQueueShelf

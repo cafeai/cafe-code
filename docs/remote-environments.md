@@ -48,6 +48,22 @@ cannot be overridden. Pure browser clients use their browser/OS certificate trus
 Approval is offered only when explicitly adding a saved environment; background
 reconnects never display trust prompts or replay a password.
 
+Source launches through `yarn start:desktop` filter only Chromium's exact
+`ssl_client_socket_impl.cc` authority-handshake line (`net_error -202`) from
+the child's terminal stderr. Chromium emits that line before Electron can
+apply Cafe's saved certificate approval. Rejected certificates still produce
+Cafe's `TLS certificate rejected` warning with a finite reason, without URLs,
+query tokens or certificate contents. Other TLS failures, GPU errors and app
+output retain their original bytes. Filtering uses bounded line buffering and
+backpressure and drains final stderr before the launcher exits. Headless server
+output, direct packaged-app launches and macOS LaunchServices restart logs keep
+their existing output path.
+
+This changes log presentation only. Certificate approval remains bound to the
+exact HTTPS/WSS origin, port and fingerprint. Electron's earlier session verifier
+receives a hostname without a destination port and caches results, so Cafe does
+not move its origin-bound approval there or change global TLS trust.
+
 Cafe refreshes its generated self-signed certificate on backend startup when
 the current LAN addresses are missing from it. After a DHCP address change,
 restart/update Cafe on the server before connecting to the new address. That

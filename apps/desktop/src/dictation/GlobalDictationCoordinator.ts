@@ -140,7 +140,7 @@ function isTrustedMainSender(
   try {
     const url = new URL(frame.url);
     return (
-      DesktopIpc.isTrustedDesktopIpcFrameUrl(frame.url) &&
+      DesktopIpc.isTrustedDesktopIpcFrameUrl(frame.url, expectedUrl) &&
       url.origin === expectedUrl.origin &&
       url.pathname === expectedUrl.pathname &&
       url.searchParams.get("cafeDictationOverlay") !== "1"
@@ -527,8 +527,13 @@ export const installGlobalDictationCoordinator = Effect.gen(function* () {
         panel.webContents.on("will-navigate", (event, destination) => {
           if (destination !== rendererUrl.href) event.preventDefault();
         });
+        panel.webContents.on("will-redirect", (event, destination, _inPlace, isMainFrame) => {
+          if (isMainFrame && destination !== rendererUrl.href) event.preventDefault();
+        });
         try {
-          await runPromise(desktopIpc.trustWebContents(panel.webContents));
+          await runPromise(
+            desktopIpc.trustWebContents(panel.webContents, { url: rendererUrl, role: "dictation" }),
+          );
           if (!isCurrentStartup() || panel.isDestroyed()) {
             if (!panel.isDestroyed()) panel.destroy();
             return null;

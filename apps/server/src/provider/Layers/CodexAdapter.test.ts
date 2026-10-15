@@ -1,3 +1,4 @@
+import * as ManagementMcp from "../../mcp/sessionConnection.ts";
 // @effect-diagnostics nodeBuiltinImport:off
 import assert from "node:assert/strict";
 import * as crypto from "node:crypto";
@@ -1163,6 +1164,53 @@ function makeRuntimeFactory() {
     },
   };
 }
+
+it.effect(
+  "attaches management tools through the owned Codex launch and retires them with the session",
+  () => {
+    const factory = makeRuntimeFactory();
+    return Effect.gen(function* () {
+      let disposed = false;
+      const binding = {
+        name: "cafe-code-fixture",
+        launch: {
+          command: process.execPath,
+          args: [
+            path.join(process.cwd(), "inert-bridge.mjs"),
+            path.join(process.cwd(), "inert-connection.json"),
+          ],
+          env: { ELECTRON_RUN_AS_NODE: "1" },
+        },
+        dispose: Effect.sync(() => {
+          disposed = true;
+        }),
+      };
+      const spy = vi
+        .spyOn(ManagementMcp, "makeManagementMcpSession")
+        .mockReturnValue(Effect.succeed(binding));
+      yield* Effect.addFinalizer(() => Effect.sync(() => spy.mockRestore()));
+      const account = ProviderInstanceId.make("codex-management-account");
+      const adapter = yield* makeCodexAdapter(decodeCodexSettings({}), {
+        instanceId: account,
+        makeRuntime: factory.factory,
+      });
+      const threadId = asThreadId("management-launch");
+      yield* adapter.startSession({ threadId, runtimeMode: "approval-required" });
+      assert.deepEqual(spy.mock.calls[0]?.[0], { threadId, providerInstanceId: account });
+      assert.equal(factory.lastRuntime?.options.managementMcp?.name, binding.name);
+      assert.equal(factory.lastRuntime?.options.runtimeMode, "approval-required");
+      assert.equal(disposed, false);
+      yield* adapter.stopSession(threadId);
+      assert.equal(disposed, true);
+    }).pipe(
+      Effect.provide(SqlitePersistenceMemory),
+      Effect.provide(ServerConfig.layerTest(process.cwd(), { prefix: "cafe-management-codex-" })),
+      Effect.provide(ServerSettingsService.layerTest()),
+      Effect.provide(providerSessionDirectoryTestLayer),
+      Effect.provide(NodeServices.layer),
+    );
+  },
+);
 
 it.effect(
   "reads server custom instructions when materializing each Codex session without changing user turns",
@@ -7261,6 +7309,64 @@ lifecycleLayer("CodexAdapterLive lifecycle", (it) => {
         lastReasoningOutputTokens: 0,
         compactsAutomatically: true,
       });
+    }),
+  );
+
+  it.effect("pairs the runtime-timed interval with the last response's output tokens", () =>
+    Effect.gen(function* () {
+      const { adapter, runtime } = yield* startLifecycleRuntime();
+      const eventsFiber = yield* Stream.runCollect(Stream.take(adapter.streamEvents, 3)).pipe(
+        Effect.forkChild,
+      );
+      const usageNotification = (
+        id: string,
+        lastOutputTokens: number,
+        responseGenerationMs?: number,
+      ) =>
+        ({
+          id: asEventId(id),
+          kind: "notification",
+          provider: ProviderDriverKind.make("codex"),
+          threadId: asThreadId("thread-1"),
+          turnId: asTurnId("turn-1"),
+          createdAt: "2026-01-01T00:00:00.000Z",
+          method: "thread/tokenUsage/updated",
+          ...(responseGenerationMs !== undefined ? { responseGenerationMs } : {}),
+          payload: {
+            threadId: "thread-1",
+            turnId: "turn-1",
+            tokenUsage: {
+              total: {
+                inputTokens: 900,
+                cachedInputTokens: 0,
+                outputTokens: 1_200,
+                reasoningOutputTokens: 0,
+                totalTokens: 2_100,
+              },
+              last: {
+                inputTokens: 500,
+                cachedInputTokens: 0,
+                outputTokens: lastOutputTokens,
+                reasoningOutputTokens: 0,
+                totalTokens: 900,
+              },
+              modelContextWindow: 258_400,
+            },
+          },
+        }) satisfies ProviderEvent;
+
+      yield* runtime.emit(usageNotification("evt-timed", 400, 5_000));
+      // No owner-authored interval: the payload alone is never a measurement.
+      yield* runtime.emit(usageNotification("evt-untimed", 400));
+      // An interval implying an implausible rate is dropped, not displayed.
+      yield* runtime.emit(usageNotification("evt-implausible", 400, 50));
+
+      const samples = Array.from(yield* Fiber.join(eventsFiber)).map((event) =>
+        event.type === "thread.token-usage.updated"
+          ? event.payload.usage.responseGeneration
+          : event.type,
+      );
+      assert.deepEqual(samples, [{ outputTokens: 400, durationMs: 5_000 }, undefined, undefined]);
     }),
   );
 

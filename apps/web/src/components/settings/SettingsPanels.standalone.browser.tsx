@@ -6,7 +6,14 @@ import {
   type OrchestrationShellSnapshot,
 } from "@cafecode/contracts";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { render } from "vitest-browser-react";
+import { render as renderReact } from "vitest-browser-react";
+import type { ReactNode } from "react";
+import {
+  createMemoryHistory,
+  createRootRoute,
+  createRouter,
+  RouterProvider,
+} from "@tanstack/react-router";
 import { page } from "vitest/browser";
 import { ArchivedThreadsPanel, RecentlyDeletedThreadsPanel } from "./SettingsPanels";
 import { useStore } from "../../store";
@@ -93,6 +100,15 @@ function registerSecondaryEnvironment(environmentId: EnvironmentId, connected: b
   useSavedEnvironmentRuntimeStore
     .getState()
     .patch(environmentId, { connectionState: connected ? "connected" : "disconnected" });
+}
+// History navigation uses the same router context as the real Settings page.
+function render(children: ReactNode) {
+  const root = createRootRoute({ component: () => children });
+  const router = createRouter({
+    routeTree: root,
+    history: createMemoryHistory({ initialEntries: ["/"] }),
+  });
+  return renderReact(<RouterProvider router={router} />);
 }
 function snapshot(title: string): OrchestrationShellSnapshot {
   // Shell-only history fixture: there is deliberately no project or detail.

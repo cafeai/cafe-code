@@ -3116,50 +3116,50 @@ describe("Codex notification emission timestamps", () => {
 });
 
 describe("buildCodexAppServerArgs", () => {
-  it("adds only the admitted visualization catalog and leaves unavailable tools unadvertised", () => {
-    // Inspect the real structured launch builder without starting a provider or
-    // reading an account profile. The private connection path is inert data.
-    const launch = {
-      command: process.execPath,
-      args: ["synthetic-visualization-bridge.mjs", "synthetic-private-connection.json"],
-      env: { ELECTRON_RUN_AS_NODE: "1" },
-    };
-    const name = `cafe-visualizations-${"a".repeat(22)}`;
-    const options = {
-      schedulingMcp: { name: "cafe-scheduling", launch },
-      maxConcurrentSubagents: 4,
-    };
-    const baseline = buildCodexAppServerArgs(options);
-    assert.equal(
-      baseline.some((argument) => argument.includes(name)),
-      false,
-    );
-    assert.deepEqual(
-      buildCodexAppServerArgs({ ...options, visualizationMcp: undefined }),
-      baseline,
-    );
-    const args = buildCodexAppServerArgs({ ...options, visualizationMcp: { name, launch } });
-    const config = args.find((argument) => argument.startsWith(`mcp_servers.${name}=`));
-    assert.ok(config);
-    const index = args.indexOf(config);
-    assert.equal(args[index - 1], "-c");
-    assert.deepEqual(JSON.parse(JSON.stringify(Toml.parse(config))), {
-      mcp_servers: {
-        [name]: {
-          ...launch,
-          enabled: true,
-          required: true,
-          startup_timeout_sec: 15,
-          tool_timeout_sec: 60,
+  it.each(["visualizationMcp", "managementMcp"] as const)(
+    "adds only the admitted %s catalog without changing permissions",
+    (kind) => {
+      // Inspect the real structured launch builder without starting a provider or
+      // reading an account profile. The private connection path is inert data.
+      const launch = {
+        command: process.execPath,
+        args: ["synthetic-visualization-bridge.mjs", "synthetic-private-connection.json"],
+        env: { ELECTRON_RUN_AS_NODE: "1" },
+      };
+      const name = `cafe-visualizations-${"a".repeat(22)}`;
+      const options = {
+        schedulingMcp: { name: "cafe-scheduling", launch },
+        maxConcurrentSubagents: 4,
+      };
+      const baseline = buildCodexAppServerArgs(options);
+      assert.equal(
+        baseline.some((argument) => argument.includes(name)),
+        false,
+      );
+      assert.deepEqual(buildCodexAppServerArgs({ ...options, [kind]: undefined }), baseline);
+      const args = buildCodexAppServerArgs({ ...options, [kind]: { name, launch } });
+      const config = args.find((argument) => argument.startsWith(`mcp_servers.${name}=`));
+      assert.ok(config);
+      const index = args.indexOf(config);
+      assert.equal(args[index - 1], "-c");
+      assert.deepEqual(JSON.parse(JSON.stringify(Toml.parse(config))), {
+        mcp_servers: {
+          [name]: {
+            ...launch,
+            enabled: true,
+            required: kind !== "managementMcp",
+            startup_timeout_sec: 15,
+            tool_timeout_sec: 60,
+          },
         },
-      },
-    });
-    assert.deepEqual(
-      args.filter((_, position) => position !== index && position !== index - 1),
-      baseline,
-    );
-    assert.doesNotMatch(config, /approval|sandbox|bearer|token|threadId/u);
-  });
+      });
+      assert.deepEqual(
+        args.filter((_, position) => position !== index && position !== index - 1),
+        baseline,
+      );
+      assert.doesNotMatch(config, /approval|sandbox|bearer|token|threadId/u);
+    },
+  );
   it("attaches a required isolated scheduling catalog without changing permissions or other MCPs", () => {
     const schedulingMcp = {
       name: "cafe-fixture_generation",
@@ -6048,6 +6048,27 @@ describe("buildTurnStartParams", () => {
 });
 
 describe("buildTurnSteerParams", () => {
+  it("keeps image-only starts and steers free of text input", () => {
+    const attachments = [{ type: "image" as const, url: "data:image/png;base64,AQIDBA==" }];
+    const start = Effect.runSync(
+      buildTurnStartParams({
+        threadId: "provider-image-only-thread",
+        runtimeMode: "full-access",
+        attachments,
+      }),
+    );
+    const steer = Effect.runSync(
+      buildTurnSteerParams({
+        threadId: "provider-image-only-thread",
+        expectedTurnId: TurnId.make("image-only-active-turn"),
+        clientUserMessageId: "image-only-message",
+        attachments,
+      }),
+    );
+    assert.deepStrictEqual(start.input, attachments);
+    assert.deepStrictEqual(steer.input, attachments);
+  });
+
   it("builds the upstream Codex turn/steer shape without turn-start overrides", () => {
     const clientCorrelationId = buildCodexSteerClientCorrelationId("message-1");
     const params = Effect.runSync(

@@ -6,6 +6,7 @@ import type { ServerProviderAccountRateLimits } from "@cafecode/contracts";
 
 import { cn } from "~/lib/utils";
 import { type ContextWindowSnapshot, formatContextWindowTokens } from "~/lib/contextWindow";
+import { formatTokensPerSecond } from "~/lib/generationRate";
 import { formatCodexRateLimitPresentation } from "~/lib/codexRateLimits";
 import { ProviderAccountQuotaDetails, UsageMeterBar } from "../ProviderAccountQuotaDetails";
 import type { ProviderQuotaState } from "./useProviderQuota";
@@ -51,15 +52,18 @@ export function ContextWindowDetails(props: {
 
   const usage = props.usage ?? null;
   const layout = props.layout ?? "popover";
-  const quota = uiPresentation.formatCodexRateLimitPresentation(props.rateLimits);
+  const quota = uiPresentation.formatCodexRateLimitPresentation(props.rateLimits, {
+    compactDetails: true,
+  });
   const usedPercentage = usage ? formatPercentage(usage.usedPercentage) : null;
-  const normalizedPercentage = Math.max(0, Math.min(100, usage?.usedPercentage ?? 0));
   const hasUsage = usage !== null;
   const hasRateLimits = quota !== null;
   const hasSessionQuota = props.sessionQuota !== undefined;
   const hasSubagentLimit = formatSubagentConcurrencyLimit(props.subagentConcurrency) !== null;
   const hasContextOverride =
     formatCodexContextWindowOverride(props.codexContextWindow, uiLocale) !== null;
+  const hasProcessed = usage !== null && (usage.totalProcessedTokens ?? 0) > usage.usedTokens;
+  const generationRate = usage?.generationRate;
 
   if (!hasUsage && !hasRateLimits && !hasSubagentLimit && !hasContextOverride && !hasSessionQuota) {
     return (
@@ -90,7 +94,7 @@ export function ContextWindowDetails(props: {
       ) : null}
 
       {hasUsage && layout === "panel" ? (
-        <UsageMeterBar percent={normalizedPercentage} testId="context" />
+        <UsageMeterBar percent={usage.usedPercentage ?? 0} testId="context" />
       ) : null}
 
       {hasUsage && usage.maxTokens !== null && usedPercentage ? (
@@ -135,38 +139,39 @@ export function ContextWindowDetails(props: {
         </div>
       ) : null}
 
-      {hasUsage &&
-      (usage.totalProcessedTokens ?? null) !== null &&
-      (usage.totalProcessedTokens ?? 0) > usage.usedTokens ? (
-        <div className="text-xs text-muted-foreground">
-          {uiText(
-            "Total processed: {tokens} tokens",
-            {
-              tokens: formatContextWindowTokens(usage.totalProcessedTokens ?? null),
-            },
-            undefined,
-            uiLocale,
-          )}
-        </div>
-      ) : null}
-
-      {hasUsage && usage.compactsAutomatically ? (
-        <div className="text-xs text-muted-foreground">
-          {usage.autoCompactTokenLimit
-            ? uiText(
-                "Automatically compacts around {value0} tokens.",
-                {
-                  value0: formatContextWindowTokens(usage.autoCompactTokenLimit),
-                },
-                undefined,
-                uiLocale,
-              )
-            : uiText(
-                "Automatically compacts its context when needed.",
-                undefined,
+      {hasProcessed || generationRate ? (
+        <div
+          className="flex min-w-0 flex-wrap items-baseline gap-x-3 gap-y-1 text-xs text-muted-foreground tabular-nums"
+          data-context-window-statistics
+        >
+          {hasProcessed ? (
+            <span
+              className="min-w-0 max-w-full"
+              title={uiText(
+                "Total processed: {tokens} tokens",
+                { tokens: formatContextWindowTokens(usage?.totalProcessedTokens ?? null) },
                 undefined,
                 uiLocale,
               )}
+            >
+              {uiText(
+                "Processed: {tokens}",
+                { tokens: formatContextWindowTokens(usage?.totalProcessedTokens ?? null) },
+                undefined,
+                uiLocale,
+              )}
+            </span>
+          ) : null}
+          {generationRate ? (
+            <span className="min-w-0 max-w-full">
+              {uiText(
+                "Speed: {rate} tok/s",
+                { rate: formatTokensPerSecond(generationRate) },
+                undefined,
+                uiLocale,
+              )}
+            </span>
+          ) : null}
         </div>
       ) : null}
 

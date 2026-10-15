@@ -98,6 +98,7 @@ import * as EffectCodexSchema from "effect-codex-app-server/schema";
 import { buildCodexInitializeParams } from "./CodexProvider.ts";
 import { matchesSubagentPolicySession } from "../subagentPolicyContinuation.ts";
 import { isCodexRootAgentPath } from "./CodexSubagentPath.ts";
+import { CodexResponseGenerationTracker } from "../codexResponseGeneration.ts";
 import { rewindCodexThreadWithClient } from "./CodexThreadRewind.ts";
 import { codexNativeReviewParams, decodeCodexNativeReviewResponse } from "./CodexNativeReview.ts";
 import type { ProviderAdapterRewindOutcomeUnknownError } from "../Errors.ts";
@@ -352,6 +353,7 @@ export interface CodexTransportPolicy {
 
 export interface CodexAppServerLaunchOptions {
   readonly schedulingMcp?: Pick<SchedulingSessionBinding, "name" | "launch"> | undefined;
+  readonly managementMcp?: Pick<SchedulingSessionBinding, "name" | "launch"> | undefined;
   readonly visualizationMcp?: Pick<SchedulingSessionBinding, "name" | "launch"> | undefined;
   readonly maxConcurrentSubagents?: number | undefined;
   readonly transportPolicy?: CodexTransportPolicy | undefined;
@@ -381,7 +383,10 @@ function quoteSchedulingMcpToml(value: string): string {
  * https://learn.chatgpt.com/docs/extend/mcp
  * https://learn.chatgpt.com/docs/config-file/config-advanced
  */
-function schedulingMcpOverride(binding: NonNullable<CodexAppServerLaunchOptions["schedulingMcp"]>) {
+function schedulingMcpOverride(
+  binding: NonNullable<CodexAppServerLaunchOptions["schedulingMcp"]>,
+  required = true,
+) {
   if (!/^[A-Za-z0-9_-]{1,128}$/u.test(binding.name)) {
     throw new TypeError("Invalid scheduling MCP server name.");
   }
@@ -389,7 +394,7 @@ function schedulingMcpOverride(binding: NonNullable<CodexAppServerLaunchOptions[
   const environment = Object.entries(env)
     .map(([key, value]) => `${quoteSchedulingMcpToml(key)}=${quoteSchedulingMcpToml(value)}`)
     .join(",");
-  return `mcp_servers.${binding.name}={command=${quoteSchedulingMcpToml(command)},args=[${args.map(quoteSchedulingMcpToml).join(",")}],env={${environment}},enabled=true,required=true,startup_timeout_sec=15,tool_timeout_sec=60}`;
+  return `mcp_servers.${binding.name}={command=${quoteSchedulingMcpToml(command)},args=[${args.map(quoteSchedulingMcpToml).join(",")}],env={${environment}},enabled=true,required=${required},startup_timeout_sec=15,tool_timeout_sec=60}`;
 }
 
 export function buildCodexAppServerArgs(
@@ -440,6 +445,10 @@ export function buildCodexAppServerArgs(
     "-c",
     CODEX_UPDATE_PLAN_CONFIG_OVERRIDE,
     ...concurrencyArgs,
+    // Management can be switched off at the backend. Its failed handshake must
+    // not prevent a chat from starting; internal session bridges retain their
+    // existing required startup policy.
+    ...(options.managementMcp ? ["-c", schedulingMcpOverride(options.managementMcp, false)] : []),
     ...(options.schedulingMcp ? ["-c", schedulingMcpOverride(options.schedulingMcp)] : []),
     ...(options.visualizationMcp ? ["-c", schedulingMcpOverride(options.visualizationMcp)] : []),
   ] as const;
@@ -476,6 +485,7 @@ export interface CodexSessionRuntimeOptions {
   /** Exact Cafe chat/account-bound durable guard; never a native history writer. */
   readonly historySafety?: CodexHistorySafetyCallbacks<CodexSessionRuntimeError>;
   readonly schedulingMcp?: Pick<SchedulingSessionBinding, "name" | "launch"> | undefined;
+  readonly managementMcp?: Pick<SchedulingSessionBinding, "name" | "launch"> | undefined;
   readonly threadId: ThreadId;
   readonly providerInstanceId?: ProviderInstanceId;
   readonly binaryPath: string;
@@ -6290,6 +6300,7 @@ export const makeCodexSessionRuntime = (
     };
     const appServerArgs = buildCodexAppServerArgs({
       schedulingMcp: options.schedulingMcp,
+      managementMcp: options.managementMcp,
       visualizationMcp: options.visualizationMcp,
       maxConcurrentSubagents: options.maxConcurrentSubagents,
       transportPolicy: options.transportPolicy,
@@ -6393,6 +6404,10 @@ export const makeCodexSessionRuntime = (
     const runtimeGeneration = makeCodexSubagentRuntimeGeneration();
     const { subagentRuntimeId } = runtimeGeneration;
     const childUsageAccounting = makeCodexChildUsageAccounting();
+    // Display-only decode timing for the root thread's model responses. It is
+    // process-local like the app-server it observes; a replacement process
+    // starts a fresh window rather than inheriting a half-observed response.
+    const responseGenerationTracker = new CodexResponseGenerationTracker();
     const initialSession = {
       provider: PROVIDER,
       subagentRuntimeId,
@@ -8286,6 +8301,16 @@ export const makeCodexSessionRuntime = (
         // above remains safe; no guessed generation or lifecycle is published.
         if (!nativeNotificationAdmitted) return;
 
+        // Root-only: children are separate native threads whose concurrent
+        // sampling loops would otherwise interleave with the root's window.
+        // The measured interval rides on the root token-usage event as
+        // owner-authored metadata; it never affects lifecycle or accounting.
+        const responseGenerationMs =
+          childRoute === undefined &&
+          readNotificationThreadId(notification) === rootProviderThreadId
+            ? responseGenerationTracker.observe(notification, observation.observedAtMs)
+            : undefined;
+
         // Child numeric accounting is independent of lifecycle projection. The
         // collector requires exact root ancestry and a routed owner, subtracts
         // preexisting history, and emits only anonymous epoch/model counters.
@@ -8417,6 +8442,7 @@ export const makeCodexSessionRuntime = (
                     : {}),
                   ...(payload !== undefined ? { payload } : {}),
                   ...(available ? { nativeContextAvailable: true as const } : {}),
+                  ...(responseGenerationMs !== undefined ? { responseGenerationMs } : {}),
                 },
                 observedAt,
               );

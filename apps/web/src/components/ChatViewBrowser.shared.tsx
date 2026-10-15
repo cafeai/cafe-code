@@ -5615,66 +5615,146 @@ describe(`ChatView full app (${chatViewBrowserPart})`, () => {
       }
     });
 
-    it("attaches an image through the composer file picker", async () => {
-      const mounted = await mountChatView({
-        viewport: DEFAULT_VIEWPORT,
-        snapshot: createSnapshotForTargetUser({
-          targetMessageId: "msg-user-attach-image" as MessageId,
-          targetText: "attach image target",
-        }),
-      });
+    it.each([
+      { provider: "codex", sessionStatus: "ready" },
+      { provider: "claudeAgent", sessionStatus: "ready" },
+      { provider: "codex", sessionStatus: "running" },
+      { provider: "claudeAgent", sessionStatus: "running" },
+    ] as const)(
+      "sends an image without text to $provider in a $sessionStatus chat",
+      async ({ provider, sessionStatus }) => {
+        const mounted = await mountChatView({
+          viewport: DEFAULT_VIEWPORT,
+          snapshot: createSnapshotForTargetUser({
+            targetMessageId: "msg-user-attach-image" as MessageId,
+            targetText: "attach image target",
+            provider,
+            sessionStatus,
+          }),
+          resolveRpc: (body) =>
+            body._tag === ORCHESTRATION_WS_METHODS.dispatchCommand
+              ? { sequence: fixture.snapshot.snapshotSequence + 1 }
+              : undefined,
+          configureFixture: (nextFixture) => {
+            nextFixture.serverConfig = {
+              ...nextFixture.serverConfig,
+              providers: [
+                {
+                  ...nextFixture.serverConfig.providers[0]!,
+                  driver: ProviderDriverKind.make(provider),
+                  instanceId: ProviderInstanceId.make(provider),
+                },
+              ],
+            };
+          },
+        });
 
-      try {
-        await waitForComposerEditor();
+        try {
+          await waitForComposerEditor();
 
-        const attachButton = await waitForElement(
-          () =>
-            document.querySelector<HTMLButtonElement>(
-              '[data-chat-composer-form="true"] button[aria-label="Attach files or images"]',
-            ),
-          "Unable to find composer attach-image button.",
-        );
+          const attachButton = await waitForElement(
+            () =>
+              document.querySelector<HTMLButtonElement>(
+                '[data-chat-composer-form="true"] button[aria-label="Attach files or images"]',
+              ),
+            "Unable to find composer attach-image button.",
+          );
 
-        const fileInput = document.querySelector<HTMLInputElement>(
-          '[data-chat-composer-form="true"] input[type="file"]',
-        );
-        expect(fileInput).toBeTruthy();
-        expect(fileInput!.accept).toBe("");
-        expect(fileInput!.multiple).toBe(true);
+          const fileInput = document.querySelector<HTMLInputElement>(
+            '[data-chat-composer-form="true"] input[type="file"]',
+          );
+          expect(fileInput).toBeTruthy();
+          expect(fileInput!.accept).toBe("");
+          expect(fileInput!.multiple).toBe(true);
 
-        // Tapping the button forwards to the hidden file input's native picker.
-        let pickerOpened = false;
-        const originalClick = fileInput!.click.bind(fileInput!);
-        fileInput!.click = () => {
-          pickerOpened = true;
-        };
-        attachButton.click();
-        expect(pickerOpened).toBe(true);
-        fileInput!.click = originalClick;
+          // Tapping the button forwards to the hidden file input's native picker.
+          let pickerOpened = false;
+          const originalClick = fileInput!.click.bind(fileInput!);
+          fileInput!.click = () => {
+            pickerOpened = true;
+          };
+          attachButton.click();
+          expect(pickerOpened).toBe(true);
+          fileInput!.click = originalClick;
 
-        // Simulate the user choosing a file from the native picker.
-        const transfer = new DataTransfer();
-        transfer.items.add(
-          new File([new Uint8Array([1, 2, 3, 4])], "diagram.png", { type: "image/png" }),
-        );
-        fileInput!.files = transfer.files;
-        fileInput!.dispatchEvent(new Event("change", { bubbles: true }));
+          // Simulate the user choosing a file from the native picker.
+          const transfer = new DataTransfer();
+          transfer.items.add(
+            new File([new Uint8Array([1, 2, 3, 4])], "diagram.png", { type: "image/png" }),
+          );
+          fileInput!.files = transfer.files;
+          fileInput!.dispatchEvent(new Event("change", { bubbles: true }));
 
-        // The chosen image shows up in the composer preview strip.
-        await waitForElement(
-          () =>
-            document.querySelector<HTMLButtonElement>('button[aria-label="Preview diagram.png"]'),
-          "Unable to find attached image preview.",
-        );
-        await waitForElement(
-          () =>
-            document.querySelector<HTMLButtonElement>('button[aria-label="Remove diagram.png"]'),
-          "Unable to find attached image remove control.",
-        );
-      } finally {
-        await mounted.cleanup();
-      }
-    });
+          // The chosen image shows up in the composer preview strip.
+          await waitForElement(
+            () =>
+              document.querySelector<HTMLButtonElement>('button[aria-label="Preview diagram.png"]'),
+            "Unable to find attached image preview.",
+          );
+          await waitForElement(
+            () =>
+              document.querySelector<HTMLButtonElement>('button[aria-label="Remove diagram.png"]'),
+            "Unable to find attached image remove control.",
+          );
+
+          await page
+            .getByRole("button", {
+              name: sessionStatus === "running" ? "Queue message" : "Send message",
+              exact: true,
+            })
+            .click();
+          if (sessionStatus === "running") {
+            await vi.waitFor(() => {
+              const saved = createFollowUpQueuePersistence().load(LOCAL_ENVIRONMENT_ID);
+              expect(saved.ok && saved.value.pending[0]).toMatchObject({
+                promptText: "",
+                images: [{ name: "diagram.png" }],
+              });
+            });
+            expect(wsRequests.some((request) => request.type === "thread.turn.start")).toBe(false);
+            const readyThread = {
+              ...fixture.snapshot.threads[0]!,
+              session: { ...fixture.snapshot.threads[0]!.session!, status: "ready" as const },
+            };
+            fixture.snapshot = {
+              ...fixture.snapshot,
+              snapshotSequence: fixture.snapshot.snapshotSequence + 1,
+              threads: [readyThread],
+            };
+            rpcHarness.emitStreamValue(ORCHESTRATION_WS_METHODS.subscribeThread, {
+              kind: "snapshot",
+              snapshot: {
+                snapshotSequence: fixture.snapshot.snapshotSequence,
+                thread: readyThread,
+              },
+            });
+          }
+          await vi.waitFor(
+            () => {
+              const requests = wsRequests.filter((request) => request.type === "thread.turn.start");
+              expect(requests).toHaveLength(1);
+              expect(requests[0]).toMatchObject({
+                message: {
+                  text: "",
+                  attachments: [
+                    {
+                      type: "image",
+                      name: "diagram.png",
+                      dataUrl: "data:image/png;base64,AQIDBA==",
+                    },
+                  ],
+                },
+                modelSelection: { instanceId: provider },
+              });
+            },
+            { timeout: 8_000, interval: 16 },
+          );
+          expect(document.body.textContent).not.toContain("User attached one or more images");
+        } finally {
+          await mounted.cleanup();
+        }
+      },
+    );
 
     it("exposes the attach-image button in the mobile keyboard overlay", async () => {
       // Headless Chromium reports a fine pointer, so force the touch media query

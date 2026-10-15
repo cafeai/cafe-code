@@ -1,7 +1,6 @@
 // @effect-diagnostics nodeBuiltinImport:off
 import { execFileSync } from "node:child_process";
 import {
-  cpSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
@@ -13,37 +12,12 @@ import {
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import * as NodeServices from "@effect/platform-node/NodeServices";
+import { copyStagedYarnProject } from "./lib/staged-yarn-project.ts";
 import * as Console from "effect/Console";
 import * as Effect from "effect/Effect";
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
-
-const workspaceFiles = [
-  "package.json",
-  "yarn.lock",
-  ".yarnrc.yml",
-  ".yarn/patches/effect.patch",
-  "apps/server/package.json",
-  "apps/desktop/package.json",
-  "apps/web/package.json",
-  "oxlint-plugin-cafecode/package.json",
-  "packages/client-runtime/package.json",
-  "packages/contracts/package.json",
-  "packages/effect-acp/package.json",
-  "packages/shared/package.json",
-  "packages/effect-codex-app-server/package.json",
-  "scripts/package.json",
-  "packaging/desktop-runtime/package.json",
-] as const;
-
-function copyWorkspaceManifestFixture(targetRoot: string): void {
-  for (const relativePath of workspaceFiles) {
-    const sourcePath = resolve(repoRoot, relativePath);
-    const destinationPath = resolve(targetRoot, relativePath);
-    mkdirSync(dirname(destinationPath), { recursive: true });
-    cpSync(sourcePath, destinationPath);
-  }
-}
 
 function writeMacManifestFixtures(targetRoot: string): { arm64Path: string; x64Path: string } {
   const assetDirectory = resolve(targetRoot, "release-assets");
@@ -175,7 +149,9 @@ function assertMissing(path: string, message: string): void {
 const tempRoot = mkdtempSync(join(tmpdir(), "cafecode-release-smoke-"));
 
 try {
-  copyWorkspaceManifestFixture(tempRoot);
+  await Effect.runPromise(
+    copyStagedYarnProject(repoRoot, tempRoot).pipe(Effect.provide(NodeServices.layer)),
+  );
 
   execFileSync(
     process.execPath,

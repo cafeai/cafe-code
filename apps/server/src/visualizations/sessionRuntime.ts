@@ -17,7 +17,7 @@ import * as Schema from "effect/Schema";
 import * as Semaphore from "effect/Semaphore";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
 import { ServerConfig } from "../config.ts";
-import { makeSchedulingSessionFiles } from "../scheduledFollowups/sessionFiles.ts";
+import { makeSessionMcpFiles } from "../mcp/sessionFiles.ts";
 import { claimVisualizationCompletion } from "./store.ts";
 
 export const VISUALIZATION_SESSION_DAEMON_PATH = "/visualizations/session/authorize";
@@ -116,7 +116,7 @@ export const makeVisualizationSessionRuntime = (options: {
     type Candidate = {
       authority: VisualizationSessionAuthority;
       predecessor: string | null;
-      files: Awaited<ReturnType<typeof makeSchedulingSessionFiles>>;
+      files: Awaited<ReturnType<typeof makeSessionMcpFiles>>;
       revoked: boolean;
       disposed: boolean;
       active: boolean;
@@ -200,7 +200,7 @@ export const makeVisualizationSessionRuntime = (options: {
             };
             const files = yield* Effect.tryPromise({
               try: () =>
-                makeSchedulingSessionFiles({
+                makeSessionMcpFiles({
                   bridgeSource: options.bridgeSource,
                   port: options.mcpPort,
                   token,

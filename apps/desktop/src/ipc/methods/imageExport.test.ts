@@ -34,7 +34,7 @@ beforeEach(() => {
   native.showSaveDialog.mockResolvedValue({ canceled: true });
 });
 
-function topFrame(url = "file:///Applications/CafeCode/index.html"): DesktopIpc.DesktopIpcWebFrame {
+function topFrame(url = "http://127.0.0.1:5733/"): DesktopIpc.DesktopIpcWebFrame {
   const frame = {
     url,
     detached: false,
@@ -78,7 +78,7 @@ async function withImageIpc(
   await Effect.runPromise(
     Effect.scoped(
       Effect.gen(function* () {
-        yield* ipc.trustWebContents(sender);
+        yield* ipc.trustWebContents(sender, { url: new URL(frame.url), role: "main" });
         yield* ipc.handle(copyPng);
         yield* ipc.handle(savePng);
         yield* Effect.promise(() =>
@@ -211,11 +211,13 @@ describe("native PNG IPC", () => {
           // this synthetic selection cannot touch the host filesystem.
           return { canceled: false, filePath: "must-not-be-observed.png" };
         });
-        await expect(
-          invoke(SAVE_PNG_CHANNEL, event, { png: fixturePng(), suggestedName: "diagram.png" }),
-        ).resolves.toBe("cancelled");
-        expect(sender.listenerCount("did-start-navigation")).toBe(0);
-        expect(sender.listenerCount("render-process-gone")).toBe(0);
+        const result = invoke(SAVE_PNG_CHANNEL, event, {
+          png: fixturePng(),
+          suggestedName: "diagram.png",
+        });
+        await expect(result).rejects.toThrow(DesktopIpc.DesktopIpcSenderValidationError);
+        expect(sender.listenerCount("did-start-navigation")).toBe(1);
+        expect(sender.listenerCount("render-process-gone")).toBe(1);
       });
     },
   );

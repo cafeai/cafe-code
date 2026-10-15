@@ -31,7 +31,9 @@ export async function readBridgeConnection(
     typeof connection.token !== "string" ||
     connection.token.length < 32
   ) {
-    throw new Error("Cafe Code is unavailable. Open the desktop app and reinstall MCP.");
+    throw new Error(
+      "Cafe Code is unavailable. Resume the Cafe chat to reconnect its management tools.",
+    );
   }
   const url = new URL(connection.url);
   // This bridge is a local capability, never an arbitrary HTTP proxy. Redirects
@@ -130,7 +132,7 @@ export async function runLocalBridge(options: {
             message.id,
             response.status === 403
               ? "Cafe Code MCP is off or this connection is not authorized."
-              : "Cafe Code MCP is unavailable. Check Settings → MCP in the desktop app.",
+              : "Cafe Code MCP is unavailable. Check Settings → Cafe tools in the desktop app.",
           );
         return;
       }
@@ -150,7 +152,7 @@ export async function runLocalBridge(options: {
             ? "Cafe MCP request was cancelled; already-started work may still finish."
             : requestStarted && message.method === "tools/call"
               ? "The Cafe MCP connection was lost. The tool may have completed; check its result before repeating the action."
-              : "Cafe Code MCP is unavailable. Open the desktop app and check Settings → MCP.",
+              : "Cafe Code MCP is unavailable. Open the desktop app and check Settings → Cafe tools.",
         );
     } finally {
       controllers.delete(controller);

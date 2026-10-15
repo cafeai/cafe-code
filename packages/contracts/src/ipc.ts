@@ -529,7 +529,6 @@ export interface LocalApi {
   server: {
     usageReset: (input: ProviderUsageResetInput) => Promise<ProviderUsageResetResult>;
     getMcpStatus: () => Promise<CafeMcpStatus>;
-    updateMcpClient: (input: CafeMcpClientUpdate) => Promise<CafeMcpStatus>;
     getConfig: () => Promise<ServerConfig>;
     /**
      * Refresh provider snapshots. When `input.instanceId` is supplied only that
@@ -693,4 +692,4 @@ export interface EnvironmentApi {
     ) => () => void;
   };
 }
-import type { CafeMcpClientUpdate, CafeMcpStatus } from "./mcp.ts";
+import type { CafeMcpStatus } from "./mcp.ts";

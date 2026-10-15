@@ -19,6 +19,8 @@ import * as Option from "effect/Option";
 import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
 import { cast } from "effect/Function";
+import { isHttpsProxyRequest } from "./httpTransport.ts";
+import { readHttpBody, readHttpJson, respondToHttpBodyError } from "./httpBody.ts";
 import {
   HttpBody,
   HttpClient,
@@ -223,13 +225,6 @@ const serveStaticFile = (input: {
     });
   });
 
-// True when the request reached this HTTP server through the HTTPS sibling proxy,
-// which stamps these headers (see httpsSiblingServer.ts). Such requests are already
-// encrypted end-to-end for the client, so they must be served the real app.
-function isViaHttpsProxy(headers: Record<string, string | undefined>): boolean {
-  return headers["x-cafe-code-https-proxy"] === "1" || headers["x-forwarded-proto"] === "https";
-}
-
 function escapeHtml(value: string): string {
   return value
     .replace(/&/g, "&amp;")
@@ -376,7 +371,7 @@ export const httpsCertificateRouteLayer = HttpRouter.add(
 const requireAuthenticatedRequest = Effect.gen(function* () {
   const request = yield* HttpServerRequest.HttpServerRequest;
   const serverAuth = yield* ServerAuth;
-  yield* serverAuth.authenticateHttpRequest(request);
+  return yield* serverAuth.authenticateHttpRequest(request);
 });
 
 const serverEnvironmentRouteHandler = Effect.gen(function* () {
@@ -455,9 +450,9 @@ export const webPushSubscribeRouteLayer = HttpRouter.add(
   "POST",
   "/api/notifications/web-push/subscriptions",
   Effect.gen(function* () {
-    yield* requireAuthenticatedRequest;
+    const owner = yield* requireAuthenticatedRequest;
     const request = yield* HttpServerRequest.HttpServerRequest;
-    const body = yield* request.json.pipe(Effect.catch(() => Effect.succeed(null)));
+    const body = yield* readHttpJson(request).pipe(Effect.catch(() => Effect.succeed(null)));
     const decoded = yield* decodeWebPushSubscribeRequest(body).pipe(
       Effect.catch(() => Effect.succeed(null)),
     );
@@ -466,6 +461,7 @@ export const webPushSubscribeRouteLayer = HttpRouter.add(
     }
     const webPush = yield* WebPushNotifications;
     yield* webPush.saveSubscription({
+      owner,
       subscription: decoded.subscription,
       label: decoded.label,
     });
@@ -480,9 +476,9 @@ export const webPushUnsubscribeRouteLayer = HttpRouter.add(
   "POST",
   "/api/notifications/web-push/unsubscribe",
   Effect.gen(function* () {
-    yield* requireAuthenticatedRequest;
+    const owner = yield* requireAuthenticatedRequest;
     const request = yield* HttpServerRequest.HttpServerRequest;
-    const body = yield* request.json.pipe(Effect.catch(() => Effect.succeed(null)));
+    const body = yield* readHttpJson(request).pipe(Effect.catch(() => Effect.succeed(null)));
     const decoded = yield* decodeWebPushUnsubscribeRequest(body).pipe(
       Effect.catch(() => Effect.succeed(null)),
     );
@@ -490,7 +486,7 @@ export const webPushUnsubscribeRouteLayer = HttpRouter.add(
       return HttpServerResponse.text("Invalid unsubscribe payload.", { status: 400 });
     }
     const webPush = yield* WebPushNotifications;
-    yield* webPush.removeSubscription(decoded.endpoint);
+    yield* webPush.removeSubscription(decoded.endpoint, owner);
     return HttpServerResponse.empty({ status: 204, headers: browserApiCorsHeaders });
   }).pipe(
     Effect.catchTag("AuthError", respondToAuthError),
@@ -502,16 +498,16 @@ export const webPushLocaleRouteLayer = HttpRouter.add(
   "POST",
   "/api/notifications/web-push/subscriptions/locale",
   Effect.gen(function* () {
-    yield* requireAuthenticatedRequest;
+    const owner = yield* requireAuthenticatedRequest;
     const request = yield* HttpServerRequest.HttpServerRequest;
-    const body = yield* request.json.pipe(Effect.catch(() => Effect.succeed(null)));
+    const body = yield* readHttpJson(request).pipe(Effect.catch(() => Effect.succeed(null)));
     const decoded = yield* decodeWebPushLocaleRequest(body).pipe(
       Effect.catch(() => Effect.succeed(null)),
     );
     if (!decoded || !decoded.subscription.uiLocale)
       return HttpServerResponse.text("Invalid subscription locale payload.", { status: 400 });
     const webPush = yield* WebPushNotifications;
-    yield* webPush.updateSubscriptionLocale(decoded.subscription);
+    yield* webPush.updateSubscriptionLocale(decoded.subscription, owner);
     return HttpServerResponse.empty({ status: 204, headers: browserApiCorsHeaders });
   }).pipe(
     Effect.catchTag("AuthError", respondToAuthError),
@@ -524,6 +520,45 @@ export const webPushLocaleRouteLayer = HttpRouter.add(
 // mobile composer behavior can be diagnosed without devtools on the device.
 // The browser debug flag is not authoritative: the server only accepts these
 // diagnostics when it was explicitly started with debug logging enabled.
+const ClientDebugEvent = Schema.Struct({
+  seq: Schema.Int.check(Schema.isBetween({ minimum: 0, maximum: Number.MAX_SAFE_INTEGER })),
+  event: Schema.Literals([
+    "init",
+    "visualViewport-resize",
+    "window-resize",
+    "focusin",
+    "focusout",
+    "composer-state",
+    "dismiss-keyboard",
+    "keyboard-open-detected",
+    "keyboard-close-detected",
+    "submit-start",
+    "submit-settled",
+    "editor-reenabled-skip-refocus",
+    "expand-mobile-composer",
+    "surface-edge-tap-expand",
+    "collapsed-focus-ignored",
+  ]),
+  maxSm: Schema.optionalKey(Schema.Boolean),
+  maxMd: Schema.optionalKey(Schema.Boolean),
+  touchOnly: Schema.optionalKey(Schema.Boolean),
+});
+const debugRates = new Map<string, { expires: number; count: number }>();
+let debugWindow = { expires: 0, count: 0 };
+function admitClientDebugEvent(sessionId: string): boolean {
+  const now = Date.now();
+  if (debugWindow.expires <= now) debugWindow = { expires: now + 60_000, count: 0 };
+  if (++debugWindow.count > 120) return false;
+  for (const [id, rate] of debugRates) if (rate.expires <= now) debugRates.delete(id);
+  let rate = debugRates.get(sessionId);
+  if (!rate) {
+    if (debugRates.size >= 1024) return false;
+    rate = { expires: now + 60_000, count: 0 };
+    debugRates.set(sessionId, rate);
+  }
+  return ++rate.count <= 20;
+}
+
 export const clientDebugLogRouteLayer = HttpRouter.add(
   "POST",
   "/api/client-debug-log",
@@ -533,11 +568,20 @@ export const clientDebugLogRouteLayer = HttpRouter.add(
       return HttpServerResponse.empty({ status: 404, headers: browserApiCorsHeaders });
     }
 
+    const session = yield* requireAuthenticatedRequest;
+    if (!admitClientDebugEvent(session.sessionId))
+      return HttpServerResponse.empty({ status: 429, headers: browserApiCorsHeaders });
     const request = yield* HttpServerRequest.HttpServerRequest;
-    const body = yield* request.json.pipe(Effect.catch(() => Effect.succeed("<unparseable body>")));
-    yield* Effect.logInfo("[client-debug]", body);
+    const body = yield* readHttpJson(request, 8 * 1024);
+    const decoded = Schema.decodeUnknownOption(ClientDebugEvent)(body);
+    if (Option.isNone(decoded))
+      return HttpServerResponse.empty({ status: 400, headers: browserApiCorsHeaders });
+    yield* Effect.logInfo("[client-debug]", decoded.value);
     return HttpServerResponse.empty({ status: 204, headers: browserApiCorsHeaders });
-  }),
+  }).pipe(
+    Effect.catchTag("AuthError", respondToAuthError),
+    Effect.catchTag("HttpBodyError", respondToHttpBodyError),
+  ),
 );
 
 export const brandingSidebarImageUploadRouteLayer = HttpRouter.add(
@@ -557,7 +601,7 @@ export const brandingSidebarImageUploadRouteLayer = HttpRouter.add(
       }
     }
 
-    const body = yield* request.arrayBuffer.pipe(
+    const body = yield* readHttpBody(request, MAX_SIDEBAR_BRAND_IMAGE_FILE_BYTES).pipe(
       Effect.mapError(
         (cause) =>
           new BrandingImageError({
@@ -637,7 +681,6 @@ export const brandingSidebarImageServeRouteLayer = HttpRouter.add(
 
 class DecodeOtlpTraceRecordsError extends Data.TaggedError("DecodeOtlpTraceRecordsError")<{
   readonly cause: unknown;
-  readonly bodyJson: OtlpTracer.TraceData;
 }> {}
 
 export const otlpTracesProxyRouteLayer = HttpRouter.add(
@@ -650,19 +693,14 @@ export const otlpTracesProxyRouteLayer = HttpRouter.add(
     const otlpTracesUrl = config.otlpTracesUrl;
     const browserTraceCollector = yield* BrowserTraceCollector;
     const httpClient = yield* HttpClient.HttpClient;
-    const bodyJson = cast<unknown, OtlpTracer.TraceData>(yield* request.json);
+    const bodyJson = cast<unknown, OtlpTracer.TraceData>(yield* readHttpJson(request, 1024 * 1024));
 
     yield* Effect.try({
       try: () => decodeOtlpTraceRecords(bodyJson),
-      catch: (cause) => new DecodeOtlpTraceRecordsError({ cause, bodyJson }),
+      catch: (cause) => new DecodeOtlpTraceRecordsError({ cause: undefined }),
     }).pipe(
       Effect.flatMap((records) => browserTraceCollector.record(records)),
-      Effect.catch((cause) =>
-        Effect.logWarning("Failed to decode browser OTLP traces", {
-          cause,
-          bodyJson,
-        }),
-      ),
+      Effect.catch(() => Effect.logWarning("Failed to decode browser OTLP traces")),
     );
 
     if (otlpTracesUrl === undefined) {
@@ -676,17 +714,15 @@ export const otlpTracesProxyRouteLayer = HttpRouter.add(
       .pipe(
         Effect.flatMap(HttpClientResponse.filterStatusOk),
         Effect.as(HttpServerResponse.empty({ status: 204 })),
-        Effect.tapError((cause) =>
-          Effect.logWarning("Failed to export browser OTLP traces", {
-            cause,
-            otlpTracesUrl,
-          }),
-        ),
+        Effect.tapError(() => Effect.logWarning("Failed to export browser OTLP traces")),
         Effect.catch(() =>
           Effect.succeed(HttpServerResponse.text("Trace export failed.", { status: 502 })),
         ),
       );
-  }).pipe(Effect.catchTag("AuthError", respondToAuthError)),
+  }).pipe(
+    Effect.catchTag("AuthError", respondToAuthError),
+    Effect.catchTag("HttpBodyError", respondToHttpBodyError),
+  ),
 );
 
 export const attachmentsRouteLayer = HttpRouter.add(
@@ -833,8 +869,8 @@ export const staticAndDevRouteLayer = HttpRouter.add(
     // it stays reachable over HTTP for bootstrapping.
     if (config.httpsEnabled && config.httpsPort !== undefined) {
       const remoteAddress = Option.getOrUndefined(request.remoteAddress);
-      const isExternalPeer = remoteAddress !== undefined && !isLoopbackRemoteAddress(remoteAddress);
-      if (isExternalPeer && !isViaHttpsProxy(request.headers)) {
+      const isExternalPeer = remoteAddress === undefined || !isLoopbackRemoteAddress(remoteAddress);
+      if (isExternalPeer && !isHttpsProxyRequest(request)) {
         return HttpServerResponse.text(
           renderHttpsBootstrapPage({
             hostname: url.value.hostname,

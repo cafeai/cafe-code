@@ -1,3 +1,5 @@
+import { readHttpJson } from "../httpBody.ts";
+import * as Schema from "effect/Schema";
 import {
   ClientOrchestrationCommand,
   OrchestrationDispatchCommandError,
@@ -75,15 +77,17 @@ export const orchestrationDispatchRouteLayer = HttpRouter.add(
     const projectionSnapshotQuery = yield* ProjectionSnapshotQuery;
     const providerService = yield* ProviderService;
     const standaloneWorkspaces = yield* makeStandaloneWorkspaceStore;
-    const command = yield* HttpServerRequest.schemaBodyJson(ClientOrchestrationCommand).pipe(
-      Effect.mapError(
-        (cause) =>
-          new OrchestrationDispatchCommandError({
-            message: "Invalid orchestration command payload.",
-            cause,
-          }),
-      ),
-    );
+    const command = yield* readHttpJson(yield* HttpServerRequest.HttpServerRequest, 1024 * 1024)
+      .pipe(Effect.flatMap(Schema.decodeUnknownEffect(ClientOrchestrationCommand)))
+      .pipe(
+        Effect.mapError(
+          (cause) =>
+            new OrchestrationDispatchCommandError({
+              message: "Invalid orchestration command payload.",
+              cause,
+            }),
+        ),
+      );
     const normalizedCommand = yield* normalizeDispatchCommand(command);
     const dispatch =
       normalizedCommand.type === "thread.fork"

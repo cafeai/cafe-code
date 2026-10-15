@@ -10,6 +10,7 @@ import * as Effect from "effect/Effect";
 import * as Scope from "effect/Scope";
 import { HttpServer } from "effect/unstable/http";
 
+import { httpsProxyAuthority } from "./httpTransport.ts";
 import { ServerConfig, type ServerConfigShape } from "./config.ts";
 import { ensureHttpsCertificateMaterial, type HttpsCertificateError } from "./httpsCertificate.ts";
 import { formatHostForUrl, isWildcardHost, resolveListeningPort } from "./startupAccess.ts";
@@ -28,6 +29,9 @@ const normalizeHostForConnect = (host: string): string => host.replace(/^\[(.*)\
 const resolveProxyTargetHost = (host: string | undefined): string =>
   host && !isWildcardHost(host) ? normalizeHostForConnect(host) : "127.0.0.1";
 
+export const resolveHttpsProxyTarget = (address: HttpServer.Address, fallback?: string): string =>
+  resolveProxyTargetHost(address._tag === "TcpAddress" ? address.hostname : fallback);
+
 const hostHeaderValue = (host: string, port: number): string => {
   const formattedHost = formatHostForUrl(host);
   return `${formattedHost}:${port}`;
@@ -37,11 +41,10 @@ const proxyHeaders = (input: {
   readonly headers: IncomingHttpHeaders;
   readonly targetHost: string;
   readonly targetPort: number;
+  readonly client: string;
 }): IncomingHttpHeaders => ({
-  ...input.headers,
+  ...httpsProxyAuthority.headers(input.headers, input.client),
   host: hostHeaderValue(input.targetHost, input.targetPort),
-  "x-forwarded-proto": "https",
-  "x-cafe-code-https-proxy": "1",
 });
 
 const writeHeaderLine = (socket: Net.Socket, name: string, value: string | readonly string[]) => {
@@ -68,6 +71,7 @@ const proxyHttpRequest = (input: {
       method: input.request.method,
       headers: proxyHeaders({
         headers: input.request.headers,
+        client: input.request.socket.remoteAddress ?? "",
         targetHost: input.targetHost,
         targetPort: input.targetPort,
       }),
@@ -112,6 +116,7 @@ const proxyWebSocketUpgrade = (input: {
       );
       const headers = proxyHeaders({
         headers: input.request.headers,
+        client: input.request.socket.remoteAddress ?? "",
         targetHost: input.targetHost,
         targetPort: input.targetPort,
       });
@@ -181,7 +186,10 @@ const acquireHttpsSiblingServer: Effect.Effect<
 
   const httpServer = yield* HttpServer.HttpServer;
   const targetPort = resolveListeningPort(httpServer.address, config.port);
-  const targetHost = resolveProxyTargetHost(config.host);
+  // Use the observed bound address. A configured DNS name may resolve to a
+  // different address later; neither credentials nor proxy authority may follow it.
+  const targetHost = resolveHttpsProxyTarget(httpServer.address, config.host);
+  httpsProxyAuthority.admitPeer(targetHost);
   const certificate = yield* ensureHttpsCertificateMaterial(config);
 
   const server = Https.createServer(

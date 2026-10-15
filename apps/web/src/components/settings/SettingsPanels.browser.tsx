@@ -54,6 +54,7 @@ import { DiagnosticsSettingsPanel } from "./DiagnosticsSettings";
 import { KeybindingsSettingsPanel } from "./KeybindingsSettings";
 import {
   AppearanceSettingsPanel,
+  GeneralSettingsPanel,
   LanguageSettingsRow,
   ChatSettingsPanel,
   FilesSettingsPanel,
@@ -861,7 +862,7 @@ describe("settings panels", () => {
       .toBeVisible();
     expect(updateSettings).not.toHaveBeenCalled();
 
-    await page.getByRole("button", { name: "Reset text generation model to default" }).click();
+    await page.getByRole("button", { name: "Reset automatic naming model to default" }).click();
     expect(updateSettings).toHaveBeenCalledTimes(1);
     expect(updateSettings).toHaveBeenCalledWith({
       textGenerationModelSelection: {
@@ -875,7 +876,7 @@ describe("settings panels", () => {
       .element(page.getByRole("button", { name: "Medium · Normal", exact: true }))
       .toBeVisible();
     await expect
-      .element(page.getByRole("button", { name: "Reset text generation model to default" }))
+      .element(page.getByRole("button", { name: "Reset automatic naming model to default" }))
       .not.toBeInTheDocument();
   });
 
@@ -1265,14 +1266,31 @@ describe("settings panels", () => {
       expect(updateClientSettings).toHaveBeenCalledWith({ chatClickBehavior: "open" });
       expect(getServerConfig()?.clientSettings.chatClickBehavior).toBe("open");
     });
-    await page.getByRole("button", { name: "Reset single-click behavior to default" }).click();
+    await page.getByRole("button", { name: "Reset clicking a chat to default" }).click();
     await vi.waitFor(() => {
       expect(updateClientSettings).toHaveBeenLastCalledWith({ chatClickBehavior: "preview" });
       expect(getServerConfig()?.clientSettings.chatClickBehavior).toBe("preview");
     });
   });
 
+  it("groups project defaults in General and hides desktop-only controls in browsers", async () => {
+    Reflect.deleteProperty(window, "desktopBridge");
+    setServerConfigSnapshot(createBaseServerConfig());
+    mounted = await renderWithTestRouter(
+      <AppAtomRegistryProvider>
+        <GeneralSettingsPanel />
+      </AppAtomRegistryProvider>,
+    );
+    await expect.element(page.getByRole("heading", { name: "General", exact: true })).toBeVisible();
+    await expect.element(page.getByText("Language", { exact: true })).toBeVisible();
+    await expect.element(page.getByText("Time format", { exact: true })).toBeVisible();
+    await expect.element(page.getByText("Default project folder", { exact: true })).toBeVisible();
+    await expect.element(page.getByText("Default editor", { exact: true })).toBeVisible();
+    await expect.element(page.getByText("Keep awake", { exact: true })).not.toBeInTheDocument();
+  });
+
   it("persists appearance preferences from Appearance settings", async () => {
+    await page.viewport(1100, 900);
     const desktopBridge = createDesktopBridgeStub();
     window.desktopBridge = desktopBridge;
     const { updateClientSettings } = installClientSettingsNativeApi(desktopBridge);
@@ -1284,6 +1302,14 @@ describe("settings panels", () => {
       </AppAtomRegistryProvider>,
     );
 
+    await expect
+      .element(page.getByRole("heading", { name: "Weather effects", exact: true }))
+      .toBeInTheDocument();
+    await expect
+      .element(page.getByRole("switch", { name: "Enable Task Atrium" }))
+      .not.toBeInTheDocument();
+    await expect.element(page.getByText("Language", { exact: true })).not.toBeInTheDocument();
+    await expect.element(page.getByText("Time format", { exact: true })).not.toBeInTheDocument();
     const setColorInput = (ariaLabel: string, value: string) => {
       const input = document.querySelector(
         `input[aria-label="${ariaLabel}"]`,
@@ -1298,7 +1324,9 @@ describe("settings panels", () => {
       input!.dispatchEvent(new FocusEvent("focusout", { bubbles: true }));
     };
 
-    await expect.element(page.getByText("Accent color")).toBeInTheDocument();
+    await expect
+      .element(page.getByRole("heading", { name: "Accent color", exact: true }))
+      .toBeInTheDocument();
     await expect.element(page.getByText("Interface size")).toBeInTheDocument();
     page.getByRole("slider", { name: "Interface size" }).element().focus();
     await userEvent.keyboard("{ArrowRight}");
@@ -1343,6 +1371,27 @@ describe("settings panels", () => {
     await expect
       .element(page.getByRole("heading", { name: "Sidebar image", exact: true }))
       .toBeInTheDocument();
+    await expect
+      .element(page.getByRole("switch", { name: "Enable sidebar image" }))
+      .not.toBeChecked();
+    await expect.element(page.getByRole("button", { name: "Choose image" })).toBeDisabled();
+    const imageRow = page
+      .getByRole("heading", { name: "Sidebar image", exact: true })
+      .element()
+      .closest("div.border-t");
+    expect(imageRow?.classList.contains("opacity-50")).toBe(true);
+    await page.screenshot({
+      element: page
+        .getByRole("switch", { name: "Enable sidebar image" })
+        .element()
+        .closest("section")!,
+      path: "../../../../../.explorations/settings-reorganization/sidebar-image-disabled.png",
+    });
+    await page.getByRole("switch", { name: "Enable sidebar image" }).click();
+    await expect.element(page.getByRole("button", { name: "Choose image" })).toBeEnabled();
+    await page.screenshot({
+      path: "../../../../../.explorations/settings-reorganization/appearance.png",
+    });
     const imageInput = document.querySelector(
       'input[aria-label="Sidebar image file"]',
     ) as HTMLInputElement | null;
@@ -1396,14 +1445,16 @@ describe("settings panels", () => {
     await expect.element(page.getByText("Choose an image under 1 MB.")).toBeInTheDocument();
     expect(updateClientSettings).toHaveBeenCalledTimes(callsBeforeOversizedImage);
 
-    await expect.element(page.getByText("Accent color")).toBeInTheDocument();
+    await expect
+      .element(page.getByRole("heading", { name: "Accent color", exact: true }))
+      .toBeInTheDocument();
     setColorInput("App accent color", "#dc2626");
 
     await vi.waitFor(() => {
       expect(updateClientSettings).toHaveBeenCalledWith({ appAccentColor: "#dc2626" });
     });
 
-    await expect.element(page.getByText("Sidebar color")).toBeInTheDocument();
+    await expect.element(page.getByText("Sidebar effects color")).toBeInTheDocument();
     setColorInput("Animated sidebar color", "#16a34a");
 
     await vi.waitFor(() => {
@@ -1418,9 +1469,9 @@ describe("settings panels", () => {
     });
 
     await expect
-      .element(page.getByRole("heading", { name: "Show sidebar image", exact: true }))
+      .element(page.getByRole("heading", { name: "Enable sidebar image", exact: true }))
       .toBeInTheDocument();
-    await page.getByLabelText("Show sidebar image").click();
+    await page.getByLabelText("Enable sidebar image").click();
 
     await vi.waitFor(() => {
       expect(updateClientSettings).toHaveBeenCalledWith({ showSidebarMascot: false });
@@ -1433,7 +1484,7 @@ describe("settings panels", () => {
       expect(updateClientSettings).toHaveBeenCalledWith({ showSidebarAttribution: false });
     });
 
-    await expect.element(page.getByText("Background animations")).toBeInTheDocument();
+    await expect.element(page.getByText("Animate while unfocused")).toBeInTheDocument();
     await page.getByLabelText("Keep animations running in background").click();
 
     await vi.waitFor(() => {

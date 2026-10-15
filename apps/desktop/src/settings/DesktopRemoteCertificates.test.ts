@@ -5,6 +5,8 @@ import type * as Electron from "electron";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
+import * as Logger from "effect/Logger";
+import * as References from "effect/References";
 import * as Path from "effect/Path";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -48,7 +50,8 @@ function fixture(
   },
   test: (input: {
     service: DesktopRemoteCertificates.DesktopRemoteCertificatesShape;
-    check: (url?: string) => boolean;
+    check: (url?: string, error?: string) => boolean;
+    warnings: Array<{ message: string; annotations: Readonly<Record<string, unknown>> }>;
     fileSystem: FileSystem.FileSystem;
     registryPath: string;
     showMessageBox: ReturnType<typeof vi.fn>;
@@ -77,11 +80,20 @@ function fixture(
           );
         if (options.failWrite) yield* fileSystem.makeDirectory(registryPath);
         let listener: CertificateListener | undefined;
+        const warnings: Array<{ message: string; annotations: Readonly<Record<string, unknown>> }> =
+          [];
+        const logger = Logger.make(({ message, fiber }) => {
+          warnings.push({
+            message: String(message),
+            annotations: fiber.getRef(References.CurrentLogAnnotations),
+          });
+        });
         const showMessageBox = vi
           .fn()
           .mockReturnValue(Effect.succeed({ response: options.response, checkboxChecked: false }));
         const dependencies = Layer.mergeAll(
           NodeServices.layer,
+          Logger.layer([logger], { mergeWithExisting: false }),
           Layer.succeed(DesktopEnvironment.DesktopEnvironment, {
             savedEnvironmentRegistryPath: path.join(directory, "saved-environments.json"),
           } as DesktopEnvironment.DesktopEnvironmentShape),
@@ -106,15 +118,16 @@ function fixture(
             registryPath,
             fileSystem,
             showMessageBox,
+            warnings,
             reload,
-            check: (url = origin) => {
+            check: (url = origin, error = "net::ERR_CERT_AUTHORITY_INVALID") => {
               const preventDefault = vi.fn();
               const callback = vi.fn();
               listener?.(
                 { preventDefault } as unknown as Electron.Event,
                 {} as Electron.WebContents,
                 url,
-                "net::ERR_CERT_AUTHORITY_INVALID",
+                error,
                 { data: cert } as Electron.Certificate,
                 callback,
               );
@@ -128,6 +141,34 @@ function fixture(
 }
 
 describe("desktop remote certificate approval", () => {
+  it("keeps approved peers quiet and reports rejection without copying URL credentials or received errors", () =>
+    fixture({ response: 1 }, ({ service, check, warnings }) =>
+      Effect.gen(function* () {
+        expect(yield* service.prepare(origin)).toBe("approved");
+        expect(check(`${origin}/?wsToken=private-fixture-token`)).toBe(true);
+        yield* Effect.yieldNow;
+        expect(warnings).toEqual([]);
+        expect(check("https://127.0.0.1:3776/private/path?wsToken=private-fixture-token")).toBe(
+          false,
+        );
+        expect(check(origin, "net::ERR_CERT_DATE_INVALID")).toBe(false);
+        expect(check(origin, "net::ERR_CERT_COMMON_NAME_INVALID")).toBe(false);
+        expect(check(origin, "private arbitrary received diagnostic")).toBe(false);
+        yield* Effect.yieldNow;
+        expect(warnings.map((entry) => entry.message)).toEqual(
+          Array(4).fill("TLS certificate rejected"),
+        );
+        expect(warnings.map((entry) => entry.annotations.reason)).toEqual([
+          "unapproved-authority",
+          "invalid-dates",
+          "address-mismatch",
+          "certificate-error",
+        ]);
+        expect(JSON.stringify(warnings.map((entry) => entry.annotations))).not.toMatch(
+          /private|wsToken|3776/,
+        );
+      }),
+    ));
   it.each([0, 1])(
     "requires a new decision after a certificate changes (response %s)",
     (response) => {

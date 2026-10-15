@@ -16,6 +16,7 @@ export function shouldSurfaceProviderAccountRateLimits(
 }
 
 export interface CodexRateLimitSummaryLine {
+  readonly kind?: "credits";
   readonly label: string;
   readonly value: string;
   readonly text: string;
@@ -52,6 +53,7 @@ export interface CodexRateLimitPresentation {
 interface FormatOptions {
   readonly locale?: string;
   readonly timeZone?: string;
+  readonly compactDetails?: boolean;
 }
 
 function clampPercentage(value: number): number {
@@ -203,11 +205,14 @@ export function selectCodexRateLimitSnapshot(
 
 export function formatCodexRateLimitResetAvailability(
   rateLimits: ServerProviderAccountRateLimits | null | undefined,
+  compact = false,
 ): string | null {
   const availableCount = selectCodexAvailableResetCount(rateLimits);
   return availableCount === null
     ? null
-    : uiText("Usage limit resets available: {count}", { count: availableCount });
+    : compact
+      ? uiText("Resets: {count}", { count: availableCount })
+      : uiText("Usage limit resets available: {count}", { count: availableCount });
 }
 
 export function selectCodexAvailableResetCount(
@@ -262,6 +267,7 @@ function formatCreditBalance(balance: string): string | null {
 
 function formatCreditValue(
   credits: NonNullable<ServerProviderAccountRateLimitSnapshot["credits"]>,
+  compact = false,
 ): string {
   const balance = credits.balance?.trim();
   const rounded = balance ? formatCreditBalance(balance) : null;
@@ -282,7 +288,9 @@ function formatCreditValue(
   // describe as zero available; all other amounts require the provider flag.
   const zero = /^[+-]?(?:0+(?:\.0*)?|\.0+)$/u.test(balance);
   if ((credits.hasCredits && rounded !== null) || zero)
-    return uiText("{balance} available", { balance: displayBalance });
+    return compact
+      ? (rounded ?? balance)
+      : uiText("{balance} available", { balance: displayBalance });
   return uiText(
     "{available, select, yes {Available} other {None available}} (balance: {balance})",
     { available: credits.hasCredits ? "yes" : "no", balance: displayBalance },
@@ -319,11 +327,16 @@ function formatSnapshot(
     ? uiText("{window} reset: {time}", { window: secondaryResetLabel, time: secondaryResetTime })
     : null;
   const details: CodexRateLimitSummaryLine[] = [];
-  const append = (label: string, value: string) =>
-    details.push({ label, value, text: uiText("{label}: {value}", { label, value }) });
+  const append = (label: string, value: string, kind?: "credits") =>
+    details.push({
+      ...(kind ? { kind } : {}),
+      label,
+      value,
+      text: uiText("{label}: {value}", { label, value }),
+    });
   const credits = snapshot.credits;
   if (credits) {
-    append(uiText("Credits"), formatCreditValue(credits));
+    append(uiText("Credits"), formatCreditValue(credits, options.compactDetails), "credits");
   }
   const individual = snapshot.individualLimit;
   if (individual) {
@@ -400,7 +413,10 @@ export function formatCodexRateLimitPresentation(
   options: FormatOptions = {},
 ): CodexRateLimitPresentation | null {
   const buckets = formatCodexRateLimitBuckets(rateLimits, options);
-  const resetAvailability = formatCodexRateLimitResetAvailability(rateLimits);
+  const resetAvailability = formatCodexRateLimitResetAvailability(
+    rateLimits,
+    options.compactDetails,
+  );
   return buckets.length || resetAvailability ? { buckets, resetAvailability } : null;
 }
 

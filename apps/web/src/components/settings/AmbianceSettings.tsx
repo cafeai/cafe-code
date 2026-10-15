@@ -3,7 +3,6 @@ import { uiText } from "@cafecode/shared/i18n";
 import { useMemo, type CSSProperties } from "react";
 import {
   DEFAULT_UNIFIED_SETTINGS,
-  DEFAULT_AMBIANCE_ATRIUM_ENABLED,
   DEFAULT_AMBIANCE_ATRIUM_COLOR,
   DEFAULT_AMBIANCE_COLOR,
   DEFAULT_AMBIANCE_EFFECT,
@@ -30,12 +29,7 @@ import { Select, SelectItem, SelectPopup, SelectTrigger, SelectValue } from "../
 import { Slider } from "../ui/slider";
 import { Switch } from "../ui/switch";
 import { ColorWheelPicker } from "./ColorWheelPicker";
-import {
-  SettingResetButton,
-  SettingsPageContainer,
-  SettingsRow,
-  SettingsSection,
-} from "./settingsLayout";
+import { SettingResetButton, SettingsRow, SettingsSection } from "./settingsLayout";
 
 const DEFAULT_AMBIANCE_PICKER_COLOR = "#48cfff";
 
@@ -101,7 +95,7 @@ function AmbianceSurfaceToggle({
   );
 }
 
-export function AmbianceSettingsPanel() {
+export function AmbianceSettingsSections() {
   const uiLocale = useUiLocale();
   const uiPresentation = useUiPresentation(UI_PRESENTATION_SOURCES);
 
@@ -124,8 +118,8 @@ export function AmbianceSettingsPanel() {
   const opacityDirty = settings.ambianceOpacity !== DEFAULT_AMBIANCE_OPACITY;
 
   return (
-    <SettingsPageContainer title={uiText("Ambiance", undefined, undefined, uiLocale)}>
-      <SettingsSection>
+    <>
+      <SettingsSection title={uiText("Weather effects", undefined, undefined, uiLocale)}>
         <SettingsRow
           title={uiText("Weather layer", undefined, undefined, uiLocale)}
           description={uiText(
@@ -401,35 +395,6 @@ export function AmbianceSettingsPanel() {
 
       <SettingsSection title={uiText("Task Atrium", undefined, undefined, uiLocale)}>
         <SettingsRow
-          title={uiText("Task Atrium", undefined, undefined, uiLocale)}
-          description={uiText(
-            "Adds an Atrium button above Settings: a read-only overview of chats and subagents.",
-            undefined,
-            undefined,
-            uiLocale,
-          )}
-          resetAction={
-            settings.ambianceAtriumEnabled !== DEFAULT_AMBIANCE_ATRIUM_ENABLED ? (
-              <SettingResetButton
-                label={uiText("task atrium", undefined, undefined, uiLocale)}
-                onClick={() =>
-                  updateSettings({ ambianceAtriumEnabled: DEFAULT_AMBIANCE_ATRIUM_ENABLED })
-                }
-              />
-            ) : null
-          }
-          control={
-            <Switch
-              checked={settings.ambianceAtriumEnabled}
-              onCheckedChange={(checked) =>
-                updateSettings({ ambianceAtriumEnabled: Boolean(checked) })
-              }
-              aria-label={uiText("Enable Task Atrium", undefined, undefined, uiLocale)}
-            />
-          }
-        />
-
-        <SettingsRow
           title={uiText("Atrium color", undefined, undefined, uiLocale)}
           description={uiText("Defaults to the weather color.", undefined, undefined, uiLocale)}
           resetAction={
@@ -453,7 +418,7 @@ export function AmbianceSettingsPanel() {
           }
         />
       </SettingsSection>
-    </SettingsPageContainer>
+    </>
   );
 }
 

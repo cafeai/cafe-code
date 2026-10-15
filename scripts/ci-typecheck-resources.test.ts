@@ -11,6 +11,7 @@ interface Workflow {
     Record<
       string,
       {
+        readonly uses?: string;
         readonly env?: Readonly<Record<string, string>>;
         readonly steps?: ReadonlyArray<{
           readonly name?: string;
@@ -33,7 +34,13 @@ describe("CI typecheck resource budget", () => {
       // Hosted macOS defaults to a ~2 GiB V8 heap, below the server's cold
       // compiler demand. Budget a single compiler at a time, not several
       // simultaneous 4 GiB heaps on a 7 GiB runner. Keep the entire task graph.
-      const typecheckSteps = Object.values(workflow.jobs).flatMap((job) =>
+      const checked =
+        file === "release.yml"
+          ? (parse(readFileSync(resolve(repoRoot, ".github/workflows/ci.yml"), "utf8")) as Workflow)
+          : workflow;
+      if (file === "release.yml")
+        expect(workflow.jobs.quality?.uses).toBe("./.github/workflows/ci.yml");
+      const typecheckSteps = Object.values(checked.jobs).flatMap((job) =>
         (job.steps ?? []).filter((step) => step.run?.includes("yarn typecheck")),
       );
       expect(typecheckSteps, file).toHaveLength(1);

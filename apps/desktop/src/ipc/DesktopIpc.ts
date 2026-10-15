@@ -5,7 +5,19 @@ import * as Scope from "effect/Scope";
 
 export interface DesktopIpcWebContents {
   readonly id?: number;
+  readonly mainFrame?: DesktopIpcWebFrame;
   isDestroyed?: () => boolean;
+  on?: {
+    (
+      event: "did-start-navigation",
+      listener: (details: {
+        readonly isMainFrame: boolean;
+        readonly isSameDocument: boolean;
+      }) => void,
+    ): unknown;
+    (event: "render-process-gone", listener: () => void): unknown;
+    (event: "destroyed", listener: () => void): unknown;
+  };
 }
 
 export interface DesktopIpcWebFrame {
@@ -54,7 +66,10 @@ export interface DesktopSyncIpcMethod<E, R> {
 }
 
 export interface DesktopIpcShape {
-  readonly trustWebContents: (webContents: DesktopIpcWebContents) => Effect.Effect<void>;
+  readonly trustWebContents: (
+    webContents: DesktopIpcWebContents,
+    policy: { readonly url: URL; readonly role: "main" | "dictation" },
+  ) => Effect.Effect<void>;
   readonly handle: <E, R>(
     input: DesktopIpcMethod<E, R>,
   ) => Effect.Effect<void, never, R | Scope.Scope>;
@@ -74,29 +89,33 @@ export class DesktopIpcSenderValidationError extends Error {
   }
 }
 
-function normalizeHostname(hostname: string): string {
-  return hostname.replace(/^\[|\]$/g, "").toLowerCase();
-}
-
-function isLoopbackHostname(hostname: string): boolean {
-  const normalized = normalizeHostname(hostname);
-  return normalized === "localhost" || normalized === "::1" || /^127(?:\.|$)/.test(normalized);
-}
-
-export function isTrustedDesktopIpcFrameUrl(rawUrl: string): boolean {
+export function isTrustedDesktopIpcFrameUrl(rawUrl: string, expectedUrl: URL): boolean {
   try {
     const url = new URL(rawUrl);
-    if (url.protocol === "file:") {
-      return true;
-    }
-    if (url.protocol !== "http:" && url.protocol !== "https:") {
+    // The application origin also serves received attachments and API data.
+    // Those response documents must never inherit the application's bridge.
+    const firstSegment = decodeURIComponent(url.pathname)
+      .replaceAll("\\", "/")
+      .split("/")
+      .find((segment) => segment.length > 0)
+      ?.toLowerCase();
+    if (
+      firstSegment?.includes("%") ||
+      ["api", "mcp", "attachments", "assets", ".well-known"].includes(firstSegment ?? "")
+    )
       return false;
-    }
-    return isLoopbackHostname(url.hostname);
+    return (
+      (url.protocol === "http:" || url.protocol === "https:") &&
+      !url.username &&
+      !url.password &&
+      url.origin === expectedUrl.origin
+    );
   } catch {
     return false;
   }
 }
+
+type TrustPolicy = { readonly url: URL; readonly role: "main" | "dictation"; revision: number };
 
 function isTopLevelFrame(frame: DesktopIpcWebFrame): boolean {
   return frame.top === undefined || frame.top === null || frame.top === frame;
@@ -104,7 +123,8 @@ function isTopLevelFrame(frame: DesktopIpcWebFrame): boolean {
 
 function validateDesktopIpcSender(
   event: DesktopIpcInvokeEvent | DesktopIpcSyncEvent,
-  trustedWebContents: WeakSet<object>,
+  trustedWebContents: WeakMap<object, TrustPolicy>,
+  channel: string,
 ): void {
   const sender = event.sender;
   if (typeof sender !== "object" || sender === null || !trustedWebContents.has(sender)) {
@@ -116,22 +136,38 @@ function validateDesktopIpcSender(
   }
 
   const frame = event.senderFrame;
-  if (!frame || !isTopLevelFrame(frame)) {
+  if (!frame || !isTopLevelFrame(frame) || frame !== sender.mainFrame || frame.detached === true) {
     throw new DesktopIpcSenderValidationError("Rejected IPC call from an untrusted frame.");
   }
 
-  if (!isTrustedDesktopIpcFrameUrl(frame.url)) {
+  const policy = trustedWebContents.get(sender)!;
+  if (
+    !isTrustedDesktopIpcFrameUrl(frame.url, policy.url) ||
+    (policy.role === "dictation" &&
+      (channel !== "desktop:get-local-environment-bootstrap" || frame.url !== policy.url.href))
+  ) {
     throw new DesktopIpcSenderValidationError("Rejected IPC call from an untrusted frame URL.");
   }
 }
 
 export const make = (ipcMain: DesktopIpcMain): DesktopIpcShape => {
-  const trustedWebContents = new WeakSet<object>();
+  const trustedWebContents = new WeakMap<object, TrustPolicy>();
 
   return DesktopIpc.of({
-    trustWebContents: (webContents) =>
+    trustWebContents: (webContents, policy) =>
       Effect.sync(() => {
-        trustedWebContents.add(webContents);
+        const record: TrustPolicy = { ...policy, url: new URL(policy.url.href), revision: 0 };
+        trustedWebContents.set(webContents, record);
+        webContents.on?.("did-start-navigation", (details) => {
+          if (details?.isMainFrame && details.isSameDocument !== true) record.revision++;
+        });
+        webContents.on?.("render-process-gone", () => {
+          record.revision++;
+        });
+        webContents.on?.("destroyed", () => {
+          record.revision++;
+          trustedWebContents.delete(webContents);
+        });
       }),
 
     handle: Effect.fn("desktop.ipc.registerInvoke")(function* <E, R>({
@@ -147,15 +183,34 @@ export const make = (ipcMain: DesktopIpcMain): DesktopIpcShape => {
           ipcMain.removeHandler(channel);
           ipcMain.handle(channel, (event, raw) => {
             try {
-              validateDesktopIpcSender(event, trustedWebContents);
+              validateDesktopIpcSender(event, trustedWebContents, channel);
             } catch (error) {
               return Promise.reject(error);
             }
 
+            const policy = trustedWebContents.get(event.sender!)!;
+            const revision = policy.revision;
+            const frame = event.senderFrame!;
+            const identity = [frame.url, frame.frameToken, frame.processId, frame.routingId];
             return runPromise(
               Effect.gen(function* () {
                 yield* Effect.annotateCurrentSpan({ channel });
-                return yield* handler(raw, event);
+                const result = yield* handler(raw, event);
+                yield* Effect.sync(() => {
+                  validateDesktopIpcSender(event, trustedWebContents, channel);
+                  if (
+                    trustedWebContents.get(event.sender!) !== policy ||
+                    policy.revision !== revision ||
+                    [frame.url, frame.frameToken, frame.processId, frame.routingId].some(
+                      (value, index) => value !== identity[index],
+                    )
+                  ) {
+                    throw new DesktopIpcSenderValidationError(
+                      "Rejected IPC result for a replaced document.",
+                    );
+                  }
+                });
+                return result;
               }).pipe(Effect.annotateLogs({ channel }), Effect.withSpan("desktop.ipc.invoke")),
             );
           });
@@ -177,7 +232,7 @@ export const make = (ipcMain: DesktopIpcMain): DesktopIpcShape => {
           ipcMain.removeAllListeners(channel);
           ipcMain.on(channel, (event) => {
             try {
-              validateDesktopIpcSender(event, trustedWebContents);
+              validateDesktopIpcSender(event, trustedWebContents, channel);
             } catch (error) {
               if (error instanceof DesktopIpcSenderValidationError) {
                 event.returnValue = null;

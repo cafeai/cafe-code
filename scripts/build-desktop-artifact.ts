@@ -4,6 +4,7 @@ import desktopPackageJson from "../apps/desktop/package.json" with { type: "json
 import serverPackageJson from "../apps/server/package.json" with { type: "json" };
 import desktopRuntimePackageJson from "../packaging/desktop-runtime/package.json" with { type: "json" };
 
+import { copyStagedYarnProject } from "./lib/staged-yarn-project.ts";
 import { BRAND_ASSET_PATHS } from "./lib/brand-assets.ts";
 import { getDefaultBuildArch } from "./lib/build-target-arch.ts";
 import { readYarnCatalog, resolveCatalogDependencies } from "./lib/resolve-catalog.ts";
@@ -19,6 +20,12 @@ export {
 } from "./lib/mac-app-privacy.ts";
 
 import { createHash } from "node:crypto";
+import { stripTypeScriptTypes } from "node:module";
+import {
+  stageManagedProviders,
+  inventoryManagedBundle,
+  type ManagedProviderManifest,
+} from "./lib/managed-provider-bundle.ts";
 import * as NodeRuntime from "@effect/platform-node/NodeRuntime";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import {
@@ -268,40 +275,6 @@ export function resolveDesktopRuntimeDependencies(
 ): Record<string, string> {
   return resolveCatalogDependencies(dependencies, catalog, "packaging/desktop-runtime");
 }
-
-const STAGED_YARN_PROJECT_FILES = [
-  "package.json",
-  "yarn.lock",
-  ".yarnrc.yml",
-  ".yarn/patches/effect.patch",
-  "apps/desktop/package.json",
-  "apps/server/package.json",
-  "apps/web/package.json",
-  "oxlint-plugin-cafecode/package.json",
-  "packages/client-runtime/package.json",
-  "packages/contracts/package.json",
-  "packages/effect-acp/package.json",
-  "packages/effect-codex-app-server/package.json",
-  "packages/shared/package.json",
-  "scripts/package.json",
-  "scripts/ensure-desktop-runtime.ts",
-  "packaging/desktop-runtime/package.json",
-] as const;
-
-const copyStagedYarnProject = Effect.fn("copyStagedYarnProject")(function* (
-  repoRoot: string,
-  stageProjectDir: string,
-) {
-  const fs = yield* FileSystem.FileSystem;
-  const path = yield* Path.Path;
-
-  for (const relativePath of STAGED_YARN_PROJECT_FILES) {
-    const sourcePath = path.join(repoRoot, relativePath);
-    const targetPath = path.join(stageProjectDir, relativePath);
-    yield* fs.makeDirectory(path.dirname(targetPath), { recursive: true });
-    yield* fs.copyFile(sourcePath, targetPath);
-  }
-});
 
 const AzureTrustedSigningOptionsConfig = Config.all({
   publisherName: Config.string("AZURE_TRUSTED_SIGNING_PUBLISHER_NAME"),
@@ -775,6 +748,39 @@ const stageWindowsManagedRuntime = Effect.fn("stageWindowsManagedRuntime")(funct
   yield* fs.remove(targetDir, { recursive: true, force: true }).pipe(Effect.ignore);
   yield* fs.makeDirectory(path.dirname(targetDir), { recursive: true });
   yield* fs.copy(extractedRoot, targetDir);
+
+  const providersRoot = path.join(
+    stageResourcesDir,
+    "managed-runtime",
+    "providers",
+    `win-${archive.arch}`,
+  );
+  const contentRoot = path.join(providersRoot, "content");
+  const manifest = JSON.parse(
+    yield* fs.readFileString(path.join(repoRoot, "packaging/managed-providers/manifest.json")),
+  ) as ManagedProviderManifest;
+  if (manifest.node !== MANAGED_WINDOWS_NODE_VERSION)
+    return yield* new BuildScriptError({ message: "Managed provider manifest Node pin is stale." });
+  yield* Effect.tryPromise({
+    try: async () => {
+      await stageManagedProviders(manifest, archive.arch, contentRoot);
+    },
+    catch: () =>
+      new BuildScriptError({ message: "Failed to stage verified managed provider closure." }),
+  });
+  yield* fs.copy(extractedRoot, path.join(contentRoot, "node"));
+  const inventory = yield* Effect.tryPromise({
+    try: () => inventoryManagedBundle(contentRoot),
+    catch: () => new BuildScriptError({ message: "Failed to seal managed provider bundle." }),
+  });
+  yield* fs.writeFileString(path.join(providersRoot, "inventory.json"), JSON.stringify(inventory));
+  const installerSource = yield* fs.readFileString(
+    path.join(repoRoot, "scripts/lib/managed-provider-bundle.ts"),
+  );
+  yield* fs.writeFileString(
+    path.join(stageResourcesDir, "managed-runtime", "install-runtime.mjs"),
+    stripTypeScriptTypes(installerSource),
+  );
 
   yield* Effect.log("[desktop-artifact] Staged Windows managed provider runtime.").pipe(
     Effect.annotateLogs({ nodeRuntime: targetDir }),

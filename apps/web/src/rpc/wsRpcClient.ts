@@ -119,7 +119,6 @@ export interface WsRpcClient {
   readonly server: {
     readonly usageReset: RpcUnaryMethod<typeof WS_METHODS.serverUsageReset>;
     readonly getMcpStatus: RpcUnaryNoArgMethod<typeof WS_METHODS.serverGetMcpStatus>;
-    readonly updateMcpClient: RpcUnaryMethod<typeof WS_METHODS.serverUpdateMcpClient>;
     readonly respondToInteraction: RpcUnaryMethod<typeof WS_METHODS.providerRespondToInteraction>;
     readonly resolveInteractionUrl: RpcUnaryMethod<typeof WS_METHODS.providerResolveInteractionUrl>;
     readonly getConfig: RpcUnaryNoArgMethod<typeof WS_METHODS.serverGetConfig>;
@@ -316,8 +315,6 @@ export function createWsRpcClient(transport: WsTransport): WsRpcClient {
         transport.request((client) => client[WS_METHODS.providerResolveInteractionUrl](input)),
       getConfig: () => transport.request((client) => client[WS_METHODS.serverGetConfig]({})),
       getMcpStatus: () => transport.request((client) => client[WS_METHODS.serverGetMcpStatus]({})),
-      updateMcpClient: (input) =>
-        transport.request((client) => client[WS_METHODS.serverUpdateMcpClient](input)),
       refreshProviders: (input) =>
         transport.request((client) => client[WS_METHODS.serverRefreshProviders](input ?? {})),
       listProviderSkills: (input) =>
