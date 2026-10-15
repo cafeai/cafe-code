@@ -65,7 +65,8 @@ export function instrumentManagedInstallerFixture(source: string): string {
         : "";
     instrumented = instrumented.replace(
       anchor,
-      `${indentation}[Console]::WriteLine('cafe-installer-fixture:${phase}:{0:o}', [DateTime]::UtcNow); [Console]::Out.Flush()${newline}${preparation}${anchor}`,
+      () =>
+        `${indentation}[Console]::WriteLine('cafe-installer-fixture:${phase}:{0:o}', [DateTime]::UtcNow); [Console]::Out.Flush()${newline}${preparation}${anchor}`,
     );
   }
   return instrumented;
