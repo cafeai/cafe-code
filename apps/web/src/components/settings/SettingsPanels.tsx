@@ -261,9 +261,11 @@ function withoutProviderInstanceFavorites(
   return favorites.filter((favorite) => favorite.provider !== instanceId);
 }
 
-const PROVIDER_SETTINGS = DRIVER_OPTIONS.map((definition) => ({
-  provider: definition.value,
-}));
+// Only legacy drivers have implicit default accounts. Drivers such as Axiom
+// appear below through their explicit providerInstances entries.
+const PROVIDER_SETTINGS = DRIVER_OPTIONS.filter((definition) =>
+  Object.hasOwn(DEFAULT_UNIFIED_SETTINGS.providers, definition.value),
+).map((definition) => ({ provider: definition.value }));
 
 function ProviderLastChecked({ lastCheckedAt }: { lastCheckedAt: string | null }) {
   const uiLocale = useUiLocale();

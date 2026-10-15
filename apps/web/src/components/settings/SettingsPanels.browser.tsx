@@ -2137,6 +2137,87 @@ describe("settings panels", () => {
     }
   });
 
+  it.each(["axiom", "axiom_personal"])(
+    "adds and manages an Axiom account %s without legacy provider defaults",
+    async (instanceId) => {
+      const config = createBaseServerConfig();
+      const codexInstance = { driver: ProviderDriverKind.make("codex"), enabled: true };
+      const updateSettings = vi.fn<LocalApi["server"]["updateSettings"]>().mockResolvedValue({
+        ...config.settings,
+        providerInstances: {},
+      });
+      window.nativeApi = {
+        persistence: {
+          getClientSettings: vi.fn().mockResolvedValue(null),
+          setClientSettings: vi.fn().mockResolvedValue(undefined),
+        },
+        server: { updateSettings },
+      } as unknown as LocalApi;
+      setServerConfigSnapshot({
+        ...config,
+        settings: { ...config.settings, providerInstances: { codex: codexInstance } },
+      });
+
+      mounted = await render(
+        <AppAtomRegistryProvider>
+          <ProviderSettingsPanel />
+        </AppAtomRegistryProvider>,
+      );
+
+      await expect
+        .element(page.getByRole("heading", { name: "Axiom", exact: true }))
+        .not.toBeInTheDocument();
+      expect(updateSettings).not.toHaveBeenCalled();
+      await page.getByRole("button", { name: "Add provider instance", exact: true }).click();
+      await page.getByRole("radio", { name: "Axiom", exact: true }).click();
+      await page.getByRole("button", { name: "Next", exact: true }).click();
+      await page.getByLabelText(/Display name/).fill("Personal Axiom");
+      await page.getByRole("textbox", { name: /^Instance ID/ }).fill(instanceId);
+      await page.getByRole("button", { name: "Next", exact: true }).click();
+      await page.getByLabelText("Binary path").fill("axiomcli");
+      await page.getByRole("button", { name: "Add provider", exact: true }).click();
+
+      const axiomInstance = {
+        driver: ProviderDriverKind.make("axiom"),
+        enabled: true,
+        displayName: "Personal Axiom",
+        config: { binaryPath: "axiomcli" },
+      };
+      await expect
+        .element(page.getByRole("heading", { name: "Personal Axiom", exact: true }))
+        .toBeVisible();
+      expect(updateSettings).toHaveBeenNthCalledWith(1, {
+        providerInstances: { codex: codexInstance, [instanceId]: axiomInstance },
+      });
+      await expect
+        .element(
+          page.getByRole("button", {
+            name: "Reset Axiom provider settings to default",
+            exact: true,
+          }),
+        )
+        .not.toBeInTheDocument();
+
+      await page.getByRole("switch", { name: "Enable Personal Axiom", exact: true }).click();
+      expect(updateSettings).toHaveBeenNthCalledWith(2, {
+        providerInstances: {
+          codex: codexInstance,
+          [instanceId]: { ...axiomInstance, enabled: false },
+        },
+      });
+      await page
+        .getByRole("button", { name: `Delete provider instance ${instanceId}`, exact: true })
+        .click();
+      await expect
+        .element(page.getByRole("heading", { name: "Personal Axiom", exact: true }))
+        .not.toBeInTheDocument();
+      expect(updateSettings).toHaveBeenCalledTimes(3);
+      expect(updateSettings.mock.calls[2]?.[0].providerInstances).toEqual({ codex: codexInstance });
+      expect(updateSettings.mock.calls.every(([patch]) => !("providers" in patch))).toBe(true);
+      expect(getServerConfig()?.settings.providers).toEqual(config.settings.providers);
+    },
+  );
+
   it("runs one-click provider updates from the provider card", async () => {
     const updateProvider = vi.fn<LocalApi["server"]["updateProvider"]>().mockResolvedValue({
       providers: [createOutdatedProvider("codex")],
