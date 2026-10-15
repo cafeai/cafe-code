@@ -21,7 +21,7 @@ describe("native managed-installer fixture isolation", () => {
       const instrumented = instrumentManagedInstallerFixture(source);
       const marker =
         /^[ \t]*\[Console\]::WriteLine\('cafe-installer-fixture:[a-z-]+:\{0:o\}', \[DateTime\]::UtcNow\); \[Console\]::Out.Flush\(\)\r?\n/gm;
-      expect(instrumented.match(marker)).toHaveLength(19);
+      expect(instrumented.match(marker)).toHaveLength(22);
       expect(instrumented.replace(marker, "")).toBe(source);
       expect(instrumented).toContain("cafe-installer-fixture:prepare-start");
       expect(instrumented).toContain("cafe-installer-fixture:prepare-complete");

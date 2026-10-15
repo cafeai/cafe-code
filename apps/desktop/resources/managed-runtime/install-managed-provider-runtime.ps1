@@ -9,6 +9,14 @@ param(
 $ErrorActionPreference = "Stop"
 Set-StrictMode -Version 3.0
 
+# Resolve the two inbox modules directly from this Windows PowerShell install.
+# With a fresh profile/cache, unqualified command discovery can scan unrelated
+# installed modules before the first Join-Path. Explicit manifests also prevent
+# a user-installed module from supplying these installer filesystem commands.
+# Import within this invocation: no cache warm-up or security-policy changes.
+Import-Module -Name "$PSHOME\Modules\Microsoft.PowerShell.Management\Microsoft.PowerShell.Management.psd1" -ErrorAction Stop
+Import-Module -Name "$PSHOME\Modules\Microsoft.PowerShell.Utility\Microsoft.PowerShell.Utility.psd1" -ErrorAction Stop
+
 function Resolve-InstallerPath {
   param(
     [string]$Value,

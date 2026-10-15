@@ -19,7 +19,13 @@ import { removePathWithRetries } from "./windows-native-artifact-smoke.ts";
 
 const installerTracePoints = [
   ["Set-StrictMode -Version 3.0", "script-start"],
-  ["function Resolve-InstallerPath {", "strict-mode-complete"],
+  ["# Resolve the two inbox modules", "strict-mode-complete"],
+  [
+    'Import-Module -Name "$PSHOME\\Modules\\Microsoft.PowerShell.Management\\',
+    "management-import-start",
+  ],
+  ['Import-Module -Name "$PSHOME\\Modules\\Microsoft.PowerShell.Utility\\', "utility-import-start"],
+  ["function Resolve-InstallerPath {", "modules-complete"],
   ["$resolvedLocalAppData = Resolve-InstallerPath", "paths-start"],
   ["$cafeRoot = Join-Path", "join-path-start"],
   ["New-Item -ItemType Directory -Path $cafeRoot", "directory-start"],
