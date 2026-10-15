@@ -37,6 +37,7 @@ const installerTracePoints = [
   ['    [Environment]::SetEnvironmentVariable("NODE_OPTIONS"', "guard-held"],
   ["    $prepared = @(& $nodePath", "prepare-start"],
   ["    if ($LASTEXITCODE -ne 0", "prepare-complete"],
+  ["    if (-not (Test-Path -LiteralPath $generationRoot", "generation-check"],
   ["    Assert-ManagedDirectory -Path $generationRoot", "generation-directory"],
   ["    Assert-ManagedDirectory -Path $settingsParent", "settings-directory"],
   ["      $activation = Publish-ManagedRecord", "activation-publication"],
@@ -58,9 +59,13 @@ export function instrumentManagedInstallerFixture(source: string): string {
       throw new Error("Managed installer fixture source changed; trace anchors require review.");
     }
     const indentation = /^\s*/.exec(anchor)![0];
+    const preparation =
+      phase === "prepare-complete"
+        ? `${indentation}[Console]::WriteLine('cafe-installer-fixture:preparation:exit={0}:count={1}:shape={2}', $LASTEXITCODE, $prepared.Count, ($prepared.Count -eq 1 -and $prepared[0] -cmatch '^[a-f0-9]{32}$'))${newline}`
+        : "";
     instrumented = instrumented.replace(
       anchor,
-      `${indentation}[Console]::WriteLine('cafe-installer-fixture:${phase}:{0:o}', [DateTime]::UtcNow); [Console]::Out.Flush()${newline}${anchor}`,
+      `${indentation}[Console]::WriteLine('cafe-installer-fixture:${phase}:{0:o}', [DateTime]::UtcNow); [Console]::Out.Flush()${newline}${preparation}${anchor}`,
     );
   }
   return instrumented;
@@ -123,6 +128,7 @@ async function run() {
   let invocation = 0;
   const start = (phase: string) => {
     const log = join(root, `installer-${++invocation}.log`);
+    const receipt = join(root, `preparation-${invocation}.json`);
     // A file captures native output without an inherited pipe delaying the
     // primary PowerShell exit while the deliberately detached peer is paused.
     const output = openSync(log, "wx");
@@ -146,7 +152,12 @@ async function run() {
           "-UserProfile",
           profile,
         ],
-        { shell: false, windowsHide: true, env: environment, stdio: ["ignore", output, output] },
+        {
+          shell: false,
+          windowsHide: true,
+          env: { ...environment, CAFE_CODE_INSTALLER_FIXTURE_RECEIPT: receipt },
+          stdio: ["ignore", output, output],
+        },
       );
     } finally {
       closeSync(output);
@@ -168,18 +179,26 @@ async function run() {
           : accept(code ?? -1);
       });
     });
-    const reportOutput = async () => {
-      const file = await open(log, "r");
+    const readBoundedOutput = async (path: string, limit: number) => {
+      const file = await open(path, "r");
       try {
-        const bytes = Buffer.alloc(16 * 1024);
+        const bytes = Buffer.alloc(limit);
         const { bytesRead } = await file.read(bytes, 0, bytes.length, 0);
-        console.error("managed-installer-fixture-output", {
-          phase,
-          output: bytes.subarray(0, bytesRead).toString("utf8"),
-        });
+        return bytes.subarray(0, bytesRead).toString("utf8");
       } finally {
         await file.close();
       }
+    };
+    const reportOutput = async () => {
+      const preparation = await readBoundedOutput(receipt, 512).catch((error: unknown) => {
+        if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
+        throw error;
+      });
+      console.error("managed-installer-fixture-output", {
+        phase,
+        output: await readBoundedOutput(log, 16 * 1024 - 512),
+        preparation,
+      });
     };
     const observedExit = exit.then(
       async (code) => {
@@ -229,7 +248,15 @@ async function run() {
       join(resource, "install-runtime.mjs"),
       `
       import * as fs from 'node:fs';import * as path from 'node:path';import {randomUUID} from 'node:crypto';
-      const [operation,,root]=process.argv.slice(2);
+      const [operation,bundle,root]=process.argv.slice(2);
+      // One exclusive receipt per invocation, including refused preparations.
+      // Only fixed scalars: never argv, profiles, credentials or provider data.
+      fs.writeFileSync(process.env.CAFE_CODE_INSTALLER_FIXTURE_RECEIPT,JSON.stringify({
+        argc:process.argv.length-2,
+        operationMatches:operation==='--prepare',
+        bundleMatches:bundle===${JSON.stringify(join(resource, "providers", process.arch === "arm64" ? "win-arm64" : "win-x64"))},
+        rootMatches:root===${JSON.stringify(managed)},
+      }),{flag:'wx'});
       if(operation!=='--prepare'||fs.existsSync(path.join(root,'fixture-fail')))process.exit(11);
       if(fs.existsSync(path.join(root,'fixture-pause'))){
         fs.writeFileSync(path.join(root,'fixture-preparing'),'');
