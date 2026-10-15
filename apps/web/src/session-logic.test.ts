@@ -2446,6 +2446,40 @@ describe("deriveWorkLogEntries", () => {
     expect(entry?.changedFiles).toBeUndefined();
   });
 
+  it.each([
+    ["web_search", "Searched the web", "fixture web query"],
+    ["fetch_url", "Opened web page", "https://example.com/fixture"],
+  ])(
+    "keeps the Axiom %s label and invocation through lifecycle folding",
+    (nativeToolName, title, query) => {
+      const payload = {
+        itemType: "web_search",
+        title,
+        detail: query,
+        data: { toolCallId: "axiom-web-tool", nativeToolName, kind: "search" },
+      };
+      const entries = deriveWorkLogEntries(
+        [
+          makeActivity({ id: "axiom-tool-start", kind: "tool.started", summary: title, payload }),
+          makeActivity({
+            id: "axiom-tool-complete",
+            kind: "tool.completed",
+            summary: title,
+            payload,
+          }),
+        ],
+        undefined,
+      );
+      const entry = entries.find((item) => item.toolCallId === "axiom-web-tool");
+      expect(entry).toMatchObject({
+        toolTitle: title,
+        displayToolTitle: title,
+        detail: query,
+        itemType: "web_search",
+      });
+    },
+  );
+
   it("drops duplicated tool detail when it only repeats the title", () => {
     const activities: OrchestrationThreadActivity[] = [
       makeActivity({

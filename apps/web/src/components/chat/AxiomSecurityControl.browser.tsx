@@ -166,7 +166,7 @@ describe("Axiom composer attestation inspector", () => {
         { ...value, reply: { state: "incomplete" } },
         Math.floor(Date.now() / 1000),
       ),
-    ).toBe("Reply incomplete");
+    ).toBe("Reply not verified");
   });
   it("discards a report for another native model or runtime", async () => {
     await render(<AxiomSecurityControl {...props} />);

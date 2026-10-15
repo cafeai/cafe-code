@@ -28,7 +28,6 @@
   "Public evidence details": "公開検証データの詳細",
   "Refresh attestation": "アテステーションを更新",
   "Reply check failed": "応答の検証に失敗",
-  "Reply incomplete": "応答が未完了",
   "Reply verified": "応答検証済み",
   "Report needs refresh": "レポートの更新が必要",
   "The report describes the provider checks shown above. Local chat storage and external tools are outside inference encryption.": "このレポートは上記のプロバイダーの検証を示します。ローカルのチャット保存と外部ツールは、推論の暗号化の対象外です。",
@@ -3240,5 +3239,8 @@
   "Server name": "サーバー名",
   "Servers are saved to this Axiom account. Tool selection applies to this conversation. Changes require idle work.": "サーバーはこの Axiom アカウントに保存されます。ツールの選択はこの会話に適用されます。実行中の処理がないときに変更できます。",
   "Start an Axiom conversation to manage its MCP tools.": "Axiom の会話を開始すると、MCP ツールを管理できます。",
-  "Axiom reports settled costs without a cache savings breakdown. Cache savings for other providers use their estimated rates.": "Axiom は確定費用を報告しますが、キャッシュ節約額の内訳は含みません。他のプロバイダーのキャッシュ節約額は料金に基づく推定値です。"
+  "Axiom reports settled costs without a cache savings breakdown. Cache savings for other providers use their estimated rates.": "Axiom は確定費用を報告しますが、キャッシュ節約額の内訳は含みません。他のプロバイダーのキャッシュ節約額は料金に基づく推定値です。",
+  "Reply not verified": "応答は未検証",
+  "Searched the web": "ウェブを検索",
+  "Opened web page": "ウェブページを開きました"
 }

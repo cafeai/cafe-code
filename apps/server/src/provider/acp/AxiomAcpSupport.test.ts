@@ -11,11 +11,12 @@ import {
   axiomAccountKey,
   axiomConfigurationKey,
   axiomCreditBalance,
+  applyAxiomSelection,
   axiomSpawnInput,
   negotiateAxiom,
   validateAxiomEvidence,
 } from "./AxiomAcpSupport.ts";
-import { AxiomSettings } from "@cafecode/contracts";
+import { AxiomSettings, ProviderInstanceId } from "@cafecode/contracts";
 
 export const evidenceFixture = (now = Math.floor(Date.now() / 1000)): Evidence => ({
   status: { state: "verified" },
@@ -34,6 +35,40 @@ export const evidenceFixture = (now = Math.floor(Date.now() / 1000)): Evidence =
 });
 
 describe("Axiom native protocol admission", () => {
+  it.effect("applies supported native defaults while retaining an explicit thinking choice", () =>
+    Effect.gen(function* () {
+      for (const [levels, explicit, expected] of [
+        [["disabled", "enabled"], undefined, "enabled"],
+        [["low", "medium", "high"], undefined, "medium"],
+        [["low", "medium", "high"], "high", "high"],
+        [[], undefined, undefined],
+      ] as const) {
+        const calls: Array<[string, string | boolean]> = [];
+        yield* applyAxiomSelection(
+          {
+            setModel: (model) =>
+              Effect.sync(() => {
+                calls.push(["model", model]);
+              }),
+            setConfigOption: (id, value) =>
+              Effect.sync(() => {
+                calls.push([id, value]);
+              }),
+          },
+          {
+            instanceId: ProviderInstanceId.make("axiom"),
+            model: "native-model",
+            ...(explicit ? { options: [{ id: "thinkingLevel", value: explicit }] } : {}),
+          },
+          { thinkingLevels: levels },
+        );
+        expect(calls).toEqual([
+          ["model", "native-model"],
+          ...(expected ? [["thinking", expected]] : []),
+        ]);
+      }
+    }),
+  );
   it.effect("negotiates the reviewed contracts independently of product version", () =>
     negotiateAxiom({
       protocolVersion: 1,

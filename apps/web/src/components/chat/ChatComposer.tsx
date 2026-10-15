@@ -84,7 +84,6 @@ import { ComposerPendingApprovalActions } from "./ComposerPendingApprovalActions
 import { CompactComposerControlsMenu } from "./CompactComposerControlsMenu";
 import { NativeCodexReview } from "./NativeCodexReview";
 import { ClaudeDeliveryPriorityPicker } from "./ClaudeDeliveryPriorityPicker";
-import { AxiomMcpControl } from "./AxiomMcpControl";
 import { AxiomSecurityControl } from "./AxiomSecurityControl";
 import { AxiomWebSearchControl } from "./AxiomWebSearchControl";
 import { ComposerTab } from "./ComposerTab";
@@ -1266,20 +1265,6 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
   // Eligibility still binds dispatch to the exact account and session above.
   const showNativeReviewControl = selectedProvider === "codex";
   const showAxiomSecurityControl = selectedProvider === "axiom";
-  const axiomControlInput =
-    isServerThread &&
-    activeThreadId &&
-    activeThread?.session?.provider === "axiom" &&
-    activeThread.session.providerInstanceId === selectedInstanceId &&
-    activeThread.session.subagentRuntimeId &&
-    activeThread.modelSelection.model === selectedModel
-      ? {
-          instanceId: selectedInstanceId,
-          threadId: activeThreadId,
-          runtimeId: activeThread.session.subagentRuntimeId,
-          modelId: selectedModel,
-        }
-      : null;
   const axiomInspectorKey = JSON.stringify([
     environmentId,
     activeThreadId,
@@ -1291,12 +1276,6 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     key: axiomInspectorKey,
     open: false,
   });
-  const [axiomMcpInspectorState, setAxiomMcpInspectorState] = useState({
-    key: axiomInspectorKey,
-    open: false,
-  });
-  const axiomMcpInspectorOpen =
-    axiomMcpInspectorState.key === axiomInspectorKey && axiomMcpInspectorState.open;
   const axiomInspectorOpen =
     axiomInspectorState.key === axiomInspectorKey && axiomInspectorState.open;
   const hasComposerTab = showNativeReviewControl || showAxiomSecurityControl;
@@ -3646,7 +3625,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
               expandLabel={uiText("Expand composer tools", undefined, undefined, uiLocale)}
               minimizeLabel={uiText("Minimize composer tools", undefined, undefined, uiLocale)}
               collapsed={composerTabCollapsed}
-              active={nativeReviewOpen || axiomInspectorOpen || axiomMcpInspectorOpen}
+              active={nativeReviewOpen || axiomInspectorOpen}
               onCollapsedChange={useUiStateStore.getState().setComposerTabCollapsed}
             >
               {showAxiomSecurityControl ? (
@@ -3670,23 +3649,6 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                           modelId: selectedModel,
                         }
                       : null
-                  }
-                />
-              ) : null}
-              {showAxiomSecurityControl ? (
-                <AxiomMcpControl
-                  key={axiomInspectorKey + ":mcp"}
-                  onOpenChange={(open) =>
-                    setAxiomMcpInspectorState({ key: axiomInspectorKey, open })
-                  }
-                  environmentId={environmentId}
-                  input={axiomControlInput}
-                  connected={environmentUnavailable === null && !isConnecting}
-                  idle={phase !== "running" && !isSendBusy}
-                  onRevision={(revision) =>
-                    useComposerDraftStore
-                      .getState()
-                      .setAxiomMcpRevision(composerDraftTarget, revision, selectedInstanceId)
                   }
                 />
               ) : null}

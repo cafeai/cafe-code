@@ -322,7 +322,7 @@ describe("provider-specific composer menu actions", () => {
         models: [
           {
             slug: "native-model",
-            name: "Axiom model",
+            name: "DeepSeek V4.1 Flash",
             isCustom: false,
             capabilities: createModelCapabilities({
               optionDescriptors: [
@@ -331,7 +331,7 @@ describe("provider-specific composer menu actions", () => {
                   label: "Thinking",
                   type: "select",
                   options: [
-                    { id: "medium", label: "Medium" },
+                    { id: "medium", label: "Medium", isDefault: true },
                     { id: "high", label: "High" },
                   ],
                 },
@@ -341,9 +341,7 @@ describe("provider-specific composer menu actions", () => {
         ],
       };
       const activeThread = thread();
-      activeThread.modelSelection = createModelSelection(axiom.instanceId, "native-model", [
-        { id: "thinkingLevel", value: "medium" },
-      ]);
+      activeThread.modelSelection = createModelSelection(axiom.instanceId, "native-model");
       activeThread.session = {
         ...activeThread.session!,
         provider: ProviderDriverKind.make("axiom"),
@@ -364,6 +362,17 @@ describe("provider-specific composer menu actions", () => {
         '[aria-label="More composer controls"]',
       )!;
       expect(thinking.textContent).toContain("Medium");
+      const modelPicker = fixture.host.querySelector('[data-chat-provider-model-picker="true"]')!;
+      expect(modelPicker.textContent).toContain("DeepSeek V4.1 Flash");
+      expect(modelPicker.textContent).not.toContain("Tinfoil");
+      expect(
+        fixture.host
+          .querySelector('[data-provider-model-trigger-title="true"]')
+          ?.classList.contains("grid"),
+      ).toBe(false);
+      await expect
+        .element(page.getByRole("button", { name: "MCP tools", exact: true }))
+        .not.toBeInTheDocument();
       const button = fixture.host.querySelector<HTMLButtonElement>(
         '[data-axiom-web-search="true"]',
       )!;

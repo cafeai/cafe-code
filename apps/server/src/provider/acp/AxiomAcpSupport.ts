@@ -80,6 +80,10 @@ export const AxiomModels = Schema.Struct({
   ).check(Schema.isMaxLength(2048)),
 });
 export type AxiomModel = (typeof AxiomModels.Type.models)[number];
+/** Match native reconciliation of its default Medium preference. */
+export const axiomDefaultThinkingLevel = (model: Pick<AxiomModel, "thinkingLevels">) =>
+  ["medium", "enabled"].find((level) => model.thinkingLevels.includes(level)) ??
+  model.thinkingLevels[0];
 export const AxiomBilling = Schema.Struct({
   status: Schema.Struct({
     availableMicrousd: Schema.Number.check(
@@ -414,10 +418,13 @@ export const applyAxiomSelection = (
     ) => Effect.Effect<unknown, AcpErrors.AcpError>;
   },
   selection?: ModelSelection,
+  model?: Pick<AxiomModel, "thinkingLevels">,
 ) =>
   Effect.gen(function* () {
     if (selection?.model) yield* runtime.setModel(selection.model);
-    const thinking = selection?.options?.find((option) => option.id === "thinkingLevel")?.value;
+    const thinking =
+      selection?.options?.find((option) => option.id === "thinkingLevel")?.value ??
+      (model ? axiomDefaultThinkingLevel(model) : undefined);
     if (typeof thinking === "string") yield* runtime.setConfigOption("thinking", thinking);
   });
 

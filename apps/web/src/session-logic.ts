@@ -1185,6 +1185,11 @@ function toDerivedWorkLogEntry(
     entry.changedFiles = changedFiles;
   }
   if (title) entry.toolTitle = title;
+  if (itemType === "web_search") {
+    const nativeToolName = asRecord(payload?.data)?.nativeToolName;
+    if (nativeToolName === "web_search") entry.displayToolTitle = uiText("Searched the web");
+    else if (nativeToolName === "fetch_url") entry.displayToolTitle = uiText("Opened web page");
+  }
   if (itemType) {
     entry.itemType = itemType;
   }

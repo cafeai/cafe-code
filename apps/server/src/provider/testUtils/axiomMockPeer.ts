@@ -120,6 +120,28 @@ const evidence = () => ({
 });
 const finish = (authenticated: boolean) => {
   if (!pending) return;
+  if (pending.prompt.includes("accounting before verification"))
+    activity({
+      kind: "request_usage_changed",
+      usage: {
+        requestId: `request-${turn}`,
+        modelId: model,
+        turnId: pending.nativeTurn,
+        purpose: "conversation",
+        state: "completed",
+        responseVerified: false,
+        providerId: "tinfoil",
+        completeness: "final",
+        settled: true,
+        inputTokens: "100",
+        cachedInputTokens: "20",
+        outputTokens: "30",
+        reasoningTokens: "5",
+        costMicrousd: "123456",
+        startedAtMs: String(Date.now() - 10),
+        finishedAtMs: String(Date.now()),
+      },
+    });
   activity({
     kind: "request_usage_changed",
     usage: {
@@ -409,6 +431,7 @@ createInterface({ input: process.stdin }).on("line", (line) => {
                   ? JSON.stringify({
                       frontend,
                       agent,
+                      thinking,
                       webEnabled: params._meta.axiom.webEnabled,
                       agentRevision: params._meta.axiom.agentRevision,
                       mcpRevision: params._meta.axiom.mcpRevision,
@@ -417,6 +440,43 @@ createInterface({ input: process.stdin }).on("line", (line) => {
           },
         },
       });
+      if (prompt.includes("native web tools")) {
+        for (const [name, rawInput] of [
+          ["web_search", { query: "fixture web query" }],
+          ["fetch_url", { url: "https://example.com/fixture" }],
+          ["search_text", { pattern: "fixture file pattern" }],
+        ] as const) {
+          const toolCallId = `${nativeTurn}:${name}`;
+          notify("session/update", {
+            sessionId,
+            update: {
+              sessionUpdate: "tool_call",
+              toolCallId,
+              kind: "search",
+              status: "pending",
+              title: `Search fixture · ${name}`,
+              rawInput,
+            },
+          });
+          notify("session/update", {
+            sessionId,
+            update: {
+              sessionUpdate: "tool_call_update",
+              toolCallId,
+              status: "in_progress",
+              content: [{ type: "content", content: { type: "text", text: "fixture results" } }],
+            },
+          });
+          notify("session/update", {
+            sessionId,
+            update: {
+              sessionUpdate: "tool_call_update",
+              toolCallId,
+              status: "completed",
+            },
+          });
+        }
+      }
       if (prompt.includes("question")) {
         questionId = 2000000 + turn;
         write({

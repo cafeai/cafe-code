@@ -26,7 +26,7 @@ export function axiomSecurityLabel(
   if (!report) return uiText("Verification unavailable");
   if (report.reply.state === "verifying") return uiText("Verifying reply");
   if (report.reply.state === "verified") return uiText("Reply verified");
-  if (report.reply.state === "incomplete") return uiText("Reply incomplete");
+  if (report.reply.state === "incomplete") return uiText("Reply not verified");
   if (report.reply.state === "failed") return uiText("Reply check failed");
   if (report.evidence && report.evidence.hardExpiresAtUnixSeconds <= nowSeconds)
     return uiText("Report needs refresh");

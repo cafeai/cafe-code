@@ -15,6 +15,7 @@ import { ServerConfig } from "../../config.ts";
 import { makeAxiomTextGeneration } from "../../textGeneration/AxiomTextGeneration.ts";
 import {
   axiomConfigurationKey,
+  axiomDefaultThinkingLevel,
   axiomCreditBalance,
   AxiomBilling,
   AxiomAccount,
@@ -34,9 +35,8 @@ const DRIVER = ProviderDriverKind.make("axiom");
 const decodeSettings = Schema.decodeSync(AxiomSettings);
 export const axiomModelToCafe = (model: AxiomModel): ServerProviderModel => ({
   slug: model.id,
-  name: model.label,
+  name: model.shortLabel,
   shortName: model.shortLabel,
-  subProvider: model.providerLabel,
   isCustom: false,
   capabilities: {
     inputModalities: model.supportsImages ? ["text", "image"] : ["text"],
@@ -48,7 +48,11 @@ export const axiomModelToCafe = (model: AxiomModel): ServerProviderModel => ({
             id: "thinkingLevel",
             label: "Thinking",
             type: "select",
-            options: model.thinkingLevels.map((id) => ({ id, label: id })),
+            options: model.thinkingLevels.map((id) => ({
+              id,
+              label: id === "xhigh" ? "Extra high" : id.charAt(0).toUpperCase() + id.slice(1),
+              ...(id === axiomDefaultThinkingLevel(model) ? { isDefault: true } : {}),
+            })),
           },
         ]
       : [],

@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
+import { presentAxiomToolCall, type AxiomWebTool } from "../axiomToolPresentation.ts";
 import {
   ProviderCommandCatalog,
   ProviderMcpState,
@@ -237,6 +238,7 @@ interface SessionContext {
   replyChecked: boolean;
   replyFailed: boolean;
   replyRequests: Map<string, boolean>;
+  webTools: Map<string, AxiomWebTool>;
   settledCosts: Set<string>;
   approvals: Map<ApprovalRequestId, PendingApproval>;
   questions: Map<ApprovalRequestId, PendingQuestion>;
@@ -1077,18 +1079,15 @@ export const makeAxiomAdapter = Effect.fn("makeAxiomAdapter")(function* (
                   ctx.replyFailed = true;
                   return;
                 }
+                // Accounting may finish before local response authentication.
+                // The latest matching receipt can complete that check later.
                 ctx.replyRequests.set(
                   usage.requestId,
                   usage.state === "completed" && usage.responseVerified === true,
                 );
                 if (usage.state === "completed" && usage.responseVerified === true)
                   ctx.replyChecked = true;
-                if (
-                  usage.state === "failed" ||
-                  usage.state === "cancelled" ||
-                  (usage.state === "completed" && usage.responseVerified !== true)
-                )
-                  ctx.replyFailed = true;
+                if (usage.state === "failed" || usage.state === "cancelled") ctx.replyFailed = true;
               } else if (event.event.kind === "security_changed") {
                 const status = yield* decodeAxiom(AxiomVerification, {
                   status: event.event.status,
@@ -1128,7 +1127,16 @@ export const makeAxiomAdapter = Effect.fn("makeAxiomAdapter")(function* (
               mapAcpToAdapterError(PROVIDER, input.threadId, "models/list", error),
             ),
           );
-          yield* applyAxiomSelection(runtime, input.modelSelection).pipe(
+          const initialOptions = yield* runtime.getConfigOptions;
+          const initialModelOption = initialOptions.find((option) => option.category === "model");
+          const initialModelId =
+            input.modelSelection?.model ??
+            (initialModelOption?.type === "select" ? initialModelOption.currentValue : undefined);
+          yield* applyAxiomSelection(
+            runtime,
+            input.modelSelection,
+            modelList.models.find((model) => model.id === initialModelId),
+          ).pipe(
             Effect.mapError((error) =>
               mapAcpToAdapterError(PROVIDER, input.threadId, "session/config", error),
             ),
@@ -1222,6 +1230,7 @@ export const makeAxiomAdapter = Effect.fn("makeAxiomAdapter")(function* (
             replyChecked: false,
             replyFailed: false,
             replyRequests: new Map(),
+            webTools: new Map(),
             settledCosts: new Set(),
             approvals: new Map(),
             questions: new Map(),
@@ -1314,7 +1323,17 @@ export const makeAxiomAdapter = Effect.fn("makeAxiomAdapter")(function* (
                   break;
                 }
                 case "ToolCallUpdated":
-                  yield* emit(makeAcpToolCallEvent({ ...base, ...event }));
+                  yield* emit(
+                    makeAcpToolCallEvent({
+                      ...base,
+                      ...event,
+                      toolCall: presentAxiomToolCall(
+                        event.toolCall,
+                        event.rawPayload,
+                        owner.webTools,
+                      ),
+                    }),
+                  );
                   break;
                 case "PlanUpdated":
                   yield* emit(
@@ -1434,15 +1453,12 @@ export const makeAxiomAdapter = Effect.fn("makeAxiomAdapter")(function* (
               "sendTurn",
               "Use Cafe's provider, model or verification controls for this native command.",
             );
-          yield* native(
-            ctx,
-            "session/config",
-            applyAxiomSelection(ctx.runtime, input.modelSelection),
-          );
-          const modelId = input.modelSelection?.model ?? ctx.session.model!;
+          const selection = input.modelSelection ?? ctx.session.modelSelection;
+          const modelId = selection?.model ?? ctx.session.model!;
           const model = ctx.models.find((entry) => entry.id === modelId);
           if (!model || !["near", "tinfoil"].includes(model.providerId))
             return yield* invalid("sendTurn", "Select a model in Axiom's current catalog.");
+          yield* native(ctx, "session/config", applyAxiomSelection(ctx.runtime, selection, model));
           if (
             (input.attachments?.length ?? 0) > 8 ||
             (input.attachments ?? []).reduce((sum, attachment) => sum + attachment.sizeBytes, 0) >
@@ -1562,13 +1578,14 @@ export const makeAxiomAdapter = Effect.fn("makeAxiomAdapter")(function* (
           ctx.replyChecked = false;
           ctx.replyFailed = false;
           ctx.replyRequests.clear();
+          ctx.webTools.clear();
           ctx.session = {
             ...ctx.session,
             model: modelId,
             modelSelection: {
               instanceId,
               model: modelId,
-              ...(input.modelSelection?.options ? { options: input.modelSelection.options } : {}),
+              ...(selection?.options ? { options: selection.options } : {}),
             },
             interactionMode: input.interactionMode ?? ctx.session.interactionMode,
             status: "running",

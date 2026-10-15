@@ -28,8 +28,11 @@ or command ledger. Completion refreshes provider status. Close this account's
 Cafe sessions before changing its native sign-in. Signing in through the installed
 Axiom application and refreshing the provider is also supported.
 
-Select Axiom and a discovered model in the composer. Thinking choices come from
-the native catalog and are applied with the `thinking` configuration option.
+Select Axiom and a discovered model in the composer. Model selectors show the
+native short model name, without a hosting-provider prefix. Thinking choices
+come from the native catalog and are applied with the `thinking` configuration
+option. Cafe exposes a concrete default: Medium when supported, otherwise
+Enabled, then the first native choice. Explicit choices remain selected.
 Discovery supports a bounded model-only refresh, without creating a chat or
 running inference. Read-only account credit is optional when the native billing
 contract is available; integer microUSD is displayed without decimal rounding.
@@ -85,12 +88,10 @@ contract is available; integer microUSD is displayed without decimal rounding.
   extension and requires idle work.
 - Context use is the native replacement report from a completed request, with
   its reported capacity. It is not a draft estimate or an invented billing total.
-- MCP servers can be saved, edited, tested and deleted in **Composer tools → MCP
-  tools** after starting a conversation. Select the discovered tools for that
-  native thread. Server registrations belong to the native account; selection
-  belongs to the conversation. This uses Axiom's stdio MCP interface, not an
-  arbitrary URL launcher. Native MCP resources, prompts and MCP Apps are not
-  advertised by this tool-only interface.
+- The composer tab contains verification, without an MCP management control.
+  Native MCP configuration remains in Axiom. Cafe's backend retains its scoped
+  MCP protocol and revision checks; resources, prompts and MCP Apps are not
+  advertised by that tool-only interface.
 - MCP mutations require the exact idle account/runtime/thread/configuration and
   native revision. Secrets are write-only: blank preserves existing environment
   values, while an empty object clears them. Native credential identifiers and
@@ -100,8 +101,8 @@ contract is available; integer microUSD is displayed without decimal rounding.
 - Each ordinary message captures the reviewed MCP revision, including queue
   save/edit/claim/reload and retry paths. Prompts carry that revision and the
   native runtime rejects changed executable/tool configuration. A conversation
-  with selected tools requires explicit review through the MCP control after
-  losing its unsent draft state. Plan prompts omit MCP configuration entirely.
+  with selected tools requires an explicitly reviewed revision; missing review
+  fails closed. Plan prompts omit MCP configuration entirely.
 - Title, branch, commit and change-request helpers explicitly keep CLI sessions
   with the native None profile, a bounded deadline and no inference retries.
   Desktop mode cannot select None through `session/set_mode`.

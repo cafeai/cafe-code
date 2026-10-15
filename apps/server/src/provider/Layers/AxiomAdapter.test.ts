@@ -436,6 +436,62 @@ describe("Axiom scoped ACP adapter", () => {
       expect(JSON.stringify(events)).not.toContain("fixture-account");
     }).pipe(Effect.provide(layer), Effect.scoped),
   );
+  it.effect("accepts native authentication after an earlier completed accounting snapshot", () =>
+    Effect.gen(function* () {
+      const { adapter, events, complete, readReport } = yield* setup;
+      yield* adapter.sendTurn({ threadId, input: "accounting before verification" });
+      yield* Deferred.await(complete);
+      expect((yield* readReport)?.reply.state).toBe("verified");
+      expect(
+        events.filter((event) => event.type === "thread.usage-accounting.updated"),
+      ).toHaveLength(1);
+    }).pipe(Effect.provide(layer), Effect.scoped),
+  );
+  it.effect("keeps native web identities and queries through sparse progress and completion", () =>
+    Effect.gen(function* () {
+      const { adapter, events, complete } = yield* setup;
+      yield* adapter.sendTurn({ threadId, input: "native web tools" });
+      yield* Deferred.await(complete);
+      for (const [name, title, detail] of [
+        ["web_search", "Searched the web", "fixture web query"],
+        ["fetch_url", "Opened web page", "https://example.com/fixture"],
+      ]) {
+        const matching = events.filter(
+          (event) =>
+            (event.type === "item.updated" || event.type === "item.completed") &&
+            event.itemId?.endsWith(`:${name}`),
+        );
+        expect(matching).toHaveLength(3);
+        for (const event of matching)
+          expect(event.payload).toMatchObject({
+            title,
+            detail,
+            itemType: "web_search",
+            data: { nativeToolName: name },
+          });
+      }
+      const fileSearch = events.find(
+        (event) => event.type === "item.updated" && event.itemId?.endsWith(":search_text"),
+      );
+      expect(fileSearch?.payload).toMatchObject({ title: "Searched files" });
+    }).pipe(Effect.provide(layer), Effect.scoped),
+  );
+  it.effect("applies a concrete default thinking mode when a model selection has no choice", () =>
+    Effect.gen(function* () {
+      const { adapter, events, complete } = yield* setup;
+      yield* adapter.sendTurn({
+        threadId,
+        input: "configuration fixture",
+        modelSelection: { instanceId, model: "test-model" },
+      });
+      yield* Deferred.await(complete);
+      const reply = events
+        .filter((event) => event.type === "content.delta")
+        .map((event) => event.payload.delta)
+        .join("");
+      expect(JSON.parse(reply).thinking).toBe("medium");
+    }).pipe(Effect.provide(layer), Effect.scoped),
+  );
   it.effect("never promotes unauthenticated completion to a verified reply", () =>
     Effect.gen(function* () {
       const { adapter, complete, readReport } = yield* setup;

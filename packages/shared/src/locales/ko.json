@@ -28,7 +28,6 @@
   "Public evidence details": "공개 증거 세부 정보",
   "Refresh attestation": "실행 환경 증명 새로고침",
   "Reply check failed": "응답 검증 실패",
-  "Reply incomplete": "응답 미완료",
   "Reply verified": "응답 검증됨",
   "Report needs refresh": "보고서 새로고침 필요",
   "The report describes the provider checks shown above. Local chat storage and external tools are outside inference encryption.": "이 보고서는 위에 표시된 제공자의 검증 결과를 설명합니다. 로컬 채팅 저장소와 외부 도구는 추론 암호화의 범위 밖에 있습니다.",
@@ -3240,5 +3239,8 @@
   "Server name": "서버 이름",
   "Servers are saved to this Axiom account. Tool selection applies to this conversation. Changes require idle work.": "서버는 이 Axiom 계정에 저장됩니다. 도구 선택은 이 대화에 적용됩니다. 실행 중인 작업이 없을 때 변경할 수 있습니다.",
   "Start an Axiom conversation to manage its MCP tools.": "Axiom 대화를 시작하면 MCP 도구를 관리할 수 있습니다.",
-  "Axiom reports settled costs without a cache savings breakdown. Cache savings for other providers use their estimated rates.": "Axiom은 확정 비용을 보고하지만 캐시 절감액의 내역은 제공하지 않습니다. 다른 제공자의 캐시 절감액은 추정 요금을 사용합니다."
+  "Axiom reports settled costs without a cache savings breakdown. Cache savings for other providers use their estimated rates.": "Axiom은 확정 비용을 보고하지만 캐시 절감액의 내역은 제공하지 않습니다. 다른 제공자의 캐시 절감액은 추정 요금을 사용합니다.",
+  "Reply not verified": "응답 미검증",
+  "Searched the web": "웹 검색",
+  "Opened web page": "웹 페이지 열기"
 }
