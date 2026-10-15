@@ -700,6 +700,21 @@ function installFileSettingsNativeApi(config: ServerConfig) {
   return { getConfig, openSystemPromptFile, openPath, openInEditor, confirm };
 }
 
+function installProviderAccountSettings(config: ServerConfig) {
+  const updateSettings = vi
+    .fn<LocalApi["server"]["updateSettings"]>()
+    .mockResolvedValue(config.settings);
+  window.nativeApi = {
+    persistence: {
+      getClientSettings: vi.fn().mockResolvedValue(null),
+      setClientSettings: vi.fn().mockResolvedValue(undefined),
+    },
+    server: { updateSettings },
+  } as unknown as LocalApi;
+  setServerConfigSnapshot(config);
+  return updateSettings;
+}
+
 describe("settings panels", () => {
   let mounted:
     | (Awaited<ReturnType<typeof render>> & {
@@ -2135,6 +2150,154 @@ describe("settings panels", () => {
     } finally {
       writeText.mockRestore();
     }
+  });
+
+  it.each(["", "仕事"])(
+    "generates an Axiom account ID with display name %j",
+    async (displayName) => {
+      const config = createBaseServerConfig();
+      const updateSettings = installProviderAccountSettings(config);
+      mounted = await render(
+        <AppAtomRegistryProvider>
+          <ProviderSettingsPanel />
+        </AppAtomRegistryProvider>,
+      );
+
+      await page.getByRole("button", { name: "Add provider instance", exact: true }).click();
+      await page.getByRole("radio", { name: "Axiom", exact: true }).click();
+      await page.getByRole("button", { name: "Next", exact: true }).click();
+      await page.getByLabelText(/Display name/).fill(displayName);
+      await expect
+        .element(page.getByRole("textbox", { name: /^Instance ID/ }))
+        .toHaveValue("axiom");
+      await page.getByRole("button", { name: "Next", exact: true }).click();
+      await page.getByRole("button", { name: "Add provider", exact: true }).click();
+
+      expect(updateSettings).toHaveBeenCalledExactlyOnceWith({
+        providerInstances: {
+          ...config.settings.providerInstances,
+          axiom: {
+            driver: ProviderDriverKind.make("axiom"),
+            enabled: true,
+            ...(displayName ? { displayName } : {}),
+          },
+        },
+      });
+      await expect.element(page.getByRole("dialog")).not.toBeInTheDocument();
+    },
+  );
+
+  it("generates unique IDs without replacing legacy or explicit accounts", async () => {
+    const axiom = { driver: ProviderDriverKind.make("axiom"), enabled: true };
+    const base = createBaseServerConfig();
+    const config = {
+      ...base,
+      settings: {
+        ...base.settings,
+        providerInstances: {
+          [ProviderInstanceId.make("axiom")]: axiom,
+          [ProviderInstanceId.make("axiom_2")]: axiom,
+        },
+      },
+    };
+    const updateSettings = installProviderAccountSettings(config);
+    mounted = await render(
+      <AppAtomRegistryProvider>
+        <ProviderSettingsPanel />
+      </AppAtomRegistryProvider>,
+    );
+
+    await page.getByRole("button", { name: "Add provider instance", exact: true }).click();
+    await page.getByRole("button", { name: "Next", exact: true }).click();
+    await expect
+      .element(page.getByRole("textbox", { name: /^Instance ID/ }))
+      .toHaveValue("codex_2");
+    await page.getByRole("button", { name: /Provider: Codex/ }).click();
+    await page.getByRole("radio", { name: "Axiom", exact: true }).click();
+    await page.getByRole("button", { name: "Next", exact: true }).click();
+    await expect
+      .element(page.getByRole("textbox", { name: /^Instance ID/ }))
+      .toHaveValue("axiom_3");
+    await page.getByRole("button", { name: "Next", exact: true }).click();
+    await page.getByRole("button", { name: "Add provider", exact: true }).click();
+    expect(updateSettings).toHaveBeenCalledExactlyOnceWith({
+      providerInstances: {
+        ...config.settings.providerInstances,
+        axiom_3: axiom,
+      },
+    });
+  });
+
+  it.each(["", "invalid id", "codex"])(
+    "shows the invalid account ID %j before leaving Identity",
+    async (invalidId) => {
+      const updateSettings = installProviderAccountSettings(createBaseServerConfig());
+      mounted = await render(
+        <AppAtomRegistryProvider>
+          <ProviderSettingsPanel />
+        </AppAtomRegistryProvider>,
+      );
+      await page.getByRole("button", { name: "Add provider instance", exact: true }).click();
+      await page.getByRole("radio", { name: "Axiom", exact: true }).click();
+      await page.getByRole("button", { name: "Next", exact: true }).click();
+      const input = page.getByRole("textbox", { name: /^Instance ID/ });
+      await input.fill(invalidId);
+      await page.getByRole("button", { name: "Next", exact: true }).click();
+      await expect.element(page.getByRole("alert")).toBeVisible();
+      await expect.element(input).toHaveFocus();
+      await expect.element(input).toHaveAttribute("aria-invalid", "true");
+      await expect
+        .element(page.getByRole("button", { name: "Add provider", exact: true }))
+        .not.toBeInTheDocument();
+      expect(updateSettings).not.toHaveBeenCalled();
+    },
+  );
+
+  it("returns to and focuses an ID error discovered when creating from Config", async () => {
+    const config = createBaseServerConfig();
+    const updateSettings = installProviderAccountSettings(config);
+    mounted = await render(
+      <AppAtomRegistryProvider>
+        <ProviderSettingsPanel />
+      </AppAtomRegistryProvider>,
+    );
+    await page.getByRole("button", { name: "Add provider instance", exact: true }).click();
+    await page.getByRole("radio", { name: "Axiom", exact: true }).click();
+    await page.getByRole("button", { name: "Next", exact: true }).click();
+    await page.getByRole("textbox", { name: /^Instance ID/ }).fill("axiom_custom");
+    await page.getByLabelText(/Display name/).fill("Work Axiom");
+    await expect
+      .element(page.getByRole("textbox", { name: /^Instance ID/ }))
+      .toHaveValue("axiom_custom");
+    await page.getByRole("button", { name: "Next", exact: true }).click();
+    const concurrentAccount = { driver: ProviderDriverKind.make("axiom"), enabled: true };
+    setServerConfigSnapshot({
+      ...config,
+      settings: {
+        ...config.settings,
+        providerInstances: {
+          ...config.settings.providerInstances,
+          [ProviderInstanceId.make("axiom_custom")]: concurrentAccount,
+        },
+      },
+    });
+    await page.getByRole("button", { name: "Add provider", exact: true }).click();
+    await expect
+      .element(page.getByRole("alert"))
+      .toHaveTextContent("An instance named 'axiom_custom' already exists.");
+    await expect.element(page.getByRole("textbox", { name: /^Instance ID/ })).toHaveFocus();
+    expect(updateSettings).not.toHaveBeenCalled();
+    await page.getByRole("textbox", { name: /^Instance ID/ }).fill("axiom_work");
+    await expect.element(page.getByRole("alert")).not.toBeInTheDocument();
+    await page.getByRole("button", { name: "Next", exact: true }).click();
+    await page.getByRole("button", { name: "Add provider", exact: true }).click();
+    expect(updateSettings).toHaveBeenCalledExactlyOnceWith({
+      providerInstances: {
+        ...config.settings.providerInstances,
+        axiom_custom: concurrentAccount,
+        axiom_work: { ...concurrentAccount, displayName: "Work Axiom" },
+      },
+    });
   });
 
   it.each(["axiom", "axiom_personal"])(

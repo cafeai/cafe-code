@@ -1,5 +1,6 @@
 import React, { type SVGProps, useId } from "react";
 import { cn } from "~/lib/utils";
+import axiomSymbolLogoUrl from "../assets/axiom-symbol-logo.svg";
 
 export type Icon = React.FC<SVGProps<SVGSVGElement>>;
 
@@ -453,6 +454,13 @@ const ANTIGRAVITY_ICON_DATA_URL =
 export const AntigravityIcon: Icon = (props) => (
   <svg {...props} viewBox="0 0 128 128" fill="none">
     <image href={ANTIGRAVITY_ICON_DATA_URL} width="128" height="128" />
+  </svg>
+);
+
+/** Official colored symbol from Axiom's packages/brand/assets. */
+export const AxiomIcon: Icon = (props) => (
+  <svg {...props} viewBox="0 0 215 147" fill="none">
+    <image href={axiomSymbolLogoUrl} width="215" height="147" />
   </svg>
 );
 

@@ -8,8 +8,7 @@ import {
   ProviderDriverKind,
 } from "@cafecode/contracts";
 import type * as Schema from "effect/Schema";
-import { ShieldCheckIcon } from "lucide-react";
-import { ClaudeAI, GrokIcon, type Icon, OpenAI, OpenCodeIcon } from "../Icons";
+import { AxiomIcon, ClaudeAI, GrokIcon, type Icon, OpenAI, OpenCodeIcon } from "../Icons";
 
 type ProviderSettingsSchema = {
   readonly fields: Readonly<Record<string, Schema.Top>>;
@@ -67,7 +66,7 @@ export const PROVIDER_CLIENT_DEFINITIONS: readonly ProviderClientDefinition[] = 
   {
     value: ProviderDriverKind.make("axiom"),
     label: "Axiom",
-    icon: ShieldCheckIcon,
+    icon: AxiomIcon,
     settingsSchema: AxiomSettings,
   },
 ];

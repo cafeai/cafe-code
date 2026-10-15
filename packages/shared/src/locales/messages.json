@@ -113,7 +113,7 @@
   },
   "(optional)": {
     "message": "(optional)",
-    "locations": ["apps/web/src/components/settings/AddProviderInstanceDialog.tsx:44"]
+    "locations": ["apps/web/src/components/settings/AddProviderInstanceDialog.tsx:45"]
   },
   "+{count} more": {
     "message": "+{count} more",
@@ -450,7 +450,7 @@
   },
   "Accent color ": {
     "message": "Accent color ",
-    "locations": ["apps/web/src/components/settings/AddProviderInstanceDialog.tsx:378"]
+    "locations": ["apps/web/src/components/settings/AddProviderInstanceDialog.tsx:418"]
   },
   "Accept Intel OutOfDate for this NEAR provider until AxiomCLI restarts. All other verification checks remain required.": {
     "message": "Accept Intel OutOfDate for this NEAR provider until AxiomCLI restarts. All other verification checks remain required.",
@@ -610,7 +610,7 @@
   },
   "Add another account or install of a provider.": {
     "message": "Add another account or install of a provider.",
-    "locations": ["apps/web/src/components/settings/AddProviderInstanceDialog.tsx:237"]
+    "locations": ["apps/web/src/components/settings/AddProviderInstanceDialog.tsx:267"]
   },
   "Add another project in this environment first.": {
     "message": "Add another project in this environment first.",
@@ -657,8 +657,8 @@
   "Add provider": {
     "message": "Add provider",
     "locations": [
-      "apps/web/src/components/settings/AddProviderInstanceDialog.tsx:235",
-      "apps/web/src/components/settings/AddProviderInstanceDialog.tsx:436"
+      "apps/web/src/components/settings/AddProviderInstanceDialog.tsx:265",
+      "apps/web/src/components/settings/AddProviderInstanceDialog.tsx:476"
     ]
   },
   "Add provider instance": {
@@ -896,7 +896,7 @@
   },
   "An instance named ''{id}'' already exists.": {
     "message": "An instance named ''{id}'' already exists.",
-    "locations": ["apps/web/src/components/settings/AddProviderInstanceDialog.tsx:88"]
+    "locations": ["apps/web/src/components/settings/AddProviderInstanceDialog.tsx:99"]
   },
   "An unexpected error occurred.": {
     "message": "An unexpected error occurred.",
@@ -1293,7 +1293,7 @@
       "apps/web/src/components/CommandPalette.tsx:1609",
       "apps/web/src/components/CommandPalette.tsx:1837",
       "apps/web/src/components/OnboardingScreen.tsx:797",
-      "apps/web/src/components/settings/AddProviderInstanceDialog.tsx:428",
+      "apps/web/src/components/settings/AddProviderInstanceDialog.tsx:468",
       "apps/web/src/components/settings/SettingsSidebarNav.tsx:293"
     ]
   },
@@ -1704,7 +1704,7 @@
       "apps/web/src/components/chat/ThreadGoalControl.tsx:412",
       "apps/web/src/components/chat/ThreadGoalControl.tsx:481",
       "apps/web/src/components/global-dictation/GlobalDictationOverlay.tsx:1020",
-      "apps/web/src/components/settings/AddProviderInstanceDialog.tsx:427",
+      "apps/web/src/components/settings/AddProviderInstanceDialog.tsx:467",
       "apps/web/src/components/settings/ConnectionsSettings.tsx:1015",
       "apps/web/src/components/settings/ConnectionsSettings.tsx:1219",
       "apps/web/src/components/settings/ConnectionsSettings.tsx:1267",
@@ -2579,7 +2579,7 @@
   },
   "Config": {
     "message": "Config",
-    "locations": ["apps/web/src/components/settings/AddProviderInstanceDialog.tsx:157"]
+    "locations": ["apps/web/src/components/settings/AddProviderInstanceDialog.tsx:184"]
   },
   "Configure": {
     "message": "Configure",
@@ -3049,7 +3049,7 @@
   },
   "Could not add provider": {
     "message": "Could not add provider",
-    "locations": ["apps/web/src/components/settings/AddProviderInstanceDialog.tsx:210"]
+    "locations": ["apps/web/src/components/settings/AddProviderInstanceDialog.tsx:240"]
   },
   "Could not add this environment. Check the server address and pairing credential, then try again.": {
     "message": "Could not add this environment. Check the server address and pairing credential, then try again.",
@@ -3682,7 +3682,7 @@
   },
   "Custom provider accent color": {
     "message": "Custom provider accent color",
-    "locations": ["apps/web/src/components/settings/AddProviderInstanceDialog.tsx:382"]
+    "locations": ["apps/web/src/components/settings/AddProviderInstanceDialog.tsx:422"]
   },
   "Custom style captured. Review the instructions, then choose Apply custom style.": {
     "message": "Custom style captured. Review the instructions, then choose Apply custom style.",
@@ -4261,7 +4261,7 @@
   },
   "Display name <slot1></slot1>": {
     "message": "Display name <slot1></slot1>",
-    "locations": ["apps/web/src/components/settings/AddProviderInstanceDialog.tsx:333"]
+    "locations": ["apps/web/src/components/settings/AddProviderInstanceDialog.tsx:363"]
   },
   "Displays the mobile sidebar.": {
     "message": "Displays the mobile sidebar.",
@@ -4370,7 +4370,7 @@
   },
   "Early Access": {
     "message": "Early Access",
-    "locations": ["apps/web/src/components/settings/providerDriverMeta.ts:58"]
+    "locations": ["apps/web/src/components/settings/providerDriverMeta.ts:57"]
   },
   "Edit": {
     "message": "Edit",
@@ -5722,7 +5722,7 @@
   },
   "Identity": {
     "message": "Identity",
-    "locations": ["apps/web/src/components/settings/AddProviderInstanceDialog.tsx:156"]
+    "locations": ["apps/web/src/components/settings/AddProviderInstanceDialog.tsx:183"]
   },
   "If the sandbox can''t start on this machine, connection checks will fail again.": {
     "message": "If the sandbox can''t start on this machine, connection checks will fail again.",
@@ -5893,19 +5893,19 @@
   },
   "Instance ID": {
     "message": "Instance ID",
-    "locations": ["apps/web/src/components/settings/AddProviderInstanceDialog.tsx:348"]
+    "locations": ["apps/web/src/components/settings/AddProviderInstanceDialog.tsx:378"]
   },
   "Instance ID is required.": {
     "message": "Instance ID is required.",
-    "locations": ["apps/web/src/components/settings/AddProviderInstanceDialog.tsx:81"]
+    "locations": ["apps/web/src/components/settings/AddProviderInstanceDialog.tsx:92"]
   },
   "Instance ID must be 64 characters or fewer.": {
     "message": "Instance ID must be 64 characters or fewer.",
-    "locations": ["apps/web/src/components/settings/AddProviderInstanceDialog.tsx:82"]
+    "locations": ["apps/web/src/components/settings/AddProviderInstanceDialog.tsx:93"]
   },
   "Instance ID must start with a letter and use only letters, digits, ''-'', or ''_''.": {
     "message": "Instance ID must start with a letter and use only letters, digits, ''-'', or ''_''.",
-    "locations": ["apps/web/src/components/settings/AddProviderInstanceDialog.tsx:84"]
+    "locations": ["apps/web/src/components/settings/AddProviderInstanceDialog.tsx:95"]
   },
   "Instance label": {
     "message": "Instance label",
@@ -5948,7 +5948,7 @@
   },
   "Internal ID: letters, digits, - or _.": {
     "message": "Internal ID: letters, digits, - or _.",
-    "locations": ["apps/web/src/components/settings/AddProviderInstanceDialog.tsx:364"]
+    "locations": ["apps/web/src/components/settings/AddProviderInstanceDialog.tsx:404"]
   },
   "Interrupt retargeted to provider active turn": {
     "message": "Interrupt retargeted to provider active turn",
@@ -7053,7 +7053,7 @@
       "apps/web/src/components/chat/ComposerPrimaryActions.tsx:49",
       "apps/web/src/components/chat/ProviderTasks.tsx:223",
       "apps/web/src/components/chat/ProviderTasks.tsx:309",
-      "apps/web/src/components/settings/AddProviderInstanceDialog.tsx:432"
+      "apps/web/src/components/settings/AddProviderInstanceDialog.tsx:472"
     ]
   },
   "Next attempt in {value0}": {
@@ -7276,7 +7276,7 @@
   },
   "No other settings needed.": {
     "message": "No other settings needed.",
-    "locations": ["apps/web/src/components/settings/AddProviderInstanceDialog.tsx:407"]
+    "locations": ["apps/web/src/components/settings/AddProviderInstanceDialog.tsx:447"]
   },
   "No output received yet.": {
     "message": "No output received yet.",
@@ -8532,8 +8532,8 @@
       "apps/web/src/components/atrium/TaskAtrium.tsx:255",
       "apps/web/src/components/chat/AxiomSecurityControl.tsx:255",
       "apps/web/src/components/chat/ComposerCommandMenu.tsx:103",
-      "apps/web/src/components/settings/AddProviderInstanceDialog.tsx:155",
-      "apps/web/src/components/settings/AddProviderInstanceDialog.tsx:293"
+      "apps/web/src/components/settings/AddProviderInstanceDialog.tsx:182",
+      "apps/web/src/components/settings/AddProviderInstanceDialog.tsx:323"
     ]
   },
   "Provider / inherited default": {
@@ -11007,7 +11007,7 @@
   },
   "Step <slot1></slot1>": {
     "message": "Step <slot1></slot1>",
-    "locations": ["apps/web/src/components/settings/AddProviderInstanceDialog.tsx:273"]
+    "locations": ["apps/web/src/components/settings/AddProviderInstanceDialog.tsx:303"]
   },
   "Step {value0} / {value1}": {
     "message": "Step {value0} / {value1}",
@@ -12640,7 +12640,7 @@
   },
   "Update failed.": {
     "message": "Update failed.",
-    "locations": ["apps/web/src/components/settings/AddProviderInstanceDialog.tsx:214"]
+    "locations": ["apps/web/src/components/settings/AddProviderInstanceDialog.tsx:244"]
   },
   "Update now": {
     "message": "Update now",
@@ -13715,7 +13715,7 @@
   },
   "e.g. Work": {
     "message": "e.g. Work",
-    "locations": ["apps/web/src/components/settings/AddProviderInstanceDialog.tsx:340"]
+    "locations": ["apps/web/src/components/settings/AddProviderInstanceDialog.tsx:370"]
   },
   "e.g. {arguments}": {
     "message": "e.g. {arguments}",
@@ -14421,7 +14421,7 @@
   },
   "{provider} Workspace": {
     "message": "{provider} Workspace",
-    "locations": ["apps/web/src/components/settings/AddProviderInstanceDialog.tsx:153"]
+    "locations": ["apps/web/src/components/settings/AddProviderInstanceDialog.tsx:180"]
   },
   "{provider} is not authenticated. Open Settings -'>' Source Control for setup guidance.": {
     "message": "{provider} is not authenticated. Open Settings -'>' Source Control for setup guidance.",
@@ -14707,7 +14707,7 @@
   },
   "{value0}_work": {
     "message": "{value0}_work",
-    "locations": ["apps/web/src/components/settings/AddProviderInstanceDialog.tsx:352"]
+    "locations": ["apps/web/src/components/settings/AddProviderInstanceDialog.tsx:383"]
   },
   "{value} B": {
     "message": "{value} B",

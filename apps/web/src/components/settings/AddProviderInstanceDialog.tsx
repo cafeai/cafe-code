@@ -5,8 +5,9 @@ import { uiText } from "@cafecode/shared/i18n";
 import { UiMessage } from "~/i18n";
 import { CheckIcon } from "lucide-react";
 import { Radio as RadioPrimitive } from "@base-ui/react/radio";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
+  defaultInstanceIdForDriver,
   ProviderInstanceId,
   ProviderDriverKind,
   type ProviderInstanceConfig,
@@ -48,8 +49,8 @@ function OptionalMark() {
 
 /**
  * Normalize a user-provided label into a slug suffix for the instance id.
- * The full id is formed by prefixing the driver slug — e.g. label "Work" on
- * driver "codex" becomes `codex_work`. Output is trimmed to 48 chars so the
+ * Named accounts prefix the label with the driver slug — e.g. label "Work"
+ * on driver "codex" becomes `codex_work`. Output is trimmed to 48 chars so the
  * final composed id stays under the 64-char slug cap enforced by
  * `ProviderInstanceId` in `@cafecode/contracts`.
  */
@@ -62,9 +63,19 @@ function slugifyLabel(value: string): string {
     .slice(0, 48);
 }
 
-function deriveInstanceId(driver: ProviderDriverKind, label: string): string {
+function deriveInstanceId(
+  driver: ProviderDriverKind,
+  label: string,
+  existing: ReadonlySet<string>,
+): string {
   const slug = slugifyLabel(label);
-  return slug ? `${driver}_${slug}` : "";
+  const base = (slug ? `${driver}_${slug}` : String(driver)).slice(0, 64);
+  let candidate = base;
+  for (let index = 2; existing.has(candidate); index += 1) {
+    const suffix = `_${index}`;
+    candidate = `${base.slice(0, 64 - suffix.length)}${suffix}`;
+  }
+  return candidate;
 }
 
 const INSTANCE_ID_PATTERN = /^[a-zA-Z][a-zA-Z0-9_-]*$/;
@@ -105,8 +116,9 @@ export function AddProviderInstanceDialog({ open, onOpenChange }: AddProviderIns
   const [driver, setDriver] = useState<ProviderDriverKind>(DEFAULT_DRIVER_KIND);
   const [label, setLabel] = useState("");
   const [accentColor, setAccentColor] = useState<string>("");
-  const [instanceId, setInstanceId] = useState("");
+  const [instanceIdDraft, setInstanceIdDraft] = useState("");
   const [instanceIdDirty, setInstanceIdDirty] = useState(false);
+  const instanceIdInputRef = useRef<HTMLInputElement>(null);
   // Driver-specific config drafts keyed by driver so toggling between drivers
   // during the same dialog session does not lose in-progress input.
   const [configByDriver, setConfigByDriver] = useState<Record<string, Record<string, unknown>>>({});
@@ -115,9 +127,18 @@ export function AddProviderInstanceDialog({ open, onOpenChange }: AddProviderIns
   const [hasAttemptedSubmit, setHasAttemptedSubmit] = useState(false);
 
   const existingIds = useMemo(
-    () => new Set(Object.keys(settings.providerInstances ?? {})),
-    [settings.providerInstances],
+    () =>
+      new Set([
+        ...Object.keys(settings.providers).map((driver) =>
+          String(defaultInstanceIdForDriver(ProviderDriverKind.make(driver))),
+        ),
+        ...Object.keys(settings.providerInstances ?? {}),
+      ]),
+    [settings.providerInstances, settings.providers],
   );
+  const instanceId = instanceIdDirty
+    ? instanceIdDraft
+    : deriveInstanceId(driver, label, existingIds);
 
   // Reset the form every time the dialog opens so each creation starts
   // from a clean slate.
@@ -126,19 +147,12 @@ export function AddProviderInstanceDialog({ open, onOpenChange }: AddProviderIns
     setDriver(DEFAULT_DRIVER_KIND);
     setLabel("");
     setAccentColor("");
-    setInstanceId("");
+    setInstanceIdDraft("");
     setWizardStep(0);
     setInstanceIdDirty(false);
     setConfigByDriver({});
     setHasAttemptedSubmit(false);
   }, [open]);
-
-  // Auto-derive the instance id from driver + label until the user types
-  // in the Instance ID field directly (after which they own its value).
-  useEffect(() => {
-    if (instanceIdDirty) return;
-    setInstanceId(deriveInstanceId(driver, label));
-  }, [driver, label, instanceIdDirty]);
 
   const driverOption =
     uiPresentation.DRIVER_OPTION_BY_VALUE[driver] ?? uiPresentation.DEFAULT_DRIVER_OPTION;
@@ -148,6 +162,19 @@ export function AddProviderInstanceDialog({ open, onOpenChange }: AddProviderIns
   );
   const instanceIdError = uiPresentation.validateInstanceId(instanceId, existingIds);
   const showInstanceIdError = hasAttemptedSubmit && instanceIdError !== null;
+  useEffect(() => {
+    if (showInstanceIdError && wizardStep === 1) instanceIdInputRef.current?.focus();
+  }, [showInstanceIdError, wizardStep]);
+
+  const goToStep = (step: number) => {
+    if (step > 1 && instanceIdError !== null) {
+      setHasAttemptedSubmit(true);
+      setWizardStep(1);
+      instanceIdInputRef.current?.focus();
+      return;
+    }
+    setWizardStep(step);
+  };
   const previewLabel =
     label.trim() ||
     uiText("{provider} Workspace", { provider: driverOption.label }, undefined, uiLocale);
@@ -177,7 +204,10 @@ export function AddProviderInstanceDialog({ open, onOpenChange }: AddProviderIns
 
   const handleSave = useCallback(() => {
     setHasAttemptedSubmit(true);
-    if (instanceIdError !== null) return;
+    if (instanceIdError !== null) {
+      setWizardStep(1);
+      return;
+    }
 
     const config = configByDriver[driver] ?? {};
     const hasConfig = Object.keys(config).length > 0;
@@ -254,7 +284,7 @@ export function AddProviderInstanceDialog({ open, onOpenChange }: AddProviderIns
                         ? "border-border bg-background hover:bg-accent"
                         : "border-border bg-muted/40 hover:bg-accent",
                   )}
-                  onClick={() => setWizardStep(index)}
+                  onClick={() => goToStep(index)}
                 >
                   <span
                     className={cn(
@@ -348,17 +378,27 @@ export function AddProviderInstanceDialog({ open, onOpenChange }: AddProviderIns
                   {uiText("Instance ID", undefined, undefined, uiLocale)}
                 </span>
                 <Input
+                  ref={instanceIdInputRef}
                   className="bg-background"
                   placeholder={uiText("{value0}_work", { value0: driver }, undefined, uiLocale)}
                   value={instanceId}
                   onChange={(event) => {
                     setInstanceIdDirty(true);
-                    setInstanceId(event.target.value);
+                    setInstanceIdDraft(event.target.value);
                   }}
                   aria-invalid={showInstanceIdError}
+                  aria-describedby={
+                    showInstanceIdError ? "add-provider-instance-id-error" : undefined
+                  }
                 />
                 {showInstanceIdError ? (
-                  <span className="text-xs text-destructive-foreground">{instanceIdError}</span>
+                  <span
+                    id="add-provider-instance-id-error"
+                    role="alert"
+                    className="text-xs text-destructive-foreground"
+                  >
+                    {instanceIdError}
+                  </span>
                 ) : (
                   <span className="text-xs text-muted-foreground">
                     {uiText(
@@ -428,7 +468,7 @@ export function AddProviderInstanceDialog({ open, onOpenChange }: AddProviderIns
                 : uiText("Back", undefined, undefined, uiLocale)}
             </Button>
             {wizardStep < wizardSteps.length - 1 ? (
-              <Button size="sm" onClick={() => setWizardStep((step) => Math.min(2, step + 1))}>
+              <Button size="sm" onClick={() => goToStep(Math.min(2, wizardStep + 1))}>
                 {uiText("Next", undefined, undefined, uiLocale)}
               </Button>
             ) : (
