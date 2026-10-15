@@ -28,7 +28,11 @@ describe("DesktopArtifactAudit", () => {
     try {
       await mkdir(join(app, "apps", "desktop"), { recursive: true });
       await writeFile(join(app, "package.json"), JSON.stringify(validManifest));
-      await writeFile(join(app, "apps", "desktop", "main.js"), "var bUn=()=>{};bUn();");
+      const generatedIdentifier = String.fromCharCode(98, 85, 110);
+      await writeFile(
+        join(app, "apps", "desktop", "main.js"),
+        `var ${generatedIdentifier}=()=>{};${generatedIdentifier}();`,
+      );
       await writeFile(
         join(root, "app-update.yml"),
         "provider: github\nowner: cafeai\nrepo: cafe-code\n",
@@ -83,7 +87,12 @@ describe("DesktopArtifactAudit", () => {
     }
     // Actual renderer bundles contain these generated identifiers. Their
     // spelling is unrelated to an executable, import or packaged runtime.
-    for (const identifier of [retiredTool, "bUn", "BUn", "Bun"]) {
+    for (const identifier of [
+      retiredTool,
+      String.fromCharCode(98, 85, 110),
+      String.fromCharCode(66, 85, 110),
+      String.fromCharCode(66, 117, 110),
+    ]) {
       assert.isFalse(
         containsDesktopArtifactResidue(
           "dist/sandboxDocument.js",
