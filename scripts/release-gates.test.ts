@@ -31,11 +31,19 @@ describe("release publication gates", () => {
       ),
     ).toBe(true);
     expect(
-      ci.jobs.quality.steps.some(
-        (step: { run?: string }) =>
-          step.run === "corepack yarn workspace @cafecode/web test:browser",
-      ),
-    ).toBe(true);
+      ci.jobs.quality.steps.filter((step: { name?: string }) => step.name === "Browser tests"),
+    ).toEqual([
+      {
+        name: "Browser tests",
+        if: "runner.os == 'Linux'",
+        run: [
+          "corepack yarn workspace @cafecode/web test:browser --project=desktop --project=touch",
+          "corepack yarn workspace @cafecode/web test:browser --project=visualization-fluid-motion",
+          "corepack yarn workspace @cafecode/web test:browser --project=context-reduced-motion",
+          "",
+        ].join("\n"),
+      },
+    ]);
   });
   it("qualifies uploaded bytes before sealing and checks the candidate feed before publishing", () => {
     const release = workflow("release.yml");
