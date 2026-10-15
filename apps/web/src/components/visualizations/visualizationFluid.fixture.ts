@@ -258,8 +258,14 @@ export async function createFluidFixture(
 /** Fixed synthetic chart only; actual browser GL/RAF/media remain untouched.
  * The real-pixel positive must fail visibly if this native driver is unavailable
  * rather than silently substituting the resource recorder or skipping a host. */
-export async function createNativeFluidFixture(): Promise<NativeFluidFixture> {
+export async function createNativeFluidFixture(
+  ownPendingFrame: (frame: HTMLIFrameElement) => void,
+): Promise<NativeFluidFixture> {
   const frame = document.createElement("iframe");
+  // The caller registers retirement before any navigation or append can wait.
+  // Its afterEach owns this pending frame even if a hard test timeout settles
+  // before the load await, independently of the async test body's finally.
+  ownPendingFrame(frame);
   frame.style.width = "400px";
   frame.style.height = "300px";
   frame.title = "Native WebGL fluid runtime fixture";

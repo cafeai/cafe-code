@@ -3,7 +3,7 @@ import {
   visualizationFluidScript,
 } from "@cafecode/shared/visualizationFluidRuntime";
 import { afterEach, describe, expect, it } from "vitest";
-import { userEvent } from "vitest/browser";
+import { page, userEvent } from "vitest/browser";
 import {
   createFluidFixture,
   createNativeFluidFixture,
@@ -13,6 +13,9 @@ import {
 
 const fixtures: FluidFixture[] = [];
 const nativeFixtures: NativeFluidFixture[] = [];
+// Vitest can settle its deadline before an unresolved test-body await unwinds.
+// Own diagnostic/temporary-DOM cleanup independently of that body's finally.
+const nativeCleanups: (() => void)[] = [];
 async function fixture(options: Parameters<typeof createFluidFixture>[0] = {}) {
   // Native context policy is a precondition, not a request to change the
   // user's preference or bypass the runtime's static accessibility branch.
@@ -33,8 +36,9 @@ function frames(value: Pick<FluidFixture, "canvas">) {
   return Number(value.canvas().dataset.cafeFluidFrames);
 }
 
-/** The browser provider delivers the click into the child document. Reading
- * its button geometry is an observation, never a focus/input rewrite. */
+/** Target the exact native child control, not its outer iframe at a manually
+ * calculated offset. Native actionability and hit-target checks must belong to
+ * the actual button; observing its geometry never rewrites focus or input. */
 async function clickChart(
   value: Pick<FluidFixture, "document" | "frame">,
   choice: "a" | "b" | "same",
@@ -45,10 +49,15 @@ async function clickChart(
   const rect = button.getBoundingClientRect();
   expect(rect.width).toBeGreaterThan(0);
   expect(rect.height).toBeGreaterThan(0);
+  expect(value.frame.contentDocument).toBe(value.document);
+  expect(button.ownerDocument).toBe(value.document);
   const previous = Number(value.document.documentElement.dataset.fixtureTrustedClicks ?? "0");
-  await userEvent.click(value.frame, {
-    position: { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 },
-  });
+  const names = { a: "Chart A", b: "Chart B", same: "Same chart" } as const;
+  await userEvent.click(
+    page
+      .frameLocator(page.elementLocator(value.frame))
+      .getByRole("button", { name: names[choice], exact: true }),
+  );
   expect(value.document.documentElement.dataset.fixtureTrustedClicks).toBe(String(previous + 1));
   expect(value.document.documentElement.dataset.fixtureChart).toBe(choice);
 }
@@ -88,6 +97,7 @@ async function nativePixelDigest(
  * WebGL control uses an unmocked document and separately samples real pixels. */
 describe("generated fluid decoration lifecycle", () => {
   afterEach(() => {
+    for (const cleanup of nativeCleanups.splice(0)) cleanup();
     for (const value of fixtures.splice(0)) {
       value.dispose();
       expect(value.recorder.summary()).toMatchObject({ resizeObservers: 0, mutationObservers: 0 });
@@ -712,68 +722,164 @@ describe("generated fluid decoration lifecycle", () => {
   );
 
   it("continues actual native WebGL pixels after exhausting size admissions with trusted chart buttons", async () => {
-    expect(window.matchMedia("(prefers-reduced-motion: reduce)").matches).toBe(false);
-    expect(window.matchMedia("(hover: hover)").matches).toBe(true);
-    expect(window.matchMedia("(pointer: fine)").matches).toBe(true);
-    const value = await createNativeFluidFixture();
-    nativeFixtures.push(value);
-    expect(value.window.matchMedia("(prefers-reduced-motion: reduce)").matches).toBe(false);
-    expect(value.window.matchMedia("(hover: hover)").matches).toBe(true);
-    expect(value.window.matchMedia("(pointer: fine)").matches).toBe(true);
-    expect((value.window as Window & { __fluidFixture?: unknown }).__fluidFixture).toBeUndefined();
-    const canvas = value.canvas();
-    // A native unsupported/absent driver is a qualification failure, not an
-    // excuse to use a recorder, skip this host or add permissive native flags.
-    expect(canvas.dataset.cafeFluidState).toBe("running");
-    const gl = canvas.getContext("webgl2") ?? canvas.getContext("webgl");
-    expect(gl).not.toBeNull();
-    expect(gl!.getParameter(gl!.VERSION)).toMatch(/^WebGL/);
-    await expect.poll(() => frames(value)).toBeGreaterThan(12);
-    for (let index = 0; index < 7; index++) {
-      const before = frames(value);
-      const choice = index % 2 === 0 ? "b" : "a";
-      await clickChart(value, choice);
-      expect(canvas.getBoundingClientRect().width).toBe(choice === "a" ? 320 : 160);
-      expect(canvas.getBoundingClientRect().height).toBe(160);
-      await expect.poll(() => [canvas.width, canvas.height]).toEqual(physicalSize(value));
-      await expect.poll(() => frames(value)).toBeGreaterThan(before);
+    // Preserve the original single test deadline. If it expires, retain which
+    // native phase/input actually finished before afterEach removes the frame;
+    // a later screenshot cannot reconstruct that evidence. This bounded trace
+    // reads existing scalar attributes only, never GL state, pixels or source.
+    const startedAt = performance.now();
+    const phases: {
+      phase: string;
+      index: number | null;
+      elapsedMs: number;
+      trustedClicks: number | null;
+      frames: number | null;
+      width: number | null;
+      height: number | null;
+    }[] = [];
+    let observed: NativeFluidFixture | undefined;
+    let pendingFrame: HTMLIFrameElement | undefined;
+    let finished = false;
+    let retired = false;
+    let truncated = false;
+    const record = (phase: string, index: number | null = null) => {
+      if (retired) throw new Error("Native fluid qualification already retired");
+      if (phases.length === 128) {
+        truncated = true;
+        return;
+      }
+      const canvas = observed?.canvas();
+      const finiteCount = (value: unknown): number | null => {
+        const count = typeof value === "number" ? value : Number(value);
+        return Number.isSafeInteger(count) && count >= 0 ? count : null;
+      };
+      phases.push({
+        phase,
+        index,
+        elapsedMs: Math.round(performance.now() - startedAt),
+        trustedClicks: observed
+          ? finiteCount(observed.document.documentElement.dataset.fixtureTrustedClicks)
+          : null,
+        frames: canvas ? finiteCount(canvas.dataset.cafeFluidFrames) : null,
+        width: canvas ? finiteCount(canvas.width) : null,
+        height: canvas ? finiteCount(canvas.height) : null,
+      });
+    };
+    // An identically named control outside the owned child must receive no
+    // input. Keep this alongside the real 31-click path, not a mocked locator.
+    const decoy = document.createElement("button");
+    decoy.type = "button";
+    decoy.textContent = "Chart A";
+    let decoyClicks = 0;
+    decoy.onclick = () => decoyClicks++;
+    const cleanup = () => {
+      if (retired) return;
+      retired = true;
+      try {
+        if (!finished) console.info("native-fluid-qualification-phases", { truncated, phases });
+      } finally {
+        decoy.remove();
+        // Creation ownership is installed before srcdoc/navigation or append.
+        // A hard timeout during frame load must not strand an unregistered frame.
+        pendingFrame?.remove();
+      }
+    };
+    nativeCleanups.push(cleanup);
+    document.body.append(decoy);
+    try {
+      record("fixture-start");
+      expect(window.matchMedia("(prefers-reduced-motion: reduce)").matches).toBe(false);
+      expect(window.matchMedia("(hover: hover)").matches).toBe(true);
+      expect(window.matchMedia("(pointer: fine)").matches).toBe(true);
+      const value = await createNativeFluidFixture((frame) => {
+        pendingFrame = frame;
+      });
+      if (retired) {
+        value.dispose();
+        throw new Error("Native fluid qualification already retired");
+      }
+      nativeFixtures.push(value);
+      pendingFrame = undefined;
+      observed = value;
+      record("fixture-ready");
+      expect(value.window.matchMedia("(prefers-reduced-motion: reduce)").matches).toBe(false);
+      expect(value.window.matchMedia("(hover: hover)").matches).toBe(true);
+      expect(value.window.matchMedia("(pointer: fine)").matches).toBe(true);
+      expect(
+        (value.window as Window & { __fluidFixture?: unknown }).__fluidFixture,
+      ).toBeUndefined();
+      const canvas = value.canvas();
+      // A native unsupported/absent driver is a qualification failure, not an
+      // excuse to use a recorder, skip this host or add permissive native flags.
       expect(canvas.dataset.cafeFluidState).toBe("running");
-    }
-    const size = [canvas.width, canvas.height];
-    const beforeFrames = frames(value);
-    const beforePixels = await nativePixelDigest(canvas, gl!);
-    for (let index = 0; index < 24; index++) {
-      const before = frames(value);
-      const choice = index % 2 === 0 ? "a" : "b";
-      await clickChart(value, choice);
-      expect(canvas.getBoundingClientRect().width).toBe(choice === "a" ? 320 : 160);
-      await expect.poll(() => frames(value)).toBeGreaterThan(before);
-      expect(value.canvas()).toBe(canvas);
-      expect(canvas.getContext("webgl2") ?? canvas.getContext("webgl")).toBe(gl);
+      const gl = canvas.getContext("webgl2") ?? canvas.getContext("webgl");
+      expect(gl).not.toBeNull();
+      expect(gl!.getParameter(gl!.VERSION)).toMatch(/^WebGL/);
+      await expect.poll(() => frames(value)).toBeGreaterThan(12);
+      record("initial-frames-ready");
+      for (let index = 0; index < 7; index++) {
+        const before = frames(value);
+        const choice = index % 2 === 0 ? "b" : "a";
+        record("admission-click-start", index);
+        await clickChart(value, choice);
+        record("admission-click-complete", index);
+        expect(canvas.getBoundingClientRect().width).toBe(choice === "a" ? 320 : 160);
+        expect(canvas.getBoundingClientRect().height).toBe(160);
+        await expect.poll(() => [canvas.width, canvas.height]).toEqual(physicalSize(value));
+        await expect.poll(() => frames(value)).toBeGreaterThan(before);
+        expect(canvas.dataset.cafeFluidState).toBe("running");
+        record("admission-frame-ready", index);
+      }
+      const size = [canvas.width, canvas.height];
+      const beforeFrames = frames(value);
+      record("before-pixels-start");
+      const beforePixels = await nativePixelDigest(canvas, gl!);
+      record("before-pixels-complete");
+      for (let index = 0; index < 24; index++) {
+        const before = frames(value);
+        const choice = index % 2 === 0 ? "a" : "b";
+        record("retained-click-start", index);
+        await clickChart(value, choice);
+        record("retained-click-complete", index);
+        expect(canvas.getBoundingClientRect().width).toBe(choice === "a" ? 320 : 160);
+        await expect.poll(() => frames(value)).toBeGreaterThan(before);
+        expect(value.canvas()).toBe(canvas);
+        expect(canvas.getContext("webgl2") ?? canvas.getContext("webgl")).toBe(gl);
+        expect([canvas.width, canvas.height]).toEqual(size);
+        expect(canvas.dataset.cafeFluidState).toBe("running");
+        expect(canvas.dataset.cafeFluidTextures).toBe("8");
+        expect(canvas.dataset.cafeFluidPrograms).toBe("10");
+        expect(canvas.dataset.cafeFluidBuffers).toBe("2");
+        expect(canvas.dataset.cafeFluidRaf).toBe("true");
+        expect(Number(canvas.dataset.cafeFluidTextureBytes)).toBeLessThanOrEqual(16 * 1024 * 1024);
+        record("retained-frame-ready", index);
+      }
+      record("after-pixels-start");
+      const afterPixels = await nativePixelDigest(canvas, gl!);
+      record("after-pixels-complete");
+      expect(frames(value)).toBeGreaterThanOrEqual(beforeFrames + 24);
+      expect(afterPixels).not.toBe(beforePixels);
+      expect(value.document.documentElement.dataset.fixtureTrustedClicks).toBe("31");
+      expect(decoyClicks).toBe(0);
+      value.visible(false);
+      record("paused");
+      const paused = frames(value);
+      const pausedPixels = await nativePixelDigest(canvas, gl!);
+      record("paused-click-start");
+      await clickChart(value, "a");
+      record("paused-click-complete");
+      expect(canvas.dataset.cafeFluidState).toBe("paused");
+      expect(canvas.dataset.cafeFluidRaf).toBe("false");
+      expect(frames(value)).toBe(paused);
+      expect(await nativePixelDigest(canvas, gl!)).toBe(pausedPixels);
       expect([canvas.width, canvas.height]).toEqual(size);
-      expect(canvas.dataset.cafeFluidState).toBe("running");
-      expect(canvas.dataset.cafeFluidTextures).toBe("8");
-      expect(canvas.dataset.cafeFluidPrograms).toBe("10");
-      expect(canvas.dataset.cafeFluidBuffers).toBe("2");
-      expect(canvas.dataset.cafeFluidRaf).toBe("true");
-      expect(Number(canvas.dataset.cafeFluidTextureBytes)).toBeLessThanOrEqual(16 * 1024 * 1024);
+      value.visible(true);
+      await expect.poll(() => frames(value)).toBeGreaterThan(paused + 2);
+      expect(await nativePixelDigest(canvas, gl!)).not.toBe(pausedPixels);
+      expect(decoyClicks).toBe(0);
+      finished = true;
+    } finally {
+      cleanup();
     }
-    const afterPixels = await nativePixelDigest(canvas, gl!);
-    expect(frames(value)).toBeGreaterThanOrEqual(beforeFrames + 24);
-    expect(afterPixels).not.toBe(beforePixels);
-    expect(value.document.documentElement.dataset.fixtureTrustedClicks).toBe("31");
-    value.visible(false);
-    const paused = frames(value);
-    const pausedPixels = await nativePixelDigest(canvas, gl!);
-    await clickChart(value, "a");
-    expect(canvas.dataset.cafeFluidState).toBe("paused");
-    expect(canvas.dataset.cafeFluidRaf).toBe("false");
-    expect(frames(value)).toBe(paused);
-    expect(await nativePixelDigest(canvas, gl!)).toBe(pausedPixels);
-    expect([canvas.width, canvas.height]).toEqual(size);
-    value.visible(true);
-    await expect.poll(() => frames(value)).toBeGreaterThan(paused + 2);
-    expect(await nativePixelDigest(canvas, gl!)).not.toBe(pausedPixels);
   });
 
   it("bounds extreme aspect ratios and refuses invalid size before context allocation", async () => {

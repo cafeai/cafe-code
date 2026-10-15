@@ -132,8 +132,77 @@ describe("AmbianceLayer", () => {
     }
   });
 
-  it("keeps the original visible ambiance painting through 24 native child-frame clicks", async () => {
+  it("keeps the original visible ambiance painting through 24 native child-frame clicks", async (test) => {
     const host = document.createElement("div");
+    const startedAt = performance.now();
+    const phases: {
+      phase: string;
+      index: number | null;
+      elapsedMs: number;
+      trusted: boolean | null;
+      frames: number;
+    }[] = [];
+    let currentIndex: number | null = null;
+    let latestPhase = "fixture-start";
+    let truncated = false;
+    let retired = false;
+    let finished = false;
+    let observeFrames = () => 0;
+    let restoreClears: (() => void) | undefined;
+    const removeObservers: (() => void)[] = [];
+    let rendering: ReturnType<typeof render> | undefined;
+    let cleanupPromise: Promise<void> | undefined;
+    const record = (phase: string, event?: Event) => {
+      // A test deadline can finish while native input or rendering still awaits
+      // its response. A late continuation cannot resume work after retirement.
+      if (retired) throw new Error("Native ambiance qualification already retired");
+      latestPhase = phase;
+      if (phases.length === 128) {
+        truncated = true;
+        return;
+      }
+      phases.push({
+        phase,
+        index: currentIndex,
+        elapsedMs: Math.round(performance.now() - startedAt),
+        trusted: event?.isTrusted ?? null,
+        frames: observeFrames(),
+      });
+    };
+    const cleanup = () => {
+      if (cleanupPromise) return cleanupPromise;
+      retired = true;
+      cleanupPromise = (async () => {
+        try {
+          // Fixed phase/count scalars only. Preserve failure observations even
+          // if a native click times out before the final continuity assertion.
+          if (!finished) {
+            console.info("native-ambiance-qualification-phases", {
+              latestPhase,
+              currentIndex,
+              truncated,
+              phases,
+            });
+          }
+        } finally {
+          try {
+            for (const remove of removeObservers.splice(0)) remove();
+            // Own the pending render itself, not only a result assigned after
+            // await. A hard timeout must join its eventual effect cleanup
+            // before restoring the recorder or admitting the next fixture.
+            const rendered = await rendering;
+            await rendered?.unmount();
+          } finally {
+            restoreClears?.();
+            host.remove();
+          }
+        }
+      })();
+      return cleanupPromise;
+    };
+    // Register before append/navigation or any await. The test-owned completion
+    // hook joins this same one-shot cleanup if a hard deadline beats finally.
+    test.onTestFinished(cleanup);
     const parentControl = document.createElement("button");
     const canvasHost = document.createElement("div");
     parentControl.type = "button";
@@ -161,7 +230,9 @@ describe("AmbianceLayer", () => {
     host.append(parentControl, frame, canvasHost);
     document.body.append(host);
     try {
+      record("fixture-load-start");
       await loaded;
+      record("fixture-load-complete");
       const childDocument = frame.contentDocument;
       const childWindow = frame.contentWindow;
       const childControl = childDocument?.querySelector<HTMLButtonElement>("#native-child-control");
@@ -188,6 +259,7 @@ describe("AmbianceLayer", () => {
       // Count only completed calls on the exact ambiance canvas, and separately
       // verify actual painted pixels. Invocation alone is not a paint oracle.
       const clears = vi.spyOn(CanvasRenderingContext2D.prototype, "clearRect");
+      restoreClears = () => clears.mockRestore();
       let canvas: HTMLCanvasElement | null = null;
       const completedFrames = (): number =>
         clears.mock.contexts.reduce<number>(
@@ -200,6 +272,7 @@ describe("AmbianceLayer", () => {
             ),
           0,
         );
+      observeFrames = completedFrames;
       const painted = () => {
         if (!canvas) return false;
         const context = canvas.getContext("2d");
@@ -242,12 +315,20 @@ describe("AmbianceLayer", () => {
         [childWindow, "focus", "child-window-focus"],
         [childDocument, "focusin", "child-document-focusin"],
       ];
-      const removeObservers = observationOwners.map(([target, type, phase]) => {
-        const listener = (event: Event) => observe(phase, event);
-        target.addEventListener(type, listener);
-        return () => target.removeEventListener(type, listener);
-      });
-      let screen: Awaited<ReturnType<typeof render>> | undefined;
+      removeObservers.push(
+        ...observationOwners.map(([target, type, phase]) => {
+          const listener = (event: Event) => observe(phase, event);
+          target.addEventListener(type, listener);
+          return () => target.removeEventListener(type, listener);
+        }),
+      );
+      for (const type of ["pointerdown", "click"] as const) {
+        const listener = (event: Event) => {
+          if (!retired) record(`child-${type}`, event);
+        };
+        childControl.addEventListener(type, listener);
+        removeObservers.push(() => childControl.removeEventListener(type, listener));
+      }
       try {
         // Initial ownership is established by real input, not element.focus(),
         // a hasFocus stub or synthetic focus/blur delivery.
@@ -255,7 +336,12 @@ describe("AmbianceLayer", () => {
         await expect.poll(() => document.activeElement).toBe(parentControl);
         expect(document.hasFocus()).toBe(true);
         expect(document.hidden).toBe(false);
-        screen = await render(<AmbianceLayer />, { container: canvasHost });
+        record("parent-focus-ready");
+        rendering = render(<AmbianceLayer />, { container: canvasHost });
+        await rendering;
+        if (retired) {
+          throw new Error("Native ambiance qualification already retired");
+        }
         canvas = host.querySelector<HTMLCanvasElement>('[data-cafe-ambiance-canvas="true"]');
         expect(canvas).toBeInstanceOf(HTMLCanvasElement);
         expect(canvas?.dataset.cafeAmbianceEffect).toBe("lattice");
@@ -266,11 +352,15 @@ describe("AmbianceLayer", () => {
         await expect.poll(() => completedFrames() > 1 && painted()).toBe(true);
         expect(completedFrames()).toBeGreaterThan(1);
         expect(painted()).toBe(true);
+        record("initial-paint-ready");
         const before = completedFrames();
         const checkpoints: { click: number; focused: boolean; hidden: boolean; frames: number }[] =
           [];
         for (let index = 0; index < 24; index += 1) {
+          currentIndex = index;
+          record("child-click-start");
           await userEvent.click(nativeChildControl);
+          record("child-click-returned");
           await expect
             .poll(() => childDocument.documentElement.dataset.nativeTrustedClicks)
             .toBe(String(index + 1));
@@ -279,6 +369,7 @@ describe("AmbianceLayer", () => {
           await new Promise<void>((resolve) => {
             requestAnimationFrame(() => requestAnimationFrame(() => resolve()));
           });
+          record("child-frames-complete");
           checkpoints.push({
             click: index + 1,
             focused: document.hasFocus(),
@@ -314,18 +405,12 @@ describe("AmbianceLayer", () => {
             })}`,
           );
         }
+        finished = true;
       } finally {
-        for (const remove of removeObservers) remove();
-        try {
-          await screen?.unmount();
-        } finally {
-          // The native call-through recorder belongs only to this fixture;
-          // later files must not accumulate its canvas calls or retain owners.
-          clears.mockRestore();
-        }
+        await cleanup();
       }
     } finally {
-      host.remove();
+      await cleanup();
     }
   });
 });

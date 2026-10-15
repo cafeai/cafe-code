@@ -1,6 +1,6 @@
 # Browser test input isolation
 
-Last updated: 2026-10-15 03:07:23 JST (UTC+0900)
+Last updated: 2026-10-15 12:49:47 JST (UTC+0900)
 
 Cafe's pinned Vitest browser runner isolates test files by replacing a tester
 iframe. Its owning Playwright page and browser context can be reused for later
@@ -128,6 +128,33 @@ group; it grants no special motion policy or relaxed input/deadline. Its passing
 baseline is not evidence of the recording's original stopping cause. Native
 hosted delivery remains required after local checks.
 
+Native chart input targets each exact-named button through the current fixture's
+frame locator. Preserve the button's measured nonempty geometry, exact document
+ownership and trusted count/choice receipts; do not target the outer iframe at a
+manually calculated offset. Ordinary Playwright actionability and hit-target
+checks now apply to the actual child control. An identically named outer button
+receives no input during the same original repeated-click sequence. There are no
+forced clicks, raw pointer/CDP commands, synthetic events or new input contexts.
+
+If the real WebGL positive fails, it flushes at most 128 content-free phase/index,
+elapsed-time, trusted-click/frame-count and physical-dimension observations before
+cleanup. The observer adds no timers, GL calls or input and never logs source or
+pixels. The motivating Linux failure exhausted its enclosing 30-second allowance
+during a post-cap iframe click; the 486ms action timeout was the remaining budget,
+not a separately configured short deadline. Initial frames, all seven physical
+admissions and the first nonempty pixel sample had passed. The exact failing
+iteration and earlier elapsed-time distribution were unobserved; neither a GPU
+cause nor stopped pixels is established. The targeting repair preserves every
+original action, frame/pixel/resource assertion, worker cap and deadline.
+
+Register the idempotent diagnostic/temporary-DOM cleanup before appending a decoy
+or starting frame navigation, and drain it first in `afterEach`. Vitest's hard
+deadline can settle while a test-body await remains unresolved; that body's
+`finally` is not sufficient cleanup ownership. The fixture registers its pending
+frame before source assignment/append, and late creation cannot resume input
+after retirement. Normal completion uses the same one-shot cleanup before the
+existing loaded-frame disposal.
+
 The initial-paint precondition observes both completed clears and actual nonempty
 pixels in the same original poll. A returned lifecycle clear or draw clear is not
 proof that eased drive has reached the engine's paint branch. Keep the original
@@ -135,6 +162,43 @@ numeric clear and pixel assertions afterward, then all 24 trusted child clicks,
 frame identity, focus, continued painting and cleanup assertions. Do not replace
 real pixels with counter-only readiness, change production animation, force media
 or relax the existing input, worker or deadline policy.
+
+The separate ambiance positive retains at most 128 fixed phase/index/elapsed,
+trusted-event and completed-frame observations, including native child pointer
+delivery, click return and completion of the original two animation frames.
+Its latest phase/index remains available if the trace fills. Failure emits the
+stored observations before cleanup, rather than relying on reaching the final
+continuity assertion after all 24 clicks. Keep every trusted-count, focus,
+identity, actual-pixel and per-click frame-progress assertion unchanged. The
+earlier full-suite timeout retained neither its failing index nor input-delivery
+phase; it does not establish a production animation, GPU or hit-target cause.
+
+Own pending rendering synchronously before awaiting it. A one-shot test-completion
+hook joins that render and explicit unmount before restoring the exact native
+recorder or removing its host; the ordinary `finally` joins the same cleanup.
+Retired load/render/input continuations cannot start another input sequence.
+The pinned React browser adapter cleans up before the next test, not in an
+automatic per-test `afterEach`, so that later cleanup is not a retirement receipt
+for a timed-out owner. Diagnostics read only fixed synthetic fixture metadata,
+not received source, pixels, provider data or native GL state.
+
+## Transient Mermaid copy feedback
+
+The incomplete-source fixture owns its copy mock's exact deferred result before
+render or native input. Complete the original click and exact source/count
+assertion while feedback remains absent, then resolve that result and retain the
+original visible `Copied`, completed-source and render assertions. Production's
+real feedback timer remains unchanged. An already-resolved mock can start that
+timer while the awaited input round trip still hides the feedback window from
+the fixture; a later `Copy` snapshot alone cannot prove which phase occurred.
+
+Register shared one-shot cleanup before awaiting render. It joins the owned
+pending render and explicit unmount before releasing an abandoned copy result,
+including hard deadlines and unmount failures. Retired continuations cannot
+rerender or release success feedback after that owner has been removed. This is
+test synchronization, not a production clipboard, feedback-duration, renderer,
+permission or input-policy change; native input, worker caps and deadlines stay
+unchanged.
 
 ## Native-host Mermaid security scheduling
 

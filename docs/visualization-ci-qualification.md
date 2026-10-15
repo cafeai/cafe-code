@@ -2,7 +2,7 @@
 
 Status: Qualification procedure for the current Full-access browser path
 Created: 2026-10-13 18:22:30 JST (UTC+0900)
-Last updated: 2026-10-14 22:13:47 JST (UTC+0900)
+Last updated: 2026-10-15 12:49:47 JST (UTC+0900)
 
 The current feature executes ordinary same-origin browser frames, not a separate
 native source host. CI selects real browser input/layout/lifecycle/App protocol
@@ -79,9 +79,24 @@ GL/RAF/media recorder: both nonempty RGBA samples have identical retained
 canvas/context/dimensions and different SHA-256 digests after native input and
 actual frame progress. Pause keeps pixels stable and resumption changes them.
 That positive is separate from recorder accounting and physical-memory claims.
+Chart controls use exact native child-button locators, retaining native
+actionability, trusted delivery and zero input to identically named outer
+controls. On failure, a finite scalar phase trace is emitted before teardown;
+it does not consume GL state or substitute for actual pixel assertions. Keep
+the original single-test deadline, full repeated-input sequence and all native
+context/resource checks. A remaining-budget click timeout alone is not evidence
+of frozen pixels or a production solver defect.
 An isolated app-wide lattice/iframe focus check retains the background-animation
 preference and original engine, without treating that separate passing layer as
 proof of the recording's original cause.
+Its bounded native-input phase trace also survives a timeout before the final
+continuity assertion. Original 24-click, actual-pixel, focus and frame-progress
+checks remain intact. A shared completion finalizer owns pending render/unmount
+and recorder retirement instead of relying on the next test's React cleanup.
+Mermaid's incomplete-source copy fixture separately holds exact copy settlement
+until native click completion before observing transient feedback, retaining the
+real production timer and all source/count/render assertions. Neither fixture
+changes production animation, clipboard policy, native input or timing budgets.
 
 Linux retains the complete browser suite. Windows/macOS use the existing focused
 subset plus current history/owner/App/capture fixtures, with original worker caps,
