@@ -44,6 +44,7 @@ const installerTracePoints = [
   ["      $result = Publish-ManagedRecord", "result-publication"],
   ["      if (Test-Path -LiteralPath $settingsPath)", "settings-publication"],
   ['  try { Write-InstallerLog "Verified managed', "committed"],
+  ['  try { Write-InstallerLog "Managed provider runtime bootstrap failed', "failed"],
 ] as const;
 
 /** Add fixed stdout observations only to the temporary synthetic copy. Direct
@@ -59,14 +60,16 @@ export function instrumentManagedInstallerFixture(source: string): string {
       throw new Error("Managed installer fixture source changed; trace anchors require review.");
     }
     const indentation = /^\s*/.exec(anchor)![0];
-    const preparation =
+    const detail =
       phase === "prepare-complete"
-        ? `${indentation}[Console]::WriteLine('cafe-installer-fixture:preparation:exit={0}:count={1}:shape={2}', $LASTEXITCODE, $prepared.Count, ($prepared.Count -eq 1 -and $prepared[0] -cmatch '^[a-f0-9]{32}$'))${newline}`
-        : "";
+        ? `${indentation}[Console]::WriteLine('cafe-installer-fixture:preparation:exit={0}:count={1}:shape={2}', $ExecutionContext.SessionState.PSVariable.GetValue('LASTEXITCODE'), $prepared.Count, ($prepared.Count -eq 1 -and $prepared[0] -cmatch '^[a-f0-9]{32}$')); [Console]::Out.Flush()${newline}`
+        : phase === "failed"
+          ? `${indentation}[Console]::Error.WriteLine('cafe-installer-fixture:failure:{0}', ([string]$_.Exception.Message).Substring(0, [Math]::Min(1024, ([string]$_.Exception.Message).Length))); [Console]::Error.Flush()${newline}`
+          : "";
     instrumented = instrumented.replace(
       anchor,
       () =>
-        `${indentation}[Console]::WriteLine('cafe-installer-fixture:${phase}:{0:o}', [DateTime]::UtcNow); [Console]::Out.Flush()${newline}${preparation}${anchor}`,
+        `${indentation}[Console]::WriteLine('cafe-installer-fixture:${phase}:{0:o}', [DateTime]::UtcNow); [Console]::Out.Flush()${newline}${detail}${anchor}`,
     );
   }
   return instrumented;
