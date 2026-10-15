@@ -30,6 +30,8 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  vi.restoreAllMocks();
+  vi.unstubAllGlobals();
   // Node does not normally define this Electron-only property. Restore the
   // actual host descriptor instead of leaving the fixture on the test runner.
   if (originalMainFrameDescriptor) {
@@ -44,31 +46,28 @@ function setMainFrameIdentity(value: boolean | undefined): void {
 }
 
 describe("desktop preload capability boundary", () => {
-  it("delivers only bounded visualization host metadata and exact subscriptions", async () => {
+  it("does not expose the retired native visualization execution surface", async () => {
     setMainFrameIdentity(true);
     await import("./preload.ts");
     const [, bridge] = electron.exposeInMainWorld.mock.calls[0] as [string, DesktopBridge];
-    const listener = vi.fn();
-    const unsubscribe = bridge.onVisualizationHostEvent!(listener);
-    const [channel, wrapped] = electron.on.mock.calls.at(-1)!;
-    const value = {
-      leaseId: "12345678-1234-4123-8123-123456789abc",
-      state: "message",
-      json: '{"method":"ping"}',
-    };
-    wrapped({}, value);
-    for (const patch of [
-      { source: "private" },
-      { reason: "private exception" },
-      { state: "retired" },
-      { json: "日".repeat(50_000) },
-      { leaseId: "wrong" },
+    for (const name of [
+      "getVisualizationHostCapabilities",
+      "getVisualizationHostCapacity",
+      "onVisualizationCapacityChanged",
+      "openVisualization",
+      "focusVisualization",
+      "updateVisualization",
+      "retireVisualization",
+      "yieldVisualization",
+      "beginVisualizationTransition",
+      "captureVisualization",
+      "sendVisualizationMessage",
+      "suspendVisualization",
+      "onVisualizationHostEvent",
     ])
-      wrapped({}, { ...value, ...patch });
-    expect(listener.mock.calls).toEqual([[value]]);
-    unsubscribe();
-    expect(electron.removeListener).toHaveBeenCalledWith(channel, wrapped);
+      expect(Object.hasOwn(bridge, name)).toBe(false);
     expect(electron.invoke).not.toHaveBeenCalled();
+    expect(electron.on).not.toHaveBeenCalled();
   });
   it("delivers only finite locale metadata and retires listeners without invoking IPC", async () => {
     setMainFrameIdentity(true);

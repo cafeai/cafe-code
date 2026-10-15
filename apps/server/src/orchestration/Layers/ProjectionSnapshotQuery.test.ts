@@ -5743,15 +5743,19 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
     }),
   );
 
-  it.effect("omits routine steering diagnostics from historical presence, counts and pages", () =>
+  it.effect("retains steer receipts while omitting repeated historical steering diagnostics", () =>
     Effect.gen(function* () {
       const snapshotQuery = yield* ProjectionSnapshotQuery;
       const sql = yield* SqlClient.SqlClient;
       const threadId = ThreadId.make("thread-steering-presentation");
       const hiddenTurn = TurnId.make("turn-steering-only");
       const mixedTurn = TurnId.make("turn-steering-and-work");
+      const receiptTurn = TurnId.make("turn-steering-receipts");
       const hidden = [
-        { kind: "provider.turn.steer.accepted", payload: { messageId: "message-1" } },
+        {
+          kind: "provider.turn.steer.failed",
+          payload: { messageId: "message-1", retryableFollowUp: true },
+        },
         { kind: "task.progress", payload: { taskId: "codex-turn-steer:correlation-1" } },
         { kind: "task.progress", payload: { taskId: "codex-turn-steer-processing:correlation-1" } },
         { kind: "task.progress", payload: { detail: "Codex app-server accepted turn/steer." } },
@@ -5808,6 +5812,35 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
           },
         },
       ];
+      // Receipts are bounded server-authored identities, not a copy of the
+      // steer prompt or native error. Their display must survive even when a
+      // historical turn contains no other ordinary work-log activity.
+      const receipts = [
+        {
+          kind: "provider.turn.steer.delivery-attempted",
+          summary: "Steer delivery attempted",
+          payload: {
+            provider: "codex",
+            messageId: "message-receipt",
+            intentSequence: 41,
+            expectedTurnId: receiptTurn,
+            delivery: "live-steer",
+            deliveryState: "attempted",
+            reason: "live-steer",
+          },
+        },
+        {
+          kind: "provider.turn.steer.accepted",
+          summary: "Steer accepted",
+          payload: {
+            provider: "codex",
+            messageId: "message-receipt",
+            intentSequence: 41,
+            acceptedTurnId: receiptTurn,
+            clientCorrelationId: codexClientCorrelationId,
+          },
+        },
+      ];
       const visible = [
         { kind: "runtime.warning", payload: { message: "Provider connection lost" } },
         {
@@ -5842,11 +5875,29 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
              'Useful activity', ${JSON.stringify(activity.payload)}, ${hidden.length + index + 1}, '2026-10-09T12:00:01.000Z')
         `;
       }
+      for (const turnId of [receiptTurn, mixedTurn]) {
+        for (const [index, activity] of receipts.entries()) {
+          const payload = {
+            ...activity.payload,
+            ...(activity.kind === "provider.turn.steer.accepted"
+              ? { acceptedTurnId: turnId }
+              : { expectedTurnId: turnId }),
+          };
+          yield* sql`
+            INSERT INTO projection_thread_activities
+              (activity_id, thread_id, turn_id, tone, kind, summary, payload_json, sequence, created_at)
+            VALUES
+              (${`${turnId}-receipt-${index}`}, ${threadId}, ${turnId}, 'info', ${activity.kind},
+               ${activity.summary}, ${JSON.stringify(payload)},
+               ${hidden.length + visible.length + index + 1}, '2026-10-09T12:00:02.000Z')
+          `;
+        }
+      }
       const presence = yield* snapshotQuery.getThreadTurnWorkLogPresence({
         threadId,
-        turnIds: [hiddenTurn, mixedTurn, TurnId.make("turn-absent")],
+        turnIds: [hiddenTurn, mixedTurn, receiptTurn, TurnId.make("turn-absent")],
       });
-      assert.deepStrictEqual(presence.turnIdsWithWorkLog, [mixedTurn]);
+      assert.deepStrictEqual(presence.turnIdsWithWorkLog, [mixedTurn, receiptTurn]);
       const hiddenPage = yield* snapshotQuery.getThreadTurnActivityPage({
         threadId,
         turnId: hiddenTurn,
@@ -5861,7 +5912,7 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
         offset: 0,
         limit: 2,
       });
-      assert.equal(firstPage.totalCount, visible.length);
+      assert.equal(firstPage.totalCount, visible.length + receipts.length);
       assert.deepStrictEqual(
         firstPage.activities.map((activity) => activity.id),
         ["visible-steering-0", "visible-steering-1"],
@@ -5874,14 +5925,378 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
       });
       assert.deepStrictEqual(
         secondPage.activities.map((activity) => activity.id),
-        ["visible-steering-2", "visible-steering-3", "visible-steering-4", "visible-steering-5"],
+        [
+          "visible-steering-2",
+          "visible-steering-3",
+          "visible-steering-4",
+          "visible-steering-5",
+          `${mixedTurn}-receipt-0`,
+          `${mixedTurn}-receipt-1`,
+        ],
       );
+      const receiptPage = yield* snapshotQuery.getThreadTurnActivityPage({
+        threadId,
+        turnId: receiptTurn,
+        offset: 0,
+        limit: 10,
+      });
+      assert.equal(receiptPage.totalCount, receipts.length);
+      assert.deepStrictEqual(
+        receiptPage.activities.map((activity) => ({
+          kind: activity.kind,
+          summary: activity.summary,
+          payload: activity.payload,
+        })),
+        receipts,
+      );
+      const siblingPage = yield* snapshotQuery.getThreadTurnActivityPage({
+        threadId: ThreadId.make("thread-steering-sibling"),
+        turnId: receiptTurn,
+        offset: 0,
+        limit: 10,
+      });
+      assert.equal(siblingPage.totalCount, 0);
+      assert.deepStrictEqual(siblingPage.activities, []);
       // Presentation filtering never deletes the receipts used by recovery.
       const retained = yield* sql<{ count: number }>`
         SELECT COUNT(*) AS count FROM projection_thread_activities
         WHERE thread_id = ${threadId} AND turn_id = ${hiddenTurn}
       `;
       assert.equal(retained[0]?.count, hidden.length);
+    }),
+  );
+
+  it.effect(
+    "keeps exact approval-review starts discoverable in historical counts, pages, and presence",
+    () =>
+      Effect.gen(function* () {
+        const snapshotQuery = yield* ProjectionSnapshotQuery;
+        const sql = yield* SqlClient.SqlClient;
+        const threadId = ThreadId.make("thread-review-history");
+        const turnId = TurnId.make("turn-review-history");
+        const hiddenTurnId = TurnId.make("turn-hidden-review-history");
+        const timestamp = (sequence: number) =>
+          `2026-10-14T00:00:${String(sequence).padStart(2, "0")}.000Z`;
+        const insertStart = (
+          id: string,
+          rowThreadId: ThreadId,
+          rowTurnId: TurnId,
+          sequence: number,
+          payload: Record<string, unknown>,
+        ) => sql`
+        INSERT INTO projection_thread_activities (
+          activity_id, thread_id, turn_id, tone, kind, summary, payload_json, sequence, created_at
+        ) VALUES (
+          ${id}, ${rowThreadId}, ${rowTurnId}, 'info', 'task.started',
+          'Approval review started', ${JSON.stringify(payload)}, ${sequence}, ${timestamp(sequence)}
+        )
+      `;
+
+        yield* sql`DELETE FROM projection_thread_activities`;
+        // These are the exact public start shape produced by the Codex adapter.
+        // No completion is present: the start alone must keep an interrupted or
+        // still-running review discoverable after the bounded live tail evicts it.
+        yield* insertStart("review-start-first", threadId, turnId, 10, {
+          taskId: "review-first",
+          taskType: "approval-review",
+          description: "Automatic approval review started",
+        });
+        yield* insertStart("review-start-second", threadId, turnId, 20, {
+          taskId: "review-second",
+          taskType: "approval-review",
+          visibility: "visible",
+        });
+
+        // Do not reopen ordinary task starts, ambient work, private workflow
+        // metadata or the dedicated subagent surface through the new exception.
+        // Present-but-null reserved metadata must remain fail-closed as well.
+        const hiddenPayloads = [
+          {},
+          { taskType: "ordinary" },
+          { taskType: "future-approval-review" },
+          { taskType: { value: "approval-review" } },
+          { taskType: ["approval-review"] },
+          { taskType: "approval-review", visibility: "ambient" },
+          { taskType: "approval-review", workflow: {} },
+          { taskType: "approval-review", workflow: null },
+          { taskType: "approval-review", subagent: { threadId: "private-child" } },
+          { taskType: "approval-review", subagent: null },
+          { taskType: "approval-review", itemType: "collab_agent_tool_call" },
+        ];
+        for (const [index, payload] of hiddenPayloads.entries()) {
+          yield* insertStart(`hidden-review-${index}`, threadId, hiddenTurnId, index + 1, payload);
+        }
+        // Identical turn spelling in a sibling chat, and a sibling turn in this
+        // chat, cannot contribute to this exact reader's presence or page count.
+        yield* insertStart(
+          "foreign-review-start",
+          ThreadId.make("thread-review-history-foreign"),
+          turnId,
+          15,
+          { taskType: "approval-review" },
+        );
+        yield* insertStart(
+          "sibling-review-start",
+          threadId,
+          TurnId.make("turn-review-sibling"),
+          15,
+          {
+            taskType: "approval-review",
+          },
+        );
+
+        const presence = yield* snapshotQuery.getThreadTurnWorkLogPresence({
+          threadId,
+          turnIds: [turnId, hiddenTurnId, TurnId.make("turn-review-absent"), turnId],
+        });
+        assert.equal(presence.threadId, threadId);
+        assert.deepStrictEqual(presence.turnIdsWithWorkLog, [turnId]);
+
+        const page = yield* snapshotQuery.getThreadTurnActivityPage({
+          threadId,
+          turnId,
+          offset: 0,
+          limit: 10,
+        });
+        assert.equal(page.threadId, threadId);
+        assert.equal(page.turnId, turnId);
+        assert.equal(page.totalCount, 2);
+        assert.deepStrictEqual(
+          page.activities.map((activity) => activity.id),
+          ["review-start-first", "review-start-second"],
+        );
+        const offsetPage = yield* snapshotQuery.getThreadTurnActivityPage({
+          threadId,
+          turnId,
+          offset: 1,
+          limit: 1,
+        });
+        assert.equal(offsetPage.totalCount, 2);
+        assert.deepStrictEqual(
+          offsetPage.activities.map((activity) => activity.id),
+          ["review-start-second"],
+        );
+
+        const before = {
+          sequence: 20,
+          createdAt: timestamp(20),
+          activityId: EventId.make("review-start-second"),
+        };
+        const earlierPresence = yield* snapshotQuery.getThreadTurnWorkLogPresence({
+          threadId,
+          turnIds: [turnId, hiddenTurnId],
+          before,
+        });
+        assert.equal(earlierPresence.threadId, threadId);
+        assert.deepStrictEqual(earlierPresence.turnIdsWithWorkLog, [turnId]);
+        const earlierPage = yield* snapshotQuery.getThreadTurnActivityPage({
+          threadId,
+          turnId,
+          offset: 0,
+          limit: 1,
+          before,
+        });
+        assert.deepStrictEqual(earlierPage.before, before);
+        assert.equal(earlierPage.totalCount, 1);
+        assert.deepStrictEqual(
+          earlierPage.activities.map((activity) => activity.id),
+          ["review-start-first"],
+        );
+        const emptyBefore = {
+          sequence: 10,
+          createdAt: timestamp(10),
+          activityId: EventId.make("review-start-first"),
+        };
+        const emptyPresence = yield* snapshotQuery.getThreadTurnWorkLogPresence({
+          threadId,
+          turnIds: [turnId],
+          before: emptyBefore,
+        });
+        assert.deepStrictEqual(emptyPresence.turnIdsWithWorkLog, []);
+        const emptyPage = yield* snapshotQuery.getThreadTurnActivityPage({
+          threadId,
+          turnId,
+          offset: 0,
+          limit: 10,
+          before: emptyBefore,
+        });
+        assert.equal(emptyPage.totalCount, 0);
+        assert.deepStrictEqual(emptyPage.activities, []);
+        const hiddenPage = yield* snapshotQuery.getThreadTurnActivityPage({
+          threadId,
+          turnId: hiddenTurnId,
+          offset: 0,
+          limit: 10,
+        });
+        assert.equal(hiddenPage.totalCount, 0);
+        assert.deepStrictEqual(hiddenPage.activities, []);
+        // This is a read-only display predicate. Hidden diagnostic bytes remain
+        // persisted; restoration must never rewrite or delete another surface.
+        const retained = yield* sql<{ count: number }>`
+        SELECT COUNT(*) AS count FROM projection_thread_activities
+        WHERE thread_id = ${threadId} AND turn_id = ${hiddenTurnId}
+      `;
+        assert.equal(retained[0]?.count, hiddenPayloads.length);
+      }),
+  );
+
+  it.effect("preserves case-sensitive plan-boundary filtering throughout historical readers", () =>
+    Effect.gen(function* () {
+      const snapshotQuery = yield* ProjectionSnapshotQuery;
+      const sql = yield* SqlClient.SqlClient;
+      const threadId = ThreadId.make("thread-plan-boundary-history");
+      const turnId = TurnId.make("turn-plan-boundary-history");
+      const hiddenTurnId = TurnId.make("turn-exact-plan-boundary-only");
+      const timestamp = (sequence: number) =>
+        `2026-10-14T01:00:${String(sequence).padStart(2, "0")}.000Z`;
+      const insertTool = (
+        id: string,
+        rowThreadId: ThreadId,
+        rowTurnId: TurnId,
+        sequence: number,
+        kind: "tool.updated" | "tool.completed",
+        detail: string,
+      ) => sql`
+        INSERT INTO projection_thread_activities (
+          activity_id, thread_id, turn_id, tone, kind, summary, payload_json, sequence, created_at
+        ) VALUES (
+          ${id}, ${rowThreadId}, ${rowTurnId}, 'tool', ${kind}, 'Tool output',
+          ${JSON.stringify({ detail })}, ${sequence}, ${timestamp(sequence)}
+        )
+      `;
+
+      yield* sql`DELETE FROM projection_thread_activities`;
+      // Only the exact Cafe plan-boundary prefix has its separate presentation.
+      // Provider output with different casing is an ordinary tool row, just as
+      // String.startsWith in the live/snapshot reader already treats it.
+      yield* insertTool(
+        "exact-plan-boundary",
+        threadId,
+        turnId,
+        10,
+        "tool.completed",
+        "ExitPlanMode: proposed plan",
+      );
+      yield* insertTool(
+        "lowercase-tool-output",
+        threadId,
+        turnId,
+        20,
+        "tool.updated",
+        "exitplanmode: ordinary tool output",
+      );
+      yield* insertTool(
+        "mixedcase-tool-output",
+        threadId,
+        turnId,
+        30,
+        "tool.completed",
+        "EXITPlanMode: ordinary tool output",
+      );
+      yield* insertTool(
+        "different-tool-prefix",
+        threadId,
+        turnId,
+        40,
+        "tool.completed",
+        "ExitPlanModeX: ordinary tool output",
+      );
+      yield* insertTool(
+        "exact-only-plan-boundary",
+        threadId,
+        hiddenTurnId,
+        10,
+        "tool.updated",
+        "ExitPlanMode: proposed plan",
+      );
+      yield* insertTool(
+        "foreign-lowercase-output",
+        ThreadId.make("thread-plan-boundary-foreign"),
+        turnId,
+        15,
+        "tool.completed",
+        "exitplanmode: foreign output",
+      );
+      yield* insertTool(
+        "sibling-lowercase-output",
+        threadId,
+        TurnId.make("turn-plan-boundary-sibling"),
+        15,
+        "tool.completed",
+        "exitplanmode: sibling output",
+      );
+
+      const presence = yield* snapshotQuery.getThreadTurnWorkLogPresence({
+        threadId,
+        turnIds: [turnId, hiddenTurnId],
+      });
+      assert.equal(presence.threadId, threadId);
+      assert.deepStrictEqual(presence.turnIdsWithWorkLog, [turnId]);
+      const page = yield* snapshotQuery.getThreadTurnActivityPage({
+        threadId,
+        turnId,
+        offset: 0,
+        limit: 10,
+      });
+      assert.equal(page.totalCount, 3);
+      assert.deepStrictEqual(
+        page.activities.map((activity) => activity.id),
+        ["lowercase-tool-output", "mixedcase-tool-output", "different-tool-prefix"],
+      );
+
+      const before = {
+        sequence: 30,
+        createdAt: timestamp(30),
+        activityId: EventId.make("mixedcase-tool-output"),
+      };
+      const earlierPresence = yield* snapshotQuery.getThreadTurnWorkLogPresence({
+        threadId,
+        turnIds: [turnId, hiddenTurnId],
+        before,
+      });
+      assert.equal(earlierPresence.threadId, threadId);
+      assert.deepStrictEqual(earlierPresence.turnIdsWithWorkLog, [turnId]);
+      const earlierPage = yield* snapshotQuery.getThreadTurnActivityPage({
+        threadId,
+        turnId,
+        offset: 0,
+        limit: 1,
+        before,
+      });
+      assert.deepStrictEqual(earlierPage.before, before);
+      assert.equal(earlierPage.totalCount, 1);
+      assert.deepStrictEqual(
+        earlierPage.activities.map((activity) => activity.id),
+        ["lowercase-tool-output"],
+      );
+      const emptyBefore = {
+        sequence: 20,
+        createdAt: timestamp(20),
+        activityId: EventId.make("lowercase-tool-output"),
+      };
+      const emptyPresence = yield* snapshotQuery.getThreadTurnWorkLogPresence({
+        threadId,
+        turnIds: [turnId],
+        before: emptyBefore,
+      });
+      assert.deepStrictEqual(emptyPresence.turnIdsWithWorkLog, []);
+      const emptyPage = yield* snapshotQuery.getThreadTurnActivityPage({
+        threadId,
+        turnId,
+        offset: 0,
+        limit: 10,
+        before: emptyBefore,
+      });
+      assert.equal(emptyPage.totalCount, 0);
+      assert.deepStrictEqual(emptyPage.activities, []);
+      const hiddenPage = yield* snapshotQuery.getThreadTurnActivityPage({
+        threadId,
+        turnId: hiddenTurnId,
+        offset: 0,
+        limit: 10,
+      });
+      assert.equal(hiddenPage.totalCount, 0);
+      assert.deepStrictEqual(hiddenPage.activities, []);
     }),
   );
 

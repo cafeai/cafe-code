@@ -3,7 +3,7 @@
 Decision status: Accepted within the authorized Work log repair
 Implementation status: Complete; final delivery gates tracked in plan149
 Created: 2026-10-11 13:14:45 JST (UTC+0900)
-Last updated: 2026-10-11 13:25:45 JST (UTC+0900)
+Last updated: 2026-10-14 03:04:25 JST (UTC+0900)
 
 ## Context
 
@@ -56,6 +56,15 @@ remounting the timeline resets the focused cache; no implicit provider probe or
 unqualified live repair is claimed.
 
 ## Consequences and qualification
+
+The later historical-reader repair applies the same exact-owner rule to
+previous-turn offset pages, not only the current-turn cursor reader. Cached
+rows reset on environment/chat/turn changes and asynchronous page/error/finalizer
+publication requires the original mounted reader's current request. This is a
+repair within the accepted presentation-only boundary, not a new authorization
+or provider control. Saved approval-review starts use the ordinary displayable
+work predicate consistently in presence/count/page reads; internal task starts
+and structured subagent rows remain excluded.
 
 Memory/network work stays bounded and history reads remain independent from
 provider recovery. Legacy cursor-less servers fail the new reader visibly;

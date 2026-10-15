@@ -38,12 +38,14 @@ import {
 } from "@cafecode/contracts";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
+import * as Exit from "effect/Exit";
 import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
 import * as Path from "effect/Path";
 import * as PubSub from "effect/PubSub";
 import * as Queue from "effect/Queue";
 import * as Schema from "effect/Schema";
+import * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
 import { HttpClient, HttpClientResponse } from "effect/unstable/http";
 
@@ -172,6 +174,7 @@ const makeLifecycleDriver = Effect.gen(function* () {
           snapshot: {
             maintenanceCapabilities: { provider: driverKind, packageName: null, update: null },
             getSnapshot: Effect.succeed(initialSnapshot),
+            getCurrentSnapshot: Effect.succeed(initialSnapshot),
             refresh,
             refreshAccountUsage: refresh,
             refreshModels: refresh,
@@ -303,6 +306,13 @@ describe("ProviderInstanceRegistryLive — non-runtime settings", () => {
             displayName: entry.displayName ?? fixture.driver.metadata.displayName,
             accentColor: entry.accentColor,
           });
+          // Registry catalogue synchronization reads this inert view directly.
+          // It must receive the same live presentation without a health/model
+          // refresh, including Reset and otherwise lifecycle-neutral defaults.
+          expect(yield* current.snapshot.getCurrentSnapshot!).toMatchObject({
+            displayName: entry.displayName ?? fixture.driver.metadata.displayName,
+            accentColor: entry.accentColor,
+          });
           if (
             update !== "clear-subagent-default" &&
             update !== "clear-context-default" &&
@@ -373,6 +383,340 @@ describe("ProviderInstanceRegistryLive — non-runtime settings", () => {
         expect(yield* current.adapter.listSessions()).toEqual([]);
         expect(fixture.counters.created).toBe(2);
         expect(fixture.counters.closed).toBe(1);
+      }),
+    );
+  }
+});
+
+describe("ProviderInstanceRegistryLive — owner retirement", () => {
+  for (const action of ["remove", "replace"] as const) {
+    it.effect(
+      `revokes an exact owner before held ${action} cleanup and serializes its replacement`,
+      () =>
+        Effect.gen(function* () {
+          const fixture = yield* makeLifecycleDriver;
+          const closing = yield* Deferred.make<void>();
+          const release = yield* Deferred.make<void>();
+          const id = ProviderInstanceId.make("registry_retiring");
+          const otherId = ProviderInstanceId.make("registry_retained");
+          const entry: ProviderInstanceConfig = {
+            driver: fixture.driver.driverKind,
+            config: { binaryPath: "original" },
+          };
+          const otherEntry: ProviderInstanceConfig = {
+            driver: fixture.driver.driverKind,
+            config: { binaryPath: "other" },
+          };
+          const driver: typeof fixture.driver = {
+            ...fixture.driver,
+            create: (input) =>
+              Effect.gen(function* () {
+                const instance = yield* fixture.driver.create(input);
+                if (input.instanceId === id && input.config.binaryPath === "original") {
+                  yield* Effect.addFinalizer(() =>
+                    Deferred.succeed(closing, undefined).pipe(
+                      Effect.andThen(Deferred.await(release)),
+                    ),
+                  );
+                }
+                return instance;
+              }),
+          };
+          yield* Effect.gen(function* () {
+            const { registry, mutator } = yield* makeProviderInstanceRegistry({
+              drivers: [driver],
+              configMap: { [id]: entry, [otherId]: otherEntry },
+            });
+            const original = (yield* registry.getInstance(id))!;
+            const retained = (yield* registry.getInstance(otherId))!;
+            const session = yield* original.adapter.startSession({
+              threadId: ThreadId.make("retiring-native-session"),
+              runtimeMode: "full-access",
+            });
+            const changes = yield* registry.subscribeChanges;
+            const next: ProviderInstanceConfigMap =
+              action === "remove"
+                ? { [otherId]: otherEntry }
+                : {
+                    [id]: { ...entry, config: { binaryPath: "replacement" } },
+                    [otherId]: otherEntry,
+                  };
+            const first = yield* mutator.reconcile(next).pipe(Effect.forkChild);
+            yield* Deferred.await(closing);
+            // This publication precedes the old finalizer's completion, exactly
+            // when an interrupted registry admission can wake its pending reader.
+            yield* PubSub.take(changes);
+            expect(yield* registry.getInstance(id)).toBeUndefined();
+            expect(yield* registry.listInstances).toEqual([retained]);
+            expect(yield* registry.getInstance(otherId)).toBe(retained);
+            expect(yield* original.adapter.listSessions()).toEqual([session]);
+            expect(fixture.counters.created).toBe(2);
+            expect(fixture.counters.closed).toBe(0);
+            // Starting this exact concurrent invocation is not a cleanup receipt:
+            // it must wait for the first reconcile permit, never spawn a competitor.
+            const second = yield* mutator
+              .reconcile(next)
+              .pipe(Effect.forkChild({ startImmediately: true }));
+            expect(fixture.counters.created).toBe(2);
+            expect(yield* registry.getInstance(id)).toBeUndefined();
+            yield* Deferred.succeed(release, undefined);
+            yield* Fiber.join(first);
+            yield* Fiber.join(second);
+            expect(fixture.counters.closed).toBe(1);
+            expect(fixture.counters.created).toBe(action === "replace" ? 3 : 2);
+            expect(yield* original.adapter.listSessions()).toEqual([]);
+            expect(yield* registry.getInstance(otherId)).toBe(retained);
+            const replacement = yield* registry.getInstance(id);
+            if (action === "replace") {
+              expect(replacement).toBeDefined();
+              expect(replacement).not.toBe(original);
+              expect(yield* replacement!.adapter.listSessions()).toEqual([]);
+            } else {
+              expect(replacement).toBeUndefined();
+            }
+          }).pipe(Effect.ensuring(Deferred.succeed(release, undefined)));
+        }),
+    );
+  }
+
+  it.effect(
+    "joins cancelled retirement before an unchanged-config retry can rebuild its owner",
+    () =>
+      Effect.gen(function* () {
+        const fixture = yield* makeLifecycleDriver;
+        const closing = yield* Deferred.make<void>();
+        const release = yield* Deferred.make<void>();
+        let held = false;
+        const id = ProviderInstanceId.make("registry_retirement_cancel");
+        const entry: ProviderInstanceConfig = {
+          driver: fixture.driver.driverKind,
+          config: { binaryPath: "original" },
+        };
+        const driver: typeof fixture.driver = {
+          ...fixture.driver,
+          create: (input) =>
+            Effect.gen(function* () {
+              const instance = yield* fixture.driver.create(input);
+              if (!held) {
+                held = true;
+                yield* Effect.addFinalizer(() =>
+                  Deferred.succeed(closing, undefined).pipe(
+                    Effect.andThen(Deferred.await(release)),
+                  ),
+                );
+              }
+              return instance;
+            }),
+        };
+        yield* Effect.gen(function* () {
+          const { registry, mutator } = yield* makeProviderInstanceRegistry({
+            drivers: [driver],
+            configMap: { [id]: entry },
+          });
+          const original = (yield* registry.getInstance(id))!;
+          const retirement = yield* mutator.reconcile({}).pipe(Effect.forkChild);
+          yield* Deferred.await(closing);
+          // startImmediately dispatches the real interruption before returning;
+          // its join remains blocked on the exact masked old-owner cleanup.
+          const cancellation = yield* Fiber.interrupt(retirement).pipe(
+            Effect.forkChild({ startImmediately: true }),
+          );
+          const retry = yield* mutator
+            .reconcile({ [id]: entry })
+            .pipe(Effect.forkChild({ startImmediately: true }));
+          expect(yield* registry.getInstance(id)).toBeUndefined();
+          expect(yield* registry.listInstances).toEqual([]);
+          expect(fixture.counters.created).toBe(1);
+          expect(fixture.counters.closed).toBe(0);
+          yield* Deferred.succeed(release, undefined);
+          yield* Fiber.join(cancellation);
+          expect(Exit.isFailure(yield* Fiber.await(retirement))).toBe(true);
+          yield* Fiber.join(retry);
+          expect(fixture.counters.created).toBe(2);
+          expect(fixture.counters.closed).toBe(1);
+          expect(yield* registry.getInstance(id)).not.toBe(original);
+          expect(yield* registry.listInstances).toHaveLength(1);
+        }).pipe(Effect.ensuring(Deferred.succeed(release, undefined)));
+      }),
+  );
+
+  it.effect(
+    "cleans all unpublished creates before cancellation releases the reconcile permit",
+    () =>
+      Effect.gen(function* () {
+        const fixture = yield* makeLifecycleDriver;
+        const created = yield* Deferred.make<void>();
+        const creationGate = yield* Deferred.make<void>();
+        const cleanupStarted = yield* Deferred.make<void>();
+        const cleanupGate = yield* Deferred.make<void>();
+        const interrupted = yield* Deferred.make<void>();
+        const firstId = ProviderInstanceId.make("registry_provisional_first");
+        const secondId = ProviderInstanceId.make("registry_provisional_second");
+        let held = false;
+        const driver: typeof fixture.driver = {
+          ...fixture.driver,
+          create: (input) =>
+            Effect.gen(function* () {
+              const instance = yield* fixture.driver.create(input);
+              if (input.instanceId === secondId && !held) {
+                held = true;
+                yield* Effect.addFinalizer(() =>
+                  Deferred.succeed(cleanupStarted, undefined).pipe(
+                    Effect.andThen(Deferred.await(cleanupGate)),
+                  ),
+                );
+                // Install cancellation observation before publishing readiness:
+                // Deferred completion can synchronously resume the cancelling test.
+                yield* Deferred.succeed(created, undefined).pipe(
+                  Effect.andThen(Deferred.await(creationGate)),
+                  Effect.onInterrupt(() => Deferred.succeed(interrupted, undefined)),
+                );
+              }
+              return instance;
+            }),
+        };
+        const configMap: ProviderInstanceConfigMap = {
+          [firstId]: { driver: driver.driverKind },
+          [secondId]: { driver: driver.driverKind },
+        };
+        yield* Effect.gen(function* () {
+          const { registry, mutator } = yield* makeProviderInstanceRegistry({
+            drivers: [driver],
+            configMap: {},
+          });
+          const pending = yield* mutator.reconcile(configMap).pipe(Effect.forkChild);
+          yield* Deferred.await(created);
+          expect(fixture.counters.created).toBe(2);
+          expect(yield* registry.listInstances).toEqual([]);
+          const cancellation = yield* Fiber.interrupt(pending).pipe(
+            Effect.forkChild({ startImmediately: true }),
+          );
+          yield* Deferred.await(interrupted);
+          yield* Deferred.await(cleanupStarted);
+          // The first complete create was never published either. Its scope has
+          // already closed; the later partial create is still joining cleanup.
+          expect(fixture.counters.closed).toBe(1);
+          const retry = yield* mutator
+            .reconcile(configMap)
+            .pipe(Effect.forkChild({ startImmediately: true }));
+          expect(fixture.counters.created).toBe(2);
+          expect(yield* registry.getInstance(firstId)).toBeUndefined();
+          expect(yield* registry.getInstance(secondId)).toBeUndefined();
+          yield* Deferred.succeed(cleanupGate, undefined);
+          yield* Fiber.join(cancellation);
+          expect(Exit.isFailure(yield* Fiber.await(pending))).toBe(true);
+          yield* Fiber.join(retry);
+          expect(fixture.counters.created).toBe(4);
+          expect(fixture.counters.closed).toBe(2);
+          expect((yield* registry.listInstances).map((instance) => instance.instanceId)).toEqual([
+            firstId,
+            secondId,
+          ]);
+        }).pipe(
+          Effect.ensuring(
+            Deferred.succeed(creationGate, undefined).pipe(
+              Effect.andThen(Deferred.succeed(cleanupGate, undefined)),
+            ),
+          ),
+        );
+      }),
+  );
+
+  it.effect("refuses an unpublished create that finishes after its registry parent closes", () =>
+    Effect.gen(function* () {
+      const fixture = yield* makeLifecycleDriver;
+      const ownerScope = yield* Scope.make();
+      yield* Effect.addFinalizer(() => Scope.close(ownerScope, Exit.void));
+      const created = yield* Deferred.make<void>();
+      const release = yield* Deferred.make<void>();
+      const id = ProviderInstanceId.make("registry_shutdown_create");
+      const driver: typeof fixture.driver = {
+        ...fixture.driver,
+        create: (input) =>
+          Effect.gen(function* () {
+            const instance = yield* fixture.driver.create(input);
+            yield* Deferred.succeed(created, undefined);
+            yield* Deferred.await(release);
+            return instance;
+          }),
+      };
+      const configMap: ProviderInstanceConfigMap = { [id]: { driver: driver.driverKind } };
+      yield* Effect.gen(function* () {
+        const { registry, mutator } = yield* makeProviderInstanceRegistry({
+          drivers: [driver],
+          configMap: {},
+        }).pipe(Effect.provideService(Scope.Scope, ownerScope));
+        // This caller is test-owned, not a worker in the registry's child scope.
+        // Closing the registry therefore must refuse its later local adoption.
+        const pending = yield* mutator.reconcile(configMap).pipe(Effect.forkChild);
+        yield* Deferred.await(created);
+        expect(fixture.counters.created).toBe(1);
+        expect(yield* registry.listInstances).toEqual([]);
+        yield* Scope.close(ownerScope, Exit.void);
+        expect(fixture.counters.closed).toBe(1);
+        yield* Deferred.succeed(release, undefined);
+        expect(Exit.isFailure(yield* Fiber.await(pending))).toBe(true);
+        expect(yield* registry.getInstance(id)).toBeUndefined();
+        expect(yield* registry.listInstances).toEqual([]);
+        expect(Exit.isFailure(yield* Effect.exit(mutator.reconcile(configMap)))).toBe(true);
+        expect(fixture.counters.created).toBe(1);
+        expect(fixture.counters.closed).toBe(1);
+      }).pipe(Effect.ensuring(Deferred.succeed(release, undefined)));
+    }),
+  );
+
+  for (const phase of ["published", "provisional"] as const) {
+    it.effect(`never treats a defective ${phase} cleanup as a successful closed-scope retry`, () =>
+      Effect.gen(function* () {
+        const fixture = yield* makeLifecycleDriver;
+        const ownerScope = yield* Scope.make();
+        // This exact synthetic owner's deliberately defective finalizer must
+        // be observed, not leak a defect into the enclosing test's teardown.
+        yield* Effect.addFinalizer(() =>
+          Scope.close(ownerScope, Exit.void).pipe(Effect.exit, Effect.asVoid),
+        );
+        let cleanupCalls = 0;
+        const driver: typeof fixture.driver = {
+          ...fixture.driver,
+          create: (input) =>
+            Effect.gen(function* () {
+              const instance = yield* fixture.driver.create(input);
+              yield* Effect.addFinalizer(() =>
+                Effect.sync(() => {
+                  cleanupCalls += 1;
+                }).pipe(
+                  Effect.andThen(Effect.die(new Error("Synthetic exact-owner cleanup failure"))),
+                ),
+              );
+              if (phase === "provisional") yield* Effect.die(new Error("Synthetic create failure"));
+              return instance;
+            }),
+        };
+        const id = ProviderInstanceId.make("registry_cleanup_refusal");
+        const entry: ProviderInstanceConfig = {
+          driver: driver.driverKind,
+          config: { binaryPath: "original" },
+        };
+        const { registry, mutator } = yield* makeProviderInstanceRegistry({
+          drivers: [driver],
+          configMap: phase === "published" ? { [id]: entry } : {},
+        }).pipe(Effect.provideService(Scope.Scope, ownerScope));
+        const desired: ProviderInstanceConfigMap = {
+          [id]: { ...entry, config: { binaryPath: "replacement" } },
+        };
+        expect(Exit.isFailure(yield* Effect.exit(mutator.reconcile(desired)))).toBe(true);
+        expect(yield* registry.getInstance(id)).toBeUndefined();
+        expect(yield* registry.listInstances).toEqual([]);
+        expect(fixture.counters.created).toBe(1);
+        expect(cleanupCalls).toBe(1);
+        // Both the attempted replacement and the original saved envelope must
+        // remain refused. Scope.closed alone cannot qualify physical teardown.
+        for (const retry of [desired, { [id]: entry }, {}]) {
+          expect(Exit.isFailure(yield* Effect.exit(mutator.reconcile(retry)))).toBe(true);
+          expect(fixture.counters.created).toBe(1);
+          expect(cleanupCalls).toBe(1);
+          expect(yield* registry.listInstances).toEqual([]);
+        }
       }),
     );
   }

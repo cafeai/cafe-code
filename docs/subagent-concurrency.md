@@ -52,6 +52,12 @@ The guard covers the owned bindings and frames observed by the current runtime;
 it does not prove physical idleness in unread native/OS buffers or historical
 children absent from that runtime's bounded metadata.
 
+The pure policy-change refusal preserves its finite meaning across the local
+daemon boundary, allowing the existing narrowly qualified continuation with the
+old recorded policy. Saved changes remain pending; mixed session changes and
+unqualified failures do not gain that fallback. No active chat is restarted or
+input automatically repeated. See [the transport decision](decisions/provider-reconfiguration-refusal-transport.md).
+
 Resolution is the selected driver's chat override, then the exact selected
 account's Default subagent limit, then its existing legacy runtime override,
 then native configuration/environment. New chats do not copy the default into an
@@ -168,6 +174,13 @@ automatic recovery. Only definitive transient failures retry indefinitely with
 capped jittered backoff, and no ambiguous submission is resent. Atrium failure
 age/dismissal cannot hide confirmed active children. See
 [persistent recovery](decisions/codex-persistent-transient-recovery.md).
+Automatic continuation now follows the explicit
+[failed-root session-restart policy](decisions/codex-failed-root-session-restart.md):
+it retires the exact failed session and its children before reopening the same
+history as a fresh native generation. Children remain visible only while their
+current owner is positively observed; the new generation cannot inherit old
+Working claims. This is failure recovery, not permission to interrupt work merely
+to apply newly saved subagent/context defaults.
 Closed, completed, failed, and stopped workers leave those active rosters.
 Atrium cards start on **Active (N)**, showing confirmed active/waiting workers.
 Choose **History (N)** to inspect completed, failed, stopped, or unverified workers.

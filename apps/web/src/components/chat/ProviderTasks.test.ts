@@ -7,7 +7,7 @@ import {
   TurnId,
   type OrchestrationThreadActivity,
 } from "@cafecode/contracts";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   deriveActiveProviderTasks,
   hasProviderTaskContent,
@@ -45,6 +45,126 @@ function activity(kind: string, payload: Record<string, unknown>): Orchestration
   };
 }
 describe("ordinary provider task controls", () => {
+  it("derives child identity independently of operation kind and controls in every task lane", () => {
+    const child = "private-owner-child";
+    const started = activity("tool.started", {
+      itemId: "raw-agent-target",
+      itemType: "collab_agent_tool_call",
+      detail: "Root-looking task label",
+      data: { toolName: "Agent", receiverThreadIds: ["not-the-owner"] },
+      nativeWorkRuntimeId: runtimeId,
+      taskOwner: { type: "child", id: child },
+      individualTaskControl: reference,
+    });
+    const controlled = deriveActiveProviderTasks({ ...context, activities: [started] })[0];
+    expect(controlled?.ownerSubagentId).toBe(child);
+    expect(controlled?.reference).toEqual(reference);
+    const readOnly = deriveActiveProviderTasks({
+      ...context,
+      providerInstanceId: ProviderInstanceId.make("other-account"),
+      activities: [started],
+    })[0];
+    expect(readOnly?.ownerSubagentId).toBe(child);
+    expect(readOnly?.reference).toBeUndefined();
+    const foreground = {
+      ...started,
+      payload: {
+        ...(started.payload as Record<string, unknown>),
+        individualTaskControl: undefined,
+      },
+    };
+    const observed = deriveActiveProviderTasks({
+      ...context,
+      activeTurnId: foreground.turnId,
+      activeTurnRunning: true,
+      activities: [foreground],
+    })[0];
+    expect(observed?.ownerSubagentId).toBe(child);
+    expect(observed?.reference).toBeUndefined();
+    expect(controlled?.kind).toBe("agent");
+    expect(controlled?.ownerSubagentId).not.toBe(controlled?.reference?.taskId);
+  });
+
+  it("keeps root, missing, malformed and foreign-runtime owners blank without borrowing labels or controls", () => {
+    const getter = vi.fn(() => "must-not-read");
+    const accessor = Object.defineProperty({ type: "child" }, "id", { get: getter });
+    for (const taskOwner of [
+      undefined,
+      { type: "root" },
+      { type: "unknown", id: "unqualified-child" },
+      { type: "child", id: "" },
+      { type: "child", id: "x".repeat(513) },
+      { type: "child", id: "bad\u0000identity" },
+      Object.create({ type: "child", id: "inherited-child" }),
+      accessor,
+    ]) {
+      const started = activity("tool.started", {
+        itemId: "looks-like-child",
+        itemType: "collab_agent_tool_call",
+        detail: "Agent: looks-like-child",
+        nativeWorkRuntimeId: runtimeId,
+        taskOwner,
+        individualTaskControl: reference,
+      });
+      const task = deriveActiveProviderTasks({ ...context, activities: [started] })[0];
+      expect(task?.ownerSubagentId).toBeUndefined();
+      expect(task?.reference).toEqual(reference);
+    }
+    expect(getter).not.toHaveBeenCalled();
+    for (const nativeWorkRuntimeId of [undefined, "other-runtime"]) {
+      const task = deriveActiveProviderTasks({
+        ...context,
+        activities: [
+          activity("tool.started", {
+            itemId: "control-is-not-owner-proof",
+            taskOwner: { type: "child", id: "child" },
+            nativeWorkRuntimeId,
+            individualTaskControl: reference,
+          }),
+        ],
+      })[0];
+      expect(task?.reference).toEqual(reference);
+      expect(task?.ownerSubagentId).toBeUndefined();
+    }
+  });
+
+  it("replaces or clears the exact task's owner on newer activity and runtime replacement", () => {
+    const started = activity("tool.started", {
+      itemId: "same-task",
+      nativeWorkRuntimeId: runtimeId,
+      taskOwner: { type: "child", id: "first-child" },
+      individualTaskControl: reference,
+    });
+    for (const taskOwner of [{ type: "child", id: "second-child" }, { type: "root" }, undefined]) {
+      const update = activity("tool.updated", {
+        itemId: "same-task",
+        nativeWorkRuntimeId: runtimeId,
+        taskOwner,
+        individualTaskControl: reference,
+      });
+      for (const activities of [
+        [started, update],
+        [update, started],
+      ]) {
+        const tasks = deriveActiveProviderTasks({ ...context, activities });
+        expect(tasks).toHaveLength(1);
+        expect(tasks[0]?.ownerSubagentId).toBe(
+          taskOwner?.type === "child" ? taskOwner.id : undefined,
+        );
+        expect(tasks[0]?.reference).toEqual(reference);
+      }
+    }
+    expect(
+      deriveActiveProviderTasks({
+        ...context,
+        runtimeSession: {
+          orchestrationStatus: "running",
+          subagentRuntimeId: "replacement-runtime",
+        },
+        activities: [started],
+      }),
+    ).toEqual([]);
+  });
   it("formats controlled and read-only native placeholders without changing control identity", () => {
     const started = activity("tool.started", {
       itemId: "raw-bash-item",

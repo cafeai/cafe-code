@@ -41,6 +41,12 @@ Open **Tasks** to see current ordinary provider tasks and foreground tools. The
 list shows five rows per page. Subagents retain their existing task/detail view,
 with the same individual controls in the selected subagent's detail.
 
+An ordinary task performed by a verified current subagent shows that worker's
+same local avatar used in the roster. Root tasks have no icon. Older, missing or
+ambiguous source ownership also leaves the icon blank; tool type, receiver and
+control IDs never select a worker. These decorative icons add no task controls
+or history lookup. See [source-owner icons](decisions/provider-task-owner-icons.md).
+
 - **Run in background** targets just the displayed foreground task or tool. It
   never means “background everything.” A provider that declines because the work
   is no longer foreground is reported honestly.

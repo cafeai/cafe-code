@@ -12,6 +12,10 @@ Partially supersedes: the failed-root availability assumption in
 generation or conservative unknown/closed-runtime rules.
 Supplements: [verified runtime recovery](verified-runtime-recovery.md) with a
 distinct definitive-transient-root path; its Stop and at-most-once rules remain.
+Partially superseded by: [failed-root session restart](codex-failed-root-session-restart.md)
+for automatic continuation's retention of the failed native context and children.
+That successor requires exact guarded retirement and same-history reopening;
+the remaining classifiers, observation, control and at-most-once rules here remain.
 
 ## Context
 

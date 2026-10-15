@@ -1,4 +1,5 @@
 import { useUiLocale, useUiPresentation } from "~/i18n";
+import { flushSync } from "react-dom";
 import { uiText, type UiLocale } from "@cafecode/shared/i18n";
 import { UiMessage } from "~/i18n";
 import { FileAttachmentPill } from "./FileAttachmentPill";
@@ -6,6 +7,7 @@ import { TurnConfigurationWorkEntry } from "./TurnConfigurationWorkEntry";
 import { ClaudeCommandWorkEntry, ClaudeSummaryWorkEntry } from "./ProviderOperationWorkEntry";
 import { ProviderDiagnosticWorkEntry } from "./ProviderDiagnosticWorkEntry";
 import {
+  OrchestrationThreadTurnActivityPage,
   type EnvironmentId,
   type EditorId,
   type MessageId,
@@ -16,6 +18,7 @@ import {
   type ThreadId,
   type TurnId,
 } from "@cafecode/contracts";
+import { Schema } from "effect";
 import {
   createContext,
   memo,
@@ -92,6 +95,8 @@ import {
 } from "@cafecode/contracts/settings";
 import { formatTimestamp } from "../../timestampFormat";
 import { VisualizationCard } from "../visualizations/VisualizationCard";
+import type { VisualizationPane } from "../visualizations/VisualizationViewerProvider";
+import { createVisualizationTimelineScrollOwner } from "../visualizations/visualizationTimelineScroll";
 import { hasOnScreenKeyboard } from "../../hooks/useMediaQuery";
 import {
   isWholeMessageSelection,
@@ -108,6 +113,7 @@ import { useSettings } from "../../hooks/useSettings";
 import { useServerAvailableEditors } from "../../rpc/serverState";
 import {
   extractOpenablePathTokens,
+  isTimelinePhysicallyAtEnd,
   isTimelineScrolledToEnd,
   resolveFileOpenEditor,
   resolveWorkspaceFilePath,
@@ -125,6 +131,7 @@ import {
 import { useHistoricalWorkLogPresence } from "./useHistoricalWorkLogPresence";
 import {
   activityCursor,
+  compareActivityCursors,
   cursorKey,
   deriveEarlierWorkLogEntries,
   EARLIER_WORK_LOG_RETAINED_LIMIT,
@@ -151,6 +158,11 @@ export {
 // ---------------------------------------------------------------------------
 
 interface TimelineRowSharedState {
+  visualizationPane?: VisualizationPane;
+  visualizationRuntimeMode: import("@cafecode/contracts").RuntimeMode | null;
+  generatedVisualizationAdmissionReady: boolean;
+  onVisualizationScrollIntent: (deltaY: number) => boolean | void;
+  onVisualizationLayoutIntent: (anchor: HTMLElement, height: number) => (() => void) | undefined;
   subagentRuntimeSession: SubagentRuntimeContext | null;
   timestampFormat: TimestampFormat;
   activeProvider: ProviderDriverKind | null;
@@ -277,6 +289,9 @@ const TIMELINE_REVIEW_VISIBLE_CONTENT_POSITION = {
 // ---------------------------------------------------------------------------
 
 interface MessagesTimelineProps {
+  visualizationPane?: VisualizationPane;
+  /** Canonical received exact-thread policy, never the editable composer draft. */
+  visualizationRuntimeMode?: import("@cafecode/contracts").RuntimeMode | null;
   /** Explicit selected-message native fork. Omitted for unsupported providers. */
   onForkMessage?: ((messageId: MessageId) => void) | undefined;
   messageForkDisabled?: boolean;
@@ -318,6 +333,8 @@ interface MessagesTimelineProps {
   viewPositionCache?: Map<string, TimelineViewPosition>;
   viewPositionKey?: string;
   onIsAtEndChange: (isAtEnd: boolean) => void;
+  /** Fresh loaded-list native geometry only, not optimistic follow/submit state. */
+  onObservedBottom?: (() => void) | undefined;
   onUserScrollIntent: () => void;
   onDebugScrollEvent?: (event: TimelineScrollDebugEventInput) => void;
   selectedSubagent?: SubagentDetailSelection | null;
@@ -330,6 +347,8 @@ interface MessagesTimelineProps {
 // ---------------------------------------------------------------------------
 
 export const MessagesTimeline = memo(function MessagesTimeline({
+  visualizationPane,
+  visualizationRuntimeMode = null,
   onForkMessage,
   messageForkDisabled = false,
   scheduledFollowups,
@@ -364,6 +383,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
   viewPositionCache,
   viewPositionKey,
   onIsAtEndChange,
+  onObservedBottom,
   onUserScrollIntent,
   onDebugScrollEvent,
   selectedSubagent: controlledSelectedSubagent,
@@ -520,6 +540,39 @@ export const MessagesTimeline = memo(function MessagesTimeline({
     };
   }, [activeThreadEnvironmentId, activeThreadId, rows, selectedSubagent, subagentRuntimeSession]);
   const isSubagentDetailOpen = resolvedSelectedSubagent !== null;
+  // This is the exhaustive branch shared by both empty/loading returns below.
+  // Removing that list is a real lifetime change even in the same Cafe chat;
+  // keeping the caller's ref object does not preserve its initial-load proof.
+  const willRenderTimelineList = rows.length > 0 || isWorking || isSubagentDetailOpen;
+  // The virtualizer retains its legitimate initial target until public onLoad.
+  // Do not admit native input during that unfinished bootstrap or fight it with
+  // forced offsets. An absent->present list gets a new token; streamed rows,
+  // presentation and height updates of the same present list do not reset it.
+  const visualizationAdmissionScope = useMemo(
+    () =>
+      Object.freeze({
+        environmentId: activeThreadEnvironmentId,
+        threadId: activeThreadId,
+        listRef,
+        present: willRenderTimelineList,
+      }),
+    [activeThreadEnvironmentId, activeThreadId, listRef, willRenderTimelineList],
+  );
+  const currentVisualizationAdmissionScope = useRef<object | null>(null);
+  const [loadedVisualizationAdmissionScope, setLoadedVisualizationAdmissionScope] = useState<
+    object | null
+  >(null);
+  const generatedVisualizationAdmissionReady =
+    willRenderTimelineList && loadedVisualizationAdmissionScope === visualizationAdmissionScope;
+  useLayoutEffect(() => {
+    currentVisualizationAdmissionScope.current = willRenderTimelineList
+      ? visualizationAdmissionScope
+      : null;
+    return () => {
+      if (currentVisualizationAdmissionScope.current === visualizationAdmissionScope)
+        currentVisualizationAdmissionScope.current = null;
+    };
+  }, [visualizationAdmissionScope, willRenderTimelineList]);
   // Returning from a subagent detail slides the (still mounted) timeline back
   // in from the start edge. Adjusting state during render restarts the CSS
   // animation exactly once per open→closed transition.
@@ -534,6 +587,35 @@ export const MessagesTimeline = memo(function MessagesTimeline({
   const tailFollowItemLayoutRepinFrameRef = useRef<number | null>(null);
   const autoFollowTailRef = useRef(autoFollowTail);
   autoFollowTailRef.current = autoFollowTail;
+  const visualizationScrollOwnerRef = useRef<ReturnType<
+    typeof createVisualizationTimelineScrollOwner
+  > | null>(null);
+  const visualizationScrollOwner = useMemo(
+    () => ({
+      scroll: (deltaY: number, beforeScroll?: () => void) =>
+        visualizationScrollOwnerRef.current?.scroll(deltaY, beforeScroll) ?? false,
+      preserve: (anchor: HTMLElement, height: number) =>
+        visualizationScrollOwnerRef.current?.preserve(anchor, height),
+      interrupt: () => visualizationScrollOwnerRef.current?.interrupt(),
+      observeScroll: () => visualizationScrollOwnerRef.current?.observeScroll(),
+    }),
+    [],
+  );
+  useLayoutEffect(() => {
+    // Each committed effect setup owns a fresh lifetime. The committed ref,
+    // rather than mutable locals inside a compiler-memoized object, forwards
+    // callbacks to only that live owner. StrictMode cleanup never reopens an
+    // old instance and scope loss permanently closes the exact prior owner.
+    const owner = createVisualizationTimelineScrollOwner({
+      readList: () => listRef.current,
+      following: () => autoFollowTailRef.current,
+    });
+    visualizationScrollOwnerRef.current = owner;
+    return () => {
+      if (visualizationScrollOwnerRef.current === owner) visualizationScrollOwnerRef.current = null;
+      owner.close();
+    };
+  }, [activeThreadId, activeThreadEnvironmentId, listRef]);
   const forcedScrollGenerationRef = useRef(0);
   const touchStartYRef = useRef<number | null>(null);
   const touchReviewIntentReportedRef = useRef(false);
@@ -718,12 +800,93 @@ export const MessagesTimeline = memo(function MessagesTimeline({
       forceScrollToEnd(rows.length, "tail-follow-item-layout-repin");
     });
   }, [forceScrollToEnd, rows.length]);
+  const bottomObservationFrameRef = useRef<number | null>(null);
+  const bottomObserverLifetime = useMemo(
+    () =>
+      Object.freeze({
+        ready: generatedVisualizationAdmissionReady,
+        detailOpen: isSubagentDetailOpen,
+        hydrating: isThreadHistoryHydrating,
+        observe: onObservedBottom,
+        scope: visualizationAdmissionScope,
+      }),
+    [
+      generatedVisualizationAdmissionReady,
+      isSubagentDetailOpen,
+      isThreadHistoryHydrating,
+      onObservedBottom,
+      visualizationAdmissionScope,
+    ],
+  );
+  const currentBottomObserverLifetime = useRef<object | null>(null);
+  useLayoutEffect(() => {
+    currentBottomObserverLifetime.current = bottomObserverLifetime;
+    return () => {
+      if (currentBottomObserverLifetime.current === bottomObserverLifetime) {
+        currentBottomObserverLifetime.current = null;
+      }
+    };
+  }, [bottomObserverLifetime]);
+  const observePhysicalBottom = useCallback(() => {
+    if (
+      currentBottomObserverLifetime.current !== bottomObserverLifetime ||
+      !bottomObserverLifetime.observe ||
+      !bottomObserverLifetime.ready ||
+      bottomObserverLifetime.hydrating ||
+      bottomObserverLifetime.detailOpen ||
+      currentVisualizationAdmissionScope.current !== bottomObserverLifetime.scope
+    )
+      return;
+    // The public list ref exposes the actual owning scroll node. Its geometry
+    // cannot be replaced by LegendList's isAtEnd flag: submit pinning reports
+    // that flag before native movement, and hidden/unloaded lists are not proof.
+    const node = listRef.current?.getScrollableNode?.();
+    if (node?.isConnected && isTimelinePhysicallyAtEnd(node)) bottomObserverLifetime.observe();
+  }, [bottomObserverLifetime, listRef]);
+  const schedulePhysicalBottomObservation = useCallback(() => {
+    if (!onObservedBottom || bottomObservationFrameRef.current !== null) return;
+    bottomObservationFrameRef.current = window.requestAnimationFrame(() => {
+      bottomObservationFrameRef.current = null;
+      observePhysicalBottom();
+    });
+  }, [observePhysicalBottom, onObservedBottom]);
+  useEffect(() => {
+    // Also covers content shrink/initial restored geometry without requiring a
+    // native scroll event. One read per layout, with no polling or scroll write.
+    if (rows.length > 0) schedulePhysicalBottomObservation();
+    return () => {
+      if (bottomObservationFrameRef.current !== null) {
+        window.cancelAnimationFrame(bottomObservationFrameRef.current);
+        bottomObservationFrameRef.current = null;
+      }
+    };
+  }, [rows.length, schedulePhysicalBottomObservation]);
   const handleItemSizeChanged = useCallback(() => {
     // Footer metrics use this same follow-only path: delayed proposals can
     // grow after the initial scroll settles, but must never move a reader who
     // deliberately scrolled away. Coalescing covers item and footer changes.
     scheduleTailFollowItemLayoutRepin();
-  }, [scheduleTailFollowItemLayoutRepin]);
+    schedulePhysicalBottomObservation();
+  }, [schedulePhysicalBottomObservation, scheduleTailFollowItemLayoutRepin]);
+  const handleInitialListLoad = useCallback(() => {
+    // Only completion from this exact committed list scope may admit generated
+    // cards. Old callbacks cannot unset or grant a newer scope. Once complete,
+    // streamed rows, theme and height changes never revoke/reset readiness.
+    if (currentVisualizationAdmissionScope.current !== visualizationAdmissionScope) {
+      emitScrollDebugEvent("initial-list-load-rejected", {
+        details: {
+          currentPresent: currentVisualizationAdmissionScope.current !== null,
+          observedPresent: visualizationAdmissionScope.present,
+        },
+      });
+      return;
+    }
+    setLoadedVisualizationAdmissionScope(visualizationAdmissionScope);
+    // Finite source-free breadcrumb; no transcript or private source bytes.
+    emitScrollDebugEvent("initial-list-load", {
+      state: onDebugScrollEvent ? (listRef.current?.getState?.() ?? null) : null,
+    });
+  }, [emitScrollDebugEvent, listRef, onDebugScrollEvent, visualizationAdmissionScope]);
   const cancelSubmitStickToEnd = useCallback(() => {
     // Invalidate every already-scheduled initial/submit hard-scroll callback.
     // Clearing only the deadline is insufficient because the animation-frame
@@ -784,6 +947,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
 
   const handleUserScrollIntent = useCallback(
     (event?: { readonly type?: string }) => {
+      visualizationScrollOwner.interrupt();
       emitScrollDebugEvent("user-scroll-intent", {
         state: onDebugScrollEvent ? (listRef.current?.getState?.() ?? null) : null,
         details: {
@@ -793,10 +957,19 @@ export const MessagesTimeline = memo(function MessagesTimeline({
       cancelSubmitStickToEnd();
       onUserScrollIntent();
     },
-    [cancelSubmitStickToEnd, emitScrollDebugEvent, listRef, onDebugScrollEvent, onUserScrollIntent],
+    [
+      cancelSubmitStickToEnd,
+      emitScrollDebugEvent,
+      listRef,
+      onDebugScrollEvent,
+      onUserScrollIntent,
+      visualizationScrollOwner,
+    ],
   );
 
   const handleScroll = useCallback(() => {
+    visualizationScrollOwner.observeScroll();
+    observePhysicalBottom();
     if (Date.now() <= stickToEndDeadlineMsRef.current) {
       const state = listRef.current?.getState?.() ?? null;
       const shouldRepin = state === null || !isTimelineScrolledToEnd(state);
@@ -847,22 +1020,52 @@ export const MessagesTimeline = memo(function MessagesTimeline({
     handleUserScrollIntent,
     listRef,
     onIsAtEndChange,
+    observePhysicalBottom,
     scheduleSubmitStickScrollEventRepin,
     viewPositionCache,
     viewPositionKey,
+    visualizationScrollOwner,
   ]);
   const handleWheel = useCallback(
     (event: ReactWheelEvent<HTMLElement>) => {
+      // Even downward input can supersede an outstanding chart-only resize
+      // correction, without otherwise changing follow/review policy.
+      visualizationScrollOwner.interrupt();
       if (event.deltaY < 0) {
         handleUserScrollIntent(event);
       }
     },
-    [handleUserScrollIntent],
+    [handleUserScrollIntent, visualizationScrollOwner],
   );
-  const handleTouchStart = useCallback((event: ReactTouchEvent<HTMLElement>) => {
-    touchStartYRef.current = event.touches.item(0)?.clientY ?? null;
-    touchReviewIntentReportedRef.current = false;
-  }, []);
+  const handleVisualizationScrollIntent = useCallback(
+    (deltaY: number) => {
+      visualizationScrollOwner.interrupt();
+      if (deltaY >= 0) return false;
+      // This originates from trusted wheel input in the exact visible chart frame. Enter
+      // review before applying its scroll, so a queued tail correction cannot
+      // race the native gesture. No synthetic DOM event or sibling list is used.
+      // The child frame is outside React's parent DOM event boundary. Commit its
+      // existing parent review-mode update before the caller performs scrollBy:
+      // otherwise React may batch it with a simultaneously growing chart/turn,
+      // leaving LegendList's committed maintain-at-end policy active during
+      // that measurement. Only this authenticated upward intent is synchronous;
+      // ordinary browser wheel/touch and all streaming/follow policies remain.
+      return visualizationScrollOwner.scroll(deltaY, () => {
+        autoFollowTailRef.current = false;
+        cancelTailFollowItemLayoutRepin();
+        flushSync(() => handleUserScrollIntent({ type: "inline-chart-wheel" }));
+      });
+    },
+    [cancelTailFollowItemLayoutRepin, handleUserScrollIntent, visualizationScrollOwner],
+  );
+  const handleTouchStart = useCallback(
+    (event: ReactTouchEvent<HTMLElement>) => {
+      visualizationScrollOwner.interrupt();
+      touchStartYRef.current = event.touches.item(0)?.clientY ?? null;
+      touchReviewIntentReportedRef.current = false;
+    },
+    [visualizationScrollOwner],
+  );
   const handleTouchMove = useCallback(
     (event: ReactTouchEvent<HTMLElement>) => {
       const startY = touchStartYRef.current;
@@ -914,6 +1117,8 @@ export const MessagesTimeline = memo(function MessagesTimeline({
   }, []);
   const handleKeyDown = useCallback(
     (event: ReactKeyboardEvent<HTMLElement>) => {
+      if (["ArrowUp", "ArrowDown", "PageUp", "PageDown", "Home", "End", " "].includes(event.key))
+        visualizationScrollOwner.interrupt();
       if (
         event.key === "ArrowUp" ||
         event.key === "PageUp" ||
@@ -931,7 +1136,14 @@ export const MessagesTimeline = memo(function MessagesTimeline({
         onUserScrollIntent();
       }
     },
-    [cancelSubmitStickToEnd, emitScrollDebugEvent, listRef, onDebugScrollEvent, onUserScrollIntent],
+    [
+      cancelSubmitStickToEnd,
+      emitScrollDebugEvent,
+      listRef,
+      onDebugScrollEvent,
+      onUserScrollIntent,
+      visualizationScrollOwner,
+    ],
   );
 
   const previousRowCountRef = useRef(0);
@@ -1064,6 +1276,11 @@ export const MessagesTimeline = memo(function MessagesTimeline({
 
   const sharedState = useMemo<TimelineRowSharedState>(
     () => ({
+      ...(visualizationPane ? { visualizationPane } : {}),
+      visualizationRuntimeMode,
+      generatedVisualizationAdmissionReady,
+      onVisualizationScrollIntent: handleVisualizationScrollIntent,
+      onVisualizationLayoutIntent: visualizationScrollOwner.preserve,
       timestampFormat,
       markdownCwd,
       additionalWorkspaceRoots,
@@ -1081,6 +1298,11 @@ export const MessagesTimeline = memo(function MessagesTimeline({
       rowEntrances,
     }),
     [
+      visualizationPane,
+      visualizationRuntimeMode,
+      generatedVisualizationAdmissionReady,
+      handleVisualizationScrollIntent,
+      visualizationScrollOwner,
       timestampFormat,
       markdownCwd,
       additionalWorkspaceRoots,
@@ -1118,7 +1340,13 @@ export const MessagesTimeline = memo(function MessagesTimeline({
   // from TimelineRowCtx, which propagates through LegendList's memo.
   const renderItem = useCallback(
     ({ item }: { item: MessagesTimelineRow }) => (
-      <div className="mx-auto w-full min-w-0 max-w-3xl overflow-x-clip" data-timeline-root="true">
+      <div
+        className={cn(
+          "mx-auto w-full min-w-0 overflow-x-clip",
+          item.kind === "visualization" ? "max-w-none" : "max-w-3xl",
+        )}
+        data-timeline-root="true"
+      >
         <TimelineRowContent row={item} />
       </div>
     ),
@@ -1142,16 +1370,11 @@ export const MessagesTimeline = memo(function MessagesTimeline({
     [isSubagentDetailOpen, scheduledFollowups],
   );
 
-  if (
-    rows.length === 0 &&
-    !isWorking &&
-    resolvedSelectedSubagent === null &&
-    isThreadHistoryHydrating
-  ) {
+  if (!willRenderTimelineList && isThreadHistoryHydrating) {
     return <ThreadHistoryLoadingState />;
   }
 
-  if (rows.length === 0 && !isWorking && resolvedSelectedSubagent === null) {
+  if (!willRenderTimelineList) {
     return (
       <div className="flex h-full min-w-0 flex-col overflow-y-auto px-3 sm:px-5 animate-enter-fade">
         <div className="flex min-h-40 flex-1 shrink-0 items-center justify-center">
@@ -1198,6 +1421,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
                   : TIMELINE_REVIEW_VISIBLE_CONTENT_POSITION
               }
               onItemSizeChanged={handleItemSizeChanged}
+              onLoad={handleInitialListLoad}
               {...(scheduledFollowups ? { onMetricsChange: handleItemSizeChanged } : {})}
               onScroll={handleScroll}
               onWheel={handleWheel}
@@ -1410,6 +1634,11 @@ function VisualizationTimelineRow({
       threadId={ctx.activeThreadId}
       entry={row.visualization}
       timestampFormat={ctx.timestampFormat}
+      {...(ctx.visualizationPane ? { pane: ctx.visualizationPane } : {})}
+      onScrollIntent={ctx.onVisualizationScrollIntent}
+      onLayoutIntent={ctx.onVisualizationLayoutIntent}
+      generatedAdmissionReady={ctx.generatedVisualizationAdmissionReady}
+      runtimeMode={ctx.visualizationRuntimeMode}
     />
   ) : null;
 }
@@ -2279,6 +2508,48 @@ const EarlierWorkLogSection = memo(function EarlierWorkLogSection({
 
 type HistoricalWorkLogError = "disconnected" | "initial" | "older" | "all";
 
+const isHistoricalWorkLogPage = Schema.is(OrchestrationThreadTurnActivityPage);
+
+/** Offset history has no cursor echo, but must still bind every received row
+ * to the requested exact chat/turn and finite page before private details can
+ * enter the reader. Count and page use the same authenticated server query. */
+function validateHistoricalWorkLogPage(input: {
+  readonly page: OrchestrationThreadTurnActivityPage;
+  readonly threadId: ThreadId;
+  readonly turnId: TurnId;
+  readonly offset: number;
+  readonly limit: number;
+}): void {
+  const { page, threadId, turnId, offset, limit } = input;
+  if (
+    !isHistoricalWorkLogPage(page) ||
+    page.threadId !== threadId ||
+    page.turnId !== turnId ||
+    page.offset !== offset ||
+    page.limit !== limit ||
+    page.before !== undefined ||
+    !Number.isSafeInteger(page.totalCount) ||
+    page.totalCount < 0 ||
+    page.activities.length !== Math.min(limit, Math.max(0, page.totalCount - offset))
+  )
+    throw new Error("Invalid historical work page");
+  const ids = new Set<string>();
+  let previous: OrchestrationThreadActivityCursor | undefined;
+  for (const activity of page.activities) {
+    const cursor = activityCursor(activity);
+    if (
+      activity.turnId !== turnId ||
+      ids.has(activity.id) ||
+      (activity.sequence !== undefined &&
+        (!Number.isSafeInteger(activity.sequence) || activity.sequence < 0)) ||
+      (previous && compareActivityCursors(previous, cursor) >= 0)
+    )
+      throw new Error("Invalid historical work order");
+    ids.add(activity.id);
+    previous = cursor;
+  }
+}
+
 /** Keep the failed operation's finite identity, not its startup-language copy. */
 function formatHistoricalWorkLogError(error: HistoricalWorkLogError, locale: UiLocale): string {
   switch (error) {
@@ -2293,9 +2564,22 @@ function formatHistoricalWorkLogError(error: HistoricalWorkLogError, locale: UiL
   }
 }
 
-/** Owns its own expand/collapse state so toggling re-renders only this row.
- *  State resets on unmount which is fine — work groups start collapsed. */
 const HistoricalWorkLogSection = memo(function HistoricalWorkLogSection({
+  row,
+}: {
+  row: Extract<MessagesTimelineRow, { kind: "historical-work" }>;
+}) {
+  const ctx = use(TimelineRowCtx);
+  // Turn IDs and chat IDs can legitimately repeat on another environment.
+  // Remount the whole private reader before paint instead of resetting its
+  // arrays in an effect which could briefly reveal the previous owner's page.
+  const owner = JSON.stringify([ctx.activeThreadEnvironmentId, ctx.activeThreadId, row.turnId]);
+  return <HistoricalWorkLogReader key={owner} row={row} />;
+});
+
+/** Owns its expansion/page state for exactly one environment/chat/turn.
+ * Collapsing keeps completed pages but retires any still-pending read. */
+const HistoricalWorkLogReader = memo(function HistoricalWorkLogReader({
   row,
 }: {
   row: Extract<MessagesTimelineRow, { kind: "historical-work" }>;
@@ -2313,33 +2597,72 @@ const HistoricalWorkLogSection = memo(function HistoricalWorkLogSection({
   const [isLoading, setIsLoading] = useState(false);
   const [isLoadingOlder, setIsLoadingOlder] = useState(false);
   const [loadErrorCode, setLoadErrorCode] = useState<HistoricalWorkLogError | null>(null);
+  const mountedRef = useRef(false);
+  const expandedRef = useRef(false);
+  const generationRef = useRef(0);
+  const pendingGenerationRef = useRef<number | null>(null);
+
+  useLayoutEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      expandedRef.current = false;
+      generationRef.current++;
+      pendingGenerationRef.current = null;
+    };
+  }, []);
+  const beginRequest = useCallback((): number | null => {
+    if (!mountedRef.current || !expandedRef.current || pendingGenerationRef.current !== null)
+      return null;
+    const generation = ++generationRef.current;
+    pendingGenerationRef.current = generation;
+    return generation;
+  }, []);
+  const ownsRequest = useCallback(
+    (generation: number): boolean =>
+      mountedRef.current &&
+      expandedRef.current &&
+      generationRef.current === generation &&
+      pendingGenerationRef.current === generation,
+    [],
+  );
 
   useEffect(() => {
     if (!isExpanded || initialPageLoaded) {
       return;
     }
+    const generation = beginRequest();
+    if (generation === null) return;
+    const stillOwned = () => ownsRequest(generation);
     const api = readEnvironmentApi(ctx.activeThreadEnvironmentId);
     const activeThreadId = ctx.activeThreadId;
     if (!api || activeThreadId === null) {
-      setInitialPageLoaded(true);
+      // No page was admitted. Keep explicit close/reopen retry available after
+      // reconnect rather than permanently treating absence as loaded history.
       setLoadErrorCode("disconnected");
+      pendingGenerationRef.current = null;
       return;
     }
 
-    let cancelled = false;
     const loadInitialPage = async () => {
       setIsLoading(true);
       setLoadErrorCode(null);
       try {
-        const knownTotal = (
-          await api.orchestration.getThreadTurnActivityPage({
-            threadId: activeThreadId,
-            turnId: row.turnId,
-            offset: 0,
-            limit: 1,
-          })
-        ).totalCount;
-        if (cancelled) return;
+        const countPage = await api.orchestration.getThreadTurnActivityPage({
+          threadId: activeThreadId,
+          turnId: row.turnId,
+          offset: 0,
+          limit: 1,
+        });
+        if (!stillOwned()) return;
+        validateHistoricalWorkLogPage({
+          page: countPage,
+          threadId: activeThreadId,
+          turnId: row.turnId,
+          offset: 0,
+          limit: 1,
+        });
+        const knownTotal = countPage.totalCount;
         setTotalCount(knownTotal);
         if (knownTotal <= 0) {
           setActivityRows([]);
@@ -2355,32 +2678,45 @@ const HistoricalWorkLogSection = memo(function HistoricalWorkLogSection({
           offset,
           limit,
         });
-        if (cancelled) return;
+        if (!stillOwned()) return;
+        validateHistoricalWorkLogPage({
+          page,
+          threadId: activeThreadId,
+          turnId: row.turnId,
+          offset,
+          limit,
+        });
         setTotalCount(page.totalCount);
         setActivityRows(page.activities);
         setLoadedOffset(page.offset);
         setInitialPageLoaded(true);
       } catch {
-        if (!cancelled) {
+        if (stillOwned()) {
           setLoadErrorCode("initial");
         }
       } finally {
-        if (!cancelled) {
+        if (stillOwned()) {
           setIsLoading(false);
+          pendingGenerationRef.current = null;
         }
       }
     };
 
     void loadInitialPage();
     return () => {
-      cancelled = true;
+      if (pendingGenerationRef.current === generation) {
+        generationRef.current++;
+        pendingGenerationRef.current = null;
+      }
     };
   }, [
     ctx.activeThreadEnvironmentId,
     ctx.activeThreadId,
+    beginRequest,
     initialPageLoaded,
     isExpanded,
     onHistoricalWorkLogPresenceResolved,
+    ownsRequest,
     row.turnId,
   ]);
 
@@ -2462,6 +2798,9 @@ const HistoricalWorkLogSection = memo(function HistoricalWorkLogSection({
       setLoadErrorCode("disconnected");
       return;
     }
+    const generation = beginRequest();
+    if (generation === null) return;
+    const stillOwned = () => ownsRequest(generation);
     const nextOffset = Math.max(0, loadedOffset - HISTORICAL_WORK_LOG_PAGE_SIZE);
     const limit = loadedOffset - nextOffset;
     setIsLoadingOlder(true);
@@ -2473,15 +2812,38 @@ const HistoricalWorkLogSection = memo(function HistoricalWorkLogSection({
         offset: nextOffset,
         limit,
       });
+      if (!stillOwned()) return;
+      validateHistoricalWorkLogPage({
+        page,
+        threadId: activeThreadId,
+        turnId: row.turnId,
+        offset: nextOffset,
+        limit,
+      });
       setTotalCount(page.totalCount);
-      setActivityRows((current) => mergeHistoricalActivityRows([...page.activities, ...current]));
+      setActivityRows((current) =>
+        mountedRef.current && expandedRef.current && generationRef.current === generation
+          ? mergeHistoricalActivityRows([...page.activities, ...current])
+          : current,
+      );
       setLoadedOffset(page.offset);
     } catch {
-      setLoadErrorCode("older");
+      if (stillOwned()) setLoadErrorCode("older");
     } finally {
-      setIsLoadingOlder(false);
+      if (stillOwned()) {
+        setIsLoadingOlder(false);
+        pendingGenerationRef.current = null;
+      }
     }
-  }, [ctx.activeThreadEnvironmentId, ctx.activeThreadId, isLoadingOlder, loadedOffset, row.turnId]);
+  }, [
+    beginRequest,
+    ctx.activeThreadEnvironmentId,
+    ctx.activeThreadId,
+    isLoadingOlder,
+    loadedOffset,
+    ownsRequest,
+    row.turnId,
+  ]);
 
   const loadAllPages = useCallback(async () => {
     if (totalCount === null || totalCount <= 0 || totalCount > HISTORICAL_WORK_LOG_SHOW_ALL_LIMIT) {
@@ -2493,6 +2855,9 @@ const HistoricalWorkLogSection = memo(function HistoricalWorkLogSection({
       setLoadErrorCode("disconnected");
       return;
     }
+    const generation = beginRequest();
+    if (generation === null) return;
+    const stillOwned = () => ownsRequest(generation);
     setIsLoadingOlder(true);
     setLoadErrorCode(null);
     try {
@@ -2502,15 +2867,33 @@ const HistoricalWorkLogSection = memo(function HistoricalWorkLogSection({
         offset: 0,
         limit: totalCount,
       });
+      if (!stillOwned()) return;
+      validateHistoricalWorkLogPage({
+        page,
+        threadId: activeThreadId,
+        turnId: row.turnId,
+        offset: 0,
+        limit: totalCount,
+      });
       setTotalCount(page.totalCount);
       setActivityRows(page.activities);
       setLoadedOffset(page.offset);
     } catch {
-      setLoadErrorCode("all");
+      if (stillOwned()) setLoadErrorCode("all");
     } finally {
-      setIsLoadingOlder(false);
+      if (stillOwned()) {
+        setIsLoadingOlder(false);
+        pendingGenerationRef.current = null;
+      }
     }
-  }, [ctx.activeThreadEnvironmentId, ctx.activeThreadId, row.turnId, totalCount]);
+  }, [
+    beginRequest,
+    ctx.activeThreadEnvironmentId,
+    ctx.activeThreadId,
+    ownsRequest,
+    row.turnId,
+    totalCount,
+  ]);
 
   // `totalCount` and `loadedOffset` describe raw activities, including the
   // independently rendered subagent lifecycle. Only a complete scan plus an
@@ -2537,7 +2920,20 @@ const HistoricalWorkLogSection = memo(function HistoricalWorkLogSection({
             type="button"
             className="focus-ring flex min-w-0 flex-1 items-center gap-1.5 rounded-xl px-2.5 py-1.5 text-left text-2xs text-subtle-foreground transition-colors duration-(--duration-fast) hover:text-foreground"
             aria-expanded={isExpanded}
-            onClick={() => setIsExpanded((value) => !value)}
+            onClick={() => {
+              const expanded = !expandedRef.current;
+              expandedRef.current = expanded;
+              if (!expanded) {
+                // Retire the exact unfinished read synchronously. Its late
+                // success, error and finalizer cannot affect a reopened read;
+                // completed pages and their explicit paging position remain.
+                generationRef.current++;
+                pendingGenerationRef.current = null;
+                setIsLoading(false);
+                setIsLoadingOlder(false);
+              }
+              setIsExpanded(expanded);
+            }}
           >
             <ChevronRightIcon
               aria-hidden="true"

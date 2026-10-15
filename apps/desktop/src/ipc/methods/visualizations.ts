@@ -10,6 +10,9 @@ import {
   VisualizationHostCapture,
   VisualizationHostMessageInput,
   VisualizationHostSuspendInput,
+  VisualizationHostCapacity,
+  VisualizationHostYieldResult,
+  VisualizationHostCapacityObservation,
 } from "@cafecode/contracts/visualizationHost";
 
 import { DesktopVisualizations } from "../../visualizations/DesktopVisualizations.ts";
@@ -58,6 +61,57 @@ export const getVisualizationHostCapabilities = privateMethod(
       }),
   }),
 );
+export const getVisualizationHostCapacity = privateMethod(
+  makeIpcMethod({
+    channel: Channels.VISUALIZATION_CAPACITY_CHANNEL,
+    payload: Schema.Void,
+    result: VisualizationHostCapacity,
+    handler: (_input, event) =>
+      Effect.gen(function* () {
+        owner(event);
+        const host = yield* DesktopVisualizations;
+        return host.capacity();
+      }),
+  }),
+);
+export const observeVisualizationCapacity = privateMethod(
+  makeIpcMethod({
+    channel: Channels.VISUALIZATION_CAPACITY_OBSERVE_CHANNEL,
+    payload: VisualizationHostCapacityObservation,
+    result: Schema.NullOr(VisualizationHostCapacity),
+    handler: (input, event) =>
+      Effect.gen(function* () {
+        const host = yield* DesktopVisualizations;
+        return host.observeCapacity(owner(event), input.observing, input.observerId, input.sequence)
+          ? host.capacity()
+          : null;
+      }),
+  }),
+);
+export const yieldVisualization = privateMethod(
+  makeIpcMethod({
+    channel: Channels.VISUALIZATION_YIELD_CHANNEL,
+    payload: VisualizationHostLeaseInput,
+    result: VisualizationHostYieldResult,
+    handler: (input, event) =>
+      Effect.gen(function* () {
+        const host = yield* DesktopVisualizations;
+        return yield* Effect.promise(() => host.yield(owner(event), input.leaseId));
+      }),
+  }),
+);
+export const beginVisualizationTransition = privateMethod(
+  makeIpcMethod({
+    channel: Channels.VISUALIZATION_TRANSITION_CHANNEL,
+    payload: VisualizationHostLeaseInput,
+    result: Schema.Boolean,
+    handler: (input, event) =>
+      Effect.gen(function* () {
+        const host = yield* DesktopVisualizations;
+        return host.beginTransition(owner(event), input.leaseId);
+      }),
+  }),
+);
 export const openVisualization = privateMethod(
   makeIpcMethod({
     channel: Channels.VISUALIZATION_OPEN_CHANNEL,
@@ -67,6 +121,18 @@ export const openVisualization = privateMethod(
       Effect.gen(function* () {
         const host = yield* DesktopVisualizations;
         return yield* Effect.promise(() => host.open(owner(event), input));
+      }),
+  }),
+);
+export const focusVisualization = privateMethod(
+  makeIpcMethod({
+    channel: Channels.VISUALIZATION_FOCUS_CHANNEL,
+    payload: VisualizationHostLeaseInput,
+    result: Schema.Boolean,
+    handler: (input, event) =>
+      Effect.gen(function* () {
+        const host = yield* DesktopVisualizations;
+        return host.focus(owner(event), input.leaseId);
       }),
   }),
 );

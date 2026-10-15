@@ -118,6 +118,8 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
   runtimeRecoveryBarrierVerified = false,
   codexRootReplacementVerified = false,
   codexFailedRootVerified = false,
+  codexFailedRootGenerationTransferVerified = false,
+  codexRecoveryAcceptedVerified = false,
   scheduledFollowUpVerified = false,
 }: {
   readonly command: OrchestrationCommand;
@@ -128,6 +130,8 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
   readonly codexRootReplacementVerified?: boolean;
   /** Exact internal intent/attempt/ACK and control barrier, checked by the engine. */
   readonly codexFailedRootVerified?: boolean;
+  readonly codexFailedRootGenerationTransferVerified?: boolean;
+  readonly codexRecoveryAcceptedVerified?: boolean;
   /** Only an exact occurrence claimed in the event commit transaction may set this. */
   readonly scheduledFollowUpVerified?: boolean;
 }): Effect.fn.Return<DecideOrchestrationCommandResult, OrchestrationCommandInvariantError> {
@@ -1491,6 +1495,43 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
         });
       }
       const failedRoot = command.codexFailedRoot;
+      const recoveryAccepted = command.codexRecoveryAccepted;
+      if (
+        recoveryAccepted !== undefined &&
+        (!codexRecoveryAcceptedVerified ||
+          !command.commandId.startsWith("server:") ||
+          command.expectedSessionLifecycle === undefined ||
+          command.expectedSubagentRuntimeId == null ||
+          thread.archivedAt !== null ||
+          thread.deletedAt !== null ||
+          thread.session == null ||
+          thread.session.status === "stopped" ||
+          thread.session.status === "interrupted" ||
+          thread.session.providerName !== "codex" ||
+          thread.session.providerInstanceId !== command.session.providerInstanceId ||
+          thread.modelSelection.instanceId !== command.session.providerInstanceId ||
+          (thread.latestTurn?.turnId !== recoveryAccepted.previousTurnId &&
+            thread.latestTurn?.turnId !== recoveryAccepted.turnId) ||
+          (thread.latestTurn?.turnId === recoveryAccepted.previousTurnId &&
+            thread.latestTurn.state !== "error") ||
+          (thread.latestTurn?.turnId === recoveryAccepted.turnId &&
+            thread.latestTurn.state !== "running") ||
+          (thread.session.activeTurnId !== null &&
+            thread.session.activeTurnId !== recoveryAccepted.turnId) ||
+          command.session.threadId !== command.threadId ||
+          command.session.providerName !== "codex" ||
+          command.session.status !== "running" ||
+          command.session.activeTurnId !== recoveryAccepted.turnId ||
+          command.session.subagentRuntimeId == null ||
+          recoveryAccepted.turnId === recoveryAccepted.previousTurnId ||
+          command.codexFailedRoot !== undefined ||
+          command.codexRootReplacement !== undefined ||
+          command.terminalTurnRecovery !== undefined)
+      )
+        return yield* new OrchestrationCommandInvariantError({
+          commandType: command.type,
+          detail: "Codex recovery acceptance is no longer authorized.",
+        });
       if (
         failedRoot !== undefined &&
         (!codexFailedRootVerified ||
@@ -1503,7 +1544,10 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
           thread.session.providerName !== "codex" ||
           thread.session.activeTurnId !== null ||
           thread.session.providerInstanceId !== command.session.providerInstanceId ||
-          thread.session.subagentRuntimeId !== command.session.subagentRuntimeId ||
+          // Only the engine's immutable old-intent/new-ACK join may transfer
+          // generations. This context is not a client command or event field.
+          (thread.session.subagentRuntimeId !== command.session.subagentRuntimeId &&
+            !codexFailedRootGenerationTransferVerified) ||
           thread.modelSelection.instanceId !== command.session.providerInstanceId ||
           (thread.latestTurn?.turnId !== failedRoot.previousTurnId &&
             thread.latestTurn?.turnId !== failedRoot.turnId) ||

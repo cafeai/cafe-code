@@ -96,6 +96,41 @@ const TABLE_VIEWER_MARKDOWN = [
   "| Hedy | Local transcription and speaker labels | Needs the right speech engine |",
 ].join("\n");
 
+/** Inspect native text advances, not TeX source length or mocked font metrics. */
+function mathLabelGlyphs(root: Element, label: string, occurrence = 0) {
+  const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+  const nodes: Text[] = [];
+  while (walker.nextNode()) nodes.push(walker.currentNode as Text);
+  const text = nodes.map((node) => node.data).join("");
+  let start = -1;
+  for (let index = 0; index <= occurrence; index += 1) {
+    start = text.indexOf(label, start + 1);
+    if (start < 0) throw new Error(`Expected synthetic math label ${label}`);
+  }
+  return Array.from(label, (character, index) => {
+    let offset = start + index;
+    const node = nodes.find((candidate) => {
+      if (offset < candidate.data.length) return true;
+      offset -= candidate.data.length;
+      return false;
+    });
+    if (!node?.parentElement) throw new Error("Expected native math text node");
+    const range = document.createRange();
+    range.setStart(node, offset);
+    range.setEnd(node, offset + character.length);
+    const bounds = range.getBoundingClientRect();
+    return {
+      character,
+      left: bounds.left,
+      right: bounds.right,
+      top: bounds.top,
+      bottom: bounds.bottom,
+      width: bounds.width,
+      font: getComputedStyle(node.parentElement).fontFamily,
+    };
+  });
+}
+
 function renderTableViewerFixture(text = TABLE_VIEWER_MARKDOWN) {
   return (
     <div style={{ width: 320 }}>
@@ -681,6 +716,313 @@ describe("ChatMarkdown", () => {
         ),
       ).toEqual(["x", "2 + 2 = 4"]);
       expect(document.querySelector(".katex-error")).toBeNull();
+    } finally {
+      await screen.unmount();
+    }
+  });
+
+  it.each([
+    { theme: "light", scale: 100, width: 760 },
+    { theme: "dark", scale: 130, width: 320 },
+  ])(
+    "keeps boxed theorem and atomic function subscripts separate in $theme at $scale%",
+    async ({ theme, scale, width }) => {
+      const boxed = String.raw`\boxed{c(1+L_{\mathrm{cont}}^2+L_{\mathrm{atom}})\le D_{\alpha}(\varepsilon)\le C(1+L_{\mathrm{cont}}^2+L_{\mathrm{atom}})}`;
+      const bound = String.raw`k\ge D_{\mathrm{atom}}(\varepsilon/v).`;
+      const inline = String.raw`D_{\mathrm{atom}}(\varepsilon/v)`;
+      const source = [
+        "Candidate theorem.",
+        "",
+        "$$",
+        boxed,
+        "$$",
+        "",
+        "Lower bound.",
+        "",
+        "$$",
+        bound,
+        "$$",
+        "",
+        `Inline comparison $${inline}$.`,
+        "",
+        "| Case | Bound |",
+        "| --- | --- |",
+        `| Native table control | $${inline}$ |`,
+        "",
+        "```text",
+        bound,
+        "```",
+      ].join("\n");
+      const documentRoot = document.documentElement;
+      const originalFontSize = documentRoot.style.fontSize;
+      const originalDark = documentRoot.classList.contains("dark");
+      documentRoot.classList.toggle("dark", theme === "dark");
+      applyInterfaceScalePercent(scale);
+      const screen = await render(
+        <div data-testid="math-layout-host" style={{ width, maxWidth: "100%" }}>
+          <ChatMarkdown text={source} cwd="/repo/project" />
+        </div>,
+      );
+      try {
+        const host = page.getByTestId("math-layout-host").element() as HTMLElement;
+        await vi.waitFor(() => expect(host.querySelectorAll(".katex")).toHaveLength(4));
+        // Real local KaTeX faces must load before geometry can qualify their
+        // layout. A fallback-font pass would not reproduce the production math.
+        const faces = await Promise.all([
+          document.fonts.load('400 12px "KaTeX_Main"', "atom cont"),
+          document.fonts.load('italic 400 16px "KaTeX_Math"', "kDL"),
+        ]);
+        expect(
+          faces.every(
+            (loaded) => loaded.length > 0 && loaded.every((face) => face.status === "loaded"),
+          ),
+        ).toBe(true);
+        await document.fonts.ready;
+        expect(host.querySelector(".katex-error")).toBeNull();
+        expect(
+          Array.from(
+            host.querySelectorAll(".katex-mathml annotation"),
+            (element) => element.textContent,
+          ),
+        ).toEqual([boxed, bound, inline, inline]);
+        expect(host.querySelector("pre code")?.textContent).toBe(`${bound}\n`);
+
+        const maths = Array.from(host.querySelectorAll(".katex-html"));
+        const assertLabel = (math: Element, label: string, occurrence = 0) => {
+          const glyphs = mathLabelGlyphs(math, label, occurrence);
+          for (const glyph of glyphs) {
+            expect(glyph.font).toContain("KaTeX_Main");
+            expect(glyph.width).toBeGreaterThan(0);
+            expect(
+              Math.abs(glyph.top - glyphs[0]!.top),
+              JSON.stringify(glyphs),
+            ).toBeLessThanOrEqual(0.25);
+          }
+          for (let index = 1; index < glyphs.length; index += 1) {
+            expect(glyphs[index]!.left, JSON.stringify(glyphs)).toBeGreaterThanOrEqual(
+              glyphs[index - 1]!.right - 0.25,
+            );
+            expect(glyphs[index]!.right, JSON.stringify(glyphs)).toBeGreaterThan(
+              glyphs[index - 1]!.right,
+            );
+          }
+          return glyphs;
+        };
+        // The same native-font equation inside a table is an independent control:
+        // table cells already reject the surrounding prose's emergency wrapping.
+        assertLabel(maths[3]!, "atom");
+        for (const occurrence of [0, 1]) {
+          assertLabel(maths[0]!, "cont", occurrence);
+          assertLabel(maths[0]!, "atom", occurrence);
+        }
+        for (const math of maths.slice(1, 3)) {
+          const subscript = assertLabel(math, "atom");
+          const delimiter = mathLabelGlyphs(math, "(");
+          expect(
+            delimiter[0]!.left,
+            JSON.stringify({ subscript, delimiter }),
+          ).toBeGreaterThanOrEqual(subscript.at(-1)!.right - 0.25);
+        }
+        expect(host.scrollWidth).toBeLessThanOrEqual(host.clientWidth + 1);
+        if (width === 320) {
+          const display = host.querySelector<HTMLElement>(".katex-display")!;
+          expect(display.scrollWidth).toBeGreaterThan(display.clientWidth);
+          expect(getComputedStyle(display).overflowX).toBe("auto");
+        }
+      } finally {
+        await screen.unmount();
+        documentRoot.style.fontSize = originalFontSize;
+        documentRoot.classList.toggle("dark", originalDark);
+      }
+    },
+  );
+
+  it.each([
+    { theme: "light", scale: 100, width: 760 },
+    { theme: "dark", scale: 130, width: 320 },
+  ])(
+    "keeps tagged equations separate from their labels in $theme at $scale%",
+    async ({ theme, scale, width }) => {
+      const boxed = String.raw`\boxed{c(1+L_c^2+L_a)\le D_\alpha(\varepsilon)\le C(1+L_c^2+L_a)} \tag{MX-1}`;
+      const bound = String.raw`k\ge D_a(\varepsilon/v). \tag{MX-2}`;
+      const source = [
+        "Candidate theorem.",
+        "",
+        "$$",
+        boxed,
+        "$$",
+        "",
+        "Atomic lower bound.",
+        "",
+        "$$",
+        bound,
+        "$$",
+        "",
+        "```text",
+        boxed,
+        bound,
+        "```",
+      ].join("\n");
+      const documentRoot = document.documentElement;
+      const originalFontSize = documentRoot.style.fontSize;
+      const originalDark = documentRoot.classList.contains("dark");
+      documentRoot.classList.toggle("dark", theme === "dark");
+      applyInterfaceScalePercent(scale);
+      const screen = await render(
+        <div data-testid="tagged-math-layout-host" style={{ width, maxWidth: "100%" }}>
+          <ChatMarkdown text={source} cwd="/repo/project" />
+        </div>,
+      );
+      try {
+        const host = page.getByTestId("tagged-math-layout-host").element() as HTMLElement;
+        await vi.waitFor(() => expect(host.querySelectorAll(".katex-display")).toHaveLength(2));
+        const faces = await Promise.all([
+          document.fonts.load('400 16px "KaTeX_Main"', "(MX-12)"),
+          document.fonts.load('italic 400 16px "KaTeX_Math"', "cCLDk"),
+        ]);
+        expect(
+          faces.every(
+            (loaded) => loaded.length > 0 && loaded.every((face) => face.status === "loaded"),
+          ),
+        ).toBe(true);
+        await document.fonts.ready;
+        expect(host.querySelector(".katex-error")).toBeNull();
+        expect(
+          Array.from(
+            host.querySelectorAll(".katex-mathml annotation"),
+            (element) => element.textContent,
+          ),
+        ).toEqual([boxed, bound]);
+        expect(host.querySelector("pre code")?.textContent).toBe(`${boxed}\n${bound}\n`);
+
+        for (const [index, math] of Array.from(host.querySelectorAll(".katex-html")).entries()) {
+          const bases = Array.from(math.querySelectorAll<HTMLElement>(":scope > .base"));
+          const tag = math.querySelector<HTMLElement>(":scope > .tag");
+          expect(bases.length).toBeGreaterThan(0);
+          expect(tag?.textContent).toBe(`(MX-${index + 1})`);
+          const body = bases.map((base) => base.getBoundingClientRect());
+          const label = tag!.getBoundingClientRect();
+          const right = Math.max(...body.map((bounds) => bounds.right));
+          const geometry = JSON.stringify({
+            width,
+            scale,
+            equation: index + 1,
+            body: body.map(({ left, right, top, bottom }) => ({ left, right, top, bottom })),
+            label: { left: label.left, right: label.right, top: label.top, bottom: label.bottom },
+          });
+          // Direct native KaTeX bases are the visible equation; MathML is the
+          // clipped accessibility copy. A tag must not paint over any base,
+          // including the boxed theorem's right-hand side and atomic subscript.
+          expect(label.left, geometry).toBeGreaterThanOrEqual(right - 0.25);
+          expect(label.width).toBeGreaterThan(0);
+          expect(body.every((bounds) => bounds.width > 0)).toBe(true);
+          const display = math.closest<HTMLElement>(".katex-display")!;
+          expect(getComputedStyle(display).overflowX).toBe("auto");
+          expect(label.right).toBeLessThanOrEqual(
+            display.getBoundingClientRect().left + display.scrollWidth + 1,
+          );
+        }
+        expect(host.scrollWidth).toBeLessThanOrEqual(host.clientWidth + 1);
+        if (width === 320) {
+          const display = host.querySelector<HTMLElement>(".katex-display")!;
+          expect(display.scrollWidth).toBeGreaterThan(display.clientWidth);
+        }
+      } finally {
+        await screen.unmount();
+        documentRoot.style.fontSize = originalFontSize;
+        documentRoot.classList.toggle("dark", originalDark);
+      }
+    },
+  );
+
+  it("keeps unnumbered and multiline display tags in the local math flow", async () => {
+    const formulas = [
+      String.raw`x+y=z \tag*{Long equation label without parentheses}`,
+      String.raw`\begin{aligned}x+y&=z\\k&\ge D_a(\varepsilon/v)\end{aligned} \tag{MX-3}`,
+    ];
+    const source = formulas
+      .flatMap((formula) => ["$$", formula, "$$", ""])
+      .concat(["```text", ...formulas, "```"])
+      .join("\n");
+    const screen = await render(
+      <div data-testid="alternate-tag-layout-host" style={{ width: 320, maxWidth: "100%" }}>
+        <ChatMarkdown text={source} cwd="/repo/project" />
+      </div>,
+    );
+    try {
+      const host = page.getByTestId("alternate-tag-layout-host").element() as HTMLElement;
+      await vi.waitFor(() => expect(host.querySelectorAll(".katex-display")).toHaveLength(2));
+      const faces = await document.fonts.load(
+        '400 16px "KaTeX_Main"',
+        "Long equation label without parentheses (MX-3)",
+      );
+      expect(faces.length).toBeGreaterThan(0);
+      expect(faces.every((face) => face.status === "loaded")).toBe(true);
+      await document.fonts.ready;
+      expect(host.querySelector(".katex-error")).toBeNull();
+      expect(
+        Array.from(
+          host.querySelectorAll(".katex-mathml annotation"),
+          (element) => element.textContent,
+        ),
+      ).toEqual(formulas);
+      expect(host.querySelector("pre code")?.textContent).toBe(`${formulas.join("\n")}\n`);
+      for (const [index, math] of Array.from(host.querySelectorAll(".katex-html")).entries()) {
+        const bases = Array.from(math.querySelectorAll<HTMLElement>(":scope > .base"));
+        const tag = math.querySelector<HTMLElement>(":scope > .tag")!;
+        expect(tag.textContent).toBe(
+          // KaTeX deliberately emits non-breaking spaces for text-mode math.
+          // Assert its exact native glyph text rather than normalizing away
+          // the distinction that keeps the label in one intrinsic-width row.
+          index === 0 ? "Long\u00a0equation\u00a0label\u00a0without\u00a0parentheses" : "(MX-3)",
+        );
+        const bodyRight = Math.max(...bases.map((base) => base.getBoundingClientRect().right));
+        const label = tag.getBoundingClientRect();
+        expect(
+          label.left,
+          JSON.stringify({ equation: index + 1, bodyRight, labelLeft: label.left }),
+        ).toBeGreaterThan(bodyRight);
+        const display = math.closest<HTMLElement>(".katex-display")!;
+        expect(label.right).toBeLessThanOrEqual(
+          display.getBoundingClientRect().left + display.scrollWidth + 1,
+        );
+      }
+      const longLabelDisplay = host.querySelector<HTMLElement>(".katex-display")!;
+      expect(longLabelDisplay.scrollWidth).toBeGreaterThan(longLabelDisplay.clientWidth);
+      expect(host.scrollWidth).toBeLessThanOrEqual(host.clientWidth + 1);
+    } finally {
+      await screen.unmount();
+    }
+  });
+
+  it("keeps display-tag HTML extensions untrusted and malformed math contained", async () => {
+    const untrusted = String.raw`x=1 \tag{\htmlClass{math-tag-injected}{label}}`;
+    const malformed = String.raw`\frac{1}{`;
+    const source = [
+      "$$",
+      untrusted,
+      "$$",
+      "",
+      "$$",
+      malformed,
+      "$$",
+      "",
+      "Following prose remains readable.",
+      "",
+      "```text",
+      untrusted,
+      malformed,
+      "```",
+    ].join("\n");
+    const screen = await render(<ChatMarkdown text={source} cwd="/repo/project" />);
+    try {
+      await expect.element(page.getByText("Following prose remains readable.")).toBeInTheDocument();
+      const markdown = document.querySelector<HTMLElement>(".chat-markdown")!;
+      expect(markdown.querySelector(".math-tag-injected")).toBeNull();
+      expect(markdown.querySelector("script, iframe, a")).toBeNull();
+      expect(markdown.querySelector(".katex-error")?.textContent).toBe(malformed);
+      expect(markdown.querySelector(".katex-mathml annotation")?.textContent).toBe(untrusted);
+      expect(markdown.querySelector("pre code")?.textContent).toBe(`${untrusted}\n${malformed}\n`);
     } finally {
       await screen.unmount();
     }

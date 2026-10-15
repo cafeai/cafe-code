@@ -1,6 +1,6 @@
 # Live chat activity
 
-Last updated: 2026-10-12 15:11:00 JST (UTC+0900)
+Last updated: 2026-10-14 03:04:25 JST (UTC+0900)
 
 The composer has one compact activity line above the editor. It shows Working,
 Running command, a computer action, or waiting for a tool, agent, answer or
@@ -68,8 +68,19 @@ beside the visible count means more or omitted entries, not an exact lifetime
 total. Received live operation snapshots replace stale history and prevent an
 already-inline command from appearing twice. Subagents remain separate.
 
-Failures appear inline with Retry, never a toast or automatic history loop.
-Changing chats discards late responses. These reads cannot start, stop or
+An approval-review start is useful ordinary work, unlike an internal task start.
+It remains discoverable through the same saved presence, count and page queries
+after leaving the live window. The plan-boundary prefix matches its exact
+received spelling; an ordinary lowercase lookalike is not a plan boundary.
+Structured subagent events still belong only to their separate roster.
+
+Failures stay inline, never a toast or automatic history loop. Earlier work
+offers Retry; a previous-turn initial load can be retried by closing and
+reopening that Work log, while older-page actions remain explicit.
+Both previous-turn and Earlier work readers bind their cached rows and pending
+responses to the exact environment, chat, turn and mounted reader. Changing
+owners discards the old rows immediately; a late page, error or loading cleanup
+cannot replace the new reader's state. These reads cannot start, stop or
 reopen a turn, confer task control, or change provider retry behavior. See
 [the bounded history decision](decisions/bounded-work-log-history.md).
 

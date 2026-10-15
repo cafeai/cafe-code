@@ -178,6 +178,9 @@ export interface ThreadSession {
   maxConcurrentSubagents?: number | null | undefined;
   /** Independently materialized Codex setting; absent legacy evidence remains unknown. */
   codexContextWindowOverride?: number | null | undefined;
+  /** Nominal auto-compaction request sent at successful native opening, not its
+   * resolved threshold. Null is known omission; absent legacy proof is unknown. */
+  codexAutoCompactTokenLimit?: number | null | undefined;
   /** Opaque evidence identifying the currently observed native provider runtime. */
   subagentRuntimeId?: string | null | undefined;
 }

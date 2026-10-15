@@ -37,6 +37,16 @@ export interface ProviderRuntimeBinding {
   readonly runtimeMode?: RuntimeMode;
 }
 
+/** Input-only observation metadata; reads never manufacture or expose this flag. */
+export interface ProviderRuntimeBindingWrite extends ProviderRuntimeBinding {
+  /**
+   * Internal negative-evidence boundary, never persisted or transported as
+   * provider policy/authorization. A complete admitted adapter observation may
+   * retire absent request proof; ordinary same-generation event writes cannot.
+   */
+  readonly nativeSessionObservation?: true;
+}
+
 export interface ProviderRuntimeBindingWithMetadata extends ProviderRuntimeBinding {
   readonly lastSeenAt: string;
 }
@@ -52,7 +62,7 @@ export interface ProviderSessionDirectoryShape {
   readonly rewinds?: ConversationRewindStore;
   readonly taskControls?: TaskControlJournal;
   readonly upsert: (
-    binding: ProviderRuntimeBinding,
+    binding: ProviderRuntimeBindingWrite,
   ) => Effect.Effect<void, ProviderSessionDirectoryWriteError>;
 
   readonly remove: (

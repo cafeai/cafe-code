@@ -184,8 +184,7 @@ describe("bounded MCP App protocol", () => {
     const capabilities = JSON.parse(result.messages[0]!).result.hostCapabilities;
     expect(capabilities).not.toHaveProperty("message");
     expect(capabilities).not.toHaveProperty("updateModelContext");
-    expect(capabilities.sandbox.permissions).toEqual({});
-    expect(capabilities.sandbox.csp.connectDomains).toEqual([]);
+    expect(capabilities).not.toHaveProperty("sandbox");
   });
   it("admits only credential-free explicit web links", () => {
     expect(admittedMcpAppLink("https://example.com/view?a=1")).toBe("https://example.com/view?a=1");

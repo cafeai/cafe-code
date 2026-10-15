@@ -684,7 +684,9 @@ export const CodexSettings = makeProviderSettingsSchema(
     autoCompactTokenLimit: Schema.optionalKey(CodexAutoCompactTokenLimit).pipe(
       Schema.annotateKey({
         title: "Auto-compact override",
-        description: "Token count that triggers compaction. Blank: Codex's per-model default.",
+        description: "Requested compaction threshold. An explicit value takes precedence.",
+        documentation:
+          "Blank follows an active context-window override; otherwise Codex configuration and model defaults apply. Native limits still apply.",
         providerSettingsForm: {
           control: "number",
           step: 1_000,

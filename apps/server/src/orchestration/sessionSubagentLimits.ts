@@ -11,6 +11,7 @@ interface SessionLimitIdentity {
   readonly providerInstanceId?: ProviderInstanceId | null | undefined;
   readonly maxConcurrentSubagents?: MaxConcurrentSubagents | null | undefined;
   readonly codexContextWindowOverride?: CodexContextWindowOverride | null | undefined;
+  readonly codexAutoCompactTokenLimit?: CodexContextWindowOverride | null | undefined;
   readonly subagentRuntimeId?: string | null | undefined;
 }
 
@@ -26,6 +27,7 @@ export function materializedSubagentLimitFields(
 ): {
   readonly maxConcurrentSubagents?: MaxConcurrentSubagents | null;
   readonly codexContextWindowOverride?: CodexContextWindowOverride | null;
+  readonly codexAutoCompactTokenLimit?: CodexContextWindowOverride | null;
   readonly subagentRuntimeId?: string | null;
 } {
   // Ordinary parent lifecycle updates must retain the exact native context.
@@ -65,19 +67,33 @@ export function materializedSubagentLimitFields(
   const runtimeFields = {
     ...(runtimeId === undefined ? {} : { subagentRuntimeId: runtimeId }),
     ...(contextOverride === undefined ? {} : { codexContextWindowOverride: contextOverride }),
+    // Request proof is stricter than historical configured context: a real
+    // native generation is mandatory. Complete generation observations omit
+    // proof to explicitly retire an unknown legacy runtime's former evidence,
+    // even when its generation spelling is unchanged. Ordinary partial
+    // lifecycle producers can preserve it only by omitting generation; those
+    // that explicitly carry a generation must also report its received proof.
+    // Never synthesize this value from the neighboring context number.
+    ...(incoming.providerName === "codex" &&
+    typeof runtimeId === "string" &&
+    runtimeId.length > 0 &&
+    incoming.codexAutoCompactTokenLimit !== undefined
+      ? { codexAutoCompactTokenLimit: incoming.codexAutoCompactTokenLimit }
+      : sameBinding &&
+          incoming.providerName === "codex" &&
+          incoming.subagentRuntimeId === undefined &&
+          typeof previous.subagentRuntimeId === "string" &&
+          previous.subagentRuntimeId.length > 0 &&
+          previous.codexAutoCompactTokenLimit !== undefined
+        ? { codexAutoCompactTokenLimit: previous.codexAutoCompactTokenLimit }
+        : {}),
   };
   if (incoming.maxConcurrentSubagents !== undefined) {
     return { ...runtimeFields, maxConcurrentSubagents: incoming.maxConcurrentSubagents };
   }
-  if (
-    previous !== undefined &&
-    previous !== null &&
-    incoming.threadId === previous.threadId &&
-    incoming.providerName === previous.providerName &&
-    incoming.providerInstanceId != null &&
-    incoming.providerInstanceId === previous.providerInstanceId &&
-    previous.maxConcurrentSubagents !== undefined
-  ) {
+  if (previous != null && sameContextBinding && previous.maxConcurrentSubagents !== undefined) {
+    // An exact replacement generation is a new opening observation. Omitted
+    // policy there is unknown, not proof borrowed from the retired process.
     return { ...runtimeFields, maxConcurrentSubagents: previous.maxConcurrentSubagents };
   }
   return runtimeFields;

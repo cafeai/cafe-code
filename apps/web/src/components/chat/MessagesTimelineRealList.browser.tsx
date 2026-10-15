@@ -20,7 +20,7 @@ import * as Schema from "effect/Schema";
 import type { LegendListRef } from "@legendapp/list/react";
 import { createRef, useCallback, useState, type ComponentProps } from "react";
 import { describe, expect, it, vi } from "vitest";
-import { cdp } from "vitest/browser";
+import { cdp, page } from "vitest/browser";
 import { render } from "vitest-browser-react";
 
 import {
@@ -28,6 +28,8 @@ import {
   __setEnvironmentApiOverrideForTests,
 } from "../../environmentApi";
 import { MessagesTimeline } from "./MessagesTimeline";
+import { ScrollToBottomControl } from "./ScrollToBottomControl";
+import { useScrollToBottomDismissal } from "./useScrollToBottomDismissal";
 import { refreshScheduledFollowups } from "./scheduledFollowupsResource";
 
 type TimelineProps = ComponentProps<typeof MessagesTimeline>;
@@ -35,6 +37,9 @@ type TimelineEntries = TimelineProps["timelineEntries"];
 
 const CREATED_AT = "2026-09-20T12:00:00.000Z";
 const EMPTY_REVERT_COUNTS = new Map<MessageId, number>();
+const decodeGeneratedVisualizationReference = Schema.decodeUnknownSync(
+  GeneratedVisualizationReference,
+);
 const ignore = () => undefined;
 
 function messages(scope: string, count = 40): TimelineEntries {
@@ -102,17 +107,45 @@ function TimelineFixture({
   listRef,
   scope,
   scheduledFollowups,
+  scrollControl = false,
+  stickRevision = 0,
+  onBottomObservation,
+  onEndChange,
+  onDebugScrollEvent,
+  hydrating = false,
 }: {
   entries: TimelineEntries;
   listRef: TimelineProps["listRef"];
   scope: string;
   scheduledFollowups?: TimelineProps["scheduledFollowups"];
+  scrollControl?: boolean;
+  stickRevision?: number;
+  onBottomObservation?: () => void;
+  onEndChange?: (atEnd: boolean) => void;
+  onDebugScrollEvent?: TimelineProps["onDebugScrollEvent"];
+  hydrating?: boolean;
 }) {
   const [following, setFollowing] = useState(true);
   const stopFollowing = useCallback(() => setFollowing(false), []);
+  const dismissal = useScrollToBottomDismissal(`real-list:${scope}`);
+  const observeBottom = useCallback(() => {
+    dismissal.observeBottom();
+    onBottomObservation?.();
+  }, [dismissal.observeBottom, onBottomObservation]);
+  const observeEndChange = useCallback(
+    (atEnd: boolean) => {
+      onEndChange?.(atEnd);
+      if (scrollControl) setFollowing(atEnd);
+    },
+    [onEndChange, scrollControl],
+  );
 
   return (
-    <div className="h-full min-h-0" data-real-list-following={following}>
+    <div
+      className="relative h-full min-h-0"
+      data-real-list-following={following}
+      data-scroll-control-dismissed={dismissal.dismissed}
+    >
       <MessagesTimeline
         activeThreadId={ThreadId.make(scope)}
         activeThreadEnvironmentId={EnvironmentId.make("real-list-fixture")}
@@ -124,20 +157,31 @@ function TimelineFixture({
         completionDividerAfterEntryId={null}
         completionSummary={null}
         isRevertingCheckpoint={false}
+        isThreadHistoryHydrating={hydrating}
         isWorking={false}
         listRef={listRef}
         markdownCwd={undefined}
         onImageExpand={ignore}
-        onIsAtEndChange={ignore}
+        onIsAtEndChange={observeEndChange}
+        onObservedBottom={scrollControl || onBottomObservation ? observeBottom : undefined}
         onRevertUserMessage={ignore}
         onUserScrollIntent={stopFollowing}
+        {...(onDebugScrollEvent ? { onDebugScrollEvent } : {})}
         revertTurnCountByUserMessageId={EMPTY_REVERT_COUNTS}
         {...(scheduledFollowups ? { scheduledFollowups } : {})}
-        stickToEndRevision={0}
+        stickToEndRevision={stickRevision}
         timelineEntries={entries}
         timestampFormat="24-hour"
         workspaceRoot={undefined}
       />
+      {scrollControl && !following && !dismissal.dismissed ? (
+        <div className="pointer-events-none absolute bottom-1 left-1/2 -translate-x-1/2">
+          <ScrollToBottomControl
+            onScrollToBottom={() => void listRef.current?.scrollToEnd({ animated: true })}
+            onHideUntilBottom={dismissal.hideUntilBottom}
+          />
+        </div>
+      ) : null}
     </div>
   );
 }
@@ -158,6 +202,96 @@ function readScroller(listRef: TimelineProps["listRef"]): HTMLElement {
 
 function tailDistance(scroller: HTMLElement): number {
   return scroller.scrollHeight - scroller.clientHeight - scroller.scrollTop;
+}
+
+/** Read only the exact list's public receipt and its actual mounted geometry.
+ * The last-known DOM offset alone does not attest completed list bootstrap or
+ * ResizeObserver/recycled-row adoption. No state is changed by this read. */
+function readProposalListObservation(
+  host: HTMLElement,
+  listRef: TimelineProps["listRef"],
+  initialLoadObserved: boolean,
+) {
+  const scroller = readScroller(listRef);
+  const state = listRef.current!.getState();
+  const viewport = scroller.getBoundingClientRect();
+  const mounted = [];
+  // This fixed forty-row fixture needs only bounded logical indices and native
+  // geometry/size receipts. Never return messages, data objects or DOM nodes.
+  for (let index = 0; index < Math.min(state.data.length, 40); index += 1) {
+    const row = state.elementAtIndex(index) as HTMLElement | undefined;
+    if (!row?.isConnected) continue;
+    const bounds = row.getBoundingClientRect();
+    const knownSize = state.sizeAtIndex(index);
+    mounted.push({
+      index,
+      rowIdentityMatches:
+        row.querySelector<HTMLElement>("[data-timeline-row-id]")?.dataset.timelineRowId ===
+          state.data[index]?.id || row.dataset.timelineRowId === state.data[index]?.id,
+      knownSize: typeof knownSize === "number" ? knownSize : null,
+      measuredSize: Math.round(bounds.height),
+      top: bounds.top,
+      bottom: bounds.bottom,
+    });
+  }
+  return {
+    initialLoadObserved,
+    nativeScroll: scroller.scrollTop,
+    publicScroll: state.scroll,
+    nativeTailDistance: tailDistance(scroller),
+    publicAtEnd: state.isAtEnd,
+    start: state.start,
+    end: state.end,
+    startBuffered: state.startBuffered,
+    endBuffered: state.endBuffered,
+    dataLength: state.data.length,
+    nativeScrollHeight: scroller.scrollHeight,
+    publicContentLength: state.contentLength,
+    nativeViewportHeight: scroller.clientHeight,
+    publicViewportHeight: state.scrollLength,
+    nativeViewportTop: viewport.top,
+    nativeViewportBottom: viewport.bottom,
+    proposalPresent: host.querySelector("[data-scheduled-followup-notices] article") !== null,
+    mounted,
+  };
+}
+
+/** Review starts only after this exact list's public load callback and native
+ * scroll/measurement receipt. Preserve LegendList's own rounded size contract;
+ * a missing size is not an estimated or tolerated successful measurement. */
+function isProposalReviewBaselineReady(
+  observation: ReturnType<typeof readProposalListObservation>,
+): boolean {
+  if (
+    !observation.initialLoadObserved ||
+    observation.publicScroll !== observation.nativeScroll ||
+    observation.publicAtEnd ||
+    observation.nativeTailDistance <= 400 ||
+    !Number.isInteger(observation.start) ||
+    !Number.isInteger(observation.end) ||
+    !Number.isInteger(observation.startBuffered) ||
+    !Number.isInteger(observation.endBuffered) ||
+    observation.startBuffered < 0 ||
+    observation.start < observation.startBuffered ||
+    observation.end < observation.start ||
+    observation.endBuffered < observation.end ||
+    observation.endBuffered >= observation.dataLength ||
+    observation.mounted.length === 0 ||
+    !observation.mounted.every(
+      (row) => row.rowIdentityMatches && row.measuredSize > 0 && row.knownSize === row.measuredSize,
+    )
+  )
+    return false;
+  for (let index = observation.startBuffered; index <= observation.endBuffered; index += 1) {
+    if (!observation.mounted.some((row) => row.index === index)) return false;
+  }
+  return observation.mounted.some(
+    (row) =>
+      row.index >= observation.start &&
+      row.index <= observation.end &&
+      row.top >= observation.nativeViewportTop &&
+      row.bottom <= observation.nativeViewportBottom,
+  );
 }
 
 /** Native wheel input only: never change a reused worker's device/media policy. */
@@ -219,6 +353,146 @@ async function expectTail(
 }
 
 describe("MessagesTimeline with real LegendList", () => {
+  it("hides the scroll control without moving review and restores it only after native bottom then review", async () => {
+    const scope = "scroll-control-review";
+    const host = createHost();
+    const listRef = createRef<LegendListRef>();
+    const view = await render(
+      <TimelineFixture entries={messages(scope)} listRef={listRef} scope={scope} scrollControl />,
+      { container: host },
+    );
+    try {
+      await expectTail(host, listRef, `${scope}-message-39`);
+      await listRef.current!.scrollToEnd({ animated: false });
+      const scroller = readScroller(listRef);
+      await vi.waitFor(() => expect(Math.abs(tailDistance(scroller))).toBeLessThanOrEqual(8));
+      await reviewWithNativeWheel(scroller);
+      await vi.waitFor(() => expect(tailDistance(scroller)).toBeGreaterThan(100));
+      const jump = page.getByRole("button", { name: "Scroll to bottom", exact: true });
+      await expect.element(jump).toBeVisible();
+      await jump.hover();
+      const hide = page.getByRole("button", { name: "Hide until bottom", exact: true });
+      await expect.element(hide).toBeVisible();
+      const reviewOffset = scroller.scrollTop;
+      await hide.click();
+      await vi.waitFor(() =>
+        expect(host.querySelector("[data-scroll-control-dismissed=true]")).not.toBeNull(),
+      );
+      await expect.element(jump).not.toBeInTheDocument();
+      expect(scroller.scrollTop).toBe(reviewOffset);
+      expect(host.querySelector("[data-real-list-following=false]")).not.toBeNull();
+      const grown = growLastMessage(messages(scope, 41));
+      await view.rerender(
+        <TimelineFixture entries={grown} listRef={listRef} scope={scope} scrollControl />,
+      );
+      await vi.waitFor(() => expect(listRef.current!.getState().data.length).toBe(41));
+      expect(host.querySelector("[data-scroll-control-dismissed=true]")).not.toBeNull();
+      expect(scroller.scrollTop).toBe(reviewOffset);
+      expect(host.querySelector("[data-real-list-following=false]")).not.toBeNull();
+      // Physical native movement is the reset witness, not an appended message
+      // or optimistic isAtEnd request. Returning to review exposes the control.
+      // Traverse the measured tail in ordinary finite wheel steps. A single
+      // estimated-content jump is not proof that newly visible rows have
+      // finished measuring, just as in the longer artifact review fixture.
+      for (let gesture = 0; gesture < 4; gesture += 1) {
+        await reviewWithNativeWheel(scroller, 300);
+        await new Promise<void>((resolve) => window.requestAnimationFrame(() => resolve()));
+      }
+      await vi.waitFor(() => {
+        expect(Math.abs(tailDistance(scroller))).toBeLessThanOrEqual(8);
+        expect(host.querySelector("[data-scroll-control-dismissed=false]")).not.toBeNull();
+      });
+      await reviewWithNativeWheel(scroller);
+      await vi.waitFor(() => expect(tailDistance(scroller)).toBeGreaterThan(100));
+      await expect.element(jump).toBeVisible();
+      await jump.hover();
+      await expect.element(hide).toBeVisible();
+      await hide.click();
+      await vi.waitFor(() =>
+        expect(host.querySelector("[data-scroll-control-dismissed=true]")).not.toBeNull(),
+      );
+      // A real content shrink can reach bottom without another wheel event.
+      // Observe the native clamp; do not manufacture a bottom flag or scroll.
+      await view.rerender(
+        <TimelineFixture
+          entries={messages(scope, 3)}
+          listRef={listRef}
+          scope={scope}
+          scrollControl
+          hydrating
+        />,
+      );
+      await vi.waitFor(() => {
+        expect(listRef.current!.getState().data.length).toBe(3);
+        expect(Math.abs(tailDistance(scroller))).toBeLessThanOrEqual(8);
+      });
+      // An intermediate short/empty hydration projection is not a completed
+      // view. It cannot consume the exact chat's dismissal while loading.
+      expect(host.querySelector("[data-scroll-control-dismissed=true]")).not.toBeNull();
+      await view.rerender(
+        <TimelineFixture
+          entries={messages(scope, 3)}
+          listRef={listRef}
+          scope={scope}
+          scrollControl
+        />,
+      );
+      await vi.waitFor(() => {
+        expect(Math.abs(tailDistance(scroller))).toBeLessThanOrEqual(8);
+        expect(host.querySelector("[data-scroll-control-dismissed=false]")).not.toBeNull();
+      });
+    } finally {
+      await view.unmount();
+      host.remove();
+    }
+  });
+
+  it("keeps submit-time optimistic end signals separate from actual native-bottom observations", async () => {
+    const scope = "scroll-control-submit";
+    const host = createHost();
+    const listRef = createRef<LegendListRef>();
+    let bottoms = 0;
+    const optimistic: Array<{ gap: number; observed: number }> = [];
+    const onBottomObservation = () => {
+      bottoms += 1;
+    };
+    const onEndChange = (atEnd: boolean) => {
+      if (atEnd && listRef.current)
+        optimistic.push({ gap: tailDistance(readScroller(listRef)), observed: bottoms });
+    };
+    const fixture = (stickRevision: number) => (
+      <TimelineFixture
+        entries={messages(scope)}
+        listRef={listRef}
+        scope={scope}
+        stickRevision={stickRevision}
+        onBottomObservation={onBottomObservation}
+        onEndChange={onEndChange}
+      />
+    );
+    const view = await render(fixture(0), { container: host });
+    try {
+      await expectTail(host, listRef, `${scope}-message-39`);
+      await listRef.current!.scrollToEnd({ animated: false });
+      const scroller = readScroller(listRef);
+      await reviewWithNativeWheel(scroller);
+      await vi.waitFor(() => expect(tailDistance(scroller)).toBeGreaterThan(100));
+      bottoms = 0;
+      optimistic.length = 0;
+      await view.rerender(fixture(1));
+      await vi.waitFor(() =>
+        expect(optimistic.some((value) => value.gap > 100 && value.observed === 0)).toBe(true),
+      );
+      await vi.waitFor(() => {
+        expect(Math.abs(tailDistance(scroller))).toBeLessThanOrEqual(8);
+        expect(bottoms).toBeGreaterThan(0);
+      });
+    } finally {
+      await view.unmount();
+      host.remove();
+    }
+  });
+
   it("preserves an exact overlap anchor when older review slides the 1,000-artifact window", async () => {
     const scope = "artifact-sliding-review";
     const host = createHost();
@@ -249,25 +523,47 @@ describe("MessagesTimeline with real LegendList", () => {
       );
       for (let frame = 0; frame < 4; frame += 1)
         await new Promise<void>((resolve) => window.requestAnimationFrame(() => resolve()));
-      // Finite wheel gestures can leave two clipped cards with neither fully
-      // visible. Align one measured card through native input before requiring
-      // a complete overlap anchor; incidental wheel phase is not list behavior.
-      const viewport = scroller.getBoundingClientRect();
-      const candidate = Array.from(
+      // A finite wheel traversal can stop between cards even after all mounted
+      // rows have real measurements. Establish the fully-contained precondition
+      // with one measured native gesture, rather than waiting for a stationary
+      // partial row to somehow become a valid preservation anchor.
+      const viewportBeforeAlignment = scroller.getBoundingClientRect();
+      const mountedOverlap = Array.from(
         host.querySelectorAll<HTMLElement>("[data-visualization-card]"),
-      ).find((row) => {
+      ).filter((row) => {
         const bounds = row.getBoundingClientRect();
         return (
-          bounds.top >= viewport.top &&
-          bounds.top < viewport.bottom &&
-          bounds.height < viewport.height
+          bounds.height > 0 &&
+          bounds.height < viewportBeforeAlignment.height &&
+          bounds.bottom > viewportBeforeAlignment.top &&
+          bounds.top < viewportBeforeAlignment.bottom
         );
       });
-      expect(candidate).toBeDefined();
-      await reviewWithNativeWheel(
-        scroller,
-        candidate!.getBoundingClientRect().top - viewport.top - 16,
-      );
+      expect(mountedOverlap.length).toBeGreaterThan(0);
+      if (
+        !mountedOverlap.some((row) => {
+          const bounds = row.getBoundingClientRect();
+          return (
+            bounds.top >= viewportBeforeAlignment.top &&
+            bounds.bottom <= viewportBeforeAlignment.bottom
+          );
+        })
+      ) {
+        const center = (viewportBeforeAlignment.top + viewportBeforeAlignment.bottom) / 2;
+        const candidate = mountedOverlap.toSorted((left, right) => {
+          const leftBounds = left.getBoundingClientRect();
+          const rightBounds = right.getBoundingClientRect();
+          return (
+            Math.abs((leftBounds.top + leftBounds.bottom) / 2 - center) -
+            Math.abs((rightBounds.top + rightBounds.bottom) / 2 - center)
+          );
+        })[0]!;
+        const bounds = candidate.getBoundingClientRect();
+        const margin = (viewportBeforeAlignment.height - bounds.height) / 2;
+        const delta = bounds.top - viewportBeforeAlignment.top - margin;
+        expect(Math.abs(delta)).toBeLessThanOrEqual(viewportBeforeAlignment.height);
+        await reviewWithNativeWheel(scroller, delta);
+      }
       let anchor: HTMLElement | undefined;
       await vi.waitFor(() => {
         const viewport = scroller.getBoundingClientRect();
@@ -357,7 +653,10 @@ describe("MessagesTimeline with real LegendList", () => {
           await new Promise<void>((resolve) => window.requestAnimationFrame(() => resolve()));
         }
         const scroller = readScroller(listRef);
-        scroller.scrollTop = scroller.scrollHeight;
+        // Complete the list's supported end preparation, including any
+        // data/MVCP settlement, rather than only changing native pixels while
+        // an earlier imperative end operation may still be queued.
+        await listRef.current!.scrollToEnd({ animated: false });
         await vi.waitFor(() => expect(Math.abs(tailDistance(scroller))).toBeLessThanOrEqual(2));
         const mountedCards = host.querySelectorAll("[data-visualization-card]").length;
         expect(mountedCards).toBeGreaterThan(0);
@@ -368,26 +667,25 @@ describe("MessagesTimeline with real LegendList", () => {
         const lastCard = host.querySelector<HTMLElement>(
           '[data-visualization-card="00000000-0000-4000-8000-000000001000"]',
         )!;
-        const surface = lastCard.querySelector<HTMLElement>("[data-visualization-native-surface]")!;
+        const surface = lastCard.querySelector<HTMLElement>("[data-visualization-inline-surface]")!;
         const reservedHeight = surface.getBoundingClientRect().height;
         const reservedWidth = surface.getBoundingClientRect().width;
         expect(reservedWidth).toBeGreaterThan(200);
-        // The actual desktop-project viewport may be narrower than this host's
-        // 760px maximum. Its intentional 80px minimum is still reserved geometry.
-        expect(reservedHeight).toBeCloseTo(
-          Math.max(80, Math.min(innerHeight * 0.7, 700, (reservedWidth * 120) / 640)),
-          1,
-        );
-        // Late poster metadata has the same admitted dimensions. Its image
-        // transport is unavailable in this isolated real-list fixture; the
-        // reserved box must not collapse or cause a layout-driven tail jump.
+        // Compact history has no Full-access/source grant in this fixture.
+        // Its public 120px extent reserves flow until an actual admitted frame
+        // reports natural height; width and old bitmap aspect ratio do not
+        // determine the current live-only reservation.
+        expect(reservedHeight).toBe(120);
+        // Legacy immutable poster metadata is inert and ignored by current
+        // charts. Its arrival cannot fetch a preview, collapse the reservation,
+        // or take over the actual list's physical tail/review ownership.
         entries = entries.map((value) =>
           value.kind === "visualization" && value.id === `visualization:${scope}:999`
             ? {
                 ...value,
                 visualization: {
                   ...value.visualization,
-                  reference: Schema.decodeUnknownSync(GeneratedVisualizationReference)({
+                  reference: decodeGeneratedVisualizationReference({
                     ...value.visualization.reference,
                     poster: { id: "945c84d1-2b36-4ff2-a6e5-554fa5df36cd", width: 640, height: 120 },
                   }),
@@ -401,26 +699,78 @@ describe("MessagesTimeline with real LegendList", () => {
         );
         await expectTail(host, listRef, `${scope}-message-39`, "late poster metadata");
         if (!following) {
-          await reviewWithNativeWheel(scroller);
-          await vi.waitFor(() => {
-            expect(host.querySelector('[data-real-list-following="false"]')).not.toBeNull();
-            expect(tailDistance(scroller)).toBeGreaterThan(400);
-          });
-          // Let the real browser scroll event and recycled-row measurements
-          // commit before choosing the review anchor; follow-mode state alone
-          // is synchronous and does not attest the virtualizer's new viewport.
-          for (let frame = 0; frame < 4; frame += 1) {
-            await new Promise<void>((resolve) => window.requestAnimationFrame(() => resolve()));
+          // Preserve the automatic late-metadata follow assertion above before
+          // completing initial tail preparation for the separate review gesture.
+          await listRef.current!.scrollToEnd({ animated: false });
+          await vi.waitFor(() => expect(Math.abs(tailDistance(scroller))).toBeLessThanOrEqual(2));
+          let completedReviewScroll = false;
+          const observeReviewScrollEnd = (event: Event) => {
+            if (event.isTrusted && event.target === scroller && tailDistance(scroller) > 400)
+              completedReviewScroll = true;
+          };
+          // Visibility/follow intent and a fixed number of frames do not
+          // attest that a native gesture has completed. Observe this exact
+          // scroller's genuine completion before capturing its review anchor;
+          // this strengthens readiness, not a claim about the old failure's
+          // unobserved origin or permission to change production scrolling.
+          scroller.addEventListener("scrollend", observeReviewScrollEnd);
+          try {
+            await reviewWithNativeWheel(scroller);
+            await vi.waitFor(() => {
+              expect(host.querySelector('[data-real-list-following="false"]')).not.toBeNull();
+              expect(tailDistance(scroller)).toBeGreaterThan(400);
+              expect(completedReviewScroll).toBe(true);
+            });
+          } finally {
+            scroller.removeEventListener("scrollend", observeReviewScrollEnd);
           }
         }
-        const viewport = scroller.getBoundingClientRect();
-        const anchor = Array.from(
-          host.querySelectorAll<HTMLElement>("[data-message-id], [data-visualization-card]"),
-        ).find((row) => {
-          const bounds = row.getBoundingClientRect();
-          return bounds.top >= viewport.top && bounds.bottom <= viewport.bottom;
+        let anchor: HTMLElement | undefined;
+        await vi.waitFor(() => {
+          const viewport = scroller.getBoundingClientRect(),
+            state = listRef.current!.getState();
+          // Native review pixels can move before the public recycled slice and
+          // its ResizeObserver measurements commit. The review append must start
+          // from an exact visible, measured logical row, not a transient occupant.
+          // Programmatic tail mode retains its existing physical-layout proof:
+          // the public end target need not equal the native clamped scroll offset.
+          if (!following) {
+            expect(state.scroll).toBe(scroller.scrollTop);
+            expect(state.start).toBeGreaterThanOrEqual(0);
+            expect(state.end).toBeGreaterThanOrEqual(state.start);
+            expect(state.end).toBeLessThan(state.data.length);
+          }
+          anchor = Array.from(
+            host.querySelectorAll<HTMLElement>("[data-message-id], [data-visualization-card]"),
+          ).find((row) => {
+            const bounds = row.getBoundingClientRect();
+            if (
+              bounds.width <= 0 ||
+              bounds.height <= 0 ||
+              bounds.top < viewport.top ||
+              bounds.bottom > viewport.bottom
+            )
+              return false;
+            if (following) return true;
+            for (let index = state.start; index <= state.end; index += 1) {
+              const fullRow = state.elementAtIndex(index);
+              if (!fullRow?.contains(row)) continue;
+              expect(
+                row.closest<HTMLElement>("[data-timeline-row-id]")?.dataset.timelineRowId,
+              ).toBe(state.data[index].id);
+              // The public size measures the whole row container, including
+              // parent padding; an inner chart's reserved height is not enough.
+              // Pinned LegendList stores Math.round(size), so require that
+              // exact measured quantization rather than an arbitrary tolerance.
+              const fullRowHeight = fullRow.getBoundingClientRect().height;
+              expect(fullRowHeight).toBeGreaterThan(0);
+              expect(state.sizeAtIndex(index)).toBe(Math.round(fullRowHeight));
+              return true;
+            }
+            return false;
+          });
+          expect(anchor).toBeDefined();
         });
-        expect(anchor).toBeDefined();
         const anchorSelector = anchor!.dataset.messageId
           ? `[data-message-id="${anchor!.dataset.messageId}"]`
           : `[data-visualization-card="${anchor!.dataset.visualizationCard}"]`;
@@ -487,12 +837,46 @@ describe("MessagesTimeline with real LegendList", () => {
       } as unknown as EnvironmentApi);
       const host = createHost();
       const listRef = createRef<LegendListRef>();
+      let initialLoadObserved = false;
+      const scrollEvents: {
+        reason: string;
+        scroll: number | null;
+        remainingScrollDistance: number | null;
+        autoFollowTail: boolean | null;
+      }[] = [];
+      const observeScrollDebug: NonNullable<TimelineProps["onDebugScrollEvent"]> = (event) => {
+        if (event.source !== "MessagesTimeline" || event.activeThreadId !== threadId) return;
+        if (event.reason === "initial-list-load") initialLoadObserved = true;
+        scrollEvents.push({
+          reason: event.reason,
+          scroll: event.metrics?.scroll ?? null,
+          remainingScrollDistance: event.metrics?.remainingScrollDistance ?? null,
+          autoFollowTail: event.metrics?.autoFollowTail ?? null,
+        });
+        if (scrollEvents.length > 32) scrollEvents.shift();
+      };
+      const observeProposalLayout = (
+        stage: "before-tail-preparation" | "before-baseline" | "before-final-assertion",
+      ) => {
+        const observation = readProposalListObservation(host, listRef, initialLoadObserved);
+        console.info(
+          "proposal-real-list-observation",
+          JSON.stringify({
+            stage,
+            following,
+            ...observation,
+            scrollEvents: [...scrollEvents],
+          }),
+        );
+        return observation;
+      };
       const view = await render(
         <TimelineFixture
           entries={messages(scope)}
           listRef={listRef}
           scope={scope}
           scheduledFollowups={context}
+          onDebugScrollEvent={observeScrollDebug}
         />,
         { container: host },
       );
@@ -502,6 +886,11 @@ describe("MessagesTimeline with real LegendList", () => {
           expect(host.querySelector("[data-scheduled-followup-notices]")).toBeNull();
         });
         await expectTail(host, listRef, `${scope}-message-39`);
+        // The original physical tail and fixed frames can precede LegendList's
+        // public bootstrap completion. A later footer must not be introduced
+        // into that initial interval and mistaken for independent review growth.
+        await vi.waitFor(() => expect(initialLoadObserved).toBe(true));
+        observeProposalLayout("before-tail-preparation");
         // Finish the initial alignment frames before exercising independent
         // footer growth, then place the real browser at the physical tail.
         for (let frame = 0; frame < 4; frame += 1) {
@@ -516,7 +905,44 @@ describe("MessagesTimeline with real LegendList", () => {
           await vi.waitFor(() => {
             expect(host.querySelector('[data-real-list-following="false"]')).not.toBeNull();
             expect(tailDistance(scroller)).toBeGreaterThan(400);
+            const observation = readProposalListObservation(host, listRef, initialLoadObserved);
+            expect(isProposalReviewBaselineReady(observation), JSON.stringify(observation)).toBe(
+              true,
+            );
           });
+        }
+        const baseline = observeProposalLayout("before-baseline");
+        if (!following) {
+          // Negative controls derive from this real native baseline, not mocked
+          // renderer/media/layout. Correct pixels cannot replace the exact load
+          // receipt, current logical range or completed known row measurements.
+          expect(isProposalReviewBaselineReady(baseline)).toBe(true);
+          expect(isProposalReviewBaselineReady({ ...baseline, initialLoadObserved: false })).toBe(
+            false,
+          );
+          expect(
+            isProposalReviewBaselineReady({ ...baseline, publicScroll: baseline.nativeScroll + 1 }),
+          ).toBe(false);
+          expect(isProposalReviewBaselineReady({ ...baseline, start: -1 })).toBe(false);
+          expect(isProposalReviewBaselineReady({ ...baseline, end: baseline.dataLength })).toBe(
+            false,
+          );
+          expect(
+            isProposalReviewBaselineReady({
+              ...baseline,
+              mounted: baseline.mounted.map((row, index) =>
+                index === 0 ? { ...row, knownSize: null } : row,
+              ),
+            }),
+          ).toBe(false);
+          expect(
+            isProposalReviewBaselineReady({
+              ...baseline,
+              mounted: baseline.mounted.map((row, index) =>
+                index === 0 ? { ...row, rowIdentityMatches: false } : row,
+              ),
+            }),
+          ).toBe(false);
         }
         const previousTop = scroller.scrollTop;
         const viewportBefore = scroller.getBoundingClientRect();
@@ -566,6 +992,7 @@ describe("MessagesTimeline with real LegendList", () => {
         for (let frame = 0; frame < 4; frame += 1) {
           await new Promise<void>((resolve) => window.requestAnimationFrame(() => resolve()));
         }
+        observeProposalLayout("before-final-assertion");
         if (following) {
           await vi.waitFor(() => {
             const viewport = scroller.getBoundingClientRect();

@@ -617,6 +617,9 @@ export function projectEvent(
                       ...(thread.session?.codexContextWindowOverride !== undefined
                         ? { codexContextWindowOverride: thread.session.codexContextWindowOverride }
                         : {}),
+                      ...(thread.session?.codexAutoCompactTokenLimit !== undefined
+                        ? { codexAutoCompactTokenLimit: thread.session.codexAutoCompactTokenLimit }
+                        : {}),
                       runtimeMode: payload.runtimeMode,
                       ...(thread.session?.subagentRuntimeId !== undefined
                         ? { subagentRuntimeId: thread.session.subagentRuntimeId }

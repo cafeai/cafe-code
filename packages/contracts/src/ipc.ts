@@ -34,8 +34,15 @@ import type {
   VisualizationListResult,
   VisualizationDetailsInput,
   VisualizationDetailsResult,
+  VisualizationInlineInput,
+  VisualizationInlineResult,
+  VisualizationInlineFrameInput,
+  VisualizationInlineFrameResult,
+  VisualizationInlineFrameRetireResult,
   VisualizationViewerInput,
   VisualizationViewerTicketResult,
+  VisualizationDiscardViewerTicketInput,
+  VisualizationDiscardViewerTicketResult,
   VisualizationExportHtmlResult,
 } from "./visualizationApi.ts";
 import type {
@@ -585,7 +592,19 @@ export interface EnvironmentApi {
   visualizations?: {
     list: (input: VisualizationListInput) => Promise<VisualizationListResult>;
     details: (input: VisualizationDetailsInput) => Promise<VisualizationDetailsResult>;
+    /** Missing on older backends; never emulate executable reads via Details. */
+    inline?: (input: VisualizationInlineInput) => Promise<VisualizationInlineResult>;
+    touchInlineFrame?: (
+      input: VisualizationInlineFrameInput,
+    ) => Promise<VisualizationInlineFrameResult>;
+    retireInlineFrame?: (
+      input: VisualizationInlineFrameInput,
+    ) => Promise<VisualizationInlineFrameRetireResult>;
     viewerTicket: (input: VisualizationViewerInput) => Promise<VisualizationViewerTicketResult>;
+    /** Old backends cannot safely emulate exact unused-ticket cancellation. */
+    discardViewerTicket?: (
+      input: VisualizationDiscardViewerTicketInput,
+    ) => Promise<VisualizationDiscardViewerTicketResult>;
     exportHtml?: (input: VisualizationDetailsInput) => Promise<VisualizationExportHtmlResult>;
   };
   /** Absent on older backends; never emulate a scheduler in the renderer. */

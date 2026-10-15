@@ -58,6 +58,38 @@ function assertCompactPolicyRows() {
   expect(sectionRect.right).toBeLessThanOrEqual(window.innerWidth);
 }
 
+function assertCompactContextFacts() {
+  const facts = document.querySelector<HTMLElement>("[data-context-window-facts]")!;
+  const rows = Array.from(facts.children) as HTMLElement[];
+  expect(rows).toHaveLength(2);
+  const primary = document.querySelector<HTMLElement>('[data-account-quota-window="primary"]')!;
+  expect(primary).not.toBeNull();
+  const primaryRows = Array.from(primary.children) as HTMLElement[];
+  const primaryLast = primaryRows.at(-1)!;
+  const primaryPrevious = primaryRows.at(-2)!;
+  const primaryGap =
+    primaryLast.getBoundingClientRect().top - primaryPrevious.getBoundingClientRect().bottom;
+  const rootRem = Number.parseFloat(getComputedStyle(document.documentElement).fontSize);
+  expect(Math.abs(primaryGap - rootRem * 0.25)).toBeLessThanOrEqual(0.75);
+  for (const [index, row] of rows.entries()) {
+    const style = getComputedStyle(row);
+    expect(
+      Math.abs(Number.parseFloat(style.lineHeight) - Number.parseFloat(style.fontSize) * 1.25),
+    ).toBeLessThanOrEqual(0.1);
+    expect(row.scrollWidth).toBeLessThanOrEqual(row.clientWidth + 1);
+    if (index > 0) {
+      const gap = row.getBoundingClientRect().top - rows[index - 1]!.getBoundingClientRect().bottom;
+      expect(gap).toBeGreaterThanOrEqual(0);
+      expect(Math.abs(gap - primaryGap)).toBeLessThanOrEqual(0.75);
+    }
+  }
+  // These outer boundaries stay distinct from the compact fact grouping.
+  const quota = primary.closest<HTMLElement>("[data-account-quota]")!.parentElement!;
+  expect(quota.parentElement).toBe(facts.parentElement);
+  expect(Number.parseFloat(getComputedStyle(quota).borderTopWidth)).toBeGreaterThan(0);
+  expect(Number.parseFloat(getComputedStyle(quota).paddingTop)).toBe(rootRem * 0.5);
+}
+
 function assertSinglePolicyRow(row: HTMLElement) {
   const section = row.parentElement!;
   expect(Array.from(section.children)).toEqual([row]);
@@ -128,7 +160,7 @@ describe("ContextWindowDetails reset availability", () => {
         usedPercentage: 20,
         remainingPercentage: 80,
         updatedAt: "2026-10-12T00:00:00.000Z",
-        totalProcessedTokens: null,
+        totalProcessedTokens: 2_600_000,
         inputTokens: null,
         cachedInputTokens: null,
         cacheWriteInputTokens: null,
@@ -143,7 +175,7 @@ describe("ContextWindowDetails reset availability", () => {
         lastReasoningOutputTokens: null,
         toolUses: null,
         durationMs: null,
-        compactsAutomatically: false,
+        compactsAutomatically: true,
         autoCompactTokenLimit: null,
       };
       const subagentConcurrency = {
@@ -157,17 +189,21 @@ describe("ContextWindowDetails reset availability", () => {
         configured: number | null | undefined,
         inherited?: number,
         showSubagent = true,
+        configuredAutoCompactTokenLimit?: number | null,
       ) => {
         const codexContextWindow = deriveCodexContextWindowPresentation({
           requested,
           configured,
           inherited,
+          configuredAutoCompactTokenLimit,
+          canApplyWhenIdle: true,
         });
         return layout === "rail" ? (
           <div style={{ width: 280, height: 600 }}>
             <SessionRail
               plan={null}
               usage={usage}
+              rateLimits={rateLimits}
               subagentConcurrency={showSubagent ? subagentConcurrency : null}
               codexContextWindow={codexContextWindow}
               onShowInComposer={() => {}}
@@ -177,6 +213,7 @@ describe("ContextWindowDetails reset availability", () => {
           <div style={{ width: 280 }}>
             <ContextWindowDetails
               usage={usage}
+              rateLimits={rateLimits}
               layout={layout}
               subagentConcurrency={showSubagent ? subagentConcurrency : undefined}
               codexContextWindow={codexContextWindow}
@@ -197,6 +234,12 @@ describe("ContextWindowDetails reset availability", () => {
           Node.DOCUMENT_POSITION_FOLLOWING,
       ).toBeTruthy();
       assertCompactPolicyRows();
+      assertCompactContextFacts();
+      await expect.element(page.getByText("(~900K compaction)", { exact: true })).toBeVisible();
+      await expect.element(page.getByText("Processed: 2.6m", { exact: true })).toBeVisible();
+      await expect
+        .element(page.getByText("Automatically compacts its context when needed.", { exact: true }))
+        .not.toBeInTheDocument();
       await expect.element(page.getByText("475k context used", { exact: true })).toBeVisible();
       expect(document.body.textContent).toContain("20%");
       if (layout === "rail") {
@@ -224,23 +267,27 @@ describe("ContextWindowDetails reset availability", () => {
         .element(page.getByText("Context override: 500K → 700K when idle", { exact: true }))
         .toBeVisible();
       assertCompactPolicyRows();
+      assertCompactContextFacts();
+      await expect.element(page.getByText("(~630K compaction)", { exact: true })).toBeVisible();
       await mounted.rerender(content(null, 500_000));
       await expect
         .element(
           page.getByText("Context override: 500K → Codex default when idle", { exact: true }),
         )
         .toBeVisible();
+      expect(document.querySelector("[data-codex-context-compaction-estimate]")).toBeNull();
       await mounted.rerender(content(null, undefined, 700_000));
       await expect
         .element(page.getByText("Context override: 700K · saved", { exact: true }))
         .toBeVisible();
+      await expect.element(page.getByText("(~630K compaction)", { exact: true })).toBeVisible();
       await expect.element(page.getByText("475k context used", { exact: true })).toBeVisible();
       await mounted.rerender(content(null, null));
       expect(document.querySelector("[data-codex-context-window-details]")).toBeNull();
       assertSinglePolicyRow(
         document.querySelector<HTMLElement>("[data-subagent-concurrency-details]")!,
       );
-      await mounted.rerender(content(700_000, 700_000, undefined, false));
+      await mounted.rerender(content(700_000, 700_000, undefined, false, 700_000));
       expect(document.querySelector("[data-subagent-concurrency-details]")).toBeNull();
       await expect.element(page.getByText("Context override: 700K", { exact: true })).toBeVisible();
       const finalPolicySection = assertSinglePolicyRow(
@@ -295,6 +342,7 @@ describe("ContextWindowDetails reset availability", () => {
           codexContextWindow={deriveCodexContextWindowPresentation({
             requested: 1_000_000,
             configured: 500_000,
+            canApplyWhenIdle: true,
           })}
           onShowInComposer={() => {}}
         />

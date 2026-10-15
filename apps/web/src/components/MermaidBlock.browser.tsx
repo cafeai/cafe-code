@@ -98,22 +98,66 @@ afterEach(() => {
 });
 
 describe("Mermaid block", () => {
-  it("keeps incomplete source exact and copyable without requesting a render", async () => {
+  it("keeps incomplete source exact and copyable without requesting a render", async ({
+    onTestFinished,
+  }) => {
     const source = "flowchart LR\n  A[Unfinished  \n";
-    const screen = await render(<MermaidBlock code={source} complete={false} theme="dark" />);
+    const copied = deferred<void>();
+    // Own settlement before native input: the production feedback timer must
+    // start after the awaited click returns, not while its provider round trip
+    // can still hide the entire transient label from this fixture's observer.
+    let retired = false;
+    let screen: Awaited<ReturnType<typeof render>> | undefined;
+    let pendingRender: ReturnType<typeof render> | undefined;
+    let cleanupPromise: Promise<void> | undefined;
+    const requireActive = () => {
+      if (retired) throw new Error("Mermaid copy fixture already retired");
+    };
+    const cleanup = () => {
+      if (cleanupPromise) return cleanupPromise;
+      retired = true;
+      cleanupPromise = (async () => {
+        try {
+          // The pinned renderer's automatic cleanup runs before the next test,
+          // not before this completion hook. Join our exact pending render and
+          // retire its component before releasing an abandoned clipboard call.
+          const ownedScreen = screen ?? (await pendingRender);
+          await ownedScreen?.unmount();
+        } finally {
+          // Release on rejected render/unmount as well. Promise settlement is
+          // idempotent, so finally and the completion hook share one cleanup.
+          copied.resolve(undefined);
+        }
+      })();
+      return cleanupPromise;
+    };
+    // Install ownership before render can yield. A hard deadline can settle the
+    // test without unwinding its async body; late work must join this cleanup.
+    onTestFinished(cleanup);
+    mocks.copy.mockReturnValueOnce(copied.promise);
     try {
+      pendingRender = render(<MermaidBlock code={source} complete={false} theme="dark" />);
+      screen = await pendingRender;
+      requireActive();
       expect(document.querySelector(".mermaid-source code")?.textContent).toBe(source);
       expect(mocks.render).not.toHaveBeenCalled();
       await expect
         .element(page.getByRole("button", { name: "Diagram", exact: true }))
         .toBeDisabled();
+      requireActive();
       await page.getByRole("button", { name: "Copy Mermaid source" }).click();
+      requireActive();
       expect(mocks.copy).toHaveBeenCalledExactlyOnceWith(source);
+      expect(page.getByText("Copied", { exact: true }).query()).toBeNull();
+      copied.resolve(undefined);
       await expect.element(page.getByText("Copied", { exact: true })).toBeVisible();
+      requireActive();
       await screen.rerender(<MermaidBlock code={source + "]"} complete theme="dark" />);
+      requireActive();
       await expect.element(page.getByRole("img", { name: "Fixture diagram" })).toBeVisible();
+      requireActive();
     } finally {
-      await screen.unmount();
+      await cleanup();
     }
   });
 

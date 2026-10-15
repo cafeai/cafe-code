@@ -11,8 +11,15 @@ import {
   VisualizationListResult,
   VisualizationDetailsInput,
   VisualizationDetailsResult,
+  VisualizationInlineInput,
+  VisualizationInlineResult,
+  VisualizationInlineFrameInput,
+  VisualizationInlineFrameResult,
+  VisualizationInlineFrameRetireResult,
   VisualizationViewerInput,
   VisualizationViewerTicketResult,
+  VisualizationDiscardViewerTicketInput,
+  VisualizationDiscardViewerTicketResult,
   VisualizationExportHtmlResult,
 } from "./visualizationApi.ts";
 import {
@@ -160,7 +167,11 @@ import { VcsError } from "./vcs.ts";
 export const WS_METHODS = {
   visualizationsList: "visualizations.list",
   visualizationsDetails: "visualizations.details",
+  visualizationsInline: "visualizations.inline",
+  visualizationsTouchInlineFrame: "visualizations.touchInlineFrame",
+  visualizationsRetireInlineFrame: "visualizations.retireInlineFrame",
   visualizationsViewerTicket: "visualizations.viewerTicket",
+  visualizationsDiscardViewerTicket: "visualizations.discardViewerTicket",
   visualizationsExportHtml: "visualizations.exportHtml",
   mcpAppsPrepare: "mcpApps.prepare",
   mcpAppsResolve: "mcpApps.resolve",
@@ -735,9 +746,29 @@ export const WsRpcGroup = RpcGroup.make(
     success: VisualizationDetailsResult,
     error: VisualizationApiError,
   }),
+  Rpc.make(WS_METHODS.visualizationsInline, {
+    payload: VisualizationInlineInput,
+    success: VisualizationInlineResult,
+    error: VisualizationApiError,
+  }),
+  Rpc.make(WS_METHODS.visualizationsTouchInlineFrame, {
+    payload: VisualizationInlineFrameInput,
+    success: VisualizationInlineFrameResult,
+    error: VisualizationApiError,
+  }),
+  Rpc.make(WS_METHODS.visualizationsRetireInlineFrame, {
+    payload: VisualizationInlineFrameInput,
+    success: VisualizationInlineFrameRetireResult,
+    error: VisualizationApiError,
+  }),
   Rpc.make(WS_METHODS.visualizationsViewerTicket, {
     payload: VisualizationViewerInput,
     success: VisualizationViewerTicketResult,
+    error: VisualizationApiError,
+  }),
+  Rpc.make(WS_METHODS.visualizationsDiscardViewerTicket, {
+    payload: VisualizationDiscardViewerTicketInput,
+    success: VisualizationDiscardViewerTicketResult,
     error: VisualizationApiError,
   }),
   Rpc.make(WS_METHODS.visualizationsExportHtml, {

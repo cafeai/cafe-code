@@ -276,9 +276,19 @@ describe("expandable private provider diagnostic work entries", () => {
         formatDiagnosticTimestamp(createdAt, "24-hour"),
       );
       await expect.element(page.getByText(snapshot.message!, { exact: true })).toBeVisible();
+      // Locale and copy-status labels change the real measured disclosure's
+      // geometry. Qualify the newly visible button's action only after that
+      // existing panel has laid out, without forcing input or its animation.
+      await waitForExpandedGeometry();
+      const copyCallIndex = vi.mocked(copyTextToClipboard).mock.calls.length;
       await page.getByRole("button", { name: copyName, exact: true }).click();
-      expect(vi.mocked(copyTextToClipboard).mock.calls.at(-1)?.[0]).toContain(copyHeading);
-      expect(vi.mocked(copyTextToClipboard).mock.calls.at(-1)?.[0]).toContain(snapshot.json);
+      // A previous locale's successful call is not evidence that this exact
+      // native click reached its current handler. Bind the assertion to one
+      // fresh invocation, then retain the exact locale and private-byte proof.
+      await vi.waitFor(() => expect(copyTextToClipboard).toHaveBeenCalledTimes(copyCallIndex + 1));
+      const copied = vi.mocked(copyTextToClipboard).mock.calls[copyCallIndex]?.[0];
+      expect(copied).toContain(copyHeading);
+      expect(copied).toContain(snapshot.json);
     }
   });
 

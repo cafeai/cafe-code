@@ -63,6 +63,7 @@ import type { ProviderInstance } from "../ProviderDriver.ts";
 import { makeManualOnlyProviderMaintenanceCapabilities } from "../providerMaintenance.ts";
 import type { ProviderSnapshotSource } from "../builtInProviderCatalog.ts";
 import { codexAuthWithSubscriptionPlan } from "../codexSubscription.ts";
+import { retainNativeCodexModelCatalog } from "../makeManagedServerProvider.ts";
 import {
   DEFAULT_PROVIDER_INCONCLUSIVE_FAILURE_THRESHOLD,
   hasConclusiveProviderAuthState,
@@ -167,9 +168,18 @@ export const mergeProviderSnapshot = (
       ? retainConclusiveProviderState(previousProvider, streakReconciledProvider)
       : streakReconciledProvider;
 
+  const catalogueProvider = retainNativeCodexModelCatalog(previousProvider, reconciledProvider);
   return {
-    ...reconciledProvider,
-    models: mergeProviderModels(previousProvider.models, reconciledProvider.models),
+    ...catalogueProvider,
+    // A trusted Codex producer explicitly distinguishes static fallback from
+    // successful native discovery. Both are complete catalogues; a generic
+    // union would revive retired fallback rows or native omissions. Older and
+    // other-driver snapshots keep their established sparse merge behavior.
+    models:
+      catalogueProvider.driver === "codex" &&
+      catalogueProvider.codexModelCatalogSource !== undefined
+        ? catalogueProvider.models
+        : mergeProviderModels(previousProvider.models, catalogueProvider.models),
     // Carry forward event-sourced account rate limits when an incoming snapshot
     // omits them. Claude's periodic probe never sends a prompt, so it produces no
     // `accountRateLimits`; without this, each refresh would wipe the limits accrued
@@ -482,6 +492,11 @@ const makeProviderRegistry = (options?: ProviderRegistryOptions) =>
             ),
           );
     const providersRef = yield* Ref.make<ReadonlyArray<ServerProvider>>(cachedProviders);
+    // Catalogue qualification belongs to an exact live provider object, not
+    // its reusable account id. This volatile map never hydrates from disk.
+    // A rebuilt owner must discover its own native catalogue even when its
+    // configuration/account spelling matches the retired owner exactly.
+    const catalogueOwners = new Map<ProviderInstanceId, ProviderInstance>();
     const maintenanceActionStatesRef = yield* Ref.make<
       ReadonlyMap<ProviderInstanceId, { readonly update?: ServerProviderUpdateState | undefined }>
     >(new Map());
@@ -496,6 +511,11 @@ const makeProviderRegistry = (options?: ProviderRegistryOptions) =>
     // Serialize `syncLiveSources` so a rapid burst of reconciles doesn't
     // interleave two passes clobbering each other's fiber bookkeeping.
     const syncSemaphore = yield* Semaphore.make(1);
+    // Catalogue admission is one ordered metadata transaction across direct,
+    // stream and startup delivery. Even inert Effect reads can yield, so exact
+    // owner identity alone cannot stop an older read overwriting a newer upsert.
+    // Provider refreshes remain outside this permit with their existing caps.
+    const upsertSemaphore = yield* Semaphore.make(1);
 
     const getLiveSources: Effect.Effect<ReadonlyArray<ProviderSnapshotSource>> = Ref.get(
       liveSubsRef,
@@ -540,22 +560,48 @@ const makeProviderRegistry = (options?: ProviderRegistryOptions) =>
       };
     });
 
-    const upsertProviders = Effect.fn("upsertProviders")(function* (
+    const upsertProvidersBody = Effect.fn("upsertProvidersBody")(function* (
       nextProviders: ReadonlyArray<ServerProvider>,
       options?: {
         readonly publish?: boolean;
         readonly persist?: boolean;
         readonly replace?: boolean;
         readonly replaceModels?: boolean;
+        readonly instance?: ProviderInstance;
       },
     ) {
-      const nextProvidersWithUpdateState = yield* Effect.forEach(
+      let nextProvidersWithUpdateState: ReadonlyArray<ServerProvider> = yield* Effect.forEach(
         nextProviders,
         applyProviderUpdateState,
         {
           concurrency: "unbounded",
         },
       );
+      if (options?.instance?.snapshot.getCurrentSnapshot) {
+        // Preparation above can yield to a newer model refresh. Read the
+        // inert owner view at the final boundary rather than admitting the
+        // historical copy captured before that preparation.
+        const current = yield* options.instance.snapshot.getCurrentSnapshot;
+        const correlated = yield* correlateSnapshotWithSource(
+          buildSnapshotSource(options.instance),
+          current,
+        );
+        const preparedUpdate = nextProvidersWithUpdateState[0]?.updateState;
+        const { updateState: _currentUpdate, ...currentWithoutUpdate } = correlated;
+        nextProvidersWithUpdateState = [
+          preparedUpdate
+            ? { ...currentWithoutUpdate, updateState: preparedUpdate }
+            : currentWithoutUpdate,
+        ];
+      }
+      if (
+        options?.instance &&
+        (yield* instanceRegistry.getInstance(options.instance.instanceId)) !== options.instance
+      ) {
+        // Update-state preparation can yield. Recheck the owner at the final
+        // mutation boundary, not merely before reading its current snapshot.
+        return yield* Ref.get(providersRef);
+      }
       const [previousProviders, providers, providersToPersist] = yield* Ref.modify(
         providersRef,
         (previousProviders) => {
@@ -567,21 +613,35 @@ const makeProviderRegistry = (options?: ProviderRegistryOptions) =>
           for (const provider of nextProvidersWithUpdateState) {
             const key = snapshotInstanceKey(provider);
             updatedKeys.add(key);
-            const previousProvider = mergedProviders.get(key);
+            let previousProvider = mergedProviders.get(key);
+            if (options?.instance) {
+              if (
+                previousProvider?.driver === "codex" &&
+                previousProvider.codexModelCatalogSource === "native" &&
+                catalogueOwners.get(key) !== options.instance
+              ) {
+                const { codexModelCatalogSource: _retiredSource, ...historicalProvider } =
+                  previousProvider;
+                previousProvider = historicalProvider;
+              }
+              catalogueOwners.set(key, options.instance);
+            }
             const mergedProvider =
               options?.replace === true
                 ? provider
                 : mergeProviderSnapshot(previousProvider, provider);
             mergedProviders.set(
               key,
-              options?.replaceModels === true
+              options?.replaceModels === true &&
+                (provider.driver !== "codex" || provider.codexModelCatalogSource === undefined)
                 ? {
                     ...mergedProvider,
                     // A successful provider-owned model/list response is the
                     // authoritative catalogue. Do not let the generic sparse
                     // snapshot merge resurrect retired fallback/static slugs.
-                    // Empty and failed reads never reach this path: the driver
-                    // retains its current snapshot for those inconclusive cases.
+                    // Legacy sources have no finite provenance and retain this
+                    // historical direct-refresh policy. Proven Codex catalogues
+                    // use the source-aware merge above, including native empty.
                     models: provider.models,
                   }
                 : mergedProvider,
@@ -611,139 +671,173 @@ const makeProviderRegistry = (options?: ProviderRegistryOptions) =>
       return providers;
     });
 
+    // Keep cache/publication ordering inside the same permit too: publishing an
+    // old captured array after a newer mutation would regress its consumers even
+    // when the final providersRef was correct. This body performs no probe.
+    const upsertProviders: typeof upsertProvidersBody = (nextProviders, options) =>
+      upsertSemaphore.withPermits(1)(upsertProvidersBody(nextProviders, options));
+
     const syncProvider = Effect.fn("syncProvider")(function* (
       provider: ServerProvider,
       options?: {
         readonly publish?: boolean;
         readonly replaceModels?: boolean;
+        readonly instance?: ProviderInstance;
       },
     ) {
       return yield* upsertProviders([provider], options);
     });
 
-    const updateProviderAccountRateLimits = Effect.fn("updateProviderAccountRateLimits")(function* (
-      input:
-        | {
-            readonly instanceId: ProviderInstanceId;
-            readonly slot: "primary" | "secondary";
-            readonly window: ServerProviderAccountRateLimitWindow;
-            readonly checkedAt: string;
-          }
-        | {
-            readonly instanceId: ProviderInstanceId;
-            readonly limitId: string;
-            readonly snapshot: ServerProviderAccountRateLimitSnapshot;
-            readonly checkedAt: string;
-          },
+    const syncOwnedProvider = Effect.fn("syncOwnedProvider")(function* (
+      instance: ProviderInstance,
+      published: ServerProvider,
+      options?: { readonly replaceModels?: boolean },
     ) {
-      type RateLimitUpdateResult =
-        | { readonly changed: false }
-        | { readonly changed: true; readonly providers: ReadonlyArray<ServerProvider> };
-
-      const result = yield* Ref.modify(
-        providersRef,
-        (previousProviders): readonly [RateLimitUpdateResult, ReadonlyArray<ServerProvider>] => {
-          const provider = previousProviders.find(
-            (candidate) => candidate.instanceId === input.instanceId,
-          );
-          if (provider === undefined) {
-            // Event arrived for an instance the aggregator isn't tracking (e.g. a
-            // race at boot). Drop it — the next event will land once it's registered.
-            return [{ changed: false }, previousProviders];
-          }
-          const previousRateLimits = provider.accountRateLimits;
-          const nextRateLimits: ServerProviderAccountRateLimits =
-            "snapshot" in input
-              ? mergeProviderAccountRateLimitSnapshot({
-                  previous: previousRateLimits,
-                  limitId: input.limitId,
-                  snapshot: input.snapshot,
-                  checkedAt: input.checkedAt,
-                })
-              : {
-                  rateLimits:
-                    input.slot === "primary"
-                      ? { ...previousRateLimits?.rateLimits, primary: input.window }
-                      : { ...previousRateLimits?.rateLimits, secondary: input.window },
-                  ...(previousRateLimits?.rateLimitsByLimitId != null
-                    ? { rateLimitsByLimitId: previousRateLimits.rateLimitsByLimitId }
-                    : {}),
-                  ...(previousRateLimits?.rateLimitResetCredits !== undefined
-                    ? { rateLimitResetCredits: previousRateLimits.rateLimitResetCredits }
-                    : {}),
-                  checkedAt: input.checkedAt,
-                };
-          const nextProvider: ServerProvider = {
-            ...provider,
-            accountRateLimits: nextRateLimits,
-            // Only a fresh canonical Codex bucket can update the subscription
-            // label. Sparse quota-only or auxiliary-model updates keep it intact.
-            ...(provider.driver === "codex" && "snapshot" in input && input.limitId === "codex"
-              ? { auth: codexAuthWithSubscriptionPlan(provider.auth, input.snapshot.planType) }
-              : {}),
-          };
-          if (Equal.equals(provider, nextProvider)) {
-            return [{ changed: false }, previousProviders];
-          }
-          const nextProviders: ReadonlyArray<ServerProvider> = previousProviders.map((candidate) =>
-            candidate.instanceId === input.instanceId ? nextProvider : candidate,
-          );
-          return [{ changed: true, providers: nextProviders }, nextProviders];
-        },
-      );
-      if (result.changed) {
-        yield* PubSub.publish(changesPubSub, result.providers);
+      if ((yield* instanceRegistry.getInstance(instance.instanceId)) !== instance) {
+        return yield* Ref.get(providersRef);
       }
+      const source = buildSnapshotSource(instance);
+      // Validate even a stale delivery's routing tuple before replacing it
+      // with the owner's inert current view. Never conceal an invalid producer.
+      yield* correlateSnapshotWithSource(source, published);
+      return yield* syncProvider(published, { ...options, instance });
     });
 
-    const setProviderMaintenanceActionState = Effect.fn("setProviderMaintenanceActionState")(
-      function* (input: {
-        readonly instanceId: ProviderInstanceId;
-        readonly action: "update";
-        readonly state: ServerProviderUpdateState | null;
-      }) {
-        yield* Ref.update(maintenanceActionStatesRef, (previous) => {
-          const previousActions = previous.get(input.instanceId);
-          const nextActions = { ...previousActions };
-          if (input.state === null || input.state.status === "idle") {
-            delete nextActions[input.action];
-          } else {
-            nextActions[input.action] = input.state;
-          }
+    const updateProviderAccountRateLimitsBody = Effect.fn("updateProviderAccountRateLimitsBody")(
+      function* (
+        input:
+          | {
+              readonly instanceId: ProviderInstanceId;
+              readonly slot: "primary" | "secondary";
+              readonly window: ServerProviderAccountRateLimitWindow;
+              readonly checkedAt: string;
+            }
+          | {
+              readonly instanceId: ProviderInstanceId;
+              readonly limitId: string;
+              readonly snapshot: ServerProviderAccountRateLimitSnapshot;
+              readonly checkedAt: string;
+            },
+      ) {
+        type RateLimitUpdateResult =
+          | { readonly changed: false }
+          | { readonly changed: true; readonly providers: ReadonlyArray<ServerProvider> };
 
-          const next = new Map(previous);
-          if (Object.keys(nextActions).length === 0) {
-            next.delete(input.instanceId);
-          } else {
-            next.set(input.instanceId, nextActions);
-          }
-          return next;
-        });
-
-        const existingProviders = yield* Ref.get(providersRef);
-        const matchingProvider = existingProviders.find(
-          (candidate) => candidate.instanceId === input.instanceId,
+        const result = yield* Ref.modify(
+          providersRef,
+          (previousProviders): readonly [RateLimitUpdateResult, ReadonlyArray<ServerProvider>] => {
+            const provider = previousProviders.find(
+              (candidate) => candidate.instanceId === input.instanceId,
+            );
+            if (provider === undefined) {
+              // Event arrived for an instance the aggregator isn't tracking (e.g. a
+              // race at boot). Drop it — the next event will land once it's registered.
+              return [{ changed: false }, previousProviders];
+            }
+            const previousRateLimits = provider.accountRateLimits;
+            const nextRateLimits: ServerProviderAccountRateLimits =
+              "snapshot" in input
+                ? mergeProviderAccountRateLimitSnapshot({
+                    previous: previousRateLimits,
+                    limitId: input.limitId,
+                    snapshot: input.snapshot,
+                    checkedAt: input.checkedAt,
+                  })
+                : {
+                    rateLimits:
+                      input.slot === "primary"
+                        ? { ...previousRateLimits?.rateLimits, primary: input.window }
+                        : { ...previousRateLimits?.rateLimits, secondary: input.window },
+                    ...(previousRateLimits?.rateLimitsByLimitId != null
+                      ? { rateLimitsByLimitId: previousRateLimits.rateLimitsByLimitId }
+                      : {}),
+                    ...(previousRateLimits?.rateLimitResetCredits !== undefined
+                      ? { rateLimitResetCredits: previousRateLimits.rateLimitResetCredits }
+                      : {}),
+                    checkedAt: input.checkedAt,
+                  };
+            const nextProvider: ServerProvider = {
+              ...provider,
+              accountRateLimits: nextRateLimits,
+              // Only a fresh canonical Codex bucket can update the subscription
+              // label. Sparse quota-only or auxiliary-model updates keep it intact.
+              ...(provider.driver === "codex" && "snapshot" in input && input.limitId === "codex"
+                ? { auth: codexAuthWithSubscriptionPlan(provider.auth, input.snapshot.planType) }
+                : {}),
+            };
+            if (Equal.equals(provider, nextProvider)) {
+              return [{ changed: false }, previousProviders];
+            }
+            const nextProviders: ReadonlyArray<ServerProvider> = previousProviders.map(
+              (candidate) => (candidate.instanceId === input.instanceId ? nextProvider : candidate),
+            );
+            return [{ changed: true, providers: nextProviders }, nextProviders];
+          },
         );
-        if (!matchingProvider) {
-          return existingProviders;
+        if (result.changed) {
+          yield* PubSub.publish(changesPubSub, result.providers);
         }
-
-        const nextProvider = yield* applyProviderUpdateState(matchingProvider);
-        return yield* upsertProviders([nextProvider], {
-          persist: false,
-        });
       },
     );
+    // Quota receipts alter the same published array. They cannot overtake a
+    // catalogue mutation still persisting its prior publication under this lock.
+    const updateProviderAccountRateLimits: typeof updateProviderAccountRateLimitsBody = (input) =>
+      upsertSemaphore.withPermits(1)(updateProviderAccountRateLimitsBody(input));
+
+    const setProviderMaintenanceActionStateBody = Effect.fn(
+      "setProviderMaintenanceActionStateBody",
+    )(function* (input: {
+      readonly instanceId: ProviderInstanceId;
+      readonly action: "update";
+      readonly state: ServerProviderUpdateState | null;
+    }) {
+      yield* Ref.update(maintenanceActionStatesRef, (previous) => {
+        const previousActions = previous.get(input.instanceId);
+        const nextActions = { ...previousActions };
+        if (input.state === null || input.state.status === "idle") {
+          delete nextActions[input.action];
+        } else {
+          nextActions[input.action] = input.state;
+        }
+
+        const next = new Map(previous);
+        if (Object.keys(nextActions).length === 0) {
+          next.delete(input.instanceId);
+        } else {
+          next.set(input.instanceId, nextActions);
+        }
+        return next;
+      });
+
+      const existingProviders = yield* Ref.get(providersRef);
+      const matchingProvider = existingProviders.find(
+        (candidate) => candidate.instanceId === input.instanceId,
+      );
+      if (!matchingProvider) {
+        return existingProviders;
+      }
+
+      const nextProvider = yield* applyProviderUpdateState(matchingProvider);
+      // The caller already owns the upsert permit. Read the latest row only
+      // after acquiring it, then patch presentation without recursively taking
+      // the same permit or replaying a previously captured native catalogue.
+      return yield* upsertProvidersBody([nextProvider], {
+        persist: false,
+      });
+    });
+    const setProviderMaintenanceActionState: typeof setProviderMaintenanceActionStateBody = (
+      input,
+    ) => upsertSemaphore.withPermits(1)(setProviderMaintenanceActionStateBody(input));
 
     const refreshOneSource = Effect.fn("refreshOneSource")(function* (
       providerSource: ProviderSnapshotSource,
     ) {
+      const instance = yield* instanceRegistry.getInstance(providerSource.instanceId);
+      if (!instance || instance.snapshot.refresh !== providerSource.refresh) {
+        return yield* Ref.get(providersRef);
+      }
       return yield* providerSource.refresh.pipe(
-        Effect.flatMap((nextProvider) =>
-          correlateSnapshotWithSource(providerSource, nextProvider).pipe(
-            Effect.flatMap(syncProvider),
-          ),
-        ),
+        Effect.flatMap((nextProvider) => syncOwnedProvider(instance, nextProvider)),
       );
     });
 
@@ -790,12 +884,15 @@ const makeProviderRegistry = (options?: ProviderRegistryOptions) =>
       if (!providerSource?.refreshAccountUsage) {
         return yield* Ref.get(providersRef);
       }
+      const instance = yield* instanceRegistry.getInstance(instanceId);
+      if (
+        !instance ||
+        instance.snapshot.refreshAccountUsage !== providerSource.refreshAccountUsage
+      ) {
+        return yield* Ref.get(providersRef);
+      }
       return yield* providerSource.refreshAccountUsage.pipe(
-        Effect.flatMap((nextProvider) =>
-          correlateSnapshotWithSource(providerSource, nextProvider).pipe(
-            Effect.flatMap(syncProvider),
-          ),
-        ),
+        Effect.flatMap((nextProvider) => syncOwnedProvider(instance, nextProvider)),
       );
     });
 
@@ -808,7 +905,6 @@ const makeProviderRegistry = (options?: ProviderRegistryOptions) =>
         return yield* Ref.get(providersRef);
       }
 
-      const providerSource = buildSnapshotSource(instance);
       // The driver operation is independently bounded and owned by the
       // provider scope. Once admitted, finish the authoritative sync even if a
       // short-lived WebSocket caller disconnects; otherwise the provider's
@@ -823,13 +919,7 @@ const makeProviderRegistry = (options?: ProviderRegistryOptions) =>
                 if (currentInstance !== instance) {
                   return Ref.get(providersRef);
                 }
-                return correlateSnapshotWithSource(providerSource, nextProvider).pipe(
-                  Effect.flatMap((provider) =>
-                    syncProvider(provider, {
-                      replaceModels: true,
-                    }),
-                  ),
-                );
+                return syncOwnedProvider(instance, nextProvider, { replaceModels: true });
               }),
             ),
           ),
@@ -873,14 +963,14 @@ const makeProviderRegistry = (options?: ProviderRegistryOptions) =>
     const syncLiveSourcesBody = (admissions: Set<ProviderInstance>) =>
       Effect.gen(function* () {
         const instances = yield* instanceRegistry.listInstances;
-        const unavailableProviders = yield* instanceRegistry.listUnavailable;
+        // Preserve admission's early metadata qualification: an unavailable
+        // inventory defect must fail pending barriers before any health work
+        // starts. This observation is not reusable after those awaited probes;
+        // the final publication transaction obtains its own current inventory.
+        yield* instanceRegistry.listUnavailable;
         const nextByInstance = new Map<ProviderInstanceId, ProviderInstance>(
           instances.map((instance) => [instance.instanceId, instance] as const),
         );
-        const knownInstanceIds = new Set<ProviderInstanceId>(nextByInstance.keys());
-        for (const provider of unavailableProviders) {
-          knownInstanceIds.add(snapshotInstanceKey(provider));
-        }
         const previousSubs = yield* Ref.get(liveSubsRef);
 
         // Carry over subscriptions for instances whose identity is
@@ -905,17 +995,57 @@ const makeProviderRegistry = (options?: ProviderRegistryOptions) =>
           newlyAdded.push([instanceId, instance] as const);
           yield* barrierFor(instance);
           admissions.add(instance);
+          yield* upsertSemaphore.withPermits(1)(
+            Effect.gen(function* () {
+              // Do not retire a newer owner's proof if this serialized sync pass
+              // was itself replaced while waiting for a preceding publication.
+              if ((yield* instanceRegistry.getInstance(instanceId)) !== instance) return;
+              if (catalogueOwners.get(instanceId) === instance) return;
+              // Replacement itself retires native proof, even if the new
+              // owner's initial health probe later fails. Historical rows may
+              // remain visible, but they cannot qualify the new scope.
+              catalogueOwners.delete(instanceId);
+              const [changed, providers] = yield* Ref.modify(providersRef, (previous) => {
+                let changed = false;
+                const providers = previous.map((provider) => {
+                  if (
+                    provider.instanceId !== instanceId ||
+                    provider.driver !== "codex" ||
+                    provider.codexModelCatalogSource !== "native"
+                  )
+                    return provider;
+                  changed = true;
+                  const { codexModelCatalogSource: _retiredSource, ...historical } = provider;
+                  return historical;
+                });
+                return [[changed, providers] as const, providers] as const;
+              });
+              if (changed) yield* PubSub.publish(changesPubSub, providers);
+            }),
+          );
         }
 
         if (options?.initialAdmission === "background") {
           // Rich health must describe this owner's pending generation rather
           // than retaining a replaced runtime's known version during admission.
-          yield* upsertProviders(
-            yield* loadProviders(newlyAdded.map(([, instance]) => buildSnapshotSource(instance))),
-            {
-              persist: false,
-              replace: true,
-            },
+          // A getSnapshot result can be delayed behind a newer native catalogue
+          // or a replacement. Preserve the original snapshot-read concurrency,
+          // but admit each result through its exact owner's current-view fence.
+          yield* Effect.forEach(
+            newlyAdded,
+            ([, instance]) =>
+              Effect.gen(function* () {
+                if ((yield* instanceRegistry.getInstance(instance.instanceId)) !== instance) return;
+                const source = buildSnapshotSource(instance);
+                const snapshot = yield* source.getSnapshot;
+                const correlated = yield* correlateSnapshotWithSource(source, snapshot);
+                yield* upsertProviders([correlated], {
+                  persist: false,
+                  replace: true,
+                  instance,
+                });
+              }),
+            { concurrency: "unbounded", discard: true },
           );
         }
 
@@ -935,9 +1065,7 @@ const makeProviderRegistry = (options?: ProviderRegistryOptions) =>
                   // the replacement instance that now owns this routing key.
                   return Effect.void;
                 }
-                return correlateSnapshotWithSource(source, provider).pipe(
-                  Effect.flatMap(syncProvider),
-                );
+                return syncOwnedProvider(instance, provider);
               }),
             ),
           ).pipe(Effect.forkScoped);
@@ -962,9 +1090,7 @@ const makeProviderRegistry = (options?: ProviderRegistryOptions) =>
                 // Direct startup results need the same generation fence as the
                 // stream subscription; a stale result cannot qualify its heir.
                 if ((yield* instanceRegistry.getInstance(instance.instanceId)) !== instance) return;
-                yield* correlateSnapshotWithSource(source, provider).pipe(
-                  Effect.flatMap(syncProvider),
-                );
+                yield* syncOwnedProvider(instance, provider);
               }).pipe(
                 Effect.ignoreCause({ log: true }),
                 Effect.ensuring(
@@ -980,10 +1106,6 @@ const makeProviderRegistry = (options?: ProviderRegistryOptions) =>
             }),
           { concurrency: INITIAL_PROVIDER_REFRESH_CONCURRENCY, discard: true },
         );
-        yield* upsertProviders(unavailableProviders, {
-          persist: false,
-          replace: true,
-        });
 
         const nextSubs = new Map(carriedOver);
         for (const [instanceId, instance] of newlyAdded) {
@@ -993,29 +1115,59 @@ const makeProviderRegistry = (options?: ProviderRegistryOptions) =>
 
         // Drop aggregator state for instances that have disappeared —
         // otherwise the UI would keep rendering ghosts.
-        const [previousProviders, providers] = yield* Ref.modify(
-          providersRef,
-          (previousProviders) => {
-            const providers = orderProviderSnapshots(
-              previousProviders.filter((provider) =>
-                knownInstanceIds.has(snapshotInstanceKey(provider)),
-              ),
+        // Hold only local metadata cleanup/publication here. Initial refreshes,
+        // subscription construction and admission barriers above stay outside.
+        yield* upsertSemaphore.withPermits(1)(
+          Effect.gen(function* () {
+            // Health above can outlive this pass's captured owner inventory.
+            // Re-read only the inert registry view after acquiring publication
+            // ownership: a newer directly admitted catalogue must not be pruned
+            // or lose its private owner proof because the old health was slow.
+            // Subscription bookkeeping deliberately remains the captured pass's
+            // responsibility; the queued next pass attaches the current sources.
+            const currentInstances = yield* instanceRegistry.listInstances;
+            const currentUnavailable = yield* instanceRegistry.listUnavailable;
+            const currentByInstance = new Map<ProviderInstanceId, ProviderInstance>(
+              currentInstances.map((instance) => [instance.instanceId, instance] as const),
             );
-            return [[previousProviders, providers] as const, providers];
-          },
-        );
-        if (haveProvidersChanged(previousProviders, providers)) {
-          yield* PubSub.publish(changesPubSub, providers);
-        }
-        yield* Ref.update(maintenanceActionStatesRef, (previous) => {
-          const next = new Map(previous);
-          for (const instanceId of previous.keys()) {
-            if (!knownInstanceIds.has(instanceId)) {
-              next.delete(instanceId);
+            const knownInstanceIds = new Set<ProviderInstanceId>(currentByInstance.keys());
+            for (const provider of currentUnavailable) {
+              knownInstanceIds.add(snapshotInstanceKey(provider));
             }
-          }
-          return next;
-        });
+            // This transaction already holds the permit. A stale unavailable
+            // snapshot from before health cannot overwrite a now-live owner;
+            // publish only the freshly received unavailable inventory here.
+            yield* upsertProvidersBody(currentUnavailable, { persist: false, replace: true });
+            const [previousProviders, providers] = yield* Ref.modify(
+              providersRef,
+              (previousProviders) => {
+                const providers = orderProviderSnapshots(
+                  previousProviders.filter((provider) =>
+                    knownInstanceIds.has(snapshotInstanceKey(provider)),
+                  ),
+                );
+                return [[previousProviders, providers] as const, providers];
+              },
+            );
+            if (haveProvidersChanged(previousProviders, providers)) {
+              yield* PubSub.publish(changesPubSub, providers);
+            }
+            yield* Ref.update(maintenanceActionStatesRef, (previous) => {
+              const next = new Map(previous);
+              for (const instanceId of previous.keys()) {
+                if (!knownInstanceIds.has(instanceId)) {
+                  next.delete(instanceId);
+                }
+              }
+              return next;
+            });
+            for (const instanceId of catalogueOwners.keys()) {
+              if (currentByInstance.get(instanceId) !== catalogueOwners.get(instanceId)) {
+                catalogueOwners.delete(instanceId);
+              }
+            }
+          }),
+        );
       });
     const syncLiveSources = syncSemaphore.withPermits(1)(
       Effect.suspend(() => {

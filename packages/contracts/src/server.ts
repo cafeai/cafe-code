@@ -237,6 +237,9 @@ export const ServerProviderRuntimeCapabilities = Schema.Struct({
   // Fleet presentation is advisory; final authenticated native-owner
   // capability admission still controls explicit context requests.
   codexContextWindow: Schema.optional(Schema.Boolean),
+  // This backend knows paired request provenance; native-owner RPC remains
+  // authoritative. Absence on an older build is unsupported, never inferred.
+  codexContextCompaction: Schema.optional(Schema.Boolean),
   /** Explicit priority is qualified against the configured native CLI. */
   deliveryPriority: Schema.optional(Schema.Boolean),
   taskControls: Schema.optional(Schema.Boolean),
@@ -385,6 +388,10 @@ export const ServerProvider = Schema.Struct({
   // Surfaces in the UI alongside the missing-driver affordance.
   unavailableReason: Schema.optional(TrimmedNonEmptyString),
   models: Schema.Array(ServerProviderModel),
+  // Optional finite producer provenance, not account entitlement or an
+  // ordering/ownership token. Legacy omission is unknown: neither cached
+  // rows nor model slugs may manufacture successful native discovery.
+  codexModelCatalogSource: Schema.optionalKey(Schema.Literals(["fallback", "native"])),
   slashCommands: Schema.Array(ServerProviderSlashCommand).pipe(
     Schema.withDecodingDefault(Effect.succeed([])),
   ),

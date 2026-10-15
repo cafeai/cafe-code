@@ -91,7 +91,13 @@ function makeOrderedRailFixture() {
     summary: kind === "tool.updated" ? "Updated command" : "Command run",
     turnId,
     createdAt: "2026-10-12T00:00:01.000Z",
-    payload: { itemId: "short-lived-command", itemType: "command_execution" },
+    payload: {
+      itemId: "short-lived-command",
+      itemType: "command_execution",
+      nativeWorkRuntimeId: runtimeId,
+      taskOwner:
+        kind === "tool.updated" ? { type: "child", id: "ordered-rail-child" } : { type: "root" },
+    },
   });
   return { api, providerContext, scheduledContext, tool, workflow };
 }
@@ -243,6 +249,27 @@ describe("SessionRail", () => {
             expect(currentRow.querySelector("[data-provider-task-title]")?.textContent).toBe(
               index === 0 ? "Command run" : "Updated command",
             );
+            const ownerSlot = currentRow.querySelector<HTMLElement>(
+              "[data-provider-task-owner-slot]",
+            )!;
+            expect(ownerSlot).not.toBeNull();
+            expect(ownerSlot.getBoundingClientRect().width).toBeGreaterThan(0);
+            if (index === 0) expect(ownerSlot.childElementCount).toBe(0);
+            else {
+              const ownerIcon = ownerSlot.querySelector<SVGElement>("[data-cafe-subagent-avatar]")!;
+              const rosterIcon = rail.querySelector<SVGElement>(
+                "[data-composer-subagent-list] [data-cafe-subagent-avatar]",
+              )!;
+              expect(ownerIcon.innerHTML).toBe(rosterIcon.innerHTML);
+              expect(ownerIcon.dataset.palette).toBe(rosterIcon.dataset.palette);
+              expect(ownerIcon.dataset.petalShape).toBe(rosterIcon.dataset.petalShape);
+              expect(ownerIcon.getAttribute("aria-hidden")).toBe("true");
+              expect(ownerIcon.getAttribute("focusable")).toBe("false");
+              expect(ownerIcon.getBoundingClientRect().width).toBe(
+                ownerSlot.getBoundingClientRect().width,
+              );
+              expect(currentRow.outerHTML).not.toContain("ordered-rail-child");
+            }
             const screenshotDirectory = import.meta.env.VITE_PROVIDER_TASK_SCREENSHOT_DIR;
             if (
               index === 0 &&

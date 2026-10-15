@@ -36,6 +36,8 @@ import {
 } from "./providerTaskControls.ts";
 import { ProviderCommandCatalog } from "./providerCommands.ts";
 import { ProviderSessionQuotaReport } from "./providerQuota.ts";
+import { ProviderTaskOwner } from "./providerTaskOwnership.ts";
+import { CodexCompactionObservation } from "./codexCompactionDiagnostics.ts";
 import { CodexTransientFailureCategory } from "./providerRuntime.ts";
 
 import { ProviderSecurityReport } from "./providerSecurity.ts";
@@ -85,6 +87,10 @@ export const ProviderSession = Schema.Struct({
   // Recorded Cafe native override, never the provider's effective capacity.
   // Absent is legacy unknown; null positively records no Cafe numeric key.
   codexContextWindowOverride: Schema.optional(Schema.NullOr(CodexContextWindowOverride)),
+  // Exact nominal auto-compaction request sent by this native opening, not the
+  // provider's resolved threshold. Null positively records omission; a legacy
+  // runtime missing this field has unknown pairing even if its context matches.
+  codexAutoCompactTokenLimit: Schema.optional(Schema.NullOr(CodexContextWindowOverride)),
   threadId: ThreadId,
   resumeCursor: Schema.optional(Schema.Unknown),
   // Server-owned read-only history coordinates, distinct from permission to
@@ -283,6 +289,12 @@ export const ProviderSendTurnInput = Schema.Struct({
       turnId: TurnId,
       providerThreadId: TrimmedNonEmptyString,
       subagentRuntimeId: SubagentRuntimeId,
+      // Internal cold-recovery policy. Legacy callers omit it and retain the
+      // existing same-owner continuation boundary. The restart requires the
+      // exact immutable failure time as well as its root/process identity.
+      restartSession: Schema.optional(Schema.Literal(true)),
+      observedAt: Schema.optional(IsoDateTime),
+      providerInstanceId: Schema.optional(ProviderInstanceId),
     }),
   ),
   input: Schema.optional(
@@ -329,6 +341,16 @@ export type ProviderSteerTurnInput = typeof ProviderSteerTurnInput.Type;
 export const ProviderTurnStartResult = Schema.Struct({
   threadId: ThreadId,
   turnId: TurnId,
+  // Authenticated Cafe-owner evidence of one guarded cold restart. It binds
+  // the old failed generation to the new accepting generation without ever
+  // making a native conversation identifier into client authority.
+  recoverySession: Schema.optional(
+    Schema.Struct({
+      previousSubagentRuntimeId: SubagentRuntimeId,
+      subagentRuntimeId: SubagentRuntimeId,
+      providerThreadId: TrimmedNonEmptyString,
+    }),
+  ),
   // Native Codex session routing frozen at this start's admission. Optional
   // for older daemons/providers; standard must be explicit, never guessed.
   resolvedServiceTier: Schema.optional(
@@ -402,6 +424,12 @@ const ProviderEventKind = Schema.Literals(["session", "notification", "request",
 export const ProviderEvent = Schema.Struct({
   id: EventId,
   subagentRuntimeId: Schema.optional(SubagentRuntimeId),
+  // Source ownership is minted by the admitted route, never native tool data.
+  // It remains optional presentation metadata and carries no task authority.
+  taskOwner: Schema.optional(ProviderTaskOwner),
+  // Only an already-admitted native compaction edge may carry this finite
+  // diagnostic witness, outside raw provider data and all paid-input contracts.
+  codexCompactionObservation: Schema.optional(CodexCompactionObservation),
   // Reserved owner-authored metadata, outside the untrusted native payload.
   // Used only on an exact terminal root publication after fresh local checks.
   nativeContextAvailable: Schema.optional(Schema.Literal(true)),

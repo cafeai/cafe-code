@@ -385,3 +385,25 @@ export function contextCompactionDisplayLabel(label: string): string | undefined
       return undefined;
   }
 }
+
+/**
+ * These two server-authored delivery envelopes are concise public observations,
+ * not native detail previews. Do not inspect their payload or render a received
+ * summary: old/new rows may retain private correlation and recovery metadata.
+ * This presentation grants no acceptance, settlement, retry or replay authority.
+ */
+export function codexSteerDeliveryWorkLogLabel(
+  kind: string,
+): { readonly label: string; readonly displayLabel: string } | null {
+  switch (kind) {
+    case "provider.turn.steer.delivery-attempted":
+      return {
+        label: "Steer delivery attempted",
+        displayLabel: uiText("Steer delivery attempted"),
+      };
+    case "provider.turn.steer.accepted":
+      return { label: "Steer accepted", displayLabel: uiText("Steer accepted") };
+    default:
+      return null;
+  }
+}

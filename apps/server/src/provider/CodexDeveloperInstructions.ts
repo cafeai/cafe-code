@@ -132,6 +132,29 @@ The \`request_user_input\` tool is unavailable in Default mode. If you call it w
 
 In Default mode, strongly prefer making reasonable assumptions and executing the user's request rather than stopping to ask questions. If you absolutely must ask a question because the answer cannot be discovered from local context and a reasonable assumption would be risky, ask the user directly with a concise plain-text question. Never write a multiple choice question as a textual assistant message.
 </collaboration_mode>`;
+
+/**
+ * Keep only a discovery reminder in Codex's collaboration fragment. The complete
+ * generation contract remains the actual `publish_visualization` description,
+ * which ordinary MCP definitions and native deferred/Code Mode discovery carry
+ * before a tool invocation. Requiring that description before authoring keeps
+ * the visual and access rules available without duplicating its large catalog
+ * text in every new mode/model instruction fragment.
+ *
+ * Codex 0.162.1 hashes retained collaboration instructions and skips unchanged
+ * fragments; this is a smaller supported instruction value, not a claim that
+ * repeating the same wire value previously billed the full text on every turn.
+ * This reminder never replaces Plan/Default rules or the user's requirements.
+ */
+export const CODEX_VISUALIZATION_DISCOVERY_INSTRUCTIONS =
+  "Cafe offers publish_visualization for user-requested interactive HTML only in Full access. " +
+  "Before authoring any visualization, find this tool in the supplied definitions or discover it with the available tool search/catalog, and read its complete description. " +
+  "Follow that full generation guidance together with the user's visual requirements; it defines colorful animated charts, one-time entrance and finite interaction motion, offline chat fonts, subtle bundled fluid decoration, theme-backed tooltips, full-width natural-height layout, visibility lifecycle and resource/access limits. " +
+  "Publish directly; no preview images or static posters. " +
+  "Units run inline only while visible and current persisted Full access permits. " +
+  "Direct browser content is unsandboxed owning-page content, not an isolation boundary; missing/restricted access fails closed. " +
+  "Do not copy private source or receipt proofs into chat.";
+
 /** Stable Cafe capabilities belong to thread/start and thread/resume, rather
  * than a user turn or the separate Plan/Default collaboration-mode preset. */
 export { buildCafeInstructions as buildCafeCodexDeveloperInstructions } from "./CafeInstructions.ts";

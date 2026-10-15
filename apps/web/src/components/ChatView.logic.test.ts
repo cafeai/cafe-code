@@ -71,6 +71,8 @@ import {
   deriveComposerSendState,
   deriveLockedProvider,
   doesSteerFailureActivityMatchPending,
+  doesSteerActivityMatchPendingAttempt,
+  doesRetryableSteerFailureMatchPendingAttempt,
   doesSteerProcessingActivityMatchPending,
   hasServerAcknowledgedLocalDispatch,
   isSteerProcessingActivityTimely,
@@ -170,6 +172,41 @@ describe("steering delivery presentation", () => {
     expect(deriveSteeringDeliveryStatus({ ...pending, activities: [waiting] })).toBe("sending");
   });
 
+  it("shows reversible exact-turn compaction without inventing acceptance", () => {
+    for (const activities of [[], [accepted], [accepted, waiting]]) {
+      expect(
+        deriveSteeringDeliveryStatus({
+          ...pending,
+          activities,
+          contextCompactionActive: true,
+        }),
+      ).toBe("waiting-for-compaction");
+    }
+    expect(
+      deriveSteeringDeliveryStatus({
+        ...pending,
+        activities: [],
+        contextCompactionActive: false,
+        previousStatus: "waiting-for-compaction",
+      }),
+    ).toBe("sending");
+    expect(
+      deriveSteeringDeliveryStatus({
+        ...pending,
+        activities: [accepted],
+        contextCompactionActive: false,
+      }),
+    ).toBe("received");
+    expect(
+      deriveSteeringDeliveryStatus({
+        ...pending,
+        provider: "claudeAgent",
+        activities: [],
+        contextCompactionActive: true,
+      }),
+    ).toBe("steering");
+  });
+
   it("ignores sibling and older-generation acceptance", () => {
     for (const payload of [
       { ...accepted.payload, messageId: "sibling-message" },
@@ -181,6 +218,24 @@ describe("steering delivery presentation", () => {
         deriveSteeringDeliveryStatus({ ...pending, activities: [{ ...accepted, payload }] }),
       ).toBe("sending");
     }
+  });
+
+  it("never adopts a reused-message receipt before its current command ACK", () => {
+    expect(
+      deriveSteeringDeliveryStatus({
+        ...pending,
+        pendingIntentSequence: null,
+        requiresIntentSequence: true,
+        activities: [accepted],
+      }),
+    ).toBe("sending");
+    expect(
+      deriveSteeringDeliveryStatus({
+        ...pending,
+        requiresIntentSequence: true,
+        activities: [accepted],
+      }),
+    ).toBe("received");
   });
 
   it("does not use a sibling, earlier-attempt or unrelated warning", () => {
@@ -247,6 +302,123 @@ describe("steering delivery presentation", () => {
         previousStatus: "waiting",
       }),
     ).toBe("waiting");
+  });
+});
+
+describe("pending steer attempt observation fence", () => {
+  const activity = { payload: { messageId: "reused-id" }, sequence: 78 };
+  const current = { pendingIntentSequence: 77, requiresIntentSequence: true };
+
+  it("does not transfer reused pending ownership to an older blocked-root retry candidate", () => {
+    for (const failureIntentSequence of [null, 41, 77]) {
+      expect(
+        doesRetryableSteerFailureMatchPendingAttempt({
+          ...current,
+          pendingIntentSequence: null,
+          failureIntentSequence,
+        }),
+      ).toBe(false);
+    }
+    for (const failureIntentSequence of [null, 41]) {
+      expect(
+        doesRetryableSteerFailureMatchPendingAttempt({
+          ...current,
+          failureIntentSequence,
+        }),
+      ).toBe(false);
+    }
+    expect(
+      doesRetryableSteerFailureMatchPendingAttempt({
+        ...current,
+        failureIntentSequence: 77,
+      }),
+    ).toBe(true);
+    expect(
+      doesRetryableSteerFailureMatchPendingAttempt({
+        pendingIntentSequence: null,
+        requiresIntentSequence: false,
+        failureIntentSequence: null,
+      }),
+    ).toBe(true);
+  });
+
+  it("retains reused-ID rows before ACK and admits only current known intent or later canonical order", () => {
+    expect(doesSteerActivityMatchPendingAttempt({ ...current, activity })).toBe(true);
+    expect(
+      doesSteerActivityMatchPendingAttempt({
+        ...current,
+        pendingIntentSequence: null,
+        activity,
+      }),
+    ).toBe(false);
+    expect(
+      doesSteerActivityMatchPendingAttempt({
+        ...current,
+        activity: { ...activity, sequence: 77 },
+      }),
+    ).toBe(false);
+    expect(
+      doesSteerActivityMatchPendingAttempt({
+        ...current,
+        activity: { ...activity, sequence: 76 },
+      }),
+    ).toBe(false);
+    expect(
+      doesSteerActivityMatchPendingAttempt({
+        ...current,
+        activity: { payload: { intentSequence: 77 } },
+      }),
+    ).toBe(true);
+    expect(
+      doesSteerActivityMatchPendingAttempt({
+        ...current,
+        activity: { payload: { intentSequence: 41 }, sequence: 80 },
+      }),
+    ).toBe(false);
+    expect(
+      doesSteerActivityMatchPendingAttempt({
+        ...current,
+        activity: { payload: {} },
+      }),
+    ).toBe(false);
+  });
+
+  it("rejects malformed sequences without laundering them through another witness", () => {
+    for (const sequence of [NaN, Infinity, -1, 77.5, "78", null]) {
+      expect(
+        doesSteerActivityMatchPendingAttempt({
+          ...current,
+          activity: { payload: { intentSequence: sequence }, sequence: 80 },
+        }),
+      ).toBe(false);
+      expect(
+        doesSteerActivityMatchPendingAttempt({
+          ...current,
+          activity: { payload: { intentSequence: 77 }, sequence } as unknown as typeof activity,
+        }),
+      ).toBe(false);
+    }
+  });
+
+  it("keeps unversioned brand-new message compatibility without trusting stale known sequences", () => {
+    expect(
+      doesSteerActivityMatchPendingAttempt({
+        pendingIntentSequence: null,
+        activity: { payload: {} },
+      }),
+    ).toBe(true);
+    expect(
+      doesSteerActivityMatchPendingAttempt({
+        pendingIntentSequence: 77,
+        activity: { payload: {} },
+      }),
+    ).toBe(true);
+    expect(
+      doesSteerActivityMatchPendingAttempt({
+        pendingIntentSequence: 77,
+        activity: { payload: {}, sequence: 76 },
+      }),
+    ).toBe(false);
   });
 });
 

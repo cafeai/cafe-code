@@ -1,13 +1,14 @@
 # Chats without projects
 
-Last updated: 2026-10-09 14:03:31 JST (UTC+0900)
+Last updated: 2026-10-14 23:49:58 JST (UTC+0900)
 
 Cafe chats can exist without a project or repository. **Desk** organizes open
 tabs; **Projects** contains the saved project/chat catalog. A tab's group does
 not determine its project association.
 
-- Click the New chat pencil icon beside **Chats** in Desk or Projects, or use the global New chat
-  shortcut, to open a standalone editor in the active group. Both headings use the same action.
+- Click the New chat pencil immediately beside **Open chats** in Desk or beside
+  **Chats** in Projects, or use the global New chat shortcut, to open a standalone
+  editor in the active group. Both headings use the same action.
   The selected sidebar view stays selected.
   No folder is required, even when you have no projects.
 - To create a project-associated chat, use that project's existing New chat
@@ -61,5 +62,5 @@ not silently adopt a potentially replaced folder or delete its contents.
 
 See [the architecture decision](decisions/standalone-chats.md) for persistence,
 provider-context, security and compatibility boundaries, and the
-[Desk creation entrypoint decision](decisions/desk-chat-creation-entrypoint.md)
+[Desk creation entrypoint decision](decisions/desk-open-chats-new-action.md)
 for the shared heading action.

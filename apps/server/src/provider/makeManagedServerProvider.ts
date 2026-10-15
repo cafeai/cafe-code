@@ -81,6 +81,40 @@ const classifyProbeOutcome = (
   return snapshot.status;
 };
 
+/**
+ * A fallback health probe does not rediscover models. Retain native discovery
+ * only when both observations explicitly identify the same authenticated
+ * account. Missing identity is unknown, never evidence that two owners match.
+ * This concerns catalogue provenance, not an entitlement or launch grant.
+ */
+export const retainNativeCodexModelCatalog = (
+  previous: ServerProvider,
+  next: ServerProvider,
+): ServerProvider => {
+  if (
+    previous.driver !== "codex" ||
+    next.driver !== "codex" ||
+    previous.instanceId !== next.instanceId ||
+    previous.codexModelCatalogSource !== "native" ||
+    next.codexModelCatalogSource !== "fallback" ||
+    previous.auth.status !== "authenticated" ||
+    next.auth.status !== "authenticated" ||
+    typeof previous.auth.type !== "string" ||
+    previous.auth.type.length === 0 ||
+    previous.auth.type !== next.auth.type ||
+    typeof previous.auth.email !== "string" ||
+    previous.auth.email.length === 0 ||
+    previous.auth.email !== next.auth.email
+  ) {
+    return next;
+  }
+  return {
+    ...next,
+    models: previous.models,
+    codexModelCatalogSource: "native",
+  };
+};
+
 interface SingleFlight<A, E> {
   readonly current: Effect.Effect<Deferred.Deferred<A, E> | null>;
   readonly run: (operation: Effect.Effect<A, E>) => Effect.Effect<A, E>;
@@ -128,12 +162,29 @@ const makeSingleFlight = <A, E>(scope: Scope.Scope): Effect.Effect<SingleFlight<
             return yield* restore(Deferred.await(admission.deferred));
           }
 
-          yield* Effect.exit(Effect.interruptible(operation)).pipe(
-            Effect.flatMap((exit) => Deferred.done(candidate, exit)),
-            Effect.ensuring(
-              Ref.update(inFlightRef, (current) => (current === candidate ? null : current)),
+          yield* Effect.uninterruptibleMask((restoreWorker) =>
+            Effect.exit(restoreWorker(Effect.interruptible(operation))).pipe(
+              // Cancellation must reach the provider operation, but must not
+              // cancel delivery of its captured Exit to every shared waiter.
+              // Otherwise scope retirement can close the worker successfully
+              // while leaving callers suspended on an uncompleted Deferred.
+              Effect.flatMap((exit) =>
+                // Completing a Deferred can synchronously resume a waiter.
+                // Retire this exact flight first, so its next explicit request
+                // cannot borrow the settled result instead of starting fresh.
+                // The identity check cannot erase a newer admission.
+                Ref.update(inFlightRef, (current) => (current === candidate ? null : current)).pipe(
+                  Effect.andThen(Deferred.done(candidate, exit)),
+                ),
+              ),
             ),
-            Effect.forkIn(scope),
+          ).pipe(
+            // Establish protected bookkeeping before the first worker step.
+            // A scope already closed at fork admission immediately interrupts
+            // the explicit provider operation above, producing a failed Exit
+            // without invoking it. Ownership, budgets and concurrency stay in
+            // the same scope; native work itself is never made uninterruptible.
+            Effect.forkIn(scope, { uninterruptible: true }),
           );
 
           return yield* restore(Deferred.await(candidate));
@@ -368,7 +419,7 @@ export const makeManagedServerProvider = Effect.fn("makeManagedServerProvider")(
     const checkedSnapshot = yield* input.checkProvider;
     const finishedAtMs = yield* Clock.currentTimeMillis;
     const nextScheduledAtMs = yield* Ref.get(nextScheduledAtRef);
-    const nextSnapshot = input.probePolicy
+    const probedSnapshot = input.probePolicy
       ? yield* Effect.gen(function* () {
           const outcome = classifyProbeOutcome(checkedSnapshot, input.probePolicy!);
           const probeState = yield* Ref.modify(probeStateRef, (previous) => {
@@ -410,6 +461,10 @@ export const makeManagedServerProvider = Effect.fn("makeManagedServerProvider")(
           } satisfies ServerProvider;
         })
       : checkedSnapshot;
+    // Adapters also read this managed snapshot directly, bypassing the
+    // registry. A same-account CLI health result must not restore static rows
+    // omitted by the last successful native catalogue, including an empty one.
+    const nextSnapshot = retainNativeCodexModelCatalog(previousSnapshot, probedSnapshot);
     const nextGeneration = yield* Ref.modify(snapshotStateRef, (state) => {
       const generation = input.enrichSnapshot
         ? state.enrichmentGeneration + 1
@@ -529,18 +584,37 @@ export const makeManagedServerProvider = Effect.fn("makeManagedServerProvider")(
     // A picker-open refresh is opportunistic. A timeout, provider restart, or
     // transient model/list failure must leave the last known-good catalogue
     // and the user's current selection intact instead of flashing an empty
-    // picker. The Codex callback also treats an empty upstream page as
-    // inconclusive and returns undefined for the same reason.
+    // picker. The producer decides which discovery outcomes are inconclusive;
+    // a defined empty catalogue remains a successful, authoritative result.
     if (models === undefined) {
       return currentState.snapshot;
     }
 
-    const nextSnapshot: ServerProvider = {
-      ...currentState.snapshot,
-      models,
-    };
-    if (Equal.equals(currentState.snapshot, nextSnapshot)) {
+    // The callback may be held while settings change. Its result belongs only
+    // to the settings admitted before the await, not to a replacement account
+    // or configuration waiting on this mutation semaphore. No new probe is
+    // needed for this final identity check.
+    const currentSettings = yield* input.getSettings;
+    if (input.haveSettingsChanged(settings, currentSettings)) {
       return currentState.snapshot;
+    }
+
+    // Enrichment and schedule-only publications are inert writes outside the
+    // probe semaphore. Preserve their latest metadata rather than replaying
+    // the pre-await copy while installing this catalogue.
+    const latestState = yield* Ref.get(snapshotStateRef);
+
+    const nextSnapshot: ServerProvider = {
+      ...latestState.snapshot,
+      models,
+      // Stamp before equality comparison: identical rows still establish the
+      // first native observation. Other drivers never acquire Codex proof.
+      ...(latestState.snapshot.driver === "codex"
+        ? { codexModelCatalogSource: "native" as const }
+        : {}),
+    };
+    if (Equal.equals(latestState.snapshot, nextSnapshot)) {
+      return latestState.snapshot;
     }
 
     // Model refreshes can race asynchronous version enrichment in the same
@@ -548,8 +622,8 @@ export const makeManagedServerProvider = Effect.fn("makeManagedServerProvider")(
     // enrichment from the new snapshot so a stale callback cannot restore an
     // older model catalogue.
     const nextGeneration = input.enrichSnapshot
-      ? currentState.enrichmentGeneration + 1
-      : currentState.enrichmentGeneration;
+      ? latestState.enrichmentGeneration + 1
+      : latestState.enrichmentGeneration;
     yield* Ref.set(snapshotStateRef, {
       snapshot: nextSnapshot,
       enrichmentGeneration: nextGeneration,
@@ -636,6 +710,7 @@ export const makeManagedServerProvider = Effect.fn("makeManagedServerProvider")(
       Effect.tapError(Effect.logError),
       Effect.orDie,
     ),
+    getCurrentSnapshot: Ref.get(snapshotStateRef).pipe(Effect.map((state) => state.snapshot)),
     refresh: refreshSnapshot().pipe(Effect.tapError(Effect.logError), Effect.orDie),
     ...(input.refreshAccountUsage
       ? {

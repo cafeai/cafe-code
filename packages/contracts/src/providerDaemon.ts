@@ -96,6 +96,17 @@ export type ProviderRuntimeProcessMode = typeof ProviderRuntimeProcessMode.Type;
 export const ProviderDaemonCapability = Schema.Literals(["health", "events", "rpc", "lease"]);
 export type ProviderDaemonCapability = typeof ProviderDaemonCapability.Type;
 
+/** These two refusals prove only that an attempted configuration replacement
+ * was not admitted. They never authorize replacement, a paid-input replay or
+ * generic recovery. Keep this finite semantic witness separate from the outer
+ * exception class and diagnostic prose across the authenticated daemon wire. */
+export const ProviderDaemonSessionReconfigurationRefusal = Schema.Literals([
+  "subagent-concurrency-active",
+  "codex-context-window-active",
+]);
+export type ProviderDaemonSessionReconfigurationRefusal =
+  typeof ProviderDaemonSessionReconfigurationRefusal.Type;
+
 export const ProviderDaemonCommandDiagnostic = Schema.Struct({
   commandId: Schema.String,
   method: Schema.String,
@@ -106,6 +117,7 @@ export const ProviderDaemonCommandDiagnostic = Schema.Struct({
   requestSummary: Schema.optional(Schema.Unknown),
   responseSummary: Schema.optional(Schema.Unknown),
   errorTag: Schema.optional(Schema.String),
+  sessionReconfigurationRefusal: Schema.optional(ProviderDaemonSessionReconfigurationRefusal),
   errorMessage: Schema.optional(Schema.String),
 });
 export type ProviderDaemonCommandDiagnostic = typeof ProviderDaemonCommandDiagnostic.Type;
@@ -241,6 +253,7 @@ export const ProviderDaemonRecentRpcFailure = Schema.Struct({
   durationMs: Schema.optional(Schema.Number),
   tag: Schema.String,
   message: Schema.String,
+  sessionReconfigurationRefusal: Schema.optional(ProviderDaemonSessionReconfigurationRefusal),
   diagnostics: Schema.optional(ProviderDaemonErrorDiagnostics),
 });
 export type ProviderDaemonRecentRpcFailure = typeof ProviderDaemonRecentRpcFailure.Type;
@@ -461,9 +474,15 @@ export const ProviderDaemonAdapterCapabilities = Schema.Struct({
   // Exact authenticated owner qualification for Codex's chat-local native
   // context override. Missing on older owners means unsupported, not inherited.
   codexContextWindow: Schema.optional(Schema.Boolean),
+  // Separate from numeric-context support: older Cafe owners did not pair or
+  // attest the compaction request. Preserve missing/false across authentication.
+  codexContextCompaction: Schema.optional(Schema.Boolean),
   // Cafe's exact existing-process/no-recovery fence, not native CLI support.
   // Older owners omit it and cannot admit this continuation exception.
   subagentPolicyContinuation: Schema.optional(Schema.Boolean),
+  // Missing on legacy owners must fail closed: silently dropping a restart
+  // guard could otherwise reuse the unhealthy session or stop newer work.
+  codexFailedRootRestart: Schema.optional(Schema.Boolean),
   sessionModelSwitch: Schema.Literals(["in-session", "restart-resume", "unsupported"]),
   liveSteer: Schema.Literals(["supported", "unsupported"]),
   // Optional on the wire so a newly built desktop can still interrogate an
@@ -503,6 +522,7 @@ export type ProviderDaemonEventRecord = typeof ProviderDaemonEventRecord.Type;
 export const ProviderDaemonRpcError = Schema.Struct({
   tag: Schema.String,
   message: Schema.String,
+  sessionReconfigurationRefusal: Schema.optional(ProviderDaemonSessionReconfigurationRefusal),
   diagnostics: Schema.optional(ProviderDaemonErrorDiagnostics),
 });
 export type ProviderDaemonRpcError = typeof ProviderDaemonRpcError.Type;

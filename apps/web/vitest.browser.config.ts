@@ -10,6 +10,8 @@ const contextMotionFile = "src/components/chat/CodexContextWindowControl.motion.
 const diagnosticMotionFile = "src/components/chat/ProviderDiagnosticWorkEntry.motion.browser.tsx";
 const visualizationMotionFile = "src/components/visualizations/Visualizations.motion.browser.tsx";
 const imageMotionFile = "src/components/chat/ExpandedImageDialog.motion.browser.tsx";
+const scrollToBottomMotionFile = "src/components/chat/ScrollToBottomControl.motion.browser.tsx";
+const visualizationFluidFile = "src/components/visualizations/VisualizationFluid.browser.tsx";
 const touchViewport = { width: 430, height: 932 };
 const browserOptions = {
   enabled: true,
@@ -47,6 +49,7 @@ export default mergeConfig(
         // before collection: late discovery reloads that test iframe and is
         // not an assertion or browser-input policy failure.
         "@base-ui/react/collapsible",
+        "@base-ui/react/popover",
         "@base-ui/react/toast",
         "@effect/atom-react",
         "@tanstack/react-query",
@@ -113,7 +116,9 @@ export default mergeConfig(
               contextMotionFile,
               diagnosticMotionFile,
               visualizationMotionFile,
+              scrollToBottomMotionFile,
               imageMotionFile,
+              visualizationFluidFile,
             ],
             sequence: { groupOrder: 0 },
             browser: {
@@ -155,17 +160,40 @@ export default mergeConfig(
         {
           extends: true,
           test: {
+            name: "visualization-fluid-motion",
+            include: [visualizationFluidFile],
+            // A disposable tester iframe still inherits its owning page's
+            // native media policy. Full-motion solver/RAF assertions cannot
+            // share a page that earlier fixtures changed through CDP. Give the
+            // complete lifecycle file one provider-owned ordinary-motion
+            // context instead of resetting media, mocking matchMedia or
+            // changing production's reduced-motion accessibility branch.
+            // Sequential groups retain the aggregate worker cap, mouse input
+            // and all inherited test/hook deadlines on every native host.
+            sequence: { groupOrder: 2 },
+            browser: {
+              ...browserOptions,
+              provider: playwright({ contextOptions: { reducedMotion: "no-preference" } }),
+              instances: [{ browser: "chromium", name: "chromium-visualization-fluid-motion" }],
+            },
+          },
+        },
+        {
+          extends: true,
+          test: {
             name: "context-reduced-motion",
             include: [
               contextMotionFile,
               diagnosticMotionFile,
               visualizationMotionFile,
+              scrollToBottomMotionFile,
               imageMotionFile,
             ],
             // Qualify the inherited dialog's real reduced-motion behavior in
-            // its own native context, after both existing project groups.
+            // its own native context, after the ordinary-motion lifecycle
+            // group as well as the existing desktop/touch groups.
             // Original worker caps and test/hook deadlines remain inherited.
-            sequence: { groupOrder: 2 },
+            sequence: { groupOrder: 3 },
             browser: {
               ...browserOptions,
               provider: playwright({ contextOptions: { reducedMotion: "reduce" } }),

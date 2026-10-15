@@ -1,10 +1,20 @@
-import { type TurnId, OrchestrationThreadActivity } from "@cafecode/contracts";
+import {
+  type TurnId,
+  type ServerSettings,
+  OrchestrationThreadActivity,
+  SubagentRuntimeId,
+  validCodexContextWindowOverride,
+} from "@cafecode/contracts";
+import * as Schema from "effect/Schema";
 import { CODEX_AUTO_COMPACT_POLICY_SOURCE } from "@cafecode/shared/codexCompaction";
+import { readCodexCompactionObservation } from "@cafecode/shared/codexCompactionDiagnostics";
+import { readProviderTaskOwnerPayload } from "@cafecode/shared/providerTaskOwnership";
+import { deriveCodexContextWindowPresentation } from "../../codexContextWindow";
 import { derivePhase, isLatestTurnSettled } from "../../session-logic";
 import { type ChatMessage, type Thread, type TurnDiffSummary } from "../../types";
 
 /** Pure bounded diagnostic projections, isolated from composer and transport state. */
-export const DEBUG_SNAPSHOT_VERSION = 14;
+export const DEBUG_SNAPSHOT_VERSION = 16;
 const DEBUG_TEXT_PREVIEW_LIMIT = 120;
 const DEBUG_JSON_PREVIEW_LIMIT = 600;
 export const DEBUG_RECENT_MESSAGE_LIMIT = 6;
@@ -156,15 +166,232 @@ function summarizeDebugContextWindowActivity(activity: OrchestrationThreadActivi
 }
 
 function isDebugCodexThread(thread: Thread): boolean {
-  return (
-    String(thread.session?.provider ?? "") === "codex" ||
-    String(thread.modelSelection.instanceId).startsWith("codex")
-  );
+  // Account spelling is not a provider discriminator. A legacy/missing owner
+  // remains unknown rather than borrowing Codex policy from an ID prefix.
+  return ownCompactionField(ownCompactionField(thread, "session"), "provider") === "codex";
 }
 
 function isContextCompactionActivity(activity: OrchestrationThreadActivity): boolean {
-  const payload = readDebugRecord(activity.payload);
-  return activity.kind === "context-compaction" || payload?.itemType === "context_compaction";
+  const payload = ownCompactionField(activity, "payload");
+  return (
+    ownCompactionField(activity, "kind") === "context-compaction" ||
+    ownCompactionField(payload, "itemType") === "context_compaction"
+  );
+}
+
+/** Diagnostic input is received data. An accessor or prototype cannot supply
+ * owner/policy evidence, and private IDs are used only for internal comparison. */
+function ownCompactionField(value: unknown, key: string): unknown {
+  try {
+    if (value === null || typeof value !== "object" || Array.isArray(value)) return undefined;
+    const descriptor = Object.getOwnPropertyDescriptor(value, key);
+    return descriptor && "value" in descriptor ? descriptor.value : undefined;
+  } catch {
+    // A descriptor trap is unavailable evidence, never a debug-route defect.
+    return undefined;
+  }
+}
+
+function readCompactionOwner(payload: unknown) {
+  try {
+    return readProviderTaskOwnerPayload(payload);
+  } catch {
+    return undefined;
+  }
+}
+
+function hasCurrentCompactionOwner(session: unknown): boolean {
+  const runtime = ownCompactionField(session, "subagentRuntimeId");
+  const status = ownCompactionField(session, "status");
+  const orchestration = ownCompactionField(session, "orchestrationStatus");
+  return (
+    ownCompactionField(session, "provider") === "codex" &&
+    boundedCompactionIdentity(ownCompactionField(session, "providerInstanceId")) &&
+    typeof runtime === "string" &&
+    Schema.is(SubagentRuntimeId)(runtime) &&
+    (status === "running" || status === "ready" || status === "starting") &&
+    (orchestration === "running" || orchestration === "ready" || orchestration === "starting")
+  );
+}
+
+function boundedCompactionIdentity(value: unknown): value is string {
+  return (
+    typeof value === "string" &&
+    value.length > 0 &&
+    value.length <= 512 &&
+    !/[\p{Cc}\p{Bidi_Control}]/u.test(value)
+  );
+}
+
+/** Project only already-received observations bound to this exact current
+ * account/runtime. The last ordinary usage activity is not a pre-trigger
+ * receipt: only the producer's immutable before-start sample qualifies here.
+ * Native identities never leave this projection, including a child's avatar
+ * seed; source is the finite root/child distinction only. */
+export function summarizeDebugCodexCompactionEvidence(input: {
+  readonly session: unknown;
+  readonly activities: readonly OrchestrationThreadActivity[];
+}) {
+  const account = ownCompactionField(input.session, "providerInstanceId");
+  const runtime = ownCompactionField(input.session, "subagentRuntimeId");
+  const currentOwnerKnown = hasCurrentCompactionOwner(input.session);
+  const latest = [];
+  const seen = new Set<string>();
+  let omittedUnqualifiedCount = 0;
+  // The renderer's existing retained activity window is the only input. No
+  // history hydration, new subscription, provider lookup or global cache.
+  for (const activity of input.activities.slice(-DEBUG_THREAD_DETAIL_ACTIVITY_LIMIT).toReversed()) {
+    const payload = ownCompactionField(activity, "payload");
+    if (ownCompactionField(payload, "itemType") !== "context_compaction") continue;
+    const kind = ownCompactionField(activity, "kind");
+    const phase =
+      kind === "tool.started" ? "started" : kind === "tool.completed" ? "completed" : null;
+    const observation = readCodexCompactionObservation(
+      ownCompactionField(payload, "codexCompactionObservation"),
+    );
+    const owner = readCompactionOwner(payload);
+    if (
+      !currentOwnerKnown ||
+      phase === null ||
+      observation === null ||
+      owner === undefined ||
+      ownCompactionField(payload, "nativeWorkProviderInstanceId") !== account ||
+      ownCompactionField(payload, "nativeWorkRuntimeId") !== runtime ||
+      ownCompactionField(payload, "itemId") !== observation.nativeItemId ||
+      phase !== observation.phase ||
+      owner.type !== observation.sourceOwner.type ||
+      (owner.type === "child" &&
+        observation.sourceOwner.type === "child" &&
+        owner.id !== observation.sourceOwner.id)
+    ) {
+      omittedUnqualifiedCount += 1;
+      continue;
+    }
+    // A completion updates one item instead of duplicating its started entry.
+    // Child native turns differ from Cafe's parent turn; never compare the
+    // observation's native turn to the projected activity's canonical turn.
+    const key = JSON.stringify([
+      observation.sourceOwner,
+      observation.nativeTurnId,
+      observation.nativeItemId,
+    ]);
+    if (seen.has(key) || latest.length === 8) continue;
+    seen.add(key);
+    const usage = observation.lastReportedUsageBeforeStart;
+    latest.push({
+      phase: observation.phase,
+      source: observation.sourceOwner.type,
+      observedAt: observation.observedAt,
+      order: observation.order,
+      startObservedAt: observation.startObservedAt,
+      rootOpeningRequests: observation.rootOpeningRequests,
+      lastReportedUsageBeforeStart:
+        usage === null
+          ? null
+          : {
+              observedAt: usage.observedAt,
+              order: usage.order,
+              usedTokens: usage.usedTokens,
+              inputTokens: usage.inputTokens,
+              cachedInputTokens: usage.cachedInputTokens,
+              outputTokens: usage.outputTokens,
+              reasoningOutputTokens: usage.reasoningOutputTokens,
+              totalProcessedTokens: usage.totalProcessedTokens,
+              reportedUsableContextWindow: usage.reportedUsableContextWindow,
+            },
+      usageEvidence: observation.usageEvidence,
+      evictedSourceCount: observation.evictedSourceCount,
+      evictedItemCount: observation.evictedItemCount,
+      triggerReason: observation.triggerReason,
+      accountingScope: observation.accountingScope,
+      resolvedThreshold: observation.resolvedThreshold,
+    });
+  }
+  return {
+    currentOwnerKnown,
+    activityWindowLimit: DEBUG_THREAD_DETAIL_ACTIVITY_LIMIT,
+    observationLimit: 8,
+    omittedUnqualifiedCount,
+    latest,
+  };
+}
+
+/** Saved intent is separate from both an unsent composer draft and the actual
+ * opening. Resolve only the saved exact enabled Codex account; configuration
+ * objects, credentials and account/native identities are never returned. */
+export function summarizeDebugCodexSavedPolicy(thread: Thread, settings?: ServerSettings) {
+  if (!settings) return null;
+  const selectedAccount = ownCompactionField(
+    ownCompactionField(thread, "modelSelection"),
+    "instanceId",
+  );
+  const instances = ownCompactionField(settings, "providerInstances");
+  const instance =
+    typeof selectedAccount === "string"
+      ? ownCompactionField(instances, selectedAccount)
+      : undefined;
+  if (
+    !boundedCompactionIdentity(selectedAccount) ||
+    ownCompactionField(instance, "driver") !== "codex" ||
+    ownCompactionField(instance, "enabled") === false
+  )
+    return null;
+  const inheritedValue = debugRecordedCodexRequest(
+    ownCompactionField(instance, "defaultCodexContextWindowOverride"),
+  );
+  const explicitValue = debugRecordedCodexRequest(
+    ownCompactionField(ownCompactionField(instance, "config"), "autoCompactTokenLimit"),
+  );
+  const inherited = typeof inheritedValue === "number" ? inheritedValue : undefined;
+  const explicit = typeof explicitValue === "number" ? explicitValue : undefined;
+  const override = debugRecordedCodexRequest(
+    ownCompactionField(thread, "codexContextWindowOverride"),
+  );
+  const requested = typeof override === "number" ? override : (inherited ?? null);
+  const desiredCompaction = explicit ?? requested;
+  const session = ownCompactionField(thread, "session");
+  const selectedAccountMatchesRuntime =
+    hasCurrentCompactionOwner(session) &&
+    ownCompactionField(session, "providerInstanceId") === selectedAccount;
+  const configured = selectedAccountMatchesRuntime
+    ? debugRecordedCodexRequest(ownCompactionField(session, "codexContextWindowOverride"))
+    : undefined;
+  const configuredCompaction = selectedAccountMatchesRuntime
+    ? debugRecordedCodexRequest(ownCompactionField(session, "codexAutoCompactTokenLimit"))
+    : undefined;
+  const comparisonKnown = configured !== undefined && configuredCompaction !== undefined;
+  // Reuse the ordinary saved-policy presentation comparison; this remains a
+  // diagnostic pending indication, never authority to apply or restart it.
+  const presentation = deriveCodexContextWindowPresentation({
+    requested: override,
+    inherited,
+    requestedAutoCompactTokenLimit: explicit,
+    configured,
+    configuredAutoCompactTokenLimit: configuredCompaction,
+  });
+  return {
+    source:
+      typeof override === "number"
+        ? "chat-override"
+        : inherited !== undefined
+          ? "account-default"
+          : "codex-default",
+    savedChatContextWindow: override ?? null,
+    accountDefaultContextWindow: inherited ?? null,
+    explicitAccountAutoCompactRequest: explicit ?? null,
+    desiredRootContextWindowRequest: requested,
+    desiredRootAutoCompactRequest: desiredCompaction,
+    selectedAccountMatchesRuntime,
+    comparisonKnown,
+    pending:
+      selectedAccountMatchesRuntime && configured !== undefined ? presentation.pending : null,
+    pendingCompaction:
+      selectedAccountMatchesRuntime && configured !== undefined
+        ? presentation.pendingCompaction
+        : null,
+    isUnsentDraft: false,
+    isResolvedNativeThreshold: false,
+  };
 }
 
 function contextCompactionActivityItemId(activity: OrchestrationThreadActivity): string {
@@ -203,6 +430,7 @@ export function threadHasActiveContextCompaction(
 function summarizeDebugCodexCompaction(
   thread: Thread,
   latestContextWindowPayload: Record<string, unknown> | null,
+  settings?: ServerSettings,
 ) {
   if (!isDebugCodexThread(thread)) {
     return null;
@@ -234,22 +462,45 @@ function summarizeDebugCodexCompaction(
     readDebugNumber(latestContextWindowPayload?.inputTokens);
   const latestPayloadLimit = readDebugNumber(latestContextWindowPayload?.autoCompactTokenLimit);
   const latestCompactionActivity = compactionActivities.at(-1) ?? null;
+  const session = ownCompactionField(thread, "session");
+  const currentNominalRequest =
+    ownCompactionField(session, "provider") === "codex"
+      ? debugRecordedCodexRequest(ownCompactionField(session, "codexAutoCompactTokenLimit"))
+      : undefined;
 
   return {
     policy: {
       enabled: true,
       source: CODEX_AUTO_COMPACT_POLICY_SOURCE,
-      thresholdResolution:
-        latestPayloadLimit === null
-          ? "upstream-model-metadata-or-codex-config"
-          : "explicit-cafe-provider-override",
+      // Neither a known nominal opening nor the adapter's usage annotation
+      // reports the model's resolved threshold, accounting scope or headroom.
+      thresholdResolution: "native-unreported",
       explicitCafeOverride: latestPayloadLimit,
+      usageAnnotationOrigin: "adapter-account-config",
+      usageAnnotationIsResolvedThreshold: false,
+      // The opened runtime's nominal request is independently received proof,
+      // not a reconstructed90% estimate or an effective provider threshold.
+      nominalRequestAtNativeOpening: currentNominalRequest ?? null,
+      nominalRequestEvidenceKnown: currentNominalRequest !== undefined,
+      nominalRequestStatus:
+        currentNominalRequest === undefined
+          ? "legacy-unknown"
+          : currentNominalRequest === null
+            ? "known-omission"
+            : "recorded-nominal-request",
       // App-server owns the default threshold and scope. Cafe cannot infer a
       // precise resolved threshold from the effective-window token event
       // without duplicating model metadata logic that changes upstream.
       resolvedThresholdReportedByProvider: false,
     },
+    savedPolicy: summarizeDebugCodexSavedPolicy(thread, settings),
+    receivedNativeEvidence: summarizeDebugCodexCompactionEvidence({
+      session: thread.session,
+      activities: thread.activities,
+    }),
     latestContextWindow: {
+      sampleRole: "last-retained-general-usage-not-trigger",
+      sameCurrentOwnerReported: false,
       usedTokens: latestUsedTokens,
       inputTokens: latestInputTokens,
       maxTokens: readDebugNumber(latestContextWindowPayload?.maxTokens),
@@ -338,8 +589,9 @@ export function summarizeDebugActivity(activity: OrchestrationThreadActivity) {
     kind: activity.kind,
     tone: activity.tone,
     summaryLength: activity.summary.length,
-    summaryPreview:
-      activity.kind === "provider.async-questions"
+    summaryPreview: isContextCompactionActivity(activity)
+      ? "Context compaction lifecycle"
+      : activity.kind === "provider.async-questions"
         ? "Optional Codex questions"
         : isStructuredSubagentActivity(activity)
           ? "Subagent lifecycle update"
@@ -360,6 +612,18 @@ export function summarizeDebugActivity(activity: OrchestrationThreadActivity) {
  * or an unknown payload key into a raw renderer debug snapshot.
  */
 function activityPayloadForDebug(activity: OrchestrationThreadActivity): unknown {
+  if (isContextCompactionActivity(activity)) {
+    const payload = ownCompactionField(activity, "payload");
+    const owner = readCompactionOwner(payload);
+    return {
+      itemType: "context_compaction",
+      source: owner?.type ?? "unreported",
+      hasFiniteObservation:
+        readCodexCompactionObservation(
+          ownCompactionField(payload, "codexCompactionObservation"),
+        ) !== null,
+    };
+  }
   if (isStructuredSubagentActivity(activity)) {
     const subagent = readDebugRecord(readDebugRecord(activity.payload)?.subagent);
     // Runtime keys correlate authenticated lifecycle records, not diagnostics.
@@ -849,16 +1113,36 @@ function summarizeDebugLatestTurn(latestTurn: Thread["latestTurn"]) {
   };
 }
 
+function debugRecordedCodexRequest(value: unknown): number | null | undefined {
+  return value === null
+    ? null
+    : typeof value === "number" && validCodexContextWindowOverride(value)
+      ? value
+      : undefined;
+}
+
 export function summarizeDebugSession(session: Thread["session"]) {
   if (!session) {
     return null;
   }
+  const codexContextRequest =
+    session.provider === "codex"
+      ? debugRecordedCodexRequest(session.codexContextWindowOverride)
+      : undefined;
+  const codexCompactionRequest =
+    session.provider === "codex"
+      ? debugRecordedCodexRequest(session.codexAutoCompactTokenLimit)
+      : undefined;
   return {
     provider: session.provider,
     providerInstanceId: session.providerInstanceId ?? null,
     status: session.status,
     orchestrationStatus: session.orchestrationStatus,
     hasSubagentRuntimeEvidence: typeof session.subagentRuntimeId === "string",
+    codexContextWindowOverride: codexContextRequest ?? null,
+    hasCodexContextWindowRequestEvidence: codexContextRequest !== undefined,
+    codexAutoCompactTokenLimit: codexCompactionRequest ?? null,
+    hasCodexAutoCompactRequestEvidence: codexCompactionRequest !== undefined,
     activeTurnId: session.activeTurnId ?? null,
     createdAt: session.createdAt,
     updatedAt: session.updatedAt,
@@ -1013,7 +1297,11 @@ export function summarizeDebugThreadLifecycle(thread: Thread, nowMs: number) {
   };
 }
 
-export function summarizeDebugThreadPerformance(thread: Thread, nowMs: number) {
+export function summarizeDebugThreadPerformance(
+  thread: Thread,
+  nowMs: number,
+  settings?: ServerSettings,
+) {
   const latestTurn = thread.latestTurn;
   const latestTurnId = latestTurn?.turnId ?? null;
   const latestTurnMessages =
@@ -1040,7 +1328,11 @@ export function summarizeDebugThreadPerformance(thread: Thread, nowMs: number) {
   );
   const latestContextWindowActivity = contextWindowActivities.at(-1) ?? null;
   const latestContextWindowPayload = readDebugRecord(latestContextWindowActivity?.payload);
-  const codexCompaction = summarizeDebugCodexCompaction(thread, latestContextWindowPayload);
+  const codexCompaction = summarizeDebugCodexCompaction(
+    thread,
+    latestContextWindowPayload,
+    settings,
+  );
   const latestContextInputTokens =
     readDebugNumber(latestContextWindowPayload?.lastInputTokens) ??
     readDebugNumber(latestContextWindowPayload?.inputTokens);

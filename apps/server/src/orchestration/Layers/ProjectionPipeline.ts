@@ -1950,6 +1950,10 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
           existingSession.value.codexContextWindowOverride !== undefined
             ? { codexContextWindowOverride: existingSession.value.codexContextWindowOverride }
             : {}),
+          ...(Option.isSome(existingSession) &&
+          existingSession.value.codexAutoCompactTokenLimit !== undefined
+            ? { codexAutoCompactTokenLimit: existingSession.value.codexAutoCompactTokenLimit }
+            : {}),
           activeTurnId: null,
           lastError: null,
           updatedAt: Option.isSome(existingSession)

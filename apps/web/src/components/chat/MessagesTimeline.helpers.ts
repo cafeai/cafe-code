@@ -6,6 +6,31 @@ import type { DefaultEditorSelection } from "@cafecode/contracts/settings";
 // indistinguishable from being pinned to the tail.
 const TIMELINE_AT_END_TOLERANCE_PX = 8;
 
+/**
+ * Fresh native geometry, not the virtualizer's optimistic follow/submit flag.
+ * A hidden/empty/not-yet-measured list cannot consume a hide-until-bottom choice.
+ * This read never scrolls or changes tail/review ownership.
+ */
+export function isTimelinePhysicallyAtEnd(metrics: {
+  readonly scrollHeight: number;
+  readonly clientHeight: number;
+  readonly scrollTop: number;
+}): boolean {
+  const { scrollHeight, clientHeight, scrollTop } = metrics;
+  if (
+    !Number.isFinite(scrollHeight) ||
+    !Number.isFinite(clientHeight) ||
+    !Number.isFinite(scrollTop) ||
+    scrollHeight <= 0 ||
+    clientHeight <= 0 ||
+    scrollTop < 0
+  )
+    return false;
+  return (
+    Math.abs(Math.max(0, scrollHeight - clientHeight) - scrollTop) <= TIMELINE_AT_END_TOLERANCE_PX
+  );
+}
+
 export function shouldPreserveTimelineScrollReviewIntent(input: {
   readonly lastKnownAtEnd: boolean;
   readonly userScrollIntentSinceReset: boolean;

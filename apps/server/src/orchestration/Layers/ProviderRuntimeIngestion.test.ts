@@ -47,6 +47,7 @@ import {
   type UsageStatsServiceShape,
 } from "../../usageStats/Services/UsageStatsService.ts";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { makeCodexCompactionDiagnosticsTracker } from "@cafecode/shared/codexCompactionDiagnostics";
 
 import { OrchestrationEventStoreLive } from "../../persistence/Layers/OrchestrationEventStore.ts";
 import { OrchestrationCommandReceiptRepositoryLive } from "../../persistence/Layers/OrchestrationCommandReceipts.ts";
@@ -2276,6 +2277,7 @@ describe("ProviderRuntimeIngestion", () => {
             providerInstanceId: instanceId,
             subagentRuntimeId: null,
             codexContextWindowOverride: formerContext,
+            codexAutoCompactTokenLimit: formerContext,
             status: "ready",
             runtimeMode: "approval-required",
             activeTurnId: null,
@@ -2319,14 +2321,22 @@ describe("ProviderRuntimeIngestion", () => {
       expect(lifecycle?.type).toBe("thread.session.set");
       if (driver === "codex") {
         expect(thread.session?.codexContextWindowOverride).toBe(formerContext);
+        // A legacy unknown generation cannot substantiate the newer opening
+        // request proof even when its historical context is retained.
+        expect(thread.session).not.toHaveProperty("codexAutoCompactTokenLimit");
         if (lifecycle?.type === "thread.session.set")
           expect(lifecycle.session.codexContextWindowOverride).toBe(formerContext);
+        if (lifecycle?.type === "thread.session.set")
+          expect(lifecycle.session).not.toHaveProperty("codexAutoCompactTokenLimit");
       } else {
         // Reusing an account identifier does not rebind a Codex-only setting
         // to another native driver, even when legacy generation is unknown.
         expect(thread.session).not.toHaveProperty("codexContextWindowOverride");
+        expect(thread.session).not.toHaveProperty("codexAutoCompactTokenLimit");
         if (lifecycle?.type === "thread.session.set")
           expect(lifecycle.session).not.toHaveProperty("codexContextWindowOverride");
+        if (lifecycle?.type === "thread.session.set")
+          expect(lifecycle.session).not.toHaveProperty("codexAutoCompactTokenLimit");
       }
       expect(thread.session).toMatchObject({
         providerInstanceId: instanceId,
@@ -2362,6 +2372,7 @@ describe("ProviderRuntimeIngestion", () => {
             providerInstanceId: instanceId,
             subagentRuntimeId: null,
             codexContextWindowOverride: formerContext,
+            codexAutoCompactTokenLimit: formerContext,
             status: "ready",
             runtimeMode: "approval-required",
             activeTurnId: null,
@@ -2412,9 +2423,12 @@ describe("ProviderRuntimeIngestion", () => {
       expect(adoption?.type).toBe("thread.session.set");
       if (adoption?.type === "thread.session.set")
         expect(adoption.session).not.toHaveProperty("codexContextWindowOverride");
+      if (adoption?.type === "thread.session.set")
+        expect(adoption.session).not.toHaveProperty("codexAutoCompactTokenLimit");
       // Inventory qualifies the generation only. It cannot copy a previous
       // setting or invent a configuration observation for this separate path.
       expect(thread.session?.codexContextWindowOverride).toBeUndefined();
+      expect(thread.session).not.toHaveProperty("codexAutoCompactTokenLimit");
       expect(thread.session).toMatchObject({
         status: "ready",
         activeTurnId: null,
@@ -6389,6 +6403,81 @@ describe("ProviderRuntimeIngestion", () => {
     ]);
   });
 
+  it("projects only finite source ownership across all ordinary task and tool edges", async () => {
+    const harness = await createHarness();
+    const runtimeId = SubagentRuntimeId.make("00000000-0000-4000-8000-000000000171");
+    const base = {
+      provider: ProviderDriverKind.make("codex"),
+      createdAt: "2026-01-01T00:00:00.000Z",
+      threadId: asThreadId("thread-1"),
+      turnId: asTurnId("turn-owner"),
+      subagentRuntimeId: runtimeId,
+    };
+    const child = { type: "child" as const, id: "exact-child" };
+    const owners = [
+      undefined,
+      { type: "root" as const },
+      child,
+      { ...child, privateExtra: "private-owner-extra-sentinel" },
+      { type: "child" as const, id: "bad\n" },
+    ];
+    const expectedKinds = [
+      "tool.started",
+      "tool.updated",
+      "tool.completed",
+      "task.started",
+      "task.progress",
+      "task.completed",
+    ];
+    for (const [index, taskOwner] of owners.entries()) {
+      const item = {
+        itemType: "context_compaction" as const,
+        data: { taskOwner: child, receiverThreadIds: [child.id] },
+        ...(taskOwner ? { taskOwner } : {}),
+      };
+      const task = { taskId: `task-${index}`, ...(taskOwner ? { taskOwner } : {}) };
+      // The deliberately malformed final owner tests the defensive projection,
+      // even when a synthetic/legacy source bypasses the canonical wire codec.
+      const edges = [
+        { type: "item.started" as const, itemId: asItemId(`item-${index}`), payload: item },
+        { type: "item.updated" as const, itemId: asItemId(`item-${index}`), payload: item },
+        {
+          type: "item.completed" as const,
+          itemId: asItemId(`item-${index}`),
+          payload: { ...item, status: "completed" as const },
+        },
+        { type: "task.started" as const, payload: { ...task, taskType: "local_bash" } },
+        { type: "task.progress" as const, payload: { ...task, description: "Working" } },
+        { type: "task.completed" as const, payload: { ...task, status: "completed" as const } },
+      ];
+      for (const [edgeIndex, edge] of edges.entries())
+        harness.emit({ ...base, ...edge, eventId: asEventId(`owner-${index}-${edgeIndex}`) });
+    }
+    const thread = await waitForThread(harness.readModel, (entry) =>
+      entry.activities.some((activity) => activity.id === "owner-4-5"),
+    );
+    const activities = thread.activities.filter((activity) =>
+      String(activity.id).startsWith("owner-"),
+    );
+    expect(activities).toHaveLength(30);
+    for (const [index, owner] of owners.entries()) {
+      const group = activities.filter((activity) =>
+        String(activity.id).startsWith(`owner-${index}-`),
+      );
+      expect(group.map((activity) => activity.kind)).toEqual(expectedKinds);
+      for (const activity of group) {
+        expect(activity.payload).toMatchObject({ nativeWorkRuntimeId: runtimeId });
+        expect(activity.payload).not.toHaveProperty("individualTaskControl");
+        const payload = activity.payload as Record<string, unknown>;
+        if (index === 0 || index === 4) expect(payload).not.toHaveProperty("taskOwner");
+        else expect(payload.taskOwner).toEqual(owner?.type === "child" ? child : { type: "root" });
+        expect(JSON.stringify(payload.taskOwner ?? null)).not.toContain(
+          "private-owner-extra-sentinel",
+        );
+      }
+    }
+  });
+
   it("projects Codex context compaction item lifecycle into visible tool activity", async () => {
     const harness = await createHarness();
     const now = "2026-01-01T00:00:00.000Z";
@@ -6439,6 +6528,179 @@ describe("ProviderRuntimeIngestion", () => {
     expect(completed?.kind).toBe("tool.completed");
     expect(completed?.summary).toBe("Context compacted");
     expect(completed?.payload).toMatchObject({ status: "completed" });
+  });
+
+  it("retains only source-bound finite compaction evidence with admitted account and runtime metadata", async () => {
+    const harness = await createHarness();
+    const runtimeId = SubagentRuntimeId.make("00000000-0000-4000-8000-000000000172");
+    const accountId = ProviderInstanceId.make("codex");
+    const expected = [];
+    for (const [index, sourceOwner] of [
+      { type: "root" as const },
+      { type: "child" as const, id: "private-diagnostic-child" },
+    ].entries()) {
+      const tracker = makeCodexCompactionDiagnosticsTracker();
+      tracker.setRootOpeningRequests({ contextWindow: 800_000, autoCompactTokenLimit: 700_000 });
+      const source = {
+        sourceId: sourceOwner.type === "child" ? sourceOwner.id : "private-native-root",
+        sourceOwner,
+        observedAt: "2026-10-15T00:00:00.000Z",
+        nativeTurnId: `private-native-turn-${index}`,
+      };
+      tracker.observeUsage({
+        ...source,
+        tokenUsage: {
+          last: {
+            inputTokens: 400_000,
+            cachedInputTokens: 300_000,
+            outputTokens: 20_000,
+            reasoningOutputTokens: 12_000,
+            totalTokens: index === 0 ? 420_000 : 120_000,
+          },
+          total: { totalTokens: 980_000 },
+          modelContextWindow: 760_000,
+        },
+      });
+      for (const phase of ["started", "completed"] as const) {
+        const diagnostic = tracker.observeCompaction({
+          ...source,
+          phase,
+          nativeItemId: `diagnostic-item-${index}`,
+        });
+        if (!diagnostic) throw Error("Fixture requires an admitted finite observation");
+        expected.push(diagnostic);
+        const receivedEvidence = {
+          ...diagnostic,
+          privateExtra: "private-extra-not-projected",
+          sourceOwner: { ...diagnostic.sourceOwner, secret: "private-source-not-projected" },
+        };
+        harness.emit({
+          type: phase === "started" ? "item.started" : "item.completed",
+          eventId: asEventId(`diagnostic-activity-${index}-${phase}`),
+          provider: ProviderDriverKind.make("codex"),
+          providerInstanceId: accountId,
+          subagentRuntimeId: runtimeId,
+          createdAt: source.observedAt,
+          threadId: asThreadId("thread-1"),
+          turnId: asTurnId("canonical-parent-turn"),
+          itemId: RuntimeItemId.make(`diagnostic-item-${index}`),
+          payload: {
+            itemType: "context_compaction",
+            taskOwner: sourceOwner,
+            status: phase === "started" ? "inProgress" : "completed",
+            codexCompactionObservation: receivedEvidence,
+          },
+        });
+      }
+    }
+    const thread = await waitForThread(harness.readModel, (entry) =>
+      entry.activities.some((activity) => activity.id === "diagnostic-activity-1-completed"),
+    );
+    const activities = thread.activities.filter((activity) =>
+      String(activity.id).startsWith("diagnostic-activity-"),
+    );
+    expect(activities.map((activity) => activity.kind)).toEqual([
+      "tool.started",
+      "tool.completed",
+      "tool.started",
+      "tool.completed",
+    ]);
+    for (const [index, activity] of activities.entries()) {
+      expect(activity.turnId).toBe("canonical-parent-turn");
+      expect(activity.payload).toMatchObject({
+        nativeWorkRuntimeId: runtimeId,
+        nativeWorkProviderInstanceId: accountId,
+        codexCompactionObservation: expected[index],
+      });
+      expect(activity.payload).not.toHaveProperty("individualTaskControl");
+      expect(JSON.stringify(activity.payload)).not.toContain("private-extra-not-projected");
+      expect(JSON.stringify(activity.payload)).not.toContain("private-source-not-projected");
+    }
+  });
+
+  it("omits unbound, malformed, legacy and non-compaction diagnostic copies while retaining every ordinary edge", async () => {
+    const harness = await createHarness();
+    const tracker = makeCodexCompactionDiagnosticsTracker();
+    const diagnostic = tracker.observeCompaction({
+      sourceId: "native-root",
+      sourceOwner: { type: "root" },
+      observedAt: "2026-10-15T00:00:00.000Z",
+      nativeTurnId: "native-turn",
+      nativeItemId: "diagnostic-item",
+      phase: "started",
+    });
+    if (!diagnostic) throw Error("Fixture requires an admitted finite observation");
+    const variants: readonly unknown[] = [
+      undefined,
+      { ...diagnostic, phase: "completed" },
+      { ...diagnostic, nativeItemId: "receiver-item" },
+      { ...diagnostic, sourceOwner: { type: "child", id: "receiver-child" } },
+      { ...diagnostic, version: 2 },
+      { ...diagnostic, order: Number.MAX_SAFE_INTEGER + 1 },
+    ];
+    let getters = 0;
+    const count = variants.length + 8;
+    for (let index = 0; index < count; index++) {
+      const payload = {
+        itemType: "context_compaction" as const,
+        taskOwner: { type: "root" as const },
+        data: { codexCompactionObservation: diagnostic },
+      };
+      const event: ProviderRuntimeEvent = {
+        type: "item.started",
+        eventId: asEventId(`diagnostic-omitted-${index}`),
+        provider: ProviderDriverKind.make("codex"),
+        providerInstanceId: ProviderInstanceId.make("codex"),
+        subagentRuntimeId: SubagentRuntimeId.make("00000000-0000-4000-8000-000000000173"),
+        createdAt: "2026-10-15T00:00:00.000Z",
+        threadId: asThreadId("thread-1"),
+        turnId: asTurnId("canonical-parent-turn"),
+        itemId: RuntimeItemId.make("diagnostic-item"),
+        payload,
+      };
+      if (index < variants.length)
+        Object.defineProperty(payload, "codexCompactionObservation", { value: variants[index] });
+      else if (index === variants.length)
+        Object.defineProperty(payload, "codexCompactionObservation", {
+          get() {
+            getters++;
+            throw Error("Never execute received diagnostic getters");
+          },
+        });
+      else if (index === variants.length + 1)
+        Object.setPrototypeOf(payload, { codexCompactionObservation: diagnostic });
+      else {
+        Object.defineProperty(payload, "codexCompactionObservation", { value: diagnostic });
+        if (index === variants.length + 2)
+          Object.defineProperty(event, "providerInstanceId", { value: undefined });
+        if (index === variants.length + 3)
+          Object.defineProperty(event, "subagentRuntimeId", { value: undefined });
+        if (index === variants.length + 4)
+          Object.defineProperty(payload, "taskOwner", { value: undefined });
+        if (index === variants.length + 5)
+          Object.defineProperty(payload, "itemType", { value: "command_execution" });
+        if (index === variants.length + 6)
+          Object.defineProperty(event, "provider", {
+            value: ProviderDriverKind.make("claudeAgent"),
+          });
+        if (index === variants.length + 7)
+          Object.defineProperty(event, "type", { value: "item.updated" });
+      }
+      harness.emit(event);
+    }
+    const thread = await waitForThread(harness.readModel, (entry) =>
+      entry.activities.some((activity) => activity.id === `diagnostic-omitted-${count - 1}`),
+    );
+    const activities = thread.activities.filter((activity) =>
+      String(activity.id).startsWith("diagnostic-omitted-"),
+    );
+    expect(activities).toHaveLength(count);
+    for (const activity of activities) {
+      expect(activity.payload).not.toHaveProperty("codexCompactionObservation");
+      expect(activity.payload).not.toHaveProperty("nativeWorkProviderInstanceId");
+      expect(activity.payload).not.toHaveProperty("individualTaskControl");
+    }
+    expect(getters).toBe(0);
   });
 
   it.each([

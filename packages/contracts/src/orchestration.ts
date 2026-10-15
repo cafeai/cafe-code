@@ -332,6 +332,9 @@ export const OrchestrationSession = Schema.Struct({
   maxConcurrentSubagents: Schema.optional(Schema.NullOr(MaxConcurrentSubagents)),
   // Exact materialized Cafe configuration, not a reconstructed context meter.
   codexContextWindowOverride: Schema.optional(Schema.NullOr(CodexContextWindowOverride)),
+  // Received exact-opening request evidence only. Missing legacy metadata
+  // cannot be reconstructed from a saved context override or token usage.
+  codexAutoCompactTokenLimit: Schema.optional(Schema.NullOr(CodexContextWindowOverride)),
   runtimeMode: RuntimeMode.pipe(Schema.withDecodingDefault(Effect.succeed(DEFAULT_RUNTIME_MODE))),
   activeTurnId: Schema.NullOr(TurnId),
   lastError: Schema.NullOr(TrimmedNonEmptyString),
@@ -1527,6 +1530,18 @@ const ThreadSessionSetCommand = Schema.Struct({
   // engine also verifies its exact durable intent, one-use attempt and ACK.
   // This association creates a terminal error directly, never a running turn.
   codexFailedRoot: Schema.optional(CodexFailedRootAssociation),
+  // Internal positive ACK adoption. The engine joins this exact saved intent
+  // to its consumed attempt and accepted old-to-new owner receipt atomically
+  // with controls. It is neither client authority nor persisted event metadata.
+  codexRecoveryAccepted: Schema.optional(
+    Schema.Struct({
+      turnId: TurnId,
+      previousTurnId: TurnId,
+      messageId: MessageId,
+      intentSequence: PositiveInt,
+      requestedAt: IsoDateTime,
+    }),
+  ),
   // Server-only admission proof for a replacement ACK. This is deliberately
   // absent from the persisted event: the engine verifies the durable intent
   // and current projection while serializing this command with user controls.

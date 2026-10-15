@@ -3,6 +3,11 @@ import { afterEach, describe, expect, it } from "vitest";
 import { admitMermaidSource, MERMAID_FAILURE, MAX_MERMAID_SVG_BYTES } from "../lib/mermaid/policy";
 import { createMermaidSandboxDocument } from "../lib/mermaid/sandboxDocument";
 import { sanitizeMermaidSvg } from "../lib/mermaid/sanitizeSvg";
+import {
+  mermaidProbePhaseScript,
+  readMermaidProbeSentinel,
+  runMermaidProbe,
+} from "./mermaidProbe.test.fixture";
 
 const SVG_NAMESPACE = "http://www.w3.org/2000/svg";
 
@@ -13,10 +18,6 @@ function svgDocument(contents: string, attributes = ""): string {
 async function admitsParsedGraph(source: string, parsedMutation = ""): Promise<boolean> {
   const nonce = crypto.randomUUID();
   const id = crypto.randomUUID();
-  const frame = document.createElement("iframe");
-  const channel = new MessageChannel();
-  frame.dataset.mermaidSecurityFixture = "";
-  frame.setAttribute("sandbox", "allow-scripts");
   // Execute the real pinned parser and production admission code. Replacing
   // only the final layout call gives a direct admission signal without asking
   // every boundary fixture to perform an expensive 250-node graph layout.
@@ -26,42 +27,43 @@ async function admitsParsedGraph(source: string, parsedMutation = ""): Promise<b
   // same opaque sandbox as the parser; provider source never becomes script.
   // Tiny freezes mermaidAPI, so replace its reference with a test-only copy
   // rather than silently attempting to overwrite a frozen method.
-  const parsedOverride = parsedMutation
-    ? `const getDiagram = mermaid.mermaidAPI.getDiagramFromText.bind(mermaid.mermaidAPI);
+  // Observe every native parse, including baseline admission, on the exact
+  // invocation's one-use port. These finite breadcrumbs neither copy source
+  // or parser errors nor renew the original fixed ten-second allowance.
+  const parsedOverride = `const getDiagram = mermaid.mermaidAPI.getDiagramFromText.bind(mermaid.mermaidAPI);
        mermaid.mermaidAPI = {
          ...mermaid.mermaidAPI,
          getDiagramFromText: async (source) => {
+           probePhase('parser-entered');
            const diagram = await getDiagram(source);
+           probePhase('parser-returned');
            ${parsedMutation}
            return diagram;
          }
-       };`
-    : "";
+       };`;
   const instrumentedDocument = createMermaidSandboxDocument(nonce).replace(
     "</script></body>",
-    `</script><script nonce="${nonce}">mermaid.render = async () => ({ svg: ${JSON.stringify(admittedSvg)} });${parsedOverride}</script></body>`,
+    `</script><script nonce="${nonce}">
+     const nativePostMessage = MessagePort.prototype.postMessage;
+     ${mermaidProbePhaseScript(id)}
+     mermaid.render = async () => {
+       probePhase('render-entered');
+       probePhase('render-returned');
+       return { svg: ${JSON.stringify(admittedSvg)} };
+     };${parsedOverride}</script></body>`,
   );
-  return new Promise((resolve, reject) => {
-    const finish = (admitted: boolean | undefined) => {
-      clearTimeout(timeout);
-      channel.port1.close();
-      channel.port2.close();
-      frame.remove();
-      if (admitted === undefined) reject(new Error("Graph admission probe did not reply"));
-      else resolve(admitted);
-    };
-    const timeout = setTimeout(() => finish(undefined), 10_000);
-    channel.port1.onmessage = ({ data }: MessageEvent<unknown>) => {
-      if (!data || typeof data !== "object" || !("id" in data) || data.id !== id) return;
-      finish("svg" in data && data.svg === admittedSvg);
-    };
-    frame.onload = () => {
-      frame.onload = null;
-      frame.contentWindow?.postMessage("cafe-mermaid-render", "*", [channel.port2]);
-      channel.port1.postMessage({ id, source, theme: "dark" });
-    };
-    frame.srcdoc = instrumentedDocument;
-    document.body.append(frame);
+  // The same isolated transport used by the family probes retires all exact
+  // callbacks/ports, rejects late replies even before timer delivery, and
+  // accepts a negative result only for the production { id, failed: true }
+  // shape. Malformed replies must fail qualification, never count as refusal.
+  return runMermaidProbe({
+    id,
+    documentSource: instrumentedDocument,
+    source,
+    theme: "dark",
+    kind: "Graph admission probe",
+    invocation: parsedMutation ? "mutation" : "baseline",
+    readResult: (data) => readMermaidProbeSentinel(data, [], admittedSvg),
   });
 }
 

@@ -57,6 +57,7 @@ import {
 import {
   haveProvidersChanged,
   INITIAL_PROVIDER_REFRESH_CONCURRENCY,
+  makeProviderRegistryLive,
   mergeProviderAccountRateLimitSnapshot,
   mergeProviderSnapshot,
   mergeProviderSnapshots,
@@ -98,6 +99,27 @@ const disabledCodexSettings: CodexSettings = decodeCodexSettings({
 // login response. Omit ambient HOME/CODEX_HOME and credentials from every
 // lightweight status fixture; explicit homes below contain synthetic auth only.
 const isolatedCodexProbeEnvironment: NodeJS.ProcessEnv = {};
+
+const catalogModel = (slug: string): ServerProvider["models"][number] => ({
+  slug,
+  name: slug,
+  isCustom: false,
+  capabilities: null,
+});
+const catalogProvider = (overrides: Partial<ServerProvider> = {}): ServerProvider => ({
+  instanceId: ProviderInstanceId.make("codex"),
+  driver: ProviderDriverKind.make("codex"),
+  enabled: true,
+  installed: true,
+  version: "0.162.1",
+  status: "ready",
+  auth: { status: "authenticated", type: "chatgpt", email: "catalog-owner@example.test" },
+  checkedAt: "2026-10-15T00:00:00.000Z",
+  models: [catalogModel("current")],
+  slashCommands: [],
+  skills: [],
+  ...overrides,
+});
 
 // ── Test helpers ────────────────────────────────────────────────────
 
@@ -621,6 +643,959 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsService.layerTest(), T
     });
 
     describe("ProviderRegistryLive", () => {
+      it("does not union proven fallback or native catalogues with retired rows", () => {
+        const pending = catalogProvider({
+          auth: { status: "unknown" },
+          codexModelCatalogSource: "fallback",
+          models: [catalogModel("retired")],
+        });
+        const fallback = catalogProvider({ codexModelCatalogSource: "fallback" });
+        assert.deepStrictEqual(mergeProviderSnapshot(pending, fallback).models, fallback.models);
+        const legacy = catalogProvider({ models: [catalogModel("legacy-extra")] });
+        assert.deepStrictEqual(mergeProviderSnapshot(legacy, fallback).models, fallback.models);
+        for (const models of [[], [catalogModel("native-only")]]) {
+          const native = catalogProvider({ codexModelCatalogSource: "native", models });
+          assert.deepStrictEqual(mergeProviderSnapshot(pending, native).models, models);
+          const laterHealth = mergeProviderSnapshot(native, fallback);
+          assert.deepStrictEqual(laterHealth.models, models);
+          assert.strictEqual(laterHealth.codexModelCatalogSource, "native");
+          for (const auth of [
+            { status: "authenticated", type: "chatgpt", email: "another@example.test" },
+            { status: "authenticated", type: "apiKey" },
+            { status: "authenticated", type: "chatgpt" },
+            { status: "authenticated", email: "catalog-owner@example.test" },
+            { status: "unknown" },
+          ] satisfies ReadonlyArray<ServerProvider["auth"]>) {
+            const changedOwner = mergeProviderSnapshot(native, { ...fallback, auth });
+            assert.deepStrictEqual(changedOwner.models, fallback.models);
+            assert.strictEqual(changedOwner.codexModelCatalogSource, "fallback");
+          }
+        }
+      });
+
+      it("preserves legacy and foreign-driver sparse catalogue policy without minting native proof", () => {
+        const previous = catalogProvider({ models: [catalogModel("legacy-extra")] });
+        const legacy = catalogProvider();
+        assert.deepStrictEqual(mergeProviderSnapshot(previous, legacy).models, [
+          ...legacy.models,
+          ...previous.models,
+        ]);
+        assert.strictEqual(
+          mergeProviderSnapshot(previous, legacy).codexModelCatalogSource,
+          undefined,
+        );
+        const foreign = ProviderDriverKind.make("externalDriver");
+        const nextForeign = {
+          ...legacy,
+          driver: foreign,
+          codexModelCatalogSource: "native" as const,
+        };
+        assert.deepStrictEqual(
+          mergeProviderSnapshot({ ...previous, driver: foreign }, nextForeign).models,
+          [...legacy.models, ...previous.models],
+        );
+      });
+
+      it.effect(
+        "synchronizes the exact owner's current native catalogue instead of delayed direct or stream copies",
+        () =>
+          Effect.scoped(
+            Effect.gen(function* () {
+              const fallback = catalogProvider({ codexModelCatalogSource: "fallback" });
+              const nativeA = catalogProvider({
+                codexModelCatalogSource: "native",
+                models: [catalogModel("native-a")],
+              });
+              const nativeB = catalogProvider({ codexModelCatalogSource: "native", models: [] });
+              const current = yield* Ref.make(fallback);
+              const changes = yield* PubSub.unbounded<ServerProvider>();
+              const started = yield* Deferred.make<void>();
+              const release = yield* Deferred.make<void>();
+              const staleStreamRead = yield* Deferred.make<void>();
+              const staleReadArmed = yield* Ref.make(false);
+              const modelCalls = yield* Ref.make(0);
+              yield* Effect.addFinalizer(() =>
+                Deferred.succeed(release, undefined).pipe(Effect.ignore),
+              );
+              const instance: ProviderInstance = {
+                instanceId: fallback.instanceId,
+                driverKind: fallback.driver,
+                continuationIdentity: {
+                  driverKind: fallback.driver,
+                  continuationKey: "codex:instance:codex",
+                },
+                displayName: undefined,
+                enabled: true,
+                snapshot: {
+                  maintenanceCapabilities: makeManualOnlyProviderMaintenanceCapabilities({
+                    provider: fallback.driver,
+                    packageName: null,
+                  }),
+                  getSnapshot: Ref.get(current),
+                  getCurrentSnapshot: Ref.get(current).pipe(
+                    Effect.tap(() =>
+                      Ref.get(staleReadArmed).pipe(
+                        Effect.flatMap((armed) =>
+                          armed
+                            ? Deferred.succeed(staleStreamRead, undefined).pipe(Effect.ignore)
+                            : Effect.void,
+                        ),
+                      ),
+                    ),
+                  ),
+                  refresh: Effect.succeed(fallback),
+                  refreshModels: Ref.update(modelCalls, (count) => count + 1).pipe(
+                    Effect.andThen(Ref.set(current, nativeA)),
+                    Effect.andThen(Deferred.succeed(started, undefined)),
+                    Effect.andThen(Deferred.await(release)),
+                    Effect.as(nativeA),
+                  ),
+                  streamChanges: Stream.fromPubSub(changes).pipe(
+                    Stream.tap((snapshot) => Ref.set(staleReadArmed, snapshot === nativeA)),
+                  ),
+                },
+                adapter: {} as ProviderInstance["adapter"],
+                textGeneration: {} as ProviderInstance["textGeneration"],
+              };
+              const instanceLayer = Layer.succeed(ProviderInstanceRegistry, {
+                getInstance: (id) =>
+                  Effect.succeed(id === instance.instanceId ? instance : undefined),
+                listInstances: Effect.succeed([instance]),
+                listUnavailable: Effect.succeed([]),
+                streamChanges: Stream.empty,
+                subscribeChanges: Effect.flatMap(PubSub.unbounded<void>(), PubSub.subscribe),
+              });
+              const runtime = yield* Layer.build(
+                ProviderRegistryLive.pipe(
+                  Layer.provideMerge(instanceLayer),
+                  Layer.provideMerge(
+                    ServerConfig.layerTest(process.cwd(), {
+                      prefix: "cafe-current-model-catalogue-",
+                    }),
+                  ),
+                  Layer.provideMerge(NodeServices.layer),
+                ),
+              );
+              yield* Effect.gen(function* () {
+                const registry = yield* ProviderRegistry;
+                const direct = yield* registry.refreshInstanceModels!(instance.instanceId).pipe(
+                  Effect.forkChild,
+                );
+                yield* Deferred.await(started);
+                // The newer observation has exactly the same health timestamp;
+                // ordering cannot be guessed from checkedAt or probe diagnostics.
+                yield* Ref.set(current, nativeB);
+                yield* PubSub.publish(changes, nativeB);
+                yield* Deferred.succeed(release, undefined);
+                const result = yield* Fiber.join(direct);
+                assert.deepStrictEqual(result[0]?.models, []);
+                assert.strictEqual(result[0]?.codexModelCatalogSource, "native");
+                yield* PubSub.publish(changes, nativeA);
+                yield* Deferred.await(staleStreamRead);
+                assert.deepStrictEqual((yield* registry.getProviders)[0]?.models, []);
+                assert.strictEqual(
+                  (yield* registry.getProviders)[0]?.codexModelCatalogSource,
+                  "native",
+                );
+                assert.strictEqual(yield* Ref.get(modelCalls), 1);
+              }).pipe(Effect.provide(runtime));
+            }),
+          ),
+      );
+
+      for (const includeMaintenance of [false, true]) {
+        it.effect(
+          `serializes a held final owner check before newer native catalogue admission${includeMaintenance ? " and patches maintenance from the latest row" : ""}`,
+          () =>
+            Effect.scoped(
+              Effect.gen(function* () {
+                const nativeA = catalogProvider({
+                  codexModelCatalogSource: "native",
+                  models: [catalogModel("native-a-retired-by-b")],
+                });
+                const nativeB = catalogProvider({ codexModelCatalogSource: "native", models: [] });
+                const current = yield* Ref.make(nativeA);
+                const ownerCheckHeld = yield* Deferred.make<void>();
+                const releaseOwnerCheck = yield* Deferred.make<void>();
+                const nativeBStored = yield* Deferred.make<void>();
+                let armed = false;
+                let heldOnce = false;
+                let holdFinalOwnerCheck = false;
+                let nativeBReads = 0;
+                let modelCalls = 0;
+                let healthCalls = 0;
+                const instance: ProviderInstance = {
+                  instanceId: nativeA.instanceId,
+                  driverKind: nativeA.driver,
+                  continuationIdentity: {
+                    driverKind: nativeA.driver,
+                    continuationKey: "codex:instance:codex",
+                  },
+                  displayName: undefined,
+                  enabled: true,
+                  snapshot: {
+                    maintenanceCapabilities: makeManualOnlyProviderMaintenanceCapabilities({
+                      provider: nativeA.driver,
+                      packageName: null,
+                    }),
+                    getSnapshot: Ref.get(current),
+                    getCurrentSnapshot: Ref.get(current).pipe(
+                      Effect.tap((snapshot) =>
+                        Effect.sync(() => {
+                          if (armed && snapshot === nativeA && !heldOnce) {
+                            heldOnce = true;
+                            holdFinalOwnerCheck = true;
+                          }
+                          if (armed && snapshot === nativeB) nativeBReads += 1;
+                        }),
+                      ),
+                    ),
+                    refresh: Effect.sync(() => {
+                      healthCalls += 1;
+                      return nativeA;
+                    }),
+                    refreshModels: Effect.gen(function* () {
+                      modelCalls += 1;
+                      if (modelCalls > 2)
+                        return yield* Effect.die(new Error("Unexpected synthetic model refresh"));
+                      const snapshot = modelCalls === 1 ? nativeA : nativeB;
+                      yield* Ref.set(current, snapshot);
+                      if (snapshot === nativeB) yield* Deferred.succeed(nativeBStored, undefined);
+                      return snapshot;
+                    }),
+                    streamChanges: Stream.never,
+                  },
+                  adapter: {} as ProviderInstance["adapter"],
+                  textGeneration: {} as ProviderInstance["textGeneration"],
+                };
+                const instanceLayer = Layer.succeed(ProviderInstanceRegistry, {
+                  getInstance: (id) =>
+                    Effect.suspend(() => {
+                      if (id !== instance.instanceId) return Effect.succeed(undefined);
+                      if (!holdFinalOwnerCheck) return Effect.succeed(instance);
+                      holdFinalOwnerCheck = false;
+                      // The exact inert A read armed this later owner check. The
+                      // current owner stays identical; only its catalogue advances.
+                      return Deferred.succeed(ownerCheckHeld, undefined).pipe(
+                        Effect.andThen(Deferred.await(releaseOwnerCheck)),
+                        Effect.as(instance),
+                      );
+                    }),
+                  listInstances: Effect.succeed([instance]),
+                  listUnavailable: Effect.succeed([]),
+                  streamChanges: Stream.empty,
+                  subscribeChanges: Effect.flatMap(PubSub.unbounded<void>(), PubSub.subscribe),
+                });
+                const runtime = yield* Layer.build(
+                  makeProviderRegistryLive({ statusCache: "disabled" }).pipe(
+                    Layer.provideMerge(instanceLayer),
+                    Layer.provideMerge(
+                      ServerConfig.layerTest(process.cwd(), {
+                        prefix: "cafe-ordered-model-catalogue-",
+                      }),
+                    ),
+                    Layer.provideMerge(NodeServices.layer),
+                  ),
+                );
+                yield* Effect.gen(function* () {
+                  const registry = yield* ProviderRegistry;
+                  assert.strictEqual(healthCalls, 1);
+                  armed = true;
+                  const first = yield* registry.refreshInstanceModels!(instance.instanceId).pipe(
+                    Effect.forkChild,
+                  );
+                  yield* Deferred.await(ownerCheckHeld);
+                  // startImmediately runs the fully synthetic B provider operation
+                  // through its real acceptance receipt. Without upsert serialization
+                  // its pure remaining path also commits B before this fork returns.
+                  // With the fix it stops at the permit, never at a paid/provider gate.
+                  const second = yield* registry.refreshInstanceModels!(instance.instanceId).pipe(
+                    Effect.forkChild({ startImmediately: true }),
+                  );
+                  yield* Deferred.await(nativeBStored);
+                  assert.strictEqual(modelCalls, 2);
+                  assert.strictEqual(nativeBReads, 0);
+                  assert.deepStrictEqual((yield* registry.getProviders)[0]?.models, nativeA.models);
+                  const maintenanceState = {
+                    status: "running" as const,
+                    startedAt: null,
+                    finishedAt: null,
+                    message: null,
+                    output: null,
+                  };
+                  const maintenance = includeMaintenance
+                    ? yield* registry
+                        .setProviderMaintenanceActionState({
+                          instanceId: instance.instanceId,
+                          action: "update",
+                          state: maintenanceState,
+                        })
+                        .pipe(Effect.forkChild({ startImmediately: true }))
+                    : undefined;
+                  // Release the exact A owner-check gate before joining B. Waiting
+                  // for B's registry commit while A owns the permit would deadlock.
+                  yield* Deferred.succeed(releaseOwnerCheck, undefined);
+                  yield* Fiber.join(first);
+                  const result = yield* Fiber.join(second);
+                  if (maintenance) yield* Fiber.join(maintenance);
+                  assert.deepStrictEqual(result[0]?.models, []);
+                  const final = (yield* registry.getProviders)[0];
+                  assert.deepStrictEqual(final?.models, []);
+                  assert.strictEqual(final?.codexModelCatalogSource, "native");
+                  assert.deepStrictEqual(
+                    final?.updateState,
+                    includeMaintenance ? maintenanceState : undefined,
+                  );
+                  assert.strictEqual(nativeBReads, 1);
+                  assert.strictEqual(modelCalls, 2);
+                  assert.strictEqual(healthCalls, 1);
+                }).pipe(
+                  Effect.provide(runtime),
+                  // An assertion failure must release the real owner gate before
+                  // scoped child-fiber teardown tries to join the held refresh.
+                  Effect.ensuring(Deferred.succeed(releaseOwnerCheck, undefined)),
+                );
+              }),
+            ),
+        );
+      }
+
+      it.effect(
+        "keeps a native catalogue while a delayed background startup snapshot is admitted",
+        () =>
+          Effect.scoped(
+            Effect.gen(function* () {
+              const fallback = catalogProvider({ codexModelCatalogSource: "fallback" });
+              const native = catalogProvider({ codexModelCatalogSource: "native", models: [] });
+              const current = yield* Ref.make(fallback);
+              const startupRead = yield* Deferred.make<void>();
+              const releaseStartup = yield* Deferred.make<void>();
+              const healthStarted = yield* Deferred.make<void>();
+              const releaseHealth = yield* Deferred.make<void>();
+              let snapshotCalls = 0;
+              let healthCalls = 0;
+              let modelCalls = 0;
+              const instance: ProviderInstance = {
+                instanceId: fallback.instanceId,
+                driverKind: fallback.driver,
+                continuationIdentity: {
+                  driverKind: fallback.driver,
+                  continuationKey: "codex:instance:codex",
+                },
+                displayName: undefined,
+                enabled: true,
+                snapshot: {
+                  maintenanceCapabilities: makeManualOnlyProviderMaintenanceCapabilities({
+                    provider: fallback.driver,
+                    packageName: null,
+                  }),
+                  getSnapshot: Effect.gen(function* () {
+                    snapshotCalls += 1;
+                    // The first read seeds boot status. Only the actual background
+                    // read retains its already-captured fallback behind this gate.
+                    const snapshot = yield* Ref.get(current);
+                    if (snapshotCalls === 2) {
+                      yield* Deferred.succeed(startupRead, undefined);
+                      yield* Deferred.await(releaseStartup);
+                    }
+                    return snapshot;
+                  }),
+                  getCurrentSnapshot: Ref.get(current),
+                  refresh: Effect.gen(function* () {
+                    healthCalls += 1;
+                    yield* Deferred.succeed(healthStarted, undefined);
+                    yield* Deferred.await(releaseHealth);
+                    return yield* Ref.get(current);
+                  }),
+                  refreshModels: Effect.gen(function* () {
+                    modelCalls += 1;
+                    yield* Ref.set(current, native);
+                    return native;
+                  }),
+                  streamChanges: Stream.never,
+                },
+                adapter: {} as ProviderInstance["adapter"],
+                textGeneration: {} as ProviderInstance["textGeneration"],
+              };
+              const instanceLayer = Layer.succeed(ProviderInstanceRegistry, {
+                getInstance: (id) =>
+                  Effect.succeed(id === instance.instanceId ? instance : undefined),
+                listInstances: Effect.succeed([instance]),
+                listUnavailable: Effect.succeed([]),
+                streamChanges: Stream.empty,
+                subscribeChanges: Effect.flatMap(PubSub.unbounded<void>(), PubSub.subscribe),
+              });
+              const runtime = yield* Layer.build(
+                makeProviderRegistryLive({
+                  statusCache: "disabled",
+                  initialAdmission: "background",
+                }).pipe(
+                  Layer.provideMerge(instanceLayer),
+                  Layer.provideMerge(
+                    ServerConfig.layerTest(process.cwd(), {
+                      prefix: "cafe-background-model-catalogue-",
+                    }),
+                  ),
+                  Layer.provideMerge(NodeServices.layer),
+                ),
+              );
+              yield* Effect.gen(function* () {
+                const registry = yield* ProviderRegistry;
+                yield* Deferred.await(startupRead);
+                const refreshed = yield* registry.refreshInstanceModels!(instance.instanceId);
+                assert.deepStrictEqual(refreshed[0]?.models, []);
+                assert.strictEqual(refreshed[0]?.codexModelCatalogSource, "native");
+                yield* Deferred.succeed(releaseStartup, undefined);
+                yield* Deferred.await(healthStarted);
+                // Observe after the original startup replacement but before health
+                // can conceal it. Native empty must remain exact at this boundary.
+                assert.deepStrictEqual((yield* registry.getProviders)[0]?.models, []);
+                assert.strictEqual(
+                  (yield* registry.getProviders)[0]?.codexModelCatalogSource,
+                  "native",
+                );
+                assert.strictEqual(snapshotCalls, 2);
+                assert.strictEqual(modelCalls, 1);
+                assert.strictEqual(healthCalls, 1);
+                yield* Deferred.succeed(releaseHealth, undefined);
+                assert.strictEqual(
+                  yield* registry.awaitInstanceInitialRefresh!(instance.instanceId),
+                  instance,
+                );
+                assert.deepStrictEqual((yield* registry.getProviders)[0]?.models, []);
+                assert.strictEqual(
+                  (yield* registry.getProviders)[0]?.codexModelCatalogSource,
+                  "native",
+                );
+              }).pipe(
+                Effect.provide(runtime),
+                Effect.ensuring(
+                  Deferred.succeed(releaseStartup, undefined).pipe(
+                    Effect.andThen(Deferred.succeed(releaseHealth, undefined)),
+                  ),
+                ),
+              );
+            }),
+          ),
+      );
+
+      for (const inventoryChange of ["replace", "add"] as const) {
+        it.effect(
+          `preserves a newly admitted ${inventoryChange} owner across an older held health pass`,
+          () =>
+            Effect.scoped(
+              Effect.gen(function* () {
+                const oldSnapshot = catalogProvider({ codexModelCatalogSource: "fallback" });
+                const nextId =
+                  inventoryChange === "replace"
+                    ? oldSnapshot.instanceId
+                    : ProviderInstanceId.make("codex_new_current");
+                const native = catalogProvider({
+                  instanceId: nextId,
+                  codexModelCatalogSource: "native",
+                  models: [],
+                });
+                const fallback = catalogProvider({
+                  instanceId: nextId,
+                  codexModelCatalogSource: "fallback",
+                  models: [catalogModel("must-not-resurrect-after-old-pass")],
+                });
+                const currentNextSnapshot = yield* Ref.make(fallback);
+                const healthStarted = yield* Deferred.make<void>();
+                const releaseHealth = yield* Deferred.make<void>();
+                const nextPassStarted = yield* Deferred.make<void>();
+                const releaseNextPass = yield* Deferred.make<void>();
+                const nativeStored = yield* Deferred.make<void>();
+                const registryChanges = yield* PubSub.unbounded<void>();
+                let oldHealthCalls = 0;
+                let nextHealthCalls = 0;
+                let modelCalls = 0;
+                let lastInventoryReader: number | undefined;
+                let oldPassReader: number | undefined;
+                let holdQueuedPass = false;
+                const old: ProviderInstance = {
+                  instanceId: oldSnapshot.instanceId,
+                  driverKind: oldSnapshot.driver,
+                  continuationIdentity: {
+                    driverKind: oldSnapshot.driver,
+                    continuationKey: "codex:old-fixture",
+                  },
+                  displayName: undefined,
+                  enabled: true,
+                  snapshot: {
+                    maintenanceCapabilities: makeManualOnlyProviderMaintenanceCapabilities({
+                      provider: oldSnapshot.driver,
+                      packageName: null,
+                    }),
+                    getSnapshot: Effect.succeed(oldSnapshot),
+                    getCurrentSnapshot: Effect.succeed(oldSnapshot),
+                    refresh: Effect.gen(function* () {
+                      oldHealthCalls += 1;
+                      yield* Deferred.succeed(healthStarted, undefined);
+                      yield* Deferred.await(releaseHealth);
+                      return oldSnapshot;
+                    }),
+                    streamChanges: Stream.never,
+                  },
+                  adapter: {} as ProviderInstance["adapter"],
+                  textGeneration: {} as ProviderInstance["textGeneration"],
+                };
+                const next: ProviderInstance = {
+                  instanceId: nextId,
+                  driverKind: native.driver,
+                  continuationIdentity: {
+                    driverKind: native.driver,
+                    continuationKey: "codex:new-fixture",
+                  },
+                  displayName: undefined,
+                  enabled: true,
+                  snapshot: {
+                    maintenanceCapabilities: makeManualOnlyProviderMaintenanceCapabilities({
+                      provider: native.driver,
+                      packageName: null,
+                    }),
+                    getSnapshot: Ref.get(currentNextSnapshot),
+                    getCurrentSnapshot: Ref.get(currentNextSnapshot),
+                    refresh: Effect.sync(() => {
+                      nextHealthCalls += 1;
+                      return native;
+                    }),
+                    refreshModels: Effect.gen(function* () {
+                      modelCalls += 1;
+                      if (modelCalls > 2)
+                        return yield* Effect.die(
+                          new Error("Unexpected generation fixture refresh"),
+                        );
+                      // The second finite fallback is only a synthetic metadata
+                      // admission witness. It does not claim a native CLI model/list
+                      // can turn successful discovery into this fallback policy.
+                      const snapshot = modelCalls === 1 ? native : fallback;
+                      yield* Ref.set(currentNextSnapshot, snapshot);
+                      if (modelCalls === 1) yield* Deferred.succeed(nativeStored, undefined);
+                      return snapshot;
+                    }),
+                    streamChanges: Stream.never,
+                  },
+                  adapter: {} as ProviderInstance["adapter"],
+                  textGeneration: {} as ProviderInstance["textGeneration"],
+                };
+                const currentInstances = yield* Ref.make<ReadonlyArray<ProviderInstance>>([old]);
+                const instanceLayer = Layer.succeed(ProviderInstanceRegistry, {
+                  getInstance: (id) =>
+                    Ref.get(currentInstances).pipe(
+                      Effect.map((instances) =>
+                        instances.find((instance) => instance.instanceId === id),
+                      ),
+                    ),
+                  listInstances: Effect.gen(function* () {
+                    const reader = yield* Effect.fiberId;
+                    lastInventoryReader = reader;
+                    const instances = yield* Ref.get(currentInstances);
+                    if (holdQueuedPass && reader !== oldPassReader) {
+                      // Observe the queued sync fiber before it can repair the old
+                      // pass's final cleanup. The same old fiber's fresh final read
+                      // must pass through, regardless of the number of inert reads.
+                      yield* Deferred.succeed(nextPassStarted, undefined);
+                      yield* Deferred.await(releaseNextPass);
+                    }
+                    return instances;
+                  }),
+                  listUnavailable: Effect.succeed([]),
+                  streamChanges: Stream.fromPubSub(registryChanges),
+                  subscribeChanges: PubSub.subscribe(registryChanges),
+                });
+                const runtime = yield* Layer.build(
+                  makeProviderRegistryLive({
+                    statusCache: "disabled",
+                    initialAdmission: "background",
+                  }).pipe(
+                    Layer.provideMerge(instanceLayer),
+                    Layer.provideMerge(
+                      ServerConfig.layerTest(process.cwd(), {
+                        prefix: "cafe-current-generation-prune-",
+                      }),
+                    ),
+                    Layer.provideMerge(NodeServices.layer),
+                  ),
+                );
+                yield* Effect.gen(function* () {
+                  const registry = yield* ProviderRegistry;
+                  yield* Deferred.await(healthStarted);
+                  assert.notStrictEqual(lastInventoryReader, undefined);
+                  oldPassReader = lastInventoryReader;
+                  holdQueuedPass = true;
+                  yield* Ref.set(
+                    currentInstances,
+                    inventoryChange === "replace" ? [next] : [old, next],
+                  );
+                  const admitted = yield* registry.refreshInstanceModels!(nextId);
+                  yield* Deferred.await(nativeStored);
+                  assert.deepStrictEqual(
+                    admitted.find((provider) => provider.instanceId === nextId)?.models,
+                    [],
+                  );
+                  assert.strictEqual(
+                    admitted.find((provider) => provider.instanceId === nextId)
+                      ?.codexModelCatalogSource,
+                    "native",
+                  );
+                  // The mutation subscription is acquired before background work.
+                  // Queue a real next pass, then let the older health finish; its
+                  // exclusive sync permit is released only after final cleanup.
+                  yield* PubSub.publish(registryChanges, undefined);
+                  yield* Deferred.succeed(releaseHealth, undefined);
+                  yield* Deferred.await(nextPassStarted);
+                  const afterOldPass = (yield* registry.getProviders).find(
+                    (provider) => provider.instanceId === nextId,
+                  );
+                  assert.isDefined(afterOldPass);
+                  assert.deepStrictEqual(afterOldPass?.models, []);
+                  assert.strictEqual(afterOldPass?.codexModelCatalogSource, "native");
+                  // A public native flag alone cannot prove the private catalogue
+                  // owner survived. Admit same-owner fallback before releasing the
+                  // next pass: only retained exact ownership can preserve native []
+                  // rather than resurrecting the fixture fallback's retired row.
+                  const retained = yield* registry.refreshInstanceModels!(nextId);
+                  const current = retained.find((provider) => provider.instanceId === nextId);
+                  assert.deepStrictEqual(current?.models, []);
+                  assert.strictEqual(current?.codexModelCatalogSource, "native");
+                  assert.strictEqual(oldHealthCalls, 1);
+                  assert.strictEqual(nextHealthCalls, 0);
+                  assert.strictEqual(modelCalls, 2);
+                }).pipe(
+                  Effect.provide(runtime),
+                  Effect.ensuring(
+                    Deferred.succeed(releaseHealth, undefined).pipe(
+                      Effect.andThen(Deferred.succeed(releaseNextPass, undefined)),
+                    ),
+                  ),
+                );
+              }),
+            ),
+        );
+      }
+
+      for (const replacementRefreshFails of [false, true]) {
+        it.effect(
+          `retires native catalogue qualification on a same-account replacement with ${replacementRefreshFails ? "failed" : "successful"} admission and rejects an old held read`,
+          () =>
+            Effect.scoped(
+              Effect.gen(function* () {
+                const native = catalogProvider({
+                  codexModelCatalogSource: "native",
+                  models: [catalogModel("old-owner-only")],
+                });
+                const fallback = catalogProvider({
+                  codexModelCatalogSource: "fallback",
+                  models: [catalogModel("replacement-fallback")],
+                });
+                const oldChanges = yield* PubSub.unbounded<ServerProvider>();
+                const registryChanges = yield* PubSub.unbounded<void>();
+                const readStarted = yield* Deferred.make<void>();
+                const releaseRead = yield* Deferred.make<void>();
+                const holdRead = yield* Ref.make(false);
+                const stale = { ...native, models: [catalogModel("stale-held-only")] };
+                yield* Effect.addFinalizer(() =>
+                  Deferred.succeed(releaseRead, undefined).pipe(Effect.ignore),
+                );
+                const makeInstance = (
+                  snapshot: ServerProvider,
+                  old: boolean,
+                ): ProviderInstance => ({
+                  instanceId: snapshot.instanceId,
+                  driverKind: snapshot.driver,
+                  continuationIdentity: {
+                    driverKind: snapshot.driver,
+                    continuationKey: "codex:instance:codex",
+                  },
+                  displayName: undefined,
+                  enabled: true,
+                  snapshot: {
+                    maintenanceCapabilities: makeManualOnlyProviderMaintenanceCapabilities({
+                      provider: snapshot.driver,
+                      packageName: null,
+                    }),
+                    getSnapshot: Effect.succeed(snapshot),
+                    refresh:
+                      old || !replacementRefreshFails
+                        ? Effect.succeed(snapshot)
+                        : Effect.die(new Error("synthetic replacement health failure")),
+                    getCurrentSnapshot: old
+                      ? Ref.get(holdRead).pipe(
+                          Effect.flatMap((held) =>
+                            held
+                              ? Deferred.succeed(readStarted, undefined).pipe(
+                                  Effect.andThen(Deferred.await(releaseRead)),
+                                  Effect.as(stale),
+                                )
+                              : Effect.succeed(snapshot),
+                          ),
+                        )
+                      : Effect.succeed(snapshot),
+                    refreshModels: Effect.succeed(snapshot),
+                    streamChanges: old ? Stream.fromPubSub(oldChanges) : Stream.never,
+                  },
+                  adapter: {} as ProviderInstance["adapter"],
+                  textGeneration: {} as ProviderInstance["textGeneration"],
+                });
+                const old = makeInstance(native, true);
+                const replacement = makeInstance(fallback, false);
+                const current = yield* Ref.make(old);
+                const instanceLayer = Layer.succeed(ProviderInstanceRegistry, {
+                  getInstance: (id) =>
+                    id === old.instanceId ? Ref.get(current) : Effect.succeed(undefined),
+                  listInstances: Ref.get(current).pipe(Effect.map((instance) => [instance])),
+                  listUnavailable: Effect.succeed([]),
+                  streamChanges: Stream.fromPubSub(registryChanges),
+                  subscribeChanges: PubSub.subscribe(registryChanges),
+                });
+                const runtime = yield* Layer.build(
+                  ProviderRegistryLive.pipe(
+                    Layer.provideMerge(instanceLayer),
+                    Layer.provideMerge(
+                      ServerConfig.layerTest(process.cwd(), {
+                        prefix: "cafe-replaced-model-catalogue-",
+                      }),
+                    ),
+                    Layer.provideMerge(NodeServices.layer),
+                  ),
+                );
+                yield* Effect.gen(function* () {
+                  const registry = yield* ProviderRegistry;
+                  assert.strictEqual(
+                    (yield* registry.getProviders)[0]?.codexModelCatalogSource,
+                    "native",
+                  );
+                  yield* Ref.set(holdRead, true);
+                  const direct = yield* registry.refreshInstanceModels!(old.instanceId).pipe(
+                    Effect.forkChild,
+                  );
+                  yield* Deferred.await(readStarted);
+                  yield* Ref.set(current, replacement);
+                  yield* Deferred.succeed(releaseRead, undefined);
+                  const staleResult = yield* Fiber.join(direct);
+                  assert.deepStrictEqual(staleResult[0]?.models, native.models);
+                  yield* PubSub.publish(registryChanges, undefined);
+                  assert.strictEqual(
+                    yield* registry.awaitInstanceInitialRefresh!(old.instanceId),
+                    replacement,
+                  );
+                  const replaced = (yield* registry.getProviders)[0];
+                  assert.deepStrictEqual(
+                    replaced?.models,
+                    replacementRefreshFails ? native.models : fallback.models,
+                  );
+                  assert.strictEqual(
+                    replaced?.codexModelCatalogSource,
+                    replacementRefreshFails ? undefined : "fallback",
+                  );
+                  yield* PubSub.publish(oldChanges, stale);
+                  yield* registry.refreshInstance(old.instanceId);
+                  assert.deepStrictEqual(
+                    (yield* registry.getProviders)[0]?.models,
+                    replacementRefreshFails ? native.models : fallback.models,
+                  );
+                  assert.strictEqual(
+                    (yield* registry.getProviders)[0]?.codexModelCatalogSource,
+                    replacementRefreshFails ? undefined : "fallback",
+                  );
+                }).pipe(Effect.provide(runtime));
+              }),
+            ),
+        );
+      }
+      it.effect("publishes an admitted native cache write before a queued quota mutation", () =>
+        Effect.scoped(
+          Effect.gen(function* () {
+            const fileSystem = yield* FileSystem.FileSystem;
+            const path = yield* Path.Path;
+            const fixtureRoot = yield* fileSystem.makeTempDirectoryScoped({
+              prefix: "cafe-ordered-provider-publication-",
+            });
+            const seed = catalogProvider({ codexModelCatalogSource: "fallback" });
+            const native = catalogProvider({
+              codexModelCatalogSource: "native",
+              models: [catalogModel("native-publication-a")],
+            });
+            const current = yield* Ref.make(seed);
+            const cacheWriteHeld = yield* Deferred.make<void>();
+            const releaseCacheWrite = yield* Deferred.make<void>();
+            let armed = false;
+            let held = false;
+            let heldWrites = 0;
+            let modelCalls = 0;
+            let healthCalls = 0;
+            const guardedFileSystem: FileSystem.FileSystem = {
+              ...fileSystem,
+              writeFileString: (filePath, contents, options) => {
+                const relative = path.relative(fixtureRoot, path.resolve(filePath));
+                if (
+                  path.isAbsolute(relative) ||
+                  relative === ".." ||
+                  relative.startsWith(".." + path.sep)
+                ) {
+                  return Effect.die(
+                    new Error("Provider publication fixture attempted an external write"),
+                  );
+                }
+                if (armed && !held && contents.includes('"native-publication-a"')) {
+                  held = true;
+                  heldWrites += 1;
+                  // Hold this exact real atomic-cache write after the registry's
+                  // Ref mutation, before its original rename/publication completes.
+                  return Deferred.succeed(cacheWriteHeld, undefined).pipe(
+                    Effect.andThen(Deferred.await(releaseCacheWrite)),
+                    Effect.andThen(fileSystem.writeFileString(filePath, contents, options)),
+                  );
+                }
+                return fileSystem.writeFileString(filePath, contents, options);
+              },
+            };
+            const instance: ProviderInstance = {
+              instanceId: seed.instanceId,
+              driverKind: seed.driver,
+              continuationIdentity: {
+                driverKind: seed.driver,
+                continuationKey: "codex:instance:codex",
+              },
+              displayName: undefined,
+              enabled: true,
+              snapshot: {
+                maintenanceCapabilities: makeManualOnlyProviderMaintenanceCapabilities({
+                  provider: seed.driver,
+                  packageName: null,
+                }),
+                getSnapshot: Ref.get(current),
+                getCurrentSnapshot: Ref.get(current),
+                refresh: Effect.sync(() => {
+                  healthCalls += 1;
+                  return seed;
+                }),
+                refreshModels: Effect.gen(function* () {
+                  modelCalls += 1;
+                  yield* Ref.set(current, native);
+                  return native;
+                }),
+                streamChanges: Stream.never,
+              },
+              adapter: {} as ProviderInstance["adapter"],
+              textGeneration: {} as ProviderInstance["textGeneration"],
+            };
+            const instanceLayer = Layer.succeed(ProviderInstanceRegistry, {
+              getInstance: (id) =>
+                Effect.succeed(id === instance.instanceId ? instance : undefined),
+              listInstances: Effect.succeed([instance]),
+              listUnavailable: Effect.succeed([]),
+              streamChanges: Stream.empty,
+              subscribeChanges: Effect.flatMap(PubSub.unbounded<void>(), PubSub.subscribe),
+            });
+            const runtime = yield* Layer.build(
+              ProviderRegistryLive.pipe(
+                Layer.provideMerge(instanceLayer),
+                Layer.provideMerge(
+                  ServerConfig.layerTest(fixtureRoot, path.join(fixtureRoot, "server")),
+                ),
+                Layer.provideMerge(
+                  Layer.mergeAll(
+                    NodeServices.layer,
+                    Layer.succeed(FileSystem.FileSystem, guardedFileSystem),
+                  ),
+                ),
+              ),
+            );
+            yield* Effect.gen(function* () {
+              const registry = yield* ProviderRegistry;
+              const config = yield* ServerConfig;
+              const pull = yield* Stream.toPull(registry.streamChanges);
+              const subscribed = yield* pull.pipe(Effect.forkChild({ startImmediately: true }));
+              const readiness = {
+                status: "queued" as const,
+                startedAt: null,
+                finishedAt: null,
+                message: null,
+                output: null,
+              };
+              // A received real publication proves this exact pull's subscription
+              // is acquired. Clear and receive the marker before arming the write;
+              // stream construction or mock invocation alone is not readiness.
+              yield* registry.setProviderMaintenanceActionState({
+                instanceId: instance.instanceId,
+                action: "update",
+                state: readiness,
+              });
+              const subscribedReceipt = yield* Fiber.join(subscribed);
+              assert.strictEqual(subscribedReceipt.length, 1);
+              assert.deepStrictEqual(subscribedReceipt[0][0]?.updateState, readiness);
+              const cleared = yield* pull.pipe(Effect.forkChild({ startImmediately: true }));
+              yield* registry.setProviderMaintenanceActionState({
+                instanceId: instance.instanceId,
+                action: "update",
+                state: null,
+              });
+              const clearedReceipt = yield* Fiber.join(cleared);
+              assert.strictEqual(clearedReceipt.length, 1);
+              assert.strictEqual(clearedReceipt[0][0]?.updateState, undefined);
+              const firstPublication = yield* pull.pipe(
+                Effect.forkChild({ startImmediately: true }),
+              );
+              armed = true;
+              const refresh = yield* registry.refreshInstanceModels!(instance.instanceId).pipe(
+                Effect.forkChild,
+              );
+              yield* Deferred.await(cacheWriteHeld);
+              assert.strictEqual(heldWrites, 1);
+              assert.deepStrictEqual((yield* registry.getProviders)[0]?.models, native.models);
+              const quota = yield* registry
+                .updateProviderAccountRateLimits({
+                  instanceId: instance.instanceId,
+                  limitId: "codex",
+                  snapshot: { primary: { usedPercent: 37 } },
+                  checkedAt: "2026-10-15T00:01:00.000Z",
+                })
+                .pipe(Effect.forkChild({ startImmediately: true }));
+              // The unpatched pure quota path publishes immediately; the fixed
+              // path waits for the admitted cache writer. Never await a newer
+              // commit while that writer's exact cache gate is held.
+              yield* Deferred.succeed(releaseCacheWrite, undefined);
+              yield* Fiber.join(refresh);
+              yield* Fiber.join(quota);
+              const first = yield* Fiber.join(firstPublication);
+              // Native subscription pulls may legally batch both publications.
+              // Assert exact array ordering without waiting for a nonexistent
+              // third publication merely because the first chunk contained two.
+              const second = first.length < 2 ? yield* pull : [];
+              const delivered = [...first, ...second];
+              assert.strictEqual(delivered.length, 2);
+              assert.deepStrictEqual(delivered[0]?.[0]?.models, native.models);
+              assert.strictEqual(delivered[0]?.[0]?.codexModelCatalogSource, "native");
+              assert.strictEqual(delivered[0]?.[0]?.accountRateLimits, undefined);
+              assert.deepStrictEqual(delivered[1]?.[0]?.models, native.models);
+              assert.strictEqual(
+                delivered[1]?.[0]?.accountRateLimits?.rateLimits.primary?.usedPercent,
+                37,
+              );
+              assert.deepStrictEqual(yield* registry.getProviders, delivered[1]);
+              const cachePath = yield* resolveProviderStatusCachePath({
+                cacheDir: config.providerStatusCacheDir,
+                instanceId: instance.instanceId,
+              });
+              const cached = yield* readProviderStatusCache(cachePath);
+              assert.deepStrictEqual(cached?.models, native.models);
+              assert.strictEqual(cached?.codexModelCatalogSource, "native");
+              // Event quota projection deliberately keeps its original no-cache
+              // policy; it must not trigger another provider or persistence call.
+              assert.strictEqual(cached?.accountRateLimits, undefined);
+              assert.strictEqual(heldWrites, 1);
+              assert.strictEqual(modelCalls, 1);
+              assert.strictEqual(healthCalls, 1);
+            }).pipe(
+              Effect.provide(runtime),
+              Effect.ensuring(Deferred.succeed(releaseCacheWrite, undefined)),
+            );
+          }),
+        ).pipe(Effect.provide(NodeServices.layer)),
+      );
+
       it("treats equal provider snapshots as unchanged", () => {
         const providers = [
           {
@@ -2439,6 +3414,7 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsService.layerTest(), T
 
       it.effect("uses the Codex CLI login status path for lightweight provider status", () =>
         Effect.gen(function* () {
+          const probeArgs: string[] = [];
           const status = yield* checkCodexCliProviderStatus(
             defaultCodexSettings,
             isolatedCodexProbeEnvironment,
@@ -2446,6 +3422,7 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsService.layerTest(), T
             Effect.provide(
               mockSpawnerLayer((args) => {
                 const joined = args.join(" ");
+                probeArgs.push(joined);
                 if (joined === "--version") {
                   return { stdout: "codex-cli 0.153.4\n", stderr: "", code: 0 };
                 }
@@ -2463,6 +3440,8 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsService.layerTest(), T
           assert.strictEqual(status.auth.status, "authenticated");
           assert.strictEqual(status.auth.type, "chatgpt");
           assert.strictEqual(status.auth.label, "ChatGPT Subscription");
+          assert.strictEqual(status.codexModelCatalogSource, "fallback");
+          assert.deepStrictEqual(probeArgs, ["--version", "login status"]);
           assert.deepStrictEqual(
             status.models.map((model) => model.slug),
             [
@@ -2473,10 +3452,6 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsService.layerTest(), T
               "gpt-5.6-sol",
               "gpt-5.6-terra",
               "gpt-5.6-luna",
-              "gpt-5.5",
-              "gpt-5.4",
-              "gpt-5.4-mini",
-              "gpt-5.3-codex-spark",
             ],
           );
           const reasoningDescriptor = (slug: string) => {

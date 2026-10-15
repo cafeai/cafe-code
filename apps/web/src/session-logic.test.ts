@@ -1844,9 +1844,8 @@ describe("deriveWorkLogEntries", () => {
     expect(entries[0]?.label).toBe("Searching for API endpoints");
   });
 
-  it("omits routine Codex delivery and running observations without hiding failures", () => {
+  it("shows canonical Codex receipts while omitting duplicate progress and polling", () => {
     const hidden = [
-      { kind: "provider.turn.steer.accepted", payload: { messageId: "steer-1" } },
       { kind: "task.progress", payload: { taskId: "codex-turn-steer:receipt-1" } },
       { kind: "task.progress", payload: { taskId: "codex-turn-steer-processing:receipt-1" } },
       {
@@ -1886,6 +1885,18 @@ describe("deriveWorkLogEntries", () => {
     );
     const visible = [
       makeActivity({
+        id: "attempted-steer",
+        kind: "provider.turn.steer.delivery-attempted",
+        summary: "Steer delivery attempted",
+        payload: { messageId: "steer-1" },
+      }),
+      makeActivity({
+        id: "accepted-steer",
+        kind: "provider.turn.steer.accepted",
+        summary: "Steer accepted",
+        payload: { messageId: "steer-1" },
+      }),
+      makeActivity({
         id: "actual-warning",
         kind: "runtime.warning",
         payload: { message: "Connection lost" },
@@ -1919,7 +1930,7 @@ describe("deriveWorkLogEntries", () => {
       ).map((entry) => entry.id),
     ).toEqual(visible.map((activity) => activity.id));
     expect(deriveWorkLogEntries(hidden, undefined)).toEqual([]);
-    expect(hidden).toHaveLength(8);
+    expect(hidden).toHaveLength(7);
   });
 
   it("shows runtime warning message details in work log entries", () => {

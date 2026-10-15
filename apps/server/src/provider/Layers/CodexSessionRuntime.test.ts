@@ -29,6 +29,7 @@ import {
   ProviderItemId,
   SubagentRuntimeId,
   type ProviderSession,
+  type ProviderEvent,
   type ProviderUserInputAnswers,
   ThreadId,
   TurnId,
@@ -40,6 +41,7 @@ import * as EffectCodexSchema from "effect-codex-app-server/schema";
 import {
   CODEX_DEFAULT_MODE_DEVELOPER_INSTRUCTIONS,
   CODEX_PLAN_MODE_DEVELOPER_INSTRUCTIONS,
+  CODEX_VISUALIZATION_DISCOVERY_INSTRUCTIONS,
 } from "../CodexDeveloperInstructions.ts";
 import { GENERATED_VISUALIZATION_INSTRUCTIONS } from "../../visualizations/mcp.ts";
 import {
@@ -64,6 +66,8 @@ import {
   acceptsCodexChildNotification,
   admitCodexTurnStartLifecycleBoundary,
   assertCodexFailedRootContinuationBoundary,
+  reserveCodexFailedRootRestartBoundary,
+  assertCodexRecoverySessionBoundary,
   commitCodexRootErrorLifecycleBoundary,
   reconcileCodexSystemErrorThreadStatusLifecycleBoundary,
   readCodexRootTurnFailure,
@@ -126,6 +130,7 @@ import {
   resolveCodexSessionRuntimeSteerClientCorrelationId,
   resolveCodexThreadSettingsSessionModel,
   resolveCodexChildConversationNotification,
+  readAdmittedCodexTaskOwner,
   sanitizeCodexProtocolDiagnosticPayload,
   shouldForwardCodexRootGoalNotification,
   selectCodexActiveSnapshotTurn,
@@ -149,6 +154,7 @@ import {
   type CodexAggregateRootCompletion,
   type CodexReasoningEffortSnapshot,
   type CodexSubagentHistoryReadClient,
+  type CodexSessionRuntimeOptions,
 } from "./CodexSessionRuntime.ts";
 import {
   buildCodexSteerClientCorrelationId,
@@ -183,155 +189,517 @@ const childMetadata = (id: string, parentThreadId: string): AncestryMetadata => 
   source: { subAgent: { thread_spawn: { depth: 1, parent_thread_id: parentThreadId } } },
 });
 
-effectIt.effect("binds goal mutation provenance to existing explicit controls and user Stop", () =>
-  Effect.gen(function* () {
-    // The real runtime and typed JSONL client run against a scoped in-memory
-    // peer. No provider executable, configuration, profile or credential is
-    // touched while verifying these authenticated goal-control wire shapes.
-    const output = yield* Queue.unbounded<Uint8Array>();
-    const calls: Array<{ method: string; params?: Record<string, unknown> }> = [];
-    const nativeThreadId = "synthetic-goal-thread";
-    const goal = {
-      threadId: nativeThreadId,
-      objective: "Explicit owner goal",
-      status: "active",
-      tokenBudget: null,
-      tokensUsed: 7,
-      timeUsedSeconds: 2,
-      createdAt: 1,
-      updatedAt: 2,
-    };
-    const thread = {
-      id: nativeThreadId,
-      cliVersion: "0.162.1",
-      createdAt: 1,
-      updatedAt: 1,
-      cwd: process.cwd(),
-      ephemeral: false,
-      modelProvider: "openai",
-      preview: "",
-      projectId: null,
-      sessionId: "synthetic-session",
-      source: "appServer",
-      turns: [],
-      status: { type: "idle" },
-    };
-    const opened = {
-      cwd: process.cwd(),
-      model: "gpt-6.1-sol",
-      modelProvider: "openai",
-      approvalPolicy: "never",
-      approvalsReviewer: "user",
-      sandbox: { type: "dangerFullAccess" },
-      thread,
-    };
-    const encoder = new TextEncoder();
-    let pending = "";
-    const spawner = ChildProcessSpawner.make(() =>
-      Effect.succeed(
-        ChildProcessSpawner.makeHandle({
-          pid: ChildProcessSpawner.ProcessId(7002),
-          exitCode: Effect.never,
-          isRunning: Effect.succeed(true),
-          kill: () => Effect.void,
-          unref: Effect.succeed(Effect.void),
-          stdin: Sink.forEach((chunk: Uint8Array) =>
-            Effect.gen(function* () {
-              pending += new TextDecoder().decode(chunk);
-              const lines = pending.split("\n");
-              pending = lines.pop() ?? "";
-              for (const line of lines) {
-                const request = JSON.parse(line) as {
-                  id?: string | number;
-                  method: string;
-                  params?: Record<string, unknown>;
-                };
-                calls.push({
-                  method: request.method,
-                  ...(request.params ? { params: request.params } : {}),
-                });
-                if (request.id === undefined) continue;
-                const result =
-                  request.method === "initialize"
-                    ? {
-                        userAgent: "synthetic",
-                        codexHome: process.cwd(),
-                        platformFamily: "synthetic",
-                        platformOs: "synthetic",
-                      }
-                    : request.method === "thread/start"
-                      ? opened
-                      : request.method === "thread/read"
-                        ? { thread }
-                        : request.method === "thread/turns/list"
-                          ? { data: [], nextCursor: null }
-                          : request.method === "thread/goal/get"
-                            ? { goal }
-                            : request.method === "thread/goal/set"
-                              ? { goal: { ...goal, ...request.params } }
-                              : request.method === "thread/goal/clear"
-                                ? { cleared: true }
-                                : {};
-                yield* Queue.offer(
-                  output,
-                  encoder.encode(`${JSON.stringify({ id: request.id, result })}\n`),
-                );
-              }
+for (const request of [
+  { label: "inherited", expected: null },
+  { label: "paired", context: 800_000, expected: 800_000 },
+  { label: "explicit", context: 800_000, explicit: 600_000, expected: 600_000 },
+  { label: "paired-resume", context: 800_000, resume: true, expected: 800_000 },
+  { label: "paired-exact-resume", context: 800_000, resume: true, exact: true, expected: 800_000 },
+  {
+    label: "failed-exact-resume",
+    resume: true,
+    exact: true,
+    failed: true,
+    recoverable: true,
+    expected: null,
+  },
+  { label: "missing-exact-resume", exact: true, missingResume: true, expected: null },
+  { label: "mismatched-exact-resume", resume: true, exact: true, mismatched: true, expected: null },
+  { label: "inherited-setting", inherited: true, expected: null },
+  { label: "accessor-setting", accessor: true, expected: null },
+  {
+    label: "captured-setting",
+    context: 800_000,
+    explicit: 600_000,
+    mutate: true,
+    expected: 600_000,
+  },
+  { label: "failed-opening", context: 800_000, failed: true, expected: 800_000 },
+  {
+    label: "diagnostic-source",
+    context: 800_000,
+    explicit: 700_000,
+    expected: 700_000,
+    diagnostic: true,
+  },
+] as const)
+  effectIt.effect(
+    `records ${request.label} opening request before retaining explicit goal controls`,
+    () =>
+      Effect.gen(function* () {
+        // The real runtime and typed JSONL client run against a scoped in-memory
+        // peer. No provider executable, configuration, profile or credential is
+        // touched while verifying these authenticated goal-control wire shapes.
+        const output = yield* Queue.unbounded<Uint8Array>();
+        const openingWillFail =
+          "failed" in request || "missingResume" in request || "mismatched" in request;
+        const openingWillBeRejected = "failed" in request;
+        const resumeWillFailRecoverably = "recoverable" in request;
+        const responseWillBeMismatched = "mismatched" in request;
+        const calls: Array<{ method: string; params?: Record<string, unknown> }> = [];
+        const nativeThreadId = "synthetic-goal-thread";
+        const goal = {
+          threadId: nativeThreadId,
+          objective: "Explicit owner goal",
+          status: "active",
+          tokenBudget: null,
+          tokensUsed: 7,
+          timeUsedSeconds: 2,
+          createdAt: 1,
+          updatedAt: 2,
+        };
+        const thread = {
+          id: nativeThreadId,
+          cliVersion: "0.162.1",
+          createdAt: 1,
+          updatedAt: 1,
+          cwd: process.cwd(),
+          ephemeral: false,
+          modelProvider: "openai",
+          preview: "",
+          projectId: null,
+          sessionId: "synthetic-session",
+          source: "appServer",
+          turns: [],
+          status: { type: "idle" },
+        };
+        const opened = {
+          cwd: process.cwd(),
+          model: "gpt-6.1-sol",
+          modelProvider: "openai",
+          approvalPolicy: "never",
+          approvalsReviewer: "user",
+          sandbox: { type: "dangerFullAccess" },
+          thread,
+        };
+        const encoder = new TextEncoder();
+        let pending = "";
+        const spawner = ChildProcessSpawner.make(() =>
+          Effect.succeed(
+            ChildProcessSpawner.makeHandle({
+              pid: ChildProcessSpawner.ProcessId(7002),
+              exitCode: Effect.never,
+              isRunning: Effect.succeed(true),
+              kill: () => Effect.void,
+              unref: Effect.succeed(Effect.void),
+              stdin: Sink.forEach((chunk: Uint8Array) =>
+                Effect.gen(function* () {
+                  pending += new TextDecoder().decode(chunk);
+                  const lines = pending.split("\n");
+                  pending = lines.pop() ?? "";
+                  for (const line of lines) {
+                    const request = JSON.parse(line) as {
+                      id?: string | number;
+                      method: string;
+                      params?: Record<string, unknown>;
+                    };
+                    calls.push({
+                      method: request.method,
+                      ...(request.params ? { params: request.params } : {}),
+                    });
+                    if (request.id === undefined) continue;
+                    const result =
+                      request.method === "initialize"
+                        ? {
+                            userAgent: "synthetic",
+                            codexHome: process.cwd(),
+                            platformFamily: "synthetic",
+                            platformOs: "synthetic",
+                          }
+                        : request.method === "thread/start" || request.method === "thread/resume"
+                          ? responseWillBeMismatched
+                            ? {
+                                ...opened,
+                                thread: { ...opened.thread, id: "foreign-native-history" },
+                              }
+                            : opened
+                          : request.method === "thread/read"
+                            ? { thread }
+                            : request.method === "thread/turns/list"
+                              ? { data: [], nextCursor: null }
+                              : request.method === "thread/goal/get"
+                                ? { goal }
+                                : request.method === "thread/goal/set"
+                                  ? { goal: { ...goal, ...request.params } }
+                                  : request.method === "thread/goal/clear"
+                                    ? { cleared: true }
+                                    : {};
+                    yield* Queue.offer(
+                      output,
+                      encoder.encode(
+                        `${JSON.stringify({
+                          id: request.id,
+                          ...(openingWillBeRejected &&
+                          (request.method === "thread/start" || request.method === "thread/resume")
+                            ? {
+                                error: {
+                                  code: -32602,
+                                  message: resumeWillFailRecoverably
+                                    ? "thread not found"
+                                    : "Synthetic opening refused",
+                                },
+                              }
+                            : { result }),
+                        })}\n`,
+                      ),
+                    );
+                  }
+                }),
+              ),
+              stdout: Stream.fromQueue(output),
+              stderr: Stream.empty,
+              all: Stream.empty,
+              getInputFd: () => Sink.drain,
+              getOutputFd: () => Stream.empty,
             }),
           ),
-          stdout: Stream.fromQueue(output),
-          stderr: Stream.empty,
-          all: Stream.empty,
-          getInputFd: () => Sink.drain,
-          getOutputFd: () => Stream.empty,
-        }),
-      ),
-    );
-    const runtime = yield* makeCodexSessionRuntime({
-      threadId: ThreadId.make("synthetic-goal-cafe-thread"),
-      binaryPath: "never-launched-provider",
-      environment: {},
-      cwd: process.cwd(),
-      runtimeMode: "full-access",
-    }).pipe(Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner));
-    yield* runtime.start();
-    yield* runtime.setGoal({ objective: "Owner edited goal", status: "active", tokenBudget: 100 });
-    yield* runtime.clearGoal;
-    yield* runtime.interruptTurn(TurnId.make("synthetic-goal-turn"));
-    assert.deepEqual(
-      calls.filter(
-        (call) => call.method === "thread/goal/set" || call.method === "thread/goal/clear",
-      ),
-      [
-        {
-          method: "thread/goal/set",
-          params: {
-            threadId: nativeThreadId,
-            origin: "user",
-            objective: "Owner edited goal",
-            status: "active",
-            tokenBudget: 100,
-          },
-        },
-        { method: "thread/goal/clear", params: { threadId: nativeThreadId, origin: "user" } },
-        {
-          method: "thread/goal/set",
-          params: { threadId: nativeThreadId, origin: "user", status: "paused" },
-        },
-      ],
-    );
-    assert.equal(
-      calls.some((call) => call.method === "turn/start" || call.method === "turn/steer"),
-      false,
-    );
-    assert.equal(
-      calls
-        .filter((call) => call.method === "thread/goal/get")
-        .every((call) => !Object.hasOwn(call.params ?? {}, "origin")),
-      true,
-    );
-  }),
-);
+        );
+        let accessorReads = 0;
+        const runtimeOptions = {
+          threadId: ThreadId.make("synthetic-goal-cafe-thread"),
+          binaryPath: "never-launched-provider",
+          environment: {},
+          cwd: process.cwd(),
+          runtimeMode: "full-access",
+          ...("diagnostic" in request
+            ? { providerInstanceId: ProviderInstanceId.make("codex_diagnostic_test") }
+            : {}),
+          ...("context" in request ? { codexContextWindowOverride: request.context } : {}),
+          ...("explicit" in request ? { autoCompactTokenLimit: request.explicit } : {}),
+          ...("resume" in request ? { resumeCursor: { threadId: nativeThreadId } } : {}),
+          ...("exact" in request ? { requireExactResume: true as const } : {}),
+        } satisfies CodexSessionRuntimeOptions;
+        if ("inherited" in request) {
+          Object.setPrototypeOf(runtimeOptions, {
+            autoCompactTokenLimit: 150_000,
+            codexContextWindowOverride: 800_000,
+          });
+        }
+        if ("accessor" in request) {
+          for (const field of ["autoCompactTokenLimit", "codexContextWindowOverride"]) {
+            Object.defineProperty(runtimeOptions, field, {
+              enumerable: true,
+              get: () => {
+                accessorReads += 1;
+                return 150_000;
+              },
+            });
+          }
+        }
+        const runtime = yield* makeCodexSessionRuntime(runtimeOptions).pipe(
+          Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
+        );
+        // Mere runtime construction/settings are not evidence of a successful
+        // native opening. The additive request field is unknown until its ACK.
+        assert.equal(Object.hasOwn(yield* runtime.getSession, "codexAutoCompactTokenLimit"), false);
+        if ("mutate" in request) {
+          Object.defineProperty(runtimeOptions, "autoCompactTokenLimit", { value: 150_000 });
+          Object.defineProperty(runtimeOptions, "codexContextWindowOverride", { value: 500_000 });
+        }
+        if (openingWillFail) {
+          const exit = yield* Effect.exit(runtime.start());
+          assert.equal(exit._tag, "Failure");
+          assert.equal(
+            Object.hasOwn(yield* runtime.getSession, "codexAutoCompactTokenLimit"),
+            false,
+          );
+          if ("exact" in request) {
+            // Exercise the actual runtime-to-native opening path, not just the
+            // helper: missing cursors never initialize, and recoverable errors
+            // or changed identities cannot publish a fresh native thread.
+            assert.deepEqual(
+              calls
+                .filter((call) => call.method === "thread/start" || call.method === "thread/resume")
+                .map((call) => call.method),
+              "missingResume" in request ? [] : ["thread/resume"],
+            );
+            if ("missingResume" in request) assert.deepEqual(calls, []);
+            assert.deepEqual(
+              (yield* runtime.getSession).resumeCursor,
+              "resume" in request ? { threadId: nativeThreadId } : undefined,
+            );
+          }
+          return;
+        }
+        yield* runtime.start();
+        const session = yield* runtime.getSession;
+        assert.equal(accessorReads, 0);
+        assert.equal(
+          session.codexContextWindowOverride,
+          "context" in request ? request.context : null,
+        );
+        assert.equal(session.codexAutoCompactTokenLimit, request.expected);
+        const opening = calls.find(
+          (call) => call.method === ("resume" in request ? "thread/resume" : "thread/start"),
+        )!;
+        if ("exact" in request) {
+          assert.equal(
+            session.resumeCursor && Reflect.get(session.resumeCursor as object, "threadId"),
+            nativeThreadId,
+          );
+          assert.deepEqual(
+            calls
+              .filter((call) => call.method === "thread/start" || call.method === "thread/resume")
+              .map((call) => call.method),
+            ["thread/resume"],
+          );
+          assert.equal(Object.hasOwn(opening.params!, "requireExactResume"), false);
+        }
+        assert.deepEqual(opening.params?.config, {
+          ...("context" in request ? { model_context_window: request.context } : {}),
+          ...(request.expected !== null
+            ? { model_auto_compact_token_limit: request.expected }
+            : {}),
+        });
+        if ("diagnostic" in request) {
+          // Exercise the real runtime's typed JSONL notification admission,
+          // not merely the pure tracker. Install the exact output observer
+          // before feeding native frames; no sleeps, retry or provider calls.
+          const barrierObserved = yield* Deferred.make<void>();
+          const isBarrier = (event: ProviderEvent) =>
+            event.method === "warning" &&
+            event.payload !== null &&
+            typeof event.payload === "object" &&
+            Reflect.get(event.payload, "message") === "Diagnostic fixture barrier";
+          const notifications = yield* runtime.events.pipe(
+            Stream.tap((event) =>
+              isBarrier(event) ? Deferred.succeed(barrierObserved, undefined) : Effect.void,
+            ),
+            Stream.takeUntil(isBarrier),
+            Stream.runCollect,
+            Effect.forkChild,
+          );
+          const tokenUsage = (usedTokens: number) => ({
+            last: {
+              inputTokens: usedTokens - 20,
+              cachedInputTokens: 5,
+              outputTokens: 20,
+              reasoningOutputTokens: 10,
+              totalTokens: usedTokens,
+            },
+            total: {
+              inputTokens: 900_000,
+              cachedInputTokens: 700_000,
+              outputTokens: 80_000,
+              reasoningOutputTokens: 40_000,
+              totalTokens: 980_000,
+            },
+            modelContextWindow: 760_000,
+          });
+          const nativeUsage = (threadId: string, turnId: string, usedTokens: number) => ({
+            method: "thread/tokenUsage/updated",
+            params: { threadId, turnId, tokenUsage: tokenUsage(usedTokens) },
+          });
+          const nativeCompaction = (
+            threadId: string,
+            turnId: string,
+            id: string,
+            phase: "started" | "completed",
+          ) => ({
+            method: `item/${phase}`,
+            params: {
+              threadId,
+              turnId,
+              item: { type: "contextCompaction", id },
+              ...(phase === "started"
+                ? { startedAtMs: 1_800_000_000_000 }
+                : { completedAtMs: 1_800_000_000_001 }),
+            },
+          });
+          const frames = [
+            {
+              method: "turn/started",
+              params: {
+                threadId: nativeThreadId,
+                turn: { id: "diagnostic-parent-turn", status: "inProgress", items: [] },
+              },
+            },
+            nativeUsage(nativeThreadId, "diagnostic-parent-turn", 420_000),
+            nativeCompaction(
+              nativeThreadId,
+              "diagnostic-parent-turn",
+              "root-diagnostic-compaction",
+              "started",
+            ),
+            nativeUsage(nativeThreadId, "diagnostic-parent-turn", 15_000),
+            nativeCompaction(
+              nativeThreadId,
+              "diagnostic-parent-turn",
+              "root-diagnostic-compaction",
+              "completed",
+            ),
+            {
+              method: "item/started",
+              params: {
+                threadId: nativeThreadId,
+                turnId: "diagnostic-parent-turn",
+                startedAtMs: 1,
+                item: {
+                  type: "subAgentActivity",
+                  id: "native-child-registration",
+                  kind: "started",
+                  agentThreadId: "diagnostic-child",
+                  agentPath: "/root/diagnostic",
+                },
+              },
+            },
+            {
+              method: "turn/started",
+              params: {
+                threadId: "diagnostic-child",
+                turn: { id: "diagnostic-child-turn", status: "inProgress", items: [] },
+              },
+            },
+            nativeUsage("diagnostic-child", "diagnostic-child-turn", 120_000),
+            // A stale explicit generation is refused by the original repeated
+            // admission guard and cannot replace the child's current sample.
+            nativeUsage("diagnostic-child", "diagnostic-retired-turn", 60_000),
+            nativeCompaction(
+              "diagnostic-child",
+              "diagnostic-retired-turn",
+              "stale-compaction",
+              "started",
+            ),
+            nativeCompaction(
+              "diagnostic-child",
+              "diagnostic-child-turn",
+              "child-diagnostic-compaction",
+              "started",
+            ),
+            nativeUsage("diagnostic-child", "diagnostic-child-turn", 25_000),
+            nativeCompaction(
+              "diagnostic-child",
+              "diagnostic-child-turn",
+              "child-diagnostic-compaction",
+              "completed",
+            ),
+            // Unknown source compatibility may still forward an item; it may
+            // not fabricate a root/child owner or diagnostic source evidence.
+            nativeCompaction(
+              "unknown-diagnostic-source",
+              "unknown-turn",
+              "unknown-compaction",
+              "started",
+            ),
+            {
+              method: "warning",
+              params: { threadId: nativeThreadId, message: "Diagnostic fixture barrier" },
+            },
+          ];
+          for (const frame of frames) {
+            const admittedShape = decodeNativeNotificationForDiagnostics(frame);
+            yield* Queue.offer(output, encoder.encode(`${JSON.stringify(admittedShape)}\n`));
+          }
+          yield* Deferred.await(barrierObserved);
+          const received = Array.from(yield* Fiber.join(notifications));
+          const edges = received.filter((event) => event.codexCompactionObservation !== undefined);
+          assert.deepEqual(
+            edges.map((event) => [event.method, event.itemId]),
+            [
+              ["item/started", "root-diagnostic-compaction"],
+              ["item/completed", "root-diagnostic-compaction"],
+              ["item/started", "child-diagnostic-compaction"],
+              ["item/completed", "child-diagnostic-compaction"],
+            ],
+          );
+          for (const [index, edge] of edges.entries()) {
+            const diagnostic = edge.codexCompactionObservation!;
+            assert.deepEqual(
+              diagnostic.sourceOwner,
+              index < 2 ? { type: "root" } : { type: "child", id: "diagnostic-child" },
+            );
+            assert.equal(
+              diagnostic.nativeTurnId,
+              index < 2 ? "diagnostic-parent-turn" : "diagnostic-child-turn",
+            );
+            assert.equal(
+              diagnostic.lastReportedUsageBeforeStart?.usedTokens,
+              index < 2 ? 420_000 : 120_000,
+            );
+            assert.equal(diagnostic.lastReportedUsageBeforeStart?.reasoningOutputTokens, 10);
+            assert.equal(diagnostic.lastReportedUsageBeforeStart?.totalProcessedTokens, 980_000);
+            assert.equal(
+              diagnostic.lastReportedUsageBeforeStart?.reportedUsableContextWindow,
+              760_000,
+            );
+            assert.deepEqual(diagnostic.rootOpeningRequests, {
+              contextWindow: 800_000,
+              autoCompactTokenLimit: 700_000,
+            });
+            assert.equal(edge.providerInstanceId, "codex_diagnostic_test");
+            assert.equal(edge.turnId, "diagnostic-parent-turn");
+            assert.equal(diagnostic.resolvedThreshold, null);
+          }
+          assert.equal(
+            received.some((event) => event.itemId === "stale-compaction"),
+            false,
+          );
+          assert.equal(
+            received.find((event) => event.itemId === "unknown-compaction")
+              ?.codexCompactionObservation,
+            undefined,
+          );
+          assert.equal(
+            received.filter((event) => event.method === "thread/tokenUsage/updated").length,
+            2,
+          );
+          assert.equal(
+            received
+              .filter((event) => event.method === "thread/tokenUsage/updated")
+              .every(
+                (event) =>
+                  event.payload !== null &&
+                  typeof event.payload === "object" &&
+                  Reflect.get(event.payload, "threadId") === nativeThreadId,
+              ),
+            true,
+          );
+          assert.equal(
+            calls.some((call) => call.method === "turn/start" || call.method === "turn/steer"),
+            false,
+          );
+        }
+        yield* runtime.setGoal({
+          objective: "Owner edited goal",
+          status: "active",
+          tokenBudget: 100,
+        });
+        yield* runtime.clearGoal;
+        yield* runtime.interruptTurn(TurnId.make("synthetic-goal-turn"));
+        assert.deepEqual(
+          calls.filter(
+            (call) => call.method === "thread/goal/set" || call.method === "thread/goal/clear",
+          ),
+          [
+            {
+              method: "thread/goal/set",
+              params: {
+                threadId: nativeThreadId,
+                origin: "user",
+                objective: "Owner edited goal",
+                status: "active",
+                tokenBudget: 100,
+              },
+            },
+            { method: "thread/goal/clear", params: { threadId: nativeThreadId, origin: "user" } },
+            {
+              method: "thread/goal/set",
+              params: { threadId: nativeThreadId, origin: "user", status: "paused" },
+            },
+          ],
+        );
+        assert.equal(
+          calls.some((call) => call.method === "turn/start" || call.method === "turn/steer"),
+          false,
+        );
+        assert.equal(
+          calls
+            .filter((call) => call.method === "thread/goal/get")
+            .every((call) => !Object.hasOwn(call.params ?? {}, "origin")),
+          true,
+        );
+      }),
+  );
 
 it("binds native event generations to the originating runtime across resume and delayed publication", () => {
   const original = makeCodexSubagentRuntimeGeneration();
@@ -676,6 +1044,7 @@ describe("Codex bounded child route admission", () => {
         ]) {
           const admitted = yield* fence.acceptsNotification({ ...input, notification });
           assert.equal(admitted, false);
+          assert.equal(readAdmittedCodexTaskOwner({ ...input, notification, admitted }), undefined);
           // The runtime uses this boundary before callbacks, liveness, route
           // registration, private projection and ordinary publication alike.
           if (admitted) {
@@ -839,6 +1208,15 @@ describe("Codex bounded child route admission", () => {
                   rootProviderThreadId: "root",
                 })) && acceptsCodexChildNotification(currentChildren, notification, currentRoutes);
               assert.equal(admitted, false);
+              assert.equal(
+                readAdmittedCodexTaskOwner({
+                  notification,
+                  routes: currentRoutes,
+                  rootProviderThreadId: "root",
+                  admitted,
+                }),
+                undefined,
+              );
               // This is the runtime's complete mutation boundary, not a simulated
               // conditional reducer: rejection must write neither Ref nor clone.
               const committed = yield* commitCodexChildConversationNotification({
@@ -3563,10 +3941,384 @@ describe("Codex failed-root continuation authority", () => {
       };
     });
 
+  const makeReplacementBoundary = () =>
+    Effect.gen(function* () {
+      const boundary = yield* makeBoundary();
+      const replacement = SubagentRuntimeId.make("00000000-0000-4000-8000-000000000083");
+      yield* Ref.set(boundary.completionsRef, new Map());
+      yield* Ref.set(boundary.latestRootTurnIdRef, undefined);
+      yield* Ref.update(boundary.sessionRef, (value) => ({
+        ...value,
+        subagentRuntimeId: replacement,
+        lastError: undefined,
+      }));
+      return {
+        ...boundary,
+        historyUsable: Effect.succeed(true),
+        automaticCompactionPending: Effect.succeed(false),
+        notificationSettled: () => true,
+        expectedRecoverySession: {
+          previousSubagentRuntimeId: runtimeId,
+          subagentRuntimeId: replacement,
+          providerThreadId: "native-thread",
+        },
+      };
+    });
+
   const systemErrorNotification = {
     method: "thread/status/changed",
     params: { threadId: "native-thread", status: { type: "systemError" } },
   };
+
+  effectIt.effect("reserves only the exact failed owner once before cold teardown", () =>
+    Effect.gen(function* () {
+      const boundary = yield* makeBoundary();
+      const expected = {
+        ...expectedFailedRoot,
+        providerInstanceId: session.providerInstanceId!,
+        observedAt: completion.observedAt,
+        restartSession: true as const,
+      };
+      const input = {
+        ...boundary,
+        expectedFailedRoot: expected,
+        historyUsable: Effect.succeed(true),
+        automaticCompactionPending: Effect.succeed(false),
+        notificationSettled: () => true,
+      };
+      assert.equal(yield* reserveCodexFailedRootRestartBoundary(input), true);
+      assert.equal(yield* Ref.get(boundary.closedRef), true);
+      assert.deepEqual(yield* Ref.get(boundary.sessionRef), session);
+      assert.deepEqual(
+        yield* Ref.get(boundary.completionsRef),
+        new Map([[String(failedTurnId), completion]]),
+      );
+      // Cleanup may await notification scopes only after the native permit is
+      // released. A second reservation never grants a second retirement/open.
+      assert.equal(yield* reserveCodexFailedRootRestartBoundary(input), false);
+      assert.equal(
+        yield* boundary.semaphore.withPermits(1)(Effect.succeed("released")),
+        "released",
+      );
+    }),
+  );
+
+  effectIt.effect(
+    "cold retirement refuses uncertain, changed and revoked native authority without marking it closed",
+    () =>
+      Effect.gen(function* () {
+        for (const scenario of [
+          "unknown root",
+          "wrong root",
+          "wrong generation",
+          "wrong account",
+          "wrong history",
+          "missing timestamp",
+          "changed timestamp",
+          "active root",
+          "already closed",
+          "root start pending",
+          "manual compaction",
+          "automatic compaction",
+          "unusable history",
+          "missing context",
+          "queued native receipt",
+        ] as const) {
+          const boundary = yield* makeBoundary();
+          if (scenario === "unknown root") yield* Ref.set(boundary.latestRootTurnIdRef, undefined);
+          if (scenario === "active root")
+            yield* Ref.update(boundary.sessionRef, (value) => ({
+              ...value,
+              status: "running" as const,
+              activeTurnId: TurnId.make("new-root"),
+            }));
+          if (scenario === "already closed") yield* Ref.set(boundary.closedRef, true);
+          if (scenario === "root start pending")
+            yield* Ref.set(boundary.nativeTurnStartPendingRef, true);
+          if (scenario === "manual compaction")
+            yield* Ref.set(boundary.manualCompactionPendingRef, true);
+          const expected = {
+            ...expectedFailedRoot,
+            providerInstanceId:
+              scenario === "wrong account"
+                ? ProviderInstanceId.make("foreign-account")
+                : session.providerInstanceId!,
+            observedAt:
+              scenario === "missing timestamp"
+                ? undefined
+                : scenario === "changed timestamp"
+                  ? "2026-10-10T11:01:01.000Z"
+                  : completion.observedAt,
+            restartSession: true as const,
+            ...(scenario === "wrong root" ? { turnId: TurnId.make("foreign-root") } : {}),
+            ...(scenario === "wrong generation"
+              ? {
+                  subagentRuntimeId: SubagentRuntimeId.make("00000000-0000-4000-8000-000000000099"),
+                }
+              : {}),
+            ...(scenario === "wrong history" ? { providerThreadId: "foreign-native-history" } : {}),
+          };
+          assert.equal(
+            yield* reserveCodexFailedRootRestartBoundary({
+              ...boundary,
+              expectedFailedRoot: expected,
+              nativeContextAvailable: Effect.succeed(scenario !== "missing context"),
+              historyUsable: Effect.succeed(scenario !== "unusable history"),
+              automaticCompactionPending: Effect.succeed(scenario === "automatic compaction"),
+              notificationSettled: () => scenario !== "queued native receipt",
+            }),
+            false,
+            scenario,
+          );
+          assert.equal(yield* Ref.get(boundary.closedRef), scenario === "already closed", scenario);
+        }
+      }),
+  );
+
+  effectIt.effect(
+    "cold replacement admission requires explicit settled notification proof and preserves ordinary admission",
+    () =>
+      Effect.gen(function* () {
+        for (const proof of ["settled", "missing", "unsettled"] as const) {
+          const boundary = yield* makeReplacementBoundary();
+          const { notificationSettled: _initialProof, ...withoutProof } = boundary;
+          const outcome = yield* admitCodexTurnStartLifecycleBoundary({
+            ...withoutProof,
+            ...(proof === "settled" ? { notificationSettled: () => true } : {}),
+            ...(proof === "unsettled" ? { notificationSettled: () => false } : {}),
+          }).pipe(Effect.exit);
+          assert.equal(outcome._tag, proof === "settled" ? "Success" : "Failure", proof);
+          assert.equal(
+            yield* Ref.get(boundary.nativeTurnStartPendingRef),
+            proof === "settled",
+            proof,
+          );
+          assert.equal(
+            (yield* Ref.get(boundary.nativeTurnStartRequestRef)) !== undefined,
+            proof === "settled",
+            proof,
+          );
+        }
+        const ordinary = yield* makeBoundary();
+        const admission = yield* admitCodexTurnStartLifecycleBoundary({
+          ...ordinary,
+          notificationSettled: () => false,
+        });
+        assert.equal(yield* Ref.get(ordinary.nativeTurnStartPendingRef), true);
+        assert.equal(yield* Ref.get(ordinary.nativeTurnStartRequestRef), admission.requestToken);
+      }),
+  );
+
+  effectIt.effect(
+    "received root, compaction and history frames block cold reservation and submission before their queued projection",
+    () =>
+      Effect.gen(function* () {
+        const notifications = [
+          {
+            method: "turn/started",
+            params: {
+              threadId: "native-thread",
+              turn: { id: "new-native-root", status: "inProgress" },
+            },
+          },
+          {
+            method: "item/started",
+            params: {
+              threadId: "native-thread",
+              turnId: "native-compaction-root",
+              item: { id: "native-compaction-item", type: "contextCompaction" },
+            },
+          },
+          {
+            method: "error",
+            params: {
+              threadId: "native-thread",
+              turnId: "native-history-root",
+              error: { message: "list_turns is not supported yet" },
+              willRetry: false,
+            },
+          },
+        ] as const;
+        for (const phase of ["reservation", "submission"] as const) {
+          for (const receiptState of ["queued", "consumed"] as const) {
+            for (const awaitedCheck of ["availability", "history", "compaction"] as const) {
+              for (const notification of notifications) {
+                const label = `${phase}:${receiptState}:${awaitedCheck}:${notification.method}`;
+                const boundary = yield* makeReplacementBoundary();
+                const fence = yield* makeCodexNotificationRetirementFence({
+                  closed: boundary.closedRef,
+                  semaphore: boundary.semaphore,
+                });
+                const admission =
+                  phase === "submission"
+                    ? yield* admitCodexTurnStartLifecycleBoundary({
+                        ...boundary,
+                        notificationSettled: () => fence.isSettled(),
+                      })
+                    : undefined;
+                const queue = yield* Queue.unbounded<typeof notification>();
+                const handlerEntered = yield* Deferred.make<void>();
+                const releaseHandler = yield* Deferred.make<void>();
+                const checkEntered = yield* Deferred.make<void>();
+                const releaseCheck = yield* Deferred.make<void>();
+                yield* Effect.addFinalizer(() =>
+                  Effect.all([
+                    Deferred.succeed(releaseHandler, undefined),
+                    Deferred.succeed(releaseCheck, undefined),
+                  ]).pipe(Effect.asVoid),
+                );
+                // Use the actual wire-receipt fence and its exact owning queue.
+                // Dequeue alone does not retire a frame: the handler may await
+                // observation or the aggregate permit before writing any refs.
+                fence.observeIncomingData();
+                fence.observeReceived();
+                fence.observeIncomingDataProcessed(false);
+                yield* fence.admit(Queue.offer(queue, notification));
+                const handling =
+                  receiptState === "consumed"
+                    ? yield* fence
+                        .handle(
+                          Effect.gen(function* () {
+                            assert.equal(yield* Queue.take(queue), notification);
+                            yield* Deferred.succeed(handlerEntered, undefined);
+                            yield* Deferred.await(releaseHandler);
+                          }),
+                        )
+                        .pipe(Effect.forkChild)
+                    : undefined;
+                if (handling !== undefined) yield* Deferred.await(handlerEntered);
+                assert.equal(yield* Queue.size(queue), receiptState === "queued" ? 1 : 0, label);
+                assert.equal(yield* fence.pendingCount, 1, label);
+                const heldCheck = (value: boolean) =>
+                  Deferred.succeed(checkEntered, undefined).pipe(
+                    Effect.andThen(Deferred.await(releaseCheck)),
+                    Effect.as(value),
+                  );
+                const guarded = {
+                  ...boundary,
+                  nativeContextAvailable:
+                    awaitedCheck === "availability" ? heldCheck(true) : Effect.succeed(true),
+                  historyUsable:
+                    awaitedCheck === "history" ? heldCheck(true) : Effect.succeed(true),
+                  automaticCompactionPending:
+                    awaitedCheck === "compaction" ? heldCheck(false) : Effect.succeed(false),
+                  notificationSettled: () => fence.isSettled(),
+                };
+                let continuationRequests = 0;
+                const operation =
+                  phase === "reservation"
+                    ? admitCodexTurnStartLifecycleBoundary(guarded).pipe(Effect.asVoid)
+                    : assertCodexRecoverySessionBoundary({ ...guarded, ...admission! });
+                const submitted = yield* operation.pipe(
+                  Effect.andThen(
+                    Effect.sync(() => {
+                      continuationRequests += 1;
+                    }),
+                  ),
+                  Effect.exit,
+                  Effect.forkChild,
+                );
+                yield* Deferred.await(checkEntered);
+                // Every processed snapshot is still idle/safe. Only receipt
+                // authority can refuse the exact paused continuation here.
+                assert.equal((yield* Ref.get(boundary.sessionRef)).status, "ready", label);
+                assert.equal(yield* Ref.get(boundary.manualCompactionPendingRef), false, label);
+                assert.equal(fence.isSettled(), false, label);
+                yield* Deferred.succeed(releaseCheck, undefined);
+                assert.equal((yield* Fiber.join(submitted))._tag, "Failure", label);
+                assert.equal(continuationRequests, 0, label);
+                assert.equal(
+                  yield* Ref.get(boundary.nativeTurnStartPendingRef),
+                  phase === "submission",
+                  label,
+                );
+                assert.equal(
+                  yield* Ref.get(boundary.nativeTurnStartRequestRef),
+                  admission?.requestToken,
+                  label,
+                );
+                assert.equal(yield* fence.pendingCount, 1, label);
+                if (handling !== undefined) {
+                  yield* Deferred.succeed(releaseHandler, undefined);
+                  yield* Fiber.join(handling);
+                } else {
+                  yield* fence.handle(Queue.take(queue).pipe(Effect.asVoid));
+                }
+                assert.equal(fence.isSettled(), true, label);
+                assert.equal(yield* fence.pendingCount, 0, label);
+              }
+            }
+          }
+        }
+      }),
+  );
+
+  effectIt.effect(
+    "replacement submission guard rejects late Stop, native work and owner changes without transport I/O",
+    () =>
+      Effect.gen(function* () {
+        for (const scenario of [
+          "exact",
+          "stop",
+          "new root",
+          "new owner",
+          "different history",
+          "compaction",
+          "automatic compaction",
+          "unusable history",
+          "missing context",
+          "reused generation",
+          "missing ingress proof",
+        ] as const) {
+          const boundary = yield* makeBoundary();
+          const replacement = SubagentRuntimeId.make("00000000-0000-4000-8000-000000000083");
+          yield* Ref.set(boundary.completionsRef, new Map());
+          yield* Ref.set(boundary.latestRootTurnIdRef, undefined);
+          yield* Ref.update(boundary.sessionRef, (value) => ({
+            ...value,
+            subagentRuntimeId: replacement,
+            lastError: undefined,
+          }));
+          const admission = yield* admitCodexTurnStartLifecycleBoundary({ ...boundary });
+          if (scenario === "stop") yield* Ref.set(boundary.closedRef, true);
+          if (scenario === "new root") yield* Ref.set(boundary.rootLifecycleEpochRef, Symbol());
+          if (scenario === "new owner")
+            yield* Ref.update(boundary.sessionRef, (value) => ({
+              ...value,
+              subagentRuntimeId: runtimeId,
+            }));
+          if (scenario === "different history")
+            yield* Ref.update(boundary.sessionRef, (value) => ({
+              ...value,
+              resumeCursor: { threadId: "foreign-history" },
+            }));
+          if (scenario === "compaction") yield* Ref.set(boundary.manualCompactionPendingRef, true);
+          let nativeRequests = 0;
+          const outcome = yield* assertCodexRecoverySessionBoundary({
+            ...boundary,
+            ...admission,
+            nativeContextAvailable: Effect.succeed(scenario !== "missing context"),
+            automaticCompactionPending: Effect.succeed(scenario === "automatic compaction"),
+            historyUsable: Effect.succeed(scenario !== "unusable history"),
+            ...(scenario !== "missing ingress proof" ? { notificationSettled: () => true } : {}),
+            expectedRecoverySession: {
+              previousSubagentRuntimeId: scenario === "reused generation" ? replacement : runtimeId,
+              subagentRuntimeId: replacement,
+              providerThreadId: "native-thread",
+            },
+          }).pipe(
+            Effect.andThen(
+              Effect.sync(() => {
+                nativeRequests += 1;
+              }),
+            ),
+            Effect.exit,
+          );
+          assert.equal(outcome._tag, scenario === "exact" ? "Success" : "Failure", scenario);
+          assert.equal(nativeRequests, scenario === "exact" ? 1 : 0, scenario);
+        }
+      }),
+  );
 
   effectIt.effect(
     "raw systemError/error/failed-completion ordering preserves exact native failure availability",
@@ -4399,6 +5151,127 @@ describe("codex elapsed watchdog scheduling", () => {
 });
 
 describe("Codex child conversation routing", () => {
+  it.each(["contextCompaction", "commandExecution", "mcpToolCall"])(
+    "attributes ordinary %s only to its admitted native source, never its receivers",
+    (itemType) => {
+      const parent = TurnId.make("task-owner-parent");
+      const routes = new Map([
+        ["source-child", parent],
+        ["receiver-child", parent],
+      ]);
+      const originalRoutes = new Map(routes);
+      const notification = {
+        method: "item/started",
+        params: {
+          threadId: "source-child",
+          turnId: "source-native-turn",
+          taskOwner: { type: "child", id: "counterfeit-native-owner" },
+          item: {
+            type: itemType,
+            id: "ordinary-source-item",
+            agentThreadId: "receiver-child",
+            senderThreadId: "receiver-child",
+            receiverThreadIds: ["receiver-child"],
+          },
+        },
+      };
+      const input = { notification, routes, rootProviderThreadId: "root", admitted: true };
+      assert.deepEqual(resolveCodexChildConversationNotification(routes, notification, "root"), {
+        parentTurnId: parent,
+        suppressLifecycle: false,
+      });
+      assert.deepEqual(readAdmittedCodexTaskOwner(input), { type: "child", id: "source-child" });
+      assert.deepEqual(
+        readAdmittedCodexTaskOwner({
+          ...input,
+          notification: { ...notification, params: { ...notification.params, threadId: "root" } },
+        }),
+        { type: "root" },
+      );
+      assert.equal(
+        readAdmittedCodexTaskOwner({
+          ...input,
+          notification: {
+            ...notification,
+            params: { ...notification.params, threadId: "unknown" },
+          },
+        }),
+        undefined,
+      );
+      const { threadId: _source, ...withoutSource } = notification.params;
+      assert.equal(
+        readAdmittedCodexTaskOwner({
+          ...input,
+          notification: { ...notification, params: withoutSource },
+        }),
+        undefined,
+      );
+      assert.equal(readAdmittedCodexTaskOwner({ ...input, admitted: false }), undefined);
+      assert.deepEqual(routes, originalRoutes);
+    },
+  );
+
+  it("omits unsupported child identities without normalizing or truncating route evidence", () => {
+    const parent = TurnId.make("task-owner-bound-parent");
+    for (const source of [
+      "x".repeat(513),
+      "child\u0000suffix",
+      "child\u202esuffix",
+      " child",
+      "child ",
+      "child  suffix",
+      "child\u00a0suffix",
+      "child\u2003suffix",
+      "\u00a0child",
+    ]) {
+      const routes = new Map([[source, parent]]);
+      const originalRoutes = new Map(routes);
+      const notification = { method: "item/completed", params: { threadId: source } };
+      assert.equal(
+        readAdmittedCodexTaskOwner({
+          notification,
+          routes,
+          rootProviderThreadId: "root",
+          admitted: true,
+        }),
+        undefined,
+      );
+      assert.deepEqual(resolveCodexChildConversationNotification(routes, notification, "root"), {
+        parentTurnId: parent,
+        suppressLifecycle: false,
+      });
+      assert.deepEqual(routes, originalRoutes);
+    }
+    for (const source of ["x".repeat(512), "child suffix"])
+      assert.deepEqual(
+        readAdmittedCodexTaskOwner({
+          notification: { method: "item/completed", params: { threadId: source } },
+          routes: new Map([[source, parent]]),
+          rootProviderThreadId: "root",
+          admitted: true,
+        }),
+        { type: "child", id: source },
+      );
+    assert.deepEqual(
+      readAdmittedCodexTaskOwner({
+        notification: { method: "item/completed", params: { threadId: " exact root " } },
+        routes: new Map(),
+        rootProviderThreadId: " exact root ",
+        admitted: true,
+      }),
+      { type: "root" },
+    );
+    assert.equal(
+      readAdmittedCodexTaskOwner({
+        notification: { method: "item/completed", params: { threadId: "root" } },
+        routes: new Map(),
+        rootProviderThreadId: undefined,
+        admitted: true,
+      }),
+      undefined,
+    );
+  });
+
   it("keeps child errors out of primary runtime error state", () => {
     assert.equal(codexAggregateNotificationMethod("error", true), "codex.subagent/error");
     assert.equal(codexAggregateNotificationMethod("error", false), "error");
@@ -4989,6 +5862,15 @@ describe("Codex child conversation routing", () => {
       };
       const admitted = acceptsCodexChildNotification(current, notification, routes);
       assert.equal(admitted, false);
+      assert.equal(
+        readAdmittedCodexTaskOwner({
+          notification,
+          routes,
+          rootProviderThreadId: "root",
+          admitted,
+        }),
+        undefined,
+      );
       // The live handler uses this exact shared predicate before remembering
       // descendants and returns before *any* canonical publication, including
       // ordinary child errors that have no private projection method.
@@ -5780,12 +6662,13 @@ function makeThreadOpenResponse(
 
 describe("buildTurnStartParams", () => {
   it.each(["default", "plan"] as const)(
-    "appends conditional visualization guidance without replacing %s mode or turn authority",
+    "appends conditional visualization discovery without replacing %s mode or turn authority",
     (interactionMode) => {
       const input = {
         threadId: "synthetic-visualization-native-thread",
         runtimeMode: "approval-required" as const,
-        prompt: "The exact user prompt remains user input.",
+        prompt: "Use colorful animated charts with a subtle frosted WebGL background.",
+        attachments: [{ type: "image" as const, url: "https://example.invalid/reference.png" }],
         model: "gpt-6.1-sol",
         serviceTier: "fast" as const,
         effort: "high" as const,
@@ -5798,10 +6681,11 @@ describe("buildTurnStartParams", () => {
           : CODEX_DEFAULT_MODE_DEVELOPER_INSTRUCTIONS;
       assert.equal(baseline.collaborationMode?.settings.developer_instructions, modeInstructions);
       assert.equal(JSON.stringify(baseline).includes("preview_visualization"), false);
-      assert.deepEqual(
-        Effect.runSync(buildTurnStartParams({ ...input, visualizationInstructions: false })),
-        baseline,
-      );
+      // The exact optional contract admits false or an omitted property, not
+      // an explicitly present undefined value. Exercise both valid requests.
+      for (const nonvisualizationInput of [input, { ...input, visualizationInstructions: false }]) {
+        assert.deepEqual(Effect.runSync(buildTurnStartParams(nonvisualizationInput)), baseline);
+      }
       const admitted = Effect.runSync(
         buildTurnStartParams({ ...input, visualizationInstructions: true }),
       );
@@ -5811,7 +6695,7 @@ describe("buildTurnStartParams", () => {
           ...baseline.collaborationMode,
           settings: {
             ...baseline.collaborationMode!.settings,
-            developer_instructions: `${modeInstructions}\n\n${GENERATED_VISUALIZATION_INSTRUCTIONS}`,
+            developer_instructions: `${modeInstructions}\n\n${CODEX_VISUALIZATION_DISCOVERY_INSTRUCTIONS}`,
           },
         },
       });
@@ -5819,8 +6703,35 @@ describe("buildTurnStartParams", () => {
       // prompt, model selection, native effort, approval or sandbox settings.
       assert.deepEqual(admitted.input, baseline.input);
       assert.equal(admitted.collaborationMode?.mode, interactionMode);
+      assert.equal(
+        admitted.collaborationMode?.settings.developer_instructions?.includes(
+          GENERATED_VISUALIZATION_INSTRUCTIONS,
+        ),
+        false,
+      );
+      assert.equal(admitted.model, input.model);
+      assert.equal(admitted.serviceTier, input.serviceTier);
+      assert.equal(admitted.collaborationMode?.settings.reasoning_effort, input.effort);
+      assert.equal(admitted.approvalPolicy, baseline.approvalPolicy);
+      assert.deepEqual(admitted.sandboxPolicy, baseline.sandboxPolicy);
     },
   );
+  it("does not add collaboration or user instructions when the caller omits interaction mode", () => {
+    const input = {
+      threadId: "synthetic-visualization-native-thread",
+      runtimeMode: "full-access" as const,
+      prompt: "The user's content stays exact.",
+      model: "gpt-6.1-sol",
+      serviceTier: "fast" as const,
+      effort: "high" as const,
+    };
+    const baseline = Effect.runSync(buildTurnStartParams(input));
+    assert.equal(baseline.collaborationMode, undefined);
+    assert.deepEqual(
+      Effect.runSync(buildTurnStartParams({ ...input, visualizationInstructions: true })),
+      baseline,
+    );
+  });
   it.each(["standard", "daybreakBlue", "daybreakRed"] as const)(
     "preserves explicit %s cyber treatment through experimental request decoding",
     (cyberAccessProgram) => {
@@ -8457,6 +9368,13 @@ describe("openCodexThread", () => {
           Reflect.get(Reflect.get(calls[0]!.payload as object, "config"), "model_context_window"),
           128_000,
         );
+        assert.equal(
+          Reflect.get(
+            Reflect.get(calls[0]!.payload as object, "config"),
+            "model_auto_compact_token_limit",
+          ),
+          128_000,
+        );
         assert.equal(Reflect.has(calls[0]!.payload as object, "input"), false);
       }
     },
@@ -8634,6 +9552,109 @@ describe("openCodexThread", () => {
     }
   });
 
+  it("requires the exact resumed native conversation without changing opening policy or exposing the private flag", async () => {
+    const calls: Array<{ method: string; payload: unknown }> = [];
+    const opened = await Effect.runPromise(
+      openCodexThread({
+        client: {
+          raw: {
+            request: (method, payload) => {
+              calls.push({ method, payload });
+              return Effect.succeed(makeThreadOpenResponse("exact-native-history"));
+            },
+          },
+        },
+        threadId: ThreadId.make("cold-cafe-thread"),
+        runtimeMode: "approval-required",
+        cwd: process.cwd(),
+        requestedModel: "gpt-6.1-sol",
+        serviceTier: "default",
+        resumeThreadId: "exact-native-history",
+        requireExactResume: true,
+        codexContextWindowOverride: 800_000,
+        autoCompactTokenLimit: 640_000,
+      }),
+    );
+    assert.equal(opened.thread.id, "exact-native-history");
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0]!.method, "thread/resume");
+    const payload = calls[0]!.payload as Record<string, unknown>;
+    assert.equal(payload.threadId, "exact-native-history");
+    assert.equal(payload.model, "gpt-6.1-sol");
+    assert.equal(payload.serviceTier, "default");
+    assert.deepEqual(payload.config, {
+      model_context_window: 800_000,
+      model_auto_compact_token_limit: 640_000,
+    });
+    assert.equal(payload.excludeTurns, true);
+    assert.deepEqual(payload.initialTurnsPage, {
+      itemsView: "notLoaded",
+      limit: 1,
+      sortDirection: "desc",
+    });
+    assert.equal(Object.hasOwn(payload, "requireExactResume"), false);
+    assert.equal(Object.hasOwn(payload, "input"), false);
+  });
+
+  it("propagates a recoverable exact-resume failure without creating a blank native conversation", async () => {
+    const calls: Array<{ method: string; payload: unknown }> = [];
+    const failure = CodexErrors.CodexAppServerRequestError.invalidRequest("thread not found");
+    const error = await Effect.runPromise(
+      openCodexThread({
+        client: {
+          raw: {
+            request: (method, payload) => {
+              calls.push({ method, payload });
+              return method === "thread/resume"
+                ? Effect.fail(failure)
+                : Effect.succeed(makeThreadOpenResponse("unrelated-blank-thread"));
+            },
+          },
+        },
+        threadId: ThreadId.make("cold-cafe-thread"),
+        runtimeMode: "approval-required",
+        cwd: process.cwd(),
+        requestedModel: "gpt-6.1-sol",
+        serviceTier: undefined,
+        resumeThreadId: "exact-native-history",
+        requireExactResume: true,
+      }).pipe(Effect.flip),
+    );
+    assert.equal(error, failure);
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0]!.method, "thread/resume");
+    assert.equal(Reflect.get(calls[0]!.payload as object, "threadId"), "exact-native-history");
+  });
+
+  it.each([undefined, "", "   "])(
+    "refuses a missing exact-resume cursor (%s) before any native RPC",
+    async (resumeThreadId) => {
+      const calls: Array<{ method: string; payload: unknown }> = [];
+      const error = await Effect.runPromise(
+        openCodexThread({
+          client: {
+            raw: {
+              request: (method, payload) => {
+                calls.push({ method, payload });
+                return Effect.succeed(makeThreadOpenResponse("unrelated-blank-thread"));
+              },
+            },
+          },
+          threadId: ThreadId.make("cold-cafe-thread"),
+          runtimeMode: "approval-required",
+          cwd: process.cwd(),
+          requestedModel: "gpt-6.1-sol",
+          serviceTier: undefined,
+          resumeThreadId,
+          requireExactResume: true,
+        }).pipe(Effect.flip),
+      );
+      assert.equal(error._tag, "CodexAppServerRequestError");
+      assert.equal(error.message, "The exact Codex conversation is required for recovery opening.");
+      assert.deepEqual(calls, []);
+    },
+  );
+
   it("preserves workspace-write roots without injecting Codex compaction defaults", async () => {
     const calls: Array<{ method: "thread/start" | "thread/resume"; payload: unknown }> = [];
     const client = {
@@ -8730,7 +9751,7 @@ describe("openCodexThread", () => {
     }
   });
 
-  it("translates an explicit nominal context override on start/resume and omits it on inheritance", async () => {
+  it("pairs nominal context on start/resume, preserves explicit compaction precedence and omits inherited keys", async () => {
     const calls: Array<{ method: "thread/start" | "thread/resume"; payload: unknown }> = [];
     const client = {
       raw: {
@@ -8741,7 +9762,46 @@ describe("openCodexThread", () => {
       },
     };
     for (const resumeThreadId of [undefined, "existing-thread"]) {
-      for (const codexContextWindowOverride of [500_000, undefined]) {
+      // Open with context first, then without either setting, to prove a later
+      // native-inheritance/reset request cannot retain its predecessor's keys.
+      for (const scenario of [
+        {
+          codexContextWindowOverride: 800_000,
+          autoCompactTokenLimit: undefined,
+          expectedConfig: {
+            model_context_window: 800_000,
+            model_auto_compact_token_limit: 800_000,
+          },
+        },
+        {
+          codexContextWindowOverride: undefined,
+          autoCompactTokenLimit: undefined,
+          expectedConfig: {},
+        },
+        {
+          codexContextWindowOverride: undefined,
+          autoCompactTokenLimit: 150_000,
+          expectedConfig: { model_auto_compact_token_limit: 150_000 },
+        },
+        {
+          codexContextWindowOverride: 800_000,
+          autoCompactTokenLimit: 150_000,
+          expectedConfig: {
+            model_context_window: 800_000,
+            model_auto_compact_token_limit: 150_000,
+          },
+        },
+        {
+          // This is an admitted nominal integer, not a model-capacity claim.
+          // No Cafe ratio/rounding may change either structured request value.
+          codexContextWindowOverride: Number.MAX_SAFE_INTEGER,
+          autoCompactTokenLimit: undefined,
+          expectedConfig: {
+            model_context_window: Number.MAX_SAFE_INTEGER,
+            model_auto_compact_token_limit: Number.MAX_SAFE_INTEGER,
+          },
+        },
+      ]) {
         await Effect.runPromise(
           openCodexThread({
             client,
@@ -8751,22 +9811,87 @@ describe("openCodexThread", () => {
             requestedModel: "gpt-6.1-sol",
             serviceTier: undefined,
             resumeThreadId,
-            ...(codexContextWindowOverride !== undefined ? { codexContextWindowOverride } : {}),
+            ...(scenario.codexContextWindowOverride !== undefined
+              ? { codexContextWindowOverride: scenario.codexContextWindowOverride }
+              : {}),
+            ...(scenario.autoCompactTokenLimit !== undefined
+              ? { autoCompactTokenLimit: scenario.autoCompactTokenLimit }
+              : {}),
           }),
         );
         const config = (calls.at(-1)!.payload as { config: Record<string, unknown> }).config;
-        assert.deepEqual(
-          config,
-          codexContextWindowOverride === undefined ? {} : { model_context_window: 500_000 },
-        );
-        assert.equal("model_auto_compact_token_limit" in config, false);
+        assert.deepEqual(config, scenario.expectedConfig);
+        assert.equal("model_auto_compact_token_limit_scope" in config, false);
       }
     }
     assert.deepEqual(
       calls.map((call) => call.method),
-      ["thread/start", "thread/start", "thread/resume", "thread/resume"],
+      [
+        "thread/start",
+        "thread/start",
+        "thread/start",
+        "thread/start",
+        "thread/start",
+        "thread/resume",
+        "thread/resume",
+        "thread/resume",
+        "thread/resume",
+        "thread/resume",
+      ],
     );
   });
+
+  it.each([undefined, 150_000])(
+    "retains paired context and explicit compaction intent through recoverable resume fallback (%s)",
+    async (autoCompactTokenLimit) => {
+      const calls: Array<{ method: "thread/start" | "thread/resume"; payload: unknown }> = [];
+      const client = {
+        raw: {
+          request: (method: "thread/start" | "thread/resume", payload: unknown) => {
+            calls.push({ method, payload });
+            return method === "thread/resume"
+              ? Effect.fail(
+                  new CodexErrors.CodexAppServerRequestError({
+                    code: -32603,
+                    errorMessage: "thread not found",
+                  }),
+                )
+              : Effect.succeed(makeThreadOpenResponse("fresh-context-thread"));
+          },
+        },
+      };
+
+      const opened = await Effect.runPromise(
+        openCodexThread({
+          client,
+          threadId: ThreadId.make("context-thread"),
+          runtimeMode: "full-access",
+          cwd: process.cwd(),
+          requestedModel: "gpt-6.1-sol",
+          serviceTier: undefined,
+          resumeThreadId: "stale-context-thread",
+          codexContextWindowOverride: 800_000,
+          ...(autoCompactTokenLimit !== undefined ? { autoCompactTokenLimit } : {}),
+        }),
+      );
+
+      assert.equal(opened.thread.id, "fresh-context-thread");
+      assert.deepEqual(
+        calls.map((call) => call.method),
+        ["thread/resume", "thread/start"],
+      );
+      for (const call of calls) {
+        const config = (call.payload as { config: Record<string, unknown> }).config;
+        assert.deepEqual(config, {
+          model_context_window: 800_000,
+          model_auto_compact_token_limit: autoCompactTokenLimit ?? 800_000,
+        });
+        assert.equal("model_auto_compact_token_limit_scope" in config, false);
+      }
+      assert.equal(Reflect.get(calls[0]!.payload as object, "threadId"), "stale-context-thread");
+      assert.equal(Reflect.has(calls[1]!.payload as object, "threadId"), false);
+    },
+  );
 
   it("propagates non-recoverable resume failures", async () => {
     const client = {

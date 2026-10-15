@@ -1,0 +1,1167 @@
+import { constants as vmConstants, createContext, Script } from "node:vm";
+import { describe, expect, it } from "vitest";
+import {
+  VISUALIZATION_FLUID_DIAGNOSTIC_COUNTER_MAX,
+  VISUALIZATION_FLUID_RUNTIME_SOURCE,
+  visualizationFluidScript,
+} from "./visualizationFluidRuntime.ts";
+
+/** Synthetic ordinary-page APIs execute only the fixed library, never received
+ * source, a native runtime, user profile or real GPU. Real shader/pixel evidence
+ * belongs to the explicit native fixture, independently of these ledger tests. */
+function fixture(
+  options: {
+    markers?: number;
+    unsupported?: boolean;
+    rgbaFallback?: boolean;
+    secondBufferNull?: boolean;
+    initialZero?: boolean;
+    presentationVisible?: "true" | "false";
+    counterLimit?: number;
+    authoredOpacity?: string;
+    initialBufferSize?: readonly [number, number];
+    width?: number;
+    height?: number;
+  } = {},
+) {
+  const listeners = new Map<object, Map<string, Set<(event?: unknown) => void>>>();
+  function events<T extends object>(target: T) {
+    return Object.assign(target, {
+      addEventListener(type: string, listener: (event?: unknown) => void) {
+        const types = listeners.get(target) ?? new Map();
+        const set = types.get(type) ?? new Set();
+        set.add(listener);
+        types.set(type, set);
+        listeners.set(target, types);
+      },
+      removeEventListener(type: string, listener: (event?: unknown) => void) {
+        listeners.get(target)?.get(type)?.delete(listener);
+      },
+    });
+  }
+  const owned = {
+    textures: new Set(),
+    framebuffers: new Set(),
+    programs: new Set(),
+    shaders: new Set(),
+    buffers: new Set(),
+  };
+  let draws = 0,
+    peakTextures = 0,
+    contextCalls = 0,
+    bufferAttempts = 0,
+    randomCalls = 0,
+    maxTrigonometricArgument = 0;
+  const shaderSources: string[] = [];
+  const allocations: { width: number; height: number; channels: number }[] = [];
+  const cleared: unknown[] = [];
+  let framebuffer: unknown = null;
+  const constants = [
+    "RED",
+    "RG",
+    "RGBA",
+    "RGBA16F",
+    "RG16F",
+    "R16F",
+    "HALF_FLOAT",
+    "MAX_TEXTURE_SIZE",
+    "FRAMEBUFFER_COMPLETE",
+    "LINK_STATUS",
+    "ACTIVE_UNIFORMS",
+    "COMPILE_STATUS",
+  ] as const;
+  const gl: Record<string, unknown> = Object.fromEntries(
+    constants.map((key, index) => [key, index + 1]),
+  );
+  for (const [name, set] of Object.entries(owned)) {
+    const singular =
+      name === "framebuffers"
+        ? "Framebuffer"
+        : name.slice(0, -1).replace(/^./, (letter) => letter.toUpperCase());
+    gl[`create${singular}`] = () => {
+      if (name === "buffers" && ++bufferAttempts === 2 && options.secondBufferNull) return null;
+      const value = {};
+      set.add(value);
+      peakTextures = Math.max(peakTextures, owned.textures.size);
+      return value;
+    };
+    gl[`delete${singular}`] = (value: object) => {
+      set.delete(value);
+    };
+  }
+  for (const name of [
+    "bindTexture",
+    "texParameteri",
+    "bindFramebuffer",
+    "framebufferTexture2D",
+    "clearColor",
+    "clear",
+    "activeTexture",
+    "viewport",
+    "shaderSource",
+    "compileShader",
+    "attachShader",
+    "bindAttribLocation",
+    "linkProgram",
+    "useProgram",
+    "uniform1i",
+    "uniform1f",
+    "uniform2f",
+    "uniform3f",
+    "bindBuffer",
+    "bufferData",
+    "vertexAttribPointer",
+    "enableVertexAttribArray",
+    "disable",
+    "enable",
+    "blendFunc",
+  ])
+    gl[name] = () => {};
+  gl.texImage2D = (
+    _target: unknown,
+    _level: unknown,
+    _internal: unknown,
+    width: number,
+    height: number,
+    _border: unknown,
+    format: unknown,
+  ) =>
+    allocations.push({ width, height, channels: format === gl.RED ? 1 : format === gl.RG ? 2 : 4 });
+  gl.shaderSource = (_shader: unknown, source: string) => {
+    shaderSources.push(source);
+  };
+  gl.checkFramebufferStatus = () => gl.FRAMEBUFFER_COMPLETE;
+  gl.bindFramebuffer = (_target: unknown, value: unknown) => {
+    framebuffer = value;
+  };
+  gl.clear = () => {
+    cleared.push(framebuffer);
+  };
+  gl.getExtension = () => ({ HALF_FLOAT_OES: 20 });
+  gl.getShaderParameter = () => true;
+  gl.getProgramParameter = (_program: unknown, parameter: unknown) =>
+    parameter === gl.ACTIVE_UNIFORMS ? 0 : true;
+  gl.getParameter = () => 4096;
+  gl.drawElements = () => {
+    draws += 1;
+  };
+  gl.drawingBufferWidth = 320;
+  gl.drawingBufferHeight = 180;
+  class Canvas {
+    dataset: Record<string, string> = {};
+    style: Record<string, string> = {};
+    width = options.initialBufferSize?.[0] ?? 300;
+    height = options.initialBufferSize?.[1] ?? 150;
+    isConnected = true;
+    parentNode = {};
+    rect = {
+      left: 0,
+      top: 0,
+      right: options.width ?? 320,
+      bottom: options.height ?? 180,
+      width: options.width ?? 320,
+      height: options.height ?? 180,
+    };
+    getBoundingClientRect() {
+      return this.rect;
+    }
+    setAttribute() {}
+    getContext(type: string) {
+      contextCalls += 1;
+      return options.unsupported || (options.rgbaFallback && type === "webgl2") ? null : gl;
+    }
+  }
+  const canvas = events(new Canvas());
+  // Keep style priority observable independently of the helper's own state;
+  // these bounded ordinary DOM scalars do not emulate GPU/native ownership.
+  const stylePriorities = new Map<string, string>();
+  Object.assign(canvas.style, {
+    setProperty(name: string, value: string, priority: string) {
+      canvas.style[name] = value;
+      stylePriorities.set(name, priority);
+    },
+  });
+  if (options.initialZero)
+    canvas.rect = { left: 0, top: 0, right: 0, bottom: 0, width: 0, height: 0 };
+  const document = events({
+    hidden: false,
+    readyState: "complete",
+    documentElement: {
+      dataset: {
+        cafeVisible: "false",
+        cafeReducedMotion: "false",
+        ...(options.presentationVisible === undefined
+          ? {}
+          : { cafePresentationVisible: options.presentationVisible }),
+      },
+    },
+    querySelectorAll: () => Array.from({ length: options.markers ?? 1 }, () => canvas),
+  });
+  const motion = events({ matches: false });
+  const window = events({ devicePixelRatio: 1 });
+  const rafs = new Map<number, (time: number) => void>();
+  let next = 0,
+    now = 0;
+  const observers: (() => void)[] = [];
+  class Observer {
+    private callback: () => void;
+    constructor(callback: () => void) {
+      this.callback = callback;
+      observers.push(callback);
+    }
+    observe() {}
+    disconnect() {
+      observers.splice(observers.indexOf(this.callback), 1);
+    }
+  }
+  // Node24's ordinary VM global avoids a proxy lookup on every fixed-library
+  // global access during the genuine30,000-frame phase-wrap regression. Keep a
+  // fresh realm and the exact same synthetic APIs for EVERY fixture, never a
+  // shared realm, main-realm execution, fewer frames or a larger timeout.
+  // https://github.com/nodejs/node/blob/v24.21.0/doc/api/vm.md#vmconstantsdont_contextify
+  // Neither VM mode is a security boundary: this fixture executes only Cafe's
+  // committed fixed helper, never received HTML or other untrusted source.
+  const context = Object.assign(createContext(vmConstants.DONT_CONTEXTIFY), {
+    document,
+    window,
+    HTMLCanvasElement: Canvas,
+    getComputedStyle: () => ({ opacity: options.authoredOpacity ?? "1" }),
+    matchMedia: () => motion,
+    ResizeObserver: Observer,
+    MutationObserver: Observer,
+    performance: { now: () => now },
+    // An instrumented, smaller diagnostic saturation point makes the otherwise
+    // unreachable MAX_SAFE_INTEGER boundary testable without a mutable helper
+    // API. Numeric validity and resource admissions use the real Number APIs.
+    Number: Object.assign((value: unknown) => Number(value), {
+      isFinite: Number.isFinite,
+      isInteger: Number.isInteger,
+      isSafeInteger: Number.isSafeInteger,
+      MAX_SAFE_INTEGER: options.counterLimit ?? Number.MAX_SAFE_INTEGER,
+    }),
+    // Stable instrumentation functions avoid creating a new closure for every
+    // sample in the real long-run phase-wrap case. They retain actual trig math
+    // and record only one bounded maximum, not a lifetime list of arguments.
+    Math: Object.assign(Object.create(Math) as typeof Math, {
+      random() {
+        randomCalls++;
+        return 0.5;
+      },
+      sin(argument: number) {
+        maxTrigonometricArgument = Math.max(maxTrigonometricArgument, Math.abs(argument));
+        return Math.sin(argument);
+      },
+      cos(argument: number) {
+        maxTrigonometricArgument = Math.max(maxTrigonometricArgument, Math.abs(argument));
+        return Math.cos(argument);
+      },
+    }),
+    requestAnimationFrame(callback: (time: number) => void) {
+      const id = ++next;
+      rafs.set(id, callback);
+      return id;
+    },
+    cancelAnimationFrame(id: number) {
+      rafs.delete(id);
+    },
+  });
+  new Script(VISUALIZATION_FLUID_RUNTIME_SOURCE).runInContext(context);
+  const fire = (target: object, type: string, event?: unknown) => {
+    for (const callback of listeners.get(target)?.get(type) ?? []) callback(event);
+  };
+  const tick = () => {
+    now += 34;
+    const callbacks = [...rafs.values()];
+    rafs.clear();
+    for (const callback of callbacks) callback(now);
+  };
+  return {
+    context,
+    canvas,
+    stylePriorities,
+    document,
+    window,
+    motion,
+    owned,
+    allocations,
+    cleared,
+    rafs,
+    observers,
+    fire,
+    tick,
+    draws: () => draws,
+    contextCalls: () => contextCalls,
+    peakTextures: () => peakTextures,
+    shaderSources,
+    randomCalls: () => randomCalls,
+    maxTrigonometricArgument: () => maxTrigonometricArgument,
+    liveListeners: () =>
+      [...listeners.values()].reduce(
+        (sum, types) => sum + [...types.values()].reduce((count, set) => count + set.size, 0),
+        0,
+      ),
+  };
+}
+
+describe("fixed generated fluid library", () => {
+  it("keeps each ordinary VM global fresh without ambient Node globals or shared intrinsics", () => {
+    const first = fixture();
+    const second = fixture();
+    const probe = new Script(
+      "({global:globalThis,array:Array,node:typeof process,loader:typeof require})",
+    );
+    const a = probe.runInContext(first.context);
+    const b = probe.runInContext(second.context);
+    expect(a.global).toBe(first.context);
+    expect(b.global).toBe(second.context);
+    expect(a.array).not.toBe(Array);
+    expect(b.array).not.toBe(a.array);
+    expect(a.node).toBe("undefined");
+    expect(b.node).toBe("undefined");
+    expect(a.loader).toBe("undefined");
+    expect(b.loader).toBe("undefined");
+    first.document.documentElement.dataset.cafeVisible = "true";
+    first.fire(first.window, "cafe-visibility-changed");
+    first.tick();
+    expect(first.canvas.dataset.cafeFluidFrames).toBe("13");
+    expect(second.canvas.dataset.cafeFluidFrames).toBe("12");
+    expect(second.rafs.size).toBe(0);
+    for (const value of [first, second]) {
+      value.fire(value.window, "pagehide");
+      for (const resources of Object.values(value.owned)) expect(resources.size).toBe(0);
+      expect(value.rafs.size).toBe(0);
+      expect(value.liveListeners()).toBe(0);
+      expect(value.observers).toHaveLength(0);
+    }
+  });
+  it("embeds a bounded licensed ordinary-page constant only for generated documents", () => {
+    expect(VISUALIZATION_FLUID_DIAGNOSTIC_COUNTER_MAX).toBe(Number.MAX_SAFE_INTEGER);
+    expect(VISUALIZATION_FLUID_RUNTIME_SOURCE).toContain(
+      "Math.min(Number.MAX_SAFE_INTEGER,value+1)",
+    );
+    expect(Buffer.byteLength(VISUALIZATION_FLUID_RUNTIME_SOURCE, "utf8")).toBeLessThanOrEqual(
+      65_536,
+    );
+    expect(VISUALIZATION_FLUID_RUNTIME_SOURCE).not.toMatch(
+      /<\/script|fetch\(|XMLHttpRequest|ipcRenderer|createNoiseTexture|bloomProgram|bloomFramebuffers/i,
+    );
+    expect(VISUALIZATION_FLUID_RUNTIME_SOURCE).toContain("Copyright (c) Pavel Dobryakov");
+    expect(VISUALIZATION_FLUID_RUNTIME_SOURCE).toContain('THE SOFTWARE IS PROVIDED "AS IS"');
+    expect(VISUALIZATION_FLUID_RUNTIME_SOURCE).toContain("vec2 force = 0.5");
+    expect(VISUALIZATION_FLUID_RUNTIME_SOURCE).toContain(
+      "float pressure = (L + R + B + T - divergence) * 0.25",
+    );
+    expect(visualizationFluidScript("mcp-app")).toBe("");
+    expect(visualizationFluidScript("generated")).toBe(
+      "<script>" + VISUALIZATION_FLUID_RUNTIME_SOURCE + "</script>",
+    );
+  });
+  it.each([0, 2, 20])("allocates nothing when exact marker cardinality is %s", (markers) => {
+    const value = fixture({ markers });
+    expect(value.contextCalls()).toBe(0);
+    expect(value.draws()).toBe(0);
+    expect(value.rafs.size).toBe(0);
+    expect(value.liveListeners()).toBe(0);
+  });
+  it("releases the first exact buffer when the second allocation is unavailable", () => {
+    const value = fixture({ secondBufferNull: true });
+    expect(value.canvas.dataset.cafeFluidState).toBe("unsupported");
+    expect(Object.values(value.owned).every((set) => set.size === 0)).toBe(true);
+    expect(value.rafs.size).toBe(0);
+    expect(value.liveListeners()).toBe(0);
+  });
+  it("defers a genuine zero startup layout without GL or RAF and initializes once after positive observation", () => {
+    const value = fixture({ initialZero: true });
+    expect(value.canvas.dataset.cafeFluidState).toBe("waiting");
+    expect(value.contextCalls()).toBe(0);
+    expect(value.rafs.size).toBe(0);
+    expect(value.observers).toHaveLength(2);
+    expect(value.liveListeners()).toBe(4);
+    value.canvas.rect = { left: 0, top: 0, right: 320, bottom: 180, width: 320, height: 180 };
+    value.observers[0]!();
+    expect(value.contextCalls()).toBe(1);
+    expect(value.canvas.dataset.cafeFluidFrames).toBe("12");
+    expect(value.owned.textures.size).toBe(8);
+    expect(value.rafs.size).toBe(0);
+    value.fire(value.window, "cafe-presentation-changed");
+    expect(value.contextCalls()).toBe(1);
+  });
+  it("exhausts at the eighth zero observation without any GPU retry", () => {
+    const value = fixture({ initialZero: true });
+    for (let i = 0; i < 7; i++) value.fire(value.window, "cafe-visibility-changed");
+    expect(value.canvas.dataset.cafeFluidLayoutObservations).toBe("8");
+    expect(value.canvas.dataset.cafeFluidState).toBe("unsupported");
+    expect(value.contextCalls()).toBe(0);
+    expect(value.liveListeners()).toBe(0);
+    expect(value.observers).toHaveLength(0);
+    value.canvas.rect = { left: 0, top: 0, right: 320, bottom: 180, width: 320, height: 180 };
+    value.fire(value.window, "cafe-visibility-changed");
+    expect(value.contextCalls()).toBe(0);
+  });
+  it("keeps invalid positive layout terminal after pending startup", () => {
+    const value = fixture({ initialZero: true });
+    value.canvas.rect = { left: 0, top: 0, right: 4097, bottom: 180, width: 4097, height: 180 };
+    value.observers[0]!();
+    expect(value.canvas.dataset.cafeFluidState).toBe("unsupported");
+    expect(value.contextCalls()).toBe(0);
+    expect(value.observers).toHaveLength(0);
+    expect(value.liveListeners()).toBe(0);
+  });
+  it.each(["pagehide", "removal"] as const)(
+    "cleans exact pending observers/listeners on %s",
+    (event) => {
+      const value = fixture({ initialZero: true });
+      if (event === "pagehide") value.fire(value.window, "pagehide");
+      else {
+        value.canvas.isConnected = false;
+        value.observers[1]!();
+      }
+      expect(value.canvas.dataset.cafeFluidState).toBe("disposed");
+      expect(value.contextCalls()).toBe(0);
+      expect(value.rafs.size).toBe(0);
+      expect(value.observers).toHaveLength(0);
+      expect(value.liveListeners()).toBe(0);
+    },
+  );
+  it("produces bounded solved static hidden poster work without any RAF", () => {
+    const value = fixture();
+    expect(value.canvas.dataset.cafeFluidFrames).toBe("12");
+    expect(value.canvas.dataset.cafeFluidState).toBe("paused");
+    expect(value.rafs.size).toBe(0);
+    // Transparent page clearing must target the default drawing buffer, not
+    // erase the just-swapped dye framebuffer produced by the supplied solver.
+    expect(value.cleared.at(-1)).toBeNull();
+    expect(value.owned.textures.size).toBe(8);
+    expect(value.owned.programs.size).toBe(10);
+    expect(value.owned.shaders.size).toBe(12);
+    expect(value.owned.buffers.size).toBe(2);
+    expect(Number(value.canvas.dataset.cafeFluidTextureBytes)).toBeLessThanOrEqual(
+      16 * 1024 * 1024,
+    );
+  });
+  it("uses original display plus ten percent without altering solver resources or equations", () => {
+    const value = fixture();
+    // The supplied solver already contains ordinary numeric constants. Select only
+    // the two final presentation expressions, never count unrelated equations.
+    const gainShaders = value.shaderSources.filter(
+      (source) =>
+        source.includes("texture2D(uTexture, vUv).rgb * 1.1") ||
+        source.includes("C.rgb *= diffuse * 1.1"),
+    );
+    expect(gainShaders).toHaveLength(2);
+    expect(
+      gainShaders.some((source) => source.includes("texture2D(uTexture, vUv).rgb * 1.1")),
+    ).toBe(true);
+    expect(gainShaders.some((source) => source.includes("C.rgb *= diffuse * 1.1"))).toBe(true);
+    expect(value.canvas.style.background).toBe(
+      "linear-gradient(135deg,rgba(0,190,255,.132),rgba(123,44,255,.132),rgba(255,40,180,.132))",
+    );
+    expect(value.owned.programs.size).toBe(10);
+    expect(value.owned.shaders.size).toBe(12);
+    expect(value.owned.buffers.size).toBe(2);
+  });
+  it.each([
+    ["1", "0.15"],
+    ["0.8", "0.15"],
+    ["0.15", "0.15"],
+    ["0.05", "0.05"],
+    ["0", "0"],
+    ["unknown", "0.15"],
+    ["-1", "0.15"],
+    ["2", "0.15"],
+  ])("caps only decorative opacity %s at %s and preserves quieter source", (authored, expected) => {
+    const value = fixture({ authoredOpacity: authored });
+    expect(value.canvas.style.opacity).toBe(expected);
+    expect(value.stylePriorities.get("opacity")).toBe("important");
+    expect(value.stylePriorities.size).toBe(1);
+    expect(value.canvas.style.pointerEvents).toBe("none");
+    expect(value.owned.textures.size).toBe(8);
+    expect(value.owned.programs.size).toBe(10);
+    expect(value.owned.shaders.size).toBe(12);
+    expect(value.owned.buffers.size).toBe(2);
+  });
+  it.each([0, 2])("leaves decoration styles untouched when marker count is %s", (markers) => {
+    const value = fixture({ markers });
+    expect(value.canvas.style.opacity).toBeUndefined();
+    expect(value.canvas.style.background).toBeUndefined();
+    expect(value.stylePriorities.size).toBe(0);
+    expect(value.contextCalls()).toBe(0);
+    expect(value.rafs.size).toBe(0);
+  });
+  it("accounts actual RGBA half-float fallback and deletes old targets before resize allocation", () => {
+    const value = fixture({ rgbaFallback: true });
+    const first = Number(value.canvas.dataset.cafeFluidTextureBytes);
+    expect(first).toBeGreaterThan(0);
+    expect(first).toBe(
+      value.allocations
+        .slice(-8)
+        .reduce(
+          (sum, allocation) => sum + allocation.width * allocation.height * allocation.channels * 2,
+          0,
+        ),
+    );
+    value.canvas.rect = { left: 0, top: 0, right: 1600, bottom: 2000, width: 1600, height: 2000 };
+    value.document.documentElement.dataset.cafeVisible = "true";
+    value.fire(value.window, "cafe-visibility-changed");
+    value.tick();
+    expect(value.peakTextures()).toBe(8);
+    expect(value.canvas.width).toBeLessThanOrEqual(512);
+    expect(value.canvas.height).toBeLessThanOrEqual(512);
+    expect(Number(value.canvas.dataset.cafeFluidTextureBytes)).toBeLessThanOrEqual(
+      16 * 1024 * 1024,
+    );
+  });
+  it.each([
+    [1601, 320],
+    [4096, 2000],
+    [4096, 1],
+  ])(
+    "fills logical %sx%s while preserving every GPU, cadence and pointer bound",
+    (width, height) => {
+      const value = fixture({ width, height, rgbaFallback: true });
+      expect(value.canvas.dataset.cafeFluidState).toBe("paused");
+      expect(value.canvas.width).toBeLessThanOrEqual(512);
+      expect(value.canvas.height).toBeLessThanOrEqual(512);
+      expect(value.canvas.width).toBeGreaterThanOrEqual(1);
+      expect(value.canvas.height).toBeGreaterThanOrEqual(1);
+      if (height === 1) {
+        expect(value.canvas.width).toBe(512);
+        expect(value.canvas.height).toBe(1);
+      }
+      expect(
+        value.allocations.every(
+          (target) =>
+            target.width >= 1 &&
+            target.width <= 1024 &&
+            target.height >= 1 &&
+            target.height <= 1024,
+        ),
+      ).toBe(true);
+      expect(Number(value.canvas.dataset.cafeFluidTextureBytes)).toBeLessThanOrEqual(
+        16 * 1024 * 1024,
+      );
+      expect(value.owned.textures.size).toBe(8);
+      expect(value.owned.framebuffers.size).toBe(8);
+      expect(value.owned.programs.size).toBe(10);
+      expect(value.owned.shaders.size).toBe(12);
+      expect(value.owned.buffers.size).toBe(2);
+      const allocations = value.allocations.length;
+      value.document.documentElement.dataset.cafeVisible = "true";
+      value.fire(value.window, "cafe-visibility-changed");
+      value.fire(value.window, "pointermove", {
+        isTrusted: true,
+        clientX: width / 2,
+        clientY: height / 2,
+      });
+      value.tick();
+      expect(value.canvas.dataset.cafeFluidState).toBe("running");
+      expect(value.canvas.dataset.cafeFluidPointerInputs).toBe("1");
+      expect(value.canvas.dataset.cafeFluidFrames).toBe("13");
+      expect(value.rafs.size).toBe(1);
+      expect(value.allocations).toHaveLength(allocations);
+      value.fire(value.window, "pagehide");
+      for (const set of Object.values(value.owned)) expect(set.size).toBe(0);
+      expect(value.rafs.size).toBe(0);
+      expect(value.liveListeners()).toBe(0);
+    },
+  );
+  it.each([
+    [4097, 200],
+    [4096, 2001],
+  ])("refuses logical %sx%s before creating a GL context", (width, height) => {
+    const value = fixture({ width, height });
+    expect(value.canvas.dataset.cafeFluidState).toBe("unsupported");
+    expect(value.contextCalls()).toBe(0);
+    expect(value.rafs.size).toBe(0);
+    expect(value.allocations).toHaveLength(0);
+    expect(value.liveListeners()).toBe(0);
+  });
+  it("pauses on both actual document and native presentation visibility without budget renewal", () => {
+    const value = fixture();
+    expect(value.document.documentElement.dataset.cafePresentationVisible).toBeUndefined();
+    value.document.documentElement.dataset.cafeVisible = "true";
+    value.fire(value.window, "cafe-visibility-changed");
+    value.tick();
+    const frames = Number(value.canvas.dataset.cafeFluidFrames);
+    expect(frames).toBe(13);
+    value.document.hidden = true;
+    value.fire(value.document, "visibilitychange");
+    expect(value.rafs.size).toBe(0);
+    value.fire(value.window, "cafe-presentation-changed");
+    expect(value.canvas.dataset.cafeFluidFrames).toBe(String(frames));
+    value.document.hidden = false;
+    value.fire(value.document, "visibilitychange");
+    value.tick();
+    expect(value.canvas.dataset.cafeFluidFrames).toBe("14");
+    value.document.documentElement.dataset.cafeVisible = "false";
+    value.fire(value.window, "cafe-visibility-changed");
+    expect(value.rafs.size).toBe(0);
+  });
+  it("pauses paint-only masking without changing logical visibility or replacing solver resources", () => {
+    const value = fixture({ presentationVisible: "true" });
+    value.document.documentElement.dataset.cafeVisible = "true";
+    value.fire(value.window, "cafe-visibility-changed");
+    value.tick();
+    const resources = Object.fromEntries(
+      Object.entries(value.owned).map(([name, set]) => [name, [...set]]),
+    );
+    const allocations = value.allocations.length;
+    const draws = value.draws();
+    const frames = value.canvas.dataset.cafeFluidFrames;
+    // The native owner publishes a separate cue, not a synthetic legacy logical
+    // hide/return. Existing chart entrance handlers therefore need not replay.
+    value.fire(value.window, "pointermove", { isTrusted: true, clientX: 20, clientY: 20 });
+    value.document.documentElement.dataset.cafePresentationVisible = "false";
+    value.fire(value.window, "cafe-presentation-visibility-changed");
+    expect(value.document.documentElement.dataset.cafeVisible).toBe("true");
+    expect(value.canvas.dataset.cafeFluidState).toBe("paused");
+    expect(value.rafs.size).toBe(0);
+    for (let index = 0; index < 100; index++) {
+      value.fire(value.window, "pointermove", { isTrusted: true, clientX: 40, clientY: 40 });
+      value.fire(value.window, "cafe-presentation-visibility-changed");
+      value.tick();
+    }
+    expect(value.canvas.dataset.cafeFluidFrames).toBe(frames);
+    expect(value.canvas.dataset.cafeFluidPointerInputs).toBe("0");
+    expect(value.draws()).toBe(draws);
+    expect(value.allocations).toHaveLength(allocations);
+    value.document.documentElement.dataset.cafePresentationVisible = "true";
+    value.fire(value.window, "cafe-presentation-visibility-changed");
+    value.fire(value.window, "cafe-presentation-visibility-changed");
+    expect(value.rafs.size).toBe(1);
+    value.tick();
+    expect(Number(value.canvas.dataset.cafeFluidFrames)).toBe(Number(frames) + 1);
+    expect(value.canvas.dataset.cafeFluidPointerInputs).toBe("0");
+    for (const [name, set] of Object.entries(value.owned))
+      expect([...set]).toEqual(resources[name]);
+    expect(value.allocations).toHaveLength(allocations);
+    const resumedDraws = value.draws();
+    value.fire(value.window, "pagehide");
+    expect(value.liveListeners()).toBe(0);
+    expect(value.observers).toHaveLength(0);
+    expect(value.rafs.size).toBe(0);
+    value.fire(value.window, "cafe-presentation-visibility-changed");
+    expect(resumedDraws).toBeGreaterThan(draws);
+    expect(value.draws()).toBe(resumedDraws);
+    expect(value.canvas.dataset.cafeFluidFrames).toBe(String(Number(frames) + 1));
+    for (const set of Object.values(value.owned)) expect(set.size).toBe(0);
+  });
+  it("honors the initial paint cue without weakening document/logical/reduced-motion gates", () => {
+    const value = fixture({ presentationVisible: "false" });
+    value.document.documentElement.dataset.cafeVisible = "true";
+    value.fire(value.window, "cafe-visibility-changed");
+    expect(value.canvas.dataset.cafeFluidFrames).toBe("12");
+    expect(value.rafs.size).toBe(0);
+    value.document.documentElement.dataset.cafePresentationVisible = "true";
+    value.document.hidden = true;
+    value.fire(value.window, "cafe-presentation-visibility-changed");
+    expect(value.rafs.size).toBe(0);
+    value.document.hidden = false;
+    value.document.documentElement.dataset.cafeVisible = "false";
+    value.fire(value.window, "cafe-presentation-visibility-changed");
+    expect(value.rafs.size).toBe(0);
+    value.document.documentElement.dataset.cafeVisible = "true";
+    value.document.documentElement.dataset.cafeReducedMotion = "true";
+    value.fire(value.window, "cafe-presentation-visibility-changed");
+    expect(value.canvas.dataset.cafeFluidState).toBe("static");
+    expect(value.canvas.dataset.cafeFluidFrames).toBe("12");
+    expect(value.rafs.size).toBe(0);
+    value.document.documentElement.dataset.cafePresentationVisible = "false";
+    value.fire(value.window, "cafe-presentation-visibility-changed");
+    value.canvas.rect = { left: 0, top: 0, right: 640, bottom: 320, width: 640, height: 320 };
+    const allocations = value.allocations.length;
+    value.observers[0]!();
+    expect(value.allocations).toHaveLength(allocations);
+    expect(value.canvas.dataset.cafeFluidFrames).toBe("12");
+    value.document.documentElement.dataset.cafePresentationVisible = "true";
+    value.fire(value.window, "cafe-presentation-visibility-changed");
+    expect(value.canvas.dataset.cafeFluidFrames).toBe("24");
+    expect(value.canvas.dataset.cafeFluidState).toBe("static");
+    expect(value.rafs.size).toBe(0);
+  });
+  it("observes paint cues during bounded zero startup and removes the exact pending listener", () => {
+    const value = fixture({ initialZero: true, presentationVisible: "false" });
+    expect(value.canvas.dataset.cafeFluidState).toBe("waiting");
+    expect(value.liveListeners()).toBe(4);
+    value.document.documentElement.dataset.cafeVisible = "true";
+    value.canvas.rect = { left: 0, top: 0, right: 320, bottom: 180, width: 320, height: 180 };
+    value.fire(value.window, "cafe-presentation-visibility-changed");
+    expect(value.contextCalls()).toBe(1);
+    expect(value.canvas.dataset.cafeFluidFrames).toBe("12");
+    expect(value.rafs.size).toBe(0);
+    value.document.documentElement.dataset.cafePresentationVisible = "true";
+    value.fire(value.window, "cafe-presentation-visibility-changed");
+    expect(value.contextCalls()).toBe(1);
+    expect(value.rafs.size).toBe(1);
+    value.tick();
+    expect(value.canvas.dataset.cafeFluidFrames).toBe("13");
+    value.fire(value.window, "pagehide");
+    expect(value.liveListeners()).toBe(0);
+    expect(value.observers).toHaveLength(0);
+    expect(value.rafs.size).toBe(0);
+    value.fire(value.window, "cafe-presentation-visibility-changed");
+    expect(value.contextCalls()).toBe(1);
+  });
+  it("rebuilds only changed visible static geometry with bounded warm-up and exact old-target deletion", () => {
+    const value = fixture();
+    value.document.documentElement.dataset.cafeVisible = "true";
+    value.document.documentElement.dataset.cafeReducedMotion = "true";
+    value.fire(value.window, "cafe-visibility-changed");
+    const first = new Set(value.owned.textures);
+    value.canvas.rect = { left: 0, top: 0, right: 640, bottom: 320, width: 640, height: 320 };
+    value.observers[0]!();
+    expect(value.canvas.width).toBe(512);
+    expect(value.canvas.height).toBe(256);
+    expect(value.canvas.dataset.cafeFluidFrames).toBe("24");
+    expect(value.canvas.dataset.cafeFluidState).toBe("static");
+    expect(value.rafs.size).toBe(0);
+    expect(value.owned.textures.size).toBe(8);
+    expect(value.owned.framebuffers.size).toBe(8);
+    expect(value.owned.programs.size).toBe(10);
+    expect(value.owned.buffers.size).toBe(2);
+    expect([...first].some((texture) => value.owned.textures.has(texture))).toBe(false);
+    expect(value.peakTextures()).toBe(8);
+    expect(Number(value.canvas.dataset.cafeFluidTextureBytes)).toBeLessThanOrEqual(
+      16 * 1024 * 1024,
+    );
+    const draws = value.draws();
+    for (let index = 0; index < 100; index++) {
+      value.observers[0]!();
+      value.fire(value.window, "cafe-presentation-changed");
+    }
+    expect(value.draws()).toBe(draws);
+    expect(value.canvas.dataset.cafeFluidFrames).toBe("24");
+    expect(value.rafs.size).toBe(0);
+    value.document.hidden = true;
+    value.canvas.rect = { left: 0, top: 0, right: 0, bottom: 0, width: 0, height: 0 };
+    value.observers[0]!();
+    value.fire(value.window, "cafe-presentation-changed");
+    expect(value.draws()).toBe(draws);
+    expect(value.canvas.dataset.cafeFluidFrames).toBe("24");
+    expect(value.owned.textures.size).toBe(8);
+    value.document.hidden = false;
+    value.document.documentElement.dataset.cafeVisible = "false";
+    value.observers[0]!();
+    expect(value.draws()).toBe(draws);
+    expect(value.owned.textures.size).toBe(8);
+    value.canvas.rect = { left: 0, top: 0, right: 320, bottom: 160, width: 320, height: 160 };
+    value.document.documentElement.dataset.cafeVisible = "true";
+    value.fire(value.window, "cafe-visibility-changed");
+    expect(value.canvas.dataset.cafeFluidFrames).toBe("36");
+    expect(value.canvas.width).toBe(320);
+    expect(value.canvas.height).toBe(160);
+    expect(value.rafs.size).toBe(0);
+  });
+  it("retains the eighth complete static size without allocation or warm-up on later valid layout", () => {
+    const value = fixture();
+    value.document.documentElement.dataset.cafeVisible = "true";
+    value.document.documentElement.dataset.cafeReducedMotion = "true";
+    for (let index = 1; index <= 7; index++) {
+      value.canvas.rect = {
+        left: 0,
+        top: 0,
+        right: 320 + index,
+        bottom: 180,
+        width: 320 + index,
+        height: 180,
+      };
+      value.fire(value.window, "cafe-presentation-changed");
+      expect(value.canvas.dataset.cafeFluidFrames).toBe(String(12 * (index + 1)));
+      expect(value.owned.textures.size).toBe(8);
+      expect(value.rafs.size).toBe(0);
+    }
+    const retained = Object.fromEntries(
+      Object.entries(value.owned).map(([kind, resources]) => [kind, [...resources]]),
+    );
+    const allocations = value.allocations.length;
+    const draws = value.draws();
+    const clears = value.cleared.length;
+    const size = [value.canvas.width, value.canvas.height];
+    for (let index = 0; index < 24; index++) {
+      value.canvas.rect.width = 400 + index;
+      value.canvas.rect.height = 200 + index;
+      value.fire(value.window, "cafe-presentation-changed");
+      value.observers[0]!();
+      expect(value.canvas.dataset.cafeFluidState).toBe("static");
+      expect(value.canvas.dataset.cafeFluidFrames).toBe("96");
+      expect([value.canvas.width, value.canvas.height]).toEqual(size);
+      expect(value.allocations).toHaveLength(allocations);
+      expect(value.draws()).toBe(draws);
+      expect(value.cleared).toHaveLength(clears);
+      expect(value.rafs.size).toBe(0);
+      for (const [kind, resources] of Object.entries(value.owned))
+        expect([...resources]).toEqual(retained[kind]);
+    }
+    expect(value.peakTextures()).toBe(8);
+    expect(value.contextCalls()).toBe(1);
+    expect(value.observers).toHaveLength(2);
+    expect(value.liveListeners()).toBeGreaterThan(0);
+    // Refusal still validates layout before the retained-size branch, and a
+    // terminal failure never reopens simply because a later size is valid.
+    value.canvas.rect.width = 4097;
+    value.fire(value.window, "cafe-presentation-changed");
+    expect(value.canvas.dataset.cafeFluidState).toBe("unsupported");
+    value.canvas.rect.width = 320;
+    value.fire(value.window, "cafe-presentation-changed");
+    for (const set of Object.values(value.owned)) expect(set.size).toBe(0);
+    expect(value.rafs.size).toBe(0);
+    expect(value.observers).toHaveLength(0);
+    expect(value.liveListeners()).toBe(0);
+  });
+  it("continues ordinary frames on the eighth complete allocation without resetting its lifetime quota", () => {
+    const value = fixture();
+    value.document.documentElement.dataset.cafeVisible = "true";
+    value.fire(value.window, "cafe-visibility-changed");
+    for (let index = 0; index < 7; index++) {
+      value.canvas.rect.width = index % 2 === 0 ? 160 : 320;
+      value.canvas.rect.height = 160;
+      value.tick();
+    }
+    const retained = Object.fromEntries(
+      Object.entries(value.owned).map(([kind, resources]) => [kind, [...resources]]),
+    );
+    const allocations = value.allocations.length;
+    const targetClears = value.cleared.filter((target) => target !== null).length;
+    const size = [value.canvas.width, value.canvas.height];
+    for (let index = 0; index < 32; index++) {
+      value.canvas.rect.width = index % 2 === 0 ? 320 : 160;
+      value.tick();
+      expect(value.canvas.dataset.cafeFluidState).toBe("running");
+      expect(value.canvas.dataset.cafeFluidFrames).toBe(String(20 + index));
+      expect([value.canvas.width, value.canvas.height]).toEqual(size);
+      expect(value.allocations).toHaveLength(allocations);
+      expect(value.cleared.filter((target) => target !== null)).toHaveLength(targetClears);
+      expect(value.rafs.size).toBe(1);
+      for (const [kind, resources] of Object.entries(value.owned))
+        expect([...resources]).toEqual(retained[kind]);
+    }
+    expect(value.peakTextures()).toBe(8);
+    expect(Number(value.canvas.dataset.cafeFluidTextureBytes)).toBeLessThanOrEqual(
+      16 * 1024 * 1024,
+    );
+    // Logical and paint masks never refill admissions, clear the solver, or
+    // allocate while paused; restoring either resumes the same retained owner.
+    for (const cue of ["cafeVisible", "cafePresentationVisible"] as const) {
+      const event =
+        cue === "cafeVisible" ? "cafe-visibility-changed" : "cafe-presentation-visibility-changed";
+      value.document.documentElement.dataset[cue] = "false";
+      value.fire(value.window, event);
+      const pausedFrames = value.canvas.dataset.cafeFluidFrames;
+      value.canvas.rect.width = 400;
+      value.observers[0]!();
+      value.tick();
+      expect(value.canvas.dataset.cafeFluidFrames).toBe(pausedFrames);
+      expect(value.allocations).toHaveLength(allocations);
+      expect(value.rafs.size).toBe(0);
+      value.document.documentElement.dataset[cue] = "true";
+      value.fire(value.window, event);
+      value.tick();
+      expect(value.canvas.dataset.cafeFluidState).toBe("running");
+      expect(value.allocations).toHaveLength(allocations);
+      expect([value.canvas.width, value.canvas.height]).toEqual(size);
+    }
+    value.document.documentElement.dataset.cafeReducedMotion = "true";
+    value.fire(value.window, "cafe-presentation-changed");
+    const staticFrames = value.canvas.dataset.cafeFluidFrames;
+    const staticDraws = value.draws();
+    for (let index = 0; index < 20; index++) {
+      value.canvas.rect.width = 350 + index;
+      value.observers[0]!();
+      value.fire(value.window, "cafe-presentation-changed");
+      value.tick();
+    }
+    expect(value.canvas.dataset.cafeFluidState).toBe("static");
+    expect(value.canvas.dataset.cafeFluidFrames).toBe(staticFrames);
+    expect(value.draws()).toBe(staticDraws);
+    expect(value.allocations).toHaveLength(allocations);
+    expect(value.rafs.size).toBe(0);
+    value.fire(value.window, "pagehide");
+    value.fire(value.window, "pagehide");
+    for (const set of Object.values(value.owned)) expect(set.size).toBe(0);
+    expect(value.liveListeners()).toBe(0);
+    expect(value.observers).toHaveLength(0);
+    expect(value.rafs.size).toBe(0);
+  });
+  it.each([
+    ["width", 0],
+    ["width", 4097],
+    ["height", 0],
+    ["height", 2001],
+    ["width", Number.NaN],
+    ["height", Number.POSITIVE_INFINITY],
+  ] as const)(
+    "still refuses invalid %s=%s after exhausting all size admissions",
+    (axis, invalid) => {
+      const value = fixture();
+      value.document.documentElement.dataset.cafeVisible = "true";
+      value.fire(value.window, "cafe-visibility-changed");
+      for (let index = 1; index <= 7; index++) {
+        value.canvas.rect.width = 320 + index;
+        value.tick();
+      }
+      const allocations = value.allocations.length;
+      value.canvas.rect[axis] = invalid;
+      value.tick();
+      expect(value.canvas.dataset.cafeFluidState).toBe("unsupported");
+      expect(value.allocations).toHaveLength(allocations);
+      for (const resources of Object.values(value.owned)) expect(resources.size).toBe(0);
+      value.canvas.rect[axis] = 160;
+      value.fire(value.window, "cafe-visibility-changed");
+      value.tick();
+      expect(value.contextCalls()).toBe(1);
+      expect(value.rafs.size).toBe(0);
+      expect(value.liveListeners()).toBe(0);
+      expect(value.observers).toHaveLength(0);
+    },
+  );
+  it.each(["width", "height"] as const)(
+    "refuses an externally replaced retained drawing-buffer %s without purchasing new resources",
+    (axis) => {
+      const value = fixture();
+      value.document.documentElement.dataset.cafeVisible = "true";
+      value.fire(value.window, "cafe-visibility-changed");
+      for (let index = 1; index <= 7; index++) {
+        value.canvas.rect.width = 320 + index;
+        value.tick();
+      }
+      const allocations = value.allocations.length;
+      value.canvas[axis] += 1;
+      value.canvas.rect.width = 400;
+      value.tick();
+      expect(value.canvas.dataset.cafeFluidState).toBe("unsupported");
+      expect(value.allocations).toHaveLength(allocations);
+      for (const resources of Object.values(value.owned)) expect(resources.size).toBe(0);
+      expect(value.rafs.size).toBe(0);
+      expect(value.liveListeners()).toBe(0);
+      expect(value.observers).toHaveLength(0);
+    },
+  );
+  it("refuses a post-cap external buffer that exactly matches a new desired valid layout", () => {
+    const value = fixture();
+    value.document.documentElement.dataset.cafeVisible = "true";
+    value.fire(value.window, "cafe-visibility-changed");
+    for (let index = 1; index <= 7; index++) {
+      value.canvas.rect.width = 320 + index;
+      value.tick();
+    }
+    const allocations = value.allocations.length;
+    const frames = value.canvas.dataset.cafeFluidFrames;
+    const draws = value.draws();
+    // Setting native canvas dimensions clears its drawing buffer. Equality to
+    // today's desired layout is not proof that the old complete solver owns it.
+    value.canvas.rect.width = value.canvas.width = 400;
+    value.canvas.rect.height = value.canvas.height = 200;
+    value.tick();
+    expect(value.canvas.dataset.cafeFluidState).toBe("unsupported");
+    expect(value.canvas.dataset.cafeFluidFrames).toBe(frames);
+    expect(value.draws()).toBe(draws);
+    expect(value.allocations).toHaveLength(allocations);
+    for (const resources of Object.values(value.owned)) expect(resources.size).toBe(0);
+    value.fire(value.window, "cafe-presentation-changed");
+    value.fire(value.window, "cafe-visibility-changed");
+    value.tick();
+    expect(value.allocations).toHaveLength(allocations);
+    expect(value.contextCalls()).toBe(1);
+    expect(value.rafs.size).toBe(0);
+    expect(value.liveListeners()).toBe(0);
+    expect(value.observers).toHaveLength(0);
+  });
+  it("rebuilds an externally changed pre-cap buffer even when it matches desired geometry", () => {
+    const value = fixture();
+    value.document.documentElement.dataset.cafeVisible = "true";
+    value.fire(value.window, "cafe-visibility-changed");
+    const targets = new Set(value.owned.textures);
+    const allocations = value.allocations.length;
+    value.canvas.rect.width = value.canvas.width = 400;
+    value.canvas.rect.height = value.canvas.height = 200;
+    value.tick();
+    expect(value.canvas.dataset.cafeFluidState).toBe("running");
+    expect(value.canvas.dataset.cafeFluidFrames).toBe("13");
+    expect(value.allocations).toHaveLength(allocations + 8);
+    expect([...targets].some((target) => value.owned.textures.has(target))).toBe(false);
+    expect(value.owned.textures.size).toBe(8);
+    expect(value.owned.framebuffers.size).toBe(8);
+    expect(value.peakTextures()).toBe(8);
+    // That recovery uses one existing slot, not a second bootstrap or a refill.
+    for (let index = 1; index <= 6; index++) {
+      value.canvas.rect.width = 400 + index;
+      value.tick();
+    }
+    expect(value.allocations).toHaveLength(allocations + 7 * 8);
+    const retained = [...value.owned.textures];
+    value.canvas.rect.width = 407;
+    value.tick();
+    expect(value.canvas.dataset.cafeFluidState).toBe("running");
+    expect(value.allocations).toHaveLength(allocations + 7 * 8);
+    expect([...value.owned.textures]).toEqual(retained);
+  });
+  it("admits a healthy initial buffer equal to desired geometry only after allocating its complete solver", () => {
+    const value = fixture({ initialBufferSize: [320, 180] });
+    expect(value.canvas.width).toBe(320);
+    expect(value.canvas.height).toBe(180);
+    expect(value.contextCalls()).toBe(1);
+    expect(value.owned.textures.size).toBe(8);
+    expect(value.owned.framebuffers.size).toBe(8);
+    expect(value.owned.programs.size).toBe(10);
+    expect(value.owned.buffers.size).toBe(2);
+    expect(value.canvas.dataset.cafeFluidFrames).toBe("12");
+    const allocations = value.allocations.length;
+    value.document.documentElement.dataset.cafeVisible = "true";
+    value.fire(value.window, "cafe-visibility-changed");
+    for (let index = 1; index <= 7; index++) {
+      value.canvas.rect.width = 320 + index;
+      value.tick();
+    }
+    expect(value.allocations).toHaveLength(allocations + 7 * 8);
+    const retained = [...value.owned.textures];
+    value.canvas.rect.width = 328;
+    value.tick();
+    expect(value.canvas.dataset.cafeFluidState).toBe("running");
+    expect(value.allocations).toHaveLength(allocations + 7 * 8);
+    expect([...value.owned.textures]).toEqual(retained);
+  });
+  it("keeps a late visible static resize bounded without imposing a lifetime cutoff", () => {
+    const value = fixture();
+    value.document.documentElement.dataset.cafeVisible = "true";
+    value.fire(value.window, "cafe-visibility-changed");
+    for (let index = 12; index < 8995; index++) value.tick();
+    expect(value.canvas.dataset.cafeFluidFrames).toBe("8995");
+    value.document.documentElement.dataset.cafeReducedMotion = "true";
+    value.canvas.rect.width = 321;
+    value.fire(value.window, "cafe-presentation-changed");
+    expect(value.canvas.dataset.cafeFluidState).toBe("static");
+    expect(value.canvas.dataset.cafeFluidFrames).toBe("9007");
+    expect(value.owned.textures.size).toBe(8);
+    expect(value.peakTextures()).toBe(8);
+    expect(Number(value.canvas.dataset.cafeFluidTextureBytes)).toBeLessThanOrEqual(
+      16 * 1024 * 1024,
+    );
+    expect(value.rafs.size).toBe(0);
+  });
+  it("sustains visible motion and coalesced real pointer input beyond the former lifetime cutoff", () => {
+    const value = fixture();
+    const initialResources = Object.fromEntries(
+      Object.entries(value.owned).map(([key, entries]) => [key, new Set(entries)]),
+    );
+    const initialAllocations = value.allocations.length;
+    value.document.documentElement.dataset.cafeVisible = "true";
+    value.fire(value.window, "cafe-visibility-changed");
+    for (let index = 0; index < 400; index++) value.tick();
+    expect(value.canvas.dataset.cafeFluidFrames).toBe("412");
+    expect(value.canvas.dataset.cafeFluidState).toBe("running");
+    expect(value.rafs.size).toBe(1);
+    value.fire(value.window, "pointermove", { isTrusted: false, clientX: 10, clientY: 10 });
+    value.tick();
+    expect(value.canvas.dataset.cafeFluidPointerInputs).toBe("0");
+    for (let index = 0; index < 9; index++) {
+      for (let flood = 0; flood < 100; flood++)
+        value.fire(value.window, "pointermove", {
+          isTrusted: true,
+          clientX: 10 + index,
+          clientY: 10,
+        });
+      value.tick();
+    }
+    expect(value.canvas.dataset.cafeFluidPointerInputs).toBe("9");
+    expect(value.rafs.size).toBe(1);
+    value.motion.matches = true;
+    value.fire(value.motion, "change");
+    value.fire(value.window, "pointermove", { isTrusted: true, clientX: 10, clientY: 10 });
+    expect(value.rafs.size).toBe(0);
+    expect(value.canvas.dataset.cafeFluidState).toBe("static");
+    value.motion.matches = false;
+    value.fire(value.motion, "change");
+    for (let index = Number(value.canvas.dataset.cafeFluidFrames); index < 10_000; index++)
+      value.tick();
+    expect(value.canvas.dataset.cafeFluidFrames).toBe("10000");
+    expect(value.canvas.dataset.cafeFluidState).toBe("running");
+    expect(value.rafs.size).toBe(1);
+    value.fire(value.window, "pointermove", { isTrusted: true, clientX: 20, clientY: 20 });
+    value.fire(value.window, "cafe-presentation-changed");
+    value.fire(value.window, "pointermove", { isTrusted: true, clientX: 20, clientY: 20 });
+    value.tick();
+    expect(value.canvas.dataset.cafeFluidPointerInputs).toBe("10");
+    expect(value.canvas.dataset.cafeFluidFrames).toBe("10001");
+    expect(value.allocations).toHaveLength(initialAllocations);
+    for (const [key, entries] of Object.entries(value.owned))
+      expect(entries).toEqual(initialResources[key]);
+    value.document.documentElement.dataset.cafeVisible = "false";
+    value.fire(value.window, "cafe-visibility-changed");
+    expect(value.rafs.size).toBe(0);
+    const pausedDraws = value.draws();
+    value.tick();
+    expect(value.draws()).toBe(pausedDraws);
+    expect(value.canvas.dataset.cafeFluidState).toBe("paused");
+    value.document.documentElement.dataset.cafeVisible = "true";
+    value.fire(value.window, "cafe-visibility-changed");
+    value.tick();
+    expect(value.canvas.dataset.cafeFluidFrames).toBe("10002");
+    expect(value.rafs.size).toBe(1);
+    value.fire(value.window, "pagehide");
+    for (const set of Object.values(value.owned)) expect(set.size).toBe(0);
+    expect(value.rafs.size).toBe(0);
+    expect(value.liveListeners()).toBe(0);
+    expect(value.observers).toHaveLength(0);
+  });
+  it("saturates counters without freezing phase, palette, passive input or rendering", () => {
+    const value = fixture({ counterLimit: 64 });
+    value.document.documentElement.dataset.cafeVisible = "true";
+    value.fire(value.window, "cafe-visibility-changed");
+    for (let index = 0; index < 100; index++) {
+      value.fire(value.window, "pointermove", { isTrusted: true, clientX: 20, clientY: 20 });
+      value.tick();
+    }
+    expect(value.canvas.dataset.cafeFluidFrames).toBe("64");
+    expect(value.canvas.dataset.cafeFluidPointerInputs).toBe("64");
+    const beforeDraws = value.draws();
+    const beforeRandom = value.randomCalls();
+    for (let index = 0; index < 100; index++) value.tick();
+    expect(value.draws()).toBeGreaterThan(beforeDraws);
+    expect(value.randomCalls()).toBeGreaterThan(beforeRandom);
+    expect(value.canvas.dataset.cafeFluidFrames).toBe("64");
+    expect(value.canvas.dataset.cafeFluidPointerInputs).toBe("64");
+    expect(value.canvas.dataset.cafeFluidState).toBe("running");
+    expect(value.rafs.size).toBe(1);
+    expect(value.owned.textures.size).toBe(8);
+  });
+  it("wraps the joint orbit phase instead of accumulating imprecise trigonometric arguments", () => {
+    const value = fixture();
+    value.document.documentElement.dataset.cafeVisible = "true";
+    value.fire(value.window, "cafe-visibility-changed");
+    // More than the joint 2π×100 / .026 orbit period exercises an actual wrap,
+    // not merely a short sample whose phase has not reached the boundary yet.
+    for (let index = 0; index < 30_000; index++) value.tick();
+    expect(value.maxTrigonometricArgument()).toBeLessThanOrEqual(Math.PI * 200);
+    expect(value.maxTrigonometricArgument()).toBeGreaterThan(Math.PI * 199);
+    expect(value.canvas.dataset.cafeFluidFrames).toBe("30012");
+    expect(value.canvas.dataset.cafeFluidState).toBe("running");
+    expect(value.rafs.size).toBe(1);
+    expect(value.peakTextures()).toBe(8);
+  });
+  it.each(["pagehide", "webglcontextlost"])(
+    "releases exact resources/listeners/observers on %s",
+    (event) => {
+      const value = fixture();
+      value.document.documentElement.dataset.cafeVisible = "true";
+      value.fire(value.window, "cafe-visibility-changed");
+      value.fire(event === "pagehide" ? value.window : value.canvas, event);
+      for (const set of Object.values(value.owned)) expect(set.size).toBe(0);
+      expect(value.rafs.size).toBe(0);
+      expect(value.liveListeners()).toBe(0);
+      expect(value.observers.length).toBe(0);
+      expect(value.canvas.dataset.cafeFluidState).toBe(
+        event === "pagehide" ? "disposed" : "context-lost",
+      );
+    },
+  );
+  it("retains a static readable decoration when WebGL is absent without a retry loop", () => {
+    const value = fixture({ unsupported: true });
+    expect(value.canvas.dataset.cafeFluidState).toBe("unsupported");
+    expect(value.canvas.style.background).toBe(
+      "linear-gradient(135deg,rgba(0,190,255,.132),rgba(123,44,255,.132),rgba(255,40,180,.132))",
+    );
+    expect(value.rafs.size).toBe(0);
+    expect(value.liveListeners()).toBe(0);
+    expect(value.draws()).toBe(0);
+  });
+});

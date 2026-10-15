@@ -96,6 +96,35 @@ describe("ServerProvider", () => {
     expect(parsed.probeDiagnostics).toBeUndefined();
     expect(parsed.versionAdvisory).toBeUndefined();
     expect(parsed.updateState).toBeUndefined();
+    expect(parsed.codexModelCatalogSource).toBeUndefined();
+  });
+
+  it("round-trips only finite catalogue provenance without backfilling legacy snapshots", () => {
+    const legacy = {
+      instanceId: "codex",
+      driver: "codex",
+      enabled: true,
+      installed: true,
+      version: "1.0.0",
+      status: "ready",
+      auth: { status: "authenticated" },
+      checkedAt: "2026-04-10T00:00:00.000Z",
+      models: [],
+    };
+    const encode = Schema.encodeSync(ServerProvider);
+    expect(decodeServerProvider(encode(decodeServerProvider(legacy)))).not.toHaveProperty(
+      "codexModelCatalogSource",
+    );
+    for (const codexModelCatalogSource of ["fallback", "native"] as const) {
+      const parsed = decodeServerProvider({ ...legacy, codexModelCatalogSource });
+      expect(decodeServerProvider(encode(parsed)).codexModelCatalogSource).toBe(
+        codexModelCatalogSource,
+      );
+      expect(parsed.models).toEqual([]);
+    }
+    for (const codexModelCatalogSource of [null, "assumed-native", { source: "native" }, 1]) {
+      expect(() => decodeServerProvider({ ...legacy, codexModelCatalogSource })).toThrow();
+    }
   });
 
   it("keeps sandbox qualification separate from provider readiness and strips raw diagnostics", () => {

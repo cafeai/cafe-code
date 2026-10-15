@@ -74,10 +74,17 @@ describe("shared image export menu", () => {
       await userEvent.keyboard("{Enter}");
       const menu = page.getByRole("menu");
       await expect.element(menu).toBeVisible();
+      const copyItem = page.getByRole("menuitem", { name: "Copy image", exact: true });
+      // Base UI queues initial/item focus separately from popup visibility.
+      // Observe native keyboard ownership before the next key, and wait for
+      // Home's actual focus result before Enter can activate that exact item.
+      await expect.element(copyItem).toHaveFocus();
       const rect = menu.element().getBoundingClientRect();
       expect(rect.left).toBeGreaterThanOrEqual(0);
       expect(rect.right).toBeLessThanOrEqual(window.innerWidth);
-      await userEvent.keyboard("{Home}{Enter}");
+      await userEvent.keyboard("{Home}");
+      await expect.element(copyItem).toHaveFocus();
+      await userEvent.keyboard("{Enter}");
       await vi.waitFor(() => expect(transport.copyPng).toHaveBeenCalledTimes(1));
       await vi.waitFor(() =>
         expect(toast).toHaveBeenCalledWith(

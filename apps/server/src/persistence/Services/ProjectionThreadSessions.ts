@@ -34,6 +34,7 @@ export const ProjectionThreadSession = Schema.Struct({
   subagentRuntimeId: Schema.optional(Schema.NullOr(SubagentRuntimeId)),
   maxConcurrentSubagents: Schema.optional(Schema.NullOr(MaxConcurrentSubagents)),
   codexContextWindowOverride: Schema.optional(Schema.NullOr(CodexContextWindowOverride)),
+  codexAutoCompactTokenLimit: Schema.optional(Schema.NullOr(CodexContextWindowOverride)),
   activeTurnId: Schema.NullOr(TurnId),
   lastError: Schema.NullOr(Schema.String),
   updatedAt: IsoDateTime,
@@ -52,6 +53,8 @@ const ProjectionThreadSessionSqlFields = Schema.Struct({
   maxConcurrentSubagentsKnown: Schema.Int.check(Schema.isBetween({ minimum: 0, maximum: 1 })),
   codexContextWindowOverride: Schema.NullOr(CodexContextWindowOverride),
   codexContextWindowOverrideKnown: Schema.Int.check(Schema.isBetween({ minimum: 0, maximum: 1 })),
+  codexAutoCompactTokenLimit: Schema.NullOr(CodexContextWindowOverride),
+  codexAutoCompactTokenLimitKnown: Schema.Int.check(Schema.isBetween({ minimum: 0, maximum: 1 })),
 });
 export const ProjectionThreadSessionSqlRow = ProjectionThreadSessionSqlFields.pipe(
   Schema.decodeTo(
@@ -65,6 +68,8 @@ export const ProjectionThreadSessionSqlRow = ProjectionThreadSessionSqlFields.pi
         maxConcurrentSubagentsKnown,
         codexContextWindowOverride,
         codexContextWindowOverrideKnown,
+        codexAutoCompactTokenLimit,
+        codexAutoCompactTokenLimitKnown,
         subagentRuntimeId,
         ...row
       }) => ({
@@ -72,6 +77,7 @@ export const ProjectionThreadSessionSqlRow = ProjectionThreadSessionSqlFields.pi
         ...(subagentRuntimeId === null ? {} : { subagentRuntimeId }),
         ...(maxConcurrentSubagentsKnown === 1 ? { maxConcurrentSubagents } : {}),
         ...(codexContextWindowOverrideKnown === 1 ? { codexContextWindowOverride } : {}),
+        ...(codexAutoCompactTokenLimitKnown === 1 ? { codexAutoCompactTokenLimit } : {}),
       }),
       encode: (row) => ({
         ...row,
@@ -80,6 +86,8 @@ export const ProjectionThreadSessionSqlRow = ProjectionThreadSessionSqlFields.pi
         maxConcurrentSubagentsKnown: row.maxConcurrentSubagents === undefined ? 0 : 1,
         codexContextWindowOverride: row.codexContextWindowOverride ?? null,
         codexContextWindowOverrideKnown: row.codexContextWindowOverride === undefined ? 0 : 1,
+        codexAutoCompactTokenLimit: row.codexAutoCompactTokenLimit ?? null,
+        codexAutoCompactTokenLimitKnown: row.codexAutoCompactTokenLimit === undefined ? 0 : 1,
       }),
     }),
   ),

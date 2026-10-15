@@ -65,6 +65,7 @@ import {
 import {
   deriveCodexContextWindowPresentation,
   inheritedCodexContextWindowOverride,
+  requestedCodexAutoCompactTokenLimit,
 } from "../codexContextWindow";
 import { useDesktopDebugEnabled } from "~/lib/desktopDebugState";
 import { useWorkspaceProjects, useWorkspaceThreads } from "../environments/workspaceData";
@@ -80,7 +81,10 @@ import { getWorkspaceServerConfig } from "../environments/workspaceApi";
 import { MessageForkDialog } from "./chat/MessageForkDialog";
 import { Button } from "./ui/button";
 import { useThreadVisualizations } from "./visualizations/useThreadVisualizations";
-import { useVisualizationScope } from "./visualizations/VisualizationViewerProvider";
+import {
+  readInlineVisualizationPoolDiagnostics,
+  useVisualizationScope,
+} from "./visualizations/VisualizationViewerProvider";
 import { isElectron } from "../env";
 import { useMacDesktopTitlebar } from "../hooks/useMacDesktopTitlebar";
 import { readLocalApi } from "../localApi";
@@ -156,7 +160,7 @@ import { CodexRecoveryNotice, SessionRail } from "./chat/SessionRail";
 import { deriveCodexRecoveryPresentation } from "../codexRecovery";
 import { ComposerAsyncQuestionsPanel } from "./chat/ComposerAsyncQuestionsPanel";
 import { persistExactAsyncQuestionAnswer, type AsyncQuestion } from "./chat/asyncQuestions";
-import { ChevronDownIcon, TriangleAlertIcon } from "lucide-react";
+import { TriangleAlertIcon } from "lucide-react";
 import { cn } from "~/lib/utils";
 import { stackedThreadToast, toastManager } from "./ui/toast";
 import { newCommandId, newDraftId, newMessageId, newThreadId } from "~/lib/utils";
@@ -224,6 +228,8 @@ import {
 import { ExpandedImageDialog } from "./chat/ExpandedImageDialog";
 import { PullRequestThreadDialog } from "./PullRequestThreadDialog";
 import { MessagesTimeline } from "./chat/MessagesTimeline";
+import { ScrollToBottomControl } from "./chat/ScrollToBottomControl";
+import { useScrollToBottomDismissal } from "./chat/useScrollToBottomDismissal";
 import type { SubagentDetailSelection } from "./chat/SubagentDetailView";
 import { useTaskAtriumStore } from "./atrium/taskAtriumStore";
 import {
@@ -257,6 +263,8 @@ import {
   deriveSteeringDeliveryStatus,
   deriveComposerSendState,
   doesSteerFailureActivityMatchPending,
+  doesSteerActivityMatchPendingAttempt,
+  doesRetryableSteerFailureMatchPendingAttempt,
   doesSteerProcessingActivityMatchPending,
   hasServerAcknowledgedLocalDispatch,
   isSteerProcessingActivityTimely,
@@ -628,6 +636,9 @@ interface PendingSteerDispatch {
   readonly environmentId: EnvironmentId;
   readonly threadId: ThreadId;
   readonly messageId: MessageId;
+  /** Renderer attempt identity; never a new provider or retry authority. */
+  readonly commandId: CommandId;
+  readonly requiresIntentSequence: boolean;
   readonly turnId: TurnId | null;
   readonly snapshot: ComposerSendSnapshot;
   readonly dispatchedAt: string;
@@ -769,18 +780,32 @@ function threadHasTerminalTurnAfterSteer(thread: Thread, pending: PendingSteerDi
 }
 
 function threadHasSteerFailureForPending(thread: Thread, pending: PendingSteerDispatch) {
-  return thread.activities.some((activity) =>
-    doesSteerFailureActivityMatchPending({
-      activity,
-      pendingMessageId: pending.messageId,
-      pendingIntentSequence: pending.intentSequence,
-      dispatchedAt: pending.dispatchedAt,
-    }),
+  return thread.activities.some(
+    (activity) =>
+      doesSteerFailureActivityMatchPending({
+        activity,
+        pendingMessageId: pending.messageId,
+        pendingIntentSequence: pending.intentSequence,
+        dispatchedAt: pending.dispatchedAt,
+      }) &&
+      doesSteerActivityMatchPendingAttempt({
+        activity,
+        pendingIntentSequence: pending.intentSequence,
+        requiresIntentSequence: pending.requiresIntentSequence,
+      }),
   );
 }
 
-function threadHasSteerRecoveryForMessage(thread: Thread, messageId: MessageId) {
-  return thread.activities.some((activity) => readSteerRecoveryMessageId(activity) === messageId);
+function threadHasSteerRecoveryForMessage(thread: Thread, pending: PendingSteerDispatch) {
+  return thread.activities.some(
+    (activity) =>
+      readSteerRecoveryMessageId(activity) === pending.messageId &&
+      doesSteerActivityMatchPendingAttempt({
+        activity,
+        pendingIntentSequence: pending.intentSequence,
+        requiresIntentSequence: pending.requiresIntentSequence,
+      }),
+  );
 }
 
 function threadHasSteerProcessingStarted(thread: Thread, pending: PendingSteerDispatch) {
@@ -800,6 +825,14 @@ function threadHasSteerProcessingStarted(thread: Thread, pending: PendingSteerDi
     if (!isSteerProcessingActivity) {
       return false;
     }
+    if (
+      !doesSteerActivityMatchPendingAttempt({
+        activity,
+        pendingIntentSequence: pending.intentSequence,
+        requiresIntentSequence: pending.requiresIntentSequence,
+      })
+    )
+      return false;
     const processingMessageId = readSteerProcessingMessageId(payload);
     if (
       !isSteerProcessingActivityTimely({
@@ -839,7 +872,7 @@ function threadHasResolvedPendingSteer(thread: Thread, pending: PendingSteerDisp
     terminalTurnAfterSteer: threadHasTerminalTurnAfterSteer(thread, pending),
     steerProcessingStarted: threadHasSteerProcessingStarted(thread, pending),
     steerFailureRecorded: threadHasSteerFailureForPending(thread, pending),
-    steerRecoveryRecorded: threadHasSteerRecoveryForMessage(thread, pending.messageId),
+    steerRecoveryRecorded: threadHasSteerRecoveryForMessage(thread, pending),
     assistantResponseAfterSteer: threadHasAssistantResponseAfterSteer(thread, pending),
   });
 }
@@ -977,6 +1010,7 @@ export default function ChatView(props: ChatViewProps) {
     [environmentId, threadId],
   );
   const routeThreadKey = useMemo(() => scopedThreadKey(routeThreadRef), [routeThreadRef]);
+  const scrollControlDismissal = useScrollToBottomDismissal(routeThreadKey);
   const timelineViews = useChatPaneResource(
     "timeline-views",
     () => new Map<string, TimelineViewPosition>(),
@@ -1665,9 +1699,21 @@ export default function ChatView(props: ChatViewProps) {
       if (retryableSteerReconstructionInFlightRef.current.has(sourceMessageKey)) {
         continue;
       }
-      retryableSteerReconstructionInFlightRef.current.add(sourceMessageKey);
-
       const pending = pendingSteerDispatchByMessageIdRef.current[sourceMessageKey];
+      if (
+        pending &&
+        !doesRetryableSteerFailureMatchPendingAttempt({
+          failureIntentSequence: candidate.failure.intentSequence,
+          pendingIntentSequence: pending.intentSequence,
+          requiresIntentSequence: pending.requiresIntentSequence,
+        })
+      ) {
+        // The legacy blocked-root exception above permits restoring the exact
+        // rejected generation once, never replacing a newer in-flight retry.
+        // Before its command ACK, keep ownership with the reused pending row.
+        continue;
+      }
+      retryableSteerReconstructionInFlightRef.current.add(sourceMessageKey);
       if (pending) {
         removePendingSteerDispatch(candidate.failure.messageId);
       }
@@ -1940,6 +1986,7 @@ export default function ChatView(props: ChatViewProps) {
             pendingIntentSequence: pending.intentSequence,
             dispatchedAt: pending.dispatchedAt,
             previousStatus: pending.deliveryStatus,
+            requiresIntentSequence: pending.requiresIntentSequence,
           });
           // Detail snapshots retain a bounded activity tail. Remember observed
           // receipt/wait phases so trimming or catch-up cannot flash "Sending".
@@ -2696,13 +2743,14 @@ export default function ChatView(props: ChatViewProps) {
   const visualizations = useThreadVisualizations(
     environmentId,
     routeKind === "server" ? threadId : null,
-    pane.active && pane.visible,
+    pane.visible,
     `${activeLatestTurn?.turnId ?? ""}:${threadActivities.at(-1)?.id ?? ""}`,
   );
-  useVisualizationScope(
+  const visualizationPane = useVisualizationScope(
     environmentId,
     threadId,
-    pane.active && pane.visible && pendingApprovals.length === 0 && pendingUserInputs.length === 0,
+    pane.visible && pendingApprovals.length === 0 && pendingUserInputs.length === 0,
+    pane.active,
   );
   const timelineEntries = useMemo(
     () =>
@@ -3125,10 +3173,19 @@ export default function ChatView(props: ChatViewProps) {
             pendingIntentSequence: pending.intentSequence,
             dispatchedAt: pending.dispatchedAt,
             previousStatus: pending.deliveryStatus,
+            requiresIntentSequence: pending.requiresIntentSequence,
+            // Provisional/unknown turns cannot attribute current or child
+            // compaction to this steer. This reversible overlay is deliberately
+            // not retained by the cross-thread receipt-cache effect above.
+            contextCompactionActive:
+              activeThread !== undefined &&
+              pending.turnId !== null &&
+              threadHasActiveContextCompaction(activeThread, pending.turnId),
           }),
         })),
     [
       activeThreadId,
+      activeThread,
       pendingSteerDispatchByMessageId,
       threadActivities,
       steeringProvider,
@@ -3303,7 +3360,9 @@ export default function ChatView(props: ChatViewProps) {
       ? (lifecycleByThreadId.get(activeThread.id) ?? null)
       : null;
     const activeThreadPerformance =
-      activeThread == null ? null : summarizeDebugThreadPerformance(activeThread, capturedAtMs);
+      activeThread == null
+        ? null
+        : summarizeDebugThreadPerformance(activeThread, capturedAtMs, settings);
     const activeWaitReasons = deriveDebugWaitReasons({
       lifecycle: activeLifecycleSummary,
       performance: activeThreadPerformance,
@@ -3398,6 +3457,7 @@ export default function ChatView(props: ChatViewProps) {
       debugSnapshotVersion: DEBUG_SNAPSHOT_VERSION,
       source: "ChatView",
       capturedAt,
+      visualizations: readInlineVisualizationPoolDiagnostics(),
       debugPublisher: {
         heartbeatIntervalMs: DEBUG_RENDERER_HEARTBEAT_INTERVAL_MS,
         minSnapshotIntervalMs: DEBUG_RENDERER_SNAPSHOT_MIN_INTERVAL_MS,
@@ -3836,6 +3896,7 @@ export default function ChatView(props: ChatViewProps) {
     queuedFollowUpPendingDispatchByThreadId,
     routeKind,
     selectedProvider,
+    settings,
     serverAcknowledgedLocalDispatch,
     showScrollToBottom,
     steeringFollowUpViewItems,
@@ -5613,6 +5674,8 @@ export default function ChatView(props: ChatViewProps) {
           environmentId: activeThread.environmentId,
           threadId: activeThread.id,
           messageId: messageIdForSend,
+          commandId: commandIdForSend,
+          requiresIntentSequence: options?.queuedItem?.automaticSteerRetry != null,
           turnId: activeThread.session?.activeTurnId ?? activeThread.latestTurn?.turnId ?? null,
           snapshot,
           dispatchedAt: messageCreatedAt,
@@ -5688,7 +5751,7 @@ export default function ChatView(props: ChatViewProps) {
       }
       updatePendingSteerDispatches((current) => {
         const pending = current[String(messageIdForSend)];
-        if (pending?.dispatchedAt !== messageCreatedAt) {
+        if (pending?.commandId !== commandIdForSend) {
           return current;
         }
         return {
@@ -5701,6 +5764,25 @@ export default function ChatView(props: ChatViewProps) {
         clearActiveComposerContent(composerContentAtAdmission);
       }
     } catch (err) {
+      if (!options?.queuedItem && isIndeterminateTransportError(err)) {
+        // wsRpcClient already exhausted its bounded exact-command reconnect
+        // recovery. This is unknown delivery, not proof that the provider
+        // rejected it. Keep the exact pending row and optimistic input until
+        // its own durable receipt/processing/failure arrives; restoring the
+        // composer would invite a different command that duplicates delivery.
+        // Exact processing/recovery can retire the unique-message pending row
+        // before this late transport outcome. Consuming the admitted payload
+        // must not depend on that row still existing. The consumer compares
+        // immutable content references and editor ownership, preserving any
+        // newer or reopened draft instead of making submitted input sendable.
+        clearActiveComposerContent(composerContentAtAdmission);
+        return;
+      }
+      if (
+        pendingSteerDispatchByMessageIdRef.current[String(messageIdForSend)]?.commandId !==
+        commandIdForSend
+      )
+        return;
       removePendingSteerDispatch(messageIdForSend);
       setOptimisticUserMessages((existing) => {
         const removed = existing.filter((message) => message.id === messageIdForSend);
@@ -8210,6 +8292,9 @@ export default function ChatView(props: ChatViewProps) {
         : undefined,
   });
   const sessionRailUsage = deriveLatestContextWindowSnapshot(threadActivities);
+  const contextPolicyStatus = providerStatuses.find(
+    (status) => status.instanceId === subagentPolicyInstanceId && status.driver === "codex",
+  );
   const sessionRailContextOverride =
     subagentPolicyDriver === "codex"
       ? deriveCodexContextWindowPresentation({
@@ -8222,11 +8307,25 @@ export default function ChatView(props: ChatViewProps) {
             subagentPolicyInstanceId,
             subagentPolicyDriver,
           ),
+          requestedAutoCompactTokenLimit: requestedCodexAutoCompactTokenLimit(
+            settings,
+            subagentPolicyInstanceId,
+            subagentPolicyDriver,
+          ),
           configured:
             activeThread.session?.providerInstanceId === subagentPolicyInstanceId &&
             activeThread.session.provider === "codex"
               ? activeThread.session.codexContextWindowOverride
               : undefined,
+          configuredAutoCompactTokenLimit:
+            activeThread.session?.providerInstanceId === subagentPolicyInstanceId &&
+            activeThread.session.provider === "codex"
+              ? activeThread.session.codexAutoCompactTokenLimit
+              : undefined,
+          canApplyWhenIdle:
+            contextPolicyStatus?.enabled === true &&
+            contextPolicyStatus.runtimeCapabilities?.codexContextWindow === true &&
+            contextPolicyStatus.runtimeCapabilities.codexContextCompaction === true,
         })
       : null;
   const sessionRailRateLimits = shouldSurfaceProviderAccountRateLimits(activeProviderStatus)
@@ -8391,6 +8490,8 @@ export default function ChatView(props: ChatViewProps) {
             ) : null}
             {/* Messages — LegendList handles virtualization and scrolling internally */}
             <MessagesTimeline
+              visualizationPane={visualizationPane}
+              visualizationRuntimeMode={isServerThread ? serverThread.runtimeMode : null}
               key={activeThread.id}
               {...(pane.visible && scheduledFollowupsContext
                 ? { scheduledFollowups: scheduledFollowupsContext }
@@ -8434,6 +8535,11 @@ export default function ChatView(props: ChatViewProps) {
               viewPositionCache={timelineViews}
               viewPositionKey={routeThreadKey}
               onIsAtEndChange={onIsAtEndChange}
+              onObservedBottom={
+                pane.visible && scrollControlDismissal.dismissed
+                  ? scrollControlDismissal.observeBottom
+                  : undefined
+              }
               onUserScrollIntent={onTimelineUserScrollIntent}
               selectedSubagent={selectedSubagent}
               onOpenSubagentDetail={openSubagentDetail}
@@ -8444,18 +8550,12 @@ export default function ChatView(props: ChatViewProps) {
             />
 
             {/* scroll to bottom pill — shown when user has scrolled away from the bottom */}
-            {showScrollToBottom && (
+            {showScrollToBottom && !scrollControlDismissal.dismissed && (
               <div className="pointer-events-none absolute bottom-1 left-1/2 z-30 flex -translate-x-1/2 justify-center py-1.5">
-                <button
-                  type="button"
-                  onClick={() => scrollToEnd(true)}
-                  // The rise lives on the button, not the wrapper: the wrapper's
-                  // -translate-x-1/2 centring uses the same `translate` property.
-                  className="pointer-events-auto flex items-center gap-1.5 rounded-full border border-border bg-raised px-3 py-1 text-muted-foreground text-xs shadow-sm transition-colors duration-(--duration-fast) hover:border-border-strong hover:text-foreground hover:cursor-pointer animate-enter-rise"
-                >
-                  <ChevronDownIcon className="size-3.5" />
-                  {uiText("Scroll to bottom", undefined, undefined, uiLocale)}
-                </button>
+                <ScrollToBottomControl
+                  onScrollToBottom={() => scrollToEnd(true)}
+                  onHideUntilBottom={scrollControlDismissal.hideUntilBottom}
+                />
               </div>
             )}
           </div>

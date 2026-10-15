@@ -2,13 +2,14 @@
 
 Decision status: Accepted
 Created: 2026-10-12 11:10:24 JST (UTC+0900)
-Last updated: 2026-10-12 11:35:59 JST (UTC+0900)
+Last updated: 2026-10-13 15:54:01 JST (UTC+0900)
 Decision authority: User accepted the Codex-only menu/sidebar design, requested
 implementation/testing and this changeset's push to dev, then added a provider
 default with per-chat precedence matching subagent-limit inheritance.
 Implementation status: Implemented; synthetic qualification below, hosted release evidence separate
 Supersedes: None
-Superseded by: None
+Superseded by: [Context/compaction pairing](codex-context-compaction-pairing.md),
+only the independent-compaction decision; metadata, UI and lifecycle rules remain
 
 ## Context
 

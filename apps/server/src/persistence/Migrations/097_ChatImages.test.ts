@@ -52,16 +52,19 @@ describe("097_ChatImages", () => {
                 [96, "GeneratedVisualizations"],
                 [97, "ChatImages"],
                 [98, "ReportedUsageCosts"],
+                [99, "UsageAndCompactionReconciliation"],
               ]
             : history === "upstream-95"
               ? [
                   [96, "GeneratedVisualizations"],
                   [97, "ChatImages"],
                   [98, "ReportedUsageCosts"],
+                  [99, "UsageAndCompactionReconciliation"],
                 ]
               : [
                   [97, "ChatImages"],
                   [98, "ReportedUsageCosts"],
+                  [99, "UsageAndCompactionReconciliation"],
                 ],
         );
         assert.deepEqual(

@@ -1,0 +1,329 @@
+<!-- Synthetic ranked bars: independently authored, no user inventory or chat data.
+The intentional observer replays on genuine visibility changes. Native geometry
+updates must not manufacture duplicate visibility or reduced-motion attributes. -->
+<style>
+  :root {
+    --ink: var(--foreground);
+    --base: var(--background);
+    --blue: var(--chart-2);
+  }
+  * {
+    box-sizing: border-box;
+  }
+  body {
+    margin: 0;
+    color: var(--ink);
+    background: transparent;
+    font: 14px/1.45 system-ui;
+  }
+  .unit {
+    position: relative;
+    isolation: isolate;
+    min-width: 0;
+    padding: 18px 20px 16px;
+  }
+  .unit > canvas {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    pointer-events: none;
+    filter: blur(9px);
+    opacity: 0.4;
+    z-index: -2;
+  }
+  .veil {
+    position: absolute;
+    inset: 0;
+    pointer-events: none;
+    background: color-mix(in srgb, var(--base) 87%, transparent);
+    z-index: -1;
+  }
+  .head {
+    display: flex;
+    justify-content: space-between;
+    flex-wrap: wrap;
+    gap: 14px;
+  }
+  h2 {
+    margin: 0 0 4px;
+    font-size: 17px;
+  }
+  button {
+    font: inherit;
+    color: var(--ink);
+    border: 1px solid color-mix(in srgb, var(--ink) 12%, transparent);
+    border-radius: 6px;
+    background: transparent;
+  }
+  .controls {
+    display: flex;
+    gap: 4px;
+  }
+  .controls button {
+    padding: 6px 9px;
+  }
+  .controls button[aria-pressed="true"] {
+    color: var(--base);
+    background: var(--blue);
+  }
+  .stats {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 26px;
+    margin: 18px 0;
+  }
+  .stats b {
+    font-size: 23px;
+  }
+  .layout {
+    display: grid;
+    grid-template-columns: 20px minmax(170px, 0.95fr) minmax(0, 1.4fr) 57px;
+    gap: 10px;
+    align-items: center;
+  }
+  .bars {
+    list-style: none;
+    padding: 0;
+    margin: 0;
+    display: grid;
+    gap: 6px;
+  }
+  .row {
+    width: 100%;
+    padding: 8px 0;
+    text-align: left;
+    border-color: transparent;
+  }
+  .file {
+    min-width: 0;
+  }
+  .name,
+  .path {
+    display: block;
+    overflow: hidden;
+    white-space: nowrap;
+    text-overflow: ellipsis;
+  }
+  .name {
+    font-size: 11px;
+  }
+  .path {
+    margin-top: 3px;
+    font-size: 9px;
+  }
+  .track {
+    min-width: 0;
+    height: 20px;
+    background: color-mix(in srgb, var(--ink) 4%, transparent);
+  }
+  .fill {
+    display: block;
+    height: 100%;
+    width: var(--size);
+    transform-origin: left;
+    background: var(--blue);
+  }
+  .value {
+    text-align: right;
+    font-size: 12px;
+  }
+  .foot {
+    margin-top: 16px;
+    padding-top: 10px;
+    border-top: 1px solid color-mix(in srgb, var(--ink) 12%, transparent);
+    font-size: 10px;
+  }
+  .notes {
+    font-size: 9px;
+  }
+  .tip {
+    position: fixed;
+    max-width: 340px;
+    z-index: 5;
+    background: var(--ink);
+    color: var(--base);
+    padding: 9px 12px;
+    border-radius: 7px;
+    font-size: 11px;
+    pointer-events: none;
+  }
+  .tip[hidden] {
+    display: none;
+  }
+  @media (max-width: 580px) {
+    .unit {
+      padding: 15px 12px;
+    }
+    .layout {
+      grid-template-columns: 20px minmax(0, 1fr) 55px;
+      gap: 8px;
+    }
+    .row .rank {
+      grid-column: 1;
+      grid-row: 1;
+    }
+    .row .file {
+      grid-column: 2;
+      grid-row: 1;
+    }
+    .row .value {
+      grid-column: 3;
+      grid-row: 1;
+    }
+    .row .track {
+      grid-column: 2;
+      grid-row: 2;
+      margin-top: 3px;
+      height: 17px;
+    }
+    .row {
+      padding: 7px 0;
+    }
+    .bars {
+      gap: 7px;
+    }
+  }
+</style>
+<section class="unit">
+  <canvas data-cafe-fluid aria-hidden="true"></canvas>
+  <div class="veil" aria-hidden="true"></div>
+  <div class="head">
+    <h2>Synthetic ranked bars</h2>
+    <div class="controls">
+      <button data-limit="5" aria-pressed="true">Top 5</button
+      ><button data-limit="10" aria-pressed="false">Top 10</button>
+    </div>
+  </div>
+  <div class="stats"><b id="largest">100</b><b id="sum">500</b><b id="share">50%</b></div>
+  <ol id="bars" class="bars"></ol>
+  <div class="foot">Synthetic fixture only</div>
+  <p class="notes">Independent deterministic sample data. Hover a bar for details.</p>
+</section>
+<div id="tip" class="tip" role="tooltip" hidden></div>
+<script>
+  "use strict";
+  const list = document.getElementById("bars"),
+    tip = document.getElementById("tip");
+  const reduce = matchMedia("(prefers-reduced-motion:reduce)");
+  let limit = 5,
+    marks = [],
+    frame = 0,
+    began = 0,
+    last = 0;
+  const active = () => document.documentElement.dataset.cafeVisible === "true" && !document.hidden;
+  const quiet = () =>
+    reduce.matches || document.documentElement.dataset.cafeReducedMotion === "true";
+  function stop() {
+    if (frame) cancelAnimationFrame(frame);
+    frame = 0;
+    for (const mark of marks) mark.style.transform = "";
+  }
+  function animate() {
+    stop();
+    if (!active() || quiet()) return;
+    began = 0;
+    last = 0;
+    const tick = (time) => {
+      frame = 0;
+      if (!active() || quiet()) {
+        stop();
+        return;
+      }
+      if (!began) began = time;
+      const elapsed = time - began;
+      if (elapsed >= 650) {
+        stop();
+        return;
+      }
+      if (time - last >= 32) {
+        for (const mark of marks)
+          mark.style.transform = "scaleX(" + (1 - Math.pow(1 - elapsed / 650, 3)) + ")";
+        last = time;
+      }
+      frame = requestAnimationFrame(tick);
+    };
+    frame = requestAnimationFrame(tick);
+  }
+  function render() {
+    stop();
+    list.replaceChildren();
+    marks = [];
+    for (let index = 0; index < limit; index++) {
+      const item = document.createElement("li"),
+        row = document.createElement("button");
+      row.className = "row layout";
+      const rank = document.createElement("span");
+      rank.className = "rank";
+      rank.textContent = String(index + 1);
+      const file = document.createElement("span");
+      file.className = "file";
+      const name = document.createElement("span"),
+        path = document.createElement("span");
+      name.className = "name";
+      path.className = "path";
+      name.textContent = "independent-sample-" + index + ".ts";
+      path.textContent = "synthetic/";
+      file.append(name, path);
+      const track = document.createElement("span"),
+        fill = document.createElement("span");
+      track.className = "track";
+      fill.className = "fill";
+      fill.style.setProperty("--size", 100 - index * 5 + "%");
+      track.append(fill);
+      marks.push(fill);
+      const value = document.createElement("span");
+      value.className = "value";
+      value.textContent = String(100 - index * 5);
+      row.append(rank, file, track, value);
+      row.addEventListener("pointermove", (event) => {
+        tip.textContent = "Synthetic source details";
+        tip.hidden = false;
+        tip.style.left =
+          Math.max(8, Math.min(innerWidth - tip.offsetWidth - 8, event.clientX + 12)) + "px";
+        tip.style.top =
+          Math.max(8, Math.min(innerHeight - tip.offsetHeight - 8, event.clientY + 12)) + "px";
+      });
+      row.addEventListener("pointerleave", () => {
+        tip.hidden = true;
+      });
+      item.append(row);
+      list.append(item);
+    }
+    for (const button of document.querySelectorAll("[data-limit]"))
+      button.setAttribute("aria-pressed", String(Number(button.dataset.limit) === limit));
+    animate();
+  }
+  for (const button of document.querySelectorAll("[data-limit]"))
+    button.addEventListener("click", () => {
+      limit = Number(button.dataset.limit);
+      render();
+    });
+  const onVisibility = () => {
+    if (active()) animate();
+    else {
+      stop();
+      tip.hidden = true;
+    }
+  };
+  const observer = new MutationObserver(onVisibility);
+  observer.observe(document.documentElement, {
+    attributes: true,
+    attributeFilter: ["data-cafe-visible", "data-cafe-reduced-motion"],
+  });
+  addEventListener("cafe-visibility-changed", onVisibility);
+  document.addEventListener("visibilitychange", onVisibility);
+  reduce.addEventListener("change", onVisibility);
+  addEventListener(
+    "pagehide",
+    () => {
+      stop();
+      observer.disconnect();
+      removeEventListener("cafe-visibility-changed", onVisibility);
+      document.removeEventListener("visibilitychange", onVisibility);
+      reduce.removeEventListener("change", onVisibility);
+    },
+    { once: true },
+  );
+  render();
+</script>

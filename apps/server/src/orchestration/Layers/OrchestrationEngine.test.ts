@@ -620,6 +620,12 @@ describe("OrchestrationEngine accepted failed-root association", () => {
     "wrong message",
     "Stop",
     "newer input",
+    "replacement accepted",
+    "replacement observed timing",
+    "replacement missing transfer",
+    "replacement wrong previous",
+    "replacement wrong native commitment",
+    "replacement same generation",
   ] as const)(
     "requires the exact immutable intent/attempt/receipt and pending-message join: %s",
     async (variant) => {
@@ -627,6 +633,10 @@ describe("OrchestrationEngine accepted failed-root association", () => {
       const threadId = ThreadId.make("failed-root-association-thread");
       const account = ProviderInstanceId.make("codex");
       const runtimeId = SubagentRuntimeId.make("00000000-0000-4000-8000-000000000142");
+      const replacementRuntimeId = SubagentRuntimeId.make("00000000-0000-4000-8000-000000000143");
+      const isReplacement = variant.startsWith("replacement ");
+      const acceptedRuntimeId = isReplacement ? replacementRuntimeId : runtimeId;
+      const nativeConversationCommitment = "a".repeat(64);
       const previousTurnId = TurnId.make("failed-root-A");
       const turnId = TurnId.make("accepted-failed-root-B");
       const messageId = MessageId.make("accepted-recovery-message");
@@ -771,6 +781,13 @@ describe("OrchestrationEngine accepted failed-root association", () => {
               recovery: "codex-transient-continuation-attempted",
               sourceEventSequence: marker.sequence,
               attemptOwnerId: "immutable-winning-owner",
+              ...(isReplacement
+                ? {
+                    providerInstanceId: account,
+                    subagentRuntimeId: runtimeId,
+                    nativeConversationCommitment,
+                  }
+                : {}),
             },
             createdAt: requestedAt,
           },
@@ -794,7 +811,18 @@ describe("OrchestrationEngine accepted failed-root association", () => {
                 attemptOwnerId:
                   variant === "wrong nonce" ? "different-owner" : "immutable-winning-owner",
                 providerInstanceId: variant === "wrong account" ? "peer" : account,
-                subagentRuntimeId: runtimeId,
+                subagentRuntimeId:
+                  variant === "replacement same generation" ? runtimeId : acceptedRuntimeId,
+                ...(isReplacement && variant !== "replacement missing transfer"
+                  ? {
+                      previousSubagentRuntimeId:
+                        variant === "replacement wrong previous" ? replacementRuntimeId : runtimeId,
+                      nativeConversationCommitment:
+                        variant === "replacement wrong native commitment"
+                          ? "b".repeat(64)
+                          : nativeConversationCommitment,
+                    }
+                  : {}),
               },
               createdAt: completedAt,
             },
@@ -805,12 +833,17 @@ describe("OrchestrationEngine accepted failed-root association", () => {
               system.sql`UPDATE orchestration_events SET actor_kind = 'provider' WHERE command_id = ${receiptId}`,
             );
         }
-        if (variant === "observed timing") {
+        if (variant === "observed timing" || variant === "replacement observed timing") {
           await dispatch({
             type: "thread.session.set",
             commandId: CommandId.make("provider:association-B-start"),
             threadId,
-            session: { ...session, activeTurnId: turnId, updatedAt: observedStartedAt },
+            session: {
+              ...session,
+              subagentRuntimeId: acceptedRuntimeId,
+              activeTurnId: turnId,
+              updatedAt: observedStartedAt,
+            },
             createdAt: observedStartedAt,
           });
           await dispatch({
@@ -819,6 +852,7 @@ describe("OrchestrationEngine accepted failed-root association", () => {
             threadId,
             session: {
               ...session,
+              subagentRuntimeId: acceptedRuntimeId,
               status: "error",
               activeTurnId: null,
               lastError: "Continuation failed.",
@@ -847,7 +881,7 @@ describe("OrchestrationEngine accepted failed-root association", () => {
           commandId: CommandId.make("server:association-B-terminal"),
           threadId,
           expectedSessionLifecycle: sessionLifecycleSnapshot(current.session),
-          expectedSubagentRuntimeId: runtimeId,
+          expectedSubagentRuntimeId: current.session?.subagentRuntimeId ?? runtimeId,
           codexFailedRoot: {
             turnId,
             previousTurnId,
@@ -859,6 +893,7 @@ describe("OrchestrationEngine accepted failed-root association", () => {
           },
           session: {
             ...current.session!,
+            subagentRuntimeId: acceptedRuntimeId,
             status: "ready",
             activeTurnId: null,
             lastError: "Continuation failed.",
@@ -866,15 +901,22 @@ describe("OrchestrationEngine accepted failed-root association", () => {
           },
           createdAt: completedAt,
         };
-        if (variant === "accepted" || variant === "observed timing") {
+        const observedTiming =
+          variant === "observed timing" || variant === "replacement observed timing";
+        if (
+          variant === "accepted" ||
+          variant === "observed timing" ||
+          variant === "replacement accepted" ||
+          variant === "replacement observed timing"
+        ) {
           await dispatch(command);
           const after = await system.readModel();
           expect(after.threads[0]?.latestTurn).toMatchObject({
             turnId,
             state: "error",
             requestedAt,
-            startedAt: variant === "observed timing" ? observedStartedAt : null,
-            completedAt: variant === "observed timing" ? observedCompletedAt : completedAt,
+            startedAt: observedTiming ? observedStartedAt : null,
+            completedAt: observedTiming ? observedCompletedAt : completedAt,
           });
           expect(after.threads[0]?.session).toMatchObject({ status: "ready", activeTurnId: null });
           const [row] = await system.run(system.sql<{
@@ -887,8 +929,8 @@ describe("OrchestrationEngine accepted failed-root association", () => {
           expect(row).toEqual({
             pendingMessageId: messageId,
             state: "error",
-            startedAt: variant === "observed timing" ? observedStartedAt : null,
-            completedAt: variant === "observed timing" ? observedCompletedAt : completedAt,
+            startedAt: observedTiming ? observedStartedAt : null,
+            completedAt: observedTiming ? observedCompletedAt : completedAt,
           });
           const [old] = await system.run(
             system.sql<{

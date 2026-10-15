@@ -121,17 +121,22 @@ afterEach(() => {
   localStorage.removeItem(`cafe-code:desk:v1:${environmentId}`);
 });
 
-async function setup() {
+async function setup({ newChatDisabled = false }: { newChatDisabled?: boolean } = {}) {
   useDeskStore.getState().dispatch({ type: "open", target: chat });
   useDeskStore.getState().dispatch({ type: "open", target: draft });
   const onNavigate = vi.fn();
+  const onNewChat = vi.fn();
   const screen = await render(
     <>
-      <DeskSidebar onNavigate={onNavigate} />
+      <DeskSidebar
+        onNavigate={onNavigate}
+        onNewChat={onNewChat}
+        newChatDisabled={newChatDisabled}
+      />
       <button type="button">Outside Desk</button>
     </>,
   );
-  return { screen, onNavigate };
+  return { screen, onNavigate, onNewChat };
 }
 
 function deferredMenu() {
@@ -147,6 +152,117 @@ function openRowMenu(element: Element) {
 }
 
 describe("Desk sidebar", () => {
+  it("delegates native pointer and focused keyboard creation without mutating open views", async () => {
+    const { screen, onNavigate, onNewChat } = await setup();
+    const before = useDeskStore.getState().desk;
+    const action = screen.getByRole("button", {
+      name: "New chat in active tab group",
+      exact: true,
+    });
+    try {
+      await expect.element(action).not.toBeDisabled();
+      await action.click();
+      expect(onNewChat).toHaveBeenCalledTimes(1);
+      await expect.element(action).toHaveFocus();
+      await userEvent.keyboard("{Enter}");
+      expect(onNewChat).toHaveBeenCalledTimes(2);
+      expect(onNavigate).not.toHaveBeenCalled();
+      expect(useDeskStore.getState().desk).toBe(before);
+      for (const mutation of [
+        mocks.rename,
+        mocks.archive,
+        mocks.recycle,
+        mocks.delete,
+        mocks.hardDelete,
+      ])
+        expect(mutation).not.toHaveBeenCalled();
+    } finally {
+      await screen.unmount();
+    }
+  });
+
+  it("keeps unavailable creation out of native keyboard focus and activation", async () => {
+    const onNewChat = vi.fn();
+    const onNavigate = vi.fn();
+    const screen = await render(
+      <>
+        <button type="button">Before Desk</button>
+        <DeskSidebar onNavigate={onNavigate} onNewChat={onNewChat} newChatDisabled />
+      </>,
+    );
+    try {
+      const action = screen.getByRole("button", {
+        name: "New chat in active tab group",
+        exact: true,
+      });
+      await expect.element(action).toBeDisabled();
+      // Start from a fixture-owned native button; Tab must skip the disabled
+      // heading action, not focus it through a programmatic workaround.
+      await screen.getByRole("button", { name: "Before Desk", exact: true }).click();
+      await userEvent.keyboard("{Tab}");
+      await expect
+        .element(screen.getByRole("button", { name: "Activate group Main", exact: true }))
+        .toHaveFocus();
+      await userEvent.keyboard("{Enter}");
+      expect(onNewChat).not.toHaveBeenCalled();
+      expect(onNavigate).not.toHaveBeenCalled();
+      expect(useDeskStore.getState().desk.groups.g1?.tabs).toEqual([]);
+    } finally {
+      await screen.unmount();
+    }
+  });
+
+  it.each([
+    [false, 80],
+    [false, 100],
+    [false, 130],
+    [true, 80],
+    [true, 100],
+    [true, 130],
+  ] as const)(
+    "keeps creation immediately beside Open chats at narrow width (dark=%s, scale=%s)",
+    async (dark, scale) => {
+      const root = document.documentElement;
+      const originalDark = root.classList.contains("dark");
+      const originalFontSize = root.style.fontSize;
+      root.classList.toggle("dark", dark);
+      root.style.fontSize = `${scale}%`;
+      try {
+        const screen = await render(
+          <div data-desk-heading-fixture style={{ width: 200 }}>
+            <DeskSidebar onNavigate={vi.fn()} onNewChat={vi.fn()} />
+          </div>,
+        );
+        try {
+          const heading = screen.getByText("Open chats", { exact: true }).element();
+          const action = screen.getByRole("button", {
+            name: "New chat in active tab group",
+            exact: true,
+          });
+          await expect.element(action).toBeVisible();
+          const headingBounds = heading.getBoundingClientRect();
+          const actionBounds = action.element().getBoundingClientRect();
+          const host = document.querySelector<HTMLElement>("[data-desk-heading-fixture]")!;
+          const hostBounds = host.getBoundingClientRect();
+          const headingRow = heading.parentElement!;
+          const gap = Number.parseFloat(getComputedStyle(headingRow).columnGap);
+          expect(gap).toBeGreaterThan(0);
+          expect(actionBounds.left - headingBounds.right).toBeCloseTo(gap, 2);
+          expect(actionBounds.top).toBeLessThan(headingBounds.bottom);
+          expect(actionBounds.bottom).toBeGreaterThan(headingBounds.top);
+          expect(actionBounds.right).toBeLessThanOrEqual(hostBounds.right);
+          expect(host.scrollWidth).toBe(host.clientWidth);
+          expect(action.element().querySelector("svg")).not.toBeNull();
+        } finally {
+          await screen.unmount();
+        }
+      } finally {
+        root.classList.toggle("dark", originalDark);
+        root.style.fontSize = originalFontSize;
+      }
+    },
+  );
+
   it("observes native mouse capability in the desktop fixture context", () => {
     // Pointer delivery alone does not qualify hover CSS: Chromium's native
     // media state must also describe a mouse. Keep this as a separate oracle
@@ -188,7 +304,7 @@ describe("Desk sidebar", () => {
   it("keeps an italic preview row when double-clicked without renaming the chat", async () => {
     useDeskStore.getState().dispatch({ type: "open", target: chat, preview: true });
     const onNavigate = vi.fn();
-    const screen = await render(<DeskSidebar onNavigate={onNavigate} />);
+    const screen = await render(<DeskSidebar onNavigate={onNavigate} onNewChat={vi.fn()} />);
     const row = screen.getByRole("button", { name: "Chat fixture", exact: true });
     const title = row.element().querySelector("[data-desk-row-title]")!;
     expect(getComputedStyle(title).fontStyle).toBe("italic");
@@ -711,7 +827,7 @@ describe("Desk sidebar", () => {
       expect(onNavigate).toHaveBeenLastCalledWith(draft);
       await expect
         .element(screen.getByRole("button", { name: "New chat in active tab group" }))
-        .not.toBeInTheDocument();
+        .toBeVisible();
     } finally {
       await screen.unmount();
     }

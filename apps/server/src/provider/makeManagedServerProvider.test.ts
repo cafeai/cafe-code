@@ -3,13 +3,18 @@ import { ProviderDriverKind, ProviderInstanceId, type ServerProvider } from "@ca
 import { createModelCapabilities } from "@cafecode/shared/model";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
+import * as Exit from "effect/Exit";
 import * as Fiber from "effect/Fiber";
 import * as PubSub from "effect/PubSub";
 import * as Ref from "effect/Ref";
+import * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
 import * as TestClock from "effect/testing/TestClock";
 
-import { makeManagedServerProvider } from "./makeManagedServerProvider.ts";
+import {
+  makeManagedServerProvider,
+  retainNativeCodexModelCatalog,
+} from "./makeManagedServerProvider.ts";
 import { deterministicProviderProbePhaseOffsetMs } from "./providerProbePolicy.ts";
 
 const emptyCapabilities = createModelCapabilities({ optionDescriptors: [] });
@@ -119,6 +124,48 @@ const enrichedSnapshotSecond: ServerProvider = {
 };
 
 describe("makeManagedServerProvider", () => {
+  it("never retains native catalogues using missing, changed, or foreign owner metadata", () => {
+    const native: ServerProvider = {
+      ...refreshedSnapshot,
+      auth: { status: "authenticated", type: "chatgpt", email: "owner@example.test" },
+      codexModelCatalogSource: "native",
+      models: enrichedSnapshotSecond.models,
+    };
+    const fallback: ServerProvider = {
+      ...native,
+      codexModelCatalogSource: "fallback",
+      models: enrichedSnapshot.models,
+    };
+    const { codexModelCatalogSource: _legacySource, ...legacyFallback } = fallback;
+    for (const next of [
+      {
+        ...fallback,
+        auth: { status: "authenticated", type: "chatgpt", email: "other@example.test" },
+      },
+      { ...fallback, auth: { status: "authenticated", type: "chatgpt" } },
+      { ...fallback, auth: { status: "authenticated", email: "owner@example.test" } },
+      {
+        ...fallback,
+        auth: { status: "authenticated", type: "apiKey", email: "owner@example.test" },
+      },
+      { ...fallback, auth: { status: "unknown" } },
+      { ...fallback, auth: { status: "unauthenticated" } },
+      { ...fallback, instanceId: ProviderInstanceId.make("codex_other") },
+      { ...fallback, driver: ProviderDriverKind.make("externalDriver") },
+      legacyFallback,
+    ] satisfies ReadonlyArray<ServerProvider>) {
+      assert.strictEqual(retainNativeCodexModelCatalog(native, next), next);
+    }
+    const unidentifiedFallback: ServerProvider = { ...fallback, auth: { status: "authenticated" } };
+    // Two omitted identities are not matching identities.
+    assert.strictEqual(
+      retainNativeCodexModelCatalog(
+        { ...native, auth: { status: "authenticated" } },
+        unidentifiedFallback,
+      ),
+      unidentifiedFallback,
+    );
+  });
   it("derives stable, distributed periodic phases from public instance ids", () => {
     const intervalMs = 300_000;
     const codexPhase = deterministicProviderProbePhaseOffsetMs(
@@ -763,11 +810,377 @@ describe("makeManagedServerProvider", () => {
         );
         const latest = yield* provider.getSnapshot;
         assert.deepStrictEqual(latest.models, refreshedModels);
+        assert.strictEqual(latest.codexModelCatalogSource, "native");
         assert.strictEqual(latest.version, refreshedSnapshot.version);
         assert.deepStrictEqual(latest.auth, refreshedSnapshot.auth);
         assert.strictEqual(yield* Ref.get(checkCalls), 1);
       }),
     ),
+  );
+
+  for (const models of [enrichedSnapshotSecond.models, []] satisfies ReadonlyArray<
+    ServerProvider["models"]
+  >) {
+    it.effect(
+      `qualifies ${models.length === 0 ? "empty" : "identical"} native models before equality and retains them through same-account health`,
+      () =>
+        Effect.scoped(
+          Effect.gen(function* () {
+            const fallback: ServerProvider = {
+              ...refreshedSnapshot,
+              auth: { status: "authenticated", type: "chatgpt", email: "owner@example.test" },
+              codexModelCatalogSource: "fallback",
+              models,
+            };
+            const healthCalls = yield* Ref.make(0);
+            const modelCalls = yield* Ref.make(0);
+            const provider = yield* makeManagedServerProvider<TestSettings>({
+              maintenanceCapabilities,
+              getSettings: Effect.succeed({ enabled: true }),
+              streamSettings: Stream.never,
+              haveSettingsChanged: () => false,
+              initialSnapshot: () => Effect.succeed(fallback),
+              checkProvider: Ref.update(healthCalls, (count) => count + 1).pipe(
+                Effect.as({ ...fallback, models: enrichedSnapshot.models }),
+              ),
+              refreshModels: () =>
+                Ref.update(modelCalls, (count) => count + 1).pipe(Effect.as(models)),
+              refreshInterval: null,
+              probePolicy: { initialRefresh: "external" },
+            });
+            assert.strictEqual(
+              (yield* provider.getCurrentSnapshot!).codexModelCatalogSource,
+              "fallback",
+            );
+            const native = yield* provider.refreshModels!;
+            assert.strictEqual(native.codexModelCatalogSource, "native");
+            assert.deepStrictEqual(native.models, models);
+            assert.strictEqual(yield* Ref.get(healthCalls), 0);
+            assert.strictEqual(yield* Ref.get(modelCalls), 1);
+            const health = yield* provider.refresh;
+            assert.strictEqual(health.codexModelCatalogSource, "native");
+            assert.deepStrictEqual(health.models, models);
+            assert.strictEqual(yield* Ref.get(healthCalls), 1);
+          }),
+        ),
+    );
+  }
+
+  it.effect("does not stamp native provenance for an undefined or failed model refresh", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        for (const fail of [false, true]) {
+          const fallback: ServerProvider = {
+            ...refreshedSnapshot,
+            codexModelCatalogSource: "fallback",
+            models: enrichedSnapshotSecond.models,
+          };
+          const provider = yield* makeManagedServerProvider<TestSettings>({
+            maintenanceCapabilities,
+            getSettings: Effect.succeed({ enabled: true }),
+            streamSettings: Stream.never,
+            haveSettingsChanged: () => false,
+            initialSnapshot: () => Effect.succeed(fallback),
+            checkProvider: Effect.succeed(fallback),
+            refreshModels: () =>
+              fail ? Effect.die(new Error("synthetic model failure")) : Effect.succeed(undefined),
+            refreshInterval: null,
+            probePolicy: { initialRefresh: "external" },
+          });
+          const admitted = yield* provider.getCurrentSnapshot!;
+          const result = yield* Effect.exit(provider.refreshModels!);
+          assert.strictEqual(Exit.isFailure(result), fail);
+          assert.strictEqual(yield* provider.getCurrentSnapshot!, admitted);
+        }
+      }),
+    ),
+  );
+
+  it.effect("does not grant Codex provenance to another driver's successful model refresh", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const foreign: ServerProvider = {
+          ...refreshedSnapshot,
+          driver: ProviderDriverKind.make("externalDriver"),
+        };
+        const provider = yield* makeManagedServerProvider<TestSettings>({
+          maintenanceCapabilities,
+          getSettings: Effect.succeed({ enabled: true }),
+          streamSettings: Stream.never,
+          haveSettingsChanged: () => false,
+          initialSnapshot: () => Effect.succeed(foreign),
+          checkProvider: Effect.succeed(foreign),
+          refreshModels: () => Effect.succeed(enrichedSnapshot.models),
+          refreshInterval: null,
+          probePolicy: { initialRefresh: "external" },
+        });
+        const refreshed = yield* provider.refreshModels!;
+        assert.deepStrictEqual(refreshed.models, enrichedSnapshot.models);
+        assert.strictEqual(refreshed.codexModelCatalogSource, undefined);
+      }),
+    ),
+  );
+
+  it.effect(
+    "rejects an old enrichment callback after native empty discovery changes the managed generation",
+    () =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const fallback: ServerProvider = {
+            ...refreshedSnapshot,
+            auth: { status: "authenticated", type: "chatgpt", email: "owner@example.test" },
+            codexModelCatalogSource: "fallback",
+            models: enrichedSnapshot.models,
+          };
+          const callbacks: Array<(snapshot: ServerProvider) => Effect.Effect<void>> = [];
+          const firstReady = yield* Deferred.make<void>();
+          const secondReady = yield* Deferred.make<void>();
+          const modelsStarted = yield* Deferred.make<void>();
+          const releaseModels = yield* Deferred.make<void>();
+          yield* Effect.addFinalizer(() =>
+            Deferred.succeed(releaseModels, undefined).pipe(Effect.ignore),
+          );
+          const provider = yield* makeManagedServerProvider<TestSettings>({
+            maintenanceCapabilities,
+            getSettings: Effect.succeed({ enabled: true }),
+            streamSettings: Stream.never,
+            haveSettingsChanged: () => false,
+            initialSnapshot: () => Effect.succeed(fallback),
+            checkProvider: Effect.succeed(fallback),
+            refreshModels: () =>
+              Deferred.succeed(modelsStarted, undefined).pipe(
+                Effect.andThen(Deferred.await(releaseModels)),
+                Effect.as([]),
+              ),
+            enrichSnapshot: ({ publishSnapshot }) =>
+              Effect.gen(function* () {
+                callbacks.push(publishSnapshot);
+                yield* Deferred.succeed(
+                  callbacks.length === 1 ? firstReady : secondReady,
+                  undefined,
+                );
+              }),
+            refreshInterval: null,
+            probePolicy: { initialRefresh: "external" },
+          });
+          yield* provider.refresh;
+          yield* Deferred.await(firstReady);
+          const refresh = yield* provider.refreshModels!.pipe(Effect.forkChild);
+          yield* Deferred.await(modelsStarted);
+          yield* callbacks[0]!({ ...fallback, version: "0.162.2" });
+          yield* Deferred.succeed(releaseModels, undefined);
+          const native = yield* Fiber.join(refresh);
+          yield* Deferred.await(secondReady);
+          assert.strictEqual(callbacks.length, 2);
+          yield* callbacks[0]!(fallback);
+          const current = yield* provider.getCurrentSnapshot!;
+          assert.strictEqual(current.codexModelCatalogSource, "native");
+          assert.strictEqual(current.version, "0.162.2");
+          assert.deepStrictEqual(current.models, []);
+          assert.strictEqual(current, native);
+        }),
+      ),
+  );
+
+  it.effect(
+    "discards a held model result when its settings change without reading or probing from the inert accessor",
+    () =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const settings = yield* Ref.make<TestSettings>({ enabled: true });
+          const settingsReads = yield* Ref.make(0);
+          const healthCalls = yield* Ref.make(0);
+          const started = yield* Deferred.make<void>();
+          const release = yield* Deferred.make<void>();
+          yield* Effect.addFinalizer(() =>
+            Deferred.succeed(release, undefined).pipe(Effect.ignore),
+          );
+          const fallback: ServerProvider = {
+            ...refreshedSnapshot,
+            codexModelCatalogSource: "fallback",
+          };
+          const provider = yield* makeManagedServerProvider<TestSettings>({
+            maintenanceCapabilities,
+            getSettings: Ref.update(settingsReads, (count) => count + 1).pipe(
+              Effect.andThen(Ref.get(settings)),
+            ),
+            streamSettings: Stream.never,
+            haveSettingsChanged: (previous, next) => previous.enabled !== next.enabled,
+            initialSnapshot: () => Effect.succeed(fallback),
+            checkProvider: Ref.update(healthCalls, (count) => count + 1).pipe(
+              Effect.as(initialSnapshot),
+            ),
+            refreshModels: () =>
+              Deferred.succeed(started, undefined).pipe(
+                Effect.andThen(Deferred.await(release)),
+                Effect.as(enrichedSnapshot.models),
+              ),
+            refreshInterval: null,
+            probePolicy: { initialRefresh: "external" },
+          });
+          const admitted = yield* provider.getCurrentSnapshot!;
+          const refresh = yield* provider.refreshModels!.pipe(Effect.forkChild);
+          yield* Deferred.await(started);
+          yield* Ref.set(settings, { enabled: false });
+          const beforeReads = yield* Ref.get(settingsReads);
+          assert.strictEqual(yield* provider.getCurrentSnapshot!, admitted);
+          assert.strictEqual(yield* Ref.get(settingsReads), beforeReads);
+          assert.strictEqual(yield* Ref.get(healthCalls), 0);
+          yield* Deferred.succeed(release, undefined);
+          assert.strictEqual(yield* Fiber.join(refresh), admitted);
+          assert.strictEqual(yield* provider.getCurrentSnapshot!, admitted);
+          assert.strictEqual(yield* Ref.get(healthCalls), 0);
+        }),
+      ),
+  );
+
+  it.effect(
+    "completes a model waiter admitted after scope closure without invoking the provider",
+    () =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const scope = yield* Scope.make();
+          yield* Effect.addFinalizer(() => Scope.close(scope, Exit.void));
+          const modelCalls = yield* Ref.make(0);
+          const fallback: ServerProvider = {
+            ...refreshedSnapshot,
+            codexModelCatalogSource: "fallback",
+          };
+          const provider = yield* makeManagedServerProvider<TestSettings>({
+            maintenanceCapabilities,
+            getSettings: Effect.succeed({ enabled: true }),
+            streamSettings: Stream.never,
+            haveSettingsChanged: () => false,
+            initialSnapshot: () => Effect.succeed(fallback),
+            checkProvider: Effect.succeed(fallback),
+            refreshModels: () =>
+              Ref.update(modelCalls, (count) => count + 1).pipe(Effect.as(enrichedSnapshot.models)),
+            refreshInterval: null,
+            probePolicy: { initialRefresh: "external" },
+          }).pipe(Scope.provide(scope));
+          const admitted = yield* provider.getCurrentSnapshot!;
+          yield* Scope.close(scope, Exit.void);
+          const result = yield* Effect.exit(provider.refreshModels!);
+          assert.isTrue(Exit.isFailure(result));
+          assert.strictEqual(yield* Ref.get(modelCalls), 0);
+          assert.strictEqual(yield* provider.getCurrentSnapshot!, admitted);
+        }),
+      ),
+  );
+
+  it.effect(
+    "does not cancel a shared model worker when one caller disconnects and retires the completed flight",
+    () =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const started = yield* Deferred.make<void>();
+          const release = yield* Deferred.make<void>();
+          const modelCalls = yield* Ref.make(0);
+          const workerInterruptions = yield* Ref.make(0);
+          yield* Effect.addFinalizer(() =>
+            Deferred.succeed(release, undefined).pipe(Effect.ignore),
+          );
+          const fallback: ServerProvider = {
+            ...refreshedSnapshot,
+            codexModelCatalogSource: "fallback",
+          };
+          const provider = yield* makeManagedServerProvider<TestSettings>({
+            maintenanceCapabilities,
+            getSettings: Effect.succeed({ enabled: true }),
+            streamSettings: Stream.never,
+            haveSettingsChanged: () => false,
+            initialSnapshot: () => Effect.succeed(fallback),
+            checkProvider: Effect.succeed(fallback),
+            refreshModels: () =>
+              Ref.update(modelCalls, (count) => count + 1).pipe(
+                Effect.andThen(Deferred.succeed(started, undefined)),
+                Effect.andThen(Deferred.await(release)),
+                Effect.as(enrichedSnapshot.models),
+                Effect.onInterrupt(() => Ref.update(workerInterruptions, (count) => count + 1)),
+              ),
+            refreshInterval: null,
+            probePolicy: { initialRefresh: "external" },
+          });
+          const admitted = yield* provider.getCurrentSnapshot!;
+          const disconnected = yield* provider.refreshModels!.pipe(Effect.forkChild);
+          yield* Deferred.await(started);
+          const survivor = yield* provider.refreshModels!.pipe(
+            Effect.forkChild({ startImmediately: true }),
+          );
+          yield* Fiber.interrupt(disconnected);
+          assert.isTrue(Exit.isFailure(yield* Fiber.await(disconnected)));
+          assert.strictEqual(yield* Ref.get(modelCalls), 1);
+          assert.strictEqual(yield* Ref.get(workerInterruptions), 0);
+          assert.strictEqual(yield* provider.getCurrentSnapshot!, admitted);
+          yield* Deferred.succeed(release, undefined);
+          const accepted = yield* Fiber.join(survivor);
+          assert.deepStrictEqual(accepted.models, enrichedSnapshot.models);
+          assert.strictEqual(accepted.codexModelCatalogSource, "native");
+          assert.strictEqual(yield* Ref.get(modelCalls), 1);
+          assert.strictEqual(yield* Ref.get(workerInterruptions), 0);
+          // A later independent request must not remain attached to a retired
+          // Deferred, even when its identical result needs no new publication.
+          const next = yield* provider.refreshModels!;
+          assert.deepStrictEqual(next.models, enrichedSnapshot.models);
+          assert.strictEqual(yield* Ref.get(modelCalls), 2);
+          assert.strictEqual(yield* Ref.get(workerInterruptions), 0);
+        }),
+      ),
+  );
+
+  it.effect(
+    "does not publish native provenance when the owning scope closes during discovery",
+    () =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const scope = yield* Scope.make();
+          yield* Effect.addFinalizer(() => Scope.close(scope, Exit.void));
+          const started = yield* Deferred.make<void>();
+          const release = yield* Deferred.make<void>();
+          const interruptionObserved = yield* Deferred.make<void>();
+          yield* Effect.addFinalizer(() =>
+            Deferred.succeed(release, undefined).pipe(Effect.ignore),
+          );
+          const fallback: ServerProvider = {
+            ...refreshedSnapshot,
+            codexModelCatalogSource: "fallback",
+          };
+          const provider = yield* makeManagedServerProvider<TestSettings>({
+            maintenanceCapabilities,
+            getSettings: Effect.succeed({ enabled: true }),
+            streamSettings: Stream.never,
+            haveSettingsChanged: () => false,
+            initialSnapshot: () => Effect.succeed(fallback),
+            checkProvider: Effect.succeed(fallback),
+            refreshModels: () =>
+              Deferred.succeed(started, undefined).pipe(
+                Effect.andThen(Deferred.await(release)),
+                Effect.as(enrichedSnapshot.models),
+                Effect.onInterrupt(() =>
+                  Deferred.succeed(interruptionObserved, undefined).pipe(
+                    // The fixture owns this cleanup hold. Scope closure must
+                    // request cancellation before the test releases it, then
+                    // join the completed cleanup before examining provenance.
+                    Effect.andThen(Deferred.await(release)),
+                  ),
+                ),
+              ),
+            refreshInterval: null,
+            probePolicy: { initialRefresh: "external" },
+          }).pipe(Scope.provide(scope));
+          const admitted = yield* provider.getCurrentSnapshot!;
+          const refresh = yield* Effect.exit(provider.refreshModels!).pipe(Effect.forkChild);
+          yield* Deferred.await(started);
+          const closing = yield* Scope.close(scope, Exit.void).pipe(
+            Effect.forkChild({ startImmediately: true }),
+          );
+          yield* Deferred.await(interruptionObserved);
+          yield* Deferred.succeed(release, undefined);
+          yield* Fiber.join(closing);
+          assert.isTrue(Exit.isFailure(yield* Fiber.join(refresh)));
+          assert.strictEqual(yield* provider.getCurrentSnapshot!, admitted);
+        }),
+      ),
   );
 
   it.effect(

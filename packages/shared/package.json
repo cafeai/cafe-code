@@ -4,6 +4,26 @@
   "license": "AGPL-3.0-or-later",
   "type": "module",
   "exports": {
+    "./visualizationRasterPolicy": {
+      "types": "./src/visualizationRasterPolicy.ts",
+      "import": "./src/visualizationRasterPolicy.ts"
+    },
+    "./chatTypography": {
+      "types": "./src/chatTypography.ts",
+      "import": "./src/chatTypography.ts"
+    },
+    "./visualizationFontData": {
+      "types": "./src/visualizationFontData.ts",
+      "import": "./src/visualizationFontData.ts"
+    },
+    "./visualizationFonts": {
+      "types": "./src/visualizationFonts.ts",
+      "import": "./src/visualizationFonts.ts"
+    },
+    "./visualizationFluidRuntime": {
+      "types": "./src/visualizationFluidRuntime.ts",
+      "import": "./src/visualizationFluidRuntime.ts"
+    },
     "./mcpAppJson": {
       "types": "./src/mcpAppJson.ts",
       "import": "./src/mcpAppJson.ts"
@@ -47,6 +67,14 @@
     "./liveWork": {
       "types": "./src/liveWork.ts",
       "import": "./src/liveWork.ts"
+    },
+    "./providerTaskOwnership": {
+      "types": "./src/providerTaskOwnership.ts",
+      "import": "./src/providerTaskOwnership.ts"
+    },
+    "./codexCompactionDiagnostics": {
+      "types": "./src/codexCompactionDiagnostics.ts",
+      "import": "./src/codexCompactionDiagnostics.ts"
     },
     "./claudeResponseLimits": {
       "types": "./src/claudeResponseLimits.ts",

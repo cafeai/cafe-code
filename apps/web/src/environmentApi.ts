@@ -3,8 +3,16 @@ import type { EnvironmentId, EnvironmentApi } from "@cafecode/contracts";
 
 import type { WsRpcClient } from "./rpc/wsRpcClient";
 import { readEnvironmentConnection } from "./environments/runtime";
+import type { EnvironmentConnection } from "./environments/runtime/connection";
 
 const environmentApiOverridesForTests = new Map<EnvironmentId, EnvironmentApi>();
+// Disclosure owners compare exact API identity as well as the connection and
+// authenticated transport generation. Reconstructing this adapter on every
+// read would make an unchanged production connection appear immediately stale.
+// Key by the registry's connection, not its client or environment spelling: a
+// replacement must get new identity even when it deliberately reuses a client.
+// Weak ownership also releases adapters when their connection is no longer held.
+const environmentApisByConnection = new WeakMap<EnvironmentConnection, EnvironmentApi>();
 
 export function createEnvironmentApi(rpcClient: WsRpcClient): EnvironmentApi {
   return {
@@ -77,7 +85,12 @@ export function readEnvironmentApi(environmentId: EnvironmentId): EnvironmentApi
   }
 
   const connection = readEnvironmentConnection(environmentId);
-  return connection ? createEnvironmentApi(connection.client) : undefined;
+  if (!connection) return undefined;
+  const existing = environmentApisByConnection.get(connection);
+  if (existing) return existing;
+  const api = createEnvironmentApi(connection.client);
+  environmentApisByConnection.set(connection, api);
+  return api;
 }
 
 export function ensureEnvironmentApi(environmentId: EnvironmentId): EnvironmentApi {

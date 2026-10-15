@@ -55,6 +55,23 @@ export const codexTransientAcceptanceCommandId = (threadId: ThreadId, turnId: Tu
     .update(JSON.stringify(["cafe-codex-transient-accepted-v1", threadId, turnId]))
     .digest("hex")}`;
 
+/** Public receipts bind private history without publishing its native identifier. */
+export const codexRecoveryConversationCommitment = (input: {
+  readonly threadId: ThreadId;
+  readonly providerInstanceId: ProviderInstanceId;
+  readonly providerThreadId: string;
+}) =>
+  createHash("sha256")
+    .update(
+      JSON.stringify([
+        "cafe-codex-recovery-conversation-v1",
+        input.threadId,
+        input.providerInstanceId,
+        input.providerThreadId,
+      ]),
+    )
+    .digest("hex");
+
 export type CodexTransientRecoveryChain =
   | {
       readonly status: "fresh";
@@ -95,6 +112,8 @@ export const makeCodexTransientRecoveryChainReader = Effect.gen(function* () {
         readonly retryAttempt: number;
         readonly instanceId: string;
         readonly runtimeId: string;
+        readonly previousTurnId: string;
+        readonly sourceEventSequence: number;
         readonly continuationOrdinal: unknown;
         readonly continuationOrdinalType: string | null;
         readonly continuationOrdinalLowerBoundType: string | null;
@@ -117,6 +136,8 @@ export const makeCodexTransientRecoveryChainReader = Effect.gen(function* () {
         json_extract(event.payload_json, '$.runtimeRecovery.codexTransientFailure.retryAttempt') AS retryAttempt,
         json_extract(event.payload_json, '$.runtimeRecovery.codexTransientFailure.providerInstanceId') AS instanceId,
         json_extract(event.payload_json, '$.runtimeRecovery.codexTransientFailure.subagentRuntimeId') AS runtimeId,
+        json_extract(event.payload_json, '$.runtimeRecovery.turnId') AS previousTurnId,
+        json_extract(event.payload_json, '$.runtimeRecovery.sourceEventSequence') AS sourceEventSequence,
         CASE WHEN json_type(event.payload_json, '$.runtimeRecovery.codexTransientFailure.continuationOrdinal') = 'integer'
           AND json_extract(event.payload_json, '$.runtimeRecovery.codexTransientFailure.continuationOrdinal') BETWEEN 1 AND ${Number.MAX_SAFE_INTEGER}
           THEN json_extract(event.payload_json, '$.runtimeRecovery.codexTransientFailure.continuationOrdinal')
@@ -138,7 +159,6 @@ export const makeCodexTransientRecoveryChainReader = Effect.gen(function* () {
         } as const;
       if (
         intent.instanceId !== input.providerInstanceId ||
-        intent.runtimeId !== input.subagentRuntimeId ||
         !Number.isSafeInteger(intent.chainSource) ||
         intent.chainSource <= 0 ||
         intent.chainSource > intent.sequence ||
@@ -167,6 +187,21 @@ export const makeCodexTransientRecoveryChainReader = Effect.gen(function* () {
         AND json_type(attempt.payload_json, '$.activity.payload.attemptOwnerId') = 'text'
         AND json_extract(receipt.payload_json, '$.activity.payload.attemptOwnerId') =
           json_extract(attempt.payload_json, '$.activity.payload.attemptOwnerId')
+        AND (
+          (${intent.runtimeId} = ${input.subagentRuntimeId}
+            AND json_type(receipt.payload_json, '$.activity.payload.previousSubagentRuntimeId') IS NULL)
+          OR (${intent.runtimeId} <> ${input.subagentRuntimeId}
+            AND json_extract(receipt.payload_json, '$.activity.payload.previousSubagentRuntimeId') = ${intent.runtimeId}
+            AND json_extract(attempt.payload_json, '$.activity.payload.subagentRuntimeId') = ${intent.runtimeId}
+            AND json_extract(attempt.payload_json, '$.activity.payload.providerInstanceId') = ${input.providerInstanceId}
+            AND json_extract(attempt.payload_json, '$.activity.turnId') = ${intent.previousTurnId}
+            AND json_extract(attempt.payload_json, '$.activity.payload.sourceEventSequence') = ${intent.sourceEventSequence}
+            AND json_type(attempt.payload_json, '$.activity.payload.nativeConversationCommitment') = 'text'
+            AND length(json_extract(attempt.payload_json, '$.activity.payload.nativeConversationCommitment')) = 64
+            AND json_extract(attempt.payload_json, '$.activity.payload.nativeConversationCommitment') NOT GLOB '*[^0-9a-f]*'
+            AND json_extract(receipt.payload_json, '$.activity.payload.nativeConversationCommitment') =
+              json_extract(attempt.payload_json, '$.activity.payload.nativeConversationCommitment'))
+        )
       LIMIT 1
     `.pipe(Effect.mapError(toPersistenceSqlError("CodexTransientRecoveryChain.receipt")));
       // Advance display bookkeeping only from the same authenticated acceptance

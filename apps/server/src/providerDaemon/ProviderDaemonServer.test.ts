@@ -17,6 +17,7 @@ import {
   TurnId,
 } from "@cafecode/contracts";
 import { assert, describe, expect, it, vi } from "@effect/vitest";
+import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as Effect from "effect/Effect";
 import * as Deferred from "effect/Deferred";
 import * as Layer from "effect/Layer";
@@ -29,6 +30,7 @@ import * as SqlClient from "effect/unstable/sql/SqlClient";
 import * as SqlError from "effect/unstable/sql/SqlError";
 import { EventEmitter } from "node:events";
 import * as http from "node:http";
+import type { Socket } from "node:net";
 
 import { ProviderAdapterRegistry } from "../provider/Services/ProviderAdapterRegistry.ts";
 import {
@@ -54,7 +56,12 @@ import {
 } from "./ProviderDaemonServer.ts";
 import type { ProviderDaemonPersistentEventJournal } from "./EventJournal.ts";
 import { ProviderRuntimeInventoryLocalLive } from "./ProviderRuntimeInventory.ts";
-import { requestProviderDaemonCapabilities } from "./RemoteProviderService.ts";
+import {
+  ProviderDaemonRpcResponseError,
+  RemoteProviderServiceLive,
+  requestProviderDaemonCapabilities,
+} from "./RemoteProviderService.ts";
+import { ServerConfig } from "../config.ts";
 import {
   SCHEDULING_SESSION_DAEMON_PATH,
   installSchedulingSessionRuntime,
@@ -123,6 +130,134 @@ const startProviderDaemonServerOnEphemeralPort = (
     }),
   );
 
+/**
+ * The command qualification uses the real daemon, but does not qualify a
+ * perpetual event subscription. Keep that unrelated native stream finite at a
+ * test-owned facade, while forwarding control requests and responses without
+ * decoding, rewriting or replacing the real authenticated RPC/health path.
+ * Cleanup owns only this facade's recorded sockets and upstream requests.
+ */
+const makeFiniteRemoteControlFacade = (
+  daemonPort: number,
+  eventsRefused: Deferred.Deferred<void>,
+) => {
+  const sockets = new Set<Socket>();
+  const upstreamRequests = new Set<http.ClientRequest>();
+  let eventRequests = 0;
+  return Effect.acquireRelease(
+    Effect.promise(
+      () =>
+        new Promise<http.Server>((resolve, reject) => {
+          const facade = http.createServer((request, response) => {
+            const refuse = () => {
+              response.writeHead(401, { "content-type": "application/json", connection: "close" });
+              response.end('{"error":"synthetic subscription unavailable"}');
+            };
+            if (request.headers.authorization !== `Bearer ${TEST_TOKEN}`) {
+              refuse();
+              return;
+            }
+            const url = new URL(request.url ?? "/", "http://127.0.0.1");
+            if (
+              request.method === "GET" &&
+              url.pathname === "/api/provider-daemon/events" &&
+              url.search === "?after=0"
+            ) {
+              eventRequests += 1;
+              // Observe the exact native finite response, not merely a scheduled
+              // event fiber, before issuing any command assertions below.
+              response.once("finish", () =>
+                Effect.runSync(Deferred.succeed(eventsRefused, undefined)),
+              );
+              refuse();
+              return;
+            }
+            const controlPath =
+              (request.method === "GET" && request.url === "/api/provider-daemon/health") ||
+              (request.method === "POST" && request.url === "/api/provider-daemon/rpc");
+            if (!controlPath) {
+              response.writeHead(404, { connection: "close" });
+              response.end();
+              return;
+            }
+            const upstream = http.request(
+              {
+                hostname: "127.0.0.1",
+                port: daemonPort,
+                method: request.method,
+                path: request.url,
+                headers: {
+                  authorization: request.headers.authorization,
+                  ...(request.headers["content-type"] !== undefined
+                    ? { "content-type": request.headers["content-type"] }
+                    : {}),
+                  ...(request.headers["content-length"] !== undefined
+                    ? { "content-length": request.headers["content-length"] }
+                    : {}),
+                },
+              },
+              (nativeResponse) => {
+                response.writeHead(nativeResponse.statusCode ?? 502, {
+                  ...(nativeResponse.headers["content-type"] !== undefined
+                    ? { "content-type": nativeResponse.headers["content-type"] }
+                    : {}),
+                  connection: "close",
+                });
+                nativeResponse.once("error", () => response.destroy());
+                response.once("close", () => {
+                  if (!response.writableFinished) nativeResponse.destroy();
+                });
+                nativeResponse.pipe(response);
+              },
+            );
+            upstreamRequests.add(upstream);
+            upstream.once("close", () => upstreamRequests.delete(upstream));
+            upstream.once("error", () => {
+              if (response.headersSent) response.destroy();
+              else {
+                response.writeHead(502, { connection: "close" });
+                response.end();
+              }
+            });
+            request.once("aborted", () => upstream.destroy());
+            response.once("close", () => {
+              if (!response.writableFinished) upstream.destroy();
+            });
+            request.pipe(upstream);
+          });
+          facade.on("connection", (socket) => {
+            sockets.add(socket);
+            socket.once("close", () => sockets.delete(socket));
+          });
+          facade.once("error", reject);
+          facade.listen(0, "127.0.0.1", () => {
+            facade.off("error", reject);
+            resolve(facade);
+          });
+        }),
+    ),
+    (facade) =>
+      Effect.promise(
+        () =>
+          new Promise<void>((resolve, reject) => {
+            for (const request of upstreamRequests) request.destroy();
+            for (const socket of sockets) socket.destroy();
+            facade.close((error) => (error ? reject(error) : resolve()));
+          }),
+      ),
+  ).pipe(
+    Effect.map((facade) => {
+      const address = facade.address();
+      if (address === null || typeof address === "string")
+        throw Error("Expected scoped native facade port");
+      return {
+        endpoint: { httpBaseUrl: `http://127.0.0.1:${address.port}`, token: TEST_TOKEN },
+        eventRequestCount: () => eventRequests,
+      };
+    }),
+  );
+};
+
 const mockProviderService = {
   startSession: () => Effect.die("unexpected startSession"),
   forkSession: () => Effect.die("unexpected forkSession"),
@@ -180,6 +315,296 @@ const providerDaemonServerTestLayer = makeProviderDaemonServerTestLayer(mockProv
 
 describe("ProviderDaemonServer", () => {
   it.effect(
+    "carries only exact native reconfiguration refusals through the guarded remote start transport",
+    () => {
+      const account = ProviderInstanceId.make("codex");
+      const threadId = ThreadId.make("synthetic-retained-policy-thread");
+      const privateExtra = "private-provider-payload-must-not-enter-rpc";
+      let getterReads = 0;
+      const requestError = (input?: { provider?: string; method?: string; tag?: string }) =>
+        Object.assign(
+          new ProviderAdapterRequestError({
+            provider: input?.provider ?? "codex",
+            method: input?.method ?? "session/reconfigure",
+            detail:
+              "Provider configuration cannot change while provider work is active or uncertain.",
+            ...(input?.tag !== undefined ? { remoteErrorTag: input.tag } : {}),
+          }),
+          { privateProviderPayload: { content: privateExtra } },
+        );
+      const cases = [
+        {
+          name: "subagent",
+          error: () => requestError({ tag: "subagent-concurrency-active" }),
+          expected: "subagent-concurrency-active",
+          outer: "ProviderAdapterRequestError",
+        },
+        {
+          name: "context",
+          error: () => requestError({ tag: "codex-context-window-active" }),
+          expected: "codex-context-window-active",
+          outer: "ProviderAdapterRequestError",
+        },
+        {
+          name: "unknown-tag",
+          error: () => requestError({ tag: "unrecognized-native-refusal" }),
+          outer: "ProviderAdapterRequestError",
+        },
+        {
+          name: "other-provider",
+          error: () =>
+            requestError({ provider: "claudeAgent", tag: "subagent-concurrency-active" }),
+          outer: "ProviderAdapterRequestError",
+        },
+        {
+          name: "other-native-method",
+          error: () => requestError({ method: "turn/start", tag: "codex-context-window-active" }),
+          outer: "ProviderAdapterRequestError",
+        },
+        {
+          name: "message-only",
+          // The exact refusal prose is insufficient without typed provenance.
+          error: () => requestError(),
+          outer: "ProviderAdapterRequestError",
+        },
+        {
+          name: "other-error-class",
+          error: () =>
+            Object.assign(
+              new ProviderValidationError({
+                operation: "Synthetic.start",
+                issue: "Synthetic refusal",
+              }),
+              {
+                provider: "codex",
+                method: "session/reconfigure",
+                remoteErrorTag: "codex-context-window-active",
+              },
+            ),
+          outer: "ProviderValidationError",
+        },
+        {
+          name: "accessor-tag",
+          error: () =>
+            Object.defineProperty(requestError(), "remoteErrorTag", {
+              get: () => {
+                getterReads += 1;
+                return "codex-context-window-active";
+              },
+            }),
+          outer: "ProviderAdapterRequestError",
+        },
+        {
+          name: "inherited-tag",
+          error: () => {
+            const error = requestError();
+            const prototype = Object.create(Object.getPrototypeOf(error));
+            Object.defineProperty(prototype, "remoteErrorTag", {
+              value: "codex-context-window-active",
+            });
+            return Object.setPrototypeOf(error, prototype);
+          },
+          outer: "ProviderAdapterRequestError",
+        },
+      ] as const;
+      let current = 0;
+      let startCalls = 0;
+      let sendCalls = 0;
+      let stopCalls = 0;
+      const capabilityOwners: ProviderInstanceId[] = [];
+      const providerService: ProviderServiceShape = {
+        ...mockProviderService,
+        startSession: () =>
+          Effect.suspend(() => {
+            startCalls += 1;
+            return Effect.fail(cases[current]!.error());
+          }),
+        getCapabilities: (instanceId) =>
+          Effect.sync(() => {
+            capabilityOwners.push(instanceId);
+            return {
+              sessionModelSwitch: "in-session" as const,
+              liveSteer: "supported" as const,
+              codexContextWindow: true,
+              codexContextCompaction: true,
+              subagentConcurrency: true,
+            };
+          }),
+        sendTurn: () =>
+          Effect.sync(() => {
+            sendCalls += 1;
+          }).pipe(Effect.andThen(Effect.die("A refused start must never submit provider input"))),
+        stopSession: () =>
+          Effect.sync(() => {
+            stopCalls += 1;
+          }),
+      };
+      return Effect.gen(function* () {
+        const port = yield* startProviderDaemonServerOnEphemeralPort({
+          host: "127.0.0.1",
+          token: TEST_TOKEN,
+          version: "0.0.0-test",
+        });
+        yield* Effect.gen(function* () {
+          const eventsRefused = yield* Deferred.make<void>();
+          const facade = yield* makeFiniteRemoteControlFacade(port, eventsRefused);
+          const endpoint = facade.endpoint;
+          // The remote service's real guards and codec run within the isolated
+          // daemon scope. Its native peer is this finite fake service; configuration
+          // files are scoped test-owned temporaries, never a profile or provider.
+          const remoteConfigLayer = Layer.effect(
+            ServerConfig,
+            Effect.gen(function* () {
+              const config = yield* ServerConfig;
+              return { ...config, providerDaemon: endpoint };
+            }),
+          ).pipe(
+            Layer.provide(
+              ServerConfig.layerTest(process.cwd(), { prefix: "cafe-session-refusal-rpc-" }).pipe(
+                Layer.provide(NodeServices.layer),
+              ),
+            ),
+          );
+          const remoteLayer = RemoteProviderServiceLive.pipe(Layer.provide(remoteConfigLayer));
+          yield* Effect.gen(function* () {
+            const remote = yield* ProviderService;
+            yield* Deferred.await(eventsRefused);
+            for (current = 0; current < cases.length; current += 1) {
+              const testCase = cases[current]!;
+              const result = yield* remote
+                .startSession(threadId, {
+                  threadId,
+                  provider: ProviderDriverKind.make("codex"),
+                  providerInstanceId: account,
+                  runtimeMode: "full-access",
+                  ...(testCase.name === "subagent"
+                    ? { maxConcurrentSubagents: 9, requireIdleForSubagentLimitChange: true }
+                    : {
+                        codexContextWindowOverride: null,
+                        requireIdleForCodexContextWindowChange: true,
+                      }),
+                })
+                .pipe(Effect.flip);
+              assert.instanceOf(result, ProviderAdapterRequestError);
+              if (!(result instanceof ProviderAdapterRequestError)) {
+                return yield* Effect.die("Expected reconstructed typed remote refusal");
+              }
+              assert.equal(result.method, "startSession");
+              assert.equal(
+                result.remoteErrorTag,
+                "expected" in testCase ? testCase.expected : testCase.outer,
+              );
+              assert.instanceOf(result.cause, ProviderDaemonRpcResponseError);
+              if (!(result.cause instanceof ProviderDaemonRpcResponseError)) {
+                return yield* Effect.die("Expected actual RPC envelope reconstruction");
+              }
+              assert.equal(result.cause.remoteErrorTag, testCase.outer);
+              assert.equal(
+                result.cause.sessionReconfigurationRefusal,
+                "expected" in testCase ? testCase.expected : undefined,
+              );
+              assert.notInclude(JSON.stringify(result.cause), privateExtra);
+              assert.equal(startCalls, current + 1);
+              assert.equal(sendCalls, 0);
+              assert.equal(stopCalls, 0);
+            }
+          }).pipe(
+            // Finish this scoped client's bridge fibers and provided layer before
+            // the facade closes, then let the outer real daemon close. Its native
+            // subscription already ended with the witnessed finite 401; this is
+            // not evidence that production cancels a perpetual HTTP stream.
+            // No caller-inherited fiber or global transport cleanup is assumed.
+            Effect.provide(remoteLayer),
+            Effect.scoped,
+          );
+          assert.deepEqual(capabilityOwners, Array(cases.length - 1).fill(account));
+          assert.equal(getterReads, 0);
+          assert.equal(startCalls, cases.length);
+          assert.equal(sendCalls, 0);
+          assert.equal(stopCalls, 0);
+          assert.equal(facade.eventRequestCount(), 1);
+        }).pipe(Effect.scoped);
+      }).pipe(Effect.scoped, Effect.provide(makeProviderDaemonServerTestLayer(providerService)));
+    },
+  );
+
+  it.effect("publishes only the finite refusal field without copying private native extras", () => {
+    const privateExtra = "private-native-extra-must-not-enter-envelope";
+    let calls = 0;
+    const providerService: ProviderServiceShape = {
+      ...mockProviderService,
+      startSession: () =>
+        Effect.sync(() => {
+          calls += 1;
+        }).pipe(
+          Effect.andThen(
+            Effect.fail(
+              Object.assign(
+                new ProviderAdapterRequestError({
+                  provider: "codex",
+                  method: "session/reconfigure",
+                  remoteErrorTag: "subagent-concurrency-active",
+                  detail: "Synthetic whole-tree admission refused",
+                }),
+                { nativePayload: { prompt: privateExtra }, providerSpecificRefusal: privateExtra },
+              ),
+            ),
+          ),
+        ),
+    };
+    return Effect.gen(function* () {
+      const port = yield* startProviderDaemonServerOnEphemeralPort({
+        host: "127.0.0.1",
+        token: TEST_TOKEN,
+        version: "0.0.0-test",
+      });
+      const response = yield* Effect.promise(() =>
+        fetch(`http://127.0.0.1:${port}/api/provider-daemon/rpc`, {
+          method: "POST",
+          headers: { authorization: `Bearer ${TEST_TOKEN}`, "content-type": "application/json" },
+          body: encodeProviderDaemonRpcRequestJson({
+            method: "startSession",
+            commandId: "synthetic-reconfiguration-envelope-only",
+            payload: {
+              threadId: ThreadId.make("finite-refusal-thread"),
+              provider: ProviderDriverKind.make("codex"),
+              providerInstanceId: ProviderInstanceId.make("codex"),
+              runtimeMode: "full-access",
+            },
+          }),
+        }),
+      );
+      assert.equal(response.status, 400);
+      const raw = yield* Effect.promise(() => response.text());
+      assert.notInclude(raw, privateExtra);
+      const envelope = decodeProviderDaemonRpcEnvelopeJson(raw);
+      assert.isFalse(envelope.ok);
+      if (envelope.ok) return yield* Effect.die("Expected finite failed RPC envelope");
+      assert.equal(envelope.error.tag, "ProviderAdapterRequestError");
+      assert.equal(envelope.error.sessionReconfigurationRefusal, "subagent-concurrency-active");
+      assert.deepEqual(Object.keys(JSON.parse(raw).error).sort(), [
+        "diagnostics",
+        "message",
+        "sessionReconfigurationRefusal",
+        "tag",
+      ]);
+      const healthResponse = yield* Effect.promise(() =>
+        fetch(`http://127.0.0.1:${port}/api/provider-daemon/health`, {
+          headers: { authorization: `Bearer ${TEST_TOKEN}` },
+        }),
+      );
+      assert.equal(healthResponse.status, 200);
+      const health = decodeProviderDaemonHealth(yield* Effect.promise(() => healthResponse.json()));
+      assert.equal(
+        health.rpc?.recentFailures?.[0]?.sessionReconfigurationRefusal,
+        "subagent-concurrency-active",
+      );
+      assert.equal(health.rpc?.recentFailures?.[0]?.tag, "ProviderAdapterRequestError");
+      assert.equal(calls, 1);
+    }).pipe(Effect.scoped, Effect.provide(makeProviderDaemonServerTestLayer(providerService)));
+  });
+
+  it.effect(
     "preserves exact-instance concurrency capability through authenticated remote RPC",
     () => {
       const requestedInstances: ProviderInstanceId[] = [];
@@ -188,6 +613,7 @@ describe("ProviderDaemonServer", () => {
       const legacy = ProviderInstanceId.make("legacy-account");
       const malformed = ProviderInstanceId.make("malformed-account");
       const malformedContext = ProviderInstanceId.make("malformed-context-account");
+      const malformedCompaction = ProviderInstanceId.make("malformed-compaction-account");
       const otherCapabilities = {
         sessionModelSwitch: "restart-resume",
         liveSteer: "unsupported",
@@ -201,12 +627,18 @@ describe("ProviderDaemonServer", () => {
           Effect.sync(() => {
             requestedInstances.push(instanceId);
             if (instanceId === supported)
-              return { ...otherCapabilities, subagentConcurrency: true, codexContextWindow: true };
+              return {
+                ...otherCapabilities,
+                subagentConcurrency: true,
+                codexContextWindow: true,
+                codexContextCompaction: true,
+              };
             if (instanceId === unsupported)
               return {
                 ...otherCapabilities,
                 subagentConcurrency: false,
                 codexContextWindow: false,
+                codexContextCompaction: false,
               };
             if (instanceId === legacy) return otherCapabilities;
             if (instanceId === malformed) {
@@ -219,6 +651,12 @@ describe("ProviderDaemonServer", () => {
                 ...otherCapabilities,
                 subagentConcurrency: true,
                 codexContextWindow: "true" as unknown as boolean,
+              };
+            if (instanceId === malformedCompaction)
+              return {
+                ...otherCapabilities,
+                codexContextWindow: true,
+                codexContextCompaction: "true" as unknown as boolean,
               };
             throw new Error("Unexpected synthetic provider instance");
           }),
@@ -259,16 +697,19 @@ describe("ProviderDaemonServer", () => {
           ...otherCapabilities,
           subagentConcurrency: true,
           codexContextWindow: true,
+          codexContextCompaction: true,
         });
         assert.deepEqual(yield* requestProviderDaemonCapabilities(endpoint, unsupported), {
           ...otherCapabilities,
           subagentConcurrency: false,
           codexContextWindow: false,
+          codexContextCompaction: false,
         });
         const oldCapabilities = yield* requestProviderDaemonCapabilities(endpoint, legacy);
         assert.deepEqual(oldCapabilities, otherCapabilities);
         assert.equal(oldCapabilities.subagentConcurrency, undefined);
         assert.equal(oldCapabilities.codexContextWindow, undefined);
+        assert.equal(oldCapabilities.codexContextCompaction, undefined);
         const invalid = yield* requestProviderDaemonCapabilities(endpoint, malformed).pipe(
           Effect.flip,
         );
@@ -280,12 +721,19 @@ describe("ProviderDaemonServer", () => {
         ).pipe(Effect.flip);
         assert.instanceOf(invalidContext, ProviderAdapterRequestError);
         assert.equal(invalidContext.method, "getCapabilities");
+        const invalidCompaction = yield* requestProviderDaemonCapabilities(
+          endpoint,
+          malformedCompaction,
+        ).pipe(Effect.flip);
+        assert.instanceOf(invalidCompaction, ProviderAdapterRequestError);
+        assert.equal(invalidCompaction.method, "getCapabilities");
         assert.deepEqual(requestedInstances, [
           supported,
           unsupported,
           legacy,
           malformed,
           malformedContext,
+          malformedCompaction,
         ]);
         const sql = yield* SqlClient.SqlClient;
         const ledger = yield* sql<{

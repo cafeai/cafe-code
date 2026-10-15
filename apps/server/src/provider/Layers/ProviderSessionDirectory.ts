@@ -53,13 +53,14 @@ function mergeRuntimePayload(
   existing: unknown | null,
   next: unknown | null | undefined,
   ownerChanged: boolean,
+  nativeSessionObservation: boolean,
 ): unknown | null {
   // Partial heartbeats intentionally preserve the current owner's process
   // evidence. A new driver/account cannot inherit that evidence merely because
   // its older/unsupported adapter omits the additive field. Remove only this
   // owner's saved policy; absence stays unknown rather than becoming known null,
   // and unrelated payload fields retain their existing merge semantics.
-  const prior =
+  let prior =
     ownerChanged &&
     isRecord(existing) &&
     (!isRecord(next) || next.maxConcurrentSubagents === undefined)
@@ -69,6 +70,24 @@ function mergeRuntimePayload(
           return retained;
         })()
       : existing;
+  // Complete admitted inventory can retire absent proof even for an unchanged
+  // generation. Ordinary events also carry generation identity, so identity
+  // alone is not the complete-observation discriminator. Only an actual owner
+  // or generation change retires it during partial writes; null is a positive
+  // omitted-key report and must not be substituted for unknown absence.
+  if (
+    isRecord(prior) &&
+    (!isRecord(next) || next.codexAutoCompactTokenLimit === undefined) &&
+    (ownerChanged ||
+      nativeSessionObservation ||
+      (isRecord(next) &&
+        Object.hasOwn(next, "subagentRuntimeId") &&
+        next.subagentRuntimeId !== prior.subagentRuntimeId))
+  ) {
+    const retained = { ...prior };
+    delete retained.codexAutoCompactTokenLimit;
+    prior = retained;
+  }
   if (next === undefined) {
     return prior ?? null;
   }
@@ -173,6 +192,7 @@ const makeProviderSessionDirectory = Effect.gen(function* () {
           existingRuntime?.runtimePayload ?? null,
           binding.runtimePayload,
           ownerChanged,
+          binding.nativeSessionObservation === true,
         ),
       })
       .pipe(Effect.mapError(toPersistenceError("ProviderSessionDirectory.upsert:upsert")));

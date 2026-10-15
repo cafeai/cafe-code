@@ -2,6 +2,7 @@ import {
   ProviderDaemonRpcEnvelope,
   ProviderDaemonRpcRequest,
   type ProviderDaemonCommandDiagnostic,
+  type ProviderDaemonSessionReconfigurationRefusal,
   type ProviderDaemonRpcEnvelope as ProviderDaemonRpcEnvelopeValue,
   type ProviderDaemonRpcRequest as ProviderDaemonRpcRequestValue,
 } from "@cafecode/contracts";
@@ -51,6 +52,10 @@ const MUTATING_METHODS = new Set<ProviderDaemonRpcRequest["method"]>([
 ]);
 
 const IDENTITY_BOUND_MUTATING_METHODS = new Set<string>([
+  // A refused opening can carry exact-owner retained-policy evidence. A
+  // caller-chosen command id cannot lend that receipt to another account,
+  // policy, thread or method, even though no replacement was admitted.
+  "startSession",
   "controlTask",
   "prepareConversationRollback",
   "commitConversationRollback",
@@ -135,6 +140,7 @@ function truncateCommandError(message: string): string {
 function storedEnvelopeError(errorJson: string | null): {
   readonly tag?: string;
   readonly message?: string;
+  readonly sessionReconfigurationRefusal?: ProviderDaemonSessionReconfigurationRefusal;
 } {
   if (errorJson === null) {
     return {};
@@ -146,6 +152,9 @@ function storedEnvelopeError(errorJson: string | null): {
       : {
           tag: envelope.error.tag,
           message: envelope.error.message,
+          ...(envelope.error.sessionReconfigurationRefusal !== undefined
+            ? { sessionReconfigurationRefusal: envelope.error.sessionReconfigurationRefusal }
+            : {}),
         };
   } catch {
     return {};
@@ -343,6 +352,12 @@ function toCommandDiagnostic(row: CommandDiagnosticRow): ProviderDaemonCommandDi
     ...(requestSummary === undefined ? {} : { requestSummary }),
     ...(responseSummary === undefined ? {} : { responseSummary }),
     ...(error.tag === undefined ? {} : { errorTag: error.tag }),
+    // Content-free semantic admission evidence belongs in the existing bounded
+    // health summary as well as the RPC. It never exposes request payloads or
+    // grants retry/retirement authority merely because a diagnostic retained it.
+    ...(error.sessionReconfigurationRefusal === undefined
+      ? {}
+      : { sessionReconfigurationRefusal: error.sessionReconfigurationRefusal }),
     ...(error.message === undefined ? {} : { errorMessage: error.message }),
   };
 }

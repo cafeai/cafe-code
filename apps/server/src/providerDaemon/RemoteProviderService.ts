@@ -10,12 +10,14 @@ import {
   ProviderDaemonRpcEnvelope,
   ProviderDaemonRpcRequest,
   ProviderDaemonRpcResultByMethod,
+  ProviderDaemonSessionReconfigurationRefusal,
   type ThreadId,
   type ProviderInstanceId,
   type ProviderRuntimeEvent,
   type ProviderDaemonClientConfig,
   type ProviderCompactThreadInput,
   type ProviderSessionStartInput,
+  type ProviderSendTurnInput,
 } from "@cafecode/contracts";
 import {
   ProviderDaemonHttpStatusError,
@@ -134,11 +136,19 @@ function providerDaemonUrl(config: ProviderDaemonClientConfig, path: string): UR
  */
 export class ProviderDaemonRpcResponseError extends Error {
   readonly remoteErrorTag: string;
+  readonly sessionReconfigurationRefusal?: ProviderDaemonSessionReconfigurationRefusal;
 
-  constructor(remoteErrorTag: string, message: string) {
+  constructor(
+    remoteErrorTag: string,
+    message: string,
+    sessionReconfigurationRefusal?: ProviderDaemonSessionReconfigurationRefusal,
+  ) {
     super(message);
     this.name = "ProviderDaemonRpcResponseError";
     this.remoteErrorTag = remoteErrorTag;
+    if (sessionReconfigurationRefusal !== undefined) {
+      this.sessionReconfigurationRefusal = sessionReconfigurationRefusal;
+    }
   }
 }
 
@@ -196,12 +206,47 @@ export function toRemoteRequestError(method: string, cause: unknown): ProviderAd
     addProviderBackendBridgeDiagnostics({ authenticationFailureCount: 1 });
     setProviderBackendBridgeDiagnostics({ lastAuthenticationFailureStatus: authenticationStatus });
   }
+  // A retained-policy continuation is permitted only after the authenticated
+  // daemon explicitly refuses this startSession reconfiguration. Keep older
+  // envelopes and every unrelated method/error on their original outer tag;
+  // human-readable detail and arbitrary native tags never mint this authority.
+  const outerTagDescriptor =
+    cause instanceof ProviderDaemonRpcResponseError
+      ? Object.getOwnPropertyDescriptor(cause, "remoteErrorTag")
+      : undefined;
+  const remoteErrorTag =
+    outerTagDescriptor !== undefined &&
+    "value" in outerTagDescriptor &&
+    typeof outerTagDescriptor.value === "string"
+      ? outerTagDescriptor.value
+      : undefined;
+  const refusalDescriptor =
+    cause instanceof ProviderDaemonRpcResponseError
+      ? Object.getOwnPropertyDescriptor(cause, "sessionReconfigurationRefusal")
+      : undefined;
+  const sessionReconfigurationRefusal =
+    method === "startSession" &&
+    cause instanceof ProviderDaemonRpcResponseError &&
+    remoteErrorTag === "ProviderAdapterRequestError" &&
+    refusalDescriptor !== undefined &&
+    "value" in refusalDescriptor &&
+    Schema.is(ProviderDaemonSessionReconfigurationRefusal)(refusalDescriptor.value)
+      ? refusalDescriptor.value
+      : undefined;
+  // These two reserved values are facts, never outer exception classes. A
+  // legacy/arbitrary envelope spelling one directly cannot bypass the additive
+  // witness or borrow start-only authority for another operation.
+  const genericRemoteErrorTag =
+    remoteErrorTag === undefined ||
+    Schema.is(ProviderDaemonSessionReconfigurationRefusal)(remoteErrorTag)
+      ? "ProviderAdapterRequestError"
+      : remoteErrorTag;
   return new ProviderAdapterRequestError({
     provider: "provider-daemon",
     method,
     detail: cause instanceof Error ? cause.message : String(cause),
     ...(cause instanceof ProviderDaemonRpcResponseError
-      ? { remoteErrorTag: cause.remoteErrorTag }
+      ? { remoteErrorTag: sessionReconfigurationRefusal ?? genericRemoteErrorTag }
       : {}),
     cause,
   });
@@ -454,6 +499,7 @@ const rpc = <M extends ProviderDaemonRpcRequest["method"]>(
           rootCause === undefined
             ? `${envelope.error.tag}: ${envelope.error.message}`
             : `${envelope.error.tag}: ${envelope.error.message}; caused by ${rootCause.message}`,
+          envelope.error.sessionReconfigurationRefusal,
         );
       }
       if (isVoidProviderDaemonRpcMethod(request.method)) {
@@ -517,12 +563,37 @@ export const guardRemoteCodexContextWindowStart = <A, E, R, E2, R2>(input: {
       });
     }
     const capabilities = yield* input.readCapabilities(input.request.providerInstanceId);
-    if (capabilities.codexContextWindow !== true) {
+    if (capabilities.codexContextWindow !== true || capabilities.codexContextCompaction !== true) {
       return yield* new ProviderValidationError({
         operation: "ProviderDaemonRemoteProviderService.startSession",
-        issue: "This Codex owner does not support context-window reconfiguration.",
+        issue: "This Codex owner does not support paired context and compaction reconfiguration.",
       });
     }
+    return yield* input.effect;
+  });
+
+/** Negotiate the exact authenticated owner's cold-recovery fence before RPC. */
+export const guardRemoteCodexFailedRootRestart = <A, E, R, E2, R2>(input: {
+  readonly request: ProviderSendTurnInput;
+  readonly readCapabilities: (
+    instanceId: ProviderInstanceId,
+  ) => Effect.Effect<ProviderAdapterCapabilities, E, R>;
+  readonly effect: Effect.Effect<A, E2, R2>;
+}): Effect.Effect<A, E | E2 | ProviderValidationError, R | R2> =>
+  Effect.gen(function* () {
+    const expected = input.request.expectedFailedRoot;
+    if (expected?.restartSession !== true) return yield* input.effect;
+    if (expected.providerInstanceId === undefined || expected.observedAt === undefined)
+      return yield* new ProviderValidationError({
+        operation: "ProviderDaemonRemoteProviderService.sendTurn",
+        issue: "Failed-root restart requires an exact owner and failure timestamp.",
+      });
+    const capabilities = yield* input.readCapabilities(expected.providerInstanceId);
+    if (capabilities.codexFailedRootRestart !== true)
+      return yield* new ProviderValidationError({
+        operation: "ProviderDaemonRemoteProviderService.sendTurn",
+        issue: "This Codex owner does not support guarded failed-root session restart.",
+      });
     return yield* input.effect;
   });
 
@@ -873,7 +944,13 @@ const makeRemoteProviderService = Effect.gen(function* () {
       }),
     forkSession: (input) => guardedRpc({ method: "forkSession", payload: input }),
     discardSessionFork: (input) => guardedRpc({ method: "discardSessionFork", payload: input }),
-    sendTurn: (input) => guardedRpc({ method: "sendTurn", payload: input }),
+    sendTurn: (input) =>
+      guardRemoteCodexFailedRootRestart({
+        request: input,
+        readCapabilities: (instanceId) =>
+          requestProviderDaemonCapabilities(daemonConfig, instanceId),
+        effect: guardedRpc({ method: "sendTurn", payload: input }),
+      }),
     steerTurn: (input) => guardedRpc({ method: "steerTurn", payload: input }),
     loginProvider: (input) => guardedRpc({ method: "loginProvider", payload: input }),
     manageMcp: (input) => guardedRpc({ method: "manageMcp", payload: input }),

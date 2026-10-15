@@ -34,6 +34,7 @@ interface Step {
 }
 
 interface Workflow {
+  readonly env?: Readonly<Record<string, string>>;
   readonly jobs: Readonly<
     Record<
       string,
@@ -41,6 +42,7 @@ interface Workflow {
         readonly "runs-on"?: string;
         readonly "timeout-minutes"?: number;
         readonly "continue-on-error"?: boolean;
+        readonly env?: Readonly<Record<string, string>>;
         readonly strategy?: {
           readonly matrix?: {
             readonly os?: ReadonlyArray<string>;
@@ -67,7 +69,8 @@ describe("qualified major Actions and Ubuntu runner boundaries", () => {
     // Release quality now calls CI directly, sharing its reviewed Actions and
     // cache instead of repeating them. Candidate preflight adds one download
     // and preparation checks out the immutable tag to peel annotated tags.
-    expect(actions).toHaveLength(34);
+    // Upstream adds one scoped visualization/Mermaid failure-artifact upload.
+    expect(actions).toHaveLength(35);
     for (const step of actions) {
       const [action, commit] = step.uses!.split("@");
       expect(commit, step.uses).toBe(qualifiedActionPins[action!]);
@@ -114,6 +117,231 @@ describe("qualified major Actions and Ubuntu runner boundaries", () => {
         "retention-days": 7,
       },
     });
+  });
+
+  it("retains only the nine reviewed synthetic visualization and Mermaid failure paths", () => {
+    const steps = readWorkflow("ci.yml").jobs.quality?.steps ?? [];
+    const retention = steps.filter(
+      (step) => step.name === "Retain synthetic visualization and Mermaid failure evidence",
+    );
+    expect(retention).toHaveLength(1);
+    // Literal block equality preserves exactly nine paths, including their
+    // fixture-specific hidden directories. No profile/source/JSON/temp-tree
+    // glob, successful-run upload, override or longer retention is admitted.
+    const paths = [
+      "apps/web/.vitest/attachments/failure-screenshots/VisualizationCommitChart.browser.tsx/",
+      "apps/web/.vitest/attachments/failure-screenshots/MermaidFamilies.browser.tsx/",
+      "apps/web/.vitest/attachments/failure-screenshots/MermaidSecurity.browser.tsx/",
+      "apps/web/.vitest/attachments/failure-screenshots/Visualizations.browser.tsx/",
+      "apps/web/.vitest/attachments/failure-screenshots/VisualizationFluid.browser.tsx/",
+      "apps/web/.vitest/attachments/failure-screenshots/VisualizationHistory.browser.tsx/",
+      "apps/web/.vitest/attachments/failure-screenshots/VisualizationOwner.browser.tsx/",
+      "apps/web/.vitest/attachments/failure-screenshots/InlineMcpAppBridge.browser.tsx/",
+      "apps/web/.vitest/attachments/failure-screenshots/VisualizationInlineCapture.browser.tsx/",
+    ];
+    expect(retention[0]).toEqual({
+      name: "Retain synthetic visualization and Mermaid failure evidence",
+      if: "failure()",
+      uses: `actions/upload-artifact@${qualifiedActionPins["actions/upload-artifact"]}`,
+      with: {
+        name: "visualization-qualification-failure-${{ matrix.os }}-${{ github.run_attempt }}",
+        path: `${paths.join("\n")}\n`,
+        "include-hidden-files": true,
+        "if-no-files-found": "ignore",
+        "retention-days": 7,
+      },
+    });
+  });
+
+  it("binds current inline browser qualification without retired execution lanes or private replay", () => {
+    const workflow = readWorkflow("ci.yml");
+    const quality = workflow.jobs.quality!;
+    const steps = quality.steps ?? [];
+    const inline = {
+      name: "Full-access inline visualization browser qualification",
+      if: "runner.os != 'Linux'",
+      run: "corepack yarn workspace @cafecode/web test:browser src/components/visualizations/VisualizationHistory.browser.tsx src/components/visualizations/VisualizationOwner.browser.tsx src/components/visualizations/InlineMcpAppBridge.browser.tsx src/components/visualizations/VisualizationInlineCapture.browser.tsx --maxWorkers=2",
+    };
+    // The approved execution path is an ordinary browser frame. Whole-step
+    // equality preserves its exact fixtures/two workers with no per-step
+    // deadline, environment override or failure bypass; it is not native-host
+    // isolation evidence. Linux retains the complete browser suite instead.
+    expect(steps.filter((step) => step.name === inline.name)).toEqual([inline]);
+    expect(steps.filter((step) => step.name === "Browser tests")).toEqual([
+      {
+        name: "Browser tests",
+        if: "runner.os == 'Linux'",
+        run: "corepack yarn workspace @cafecode/web test:browser",
+      },
+    ]);
+
+    const shared = steps.filter(
+      (step) =>
+        step.name === "Cross-platform Markdown, timeline, menus and file action browser tests",
+    );
+    expect(shared).toHaveLength(1);
+    expect(shared[0]!.if).toBe("runner.os != 'Linux'");
+    const sharedArguments = shared[0]!.run!.split(/\s+/);
+    expect(sharedArguments.slice(0, 5)).toEqual([
+      "corepack",
+      "yarn",
+      "workspace",
+      "@cafecode/web",
+      "test:browser",
+    ]);
+    expect(sharedArguments.slice(5, -1)).toEqual(
+      expect.arrayContaining([
+        "src/components/WorkspaceEnvironment.browser.tsx",
+        "src/components/visualizations/Visualizations.browser.tsx",
+        "src/components/visualizations/VisualizationFluid.browser.tsx",
+        "src/components/visualizations/Visualizations.motion.browser.tsx",
+      ]),
+    );
+    // The real fixed-font, WebGL/fluid and reduced-motion fixtures run in the
+    // inherited native browser projects. Only literal component file selectors
+    // may precede the unchanged worker cap: no retry/deadline/input CLI override.
+    for (const argument of sharedArguments.slice(5, -1))
+      expect(argument).toMatch(/^src\/components\/[^\s]+\.browser\.tsx$/);
+    expect(sharedArguments.at(-1)).toBe("--maxWorkers=2");
+    // Keyboard popup readiness also requires native qualification on the
+    // other hosts. Preserve the complete file exactly once in this same
+    // subset; Linux still owns its unchanged complete suite.
+    expect(
+      sharedArguments.filter(
+        (argument) => argument === "src/components/WorkspaceEnvironment.browser.tsx",
+      ),
+    ).toHaveLength(1);
+    expect(shared[0]!.env).toBeUndefined();
+    expect(shared[0]!["timeout-minutes"]).toBeUndefined();
+    expect(shared[0]!["continue-on-error"]).toBeUndefined();
+
+    const retiredStepNames = [
+      "Prepare synthetic native visualization evidence directories",
+      "Prepare installed Electron sandbox helper (Linux)",
+      "Isolated native visualization host qualification",
+      "Isolated native visualization host qualification (Linux)",
+      "Isolated native visualization chat font qualification",
+      "Isolated native visualization chat font qualification (Linux)",
+    ];
+    const allSteps = Object.values(workflow.jobs).flatMap((job) => job.steps ?? []);
+    for (const name of retiredStepNames)
+      expect(
+        allSteps.filter((step) => step.name === name),
+        name,
+      ).toEqual([]);
+    for (const step of allSteps) {
+      expect(step.run ?? "").not.toContain("NativeVisualizationElectron.e2e.test.ts");
+      expect(step.run ?? "").not.toContain("chrome-sandbox");
+      expect(step.run ?? "").not.toContain("cafe-visualization-comprehensive");
+      expect(step.run ?? "").not.toContain("cafe-visualization-font");
+    }
+    const privateReplayKeys = [
+      "CAFE_CODE_VISUALIZATION_E2E",
+      "CAFE_CODE_VISUALIZATION_E2E_CAPTURE_DIR",
+      "CAFE_CODE_VISUALIZATION_FONT_REPLAY",
+      "CAFE_CODE_VISUALIZATION_BAR_REPLAY",
+      "CAFE_CODE_VISUALIZATION_BAR_SOURCE",
+      "CAFE_CODE_VISUALIZATION_BAR_SOURCE_SHA256",
+      "CAFE_CODE_VISUALIZATION_BAR_SOURCE_BYTES",
+    ];
+    // Shared workflow/job environments are inherited by steps. Refuse both a
+    // private replay and accidental reactivation of the retired native host.
+    const environments = [
+      workflow.env,
+      ...Object.values(workflow.jobs).flatMap((job) => [
+        job.env,
+        ...(job.steps ?? []).map((step) => step.env),
+      ]),
+    ];
+    for (const environment of environments)
+      for (const key of privateReplayKeys) expect(environment ?? {}).not.toHaveProperty(key);
+    expect(quality["timeout-minutes"]).toBe(45);
+    expect(quality["continue-on-error"]).toBeUndefined();
+    // The initial bundle supplies copied bridge fixtures; the uncached desktop
+    // build must remain the final executable check, after every browser lane.
+    const final = {
+      name: "Final forced desktop verification",
+      run: "corepack yarn build:desktop --force",
+    };
+    expect(steps.filter((step) => step.name === final.name)).toEqual([final]);
+    expect(steps.filter((step) => step.run !== undefined).at(-1)).toEqual(final);
+  });
+
+  it("runs Mermaid security exactly once in a dedicated sequential native-host step", () => {
+    const steps = readWorkflow("ci.yml").jobs.quality?.steps ?? [];
+    const selector = "src/components/MermaidSecurity.browser.tsx";
+    const dedicated = {
+      name: "Mermaid source and parsed-graph security browser qualification",
+      if: "runner.os != 'Linux'",
+      run: `corepack yarn workspace @cafecode/web test:browser ${selector} --maxWorkers=2`,
+    };
+    // Whole-step equality admits only this complete file with its existing
+    // native-host worker bound: no environment, timeout, failure bypass, retry
+    // or input override may be attached to the scheduling partition.
+    expect(steps.filter((step) => step.name === dedicated.name)).toEqual([dedicated]);
+    const selectedSteps = steps.filter((step) => step.run?.split(/\s+/).includes(selector));
+    expect(selectedSteps).toEqual([dedicated]);
+    expect(
+      selectedSteps[0]!.run!.split(/\s+/).filter((argument) => argument === selector),
+    ).toHaveLength(1);
+
+    const broadIndex = steps.findIndex(
+      (step) =>
+        step.name === "Cross-platform Markdown, timeline, menus and file action browser tests",
+    );
+    const dedicatedIndex = steps.findIndex((step) => step.name === dedicated.name);
+    expect(broadIndex).toBeGreaterThanOrEqual(0);
+    // Job steps are sequential. Keep the security file outside the broad
+    // invocation and immediately after it, before the remaining qualifications
+    // and required final forced desktop build, rather than silently dropping it.
+    expect(dedicatedIndex).toBe(broadIndex + 1);
+    expect(steps[broadIndex]!.run!.split(/\s+/)).not.toContain(selector);
+    for (const laterName of [
+      "Generated chart layout and range animation browser qualification",
+      "Additional Mermaid family browser qualification",
+      "Full-access inline visualization browser qualification",
+      "Final forced desktop verification",
+    ])
+      expect(steps.findIndex((step) => step.name === laterName)).toBeGreaterThan(dedicatedIndex);
+
+    // The complete Linux invocation still owns coverage of this file and every
+    // other browser test, with no selector or scheduling-policy substitution.
+    expect(steps.filter((step) => step.name === "Browser tests")).toEqual([
+      {
+        name: "Browser tests",
+        if: "runner.os == 'Linux'",
+        run: "corepack yarn workspace @cafecode/web test:browser",
+      },
+    ]);
+  });
+
+  it("keeps visualization and Mermaid browser qualification on the original worker and deadline bounds", () => {
+    const steps = readWorkflow("ci.yml").jobs.quality?.steps ?? [];
+    for (const expected of [
+      {
+        name: "Browser tests",
+        if: "runner.os == 'Linux'",
+        run: "corepack yarn workspace @cafecode/web test:browser",
+      },
+      {
+        name: "Mermaid source and parsed-graph security browser qualification",
+        if: "runner.os != 'Linux'",
+        run: "corepack yarn workspace @cafecode/web test:browser src/components/MermaidSecurity.browser.tsx --maxWorkers=2",
+      },
+      {
+        name: "Generated chart layout and range animation browser qualification",
+        if: "runner.os != 'Linux'",
+        run: "corepack yarn workspace @cafecode/web test:browser src/components/visualizations/VisualizationCommitChart.browser.tsx --maxWorkers=2",
+      },
+      {
+        name: "Additional Mermaid family browser qualification",
+        if: "runner.os != 'Linux'",
+        run: "corepack yarn workspace @cafecode/web test:browser src/components/MermaidFamilies.browser.tsx --maxWorkers=2",
+      },
+    ])
+      // Exact steps preserve Linux's complete suite, focused native-host files,
+      // two workers and the absence of per-step timeout/failure bypasses.
+      expect(steps.filter((step) => step.name === expected.name)).toEqual([expected]);
   });
 
   it("keeps the published Linux artifact on Ubuntu 24 while qualifying Ubuntu 26", () => {

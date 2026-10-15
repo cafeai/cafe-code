@@ -486,10 +486,19 @@ it("supports keyboard server selection and canceling without switching, while re
     trigger.element().focus();
     await userEvent.keyboard("{ArrowDown}");
     await expect.element(page.getByRole("listbox")).toBeVisible();
+    // Base UI queues the selected option's initial focus on an animation frame.
+    // Visibility alone does not establish the popup's keyboard owner: End is
+    // handled inside the popup, not by the still-focused select trigger.
+    await expect
+      .element(page.getByRole("option", { name: "Local server", exact: true }))
+      .toHaveFocus();
     await userEvent.keyboard("{End}");
     await expect
       .element(page.getByRole("option", { name: "PC (offline)", exact: true }))
       .toHaveAttribute("data-highlighted");
+    await expect
+      .element(page.getByRole("option", { name: "PC (offline)", exact: true }))
+      .toHaveFocus();
     await userEvent.keyboard("{Escape}");
     await expect.element(screen.getByTestId("workspace")).toHaveTextContent(local);
     expect(fixture.navigate).not.toHaveBeenCalled();
@@ -498,10 +507,16 @@ it("supports keyboard server selection and canceling without switching, while re
     await expect.element(trigger).toHaveFocus();
     await userEvent.keyboard("{ArrowDown}");
     await expect.element(page.getByRole("listbox")).toBeVisible();
+    await expect
+      .element(page.getByRole("option", { name: "Local server", exact: true }))
+      .toHaveFocus();
     await userEvent.keyboard("{End}");
     await expect
       .element(page.getByRole("option", { name: "PC (offline)", exact: true }))
       .toHaveAttribute("data-highlighted");
+    await expect
+      .element(page.getByRole("option", { name: "PC (offline)", exact: true }))
+      .toHaveFocus();
     await userEvent.keyboard("{Enter}");
     await expect.element(screen.getByTestId("workspace")).toHaveTextContent(remote);
     await expect.element(trigger).toHaveTextContent("PC (offline)");

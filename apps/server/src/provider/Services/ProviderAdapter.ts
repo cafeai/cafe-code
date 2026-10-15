@@ -47,8 +47,12 @@ export interface ProviderAdapterCapabilities {
   readonly subagentConcurrency?: boolean;
   /** Reviewed Codex thread-local nominal-window override; not model capacity. */
   readonly codexContextWindow?: boolean;
+  /** This Cafe owner pairs and attests nominal compaction requests on opening. */
+  readonly codexContextCompaction?: boolean;
   /** Cafe exact-process unchanged-policy delivery; never native CLI support. */
   readonly subagentPolicyContinuation?: boolean;
+  /** This Cafe owner atomically retires the exact failed root before cold resume. */
+  readonly codexFailedRootRestart?: boolean;
   /**
    * Declares how changing a model or its provider-owned traits is applied.
    * `restart-resume` preserves the native conversation while atomically

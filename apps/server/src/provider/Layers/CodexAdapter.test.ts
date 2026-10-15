@@ -17,6 +17,7 @@ import {
   RuntimeTaskId,
   type ProviderApprovalDecision,
   type ProviderEvent,
+  type ProviderTaskOwner,
   type ProviderSession,
   type ProviderThreadGoal,
   type ProviderThreadGoalSetInput,
@@ -32,6 +33,7 @@ import {
   TurnId,
 } from "@cafecode/contracts";
 import { createModelSelection } from "@cafecode/shared/model";
+import { makeCodexCompactionDiagnosticsTracker } from "@cafecode/shared/codexCompactionDiagnostics";
 import {
   makeProviderDiagnostic,
   readProviderDiagnosticSummary,
@@ -92,11 +94,17 @@ import {
   type SchedulingSessionBinding,
   type SchedulingSessionBroker,
 } from "../../scheduledFollowups/sessionRuntime.ts";
+import {
+  installVisualizationSessionRuntime,
+  type VisualizationSessionBroker,
+} from "../../visualizations/sessionRuntime.ts";
+import { VisualizationGenerationId } from "@cafecode/contracts/visualizations";
 const decodeCodexSettings = Schema.decodeSync(CodexSettings);
 const decodeMessageId = Schema.decodeUnknownSync(MessageId);
 const decodeNativeNotification = Schema.decodeUnknownSync(EffectCodexSchema.ServerNotification);
 const isStartedItem = Schema.is(EffectCodexSchema.V2ItemStartedNotification);
 const isCompletedItem = Schema.is(EffectCodexSchema.V2ItemCompletedNotification);
+const isTerminalInteraction = Schema.is(EffectCodexSchema.V2TerminalInteractionNotification);
 
 // Test-local service tag so the rest of the file can keep using `yield* CodexAdapter`.
 class CodexAdapter extends Context.Service<CodexAdapter, CodexAdapterShape>()(
@@ -947,6 +955,7 @@ class FakeCodexRuntime implements CodexSessionRuntimeShape {
   private readonly eventQueue = Effect.runSync(Queue.unbounded<ProviderEvent>());
   private readonly now = "2026-01-01T00:00:00.000Z";
   private currentSession: ProviderSession | undefined;
+  private closed = false;
 
   private initialSession(status: ProviderSession["status"]): ProviderSession {
     return {
@@ -1045,6 +1054,19 @@ class FakeCodexRuntime implements CodexSessionRuntimeShape {
     Effect.tap((idle) => (idle ? this.close : Effect.void)),
   );
 
+  // This seam is deliberately independent of ordinary close/idle admission.
+  // Recovery tests may refuse the exact failed-owner retirement without ever
+  // authorizing unconditional teardown of a newer synthetic native session.
+  public readonly closeIfFailedRootImpl = vi.fn(
+    (_expected: NonNullable<CodexSessionRuntimeSendTurnInput["expectedFailedRoot"]>) =>
+      Promise.resolve(false),
+  );
+  closeIfFailedRoot(expected: NonNullable<CodexSessionRuntimeSendTurnInput["expectedFailedRoot"]>) {
+    return Effect.promise(() => this.closeIfFailedRootImpl(expected)).pipe(
+      Effect.tap((admitted) => (admitted ? this.close : Effect.void)),
+    );
+  }
+
   /** Test-only hook that runs after the provider interrupt promise ACKs. */
   public afterInterruptAcknowledged: Effect.Effect<void> | undefined;
 
@@ -1139,9 +1161,15 @@ class FakeCodexRuntime implements CodexSessionRuntimeShape {
     return Stream.fromQueue(this.eventQueue);
   }
 
-  close = Effect.promise(() => this.closeImpl()).pipe(
-    Effect.andThen(Queue.shutdown(this.eventQueue)),
-  );
+  close = Effect.suspend(() => {
+    // Match the native closedRef reservation: repeated retirement callers
+    // share one physical close even when scoped cleanup also invokes it.
+    if (this.closed) return Effect.void;
+    this.closed = true;
+    return Effect.promise(() => this.closeImpl()).pipe(
+      Effect.andThen(Queue.shutdown(this.eventQueue)),
+    );
+  });
 
   emit(event: ProviderEvent) {
     return Queue.offer(this.eventQueue, event).pipe(Effect.asVoid);
@@ -1163,6 +1191,429 @@ function makeRuntimeFactory() {
       return runtimes.at(-1);
     },
   };
+}
+
+function makeFailedRootRecoveryFixture() {
+  const factory = makeRuntimeFactory();
+  const generations = [
+    SubagentRuntimeId.make("00000000-0000-4000-8000-000000000081"),
+    SubagentRuntimeId.make("00000000-0000-4000-8000-000000000082"),
+    SubagentRuntimeId.make("00000000-0000-4000-8000-000000000083"),
+  ];
+  const account = ProviderInstanceId.make("codex");
+  const threadId = asThreadId("cold-failed-root-conversation");
+  const nativeThreadId = "same-private-native-history";
+  const failedTurnId = asTurnId("exact-failed-root");
+  const observedAt = "2026-10-14T06:00:00.000Z";
+  const order: string[] = [];
+  factory.factory.mockImplementation((options) => {
+    const index = factory.runtimes.length;
+    const generation = generations[index]!;
+    const runtime = new FakeCodexRuntime(options);
+    const originalStart = runtime.start.bind(runtime);
+    runtime.start = () =>
+      originalStart().pipe(
+        Effect.map((session) => ({
+          ...session,
+          providerInstanceId: account,
+          subagentRuntimeId: generation,
+        })),
+        Effect.tap(() => Effect.sync(() => order.push(`opened:${index}`))),
+      );
+    runtime.getSession = runtime.getSession.pipe(
+      Effect.map((session) => ({
+        ...session,
+        providerInstanceId: account,
+        subagentRuntimeId: generation,
+      })),
+    );
+    factory.runtimes.push(runtime);
+    return Effect.succeed(runtime);
+  });
+  const layer = Layer.effect(
+    CodexAdapter,
+    makeCodexAdapter(
+      decodeCodexSettings({ maxConcurrentSubagents: 16, autoCompactTokenLimit: 640_000 }),
+      {
+        instanceId: account,
+        makeRuntime: factory.factory,
+        getSubagentConcurrencySupport: () => true,
+        getCodexContextWindowSupport: () => true,
+      },
+    ),
+  ).pipe(
+    Layer.provideMerge(ServerConfig.layerTest(process.cwd(), process.cwd())),
+    Layer.provideMerge(ServerSettingsService.layerTest()),
+    Layer.provideMerge(providerSessionDirectoryTestLayer),
+    Layer.provideMerge(NodeServices.layer),
+  );
+  const expectedFailedRoot = {
+    turnId: failedTurnId,
+    providerThreadId: nativeThreadId,
+    subagentRuntimeId: generations[0]!,
+    providerInstanceId: account,
+    observedAt,
+    restartSession: true as const,
+  };
+  const prepare = Effect.gen(function* () {
+    const adapter = yield* CodexAdapter;
+    yield* adapter.startSession({
+      threadId,
+      runtimeMode: "approval-required",
+      interactionMode: "plan",
+      cwd: process.cwd(),
+      additionalDirectories: [path.join(process.cwd(), "packages")],
+      modelSelection: createModelSelection(account, "gpt-5.4", [
+        { id: "reasoningEffort", value: "high" },
+      ]),
+      maxConcurrentSubagents: 3,
+      codexContextWindowOverride: 800_000,
+      resumeCursor: { threadId: nativeThreadId },
+    });
+    const oldRuntime = factory.runtimes[0]!;
+    const base = yield* oldRuntime.getSession;
+    oldRuntime.getSessionImpl.mockResolvedValue({
+      ...base,
+      status: "ready",
+      activeTurnId: undefined,
+      lastError: "Definitive transient native failure",
+      codexRootTurnFailure: {
+        turnId: failedTurnId,
+        providerThreadId: nativeThreadId,
+        observedAt,
+        category: "server",
+      },
+    });
+    return { adapter, oldRuntime };
+  });
+  return {
+    factory,
+    generations,
+    account,
+    threadId,
+    nativeThreadId,
+    order,
+    layer,
+    expectedFailedRoot,
+    prepare,
+  };
+}
+
+it.effect(
+  "cold failed-root recovery retires before exact-history reopening and submits one new turn with unchanged launch policy",
+  () => {
+    const fixture = makeFailedRootRecoveryFixture();
+    return Effect.gen(function* () {
+      const { adapter, oldRuntime } = yield* fixture.prepare;
+      const closeReached = yield* Deferred.make<void>();
+      const releaseClose = yield* Deferred.make<void>();
+      yield* Effect.addFinalizer(() =>
+        Deferred.succeed(releaseClose, undefined).pipe(Effect.asVoid),
+      );
+      oldRuntime.closeIfFailedRootImpl.mockResolvedValue(true);
+      const originalCloseImpl = oldRuntime.closeImpl.getMockImplementation()!;
+      oldRuntime.closeImpl.mockImplementation(() =>
+        originalCloseImpl().then(() => {
+          fixture.order.push("retired:0");
+          return undefined;
+        }),
+      );
+      oldRuntime.close = Deferred.succeed(closeReached, undefined).pipe(
+        Effect.andThen(Deferred.await(releaseClose)),
+        Effect.andThen(oldRuntime.close),
+      );
+      const resultFiber = yield* adapter
+        .sendTurn({
+          threadId: fixture.threadId,
+          input: "Continue the unfinished work. Check existing work before repeating any action.",
+          expectedFailedRoot: fixture.expectedFailedRoot,
+        })
+        .pipe(Effect.forkChild);
+      yield* Deferred.await(closeReached);
+      // Teardown completion, not a close invocation, grants the next opening.
+      assert.equal(fixture.factory.runtimes.length, 1);
+      assert.equal(oldRuntime.sendTurnImpl.mock.calls.length, 0);
+      yield* Deferred.succeed(releaseClose, undefined);
+      const result = yield* Fiber.join(resultFiber);
+      assert.equal(fixture.factory.runtimes.length, 2);
+      const replacement = fixture.factory.runtimes[1]!;
+      assert.equal(Object.hasOwn(oldRuntime.options, "requireExactResume"), false);
+      assert.equal(replacement.options.requireExactResume, true);
+      assert.deepEqual(oldRuntime.closeIfFailedRootImpl.mock.calls, [[fixture.expectedFailedRoot]]);
+      assert.deepEqual(fixture.order, ["opened:0", "retired:0", "opened:1"]);
+      // The replacement receives the recorded launch intent, not today's
+      // account default (16) or a more permissive session mode.
+      // Session-scoped tool bindings/history guards are deliberately minted
+      // again. Compare launch policy, not the identity of those new closures.
+      for (const key of [
+        "binaryPath",
+        "appServerCwd",
+        "homePath",
+        "environment",
+        "transportPolicy",
+        "customInstructions",
+        "providerInstanceId",
+        "threadId",
+        "cwd",
+        "model",
+        "serviceTier",
+        "additionalDirectories",
+        "runtimeMode",
+        "maxConcurrentSubagents",
+        "codexContextWindowOverride",
+        "autoCompactTokenLimit",
+        "resumeCursor",
+      ] as const)
+        assert.deepEqual(replacement.options[key], oldRuntime.options[key], key);
+      assert.deepEqual(replacement.options.resumeCursor, { threadId: fixture.nativeThreadId });
+      assert.equal(replacement.options.maxConcurrentSubagents, 3);
+      assert.equal(replacement.options.codexContextWindowOverride, 800_000);
+      assert.equal(replacement.options.autoCompactTokenLimit, 640_000);
+      assert.equal(replacement.options.runtimeMode, "approval-required");
+      assert.equal(oldRuntime.sendTurnImpl.mock.calls.length, 0);
+      assert.equal(oldRuntime.steerTurnImpl.mock.calls.length, 0);
+      assert.equal(replacement.steerTurnImpl.mock.calls.length, 0);
+      assert.equal(replacement.sendTurnImpl.mock.calls.length, 1);
+      assert.deepEqual(result.recoverySession, {
+        previousSubagentRuntimeId: fixture.generations[0],
+        subagentRuntimeId: fixture.generations[1],
+        providerThreadId: fixture.nativeThreadId,
+      });
+      const request = replacement.sendTurnImpl.mock.calls[0]![0];
+      assert.equal(request.allowActiveTurnSteerFallback, false);
+      assert.deepEqual(request.expectedRecoverySession, result.recoverySession);
+      assert.equal(request.expectedFailedRoot, undefined);
+      assert.equal(
+        request.input,
+        "Continue the unfinished work. Check existing work before repeating any action.",
+      );
+    }).pipe(Effect.provide(fixture.layer));
+  },
+);
+
+for (const scenario of [
+  "atomic retirement refused",
+  "legacy runtime",
+  "wrong timestamp",
+  "missing timestamp",
+  "wrong account",
+  "wrong generation",
+  "wrong native history",
+  "wrong root",
+  "active root",
+  "missing resume cursor",
+] as const) {
+  it.effect(`cold failed-root recovery cannot retire or send from ${scenario}`, () => {
+    const fixture = makeFailedRootRecoveryFixture();
+    return Effect.gen(function* () {
+      const { adapter, oldRuntime } = yield* fixture.prepare;
+      oldRuntime.closeIfFailedRootImpl.mockResolvedValue(scenario !== "atomic retirement refused");
+      if (scenario === "legacy runtime")
+        Object.defineProperty(oldRuntime, "closeIfFailedRoot", { value: undefined });
+      const current = yield* oldRuntime.getSession;
+      if (scenario === "active root")
+        oldRuntime.getSessionImpl.mockResolvedValue({
+          ...current,
+          status: "running",
+          activeTurnId: asTurnId("newer-authorized-root"),
+        });
+      if (scenario === "missing resume cursor")
+        oldRuntime.getSessionImpl.mockResolvedValue({ ...current, resumeCursor: undefined });
+      const expected = {
+        ...fixture.expectedFailedRoot,
+        ...(scenario === "wrong timestamp" ? { observedAt: "2026-10-14T06:00:01.000Z" } : {}),
+        ...(scenario === "missing timestamp" ? { observedAt: undefined } : {}),
+        ...(scenario === "wrong account"
+          ? { providerInstanceId: ProviderInstanceId.make("peer") }
+          : {}),
+        ...(scenario === "wrong generation" ? { subagentRuntimeId: fixture.generations[1]! } : {}),
+        ...(scenario === "wrong native history"
+          ? { providerThreadId: "different-private-history" }
+          : {}),
+        ...(scenario === "wrong root" ? { turnId: asTurnId("different-root") } : {}),
+      };
+      const outcome = yield* adapter
+        .sendTurn({
+          threadId: fixture.threadId,
+          input: "Continue the unfinished work.",
+          expectedFailedRoot: expected,
+        })
+        .pipe(Effect.exit);
+      assert.equal(Exit.isFailure(outcome), true);
+      assert.equal(fixture.factory.runtimes.length, 1);
+      assert.equal(oldRuntime.closeImpl.mock.calls.length, 0);
+      assert.equal(oldRuntime.sendTurnImpl.mock.calls.length, 0);
+      assert.equal(oldRuntime.steerTurnImpl.mock.calls.length, 0);
+      assert.equal(oldRuntime.closeIfIdleImpl.mock.calls.length, 0);
+      assert.equal(
+        oldRuntime.closeIfFailedRootImpl.mock.calls.length,
+        scenario === "atomic retirement refused" ? 1 : 0,
+      );
+    }).pipe(Effect.provide(fixture.layer));
+  });
+}
+
+it.effect(
+  "cold reopening joins the old session-closed bridge cleanup before installing its replacement",
+  () =>
+    schedulingCase(({ bindings }) => {
+      const fixture = makeFailedRootRecoveryFixture();
+      return Effect.gen(function* () {
+        const { adapter, oldRuntime } = yield* fixture.prepare;
+        const enteredDispose = yield* Deferred.make<void>();
+        const releaseDispose = yield* Deferred.make<void>();
+        yield* Effect.addFinalizer(() =>
+          Deferred.succeed(releaseDispose, undefined).pipe(Effect.asVoid),
+        );
+        const oldBinding = bindings[0]!;
+        const originalDispose = oldBinding.dispose;
+        vi.mocked(oldBinding.dispose).mockImplementationOnce(() =>
+          Effect.runPromise(
+            Deferred.succeed(enteredDispose, undefined).pipe(
+              Effect.andThen(Deferred.await(releaseDispose)),
+              Effect.andThen(Effect.promise(() => originalDispose())),
+            ),
+          ),
+        );
+        oldRuntime.closeIfFailedRootImpl.mockResolvedValue(true);
+        const originalClose = oldRuntime.close;
+        let emittedClosed = false;
+        oldRuntime.close = Effect.suspend(() => {
+          if (emittedClosed) return originalClose;
+          emittedClosed = true;
+          return oldRuntime
+            .emit({
+              id: asEventId("exact-old-session-closed-during-recovery"),
+              kind: "notification",
+              provider: ProviderDriverKind.make("codex"),
+              providerInstanceId: fixture.account,
+              subagentRuntimeId: fixture.generations[0],
+              threadId: fixture.threadId,
+              method: "session/closed",
+              createdAt: fixture.expectedFailedRoot.observedAt,
+              message: "Synthetic old runtime retirement",
+            })
+            .pipe(Effect.andThen(Deferred.await(enteredDispose)), Effect.andThen(originalClose));
+        });
+        const recovery = yield* adapter
+          .sendTurn({
+            threadId: fixture.threadId,
+            input: "Continue existing work.",
+            expectedFailedRoot: fixture.expectedFailedRoot,
+          })
+          .pipe(Effect.forkChild);
+        yield* Deferred.await(enteredDispose);
+        assert.equal(fixture.factory.runtimes.length, 1);
+        assert.equal(oldRuntime.sendTurnImpl.mock.calls.length, 0);
+        // The stopped flag is visible while disposal is held. It is not proof
+        // that the old context's teardown/finalizers have completed.
+        yield* Deferred.succeed(releaseDispose, undefined);
+        const accepted = yield* Fiber.join(recovery);
+        assert.equal(fixture.factory.runtimes.length, 2);
+        assert.equal(bindings[0]!.disposed, true);
+        assert.equal(bindings[1]!.active, true);
+        assert.equal(yield* adapter.hasSession(fixture.threadId), true);
+        assert.equal(accepted.recoverySession?.subagentRuntimeId, fixture.generations[1]);
+        assert.equal(fixture.factory.runtimes[1]!.sendTurnImpl.mock.calls.length, 1);
+      }).pipe(Effect.provide(fixture.layer));
+    }),
+);
+
+it.effect(
+  "revoked cold recovery finishes reserved teardown but cannot launch a replacement",
+  () => {
+    const fixture = makeFailedRootRecoveryFixture();
+    return Effect.gen(function* () {
+      const { adapter, oldRuntime } = yield* fixture.prepare;
+      const reached = yield* Deferred.make<void>();
+      const release = yield* Deferred.make<void>();
+      yield* Effect.addFinalizer(() => Deferred.succeed(release, undefined).pipe(Effect.asVoid));
+      oldRuntime.closeIfFailedRootImpl.mockResolvedValue(true);
+      const originalClose = oldRuntime.close;
+      oldRuntime.close = Deferred.succeed(reached, undefined).pipe(
+        Effect.andThen(Deferred.await(release)),
+        Effect.andThen(originalClose),
+      );
+      const recovery = yield* adapter
+        .sendTurn({
+          threadId: fixture.threadId,
+          input: "Continue existing work.",
+          expectedFailedRoot: fixture.expectedFailedRoot,
+        })
+        .pipe(Effect.forkChild);
+      yield* Deferred.await(reached);
+      const interrupted = yield* Fiber.interrupt(recovery).pipe(
+        Effect.forkChild({ startImmediately: true }),
+      );
+      assert.equal(fixture.factory.runtimes.length, 1);
+      yield* Deferred.succeed(release, undefined);
+      yield* Fiber.join(interrupted);
+      assert.equal(oldRuntime.closeIfFailedRootImpl.mock.calls.length, 1);
+      assert.equal(oldRuntime.closeImpl.mock.calls.length > 0, true);
+      assert.equal(fixture.factory.runtimes.length, 1);
+      assert.equal(oldRuntime.sendTurnImpl.mock.calls.length, 0);
+      assert.equal(oldRuntime.steerTurnImpl.mock.calls.length, 0);
+    }).pipe(Effect.provide(fixture.layer));
+  },
+);
+
+for (const mismatch of [
+  "native history",
+  "reused generation",
+  "missing generation",
+  "already running",
+] as const) {
+  it.effect(
+    `cold recovery never sends or opens a blank conversation after mismatched replacement ${mismatch}`,
+    () => {
+      const fixture = makeFailedRootRecoveryFixture();
+      return Effect.gen(function* () {
+        const { adapter, oldRuntime } = yield* fixture.prepare;
+        oldRuntime.closeIfFailedRootImpl.mockResolvedValue(true);
+        const makeRuntime = fixture.factory.factory.getMockImplementation()!;
+        fixture.factory.factory.mockImplementationOnce((options) =>
+          makeRuntime(options).pipe(
+            Effect.map((runtime) => {
+              const originalStart = runtime.start.bind(runtime);
+              runtime.start = () =>
+                originalStart().pipe(
+                  Effect.map((session) => ({
+                    ...session,
+                    ...(mismatch === "native history"
+                      ? { resumeCursor: { threadId: "different-private-history" } }
+                      : {}),
+                    ...(mismatch === "reused generation"
+                      ? { subagentRuntimeId: fixture.generations[0] }
+                      : {}),
+                    ...(mismatch === "missing generation" ? { subagentRuntimeId: undefined } : {}),
+                    ...(mismatch === "already running"
+                      ? { status: "running" as const, activeTurnId: asTurnId("other-root") }
+                      : {}),
+                  })),
+                );
+              return runtime;
+            }),
+          ),
+        );
+        const outcome = yield* adapter
+          .sendTurn({
+            threadId: fixture.threadId,
+            input: "Continue existing work.",
+            expectedFailedRoot: fixture.expectedFailedRoot,
+          })
+          .pipe(Effect.exit);
+        assert.equal(Exit.isFailure(outcome), true);
+        assert.equal(fixture.factory.runtimes.length, 2);
+        assert.equal(oldRuntime.sendTurnImpl.mock.calls.length, 0);
+        assert.equal(fixture.factory.runtimes[1]!.sendTurnImpl.mock.calls.length, 0);
+        assert.equal(fixture.factory.runtimes[1]!.steerTurnImpl.mock.calls.length, 0);
+        assert.equal(fixture.factory.runtimes[1]!.closeImpl.mock.calls.length > 0, true);
+        assert.deepEqual(fixture.factory.runtimes[1]!.options.resumeCursor, {
+          threadId: fixture.nativeThreadId,
+        });
+      }).pipe(Effect.provide(fixture.layer));
+    },
+  );
 }
 
 it.effect(
@@ -1226,10 +1677,12 @@ it.effect(
       const threadId = asThreadId("custom-instructions-chat");
       yield* adapter.startSession({ threadId, runtimeMode: "full-access" });
       assert.equal(factory.lastRuntime?.options.customInstructions, "Be concise.");
+      assert.equal(Object.hasOwn(factory.lastRuntime!.options, "requireExactResume"), false);
       yield* adapter.stopSession(threadId);
       yield* files.writeFileString(config.systemPromptPath, "Use metric units.");
       yield* adapter.startSession({ threadId, runtimeMode: "full-access" });
       assert.equal(factory.lastRuntime?.options.customInstructions, "Use metric units.");
+      assert.equal(Object.hasOwn(factory.lastRuntime!.options, "requireExactResume"), false);
     }).pipe(
       Effect.provide(SqlitePersistenceMemory),
       Effect.provide(
@@ -1412,6 +1865,24 @@ function makeConcurrencyTestLayer(
   );
 }
 
+it.effect("binds paired compaction support to the current qualified native owner", () => {
+  const factory = makeRuntimeFactory();
+  let qualified = false;
+  return Effect.gen(function* () {
+    const adapter = yield* CodexAdapter;
+    // Configuration intent must not grant a capability. Both getters observe
+    // the same independently qualified native runtime, including later loss.
+    assert.equal(adapter.capabilities.codexContextWindow, false);
+    assert.equal(adapter.capabilities.codexContextCompaction, false);
+    qualified = true;
+    assert.equal(adapter.capabilities.codexContextWindow, true);
+    assert.equal(adapter.capabilities.codexContextCompaction, true);
+    qualified = false;
+    assert.equal(adapter.capabilities.codexContextCompaction, false);
+    assert.equal(factory.runtimes.length, 0);
+  }).pipe(Effect.provide(makeConcurrencyTestLayer(factory, undefined, () => qualified)));
+});
+
 it.effect(
   "keeps Codex chat overrides isolated and preserves configured evidence across fork/resume",
   () => {
@@ -1529,6 +2000,9 @@ it.effect(
       });
       assert.equal(initial.codexContextWindowOverride, 500_000);
       assert.equal(factory.lastRuntime?.options.codexContextWindowOverride, 500_000);
+      // Runtime opening derives the companion request. Adapter options/usage
+      // must not manufacture a separately configured threshold from context.
+      assert.equal(factory.lastRuntime?.options.autoCompactTokenLimit, undefined);
       const original = factory.lastRuntime!;
       original.closeIfIdleImpl.mockResolvedValue(false);
       const denied = yield* adapter
@@ -2646,6 +3120,128 @@ sessionErrorLayer("CodexAdapterLive session errors", (it) => {
       }).pipe(Effect.provide(customLayer));
     },
   );
+
+  for (const request of [
+    { label: "explicit compaction", autoCompactTokenLimit: 150_000 },
+    { label: "no separate compaction setting", autoCompactTokenLimit: undefined },
+    { label: "inherited compaction ignored", autoCompactTokenLimit: undefined, inherited: true },
+    { label: "accessor compaction ignored", autoCompactTokenLimit: undefined, accessor: true },
+  ] as const) {
+    const { autoCompactTokenLimit } = request;
+    it.effect(
+      `keeps native usage capacity authoritative for an 800K context request with ${request.label}`,
+      () => {
+        const customRuntimeFactory = makeRuntimeFactory();
+        let accessorReads = 0;
+        const customLayer = Layer.effect(
+          CodexAdapter,
+          Effect.gen(function* () {
+            const codexConfig = decodeCodexSettings({
+              ...(autoCompactTokenLimit !== undefined ? { autoCompactTokenLimit } : {}),
+            });
+            if ("inherited" in request) {
+              Object.setPrototypeOf(codexConfig, { autoCompactTokenLimit: 150_000 });
+            }
+            if ("accessor" in request) {
+              Object.defineProperty(codexConfig, "autoCompactTokenLimit", {
+                enumerable: true,
+                get: () => {
+                  accessorReads += 1;
+                  return 150_000;
+                },
+              });
+            }
+            return yield* makeCodexAdapter(codexConfig, {
+              makeRuntime: customRuntimeFactory.factory,
+              getCodexContextWindowSupport: () => true,
+            });
+          }),
+        ).pipe(
+          Layer.provideMerge(ServerConfig.layerTest(process.cwd(), process.cwd())),
+          Layer.provideMerge(ServerSettingsService.layerTest()),
+          Layer.provideMerge(providerSessionDirectoryTestLayer),
+          Layer.provideMerge(NodeServices.layer),
+        );
+
+        return Effect.gen(function* () {
+          const adapter = yield* CodexAdapter;
+          const threadId = asThreadId("sess-context-native-usage");
+          const session = yield* adapter.startSession({
+            provider: ProviderDriverKind.make("codex"),
+            threadId,
+            runtimeMode: "full-access",
+            codexContextWindowOverride: 800_000,
+          });
+          const runtime = customRuntimeFactory.lastRuntime;
+          assert.ok(runtime);
+          assert.equal(session.codexContextWindowOverride, 800_000);
+          assert.equal(runtime.options.codexContextWindowOverride, 800_000);
+          assert.equal(runtime.options.autoCompactTokenLimit, autoCompactTokenLimit);
+          assert.equal(accessorReads, 0);
+          // The adapter cannot fabricate new-opening request evidence from
+          // settings; only the actual native runtime can report that field.
+          assert.equal(session.codexAutoCompactTokenLimit, undefined);
+          assert.equal(
+            "autoCompactTokenLimit" in runtime.options,
+            autoCompactTokenLimit !== undefined,
+          );
+
+          const firstEventFiber = yield* Stream.runHead(adapter.streamEvents).pipe(
+            Effect.forkChild,
+          );
+          yield* runtime.emit({
+            id: asEventId("evt-context-native-usage"),
+            kind: "notification",
+            provider: ProviderDriverKind.make("codex"),
+            threadId,
+            turnId: asTurnId("turn-context-native-usage"),
+            createdAt: "2026-01-01T00:00:00.000Z",
+            method: "thread/tokenUsage/updated",
+            payload: {
+              threadId: "sess-context-native-usage",
+              turnId: "turn-context-native-usage",
+              tokenUsage: {
+                total: {
+                  inputTokens: 100,
+                  cachedInputTokens: 0,
+                  outputTokens: 6,
+                  reasoningOutputTokens: 0,
+                  totalTokens: 106,
+                },
+                last: {
+                  inputTokens: 100,
+                  cachedInputTokens: 0,
+                  outputTokens: 6,
+                  reasoningOutputTokens: 0,
+                  totalTokens: 106,
+                },
+                // Received native usable capacity deliberately differs from
+                // the nominal request. It is not a compaction-threshold event.
+                modelContextWindow: 760_000,
+              },
+            },
+          } satisfies ProviderEvent);
+
+          const firstEvent = yield* Fiber.join(firstEventFiber);
+          assert.equal(firstEvent._tag, "Some");
+          if (firstEvent._tag !== "Some") {
+            return;
+          }
+          assert.equal(firstEvent.value.type, "thread.token-usage.updated");
+          if (firstEvent.value.type !== "thread.token-usage.updated") {
+            return;
+          }
+          const usage = firstEvent.value.payload.usage;
+          assert.equal(usage.maxTokens, 760_000);
+          assert.equal(usage.usedTokens, 106);
+          assert.equal(usage.compactsAutomatically, true);
+          assert.equal(usage.autoCompactTokenLimit, autoCompactTokenLimit);
+          assert.equal("autoCompactTokenLimit" in usage, autoCompactTokenLimit !== undefined);
+          assert.equal(accessorReads, 0);
+        }).pipe(Effect.provide(customLayer));
+      },
+    );
+  }
 });
 
 const lifecycleRuntimeFactory = makeRuntimeFactory();
@@ -2693,6 +3289,364 @@ function startLifecycleRuntime(subagentRuntimeId?: string) {
 }
 
 lifecycleLayer("CodexAdapterLive lifecycle", (it) => {
+  it.effect(
+    "preserves admitted ordinary task owners across item edges without trusting native owner fields",
+    () =>
+      Effect.gen(function* () {
+        const { adapter, runtime } = yield* startLifecycleRuntime();
+        const owners: readonly (ProviderTaskOwner | undefined)[] = [
+          { type: "child", id: "source-child" },
+          { type: "root" },
+          undefined,
+        ];
+        const methods = [
+          "item/started",
+          "item/commandExecution/terminalInteraction",
+          "item/completed",
+        ] as const;
+        const barrierId = asEventId("owned-item-fixture-barrier");
+        const barrierObserved = yield* Deferred.make<void>();
+        const eventsFiber = yield* adapter.streamEvents.pipe(
+          Stream.tap((event) =>
+            event.eventId === barrierId
+              ? Deferred.succeed(barrierObserved, undefined)
+              : Effect.void,
+          ),
+          Stream.takeUntil((event) => event.eventId === barrierId),
+          Stream.runCollect,
+          Effect.forkChild,
+        );
+        const originals: string[] = [];
+        const inputs: ProviderEvent[] = [];
+        for (const [index, taskOwner] of owners.entries())
+          for (const [edge, method] of methods.entries()) {
+            const itemId = asItemId(`owned-item-${index}`);
+            const event: ProviderEvent = {
+              id: asEventId(`owned-item-${index}-${edge}`),
+              kind: "notification",
+              provider: ProviderDriverKind.make("codex"),
+              createdAt: "2026-10-14T00:00:00.000Z",
+              threadId: asThreadId("thread-1"),
+              turnId: asTurnId("parent-turn"),
+              itemId,
+              method,
+              ...(taskOwner ? { taskOwner } : {}),
+              payload: {
+                threadId: taskOwner?.type === "child" ? taskOwner.id : "provider-thread-1",
+                turnId: "native-tool-turn",
+                ...(method === "item/started"
+                  ? { startedAtMs: 1 }
+                  : method === "item/completed"
+                    ? { completedAtMs: 2 }
+                    : {
+                        itemId,
+                        processId: `synthetic-process-${index}`,
+                        stdin: "Synthetic terminal input",
+                      }),
+                taskOwner: { type: "child", id: "counterfeit-native-owner" },
+                item: {
+                  id: itemId,
+                  type: "commandExecution",
+                  command: "node --version",
+                  commandActions: [],
+                  cwd: "/workspace",
+                  status: edge === 2 ? "completed" : "inProgress",
+                  taskOwner: { type: "root" },
+                  receiverThreadIds: ["receiver-child"],
+                },
+              },
+            };
+            // Native lifecycle timestamps and terminal input coordinates are
+            // required by the pinned codec. Refuse a malformed fixture before
+            // waiting for a mapped event that the adapter correctly omits.
+            assert.equal(
+              method === "item/started"
+                ? isStartedItem(event.payload)
+                : method === "item/completed"
+                  ? isCompletedItem(event.payload)
+                  : isTerminalInteraction(event.payload),
+              true,
+            );
+            inputs.push(event);
+            originals.push(JSON.stringify(event));
+            yield* runtime.emit(event);
+          }
+        // Observe this exact real mapped FIFO sentinel, not Queue.offer or a
+        // mock call. Missing item edges now fail the same strict count below
+        // instead of waiting until the enclosing unchanged test deadline.
+        yield* runtime.emit({
+          id: barrierId,
+          kind: "notification",
+          provider: ProviderDriverKind.make("codex"),
+          threadId: asThreadId("thread-1"),
+          createdAt: "2026-10-14T00:00:00.000Z",
+          method: "warning",
+          message: "Owner item fixture barrier",
+        });
+        yield* Deferred.await(barrierObserved);
+        const collected = Array.from(yield* Fiber.join(eventsFiber));
+        assert.equal(collected.at(-1)?.type, "runtime.warning");
+        const events = collected.filter((event) => event.eventId !== barrierId);
+        assert.equal(events.length, owners.length * methods.length);
+        for (const [index, event] of events.entries()) {
+          assert.equal(event.type, ["item.started", "item.updated", "item.completed"][index % 3]);
+          if (
+            event.type !== "item.started" &&
+            event.type !== "item.updated" &&
+            event.type !== "item.completed"
+          )
+            return assert.fail("Expected exact ordinary item lifecycle");
+          assert.deepEqual(event.payload.taskOwner, owners[Math.floor(index / 3)]);
+          assert.equal(event.payload.itemType, "command_execution");
+          assert.equal(event.threadId, "thread-1");
+          assert.equal(event.turnId, "parent-turn");
+          assert.equal(event.itemId, `owned-item-${Math.floor(index / 3)}`);
+          assert.equal(event.payload.individualTaskControl, undefined);
+        }
+        assert.deepEqual(
+          inputs.map((event) => JSON.stringify(event)),
+          originals,
+        );
+        assert.equal(runtime.sendTurnImpl.mock.calls.length, 0);
+        assert.equal(runtime.steerTurnImpl.mock.calls.length, 0);
+      }),
+  );
+
+  it.effect(
+    "retains exact child ownership on compaction without adopting its native target data",
+    () =>
+      Effect.gen(function* () {
+        const { adapter, runtime } = yield* startLifecycleRuntime();
+        const barrierId = asEventId("child-compaction-fixture-barrier");
+        const tracker = makeCodexCompactionDiagnosticsTracker();
+        tracker.setRootOpeningRequests({ contextWindow: 800_000, autoCompactTokenLimit: 700_000 });
+        const source = {
+          sourceId: "source-child",
+          sourceOwner: { type: "child" as const, id: "source-child" },
+          observedAt: "2026-10-14T00:00:00.000Z",
+          nativeTurnId: "child-native-turn",
+        };
+        tracker.observeUsage({
+          ...source,
+          tokenUsage: {
+            last: {
+              inputTokens: 110_000,
+              cachedInputTokens: 90_000,
+              outputTokens: 10_000,
+              reasoningOutputTokens: 5_000,
+              totalTokens: 120_000,
+            },
+            total: { totalTokens: 900_000 },
+            modelContextWindow: 760_000,
+          },
+        });
+        const expectedDiagnostics = [];
+        const barrierObserved = yield* Deferred.make<void>();
+        const eventsFiber = yield* adapter.streamEvents.pipe(
+          Stream.tap((event) =>
+            event.eventId === barrierId
+              ? Deferred.succeed(barrierObserved, undefined)
+              : Effect.void,
+          ),
+          Stream.takeUntil((event) => event.eventId === barrierId),
+          Stream.runCollect,
+          Effect.forkChild,
+        );
+        for (const method of ["item/started", "item/completed"] as const) {
+          const codexCompactionObservation = tracker.observeCompaction({
+            ...source,
+            phase: method === "item/started" ? "started" : "completed",
+            nativeItemId: "child-compaction",
+          });
+          assert.ok(codexCompactionObservation);
+          expectedDiagnostics.push(codexCompactionObservation);
+          const nativePayload = {
+            threadId: "source-child",
+            turnId: "child-native-turn",
+            taskOwner: { type: "root" },
+            item: { id: "child-compaction", type: "contextCompaction" },
+          };
+          const event: ProviderEvent = {
+            id: asEventId(`child-compaction-${method}`),
+            kind: "notification",
+            provider: ProviderDriverKind.make("codex"),
+            createdAt: "2026-10-14T00:00:00.000Z",
+            threadId: asThreadId("thread-1"),
+            turnId: asTurnId("parent-turn"),
+            itemId: asItemId("child-compaction"),
+            method,
+            taskOwner: { type: "child", id: "source-child" },
+            codexCompactionObservation,
+            payload: {
+              ...nativePayload,
+              codexCompactionObservation: {
+                ...codexCompactionObservation,
+                sourceOwner: { type: "root" },
+              },
+              ...(method === "item/started" ? { startedAtMs: 1 } : { completedAtMs: 2 }),
+            },
+          };
+          const isNativeItem = method === "item/started" ? isStartedItem : isCompletedItem;
+          assert.equal(isNativeItem(event.payload), true);
+          // Preserve the demonstrated malformed-clock boundary as an exact
+          // negative. These two timestamp-less native envelopes must map zero
+          // item edges, even with a seemingly valid outer owner witness.
+          assert.equal(isNativeItem(nativePayload), false);
+          yield* runtime.emit({
+            ...event,
+            id: asEventId(`child-compaction-missing-clock-${method}`),
+            payload: nativePayload,
+          });
+          yield* runtime.emit(event);
+        }
+        yield* runtime.emit({
+          id: barrierId,
+          kind: "notification",
+          provider: ProviderDriverKind.make("codex"),
+          threadId: asThreadId("thread-1"),
+          createdAt: "2026-10-14T00:00:00.000Z",
+          method: "warning",
+          message: "Child compaction fixture barrier",
+        });
+        yield* Deferred.await(barrierObserved);
+        const collected = Array.from(yield* Fiber.join(eventsFiber));
+        assert.equal(collected.at(-1)?.type, "runtime.warning");
+        const events = collected.filter((event) => event.eventId !== barrierId);
+        assert.deepEqual(
+          events.map((event) => event.type),
+          ["item.started", "item.completed"],
+        );
+        for (const [index, event] of events.entries()) {
+          if (event.type !== "item.started" && event.type !== "item.completed")
+            return assert.fail("Expected compaction item lifecycle");
+          assert.equal(event.payload.itemType, "context_compaction");
+          assert.deepEqual(event.payload.taskOwner, { type: "child", id: "source-child" });
+          assert.equal(event.payload.individualTaskControl, undefined);
+          assert.deepEqual(event.payload.codexCompactionObservation, expectedDiagnostics[index]);
+        }
+        assert.equal(runtime.sendTurnImpl.mock.calls.length, 0);
+      }),
+  );
+
+  it.effect(
+    "omits mismatched, legacy and native-payload-only compaction diagnostics without dropping item edges",
+    () =>
+      Effect.gen(function* () {
+        const { adapter, runtime } = yield* startLifecycleRuntime();
+        const tracker = makeCodexCompactionDiagnosticsTracker();
+        const source = {
+          sourceId: "provider-thread-1",
+          sourceOwner: { type: "root" as const },
+          observedAt: "2026-10-15T00:00:00.000Z",
+          nativeTurnId: "diagnostic-native-turn",
+        };
+        const diagnostic = tracker.observeCompaction({
+          ...source,
+          phase: "started",
+          nativeItemId: "diagnostic-item",
+        });
+        assert.ok(diagnostic);
+        const variants: readonly unknown[] = [
+          undefined,
+          { ...diagnostic, phase: "completed" },
+          { ...diagnostic, nativeItemId: "receiver-item" },
+          { ...diagnostic, nativeTurnId: "routed-parent-turn" },
+          { ...diagnostic, sourceOwner: { type: "child", id: "receiver-child" } },
+          { ...diagnostic, version: 2 },
+          { ...diagnostic, observedAt: "2026-02-30T00:00:00.000Z" },
+          { ...diagnostic, resolvedThreshold: 700_000 },
+        ];
+        const barrierId = asEventId("compaction-diagnostic-negative-barrier");
+        const observed = yield* Deferred.make<void>();
+        const collected = yield* adapter.streamEvents.pipe(
+          Stream.tap((event) =>
+            event.eventId === barrierId ? Deferred.succeed(observed, undefined) : Effect.void,
+          ),
+          Stream.takeUntil((event) => event.eventId === barrierId),
+          Stream.runCollect,
+          Effect.forkChild,
+        );
+        let getters = 0;
+        for (let index = 0; index < variants.length + 4; index++) {
+          const event: ProviderEvent = {
+            id: asEventId(`compaction-diagnostic-negative-${index}`),
+            kind: "notification",
+            provider: ProviderDriverKind.make("codex"),
+            threadId: asThreadId("thread-1"),
+            turnId: asTurnId("routed-parent-turn"),
+            itemId: asItemId("diagnostic-item"),
+            createdAt: source.observedAt,
+            method: "item/started",
+            taskOwner: source.sourceOwner,
+            payload: {
+              threadId: source.sourceId,
+              turnId: source.nativeTurnId,
+              startedAtMs: 1,
+              item: { id: "diagnostic-item", type: "contextCompaction" },
+              codexCompactionObservation: diagnostic,
+            },
+          };
+          if (index < variants.length)
+            Object.defineProperty(event, "codexCompactionObservation", { value: variants[index] });
+          else if (index === variants.length)
+            Object.defineProperty(event, "codexCompactionObservation", {
+              get() {
+                getters++;
+                throw Error("Never execute diagnostic getters");
+              },
+            });
+          else if (index === variants.length + 1)
+            Object.setPrototypeOf(event, { codexCompactionObservation: diagnostic });
+          else if (index === variants.length + 2)
+            Object.defineProperty(event, "taskOwner", { value: undefined });
+          else {
+            Object.defineProperty(event, "codexCompactionObservation", { value: diagnostic });
+            Object.defineProperty(event, "payload", {
+              value: {
+                threadId: source.sourceId,
+                turnId: source.nativeTurnId,
+                startedAtMs: 1,
+                item: {
+                  id: "diagnostic-item",
+                  type: "commandExecution",
+                  command: "node --version",
+                  commandActions: [],
+                  cwd: "/workspace",
+                  status: "inProgress",
+                },
+              },
+            });
+          }
+          assert.equal(isStartedItem(event.payload), true);
+          yield* runtime.emit(event);
+        }
+        yield* runtime.emit({
+          id: barrierId,
+          kind: "notification",
+          provider: ProviderDriverKind.make("codex"),
+          threadId: asThreadId("thread-1"),
+          createdAt: source.observedAt,
+          method: "warning",
+          message: "Diagnostic negative barrier",
+        });
+        yield* Deferred.await(observed);
+        const events = Array.from(yield* Fiber.join(collected)).filter(
+          (event) => event.eventId !== barrierId,
+        );
+        assert.equal(events.length, variants.length + 4);
+        for (const event of events) {
+          assert.equal(event.type, "item.started");
+          if (event.type !== "item.started")
+            return assert.fail("Expected original native item edge");
+          assert.equal(event.payload.codexCompactionObservation, undefined);
+          assert.equal(event.payload.individualTaskControl, undefined);
+        }
+        assert.equal(getters, 0);
+        assert.equal(runtime.sendTurnImpl.mock.calls.length, 0);
+        assert.equal(runtime.steerTurnImpl.mock.calls.length, 0);
+      }),
+  );
+
   it.effect("admits post-ACK availability confirmation only from the native runtime marker", () =>
     Effect.gen(function* () {
       const { adapter, runtime } = yield* startLifecycleRuntime(
@@ -3034,6 +3988,7 @@ lifecycleLayer("CodexAdapterLive lifecycle", (it) => {
           subagentRuntimeId: runtimeId,
         };
         const before = lifecycleRuntimeFactory.runtimes.length;
+        assert.equal(Object.hasOwn(runtime.options, "requireExactResume"), false);
         yield* adapter.sendTurn({
           threadId: asThreadId("thread-1"),
           input: "Continue the interrupted response.",
@@ -8829,6 +9784,71 @@ function schedulingCase(
     ),
   );
 }
+
+it.effect("registers visualization MCP only for the actual Codex Full-access launch", () =>
+  schedulingCase(({ createAdapter }) =>
+    Effect.gen(function* () {
+      const instance = ProviderInstanceId.make("codex-inline-fixture");
+      const generation = VisualizationGenerationId.make("00000000-0000-4000-8000-000000000001");
+      const launch = { command: process.execPath, args: [], env: { ELECTRON_RUN_AS_NODE: "1" } };
+      const activate = vi.fn(async () => {});
+      const dispose = vi.fn(async () => {});
+      const bind = vi.fn<VisualizationSessionBroker["bind"]>(async (identity) => ({
+        name: "cafe-visualizations-fixture",
+        launch,
+        authority: {
+          threadId: identity.threadId,
+          providerInstanceId: instance,
+          sessionGeneration: generation,
+          runtimeGeneration: generation,
+          tokenDigest: "a".repeat(64),
+          serverName: "cafe-visualizations-fixture",
+        },
+        activate,
+        dispose,
+        claimNativeCompletion: async () => undefined,
+      }));
+      const uninstall = installVisualizationSessionRuntime({
+        bind,
+        authorize: async () => {
+          throw new Error("Fixture has no HTTP capability.");
+        },
+        close: async () => {},
+      });
+      yield* Effect.addFinalizer(() => Effect.sync(uninstall));
+      const factory = makeRuntimeFactory();
+      const adapter = yield* createAdapter(instance, factory.factory);
+      const restricted = asThreadId("visualization-restricted");
+      const full = asThreadId("visualization-full");
+      yield* adapter.startSession({ threadId: restricted, runtimeMode: "approval-required" });
+      assert.equal(bind.mock.calls.length, 0);
+      assert.equal(factory.runtimes[0]!.options.visualizationMcp, undefined);
+      yield* adapter.startSession({ threadId: full, runtimeMode: "full-access" });
+      assert.deepEqual(
+        bind.mock.calls.map(([identity]) => identity),
+        [
+          {
+            threadId: full,
+            providerInstanceId: instance,
+            provider: "codex",
+            runtimeMode: "full-access",
+          },
+        ],
+      );
+      assert.deepEqual(factory.runtimes[1]!.options.visualizationMcp, {
+        name: "cafe-visualizations-fixture",
+        launch,
+      });
+      assert.equal(activate.mock.calls.length, 1);
+      yield* adapter.stopSession(restricted);
+      assert.equal(dispose.mock.calls.length, 0);
+      yield* adapter.stopSession(full);
+      // Explicit retirement and the existing adapter scope finalizer both
+      // request exact-binding cleanup; the production binding is idempotent.
+      assert.equal(dispose.mock.calls.length, 2);
+    }),
+  ),
+);
 
 it.effect(
   "isolates scheduling by Codex chat, account and runtime generation while preserving resume",

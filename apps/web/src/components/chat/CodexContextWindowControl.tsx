@@ -6,6 +6,7 @@ import { useUiLocale, useUiPresentation } from "~/i18n";
 import { UiMessage } from "~/i18n";
 import {
   formatCodexContextWindowOverride,
+  formatCodexContextCompactionEstimate,
   type CodexContextWindowPresentation,
   codexContextWindowSourceLabel,
 } from "../../codexContextWindow";
@@ -25,6 +26,18 @@ import {
 function contextWindowHelp() {
   return uiText(
     "Shows this chat’s saved choice and recorded session configuration, not verified model capacity. Changes wait for a safe idle turn and never interrupt current work. Codex controls supported capacity, reserved headroom and compaction. Reset inherits the account default, or Codex settings when it is blank.",
+  );
+}
+
+function contextCompactionEstimateHelp() {
+  return uiText(
+    "Estimate for the saved effective context choice at the next safe opening, not a currently applied or native-reported threshold. Uses the reviewed default total-scope 90% ceiling and any lower explicit compaction request. Actual model caps, accounting scope and buffers may differ.",
+  );
+}
+
+function contextCompactionRequestHelp() {
+  return uiText(
+    "Matching context counts do not prove that the compaction request was applied. Missing or different recorded requests remain pending; unknown runtime support does not promise idle adoption.",
   );
 }
 
@@ -51,6 +64,12 @@ function ContextWindowHelp({
       </TooltipTrigger>
       <TooltipPopup className="max-w-[min(20rem,calc(100vw-2rem))]">
         {uiPresentation.contextWindowHelp()}
+        {formatCodexContextCompactionEstimate(presentation, uiLocale) !== null ? (
+          <span className="mt-1 block">{uiPresentation.contextCompactionEstimateHelp()}</span>
+        ) : null}
+        {presentation?.pendingCompaction ? (
+          <span className="mt-1 block">{uiPresentation.contextCompactionRequestHelp()}</span>
+        ) : null}
         {presentation ? (
           <span className="mt-1 block">
             <UiMessage
@@ -71,17 +90,32 @@ export function CodexContextWindowDetails(props: {
   const uiLocale = useUiLocale();
   const uiPresentation = useUiPresentation(UI_PRESENTATION_SOURCES);
   const label = uiPresentation.formatCodexContextWindowOverride(props.presentation, uiLocale);
+  const estimate = uiPresentation.formatCodexContextCompactionEstimate(
+    props.presentation,
+    uiLocale,
+  );
   if (label === null) return null;
   return (
     <div
       data-codex-context-window-details="true"
       className="flex min-w-0 max-w-[min(20rem,calc(100vw-3rem))] items-center gap-1.5 text-xs font-medium text-foreground [overflow-wrap:anywhere]"
     >
-      {props.showHeading === false ? (
-        <span className="min-w-0">{label}</span>
-      ) : (
-        <h3 className="min-w-0">{label}</h3>
-      )}
+      <div className="min-w-0">
+        {/* Keep the original label's exact node/locator while the estimate stays
+            quiet inline text, not a second heading or received usage claim. */}
+        {props.showHeading === false ? <span>{label}</span> : <h3 className="inline">{label}</h3>}
+        {estimate !== null ? (
+          <>
+            {" "}
+            <span
+              data-codex-context-compaction-estimate
+              className="font-normal text-muted-foreground"
+            >
+              {estimate}
+            </span>
+          </>
+        ) : null}
+      </div>
       <ContextWindowHelp presentation={props.presentation ?? undefined} />
     </div>
   );
@@ -210,6 +244,9 @@ function CodexContextWindowEditor(props: CodexContextWindowControlProps) {
 
 const UI_PRESENTATION_SOURCES = {
   contextWindowHelp,
+  contextCompactionEstimateHelp,
+  contextCompactionRequestHelp,
+  formatCodexContextCompactionEstimate,
   formatCodexContextWindowOverride,
   codexContextWindowSourceLabel,
 };

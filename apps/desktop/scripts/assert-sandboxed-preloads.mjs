@@ -1,7 +1,10 @@
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 
-const PRELOAD_BUNDLES = ["preload.cjs", "globalDictationPreload.cjs", "visualizationPreload.cjs"];
+// Only the two production sandboxed preloads are emitted. Inline visualization
+// frames no longer have a native preload; removing that retired entry must not
+// make either remaining required bundle optional or weaken its import checks.
+const PRELOAD_BUNDLES = ["preload.cjs", "globalDictationPreload.cjs"];
 const SANDBOXED_REQUIRE_MODULES = new Set([
   "electron",
   "events",

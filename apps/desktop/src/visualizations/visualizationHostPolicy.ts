@@ -17,6 +17,119 @@ export const VISUALIZATION_INSTALLED_CHANNEL = "cafe-visualization:installed";
 export const VISUALIZATION_FRAME_CHANNEL = "cafe-visualization:frame";
 export const VISUALIZATION_EVENT_CHANNEL = "desktop:visualization-event";
 
+/** Electron's native mask builder clears its path below this size. Never expose
+ * an unmasked page just because only a tiny slice remains in a scroll viewport. */
+export const VISUALIZATION_MIN_CLIP_DIP = 32;
+export interface VisualizationGeometry {
+  readonly viewport: VisualizationHostBounds;
+  readonly clip: VisualizationHostBounds;
+  readonly child: VisualizationHostBounds;
+  readonly ownerZoom: number;
+  readonly clipping: "full" | "partial";
+}
+const validVisualizationBounds = (value: VisualizationHostBounds) =>
+  [value.x, value.y, value.width, value.height].every(Number.isSafeInteger) &&
+  Math.abs(value.x) <= 32_768 &&
+  Math.abs(value.y) <= 32_768 &&
+  value.width >= 1 &&
+  value.width <= 1600 &&
+  value.height >= 1 &&
+  value.height <= 2000;
+
+/** Preserve the full document layout while bounding its independently visible
+ * native parent. Owner CSS pixels, native DIP and display DPR are separate
+ * spaces. Rounding the visible edges inward prevents fractional zoom from
+ * exposing even one extra native pixel over trusted controls. No guest zoom or
+ * saved source is modified, and existing capture dimensions remain hard caps. */
+function mapVisualizationGeometry(
+  bounds: VisualizationHostBounds,
+  clipBounds: VisualizationHostBounds | undefined,
+  windowSize: readonly [number, number],
+  ownerZoom: number,
+  minimumClip: number,
+): VisualizationGeometry | null {
+  if (
+    !validVisualizationBounds(bounds) ||
+    !Number.isFinite(ownerZoom) ||
+    ownerZoom <= 0 ||
+    !windowSize.every((value) => Number.isSafeInteger(value) && value > 0)
+  )
+    return null;
+  const requestedClip = clipBounds ?? bounds;
+  if (
+    !validVisualizationBounds(requestedClip) ||
+    requestedClip.x < bounds.x ||
+    requestedClip.y < bounds.y ||
+    requestedClip.x + requestedClip.width > bounds.x + bounds.width ||
+    requestedClip.y + requestedClip.height > bounds.y + bounds.height
+  )
+    return null;
+  const viewport = {
+    x: Math.floor(bounds.x * ownerZoom),
+    y: Math.floor(bounds.y * ownerZoom),
+    width: Math.round(bounds.width * ownerZoom),
+    height: Math.round(bounds.height * ownerZoom),
+  };
+  if (!validVisualizationBounds(viewport)) return null;
+  const x = Math.max(0, viewport.x, Math.ceil(requestedClip.x * ownerZoom));
+  const y = Math.max(0, viewport.y, Math.ceil(requestedClip.y * ownerZoom));
+  const right = Math.min(
+    windowSize[0],
+    viewport.x + viewport.width,
+    Math.floor((requestedClip.x + requestedClip.width) * ownerZoom),
+  );
+  const bottom = Math.min(
+    windowSize[1],
+    viewport.y + viewport.height,
+    Math.floor((requestedClip.y + requestedClip.height) * ownerZoom),
+  );
+  const clip = { x, y, width: right - x, height: bottom - y };
+  if (!validVisualizationBounds(clip) || clip.width < minimumClip || clip.height < minimumClip)
+    return null;
+  return {
+    viewport,
+    clip,
+    child: { x: viewport.x - x, y: viewport.y - y, width: viewport.width, height: viewport.height },
+    ownerZoom,
+    clipping:
+      x === viewport.x &&
+      y === viewport.y &&
+      clip.width === viewport.width &&
+      clip.height === viewport.height
+        ? "full"
+        : "partial",
+  };
+}
+
+/** Visible native geometry always retains the mask's independently qualified
+ * minimum. A hidden-presentation witness below can never be installed as bounds. */
+export function admitVisualizationGeometry(
+  bounds: VisualizationHostBounds,
+  clipBounds: VisualizationHostBounds | undefined,
+  windowSize: readonly [number, number],
+  ownerZoom: number,
+): VisualizationGeometry | null {
+  return mapVisualizationGeometry(
+    bounds,
+    clipBounds,
+    windowSize,
+    ownerZoom,
+    VISUALIZATION_MIN_CLIP_DIP,
+  );
+}
+
+/** A positive exact crop may retain an already-owned generated document while
+ * hiding both native layers. Return only a boolean so callers cannot mistake
+ * this witness for safe mask geometry or show an unmasked sub-32-DIP slice. */
+export function hasVisualizationPresentationGeometry(
+  bounds: VisualizationHostBounds,
+  clipBounds: VisualizationHostBounds | undefined,
+  windowSize: readonly [number, number],
+  ownerZoom: number,
+): boolean {
+  return mapVisualizationGeometry(bounds, clipBounds, windowSize, ownerZoom, 1) !== null;
+}
+
 export function clampVisualizationBounds(
   bounds: VisualizationHostBounds,
   windowSize: readonly [number, number],

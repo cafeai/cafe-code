@@ -41,6 +41,7 @@ import {
   type ServerProvider,
 } from "@cafecode/contracts";
 import * as Context from "effect/Context";
+import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Equal from "effect/Equal";
 import * as Exit from "effect/Exit";
@@ -49,6 +50,7 @@ import * as PubSub from "effect/PubSub";
 import * as Ref from "effect/Ref";
 import * as Schema from "effect/Schema";
 import * as Scope from "effect/Scope";
+import * as Semaphore from "effect/Semaphore";
 import * as Stream from "effect/Stream";
 
 import { buildUnavailableProviderSnapshot } from "../unavailableProviderSnapshot.ts";
@@ -70,6 +72,7 @@ import type { AnyProviderDriver, ProviderInstance } from "../ProviderDriver.ts";
 interface LiveEntry {
   readonly instance: ProviderInstance;
   readonly scope: Scope.Closeable;
+  readonly close: Effect.Effect<void>;
   readonly entry: ProviderInstanceConfig;
   readonly updatePresentation: (entry: ProviderInstanceConfig) => Effect.Effect<void>;
 }
@@ -82,7 +85,55 @@ interface RegistryState {
   readonly entries: Ref.Ref<ReadonlyMap<ProviderInstanceId, LiveEntry>>;
   readonly unavailable: Ref.Ref<ReadonlyMap<ProviderInstanceId, ServerProvider>>;
   readonly changes: PubSub.PubSub<void>;
+  /** Exact retiring owners stay available for teardown, never for routing. */
+  readonly retiring: WeakSet<ProviderInstance>;
+  readonly reconcileSemaphore: Semaphore.Semaphore;
+  /** Unpublished scopes must finish cleanup before their routing id is reused. */
+  readonly unpublishedScopes: Map<ProviderInstanceId, Effect.Effect<void>>;
 }
+
+/**
+ * Scope.close marks a scope Closed before its asynchronous finalizers finish.
+ * Closing it a second time therefore does not join the first cleanup, and a
+ * defective cleanup must not turn into a successful no-op on retry. Every
+ * owner has one shared, immutable close receipt used by reconciliation and by
+ * the enclosing scope. Only the cleanup/receipt publication is protected;
+ * provider construction and provider operations remain interruptible.
+ */
+const makeJoinedScopeClose = (scope: Scope.Closeable) =>
+  Effect.gen(function* () {
+    const completion = yield* Deferred.make<void>();
+    let started = false;
+    return Effect.uninterruptible(
+      Effect.suspend(() => {
+        if (started) return Deferred.await(completion);
+        started = true;
+        return Effect.exit(Scope.close(scope, Exit.void)).pipe(
+          Effect.flatMap((exit) => Deferred.done(completion, exit)),
+          Effect.andThen(Deferred.await(completion)),
+        );
+      }),
+    );
+  });
+
+/** Join every provisional owner, retaining any failed receipt as a reuse veto. */
+const closeUnpublishedScopes = (state: RegistryState) =>
+  Effect.uninterruptible(
+    Effect.gen(function* () {
+      let firstFailure: Exit.Exit<void, never> | undefined;
+      for (const [id, close] of state.unpublishedScopes) {
+        const exit = yield* Effect.exit(close);
+        if (Exit.isSuccess(exit)) {
+          // The reconcile permit makes this exact-effect comparison sufficient:
+          // no other mutator can replace this id while cleanup is being joined.
+          if (state.unpublishedScopes.get(id) === close) state.unpublishedScopes.delete(id);
+        } else if (firstFailure === undefined) {
+          firstFailure = exit;
+        }
+      }
+      if (firstFailure !== undefined) yield* firstFailure;
+    }),
+  );
 
 /**
  * Only settings consumed by the driver may replace its process-owning scope.
@@ -139,6 +190,9 @@ const withLivePresentation = (
       snapshot: {
         ...snapshot,
         getSnapshot,
+        ...(snapshot.getCurrentSnapshot
+          ? { getCurrentSnapshot: snapshot.getCurrentSnapshot.pipe(Effect.map(decorate)) }
+          : {}),
         refresh: snapshot.refresh.pipe(Effect.map(decorate)),
         ...(snapshot.refreshAccountUsage
           ? { refreshAccountUsage: snapshot.refreshAccountUsage.pipe(Effect.map(decorate)) }
@@ -192,6 +246,7 @@ const buildEntry = <R>(input: {
   readonly instanceId: ProviderInstanceId;
   readonly rawInstanceId: string;
   readonly entry: ProviderInstanceConfig;
+  readonly registerUnpublishedScope: (close: Effect.Effect<void>) => void;
 }): Effect.Effect<
   | { readonly kind: "live"; readonly live: LiveEntry }
   | { readonly kind: "unavailable"; readonly snapshot: ServerProvider },
@@ -237,13 +292,24 @@ const buildEntry = <R>(input: {
     }
 
     const typedConfig = decodeResult.success;
-    const childScope = yield* Scope.make();
-    // Attach the child scope to the registry's parent scope: if the
-    // registry scope closes, each surviving instance's child scope is
-    // closed through this finalizer. `reconcile` manually closes the
-    // child scope on remove/replace; subsequent close via the parent's
-    // finalizer is a no-op because `Scope.close` is idempotent.
-    yield* Scope.addFinalizer(parentScope, Scope.close(childScope, Exit.void).pipe(Effect.ignore));
+    // Reserve cleanup ownership before entering interruptible driver code. A
+    // cancelled/defective create may already own resources even though it never
+    // returns an instance. The reconcile permit cannot be released until every
+    // such provisional scope has been joined (including earlier successful
+    // creates in the same not-yet-published batch).
+    const { childScope, close } = yield* Effect.uninterruptible(
+      Effect.gen(function* () {
+        const childScope = yield* Scope.make();
+        const close = yield* makeJoinedScopeClose(childScope);
+        input.registerUnpublishedScope(close);
+        yield* Scope.addFinalizer(parentScope, close);
+        return { childScope, close };
+      }),
+    );
+    // A parent which already closed may have run the newly registered finalizer
+    // synchronously. Closed is a refusal signal, never a successful cleanup
+    // witness authorizing a replacement or a provider call.
+    if (childScope.state._tag === "Closed") yield* Effect.interrupt;
 
     const createResult = yield* driver
       .create({
@@ -261,7 +327,7 @@ const buildEntry = <R>(input: {
         driver: entry.driver,
         detail: createResult.failure.detail,
       });
-      yield* Scope.close(childScope, Exit.void).pipe(Effect.ignore);
+      yield* close;
       return {
         kind: "unavailable" as const,
         snapshot: yield* buildUnavailableProviderSnapshot({
@@ -284,6 +350,7 @@ const buildEntry = <R>(input: {
       live: {
         ...presented,
         scope: childScope,
+        close,
         entry,
       },
     };
@@ -300,108 +367,154 @@ const makeReconcile = <R>(input: {
 }): ((configMap: ProviderInstanceConfigMap) => Effect.Effect<void, never, R>) => {
   const { state, driversById, parentScope } = input;
   return (configMap: ProviderInstanceConfigMap) =>
-    Effect.gen(function* () {
-      const previousEntries = yield* Ref.get(state.entries);
-      const previousUnavailable = yield* Ref.get(state.unavailable);
-      const nextRaw = Object.entries(configMap);
-      const nextKeys = new Set<ProviderInstanceId>(
-        nextRaw.map(([raw]) => ProviderInstanceId.make(raw)),
-      );
+    state.reconcileSemaphore.withPermits(1)(
+      Effect.gen(function* () {
+        // A previous cancelled batch can leave only completed refusal receipts,
+        // never an unjoined owner. Failed cleanup blocks reuse on every retry.
+        yield* closeUnpublishedScopes(state);
+        const previousEntries = yield* Ref.get(state.entries);
+        const previousUnavailable = yield* Ref.get(state.unavailable);
+        const nextRaw = Object.entries(configMap);
+        const nextKeys = new Set<ProviderInstanceId>(
+          nextRaw.map(([raw]) => ProviderInstanceId.make(raw)),
+        );
 
-      // 1. Close scopes for instances that disappeared or whose config
-      //    changed. Do this BEFORE creating replacements so ids map 1-to-1
-      //    to live scopes at all times.
-      const removedIds: Array<ProviderInstanceId> = [];
-      const replacedIds = new Set<ProviderInstanceId>();
-      for (const [instanceId, live] of previousEntries) {
-        if (!nextKeys.has(instanceId)) {
-          removedIds.push(instanceId);
-          continue;
-        }
-        const nextEntry = configMap[instanceId];
-        if (nextEntry !== undefined && !runtimeEntryEqual(live.entry, nextEntry)) {
-          replacedIds.add(instanceId);
-        }
-      }
-      for (const id of [...removedIds, ...replacedIds]) {
-        const live = previousEntries.get(id);
-        if (live) {
-          yield* Scope.close(live.scope, Exit.void).pipe(Effect.ignore);
-        }
-      }
-
-      // 2. Build additions and replacements. Walk `nextRaw` so the final
-      //    entry order follows settings-author order.
-      const builtEntries = new Map<ProviderInstanceId, LiveEntry>();
-      const builtUnavailable = new Map<ProviderInstanceId, ServerProvider>();
-      let orderChanged = false;
-      let presentationOrDefaultsChanged = false;
-      const previousOrder = [...previousEntries.keys()];
-      const nextOrder: Array<ProviderInstanceId> = [];
-
-      for (const [rawInstanceId, entry] of nextRaw) {
-        const instanceId = ProviderInstanceId.make(rawInstanceId);
-        nextOrder.push(instanceId);
-
-        const existing = previousEntries.get(instanceId);
-        if (existing !== undefined && !replacedIds.has(instanceId)) {
-          // Defaults are read from ServerSettings by the composer/turn reactor,
-          // not by the driver. Retain the newest envelope for comparisons without
-          // changing the process, session inventory, or subscription identity.
-          if (!Equal.equals(existing.entry, entry)) {
-            presentationOrDefaultsChanged = true;
-            yield* existing.updatePresentation(entry);
+        // 1. Close scopes for instances that disappeared or whose config
+        //    changed. Do this BEFORE creating replacements so ids map 1-to-1
+        //    to live scopes at all times.
+        const removedIds: Array<ProviderInstanceId> = [];
+        const replacedIds = new Set<ProviderInstanceId>();
+        for (const [instanceId, live] of previousEntries) {
+          if (!nextKeys.has(instanceId)) {
+            removedIds.push(instanceId);
+            continue;
           }
-          builtEntries.set(instanceId, { ...existing, entry });
-          continue;
+          const nextEntry = configMap[instanceId];
+          if (
+            state.retiring.has(live.instance) ||
+            (nextEntry !== undefined && !runtimeEntryEqual(live.entry, nextEntry))
+          ) {
+            replacedIds.add(instanceId);
+          }
+        }
+        const retiringEntries = [...removedIds, ...replacedIds]
+          .map((id) => previousEntries.get(id))
+          .filter((live): live is LiveEntry => live !== undefined);
+        if (retiringEntries.length > 0) {
+          // Revocation precedes any awaited finalizer. A cancelled admission can
+          // now complete its waiters during Scope.close without exposing the
+          // obsolete adapter/capability getter as a still-current owner.
+          // Keep entries internally until their teardown is joined, and serialize
+          // reconciliations so no concurrent caller can create a competitor.
+          // This protected region is only retirement bookkeeping/cleanup; driver
+          // construction below retains its original interruptibility and bounds.
+          yield* Effect.uninterruptible(
+            Effect.gen(function* () {
+              for (const live of retiringEntries) state.retiring.add(live.instance);
+              yield* PubSub.publish(state.changes, undefined);
+              let firstFailure: Exit.Exit<void, never> | undefined;
+              for (const live of retiringEntries) {
+                const exit = yield* Effect.exit(live.close);
+                if (Exit.isFailure(exit) && firstFailure === undefined) firstFailure = exit;
+              }
+              if (firstFailure !== undefined) yield* firstFailure;
+            }),
+          );
         }
 
-        const result = yield* buildEntry({
-          driversById,
-          parentScope,
-          instanceId,
-          rawInstanceId,
-          entry,
-        });
-        if (result.kind === "live") {
-          builtEntries.set(instanceId, result.live);
+        // 2. Build additions and replacements. Walk `nextRaw` so the final
+        //    entry order follows settings-author order.
+        const builtEntries = new Map<ProviderInstanceId, LiveEntry>();
+        const builtUnavailable = new Map<ProviderInstanceId, ServerProvider>();
+        let orderChanged = false;
+        let presentationOrDefaultsChanged = false;
+        const previousOrder = [...previousEntries.keys()];
+        const nextOrder: Array<ProviderInstanceId> = [];
+
+        for (const [rawInstanceId, entry] of nextRaw) {
+          const instanceId = ProviderInstanceId.make(rawInstanceId);
+          nextOrder.push(instanceId);
+
+          const existing = previousEntries.get(instanceId);
+          if (existing !== undefined && !replacedIds.has(instanceId)) {
+            // Defaults are read from ServerSettings by the composer/turn reactor,
+            // not by the driver. Retain the newest envelope for comparisons without
+            // changing the process, session inventory, or subscription identity.
+            if (!Equal.equals(existing.entry, entry)) {
+              presentationOrDefaultsChanged = true;
+              yield* existing.updatePresentation(entry);
+            }
+            builtEntries.set(instanceId, { ...existing, entry });
+            continue;
+          }
+
+          const result = yield* buildEntry({
+            driversById,
+            parentScope,
+            instanceId,
+            rawInstanceId,
+            entry,
+            registerUnpublishedScope: (close) => state.unpublishedScopes.set(instanceId, close),
+          });
+          if (result.kind === "live") {
+            builtEntries.set(instanceId, result.live);
+          } else {
+            builtUnavailable.set(instanceId, result.snapshot);
+          }
+        }
+
+        if (previousOrder.length === nextOrder.length) {
+          for (let i = 0; i < previousOrder.length; i++) {
+            if (previousOrder[i] !== nextOrder[i]) {
+              orderChanged = true;
+              break;
+            }
+          }
         } else {
-          builtUnavailable.set(instanceId, result.snapshot);
+          orderChanged = true;
         }
-      }
 
-      if (previousOrder.length === nextOrder.length) {
-        for (let i = 0; i < previousOrder.length; i++) {
-          if (previousOrder[i] !== nextOrder[i]) {
-            orderChanged = true;
-            break;
-          }
-        }
-      } else {
-        orderChanged = true;
-      }
+        const entriesChanged =
+          orderChanged ||
+          presentationOrDefaultsChanged ||
+          removedIds.length > 0 ||
+          replacedIds.size > 0 ||
+          builtEntries.size !== previousEntries.size;
+        const unavailableChanged =
+          builtUnavailable.size !== previousUnavailable.size ||
+          [...builtUnavailable].some(([id, snapshot]) => {
+            const prev = previousUnavailable.get(id);
+            return prev === undefined || !Equal.equals(prev, snapshot);
+          }) ||
+          [...previousUnavailable].some(([id]) => !builtUnavailable.has(id));
 
-      const entriesChanged =
-        orderChanged ||
-        presentationOrDefaultsChanged ||
-        removedIds.length > 0 ||
-        replacedIds.size > 0 ||
-        builtEntries.size !== previousEntries.size;
-      const unavailableChanged =
-        builtUnavailable.size !== previousUnavailable.size ||
-        [...builtUnavailable].some(([id, snapshot]) => {
-          const prev = previousUnavailable.get(id);
-          return prev === undefined || !Equal.equals(prev, snapshot);
-        }) ||
-        [...previousUnavailable].some(([id]) => !builtUnavailable.has(id));
-
-      yield* Ref.set(state.entries, builtEntries);
-      yield* Ref.set(state.unavailable, builtUnavailable);
-
-      if (entriesChanged || unavailableChanged) {
-        yield* PubSub.publish(state.changes, undefined);
-      }
-    });
+        // Transfer only a complete batch into the routing map. Cancellation
+        // between these local writes must not publish an owner and then have the
+        // provisional cleanup finalizer retire that now-visible owner.
+        yield* Effect.uninterruptible(
+          Effect.gen(function* () {
+            const admitted = yield* Ref.modify(state.entries, (current) => {
+              // A separately owned caller may finish an interruptible create after
+              // the registry parent has shut down. Check and publish synchronously
+              // inside this exact local mutation; a Closed scope is only a veto,
+              // never the joined-success receipt used for owner replacement.
+              if (
+                parentScope.state._tag === "Closed" ||
+                Array.from(builtEntries.values()).some((live) => live.scope.state._tag === "Closed")
+              )
+                return [false, current] as const;
+              return [true, builtEntries] as const;
+            });
+            if (!admitted) yield* Effect.interrupt;
+            yield* Ref.set(state.unavailable, builtUnavailable);
+            state.unpublishedScopes.clear();
+            if (entriesChanged || unavailableChanged) {
+              yield* PubSub.publish(state.changes, undefined);
+            }
+          }),
+        );
+      }).pipe(Effect.ensuring(closeUnpublishedScopes(state))),
+    );
 };
 
 /**
@@ -451,9 +564,18 @@ export const makeProviderInstanceRegistry = <R>(input: {
     const entries = yield* Ref.make<ReadonlyMap<ProviderInstanceId, LiveEntry>>(new Map());
     const unavailable = yield* Ref.make<ReadonlyMap<ProviderInstanceId, ServerProvider>>(new Map());
     const changes = yield* PubSub.unbounded<void>();
+    const retiring = new WeakSet<ProviderInstance>();
+    const reconcileSemaphore = yield* Semaphore.make(1);
     yield* Effect.addFinalizer(() => PubSub.shutdown(changes));
 
-    const state: RegistryState = { entries, unavailable, changes };
+    const state: RegistryState = {
+      entries,
+      unavailable,
+      changes,
+      retiring,
+      reconcileSemaphore,
+      unpublishedScopes: new Map(),
+    };
     const reconcileWithR = makeReconcile({ state, driversById, parentScope });
     const reconcile: ProviderInstanceRegistryMutatorShape["reconcile"] = (configMap) =>
       reconcileWithR(configMap).pipe(Effect.provideContext(driverContext));
@@ -463,11 +585,27 @@ export const makeProviderInstanceRegistry = <R>(input: {
     yield* reconcile(input.configMap);
 
     const registry: ProviderInstanceRegistryShape = {
-      getInstance: (id) => Ref.get(entries).pipe(Effect.map((map) => map.get(id)?.instance)),
+      getInstance: (id) =>
+        Ref.get(entries).pipe(
+          Effect.map((map) => {
+            const live = map.get(id);
+            return parentScope.state._tag !== "Closed" &&
+              live?.scope.state._tag !== "Closed" &&
+              live &&
+              !retiring.has(live.instance)
+              ? live.instance
+              : undefined;
+          }),
+        ),
       listInstances: Ref.get(entries).pipe(
-        Effect.map(
-          (map) =>
-            Array.from(map.values(), (live) => live.instance) as ReadonlyArray<ProviderInstance>,
+        Effect.map((map) =>
+          parentScope.state._tag === "Closed"
+            ? []
+            : (Array.from(map.values())
+                .filter(
+                  (live) => live.scope.state._tag !== "Closed" && !retiring.has(live.instance),
+                )
+                .map((live) => live.instance) as ReadonlyArray<ProviderInstance>),
         ),
       ),
       listUnavailable: Ref.get(unavailable).pipe(

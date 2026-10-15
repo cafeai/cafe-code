@@ -28,6 +28,7 @@ import {
   requestProviderDaemonConversationRollback,
   guardRemoteProviderThreadOperation,
   guardRemoteCodexContextWindowStart,
+  guardRemoteCodexFailedRootRestart,
   isRetryableProviderDaemonControlError,
   isVoidProviderDaemonRpcMethod,
   ProviderDaemonRpcResponseError,
@@ -82,6 +83,204 @@ const rewindConfig = { httpBaseUrl: "http://127.0.0.1:3774", token: "synthetic-t
 const encodeRpcRequest = Schema.encodeSync(ProviderDaemonRpcRequest);
 
 describe("RemoteProviderService", () => {
+  it.each(["subagent-concurrency-active", "codex-context-window-active"] as const)(
+    "preserves the finite %s refusal only for an exact startSession request error",
+    (refusal) => {
+      const response = new ProviderDaemonRpcResponseError(
+        "ProviderAdapterRequestError",
+        "Synthetic fixed refusal",
+        refusal,
+      );
+      const accepted = toRemoteRequestError("startSession", response);
+      assert.equal(accepted.remoteErrorTag, refusal);
+      assert.strictEqual(accepted.cause, response);
+      // Other methods and outer error classes cannot borrow the optional
+      // start-only admission fact, including paid turn submission and rewind.
+      for (const method of [
+        "sendTurn",
+        "steerTurn",
+        "stopSession",
+        "prepareConversationRollback",
+        "getCapabilities",
+      ]) {
+        assert.equal(
+          toRemoteRequestError(method, response).remoteErrorTag,
+          "ProviderAdapterRequestError",
+        );
+      }
+      const foreign = new ProviderDaemonRpcResponseError(
+        "ProviderUnsupportedError",
+        "Synthetic refusal",
+        refusal,
+      );
+      assert.equal(
+        toRemoteRequestError("startSession", foreign).remoteErrorTag,
+        "ProviderUnsupportedError",
+      );
+      const legacy = new ProviderDaemonRpcResponseError("ProviderAdapterRequestError", refusal);
+      assert.equal(
+        toRemoteRequestError("startSession", legacy).remoteErrorTag,
+        "ProviderAdapterRequestError",
+      );
+      for (const method of ["startSession", "sendTurn", "steerTurn", "stopSession"]) {
+        const unqualifiedOuter = new ProviderDaemonRpcResponseError(
+          refusal,
+          "Synthetic finite spelling",
+        );
+        assert.equal(
+          toRemoteRequestError(method, unqualifiedOuter).remoteErrorTag,
+          "ProviderAdapterRequestError",
+        );
+      }
+      let getterReads = 0;
+      const accessor = new ProviderDaemonRpcResponseError(
+        "ProviderAdapterRequestError",
+        "Synthetic refusal",
+      );
+      Object.defineProperty(accessor, "sessionReconfigurationRefusal", {
+        get: () => {
+          getterReads += 1;
+          return refusal;
+        },
+      });
+      assert.equal(
+        toRemoteRequestError("startSession", accessor).remoteErrorTag,
+        "ProviderAdapterRequestError",
+      );
+      const inherited = new ProviderDaemonRpcResponseError(
+        "ProviderAdapterRequestError",
+        "Synthetic refusal",
+      );
+      Object.setPrototypeOf(
+        inherited,
+        Object.create(Object.getPrototypeOf(inherited), {
+          sessionReconfigurationRefusal: { value: refusal },
+        }),
+      );
+      assert.equal(
+        toRemoteRequestError("startSession", inherited).remoteErrorTag,
+        "ProviderAdapterRequestError",
+      );
+      const outerAccessor = new ProviderDaemonRpcResponseError(
+        "ProviderAdapterRequestError",
+        "Synthetic refusal",
+        refusal,
+      );
+      Object.defineProperty(outerAccessor, "remoteErrorTag", {
+        get: () => {
+          getterReads += 1;
+          return "ProviderAdapterRequestError";
+        },
+      });
+      assert.equal(
+        toRemoteRequestError("startSession", outerAccessor).remoteErrorTag,
+        "ProviderAdapterRequestError",
+      );
+      assert.equal(getterReads, 0);
+      // A plain received error carrying similarly named fields is not an
+      // authenticated decoded RPC response and grants no semantic authority.
+      const untyped = Object.assign(new Error("Synthetic refusal"), {
+        remoteErrorTag: "ProviderAdapterRequestError",
+        sessionReconfigurationRefusal: refusal,
+      });
+      assert.equal(toRemoteRequestError("startSession", untyped).remoteErrorTag, undefined);
+      for (const malformed of ["unrecognized-refusal", "", null, true, { code: refusal }]) {
+        const malformedResponse = new ProviderDaemonRpcResponseError(
+          "ProviderAdapterRequestError",
+          "Synthetic fixed refusal",
+          malformed as never,
+        );
+        assert.equal(
+          toRemoteRequestError("startSession", malformedResponse).remoteErrorTag,
+          "ProviderAdapterRequestError",
+        );
+      }
+    },
+  );
+
+  it.effect(
+    "cold failed-root RPC requires the exact authenticated owner capability and complete failure identity before delivery",
+    () =>
+      Effect.gen(function* () {
+        const account = ProviderInstanceId.make("exact-cold-recovery-owner");
+        const request = {
+          threadId: ThreadId.make("cold-recovery-remote-thread"),
+          input: "Continue existing work.",
+          expectedFailedRoot: {
+            turnId: TurnId.make("exact-remote-failed-root"),
+            providerThreadId: "same-private-native-history",
+            subagentRuntimeId: SubagentRuntimeId.make("00000000-0000-4000-8000-000000000088"),
+            providerInstanceId: account,
+            observedAt: "2026-10-14T06:00:00.000Z",
+            restartSession: true as const,
+          },
+        };
+        let deliveries = 0;
+        const observed: ProviderInstanceId[] = [];
+        const delivery = Effect.sync(() => ++deliveries);
+        for (const capability of [false, undefined, "true"] as const) {
+          const outcome = yield* guardRemoteCodexFailedRootRestart({
+            request,
+            readCapabilities: (owner) =>
+              Effect.sync(() => {
+                observed.push(owner);
+                return {
+                  sessionModelSwitch: "in-session" as const,
+                  liveSteer: "supported" as const,
+                  ...(capability === undefined
+                    ? {}
+                    : { codexFailedRootRestart: capability as boolean }),
+                };
+              }),
+            effect: delivery,
+          }).pipe(Effect.exit);
+          assert.equal(Exit.isFailure(outcome), true);
+          assert.equal(deliveries, 0);
+        }
+        assert.deepEqual(observed, [account, account, account]);
+        const unavailable = yield* guardRemoteCodexFailedRootRestart({
+          request,
+          readCapabilities: () => Effect.die("Synthetic authenticated-owner inventory unavailable"),
+          effect: delivery,
+        }).pipe(Effect.exit);
+        assert.equal(Exit.isFailure(unavailable), true);
+        assert.equal(deliveries, 0);
+        for (const expected of [
+          { ...request.expectedFailedRoot, providerInstanceId: undefined },
+          { ...request.expectedFailedRoot, observedAt: undefined },
+        ]) {
+          const malformed = yield* guardRemoteCodexFailedRootRestart({
+            request: { ...request, expectedFailedRoot: expected },
+            readCapabilities: () => Effect.die("An incomplete owner must not be probed"),
+            effect: delivery,
+          }).pipe(Effect.exit);
+          assert.equal(Exit.isFailure(malformed), true);
+          assert.equal(deliveries, 0);
+        }
+        yield* guardRemoteCodexFailedRootRestart({
+          request,
+          readCapabilities: (owner) =>
+            Effect.sync(() => {
+              assert.equal(owner, account);
+              return {
+                sessionModelSwitch: "in-session" as const,
+                liveSteer: "supported" as const,
+                codexFailedRootRestart: true,
+              };
+            }),
+          effect: delivery,
+        });
+        assert.equal(deliveries, 1);
+        // Legacy explicit sends without a restart request remain ordinary
+        // commands; they cannot be silently upgraded into cold recovery.
+        yield* guardRemoteCodexFailedRootRestart({
+          request: { ...request, expectedFailedRoot: undefined },
+          readCapabilities: () => Effect.die("Ordinary send must not probe restart capability"),
+          effect: delivery,
+        });
+        assert.equal(deliveries, 2);
+      }),
+  );
   it.effect(
     "requires exact authenticated context support before numeric or Reset reconfiguration delivery",
     () =>
@@ -130,11 +329,29 @@ describe("RemoteProviderService", () => {
                 sessionModelSwitch: "in-session" as const,
                 liveSteer: "unsupported" as const,
                 codexContextWindow: true,
+                codexContextCompaction: true,
               };
             }),
           effect: delivery,
         });
         assert.equal(qualified, 1);
+        // A context-only legacy owner may understand the number but cannot
+        // prove that this opening pairs the automatic-compaction request.
+        for (const paired of [undefined, false, "true"] as const) {
+          const refused = yield* guardRemoteCodexContextWindowStart({
+            request: { ...base, codexContextWindowOverride: 800_000 },
+            readCapabilities: () =>
+              Effect.succeed({
+                sessionModelSwitch: "in-session" as const,
+                liveSteer: "supported" as const,
+                codexContextWindow: true,
+                ...(paired === undefined ? {} : { codexContextCompaction: paired as boolean }),
+              }),
+            effect: delivery,
+          }).pipe(Effect.result);
+          assert.equal(refused._tag, "Failure");
+          assert.equal(deliveries, 1);
+        }
         for (const request of [
           { ...base, providerInstanceId: undefined, codexContextWindowOverride: 500_000 },
           {

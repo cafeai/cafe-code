@@ -38,65 +38,6 @@ if (process.isMainFrame === true) {
       return result as ReturnType<DesktopBridge["getLocalEnvironmentBootstrap"]>;
     },
     getDebugEndpointState: () => ipcRenderer.invoke(IpcChannels.GET_DEBUG_ENDPOINT_STATE_CHANNEL),
-    getVisualizationHostCapabilities: () =>
-      ipcRenderer.invoke(IpcChannels.VISUALIZATION_CAPABILITIES_CHANNEL),
-    openVisualization: (input) => ipcRenderer.invoke(IpcChannels.VISUALIZATION_OPEN_CHANNEL, input),
-    updateVisualization: (input) =>
-      ipcRenderer.invoke(IpcChannels.VISUALIZATION_UPDATE_CHANNEL, input),
-    retireVisualization: (input) =>
-      ipcRenderer.invoke(IpcChannels.VISUALIZATION_RETIRE_CHANNEL, input),
-    captureVisualization: (input) =>
-      ipcRenderer.invoke(IpcChannels.VISUALIZATION_CAPTURE_CHANNEL, input),
-    sendVisualizationMessage: (input) =>
-      ipcRenderer.invoke(IpcChannels.VISUALIZATION_MESSAGE_CHANNEL, input),
-    suspendVisualization: (input) =>
-      ipcRenderer.invoke(IpcChannels.VISUALIZATION_SUSPEND_CHANNEL, input),
-    onVisualizationHostEvent: (listener) => {
-      const wrapped = (_event: Electron.IpcRendererEvent, raw: unknown) => {
-        if (typeof raw !== "object" || raw === null) return;
-        const value = raw as {
-          leaseId?: unknown;
-          state?: unknown;
-          json?: unknown;
-          reason?: unknown;
-        };
-        if (Object.keys(value).some((key) => !["leaseId", "state", "json", "reason"].includes(key)))
-          return;
-        if (
-          typeof value.leaseId !== "string" ||
-          !/^[a-f0-9-]{36}$/.test(value.leaseId) ||
-          !["active", "retired", "quarantined", "message"].includes(String(value.state)) ||
-          (value.json !== undefined &&
-            (value.state !== "message" ||
-              typeof value.json !== "string" ||
-              value.json.length > 128 * 1024 ||
-              new TextEncoder().encode(value.json).byteLength > 128 * 1024)) ||
-          (value.reason !== undefined &&
-            ![
-              "busy",
-              "invalid",
-              "expired",
-              "unavailable",
-              "timeout",
-              "resource-denied",
-              "capture-failed",
-              "retirement-uncertain",
-              "owner-revoked",
-            ].includes(String(value.reason)))
-        )
-          return;
-        listener({
-          leaseId: value.leaseId,
-          state: value.state as Parameters<typeof listener>[0]["state"],
-          ...(value.json !== undefined ? { json: value.json as string } : {}),
-          ...(value.reason !== undefined
-            ? { reason: value.reason as NonNullable<Parameters<typeof listener>[0]["reason"]> }
-            : {}),
-        });
-      };
-      ipcRenderer.on(IpcChannels.VISUALIZATION_EVENT_CHANNEL, wrapped);
-      return () => ipcRenderer.removeListener(IpcChannels.VISUALIZATION_EVENT_CHANNEL, wrapped);
-    },
     publishDebugSnapshot: (snapshot) =>
       ipcRenderer.invoke(IpcChannels.PUBLISH_DEBUG_SNAPSHOT_CHANNEL, snapshot),
     getClientSettings: () => ipcRenderer.invoke(IpcChannels.GET_CLIENT_SETTINGS_CHANNEL),

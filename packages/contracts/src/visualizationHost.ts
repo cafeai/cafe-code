@@ -19,6 +19,8 @@ export const VISUALIZATION_HOST_ACTIVE_MS = 5 * 60_000;
 export const VISUALIZATION_HOST_TICKET_MS = 60_000;
 export const VISUALIZATION_HOST_RETIRE_MS = 5_000;
 export const VISUALIZATION_HOST_SUSPEND_MS = 30_000;
+export const VISUALIZATION_HOST_MAX_VIEWERS = 4;
+export const VISUALIZATION_HOST_MAX_INPUT_BYTES = 64 * 1024 * 1024;
 
 const strict = { parseOptions: { onExcessProperty: "error" as const } };
 const uuid = Schema.String.check(Schema.isUUID(), Schema.isPattern(/^[a-f0-9-]{36}$/));
@@ -149,8 +151,15 @@ export const VisualizationHostInspectInput = Schema.Struct({
 export const VisualizationHostRevokeInput = Schema.Struct({
   owner: VisualizationHostOwner,
 }).annotate(strict);
+/** Authenticated backend cancellation releases only this unused ticket. */
+export const VisualizationHostDiscardInput = Schema.Struct({ ticket: capability }).annotate(strict);
+export const VisualizationHostDiscardResult = Schema.Struct({ discarded: Schema.Boolean }).annotate(
+  strict,
+);
 
-/** Renderer geometry is finite DIP data; native main clamps it to its exact owning window. */
+/** Trusted owner-page CSS geometry, not native DIP or physical raster pixels.
+ * Main alone reads the exact owning WebContents zoom and maps it into its View
+ * coordinate system. The full viewport must not shrink when history scrolls. */
 export const VisualizationHostBounds = Schema.Struct({
   x: integer(-32_768, 32_768),
   y: integer(-32_768, 32_768),
@@ -158,23 +167,52 @@ export const VisualizationHostBounds = Schema.Struct({
   height: integer(1, 2000),
 }).annotate(strict);
 export type VisualizationHostBounds = typeof VisualizationHostBounds.Type;
+const clipIsSubset = (value: {
+  readonly bounds: VisualizationHostBounds;
+  readonly clipBounds?: VisualizationHostBounds;
+}) => {
+  const clip = value.clipBounds;
+  const bounds = value.bounds;
+  return (
+    !clip ||
+    (clip.x >= bounds.x &&
+      clip.y >= bounds.y &&
+      clip.x + clip.width <= bounds.x + bounds.width &&
+      clip.y + clip.height <= bounds.y + bounds.height)
+  );
+};
 export const VisualizationHostOpenInput = Schema.Struct({
   ticket: capability,
   bounds: VisualizationHostBounds,
+  // Visible card/scroll-area intersection, separate from the full page viewport.
+  // Older native callers and private previews omit it to request the full bounds.
+  clipBounds: Schema.optionalKey(VisualizationHostBounds),
   appearance,
   presentation: Schema.optionalKey(VisualizationHostPresentation),
   displayMode: Schema.optionalKey(VisualizationHostDisplayMode),
-}).annotate(strict);
+  // Native-owned, one-use source/window/frame continuation; never a fresh lease budget.
+  continuation: Schema.optionalKey(capability),
+})
+  .check(Schema.makeFilter(clipIsSubset))
+  .annotate(strict);
 export type VisualizationHostOpenInput = typeof VisualizationHostOpenInput.Type;
 export const VisualizationHostLeaseInput = Schema.Struct({ leaseId: uuid }).annotate(strict);
 export const VisualizationHostUpdateInput = Schema.Struct({
   leaseId: uuid,
   bounds: VisualizationHostBounds,
+  clipBounds: Schema.optionalKey(VisualizationHostBounds),
   visible: Schema.Boolean,
   appearance,
   presentation: Schema.optionalKey(VisualizationHostPresentation),
   displayMode: Schema.optionalKey(VisualizationHostDisplayMode),
-}).annotate(strict);
+  // Explicit trusted fullscreen interaction only; automatic admission omits it.
+  focus: Schema.optionalKey(Schema.Boolean),
+  // Generated-only presentation hiding for a positive crop/menu; never Apps
+  // consent or authority to retain a genuinely offscreen/hidden owner.
+  presentationHidden: Schema.optionalKey(Schema.Boolean),
+})
+  .check(Schema.makeFilter(clipIsSubset))
+  .annotate(strict);
 export type VisualizationHostUpdateInput = typeof VisualizationHostUpdateInput.Type;
 export const VisualizationHostMessageInput = Schema.Struct({
   leaseId: uuid,
@@ -186,23 +224,49 @@ export const VisualizationHostMessageInput = Schema.Struct({
 export const VisualizationHostState = Schema.Struct({
   leaseId: uuid,
   state: Schema.Literals(["active", "retired", "quarantined", "blocked"]),
-  expiresAtMs: timestamp,
+  // Null is exact generated visibility-owned lifetime, not an infinite ticket.
+  expiresAtMs: Schema.NullOr(timestamp),
   reason: Schema.optionalKey(VisualizationHostReason),
 }).annotate(strict);
 export type VisualizationHostState = typeof VisualizationHostState.Type;
+/** Adversarial presentation data, never execution or provider authority. */
+export const VisualizationHostLayout = Schema.Struct({
+  height: Schema.Number.check(Schema.isInt(), Schema.isBetween({ minimum: 80, maximum: 2000 })),
+  constrained: Schema.Boolean,
+  sequence: Schema.Number.check(Schema.isInt(), Schema.isBetween({ minimum: 1, maximum: 100000 })),
+}).annotate(strict);
+export type VisualizationHostLayout = typeof VisualizationHostLayout.Type;
 export const VisualizationHostEvent = Schema.Struct({
   leaseId: uuid,
-  state: Schema.Literals(["active", "retired", "quarantined", "message"]),
+  // Transient echo of this window's consumed opening ticket, never a broker credential.
+  openingTicket: Schema.optionalKey(capability),
+  state: Schema.Literals(["active", "retired", "quarantined", "message", "wheel", "layout"]),
+  layout: Schema.optionalKey(VisualizationHostLayout),
   json: Schema.optionalKey(
     Schema.String.check(Schema.isMaxLength(VISUALIZATION_HOST_MAX_MESSAGE_BYTES)),
   ),
   reason: Schema.optionalKey(VisualizationHostReason),
-}).annotate(strict);
+  wheel: Schema.optionalKey(
+    Schema.Struct({
+      deltaX: Schema.Number.check(Schema.isBetween({ minimum: -2048, maximum: 2048 })),
+      deltaY: Schema.Number.check(Schema.isBetween({ minimum: -2048, maximum: 2048 })),
+    }).annotate(strict),
+  ),
+})
+  .check(
+    Schema.makeFilter(
+      (value) =>
+        (value.state === "wheel") === (value.wheel !== undefined) &&
+        (value.state === "layout") === (value.layout !== undefined) &&
+        (value.state === "message" || value.json === undefined),
+    ),
+  )
+  .annotate(strict);
 export type VisualizationHostEvent = typeof VisualizationHostEvent.Type;
 export const VisualizationHostInspection = Schema.Struct({
   leaseId: uuid,
   documentGeneration: uuid,
-  expiresAtMs: timestamp,
+  expiresAtMs: Schema.NullOr(timestamp),
   state: Schema.Literals(["active", "suspended"]),
 }).annotate(strict);
 export type VisualizationHostInspection = typeof VisualizationHostInspection.Type;
@@ -212,13 +276,64 @@ export const VisualizationHostCapture = Schema.Struct({
   height: integer(1, 2000),
 }).annotate(strict);
 export type VisualizationHostCapture = typeof VisualizationHostCapture.Type;
-export const VisualizationHostCapabilities = Schema.Struct({
+const legacyCapabilities = Schema.Struct({
   available: Schema.Boolean,
   reason: Schema.Literals(["ready", "unavailable", "quarantined"]),
   maxActive: Schema.Literal(1),
   activeLeaseMs: Schema.Literal(VISUALIZATION_HOST_ACTIVE_MS),
 }).annotate(strict);
+export const VisualizationHostCapabilities = Schema.Union([
+  legacyCapabilities,
+  Schema.Struct({
+    available: Schema.Boolean,
+    reason: Schema.Literals(["ready", "unavailable", "quarantined"]),
+    poolVersion: Schema.Literal(1),
+    autoGenerated: Schema.Literal(true),
+    maxActive: Schema.Literal(VISUALIZATION_HOST_MAX_VIEWERS),
+    maxMcpApps: Schema.Literal(1),
+    maxPreviews: Schema.Literal(1),
+    activeLeaseMs: Schema.Literal(VISUALIZATION_HOST_ACTIVE_MS),
+  }).annotate(strict),
+  Schema.Struct({
+    available: Schema.Boolean,
+    reason: Schema.Literals(["ready", "unavailable", "quarantined"]),
+    poolVersion: Schema.Literal(1),
+    autoGenerated: Schema.Literal(true),
+    generatedLifecycle: Schema.Literal("visible"),
+    maxActive: Schema.Literal(VISUALIZATION_HOST_MAX_VIEWERS),
+    maxMcpApps: Schema.Literal(1),
+    maxPreviews: Schema.Literal(1),
+    // External Apps alone retain this finite document lifetime.
+    activeLeaseMs: Schema.Literal(VISUALIZATION_HOST_ACTIVE_MS),
+  }).annotate(strict),
+]);
 export type VisualizationHostCapabilities = typeof VisualizationHostCapabilities.Type;
+/** Native counters are scheduling hints, never proof of slot ownership or retirement. */
+export const VisualizationHostCapacity = Schema.Struct({
+  poolVersion: Schema.Literal(1),
+  sequence: timestamp,
+  available: Schema.Boolean,
+  viewerCount: integer(0, VISUALIZATION_HOST_MAX_VIEWERS),
+  freeViewers: integer(0, VISUALIZATION_HOST_MAX_VIEWERS),
+  preparedCount: integer(0, VISUALIZATION_HOST_MAX_VIEWERS),
+  freePreparations: integer(0, VISUALIZATION_HOST_MAX_VIEWERS),
+  mcpAppAvailable: Schema.Boolean,
+  previewBusy: Schema.Boolean,
+}).annotate(strict);
+export type VisualizationHostCapacity = typeof VisualizationHostCapacity.Type;
+export const VisualizationHostCapacityObservation = Schema.Struct({
+  observing: Schema.Boolean,
+  observerId: uuid,
+  sequence: timestamp,
+}).annotate(strict);
+export const VisualizationHostYieldResult = Schema.Struct({
+  leaseId: uuid,
+  state: VisualizationHostState.fields.state,
+  expiresAtMs: Schema.NullOr(timestamp),
+  reason: Schema.optionalKey(VisualizationHostReason),
+  continuation: Schema.optionalKey(capability),
+}).annotate(strict);
+export type VisualizationHostYieldResult = typeof VisualizationHostYieldResult.Type;
 export const VisualizationHostSuspendInput = Schema.Struct({
   leaseId: uuid,
   suspended: Schema.Boolean,
@@ -227,12 +342,23 @@ export const VisualizationHostSuspendInput = Schema.Struct({
 
 /** Optional only for older desktop clients, never emulated by an ordinary browser iframe. */
 export interface VisualizationDesktopBridge {
+  focusVisualization?: (input: typeof VisualizationHostLeaseInput.Type) => Promise<boolean>;
   getVisualizationHostCapabilities?: () => Promise<VisualizationHostCapabilities>;
+  getVisualizationHostCapacity?: () => Promise<VisualizationHostCapacity>;
+  onVisualizationCapacityChanged?: (
+    listener: (value: VisualizationHostCapacity) => void,
+  ) => () => void;
   openVisualization?: (input: VisualizationHostOpenInput) => Promise<VisualizationHostState>;
   updateVisualization?: (input: VisualizationHostUpdateInput) => Promise<VisualizationHostState>;
   retireVisualization?: (
     input: typeof VisualizationHostLeaseInput.Type,
   ) => Promise<VisualizationHostState>;
+  yieldVisualization?: (
+    input: typeof VisualizationHostLeaseInput.Type,
+  ) => Promise<VisualizationHostYieldResult>;
+  beginVisualizationTransition?: (
+    input: typeof VisualizationHostLeaseInput.Type,
+  ) => Promise<boolean>;
   captureVisualization?: (
     input: typeof VisualizationHostLeaseInput.Type,
   ) => Promise<VisualizationHostCapture | null>;

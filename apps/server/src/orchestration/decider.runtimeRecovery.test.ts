@@ -103,6 +103,73 @@ function decide(
 }
 
 describe("runtime recovery admission", () => {
+  it("allows an old-to-new failed-session CAS only with the engine's exact authenticated generation-transfer proof", async () => {
+    const previous = SubagentRuntimeId.make("00000000-0000-4000-8000-000000000089");
+    const replacement = SubagentRuntimeId.make("00000000-0000-4000-8000-000000000090");
+    const base = makeThread();
+    const thread: OrchestrationThread = {
+      ...base,
+      latestTurn: { ...base.latestTurn!, state: "error" },
+      session: {
+        ...base.session!,
+        status: "ready",
+        subagentRuntimeId: previous,
+        lastError: "Original root failed.",
+      },
+    };
+    const command: Extract<OrchestrationCommand, { type: "thread.session.set" }> = {
+      type: "thread.session.set",
+      commandId: CommandId.make("server:exact-cold-failure-association"),
+      threadId,
+      expectedSessionLifecycle: sessionLifecycleSnapshot(thread.session),
+      expectedSubagentRuntimeId: previous,
+      codexFailedRoot: {
+        turnId: TurnId.make("cold-terminal-before-start"),
+        previousTurnId: turnId,
+        messageId: MessageId.make("cold-accepted-message"),
+        intentSequence: 12,
+        requestedAt: now,
+        completedAt: "2026-09-16T01:00:03.000Z",
+      },
+      session: {
+        ...thread.session!,
+        subagentRuntimeId: replacement,
+        status: "ready",
+        activeTurnId: null,
+        lastError: "Replacement root failed.",
+        updatedAt: "2026-09-16T01:00:03.000Z",
+      },
+      createdAt: "2026-09-16T01:00:03.000Z",
+    };
+    const decideTransfer = (current: OrchestrationThread, authority: boolean) =>
+      decideOrchestrationCommand({
+        command,
+        codexFailedRootVerified: true,
+        codexFailedRootGenerationTransferVerified: authority,
+        readModel: { snapshotSequence: 14, projects: [], threads: [current], updatedAt: now },
+      });
+    await expect(Effect.runPromise(decideTransfer(thread, false))).rejects.toThrow();
+    const event = await Effect.runPromise(decideTransfer(thread, true));
+    expect(event).toMatchObject({
+      type: "thread.session-set",
+      payload: {
+        session: { subagentRuntimeId: replacement, status: "ready", activeTurnId: null },
+        codexFailedRoot: command.codexFailedRoot,
+      },
+    });
+    for (const current of [
+      { ...thread, session: { ...thread.session!, status: "stopped" as const } },
+      { ...thread, session: { ...thread.session!, activeTurnId: TurnId.make("new-root") } },
+      { ...thread, session: { ...thread.session!, subagentRuntimeId: replacement } },
+      { ...thread, archivedAt: now },
+      {
+        ...thread,
+        modelSelection: { ...modelSelection, instanceId: ProviderInstanceId.make("peer") },
+      },
+    ])
+      await expect(Effect.runPromise(decideTransfer(current, true))).rejects.toThrow();
+  });
+
   it("requires engine-authenticated acceptance and the exact failed-context CAS for terminal association", async () => {
     const runtimeId = SubagentRuntimeId.make("00000000-0000-4000-8000-000000000142");
     const nextTurnId = TurnId.make("accepted-failed-continuation");

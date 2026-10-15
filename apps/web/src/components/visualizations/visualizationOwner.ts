@@ -67,8 +67,10 @@ export function observeVisualizationOwner(environmentId: EnvironmentId, revoke: 
       ? useSavedEnvironmentRuntimeStore.getState().byId[environmentId]?.connectedAt
       : null;
   let disposed = false;
-  const current = () => {
-    if (disposed || readEnvironmentApi(environmentId) !== api) return false;
+  let revoked = false;
+  let notified = false;
+  const matchesCurrentOwner = () => {
+    if (readEnvironmentApi(environmentId) !== api) return false;
     if (readEnvironmentConnection(environmentId) !== connection) return false;
     if (connection?.kind === "primary") {
       const status = getWsConnectionStatus();
@@ -87,8 +89,23 @@ export function observeVisualizationOwner(environmentId: EnvironmentId, revoke: 
     // Missing registry evidence is never labelled a local/native capability.
     return api !== undefined && api !== null;
   };
+  const current = () => {
+    if (disposed || revoked) return false;
+    if (matchesCurrentOwner()) return true;
+    // Authority loss is monotonic for this exact disclosure/Run gesture. A
+    // restored role, authenticated status or same-clock reconnect cannot revive
+    // already-pending private bytes or native responses. Reads may latch loss,
+    // but never invoke an external callback from a render/ownership predicate.
+    revoked = true;
+    return false;
+  };
   const changed = () => {
-    if (!current()) revoke();
+    if (disposed || current() || notified) return;
+    // Set both latches BEFORE external cleanup. Re-entrant checks observe lost
+    // ownership immediately, and repeated notifications cannot repeat cleanup.
+    revoked = true;
+    notified = true;
+    revoke();
   };
   const offConnection = subscribeEnvironmentConnections(changed);
   const offSaved = useSavedEnvironmentRuntimeStore.subscribe(changed);

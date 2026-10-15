@@ -11,7 +11,6 @@ import {
   type TurnId,
 } from "@cafecode/contracts";
 import * as Schema from "effect/Schema";
-import { BotIcon, TerminalIcon, WrenchIcon } from "lucide-react";
 import { useState } from "react";
 import { isSubagentRuntimeCurrent, type SubagentRuntimeContext } from "../../subagent-activity";
 import { deriveWorkflowTasks, readWorkflowTaskPresentation } from "../../workflowTaskActivity";
@@ -21,6 +20,8 @@ import { deriveForegroundTools } from "./chatActivity";
 import { deriveWorkLogEntries } from "../../session-logic";
 import { deriveLiveWorkObservations, isLiveWorkRuntimeCurrent } from "@cafecode/shared/liveWork";
 import { WorkflowTaskCard } from "./WorkflowTasks";
+import { SubagentAvatar } from "../subagents/SubagentAvatar";
+import { providerTaskOwnerAvatarSeed } from "@cafecode/shared/providerTaskOwnership";
 import {
   readProviderTaskPresentation,
   type ProviderTaskPresentation,
@@ -41,6 +42,8 @@ export interface ActiveProviderTask extends ProviderTaskPresentation {
   key: string;
   turnId: TurnId;
   reference?: ProviderIndividualTaskControl | undefined;
+  /** Exact received source identity, never inferred from tool kind or targets. */
+  ownerSubagentId?: string | undefined;
 }
 
 /** Rebuild only from exact current-runtime observations. Historical labels,
@@ -94,6 +97,7 @@ export function deriveActiveProviderTasks(context: ProviderTasksContext): Active
       key,
       turnId: activity.turnId,
       reference,
+      ownerSubagentId: providerTaskOwnerAvatarSeed(activity.payload, context.runtimeSession),
       ...readProviderTaskPresentation(activity),
     });
   }
@@ -116,6 +120,7 @@ export function deriveActiveProviderTasks(context: ProviderTasksContext): Active
       current.set(key, {
         key,
         turnId: activity.turnId,
+        ownerSubagentId: providerTaskOwnerAvatarSeed(activity.payload, context.runtimeSession),
         ...readProviderTaskPresentation(activity, entry?.command ?? entry?.detail ?? entry?.label),
       });
     }
@@ -131,6 +136,7 @@ export function deriveActiveProviderTasks(context: ProviderTasksContext): Active
     current.set(key, {
       key,
       turnId: activity.turnId,
+      ownerSubagentId: providerTaskOwnerAvatarSeed(activity.payload, context.runtimeSession),
       ...readProviderTaskPresentation(activity, entry?.command ?? entry?.detail ?? entry?.label),
     });
   }
@@ -249,22 +255,18 @@ export function ProviderTasks({
                 className="flex flex-wrap items-start gap-x-3 gap-y-2 rounded-xl border border-border-subtle px-3 py-2"
               >
                 <div className="flex min-w-0 flex-1 basis-36 items-start gap-2 py-1">
-                  {task.kind === "agent" ? (
-                    <BotIcon
-                      className="mt-0.5 size-3.5 shrink-0 text-muted-foreground"
-                      aria-hidden="true"
-                    />
-                  ) : task.kind === "command" ? (
-                    <TerminalIcon
-                      className="mt-0.5 size-3.5 shrink-0 text-muted-foreground"
-                      aria-hidden="true"
-                    />
-                  ) : (
-                    <WrenchIcon
-                      className="mt-0.5 size-3.5 shrink-0 text-muted-foreground"
-                      aria-hidden="true"
-                    />
-                  )}
+                  {/* Keep title alignment for root/unrecorded ownership. The
+                      existing avatar hashes its seed locally without exposing
+                      native IDs or adding a task-control/detail interaction. */}
+                  <span
+                    data-provider-task-owner-slot
+                    className="mt-0.5 flex size-4 shrink-0 items-center justify-center"
+                    aria-hidden="true"
+                  >
+                    {task.ownerSubagentId ? (
+                      <SubagentAvatar seed={task.ownerSubagentId} className="size-4" />
+                    ) : null}
+                  </span>
                   <p
                     data-provider-task-title
                     className="min-w-0 break-words text-xs font-medium text-foreground [overflow-wrap:anywhere]"

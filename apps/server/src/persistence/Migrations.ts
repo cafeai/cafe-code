@@ -118,8 +118,9 @@ import Migration0093 from "./Migrations/093_RecoveryPresentationIndex.ts";
 import Migration0094 from "./Migrations/094_CodexContextWindowOverride.ts";
 import Migration0095 from "./Migrations/095_ProviderActivityDiagnostics.ts";
 import Migration0096 from "./Migrations/096_GeneratedVisualizations.ts";
-import Migration0098 from "./Migrations/098_ReportedUsageCosts.ts";
 import Migration0097 from "./Migrations/097_ChatImages.ts";
+import Migration0098 from "./Migrations/098_ReportedUsageCosts.ts";
+import Migration0099 from "./Migrations/099_UsageAndCompactionReconciliation.ts";
 
 /**
  * Migration loader with all migrations defined inline.
@@ -234,6 +235,7 @@ export const migrationEntries = [
   [96, "GeneratedVisualizations", Migration0096],
   [97, "ChatImages", Migration0097],
   [98, "ReportedUsageCosts", Migration0098],
+  [99, "UsageAndCompactionReconciliation", Migration0099],
 ] as const;
 
 export const makeMigrationLoader = (

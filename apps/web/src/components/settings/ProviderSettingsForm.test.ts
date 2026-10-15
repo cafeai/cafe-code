@@ -355,7 +355,9 @@ describe("ProviderSettingsForm helpers", () => {
 
     expect(field).toMatchObject({
       label: "Auto-compact override",
-      description: "Token count that triggers compaction. Blank: Codex's per-model default.",
+      description: "Requested compaction threshold. An explicit value takes precedence.",
+      detail:
+        "Blank follows an active context-window override; otherwise Codex configuration and model defaults apply. Native limits still apply.",
       control: "number",
       step: 1_000,
       minimum: 1,

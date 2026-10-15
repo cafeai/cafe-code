@@ -30,6 +30,9 @@ const SVG_ELEMENTS = new Set([
   "style",
   "clipPath",
   "foreignObject",
+  "linearGradient",
+  "radialGradient",
+  "stop",
 ]);
 const HTML_ELEMENTS = new Set([
   "div",
@@ -138,6 +141,42 @@ export interface SvgPngInput {
   signal: AbortSignal;
 }
 
+/** PNG serialization is a finite, cancellable operation just like image
+ * decoding. A stalled callback must not retain an action or its bounded canvas
+ * indefinitely. Late callbacks have no publication authority after settlement;
+ * the rasterizer's existing finally block still clears its exact canvas. */
+export function serializeImageCanvasPng(
+  canvas: HTMLCanvasElement,
+  signal: AbortSignal,
+): Promise<Blob> {
+  signal.throwIfAborted();
+  return new Promise<Blob>((resolve, reject) => {
+    let settled = false;
+    const finish = (blob: Blob | null) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeout);
+      signal.removeEventListener("abort", aborted);
+      if (blob) resolve(blob);
+      else reject(new Error(getEXPORT_FAILURE()));
+    };
+    const aborted = () => finish(null);
+    const timeout = setTimeout(() => finish(null), DECODE_TIMEOUT_MS);
+    signal.addEventListener("abort", aborted, { once: true });
+    // A source callback/API hook can synchronously cancel after the initial
+    // check. Observe that same signal before scheduling browser work as well.
+    if (signal.aborted) {
+      finish(null);
+      return;
+    }
+    try {
+      canvas.toBlob(finish, "image/png");
+    } catch {
+      finish(null);
+    }
+  });
+}
+
 /** Export the complete intrinsic image at natural resolution. Large images
  * are uniformly reduced to the shared bitmap budget, never cropped to the
  * viewport. Allocate only the final bounded canvas, not an intrinsic bitmap. */
@@ -204,12 +243,7 @@ export async function rasterizeSvgToPng({
     context.fillRect(0, 0, targetWidth, targetHeight);
     context.drawImage(image, 0, 0, targetWidth, targetHeight);
     signal.throwIfAborted();
-    const png = await new Promise<Blob>((resolve, reject) => {
-      canvas.toBlob(
-        (blob) => (blob ? resolve(blob) : reject(new Error(getEXPORT_FAILURE()))),
-        "image/png",
-      );
-    });
+    const png = await serializeImageCanvasPng(canvas, signal);
     signal.throwIfAborted();
     if (png.type !== "image/png" || png.size < 1 || png.size > MAX_PNG_BYTES)
       throw new Error(getEXPORT_FAILURE());

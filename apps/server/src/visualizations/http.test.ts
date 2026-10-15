@@ -9,6 +9,9 @@ import * as Stream from "effect/Stream";
 import { ProviderInstanceId, ThreadId } from "@cafecode/contracts";
 import {
   VisualizationGenerationId,
+  VisualizationArtifactId,
+  VisualizationRevisionId,
+  VisualizationRequestId,
   VISUALIZATION_MAX_INPUT_JSON_BYTES,
 } from "@cafecode/contracts/visualizations";
 import { HttpServerRequest } from "effect/unstable/http";
@@ -53,9 +56,9 @@ const handle = (value: ReturnType<typeof request>) =>
   );
 
 /** Exercise the actual loopback HTTP request and SDK tool envelope without a
- * provider, profile, native host or database. Only preview is enabled in this
- * isolated service; any unintended publication fails instead of claiming a
- * successful artifact. The synthetic PNG is transport data, not host evidence. */
+ * provider, profile, native host or database. Publication returns only a
+ * synthetic transport receipt; it is not database, rendering or completion
+ * evidence. Every other operation fails instead of gaining incidental access. */
 async function generatedHttpFixture() {
   const token = "ab".repeat(32);
   const generation = VisualizationGenerationId.make("11111111-1111-4111-8111-111111111111");
@@ -67,25 +70,24 @@ async function generatedHttpFixture() {
     tokenDigest: "cd".repeat(32),
     serverName: `cafe-visualizations-${"a".repeat(22)}`,
   };
-  const preview = vi.fn<VisualizationArtifactService["preview"]>(() =>
-    Effect.succeed({
-      status: "ready" as const,
-      png: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVQIHWP4z8DwHwAFgAI/ScLbtAAAAABJRU5ErkJggg==",
-      width: 640,
-      height: 480,
-      diagnostics: [],
-    }),
+  const publish = vi.fn<VisualizationArtifactService["publish"]>(() =>
+    Effect.succeed(smallTransportReceipt),
   );
-  const unexpected = Effect.die("Only preview is admitted by the isolated HTTP fixture.");
+  const unexpected = Effect.die("Only synthetic publication is admitted by the HTTP fixture.");
   const refuseUnexpected = () => unexpected;
   const service: VisualizationArtifactService = {
-    preview,
-    publish: refuseUnexpected,
+    publish,
     publishMcpApp: refuseUnexpected,
     list: refuseUnexpected,
     details: refuseUnexpected,
+    inline: refuseUnexpected,
+    touchInlineFrame: refuseUnexpected,
+    retireInlineFrame: refuseUnexpected,
+    readInlineFrame: refuseUnexpected,
+    inlineFrameDeadline: () => undefined,
     poster: refuseUnexpected,
     viewerTicket: refuseUnexpected,
+    discardViewerTicket: refuseUnexpected,
     readViewerTicket: refuseUnexpected,
     exportHtml: refuseUnexpected,
     sweep: unexpected,
@@ -218,7 +220,7 @@ async function generatedHttpFixture() {
     );
   return {
     authority,
-    preview,
+    publish,
     send,
     prepareCompletionHold,
     close: async () => {
@@ -251,7 +253,7 @@ const smallGeneratedRequest = new TextEncoder().encode(
     jsonrpc: "2.0",
     id: 9,
     method: "tools/call",
-    params: { name: "preview_visualization", arguments: smallGeneratedInput },
+    params: { name: "publish_visualization", arguments: smallGeneratedInput },
   }),
 );
 /** Drain the real bounded payload, then await the controlled native completion
@@ -299,14 +301,32 @@ const heldGeneratedResponse = (fixture: Awaited<ReturnType<typeof generatedHttpF
     client.end(smallGeneratedRequest);
   });
 };
-const largeTransportPreview = {
-  status: "ready" as const,
-  // Equal to the admitted maximum PNG's encoded size, without introducing a
-  // renderer or claiming this transport-only fixture is an actual image.
-  png: "A".repeat(Math.ceil((8 * 1024 * 1024) / 3) * 4),
-  width: 640,
-  height: 480,
-  diagnostics: [],
+const smallTransportReceipt = {
+  version: 1 as const,
+  purpose: "cafe-visualization-receipt" as const,
+  invocationId: "11111111-1111-4111-8111-111111111111",
+  proof: "e".repeat(64),
+  reference: {
+    version: 1 as const,
+    purpose: "generated-visualization" as const,
+    artifactId: VisualizationArtifactId.make("11111111-1111-4111-8111-111111111111"),
+    revisionId: VisualizationRevisionId.make("22222222-2222-4222-8222-222222222222"),
+    title: "Synthetic chart",
+    width: 640,
+    height: 480,
+  },
+  requestId: VisualizationRequestId.make("11111111-1111-4111-8111-111111111111"),
+  inputSha256: "a".repeat(64),
+  sessionGeneration: VisualizationGenerationId.make("11111111-1111-4111-8111-111111111111"),
+  serverName: `cafe-visualizations-${"a".repeat(22)}`,
+  toolName: "publish_visualization" as const,
+} satisfies Effect.Success<ReturnType<VisualizationArtifactService["publish"]>>;
+const largeTransportReceipt = {
+  ...smallTransportReceipt,
+  // The MCP envelope repeats a receipt in text and structured content. This
+  // deliberately oversized opaque synthetic field exercises bounded native
+  // delivery, not receipt validity, artifact ownership or chart execution.
+  proof: "A".repeat(5 * 1024 * 1024),
 };
 
 describe("private visualization HTTP audience", () => {
@@ -339,7 +359,7 @@ describe("private visualization HTTP audience", () => {
         jsonrpc: "2.0",
         id: 7,
         method: "tools/call",
-        params: { name: "preview_visualization", arguments: input },
+        params: { name: "publish_visualization", arguments: input },
       });
       const bytes = new TextEncoder().encode(text);
       expect(bytes.length).toBeGreaterThan(128 * 1024);
@@ -360,9 +380,12 @@ describe("private visualization HTTP audience", () => {
       expect(JSON.parse(admitted.text)).toMatchObject({
         jsonrpc: "2.0",
         id: 7,
-        result: { content: [{ type: "text" }, { type: "image", mimeType: "image/png" }] },
+        result: {
+          content: [{ type: "text" }],
+          structuredContent: { visualizationReceipt: smallTransportReceipt },
+        },
       });
-      expect(fixture.preview).toHaveBeenCalledExactlyOnceWith(fixture.authority, input);
+      expect(fixture.publish).toHaveBeenCalledExactlyOnceWith(fixture.authority, input);
       for (const invalid of [
         new Uint8Array([0xff]),
         new TextEncoder().encode('{"source":"PRIVATE HTTP MARKER"'),
@@ -378,7 +401,7 @@ describe("private visualization HTTP audience", () => {
       await expect(
         fixture.send([new Uint8Array(VISUALIZATION_MAX_INPUT_JSON_BYTES + 1)]),
       ).rejects.toThrow();
-      expect(fixture.preview).toHaveBeenCalledTimes(1);
+      expect(fixture.publish).toHaveBeenCalledTimes(1);
     } finally {
       await fixture.close();
     }
@@ -387,7 +410,7 @@ describe("private visualization HTTP audience", () => {
     const fixture = await generatedHttpFixture();
     const held: Awaited<ReturnType<typeof heldGeneratedResponse>>[] = [];
     try {
-      fixture.preview.mockReturnValue(Effect.succeed(largeTransportPreview));
+      fixture.publish.mockReturnValue(Effect.succeed(largeTransportReceipt));
       for (let index = 0; index < 4; index++) {
         const connection = await heldGeneratedResponse(fixture);
         expect(connection.response.statusCode).toBe(200);
@@ -400,17 +423,15 @@ describe("private visualization HTTP audience", () => {
       expect(refused.status).toBe(503);
       expect(refused.connection).toBe("close");
       expect(refused.text).toBe('{"error":"Visualization request failed."}');
-      expect(fixture.preview).toHaveBeenCalledTimes(4);
+      expect(fixture.publish).toHaveBeenCalledTimes(4);
 
       held[0]!.response.destroy();
       held[0]!.client.destroy();
       await vi.waitFor(() => expect(visualizationMcpRequestCount()).toBe(3));
-      fixture.preview.mockReturnValueOnce(
-        Effect.succeed({ ...largeTransportPreview, png: "c3ludGhldGlj" }),
-      );
+      fixture.publish.mockReturnValueOnce(Effect.succeed(smallTransportReceipt));
       expect((await fixture.send([smallGeneratedRequest])).status).toBe(200);
       await vi.waitFor(() => expect(visualizationMcpRequestCount()).toBe(3));
-      expect(fixture.preview).toHaveBeenCalledTimes(5);
+      expect(fixture.publish).toHaveBeenCalledTimes(5);
     } finally {
       for (const connection of held) {
         connection.response.destroy();
@@ -434,7 +455,7 @@ describe("private visualization HTTP audience", () => {
       await ended;
       expect(held.nativeResponse.writableFinished).toBe(true);
       expect(visualizationMcpRequestCount()).toBe(0);
-      expect(fixture.preview).toHaveBeenCalledExactlyOnceWith(
+      expect(fixture.publish).toHaveBeenCalledExactlyOnceWith(
         fixture.authority,
         smallGeneratedInput,
       );
@@ -449,7 +470,7 @@ describe("private visualization HTTP audience", () => {
     let held: Awaited<ReturnType<typeof heldGeneratedResponse>> | undefined;
     vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
     try {
-      fixture.preview.mockReturnValue(Effect.succeed(largeTransportPreview));
+      fixture.publish.mockReturnValue(Effect.succeed(largeTransportReceipt));
       held = await heldGeneratedResponse(fixture);
       expect(visualizationMcpRequestCount()).toBe(1);
       await vi.advanceTimersByTimeAsync(VISUALIZATION_MCP_RESPONSE_MS - 1);
@@ -468,7 +489,7 @@ describe("private visualization HTTP audience", () => {
       expect(visualizationMcpRequestCount()).toBe(1);
       await vi.advanceTimersByTimeAsync(1);
       expect(visualizationMcpRequestCount()).toBe(0);
-      expect(fixture.preview).toHaveBeenCalledExactlyOnceWith(
+      expect(fixture.publish).toHaveBeenCalledExactlyOnceWith(
         fixture.authority,
         smallGeneratedInput,
       );

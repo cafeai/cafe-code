@@ -14,6 +14,14 @@ account/model pair. Disabled accounts and locked continuation boundaries keep
 their existing restrictions. Opening the picker retains the ordinary bounded
 catalogue refresh; scrolling does not add provider requests.
 
+Fallback lists are startup guesses, not native account availability. Once the
+current owner discovers a native catalogue, later same-account health checks
+cannot add omitted static models back. Conclusive ChatGPT fallback omits retired
+built-ins; API-key, unknown-account and explicit custom choices keep their own
+policies. Saved choices are never silently substituted. Cached lists remain
+historical presentation until a new owner establishes its own result. See
+[catalogue provenance](decisions/codex-model-catalogue-provenance.md).
+
 ## Service tier
 
 Open the composer model settings to choose **Service tier**. Cafe shows **Standard**

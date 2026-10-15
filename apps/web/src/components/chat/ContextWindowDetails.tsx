@@ -97,80 +97,87 @@ export function ContextWindowDetails(props: {
         <UsageMeterBar percent={usage.usedPercentage ?? 0} testId="context" />
       ) : null}
 
-      {hasUsage && usage.maxTokens !== null && usedPercentage ? (
-        <div
-          className={cn(
-            "text-foreground",
-            layout === "panel"
-              ? "text-ui font-medium tabular-nums"
-              : "whitespace-nowrap text-xs font-medium tabular-nums",
-          )}
-        >
-          <UiMessage
-            message={
-              "<percentage></percentage><separator></separator><used></used><divider></divider><capacity>{maximum} context used</capacity>"
-            }
-            values={{
-              maximum: formatContextWindowTokens(usage.maxTokens ?? null),
-              capacity: renderContextCapacity,
-            }}
-            slots={{
-              percentage: <span>{usedPercentage}</span>,
-              separator: <span className="mx-1">⋅</span>,
-              used: <span>{formatContextWindowTokens(usage.usedTokens)}</span>,
-              divider: <span>/</span>,
-            }}
-          />
-        </div>
-      ) : hasUsage ? (
-        <div
-          className={
-            layout === "panel" ? "text-ui text-foreground tabular-nums" : "text-sm text-foreground"
-          }
-        >
-          {uiText(
-            "{tokens} tokens used so far",
-            {
-              tokens: formatContextWindowTokens(usage.usedTokens),
-            },
-            undefined,
-            uiLocale,
-          )}
-        </div>
-      ) : null}
-
-      {hasProcessed || generationRate ? (
-        <div
-          className="flex min-w-0 flex-wrap items-baseline gap-x-3 gap-y-1 text-xs text-muted-foreground tabular-nums"
-          data-context-window-statistics
-        >
-          {hasProcessed ? (
-            <span
-              className="min-w-0 max-w-full"
-              title={uiText(
-                "Total processed: {tokens} tokens",
-                { tokens: formatContextWindowTokens(usage?.totalProcessedTokens ?? null) },
-                undefined,
-                uiLocale,
+      {hasUsage ? (
+        <div data-context-window-facts className="flex min-w-0 flex-col gap-1 leading-tight">
+          {hasUsage && usage.maxTokens !== null && usedPercentage ? (
+            <div
+              className={cn(
+                "text-foreground",
+                layout === "panel"
+                  ? "text-ui font-medium tabular-nums"
+                  : "whitespace-nowrap text-xs font-medium tabular-nums",
+                "leading-tight",
               )}
             >
+              <UiMessage
+                message={
+                  "<percentage></percentage><separator></separator><used></used><divider></divider><capacity>{maximum} context used</capacity>"
+                }
+                values={{
+                  maximum: formatContextWindowTokens(usage.maxTokens ?? null),
+                  capacity: renderContextCapacity,
+                }}
+                slots={{
+                  percentage: <span>{usedPercentage}</span>,
+                  separator: <span className="mx-1">⋅</span>,
+                  used: <span>{formatContextWindowTokens(usage.usedTokens)}</span>,
+                  divider: <span>/</span>,
+                }}
+              />
+            </div>
+          ) : hasUsage ? (
+            <div
+              className={
+                layout === "panel"
+                  ? "text-ui leading-tight text-foreground tabular-nums"
+                  : "text-sm leading-tight text-foreground"
+              }
+            >
               {uiText(
-                "Processed: {tokens}",
-                { tokens: formatContextWindowTokens(usage?.totalProcessedTokens ?? null) },
+                "{tokens} tokens used so far",
+                {
+                  tokens: formatContextWindowTokens(usage.usedTokens),
+                },
                 undefined,
                 uiLocale,
               )}
-            </span>
+            </div>
           ) : null}
-          {generationRate ? (
-            <span className="min-w-0 max-w-full">
-              {uiText(
-                "Speed: {rate} tok/s",
-                { rate: formatTokensPerSecond(generationRate) },
-                undefined,
-                uiLocale,
-              )}
-            </span>
+
+          {hasProcessed || generationRate ? (
+            <div
+              className="flex min-w-0 flex-wrap items-baseline gap-x-3 gap-y-1 text-xs leading-tight text-muted-foreground tabular-nums"
+              data-context-window-statistics
+            >
+              {hasProcessed ? (
+                <span
+                  className="min-w-0 max-w-full"
+                  title={uiText(
+                    "Total processed: {tokens} tokens",
+                    { tokens: formatContextWindowTokens(usage?.totalProcessedTokens ?? null) },
+                    undefined,
+                    uiLocale,
+                  )}
+                >
+                  {uiText(
+                    "Processed: {tokens}",
+                    { tokens: formatContextWindowTokens(usage?.totalProcessedTokens ?? null) },
+                    undefined,
+                    uiLocale,
+                  )}
+                </span>
+              ) : null}
+              {generationRate ? (
+                <span className="min-w-0 max-w-full">
+                  {uiText(
+                    "Speed: {rate} tok/s",
+                    { rate: formatTokensPerSecond(generationRate) },
+                    undefined,
+                    uiLocale,
+                  )}
+                </span>
+              ) : null}
+            </div>
           ) : null}
         </div>
       ) : null}

@@ -3,7 +3,7 @@
 // @effect-diagnostics globalDateInEffect:off
 // @effect-diagnostics globalConsoleInEffect:off
 // @effect-diagnostics globalTimers:off
-import { readVisualizationDiagnostics } from "../visualizations/visualizationDiagnostics.ts";
+import { readInlineVisualizationDiagnostics } from "./inlineVisualizationDiagnostics.ts";
 import {
   DICTATION_OPENAI_REQUEST_ID_MAX_CHARS,
   DICTATION_PROVIDER_ERROR_CODES,
@@ -1313,7 +1313,15 @@ function compactObjectWithoutContentPreviews(value: unknown): unknown {
 
   const record = value as Record<string, unknown>;
   const result: Record<string, unknown> = {};
-  for (const [key, entry] of Object.entries(record)) {
+  for (const [key, descriptor] of Object.entries(Object.getOwnPropertyDescriptors(record))) {
+    // Received debug records never get to execute an accessor while the compact
+    // endpoint independently projects their finite diagnostic metadata.
+    if (!("value" in descriptor)) continue;
+    const entry: unknown = descriptor.value;
+    if (key === "compaction") {
+      result[key] = summarizeCodexCompactionForCompactDebug(entry);
+      continue;
+    }
     if (
       key === "textPreview" ||
       key === "promptPreview" ||
@@ -1334,6 +1342,252 @@ function compactObjectWithoutContentPreviews(value: unknown): unknown {
     result[key] = compactObjectWithoutContentPreviews(entry);
   }
   return result;
+}
+
+function ownCompactionDebugField(value: unknown, key: string): unknown {
+  try {
+    if (value === null || typeof value !== "object" || Array.isArray(value)) return undefined;
+    const descriptor = Object.getOwnPropertyDescriptor(value, key);
+    return descriptor && "value" in descriptor ? descriptor.value : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function compactionDebugCount(value: unknown): number | null {
+  return readBoundedInteger(value, 0, Number.MAX_SAFE_INTEGER);
+}
+
+function compactionDebugTime(value: unknown): string | null {
+  if (typeof value !== "string" || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/.test(value))
+    return null;
+  return readCanonicalIsoTimestamp(value) === value ? value : null;
+}
+
+/** Array discrimination and length/index reads are received own-data evidence
+ * too. A proxy get trap, revoked proxy or accessor cannot execute or expand
+ * this diagnostic's fixed eight-entry allowance. */
+function boundedCompactionDebugEntries(value: unknown): readonly unknown[] {
+  try {
+    if (!Array.isArray(value)) return [];
+    const lengthDescriptor = Object.getOwnPropertyDescriptor(value, "length");
+    const length: unknown =
+      lengthDescriptor && "value" in lengthDescriptor ? lengthDescriptor.value : undefined;
+    if (typeof length !== "number" || !Number.isSafeInteger(length) || length < 0) return [];
+    const entries: unknown[] = [];
+    for (let index = 0; index < Math.min(length, 8); index += 1) {
+      try {
+        const descriptor = Object.getOwnPropertyDescriptor(value, String(index));
+        entries.push(descriptor && "value" in descriptor ? descriptor.value : undefined);
+      } catch {
+        entries.push(undefined);
+      }
+    }
+    return entries;
+  } catch {
+    return [];
+  }
+}
+
+/** This is a second, independent boundary after renderer IPC. Reconstruct only
+ * finite content-free diagnostics, never raw observations, native IDs, account
+ * config, a provider error, an arbitrary renderer key or a claimed trigger. */
+function summarizeCodexCompactionForCompactDebug(value: unknown): Record<string, unknown> | null {
+  try {
+    if (readRecord(value) === null) return null;
+  } catch {
+    return null;
+  }
+  const own = ownCompactionDebugField;
+  const policy = own(value, "policy"),
+    saved = own(value, "savedPolicy");
+  const evidence = own(value, "receivedNativeEvidence");
+  const latestValue = own(evidence, "latest");
+  const boundedEntries = boundedCompactionDebugEntries(latestValue);
+  const latest = boundedEntries.flatMap((entry) => {
+    const phase = own(entry, "phase"),
+      source = own(entry, "source");
+    const observedAt = compactionDebugTime(own(entry, "observedAt"));
+    const order = compactionDebugCount(own(entry, "order"));
+    const startValue = own(entry, "startObservedAt"),
+      startObservedAt = compactionDebugTime(startValue);
+    const usageEvidence = own(entry, "usageEvidence"),
+      usageValue = own(entry, "lastReportedUsageBeforeStart");
+    const rootValue = own(entry, "rootOpeningRequests");
+    const evictedSourceCount = compactionDebugCount(own(entry, "evictedSourceCount"));
+    const evictedItemCount = compactionDebugCount(own(entry, "evictedItemCount"));
+    if (
+      (phase !== "started" && phase !== "completed") ||
+      (source !== "root" && source !== "child") ||
+      observedAt === null ||
+      order === null ||
+      (startValue !== null && startObservedAt === null) ||
+      (usageEvidence !== "received-before-start" &&
+        usageEvidence !== "not-observed" &&
+        usageEvidence !== "start-not-observed") ||
+      evictedSourceCount === null ||
+      evictedItemCount === null ||
+      own(entry, "triggerReason") !== "unreported" ||
+      own(entry, "accountingScope") !== "unreported" ||
+      own(entry, "resolvedThreshold") !== null
+    )
+      return [];
+    let rootOpeningRequests: {
+      contextWindow: number | null;
+      autoCompactTokenLimit: number | null;
+    } | null = null;
+    if (rootValue !== null) {
+      const contextValue = own(rootValue, "contextWindow"),
+        compactValue = own(rootValue, "autoCompactTokenLimit");
+      const contextWindow = compactionDebugCount(contextValue),
+        autoCompactTokenLimit = compactionDebugCount(compactValue);
+      if (
+        (contextValue !== null && contextWindow === null) ||
+        (compactValue !== null && autoCompactTokenLimit === null)
+      )
+        return [];
+      rootOpeningRequests = { contextWindow, autoCompactTokenLimit };
+    }
+    let lastReportedUsageBeforeStart: Record<string, string | number | null> | null = null;
+    if (usageValue !== null) {
+      const usageAt = compactionDebugTime(own(usageValue, "observedAt")),
+        usageOrder = compactionDebugCount(own(usageValue, "order"));
+      const counters = {
+        usedTokens: compactionDebugCount(own(usageValue, "usedTokens")),
+        inputTokens: compactionDebugCount(own(usageValue, "inputTokens")),
+        cachedInputTokens: compactionDebugCount(own(usageValue, "cachedInputTokens")),
+        outputTokens: compactionDebugCount(own(usageValue, "outputTokens")),
+        reasoningOutputTokens: compactionDebugCount(own(usageValue, "reasoningOutputTokens")),
+        totalProcessedTokens: compactionDebugCount(own(usageValue, "totalProcessedTokens")),
+      };
+      const windowValue = own(usageValue, "reportedUsableContextWindow"),
+        reportedUsableContextWindow = compactionDebugCount(windowValue);
+      if (
+        usageAt === null ||
+        usageOrder === null ||
+        Object.values(counters).some((counter) => counter === null) ||
+        (windowValue !== null && reportedUsableContextWindow === null) ||
+        startObservedAt === null ||
+        usageOrder >= order ||
+        usageEvidence !== "received-before-start"
+      )
+        return [];
+      lastReportedUsageBeforeStart = {
+        observedAt: usageAt,
+        order: usageOrder,
+        ...counters,
+        reportedUsableContextWindow,
+      };
+    } else if (usageEvidence === "received-before-start") return [];
+    // Wall time can rewind, and duplicate starts retain their first sample.
+    // Received order, not timestamp equality/ordering, is the proof boundary.
+    if (
+      (phase === "started" && startObservedAt === null) ||
+      (usageEvidence === "start-not-observed" &&
+        (phase !== "completed" || startObservedAt !== null || usageValue !== null)) ||
+      (usageEvidence === "not-observed" && (startObservedAt === null || usageValue !== null))
+    )
+      return [];
+    return [
+      {
+        phase,
+        source,
+        observedAt,
+        order,
+        startObservedAt,
+        rootOpeningRequests,
+        lastReportedUsageBeforeStart,
+        usageEvidence,
+        evictedSourceCount,
+        evictedItemCount,
+        triggerReason: "unreported",
+        accountingScope: "unreported",
+        resolvedThreshold: null,
+      },
+    ];
+  });
+  const currentOwnerKnown = own(evidence, "currentOwnerKnown") === true;
+  const savedSource = own(saved, "source");
+  const context = own(value, "latestContextWindow"),
+    activity = own(value, "activity");
+  const nominalValue = own(policy, "nominalRequestAtNativeOpening");
+  const nominalRequestEvidenceKnown =
+    own(policy, "nominalRequestEvidenceKnown") === true &&
+    (nominalValue === null || compactionDebugCount(nominalValue) !== null);
+  return {
+    policy: {
+      enabled: own(policy, "enabled") === true,
+      source: own(policy, "source") === "codex-app-server" ? "codex-app-server" : null,
+      thresholdResolution: "native-unreported",
+      explicitCafeOverride: compactionDebugCount(own(policy, "explicitCafeOverride")),
+      usageAnnotationOrigin:
+        own(policy, "usageAnnotationOrigin") === "adapter-account-config"
+          ? "adapter-account-config"
+          : null,
+      usageAnnotationIsResolvedThreshold: false,
+      nominalRequestAtNativeOpening: compactionDebugCount(nominalValue),
+      nominalRequestEvidenceKnown,
+      nominalRequestStatus: !nominalRequestEvidenceKnown
+        ? "legacy-unknown"
+        : nominalValue === null
+          ? "known-omission"
+          : "recorded-nominal-request",
+      resolvedThresholdReportedByProvider: false,
+    },
+    savedPolicy:
+      saved === null || saved === undefined
+        ? null
+        : {
+            source:
+              savedSource === "chat-override" ||
+              savedSource === "account-default" ||
+              savedSource === "codex-default"
+                ? savedSource
+                : null,
+            savedChatContextWindow: compactionDebugCount(own(saved, "savedChatContextWindow")),
+            accountDefaultContextWindow: compactionDebugCount(
+              own(saved, "accountDefaultContextWindow"),
+            ),
+            explicitAccountAutoCompactRequest: compactionDebugCount(
+              own(saved, "explicitAccountAutoCompactRequest"),
+            ),
+            desiredRootContextWindowRequest: compactionDebugCount(
+              own(saved, "desiredRootContextWindowRequest"),
+            ),
+            desiredRootAutoCompactRequest: compactionDebugCount(
+              own(saved, "desiredRootAutoCompactRequest"),
+            ),
+            selectedAccountMatchesRuntime: own(saved, "selectedAccountMatchesRuntime") === true,
+            comparisonKnown: own(saved, "comparisonKnown") === true,
+            pending: readBoolean(own(saved, "pending")),
+            pendingCompaction: readBoolean(own(saved, "pendingCompaction")),
+            isUnsentDraft: false,
+            isResolvedNativeThreshold: false,
+          },
+    receivedNativeEvidence: {
+      currentOwnerKnown,
+      activityWindowLimit: 500,
+      observationLimit: 8,
+      omittedUnqualifiedCount: compactionDebugCount(own(evidence, "omittedUnqualifiedCount")),
+      latest: currentOwnerKnown ? latest : [],
+    },
+    latestContextWindow: {
+      sampleRole: "last-retained-general-usage-not-trigger",
+      sameCurrentOwnerReported: false,
+      usedTokens: compactionDebugCount(own(context, "usedTokens")),
+      inputTokens: compactionDebugCount(own(context, "inputTokens")),
+      maxTokens: compactionDebugCount(own(context, "maxTokens")),
+      aboveExplicitCafeOverride: readBoolean(own(context, "aboveExplicitCafeOverride")),
+    },
+    activity: {
+      contextCompactionActivityCount: compactionDebugCount(
+        own(activity, "contextCompactionActivityCount"),
+      ),
+      startedCount: compactionDebugCount(own(activity, "startedCount")),
+      completedCount: compactionDebugCount(own(activity, "completedCount")),
+      activeCount: compactionDebugCount(own(activity, "activeCount")),
+    },
+  };
 }
 
 function summarizeRendererForCompactDebug(): Record<string, unknown> {
@@ -1687,7 +1941,7 @@ function buildCompactDebugSnapshot(): Record<string, unknown> {
     process: summarizeProcessForCompactDebug(),
     providerDaemon: summarizeProviderDaemonForCompactDebug(),
     globalDictationShortcut: state.globalDictationShortcut,
-    visualizations: readVisualizationDiagnostics(),
+    visualizations: readInlineVisualizationDiagnostics(state.rendererSnapshot),
     renderer: summarizeRendererForCompactDebug(),
     freshness: buildProviderRendererFreshnessDiagnostic(),
   };
@@ -1783,7 +2037,7 @@ function buildFullDebugSnapshot(): Record<string, unknown> {
             snapshot: state.providerDaemonSnapshot,
           },
     globalDictationShortcut: state.globalDictationShortcut,
-    visualizations: readVisualizationDiagnostics(),
+    visualizations: readInlineVisualizationDiagnostics(state.rendererSnapshot),
     renderer:
       state.rendererSnapshot === null
         ? {
@@ -2013,6 +2267,7 @@ export const __desktopDebugServerTestApi = {
   },
   prepareProviderDaemonSnapshotForDebugRequest,
   buildCompactDebugSnapshot,
+  summarizeCodexCompactionForCompactDebug,
   buildFullDebugSnapshot,
   getProviderDaemonRefreshAttemptCount(): number {
     return state.providerDaemonSnapshotRefresh.attemptCount;

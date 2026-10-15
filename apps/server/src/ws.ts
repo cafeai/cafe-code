@@ -852,28 +852,34 @@ const makeWsRpcLayer = (
           privateVisualizationRead(withVisualizations((service) => service.list(input))),
         [WS_METHODS.visualizationsDetails]: (input) =>
           privateVisualizationRead(withVisualizations((service) => service.details(input))),
+        [WS_METHODS.visualizationsInline]: (input) =>
+          privateVisualizationRead(withVisualizations((service) => service.inline(input))),
+        [WS_METHODS.visualizationsTouchInlineFrame]: (input) =>
+          privateVisualizationRead(
+            withVisualizations((service) => service.touchInlineFrame(input)),
+          ),
+        [WS_METHODS.visualizationsRetireInlineFrame]: (input) =>
+          privateVisualizationRead(
+            withVisualizations((service) => service.retireInlineFrame(input)),
+          ),
         [WS_METHODS.visualizationsViewerTicket]: (input) =>
           privateVisualizationRead(
             withVisualizations((service) => service.viewerTicket(input)),
             true,
           ),
+        [WS_METHODS.visualizationsDiscardViewerTicket]: (input) =>
+          privateVisualizationRead(
+            withVisualizations((service) => service.discardViewerTicket(input)),
+            true,
+          ),
         [WS_METHODS.visualizationsExportHtml]: (input) =>
           privateVisualizationRead(withVisualizations((service) => service.exportHtml(input))),
         [WS_METHODS.mcpAppsPrepare]: (input) =>
-          privateVisualizationRead(
-            withMcpApps((service) => service.prepare(input)),
-            true,
-          ),
+          privateVisualizationRead(withMcpApps((service) => service.prepare(input))),
         [WS_METHODS.mcpAppsResolve]: (input) =>
-          privateVisualizationRead(
-            withMcpApps((service) => service.resolve(input)),
-            true,
-          ),
+          privateVisualizationRead(withMcpApps((service) => service.resolve(input))),
         [WS_METHODS.mcpAppsDetails]: (input) =>
-          privateVisualizationRead(
-            withMcpApps((service) => service.details(input)),
-            true,
-          ),
+          privateVisualizationRead(withMcpApps((service) => service.details(input))),
         [ORCHESTRATION_WS_METHODS.dispatchCommand]: (command) =>
           observeRpcEffect(
             ORCHESTRATION_WS_METHODS.dispatchCommand,

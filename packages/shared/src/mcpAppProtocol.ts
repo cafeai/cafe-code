@@ -170,15 +170,8 @@ export class McpAppProtocolSession {
             hostInfo: { name: "Cafe Code", version: "1" },
             hostCapabilities: {
               ...(this.preview ? {} : { openLinks: {}, serverTools: {}, serverResources: {} }),
-              sandbox: {
-                permissions: {},
-                csp: {
-                  connectDomains: [],
-                  resourceDomains: [],
-                  frameDomains: [],
-                  baseUriDomains: [],
-                },
-              },
+              // Direct Full-access frames can use parent authority. Do not
+              // advertise a sandbox capability or stronger permission policy.
             },
             hostContext: this.context,
           }),

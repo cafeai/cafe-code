@@ -14,7 +14,19 @@ Management tools have owner authority over Cafe projects, chats, providers and s
 
 Cafe automatically gives each Codex, Claude and Grok session a private, chat-and-account-bound connection for proposing, listing and pausing follow-ups. Separate account profiles/custom homes are supported without editing saved MCP configuration. Review proposals and the paying account in **Tasks → Scheduled**, then choose **Approve & enable**. Switching accounts requires renewed review. These narrow tools remain independent of the management toggle. See [scheduled follow-ups](scheduled-followups.md) and [session authority](decisions/session-scoped-scheduling-tools.md).
 
-When a local desktop host is available, Cafe-owned Codex and Claude sessions also receive a separate visualization connection. Exact active chat/account/native generation and completed native-call proofs govern publication; Grok is not enabled without equivalent provenance. Viewing and Codex external Apps retain their own native/consent gates. See [agent visualizations](agent-visualizations.md).
+When a local desktop host is available and the actual launch mode is Full access, Cafe-owned Codex and Claude sessions
+receive a **separate session-only** `visualization-mcp-bridge.mjs` connection for
+`publish_visualization`. It is not the management
+connection or scheduling audience and does not edit provider profiles or approval
+policies. Exact active chat/account/native generation and completed native-call
+proofs govern publication; Grok is not enabled without equivalent provenance.
+Current persisted thread Full access is rechecked before publication and source
+loading. No preview execution or poster is required. Ordinary unsandboxed
+same-origin frames run in chat while visible and can access parent authority;
+Full access is the required risk boundary, not proof of trustworthy code.
+Existing sessions require normal rebuilt-runtime adoption rather than a live
+retrofit. Codex external Apps retain exact configured-origin/one-use consent. See
+[agent visualizations and their current qualification limits](agent-visualizations.md).
 
 ## Credentials and compatibility retirement
 

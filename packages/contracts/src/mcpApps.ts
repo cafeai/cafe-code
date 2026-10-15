@@ -51,8 +51,9 @@ export const VisualizationReference = Schema.Union([
 export type VisualizationReference = typeof VisualizationReference.Type;
 
 /**
- * Native main independently attests the live ticket/lease/document. A renderer
- * supplied UUID never replaces that observation at preparation or approval.
+ * The server verifies the exact Full-access frame grant at preparation and
+ * approval. `leaseId` is the browser frame ID retained for wire compatibility,
+ * not a claim about a native process or execution containment.
  */
 export const McpAppPrepareInput = Schema.Struct({
   threadId: ThreadId,
@@ -79,6 +80,11 @@ export const McpAppPrepareResult = Schema.Union([
   Schema.Struct({
     kind: Schema.Literal("consent"),
     operationId: id,
+    // Exact server deadline, including its current frame-grant allowance.
+    // Renderer display/transit time must never restart a consent budget.
+    expiresAtMs: Schema.Int.check(
+      Schema.isBetween({ minimum: 1, maximum: Number.MAX_SAFE_INTEGER }),
+    ),
     method: Schema.Literals(["tools/call", "resources/read", "ui/message", "ui/open-link"]),
     name: Schema.optionalKey(shortLabel),
   }).annotate(strict),

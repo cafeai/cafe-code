@@ -91,5 +91,18 @@ describe("Codex context-window override transport", () => {
         codexContextWindow: false,
       }),
     ).toHaveProperty("codexContextWindow", false);
+    const decode = Schema.decodeUnknownSync(ProviderDaemonAdapterCapabilities);
+    expect(decode({ ...caps, codexContextWindow: true })).not.toHaveProperty(
+      "codexContextCompaction",
+    );
+    for (const paired of [true, false]) {
+      expect(decode({ ...caps, codexContextCompaction: paired })).toHaveProperty(
+        "codexContextCompaction",
+        paired,
+      );
+    }
+    for (const malformed of ["true", 1, null]) {
+      expect(() => decode({ ...caps, codexContextCompaction: malformed })).toThrow();
+    }
   });
 });
