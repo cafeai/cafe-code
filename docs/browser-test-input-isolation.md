@@ -24,11 +24,15 @@ or motion policy. `apps/web/vitest.browser.config.ts` has four explicit projects
 
 The desktop, touch, ordinary-motion fluid and reduced-motion groups execute
 sequentially in that order using Vitest's supported `sequence.groupOrder`.
-This preserves the existing aggregate active test-worker
-limit, including the native-host `--maxWorkers=2` policy. Providers may prewarm
-their browser processes before execution; sequential groups do not promise a
-single browser process. Existing 30-second test and hook deadlines, locator
-matching policy, cache boundaries, assertions and CI permissions are unchanged.
+CI additionally partitions them into three sequential Vitest invocations:
+desktop/touch, ordinary-motion fluid, then reduced motion. The pinned runner
+retains project browser providers until its pool closes, and providers may
+prewarm browsers before their group's execution. Group ordering alone does not
+retire the earlier providers. Process completion joins their cleanup before the
+next invocation starts. Linux's complementary project filters retain the full
+inventory; macOS/Windows retain their exact file subset with `--maxWorkers=2`
+on each invocation. Existing worker caps, 30-second test and hook deadlines,
+locator matching policy, cache boundaries, assertions and CI permissions remain.
 Root include/browser arrays remain absent because inherited array merging would
 otherwise include unrelated files in the specialized projects.
 
@@ -51,8 +55,8 @@ corepack yarn workspace @cafecode/web test:browser src/components/desk/DeskSideb
 
 Run the full suite with `corepack yarn workspace @cafecode/web test:browser`.
 The existing macOS/Windows CI subset explicitly includes both timeline files;
-Linux retains the complete suite. A file inventory must assign each browser file
-exactly once, with only the corresponding exact files in each specialized
+Linux retains the complete suite across these invocations. A file inventory must
+assign each browser file exactly once, with only the exact files in each specialized
 project. Node qualification reads the actual configuration's syntax tree and
 scoped browser-file inventory without starting a provider or importing Vite's
 application configuration; real browser assertions separately observe native
@@ -146,6 +150,16 @@ admissions and the first nonempty pixel sample had passed. The exact failing
 iteration and earlier elapsed-time distribution were unobserved; neither a GPU
 cause nor stopped pixels is established. The targeting repair preserves every
 original action, frame/pixel/resource assertion, worker cap and deadline.
+
+A subsequent Linux trace observed all initial/admission-frame checks complete,
+but native clicks consumed most of that same 30-second allowance. At timeout
+the fixture remained visible and running in the viewport, with its frame count
+still advancing; the pixel digest took about one millisecond. Another run of
+the same source passed. These observations do not establish stopped pixels or a
+GPU cause. CI's separate invocations retire the preceding native providers
+before the complete fluid file opens, and retire fluid before reduced motion.
+Every original trusted click and pixel/resource/pause/resume assertion remains,
+with no retry, input replay, relaxed deadline or smaller fixture.
 
 Register the idempotent diagnostic/temporary-DOM cleanup before appending a decoy
 or starting frame navigation, and drain it first in `afterEach`. Vitest's hard

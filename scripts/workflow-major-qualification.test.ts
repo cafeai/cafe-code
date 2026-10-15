@@ -59,6 +59,17 @@ function readWorkflow(name: string): Workflow {
   return parse(readFileSync(resolve(repoRoot, ".github/workflows", name), "utf8")) as Workflow;
 }
 
+const linuxBrowserStep: Step = {
+  name: "Browser tests",
+  if: "runner.os == 'Linux'",
+  run: [
+    "corepack yarn workspace @cafecode/web test:browser --project=desktop --project=touch",
+    "corepack yarn workspace @cafecode/web test:browser --project=visualization-fluid-motion",
+    "corepack yarn workspace @cafecode/web test:browser --project=context-reduced-motion",
+    "",
+  ].join("\n"),
+};
+
 describe("qualified major Actions and Ubuntu runner boundaries", () => {
   it("uses reviewed immutable Action commits and the canonical exact standalone Node pin", () => {
     const actions = workflowNames.flatMap((name) =>
@@ -165,15 +176,9 @@ describe("qualified major Actions and Ubuntu runner boundaries", () => {
     // The approved execution path is an ordinary browser frame. Whole-step
     // equality preserves its exact fixtures/two workers with no per-step
     // deadline, environment override or failure bypass; it is not native-host
-    // isolation evidence. Linux retains the complete browser suite instead.
+    // isolation evidence. Linux retains the complete browser inventory.
     expect(steps.filter((step) => step.name === inline.name)).toEqual([inline]);
-    expect(steps.filter((step) => step.name === "Browser tests")).toEqual([
-      {
-        name: "Browser tests",
-        if: "runner.os == 'Linux'",
-        run: "corepack yarn workspace @cafecode/web test:browser",
-      },
-    ]);
+    expect(steps.filter((step) => step.name === "Browser tests")).toEqual([linuxBrowserStep]);
 
     const shared = steps.filter(
       (step) =>
@@ -189,20 +194,22 @@ describe("qualified major Actions and Ubuntu runner boundaries", () => {
       "@cafecode/web",
       "test:browser",
     ]);
-    expect(sharedArguments.slice(5, -1)).toEqual(
+    expect(sharedArguments.slice(5, -3)).toEqual(
       expect.arrayContaining([
         "src/components/WorkspaceEnvironment.browser.tsx",
         "src/components/visualizations/Visualizations.browser.tsx",
-        "src/components/visualizations/VisualizationFluid.browser.tsx",
-        "src/components/visualizations/Visualizations.motion.browser.tsx",
       ]),
     );
-    // The real fixed-font, WebGL/fluid and reduced-motion fixtures run in the
-    // inherited native browser projects. Only literal component file selectors
-    // may precede the unchanged worker cap: no retry/deadline/input CLI override.
-    for (const argument of sharedArguments.slice(5, -1))
+    // Desktop/touch retire before the subsequent native motion invocations.
+    // Literal file selectors retain the original subset; only these two project
+    // filters precede the unchanged cap, with no retry/deadline/input override.
+    for (const argument of sharedArguments.slice(5, -3))
       expect(argument).toMatch(/^src\/components\/[^\s]+\.browser\.tsx$/);
-    expect(sharedArguments.at(-1)).toBe("--maxWorkers=2");
+    expect(sharedArguments.slice(-3)).toEqual([
+      "--project=desktop",
+      "--project=touch",
+      "--maxWorkers=2",
+    ]);
     // Keyboard popup readiness also requires native qualification on the
     // other hosts. Preserve the complete file exactly once in this same
     // subset; Linux still owns its unchanged complete suite.
@@ -292,9 +299,11 @@ describe("qualified major Actions and Ubuntu runner boundaries", () => {
     const dedicatedIndex = steps.findIndex((step) => step.name === dedicated.name);
     expect(broadIndex).toBeGreaterThanOrEqual(0);
     // Job steps are sequential. Keep the security file outside the broad
-    // invocation and immediately after it, before the remaining qualifications
-    // and required final forced desktop build, rather than silently dropping it.
-    expect(dedicatedIndex).toBe(broadIndex + 1);
+    // invocation and after the sequential ordinary/reduced-motion invocations,
+    // before the remaining qualifications and final forced desktop build.
+    expect(steps[broadIndex + 1]!.name).toBe("Ordinary-motion fluid browser qualification");
+    expect(steps[broadIndex + 2]!.name).toBe("Reduced-motion browser qualification");
+    expect(dedicatedIndex).toBe(broadIndex + 3);
     expect(steps[broadIndex]!.run!.split(/\s+/)).not.toContain(selector);
     for (const laterName of [
       "Generated chart layout and range animation browser qualification",
@@ -304,25 +313,14 @@ describe("qualified major Actions and Ubuntu runner boundaries", () => {
     ])
       expect(steps.findIndex((step) => step.name === laterName)).toBeGreaterThan(dedicatedIndex);
 
-    // The complete Linux invocation still owns coverage of this file and every
-    // other browser test, with no selector or scheduling-policy substitution.
-    expect(steps.filter((step) => step.name === "Browser tests")).toEqual([
-      {
-        name: "Browser tests",
-        if: "runner.os == 'Linux'",
-        run: "corepack yarn workspace @cafecode/web test:browser",
-      },
-    ]);
+    // The complementary Linux invocations retain every file exactly once.
+    expect(steps.filter((step) => step.name === "Browser tests")).toEqual([linuxBrowserStep]);
   });
 
   it("keeps visualization and Mermaid browser qualification on the original worker and deadline bounds", () => {
     const steps = readWorkflow("ci.yml").jobs.quality?.steps ?? [];
     for (const expected of [
-      {
-        name: "Browser tests",
-        if: "runner.os == 'Linux'",
-        run: "corepack yarn workspace @cafecode/web test:browser",
-      },
+      linuxBrowserStep,
       {
         name: "Mermaid source and parsed-graph security browser qualification",
         if: "runner.os != 'Linux'",

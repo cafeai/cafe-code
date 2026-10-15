@@ -558,7 +558,7 @@ describe("native browser project input and motion ownership", () => {
     }
   });
 
-  it("retains complete Linux and exact ordinary-motion native-host CI selection with the original worker cap", () => {
+  it("retires complementary CI browser invocations in order with complete ownership and unchanged bounds", () => {
     const workflow: unknown = parse(
       readFileSync(resolve(repoRoot, ".github/workflows/ci.yml"), "utf8"),
     );
@@ -574,7 +574,12 @@ describe("native browser project input and motion ownership", () => {
       {
         name: "Browser tests",
         if: "runner.os == 'Linux'",
-        run: "corepack yarn workspace @cafecode/web test:browser",
+        run: [
+          "corepack yarn workspace @cafecode/web test:browser --project=desktop --project=touch",
+          "corepack yarn workspace @cafecode/web test:browser --project=visualization-fluid-motion",
+          "corepack yarn workspace @cafecode/web test:browser --project=context-reduced-motion",
+          "",
+        ].join("\n"),
       },
     ]);
     const shared = steps.filter(
@@ -595,12 +600,53 @@ describe("native browser project input and motion ownership", () => {
       "@cafecode/web",
       "test:browser",
     ]);
-    expect(argv.at(-1)).toBe("--maxWorkers=2");
-    const selectors = argv.slice(5, -1);
+    expect(argv.slice(-3)).toEqual(["--project=desktop", "--project=touch", "--maxWorkers=2"]);
+    const selectors = argv.slice(5, -3);
     for (const path of selectors) expect(path).toMatch(/^src\/components\/[\w./-]+\.browser\.tsx$/);
-    expect(selectors.filter((path) => path === fluidFile)).toEqual([fluidFile]);
     expect(selectors.filter((path) => path === touchFile)).toEqual([touchFile]);
-    for (const path of reducedFiles)
-      expect(selectors.filter((item) => item === path)).toEqual([path]);
+    for (const path of [fluidFile, ...reducedFiles]) expect(selectors).not.toContain(path);
+
+    const fluid = {
+      name: "Ordinary-motion fluid browser qualification",
+      if: "runner.os != 'Linux'",
+      run: `corepack yarn workspace @cafecode/web test:browser --project=visualization-fluid-motion ${fluidFile} --maxWorkers=2`,
+    };
+    const reduced = {
+      name: "Reduced-motion browser qualification",
+      if: "runner.os != 'Linux'",
+      run: `corepack yarn workspace @cafecode/web test:browser --project=context-reduced-motion ${reducedFiles.join(" ")} --maxWorkers=2`,
+    };
+    // Whole-step equality refuses a failure bypass, input/deadline override,
+    // lost file, extra selector or different native-host worker cap.
+    expect(steps.filter((step) => record(step) && step.name === fluid.name)).toEqual([fluid]);
+    expect(steps.filter((step) => record(step) && step.name === reduced.name)).toEqual([reduced]);
+    const broadIndex = steps.indexOf(step);
+    expect(steps[broadIndex + 1]).toEqual(fluid);
+    expect(steps[broadIndex + 2]).toEqual(reduced);
+    for (const [path, owner] of [
+      [fluidFile, fluid],
+      ...reducedFiles.map((path) => [path, reduced] as const),
+    ] as const) {
+      expect(
+        steps.filter(
+          (candidate) =>
+            record(candidate) &&
+            typeof candidate.run === "string" &&
+            candidate.run.split(/\s+/).includes(path),
+        ),
+      ).toEqual([owner]);
+    }
+    // The Linux project filters cover the actual complete file inventory once;
+    // parent project names are passed directly to Vitest's supported selector.
+    const projects = readProjects(browserConfigSource);
+    assertProjectPolicy(projects);
+    assertInventory(projects, browserFiles());
+    expect(projects.map((project) => project.name)).toEqual([
+      "desktop",
+      "touch",
+      "visualization-fluid-motion",
+      "context-reduced-motion",
+    ]);
+    assertCompleteFluidCases();
   });
 });
