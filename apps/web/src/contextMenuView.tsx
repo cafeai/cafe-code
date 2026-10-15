@@ -40,7 +40,7 @@ import {
 // Labels remain inert React text and no id acquires dispatch authority here.
 function decoration(id: string): { icon: LucideIcon; group: string } {
   if (id.startsWith("rename")) return { icon: Pencil, group: "edit" };
-  if (id === "fork") return { icon: GitFork, group: "edit" };
+  if (id === "fork" || id === "duplicate") return { icon: GitFork, group: "edit" };
   if (id.startsWith("copy")) return { icon: Copy, group: "copy" };
   if (id === "archive") return { icon: Archive, group: "history" };
   if (id === "unarchive" || id === "restore") return { icon: ArchiveRestore, group: "history" };

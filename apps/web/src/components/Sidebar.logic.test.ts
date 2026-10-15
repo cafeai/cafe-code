@@ -541,7 +541,7 @@ describe("buildSidebarThreadContextMenuItems", () => {
     expect(repairItem?.disabled).toBe(true);
   });
 
-  it("disables provider-native fork when the source is unsupported or unsettled", () => {
+  it("disables native duplication when the source is unsupported or unsettled", () => {
     const forkItem = buildSidebarThreadContextMenuItems({
       debugEnabled: false,
       repairRunning: false,
@@ -549,9 +549,22 @@ describe("buildSidebarThreadContextMenuItems", () => {
     }).find((item) => item.id === "fork");
 
     expect(forkItem).toMatchObject({
-      label: "Fork chat",
+      label: "Duplicate chat",
       disabled: true,
     });
+  });
+
+  it("keeps the established native-fork action identity behind the Duplicate chat label", () => {
+    const items = buildSidebarThreadContextMenuItems({
+      debugEnabled: false,
+      repairRunning: false,
+      forkDisabled: false,
+    });
+    expect(items.find((item) => item.id === "fork")).toMatchObject({
+      label: "Duplicate chat",
+      disabled: false,
+    });
+    expect(items.map((item) => item.id)).not.toContain("duplicate");
   });
 
   it("hides thread repair outside debug mode", () => {

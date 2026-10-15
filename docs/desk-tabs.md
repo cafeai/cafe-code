@@ -1,6 +1,6 @@
 # Desk and chat tabs
 
-Last updated: 2026-10-14 13:20:45 JST (UTC+0900)
+Last updated: 2026-10-16 00:40:48 JST (UTC+0900)
 
 Use **Projects** to browse the saved project/chat catalog, including the separate
 **Chats** section for conversations without a project. Use **Desk** to
@@ -38,7 +38,7 @@ Renderer geometry and hide/reopen behavior are covered by
 `MacBrowserTitlebar.browser.tsx` and `DeskWorkspace.browser.tsx` in the web browser suite; native AppKit placement
 remains a separate desktop smoke check.
 
-- In **Settings → Chats → Single-click behavior**, choose **Preview** (the default)
+- In **Settings → Chats → Clicking a chat**, choose **Preview** (the default)
   or **Open**. Open keeps each clicked chat as a regular tab.
 - With Preview selected, click a chat in Projects, Chats or search to preview it in the current group.
   Preview titles are italic. Opening another chat replaces that group's preview;
@@ -66,7 +66,7 @@ remains a separate desktop smoke check.
   keyboard shortcut still acts on the focused chat pane. These actions are
   available only for local projects with the corresponding desktop capability.
 - Right-click an open chat in the Desk sidebar, or press Shift+F10 / the keyboard
-  menu key while its row or tab is focused, to rename, archive, move it to the
+  menu key while its row or tab is focused, to duplicate, rename, archive, move it to the
   Recycle Bin, delete it permanently, or close its tab. Opening this menu does
   not select another sidebar row or activate an inactive pane/tab. Uncreated
   drafts keep only tab/layout actions.
@@ -74,6 +74,22 @@ remains a separate desktop smoke check.
   asks for confirmation before changing anything and reuses the existing chat
   shutdown and cleanup path. If a final purge fails, check Recently Deleted
   before trying again. Close tab remains a local navigation action.
+- Choose **Duplicate chat** from a saved chat's right-click menu in Desk or
+  Projects, including Projects' standalone **Chats** section. This is the same
+  provider-history operation previously called **Fork chat** in project rows.
+  It creates a separate, resumable Codex or Claude conversation at that point,
+  preserving its account/settings and leaving the original chat and draft alone.
+  It sends no message automatically. The copy uses the same project/workspace
+  files and worktree; duplication does not clone files or create a Git branch.
+  Wait for the chat and its background work/questions to finish first. Uncreated
+  drafts and providers without native history branching cannot be duplicated.
+  A successful copy opens separately unless you changed your selection/layout
+  while it was being prepared. After a connection error, check the chat list
+  before retrying; an explicit same-source retry reuses the unresolved copy's
+  identity, while changed-source uncertainty refuses rather than making another
+  branch. No action is automatically retried.
+  If the copy was created but could not open, the notification says so; open
+  that existing copy from the chat list instead of duplicating it again.
 - Chat context menus use the same rounded, theme-aware panel on desktop and in
   the browser, with icon rows, grouped separators, keyboard navigation, and
   Escape/outside dismissal. They follow Cafe's current colors and interface

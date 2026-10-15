@@ -101,6 +101,7 @@ import { readLocalApi } from "../localApi";
 import { useComposerDraftStore } from "../composerDraftStore";
 import { useNewThreadHandler } from "../hooks/useHandleNewThread";
 import { useThreadActions } from "../hooks/useThreadActions";
+import { canDuplicateThread, isThreadDuplicationPending } from "../lib/threadDuplication";
 import {
   buildThreadRouteParams,
   resolveThreadRouteRef,
@@ -187,7 +188,6 @@ import {
   type HiddenThreadStatusSummary,
 } from "./Sidebar.logic";
 import { sortThreads } from "../lib/threadSort";
-import { isLatestTurnSettled } from "../session-logic";
 import { SidebarUpdatePill } from "./sidebar/SidebarUpdatePill";
 import { SidebarStatusBadge } from "./sidebar/SidebarStatusBadge";
 import { useCopyToClipboard } from "~/hooks/useCopyToClipboard";
@@ -988,7 +988,8 @@ export const SidebarStandaloneChats = memo(function SidebarStandaloneChats({
   const renamingInputRef = useRef<HTMLInputElement | null>(null);
   const renamingCommittedRef = useRef(false);
   const confirmArchiveButtonRefs = useRef(new Map<string, HTMLButtonElement>());
-  const { archiveThread, deleteThread, confirmAndDeleteThread } = useThreadActions();
+  const { archiveThread, deleteThread, confirmAndDeleteThread, duplicateThread } =
+    useThreadActions();
   const deletingThreadKeysRef = useRef(new Set<string>());
   const isMobile = useIsMobile();
   const archiveRequiresConfirmation =
@@ -1003,6 +1004,8 @@ export const SidebarStandaloneChats = memo(function SidebarStandaloneChats({
     () => new Map(entries.map((entry) => [entry.key, entry.thread])),
     [entries],
   );
+  const rowsByKeyRef = useRef(rowsByKey);
+  rowsByKeyRef.current = rowsByKey;
   const visibleEntries = expanded ? entries : entries.slice(0, previewCount);
   const hiddenEntryCount = Math.max(0, entries.length - previewCount);
   // Visible rows resolve their own status. Subscribe only to the hidden rows'
@@ -1142,9 +1145,16 @@ export const SidebarStandaloneChats = memo(function SidebarStandaloneChats({
       const thread = rowsByKey.get(scopedThreadKey(threadRef));
       if (!api || !thread) return;
       const running = thread.session?.status === "running" && thread.session.activeTurnId != null;
+      const duplicateAvailable =
+        canDuplicateThread(thread) && !isThreadDuplicationPending(threadRef);
       const action = await api.contextMenu.show(
         [
           { id: "rename", label: uiText("Rename", undefined, undefined, uiLocale) },
+          {
+            id: "duplicate",
+            label: uiText("Duplicate chat", undefined, undefined, uiLocale),
+            disabled: !duplicateAvailable,
+          },
           {
             id: "archive",
             label: uiText("Archive", undefined, undefined, uiLocale),
@@ -1159,6 +1169,12 @@ export const SidebarStandaloneChats = memo(function SidebarStandaloneChats({
         position,
       );
       if (action === "rename") beginRename(threadRef, thread.title);
+      else if (
+        action === "duplicate" &&
+        duplicateAvailable &&
+        canDuplicateThread(rowsByKeyRef.current.get(scopedThreadKey(threadRef)))
+      )
+        await duplicateThread(threadRef);
       else if (action === "archive" && !running) {
         if (archiveRequiresConfirmation) {
           setConfirmingArchiveThreadKey(scopedThreadKey(threadRef));
@@ -1175,6 +1191,7 @@ export const SidebarStandaloneChats = memo(function SidebarStandaloneChats({
       attemptArchiveThread,
       attemptDeleteThread,
       beginRename,
+      duplicateThread,
       rowsByKey,
       uiLocale,
     ],
@@ -1491,6 +1508,7 @@ interface SidebarProjectItemProps {
   handleNewThread: ReturnType<typeof useNewThreadHandler>["handleNewThread"];
   archiveThread: ReturnType<typeof useThreadActions>["archiveThread"];
   deleteThread: ReturnType<typeof useThreadActions>["deleteThread"];
+  duplicateThread: ReturnType<typeof useThreadActions>["duplicateThread"];
   threadJumpLabelByKey: ReadonlyMap<string, string>;
   attachThreadListAutoAnimateRef: (node: HTMLElement | null) => void;
   expandThreadListForProject: (projectKey: string) => void;
@@ -1516,6 +1534,7 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
     handleNewThread,
     archiveThread,
     deleteThread,
+    duplicateThread,
     threadJumpLabelByKey,
     attachThreadListAutoAnimateRef,
     expandThreadListForProject,
@@ -2929,13 +2948,13 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
               scopedProjectKey(scopeProjectRef(thread.environmentId, thread.projectId)),
             );
       const threadWorkspacePath = thread.worktreePath ?? threadProject?.cwd ?? project.cwd ?? null;
+      const duplicateAvailable =
+        canDuplicateThread(thread) && !isThreadDuplicationPending(threadRef);
       const clicked = await api.contextMenu.show(
         uiPresentation.buildSidebarThreadContextMenuItems({
           debugEnabled: desktopDebugEnabled,
           repairRunning: threadRepairDialog?.phase === "running",
-          forkDisabled:
-            (thread.session?.provider !== "codex" && thread.session?.provider !== "claudeAgent") ||
-            !isLatestTurnSettled(thread.latestTurn, thread.session),
+          forkDisabled: !duplicateAvailable,
         }),
         position,
       );
@@ -2946,45 +2965,13 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
       }
 
       if (clicked === "fork") {
-        const environmentApi = readEnvironmentApi(threadRef.environmentId);
-        if (!environmentApi) {
-          toastManager.add(
-            stackedThreadToast({
-              type: "error",
-              title: uiText("Could not fork chat", undefined, undefined, uiLocale),
-              description: uiText(
-                "Reconnect to the chat''s environment and try again.",
-                undefined,
-                undefined,
-                uiLocale,
-              ),
-            }),
-          );
-          return;
-        }
-
-        const targetThreadRef = scopeThreadRef(threadRef.environmentId, newThreadId());
-        try {
-          await environmentApi.orchestration.dispatchCommand({
-            type: "thread.fork",
-            commandId: newCommandId(),
-            sourceThreadId: threadRef.threadId,
-            targetThreadId: targetThreadRef.threadId,
-            title: uiText("{value0} (fork)", { value0: thread.title }, undefined, uiLocale),
-            createdAt: new Date().toISOString(),
-          });
-          void router.navigate({
-            to: "/$environmentId/$threadId",
-            params: buildThreadRouteParams(targetThreadRef),
-          });
-        } catch (error) {
-          console.warn("Failed to fork chat", { error });
-          toastManager.add(
-            stackedThreadToast({
-              type: "error",
-              title: uiText("Could not fork chat", undefined, undefined, uiLocale),
-            }),
-          );
+        // Keep the established menu ID while sharing the exact same native
+        // duplication path as Desk and standalone chats. Recheck after choice.
+        if (
+          duplicateAvailable &&
+          canDuplicateThread(sidebarThreadByKeyRef.current.get(threadKey))
+        ) {
+          await duplicateThread(threadRef);
         }
         return;
       }
@@ -3043,6 +3030,7 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
       copyThreadIdToClipboard,
       desktopDebugEnabled,
       deleteThread,
+      duplicateThread,
       memberProjectByScopedKey,
       openThreadMoveDialog,
       project.cwd,
@@ -3984,6 +3972,7 @@ interface SidebarProjectsContentProps {
   handleNewThread: ReturnType<typeof useNewThreadHandler>["handleNewThread"];
   archiveThread: ReturnType<typeof useThreadActions>["archiveThread"];
   deleteThread: ReturnType<typeof useThreadActions>["deleteThread"];
+  duplicateThread: ReturnType<typeof useThreadActions>["duplicateThread"];
   sortedProjects: readonly SidebarProjectSnapshot[];
   expandedThreadListsByProject: ReadonlySet<string>;
   activeRouteProjectKey: string | null;
@@ -4056,6 +4045,7 @@ const SidebarProjectsContent = memo(function SidebarProjectsContent(
     handleNewThread,
     archiveThread,
     deleteThread,
+    duplicateThread,
     sortedProjects,
     expandedThreadListsByProject,
     activeRouteProjectKey,
@@ -4258,6 +4248,7 @@ const SidebarProjectsContent = memo(function SidebarProjectsContent(
                             handleNewThread={handleNewThread}
                             archiveThread={archiveThread}
                             deleteThread={deleteThread}
+                            duplicateThread={duplicateThread}
                             threadJumpLabelByKey={threadJumpLabelByKey}
                             attachThreadListAutoAnimateRef={attachThreadListAutoAnimateRef}
                             expandThreadListForProject={expandThreadListForProject}
@@ -4292,6 +4283,7 @@ const SidebarProjectsContent = memo(function SidebarProjectsContent(
                     handleNewThread={handleNewThread}
                     archiveThread={archiveThread}
                     deleteThread={deleteThread}
+                    duplicateThread={duplicateThread}
                     threadJumpLabelByKey={threadJumpLabelByKey}
                     attachThreadListAutoAnimateRef={attachThreadListAutoAnimateRef}
                     expandThreadListForProject={expandThreadListForProject}
@@ -4397,7 +4389,7 @@ export default function Sidebar() {
   const desktopDebugEnabled = useDesktopDebugEnabled();
   const { updateSettings } = useUpdateSettings();
   const { handleNewThread, handleNewStandaloneChat } = useNewThreadHandler();
-  const { archiveThread, deleteThread } = useThreadActions();
+  const { archiveThread, deleteThread, duplicateThread } = useThreadActions();
   const { isMobile, setOpenMobile } = useSidebar();
   const routeThreadRef = useParams({
     strict: false,
@@ -5219,6 +5211,7 @@ export default function Sidebar() {
               handleNewThread={handleNewThread}
               archiveThread={archiveThread}
               deleteThread={deleteThread}
+              duplicateThread={duplicateThread}
               sortedProjects={sortedProjects}
               expandedThreadListsByProject={expandedThreadListsByProject}
               activeRouteProjectKey={activeRouteProjectKey}

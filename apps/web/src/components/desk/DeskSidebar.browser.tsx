@@ -22,9 +22,11 @@ const mocks = vi.hoisted(() => ({
   recycle: vi.fn(),
   delete: vi.fn(),
   hardDelete: vi.fn(),
+  duplicate: vi.fn(),
   showMenu: vi.fn(),
   confirm: vi.fn(),
   working: false,
+  duplicateSupported: true,
 }));
 vi.mock("../../threadRename", () => ({ renameThread: mocks.rename }));
 vi.mock("../ui/toast", () => ({
@@ -37,6 +39,7 @@ vi.mock("../../hooks/useThreadActions", () => ({
     confirmAndDeleteThread: mocks.recycle,
     deleteThread: mocks.delete,
     hardDeleteThread: mocks.hardDelete,
+    duplicateThread: mocks.duplicate,
   }),
 }));
 vi.mock("../../hooks/useSettings", async () => {
@@ -68,6 +71,7 @@ vi.mock("./useDeskTabMetadata", () => {
     threadRef: target.kind === "server" ? target.threadRef : null,
     exists: true,
     working: mocks.working,
+    canDuplicate: target.kind === "server" && !mocks.working && mocks.duplicateSupported,
     attention: false,
     status: null,
   });
@@ -108,11 +112,18 @@ beforeEach(async () => {
   });
   mocks.rename.mockReset();
   mocks.rename.mockResolvedValue(undefined);
-  for (const action of [mocks.archive, mocks.recycle, mocks.delete, mocks.hardDelete])
+  for (const action of [
+    mocks.archive,
+    mocks.recycle,
+    mocks.delete,
+    mocks.hardDelete,
+    mocks.duplicate,
+  ])
     action.mockReset().mockResolvedValue(undefined);
   mocks.showMenu.mockReset().mockResolvedValue(null);
   mocks.confirm.mockReset().mockResolvedValue(true);
   mocks.working = false;
+  mocks.duplicateSupported = true;
 });
 afterEach(() => {
   diagnosticPointer?.stop();
@@ -330,6 +341,7 @@ describe("Desk sidebar", () => {
     await expect.poll(() => mocks.showMenu.mock.calls.length).toBe(1);
     expect(mocks.showMenu.mock.calls[0]?.[0].map((item: { id: string }) => item.id)).toEqual([
       "rename",
+      "duplicate",
       "archive",
       "delete",
       "delete-forever",
@@ -348,6 +360,172 @@ describe("Desk sidebar", () => {
     expect(onNavigate).not.toHaveBeenCalled();
     await userEvent.keyboard("{Escape}");
   });
+
+  it.each(["pointer", "keyboard"] as const)(
+    "duplicates the captured inactive chat through its %s menu without closing or selecting it",
+    async (gesture) => {
+      const { screen, onNavigate } = await setup();
+      const reply = deferredMenu();
+      mocks.showMenu.mockReturnValueOnce(reply.promise);
+      const row = screen.getByRole("button", { name: "Chat fixture", exact: true });
+      const before = useDeskStore.getState().desk;
+      try {
+        if (gesture === "pointer") await row.click({ button: "right" });
+        else {
+          row.element().focus();
+          await userEvent.keyboard("{Shift>}{F10}{/Shift}");
+        }
+        await expect.poll(() => mocks.showMenu.mock.calls.length).toBe(1);
+        expect(mocks.showMenu.mock.calls[0]?.[0]).toContainEqual({
+          id: "duplicate",
+          label: "Duplicate chat",
+          disabled: false,
+        });
+        expect(mocks.duplicate).not.toHaveBeenCalled();
+        expect(onNavigate).not.toHaveBeenCalled();
+        expect(useDeskStore.getState().desk).toBe(before);
+        reply.answer("duplicate");
+        await expect.poll(() => mocks.duplicate.mock.calls.length).toBe(1);
+        expect(mocks.duplicate).toHaveBeenCalledExactlyOnceWith(chat.threadRef);
+        expect(useDeskStore.getState().desk).toBe(before);
+        expect(before.groups.g1?.tabs).toContain(deskTabKey(chat));
+        expect(before.groups.g1?.activeTabKey).toBe(deskTabKey(draft));
+        expect(mocks.archive).not.toHaveBeenCalled();
+        expect(mocks.recycle).not.toHaveBeenCalled();
+        expect(mocks.delete).not.toHaveBeenCalled();
+        expect(mocks.hardDelete).not.toHaveBeenCalled();
+        expect(mocks.confirm).not.toHaveBeenCalled();
+        expect(onNavigate).not.toHaveBeenCalled();
+      } finally {
+        reply.answer(null);
+        await reply.promise;
+        await screen.unmount();
+      }
+    },
+  );
+
+  it("keeps duplicate pending across repeated menu gestures and preserves the original tab", async () => {
+    const { screen, onNavigate } = await setup();
+    let acknowledge!: () => void;
+    const acknowledgement = new Promise<void>((resolve) => {
+      acknowledge = resolve;
+    });
+    mocks.duplicate.mockReturnValueOnce(acknowledgement);
+    mocks.showMenu.mockResolvedValue("duplicate");
+    const row = screen.getByRole("button", { name: "Chat fixture", exact: true });
+    const before = useDeskStore.getState().desk;
+    try {
+      openRowMenu(row.element());
+      await expect.poll(() => mocks.duplicate.mock.calls.length).toBe(1);
+      openRowMenu(row.element());
+      await expect.poll(() => mocks.showMenu.mock.calls.length).toBe(2);
+      expect(mocks.showMenu.mock.calls[1]?.[0]).toContainEqual({
+        id: "duplicate",
+        label: "Duplicate chat",
+        disabled: true,
+      });
+      expect(mocks.duplicate).toHaveBeenCalledExactlyOnceWith(chat.threadRef);
+      expect(useDeskStore.getState().desk).toBe(before);
+      acknowledge();
+      await acknowledgement;
+      expect(useDeskStore.getState().desk).toBe(before);
+      expect(onNavigate).not.toHaveBeenCalled();
+    } finally {
+      acknowledge();
+      await acknowledgement;
+      await screen.unmount();
+    }
+  });
+
+  it.each(["busy", "unsupported"] as const)(
+    "rejects a delayed duplicate choice when the clicked chat becomes %s",
+    async (change) => {
+      const { screen, onNavigate } = await setup();
+      const reply = deferredMenu();
+      mocks.showMenu.mockReturnValueOnce(reply.promise);
+      const before = useDeskStore.getState().desk;
+      try {
+        openRowMenu(screen.getByRole("button", { name: "Chat fixture", exact: true }).element());
+        await expect.poll(() => mocks.showMenu.mock.calls.length).toBe(1);
+        if (change === "busy") mocks.working = true;
+        else mocks.duplicateSupported = false;
+        reply.answer("duplicate");
+        await reply.promise;
+        // This fresh menu also exposes the current refusal rather than keeping
+        // the eligibility captured before the source changed.
+        openRowMenu(screen.getByRole("button", { name: "Chat fixture", exact: true }).element());
+        await expect.poll(() => mocks.showMenu.mock.calls.length).toBe(2);
+        expect(mocks.showMenu.mock.calls[1]?.[0]).toContainEqual({
+          id: "duplicate",
+          label: "Duplicate chat",
+          disabled: true,
+        });
+        expect(mocks.duplicate).not.toHaveBeenCalled();
+        expect(useDeskStore.getState().desk).toBe(before);
+        expect(onNavigate).not.toHaveBeenCalled();
+      } finally {
+        reply.answer(null);
+        await reply.promise;
+        await screen.unmount();
+      }
+    },
+  );
+
+  it("ignores a retired duplicate menu after another row opens its menu", async () => {
+    const { screen } = await setup();
+    const first = deferredMenu();
+    const second = deferredMenu();
+    mocks.showMenu.mockReturnValueOnce(first.promise).mockReturnValueOnce(second.promise);
+    const before = useDeskStore.getState().desk;
+    try {
+      openRowMenu(screen.getByRole("button", { name: "Chat fixture", exact: true }).element());
+      openRowMenu(screen.getByRole("button", { name: "New chat", exact: true }).element());
+      await expect.poll(() => mocks.showMenu.mock.calls.length).toBe(2);
+      first.answer("duplicate");
+      await first.promise;
+      second.answer(null);
+      await second.promise;
+      expect(mocks.duplicate).not.toHaveBeenCalled();
+      expect(useDeskStore.getState().desk).toBe(before);
+    } finally {
+      first.answer(null);
+      second.answer(null);
+      await Promise.all([first.promise, second.promise]);
+      await screen.unmount();
+    }
+  });
+
+  it.each(["row", "sidebar"] as const)(
+    "revokes duplicate intent when its original %s unmounts before the menu answers",
+    async (unmount) => {
+      const { screen } = await setup();
+      const reply = deferredMenu();
+      mocks.showMenu.mockReturnValueOnce(reply.promise);
+      let unmounted = false;
+      try {
+        openRowMenu(screen.getByRole("button", { name: "Chat fixture", exact: true }).element());
+        await expect.poll(() => mocks.showMenu.mock.calls.length).toBe(1);
+        if (unmount === "sidebar") {
+          await screen.unmount();
+          unmounted = true;
+        } else {
+          useDeskStore.getState().dispatch({ type: "close", tabKey: deskTabKey(chat) });
+          await expect
+            .element(screen.getByRole("button", { name: "Chat fixture", exact: true }))
+            .not.toBeInTheDocument();
+        }
+        const before = useDeskStore.getState().desk;
+        reply.answer("duplicate");
+        await reply.promise;
+        expect(mocks.duplicate).not.toHaveBeenCalled();
+        expect(useDeskStore.getState().desk).toBe(before);
+      } finally {
+        reply.answer(null);
+        await reply.promise;
+        if (!unmounted) await screen.unmount();
+      }
+    },
+  );
 
   it.each(["close", "rename"])(
     "discards a delayed %s choice after the tab was closed and reopened",
@@ -493,11 +671,15 @@ describe("Desk sidebar", () => {
   it("keeps drafts view-only and refuses archive after the chat becomes busy", async () => {
     const { screen } = await setup();
     const draftRow = screen.getByRole("button", { name: "New chat", exact: true });
+    // A transport/menu implementation cannot manufacture a server action for
+    // an unpromoted local draft even if it returns an absent action ID.
+    mocks.showMenu.mockResolvedValueOnce("duplicate");
     draftRow
       .element()
       .dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, cancelable: true }));
     await expect.poll(() => mocks.showMenu.mock.calls.length).toBe(1);
     expect(mocks.showMenu.mock.calls[0]?.[0]).toEqual([{ id: "close", label: "Close tab" }]);
+    expect(mocks.duplicate).not.toHaveBeenCalled();
     mocks.working = true;
     mocks.showMenu.mockResolvedValueOnce("archive");
     screen

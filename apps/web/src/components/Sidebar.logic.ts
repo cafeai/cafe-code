@@ -57,7 +57,7 @@ export function buildSidebarThreadContextMenuItems(input: {
 }): ReadonlyArray<SidebarThreadContextMenuItem> {
   const items: SidebarThreadContextMenuItem[] = [
     { id: "rename", label: uiText("Rename chat") },
-    { id: "fork", label: uiText("Fork chat"), disabled: input.forkDisabled === true },
+    { id: "fork", label: uiText("Duplicate chat"), disabled: input.forkDisabled === true },
     { id: "move", label: uiText("Move chat…") },
     { id: "copy-path", label: uiText("Copy path") },
     { id: "copy-thread-id", label: uiText("Copy chat ID") },

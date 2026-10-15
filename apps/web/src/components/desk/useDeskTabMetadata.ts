@@ -9,6 +9,7 @@ import { selectProjectByRef, selectSidebarThreadSummaryByRef, useStore } from ".
 import type { ThreadRouteTarget } from "../../threadRoutes";
 import { useUiStateStore } from "../../uiStateStore";
 import { resolveThreadStatusPill } from "../Sidebar.logic";
+import { canDuplicateThread } from "../../lib/threadDuplication";
 
 function deriveMetadata(
   target: ThreadRouteTarget,
@@ -29,6 +30,7 @@ function deriveMetadata(
     threadRef: target.kind === "server" ? target.threadRef : (draft?.promotedTo ?? null),
     working: thread?.session?.status === "running" || thread?.session?.status === "connecting",
     attention: thread?.hasPendingApprovals === true || thread?.hasPendingUserInput === true,
+    canDuplicate: canDuplicateThread(thread),
     exists: thread !== undefined || (target.kind === "draft" && draft !== undefined),
     status: thread ? resolveThreadStatusPill({ thread: { ...thread, lastVisitedAt } }) : null,
   };

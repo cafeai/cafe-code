@@ -1,6 +1,6 @@
 # Chats without projects
 
-Last updated: 2026-10-14 23:49:58 JST (UTC+0900)
+Last updated: 2026-10-15 23:47:54 JST (UTC+0900)
 
 Cafe chats can exist without a project or repository. **Desk** organizes open
 tabs; **Projects** contains the saved project/chat catalog. A tab's group does
@@ -23,6 +23,16 @@ not determine its project association.
   switch away from the newer editor you are using.
 - Find saved standalone conversations in **Projects → Chats** and search.
   Opening an existing conversation selects its tab rather than duplicating it.
+- Right-click a saved idle Codex or Claude chat and choose **Duplicate chat**
+  in either Projects or Desk to create a separate conversation with resumable
+  provider history from that point. It preserves the account/settings, sends no
+  prompt, and leaves the original chat and draft unchanged. Both conversations
+  share the same workspace files with protected reference-counted ownership;
+  deleting the original does not remove a surviving copy's files. This is not
+  a directory clone or the transcript-only fresh-session recovery action.
+  Busy chats, unsettled questions/background work, uncreated drafts and providers
+  without history-branching support are unavailable for duplication. See
+  [Desk and chat tabs](desk-tabs.md) for pending/error and opening behavior.
 - In **Projects → Chats**, hover a saved row or focus it with the keyboard to
   reveal its archive action. Touch screens show it directly. Archived chats can
   be restored from **Settings → Archived threads**. Move to Recycle Bin remains

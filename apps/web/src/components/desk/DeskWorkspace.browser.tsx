@@ -31,6 +31,7 @@ const mocks = vi.hoisted(() => ({
   recycle: vi.fn(async () => undefined),
   delete: vi.fn(async () => undefined),
   hardDelete: vi.fn(async () => undefined),
+  duplicate: vi.fn(async (_ref: unknown) => undefined),
   confirm: vi.fn(async () => true),
   palette: vi.fn(),
   macPlatform: false,
@@ -129,6 +130,7 @@ vi.mock("../../hooks/useThreadActions", () => ({
     confirmAndDeleteThread: mocks.recycle,
     deleteThread: mocks.delete,
     hardDeleteThread: mocks.hardDelete,
+    duplicateThread: mocks.duplicate,
   }),
 }));
 vi.mock("../../hooks/useSettings", async () => {
@@ -147,6 +149,7 @@ vi.mock("../ui/toast", () => ({
 vi.mock("../../lib/utils", () => ({
   cn: (...values: unknown[]) => values.flat().filter(Boolean).join(" "),
   newCommandId: () => "fixture-command",
+  newThreadId: () => "fixture-duplicate-thread",
   isMacPlatform: () => mocks.macPlatform,
 }));
 vi.mock("./useDeskTabMetadata", () => {
@@ -156,6 +159,7 @@ vi.mock("./useDeskTabMetadata", () => {
     projectName,
     threadRef: target.kind === "server" ? target.threadRef : null,
     working: false,
+    canDuplicate: target.kind === "server",
     attention: false,
     exists: true,
     status: mocks.tabStatus,
@@ -277,6 +281,7 @@ beforeEach(async () => {
   mocks.recycle.mockClear();
   mocks.delete.mockClear();
   mocks.hardDelete.mockClear();
+  mocks.duplicate.mockReset().mockResolvedValue(undefined);
   mocks.confirm.mockClear();
   mocks.palette.mockClear();
 });
@@ -1911,6 +1916,64 @@ describe("Desk workspace navigation chrome", () => {
     }
   });
 
+  it("duplicates an inactive native tab without activating or closing its source", async () => {
+    const { screen, cleanup } = await setup();
+    const finish = deferMenu();
+    try {
+      await vi.waitFor(() => expect(mocks.params.threadId).toBe("three"));
+      const before = useDeskStore.getState().desk;
+      await screen.getByRole("tab", { name: "Chat one", exact: true }).click({ button: "right" });
+      expect(mocks.showMenu).toHaveBeenCalledOnce();
+      expect(mocks.showMenu.mock.calls[0]?.[0]).toContainEqual({
+        id: "duplicate",
+        label: "Duplicate chat",
+        disabled: false,
+      });
+      expect(mocks.duplicate).not.toHaveBeenCalled();
+      expect(useDeskStore.getState().desk).toBe(before);
+      expect(mocks.params.threadId).toBe("three");
+      await finish("duplicate");
+      expect(mocks.duplicate).toHaveBeenCalledExactlyOnceWith({
+        environmentId,
+        threadId: ThreadId.make("one"),
+      });
+      expect(useDeskStore.getState().desk).toBe(before);
+      expect(before.groups.g1?.tabs).toContain(key("one"));
+      expect(before.groups.g1?.activeTabKey).toBe(key("three"));
+      expect(mocks.params.threadId).toBe("three");
+      expect(mocks.archive).not.toHaveBeenCalled();
+      expect(mocks.recycle).not.toHaveBeenCalled();
+      expect(mocks.delete).not.toHaveBeenCalled();
+      expect(mocks.hardDelete).not.toHaveBeenCalled();
+      expect(mocks.confirm).not.toHaveBeenCalled();
+    } finally {
+      await finish(undefined);
+      await cleanup();
+    }
+  });
+
+  it("ignores a duplicate answer from an older tab menu", async () => {
+    const { screen, cleanup } = await setup();
+    const first = deferMenu();
+    let second: ReturnType<typeof deferMenu> | undefined;
+    try {
+      await screen.getByRole("tab", { name: "Chat one", exact: true }).click({ button: "right" });
+      second = deferMenu();
+      await screen.getByRole("tab", { name: "Chat two", exact: true }).click({ button: "right" });
+      const before = useDeskStore.getState().desk;
+      await first("duplicate");
+      expect(mocks.duplicate).not.toHaveBeenCalled();
+      expect(useDeskStore.getState().desk).toBe(before);
+      await second(undefined);
+      expect(mocks.duplicate).not.toHaveBeenCalled();
+      expect(before.groups.g1?.tabs).toEqual([key("one"), key("two"), key("three")]);
+    } finally {
+      await first(undefined);
+      await second?.(undefined);
+      await cleanup();
+    }
+  });
+
   it.each([
     ["environment", "close"],
     ["environment", "close-group"],
@@ -2042,7 +2105,7 @@ describe("Desk workspace navigation chrome", () => {
     }
   });
 
-  it.each(["archive", "delete", "delete-forever"])(
+  it.each(["archive", "delete", "delete-forever", "duplicate"])(
     "retains the captured chat target for delayed %s after a different chat is selected",
     async (choice) => {
       const { screen, cleanup } = await setup();
@@ -2053,13 +2116,27 @@ describe("Desk workspace navigation chrome", () => {
         await finish(choice);
         const expectedRef = { environmentId, threadId: ThreadId.make("one") };
         const action =
-          choice === "archive" ? mocks.archive : choice === "delete" ? mocks.recycle : mocks.delete;
+          choice === "archive"
+            ? mocks.archive
+            : choice === "delete"
+              ? mocks.recycle
+              : choice === "duplicate"
+                ? mocks.duplicate
+                : mocks.delete;
         expect(action).toHaveBeenCalledExactlyOnceWith(expectedRef);
         if (choice === "delete-forever") {
           expect(mocks.confirm).toHaveBeenCalledOnce();
           expect(mocks.hardDelete).toHaveBeenCalledExactlyOnceWith(expectedRef, { confirm: false });
         }
         expect(useDeskStore.getState().desk.groups.g1?.activeTabKey).toBe(key("two"));
+        if (choice === "duplicate") {
+          expect(useDeskStore.getState().desk.groups.g1?.tabs).toContain(key("one"));
+          expect(mocks.archive).not.toHaveBeenCalled();
+          expect(mocks.recycle).not.toHaveBeenCalled();
+          expect(mocks.delete).not.toHaveBeenCalled();
+          expect(mocks.hardDelete).not.toHaveBeenCalled();
+          expect(mocks.confirm).not.toHaveBeenCalled();
+        }
       } finally {
         await cleanup();
       }

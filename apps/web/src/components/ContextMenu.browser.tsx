@@ -288,7 +288,7 @@ describe("shared context menu", () => {
       const promise = showContextMenuFallback(
         [
           { id: "rename", label: "Rename chat…" },
-          { id: "fork", label: "Fork chat" },
+          { id: "duplicate", label: "Duplicate chat" },
           { id: "copy-path", label: "Copy path" },
           { id: "archive", label: "Archive chat" },
           { id: "delete", label: "Move to Recycle Bin", destructive: true },
@@ -342,8 +342,10 @@ describe("shared context menu", () => {
   });
 
   it.each([
+    { theme: "light", scale: 80 },
     { theme: "light", scale: 100 },
     { theme: "light", scale: 130 },
+    { theme: "dark", scale: 80 },
     { theme: "dark", scale: 100 },
     { theme: "dark", scale: 130 },
   ])("captures the $theme menu at $scale%% for visual review", async ({ theme, scale }) => {
@@ -353,7 +355,7 @@ describe("shared context menu", () => {
     const promise = showContextMenuFallback(
       [
         { id: "rename", label: "Rename chat…" },
-        { id: "fork", label: "Fork chat" },
+        { id: "fork", label: "Duplicate chat" },
         { id: "copy-path", label: "Copy path" },
         { id: "copy-thread-id", label: "Copy chat ID" },
         { id: "archive", label: "Archive chat" },

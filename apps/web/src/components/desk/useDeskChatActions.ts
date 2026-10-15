@@ -7,6 +7,7 @@ import { readLocalApi } from "../../localApi";
 import type { ThreadRouteTarget } from "../../threadRoutes";
 import { deskTabKey } from "../../deskModel";
 import { useDeskStore } from "../../deskStore";
+import { isThreadDuplicationPending } from "../../lib/threadDuplication";
 import { stackedThreadToast, toastManager } from "../ui/toast";
 import { readDeskTabMetadata } from "./useDeskTabMetadata";
 
@@ -22,6 +23,11 @@ function items(target: ThreadRouteTarget): ContextMenuItem[] {
     JSON.stringify([metadata.threadRef.environmentId, metadata.threadRef.threadId]),
   );
   return [
+    {
+      id: "duplicate",
+      label: uiText("Duplicate chat"),
+      disabled: pending || isThreadDuplicationPending(metadata.threadRef) || !metadata.canDuplicate,
+    },
     { id: "archive", label: uiText("Archive chat"), disabled: pending || metadata.working },
     { id: "delete", label: uiText("Move to Recycle Bin"), destructive: true, disabled: pending },
     {
@@ -36,12 +42,18 @@ function items(target: ThreadRouteTarget): ContextMenuItem[] {
 export function useDeskChatActions() {
   const uiLocale = useUiLocale();
 
-  const { archiveThread, confirmAndDeleteThread, deleteThread, hardDeleteThread } =
+  const { archiveThread, confirmAndDeleteThread, deleteThread, hardDeleteThread, duplicateThread } =
     useThreadActions();
   const confirmArchive = useSettings((settings) => settings.confirmThreadArchive);
 
   const run = async (action: string, target: ThreadRouteTarget): Promise<boolean> => {
-    if (action !== "archive" && action !== "delete" && action !== "delete-forever") return false;
+    if (
+      action !== "duplicate" &&
+      action !== "archive" &&
+      action !== "delete" &&
+      action !== "delete-forever"
+    )
+      return false;
     // Resolve the exact captured target again after the menu closes. A removed
     // shell or unpromoted draft cannot authorize a mutation of a selected peer.
     const metadata = readDeskTabMetadata(target);
@@ -52,7 +64,12 @@ export function useDeskChatActions() {
     if (pendingActions.has(key)) return true;
     pendingActions.add(key);
     try {
-      if (action === "archive") {
+      if (action === "duplicate") {
+        if (metadata.canDuplicate) await duplicateThread(ref);
+        // A copy opens separately; the source's tab, draft and provider work
+        // remain owned by their existing view and lifecycle controllers.
+        return true;
+      } else if (action === "archive") {
         if (metadata.working) return true;
         if (
           confirmArchive &&

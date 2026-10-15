@@ -1,5 +1,5 @@
 import "../index.css";
-import { EnvironmentId, ProviderDriverKind, ThreadId } from "@cafecode/contracts";
+import { EnvironmentId, ProviderDriverKind, ThreadId, TurnId } from "@cafecode/contracts";
 import { scopeThreadRef, scopedThreadKey } from "@cafecode/client-runtime";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { page, userEvent } from "vitest/browser";
@@ -16,13 +16,23 @@ const mocks = vi.hoisted(() => ({
   confirmDelete: vi.fn(),
   rename: vi.fn(),
   gitStatus: vi.fn(),
+  duplicate: vi.fn(),
+  showMenu: vi.fn(),
 }));
 vi.mock("../hooks/useThreadActions", () => ({
   useThreadActions: () => ({
     archiveThread: mocks.archive,
     deleteThread: mocks.delete,
     confirmAndDeleteThread: mocks.confirmDelete,
+    duplicateThread: mocks.duplicate,
   }),
+}));
+// This row fixture owns only the menu boundary. Importing the real API from
+// an asynchronous mock pulls in runtime/service, which imports this same API
+// back; it also unnecessarily admits the real transport graph into the test.
+vi.mock("../localApi", () => ({
+  readLocalApi: () => ({ contextMenu: { show: mocks.showMenu } }),
+  ensureLocalApi: () => ({ contextMenu: { show: mocks.showMenu } }),
 }));
 vi.mock("../threadRename", () => ({ renameThread: mocks.rename }));
 vi.mock("../hooks/useSettings", async () => {
@@ -82,6 +92,8 @@ beforeEach(async () => {
   mocks.rename.mockResolvedValue(undefined);
   mocks.gitStatus.mockReset();
   mocks.gitStatus.mockReturnValue({ data: null });
+  mocks.duplicate.mockReset().mockResolvedValue(undefined);
+  mocks.showMenu.mockReset().mockResolvedValue(undefined);
   useThreadSelectionStore.getState().clearSelection();
   useComposerDraftStore.setState({ draftsByThreadKey: {}, draftThreadsByThreadKey: {} });
   useComposerDraftStore
@@ -98,7 +110,10 @@ afterEach(() => {
   useComposerDraftStore.setState({ draftsByThreadKey: {}, draftThreadsByThreadKey: {} });
 });
 
-async function setup(threads: readonly SidebarThreadSummary[] = [saved]) {
+async function setup(
+  threads: readonly SidebarThreadSummary[] = [saved],
+  activeThread?: SidebarThreadSummary,
+) {
   const onOpen = vi.fn();
   const onExpansionChange = vi.fn();
   const onNewChat = vi.fn();
@@ -109,7 +124,14 @@ async function setup(threads: readonly SidebarThreadSummary[] = [saved]) {
         entries={buildStandaloneCatalog({ threads, sortOrder: "updated_at" })}
         previewCount={8}
         expanded={false}
-        activeTarget={null}
+        activeTarget={
+          activeThread
+            ? {
+                kind: "server",
+                threadRef: scopeThreadRef(activeThread.environmentId, activeThread.id),
+              }
+            : null
+        }
         jumpLabelByKey={new Map()}
         onOpen={onOpen}
         onExpansionChange={onExpansionChange}
@@ -119,7 +141,122 @@ async function setup(threads: readonly SidebarThreadSummary[] = [saved]) {
   return { screen, onOpen, onNewChat };
 }
 
+function duplicableStandalone(provider: "codex" | "claudeAgent"): SidebarThreadSummary {
+  return {
+    ...saved,
+    id: ThreadId.make(`duplicate-${provider}`),
+    title: `Duplicate ${provider} source`,
+    session: {
+      provider: ProviderDriverKind.make(provider),
+      status: "ready",
+      orchestrationStatus: "ready",
+      createdAt: saved.createdAt,
+      updatedAt: saved.updatedAt!,
+    },
+    latestTurn: {
+      turnId: TurnId.make(`completed-${provider}`),
+      state: "completed",
+      requestedAt: saved.createdAt,
+      startedAt: saved.createdAt,
+      completedAt: saved.updatedAt!,
+      assistantMessageId: null,
+    },
+  };
+}
+
 describe("standalone Chats catalog", () => {
+  it.each(["codex", "claudeAgent"] as const)(
+    "duplicates the exact inactive %s standalone chat without activating or changing its source",
+    async (provider) => {
+      const source = duplicableStandalone(provider);
+      const original = structuredClone(source);
+      const { screen, onOpen, onNewChat } = await setup([source, saved], saved);
+      let answer!: (choice: string | undefined) => void;
+      const menu = new Promise<string | undefined>((resolve) => {
+        answer = resolve;
+      });
+      mocks.showMenu.mockReturnValueOnce(menu);
+      try {
+        await screen.getByTestId(`thread-row-${source.id}`).click({ button: "right" });
+        await expect.poll(() => mocks.showMenu.mock.calls.length).toBe(1);
+        expect(mocks.showMenu.mock.calls[0]?.[0]).toContainEqual({
+          id: "duplicate",
+          label: "Duplicate chat",
+          disabled: false,
+        });
+        expect(mocks.duplicate).not.toHaveBeenCalled();
+        expect(onOpen).not.toHaveBeenCalled();
+        expect(onNewChat).not.toHaveBeenCalled();
+        expect(source).toEqual(original);
+        answer("duplicate");
+        await expect.poll(() => mocks.duplicate.mock.calls.length).toBe(1);
+        expect(mocks.duplicate).toHaveBeenCalledExactlyOnceWith(
+          scopeThreadRef(source.environmentId, source.id),
+        );
+        expect(source).toEqual(original);
+        expect(onOpen).not.toHaveBeenCalled();
+        expect(onNewChat).not.toHaveBeenCalled();
+        expect(mocks.archive).not.toHaveBeenCalled();
+        expect(mocks.delete).not.toHaveBeenCalled();
+        expect(mocks.confirmDelete).not.toHaveBeenCalled();
+      } finally {
+        answer(undefined);
+        await menu;
+        await screen.unmount();
+      }
+    },
+  );
+
+  it.each([
+    "busy",
+    "unsupported",
+    "unsupported Axiom",
+    "missing native session",
+    "unfinished turn",
+  ] as const)("shows duplicate unavailable for a standalone chat with %s", async (state) => {
+    const eligible = duplicableStandalone("codex");
+    const source: SidebarThreadSummary = {
+      ...eligible,
+      ...(state === "busy"
+        ? { session: { ...eligible.session!, status: "running", orchestrationStatus: "running" } }
+        : state === "unsupported"
+          ? { session: { ...eligible.session!, provider: ProviderDriverKind.make("grok") } }
+          : state === "unsupported Axiom"
+            ? { session: { ...eligible.session!, provider: ProviderDriverKind.make("axiom") } }
+            : state === "missing native session"
+              ? { session: null }
+              : { latestTurn: { ...eligible.latestTurn!, completedAt: null } }),
+    };
+    const { screen, onOpen } = await setup([source]);
+    try {
+      mocks.showMenu.mockResolvedValueOnce("duplicate");
+      await screen.getByTestId(`thread-row-${source.id}`).click({ button: "right" });
+      await expect.poll(() => mocks.showMenu.mock.calls.length).toBe(1);
+      expect(mocks.showMenu.mock.calls[0]?.[0]).toContainEqual({
+        id: "duplicate",
+        label: "Duplicate chat",
+        disabled: true,
+      });
+      expect(mocks.duplicate).not.toHaveBeenCalled();
+      expect(onOpen).not.toHaveBeenCalled();
+    } finally {
+      await screen.unmount();
+    }
+  });
+
+  it("does not duplicate a standalone chat when its menu is dismissed", async () => {
+    const source = duplicableStandalone("codex");
+    const { screen, onOpen } = await setup([source]);
+    try {
+      await screen.getByTestId(`thread-row-${source.id}`).click({ button: "right" });
+      await expect.poll(() => mocks.showMenu.mock.calls.length).toBe(1);
+      expect(mocks.duplicate).not.toHaveBeenCalled();
+      expect(onOpen).not.toHaveBeenCalled();
+    } finally {
+      await screen.unmount();
+    }
+  });
+
   it("offers archive without an inline delete action or row navigation", async () => {
     const { screen, onOpen } = await setup();
     try {

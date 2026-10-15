@@ -9,16 +9,23 @@ import { useCallback, useLayoutEffect, useRef } from "react";
 
 import { getFallbackThreadIdAfterDelete } from "../components/Sidebar.logic";
 import { useComposerDraftStore } from "../composerDraftStore";
+import { useDeskStore } from "../deskStore";
 import { useNewThreadHandler } from "./useHandleNewThread";
 import { ensureEnvironmentApi, readEnvironmentApi } from "../environmentApi";
 import { invalidateGitQueries } from "../lib/gitReactQuery";
 import { refreshArchivedThreadsForEnvironment } from "../lib/archivedThreadsState";
 import { refreshDeletedThreadsForEnvironment } from "../lib/deletedThreadsState";
 import { newCommandId, newThreadId } from "../lib/utils";
+import {
+  canDuplicateThread,
+  claimThreadDuplication,
+  isThreadDuplicationPending,
+} from "../lib/threadDuplication";
 import { readWorkspaceEnvironmentId, useWorkspaceSelection } from "../environments/workspace";
 import { readLocalApi } from "../localApi";
 import {
   selectProjectByRef,
+  selectSidebarThreadSummaryByRef,
   selectThreadByRef,
   selectThreadsForEnvironment,
   useStore,
@@ -91,6 +98,132 @@ export function useThreadActions() {
     const currentRouteParams = router.state.matches[router.state.matches.length - 1]?.params ?? {};
     return resolveThreadRouteRef(currentRouteParams);
   }, [router]);
+
+  const duplicateThread = useCallback(
+    async (target: ScopedThreadRef): Promise<void> => {
+      // Menu labels and the selected pane are not authority. Re-read the exact
+      // clicked shell and its provider configuration without subscribing to or
+      // fetching another conversation's transcript.
+      const source = resolveThreadTarget(target)?.thread;
+      const summary = selectSidebarThreadSummaryByRef(useStore.getState(), target);
+      const owner = navigationOwner.current;
+      if (!owner || !canDuplicateThread(summary) || !canDuplicateThread(source) || !source) return;
+      const api = readEnvironmentApi(target.environmentId);
+      if (!api) {
+        toastManager.add(
+          stackedThreadToast({
+            type: "error",
+            title: uiText("Could not duplicate chat", undefined, undefined, uiLocale),
+            description: uiText(
+              "Reconnect to the chat''s environment and try again.",
+              undefined,
+              undefined,
+              uiLocale,
+            ),
+          }),
+        );
+        return;
+      }
+      const location = router.state.location;
+      const workspace = useWorkspaceSelection.getState();
+      const desk = useDeskStore.getState().desk;
+      const selection = source.modelSelection;
+      const selectedAccount = source.modelSelection.instanceId;
+      const nativeAccount = source.session?.providerInstanceId;
+      const nativeRuntime = source.session?.subagentRuntimeId;
+      const operation = claimThreadDuplication(
+        source,
+        uiText("{title} (copy)", { title: source.title.slice(0, 180) }, undefined, uiLocale),
+      );
+      if (!operation) {
+        // A second pending gesture is inert. An unresolved older operation or
+        // a full bounded receipt table must not silently mint another branch.
+        if (!isThreadDuplicationPending(target)) {
+          toastManager.add(
+            stackedThreadToast({
+              type: "error",
+              title: uiText("Could not duplicate chat", undefined, undefined, uiLocale),
+              description: uiText(
+                "Check the chat list for an earlier copy before trying again.",
+                undefined,
+                undefined,
+                uiLocale,
+              ),
+            }),
+          );
+        }
+        return;
+      }
+      let outcome: "acknowledged" | "uncertain" = "uncertain";
+      try {
+        // This is the established provider-native fork. The visible-history
+        // recovery duplicate cannot preserve a resumable provider snapshot and
+        // is deliberately never a fallback. No turn or prompt is submitted.
+        await api.orchestration.dispatchCommand(operation.command);
+        outcome = "acknowledged";
+        const current = resolveThreadTarget(target)?.thread;
+        if (
+          navigationOwner.current === owner &&
+          router.state.location === location &&
+          useWorkspaceSelection.getState() === workspace &&
+          useDeskStore.getState().desk === desk &&
+          readEnvironmentApi(target.environmentId) === api &&
+          current?.modelSelection === selection &&
+          current.modelSelection.instanceId === selectedAccount &&
+          current.session?.providerInstanceId === nativeAccount &&
+          current.session?.subagentRuntimeId === nativeRuntime
+        ) {
+          await router.navigate({
+            to: "/$environmentId/$threadId",
+            params: buildThreadRouteParams(
+              scopeThreadRef(target.environmentId, operation.command.targetThreadId),
+            ),
+          });
+        }
+      } catch {
+        if (outcome === "acknowledged") {
+          // Navigation is presentation after a proven commit. Never describe
+          // an opening failure as uncertain creation or invite another copy.
+          toastManager.add(
+            stackedThreadToast({
+              type: "warning",
+              title: uiText(
+                "Chat duplicated, but could not open it",
+                undefined,
+                undefined,
+                uiLocale,
+              ),
+              description: uiText(
+                "Open the copy from the chat list. Do not duplicate it again.",
+                undefined,
+                undefined,
+                uiLocale,
+              ),
+            }),
+          );
+          return;
+        }
+        // A lost response does not prove the native branch was never created.
+        // Retain its exact command/target for a deliberate same-source retry;
+        // never expose provider diagnostics or automatically repeat the action.
+        toastManager.add(
+          stackedThreadToast({
+            type: "error",
+            title: uiText("Could not duplicate chat", undefined, undefined, uiLocale),
+            description: uiText(
+              "Check the chat list and connection before trying again. The action was not automatically repeated.",
+              undefined,
+              undefined,
+              uiLocale,
+            ),
+          }),
+        );
+      } finally {
+        operation.finish(outcome);
+      }
+    },
+    [resolveThreadTarget, router, uiLocale],
+  );
 
   const continueInNewChat = useCallback(
     async (target: ScopedThreadRef, isCurrentSurface: () => boolean): Promise<void> => {
@@ -553,5 +686,6 @@ export function useThreadActions() {
     confirmAndDeleteThread,
     hardDeleteThread,
     continueInNewChat,
+    duplicateThread,
   };
 }

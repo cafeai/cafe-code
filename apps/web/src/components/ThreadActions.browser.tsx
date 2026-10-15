@@ -27,6 +27,10 @@ const mocks = vi.hoisted(() => ({
   confirm: vi.fn<(message: string) => Promise<boolean>>(),
   readApi: vi.fn(),
   workspace: { environmentId: "fixture" },
+  desk: { revision: 0 },
+  summaryUnavailable: false,
+  summaryOverrides: {} as Record<string, unknown>,
+  toast: vi.fn(),
   clear: vi.fn(),
   refreshArchived: vi.fn(),
   refreshDeleted: vi.fn(),
@@ -41,13 +45,20 @@ const mocks = vi.hoisted(() => ({
       providerInstanceId?: string;
       subagentRuntimeId?: string;
       activeTurnId?: string;
+      orchestrationStatus?: string;
+      createdAt?: string;
+      updatedAt?: string;
     } | null,
     modelSelection: { instanceId: "codex-personal", model: "gpt-6.1-sol" },
     createdAt: "2026-10-07T00:00:00.000Z",
     codexThreadId: "native-a",
     error: null as string | null,
     archivedAt: null,
-    latestTurn: null as { completedAt: string | null } | null,
+    latestTurn: null as {
+      completedAt: string | null;
+      startedAt?: string | null;
+      turnId?: string;
+    } | null,
     branch: null,
     worktreePath: null,
     runtimeMode: "full-access",
@@ -79,6 +90,9 @@ vi.mock("../environments/workspace", () => ({
   readWorkspaceEnvironmentId: () => mocks.workspace.environmentId,
   useWorkspaceSelection: { getState: () => mocks.workspace },
 }));
+vi.mock("../deskStore", () => ({
+  useDeskStore: { getState: () => ({ desk: mocks.desk }) },
+}));
 vi.mock("../composerDraftStore", () => ({
   useComposerDraftStore: (select: (store: unknown) => unknown) =>
     select({ clearDraftThread: mocks.clear, clearProjectDraftThreadById: mocks.clear }),
@@ -93,6 +107,23 @@ vi.mock("../store", () => ({
     mocks.threads.find(
       (thread) => thread.id === ref.threadId && thread.environmentId === ref.environmentId,
     ),
+  selectSidebarThreadSummaryByRef: (
+    _store: unknown,
+    ref: { environmentId: string; threadId: string },
+  ) => {
+    if (mocks.summaryUnavailable) return undefined;
+    const thread = mocks.threads.find(
+      (candidate) => candidate.id === ref.threadId && candidate.environmentId === ref.environmentId,
+    );
+    return thread
+      ? {
+          ...thread,
+          hasPendingApprovals: false,
+          hasPendingUserInput: false,
+          ...mocks.summaryOverrides,
+        }
+      : undefined;
+  },
   selectThreadsForEnvironment: () => mocks.threads,
   selectProjectByRef: () => undefined,
 }));
@@ -112,7 +143,7 @@ vi.mock("../lib/deletedThreadsState", () => ({
   refreshDeletedThreadsForEnvironment: mocks.refreshDeleted,
 }));
 vi.mock("./ui/toast", () => ({
-  toastManager: { add: vi.fn() },
+  toastManager: { add: mocks.toast },
   stackedThreadToast: (value: unknown) => value,
 }));
 
@@ -156,10 +187,15 @@ beforeEach(() => {
   mocks.confirm.mockReset().mockResolvedValue(true);
   mocks.readApi.mockReset().mockReturnValue({ orchestration: { dispatchCommand: mocks.dispatch } });
   mocks.workspace = { environmentId: "fixture" };
+  mocks.desk = { revision: 0 };
+  mocks.summaryUnavailable = false;
+  mocks.summaryOverrides = {};
+  mocks.toast.mockClear();
   mocks.clear.mockClear();
   mocks.refreshArchived.mockClear();
   mocks.refreshDeleted.mockClear();
   mocks.fallback = "b";
+  mocks.threads.splice(3);
   for (const thread of mocks.threads) {
     thread.session = null;
     thread.error = null;
@@ -261,6 +297,357 @@ describe("delete acknowledgement navigation ownership", () => {
       }
     },
   );
+});
+
+/** Each case owns a fresh source identity. Production deliberately has no
+ * registry reset that could discard an uncertain native fork's stable receipt.
+ * The fixture must not make later tests depend on clearing such a receipt.
+ */
+function duplicationSource(provider = "codex", environmentId = "fixture") {
+  const source: (typeof mocks.threads)[number] = {
+    ...mocks.threads[0]!,
+    id: crypto.randomUUID(),
+    environmentId,
+    title: "Reusable source",
+    session: {
+      provider,
+      providerInstanceId: "codex-personal",
+      subagentRuntimeId: "duplication-runtime",
+      status: "ready",
+      orchestrationStatus: "ready",
+      createdAt: "2026-10-15T00:00:00.000Z",
+      updatedAt: "2026-10-15T00:01:00.000Z",
+    },
+    latestTurn: {
+      turnId: "completed-source-turn",
+      startedAt: "2026-10-15T00:00:00.000Z",
+      completedAt: "2026-10-15T00:01:00.000Z",
+    },
+  };
+  mocks.threads.push(source);
+  return {
+    source,
+    ref: {
+      environmentId: EnvironmentId.make(environmentId),
+      threadId: ThreadId.make(source.id),
+    },
+  };
+}
+
+describe("shared provider-native chat duplication", () => {
+  it.each(["codex", "claudeAgent"])(
+    "copies the exact clicked %s chat through its own environment without a prompt or source mutation",
+    async (provider) => {
+      const { source, ref } = duplicationSource(provider, "remote");
+      source.title = "A".repeat(300);
+      // The active route intentionally belongs to another environment/chat.
+      // The menu's captured scope, not the selected route, owns the copy.
+      const original = structuredClone(source);
+      const remoteDispatch = vi.fn(async (_command: unknown) => {});
+      const remoteApi = { orchestration: { dispatchCommand: remoteDispatch } };
+      mocks.readApi.mockImplementation((environmentId: string) =>
+        environmentId === "remote"
+          ? remoteApi
+          : { orchestration: { dispatchCommand: mocks.dispatch } },
+      );
+      const { actions, screen } = await mountActions();
+      try {
+        await actions.duplicateThread(ref);
+        expect(remoteDispatch).toHaveBeenCalledOnce();
+        const command = remoteDispatch.mock.calls[0]![0] as {
+          type: string;
+          commandId: string;
+          sourceThreadId: string;
+          targetThreadId: string;
+          title: string;
+          createdAt: string;
+        };
+        expect(command).toEqual({
+          type: "thread.fork",
+          commandId: expect.any(String),
+          sourceThreadId: source.id,
+          targetThreadId: expect.any(String),
+          title: `${"A".repeat(180)} (copy)`,
+          createdAt: expect.any(String),
+        });
+        expect(command.targetThreadId).not.toBe(source.id);
+        expect(command.commandId).not.toBe(command.targetThreadId);
+        expect(Number.isFinite(Date.parse(command.createdAt))).toBe(true);
+        expect(mocks.readApi.mock.calls).toEqual([["remote"], ["remote"]]);
+        expect(mocks.dispatch).not.toHaveBeenCalled();
+        expect(mocks.confirm).not.toHaveBeenCalled();
+        expect(mocks.router.navigate).toHaveBeenCalledExactlyOnceWith({
+          to: "/$environmentId/$threadId",
+          params: { environmentId: "remote", threadId: command.targetThreadId },
+        });
+        // Account/model/options, history, context and workspace settings are
+        // copied by the established server/native snapshot, not fabricated by
+        // this renderer command. Exact shape above forbids a turn or fallback.
+        expect(source).toEqual(original);
+        expect(mocks.clear).not.toHaveBeenCalled();
+        expect(mocks.toast).not.toHaveBeenCalled();
+      } finally {
+        await screen.unmount();
+      }
+    },
+  );
+
+  it("admits only one command across two mounted action surfaces while acknowledgement is pending", async () => {
+    const { ref } = duplicationSource();
+    const first = await mountActions();
+    const second = await mountActions();
+    const acknowledge = holdCommand();
+    let pending: Promise<void> | undefined;
+    try {
+      pending = first.actions.duplicateThread(ref);
+      expect(mocks.dispatch).toHaveBeenCalledOnce();
+      await second.actions.duplicateThread(ref);
+      expect(mocks.dispatch).toHaveBeenCalledOnce();
+      expect(mocks.router.navigate).not.toHaveBeenCalled();
+      acknowledge();
+      await pending;
+      expect(mocks.dispatch).toHaveBeenCalledExactlyOnceWith(
+        expect.objectContaining({ type: "thread.fork", sourceThreadId: ref.threadId }),
+      );
+      expect(mocks.router.navigate).toHaveBeenCalledOnce();
+      expect(mocks.clear).not.toHaveBeenCalled();
+    } finally {
+      acknowledge();
+      await pending;
+      await first.screen.unmount();
+      await second.screen.unmount();
+    }
+  });
+
+  it.each([
+    "unsupported provider",
+    "unsupported Axiom provider",
+    "missing session",
+    "missing source",
+    "running",
+    "connecting",
+    "active turn",
+    "unsettled turn",
+    "unstarted turn",
+    "missing turn",
+    "archived",
+    "account mismatch",
+    "pending approval",
+    "pending question",
+    "current child work",
+    "missing shell",
+    "busy shell",
+  ])("re-reads current source and shell admission before copying: %s", async (condition) => {
+    const { source, ref } = duplicationSource();
+    const { actions, screen } = await mountActions();
+    try {
+      if (condition === "unsupported provider") source.session!.provider = "grok";
+      if (condition === "unsupported Axiom provider") source.session!.provider = "axiom";
+      if (condition === "missing session") source.session = null;
+      if (condition === "missing source") mocks.threads.splice(mocks.threads.indexOf(source), 1);
+      if (condition === "running") source.session!.status = "running";
+      if (condition === "connecting") source.session!.status = "connecting";
+      if (condition === "active turn") source.session!.activeTurnId = "new-turn";
+      if (condition === "unsettled turn") source.latestTurn!.completedAt = null;
+      if (condition === "unstarted turn") source.latestTurn!.startedAt = null;
+      if (condition === "missing turn") source.latestTurn = null;
+      if (condition === "archived")
+        Object.assign(source, { archivedAt: "2026-10-15T00:02:00.000Z" });
+      if (condition === "account mismatch") source.session!.providerInstanceId = "other-account";
+      if (condition === "pending approval") mocks.summaryOverrides = { hasPendingApprovals: true };
+      if (condition === "pending question") mocks.summaryOverrides = { hasPendingUserInput: true };
+      if (condition === "current child work")
+        mocks.summaryOverrides = {
+          liveWork: { runtimeId: "duplication-runtime", taskCount: 1, agentCount: 0 },
+        };
+      if (condition === "missing shell") mocks.summaryUnavailable = true;
+      if (condition === "busy shell")
+        mocks.summaryOverrides = { session: { ...source.session!, status: "running" } };
+      await actions.duplicateThread(ref);
+      expect(mocks.readApi).not.toHaveBeenCalled();
+      expect(mocks.dispatch).not.toHaveBeenCalled();
+      expect(mocks.router.navigate).not.toHaveBeenCalled();
+      expect(mocks.confirm).not.toHaveBeenCalled();
+      expect(mocks.clear).not.toHaveBeenCalled();
+    } finally {
+      await screen.unmount();
+    }
+  });
+
+  it("refuses a disconnected exact environment without falling back to the selected environment", async () => {
+    const { ref } = duplicationSource("codex", "offline");
+    mocks.readApi.mockReturnValue(undefined);
+    const { actions, screen } = await mountActions();
+    try {
+      await actions.duplicateThread(ref);
+      expect(mocks.readApi).toHaveBeenCalledExactlyOnceWith("offline");
+      expect(mocks.dispatch).not.toHaveBeenCalled();
+      expect(mocks.router.navigate).not.toHaveBeenCalled();
+      expect(mocks.toast).toHaveBeenCalledExactlyOnceWith(
+        expect.objectContaining({ type: "error", title: "Could not duplicate chat" }),
+      );
+      expect(mocks.clear).not.toHaveBeenCalled();
+    } finally {
+      await screen.unmount();
+    }
+  });
+
+  it("keeps opaque failures private and reuses the exact uncertain command from another mounted hook", async () => {
+    const { ref } = duplicationSource();
+    const first = await mountActions();
+    const second = await mountActions();
+    const warning = vi.spyOn(console, "warn");
+    try {
+      mocks.dispatch.mockRejectedValueOnce(new Error("private-provider-credential-fixture"));
+      await first.actions.duplicateThread(ref);
+      expect(mocks.dispatch).toHaveBeenCalledOnce();
+      expect(mocks.dispatch.mock.calls[0]![0].type).toBe("thread.fork");
+      expect(mocks.router.navigate).not.toHaveBeenCalled();
+      expect(mocks.toast).toHaveBeenCalledExactlyOnceWith(
+        expect.objectContaining({ type: "error", title: "Could not duplicate chat" }),
+      );
+      expect(JSON.stringify(mocks.toast.mock.calls)).not.toContain("private-provider");
+      expect(warning).not.toHaveBeenCalled();
+      await second.actions.duplicateThread(ref);
+      expect(mocks.dispatch).toHaveBeenCalledTimes(2);
+      expect(mocks.dispatch.mock.calls[1]![0]).toBe(mocks.dispatch.mock.calls[0]![0]);
+      expect(mocks.router.navigate).toHaveBeenCalledOnce();
+      expect(mocks.confirm).not.toHaveBeenCalled();
+      expect(mocks.clear).not.toHaveBeenCalled();
+    } finally {
+      warning.mockRestore();
+      await first.screen.unmount();
+      await second.screen.unmount();
+    }
+  });
+
+  it("reports a committed copy with failed navigation without suggesting another duplication", async () => {
+    const { source, ref } = duplicationSource();
+    const original = structuredClone(source);
+    const { actions, screen } = await mountActions();
+    const warning = vi.spyOn(console, "warn");
+    const error = vi.spyOn(console, "error");
+    try {
+      mocks.router.navigate.mockRejectedValueOnce(new Error("private-router-diagnostic-fixture"));
+      await actions.duplicateThread(ref);
+      expect(mocks.dispatch).toHaveBeenCalledExactlyOnceWith(
+        expect.objectContaining({ type: "thread.fork", sourceThreadId: source.id }),
+      );
+      const command = mocks.dispatch.mock.calls[0]![0];
+      expect(command.targetThreadId).not.toBe(source.id);
+      expect(mocks.router.navigate).toHaveBeenCalledExactlyOnceWith({
+        to: "/$environmentId/$threadId",
+        params: { environmentId: ref.environmentId, threadId: command.targetThreadId },
+      });
+      expect(mocks.toast).toHaveBeenCalledExactlyOnceWith({
+        type: "warning",
+        title: "Chat duplicated, but could not open it",
+        description: "Open the copy from the chat list. Do not duplicate it again.",
+      });
+      expect(JSON.stringify(mocks.toast.mock.calls)).not.toContain("private-router");
+      expect(warning).not.toHaveBeenCalled();
+      expect(error).not.toHaveBeenCalled();
+      expect(source).toEqual(original);
+      expect(mocks.confirm).not.toHaveBeenCalled();
+      expect(mocks.clear).not.toHaveBeenCalled();
+    } finally {
+      warning.mockRestore();
+      error.mockRestore();
+      await screen.unmount();
+    }
+  });
+
+  it("refuses a changed source after an uncertain outcome rather than minting a second native copy", async () => {
+    const { source, ref } = duplicationSource();
+    const { actions, screen } = await mountActions();
+    try {
+      mocks.dispatch.mockRejectedValueOnce(new Error("synthetic lost acknowledgement"));
+      await actions.duplicateThread(ref);
+      source.title = "A later source revision";
+      await actions.duplicateThread(ref);
+      expect(mocks.dispatch).toHaveBeenCalledOnce();
+      expect(mocks.router.navigate).not.toHaveBeenCalled();
+      expect(mocks.toast).toHaveBeenCalledTimes(2);
+      expect(mocks.clear).not.toHaveBeenCalled();
+    } finally {
+      await screen.unmount();
+    }
+  });
+
+  it.each([
+    "another route",
+    "away and back",
+    "workspace",
+    "desk pane",
+    "desk away and back",
+    "environment connection",
+    "source model",
+    "selected account",
+    "native account",
+    "native runtime",
+  ])("preserves a completed copy without stealing later %s navigation", async (change) => {
+    const { source, ref } = duplicationSource();
+    const { actions, screen } = await mountActions();
+    const acknowledge = holdCommand();
+    let pending: Promise<void> | undefined;
+    try {
+      pending = actions.duplicateThread(ref);
+      expect(mocks.dispatch).toHaveBeenCalledOnce();
+      if (change === "another route") navigateTo("b");
+      if (change === "away and back") {
+        navigateTo("b");
+        navigateTo("a");
+      }
+      if (change === "workspace") mocks.workspace = { environmentId: "other" };
+      if (change === "desk pane") mocks.desk = { revision: 1 };
+      if (change === "desk away and back") {
+        mocks.desk = { revision: 1 };
+        mocks.desk = { revision: 0 };
+      }
+      if (change === "environment connection")
+        mocks.readApi.mockReturnValue({ orchestration: { dispatchCommand: mocks.dispatch } });
+      if (change === "source model")
+        source.modelSelection = { ...source.modelSelection, model: "later-model" };
+      // An instance ID is scalar ownership as well as part of the selection
+      // object. Mutating it here independently qualifies the captured scalar
+      // fence instead of relying only on immutable-object replacement.
+      if (change === "selected account") source.modelSelection.instanceId = "later-account";
+      if (change === "native account")
+        source.session = { ...source.session!, providerInstanceId: "later-account" };
+      if (change === "native runtime")
+        source.session = { ...source.session!, subagentRuntimeId: "later-native-runtime" };
+      acknowledge();
+      await pending;
+      expect(mocks.dispatch).toHaveBeenCalledOnce();
+      expect(mocks.router.navigate).not.toHaveBeenCalled();
+      expect(mocks.clear).not.toHaveBeenCalled();
+    } finally {
+      acknowledge();
+      await pending;
+      await screen.unmount();
+    }
+  });
+
+  it("does not revive an unmounted action owner's navigation after a new surface mounts", async () => {
+    const { ref } = duplicationSource();
+    const first = await mountActions();
+    const acknowledge = holdCommand();
+    const pending = first.actions.duplicateThread(ref);
+    expect(mocks.dispatch).toHaveBeenCalledOnce();
+    await first.screen.unmount();
+    const replacement = await mountActions();
+    try {
+      acknowledge();
+      await pending;
+      expect(mocks.dispatch).toHaveBeenCalledOnce();
+      expect(mocks.router.navigate).not.toHaveBeenCalled();
+      expect(mocks.clear).not.toHaveBeenCalled();
+    } finally {
+      acknowledge();
+      await pending;
+      await replacement.screen.unmount();
+    }
+  });
 });
 
 function markHistoryBlocked() {
