@@ -168,23 +168,27 @@ async function run() {
           : accept(code ?? -1);
       });
     });
+    const reportOutput = async () => {
+      const file = await open(log, "r");
+      try {
+        const bytes = Buffer.alloc(16 * 1024);
+        const { bytesRead } = await file.read(bytes, 0, bytes.length, 0);
+        console.error("managed-installer-fixture-output", {
+          phase,
+          output: bytes.subarray(0, bytesRead).toString("utf8"),
+        });
+      } finally {
+        await file.close();
+      }
+    };
     const observedExit = exit.then(
-      (code) => {
+      async (code) => {
         console.info("managed-installer-fixture", { phase, event: "exit", code });
+        if (code !== 0) await reportOutput();
         return code;
       },
       async (error) => {
-        const file = await open(log, "r");
-        try {
-          const bytes = Buffer.alloc(16 * 1024);
-          const { bytesRead } = await file.read(bytes, 0, bytes.length, 0);
-          console.error("managed-installer-fixture-failure", {
-            phase,
-            output: bytes.subarray(0, bytesRead).toString("utf8"),
-          });
-        } finally {
-          await file.close();
-        }
+        await reportOutput();
         throw error;
       },
     );
