@@ -70,10 +70,17 @@ these artifacts as publisher-authenticated.
 
 Native CI smoke tests keep Chromium sandboxing and the real safe-storage round
 trip enabled. Linux opts into configuring only its private extracted
-`chrome-sandbox` helper as root-owned mode `4755`, rejecting shared or symlinked
+`chrome-sandbox` helper in the runner workspace's temporary area as root-owned
+mode `4755`, rejecting shared or symlinked
 helpers and checking inode identity afterward. macOS opts into a private,
-unlocked temporary keychain for the DMG/ZIP checks, then restores the original
+unlocked temporary keychain as its only search target for the DMG/ZIP checks,
+then restores the original
 default/search preferences and deletes that keychain on success or failure.
 These options are scoped to their respective artifact steps; ordinary launches
 and local smoke commands retain their existing OS policy. No signing identity,
 provider account or existing keychain contents participate in this setup.
+
+The Windows smoke sends NSIS's final `/D=` tail verbatim, preserving spaces
+without CRT-style quoting, as required by the [NSIS command-line contract](https://nsis.sourceforge.io/Docs/Chapter3.html#installerusage).
+Bootstrap failures retain exit code `1`; the error dialog uses its silent-mode
+default so unattended installs can fail without waiting for a click.

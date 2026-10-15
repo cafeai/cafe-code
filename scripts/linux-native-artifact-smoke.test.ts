@@ -6,11 +6,34 @@ import { expect } from "vitest";
 
 import {
   isLinuxReleaseMetadataValid,
+  linuxArtifactSmokeTempDirectory,
   resolveLinuxSandboxHelper,
   selectLinuxAppImage,
 } from "./linux-native-artifact-smoke.ts";
 
 describe("Linux native artifact smoke", () => {
+  it("uses the runner filesystem for setuid fixtures without changing ordinary temporary paths", () => {
+    const runnerTemp = join(tmpdir(), "synthetic-runner-temp");
+    assert.equal(linuxArtifactSmokeTempDirectory({ RUNNER_TEMP: runnerTemp }), tmpdir());
+    assert.equal(
+      linuxArtifactSmokeTempDirectory({
+        RUNNER_TEMP: runnerTemp,
+        CAFE_CODE_LINUX_ARTIFACT_PREPARE_SANDBOX: "1",
+      }),
+      runnerTemp,
+    );
+    for (const RUNNER_TEMP of [undefined, "relative-temp"]) {
+      assert.throws(
+        () =>
+          linuxArtifactSmokeTempDirectory({
+            RUNNER_TEMP,
+            CAFE_CODE_LINUX_ARTIFACT_PREPARE_SANDBOX: "1",
+          }),
+        /absolute runner temporary/,
+      );
+    }
+  });
+
   it("admits only a regular fixture helper and refuses directory replacements", async () => {
     const root = await mkdtemp(join(tmpdir(), "cafe-sandbox-admission-"));
     try {

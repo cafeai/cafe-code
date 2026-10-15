@@ -57,7 +57,7 @@ FunctionEnd
       Pop $0
       DetailPrint "Cafe-managed runtime bootstrap exited with code $0."
       ${If} $0 != 0
-        MessageBox MB_OK|MB_ICONSTOP "Cafe-managed provider installation failed. The previous runtime was preserved. Re-run this installer to repair, or disable managed providers."
+        MessageBox MB_OK|MB_ICONSTOP "Cafe-managed provider installation failed. The previous runtime was preserved. Re-run this installer to repair, or disable managed providers." /SD IDOK
         SetErrorLevel 1
         Abort
       ${EndIf}

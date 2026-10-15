@@ -62,6 +62,13 @@ describe("isolated macOS artifact keychain", () => {
         if (fail) await expect(run).rejects.toThrow("synthetic action failure");
         else await run;
         expect(actions).toBe(1);
+        expect(calls[5]).toEqual([
+          "list-keychains",
+          "-d",
+          "user",
+          "-s",
+          join(root, "runtime-smoke.keychain-db"),
+        ]);
         expect(calls.map((args) => args[0])).toEqual([
           "default-keychain",
           "list-keychains",

@@ -1,7 +1,7 @@
 import { spawn } from "node:child_process";
 import { lstat, mkdtemp, readFile, readdir, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { isAbsolute, join, resolve } from "node:path";
 
 import { runNativeDesktopRuntimeSmoke } from "./native-desktop-runtime-smoke.ts";
 
@@ -54,6 +54,17 @@ export async function resolveLinuxSandboxHelper(extractedRoot: string): Promise<
   return helper;
 }
 
+export function linuxArtifactSmokeTempDirectory(environment: NodeJS.ProcessEnv): string {
+  if (environment.CAFE_CODE_LINUX_ARTIFACT_PREPARE_SANDBOX !== "1") return tmpdir();
+  const directory = environment.RUNNER_TEMP;
+  if (!directory || !isAbsolute(directory)) {
+    throw new Error("Native sandbox preparation requires an absolute runner temporary directory.");
+  }
+  // Modern distributions mount /tmp nosuid. The runner's workspace temp area
+  // retains normal installed-file semantics without altering host mount policy.
+  return directory;
+}
+
 export async function runLinuxNativeArtifactSmoke(releaseDir = resolve("release")): Promise<void> {
   if (process.platform !== "linux" || process.arch !== "x64") {
     throw new Error("Linux native artifact smoke must run on Linux x64.");
@@ -65,7 +76,9 @@ export async function runLinuxNativeArtifactSmoke(releaseDir = resolve("release"
     throw new Error("Linux release metadata is missing or does not describe the AppImage.");
   }
 
-  const smokeRoot = await mkdtemp(join(tmpdir(), "cafecode-linux-artifact-smoke-"));
+  const smokeRoot = await mkdtemp(
+    join(linuxArtifactSmokeTempDirectory(process.env), "cafecode-linux-artifact-smoke-"),
+  );
   try {
     const preparedExtractedRoot = process.env.CAFE_CODE_LINUX_EXTRACTED_ROOT?.trim();
     const prepareSandbox = process.env.CAFE_CODE_LINUX_ARTIFACT_PREPARE_SANDBOX === "1";

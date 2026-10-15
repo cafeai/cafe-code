@@ -8,6 +8,17 @@ import {
 } from "./windows-managed-installer-smoke.ts";
 
 describe("native managed-installer fixture isolation", () => {
+  it("keeps bootstrap failure fatal without prompting during silent NSIS installation", () => {
+    const source = readFileSync(
+      new URL("../apps/desktop/resources/installer.nsh", import.meta.url),
+      "utf8",
+    );
+    const dialogs = source.split(/\r?\n/).filter((line) => /^\s*MessageBox\b/.test(line));
+    expect(dialogs).toHaveLength(1);
+    expect(dialogs[0]).toMatch(/MB_OK\|MB_ICONSTOP .+ \/SD IDOK$/);
+    expect(source).toMatch(/\/SD IDOK\s+SetErrorLevel 1\s+Abort/);
+  });
+
   it.each(["\n", "\r\n"])(
     "preserves every original installer statement with %j line endings",
     (newline) => {

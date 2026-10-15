@@ -59,7 +59,9 @@ export async function withIsolatedMacosArtifactKeychain(
     await security(["create-keychain", "-p", password, keychain]);
     await security(["set-keychain-settings", "-u", "-t", "600", keychain]);
     await security(["unlock-keychain", "-p", password, keychain]);
-    await security(["list-keychains", "-d", "user", "-s", ...originalSearch, keychain]);
+    // The smoke must not fall through to an identically named credential in
+    // the runner's login keychain and trigger its interactive access prompt.
+    await security(["list-keychains", "-d", "user", "-s", keychain]);
     await security(["default-keychain", "-d", "user", "-s", keychain]);
     await action();
   } finally {

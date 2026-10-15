@@ -310,7 +310,12 @@ export async function runWindowsNativeArtifactSmoke(
   let uninstallerPath: string | undefined;
 
   try {
-    const install = await runProcess(installer, ["/S", `/D=${installDir}`]);
+    // NSIS parses /D= as an unquoted final command-line tail, even for spaces.
+    // Node's ordinary Windows argv quoting changes that grammar. Keep this
+    // narrowly scoped native installer call shell-free and verbatim.
+    const install = await runProcess(installer, ["/S", `/D=${installDir}`], {
+      windowsVerbatimArguments: true,
+    });
     assertSuccessful(install, "NSIS install");
     const installedExecutables = selectInstalledWindowsExecutables(await readdir(installDir));
     const appPath = join(installDir, installedExecutables.app);
