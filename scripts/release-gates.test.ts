@@ -24,10 +24,11 @@ describe("release publication gates", () => {
     }[]) {
       const checkouts = job.steps.filter((step) => step.uses?.startsWith("actions/checkout@"));
       expect(checkouts).toHaveLength(1);
-      // Release callers supply an immutable source SHA, manual runs qualify
-      // their selected ref, and scheduled canaries retain the dev default.
+      // Release callers supply an immutable source SHA, manual runs pin their
+      // selected ref's event commit, and scheduled canaries retain dev. A later
+      // branch push must not change a matrix job's source midway through a run.
       expect(checkouts[0]!.with?.ref).toBe(
-        "${{ inputs.source_ref || (github.event_name == 'workflow_dispatch' && github.ref || 'dev') }}",
+        "${{ inputs.source_ref || (github.event_name == 'workflow_dispatch' && github.sha || 'dev') }}",
       );
     }
   });
