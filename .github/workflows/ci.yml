@@ -83,6 +83,14 @@ jobs:
       - name: Install dependencies
         run: corepack yarn install --immutable
 
+      - name: Isolated Windows managed installer transaction
+        # This synthetic native boundary needs dependencies but no desktop
+        # build. Fail here before spending time on unrelated qualification.
+        if: runner.os == 'Windows'
+        env:
+          CAFE_CODE_WINDOWS_MANAGED_INSTALLER_E2E: "1"
+        run: node scripts/windows-managed-installer-smoke.ts
+
       - name: Qualify installed Electron security runtime
         # Execute only the installed runtime's Node mode in an isolated profile.
         # No Cafe window, provider, credentials or GPU participates in this check.
@@ -165,12 +173,6 @@ jobs:
       - name: Release smoke
         if: inputs.release_candidate && runner.os == 'Linux'
         run: corepack yarn release:smoke
-
-      - name: Isolated Windows managed installer transaction
-        if: runner.os == 'Windows'
-        env:
-          CAFE_CODE_WINDOWS_MANAGED_INSTALLER_E2E: "1"
-        run: node scripts/windows-managed-installer-smoke.ts
 
       - name: Build desktop pipeline
         run: corepack yarn build:desktop

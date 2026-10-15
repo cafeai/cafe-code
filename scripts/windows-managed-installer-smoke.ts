@@ -17,6 +17,43 @@ import { promisify } from "node:util";
 import { pathToFileURL } from "node:url";
 import { removePathWithRetries } from "./windows-native-artifact-smoke.ts";
 
+const installerTracePoints = [
+  ["Set-StrictMode -Version 3.0", "script-start"],
+  ['Write-JsonFile -Path (Join-Path $cafeRoot "installer-options.json")', "options-start"],
+  ["if (-not $Enabled) {", "options-complete"],
+  ["  Assert-ManagedDirectory -Path $managedRoot", "managed-directory"],
+  ["  $nodeSource = Resolve-ManagedNodeSource", "node-source"],
+  ["  $guard = [IO.File]::Open($guardPath", "guard-open"],
+  ['    [Environment]::SetEnvironmentVariable("NODE_OPTIONS"', "guard-held"],
+  ["    $prepared = @(& $nodePath", "prepare-start"],
+  ["    if ($LASTEXITCODE -ne 0", "prepare-complete"],
+  ["    Assert-ManagedDirectory -Path $generationRoot", "generation-directory"],
+  ["    Assert-ManagedDirectory -Path $settingsParent", "settings-directory"],
+  ["      $activation = Publish-ManagedRecord", "activation-publication"],
+  ["      $result = Publish-ManagedRecord", "result-publication"],
+  ["      if (Test-Path -LiteralPath $settingsPath)", "settings-publication"],
+  ['  try { Write-InstallerLog "Verified managed', "committed"],
+] as const;
+
+/** Add fixed stdout observations only to the temporary synthetic copy. Every
+ * original statement and line ending remains byte-identical after removing
+ * these markers; source drift is refused before launching PowerShell. */
+export function instrumentManagedInstallerFixture(source: string): string {
+  const newline = source.includes("\r\n") ? "\r\n" : "\n";
+  let instrumented = source;
+  for (const [anchor, phase] of installerTracePoints) {
+    if (source.split(anchor).length !== 2) {
+      throw new Error("Managed installer fixture source changed; trace anchors require review.");
+    }
+    const indentation = /^\s*/.exec(anchor)![0];
+    instrumented = instrumented.replace(
+      anchor,
+      `${indentation}Write-Output 'cafe-installer-fixture:${phase}'${newline}${anchor}`,
+    );
+  }
+  return instrumented;
+}
+
 /** Only system-owned PowerShell modules and fixture-owned caches/profiles may
  * participate in this native fixture, independent of the invoking shell. */
 export function managedInstallerFixtureEnvironment(input: {
@@ -163,9 +200,14 @@ async function run() {
     await mkdir(local, { recursive: true });
     await mkdir(profile, { recursive: true });
     await copyFile(process.execPath, join(nativeNode, "node.exe"));
-    await copyFile(
-      resolve("apps/desktop/resources/managed-runtime/install-managed-provider-runtime.ps1"),
+    await writeFile(
       script,
+      instrumentManagedInstallerFixture(
+        await readFile(
+          resolve("apps/desktop/resources/managed-runtime/install-managed-provider-runtime.ps1"),
+          "utf8",
+        ),
+      ),
     );
     await writeFile(
       join(resource, "install-runtime.mjs"),
