@@ -14,6 +14,54 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { type EnvironmentState, useStore } from "../store";
 import { type Thread } from "../types";
 
+it("retains bounded exact-account web consent in received queued-steer recovery and refuses malformed consent", () => {
+  const activity: OrchestrationThreadActivity = {
+    id: EventId.make("axiom-web-recovery"),
+    tone: "error",
+    kind: "provider.turn.steer.failed",
+    summary: "Provider steer queued",
+    turnId: TurnId.make("web-turn"),
+    sequence: 4,
+    createdAt: "2026-10-14T00:00:00.000Z",
+    payload: {
+      messageId: MessageId.make("web-message"),
+      intentSequence: 3,
+      retryableFollowUp: true,
+      axiomWebConsent: { instanceId: "axiom-personal", enabled: true },
+      axiomMcpSelection: { instanceId: "axiom-personal", revision: 7 },
+    },
+  };
+  expect(readRetryableSteerFailure(activity)?.axiomWebConsent).toEqual({
+    instanceId: "axiom-personal",
+    enabled: true,
+  });
+  expect(readRetryableSteerFailure(activity)?.axiomMcpSelection).toEqual({
+    instanceId: "axiom-personal",
+    revision: 7,
+  });
+  for (const revision of [-1, Number.MAX_SAFE_INTEGER + 1, "7", null])
+    expect(
+      readRetryableSteerFailure({
+        ...activity,
+        payload: {
+          ...(activity.payload as object),
+          axiomMcpSelection: { instanceId: "axiom-personal", revision },
+        },
+      })?.axiomMcpSelection,
+    ).toBeUndefined();
+  for (const consent of [
+    { instanceId: "axiom-personal", enabled: "true" },
+    { instanceId: "bad account", enabled: true },
+    { enabled: true },
+  ])
+    expect(
+      readRetryableSteerFailure({
+        ...activity,
+        payload: { ...(activity.payload as object), axiomWebConsent: consent },
+      })?.axiomWebConsent,
+    ).toBeUndefined();
+});
+
 import {
   buildLocalDraftThread,
   canRetryLegacyCodexRootCompletion,

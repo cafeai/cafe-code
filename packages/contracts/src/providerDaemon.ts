@@ -1,3 +1,10 @@
+import { ProviderMcpNativeInput, ProviderMcpResult } from "./providerMcp.ts";
+import { ServerProviderLoginInput, ServerProviderLoginResult } from "./server.ts";
+import {
+  ProviderSecurityReadInput,
+  ProviderSecurityNativeRefreshInput,
+  ProviderSecurityResult,
+} from "./providerSecurity.ts";
 import { ProviderCompactThreadInput } from "./providerCompaction.ts";
 import { ProviderTaskControlInput, ProviderTaskControlResult } from "./providerTaskControls.ts";
 import * as Schema from "effect/Schema";
@@ -577,6 +584,19 @@ export const ProviderDaemonRpcRequest = Schema.Union([
     payload: ProviderSteerTurnInput,
   }),
   Schema.Struct({
+    method: Schema.Literal("loginProvider"),
+    payload: ServerProviderLoginInput,
+  }),
+  Schema.Struct({ method: Schema.Literal("manageMcp"), payload: ProviderMcpNativeInput }),
+  Schema.Struct({
+    method: Schema.Literal("readSecurity"),
+    payload: ProviderSecurityReadInput,
+  }),
+  Schema.Struct({
+    method: Schema.Literal("refreshSecurity"),
+    payload: ProviderSecurityNativeRefreshInput,
+  }),
+  Schema.Struct({
     method: Schema.Literal("controlTask"),
     commandId: Schema.optional(ProviderDaemonCommandId),
     payload: ProviderTaskControlInput,
@@ -689,6 +709,10 @@ export const ProviderDaemonRpcResultByMethod = {
   discardSessionFork: Schema.Void,
   sendTurn: ProviderTurnStartResult,
   steerTurn: ProviderTurnSteerResult,
+  loginProvider: ServerProviderLoginResult,
+  manageMcp: ProviderMcpResult,
+  readSecurity: ProviderSecurityResult,
+  refreshSecurity: ProviderSecurityResult,
   controlTask: ProviderTaskControlResult,
   interruptTurn: Schema.Void,
   respondToRequest: Schema.Void,

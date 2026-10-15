@@ -37,6 +37,8 @@ import { ProviderCommandCatalog } from "./providerCommands.ts";
 import { ProviderSessionQuotaReport } from "./providerQuota.ts";
 import { CodexTransientFailureCategory } from "./providerRuntime.ts";
 
+import { ProviderSecurityReport } from "./providerSecurity.ts";
+
 const ProviderSessionStatus = Schema.Literals([
   "connecting",
   "ready",
@@ -47,6 +49,7 @@ const ProviderSessionStatus = Schema.Literals([
 
 export const ProviderSession = Schema.Struct({
   provider: ProviderDriverKind,
+  securityReport: Schema.optional(ProviderSecurityReport),
   // Volatile metadata from this exact query, never an account-global catalog.
   commandCatalog: Schema.optional(ProviderCommandCatalog),
   // Passive metadata from this exact native query. Never persist or hydrate it
@@ -239,6 +242,15 @@ export type ProviderSubagentPolicySession = typeof ProviderSubagentPolicySession
 
 export const ProviderSendTurnInput = Schema.Struct({
   threadId: ThreadId,
+  /** Explicit Axiom desktop web consent for this message only. */
+  axiomWebEnabled: Schema.optional(Schema.Boolean),
+  axiomMcpRevision: Schema.optional(
+    Schema.Number.check(
+      Schema.isInt(),
+      Schema.isGreaterThanOrEqualTo(0),
+      Schema.isLessThanOrEqualTo(Number.MAX_SAFE_INTEGER),
+    ),
+  ),
   // Valid only with the owner's additive Cafe continuation-fence guarantee.
   // Missing inventory must refuse, never recover or launch another process.
   expectedSubagentPolicySession: Schema.optional(ProviderSubagentPolicySession),
@@ -285,6 +297,14 @@ export type ProviderSendTurnInput = typeof ProviderSendTurnInput.Type;
 
 export const ProviderSteerTurnInput = Schema.Struct({
   threadId: ThreadId,
+  axiomWebEnabled: Schema.optional(Schema.Boolean),
+  axiomMcpRevision: Schema.optional(
+    Schema.Number.check(
+      Schema.isInt(),
+      Schema.isGreaterThanOrEqualTo(0),
+      Schema.isLessThanOrEqualTo(Number.MAX_SAFE_INTEGER),
+    ),
+  ),
   expectedSubagentPolicySession: Schema.optional(ProviderSubagentPolicySession),
   deliveryPriority: Schema.optional(ProviderDeliveryPriority),
   expectedPrioritySession: Schema.optional(ProviderPrioritySessionBinding),

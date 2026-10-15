@@ -51,13 +51,18 @@ describe("097_ChatImages", () => {
                 [95, "ProviderActivityDiagnostics"],
                 [96, "GeneratedVisualizations"],
                 [97, "ChatImages"],
+                [98, "ReportedUsageCosts"],
               ]
             : history === "upstream-95"
               ? [
                   [96, "GeneratedVisualizations"],
                   [97, "ChatImages"],
+                  [98, "ReportedUsageCosts"],
                 ]
-              : [[97, "ChatImages"]],
+              : [
+                  [97, "ChatImages"],
+                  [98, "ReportedUsageCosts"],
+                ],
         );
         assert.deepEqual(
           yield* sql`SELECT migration_id, name FROM effect_sql_migrations

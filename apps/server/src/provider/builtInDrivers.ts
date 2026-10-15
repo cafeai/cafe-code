@@ -20,6 +20,7 @@
  *
  * @module provider/builtInDrivers
  */
+import { AxiomDriver, type AxiomDriverEnv } from "./Drivers/AxiomDriver.ts";
 import { ClaudeDriver, type ClaudeDriverEnv } from "./Drivers/ClaudeDriver.ts";
 import { CodexDriver, type CodexDriverEnv } from "./Drivers/CodexDriver.ts";
 import { GrokDriver, type GrokDriverEnv } from "./Drivers/GrokDriver.ts";
@@ -32,6 +33,7 @@ import type { AnyProviderDriver } from "./ProviderDriver.ts";
  * layer must provide every service in this union.
  */
 export type BuiltInDriversEnv =
+  | AxiomDriverEnv
   | ClaudeDriverEnv
   | CodexDriverEnv
   | GrokDriverEnv
@@ -47,4 +49,5 @@ export const BUILT_IN_DRIVERS: ReadonlyArray<AnyProviderDriver<BuiltInDriversEnv
   ClaudeDriver,
   GrokDriver,
   OpenCodeDriver,
+  AxiomDriver,
 ];

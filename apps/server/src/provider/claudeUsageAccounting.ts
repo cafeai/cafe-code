@@ -1,4 +1,4 @@
-import type { UsageAccountingModel, UsageAccountingSnapshot } from "@cafecode/contracts";
+import type { UsageAccountingSnapshot } from "@cafecode/contracts";
 
 /**
  * Official contract: https://code.claude.com/docs/en/agent-sdk/cost-tracking
@@ -19,7 +19,7 @@ const FIELDS = [
   "reasoningOutputTokens",
 ] as const;
 export type ClaudeUsageCounts = {
-  -readonly [K in Exclude<keyof UsageAccountingModel, "model">]: number;
+  [K in (typeof FIELDS)[number]]: number;
 };
 type Counts = ClaudeUsageCounts;
 export type ClaudeUsageBaseline =

@@ -51,6 +51,7 @@ describe("092_LiveWork", () => {
         [95, "ProviderActivityDiagnostics"],
         [96, "GeneratedVisualizations"],
         [97, "ChatImages"],
+        [98, "ReportedUsageCosts"],
       ]);
       assert.deepEqual(
         yield* sql<{ name: string }>`
@@ -98,6 +99,7 @@ describe("092_LiveWork", () => {
         [95, "ProviderActivityDiagnostics"],
         [96, "GeneratedVisualizations"],
         [97, "ChatImages"],
+        [98, "ReportedUsageCosts"],
       ]);
       assert.deepEqual(yield* sql`SELECT * FROM projection_live_work`, before);
       assert.deepEqual(

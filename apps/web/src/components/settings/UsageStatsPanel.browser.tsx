@@ -846,6 +846,51 @@ function settleLayoutCountersImmediately(): void {
 }
 
 describe("UsageStatsPanel", () => {
+  it("shows native Axiom costs in the overview, provider/model totals and selected daily range", async () => {
+    const base = createRangeUsageDetail();
+    const row = {
+      provider: ProviderDriverKind.make("axiom"),
+      model: "near:fixture",
+      inputTokens: 100,
+      cachedInputTokens: 20,
+      cacheWriteInputTokens: 0,
+      outputTokens: 30,
+      reasoningOutputTokens: 5,
+      reportedCost: { microusd: "123456", tokens: 130 },
+    };
+    const today = {
+      ...base.today,
+      inputTokens: 100,
+      outputTokens: 30,
+      cachedInputTokens: 20,
+      cacheWriteInputTokens: 0,
+      reasoningOutputTokens: 5,
+    };
+    const usage = {
+      ...base,
+      today,
+      totals: today,
+      days: [today],
+      tokenBreakdown: [row],
+      tokenBreakdownDays: [{ ...row, day: today.day }],
+    };
+    mounted = await render(<UsageCostContent usage={usage} range="7" />);
+    await expect.element(page.getByText("Cost (USD)", { exact: true })).toBeVisible();
+    await expect.element(page.getByText("Reported", { exact: true })).toBeVisible();
+    await expect
+      .poll(() => requiredElement("[data-usage-cost-hero-value]").textContent)
+      .toBe("$0.12");
+    expect(
+      requiredElement('[data-usage-provider-summary="axiom"] [data-usage-provider-cost-value]')
+        .textContent,
+    ).toBe("$0.12");
+    expect(
+      requiredElement('[data-usage-provider="axiom"]').getAttribute("data-usage-cost-source"),
+    ).toBe("reported");
+    await expect
+      .element(page.getByText("Recorded costs and estimates may be incomplete.", { exact: true }))
+      .toBeVisible();
+  });
   it("discloses partial prospective child usage without claiming root context growth", async () => {
     mounted = await render(<UsageCostContent usage={createUsageDetail()} />);
     // One visible line at the figures; the specifics are one focus/hover away.

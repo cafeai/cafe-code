@@ -725,6 +725,7 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
           command.runtimeRecovery !== undefined ||
           command.sourceProposedPlan !== undefined ||
           command.deliveryPriority !== undefined ||
+          command.axiomWebEnabled === true ||
           command.runtimeMode !== targetThread.runtimeMode ||
           command.interactionMode !== targetThread.interactionMode ||
           scheduled.expectedRuntimeMode !== targetThread.runtimeMode ||
@@ -890,6 +891,12 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
           causationEventId: userMessageEvent.eventId,
           type: "thread.turn-steer-requested",
           payload: {
+            ...(command.axiomWebEnabled !== undefined
+              ? { axiomWebEnabled: command.axiomWebEnabled }
+              : {}),
+            ...(command.axiomMcpRevision !== undefined
+              ? { axiomMcpRevision: command.axiomMcpRevision }
+              : {}),
             threadId: command.threadId,
             ...(command.deliveryPriority !== undefined
               ? {
@@ -997,6 +1004,12 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
         causationEventId: userMessageEvent.eventId,
         type: "thread.turn-start-requested",
         payload: {
+          ...(command.axiomWebEnabled !== undefined
+            ? { axiomWebEnabled: command.axiomWebEnabled }
+            : {}),
+          ...(command.axiomMcpRevision !== undefined
+            ? { axiomMcpRevision: command.axiomMcpRevision }
+            : {}),
           threadId: command.threadId,
           ...(command.deliveryPriority !== undefined
             ? { deliveryPriority: command.deliveryPriority }
@@ -1115,6 +1128,12 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
           causationEventId: userMessageEvent.eventId,
           type: "thread.turn-start-requested",
           payload: {
+            ...(command.axiomWebEnabled !== undefined
+              ? { axiomWebEnabled: command.axiomWebEnabled }
+              : {}),
+            ...(command.axiomMcpRevision !== undefined
+              ? { axiomMcpRevision: command.axiomMcpRevision }
+              : {}),
             threadId: command.threadId,
             ...(command.deliveryPriority !== undefined
               ? { deliveryPriority: command.deliveryPriority }
@@ -1141,6 +1160,12 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
         causationEventId: userMessageEvent.eventId,
         type: "thread.turn-steer-requested",
         payload: {
+          ...(command.axiomWebEnabled !== undefined
+            ? { axiomWebEnabled: command.axiomWebEnabled }
+            : {}),
+          ...(command.axiomMcpRevision !== undefined
+            ? { axiomMcpRevision: command.axiomMcpRevision }
+            : {}),
           threadId: command.threadId,
           ...(command.deliveryPriority !== undefined
             ? { deliveryPriority: command.deliveryPriority }

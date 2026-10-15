@@ -536,6 +536,8 @@ type ChatViewProps = {
 );
 
 interface ComposerSendSnapshot {
+  readonly axiomWebEnabled?: boolean;
+  readonly axiomMcpRevision?: number;
   readonly deliveryPriority?: import("@cafecode/contracts").ProviderDeliveryPriority;
   readonly subagentLimits?: SubagentLimits;
   readonly codexContextWindowOverride?: number | null;
@@ -1711,6 +1713,15 @@ export default function ChatView(props: ChatViewProps) {
             modelSelection: activeThread.modelSelection,
             runtimeMode: activeThread.runtimeMode,
             interactionMode: activeThread.interactionMode,
+            ...(activeThread.session?.provider === "axiom" &&
+            candidate.failure.axiomWebConsent?.instanceId === activeThread.modelSelection.instanceId
+              ? { axiomWebEnabled: candidate.failure.axiomWebConsent.enabled }
+              : {}),
+            ...(activeThread.session?.provider === "axiom" &&
+            candidate.failure.axiomMcpSelection?.instanceId ===
+              activeThread.modelSelection.instanceId
+              ? { axiomMcpRevision: candidate.failure.axiomMcpSelection.revision }
+              : {}),
           };
           const queuedItem: FollowUpQueueItem = {
             ...snapshot,
@@ -4713,6 +4724,14 @@ export default function ChatView(props: ChatViewProps) {
       providerModels: sendCtx.selectedProviderModels,
       promptEffort: sendCtx.selectedPromptEffort,
       modelSelection: sendCtx.selectedModelSelection,
+      ...(sendCtx.selectedProvider === "axiom"
+        ? {
+            axiomWebEnabled: sendCtx.axiomWebEnabled === true,
+            ...(sendCtx.axiomMcpRevision !== undefined
+              ? { axiomMcpRevision: sendCtx.axiomMcpRevision }
+              : {}),
+          }
+        : {}),
       ...(sendCtx.selectedProvider === "claudeAgent" && sendCtx.deliveryPriority !== undefined
         ? { deliveryPriority: sendCtx.deliveryPriority }
         : {}),
@@ -4749,7 +4768,9 @@ export default function ChatView(props: ChatViewProps) {
       current?.prompt !== expected?.prompt ||
       current?.images !== expected?.images ||
       current?.files !== expected?.files ||
-      current?.queueEditingItemId !== expected?.queueEditingItemId
+      current?.queueEditingItemId !== expected?.queueEditingItemId ||
+      current?.axiomWebEnabled !== expected?.axiomWebEnabled ||
+      current?.axiomMcpRevision !== expected?.axiomMcpRevision
     )
       return;
     clearComposerDraftContent(composerDraftTarget);
@@ -4769,6 +4790,15 @@ export default function ChatView(props: ChatViewProps) {
     const retryComposerImages = snapshot.images.map(cloneComposerImageForRetry);
     const restored = restoreComposerDraftContentIfEmpty(composerDraftTarget, {
       prompt: snapshot.promptText,
+      ...(snapshot.axiomWebEnabled !== undefined
+        ? {
+            axiomWebEnabled: snapshot.axiomWebEnabled,
+            ...(snapshot.axiomMcpRevision !== undefined
+              ? { axiomMcpRevision: snapshot.axiomMcpRevision }
+              : {}),
+            axiomWebInstanceId: snapshot.modelSelection.instanceId,
+          }
+        : {}),
       images: retryComposerImages,
       files: snapshot.files.map((file) =>
         composerFileFromAttachment(environmentId, activeThread!.id, file),
@@ -5279,6 +5309,8 @@ export default function ChatView(props: ChatViewProps) {
         },
         modelSelection: item.modelSelection,
         ...(item.deliveryPriority !== undefined ? { deliveryPriority: item.deliveryPriority } : {}),
+        ...(item.axiomWebEnabled !== undefined ? { axiomWebEnabled: item.axiomWebEnabled } : {}),
+        ...(item.axiomMcpRevision !== undefined ? { axiomMcpRevision: item.axiomMcpRevision } : {}),
         titleSeed: queuedThread.title,
         runtimeMode: item.runtimeMode,
         interactionMode: item.interactionMode,
@@ -5614,6 +5646,12 @@ export default function ChatView(props: ChatViewProps) {
       const receipt = await api.orchestration.dispatchCommand({
         type: "thread.turn.steer",
         commandId: commandIdForSend,
+        ...(snapshot.axiomWebEnabled !== undefined
+          ? { axiomWebEnabled: snapshot.axiomWebEnabled }
+          : {}),
+        ...(snapshot.axiomMcpRevision !== undefined
+          ? { axiomMcpRevision: snapshot.axiomMcpRevision }
+          : {}),
         threadId: activeThread.id,
         ...(snapshot.deliveryPriority !== undefined
           ? {
@@ -6013,6 +6051,12 @@ export default function ChatView(props: ChatViewProps) {
       await onSubmitPlanFollowUp({
         text: followUp.text,
         interactionMode: followUp.interactionMode,
+        ...(snapshot.axiomWebEnabled !== undefined
+          ? { axiomWebEnabled: snapshot.axiomWebEnabled }
+          : {}),
+        ...(snapshot.axiomMcpRevision !== undefined
+          ? { axiomMcpRevision: snapshot.axiomMcpRevision }
+          : {}),
       });
       return;
     }
@@ -6234,6 +6278,12 @@ export default function ChatView(props: ChatViewProps) {
         type: "thread.turn.start",
         commandId: newCommandId(),
         threadId: threadIdForSend,
+        ...(snapshot.axiomWebEnabled !== undefined
+          ? { axiomWebEnabled: snapshot.axiomWebEnabled }
+          : {}),
+        ...(snapshot.axiomMcpRevision !== undefined
+          ? { axiomMcpRevision: snapshot.axiomMcpRevision }
+          : {}),
         message: {
           messageId: messageIdForSend,
           role: "user",
@@ -6278,6 +6328,15 @@ export default function ChatView(props: ChatViewProps) {
       const draftRestored =
         !turnStartSucceeded &&
         restoreComposerDraftContentIfEmpty(sendAttemptComposerDraftTarget, {
+          ...(snapshot.axiomWebEnabled !== undefined
+            ? {
+                axiomWebEnabled: snapshot.axiomWebEnabled,
+                ...(snapshot.axiomMcpRevision !== undefined
+                  ? { axiomMcpRevision: snapshot.axiomMcpRevision }
+                  : {}),
+                axiomWebInstanceId: snapshot.modelSelection.instanceId,
+              }
+            : {}),
           prompt: promptForSend,
           images: retryComposerImages,
           files: snapshot.files.map((file) =>
@@ -6736,6 +6795,8 @@ export default function ChatView(props: ChatViewProps) {
     if (
       !store.beginQueueEdit(composerDraftTarget, item.id, {
         prompt: item.promptText,
+        ...(item.axiomWebEnabled !== undefined ? { axiomWebEnabled: item.axiomWebEnabled } : {}),
+        ...(item.axiomMcpRevision !== undefined ? { axiomMcpRevision: item.axiomMcpRevision } : {}),
         images: item.images.map(cloneComposerImageForRetry),
         files: item.files.map((attachment) =>
           composerFileFromAttachment(item.environmentId, item.threadId, attachment),
@@ -6840,6 +6901,10 @@ export default function ChatView(props: ChatViewProps) {
     const replacement: FollowUpQueueItem = {
       ...original,
       ...snapshot,
+      axiomWebEnabled: snapshot.provider === "axiom" ? snapshot.axiomWebEnabled === true : false,
+      ...(snapshot.provider === "axiom" && snapshot.axiomMcpRevision !== undefined
+        ? { axiomMcpRevision: snapshot.axiomMcpRevision }
+        : {}),
       blockedReason: null,
       dispatchState: "pending",
     };
@@ -7283,9 +7348,13 @@ export default function ChatView(props: ChatViewProps) {
     async ({
       text,
       interactionMode: nextInteractionMode,
+      axiomWebEnabled,
+      axiomMcpRevision,
     }: {
       text: string;
       interactionMode: "default" | "plan";
+      axiomWebEnabled?: boolean;
+      axiomMcpRevision?: number;
     }) => {
       const api = readEnvironmentApi(environmentId);
       if (
@@ -7390,6 +7459,9 @@ export default function ChatView(props: ChatViewProps) {
 
         await api.orchestration.dispatchCommand({
           type: "thread.turn.start",
+          ...(ctxSelectedProvider === "axiom" && axiomWebEnabled !== undefined
+            ? { axiomWebEnabled, ...(axiomMcpRevision !== undefined ? { axiomMcpRevision } : {}) }
+            : {}),
           commandId: newCommandId(),
           threadId: threadIdForSend,
           message: {

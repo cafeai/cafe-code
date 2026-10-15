@@ -3,7 +3,7 @@ import { uiText } from "@cafecode/shared/i18n";
 import { UiMessage } from "~/i18n";
 import { useMemo, useState, type ReactNode } from "react";
 import type { ProviderDriverKind, UsageStatsGetResult } from "@cafecode/contracts";
-import { rollUpCost, resolveModelRate, type ModelRate } from "@cafecode/shared/modelPricing";
+import { rollUpCost, type ModelRate } from "@cafecode/shared/modelPricing";
 
 import { useDelayedFlag } from "../../hooks/useDelayedFlag";
 import { useSettings } from "../../hooks/useSettings";
@@ -32,11 +32,11 @@ import {
 /**
  * Cost and token composition for the Usage page.
  *
- * Everything here is derived client-side from recorded counters plus the
- * pricing table; nothing is fetched. The headline is deliberately labelled as a
- * standard API-rate estimate (or a user-defined rate). The aggregate ledger
- * does not retain individual request sizes or service tiers, so it cannot
- * reproduce long-context or speed-tier adjustments or subscription charges.
+ * The shared usage response supplies recorded counters and optional settled
+ * cost receipts. Native Axiom receipts retain their reported amounts; other
+ * rows use a standard API-rate estimate (or a user-defined rate). The aggregate
+ * counters cannot reproduce per-request long-context or speed-tier adjustments
+ * or subscription charges. This component performs no provider requests.
  *
  * Two honesty rules run through the whole section. Models with no rate are
  * counted but never costed, and the priced share is shown so a partial figure
@@ -99,6 +99,7 @@ interface ModelCostRow {
   readonly model: string;
   readonly cost: number;
   readonly priced: boolean;
+  readonly reported: boolean;
   readonly tokens: number;
   readonly hasTokenUsage: boolean;
   generatingMs: number | undefined;
@@ -245,6 +246,7 @@ function UsageModelRow({ entry }: { entry: ModelCostRow }) {
       className="border-t border-border-subtle"
       data-usage-model={entry.model}
       data-usage-provider={entry.provider}
+      data-usage-cost-source={entry.reported ? "reported" : "estimated"}
     >
       <td className="max-w-[20rem] py-1.5 pr-3">
         <span className="flex min-w-0 items-center gap-1.5">
@@ -263,7 +265,14 @@ function UsageModelRow({ entry }: { entry: ModelCostRow }) {
             {uiText("—", undefined, undefined, uiLocale)}
           </span>
         ) : entry.priced ? (
-          formatUsd(displayedCost)
+          <>
+            {formatUsd(displayedCost)}
+            {entry.reported ? (
+              <span className="block text-2xs text-muted-foreground">
+                {uiText("Reported", undefined, undefined, uiLocale)}
+              </span>
+            ) : null}
+          </>
         ) : (
           <span className="text-muted-foreground">
             {uiText("Unpriced", undefined, undefined, uiLocale)}
@@ -501,13 +510,13 @@ function UsageCostMetrics({
       { cost: number; tokens: number; priced: boolean }
     >();
     for (const entry of breakdown) {
-      const rate = resolveModelRate(entry.model, overrides);
+      const priced = rollUpCost([entry], overrides);
       const tokens = entry.inputTokens + entry.outputTokens;
       const current = byProvider.get(entry.provider) ?? { cost: 0, tokens: 0, priced: false };
       current.tokens += tokens;
-      if (rate) {
+      if (priced.pricedTokens > 0 || priced.reportedCost !== undefined) {
         current.priced = true;
-        current.cost += rollUpCost([entry], overrides).cost;
+        current.cost += priced.cost;
       }
       byProvider.set(entry.provider, current);
     }
@@ -525,7 +534,10 @@ function UsageCostMetrics({
       provider: entry.provider,
       model: entry.model,
       cost: rollUpCost([entry], overrides).cost,
-      priced: resolveModelRate(entry.model, overrides) !== undefined,
+      reported: rollUpCost([entry], overrides).reportedCost !== undefined,
+      priced:
+        rollUpCost([entry], overrides).pricedTokens > 0 ||
+        rollUpCost([entry], overrides).reportedCost !== undefined,
       tokens: entry.inputTokens + entry.outputTokens,
       hasTokenUsage: true,
       generatingMs: undefined,
@@ -555,6 +567,7 @@ function UsageCostMetrics({
           model: time.model,
           cost: 0,
           priced: false,
+          reported: false,
           tokens: 0,
           hasTokenUsage: false,
           generatingMs: undefined,
@@ -683,7 +696,9 @@ function UsageCostMetrics({
     const series: UsageChartSeries[] = [
       {
         key: "cost",
-        label: uiText("Estimated cost", undefined, undefined, uiLocale),
+        label: usage.tokenBreakdown.some((row) => row.reportedCost !== undefined)
+          ? uiText("Cost", undefined, undefined, uiLocale)
+          : uiText("Estimated cost", undefined, undefined, uiLocale),
         color: COST_SERIES_COLOR,
         values: days.map((day) => dailyCosts.get(day.day)?.cost ?? 0),
       },
@@ -728,6 +743,17 @@ function UsageCostMetrics({
         uiLocale,
       );
 
+  const costRecordingDetails = (
+    <InfoTip label={uiText("About cost estimates", undefined, undefined, uiLocale)}>
+      {uiText(
+        "Priced share covers recorded tokens only; interrupted requests may not report all usage, so this is not a complete billing record. Codex subagent usage includes only observed increments after a baseline; earlier child usage is not backfilled, and child tokens do not increase the main chat’s context-window meter.",
+        undefined,
+        undefined,
+        uiLocale,
+      )}
+    </InfoTip>
+  );
+
   return (
     <>
       <div className={OVERVIEW_GRID_CLASS} data-usage-cost-overview>
@@ -735,17 +761,28 @@ function UsageCostMetrics({
         <div className="min-w-0">
           <div className="flex items-center gap-1.5 text-xs font-medium text-muted-foreground">
             <span>
-              {labelCurrency
-                ? uiText("Estimated cost (USD)", undefined, undefined, uiLocale)
-                : uiText("Estimated cost", undefined, undefined, uiLocale)}
+              {view.rollup.reportedCost !== undefined
+                ? labelCurrency
+                  ? uiText("Cost (USD)", undefined, undefined, uiLocale)
+                  : uiText("Cost", undefined, undefined, uiLocale)
+                : labelCurrency
+                  ? uiText("Estimated cost (USD)", undefined, undefined, uiLocale)
+                  : uiText("Estimated cost", undefined, undefined, uiLocale)}
             </span>
             <InfoTip label={uiText("About estimated cost", undefined, undefined, uiLocale)}>
-              {uiText(
-                "Published standard API rates, or your custom rates if set. Excludes long-context and speed-tier adjustments; not your subscription bill.",
-                undefined,
-                undefined,
-                uiLocale,
-              )}
+              {view.rollup.reportedCost !== undefined
+                ? uiText(
+                    "Includes settled Axiom costs reported by the native CLI. Other providers use standard API-rate estimates. Only recorded requests are included; this is not the account-wide bill.",
+                    undefined,
+                    undefined,
+                    uiLocale,
+                  )
+                : uiText(
+                    "Published standard API rates, or your custom rates if set. Excludes long-context and speed-tier adjustments; not your subscription bill.",
+                    undefined,
+                    undefined,
+                    uiLocale,
+                  )}
             </InfoTip>
           </div>
           <div
@@ -883,8 +920,22 @@ function UsageCostMetrics({
         <StatTile
           id="cache-savings"
           label={uiText("Net cache savings", undefined, undefined, uiLocale)}
-          value={formatUsd(cacheSavingsDisplay)}
-          info="Cache-read discounts minus cache-write premiums."
+          value={
+            view.rollup.reportedCost !== undefined &&
+            usage.tokenBreakdown.every((row) => row.provider === "axiom")
+              ? uiText("Not recorded", undefined, undefined, uiLocale)
+              : formatUsd(cacheSavingsDisplay)
+          }
+          info={
+            view.rollup.reportedCost !== undefined
+              ? uiText(
+                  "Axiom reports settled costs without a cache savings breakdown. Cache savings for other providers use their estimated rates.",
+                  undefined,
+                  undefined,
+                  uiLocale,
+                )
+              : "Cache-read discounts minus cache-write premiums."
+          }
           detail={
             view.rollup.cacheSavings < 0
               ? "Cache writes cost more than reads have saved"
@@ -1067,21 +1118,17 @@ function UsageCostMetrics({
             className="mt-3 flex items-center gap-1.5 text-2xs text-subtle-foreground"
             data-usage-cost-coverage
           >
-            <UiMessage
-              message={"Estimates from recorded usage; may be incomplete.<slot1></slot1>"}
-              slots={{
-                slot1: (
-                  <InfoTip label={uiText("About cost estimates", undefined, undefined, uiLocale)}>
-                    {uiText(
-                      "Priced share covers recorded tokens only; interrupted requests may not report all usage, so this is not a complete billing record. Codex subagent usage includes only observed increments after a baseline; earlier child usage is not backfilled, and child tokens do not increase the main chat’s context-window meter.",
-                      undefined,
-                      undefined,
-                      uiLocale,
-                    )}
-                  </InfoTip>
-                ),
-              }}
-            />
+            {view.rollup.reportedCost !== undefined ? (
+              <UiMessage
+                message="Recorded costs and estimates may be incomplete.<slot1></slot1>"
+                slots={{ slot1: costRecordingDetails }}
+              />
+            ) : (
+              <UiMessage
+                message="Estimates from recorded usage; may be incomplete.<slot1></slot1>"
+                slots={{ slot1: costRecordingDetails }}
+              />
+            )}
           </p>
         </div>
       </div>

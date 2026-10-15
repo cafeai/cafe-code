@@ -10596,6 +10596,106 @@ describe("ProviderCommandReactor", () => {
     expect(JSON.stringify(queued?.payload)).not.toContain("x.ai/interject");
   });
 
+  for (const wrapped of [false, true])
+    it(`queues changed Axiom web consent with its exact account and value (${wrapped ? "daemon" : "direct"})`, async () => {
+      const harness = await createHarness({
+        liveSteer: "supported",
+        providerInstances: {
+          [ProviderInstanceId.make("axiom")]: { driver: ProviderDriverKind.make("axiom") },
+        },
+        threadModelSelection: {
+          instanceId: ProviderInstanceId.make("axiom"),
+          model: "native-model",
+        },
+      });
+      const now = "2026-01-01T00:00:00.000Z";
+      const threadId = ThreadId.make("thread-1");
+      const activeTurnId = asTurnId("turn-grok-interject");
+      const messageId = asMessageId("user-message-grok-interject");
+      harness.steerTurn.mockImplementation(() =>
+        Effect.fail(
+          new ProviderAdapterRequestError({
+            provider: wrapped ? "provider-daemon" : "axiom",
+            method: wrapped ? "steerTurn" : "_axiom/turn/steer",
+            detail: wrapped
+              ? "Provider adapter request failed (axiom) for _axiom/turn/steer: Axiom web consent changed; deliver as a new turn."
+              : "Axiom web consent changed; deliver as a new turn.",
+          }),
+        ),
+      );
+
+      await Effect.runPromise(
+        harness.engine.dispatch({
+          type: "thread.session.set",
+          commandId: CommandId.make("cmd-session-set-grok-interject"),
+          threadId,
+          session: {
+            threadId,
+            status: "running",
+            providerName: "axiom",
+            providerInstanceId: ProviderInstanceId.make("axiom"),
+            runtimeMode: "approval-required",
+            activeTurnId,
+            lastError: null,
+            updatedAt: now,
+          },
+          createdAt: now,
+        }),
+      );
+
+      await Effect.runPromise(
+        harness.engine.dispatch({
+          type: "thread.turn.steer",
+          axiomWebEnabled: true,
+          axiomMcpRevision: 7,
+          commandId: CommandId.make("cmd-turn-steer-grok-interject"),
+          threadId,
+          message: {
+            messageId,
+            role: "user",
+            text: "wrap it up quickly",
+            attachments: [],
+          },
+          createdAt: now,
+        }),
+      );
+
+      await waitFor(async () => {
+        const thread = (await harness.readModel()).threads.find((entry) => entry.id === threadId);
+        return (
+          thread?.activities.some(
+            (activity) =>
+              activity.kind === "provider.turn.steer.failed" &&
+              activity.payload !== null &&
+              typeof activity.payload === "object" &&
+              "retryableFollowUp" in activity.payload,
+          ) ?? false
+        );
+      });
+
+      const thread = (await harness.readModel()).threads.find((entry) => entry.id === threadId);
+      const queued = thread?.activities.find(
+        (activity) => activity.kind === "provider.turn.steer.failed",
+      );
+      expect(queued).toMatchObject({
+        summary: "Provider steer queued",
+        payload: {
+          detail:
+            "Cafe Code preserved this follow-up for automatic delivery after the active turn is ready.",
+          messageId,
+          retryableFollowUp: true,
+          retryAfter: "active-turn",
+          axiomWebConsent: { instanceId: "axiom", enabled: true },
+          axiomMcpSelection: { instanceId: "axiom", revision: 7 },
+        },
+      });
+      expect(harness.steerTurn.mock.calls[0]?.[0]).toMatchObject({
+        axiomWebEnabled: true,
+        axiomMcpRevision: 7,
+      });
+      expect(JSON.stringify(queued?.payload)).not.toContain("_axiom/turn/steer");
+    });
+
   it("does not route steer requests to providers without live steering support", async () => {
     const harness = await createHarness({ liveSteer: "unsupported" });
     const now = "2026-01-01T00:00:00.000Z";

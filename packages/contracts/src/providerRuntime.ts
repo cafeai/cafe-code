@@ -309,6 +309,7 @@ const SessionConfiguredPayload = Schema.Struct({
   // Only an invalidation crosses canonical/durable event paths. Quota values
   // stay in the owner's volatile ProviderSession and the metadata subscription.
   quotaReportChanged: Schema.optional(Schema.Boolean),
+  securityReportChanged: Schema.optional(Schema.Boolean),
 });
 export type SessionConfiguredPayload = typeof SessionConfiguredPayload.Type;
 
@@ -409,7 +410,10 @@ const UsageAccountingCount = NonNegativeInt.check(
 export const UsageAccountingModel = Schema.Struct({
   model: TrimmedNonEmptyString.check(
     Schema.isMaxLength(256),
-    Schema.isPattern(/^[a-zA-Z0-9][a-zA-Z0-9._[\]-]*$/),
+    Schema.isPattern(/^[a-zA-Z0-9][a-zA-Z0-9._[\]:-]*$/),
+  ),
+  reportedCostMicrousd: Schema.optional(
+    Schema.String.check(Schema.isPattern(/^(0|[1-9][0-9]{0,99})$/)),
   ),
   inputTokens: UsageAccountingCount,
   cachedInputTokens: UsageAccountingCount,
@@ -516,6 +520,9 @@ export type CodexTransientFailureCategory = typeof CodexTransientFailureCategory
 
 export const TurnCompletedPayload = Schema.Struct({
   state: RuntimeTurnState,
+  // Provider-owned cursor updates become durable only at canonical lifecycle
+  // admission; this contains no attestation or private account credentials.
+  resumeCursor: Schema.optional(Schema.Unknown),
   stopReason: Schema.optional(Schema.NullOr(TrimmedNonEmptyStringSchema)),
   usage: Schema.optional(Schema.Unknown),
   modelUsage: Schema.optional(UnknownRecordSchema),

@@ -327,7 +327,14 @@ export async function requestProviderDaemonRpcJsonWithStableRetry<
   try {
     return await attempt();
   } catch (cause) {
-    if (!isRetryableProviderDaemonControlError(cause)) {
+    // These actions have no durable replay receipt. A lost acknowledgement is
+    // inconclusive; it must never repeat native sign-in or security consent.
+    if (
+      request.method === "loginProvider" ||
+      request.method === "refreshSecurity" ||
+      request.method === "manageMcp" ||
+      !isRetryableProviderDaemonControlError(cause)
+    ) {
       throw cause;
     }
     return attempt();
@@ -868,6 +875,10 @@ const makeRemoteProviderService = Effect.gen(function* () {
     discardSessionFork: (input) => guardedRpc({ method: "discardSessionFork", payload: input }),
     sendTurn: (input) => guardedRpc({ method: "sendTurn", payload: input }),
     steerTurn: (input) => guardedRpc({ method: "steerTurn", payload: input }),
+    loginProvider: (input) => guardedRpc({ method: "loginProvider", payload: input }),
+    manageMcp: (input) => guardedRpc({ method: "manageMcp", payload: input }),
+    readSecurity: (input) => guardedRpc({ method: "readSecurity", payload: input }),
+    refreshSecurity: (input) => guardedRpc({ method: "refreshSecurity", payload: input }),
     controlTask: (input) => guardedRpc({ method: "controlTask", payload: input }),
     interruptTurn: (input) => guardedRpc({ method: "interruptTurn", payload: input }),
     respondToRequest: (input) => guardedRpc({ method: "respondToRequest", payload: input }),

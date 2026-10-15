@@ -83,6 +83,37 @@ function raw(storage: StateStorage): string {
 }
 
 describe("follow-up queue persistence", () => {
+  it("retains Axiom message web consent across reload and fences claims against changed consent", async () => {
+    for (const consent of [undefined, false, true]) {
+      const storage = createMemoryStorage();
+      const persistence = createFollowUpQueuePersistence(storage);
+      const original = {
+        ...item(),
+        provider: ProviderDriverKind.make("axiom"),
+        modelSelection: {
+          instanceId: ProviderInstanceId.make("axiom-personal"),
+          model: "native-model",
+        },
+        axiomMcpRevision: 7,
+        ...(consent !== undefined ? { axiomWebEnabled: consent } : {}),
+      };
+      expect((await persistence.save(environmentA, [original])).ok).toBe(true);
+      const loaded = createFollowUpQueuePersistence(storage).load(environmentA);
+      if (!loaded.ok) throw new Error(loaded.error);
+      expect(loaded.value.pending[0]?.axiomWebEnabled).toBe(consent);
+      expect(loaded.value.pending[0]?.axiomMcpRevision).toBe(7);
+      expect(persistence.claim(claim(original), { ...original, axiomMcpRevision: 8 }).ok).toBe(
+        false,
+      );
+      expect(
+        persistence.claim(claim(original), { ...original, axiomWebEnabled: consent !== true }).ok,
+      ).toBe(false);
+      expect(persistence.claim(claim(original), original).ok).toBe(true);
+      const claimed = createFollowUpQueuePersistence(storage).load(environmentA);
+      if (!claimed.ok) throw new Error(claimed.error);
+      expect(claimed.value.claimed[0]?.axiomWebEnabled).toBe(consent);
+    }
+  });
   it("never serializes display provenance or changes dispatch truth when a blocked row is translated", async () => {
     const storage = createMemoryStorage();
     const persistence = createFollowUpQueuePersistence(storage);

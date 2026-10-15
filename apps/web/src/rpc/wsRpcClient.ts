@@ -134,6 +134,13 @@ export interface WsRpcClient {
     readonly subscribeProviderCommands: RpcInputStreamMethod<
       typeof WS_METHODS.serverSubscribeProviderCommands
     >;
+    readonly subscribeProviderSecurity: RpcInputStreamMethod<
+      typeof WS_METHODS.serverSubscribeProviderSecurity
+    >;
+    readonly manageProviderMcp: RpcUnaryMethod<typeof WS_METHODS.serverManageProviderMcp>;
+    readonly refreshProviderSecurity: RpcUnaryMethod<
+      typeof WS_METHODS.serverRefreshProviderSecurity
+    >;
     readonly subscribeProviderQuota: RpcInputStreamMethod<
       typeof WS_METHODS.serverSubscribeProviderQuota
     >;
@@ -321,6 +328,16 @@ export function createWsRpcClient(transport: WsTransport): WsRpcClient {
           listener,
           { ...options, tag: WS_METHODS.serverSubscribeProviderCommands },
         ),
+      subscribeProviderSecurity: (input, listener, options) =>
+        transport.subscribe(
+          (client) => client[WS_METHODS.serverSubscribeProviderSecurity](input),
+          listener,
+          { ...options, tag: WS_METHODS.serverSubscribeProviderSecurity },
+        ),
+      manageProviderMcp: (input) =>
+        transport.request((client) => client[WS_METHODS.serverManageProviderMcp](input)),
+      refreshProviderSecurity: (input) =>
+        transport.request((client) => client[WS_METHODS.serverRefreshProviderSecurity](input)),
       subscribeProviderQuota: (input, listener, options) =>
         transport.subscribe(
           (client) => client[WS_METHODS.serverSubscribeProviderQuota](input),

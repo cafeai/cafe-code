@@ -390,6 +390,57 @@ const accountingModel = (
 });
 
 describe("UsageStatsService", () => {
+  it.effect(
+    "hydrates exact Axiom costs after restart and counts settled requests independently of context",
+    () =>
+      withHarness((harness) =>
+        Effect.gen(function* () {
+          const provider = ProviderDriverKind.make("axiom");
+          const snapshot: UsageAccountingSnapshot = {
+            scopeId: "10000000-0000-4000-8000-000000000005",
+            revision: 1,
+            completeness: "complete",
+            models: [
+              {
+                model: "near:fixture",
+                inputTokens: 100,
+                cachedInputTokens: 20,
+                cacheWriteInputTokens: 0,
+                outputTokens: 30,
+                reasoningOutputTokens: 5,
+                reportedCostMicrousd: "123456",
+              },
+            ],
+          };
+          yield* harness.service.recordAccounting(provider, snapshot, 0);
+          yield* harness.emitProvider({
+            ...providerEventBase(THREAD_1, "axiom-context"),
+            provider,
+            type: "thread.token-usage.updated",
+            payload: { usage: { inputTokens: 10000, outputTokens: 3000, usedTokens: 13000 } },
+          });
+          const first = yield* harness.service.get;
+          assert.equal(first.totals.inputTokens, 100);
+          assert.equal(first.totals.outputTokens, 30);
+          assert.deepEqual(first.tokenBreakdown[0]?.reportedCost, {
+            microusd: "123456",
+            tokens: 130,
+          });
+          const rebuilt = yield* harness.rebuildService;
+          yield* rebuilt.recordAccounting(provider, snapshot, 0);
+          const second = yield* rebuilt.get;
+          assert.deepEqual(
+            second.tokenBreakdown[0]?.reportedCost,
+            first.tokenBreakdown[0]?.reportedCost,
+          );
+          assert.deepEqual(
+            second.tokenBreakdownDays?.[0]?.reportedCost,
+            first.tokenBreakdown[0]?.reportedCost,
+          );
+          assert.equal(second.totals.inputTokens, 100);
+        }),
+      ),
+  );
   it.effect("does not replay settled time when the wall clock moves backwards and catches up", () =>
     withHarness((harness) =>
       Effect.gen(function* () {
@@ -1035,7 +1086,7 @@ describe("UsageStatsService", () => {
         assert.equal(result.totals.cachedInputTokens, 9_984);
         assert.equal(result.totals.outputTokens, 16);
         assert.equal(result.tokenBreakdown.length, 1);
-        assert.deepEqual(result.tokenBreakdown[0], { ...snapshot.models[0], provider: CODEX });
+        assert.deepEqual(result.tokenBreakdown[0], { ...snapshot.models[0]!, provider: CODEX });
         assert.equal((yield* harness.repository.listDays)[0]?.outputTokens, 16);
       }),
     ),

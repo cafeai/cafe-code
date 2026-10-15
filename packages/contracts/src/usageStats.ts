@@ -55,10 +55,17 @@ export const UsageStatsModel = TrimmedNonEmptyString.check(
 );
 export type UsageStatsModel = typeof UsageStatsModel.Type;
 
+export const UsageStatsReportedCost = Schema.Struct({
+  microusd: Schema.String.check(Schema.isPattern(/^(0|[1-9][0-9]{0,99})$/)),
+  tokens: NonNegativeInt.check(Schema.isLessThanOrEqualTo(Number.MAX_SAFE_INTEGER)),
+});
+export type UsageStatsReportedCost = typeof UsageStatsReportedCost.Type;
+
 /** Lifetime output-token attribution, intentionally aggregated across accounts. */
 export const UsageStatsTokenBreakdownEntry = Schema.Struct({
   provider: ProviderDriverKind,
   model: UsageStatsModel,
+  reportedCost: Schema.optional(UsageStatsReportedCost),
   ...UsageStatsTokenCountFields,
 });
 export type UsageStatsTokenBreakdownEntry = typeof UsageStatsTokenBreakdownEntry.Type;

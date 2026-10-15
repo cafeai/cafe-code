@@ -56,6 +56,84 @@ const clearUsageStats = Effect.gen(function* () {
 
 layer("UsageStatsRepository", (it) => {
   it.effect(
+    "commits exact reported costs with token checkpoints and deduplicates replay across days",
+    () =>
+      Effect.gen(function* () {
+        yield* clearUsageStats;
+        const repository = yield* UsageStatsRepository;
+        const snapshot: UsageAccountingSnapshot = {
+          scopeId: "10000000-0000-4000-8000-000000000001",
+          revision: 1,
+          completeness: "complete",
+          models: [
+            {
+              model: "near:fixture",
+              inputTokens: 100,
+              cachedInputTokens: 20,
+              cacheWriteInputTokens: 0,
+              outputTokens: 30,
+              reasoningOutputTokens: 5,
+              reportedCostMicrousd: "9007199254740993",
+            },
+          ],
+        };
+        const input = {
+          provider: ProviderDriverKind.make("axiom"),
+          snapshot,
+          day: "2026-10-14",
+          enabled: true,
+        };
+        yield* repository.recordAccountingSnapshot(input);
+        yield* repository.recordAccountingSnapshot({ ...input, day: "2026-10-15" });
+        const rows = yield* repository.listTokenBreakdownDays;
+        assert.equal(rows.length, 1);
+        assert.deepEqual(rows[0]?.reportedCost, { microusd: "9007199254740993", tokens: 130 });
+        assert.equal(rows[0]?.inputTokens, 100);
+        const second = {
+          ...snapshot,
+          scopeId: "10000000-0000-4000-8000-000000000002",
+          models: snapshot.models.map((model) => ({ ...model, reportedCostMicrousd: "7" })),
+        };
+        yield* repository.recordAccountingSnapshot({ ...input, snapshot: second });
+        assert.deepEqual((yield* repository.listTokenBreakdownDays)[0]?.reportedCost, {
+          microusd: "9007199254741000",
+          tokens: 260,
+        });
+        assert.equal((yield* repository.listDays)[0]?.inputTokens, 200);
+      }),
+  );
+  it.effect("advances disabled reported-cost checkpoints without backfilling them", () =>
+    Effect.gen(function* () {
+      yield* clearUsageStats;
+      const repository = yield* UsageStatsRepository;
+      const snapshot: UsageAccountingSnapshot = {
+        scopeId: "10000000-0000-4000-8000-000000000003",
+        revision: 1,
+        completeness: "complete",
+        models: [
+          {
+            model: "native",
+            inputTokens: 10,
+            cachedInputTokens: 0,
+            cacheWriteInputTokens: 0,
+            outputTokens: 2,
+            reasoningOutputTokens: 0,
+            reportedCostMicrousd: "0",
+          },
+        ],
+      };
+      const input = {
+        provider: ProviderDriverKind.make("axiom"),
+        snapshot,
+        day: "2026-10-14",
+        enabled: false,
+      };
+      yield* repository.recordAccountingSnapshot(input);
+      yield* repository.recordAccountingSnapshot({ ...input, enabled: true });
+      assert.deepEqual(yield* repository.listTokenBreakdownDays, []);
+    }),
+  );
+  it.effect(
     "hydrates the stable prospective boundary and adds separate model-time rows in key order",
     () =>
       Effect.gen(function* () {

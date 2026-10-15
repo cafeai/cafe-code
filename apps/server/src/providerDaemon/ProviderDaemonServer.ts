@@ -1,3 +1,4 @@
+import { ProviderAdapterValidationError } from "../provider/Errors.ts";
 import {
   SCHEDULING_SESSION_DAEMON_PATH,
   SchedulingSessionAuthorizationRequest,
@@ -929,6 +930,28 @@ const executeRpcRequest = (
       return providerService.sendTurn(request.payload);
     case "steerTurn":
       return providerService.steerTurn(request.payload);
+    case "loginProvider":
+      return providerService.loginProvider
+        ? providerService.loginProvider(request.payload)
+        : Effect.fail(
+            new ProviderAdapterValidationError({
+              provider: "axiom",
+              operation: "loginProvider",
+              issue: "The provider owner does not support native login.",
+            }),
+          );
+    case "manageMcp":
+      return providerService.manageMcp
+        ? providerService.manageMcp(request.payload)
+        : Effect.succeed({ state: null });
+    case "readSecurity":
+      return providerService.readSecurity
+        ? providerService.readSecurity(request.payload)
+        : Effect.succeed({ report: null });
+    case "refreshSecurity":
+      return providerService.refreshSecurity
+        ? providerService.refreshSecurity(request.payload)
+        : Effect.succeed({ report: null });
     case "controlTask":
       return providerService.controlTask
         ? providerService.controlTask(request.payload)
@@ -1861,7 +1884,8 @@ export const runProviderDaemonServer = (
           const privateInteractionRequest =
             rawBody !== null &&
             typeof rawBody === "object" &&
-            ((rawBody as { method?: unknown }).method === "respondToInteraction" ||
+            ((rawBody as { method?: unknown }).method === "manageMcp" ||
+              (rawBody as { method?: unknown }).method === "respondToInteraction" ||
               (rawBody as { method?: unknown }).method === "resolveInteractionUrl");
           let rpcMethod: ProviderDaemonRpcRequestValue["method"] | null = null;
           let rpcCommandId: string | undefined;

@@ -2461,6 +2461,14 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
         ...(input.modelSelection?.model ? { "provider.model": input.modelSelection.model } : {}),
       });
       const hasImages = input.attachments.some((attachment) => attachment.type === "image");
+      if (
+        (input.axiomWebEnabled === true || input.axiomMcpRevision !== undefined) &&
+        routed.adapter.provider !== "axiom"
+      )
+        return yield* toValidationError(
+          "ProviderService.sendTurn",
+          "Web consent belongs to the selected Axiom provider.",
+        );
       const inspectLiveSession =
         hasImages ||
         input.expectedSubagentPolicySession !== undefined ||
@@ -2550,6 +2558,12 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
             );
           const turn = yield* routed.adapter.steerTurn({
             threadId: input.threadId,
+            ...(input.axiomWebEnabled !== undefined
+              ? { axiomWebEnabled: input.axiomWebEnabled }
+              : {}),
+            ...(input.axiomMcpRevision !== undefined
+              ? { axiomMcpRevision: input.axiomMcpRevision }
+              : {}),
             ...(input.expectedSubagentPolicySession !== undefined
               ? { expectedSubagentPolicySession: input.expectedSubagentPolicySession }
               : {}),
@@ -2753,6 +2767,14 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
           input.deliveryPriority === undefined && input.expectedSubagentPolicySession === undefined,
       });
       metricProvider = routed.adapter.provider;
+      if (
+        (input.axiomWebEnabled === true || input.axiomMcpRevision !== undefined) &&
+        routed.adapter.provider !== "axiom"
+      )
+        return yield* toValidationError(
+          "ProviderService.steerTurn",
+          "Web consent belongs to the selected Axiom provider.",
+        );
       if (input.expectedSubagentPolicySession !== undefined) {
         yield* assertSubagentPolicyContinuation({
           operation: "ProviderService.steerTurn",
@@ -3964,6 +3986,42 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
     });
 
   return {
+    loginProvider: (input) =>
+      Effect.gen(function* () {
+        const adapter = yield* registry.getByInstance(input.instanceId);
+        if (!adapter.login)
+          return yield* new ProviderAdapterValidationError({
+            provider: adapter.provider,
+            operation: "loginProvider",
+            issue: "Native account login is unavailable for this provider.",
+          });
+        yield* adapter.login();
+        return {
+          instanceId: input.instanceId,
+          provider: adapter.provider,
+          command: "axiomcli native sign-in",
+          message: "Opened Axiom native sign-in in your browser.",
+        };
+      }),
+    manageMcp: (input) =>
+      Effect.gen(function* () {
+        const adapter = yield* registry.getByInstance(input.instanceId);
+        if (!adapter.manageMcp || !(yield* adapter.hasSession(input.threadId)))
+          return { state: null };
+        return yield* adapter.manageMcp(input);
+      }),
+    readSecurity: (input) =>
+      Effect.gen(function* () {
+        const adapter = yield* registry.getByInstance(input.instanceId);
+        return adapter.readSecurity ? yield* adapter.readSecurity(input) : { report: null };
+      }),
+    refreshSecurity: (input) =>
+      Effect.gen(function* () {
+        const adapter = yield* registry.getByInstance(input.instanceId);
+        if (!adapter.refreshSecurity || !(yield* adapter.hasSession(input.threadId)))
+          return { report: null };
+        return yield* adapter.refreshSecurity(input);
+      }),
     controlTask,
     prepareConversationRollback,
     commitConversationRollback,

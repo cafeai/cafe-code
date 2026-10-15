@@ -11,7 +11,13 @@
  *
  * @module ProviderService
  */
+import type { ProviderMcpNativeInput, ProviderMcpResult } from "@cafecode/contracts";
 import type {
+  ServerProviderLoginInput,
+  ServerProviderLoginResult,
+  ProviderSecurityReadInput,
+  ProviderSecurityNativeRefreshInput,
+  ProviderSecurityResult,
   ProviderTaskControlInput,
   ProviderTaskControlResult,
   ProviderCompactThreadInput,
@@ -73,6 +79,18 @@ export interface ProviderSubagentDetailReadResult extends ProviderSubagentDetail
  * ProviderServiceShape - Service API for provider session and turn orchestration.
  */
 export interface ProviderServiceShape {
+  readonly loginProvider?: (
+    input: ServerProviderLoginInput,
+  ) => Effect.Effect<ServerProviderLoginResult, ProviderServiceError>;
+  readonly manageMcp?: (
+    input: ProviderMcpNativeInput,
+  ) => Effect.Effect<ProviderMcpResult, ProviderServiceError>;
+  readonly readSecurity?: (
+    input: ProviderSecurityReadInput,
+  ) => Effect.Effect<ProviderSecurityResult, ProviderServiceError>;
+  readonly refreshSecurity?: (
+    input: ProviderSecurityNativeRefreshInput,
+  ) => Effect.Effect<ProviderSecurityResult, ProviderServiceError>;
   readonly controlTask?: (
     input: ProviderTaskControlInput,
   ) => Effect.Effect<ProviderTaskControlResult, ProviderServiceError>;

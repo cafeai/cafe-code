@@ -1187,6 +1187,14 @@ export type ThreadTurnScheduledFollowUp = typeof ThreadTurnScheduledFollowUp.Typ
 
 export const ThreadTurnStartCommand = Schema.Struct({
   type: Schema.Literal("thread.turn.start"),
+  axiomWebEnabled: Schema.optional(Schema.Boolean),
+  axiomMcpRevision: Schema.optional(
+    Schema.Number.check(
+      Schema.isInt(),
+      Schema.isGreaterThanOrEqualTo(0),
+      Schema.isLessThanOrEqualTo(Number.MAX_SAFE_INTEGER),
+    ),
+  ),
   codexReview: Schema.optional(CodexReviewTarget),
   deliveryPriority: Schema.optional(ProviderDeliveryPriority),
   commandId: CommandId,
@@ -1214,6 +1222,14 @@ export const ThreadTurnStartCommand = Schema.Struct({
 
 const ClientThreadTurnStartCommand = Schema.Struct({
   type: Schema.Literal("thread.turn.start"),
+  axiomWebEnabled: Schema.optional(Schema.Boolean),
+  axiomMcpRevision: Schema.optional(
+    Schema.Number.check(
+      Schema.isInt(),
+      Schema.isGreaterThanOrEqualTo(0),
+      Schema.isLessThanOrEqualTo(Number.MAX_SAFE_INTEGER),
+    ),
+  ),
   codexReview: Schema.optional(CodexReviewTarget),
   deliveryPriority: Schema.optional(ProviderDeliveryPriority),
   commandId: CommandId,
@@ -1245,6 +1261,14 @@ const ThreadTurnInterruptCommand = Schema.Struct({
 
 const ThreadTurnSteerCommand = Schema.Struct({
   type: Schema.Literal("thread.turn.steer"),
+  axiomWebEnabled: Schema.optional(Schema.Boolean),
+  axiomMcpRevision: Schema.optional(
+    Schema.Number.check(
+      Schema.isInt(),
+      Schema.isGreaterThanOrEqualTo(0),
+      Schema.isLessThanOrEqualTo(Number.MAX_SAFE_INTEGER),
+    ),
+  ),
   deliveryPriority: Schema.optional(ProviderDeliveryPriority),
   expectedPrioritySession: Schema.optional(ProviderPrioritySessionBinding),
   commandId: CommandId,
@@ -1272,6 +1296,14 @@ const ThreadTurnSteerCommand = Schema.Struct({
 
 const ClientThreadTurnSteerCommand = Schema.Struct({
   type: Schema.Literal("thread.turn.steer"),
+  axiomWebEnabled: Schema.optional(Schema.Boolean),
+  axiomMcpRevision: Schema.optional(
+    Schema.Number.check(
+      Schema.isInt(),
+      Schema.isGreaterThanOrEqualTo(0),
+      Schema.isLessThanOrEqualTo(Number.MAX_SAFE_INTEGER),
+    ),
+  ),
   deliveryPriority: Schema.optional(ProviderDeliveryPriority),
   expectedPrioritySession: Schema.optional(ProviderPrioritySessionBinding),
   commandId: CommandId,
@@ -1808,6 +1840,14 @@ export const ThreadMessageAssistantRepairAppliedPayload = Schema.Struct({
 
 export const ThreadTurnStartRequestedPayload = Schema.Struct({
   threadId: ThreadId,
+  axiomWebEnabled: Schema.optional(Schema.Boolean),
+  axiomMcpRevision: Schema.optional(
+    Schema.Number.check(
+      Schema.isInt(),
+      Schema.isGreaterThanOrEqualTo(0),
+      Schema.isLessThanOrEqualTo(Number.MAX_SAFE_INTEGER),
+    ),
+  ),
   codexReview: Schema.optional(CodexReviewTarget),
   deliveryPriority: Schema.optional(ProviderDeliveryPriority),
   messageId: MessageId,
@@ -1839,6 +1879,14 @@ export const ThreadTurnInterruptRequestedPayload = Schema.Struct({
 
 export const ThreadTurnSteerRequestedPayload = Schema.Struct({
   threadId: ThreadId,
+  axiomWebEnabled: Schema.optional(Schema.Boolean),
+  axiomMcpRevision: Schema.optional(
+    Schema.Number.check(
+      Schema.isInt(),
+      Schema.isGreaterThanOrEqualTo(0),
+      Schema.isLessThanOrEqualTo(Number.MAX_SAFE_INTEGER),
+    ),
+  ),
   deliveryPriority: Schema.optional(ProviderDeliveryPriority),
   // Optional decoding retains old event readability. New explicit-priority
   // intents require this immutable recipient and never infer it during replay.

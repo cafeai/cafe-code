@@ -3,6 +3,7 @@ import {
   ProviderDaemonRpcRequest,
   ProviderInstanceId,
   ProviderDriverKind,
+  SubagentRuntimeId,
   ThreadId,
   TurnId,
   type ProviderSessionStartInput,
@@ -588,6 +589,46 @@ describe("RemoteProviderService", () => {
         Object.assign(new Error("provider daemon request timed out"), { code: "ETIMEDOUT" }),
       ),
     );
+  });
+  it("never replays native login or attestation consent after a lost acknowledgement", async () => {
+    const input = {
+      instanceId: ProviderInstanceId.make("axiom-fixture"),
+      threadId: ThreadId.make("fixture-thread"),
+      runtimeId: SubagentRuntimeId.make("10000000-0000-4000-8000-000000000001"),
+      modelId: "model",
+      configurationKey: "a".repeat(64),
+      acceptOutdatedTee: true,
+    };
+    const requests = [
+      { method: "loginProvider", payload: { instanceId: input.instanceId } },
+      { method: "refreshSecurity", payload: input },
+      {
+        method: "manageMcp",
+        payload: { ...input, expectedRevision: 1, action: { kind: "test", name: "fixture" } },
+      },
+    ] as const;
+    for (const request of requests) {
+      let attempts = 0;
+      const reset = Object.assign(new Error("synthetic lost acknowledgement"), {
+        code: "ECONNRESET",
+      });
+      let observed: unknown;
+      try {
+        await requestProviderDaemonRpcJsonWithStableRetry(
+          rewindConfig,
+          request,
+          async (_config, _path, options = {}) => {
+            attempts++;
+            assert.notProperty(JSON.parse(options.body ?? "null"), "commandId");
+            throw reset;
+          },
+        );
+      } catch (error) {
+        observed = error;
+      }
+      assert.equal(attempts, 1);
+      assert.strictEqual(observed, reset);
+    }
   });
 
   it("adds commandId to restartProviderRuntime daemon RPC requests", () => {
