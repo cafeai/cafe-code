@@ -1,3 +1,4 @@
+import { ProviderMcpNativeInput, ProviderMcpResult } from "./providerMcp.ts";
 import { ServerProviderLoginInput, ServerProviderLoginResult } from "./server.ts";
 import {
   ProviderSecurityReadInput,
@@ -586,6 +587,7 @@ export const ProviderDaemonRpcRequest = Schema.Union([
     method: Schema.Literal("loginProvider"),
     payload: ServerProviderLoginInput,
   }),
+  Schema.Struct({ method: Schema.Literal("manageMcp"), payload: ProviderMcpNativeInput }),
   Schema.Struct({
     method: Schema.Literal("readSecurity"),
     payload: ProviderSecurityReadInput,
@@ -708,6 +710,7 @@ export const ProviderDaemonRpcResultByMethod = {
   sendTurn: ProviderTurnStartResult,
   steerTurn: ProviderTurnSteerResult,
   loginProvider: ServerProviderLoginResult,
+  manageMcp: ProviderMcpResult,
   readSecurity: ProviderSecurityResult,
   refreshSecurity: ProviderSecurityResult,
   controlTask: ProviderTaskControlResult,

@@ -1,3 +1,4 @@
+import { ProviderMcpInput, ProviderMcpResult } from "./providerMcp.ts";
 import {
   ProviderSecurityInput,
   ProviderSecurityRefreshInput,
@@ -202,6 +203,7 @@ export const WS_METHODS = {
   serverListProviderSkills: "server.listProviderSkills",
   serverSubscribeProviderCommands: "server.subscribeProviderCommands",
   serverSubscribeProviderSecurity: "server.subscribeProviderSecurity",
+  serverManageProviderMcp: "server.manageProviderMcp",
   serverRefreshProviderSecurity: "server.refreshProviderSecurity",
   serverSubscribeProviderQuota: "server.subscribeProviderQuota",
   serverUsageReset: "server.usageReset",
@@ -318,6 +320,11 @@ export const WsServerSubscribeProviderSecurityRpc = Rpc.make(
   WS_METHODS.serverSubscribeProviderSecurity,
   { payload: ProviderSecurityInput, success: ProviderSecurityResult, stream: true },
 );
+export const WsServerManageProviderMcpRpc = Rpc.make(WS_METHODS.serverManageProviderMcp, {
+  payload: ProviderMcpInput,
+  success: ProviderMcpResult,
+  error: OrchestrationGetSnapshotError,
+});
 export const WsServerRefreshProviderSecurityRpc = Rpc.make(
   WS_METHODS.serverRefreshProviderSecurity,
   {
@@ -798,6 +805,7 @@ export const WsRpcGroup = RpcGroup.make(
   WsServerSubscribeProviderCommandsRpc,
   WsServerSubscribeProviderQuotaRpc,
   WsServerSubscribeProviderSecurityRpc,
+  WsServerManageProviderMcpRpc,
   WsServerRefreshProviderSecurityRpc,
   WsServerUsageResetRpc,
   WsServerLoginProviderRpc,

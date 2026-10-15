@@ -894,6 +894,9 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
             ...(command.axiomWebEnabled !== undefined
               ? { axiomWebEnabled: command.axiomWebEnabled }
               : {}),
+            ...(command.axiomMcpRevision !== undefined
+              ? { axiomMcpRevision: command.axiomMcpRevision }
+              : {}),
             threadId: command.threadId,
             ...(command.deliveryPriority !== undefined
               ? {
@@ -1003,6 +1006,9 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
         payload: {
           ...(command.axiomWebEnabled !== undefined
             ? { axiomWebEnabled: command.axiomWebEnabled }
+            : {}),
+          ...(command.axiomMcpRevision !== undefined
+            ? { axiomMcpRevision: command.axiomMcpRevision }
             : {}),
           threadId: command.threadId,
           ...(command.deliveryPriority !== undefined
@@ -1125,6 +1131,9 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
             ...(command.axiomWebEnabled !== undefined
               ? { axiomWebEnabled: command.axiomWebEnabled }
               : {}),
+            ...(command.axiomMcpRevision !== undefined
+              ? { axiomMcpRevision: command.axiomMcpRevision }
+              : {}),
             threadId: command.threadId,
             ...(command.deliveryPriority !== undefined
               ? { deliveryPriority: command.deliveryPriority }
@@ -1153,6 +1162,9 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
         payload: {
           ...(command.axiomWebEnabled !== undefined
             ? { axiomWebEnabled: command.axiomWebEnabled }
+            : {}),
+          ...(command.axiomMcpRevision !== undefined
+            ? { axiomMcpRevision: command.axiomMcpRevision }
             : {}),
           threadId: command.threadId,
           ...(command.deliveryPriority !== undefined

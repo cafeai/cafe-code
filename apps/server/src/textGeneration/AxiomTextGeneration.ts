@@ -7,7 +7,7 @@ import * as Schema from "effect/Schema";
 import { ChildProcessSpawner } from "effect/unstable/process";
 import type * as EffectAcpErrors from "effect-acp/errors";
 
-import { type AxiomSettings, type ModelSelection } from "@cafecode/contracts";
+import { ProviderDriverKind, type AxiomSettings, type ModelSelection } from "@cafecode/contracts";
 import { sanitizeBranchFragment, sanitizeFeatureBranchName } from "@cafecode/shared/git";
 import { extractJsonObject } from "@cafecode/shared/schemaJson";
 
@@ -25,6 +25,14 @@ import {
   sanitizePrTitle,
   sanitizeThreadTitle,
 } from "./TextGenerationUtils.ts";
+import { AuxiliaryUsage } from "../usageStats/Services/AuxiliaryUsage.ts";
+import { axiomUsageAccounting, axiomUsageTimestamp } from "../provider/axiomUsageAccounting.ts";
+import {
+  AxiomAccount,
+  axiomAccountKey,
+  decodeAxiom,
+  type AxiomSessionIdentity,
+} from "../provider/acp/AxiomAcpSupport.ts";
 import { applyAxiomSelection, makeAxiomRuntime } from "../provider/acp/AxiomAcpSupport.ts";
 
 const AXIOM_TIMEOUT_MS = 180_000;
@@ -37,6 +45,7 @@ export const makeAxiomTextGeneration = Effect.fn("makeAxiomTextGeneration")(func
   options: { readonly makeRuntime?: typeof makeAxiomRuntime } = {},
 ) {
   const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
+  const auxiliaryUsage = yield* Effect.serviceOption(AuxiliaryUsage);
 
   const runAxiomJson = <S extends Schema.Top>({
     operation,
@@ -58,13 +67,61 @@ export const makeAxiomTextGeneration = Effect.fn("makeAxiomTextGeneration")(func
   }): Effect.Effect<S["Type"], TextGenerationError, S["DecodingServices"]> =>
     Effect.gen(function* () {
       const outputRef = yield* Ref.make("");
+      let identity: AxiomSessionIdentity | undefined;
+      let nativeId: string | undefined;
+      let accountValid = true;
       const runtime = yield* (options.makeRuntime ?? makeAxiomRuntime)(
         axiomSettings,
         { cwd, frontend: "cli" },
-        () => {},
+        (value) => {
+          identity = value;
+        },
         environment,
       ).pipe(Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner));
 
+      yield* runtime.handleUnknownExtNotification((method, value) =>
+        Effect.gen(function* () {
+          if (
+            method !== "_axiom/event" ||
+            !identity ||
+            !nativeId ||
+            !accountValid ||
+            typeof value !== "object" ||
+            value === null
+          )
+            return;
+          const event = value as {
+            runtimeInstanceId?: unknown;
+            sessionId?: unknown;
+            event?: { kind?: unknown; status?: unknown; usage?: unknown };
+          };
+          if (event.runtimeInstanceId !== identity.runtimeId) return;
+          if (event.event?.kind === "account_changed") {
+            const account = yield* decodeAxiom(AxiomAccount, { status: event.event.status }).pipe(
+              Effect.option,
+            );
+            accountValid =
+              Option.isSome(account) &&
+              account.value.status.state === "valid" &&
+              account.value.status.account !== undefined &&
+              axiomAccountKey(account.value.status.account.id) === identity.accountKey;
+            return;
+          }
+          if (
+            event.sessionId !== nativeId ||
+            event.event?.kind !== "request_usage_changed" ||
+            Option.isNone(auxiliaryUsage)
+          )
+            return;
+          const snapshot = axiomUsageAccounting(identity.accountKey, nativeId, event.event.usage);
+          if (snapshot)
+            yield* auxiliaryUsage.value.record(
+              ProviderDriverKind.make("axiom"),
+              snapshot,
+              Date.parse(axiomUsageTimestamp(event.event.usage) ?? new Date().toISOString()),
+            );
+        }),
+      );
       const overflow = yield* Ref.make(false);
       yield* Stream.runForEach(runtime.getEvents(), (event) => {
         if (event._tag === "EventStreamBarrier")
@@ -82,6 +139,7 @@ export const makeAxiomTextGeneration = Effect.fn("makeAxiomTextGeneration")(func
 
       const promptResult = yield* Effect.gen(function* () {
         const started = yield* runtime.start();
+        nativeId = started.sessionId;
         yield* applyAxiomSelection(runtime, modelSelection);
         // Axiom's None permission profile disables tools for metadata inference.
         // Never inherit a project's tool grants or let a helper alter files.

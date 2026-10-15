@@ -24,6 +24,15 @@ export const LAST_INVOKED_SCRIPT_BY_PROJECT_KEY = "cafe-code:last-invoked-script
 export const LEGACY_LAST_INVOKED_SCRIPT_BY_PROJECT_KEY = "cafecode:last-invoked-script-by-project";
 const INLINE_CONTEXT_PLACEHOLDER = "\uFFFC";
 const AxiomWebConsent = Schema.Struct({ instanceId: ProviderInstanceId, enabled: Schema.Boolean });
+const AxiomMcpSelection = Schema.Struct({
+  instanceId: ProviderInstanceId,
+  revision: Schema.Number.check(
+    Schema.isInt(),
+    Schema.isGreaterThanOrEqualTo(0),
+    Schema.isLessThanOrEqualTo(Number.MAX_SAFE_INTEGER),
+  ),
+});
+const isAxiomMcpSelection = Schema.is(AxiomMcpSelection);
 const isAxiomWebConsent = Schema.is(AxiomWebConsent);
 
 export const LastInvokedScriptByProjectSchema = Schema.Record(ProjectId, Schema.String);
@@ -278,6 +287,7 @@ export function readDeliveredSteerMessageId(input: {
 export type RetryableCodexSteerTurnKind = "review" | "compact";
 
 export interface RetryableSteerFailure {
+  readonly axiomMcpSelection?: typeof AxiomMcpSelection.Type;
   readonly axiomWebConsent?: typeof AxiomWebConsent.Type;
   readonly messageId: MessageId;
   readonly intentSequence: number | null;
@@ -453,6 +463,9 @@ export function readRetryableSteerFailure(
   }
   return {
     messageId: messageId as MessageId,
+    ...(isAxiomMcpSelection(payload.axiomMcpSelection)
+      ? { axiomMcpSelection: payload.axiomMcpSelection }
+      : {}),
     ...(isAxiomWebConsent(payload.axiomWebConsent)
       ? { axiomWebConsent: payload.axiomWebConsent }
       : {}),

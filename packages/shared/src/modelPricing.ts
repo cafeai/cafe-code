@@ -189,6 +189,8 @@ export interface CostRollup {
    * the write premium. Meaningful only for rows carrying cache counters.
    */
   readonly cacheSavings: number;
+  /** Native settled costs included in `cost`; absent for estimate-only ledgers. */
+  readonly reportedCost?: number;
 }
 
 const EMPTY_ROLLUP: CostRollup = {
@@ -200,6 +202,8 @@ const EMPTY_ROLLUP: CostRollup = {
 
 export interface CostableEntry extends TokenCountsForCost {
   readonly model: string;
+  readonly provider?: string | undefined;
+  readonly reportedCost?: { readonly microusd: string; readonly tokens: number } | undefined;
 }
 
 /** Sum cost across entries, tracking how much of the volume we could price. */
@@ -213,6 +217,7 @@ export function rollUpCost(
   let pricedTokens = 0;
   let unpricedTokens = 0;
   let cacheSavings = 0;
+  let reportedCost: number | undefined;
 
   for (const entry of entries) {
     const tokens =
@@ -220,6 +225,31 @@ export function rollUpCost(
       Math.max(0, entry.outputTokens) -
       // inputTokens already contains the cache subsets; do not count twice.
       0;
+    if (entry.reportedCost !== undefined) {
+      const receipt = entry.reportedCost;
+      // Persistence/RPC retain exact decimals. Only bounded presentation
+      // values become doubles; malformed or enormous amounts remain unpriced.
+      if (
+        /^(0|[1-9][0-9]{0,99})$/.test(receipt.microusd) &&
+        Number.isSafeInteger(receipt.tokens) &&
+        receipt.tokens >= 0 &&
+        receipt.tokens <= tokens &&
+        BigInt(receipt.microusd) <= BigInt(Number.MAX_SAFE_INTEGER)
+      ) {
+        const amount = Number(receipt.microusd) / PER_MILLION;
+        reportedCost = (reportedCost ?? 0) + amount;
+        cost += amount;
+        pricedTokens += receipt.tokens;
+        unpricedTokens += tokens - receipt.tokens;
+      } else unpricedTokens += tokens;
+      continue;
+    }
+    // A similarly named upstream model does not prove Axiom's billing rate.
+    // Await native settlement instead of pricing it with another provider's table.
+    if (entry.provider === "axiom") {
+      unpricedTokens += tokens;
+      continue;
+    }
     const rate = resolveModelRate(entry.model, overrides);
     if (rate === undefined) {
       unpricedTokens += tokens;
@@ -240,7 +270,13 @@ export function rollUpCost(
       PER_MILLION;
   }
 
-  return { cost, pricedTokens, unpricedTokens, cacheSavings };
+  return {
+    cost,
+    pricedTokens,
+    unpricedTokens,
+    cacheSavings,
+    ...(reportedCost !== undefined ? { reportedCost } : {}),
+  };
 }
 
 /** Share of token volume we could attach a rate to, 0..1. `null` when empty. */

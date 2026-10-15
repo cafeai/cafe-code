@@ -10647,6 +10647,7 @@ describe("ProviderCommandReactor", () => {
         harness.engine.dispatch({
           type: "thread.turn.steer",
           axiomWebEnabled: true,
+          axiomMcpRevision: 7,
           commandId: CommandId.make("cmd-turn-steer-grok-interject"),
           threadId,
           message: {
@@ -10685,9 +10686,13 @@ describe("ProviderCommandReactor", () => {
           retryableFollowUp: true,
           retryAfter: "active-turn",
           axiomWebConsent: { instanceId: "axiom", enabled: true },
+          axiomMcpSelection: { instanceId: "axiom", revision: 7 },
         },
       });
-      expect(harness.steerTurn.mock.calls[0]?.[0]).toMatchObject({ axiomWebEnabled: true });
+      expect(harness.steerTurn.mock.calls[0]?.[0]).toMatchObject({
+        axiomWebEnabled: true,
+        axiomMcpRevision: 7,
+      });
       expect(JSON.stringify(queued?.payload)).not.toContain("_axiom/turn/steer");
     });
 

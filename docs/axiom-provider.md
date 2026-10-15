@@ -85,6 +85,23 @@ contract is available; integer microUSD is displayed without decimal rounding.
   extension and requires idle work.
 - Context use is the native replacement report from a completed request, with
   its reported capacity. It is not a draft estimate or an invented billing total.
+- MCP servers can be saved, edited, tested and deleted in **Composer tools → MCP
+  tools** after starting a conversation. Select the discovered tools for that
+  native thread. Server registrations belong to the native account; selection
+  belongs to the conversation. This uses Axiom's stdio MCP interface, not an
+  arbitrary URL launcher. Native MCP resources, prompts and MCP Apps are not
+  advertised by this tool-only interface.
+- MCP mutations require the exact idle account/runtime/thread/configuration and
+  native revision. Secrets are write-only: blank preserves existing environment
+  values, while an empty object clears them. Native credential identifiers and
+  environment values are excluded from returned state. Failed/lost control
+  acknowledgements are never automatically replayed. Test initializes the
+  selected server and discovers its tools; it does not run model inference.
+- Each ordinary message captures the reviewed MCP revision, including queue
+  save/edit/claim/reload and retry paths. Prompts carry that revision and the
+  native runtime rejects changed executable/tool configuration. A conversation
+  with selected tools requires explicit review through the MCP control after
+  losing its unsent draft state. Plan prompts omit MCP configuration entirely.
 - Title, branch, commit and change-request helpers explicitly keep CLI sessions
   with the native None profile, a bounded deadline and no inference retries.
   Desktop mode cannot select None through `session/set_mode`.
@@ -92,15 +109,51 @@ contract is available; integer microUSD is displayed without decimal rounding.
 Cafe transactional rewind, native conversation forks, durable thread goals and
 subagent concurrency overrides remain unsupported. Native prompt revision is
 not Cafe's checkpointed rewind transaction, and the reviewed contract exposes no
-native fork/goals/subagent control methods. Axiom exposes desktop MCP configuration,
-but Cafe has not integrated its separate configuration and prompt revision fences;
-Desktop MCP is not negotiated and Cafe scheduling/other MCP tools are not injected.
+native fork/goals/subagent control methods. Automatic Cafe scheduling injection
+remains unavailable: the reviewed native MCP API persists registrations and
+environment references account-wide, and ignores standard ACP session MCP
+registrations. It exposes no session-only MCP registration/cleanup contract.
+Cafe does not persist its private scheduling bridge into that native profile.
 Native thread list/timeline APIs exist, but importing conversations created outside
 Cafe remains an integration gap. Profile/logout and billing/payment controls likewise
 remain outside Cafe's current UI.
 Administrative native commands are filtered from discovery where they would
 take over Cafe's process, account, model or history ownership. Axiom billing and
 payment management remain in Axiom's product.
+
+## Reported token costs
+
+Usage/overview, Atrium, model/provider totals and daily ranges include **settled
+Axiom request costs**, marked **Reported**. The native activity and timeline
+contracts supply exact integer microUSD strings plus input, cached input, output
+and reasoning counters. Cafe preserves exact amounts in its durable ledger;
+numeric chart/currency presentation is bounded separately. A zero-cost settled
+receipt is measured zero, not an unpriced request. Axiom rows without a usable
+receipt remain unpriced even if their model name matches another provider's
+published rate. Pricing overrides never replace native receipts.
+
+Billing is independent of the current context-window meter and response
+authentication. Only terminal settled records with valid counters are admitted;
+cancelled/failed partial work can have a legitimate settled charge without a
+verified reply. Native title/compaction activity and metadata-helper observations
+use the same request identity rules. Cache-write counters and cache savings are
+not invented when the native contract does not report them.
+
+An opaque Cafe UUID derived from private native account/thread/request coordinates
+deduplicates each immutable settlement. SQLite commits the checkpoint, tokens,
+reported amount and measured token share atomically. Replayed events, overlapping
+provider entries using the same account and resume after a backend restart cannot
+add the same receipt twice. Disabled collection advances checkpoints without
+adding usage, so enabling it does not backfill suppressed observations.
+
+Native history reads reconcile pending accounting using a first timeline read
+with **both cursors omitted**, then paginate request usage independently. Recovery
+is bounded to eight 500-request pages and a 15-second control budget for the
+owned thread; it never starts inference. Recovered costs retain the native
+completion date. The overview covers recorded requests, not account-wide spend
+from Axiom's separate app/API keys or payments. Other providers retain their
+standard API-rate estimates, and the mixed-cost explanation distinguishes those
+estimates from reported Axiom costs.
 
 ## Verification in the composer tab
 
@@ -151,14 +204,16 @@ that a local source copy built a particular installed binary.
 Cafe negotiates ACP v1, extension family 0, account@2, modelCatalog@1,
 threadCatalog@1, timeline@2, attachments@2, activity@1, securityEvidence@4,
 steering@1 and compaction@1. New desktop sessions also require desktopChat@1,
-desktopAgent@1 and webConsent@1. Billing@4 is optional. Incompatible required versions
+desktopAgent@1, desktopMcp@1 and webConsent@1. Billing@4 is optional. Incompatible required versions
 fail visibly without weakening the verification policy. The upstream ACP
 runtime/package version is independent of these contract versions.
 
 Default tests use isolated synthetic Node peers and public fixture evidence,
 never installed providers, actual account credentials or paid inference. Browser
-fixtures cover received report ownership, expiry, exact consent, copying and
-keyboard dismissal/focus. They also run in the existing macOS/Windows focused
+fixtures cover received report ownership, expiry, exact consent, copying,
+keyboard dismissal/focus, MCP controls and reported-cost overview presentation.
+MCP and billing fixtures use synthetic peers/receipts without launching real
+MCP servers, reading profiles, keychains or making paid requests. They also run in the existing macOS/Windows focused
 subset, with unchanged worker bounds and deadlines.
 
 Native protocol-only qualification is explicit:

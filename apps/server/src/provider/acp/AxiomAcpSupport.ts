@@ -109,7 +109,7 @@ export const AxiomVerification = Schema.Struct({
 /** Feature versions are taken from the reviewed AxiomCLI 0.1.13 DTOs, not
  * from the independently versioned ACP runtime package. Unknown features do
  * not authorize calls. Desktop bootstrap/Agent is required for new chats;
- * Desktop MCP remains unnegotiated until Cafe owns its separate revision. */
+ * Desktop MCP uses its own revision fence and explicit per-thread selection. */
 export const AXIOM_CLIENT_CAPABILITIES = {
   elicitation: { form: {} },
   _meta: {
@@ -118,6 +118,7 @@ export const AXIOM_CLIENT_CAPABILITIES = {
       features: {
         desktopChat: 1,
         desktopAgent: 1,
+        desktopMcp: 1,
         webConsent: 1,
         account: 2,
         modelCatalog: 1,
@@ -142,6 +143,7 @@ export const AXIOM_CLI_CLIENT_CAPABILITIES = {
         ...AXIOM_CLIENT_CAPABILITIES._meta.axiom.features,
         desktopChat: 0,
         desktopAgent: 0,
+        desktopMcp: 0,
         webConsent: 0,
       },
     },
@@ -170,7 +172,9 @@ export function negotiateAxiom(
       result.protocolVersion !== 1 ||
       extension.protocolVersion.split(".")[0] !== "0" ||
       Object.entries({
-        ...(frontend === "desktop-chat" ? { desktopChat: 1, desktopAgent: 1, webConsent: 1 } : {}),
+        ...(frontend === "desktop-chat"
+          ? { desktopChat: 1, desktopAgent: 1, desktopMcp: 1, webConsent: 1 }
+          : {}),
         account: 2,
         modelCatalog: 1,
         securityEvidence: 4,

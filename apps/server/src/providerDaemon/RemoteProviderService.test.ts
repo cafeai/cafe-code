@@ -602,6 +602,10 @@ describe("RemoteProviderService", () => {
     const requests = [
       { method: "loginProvider", payload: { instanceId: input.instanceId } },
       { method: "refreshSecurity", payload: input },
+      {
+        method: "manageMcp",
+        payload: { ...input, expectedRevision: 1, action: { kind: "test", name: "fixture" } },
+      },
     ] as const;
     for (const request of requests) {
       let attempts = 0;

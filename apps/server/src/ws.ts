@@ -1539,6 +1539,38 @@ const makeWsRpcLayer = (
             ],
           );
         },
+        [WS_METHODS.serverManageProviderMcp]: (input) =>
+          Effect.gen(function* () {
+            if (
+              currentSession.role !== "owner" ||
+              !secureSecretTransport ||
+              !providerService.manageMcp
+            )
+              return yield* new OrchestrationGetSnapshotError({
+                message: "MCP requires an owner connection over HTTPS or the same machine.",
+              });
+            const authority = resolveSecurityAuthority(input);
+            const before = yield* authority;
+            if (!before)
+              return yield* new OrchestrationGetSnapshotError({
+                message: "The selected Axiom session changed.",
+              });
+            const result = yield* providerService
+              .manageMcp({ ...input, configurationKey: before.configuration })
+              .pipe(
+                Effect.mapError(
+                  () =>
+                    new OrchestrationGetSnapshotError({
+                      message:
+                        "Axiom could not apply this MCP action. Refresh the settings and wait for active work to finish.",
+                    }),
+                ),
+              );
+            const after = yield* authority;
+            return after && after.key === before.key && after.configuration === before.configuration
+              ? result
+              : { state: null };
+          }),
         [WS_METHODS.serverRefreshProviderSecurity]: (input) =>
           Effect.gen(function* () {
             if (

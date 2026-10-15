@@ -441,19 +441,25 @@ function isRejectedGrokInterjectFailure(cause: Cause.Cause<unknown>): boolean {
   );
 }
 
-function isChangedAxiomWebConsentFailure(cause: Cause.Cause<unknown>): boolean {
+function isChangedAxiomSteerSettingsFailure(cause: Cause.Cause<unknown>): boolean {
   const error = findProviderAdapterRequestError(cause);
-  const detail = "Axiom web consent changed; deliver as a new turn.";
-  return (
-    (error?.provider === "axiom" &&
-      error.method === "_axiom/turn/steer" &&
-      error.detail === detail) ||
-    (error?.provider === "provider-daemon" &&
-      error.method === "steerTurn" &&
-      error.detail.includes(
-        `Provider adapter request failed (axiom) for _axiom/turn/steer: ${detail}`,
-      ))
-  );
+  const details = [
+    "Axiom web consent changed; deliver as a new turn.",
+    "Axiom MCP settings changed; deliver as a new turn.",
+  ];
+  return details.some((detail) => matches(detail));
+  function matches(detail: string) {
+    return (
+      (error?.provider === "axiom" &&
+        error.method === "_axiom/turn/steer" &&
+        error.detail === detail) ||
+      (error?.provider === "provider-daemon" &&
+        error.method === "steerTurn" &&
+        error.detail.includes(
+          `Provider adapter request failed (axiom) for _axiom/turn/steer: ${detail}`,
+        ))
+    );
+  }
 }
 
 function isCodexNoActiveTurnToSteerFailure(cause: Cause.Cause<unknown>): boolean {
@@ -806,6 +812,10 @@ const make = Effect.gen(function* () {
     readonly intentSequence?: number;
     readonly retryableFollowUp?: boolean;
     readonly retryAfter?: "active-turn";
+    readonly axiomMcpSelection?: {
+      readonly instanceId: ProviderInstanceId;
+      readonly revision: number;
+    };
     readonly axiomWebConsent?: {
       readonly instanceId: ProviderInstanceId;
       readonly enabled: boolean;
@@ -831,6 +841,7 @@ const make = Effect.gen(function* () {
             ? { retryableFollowUp: input.retryableFollowUp }
             : {}),
           ...(input.retryAfter ? { retryAfter: input.retryAfter } : {}),
+          ...(input.axiomMcpSelection ? { axiomMcpSelection: input.axiomMcpSelection } : {}),
           ...(input.axiomWebConsent ? { axiomWebConsent: input.axiomWebConsent } : {}),
           ...(input.codexNonSteerableTurnKind
             ? { codexNonSteerableTurnKind: input.codexNonSteerableTurnKind }
@@ -2175,6 +2186,7 @@ const make = Effect.gen(function* () {
   const buildSendTurnRequestForThread = Effect.fnUntraced(function* (input: {
     readonly threadId: ThreadId;
     readonly axiomWebEnabled?: boolean;
+    readonly axiomMcpRevision?: number;
     readonly codexReview?: ProviderSendTurnInput["codexReview"];
     readonly deliveryPriority?: ProviderSendTurnInput["deliveryPriority"];
     readonly inputOrigin?: ProviderSendTurnInput["inputOrigin"];
@@ -2321,6 +2333,7 @@ const make = Effect.gen(function* () {
     const request: ProviderSendTurnInput = {
       threadId: input.threadId,
       ...(input.axiomWebEnabled !== undefined ? { axiomWebEnabled: input.axiomWebEnabled } : {}),
+      ...(input.axiomMcpRevision !== undefined ? { axiomMcpRevision: input.axiomMcpRevision } : {}),
       ...(expectedSubagentPolicySession !== undefined ? { expectedSubagentPolicySession } : {}),
       ...(input.deliveryPriority !== undefined ? { deliveryPriority: input.deliveryPriority } : {}),
       ...(input.inputOrigin !== undefined ? { inputOrigin: input.inputOrigin } : {}),
@@ -3514,6 +3527,9 @@ const make = Effect.gen(function* () {
               ...(event.payload.axiomWebEnabled !== undefined
                 ? { axiomWebEnabled: event.payload.axiomWebEnabled }
                 : {}),
+              ...(event.payload.axiomMcpRevision !== undefined
+                ? { axiomMcpRevision: event.payload.axiomMcpRevision }
+                : {}),
               threadId: event.payload.threadId,
               messageId: event.payload.messageId,
               messageText: message.text,
@@ -3574,6 +3590,9 @@ const make = Effect.gen(function* () {
           ...(event.payload.axiomWebEnabled !== undefined
             ? { axiomWebEnabled: event.payload.axiomWebEnabled }
             : {}),
+          ...(event.payload.axiomMcpRevision !== undefined
+            ? { axiomMcpRevision: event.payload.axiomMcpRevision }
+            : {}),
           threadId: event.payload.threadId,
           expectedTurnId: activeTurnId,
           messageId: event.payload.messageId,
@@ -3598,7 +3617,7 @@ const make = Effect.gen(function* () {
               const codexNonSteerableTurnKind = detectCodexNonSteerableTurnKind(cause);
               const unsupportedLiveSteer = isUnsupportedLiveSteerFailure(cause);
               const rejectedNativeSteer =
-                isRejectedGrokInterjectFailure(cause) || isChangedAxiomWebConsentFailure(cause);
+                isRejectedGrokInterjectFailure(cause) || isChangedAxiomSteerSettingsFailure(cause);
               const retryableFollowUp =
                 codexNonSteerableTurnKind !== undefined ||
                 unsupportedLiveSteer ||
@@ -3617,6 +3636,14 @@ const make = Effect.gen(function* () {
                   messageId: event.payload.messageId,
                   intentSequence: event.sequence,
                   retryableFollowUp: true,
+                  ...(event.payload.axiomMcpRevision !== undefined
+                    ? {
+                        axiomMcpSelection: {
+                          instanceId: thread.modelSelection.instanceId,
+                          revision: event.payload.axiomMcpRevision,
+                        },
+                      }
+                    : {}),
                   ...(event.payload.axiomWebEnabled !== undefined
                     ? {
                         axiomWebConsent: {
@@ -3666,6 +3693,9 @@ const make = Effect.gen(function* () {
       const sendTurnRequest = yield* buildSendTurnRequestForThread({
         ...(event.payload.axiomWebEnabled !== undefined
           ? { axiomWebEnabled: event.payload.axiomWebEnabled }
+          : {}),
+        ...(event.payload.axiomMcpRevision !== undefined
+          ? { axiomMcpRevision: event.payload.axiomMcpRevision }
           : {}),
         threadId: event.payload.threadId,
         messageId: event.payload.messageId,
@@ -3724,6 +3754,9 @@ const make = Effect.gen(function* () {
           ...(event.payload.axiomWebEnabled !== undefined
             ? { axiomWebEnabled: event.payload.axiomWebEnabled }
             : {}),
+          ...(event.payload.axiomMcpRevision !== undefined
+            ? { axiomMcpRevision: event.payload.axiomMcpRevision }
+            : {}),
           threadId: event.payload.threadId,
           ...(sendTurnRequest.value.request.expectedSubagentPolicySession !== undefined
             ? {
@@ -3748,7 +3781,7 @@ const make = Effect.gen(function* () {
               const unsupportedLiveSteer = isUnsupportedLiveSteerFailure(steerCause);
               const rejectedNativeSteer =
                 isRejectedGrokInterjectFailure(steerCause) ||
-                isChangedAxiomWebConsentFailure(steerCause);
+                isChangedAxiomSteerSettingsFailure(steerCause);
               const retryableFollowUp =
                 codexNonSteerableTurnKind !== undefined ||
                 unsupportedLiveSteer ||
@@ -3767,6 +3800,14 @@ const make = Effect.gen(function* () {
                   messageId: event.payload.messageId,
                   intentSequence: event.sequence,
                   retryableFollowUp: true,
+                  ...(event.payload.axiomMcpRevision !== undefined
+                    ? {
+                        axiomMcpSelection: {
+                          instanceId: thread.modelSelection.instanceId,
+                          revision: event.payload.axiomMcpRevision,
+                        },
+                      }
+                    : {}),
                   ...(event.payload.axiomWebEnabled !== undefined
                     ? {
                         axiomWebConsent: {
@@ -4599,6 +4640,9 @@ const make = Effect.gen(function* () {
           ...(event.payload.axiomWebEnabled !== undefined
             ? { axiomWebEnabled: event.payload.axiomWebEnabled }
             : {}),
+          ...(event.payload.axiomMcpRevision !== undefined
+            ? { axiomMcpRevision: event.payload.axiomMcpRevision }
+            : {}),
           threadId: event.payload.threadId,
           messageId: event.payload.messageId,
           // Unbound input has never named an active provider turn. If one
@@ -4695,6 +4739,9 @@ const make = Effect.gen(function* () {
         const sendTurnRequest = yield* buildSendTurnRequestForThread({
           ...(event.payload.axiomWebEnabled !== undefined
             ? { axiomWebEnabled: event.payload.axiomWebEnabled }
+            : {}),
+          ...(event.payload.axiomMcpRevision !== undefined
+            ? { axiomMcpRevision: event.payload.axiomMcpRevision }
             : {}),
           threadId: event.payload.threadId,
           messageId: event.payload.messageId,
@@ -4955,6 +5002,9 @@ const make = Effect.gen(function* () {
           ...(event.payload.axiomWebEnabled !== undefined
             ? { axiomWebEnabled: event.payload.axiomWebEnabled }
             : {}),
+          ...(event.payload.axiomMcpRevision !== undefined
+            ? { axiomMcpRevision: event.payload.axiomMcpRevision }
+            : {}),
           threadId: event.payload.threadId,
           messageId: event.payload.messageId,
           messageText: message.text,
@@ -5044,6 +5094,9 @@ const make = Effect.gen(function* () {
       ...(event.payload.axiomWebEnabled !== undefined
         ? { axiomWebEnabled: event.payload.axiomWebEnabled }
         : {}),
+      ...(event.payload.axiomMcpRevision !== undefined
+        ? { axiomMcpRevision: event.payload.axiomMcpRevision }
+        : {}),
       threadId: event.payload.threadId,
       ...(event.payload.deliveryPriority !== undefined
         ? {
@@ -5069,7 +5122,7 @@ const make = Effect.gen(function* () {
           // Grok rejections and Axiom web-consent changes, in the existing
           // follow-up queue with the original message and consent.
           const rejectedNativeSteer =
-            isRejectedGrokInterjectFailure(cause) || isChangedAxiomWebConsentFailure(cause);
+            isRejectedGrokInterjectFailure(cause) || isChangedAxiomSteerSettingsFailure(cause);
           const retryableFollowUp =
             codexNonSteerableTurnKind !== undefined || unsupportedLiveSteer || rejectedNativeSteer;
           return appendProviderFailureActivity({
@@ -5089,6 +5142,14 @@ const make = Effect.gen(function* () {
             ...(retryableFollowUp
               ? {
                   retryableFollowUp: true,
+                  ...(event.payload.axiomMcpRevision !== undefined
+                    ? {
+                        axiomMcpSelection: {
+                          instanceId: thread.modelSelection.instanceId,
+                          revision: event.payload.axiomMcpRevision,
+                        },
+                      }
+                    : {}),
                   ...(event.payload.axiomWebEnabled !== undefined
                     ? {
                         axiomWebConsent: {

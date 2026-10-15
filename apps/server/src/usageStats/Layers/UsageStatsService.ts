@@ -75,7 +75,9 @@ const decodeModelGeneratingTimeStartedAt = Schema.decodeUnknownEffect(
   UsageStatsModelGeneratingTimeStartedAt,
 );
 
-type TokenCounts = Record<UsageTokenField, number>;
+type TokenCounts = Record<UsageTokenField, number> & {
+  reportedCost?: { microusd: string; tokens: number } | undefined;
+};
 
 const zeroCounts = (): TokenCounts => ({
   outputTokens: 0,
@@ -375,13 +377,22 @@ const makeUsageStatsService = Effect.gen(function* () {
     };
   };
 
+  const addReportedCost = (target: TokenCounts, counts: TokenCounts) => {
+    if (counts.reportedCost === undefined) return;
+    target.reportedCost = {
+      microusd: String(
+        BigInt(target.reportedCost?.microusd ?? "0") + BigInt(counts.reportedCost.microusd),
+      ),
+      tokens: (target.reportedCost?.tokens ?? 0) + counts.reportedCost.tokens,
+    };
+  };
   const addTokenBreakdownTotal = (
     provider: ProviderDriverKind,
     model: string,
     counts: TokenCounts,
     day?: string,
   ): void => {
-    if (!hasCounts(counts)) {
+    if (!hasCounts(counts) && counts.reportedCost === undefined) {
       return;
     }
     let models = tokenBreakdownTotals.get(provider);
@@ -395,6 +406,7 @@ const makeUsageStatsService = Effect.gen(function* () {
       models.set(model, entry);
     }
     addCounts(entry, counts);
+    addReportedCost(entry, counts);
     tokenBreakdownSnapshotDirty = true;
     if (day !== undefined) {
       let providers = tokenBreakdownDays.get(day);
@@ -413,6 +425,7 @@ const makeUsageStatsService = Effect.gen(function* () {
         dailyModels.set(model, dailyCounts);
       }
       addCounts(dailyCounts, counts);
+      addReportedCost(dailyCounts, counts);
       tokenBreakdownDaySnapshotDirty = true;
     }
   };
@@ -496,6 +509,7 @@ const makeUsageStatsService = Effect.gen(function* () {
       for (const row of rows) {
         const counts = zeroCounts();
         for (const field of USAGE_TOKEN_FIELDS) counts[field] = row[field];
+        if (row.reportedCost !== undefined) counts.reportedCost = row.reportedCost;
         addTokenBreakdownTotal(row.provider, row.model, counts, row.day);
       }
     }),
@@ -815,7 +829,7 @@ const makeUsageStatsService = Effect.gen(function* () {
         // Claude message counts describe one request/current context, not a
         // cumulative bill. Its dedicated accounting stream deduplicates exact
         // API message IDs and settles full per-model query totals instead.
-        if (event.provider === "claudeAgent") return Effect.void;
+        if (event.provider === "claudeAgent" || event.provider === "axiom") return Effect.void;
         return Effect.gen(function* () {
           const now = yield* Clock.currentTimeMillis;
           const tracking = track(event.threadId);
@@ -855,7 +869,11 @@ const makeUsageStatsService = Effect.gen(function* () {
           const tracking = track(event.threadId);
           accrue(tracking, now);
           tracking.accrueFromMs = undefined;
-          if (event.provider !== "claudeAgent" && !tracking.sawTokenUsageThisTurn) {
+          if (
+            event.provider !== "claudeAgent" &&
+            event.provider !== "axiom" &&
+            !tracking.sawTokenUsageThisTurn
+          ) {
             const outputTokens = turnCompletedOutputTokens(event.payload.usage);
             if (enabled && outputTokens !== undefined && outputTokens > 0) {
               if (tracking.provider !== event.provider) {

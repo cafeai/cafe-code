@@ -244,6 +244,13 @@ export const ProviderSendTurnInput = Schema.Struct({
   threadId: ThreadId,
   /** Explicit Axiom desktop web consent for this message only. */
   axiomWebEnabled: Schema.optional(Schema.Boolean),
+  axiomMcpRevision: Schema.optional(
+    Schema.Number.check(
+      Schema.isInt(),
+      Schema.isGreaterThanOrEqualTo(0),
+      Schema.isLessThanOrEqualTo(Number.MAX_SAFE_INTEGER),
+    ),
+  ),
   // Valid only with the owner's additive Cafe continuation-fence guarantee.
   // Missing inventory must refuse, never recover or launch another process.
   expectedSubagentPolicySession: Schema.optional(ProviderSubagentPolicySession),
@@ -291,6 +298,13 @@ export type ProviderSendTurnInput = typeof ProviderSendTurnInput.Type;
 export const ProviderSteerTurnInput = Schema.Struct({
   threadId: ThreadId,
   axiomWebEnabled: Schema.optional(Schema.Boolean),
+  axiomMcpRevision: Schema.optional(
+    Schema.Number.check(
+      Schema.isInt(),
+      Schema.isGreaterThanOrEqualTo(0),
+      Schema.isLessThanOrEqualTo(Number.MAX_SAFE_INTEGER),
+    ),
+  ),
   expectedSubagentPolicySession: Schema.optional(ProviderSubagentPolicySession),
   deliveryPriority: Schema.optional(ProviderDeliveryPriority),
   expectedPrioritySession: Schema.optional(ProviderPrioritySessionBinding),

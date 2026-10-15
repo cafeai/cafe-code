@@ -122,6 +122,113 @@ const setup = setupWith();
 
 describe("Axiom scoped ACP adapter", () => {
   it.effect(
+    "recovers native settlements with omitted cursors and retains their stable identity on resume",
+    () =>
+      Effect.gen(function* () {
+        const { adapter, session, events } = yield* setupWith({ scenario: "recover-billing" });
+        const first = events.find((event) => event.type === "thread.usage-accounting.updated");
+        if (first?.type !== "thread.usage-accounting.updated")
+          return yield* Effect.die("Missing recovered native cost");
+        expect(first.createdAt).toBe(new Date(1791849601000).toISOString());
+        expect(first.payload.models[0]?.reportedCostMicrousd).toBe("99");
+        yield* adapter.readThread(threadId);
+        expect(
+          events.filter((event) => event.type === "thread.usage-accounting.updated"),
+        ).toHaveLength(1);
+        yield* adapter.stopSession(threadId);
+        yield* adapter.startSession({
+          threadId,
+          provider: ProviderDriverKind.make("axiom"),
+          cwd: process.cwd(),
+          runtimeMode: "approval-required",
+          resumeCursor: session.resumeCursor,
+          modelSelection: { instanceId, model: "test-model" },
+        });
+        const recovered = events.filter(
+          (event) => event.type === "thread.usage-accounting.updated",
+        );
+        expect(recovered).toHaveLength(2);
+        expect(recovered[1]?.payload).toEqual(first.payload);
+      }).pipe(Effect.provide(layer), Effect.scoped),
+  );
+  it.effect(
+    "manages native MCP with exact idle ownership and binds prompts to reviewed revisions",
+    () =>
+      Effect.gen(function* () {
+        const { adapter, session, events, complete } = yield* setup;
+        const input = {
+          instanceId,
+          threadId,
+          runtimeId: session.subagentRuntimeId!,
+          modelId: session.model!,
+          configurationKey: session.commandCatalogConfigurationKey!,
+        };
+        const initial = yield* adapter.manageMcp!({ ...input, action: { kind: "list" } });
+        expect(initial.state?.revision).toBe(0);
+        const saved = yield* adapter.manageMcp!({
+          ...input,
+          expectedRevision: 0,
+          action: {
+            kind: "save",
+            server: {
+              name: "fixture",
+              command: process.execPath,
+              args: [],
+              enabled: true,
+              env: { PRIVATE_FIXTURE: "secret-value" },
+            },
+          },
+        });
+        expect(saved.state?.revision).toBe(1);
+        expect(JSON.stringify(saved)).not.toContain("secret-value");
+        expect(JSON.stringify(saved)).not.toContain("private-native-credential");
+        expect(
+          (yield* adapter.manageMcp!({
+            ...input,
+            expectedRevision: 0,
+            action: { kind: "delete", name: "fixture" },
+          }).pipe(Effect.result))._tag,
+        ).toBe("Failure");
+        const tested = yield* adapter.manageMcp!({
+          ...input,
+          expectedRevision: 1,
+          action: { kind: "test", name: "fixture" },
+        });
+        const selected = yield* adapter.manageMcp!({
+          ...input,
+          expectedRevision: tested.state!.revision,
+          action: { kind: "select", tools: [tested.state!.servers[0]!.tools[0]!.name] },
+        });
+        expect(
+          (yield* adapter
+            .sendTurn({ threadId, input: "configuration fixture", axiomMcpRevision: 2 })
+            .pipe(Effect.result))._tag,
+        ).toBe("Failure");
+        expect(
+          (yield* adapter
+            .sendTurn({ threadId, input: "configuration fixture" })
+            .pipe(Effect.result))._tag,
+        ).toBe("Failure");
+        yield* adapter.sendTurn({
+          threadId,
+          input: "configuration fixture",
+          axiomMcpRevision: selected.state!.revision,
+        });
+        yield* Deferred.await(complete);
+        const delta = events.find((event) => event.type === "content.delta");
+        expect(
+          delta?.type === "content.delta" ? JSON.parse(delta.payload.delta).mcpRevision : null,
+        ).toBe(3);
+        expect(
+          (yield* adapter.manageMcp!({
+            ...input,
+            runtimeId: "foreign-runtime" as typeof input.runtimeId,
+            action: { kind: "list" },
+          }).pipe(Effect.result))._tag,
+        ).toBe("Failure");
+      }).pipe(Effect.provide(layer), Effect.scoped),
+  );
+  it.effect(
     "sends explicit message web consent and only steers with the active turn's setting",
     () =>
       Effect.gen(function* () {
@@ -182,6 +289,13 @@ describe("Axiom scoped ACP adapter", () => {
         const delta = events.find((event) => event.type === "content.delta");
         if (delta?.type !== "content.delta")
           return yield* Effect.die("Missing configuration observation");
+        expect(
+          events.filter((event) => event.type === "thread.usage-accounting.updated"),
+        ).toHaveLength(1);
+        const billing = events.find((event) => event.type === "thread.usage-accounting.updated");
+        expect(
+          billing?.type === "thread.usage-accounting.updated" ? billing.payload.models[0] : null,
+        ).toMatchObject({ inputTokens: 100, outputTokens: 30, reportedCostMicrousd: "123456" });
         expect(JSON.parse(delta.payload.delta)).toMatchObject({
           frontend: "desktop-chat",
           agent: {

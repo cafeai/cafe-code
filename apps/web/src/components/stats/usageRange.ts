@@ -134,6 +134,16 @@ function addTokens(
     cacheWriteInputTokens: sum.cacheWriteInputTokens + row.cacheWriteInputTokens,
     outputTokens: sum.outputTokens + row.outputTokens,
     reasoningOutputTokens: sum.reasoningOutputTokens + row.reasoningOutputTokens,
+    ...(sum.reportedCost !== undefined || row.reportedCost !== undefined
+      ? {
+          reportedCost: {
+            microusd: String(
+              BigInt(sum.reportedCost?.microusd ?? "0") + BigInt(row.reportedCost?.microusd ?? "0"),
+            ),
+            tokens: (sum.reportedCost?.tokens ?? 0) + (row.reportedCost?.tokens ?? 0),
+          },
+        }
+      : {}),
   };
 }
 
@@ -220,6 +230,7 @@ export function selectUsageRange(
             cacheWriteInputTokens: row.cacheWriteInputTokens,
             outputTokens: row.outputTokens,
             reasoningOutputTokens: row.reasoningOutputTokens,
+            ...(row.reportedCost !== undefined ? { reportedCost: row.reportedCost } : {}),
           }
         : addTokens(previous, row),
     );

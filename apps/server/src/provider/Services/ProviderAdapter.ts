@@ -7,6 +7,7 @@
  *
  * @module ProviderAdapter
  */
+import type { ProviderMcpNativeInput, ProviderMcpResult } from "@cafecode/contracts";
 import type {
   ProviderTaskControlInput,
   SubagentDetailActivity,
@@ -136,6 +137,7 @@ export interface ProviderSubagentDetail {
 
 export interface ProviderAdapterShape<TError> {
   readonly login?: () => Effect.Effect<void, TError>;
+  readonly manageMcp?: (input: ProviderMcpNativeInput) => Effect.Effect<ProviderMcpResult, TError>;
   readonly readSecurity?: (
     input: ProviderSecurityReadInput,
   ) => Effect.Effect<ProviderSecurityResult, TError>;

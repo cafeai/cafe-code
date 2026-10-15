@@ -6,6 +6,7 @@ import * as Schema from "effect/Schema";
 import {
   UsageStatsModelGeneratingTimeStartedAt,
   UsageAccountingSnapshot,
+  UsageStatsReportedCost,
 } from "@cafecode/contracts";
 import { USAGE_TOKEN_FIELDS } from "../../usageStats/tokenDelta.ts";
 
@@ -100,13 +101,17 @@ const makeUsageStatsRepository = Effect.gen(function* () {
 
   const listUsageStatsTokenBreakdownRows = SqlSchema.findAll({
     Request: Schema.Struct({}),
-    Result: UsageStatsTokenBreakdownDayRow,
+    Result: Schema.Struct({
+      ...UsageStatsTokenBreakdownDayRow.fields,
+      reportedCost: Schema.NullOr(Schema.fromJsonString(UsageStatsReportedCost)),
+    }),
     execute: () =>
       sql`
         SELECT
           day,
           provider_driver AS provider,
           model,
+          reported_cost_json AS "reportedCost",
           output_tokens AS "outputTokens",
           input_tokens AS "inputTokens",
           cached_input_tokens AS "cachedInputTokens",
@@ -212,6 +217,12 @@ const makeUsageStatsRepository = Effect.gen(function* () {
 
   const listTokenBreakdownDays: UsageStatsRepositoryShape["listTokenBreakdownDays"] =
     listUsageStatsTokenBreakdownRows({}).pipe(
+      Effect.map((rows) =>
+        rows.map(({ reportedCost, ...row }) => ({
+          ...row,
+          ...(reportedCost !== null ? { reportedCost } : {}),
+        })),
+      ),
       Effect.mapError(
         toPersistenceSqlOrDecodeError(
           "UsageStatsRepository.listTokenBreakdownDays:query",
@@ -287,6 +298,24 @@ const makeUsageStatsRepository = Effect.gen(function* () {
                   throw new Error("Usage accounting counters regressed without a new scope.");
                 }
                 const delta = { ...model, day: input.day, provider: input.provider };
+                const cost =
+                  model.reportedCostMicrousd === undefined
+                    ? undefined
+                    : BigInt(model.reportedCostMicrousd);
+                const priorCost =
+                  prior?.reportedCostMicrousd === undefined
+                    ? undefined
+                    : BigInt(prior.reportedCostMicrousd);
+                if (priorCost !== undefined && (cost === undefined || cost < priorCost))
+                  throw new Error("Reported cost regressed.");
+                const covered =
+                  cost !== undefined
+                    ? model.inputTokens +
+                      model.outputTokens -
+                      (priorCost !== undefined ? prior!.inputTokens + prior!.outputTokens : 0)
+                    : undefined;
+                if (covered !== undefined && (!Number.isSafeInteger(covered) || covered < 0))
+                  throw new Error("Invalid reported cost coverage.");
                 for (const field of USAGE_TOKEN_FIELDS)
                   delta[field] = model[field] - (prior?.[field] ?? 0);
                 // Fresh input and non-reasoning output are disjoint billed buckets
@@ -299,8 +328,21 @@ const makeUsageStatsRepository = Effect.gen(function* () {
                 ) {
                   throw new Error("Usage accounting changed a previously settled token category.");
                 }
-                if (input.enabled && USAGE_TOKEN_FIELDS.some((field) => delta[field] > 0))
-                  deltas.push(delta);
+                if (
+                  input.enabled &&
+                  (USAGE_TOKEN_FIELDS.some((field) => delta[field] > 0) || cost !== undefined)
+                )
+                  deltas.push({
+                    ...delta,
+                    ...(cost !== undefined
+                      ? {
+                          reportedCost: {
+                            microusd: String(cost - (priorCost ?? 0n)),
+                            tokens: covered!,
+                          },
+                        }
+                      : {}),
+                  });
               }
               if (previous?.models.some((model) => !names.has(model.model))) {
                 throw new Error("Usage accounting snapshot omitted an existing model.");
@@ -324,6 +366,29 @@ const makeUsageStatsRepository = Effect.gen(function* () {
           for (const delta of accepted) {
             yield* upsertUsageStatsDayDelta({ ...delta, generatingMs: 0, userMessages: 0 });
             yield* upsertUsageStatsTokenBreakdownDelta(delta);
+            if (delta.reportedCost !== undefined) {
+              const rows = yield* sql<{
+                reported_cost_json: string | null;
+              }>`SELECT reported_cost_json FROM usage_stats_token_breakdown_days WHERE day = ${delta.day} AND provider_driver = ${delta.provider} AND model = ${delta.model}`;
+              const previous = rows[0]?.reported_cost_json
+                ? yield* Schema.decodeUnknownEffect(Schema.fromJsonString(UsageStatsReportedCost))(
+                    rows[0].reported_cost_json,
+                  ).pipe(
+                    Effect.mapError(
+                      toPersistenceDecodeCauseError("UsageStatsRepository:reportedCost"),
+                    ),
+                  )
+                : undefined;
+              const cost = yield* Schema.decodeUnknownEffect(UsageStatsReportedCost)({
+                microusd: String(
+                  BigInt(previous?.microusd ?? "0") + BigInt(delta.reportedCost.microusd),
+                ),
+                tokens: (previous?.tokens ?? 0) + delta.reportedCost.tokens,
+              }).pipe(
+                Effect.mapError(toPersistenceDecodeCauseError("UsageStatsRepository:reportedCost")),
+              );
+              yield* sql`UPDATE usage_stats_token_breakdown_days SET reported_cost_json = ${JSON.stringify(cost)} WHERE day = ${delta.day} AND provider_driver = ${delta.provider} AND model = ${delta.model}`;
+            }
           }
           return accepted;
         }),

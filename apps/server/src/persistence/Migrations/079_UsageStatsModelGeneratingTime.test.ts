@@ -26,7 +26,10 @@ layer("079_UsageStatsModelGeneratingTime", (it) => {
         yield* sql`INSERT INTO usage_stats_days (day, generating_ms, output_tokens, user_messages) VALUES ('2026-09-01', 60000, 100, 2)`;
         yield* sql`INSERT INTO usage_stats_token_breakdown_days (day, provider_driver, model, output_tokens) VALUES ('2026-09-01', 'codex', 'gpt-old', 100)`;
         const oldDays = yield* repository.listDays;
-        const oldTokens = yield* repository.listTokenBreakdownDays;
+        // Capture the historical schema directly; the current repository also
+        // reads columns introduced by later migrations.
+        const oldTokens =
+          yield* sql`SELECT day, provider_driver AS provider, model, output_tokens AS "outputTokens", input_tokens AS "inputTokens", cached_input_tokens AS "cachedInputTokens", cache_write_input_tokens AS "cacheWriteInputTokens", reasoning_output_tokens AS "reasoningOutputTokens" FROM usage_stats_token_breakdown_days ORDER BY day, provider_driver, model`;
         yield* runMigrations();
         const first = yield* repository.readModelGeneratingTime;
         assert.equal(new Date(first.startedAt).toISOString(), first.startedAt);

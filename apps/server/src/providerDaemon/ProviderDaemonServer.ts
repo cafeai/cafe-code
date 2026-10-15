@@ -940,6 +940,10 @@ const executeRpcRequest = (
               issue: "The provider owner does not support native login.",
             }),
           );
+    case "manageMcp":
+      return providerService.manageMcp
+        ? providerService.manageMcp(request.payload)
+        : Effect.succeed({ state: null });
     case "readSecurity":
       return providerService.readSecurity
         ? providerService.readSecurity(request.payload)
@@ -1880,7 +1884,8 @@ export const runProviderDaemonServer = (
           const privateInteractionRequest =
             rawBody !== null &&
             typeof rawBody === "object" &&
-            ((rawBody as { method?: unknown }).method === "respondToInteraction" ||
+            ((rawBody as { method?: unknown }).method === "manageMcp" ||
+              (rawBody as { method?: unknown }).method === "respondToInteraction" ||
               (rawBody as { method?: unknown }).method === "resolveInteractionUrl");
           let rpcMethod: ProviderDaemonRpcRequestValue["method"] | null = null;
           let rpcCommandId: string | undefined;

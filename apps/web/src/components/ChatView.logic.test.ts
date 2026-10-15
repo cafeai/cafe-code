@@ -28,12 +28,27 @@ it("retains bounded exact-account web consent in received queued-steer recovery 
       intentSequence: 3,
       retryableFollowUp: true,
       axiomWebConsent: { instanceId: "axiom-personal", enabled: true },
+      axiomMcpSelection: { instanceId: "axiom-personal", revision: 7 },
     },
   };
   expect(readRetryableSteerFailure(activity)?.axiomWebConsent).toEqual({
     instanceId: "axiom-personal",
     enabled: true,
   });
+  expect(readRetryableSteerFailure(activity)?.axiomMcpSelection).toEqual({
+    instanceId: "axiom-personal",
+    revision: 7,
+  });
+  for (const revision of [-1, Number.MAX_SAFE_INTEGER + 1, "7", null])
+    expect(
+      readRetryableSteerFailure({
+        ...activity,
+        payload: {
+          ...(activity.payload as object),
+          axiomMcpSelection: { instanceId: "axiom-personal", revision },
+        },
+      })?.axiomMcpSelection,
+    ).toBeUndefined();
   for (const consent of [
     { instanceId: "axiom-personal", enabled: "true" },
     { instanceId: "bad account", enabled: true },

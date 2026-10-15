@@ -2461,7 +2461,10 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
         ...(input.modelSelection?.model ? { "provider.model": input.modelSelection.model } : {}),
       });
       const hasImages = input.attachments.some((attachment) => attachment.type === "image");
-      if (input.axiomWebEnabled === true && routed.adapter.provider !== "axiom")
+      if (
+        (input.axiomWebEnabled === true || input.axiomMcpRevision !== undefined) &&
+        routed.adapter.provider !== "axiom"
+      )
         return yield* toValidationError(
           "ProviderService.sendTurn",
           "Web consent belongs to the selected Axiom provider.",
@@ -2557,6 +2560,9 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
             threadId: input.threadId,
             ...(input.axiomWebEnabled !== undefined
               ? { axiomWebEnabled: input.axiomWebEnabled }
+              : {}),
+            ...(input.axiomMcpRevision !== undefined
+              ? { axiomMcpRevision: input.axiomMcpRevision }
               : {}),
             ...(input.expectedSubagentPolicySession !== undefined
               ? { expectedSubagentPolicySession: input.expectedSubagentPolicySession }
@@ -2761,7 +2767,10 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
           input.deliveryPriority === undefined && input.expectedSubagentPolicySession === undefined,
       });
       metricProvider = routed.adapter.provider;
-      if (input.axiomWebEnabled === true && routed.adapter.provider !== "axiom")
+      if (
+        (input.axiomWebEnabled === true || input.axiomMcpRevision !== undefined) &&
+        routed.adapter.provider !== "axiom"
+      )
         return yield* toValidationError(
           "ProviderService.steerTurn",
           "Web consent belongs to the selected Axiom provider.",
@@ -3993,6 +4002,13 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
           command: "axiomcli native sign-in",
           message: "Opened Axiom native sign-in in your browser.",
         };
+      }),
+    manageMcp: (input) =>
+      Effect.gen(function* () {
+        const adapter = yield* registry.getByInstance(input.instanceId);
+        if (!adapter.manageMcp || !(yield* adapter.hasSession(input.threadId)))
+          return { state: null };
+        return yield* adapter.manageMcp(input);
       }),
     readSecurity: (input) =>
       Effect.gen(function* () {

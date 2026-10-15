@@ -94,12 +94,17 @@ describe("follow-up queue persistence", () => {
           instanceId: ProviderInstanceId.make("axiom-personal"),
           model: "native-model",
         },
+        axiomMcpRevision: 7,
         ...(consent !== undefined ? { axiomWebEnabled: consent } : {}),
       };
       expect((await persistence.save(environmentA, [original])).ok).toBe(true);
       const loaded = createFollowUpQueuePersistence(storage).load(environmentA);
       if (!loaded.ok) throw new Error(loaded.error);
       expect(loaded.value.pending[0]?.axiomWebEnabled).toBe(consent);
+      expect(loaded.value.pending[0]?.axiomMcpRevision).toBe(7);
+      expect(persistence.claim(claim(original), { ...original, axiomMcpRevision: 8 }).ok).toBe(
+        false,
+      );
       expect(
         persistence.claim(claim(original), { ...original, axiomWebEnabled: consent !== true }).ok,
       ).toBe(false);

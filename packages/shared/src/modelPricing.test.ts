@@ -10,6 +10,50 @@ import {
 
 const RATE: ModelRate = { input: 10, cachedInput: 1, cacheWrite: 12, output: 50 };
 
+describe("native reported costs", () => {
+  const counts = {
+    inputTokens: 100,
+    cachedInputTokens: 80,
+    cacheWriteInputTokens: 0,
+    outputTokens: 20,
+  };
+  it("uses the native receipt and measured token share instead of estimates or overrides", () => {
+    expect(
+      rollUpCost(
+        [
+          {
+            provider: "axiom",
+            model: "gpt-6-sol",
+            ...counts,
+            reportedCost: { microusd: "123456", tokens: 100 },
+          },
+        ],
+        { gpt: RATE },
+      ),
+    ).toEqual({
+      cost: 0.123456,
+      reportedCost: 0.123456,
+      pricedTokens: 100,
+      unpricedTokens: 20,
+      cacheSavings: 0,
+    });
+  });
+  it("keeps an unreported Axiom model unpriced even when an upstream model name matches", () => {
+    expect(rollUpCost([{ provider: "axiom", model: "gpt-6-sol", ...counts }]).unpricedTokens).toBe(
+      120,
+    );
+  });
+  it("recognizes a measured zero charge and refuses to round enormous or invalid receipts", () => {
+    expect(
+      rollUpCost([{ model: "native", ...counts, reportedCost: { microusd: "0", tokens: 120 } }]),
+    ).toMatchObject({ cost: 0, reportedCost: 0, pricedTokens: 120, unpricedTokens: 0 });
+    for (const microusd of ["9007199254740993", "-1", "1.2", "1e6"])
+      expect(
+        rollUpCost([{ model: "native", ...counts, reportedCost: { microusd, tokens: 120 } }]),
+      ).toMatchObject({ cost: 0, unpricedTokens: 120 });
+  });
+});
+
 describe("resolveModelRate", () => {
   it("matches a bundled family by prefix so dated releases inherit it", () => {
     const dated = resolveModelRate("claude-opus-4-5-20260101");

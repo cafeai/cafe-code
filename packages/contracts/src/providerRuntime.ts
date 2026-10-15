@@ -410,7 +410,10 @@ const UsageAccountingCount = NonNegativeInt.check(
 export const UsageAccountingModel = Schema.Struct({
   model: TrimmedNonEmptyString.check(
     Schema.isMaxLength(256),
-    Schema.isPattern(/^[a-zA-Z0-9][a-zA-Z0-9._[\]-]*$/),
+    Schema.isPattern(/^[a-zA-Z0-9][a-zA-Z0-9._[\]:-]*$/),
+  ),
+  reportedCostMicrousd: Schema.optional(
+    Schema.String.check(Schema.isPattern(/^(0|[1-9][0-9]{0,99})$/)),
   ),
   inputTokens: UsageAccountingCount,
   cachedInputTokens: UsageAccountingCount,

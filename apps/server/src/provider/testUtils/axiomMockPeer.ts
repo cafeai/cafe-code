@@ -26,6 +26,21 @@ const persist = () => {
       mode: 0o600,
     });
 };
+let mcp = {
+  revision: 0,
+  servers: [] as Array<{
+    name: string;
+    command: string;
+    args: string[];
+    enabled: boolean;
+    environmentKeys: string[];
+    credentialId: string | null;
+    tools: Array<{ name: string; description: string; schemaHash: string }>;
+    status: string;
+    error: string | null;
+  }>,
+  selectedTools: [] as string[],
+};
 let sequence = 0;
 let model = "test-model";
 let thinking = "medium";
@@ -114,6 +129,16 @@ const finish = (authenticated: boolean) => {
       purpose: "conversation",
       state: "completed",
       responseVerified: authenticated,
+      providerId: "tinfoil",
+      completeness: "final",
+      settled: true,
+      inputTokens: "100",
+      cachedInputTokens: "20",
+      outputTokens: "30",
+      reasoningTokens: "5",
+      costMicrousd: "123456",
+      startedAtMs: String(Date.now() - 10),
+      finishedAtMs: String(Date.now()),
     },
   });
   activity({ kind: "active_turn_changed", turnId: null });
@@ -158,6 +183,7 @@ createInterface({ input: process.stdin }).on("line", (line) => {
               features: {
                 desktopChat: desktop ? 1 : 0,
                 desktopAgent: desktop ? 1 : 0,
+                desktopMcp: desktop ? 1 : 0,
                 webConsent: desktop ? 1 : 0,
                 account: 2,
                 modelCatalog: 1,
@@ -300,6 +326,50 @@ createInterface({ input: process.stdin }).on("line", (line) => {
         },
       });
       break;
+    case "_axiom/desktop/mcp": {
+      if (params.action.kind !== "list") {
+        if (pending || params.expectedRevision !== mcp.revision) {
+          reject(id, "MCP requires exact idle revision");
+          break;
+        }
+        if (params.action.kind === "save") {
+          const server = params.action.server;
+          mcp.servers = [
+            ...mcp.servers.filter((value) => value.name !== server.name),
+            {
+              ...server,
+              env: undefined,
+              environmentKeys: Object.keys(server.env ?? {}),
+              credentialId: "private-native-credential",
+              tools: [],
+              status: "untested",
+              error: null,
+            },
+          ];
+        }
+        if (params.action.kind === "test") {
+          const server = mcp.servers.find((value) => value.name === params.action.name);
+          if (server) {
+            server.status = "tested";
+            server.tools = [
+              {
+                name: "mcp__" + server.name + "__example",
+                description: "Fixture tool",
+                schemaHash: "c".repeat(64),
+              },
+            ];
+          }
+        }
+        if (params.action.kind === "delete") {
+          mcp.servers = mcp.servers.filter((value) => value.name !== params.action.name);
+          mcp.selectedTools = [];
+        }
+        if (params.action.kind === "select") mcp.selectedTools = params.action.tools;
+        mcp.revision++;
+      }
+      result(id, mcp);
+      break;
+    }
     case "_axiom/security/prewarm":
     case "_axiom/security/verify":
       result(id, { status: { state: "verified" }, evidence: evidence() });
@@ -341,6 +411,7 @@ createInterface({ input: process.stdin }).on("line", (line) => {
                       agent,
                       webEnabled: params._meta.axiom.webEnabled,
                       agentRevision: params._meta.axiom.agentRevision,
+                      mcpRevision: params._meta.axiom.mcpRevision,
                     })
                   : "Fixture reply",
           },
@@ -426,10 +497,34 @@ createInterface({ input: process.stdin }).on("line", (line) => {
       result(id, {
         thread: { threadId: sessionId, cwd, revision: turn, lastTimelineSequence: turn },
         ...(desktop ? { desktopAgent: agent } : {}),
+        requestUsage:
+          scenario === "recover-billing" &&
+          params.afterSequence === undefined &&
+          params.afterRequestId === undefined
+            ? [
+                {
+                  requestId: "recovered-request",
+                  modelId: model,
+                  providerId: "tinfoil",
+                  purpose: "conversation",
+                  state: "completed",
+                  completeness: "final",
+                  settled: true,
+                  responseVerified: false,
+                  inputTokens: "10",
+                  cachedInputTokens: "0",
+                  outputTokens: "2",
+                  reasoningTokens: "0",
+                  costMicrousd: "99",
+                  startedAtMs: "1791849600000",
+                  finishedAtMs: "1791849601000",
+                },
+              ]
+            : [],
         items: [
           {
             id: `assistant-${turn}`,
-            turnId: lastNativeTurn,
+            turnId: lastNativeTurn || null,
             kind: "assistant_message",
             content: "Fixture reply",
           },

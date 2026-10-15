@@ -15,6 +15,7 @@ import {
   ProviderDriverKind,
   UsageStatsDayKey,
   UsageStatsModel,
+  UsageStatsReportedCost,
   UsageStatsModelGeneratingTimeDayEntry,
   type UsageAccountingSnapshot,
 } from "@cafecode/contracts";
@@ -40,6 +41,7 @@ export const UsageStatsTokenBreakdownDayRow = Schema.Struct({
   day: UsageStatsDayKey,
   provider: ProviderDriverKind,
   model: UsageStatsModel,
+  reportedCost: Schema.optional(UsageStatsReportedCost),
   outputTokens: NonNegativeInt,
   inputTokens: NonNegativeInt,
   cachedInputTokens: NonNegativeInt,

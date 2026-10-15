@@ -73,7 +73,7 @@ Negotiate additional capabilities only when Cafe implements their full contract.
    - Implement negotiated native compaction and steering with exact turn IDs
      and accepted-message identity; unsupported operations use existing Cafe
      capability routing. Do not fabricate fork, rewind, goals, subagent limits,
-     MCP injection or native sandbox guarantees absent from Axiom's protocol.
+     session-only MCP injection or native sandbox guarantees absent from Axiom's protocol.
 
 4. **Attestation and reply verification**
    - Carry an optional typed public security projection through authenticated
@@ -124,3 +124,24 @@ scoped attestation and latest-reply information without redesigning the chat.
 Existing providers retain their behavior. All required repository checks and the
 forced desktop build pass. Unsupported native capabilities are documented and
 accurately advertised, with no partial implementations or counterfeit evidence.
+
+## MCP and reported-cost follow-up
+
+- Implement native desktop MCP save/edit/delete/test and per-thread tool selection
+  in the existing composer tools tab. Negotiate desktopMcp@1 and fence control
+  actions with the exact account/runtime/configuration and native revision.
+- Capture the reviewed revision in direct sends, queue edits/claims/reload and
+  canonical rejected-steer recovery. Keep environment values write-only and
+  exclude these non-replayable control actions from the command ledger.
+- Keep automatic scheduling unavailable until native session-only MCP registration
+  exists; account-wide desktop configuration is not a session injection API.
+- Record settled native per-request tokens/costs through the existing atomic
+  accounting checkpoint. Preserve decimal microUSD and measured token coverage,
+  deduplicate native replay across process restarts, and hydrate daily/model costs.
+- Show reported Axiom amounts beside existing standard-rate estimates in the
+  shared overview, provider/model rows, daily ranges and Atrium. Keep the live
+  context meter, cache-savings estimates and reply verification separate.
+- Qualify synthetic MCP/revision/credential and settlement/replay/disabled-collection
+  behavior plus shared browser presentation; finish with full repository checks
+  and the forced desktop build. Native server/profile/payment execution remains
+  separate live qualification.

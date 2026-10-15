@@ -47,6 +47,13 @@ const persistedItem = Schema.Struct({
   modelSelection: ModelSelection,
   deliveryPriority: Schema.optional(Schema.Literals(["now", "next", "later"])),
   axiomWebEnabled: Schema.optional(Schema.Boolean),
+  axiomMcpRevision: Schema.optional(
+    Schema.Number.check(
+      Schema.isInt(),
+      Schema.isGreaterThanOrEqualTo(0),
+      Schema.isLessThanOrEqualTo(Number.MAX_SAFE_INTEGER),
+    ),
+  ),
   runtimeMode: RuntimeMode,
   interactionMode: ProviderInteractionMode,
   queuedAt: Schema.String.check(Schema.isMaxLength(64)),
@@ -74,6 +81,7 @@ export interface FollowUpQueuePersistenceItem {
   readonly threadId: ThreadId;
   readonly promptText: string;
   readonly axiomWebEnabled?: boolean;
+  readonly axiomMcpRevision?: number;
   readonly images: readonly ComposerImageAttachment[];
   readonly files?: readonly ChatFileAttachment[];
   readonly provider: ProviderDriverKind;
@@ -259,6 +267,7 @@ function itemMetadata(item: FollowUpQueuePersistenceItem): PersistedItem {
     modelSelection: item.modelSelection,
     ...(item.deliveryPriority !== undefined ? { deliveryPriority: item.deliveryPriority } : {}),
     ...(item.axiomWebEnabled !== undefined ? { axiomWebEnabled: item.axiomWebEnabled } : {}),
+    ...(item.axiomMcpRevision !== undefined ? { axiomMcpRevision: item.axiomMcpRevision } : {}),
     runtimeMode: item.runtimeMode,
     interactionMode: item.interactionMode,
     queuedAt: item.queuedAt,
@@ -345,6 +354,7 @@ function hydrateItem(item: PersistedItem): HydratedFollowUpQueueItem {
     modelSelection: item.modelSelection,
     ...(item.deliveryPriority !== undefined ? { deliveryPriority: item.deliveryPriority } : {}),
     ...(item.axiomWebEnabled !== undefined ? { axiomWebEnabled: item.axiomWebEnabled } : {}),
+    ...(item.axiomMcpRevision !== undefined ? { axiomMcpRevision: item.axiomMcpRevision } : {}),
     runtimeMode: item.runtimeMode,
     interactionMode: item.interactionMode,
     queuedAt: item.queuedAt,

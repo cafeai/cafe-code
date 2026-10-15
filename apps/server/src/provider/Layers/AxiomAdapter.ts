@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import {
   ProviderCommandCatalog,
+  ProviderMcpState,
   ApprovalRequestId,
   EventId,
   ProviderDriverKind,
@@ -55,6 +56,7 @@ import {
   type AxiomModel,
   type AxiomSessionIdentity,
 } from "../acp/AxiomAcpSupport.ts";
+import { axiomUsageAccounting, axiomUsageTimestamp } from "../axiomUsageAccounting.ts";
 import { mapAcpToAdapterError } from "../acp/AcpAdapterSupport.ts";
 import {
   makeAcpAssistantItemEvent,
@@ -104,6 +106,7 @@ const OWNED_COMMANDS = new Set([
   "top-up",
   "redeem",
   "usage",
+  "mcp",
 ]);
 const Identifier = Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(512));
 const ResumeFields = {
@@ -127,6 +130,18 @@ const Resume = Schema.Struct({
   ...ResumeFields,
 });
 const decodeResume = Schema.decodeUnknownEffect(Resume);
+const readMcpState = (runtime: Pick<AcpSessionRuntime["Service"], "request">, nativeId: string) =>
+  runtime.request("_axiom/desktop/mcp", { threadId: nativeId, action: { kind: "list" } }).pipe(
+    Effect.flatMap((value) => decodeAxiom(ProviderMcpState, value)),
+    Effect.timeout("15 seconds"),
+    Effect.catchTag("TimeoutError", () =>
+      Effect.fail(
+        AcpErrors.AcpRequestError.invalidParams(
+          "Axiom MCP settings could not be read. Refresh before retrying.",
+        ),
+      ),
+    ),
+  );
 const decodeCommandCatalog = Schema.decodeUnknownExit(ProviderCommandCatalog);
 const NativeHistoryPage = Schema.Struct({
   thread: Schema.Struct({
@@ -212,6 +227,7 @@ interface SessionContext {
   nativeCwd: string;
   agentRevision: number;
   webEnabled: boolean;
+  mcp: typeof ProviderMcpState.Type;
   models: readonly AxiomModel[];
   sequence: number;
   nativeTurn: string | undefined;
@@ -221,6 +237,7 @@ interface SessionContext {
   replyChecked: boolean;
   replyFailed: boolean;
   replyRequests: Map<string, boolean>;
+  settledCosts: Set<string>;
   approvals: Map<ApprovalRequestId, PendingApproval>;
   questions: Map<ApprovalRequestId, PendingQuestion>;
   nativeTurns: Map<string, TurnId>;
@@ -439,6 +456,56 @@ export const makeAxiomAdapter = Effect.fn("makeAxiomAdapter")(function* (
     Effect.forEach([...sessions.values()], close, { discard: true }),
   );
 
+  const recordCost = (ctx: SessionContext, usage: unknown) =>
+    Effect.gen(function* () {
+      if (!ctx.accountValid || ctx.closed) return;
+      const snapshot = axiomUsageAccounting(ctx.identity.accountKey, ctx.nativeId, usage);
+      if (!snapshot || ctx.settledCosts.has(snapshot.scopeId)) return;
+      const occurredAt = axiomUsageTimestamp(usage);
+      yield* emit({
+        type: "thread.usage-accounting.updated",
+        ...(yield* stamp),
+        ...(occurredAt ? { createdAt: occurredAt } : {}),
+        provider: PROVIDER,
+        threadId: ctx.session.threadId,
+        payload: snapshot,
+      });
+      if (ctx.settledCosts.size < 4096) ctx.settledCosts.add(snapshot.scopeId);
+    });
+
+  const reconcileCosts = (ctx: SessionContext) =>
+    Effect.gen(function* () {
+      let cursor: string | undefined;
+      const pageSchema = Schema.Struct({
+        thread: Schema.Struct({ threadId: Identifier }),
+        requestUsage: Schema.Array(Schema.Unknown).check(Schema.isMaxLength(500)),
+        nextRequestUsageCursor: Schema.optional(Schema.NullOr(Identifier)),
+      });
+      for (let pageIndex = 0; pageIndex < 8; pageIndex++) {
+        if (ctx.closed || !ctx.accountValid || sessions.get(ctx.session.threadId) !== ctx) return;
+        const page = yield* ctx.runtime
+          .request("_axiom/thread/timeline", {
+            threadId: ctx.nativeId,
+            limit: 500,
+            // Omit both cursors on the first page: the native handler only
+            // reconciles pending accounting in that exact spelling.
+            ...(cursor ? { afterRequestId: cursor, afterSequence: 0 } : {}),
+          })
+          .pipe(Effect.flatMap((value) => decodeAxiom(pageSchema, value)));
+        if (page.thread.threadId !== ctx.nativeId || ctx.closed || !ctx.accountValid) return;
+        for (const usage of page.requestUsage) {
+          yield* recordCost(ctx, usage);
+        }
+        if (!page.nextRequestUsageCursor) return;
+        if (page.nextRequestUsageCursor === cursor) return;
+        cursor = page.nextRequestUsageCursor;
+      }
+    }).pipe(
+      Effect.timeoutOption("15 seconds"),
+      Effect.catchCause(() => Effect.logWarning("Axiom reported-cost recovery is unavailable.")),
+      Effect.asVoid,
+    );
+
   const refreshSecurity = (input: ProviderSecurityNativeRefreshInput) =>
     lock(
       input.threadId,
@@ -608,6 +675,81 @@ export const makeAxiomAdapter = Effect.fn("makeAxiomAdapter")(function* (
       sessionFork: "unsupported",
       threadGoals: "unsupported",
     },
+    manageMcp: (input) =>
+      lock(
+        input.threadId,
+        Effect.gen(function* () {
+          const ctx = yield* requireSession(input.threadId);
+          if (
+            !ctx.accountValid ||
+            input.instanceId !== instanceId ||
+            input.runtimeId !== ctx.identity.runtimeId ||
+            input.modelId !== ctx.session.model ||
+            input.configurationKey !== ctx.session.commandCatalogConfigurationKey ||
+            ctx.turn ||
+            ctx.verificationBusy
+          )
+            return yield* invalid("manageMcp", "The exact idle Axiom session is required.");
+          if (
+            input.action.kind !== "list" &&
+            [...sessions.values()].some(
+              (other) =>
+                other.identity.accountKey === ctx.identity.accountKey &&
+                (other.turn || other.verificationBusy),
+            )
+          )
+            return yield* invalid(
+              "manageMcp",
+              "Wait for this Axiom account’s active conversations before changing MCP settings.",
+            );
+          const account = yield* native(
+            ctx,
+            "account/status",
+            ctx.runtime
+              .request("_axiom/account/status", {})
+              .pipe(Effect.flatMap((value) => decodeAxiom(AxiomAccount, value))),
+          );
+          if (
+            account.status.state !== "valid" ||
+            !account.status.account ||
+            axiomAccountKey(account.status.account.id) !== ctx.identity.accountKey
+          )
+            return yield* invalid("manageMcp", "The native Axiom account changed.");
+          const state = yield* native(
+            ctx,
+            "desktop/mcp",
+            ctx.runtime
+              .request("_axiom/desktop/mcp", {
+                threadId: ctx.nativeId,
+                ...(input.expectedRevision !== undefined
+                  ? { expectedRevision: input.expectedRevision }
+                  : {}),
+                action: input.action,
+              })
+              .pipe(
+                Effect.flatMap((value) => decodeAxiom(ProviderMcpState, value)),
+                Effect.timeout("40 seconds"),
+                Effect.catchTag("TimeoutError", () =>
+                  Effect.fail(
+                    AcpErrors.AcpRequestError.invalidParams(
+                      "MCP did not complete. Refresh before retrying.",
+                    ),
+                  ),
+                ),
+              ),
+          );
+          if (!ctx.accountValid || ctx.closed) return { state: null };
+          ctx.mcp = state;
+          return { state };
+        }),
+      ).pipe(
+        Effect.timeout("45 seconds"),
+        Effect.catchTag("TimeoutError", () =>
+          Effect.fail(
+            invalid("manageMcp", "MCP control did not complete. Refresh before retrying."),
+          ),
+        ),
+      ),
     readSecurity: (input) =>
       Effect.sync(() => {
         const ctx = sessions.get(input.threadId);
@@ -869,6 +1011,9 @@ export const makeAxiomAdapter = Effect.fn("makeAxiomAdapter")(function* (
                 return;
               }
               if (event.sessionId !== ctx.nativeId) return;
+              if (event.event.kind === "request_usage_changed" && ctx.accountValid) {
+                yield* recordCost(ctx, event.event.usage);
+              }
               if (event.event.kind === "active_turn_changed") {
                 const active = yield* decodeAxiom(ActiveTurn, event.event).pipe(
                   Effect.catch(() => Effect.succeed(undefined)),
@@ -1007,6 +1152,11 @@ export const makeAxiomAdapter = Effect.fn("makeAxiomAdapter")(function* (
               mapAcpToAdapterError(PROVIDER, input.threadId, "desktop/agent/configure", error),
             ),
           );
+          const mcp = yield* readMcpState(runtime, started.sessionId).pipe(
+            Effect.mapError((error) =>
+              mapAcpToAdapterError(PROVIDER, input.threadId, "desktop/mcp", error),
+            ),
+          );
           const configuration = yield* runtime.getConfigOptions;
           const modelOption = configuration.find((option) => option.category === "model");
           const modelId =
@@ -1061,6 +1211,7 @@ export const makeAxiomAdapter = Effect.fn("makeAxiomAdapter")(function* (
             nativeCwd: desktopAgent.workingDirectory,
             agentRevision: desktopAgent.revision,
             webEnabled: false,
+            mcp,
             nativeId: started.sessionId,
             models: modelList.models,
             sequence: 0,
@@ -1071,6 +1222,7 @@ export const makeAxiomAdapter = Effect.fn("makeAxiomAdapter")(function* (
             replyChecked: false,
             replyFailed: false,
             replyRequests: new Map(),
+            settledCosts: new Set(),
             approvals: new Map(),
             questions: new Map(),
             completion: undefined,
@@ -1201,6 +1353,7 @@ export const makeAxiomAdapter = Effect.fn("makeAxiomAdapter")(function* (
             payload: { state: "ready" },
           });
           transferred = true;
+          yield* reconcileCosts(owner);
           // Prewarm carries only the selected model id. The native cache and
           // inference enforce freshness; a late answer cannot replace another
           // session/model's evidence. Failure here never replays a user prompt.
@@ -1385,6 +1538,17 @@ export const makeAxiomAdapter = Effect.fn("makeAxiomAdapter")(function* (
           ctx.agentRevision = agent.revision;
           ctx.nativeCwd = agent.workingDirectory;
           ctx.session = { ...ctx.session, resumeCursor: resumeCursor(ctx) };
+          const mcp = yield* native(ctx, "desktop/mcp", readMcpState(ctx.runtime, ctx.nativeId));
+          if (
+            (input.interactionMode ?? ctx.session.interactionMode) !== "plan" &&
+            (mcp.revision !== (input.axiomMcpRevision ?? ctx.mcp.revision) ||
+              (input.axiomMcpRevision === undefined && mcp.selectedTools.length > 0))
+          )
+            return yield* invalid(
+              "sendTurn",
+              "Axiom MCP settings changed. Review the MCP control and resend this message.",
+            );
+          ctx.mcp = mcp;
           const webEnabled = input.axiomWebEnabled === true;
           ctx.webEnabled = webEnabled;
           const turn = TurnId.make(randomUUID());
@@ -1447,6 +1611,9 @@ export const makeAxiomAdapter = Effect.fn("makeAxiomAdapter")(function* (
                     attachments,
                     webEnabled,
                     agentRevision: ctx.agentRevision,
+                    ...(ctx.session.interactionMode !== "plan"
+                      ? { mcpRevision: ctx.mcp.revision }
+                      : {}),
                   },
                 },
               }),
@@ -1468,6 +1635,7 @@ export const makeAxiomAdapter = Effect.fn("makeAxiomAdapter")(function* (
                 : lock(input.threadId, settle(ctx, turn, "failed")),
             ),
             Effect.onInterrupt(() => Effect.void),
+            Effect.ensuring(reconcileCosts(ctx)),
           );
           // Prompt response is completion, not admission. The exact session scope
           // outlives Cafe RPC/renderer connections and owns this generation fiber.
@@ -1489,6 +1657,12 @@ export const makeAxiomAdapter = Effect.fn("makeAxiomAdapter")(function* (
             "steerTurn",
             "The exact active Axiom turn and text guidance are required.",
           );
+        if (input.axiomMcpRevision !== undefined && input.axiomMcpRevision !== ctx.mcp.revision)
+          return yield* new ProviderAdapterRequestError({
+            provider: PROVIDER,
+            method: "_axiom/turn/steer",
+            detail: "Axiom MCP settings changed; deliver as a new turn.",
+          });
         if ((input.axiomWebEnabled === true) !== ctx.webEnabled)
           return yield* new ProviderAdapterRequestError({
             provider: PROVIDER,
@@ -1665,6 +1839,7 @@ export const makeAxiomAdapter = Effect.fn("makeAxiomAdapter")(function* (
     readThread: (threadId) =>
       Effect.gen(function* () {
         const ctx = yield* requireSession(threadId);
+        yield* reconcileCosts(ctx);
         const turns = new Map<TurnId, { id: TurnId; items: unknown[] }>();
         const head = yield* native(
           ctx,

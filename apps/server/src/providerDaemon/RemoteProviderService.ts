@@ -332,6 +332,7 @@ export async function requestProviderDaemonRpcJsonWithStableRetry<
     if (
       request.method === "loginProvider" ||
       request.method === "refreshSecurity" ||
+      request.method === "manageMcp" ||
       !isRetryableProviderDaemonControlError(cause)
     ) {
       throw cause;
@@ -875,6 +876,7 @@ const makeRemoteProviderService = Effect.gen(function* () {
     sendTurn: (input) => guardedRpc({ method: "sendTurn", payload: input }),
     steerTurn: (input) => guardedRpc({ method: "steerTurn", payload: input }),
     loginProvider: (input) => guardedRpc({ method: "loginProvider", payload: input }),
+    manageMcp: (input) => guardedRpc({ method: "manageMcp", payload: input }),
     readSecurity: (input) => guardedRpc({ method: "readSecurity", payload: input }),
     refreshSecurity: (input) => guardedRpc({ method: "refreshSecurity", payload: input }),
     controlTask: (input) => guardedRpc({ method: "controlTask", payload: input }),

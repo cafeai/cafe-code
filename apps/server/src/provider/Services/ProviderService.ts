@@ -11,6 +11,7 @@
  *
  * @module ProviderService
  */
+import type { ProviderMcpNativeInput, ProviderMcpResult } from "@cafecode/contracts";
 import type {
   ServerProviderLoginInput,
   ServerProviderLoginResult,
@@ -81,6 +82,9 @@ export interface ProviderServiceShape {
   readonly loginProvider?: (
     input: ServerProviderLoginInput,
   ) => Effect.Effect<ServerProviderLoginResult, ProviderServiceError>;
+  readonly manageMcp?: (
+    input: ProviderMcpNativeInput,
+  ) => Effect.Effect<ProviderMcpResult, ProviderServiceError>;
   readonly readSecurity?: (
     input: ProviderSecurityReadInput,
   ) => Effect.Effect<ProviderSecurityResult, ProviderServiceError>;

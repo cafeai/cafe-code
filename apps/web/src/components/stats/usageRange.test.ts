@@ -70,6 +70,29 @@ const timeRow = (
 ): UsageStatsModelGeneratingTimeDayEntry => ({ day: key, provider, model, generatingMs });
 
 describe("usage range calendar bounds", () => {
+  it("aggregates exact native costs only from the selected days and retains their measured share", () => {
+    const axi = ProviderDriverKind.make("axiom");
+    const first = {
+      ...row("2026-09-30", "native", { inputTokens: 100, outputTokens: 20 }, axi),
+      reportedCost: { microusd: "9007199254740993", tokens: 120 },
+    };
+    const second = {
+      ...row("2026-10-01", "native", { inputTokens: 200, outputTokens: 30 }, axi),
+      reportedCost: { microusd: "7", tokens: 230 },
+    };
+    const result = selectUsageRange(
+      usage({
+        days: [day(first.day, first), day(second.day, second)],
+        tokenBreakdownDays: [first, second],
+      }),
+      "7",
+    );
+    expect(result.tokenBreakdown[0]?.reportedCost).toEqual({
+      microusd: "9007199254741000",
+      tokens: 350,
+    });
+    expect(result.tokenBreakdownDays?.[0]?.reportedCost).toEqual(first.reportedCost);
+  });
   it("offers the approved finite inclusive day counts and full history", () => {
     expect(USAGE_RANGES.map(({ key, days }) => ({ key, days }))).toEqual([
       { key: "7", days: 7 },
