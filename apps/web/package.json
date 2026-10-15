@@ -37,7 +37,7 @@
     "class-variance-authority": "^0.7.1",
     "dompurify": "3.4.16",
     "effect": "catalog:",
-    "katex": "^0.17.0",
+    "katex": "^0.18.11",
     "lexical": "^0.41.0",
     "lucide-react": "^1.48.0",
     "mermaid": "12.0.0",

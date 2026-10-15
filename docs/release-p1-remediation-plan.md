@@ -105,9 +105,24 @@ application defect and still requires P1 2.
 
 The initial audit also reports high advisories in the MCP SDK,
 `http-cache-semantics`, and `source-map-js`, a moderate advisory in `sprintf-js`,
-and a low advisory in KaTeX. Those remain visible follow-up work for the full
-release audit gate. The MCP OAuth-client advisory explicitly excludes SDK-built
-servers; use actual calling paths when recording applicability.
+and a low advisory in KaTeX. The October 15 follow-up updates the MCP SDK to
+1.32.1 in source, scripts and the staged desktop runtime; KaTeX to 0.18.11 across
+the direct and Mermaid/rehype branches; `http-cache-semantics` to 4.3.0; and
+`source-map-js` to 1.2.2. `global-agent` 4.1.3 removes the obsolete
+`roarr -> sprintf-js` branch, for which no patched formatter release exists.
+The unfiltered recursive audit then reports no findings, without changing its
+severity coverage or excluding packages. The MCP OAuth-client advisory excludes
+SDK-built servers; Cafe has no SDK OAuth client provider or stored client tokens
+to migrate in these calling paths.
+
+The lock update retains `@hono/node-server` 1.19.17 within the new SDK's supported
+v1/v2 union instead of adopting an unrelated major. Nine new tarballs match their
+npm SHA-512 integrity and their advertised registry signatures verify against
+the registry's public keys. Full Sigstore certificate-chain/transparency-log
+verification is not claimed. The actual `@electron/get` consumer's bootstrap,
+proxy routing and `NO_PROXY` bypass are exercised with two isolated loopback
+servers; native packaging and the existing MCP/Markdown/Mermaid tests still
+qualify the exact candidate independently of the dependency audit.
 
 ## P1 1 Restrict desktop navigation and IPC
 

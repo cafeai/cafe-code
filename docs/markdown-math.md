@@ -38,7 +38,7 @@ viewport. Its intrinsic-width KaTeX child keeps wide formulas out of the message
 column's width calculation. Ordinary prose keeps its separate emergency wrapping
 policy, and table math stays inside the table's local scroll viewport.
 
-Native KaTeX places a direct display `.tag` absolutely at the right edge of a
+Native KaTeX places a direct display `.katex-tag` absolutely at the right edge of a
 full-width equation box. That assumption is incompatible with chat's
 intrinsic-width equation: the tag's width is excluded from the box, so a label
 such as `(MX-1)` paints over the formula's final terms. The issue was reproduced

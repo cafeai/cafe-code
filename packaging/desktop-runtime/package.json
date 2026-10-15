@@ -10,7 +10,7 @@
     "@anthropic-ai/sdk": "^0.98.0",
     "@effect/platform-node": "catalog:",
     "@effect/platform-node-shared": "catalog:",
-    "@modelcontextprotocol/sdk": "^1.29.0",
+    "@modelcontextprotocol/sdk": "^1.32.1",
     "@opencode-ai/sdk": "^1.17.18",
     "@pierre/diffs": "catalog:",
     "@types/web-push": "^3.6.4",

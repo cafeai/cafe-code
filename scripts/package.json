@@ -14,7 +14,7 @@
     "@cafecode/shared": "workspace:*",
     "@effect/platform-node": "catalog:",
     "@formatjs/icu-messageformat-parser": "3.5.21",
-    "@modelcontextprotocol/sdk": "^1.29.0",
+    "@modelcontextprotocol/sdk": "^1.32.1",
     "effect": "catalog:",
     "micromark-util-decode-string": "^2.0.1",
     "yaml": "2.9.1",

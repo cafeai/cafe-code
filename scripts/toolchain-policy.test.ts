@@ -155,11 +155,15 @@ describe("repository toolchain policy", () => {
     ).toBe("42.10.0");
   });
 
-  it("retains fixed security floors in every installed URI, IP, proxy and brace-expansion branch", () => {
+  it("retains fixed security floors throughout the installed dependency graph", () => {
     const resolutions = readStringMap(readJson("package.json").resolutions);
     expect(resolutions["fast-uri"]).toBe("^3.1.8");
     expect(resolutions["ip-address"]).toBe("^10.7.1");
     expect(resolutions["proxy-addr"]).toBe("^2.0.8");
+    expect(resolutions["global-agent"]).toBe("^4.1.3");
+    expect(resolutions["http-cache-semantics"]).toBe("^4.3.0");
+    expect(resolutions.katex).toBe("^0.18.11");
+    expect(resolutions["source-map-js"]).toBe("^1.2.2");
     const lock = parse(readFileSync(resolve(repoRoot, "yarn.lock"), "utf8")) as Record<
       string,
       { version?: string }
@@ -169,6 +173,11 @@ describe("repository toolchain policy", () => {
       "fast-uri": { 3: [1, 8] },
       "ip-address": { 10: [7, 1] },
       "proxy-addr": { 2: [0, 8] },
+      "@modelcontextprotocol/sdk": { 1: [31, 0] },
+      "global-agent": { 4: [1, 3] },
+      "http-cache-semantics": { 4: [3, 0] },
+      katex: { 0: [18, 2] },
+      "source-map-js": { 1: [2, 2] },
     };
     for (const [name, branches] of Object.entries(minimums)) {
       const entries = Object.entries(lock).filter(([descriptor]) =>
@@ -188,6 +197,11 @@ describe("repository toolchain policy", () => {
         ).toBe(true);
       }
     }
+    // No patched sprintf-js release exists. Remove its obsolete logger branch
+    // instead of suppressing that advisory or substituting a version label.
+    expect(Object.keys(lock).filter((descriptor) => descriptor.startsWith("sprintf-js@"))).toEqual(
+      [],
+    );
   });
 
   it("rejects spoofed IPv4 hops through short IPv6 trust subnets", () => {

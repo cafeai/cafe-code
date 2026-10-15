@@ -896,8 +896,8 @@ describe("ChatMarkdown", () => {
         expect(host.querySelector("pre code")?.textContent).toBe(`${boxed}\n${bound}\n`);
 
         for (const [index, math] of Array.from(host.querySelectorAll(".katex-html")).entries()) {
-          const bases = Array.from(math.querySelectorAll<HTMLElement>(":scope > .base"));
-          const tag = math.querySelector<HTMLElement>(":scope > .tag");
+          const bases = Array.from(math.querySelectorAll<HTMLElement>(":scope > .katex-base"));
+          const tag = math.querySelector<HTMLElement>(":scope > .katex-tag");
           expect(bases.length).toBeGreaterThan(0);
           expect(tag?.textContent).toBe(`(MX-${index + 1})`);
           const body = bases.map((base) => base.getBoundingClientRect());
@@ -968,8 +968,8 @@ describe("ChatMarkdown", () => {
       ).toEqual(formulas);
       expect(host.querySelector("pre code")?.textContent).toBe(`${formulas.join("\n")}\n`);
       for (const [index, math] of Array.from(host.querySelectorAll(".katex-html")).entries()) {
-        const bases = Array.from(math.querySelectorAll<HTMLElement>(":scope > .base"));
-        const tag = math.querySelector<HTMLElement>(":scope > .tag")!;
+        const bases = Array.from(math.querySelectorAll<HTMLElement>(":scope > .katex-base"));
+        const tag = math.querySelector<HTMLElement>(":scope > .katex-tag")!;
         expect(tag.textContent).toBe(
           // KaTeX deliberately emits non-breaking spaces for text-mode math.
           // Assert its exact native glyph text rather than normalizing away

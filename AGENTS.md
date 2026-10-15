@@ -418,7 +418,7 @@ If a tradeoff is required, choose correctness, durability, and debuggability ove
 - Codex ChatGPT search output can include private-use citation delimiters such as `U+E200 cite U+E202 <handle> U+E201` around opaque handles like `turn4search3`. These are valid UTF-8 provider markup, not mojibake or a local decoder failure. Cafe must keep raw provider text persisted for diagnostics, but Codex chat display and assistant-copy text should normalize those markers through `apps/web/src/lib/codexCitations.ts` so private-use glyphs do not appear in the UI. Do not fabricate external links unless app-server supplies trusted URL metadata for the handle.
 
 KaTeX display equation labels must participate in the same intrinsic-width local
-scroll flow as their formula. Native absolute `.tag` placement assumes a full-
+scroll flow as their formula. Native absolute `.katex-tag` placement assumes a full-
 width equation, while Cafe's min-content inline display would paint it over the
 final terms. Scope the static-position/gap override to only the direct display
 tag; keep internal arrays, untagged math, MathML, native struts, sanitization,
