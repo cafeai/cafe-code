@@ -94,6 +94,10 @@ export function managedInstallerFixtureEnvironment(input: {
     TEMP: input.root,
     TMP: input.root,
     PATH: dirname(input.node),
+    // Classify the copied Node as a native executable. Windows PowerShell's
+    // document-association path can return without stdout or LASTEXITCODE.
+    // Only .exe peers are used here; never inherit shell/script extensions.
+    PATHEXT: ".EXE",
     PSModulePath: join(dirname(input.powershell), "Modules"),
     PSModuleAnalysisCachePath: join(input.root, "PowerShellModuleAnalysisCache"),
   };

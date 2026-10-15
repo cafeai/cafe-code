@@ -62,6 +62,7 @@ describe("native managed-installer fixture isolation", () => {
       TEMP: root,
       TMP: root,
       PATH: join(root, "runtime"),
+      PATHEXT: ".EXE",
       PSModulePath: join(systemRoot, "System32", "WindowsPowerShell", "v1.0", "Modules"),
       PSModuleAnalysisCachePath: join(root, "PowerShellModuleAnalysisCache"),
     });
