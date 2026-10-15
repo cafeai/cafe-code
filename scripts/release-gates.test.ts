@@ -9,6 +9,23 @@ const workflow = (name: string) =>
 
 describe("release publication gates", () => {
   it("qualifies one selected source across every reliability job", () => {
+    const ci = workflow("ci.yml");
+    expect(ci.on.workflow_dispatch.inputs.reliability_only).toEqual({
+      description: "Run the complete isolated reliability and packaged-runtime workflow",
+      type: "boolean",
+      default: false,
+    });
+    // Route through CI's registered manual entrypoint before the new reusable
+    // workflow reaches the default branch. The caller pins its event commit.
+    expect(ci.jobs["reliability-qualification"]).toEqual({
+      if: "${{ github.event_name == 'workflow_dispatch' && inputs.reliability_only && !inputs.windows_ownership_only }}",
+      permissions: { contents: "read" },
+      uses: "./.github/workflows/reliability.yml",
+      with: { source_ref: "${{ github.sha }}" },
+    });
+    expect(ci.jobs.quality.if).toBe(
+      "${{ !inputs.windows_ownership_only && !inputs.reliability_only }}",
+    );
     const reliability = workflow("reliability.yml");
     expect(reliability.on.workflow_call.inputs.source_ref).toEqual({
       type: "string",

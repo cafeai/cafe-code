@@ -11,6 +11,10 @@ on:
         default: false
   workflow_dispatch:
     inputs:
+      reliability_only:
+        description: Run the complete isolated reliability and packaged-runtime workflow
+        type: boolean
+        default: false
       windows_ownership_only:
         description: Run isolated Windows ownership and packaged-runtime qualification
         type: boolean
@@ -28,6 +32,14 @@ env:
   COREPACK_ENABLE_DOWNLOAD_PROMPT: "0"
 
 jobs:
+  reliability-qualification:
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.reliability_only && !inputs.windows_ownership_only }}
+    permissions:
+      contents: read
+    uses: ./.github/workflows/reliability.yml
+    with:
+      source_ref: ${{ github.sha }}
+
   windows-ownership-qualification:
     if: ${{ github.event_name == 'workflow_dispatch' && inputs.windows_ownership_only }}
     permissions:
@@ -37,7 +49,7 @@ jobs:
       windows_ownership_only: true
 
   quality:
-    if: ${{ !inputs.windows_ownership_only }}
+    if: ${{ !inputs.windows_ownership_only && !inputs.reliability_only }}
     name: Quality (${{ matrix.os }})
     strategy:
       fail-fast: false
