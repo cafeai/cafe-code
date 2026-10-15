@@ -35,7 +35,9 @@ const installerTracePoints = [
   ['  try { Write-InstallerLog "Verified managed', "committed"],
 ] as const;
 
-/** Add fixed stdout observations only to the temporary synthetic copy. Every
+/** Add fixed stdout observations only to the temporary synthetic copy. Direct
+ * Console calls avoid loading a diagnostic cmdlet/module before the installer.
+ * Flush each marker so a later block cannot hide completed script phases. Every
  * original statement and line ending remains byte-identical after removing
  * these markers; source drift is refused before launching PowerShell. */
 export function instrumentManagedInstallerFixture(source: string): string {
@@ -48,7 +50,7 @@ export function instrumentManagedInstallerFixture(source: string): string {
     const indentation = /^\s*/.exec(anchor)![0];
     instrumented = instrumented.replace(
       anchor,
-      `${indentation}Write-Output 'cafe-installer-fixture:${phase}'${newline}${anchor}`,
+      `${indentation}[Console]::WriteLine('cafe-installer-fixture:${phase}'); [Console]::Out.Flush()${newline}${anchor}`,
     );
   }
   return instrumented;
