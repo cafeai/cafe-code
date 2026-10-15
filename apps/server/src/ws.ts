@@ -90,6 +90,7 @@ import {
 } from "./provider/claudeCommands.ts";
 import * as ProviderMaintenanceRunner from "./provider/providerMaintenanceRunner.ts";
 import * as ProviderLoginLauncher from "./provider/providerLoginLauncher.ts";
+import { axiomLoginFailureMessage } from "./provider/axiomAccount.ts";
 import { ServerLifecycleEvents } from "./serverLifecycleEvents.ts";
 import { UsageStatsService } from "./usageStats/Services/UsageStatsService.ts";
 import { ScheduledFollowups } from "./scheduledFollowups/service.ts";
@@ -1803,11 +1804,10 @@ const makeWsRpcLayer = (
                 });
               return yield* providerService.loginProvider(input).pipe(
                 Effect.mapError(
-                  () =>
+                  (error) =>
                     new ServerProviderLoginError({
                       instanceId: input.instanceId,
-                      reason:
-                        "Could not open native Axiom sign-in. Close Axiom chats and try again.",
+                      reason: axiomLoginFailureMessage(error),
                     }),
                 ),
               );

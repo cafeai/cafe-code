@@ -4229,7 +4229,7 @@
   },
   "Dismiss provider status": {
     "message": "Dismiss provider status",
-    "locations": ["apps/web/src/components/chat/ProviderStatusBanner.tsx:53"]
+    "locations": ["apps/web/src/components/chat/ProviderStatusBanner.tsx:56"]
   },
   "Dismiss provider update notice": {
     "message": "Dismiss provider update notice",
@@ -6292,7 +6292,7 @@
   },
   "Load older visualizations": {
     "message": "Load older visualizations",
-    "locations": ["apps/web/src/components/ChatView.tsx:8393"]
+    "locations": ["apps/web/src/components/ChatView.tsx:8394"]
   },
   "Loading": {
     "message": "Loading",
@@ -9011,7 +9011,7 @@
   "Refresh": {
     "message": "Refresh",
     "locations": [
-      "apps/web/src/components/ChatView.tsx:8382",
+      "apps/web/src/components/ChatView.tsx:8383",
       "apps/web/src/components/OnboardingScreen.tsx:413",
       "apps/web/src/components/chat/AxiomMcpControl.tsx:165",
       "apps/web/src/components/settings/McpSettings.tsx:284"
@@ -9571,7 +9571,7 @@
   },
   "Return to latest": {
     "message": "Return to latest",
-    "locations": ["apps/web/src/components/ChatView.tsx:8398"]
+    "locations": ["apps/web/src/components/ChatView.tsx:8399"]
   },
   "Revert this thread to checkpoint {checkpoint}?\nThis will discard newer messages and turn diffs in this thread.\nThis action cannot be undone.": {
     "message": "Revert this thread to checkpoint {checkpoint}?\nThis will discard newer messages and turn diffs in this thread.\nThis action cannot be undone.",
@@ -10097,7 +10097,7 @@
   },
   "Scroll to bottom": {
     "message": "Scroll to bottom",
-    "locations": ["apps/web/src/components/ChatView.tsx:8468"]
+    "locations": ["apps/web/src/components/ChatView.tsx:8469"]
   },
   "Scroll to zoom. Drag to pan.": {
     "message": "Scroll to zoom. Drag to pan.",
@@ -13075,7 +13075,7 @@
   },
   "Visualization history could not refresh.": {
     "message": "Visualization history could not refresh.",
-    "locations": ["apps/web/src/components/ChatView.tsx:8374"]
+    "locations": ["apps/web/src/components/ChatView.tsx:8375"]
   },
   "Voice command stopped. Your draft is unchanged.": {
     "message": "Voice command stopped. Your draft is unchanged.",

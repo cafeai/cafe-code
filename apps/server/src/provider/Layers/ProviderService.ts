@@ -3995,12 +3995,15 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
             operation: "loginProvider",
             issue: "Native account login is unavailable for this provider.",
           });
-        yield* adapter.login();
+        const outcome = yield* adapter.login();
         return {
           instanceId: input.instanceId,
           provider: adapter.provider,
           command: "axiomcli native sign-in",
-          message: "Opened Axiom native sign-in in your browser.",
+          message:
+            outcome === "authenticated"
+              ? "Axiom is already signed in. Provider status has been refreshed."
+              : "Opened Axiom native sign-in in your browser.",
         };
       }),
     manageMcp: (input) =>

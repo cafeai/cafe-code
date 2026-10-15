@@ -32,6 +32,8 @@ import * as Stream from "effect/Stream";
 import * as AcpErrors from "effect-acp/errors";
 import * as AcpSchema from "effect-acp/schema";
 import { ServerConfig } from "../../config.ts";
+import { launchBrowser } from "../../process/externalLauncher.ts";
+import { AXIOM_LOGIN_ERRORS, axiomLoginUrl } from "../axiomAccount.ts";
 import { readStoredFileAttachment } from "../../fileAttachmentStore.ts";
 import { resolveAttachmentPath } from "../../attachmentStore.ts";
 import {
@@ -300,7 +302,9 @@ export interface AxiomAdapterOptions {
   readonly instanceId?: ProviderInstanceId;
   readonly environment?: NodeJS.ProcessEnv;
   readonly makeRuntime?: typeof makeAxiomRuntime;
+  readonly makeControl?: typeof makeAxiomControl;
   readonly onAccountChanged?: Effect.Effect<void>;
+  readonly openLoginUrl?: (url: string) => Effect.Effect<void, unknown>;
   readonly configurationKey?: string;
 }
 
@@ -594,11 +598,7 @@ export const makeAxiomAdapter = Effect.fn("makeAxiomAdapter")(function* (
     provider: PROVIDER,
     login: () =>
       Effect.gen(function* () {
-        if (loginPending || sessions.size > 0)
-          return yield* invalid(
-            "login",
-            "Close this account's Cafe chats before changing its native sign-in.",
-          );
+        if (loginPending) return yield* invalid("login", AXIOM_LOGIN_ERRORS.pending);
         loginPending = true;
         const scope = yield* Scope.make("sequential");
         let transferred = false;
@@ -613,7 +613,7 @@ export const makeAxiomAdapter = Effect.fn("makeAxiomAdapter")(function* (
                 ),
               ),
         );
-        const control = yield* makeAxiomControl(
+        const control = yield* (options.makeControl ?? makeAxiomControl)(
           settings,
           serverConfig.cwd,
           options.environment,
@@ -621,31 +621,69 @@ export const makeAxiomAdapter = Effect.fn("makeAxiomAdapter")(function* (
           Effect.provideService(Scope.Scope, scope),
           Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
           Effect.timeout(15_000),
-          Effect.mapError(() =>
-            invalid("login", "Could not start the native Axiom account connection."),
-          ),
+          Effect.mapError(() => invalid("login", AXIOM_LOGIN_ERRORS.connection)),
         );
+        const { status } = yield* control.client.raw.request("_axiom/account/status", {}).pipe(
+          Effect.flatMap((value) => decodeAxiom(AxiomAccount, value)),
+          Effect.timeout(15_000),
+          Effect.mapError(() => invalid("login", AXIOM_LOGIN_ERRORS.account)),
+        );
+        // A stale discovery warning must not turn an already valid account
+        // into a second native login (which the CLI correctly rejects).
+        if (status.state === "valid" && status.account) {
+          yield* options.onAccountChanged ?? Effect.void;
+          return "authenticated" as const;
+        }
+        if (status.state !== "signed_out" && status.state !== "expired")
+          return yield* invalid("login", AXIOM_LOGIN_ERRORS.account);
+        if (sessions.size > 0) return yield* invalid("login", AXIOM_LOGIN_ERRORS.busy);
         const result = yield* control.client.raw
           .request("_axiom/account/native_login_start", {})
           .pipe(
             Effect.flatMap((value) =>
               decodeAxiom(
                 Schema.Struct({
-                  login: Schema.Struct({ loginId: Identifier, browserOpened: Schema.Boolean }),
+                  login: Schema.Struct({
+                    loginId: Identifier,
+                    browserOpened: Schema.Boolean,
+                    authorizationUrl: Schema.String.check(
+                      Schema.isMinLength(1),
+                      Schema.isMaxLength(4096),
+                    ),
+                  }),
                 }),
                 value,
               ),
             ),
             Effect.timeout(15_000),
-            Effect.mapError(() => invalid("login", "Could not open native Axiom sign-in.")),
+            Effect.mapError(() => invalid("login", AXIOM_LOGIN_ERRORS.start)),
           );
+        const cancelLogin = control.client.raw
+          .request("_axiom/account/native_login_cancel", { loginId: result.login.loginId })
+          .pipe(Effect.timeout(3000), Effect.ignore);
         if (!result.login.browserOpened) {
-          yield* control.client.raw
-            .request("_axiom/account/native_login_cancel", { loginId: result.login.loginId })
-            .pipe(Effect.ignore);
-          return yield* invalid(
-            "login",
-            "Open Axiom's installed app to sign in, then refresh Cafe's provider.",
+          const url = axiomLoginUrl(
+            result.login.authorizationUrl,
+            options.environment ?? process.env,
+          );
+          if (!url) {
+            yield* cancelLogin;
+            return yield* invalid("login", AXIOM_LOGIN_ERRORS.url);
+          }
+          // Desktop-chat deliberately leaves browser opening to its host.
+          // Keep the checked URL private to this owner-triggered connection.
+          yield* (
+            options.openLoginUrl
+              ? options.openLoginUrl(url)
+              : launchBrowser(url).pipe(
+                  Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
+                )
+          ).pipe(
+            Effect.catch(() =>
+              cancelLogin.pipe(
+                Effect.andThen(Effect.fail(invalid("login", AXIOM_LOGIN_ERRORS.browser))),
+              ),
+            ),
           );
         }
         // Only this explicit user action creates a native login. The private
@@ -669,6 +707,7 @@ export const makeAxiomAdapter = Effect.fn("makeAxiomAdapter")(function* (
             Effect.forkIn(instanceScope),
           );
         transferred = true;
+        return "started" as const;
       }).pipe(Effect.scoped),
     capabilities: {
       sessionModelSwitch: "in-session",

@@ -136,7 +136,7 @@ export interface ProviderSubagentDetail {
 }
 
 export interface ProviderAdapterShape<TError> {
-  readonly login?: () => Effect.Effect<void, TError>;
+  readonly login?: () => Effect.Effect<"authenticated" | "started", TError>;
   readonly manageMcp?: (input: ProviderMcpNativeInput) => Effect.Effect<ProviderMcpResult, TError>;
   readonly readSecurity?: (
     input: ProviderSecurityReadInput,

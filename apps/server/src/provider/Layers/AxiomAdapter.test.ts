@@ -1,5 +1,7 @@
 // @effect-diagnostics nodeBuiltinImport:off
 import { fileURLToPath } from "node:url";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { describe, expect, it } from "@effect/vitest";
 import {
@@ -17,7 +19,8 @@ import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
 import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process";
 import { ServerConfig } from "../../config.ts";
-import { makeAxiomRuntime } from "../acp/AxiomAcpSupport.ts";
+import { makeAxiomControl, makeAxiomRuntime } from "../acp/AxiomAcpSupport.ts";
+import { AXIOM_LOGIN_ERRORS } from "../axiomAccount.ts";
 import { makeAxiomAdapter, selectAxiomPermissionOption } from "./AxiomAdapter.ts";
 
 const fixturePath = fileURLToPath(new URL("../testUtils/axiomMockPeer.ts", import.meta.url));
@@ -26,6 +29,152 @@ const layer = ServerConfig.layerTest(process.cwd(), { prefix: "cafe-axiom-test-"
 );
 const threadId = ThreadId.make("axiom-test-thread");
 const instanceId = ProviderInstanceId.make("axiom-test-account");
+
+const loginFixture = (scenario: string, browserFailure = false, withSession = false) =>
+  Effect.gen(function* () {
+    const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
+    const config = yield* ServerConfig;
+    const opened: string[] = [];
+    const refreshed = yield* Deferred.make<void>();
+    const peerSpawner = (scenario: string) =>
+      ChildProcessSpawner.make(() =>
+        spawner.spawn(
+          ChildProcess.make(
+            process.execPath,
+            [fixturePath, "desktop-chat", config.baseDir, scenario],
+            {
+              shell: false,
+              extendEnv: false,
+              env: {
+                ...(process.env.SystemRoot ? { SystemRoot: process.env.SystemRoot } : {}),
+                ...(process.env.windir ? { windir: process.env.windir } : {}),
+              },
+            },
+          ),
+        ),
+      );
+    const adapter = yield* makeAxiomAdapter(Schema.decodeSync(AxiomSettings)({}), {
+      instanceId,
+      makeControl: (...args) =>
+        makeAxiomControl(...args).pipe(
+          Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, peerSpawner(scenario)),
+        ),
+      makeRuntime: (...args) =>
+        makeAxiomRuntime(...args).pipe(
+          Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, peerSpawner("normal")),
+        ),
+      openLoginUrl: (url) =>
+        browserFailure
+          ? Effect.fail(new Error("fixture browser failure"))
+          : Effect.sync(() => {
+              opened.push(url);
+            }),
+      onAccountChanged: Deferred.succeed(refreshed, undefined).pipe(Effect.asVoid),
+    });
+    if (withSession)
+      yield* adapter.startSession({
+        threadId,
+        provider: ProviderDriverKind.make("axiom"),
+        cwd: process.cwd(),
+        runtimeMode: "approval-required",
+        interactionMode: "default",
+        modelSelection: { instanceId, model: "test-model" },
+      });
+    return {
+      adapter,
+      opened,
+      refreshed,
+      methods: () =>
+        JSON.parse(readFileSync(join(config.baseDir, "login-methods.json"), "utf8")) as string[],
+    };
+  });
+
+describe("Axiom native sign-in", () => {
+  it.effect("refreshes an already valid account while retaining its open Cafe session", () =>
+    Effect.gen(function* () {
+      const fixture = yield* loginFixture("login-valid", false, true);
+      expect(yield* fixture.adapter.login!()).toBe("authenticated");
+      expect(yield* fixture.adapter.hasSession(threadId)).toBe(true);
+      expect(fixture.methods()).toEqual(["initialize", "_axiom/account/status"]);
+      expect(fixture.opened).toEqual([]);
+    }).pipe(Effect.provide(layer), Effect.scoped),
+  );
+  it.effect("still refuses an account-changing login while a Cafe session is open", () =>
+    Effect.gen(function* () {
+      const fixture = yield* loginFixture("login-signed-out", false, true);
+      expect(yield* fixture.adapter.login!().pipe(Effect.flip)).toMatchObject({
+        issue: AXIOM_LOGIN_ERRORS.busy,
+      });
+      expect(yield* fixture.adapter.hasSession(threadId)).toBe(true);
+      expect(fixture.methods()).toEqual(["initialize", "_axiom/account/status"]);
+      expect(fixture.opened).toEqual([]);
+    }).pipe(Effect.provide(layer), Effect.scoped),
+  );
+  it.effect("refreshes an already signed-in account without creating a second login", () =>
+    Effect.gen(function* () {
+      const fixture = yield* loginFixture("login-valid");
+      expect(yield* fixture.adapter.login!()).toBe("authenticated");
+      yield* Deferred.await(fixture.refreshed);
+      expect(fixture.opened).toEqual([]);
+      expect(fixture.methods()).toEqual(["initialize", "_axiom/account/status"]);
+    }).pipe(Effect.provide(layer), Effect.scoped),
+  );
+  it.effect("opens the private checked URL when desktop-chat delegates browser launch", () =>
+    Effect.gen(function* () {
+      const fixture = yield* loginFixture("login-signed-out");
+      expect(yield* fixture.adapter.login!()).toBe("started");
+      yield* Deferred.await(fixture.refreshed);
+      expect(fixture.opened).toEqual([
+        "https://auth.axiom.stream/native/authorize?authorization_id=fixture&state=fixture-private-authorization-state",
+      ]);
+      expect(fixture.methods()).toEqual([
+        "initialize",
+        "_axiom/account/status",
+        "_axiom/account/native_login_start",
+        "_axiom/account/native_login_complete",
+      ]);
+      expect(yield* fixture.adapter.listSessions()).toEqual([]);
+    }).pipe(Effect.provide(layer), Effect.scoped),
+  );
+  it.effect("does not create a login when the account check is unavailable", () =>
+    Effect.gen(function* () {
+      const fixture = yield* loginFixture("login-unavailable");
+      const outcome = yield* fixture.adapter.login!().pipe(Effect.flip);
+      expect(outcome).toMatchObject({ issue: AXIOM_LOGIN_ERRORS.account });
+      expect(fixture.methods()).toEqual(["initialize", "_axiom/account/status"]);
+      expect(fixture.opened).toEqual([]);
+    }).pipe(Effect.provide(layer), Effect.scoped),
+  );
+  it.effect("cancels an untrusted native URL without opening it or completing login", () =>
+    Effect.gen(function* () {
+      const fixture = yield* loginFixture("login-invalid-url");
+      expect(yield* fixture.adapter.login!().pipe(Effect.flip)).toMatchObject({
+        issue: AXIOM_LOGIN_ERRORS.url,
+      });
+      expect(fixture.opened).toEqual([]);
+      expect(fixture.methods()).toEqual([
+        "initialize",
+        "_axiom/account/status",
+        "_axiom/account/native_login_start",
+        "_axiom/account/native_login_cancel",
+      ]);
+    }).pipe(Effect.provide(layer), Effect.scoped),
+  );
+  it.effect("cancels the native capability when the host browser cannot open", () =>
+    Effect.gen(function* () {
+      const fixture = yield* loginFixture("login-signed-out", true);
+      expect(yield* fixture.adapter.login!().pipe(Effect.flip)).toMatchObject({
+        issue: AXIOM_LOGIN_ERRORS.browser,
+      });
+      expect(fixture.methods()).toEqual([
+        "initialize",
+        "_axiom/account/status",
+        "_axiom/account/native_login_start",
+        "_axiom/account/native_login_cancel",
+      ]);
+    }).pipe(Effect.provide(layer), Effect.scoped),
+  );
+});
 
 const setupWith = (
   configuration: {

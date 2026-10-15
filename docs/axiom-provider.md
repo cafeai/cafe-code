@@ -21,12 +21,19 @@ probe or enable a new provider. Provider entries can have separate presentation,
 environments, models and processes; entries using the same native Axiom profile
 share that profile's account credentials. Cafe does not create shadow auth homes.
 
-Use **Log In** when native account status requires it. Cafe starts Axiom's native
-browser sign-in under a provider-owned temporary process scope. Tokens and the
-private login handle stay in AxiomCLI/the server, never the renderer, diagnostics
-or command ledger. Completion refreshes provider status. Close this account's
-Cafe sessions before changing its native sign-in. Signing in through the installed
-Axiom application and refreshing the provider is also supported.
+Use **Log In** when native account status requires it. Cafe first checks the
+native account; an already valid account simply refreshes provider status without
+creating a second login or closing its conversations. Temporary account-check
+failures are reported as unknown availability, not as signed-out accounts.
+For a signed-out or expired account, Cafe starts native browser sign-in under a
+provider-owned temporary process scope. Desktop-chat delegates browser opening
+to Cafe, which admits only the configured authentication origin and exact native
+authorization route. Tokens, the authorization URL and private login handle stay
+in AxiomCLI/the server, never the renderer, diagnostics or command ledger.
+Completion refreshes provider status. Close this account's Cafe sessions before
+changing its native sign-in. Signing in through the installed Axiom application
+and refreshing the provider is also supported. Provider warnings remain inside
+the chat column so that the docked Tasks panel retains its full height.
 
 Select Axiom and a discovered model in the composer. Model selectors show the
 native short model name, without a hosting-provider prefix. Thinking choices

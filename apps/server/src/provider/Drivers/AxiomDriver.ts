@@ -30,6 +30,7 @@ import { makeManagedServerProvider } from "../makeManagedServerProvider.ts";
 import { mergeProviderInstanceEnvironment } from "../ProviderInstanceEnvironment.ts";
 import { defaultProviderContinuationIdentity, type ProviderDriver } from "../ProviderDriver.ts";
 import { makeManualOnlyProviderMaintenanceCapabilities } from "../providerMaintenance.ts";
+import { axiomAccountHealth } from "../axiomAccount.ts";
 
 const DRIVER = ProviderDriverKind.make("axiom");
 const decodeSettings = Schema.decodeSync(AxiomSettings);
@@ -140,14 +141,7 @@ export const AxiomDriver: ProviderDriver<AxiomSettings, AxiomDriverEnv> = {
             ...base,
             installed: true,
             version: initialized.agentInfo?.version ?? null,
-            status: authenticated ? ("ready" as const) : ("warning" as const),
-            auth: {
-              status: authenticated ? ("authenticated" as const) : ("unauthenticated" as const),
-              type: "native",
-              ...(authenticated && status.account?.displayName
-                ? { label: status.account.displayName }
-                : {}),
-            },
+            ...axiomAccountHealth(status),
             authActions: { login: true },
             models,
             ...(billing
@@ -166,9 +160,6 @@ export const AxiomDriver: ProviderDriver<AxiomSettings, AxiomDriverEnv> = {
                   },
                 }
               : {}),
-            message: authenticated
-              ? "AxiomCLI is ready. Inference verification is enforced by the native runtime."
-              : "Sign in to Axiom to load your model catalog.",
           };
         }).pipe(
           Effect.timeout(15_000),

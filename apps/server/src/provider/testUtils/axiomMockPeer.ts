@@ -9,6 +9,13 @@ const frontend = process.argv[2] ?? "cli";
 const desktop = frontend === "desktop-chat";
 const fixtureRoot = process.argv[3];
 const scenario = process.argv[4];
+let accountState =
+  scenario?.startsWith("login-") && scenario !== "login-valid"
+    ? scenario === "login-unavailable"
+      ? "unavailable"
+      : "signed_out"
+    : "valid";
+const loginMethods: string[] = [];
 const runtimeInstanceId = randomUUID();
 let sessionId = randomUUID();
 let cwd = "";
@@ -190,6 +197,10 @@ createInterface({ input: process.stdin }).on("line", (line) => {
     return;
   }
   const { id, method, params = {} } = message;
+  if (scenario?.startsWith("login-")) {
+    loginMethods.push(method);
+    writeFileSync(join(fixtureRoot!, "login-methods.json"), JSON.stringify(loginMethods));
+  }
   switch (method) {
     case "initialize":
       result(id, {
@@ -244,10 +255,32 @@ createInterface({ input: process.stdin }).on("line", (line) => {
       result(id, {
         status: {
           revision: 1,
-          state: "valid",
-          account: { id: "fixture-account", displayName: "Fixture" },
+          state: accountState,
+          ...(accountState === "valid"
+            ? { account: { id: "fixture-account", displayName: "Fixture" } }
+            : {}),
         },
       });
+      break;
+    case "_axiom/account/native_login_start":
+      if (accountState === "valid") {
+        reject(id, "sign out of the current Axiom account before starting another native login");
+        break;
+      }
+      result(id, {
+        login: {
+          loginId: "fixture-native-login",
+          browserOpened: false,
+          authorizationUrl: `https://${scenario === "login-invalid-url" ? "untrusted.example" : "auth.axiom.stream"}/native/authorize?authorization_id=fixture&state=fixture-private-authorization-state`,
+        },
+      });
+      break;
+    case "_axiom/account/native_login_complete":
+      accountState = "valid";
+      result(id, { status: { revision: 2, state: "valid", account: { id: "fixture-account" } } });
+      break;
+    case "_axiom/account/native_login_cancel":
+      result(id, {});
       break;
     case "_axiom/models/list":
       result(id, {

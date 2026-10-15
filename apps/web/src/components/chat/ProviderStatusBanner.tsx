@@ -38,7 +38,10 @@ export const ProviderStatusBanner = memo(function ProviderStatusBanner({
   }
 
   return (
-    <div className="pt-3 mx-auto max-w-3xl animate-enter-rise">
+    <div
+      data-provider-status-banner="true"
+      className="w-full shrink-0 px-3 pt-3 mx-auto max-w-3xl animate-enter-rise"
+    >
       <Alert variant={status.status === "error" ? "error" : "warning"}>
         <CircleAlertIcon />
         <AlertTitle>{title}</AlertTitle>

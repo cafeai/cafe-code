@@ -4166,6 +4166,85 @@ describe(`ChatView full app (${chatViewBrowserPart})`, () => {
       }
     });
 
+    it("keeps the Tasks column aligned and full height while an Axiom provider warning is visible", async () => {
+      const instanceId = ProviderInstanceId.make("axiom");
+      const base = createSnapshotForTargetUser({
+        targetMessageId: "warning-user" as MessageId,
+        targetText: "Axiom warning layout",
+      });
+      const snapshot = {
+        ...base,
+        threads: base.threads.map((thread) => ({
+          ...thread,
+          modelSelection: { instanceId, model: "native-model" },
+          session: thread.session
+            ? {
+                ...thread.session,
+                provider: ProviderDriverKind.make("axiom"),
+                providerInstanceId: instanceId,
+              }
+            : null,
+        })),
+      };
+      useUiStateStore.setState({ sessionRailDocked: true });
+      const mounted = await mountChatView({
+        viewport: WIDE_FOOTER_VIEWPORT,
+        snapshot,
+        configureFixture: (next) => {
+          next.serverConfig = {
+            ...next.serverConfig,
+            providers: [
+              {
+                ...next.serverConfig.providers[0]!,
+                instanceId,
+                driver: ProviderDriverKind.make("axiom"),
+                displayName: "Axiom",
+                status: "warning",
+                auth: { status: "unknown" },
+                message:
+                  "Axiom's account check is temporarily unavailable. Refresh this provider to try again.",
+                models: [
+                  {
+                    slug: "native-model",
+                    name: "DeepSeek V4.1 Flash",
+                    isCustom: false,
+                    capabilities: null,
+                  },
+                ],
+              },
+            ],
+          };
+        },
+      });
+      try {
+        const banner = await waitForElement(
+          () => document.querySelector<HTMLElement>('[data-provider-status-banner="true"]'),
+          "Provider warning did not appear",
+        );
+        const rail = await waitForElement(
+          () => document.querySelector<HTMLElement>('[data-chat-right-column="true"]'),
+          "Tasks column did not appear",
+        );
+        const header = document.querySelector<HTMLElement>('[data-chat-view-header="true"]')!;
+        const before = rail.getBoundingClientRect();
+        expect(banner.getBoundingClientRect().height).toBeGreaterThan(0);
+        expect(Math.abs(before.top - header.getBoundingClientRect().bottom)).toBeLessThanOrEqual(1);
+        expect(banner.getBoundingClientRect().right).toBeLessThanOrEqual(before.left + 1);
+        await page.screenshot({
+          path: "../../../../.explorations/axiom-health-layout/provider-warning-rail.png",
+        });
+        await page.getByRole("button", { name: "Dismiss provider status", exact: true }).click();
+        await vi.waitFor(() =>
+          expect(document.querySelector('[data-provider-status-banner="true"]')).toBeNull(),
+        );
+        const after = rail.getBoundingClientRect();
+        expect(Math.abs(after.top - before.top)).toBeLessThanOrEqual(1);
+        expect(Math.abs(after.height - before.height)).toBeLessThanOrEqual(1);
+      } finally {
+        await mounted.cleanup();
+      }
+    });
+
     it("keeps composer popovers when the session rail is preferred on a narrow viewport", async () => {
       useUiStateStore.setState({ sessionRailDocked: true });
       const mounted = await mountChatView({
