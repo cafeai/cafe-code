@@ -19,6 +19,10 @@ import { removePathWithRetries } from "./windows-native-artifact-smoke.ts";
 
 const installerTracePoints = [
   ["Set-StrictMode -Version 3.0", "script-start"],
+  ["function Resolve-InstallerPath {", "strict-mode-complete"],
+  ["$resolvedLocalAppData = Resolve-InstallerPath", "paths-start"],
+  ["$cafeRoot = Join-Path", "join-path-start"],
+  ["New-Item -ItemType Directory -Path $cafeRoot", "directory-start"],
   ['Write-JsonFile -Path (Join-Path $cafeRoot "installer-options.json")', "options-start"],
   ["if (-not $Enabled) {", "options-complete"],
   ["  Assert-ManagedDirectory -Path $managedRoot", "managed-directory"],
@@ -50,7 +54,7 @@ export function instrumentManagedInstallerFixture(source: string): string {
     const indentation = /^\s*/.exec(anchor)![0];
     instrumented = instrumented.replace(
       anchor,
-      `${indentation}[Console]::WriteLine('cafe-installer-fixture:${phase}'); [Console]::Out.Flush()${newline}${anchor}`,
+      `${indentation}[Console]::WriteLine('cafe-installer-fixture:${phase}:{0:o}', [DateTime]::UtcNow); [Console]::Out.Flush()${newline}${anchor}`,
     );
   }
   return instrumented;
