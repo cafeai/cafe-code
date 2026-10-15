@@ -222,7 +222,15 @@ it.each(["tail", "review"] as const)(
           host.querySelector(`[data-image-list-following="${mode === "tail"}"]`),
         ).not.toBeNull();
       }
-      expect(Array.from(host.querySelectorAll(".chat-markdown img"))).toEqual(images);
+      // LegendList may reorder its retained row containers without replacing
+      // their images or moving the visible anchor. Bind the complete image set
+      // by object identity rather than the virtualizer's physical DOM order.
+      const retainedImages = Array.from(
+        host.querySelectorAll<HTMLImageElement>(".chat-markdown img"),
+      );
+      expect(retainedImages).toHaveLength(images.length);
+      const originalImages = new Set(images);
+      for (const image of retainedImages) expect(originalImages.has(image)).toBe(true);
       expect(images.map((image) => image.src)).toEqual(sources);
       expect(mocks.fileRequest).toHaveBeenCalledTimes(requestCount);
       expect(revoked).not.toHaveBeenCalled();

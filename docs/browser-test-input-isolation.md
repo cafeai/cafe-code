@@ -155,6 +155,12 @@ frame before source assignment/append, and late creation cannot resume input
 after retirement. Normal completion uses the same one-shot cleanup before the
 existing loaded-frame disposal.
 
+Failure cleanup also records finite document-visibility, runtime-state and
+viewport-intersection phase labels before retirement. These inspect only the
+fixture's current presentation metadata and geometry within the same 128-entry
+bound. They distinguish an unobserved pause or offscreen document from a running
+counter without reading GL state or claiming a graphics-driver cause.
+
 The initial-paint precondition observes both completed clears and actual nonempty
 pixels in the same original poll. A returned lifecycle clear or draw clear is not
 proof that eased drive has reached the engine's paint branch. Keep the original
@@ -304,6 +310,12 @@ This readiness repair does not claim that unobserved original phase as proven;
 hosted Linux qualification remains separate from local browser evidence.
 
 ## Real-list review readiness
+
+Image-continuity fixtures compare the complete retained image set by object
+identity. LegendList may reorder retained row containers in the DOM while their
+physical positions stay unchanged. A different DOM order is not an image
+replacement: retain exact image membership, URL and request counts, the absence
+of URL revocation, and the original visible row/image geometry assertions.
 
 Wheel intent can commit review mode before the native gesture and the real
 virtualizer finish updating their viewport. A fixed number of animation frames

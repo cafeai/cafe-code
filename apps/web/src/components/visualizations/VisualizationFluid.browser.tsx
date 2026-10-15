@@ -773,6 +773,26 @@ describe("generated fluid decoration lifecycle", () => {
     decoy.onclick = () => decoyClicks++;
     const cleanup = () => {
       if (retired) return;
+      if (!finished && observed) {
+        record(observed.document.hidden ? "failure-document-hidden" : "failure-document-visible");
+        const state = observed.canvas().dataset.cafeFluidState;
+        record(
+          state === "running"
+            ? "failure-runtime-running"
+            : state === "paused"
+              ? "failure-runtime-paused"
+              : "failure-runtime-other",
+        );
+        const bounds = observed.frame.getBoundingClientRect();
+        record(
+          bounds.bottom > 0 &&
+            bounds.top < window.innerHeight &&
+            bounds.right > 0 &&
+            bounds.left < window.innerWidth
+            ? "failure-frame-in-viewport"
+            : "failure-frame-outside-viewport",
+        );
+      }
       retired = true;
       try {
         if (!finished) console.info("native-fluid-qualification-phases", { truncated, phases });

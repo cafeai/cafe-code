@@ -1,11 +1,45 @@
 // @effect-diagnostics nodeBuiltinImport:off
 import { execFile, spawn } from "node:child_process";
-import { copyFile, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
+import { closeSync, openSync } from "node:fs";
+import {
+  copyFile,
+  mkdir,
+  mkdtemp,
+  open,
+  readFile,
+  realpath,
+  rm,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { promisify } from "node:util";
 import { pathToFileURL } from "node:url";
 import { removePathWithRetries } from "./windows-native-artifact-smoke.ts";
+
+/** Only system-owned PowerShell modules and fixture-owned caches/profiles may
+ * participate in this native fixture, independent of the invoking shell. */
+export function managedInstallerFixtureEnvironment(input: {
+  readonly systemRoot: string;
+  readonly powershell: string;
+  readonly node: string;
+  readonly profile: string;
+  readonly local: string;
+  readonly root: string;
+}): NodeJS.ProcessEnv {
+  return {
+    SystemRoot: input.systemRoot,
+    WINDIR: input.systemRoot,
+    USERPROFILE: input.profile,
+    APPDATA: join(input.profile, "AppData", "Roaming"),
+    LOCALAPPDATA: input.local,
+    TEMP: input.root,
+    TMP: input.root,
+    PATH: dirname(input.node),
+    PSModulePath: join(dirname(input.powershell), "Modules"),
+    PSModuleAnalysisCachePath: join(input.root, "PowerShellModuleAnalysisCache"),
+  };
+}
 
 /** Explicit native qualification of the real PowerShell activation/rollback
  * boundary. Only its package-preparation child is replaced with an inert peer;
@@ -29,36 +63,45 @@ async function run() {
     "v1.0",
     "powershell.exe",
   );
-  const environment = {
-    SystemRoot: process.env.SystemRoot,
-    WINDIR: process.env.WINDIR,
-    USERPROFILE: profile,
-    APPDATA: join(profile, "AppData", "Roaming"),
-    LOCALAPPDATA: local,
-    TEMP: root,
-    TMP: root,
-    PATH: dirname(process.execPath),
-  };
-  const start = () => {
-    const child = spawn(
-      powershell,
-      [
-        "-NoProfile",
-        "-NonInteractive",
-        "-ExecutionPolicy",
-        "Bypass",
-        "-File",
-        script,
-        "-Enabled",
-        "-InstallDir",
-        installDir,
-        "-LocalAppData",
-        local,
-        "-UserProfile",
-        profile,
-      ],
-      { shell: false, windowsHide: true, env: environment, stdio: "ignore" },
-    );
+  const environment = managedInstallerFixtureEnvironment({
+    systemRoot: process.env.SystemRoot!,
+    powershell,
+    node: process.execPath,
+    profile,
+    local,
+    root,
+  });
+  let invocation = 0;
+  const start = (phase: string) => {
+    const log = join(root, `installer-${++invocation}.log`);
+    // A file captures native output without an inherited pipe delaying the
+    // primary PowerShell exit while the deliberately detached peer is paused.
+    const output = openSync(log, "wx");
+    console.info("managed-installer-fixture", { phase, event: "start" });
+    let child: ReturnType<typeof spawn>;
+    try {
+      child = spawn(
+        powershell,
+        [
+          "-NoProfile",
+          "-NonInteractive",
+          "-ExecutionPolicy",
+          "Bypass",
+          "-File",
+          script,
+          "-Enabled",
+          "-InstallDir",
+          installDir,
+          "-LocalAppData",
+          local,
+          "-UserProfile",
+          profile,
+        ],
+        { shell: false, windowsHide: true, env: environment, stdio: ["ignore", output, output] },
+      );
+    } finally {
+      closeSync(output);
+    }
     const exit = new Promise<number>((accept, reject) => {
       let timedOut = false;
       const timer = setTimeout(() => {
@@ -72,13 +115,33 @@ async function run() {
       child.once("close", (code) => {
         clearTimeout(timer);
         timedOut
-          ? reject(new Error("Synthetic installer exceeded its deadline."))
+          ? reject(new Error(`Synthetic installer exceeded its deadline (${phase}).`))
           : accept(code ?? -1);
       });
     });
-    return { child, exit };
+    const observedExit = exit.then(
+      (code) => {
+        console.info("managed-installer-fixture", { phase, event: "exit", code });
+        return code;
+      },
+      async (error) => {
+        const file = await open(log, "r");
+        try {
+          const bytes = Buffer.alloc(16 * 1024);
+          const { bytesRead } = await file.read(bytes, 0, bytes.length, 0);
+          console.error("managed-installer-fixture-failure", {
+            phase,
+            output: bytes.subarray(0, bytesRead).toString("utf8"),
+          });
+        } finally {
+          await file.close();
+        }
+        throw error;
+      },
+    );
+    return { child, exit: observedExit };
   };
-  const invoke = () => start().exit;
+  const invoke = (phase: string) => start(phase).exit;
   const waitForFile = async (file: string) => {
     const deadline = Date.now() + 30_000;
     while (Date.now() < deadline) {
@@ -127,7 +190,7 @@ async function run() {
       fs.writeFileSync(path.join(root,'fixture-child-completed'),'');
     `,
     );
-    assert((await invoke()) === 0, "Fresh synthetic installation failed.");
+    assert((await invoke("fresh")) === 0, "Fresh synthetic installation failed.");
     const qualifyLayout = async (expected: string) => {
       await promisify(execFile)(
         process.execPath,
@@ -148,7 +211,7 @@ async function run() {
     assert(/^[a-f0-9]{32}$/u.test(first.generation), "Fresh activation has no exact generation.");
     await qualifyLayout(join(managed, "generations", first.generation, "providers", "codex"));
     await writeFile(settings, '{"userPreference":"preserve"}');
-    assert((await invoke()) === 0, "Synthetic repair failed.");
+    assert((await invoke("repair")) === 0, "Synthetic repair failed.");
     const selected = await readFile(active, "utf8");
     const selectedResult = await readFile(result, "utf8");
     assert(
@@ -161,7 +224,7 @@ async function run() {
       "Repair removed a prior generation.",
     );
     await writeFile(join(managed, "fixture-fail"), "");
-    assert((await invoke()) !== 0, "Preparation failure reported success.");
+    assert((await invoke("preparation-failure")) !== 0, "Preparation failure reported success.");
     assert(
       (await readFile(active, "utf8")) === selected,
       "Preparation failure changed activation.",
@@ -169,7 +232,10 @@ async function run() {
     await rm(join(managed, "fixture-fail"));
     await rm(settings);
     await mkdir(settings);
-    assert((await invoke()) !== 0, "Settings publication failure reported success.");
+    assert(
+      (await invoke("settings-failure")) !== 0,
+      "Settings publication failure reported success.",
+    );
     assert(
       (await readFile(active, "utf8")) === selected,
       "Settings failure did not restore activation.",
@@ -182,7 +248,7 @@ async function run() {
     await writeFile(settings, '{"userPreference":"preserve"}');
     await rm(result);
     await mkdir(result);
-    assert((await invoke()) !== 0, "Result publication failure reported success.");
+    assert((await invoke("result-failure")) !== 0, "Result publication failure reported success.");
     assert(
       (await readFile(active, "utf8")) === selected,
       "Result failure did not restore activation.",
@@ -194,7 +260,7 @@ async function run() {
     await writeFile(active, selected);
     await rm(join(managed, "fixture-child-completed"));
     await writeFile(join(managed, "fixture-pause"), "");
-    const interrupted = start();
+    const interrupted = start("interruption");
     const interruptedExit = interrupted.exit;
     // Observe rejection immediately, including while awaiting peer readiness.
     const completed = interruptedExit.then(
@@ -205,7 +271,10 @@ async function run() {
     try {
       await waitForFile(join(managed, "fixture-preparing"));
       preparing = true;
-      assert((await invoke()) !== 0, "A competing installer bypassed the OS-held guard.");
+      assert(
+        (await invoke("competing-guard")) !== 0,
+        "A competing installer bypassed the OS-held guard.",
+      );
       interrupted.child.kill();
       await completed;
       await rm(join(managed, "fixture-pause"));
@@ -214,7 +283,10 @@ async function run() {
         (await readFile(active, "utf8")) === selected,
         "A detached preparation child gained activation authority.",
       );
-      assert((await invoke()) === 0, "Repair did not reacquire a dead installer's OS guard.");
+      assert(
+        (await invoke("repair-after-interruption")) === 0,
+        "Repair did not reacquire a dead installer's OS guard.",
+      );
     } finally {
       if (interrupted.child.exitCode === null) interrupted.child.kill();
       await completed;
