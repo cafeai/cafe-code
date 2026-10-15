@@ -118,7 +118,13 @@ jobs:
 
       - name: Test
         if: runner.os != 'Windows'
-        run: corepack yarn test
+        # Preserve the complete task graph and every runner/timeout bound.
+        # The copied-executable boundary runs after the other workspaces retire;
+        # a repeated native macOS timeout under the combined graph did not
+        # establish whether copy, launch, protocol I/O or cleanup consumed it.
+        run: |
+          corepack yarn test --filter='!effect-codex-app-server'
+          corepack yarn test --filter=effect-codex-app-server
 
       - name: Test (Windows bounded workers)
         # Bound both independent workspace runners and their fork pools after

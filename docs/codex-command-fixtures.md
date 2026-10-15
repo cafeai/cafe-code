@@ -25,6 +25,11 @@ ownership must not replace the long-running session's existing cleanup policy.
   child-retirement assertions. It does not repeat executable-copy admission;
   both literal-argv and construction-failure cases still use copied spaced
   executables. Keep the existing per-host test deadlines unchanged.
+- macOS/Linux CI runs the complete typed-client test workspace after the
+  complementary set of other workspaces retires. The two Turbo selections
+  cover the same complete task graph once, without changing Vitest workers,
+  case selection, timeouts or failure handling. A timeout seen under the combined
+  graph alone does not identify copy, launch, protocol or cleanup as its cause.
 - The separate typed initialization/account/skills test launches the current
   pinned Node executable directly with a scoped synthetic peer and the same
   isolated home/environment. It exercises real subprocess protocol I/O without

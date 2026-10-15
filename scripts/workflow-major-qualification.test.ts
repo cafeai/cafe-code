@@ -365,15 +365,22 @@ describe("qualified major Actions and Ubuntu runner boundaries", () => {
     }
   });
 
-  it("bounds only Windows default-suite scheduling without suppressing failures", () => {
+  it("retains the full test graph while sequencing native copies and bounding Windows workers", () => {
     const quality = readWorkflow("ci.yml").jobs.quality!;
     const steps = quality.steps ?? [];
-    const defaultTests = steps.filter((step) => step.run === "corepack yarn test");
+    const defaultTests = steps.filter((step) => step.name === "Test");
     const boundedTests = steps.filter(
       (step) => step.run === "corepack yarn test --concurrency=2 -- --maxWorkers=2",
     );
     expect(defaultTests).toHaveLength(1);
-    expect(defaultTests[0]!.if).toBe("runner.os != 'Windows'");
+    expect(defaultTests[0]).toEqual({
+      name: "Test",
+      if: "runner.os != 'Windows'",
+      // Complementary package filters retain the same entire graph, each
+      // package exactly once. No case filter, retry, worker/timeout override,
+      // environment change or failure bypass may enter this ordering boundary.
+      run: "corepack yarn test --filter='!effect-codex-app-server'\ncorepack yarn test --filter=effect-codex-app-server\n",
+    });
     expect(boundedTests).toHaveLength(1);
     expect(boundedTests[0]!.if).toBe("runner.os == 'Windows'");
     expect(boundedTests[0]!.env).toBeUndefined();
@@ -438,7 +445,7 @@ describe("qualified major Actions and Ubuntu runner boundaries", () => {
     const runtime = steps.findIndex(
       (step) => step.run === "node scripts/qualify-electron-runtime.ts",
     );
-    const tests = steps.findIndex((step) => step.run === "corepack yarn test");
+    const tests = steps.findIndex((step) => step.name === "Test");
     expect(install).toBeGreaterThanOrEqual(0);
     expect(runtime).toBeGreaterThan(install);
     expect(runtime).toBeLessThan(tests);
