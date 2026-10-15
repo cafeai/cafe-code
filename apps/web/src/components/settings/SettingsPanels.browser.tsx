@@ -2155,7 +2155,10 @@ describe("settings panels", () => {
       } as unknown as LocalApi;
       setServerConfigSnapshot({
         ...config,
-        settings: { ...config.settings, providerInstances: { codex: codexInstance } },
+        settings: {
+          ...config.settings,
+          providerInstances: { [ProviderInstanceId.make("codex")]: codexInstance },
+        },
       });
 
       mounted = await render(
