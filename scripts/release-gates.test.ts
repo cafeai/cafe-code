@@ -8,6 +8,30 @@ const workflow = (name: string) =>
   parse(readFileSync(resolve(root, ".github/workflows", name), "utf8"));
 
 describe("release publication gates", () => {
+  it("qualifies one selected source across every reliability job", () => {
+    const reliability = workflow("reliability.yml");
+    expect(reliability.on.workflow_call.inputs.source_ref).toEqual({
+      type: "string",
+      default: "",
+    });
+    expect(Object.keys(reliability.jobs).sort()).toEqual([
+      "dependency-advisories",
+      "packaged-runtime",
+      "process-lifecycle",
+    ]);
+    for (const job of Object.values(reliability.jobs) as {
+      steps: { uses?: string; with?: { ref?: string } }[];
+    }[]) {
+      const checkouts = job.steps.filter((step) => step.uses?.startsWith("actions/checkout@"));
+      expect(checkouts).toHaveLength(1);
+      // Release callers supply an immutable source SHA, manual runs qualify
+      // their selected ref, and scheduled canaries retain the dev default.
+      expect(checkouts[0]!.with?.ref).toBe(
+        "${{ inputs.source_ref || (github.event_name == 'workflow_dispatch' && github.ref || 'dev') }}",
+      );
+    }
+  });
+
   it("requires reusable native quality/lifecycle checks for the exact tag commit", () => {
     const release = workflow("release.yml");
     for (const name of ["quality", "reliability"]) {
