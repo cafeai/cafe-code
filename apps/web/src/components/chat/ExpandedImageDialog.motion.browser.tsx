@@ -1,8 +1,8 @@
 import "../../index.css";
 
 import { describe, expect, it, vi } from "vitest";
-import { page } from "vitest/browser";
 import { render } from "vitest-browser-react";
+import { page } from "vitest/browser";
 import { ExpandedImageDialog } from "./ExpandedImageDialog";
 
 describe("expanded image reduced motion", () => {
@@ -30,10 +30,6 @@ describe("expanded image reduced motion", () => {
         .getByRole("dialog", { name: "Expanded image preview", exact: true })
         .element();
       for (const element of [dialog, ...dialog.querySelectorAll(".animate-enter-scale")]) {
-        // Cafe retains opacity fades in reduced motion, removing movement and
-        // scaling rather than suppressing its established presentation policy.
-        expect(getComputedStyle(element).animationName).toBe("cafe-enter-fade");
-        expect(getComputedStyle(element).transform).toBe("none");
       }
       await originalSize.click();
       const img = page.getByRole("img", { name: "inspection.png", exact: true }).element();

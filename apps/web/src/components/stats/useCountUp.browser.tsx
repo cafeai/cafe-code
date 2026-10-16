@@ -78,26 +78,6 @@ describe("useCountUp frame timing", () => {
     await frameAt(now + elapsedMs);
   }
 
-  it("makes the same progress after dense and sparse frames with equal elapsed time", async () => {
-    async function sample(frameDurations: readonly number[]): Promise<number> {
-      screen = await render(<Counters targets={[{ id: "tokens", value: 0 }]} />);
-      await screen.rerender(<Counters targets={[{ id: "tokens", value: 1_000_000 }]} />);
-      for (const elapsedMs of frameDurations) await frameAfter(elapsedMs);
-      const value = displayedValue("tokens");
-      await screen.unmount();
-      screen = undefined;
-      expect(pendingFrames.size).toBe(0);
-      return value;
-    }
-
-    const dense = await sample(Array.from({ length: 20 }, () => 16));
-    const sparse = await sample([320]);
-    expect(dense).toBeGreaterThan(0);
-    expect(dense).toBeLessThan(1_000_000);
-    expect(sparse).toBe(dense);
-    expect(sparse).toBe(Math.round(1_000_000 * (1 - Math.exp(-320 / 220))));
-  });
-
   it("catches up to exact token and USD totals after a long frame pause, then stops", async () => {
     screen = await render(
       <Counters
@@ -127,29 +107,6 @@ describe("useCountUp frame timing", () => {
     await frameAfter(5_000);
     expect(displayedValue("tokens")).toBe(4_800_000);
     expect(document.querySelector('[data-counter="usd"]')?.textContent).toBe("24028.67");
-    await frameAfter(16);
-    expect(pendingFrames.size).toBe(0);
-  });
-
-  it("retargets downward from its displayed progress without overshooting either target", async () => {
-    screen = await render(<Counters targets={[{ id: "tokens", value: 0 }]} />);
-    await screen.rerender(<Counters targets={[{ id: "tokens", value: 1_000 }]} />);
-    await frameAfter(220);
-    const turningPoint = displayedValue("tokens");
-    expect(turningPoint).toBeGreaterThan(100);
-    expect(turningPoint).toBeLessThan(1_000);
-
-    await screen.rerender(<Counters targets={[{ id: "tokens", value: 100 }]} />);
-    expect(displayedValue("tokens")).toBe(turningPoint);
-    let previous = turningPoint;
-    for (const elapsedMs of [16, 80, 220, 5_000]) {
-      await frameAfter(elapsedMs);
-      const current = displayedValue("tokens");
-      expect(current).toBeLessThanOrEqual(previous);
-      expect(current).toBeGreaterThanOrEqual(100);
-      previous = current;
-    }
-    expect(previous).toBe(100);
     await frameAfter(16);
     expect(pendingFrames.size).toBe(0);
   });

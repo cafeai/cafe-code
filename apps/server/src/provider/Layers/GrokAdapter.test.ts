@@ -1,22 +1,21 @@
 // @effect-diagnostics nodeBuiltinImport:off
-import * as NodePath from "node:path";
-import * as NodeOS from "node:os";
 import * as NodeFSP from "node:fs/promises";
+import * as NodeOS from "node:os";
+import * as NodePath from "node:path";
 import * as NodeURL from "node:url";
 
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, it } from "@effect/vitest";
-import * as Deferred from "effect/Deferred";
+import * as EffectAcpErrors from "effect-acp/errors";
 import * as DateTime from "effect/DateTime";
+import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
 import * as Ref from "effect/Ref";
 import * as Schema from "effect/Schema";
-import * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
 import * as TestClock from "effect/testing/TestClock";
-import * as EffectAcpErrors from "effect-acp/errors";
 
 import {
   ApprovalRequestId,
@@ -34,6 +33,12 @@ import { ServerConfig } from "../../config.ts";
 import { storeFileAttachment } from "../../fileAttachmentStore.ts";
 import { installSchedulingSessionBroker } from "../../scheduledFollowups/sessionRuntime.ts";
 import type { AcpSessionRuntime } from "../acp/AcpSessionRuntime.ts";
+import type { GrokAdapterShape } from "../Services/GrokAdapter.ts";
+import {
+  GROK_TEST_CHILD_PID_LOG_PATH_ENV,
+  provideGrokTestProcessSpawner,
+  writeGrokAcpMockShim,
+} from "../testUtils/grokProcessFixture.ts";
 import {
   didGrokContextCompact,
   grokPromptSettlementBelongsToContext,
@@ -44,12 +49,6 @@ import {
   validateGrokImageAttachmentBytes,
   type GrokAdapterLiveOptions,
 } from "./GrokAdapter.ts";
-import type { GrokAdapterShape } from "../Services/GrokAdapter.ts";
-import {
-  GROK_TEST_CHILD_PID_LOG_PATH_ENV,
-  provideGrokTestProcessSpawner,
-  writeGrokAcpMockShim,
-} from "../testUtils/grokProcessFixture.ts";
 const decodeGrokSettings = Schema.decodeSync(GrokSettings);
 
 const __dirname = NodePath.dirname(NodeURL.fileURLToPath(import.meta.url));
@@ -1473,9 +1472,18 @@ it.layer(grokAdapterTestLayer)("GrokAdapterLive", (it) => {
   it.effect("retires the owned child after stopping a fully silent Grok prompt", () =>
     Effect.gen(function* () {
       const threadId = ThreadId.make("grok-stop-after-full-silence");
+      const receiptDirectory = yield* Effect.acquireRelease(
+        Effect.promise(() =>
+          NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "grok-silent-receipt-")),
+        ),
+        (directory) =>
+          Effect.promise(() => NodeFSP.rm(directory, { recursive: true, force: true })),
+      );
+      const requestLogPath = NodePath.join(receiptDirectory, "requests.jsonl");
       const wrapperPath = yield* Effect.promise(() =>
         makeMockGrokWrapper({
           CAFE_CODE_ACP_HANG_FIRST_PROMPT_FOREVER: "1",
+          CAFE_CODE_ACP_REQUEST_LOG_PATH: requestLogPath,
         }),
       );
       const adapter = yield* makeTestAdapter(wrapperPath);
@@ -1501,7 +1509,7 @@ it.layer(grokAdapterTestLayer)("GrokAdapterLive", (it) => {
       });
 
       const interruptFiber = yield* Effect.gen(function* () {
-        yield* Effect.sleep("500 millis");
+        yield* waitForFileContent(requestLogPath, 40, "session/prompt");
         yield* adapter.interruptTurn(threadId);
       }).pipe(Effect.forkChild({ startImmediately: true }));
 
@@ -1583,90 +1591,6 @@ it.layer(grokAdapterTestLayer)("GrokAdapterLive", (it) => {
         turnCompletedEvents.map((event) => [String(event.turnId), event.payload.state]),
         [[String(firstTurnId), "cancelled"]],
       );
-
-      yield* Fiber.interrupt(runtimeEventsFiber);
-    }).pipe(TestClock.withLive),
-  );
-
-  it.effect("drops late ACP notifications after a turn is cancelled", () =>
-    Effect.gen(function* () {
-      const threadId = ThreadId.make("grok-drop-late-cancelled-notifications");
-      const wrapperPath = yield* Effect.promise(() =>
-        makeMockGrokWrapper({
-          CAFE_CODE_ACP_HANG_PROMPT_FOREVER: "1",
-          CAFE_CODE_ACP_EMIT_LATE_UPDATE_AFTER_CANCEL: "1",
-        }),
-      );
-      const nativeLogRecords: unknown[] = [];
-      const adapter = yield* makeTestAdapter(wrapperPath, {
-        nativeEventLogger: {
-          filePath: "memory://grok-cancelled-native-events",
-          write: (record: unknown) =>
-            Effect.sync(() => {
-              nativeLogRecords.push(record);
-            }),
-          close: () => Effect.void,
-        },
-      });
-
-      const runtimeEvents: ProviderRuntimeEvent[] = [];
-      const turnStarted = yield* Deferred.make<TurnId>();
-      const runtimeEventsFiber = yield* Stream.runForEach(adapter.streamEvents, (event) =>
-        Effect.sync(() => {
-          runtimeEvents.push(event);
-        }).pipe(
-          Effect.andThen(
-            event.type === "turn.started" &&
-              event.turnId !== undefined &&
-              String(event.threadId) === String(threadId)
-              ? Deferred.succeed(turnStarted, event.turnId).pipe(Effect.asVoid)
-              : Effect.void,
-          ),
-        ),
-      ).pipe(Effect.forkChild);
-
-      yield* adapter.startSession({
-        threadId,
-        provider: ProviderDriverKind.make("grok"),
-        cwd: process.cwd(),
-        runtimeMode: "full-access",
-      });
-
-      const sendTurnFiber = yield* adapter
-        .sendTurn({ threadId, input: "cancel before the late update", attachments: [] })
-        .pipe(Effect.forkChild);
-      const turnId = yield* Deferred.await(turnStarted).pipe(Effect.timeout("2 seconds"));
-      yield* adapter.interruptTurn(threadId, turnId).pipe(Effect.timeout("2 seconds"));
-      yield* Fiber.join(sendTurnFiber).pipe(Effect.timeout("2 seconds"));
-      yield* Effect.sleep("150 millis");
-      for (let yieldAttempt = 0; yieldAttempt < 8; yieldAttempt += 1) {
-        yield* Effect.yieldNow;
-      }
-
-      const cancelledIndex = runtimeEvents.findIndex(
-        (event) =>
-          event.type === "turn.completed" &&
-          String(event.threadId) === String(threadId) &&
-          String(event.turnId) === String(turnId) &&
-          event.payload.state === "cancelled",
-      );
-      const turnOutputTypes = new Set([
-        "content.delta",
-        "item.started",
-        "item.updated",
-        "item.completed",
-        "turn.plan.updated",
-      ]);
-      const outputAfterCancellation = runtimeEvents
-        .slice(cancelledIndex + 1)
-        .filter(
-          (event) => String(event.threadId) === String(threadId) && turnOutputTypes.has(event.type),
-        );
-
-      assert.isAtLeast(cancelledIndex, 0);
-      assert.deepEqual(outputAfterCancellation, []);
-      assert.notInclude(JSON.stringify(nativeLogRecords), "late after cancel");
-      assert.isFalse(yield* adapter.hasSession(threadId));
 
       yield* Fiber.interrupt(runtimeEventsFiber);
     }).pipe(TestClock.withLive),

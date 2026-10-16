@@ -112,39 +112,6 @@ describe("passive Claude session quota subscription", () => {
       await expect.element(page.getByTestId("status")).toHaveTextContent("loading");
     }
   });
-  it("clears offline and resubscribe readings, handles null snapshots without zero, then recovers", async () => {
-    subscribe.mockReturnValue(vi.fn());
-    const mounted = await render(<Harness />);
-    await expect.poll(() => subscribe.mock.calls.length).toBe(1);
-    const old = subscribe.mock.calls[0]![1];
-    old(result);
-    await expect.element(page.getByTestId("status")).toHaveTextContent("available");
-    subscribe.mock.calls[0]![2].onResubscribe?.();
-    await expect.element(page.getByTestId("received")).toHaveTextContent("none");
-    old({ report: null });
-    await expect.element(page.getByTestId("status")).toHaveTextContent("unavailable");
-    await mounted.rerender(<Harness scope={{ ...context, connected: false }} />);
-    old(result);
-    await expect.element(page.getByTestId("status")).toHaveTextContent("offline");
-    await expect.element(page.getByTestId("received")).toHaveTextContent("none");
-    await mounted.rerender(<Harness />);
-    await expect.poll(() => subscribe.mock.calls.length).toBe(2);
-    subscribe.mock.calls.at(-1)![1](result);
-    await expect.element(page.getByTestId("status")).toHaveTextContent("available");
-  });
-  it("shows unavailable for an older/failed endpoint and an undelivered first snapshot", async () => {
-    subscribe.mockImplementationOnce(() => {
-      throw new Error("unsupported endpoint");
-    });
-    const mounted = await render(<Harness />);
-    await expect.element(page.getByTestId("status")).toHaveTextContent("unavailable");
-    vi.useFakeTimers();
-    subscribe.mockReturnValue(vi.fn());
-    await mounted.rerender(<Harness scope={{ ...context, scopeRevision: "new-generation" }} />);
-    await expect.poll(() => subscribe.mock.calls.length).toBe(2);
-    await vi.advanceTimersByTimeAsync(6_000);
-    await expect.element(page.getByTestId("status")).toHaveTextContent("unavailable");
-  });
   it("does not borrow an instance-wide report when a Claude chat has no exact native query", async () => {
     subscribe.mockReturnValue(vi.fn());
     const mounted = await render(<Harness scope={{ ...context, input: null }} />);

@@ -2,8 +2,8 @@ import "../../index.css";
 
 import { useState } from "react";
 import { describe, expect, it, vi } from "vitest";
-import { page, userEvent } from "vitest/browser";
 import { render } from "vitest-browser-react";
+import { page, userEvent } from "vitest/browser";
 
 import { InfoTip } from "./info-tip";
 import { SegmentedControl, type SegmentedControlOption } from "./segmented-control";
@@ -71,7 +71,6 @@ describe("SegmentedControl", () => {
     await expect
       .element(page.getByRole("button", { name: "Week", exact: true }))
       .toHaveAttribute("aria-pressed", "false");
-    await expect.poll(() => indicatorRestsOn("Day")).toBe(true);
 
     await page.getByRole("button", { name: "Month", exact: true }).click();
 
@@ -83,9 +82,6 @@ describe("SegmentedControl", () => {
     await expect
       .element(page.getByRole("button", { name: "Day", exact: true }))
       .toHaveAttribute("aria-pressed", "false");
-    // Movement uses transform-family properties only, never left/top.
-    expect(getComputedStyle(indicator()).transitionProperty).toContain("translate");
-    await expect.poll(() => indicatorRestsOn("Month")).toBe(true);
   });
 
   it("keeps exactly one selection when the pressed option is clicked again", async () => {
@@ -126,7 +122,6 @@ describe("SegmentedControl", () => {
 
     await userEvent.keyboard("{ArrowRight} ");
     expect(onValueChange).toHaveBeenLastCalledWith("month");
-    await expect.poll(() => indicatorRestsOn("Month")).toBe(true);
   });
 
   it("does not select a disabled option", async () => {

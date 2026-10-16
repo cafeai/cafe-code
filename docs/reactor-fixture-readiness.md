@@ -51,3 +51,5 @@ passes do not qualify native Windows or hosted artifact delivery. Hosted deliver
 still requires every applicable Quality/artifact/AppImage job and four exact-head,
 nonempty, unexpired release artifacts; diagnostics and skipped dependencies do not
 qualify releases. No AppImage launch/smoke phase is inferred from build/upload.
+
+Preparation-backoff integration tests observe the original controlled clock sleep registering before advancing it. The exponential schedule/cap is a separate pure decision table; integration tests cover actual retry and Stop without replaying the whole cap table through SQLite. Checkpoint fixtures subscribe to their exact engine before dispatch and await its ordered event queue, rather than rescanning all historical events every polling turn.

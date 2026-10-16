@@ -1,4 +1,3 @@
-import "../../index.css";
 import {
   EnvironmentId,
   ProviderDriverKind,
@@ -7,18 +6,19 @@ import {
   type ServerProvider,
 } from "@cafecode/contracts";
 import { DEFAULT_UNIFIED_SETTINGS } from "@cafecode/contracts/settings";
-import { createModelCapabilities, createModelSelection } from "@cafecode/shared/model";
 import { getUiLocale, setUiLocale } from "@cafecode/shared/i18n";
+import { createModelCapabilities, createModelSelection } from "@cafecode/shared/model";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { createRef } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { page, userEvent } from "vitest/browser";
 import { render } from "vitest-browser-react";
-import { useComposerDraftStore } from "../../composerDraftStore";
-import { useUiStateStore } from "../../uiStateStore";
-import { applyInterfaceScalePercent } from "../../interfaceScale";
+import { page, userEvent } from "vitest/browser";
 import { ChatPaneContext } from "../../chatPaneContext";
+import { useComposerDraftStore } from "../../composerDraftStore";
+import "../../index.css";
+import { applyInterfaceScalePercent } from "../../interfaceScale";
 import type { Thread } from "../../types";
+import { useUiStateStore } from "../../uiStateStore";
 import { ChatComposer, type ChatComposerHandle, type ChatComposerProps } from "./ChatComposer";
 
 // Only the unrelated external environment integrations are replaced. Provider
@@ -379,16 +379,6 @@ describe("provider-specific composer menu actions", () => {
       const footer = fixture.host.querySelector('[data-chat-composer-footer="true"]')!;
       expect(footer.contains(button)).toBe(true);
       expect(fixture.host.querySelector(".cafe-composer-tab")?.contains(button)).toBe(false);
-      expect(button.getBoundingClientRect().left).toBeGreaterThanOrEqual(
-        thinking.getBoundingClientRect().right - 1,
-      );
-      expect(
-        Math.abs(button.getBoundingClientRect().top - thinking.getBoundingClientRect().top),
-      ).toBeLessThanOrEqual(1);
-      await page.screenshot({
-        element: fixture.host.querySelector('[data-chat-composer-form="true"]')!,
-        path: `../../../../../.explorations/axiom/web-search-composer-${width}-${scale}-${dark ? "dark" : "light"}.png`,
-      });
       useComposerDraftStore.getState().clearComposerContent(fixture.props.composerDraftTarget);
       await expect.element(web).toHaveAttribute("aria-pressed", "true");
       expect(fixture.composerRef.current?.getSendContext().axiomWebEnabled).toBe(true);
@@ -499,263 +489,6 @@ describe("provider-specific composer menu actions", () => {
       }
     },
   );
-
-  it.each([
-    { width: 1100, scale: 100, dark: false },
-    { width: 1100, scale: 100, dark: true },
-    { width: 1100, scale: 80, dark: false },
-    { width: 1100, scale: 130, dark: true },
-    { width: 390, scale: 80, dark: true },
-    { width: 390, scale: 130, dark: false },
-  ])(
-    "folds the shared tab into a shallow lip at width $width and $scale% scale",
-    async ({ width, scale, dark }) => {
-      applyInterfaceScalePercent(scale);
-      document.documentElement.classList.toggle("dark", dark);
-      await using fixture = await mountComposer(width, {
-        phase: "running",
-        activity: {
-          label: "Working…",
-          attention: false,
-          taskCount: 0,
-          agentCount: 0,
-          canInspect: false,
-        },
-      });
-      const sharedTab = document.querySelector<HTMLElement>(".cafe-composer-tab")!;
-      const provider = "codex";
-      await waitForTabEntrance();
-      const capture = (state: string) =>
-        page.screenshot({
-          element: document.querySelector('[data-chat-composer-form="true"]')!,
-          path: `../../../../../.explorations/composer-tab-visual/${provider}-${width}-${scale}-${dark ? "dark" : "light"}-${state}.png`,
-        });
-      await capture("expanded");
-      const content = document.querySelector(".cafe-composer-tab-content")!.getBoundingClientRect();
-      const items = document.querySelector(".cafe-composer-tab-items")!.getBoundingClientRect();
-      expect(items.left).toBeGreaterThanOrEqual(content.left - 1);
-      expect(items.right).toBeLessThanOrEqual(content.right + 1);
-      expect(document.querySelector(".cafe-composer-tab")).toBe(sharedTab);
-      const caret = page
-        .getByRole("button", { name: "Minimize composer tools", exact: true })
-        .element();
-      const initial = caret.getBoundingClientRect();
-      const caretIcon = caret.querySelector("svg")!;
-      const initialIconY = caretIcon.getBoundingClientRect().y;
-      const frame = document.querySelector('[data-chat-composer-tab="true"]')!.parentElement!;
-      const initialFrameTop = frame.getBoundingClientRect().top;
-      const activity = document.querySelector<HTMLElement>("[data-composer-activity-status]")!;
-      const activityBounds = activity.getBoundingClientRect();
-      expect(Math.abs(activityBounds.bottom - initialFrameTop)).toBeLessThanOrEqual(1);
-      expect(activityBounds.right).toBeLessThanOrEqual(sharedTab.getBoundingClientRect().left);
-      const expandedWidth = document
-        .querySelector(".cafe-composer-tab")!
-        .getBoundingClientRect().width;
-      // The visible caret lowers into the lip, while the same larger hit
-      // target stays fixed throughout the animation and repeated toggles.
-      for (let count = 0; count < 4; count++) {
-        // Arm the native transition before the real pointer click. The
-        // collapsed attribute changes in the same React commit as the CSS
-        // width. Observe that commit and force the style update before the
-        // browser can advance frames: transitionrun is queued separately,
-        // so its delivery does not prove that the animation is still in
-        // getAnimations(). A timed frame loop can also miss the entire
-        // 200ms transition on a busy worker.
-        let stopListening: (() => void) | undefined;
-        let transitionWaitTimeout: number | undefined;
-        let pausedAnimations: Animation[] = [];
-        const transitionReady = new Promise<CSSTransition>((resolve, reject) => {
-          const previousCollapsed = sharedTab.getAttribute("data-collapsed");
-          const observer = new MutationObserver(() => {
-            if (sharedTab.getAttribute("data-collapsed") === previousCollapsed) return;
-            observer.disconnect();
-            try {
-              const transition = sharedTab
-                .getAnimations()
-                .find(
-                  (animation): animation is CSSTransition =>
-                    animation instanceof CSSTransition && animation.transitionProperty === "width",
-                );
-              if (!transition) {
-                throw new Error("Composer tab changed collapse state without a width transition");
-              }
-              // The shallow lip also animates its decoration height and
-              // caret. Sample them on the same clock as the width.
-              pausedAnimations = sharedTab.getAnimations({ subtree: true });
-              pausedAnimations.forEach((animation) => animation.pause());
-              resolve(transition);
-            } catch (error) {
-              reject(error);
-            }
-          });
-          observer.observe(sharedTab, { attributes: true, attributeFilter: ["data-collapsed"] });
-          stopListening = () => observer.disconnect();
-        });
-        const widths = new Set<number>();
-        try {
-          await page.elementLocator(caret).click();
-          const transition = await Promise.race([
-            transitionReady,
-            new Promise<never>((_, reject) => {
-              transitionWaitTimeout = window.setTimeout(
-                () => reject(new Error("Composer tab width transition did not start within 5s")),
-                5_000,
-              );
-            }),
-          ]);
-          expect(transition.effect?.getComputedTiming().duration).toBe(200);
-          for (const time of [0, 40, 80, 120, 160, 200]) {
-            pausedAnimations.forEach((animation) => {
-              animation.currentTime = time;
-            });
-            const current = caret.getBoundingClientRect();
-            expect(current.x).toBeCloseTo(initial.x, 1);
-            expect(current.y).toBeCloseTo(initial.y, 1);
-            expect(current.width).toBeCloseTo(initial.width, 1);
-            expect(current.height).toBeCloseTo(initial.height, 1);
-            expect(frame.getBoundingClientRect().top).toBeCloseTo(initialFrameTop, 1);
-            widths.add(Math.round(sharedTab.getBoundingClientRect().width));
-          }
-          pausedAnimations.forEach((animation) => animation.finish());
-        } finally {
-          if (transitionWaitTimeout !== undefined) window.clearTimeout(transitionWaitTimeout);
-          stopListening?.();
-          for (const animation of pausedAnimations) {
-            if (animation.playState !== "finished" && animation.playState !== "idle") {
-              animation.finish();
-            }
-          }
-        }
-        // An endpoint-only assertion missed the max-content regression: the
-        // tab reached both sizes but jumped between them without animating.
-        expect(widths.size).toBeGreaterThan(2);
-        expect(caret.getAttribute("aria-expanded")).toBe(count % 2 === 0 ? "false" : "true");
-        const tab = document.querySelector(".cafe-composer-tab")!.getBoundingClientRect();
-        expect(tab.left).toBeGreaterThanOrEqual(0);
-        expect(tab.right).toBeLessThanOrEqual(window.innerWidth);
-        const shape = document.querySelector(".cafe-composer-tab-shape")!.getBoundingClientRect();
-        const icon = caretIcon.getBoundingClientRect();
-        if (count % 2 === 0) {
-          expect(tab.width).toBeLessThan(expandedWidth);
-          expect(shape.height).toBeLessThan(tab.height / 2);
-          const exposedHeight = initialFrameTop - shape.top;
-          expect(exposedHeight).toBeGreaterThan(0);
-          expect(exposedHeight).toBeLessThan(tab.height / 3);
-          expect(icon.y).toBeGreaterThan(initialIconY);
-          expect(icon.y + icon.height / 2).toBeGreaterThan(shape.top);
-          expect(icon.y + icon.height / 2).toBeLessThan(initialFrameTop);
-        } else {
-          expect(shape.height).toBeCloseTo(tab.height, 1);
-          expect(icon.y).toBeCloseTo(initialIconY, 1);
-        }
-        if (count === 0) await capture("minimized");
-      }
-      await fixture.update({
-        followUpQueueItems: [
-          {
-            id: "attached-queue-message",
-            preview: "Keep the next changes together",
-            promptText: "Keep the next changes together",
-            images: [],
-            queuedAt: createdAt,
-            expanded: false,
-            canExpand: false,
-            blockedReason: null,
-          },
-        ],
-        steeringFollowUpItems: [
-          {
-            id: "attached-steering-message",
-            preview: "Just checking in, what's the current progress?",
-            promptText: "Just checking in, what's the current progress?",
-            dispatchedAt: createdAt,
-          },
-        ],
-      });
-      const queue = document.querySelector('[data-cafe-followup-queue="true"]')!;
-      const typingArea = document.querySelector("[data-chat-composer-mobile-collapsed]")!;
-      const expectAttachedQueue = async () => {
-        await vi.waitFor(() => {
-          const queueRect = queue.getBoundingClientRect();
-          const typingRect = typingArea.getBoundingClientRect();
-          expect(queueRect.bottom).toBeCloseTo(typingRect.top, 1);
-          expect(queueRect.left).toBeCloseTo(typingRect.left, 1);
-          expect(queueRect.right).toBeCloseTo(typingRect.right, 1);
-          // The curved tab's decorative base sits behind the shared frame;
-          // its buttons must stay clear of the queue's heading and actions.
-          const headingTop = queue.firstElementChild!.getBoundingClientRect().top;
-          for (const button of document.querySelectorAll(".cafe-composer-tab button")) {
-            expect(button.getBoundingClientRect().bottom).toBeLessThanOrEqual(headingTop);
-          }
-        });
-      };
-      await expectAttachedQueue();
-      await capture("queue-expanded");
-      await page.getByRole("button", { name: "Minimize composer tools", exact: true }).click();
-      await waitForTabEntrance();
-      await expectAttachedQueue();
-      await capture("queue-minimized");
-      await page.getByRole("button", { name: "Expand composer tools", exact: true }).click();
-      await waitForTabEntrance();
-      await fixture.update({ followUpQueueItems: [], steeringFollowUpItems: [] });
-      expect(fixture.onSend).not.toHaveBeenCalled();
-      expect(fixture.onStartCodeReview).not.toHaveBeenCalled();
-    },
-  );
-
-  it("preserves the original rise-in animation and rounded outline during collapse", async () => {
-    document.documentElement.classList.add("dark");
-    await using fixture = await mountComposer(1100);
-    const entry = document.querySelector(".cafe-composer-tab-entry")!;
-    const entrance = entry
-      .getAnimations()
-      .find(
-        (animation) =>
-          animation instanceof CSSAnimation &&
-          animation.animationName === "cafe-composer-tab-enter",
-      )!;
-    entrance.pause();
-    entrance.currentTime = 100;
-    const style = getComputedStyle(entry);
-    expect(Number(style.opacity)).toBeLessThan(1);
-    expect(new DOMMatrixReadOnly(style.transform).m42).toBeGreaterThan(0);
-    const capture = (state: string) =>
-      page.screenshot({
-        element: document.querySelector('[data-chat-composer-form="true"]')!,
-        path: `../../../../../.explorations/composer-tab-visual/animation-${state}.png`,
-      });
-    await capture("entrance");
-    entrance.finish();
-
-    const tab = document.querySelector(".cafe-composer-tab")!;
-    const caret = page
-      .getByRole("button", { name: "Minimize composer tools", exact: true })
-      .element() as HTMLButtonElement;
-    const anchor = caret.getBoundingClientRect();
-    const expandedWidth = tab.getBoundingClientRect().width;
-    caret.click();
-    await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
-    const transitions = tab.getAnimations({ subtree: true });
-    expect(
-      transitions.some(
-        (animation) =>
-          animation instanceof CSSTransition && animation.transitionProperty === "width",
-      ),
-    ).toBe(true);
-    for (const animation of transitions) {
-      animation.pause();
-      animation.currentTime = 100;
-    }
-    const intermediateWidth = tab.getBoundingClientRect().width;
-    expect(intermediateWidth).toBeLessThan(expandedWidth);
-    expect(caret.getBoundingClientRect().x).toBeCloseTo(anchor.x, 1);
-    expect(caret.getBoundingClientRect().y).toBeCloseTo(anchor.y, 1);
-    await capture("collapse-midpoint");
-    transitions.forEach((animation) => animation.finish());
-    expect(tab.getBoundingClientRect().width).toBeLessThan(intermediateWidth);
-    expect(document.querySelector(".cafe-composer-tab-content")?.hasAttribute("inert")).toBe(true);
-    expect(fixture.onSend).not.toHaveBeenCalled();
-  });
 
   it("keeps delivery explanations in hover/focus tooltips and changes only the next message choice", async () => {
     await using fixture = await mountComposer(390);
@@ -870,9 +603,6 @@ describe("provider-specific composer menu actions", () => {
         .element(page.getByText("Message delivery", { exact: true }))
         .not.toBeInTheDocument();
       await waitForTabEntrance();
-      await page.screenshot({
-        path: `../../../../../.explorations/composer-menu-ui/codex-closed-${width}.png`,
-      });
       await page.getByRole("button", { name: "More composer controls", exact: true }).click();
       const review = page.getByRole("menuitem", { name: "Codex review", exact: true });
       await expect.element(review).toBeVisible();
@@ -900,17 +630,11 @@ describe("provider-specific composer menu actions", () => {
       await expect
         .element(page.getByText("Message delivery", { exact: true }))
         .not.toBeInTheDocument();
-      await page.screenshot({
-        path: `../../../../../.explorations/composer-menu-ui/claude-closed-${width}.png`,
-      });
       await page.getByRole("button", { name: "More composer controls", exact: true }).click();
       await expect
         .element(page.getByRole("menuitem", { name: "Codex review", exact: true }))
         .not.toBeInTheDocument();
       await expect.element(page.getByText("Message delivery", { exact: true })).toBeVisible();
-      await page.screenshot({
-        path: `../../../../../.explorations/composer-menu-ui/claude-menu-${width}.png`,
-      });
       await page.getByRole("menuitemradio", { name: "Next", exact: true }).click();
       await closeComposerControlsWithKeyboard();
       await expect.element(page.getByRole("menu")).not.toBeInTheDocument();

@@ -1,13 +1,12 @@
-import { useUiLocale, useUiPresentation } from "~/i18n";
-import { uiLabelList } from "@cafecode/shared/i18n";
-import { uiFormatDateTime, uiText } from "@cafecode/shared/i18n";
-import { useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { UsageStatsDay } from "@cafecode/contracts";
+import { uiFormatDateTime, uiLabelList, uiText } from "@cafecode/shared/i18n";
+import { useLayoutEffect, useMemo, useRef, useState } from "react";
+import { useUiLocale, useUiPresentation } from "~/i18n";
+import { buildActivityCalendar } from "./activityCalendar";
 
 import { usageDayToUtcDayIndex, utcDayIndexToUsageDay } from "./usageRange";
 
 /** ~6 months of history, GitHub-style week columns. */
-const WEEKS = 26;
 /** Bounded calendars keep readable cells instead of stretching seven days across a card. */
 const BOUNDED_CELL_SIZE_REM = 0.875;
 const BOUNDED_CELL_GAP_REM = 0.1875;
@@ -222,50 +221,14 @@ export function ActivityHeatmap({
   const byDay = useMemo(() => new Map(days.map((day) => [day.day, day.generatingMs])), [days]);
 
   const { rangeStart, start, endDay, weekCount, historicalMaxMs, calendarKey } = useMemo(() => {
-    const endDay = usageDayToUtcDayIndex(bounded ? (endDayKey ?? "") : dayKeyOf(new Date()));
-    const explicitStartDay = bounded ? usageDayToUtcDayIndex(startDayKey ?? "") : undefined;
-    // Invalid explicit bounds fail closed. In particular they must not silently
-    // replace the server's day anchor with the browser's unrelated current date.
-    if (
-      endDay === undefined ||
-      (bounded && (explicitStartDay === undefined || explicitStartDay > endDay))
-    ) {
-      return {
-        rangeStart: 0,
-        start: 0,
-        endDay: -1,
-        weekCount: 0,
-        historicalMaxMs: 0,
-        calendarKey: "",
-      };
-    }
-    // The Unix epoch was a Thursday. Integer day arithmetic aligns Sunday
-    // columns without local Date setters, whose offsets can change at DST.
-    const weekdayOf = (dayIndex: number) => (((dayIndex + 4) % 7) + 7) % 7;
-    const rangeStart = explicitStartDay ?? endDay - weekdayOf(endDay) - (WEEKS - 1) * 7;
-    const start = rangeStart - weekdayOf(rangeStart);
-    const weekCount = Math.floor((endDay - start) / 7) + 1;
-    let max = 0;
-    // Scale only recorded in-range activity. Walking every empty calendar date
-    // here would defeat virtualization for sparse or exceptionally old history.
-    for (const [dayKey, generatingMs] of byDay) {
-      // Today's live value replaces its fetched row, including when it falls
-      // below that row. Exclude it from the historical peak so current updates
-      // can change the peak in O(1), without rescanning lifetime history.
-      if (dayKey === todayDayKey) continue;
-      const dayIndex = usageDayToUtcDayIndex(dayKey);
-      if (dayIndex !== undefined && dayIndex >= rangeStart && dayIndex <= endDay) {
-        max = Math.max(max, generatingMs);
-      }
-    }
-    return {
-      rangeStart,
-      start,
-      endDay,
-      weekCount,
-      historicalMaxMs: max,
-      calendarKey: `${bounded}:${rangeStart}:${endDay}`,
-    };
+    return buildActivityCalendar({
+      byDay,
+      bounded,
+      startDayKey,
+      endDayKey,
+      todayDayKey,
+      browserDay: dayKeyOf(new Date()),
+    });
   }, [byDay, todayDayKey, bounded, startDayKey, endDayKey]);
   const todayDayIndex = todayDayKey === undefined ? undefined : usageDayToUtcDayIndex(todayDayKey);
   const maxMs =

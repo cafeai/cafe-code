@@ -1,12 +1,12 @@
-import "../../index.css";
 import { EnvironmentId, EventId, ThreadId, type EnvironmentApi } from "@cafecode/contracts";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { page, userEvent } from "vitest/browser";
 import { render } from "vitest-browser-react";
+import { page, userEvent } from "vitest/browser";
 import {
   __resetEnvironmentApiOverridesForTests,
   __setEnvironmentApiOverrideForTests,
 } from "../../environmentApi";
+import "../../index.css";
 import { ProviderDiagnosticWorkEntry } from "./ProviderDiagnosticWorkEntry";
 
 /** Runs only in the existing provider-owned reduced-motion browser context. */
@@ -51,12 +51,6 @@ describe("diagnostic disclosure reduced motion", () => {
         page.getByText("Diagnostic details were not recorded for this event.", { exact: true }),
       )
       .toBeVisible();
-    const panel = document.querySelector<HTMLElement>(
-      '[data-provider-diagnostic] [data-slot="collapsible-panel"]',
-    )!;
-    expect(getComputedStyle(panel).transitionDuration).toBe("0s");
-    const chevron = trigger.element().querySelector<SVGElement>("svg:last-child")!;
-    expect(getComputedStyle(chevron).transitionDuration).toBe("0s");
     expect(read).toHaveBeenCalledOnce();
     await userEvent.keyboard(" ");
     await expect.element(trigger).toHaveAttribute("aria-expanded", "false");

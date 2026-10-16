@@ -1,0 +1,12 @@
+{
+  "touchTimelineFile": "src/components/chat/MessagesTimeline.touch.browser.tsx",
+  "visualizationFluidFile": "src/components/visualizations/VisualizationFluid.browser.tsx",
+  "reducedMotionFiles": [
+    "src/components/chat/CodexContextWindowControl.motion.browser.tsx",
+    "src/components/chat/ProviderDiagnosticWorkEntry.motion.browser.tsx",
+    "src/components/visualizations/Visualizations.motion.browser.tsx",
+    "src/components/chat/ScrollToBottomControl.motion.browser.tsx",
+    "src/components/chat/ExpandedImageDialog.motion.browser.tsx"
+  ],
+  "browserStressPattern": "**/*.stress.browser.tsx"
+}

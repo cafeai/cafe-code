@@ -1,0 +1,107 @@
+# Test suite policy
+
+Required CI protects features: correct actions and values, retained user input,
+authorization, account/chat ownership, persistence, cancellation, history and
+exactly-once delivery. An assertion should explain a user-visible failure or a
+consequential invariant. A harmless design or implementation refactor should
+not require updating unrelated tests.
+
+## Required and optional coverage
+
+- `yarn test` runs unit/contract tests and isolated integration tests through Turbo.
+- Web `test:browser` runs browser feature projects. Linux retains broad shared
+  renderer coverage; macOS/Windows retain the focused native-host journeys.
+- Ordinary-motion fluid coverage is a small bounded lifecycle smoke. Reduced
+  motion and touch keep separate provider-owned contexts. Runner invocations
+  close before the next media group starts; workers and deadlines are unchanged.
+- `yarn workspace @cafecode/web test:browser:stress` explicitly runs native
+  decorative GPU/pixel stress experiments in a fresh ordinary-motion context.
+- `yarn workspace @cafecode/web test:soak` explicitly runs pinned Effect internal
+  registry instrumentation and long request/reconnect loops.
+- The optional `test-stress.yml` workflow runs stress/soak qualification on its
+  schedule or by manual dispatch. It is not a dependency of PR/release quality.
+- Real provider, native desktop, credential/profile and process-handoff checks
+  remain explicit E2E/native qualification. Renderer tests do not prove native
+  Windows/AppKit, signing, sandbox or safe-storage behavior.
+
+Use the pinned Node and Corepack Yarn. Agent-initiated CPU-heavy checks on
+macOS/Linux start with `nice -n 10`. Finish source verification with the forced
+desktop build. Do not restart or push without the existing explicit authorization.
+
+## Assertions and fixtures
+
+Keep native input, focus and accessibility semantics. Geometry is appropriate
+for hit targets, clipped content, native control exclusion, drag destinations,
+image aspect ratios and preserving the message being read. Do not pin exact
+padding, row order, typography ratios, icon masks, animation names/easing,
+intermediate frames or theme colors in feature tests.
+
+Readiness must describe the exact action's prerequisite: a committed list load,
+focused popup item, submitted provider request or registered timer. Await an
+owned receipt installed before the action. Mock invocation does not attest
+completed work. Keep zero/once counts for paid submission and authorization.
+Use controlled clocks for time policy; a feature test must accept a correct
+final counter even when no intermediate animation frame was observed.
+
+Prefer pure decision tables/controller tests for account/context/date/metadata
+combinations and a few browser wiring paths. Preserve late-response, owner-loss,
+no-replay and privacy cases. Shared controller extraction must fence callbacks
+and late asynchronous acquisition after retirement just as the hook did.
+
+Policy tests check declarative or resolved semantics: supported runtime pins,
+action integrity, safe artifact paths, bounded resources and unique context
+ownership. Do not freeze variable names, source spelling, exact step counts,
+whole workflow objects or the current number/order of test cases. Removing a
+test intentionally must not require defeating another test that counts it.
+
+## October 16 audit implementation map
+
+The IDs refer to the audit at revision `99180e13`. A mixed suite retains its
+feature assertions; a finding does not authorize deleting security or workflow
+coverage simply because it shares a file with cosmetic checks.
+
+| Finding | Change                                                                                                                                                                   |
+| ------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| B01     | Native fluid resize/click/pixel stress moves to explicit stress qualification.                                                                                           |
+| B02     | Required fluid smoke checks behavior, bounded resources and disposal; removes solver hashes/exact inventories/long frame counts.                                         |
+| B03     | Repeated ambiance child-frame pixel stress moves to the optional browser project.                                                                                        |
+| B04     | Status animation sampling is replaced by a background-preference smoke.                                                                                                  |
+| B05     | Standalone sample-chart animation/hash/helper tests are retired; production live-chart and native font qualification remain.                                             |
+| B06     | Context typography matrix is removed; accessible override editing remains.                                                                                               |
+| B07     | Usage facts retain values, unknown/zero distinctions and containment without exact density formulas.                                                                     |
+| B08     | Composer tab lip/transition sampling is removed; actions, policy and draft retention remain.                                                                             |
+| B09     | Sidebar entrance animation and exact coordinate assertions are removed.                                                                                                  |
+| B10     | Titlebar/onboarding checks use control exclusion and reachable actions instead of design constants.                                                                      |
+| B11     | Footer checks accessible navigation with native input, without icon masks/dimensions.                                                                                    |
+| B12     | Calendar range/peak decisions move to Node tests; browser hover/scroll behavior remains.                                                                                 |
+| B13     | Segmented control keeps selection/keyboard/disabled semantics without indicator CSS placement.                                                                           |
+| B14     | Count-up numerical behavior moves to a pure unit; browser tests keep final totals and cleanup.                                                                           |
+| B15     | Usage tests check final totals instead of transient real-time animation windows.                                                                                         |
+| B16     | Task/schedule drafts and focus survive churn without fixed row offsets or decorative quota colors.                                                                       |
+| B17     | Provider configuration retains scoped editing/validation/reset; removes header spacing matrices.                                                                         |
+| B18     | Reduced-motion scrolling tests keyboard disclosure/cancellation/action, without transition-edge sampling.                                                                |
+| B19     | Small image/diagnostic/context motion smokes retain behavior and accessibility without settled coordinate equality.                                                      |
+| B20     | Presentation-only full-app ChatView cases are removed.                                                                                                                   |
+| B21     | Split feature-specific snapshot builders out of the shared full-app harness; keep workflow/owner races and cover pure policies below the UI.                             |
+| B22     | Desk keeps real drag/split/menu/keyboard behavior; removes spinner equivalence and heading adjacency checks.                                                             |
+| B23     | Atrium keeps task/history/ownership/reachability; removes exact column tiling and repeated visual permutations.                                                          |
+| B24     | Math/diagram source and controls remain; remove exact equation placement and repeated appearance variants.                                                               |
+| B25     | Illustrative titlebar/menu screenshot cases leave the blocking suite.                                                                                                    |
+| B26     | Metadata controller, skills scope and usage resource tests run in Node; browser hook wiring and owner isolation remain.                                                  |
+| B27     | Reduced-motion fluid coverage is a small static-output/cleanup smoke.                                                                                                    |
+| B28     | Combined image/chart test separates bootstrap/loading from captured review-document ownership.                                                                           |
+| B29     | Image/list fixtures observe committed initial load and rendered revision, preserving visible-anchor assertions without fixed frame loops or tests of fixture validators. |
+| B30     | Elapsed-time/visibility/retirement policy moves to a Node ticker controller; native hover/focus remains.                                                                 |
+| N01     | Preparation retry schedule has a pure cap table and an integration receipt for actual timer registration before advancing the clock/Stop.                                |
+| N02     | Provider error attribution, Claude path encoding and Codex launch/turn/mapping policy tables leave giant integration suites.                                             |
+| N03     | Checkpoint fixtures subscribe to their engine before dispatch instead of repeatedly replaying the entire event log.                                                      |
+| N04     | Grok Stop waits for an accepted synthetic prompt; retire the vacuous delayed-notification case whose child was already dead.                                             |
+| N05     | Browser policy checks declarative ownership data instead of interpreting test/config source and pinning 34 cases.                                                        |
+| N06     | Workflow checks retain action pinning, artifact scope and resource limits without exact incidental counts/whole-step copies.                                             |
+| N07     | Canonical toolchain checks remain; config import/source-string spelling checks are removed.                                                                              |
+| N08     | Public typed RPC feature tests are required; private-map instrumentation/high-volume soak is explicit qualification.                                                     |
+| N09     | Icon tests retain decoding/required dimensions instead of silhouette pixel sampling.                                                                                     |
+| N10     | Prompt tests retain inputs/schema/bounds/sanitization without editorial section labels.                                                                                  |
+
+This map is a review aid, not a meta-test requiring this exact inventory to
+remain forever. Add/remove cases based on feature risk, not a target test count.

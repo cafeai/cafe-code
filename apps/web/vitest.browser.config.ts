@@ -1,17 +1,13 @@
-import { fileURLToPath } from "node:url";
 import { playwright } from "@vitest/browser-playwright";
+import { fileURLToPath } from "node:url";
 import { configDefaults, defineConfig, mergeConfig } from "vitest/config";
 
+import browserTestPolicy from "./browser-test-policy.json" with { type: "json" };
 import viteConfig from "./vite.config.ts";
 
 const srcPath = fileURLToPath(new URL("./src", import.meta.url));
-const touchTimelineFile = "src/components/chat/MessagesTimeline.touch.browser.tsx";
-const contextMotionFile = "src/components/chat/CodexContextWindowControl.motion.browser.tsx";
-const diagnosticMotionFile = "src/components/chat/ProviderDiagnosticWorkEntry.motion.browser.tsx";
-const visualizationMotionFile = "src/components/visualizations/Visualizations.motion.browser.tsx";
-const imageMotionFile = "src/components/chat/ExpandedImageDialog.motion.browser.tsx";
-const scrollToBottomMotionFile = "src/components/chat/ScrollToBottomControl.motion.browser.tsx";
-const visualizationFluidFile = "src/components/visualizations/VisualizationFluid.browser.tsx";
+const { touchTimelineFile, visualizationFluidFile, reducedMotionFiles, browserStressPattern } =
+  browserTestPolicy;
 const touchViewport = { width: 430, height: 932 };
 const browserOptions = {
   enabled: true,
@@ -113,11 +109,8 @@ export default mergeConfig(
             exclude: [
               ...configDefaults.exclude,
               touchTimelineFile,
-              contextMotionFile,
-              diagnosticMotionFile,
-              visualizationMotionFile,
-              scrollToBottomMotionFile,
-              imageMotionFile,
+              ...reducedMotionFiles,
+              browserStressPattern,
               visualizationFluidFile,
             ],
             sequence: { groupOrder: 0 },
@@ -182,13 +175,7 @@ export default mergeConfig(
           extends: true,
           test: {
             name: "context-reduced-motion",
-            include: [
-              contextMotionFile,
-              diagnosticMotionFile,
-              visualizationMotionFile,
-              scrollToBottomMotionFile,
-              imageMotionFile,
-            ],
+            include: reducedMotionFiles,
             // Qualify the inherited dialog's real reduced-motion behavior in
             // its own native context, after the ordinary-motion lifecycle
             // group as well as the existing desktop/touch groups.

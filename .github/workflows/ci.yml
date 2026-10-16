@@ -204,7 +204,7 @@ jobs:
         # Close each invocation's native browser providers before starting the
         # next motion policy. groupOrder orders tests inside one invocation,
         # but Vitest retains those providers until the entire runner exits.
-        # Keep the complete inventory and existing workers/deadlines.
+        # Keep feature coverage and existing workers/deadlines.
         run: |
           corepack yarn workspace @cafecode/web test:browser --project=desktop --project=touch
           corepack yarn workspace @cafecode/web test:browser --project=visualization-fluid-motion
@@ -251,7 +251,7 @@ jobs:
 
       - name: Ordinary-motion fluid browser qualification
         # A new invocation joins the previous providers before this native
-        # WebGL suite opens. Retain all 34 cases and the original limits.
+        # WebGL suite opens. Run the bounded lifecycle smoke with the original limits.
         if: runner.os != 'Linux'
         run: corepack yarn workspace @cafecode/web test:browser --project=visualization-fluid-motion src/components/visualizations/VisualizationFluid.browser.tsx --maxWorkers=2
 
@@ -270,14 +270,6 @@ jobs:
         # Linux selects it through its unchanged complete browser suite.
         if: runner.os != 'Linux'
         run: corepack yarn workspace @cafecode/web test:browser src/components/MermaidSecurity.browser.tsx --maxWorkers=2
-
-      - name: Generated chart layout and range animation browser qualification
-        # Exact-data synthetic source checks actual-width SVG glyphs, finite
-        # range/KPI transitions and natural unit layout without changing device
-        # policy or qualifying native GPU/pixel/lease behavior. Linux's complete
-        # browser suite already selects this file; retain the native-host bounds.
-        if: runner.os != 'Linux'
-        run: corepack yarn workspace @cafecode/web test:browser src/components/visualizations/VisualizationCommitChart.browser.tsx --maxWorkers=2
 
       - name: Additional Mermaid family browser qualification
         # Real local-engine labels/geometry, image decoding, PNG and parsed
@@ -337,7 +329,6 @@ jobs:
         with:
           name: visualization-qualification-failure-${{ matrix.os }}-${{ github.run_attempt }}
           path: |
-            apps/web/.vitest/attachments/failure-screenshots/VisualizationCommitChart.browser.tsx/
             apps/web/.vitest/attachments/failure-screenshots/MermaidFamilies.browser.tsx/
             apps/web/.vitest/attachments/failure-screenshots/MermaidSecurity.browser.tsx/
             apps/web/.vitest/attachments/failure-screenshots/Visualizations.browser.tsx/

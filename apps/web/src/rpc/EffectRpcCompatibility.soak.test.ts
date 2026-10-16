@@ -1,11 +1,11 @@
-import { readFileSync } from "node:fs";
-import { fileURLToPath } from "node:url";
 import * as Effect from "effect/Effect";
 import * as Queue from "effect/Queue";
 import * as Schedule from "effect/Schedule";
 import { RpcClient, RpcSerialization } from "effect/unstable/rpc";
 import type { FromServerEncoded } from "effect/unstable/rpc/RpcMessage";
 import * as Socket from "effect/unstable/socket/Socket";
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 
 const runtimeUrl = import.meta.resolve("effect/unstable/rpc/RpcClient");

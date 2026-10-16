@@ -1,10 +1,11 @@
-import { useEffect, useMemo, useState } from "react";
 import type {
   EnvironmentId,
   ProviderSessionQuotaInput,
   ProviderSessionQuotaReport,
   ProviderSessionQuotaResult,
 } from "@cafecode/contracts";
+import { useEffect, useMemo, useState } from "react";
+import { subscribeMetadata } from "./metadataSubscription";
 
 export interface ProviderQuotaContext {
   readonly environmentId: EnvironmentId;
@@ -41,27 +42,14 @@ export function useProviderQuota(
     const scoped = JSON.parse(key) as ProviderQuotaContext | null;
     if (!visible || !scoped?.connected || !scoped.input) return;
     const input = scoped.input;
-    let current = true;
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    const publish = (value: ProviderQuotaState) => {
-      if (!current) return;
-      clearTimeout(timer);
-      setState({ request, value });
-    };
-    const awaiting = () => {
-      publish({ status: "loading", report: null });
-      timer = setTimeout(() => publish({ status: "unavailable", report: null }), 6_000);
-    };
-    awaiting();
-    let close: (() => void) | undefined;
-    const subscribe = async () => {
-      try {
-        // Hidden/unscoped legacy consumers must not load the runtime bootstrap
-        // graph at all. This still uses the existing authenticated connection;
-        // it neither bootstraps a connection nor probes a provider.
+    return subscribeMetadata<ProviderQuotaState>({
+      loading: { status: "loading", report: null },
+      unavailable: { status: "unavailable", report: null },
+      publish: (value) => setState({ request, value }),
+      subscribe: async (publish, awaiting, active) => {
         const { requireEnvironmentConnection } = await import("../../environments/runtime");
-        if (!current) return;
-        close = requireEnvironmentConnection(
+        if (!active()) return () => undefined;
+        return requireEnvironmentConnection(
           scoped.environmentId,
         ).client.server.subscribeProviderQuota(
           input,
@@ -69,16 +57,8 @@ export function useProviderQuota(
             publish({ status: result.report ? "available" : "unavailable", report: result.report }),
           { onResubscribe: awaiting, retryNonTransportErrors: false },
         );
-      } catch {
-        publish({ status: "unavailable", report: null });
-      }
-    };
-    void subscribe();
-    return () => {
-      current = false;
-      clearTimeout(timer);
-      close?.();
-    };
+      },
+    });
     // The serialized scope captures the complete input, settings generation and
     // connection state; caller object identity alone is not a new subscription.
   }, [key, request, visible]);

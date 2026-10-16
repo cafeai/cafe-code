@@ -995,7 +995,7 @@
   },
   "Apr": {
     "message": "Apr",
-    "locations": ["apps/web/src/components/stats/ActivityHeatmap.tsx:39"]
+    "locations": ["apps/web/src/components/stats/ActivityHeatmap.tsx:38"]
   },
   "Archive": {
     "message": "Archive",
@@ -1127,7 +1127,7 @@
   },
   "Aug": {
     "message": "Aug",
-    "locations": ["apps/web/src/components/stats/ActivityHeatmap.tsx:43"]
+    "locations": ["apps/web/src/components/stats/ActivityHeatmap.tsx:42"]
   },
   "Aurora": {
     "message": "Aurora",
@@ -3742,11 +3742,11 @@
   },
   "Daily generating time for the last few months; brighter cells mean more time.": {
     "message": "Daily generating time for the last few months; brighter cells mean more time.",
-    "locations": ["apps/web/src/components/stats/ActivityHeatmap.tsx:563"]
+    "locations": ["apps/web/src/components/stats/ActivityHeatmap.tsx:526"]
   },
   "Daily generating time from {value0} through {value1}; brighter cells mean more time.": {
     "message": "Daily generating time from {value0} through {value1}; brighter cells mean more time.",
-    "locations": ["apps/web/src/components/stats/ActivityHeatmap.tsx:557"]
+    "locations": ["apps/web/src/components/stats/ActivityHeatmap.tsx:520"]
   },
   "Daily tokens": {
     "message": "Daily tokens",
@@ -3797,7 +3797,7 @@
   },
   "Dec": {
     "message": "Dec",
-    "locations": ["apps/web/src/components/stats/ActivityHeatmap.tsx:47"]
+    "locations": ["apps/web/src/components/stats/ActivityHeatmap.tsx:46"]
   },
   "Decline": {
     "message": "Decline",
@@ -4483,11 +4483,11 @@
   },
   "Elapsed turn time": {
     "message": "Elapsed turn time",
-    "locations": ["apps/web/src/components/chat/ComposerActivityStatus.tsx:105"]
+    "locations": ["apps/web/src/components/chat/ComposerActivityStatus.tsx:91"]
   },
   "Elapsed turn time: ": {
     "message": "Elapsed turn time: ",
-    "locations": ["apps/web/src/components/chat/ComposerActivityStatus.tsx:112"]
+    "locations": ["apps/web/src/components/chat/ComposerActivityStatus.tsx:98"]
   },
   "Empty Recycle Bin": {
     "message": "Empty Recycle Bin",
@@ -5262,7 +5262,7 @@
   },
   "Feb": {
     "message": "Feb",
-    "locations": ["apps/web/src/components/stats/ActivityHeatmap.tsx:37"]
+    "locations": ["apps/web/src/components/stats/ActivityHeatmap.tsx:36"]
   },
   "Fetch interval": {
     "message": "Fetch interval",
@@ -5477,7 +5477,7 @@
     "message": "Fri",
     "locations": [
       "apps/web/src/components/chat/schedulePresentation.ts:136",
-      "apps/web/src/components/stats/ActivityHeatmap.tsx:69"
+      "apps/web/src/components/stats/ActivityHeatmap.tsx:68"
     ]
   },
   "Friday": {
@@ -5517,7 +5517,7 @@
   },
   "Generation speed: {rate} tokens per second": {
     "message": "Generation speed: {rate} tokens per second",
-    "locations": ["apps/web/src/components/chat/ComposerActivityStatus.tsx:129"]
+    "locations": ["apps/web/src/components/chat/ComposerActivityStatus.tsx:115"]
   },
   "Get authorization link": {
     "message": "Get authorization link",
@@ -6064,7 +6064,7 @@
   },
   "Jan": {
     "message": "Jan",
-    "locations": ["apps/web/src/components/stats/ActivityHeatmap.tsx:36"]
+    "locations": ["apps/web/src/components/stats/ActivityHeatmap.tsx:35"]
   },
   "Join the active turn; supported work may move to the background.": {
     "message": "Join the active turn; supported work may move to the background.",
@@ -6072,11 +6072,11 @@
   },
   "Jul": {
     "message": "Jul",
-    "locations": ["apps/web/src/components/stats/ActivityHeatmap.tsx:42"]
+    "locations": ["apps/web/src/components/stats/ActivityHeatmap.tsx:41"]
   },
   "Jun": {
     "message": "Jun",
-    "locations": ["apps/web/src/components/stats/ActivityHeatmap.tsx:41"]
+    "locations": ["apps/web/src/components/stats/ActivityHeatmap.tsx:40"]
   },
   "KILL": {
     "message": "KILL",
@@ -6279,7 +6279,7 @@
   },
   "Less": {
     "message": "Less",
-    "locations": ["apps/web/src/components/stats/ActivityHeatmap.tsx:640"]
+    "locations": ["apps/web/src/components/stats/ActivityHeatmap.tsx:603"]
   },
   "Let Claude defer this behind more urgent messages—not a scheduled time.": {
     "message": "Let Claude defer this behind more urgent messages—not a scheduled time.",
@@ -6541,7 +6541,7 @@
   },
   "Mar": {
     "message": "Mar",
-    "locations": ["apps/web/src/components/stats/ActivityHeatmap.tsx:38"]
+    "locations": ["apps/web/src/components/stats/ActivityHeatmap.tsx:37"]
   },
   "Markdown": {
     "message": "Markdown",
@@ -6594,7 +6594,7 @@
   },
   "May": {
     "message": "May",
-    "locations": ["apps/web/src/components/stats/ActivityHeatmap.tsx:40"]
+    "locations": ["apps/web/src/components/stats/ActivityHeatmap.tsx:39"]
   },
   "Medium": {
     "message": "Medium",
@@ -6755,7 +6755,7 @@
     "message": "Mon",
     "locations": [
       "apps/web/src/components/chat/schedulePresentation.ts:132",
-      "apps/web/src/components/stats/ActivityHeatmap.tsx:55"
+      "apps/web/src/components/stats/ActivityHeatmap.tsx:54"
     ]
   },
   "Monday": {
@@ -6776,7 +6776,7 @@
   },
   "More": {
     "message": "More",
-    "locations": ["apps/web/src/components/stats/ActivityHeatmap.tsx:649"]
+    "locations": ["apps/web/src/components/stats/ActivityHeatmap.tsx:612"]
   },
   "More composer controls": {
     "message": "More composer controls",
@@ -7260,7 +7260,7 @@
   },
   "No generating time": {
     "message": "No generating time",
-    "locations": ["apps/web/src/components/stats/ActivityHeatmap.tsx:114"]
+    "locations": ["apps/web/src/components/stats/ActivityHeatmap.tsx:113"]
   },
   "No git checkout was found for this Cafe Code install.": {
     "message": "No git checkout was found for this Cafe Code install.",
@@ -7606,7 +7606,7 @@
   },
   "Nov": {
     "message": "Nov",
-    "locations": ["apps/web/src/components/stats/ActivityHeatmap.tsx:46"]
+    "locations": ["apps/web/src/components/stats/ActivityHeatmap.tsx:45"]
   },
   "Now": {
     "message": "Now",
@@ -7637,7 +7637,7 @@
   },
   "Oct": {
     "message": "Oct",
-    "locations": ["apps/web/src/components/stats/ActivityHeatmap.tsx:45"]
+    "locations": ["apps/web/src/components/stats/ActivityHeatmap.tsx:44"]
   },
   "Off": {
     "message": "Off",
@@ -10131,7 +10131,7 @@
   },
   "Scroll through daily activity history": {
     "message": "Scroll through daily activity history",
-    "locations": ["apps/web/src/components/stats/ActivityHeatmap.tsx:484"]
+    "locations": ["apps/web/src/components/stats/ActivityHeatmap.tsx:447"]
   },
   "Scroll to bottom": {
     "message": "Scroll to bottom",
@@ -10333,7 +10333,7 @@
   },
   "Sep": {
     "message": "Sep",
-    "locations": ["apps/web/src/components/stats/ActivityHeatmap.tsx:44"]
+    "locations": ["apps/web/src/components/stats/ActivityHeatmap.tsx:43"]
   },
   "Separate sign-in that shares this home's history and config.": {
     "message": "Separate sign-in that shares this home's history and config.",
@@ -13244,7 +13244,7 @@
     "message": "Wed",
     "locations": [
       "apps/web/src/components/chat/schedulePresentation.ts:134",
-      "apps/web/src/components/stats/ActivityHeatmap.tsx:62"
+      "apps/web/src/components/stats/ActivityHeatmap.tsx:61"
     ]
   },
   "Wednesday": {
@@ -14274,7 +14274,7 @@
   },
   "{hasHours, select, yes {{hours}h{hasMinutes, select, yes { {minutes}m} other {}}} other {{hasMinutes, select, yes {{minutes}m{hasSeconds, select, yes { {seconds}s} other {}}} other {{seconds}s}}}} generating": {
     "message": "{hasHours, select, yes {{hours}h{hasMinutes, select, yes { {minutes}m} other {}}} other {{hasMinutes, select, yes {{minutes}m{hasSeconds, select, yes { {seconds}s} other {}}} other {{seconds}s}}}} generating",
-    "locations": ["apps/web/src/components/stats/ActivityHeatmap.tsx:123"]
+    "locations": ["apps/web/src/components/stats/ActivityHeatmap.tsx:122"]
   },
   "{hours}h": {
     "message": "{hours}h",
@@ -14492,7 +14492,7 @@
   },
   "{rate} tok/s": {
     "message": "{rate} tok/s",
-    "locations": ["apps/web/src/components/chat/ComposerActivityStatus.tsx:126"]
+    "locations": ["apps/web/src/components/chat/ComposerActivityStatus.tsx:112"]
   },
   "{recurrence} · Planned: {time}": {
     "message": "{recurrence} · Planned: {time}",
@@ -14735,7 +14735,7 @@
   },
   "{value0}. Show tasks": {
     "message": "{value0}. Show tasks",
-    "locations": ["apps/web/src/components/chat/ComposerActivityStatus.tsx:174"]
+    "locations": ["apps/web/src/components/chat/ComposerActivityStatus.tsx:160"]
   },
   "{value0}MB": {
     "message": "{value0}MB",

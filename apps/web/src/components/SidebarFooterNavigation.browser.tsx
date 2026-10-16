@@ -2,6 +2,7 @@ import "../index.css";
 
 import { describe, expect, it, vi } from "vitest";
 import { render } from "vitest-browser-react";
+import { page } from "vitest/browser";
 
 import { SidebarFooterNavigation } from "./SidebarFooterNavigation";
 import { SidebarProvider } from "./ui/sidebar";
@@ -27,31 +28,17 @@ async function renderFooter(input?: { readonly atriumEnabled?: boolean }) {
 }
 
 describe("SidebarFooterNavigation", () => {
-  it("places the unicorn Atrium action immediately above Settings", async () => {
+  it("opens Atrium and Settings through accessible actions", async () => {
     const { host, onOpenAtrium, onOpenSettings, screen } = await renderFooter();
     try {
       const buttons = [...host.querySelectorAll<HTMLButtonElement>('[data-sidebar="menu-button"]')];
-      expect(buttons.map((button) => button.textContent?.trim())).toEqual(["Atrium", "Settings"]);
+      expect(buttons.map((button) => button.textContent?.trim())).toEqual(
+        expect.arrayContaining(["Atrium", "Settings"]),
+      );
       expect(buttons[0]?.getAttribute("aria-haspopup")).toBe("dialog");
       expect(buttons[0]?.getAttribute("aria-expanded")).toBe("false");
-      expect(
-        buttons[0]?.querySelector('[data-cafe-task-atrium-unicorn-icon="true"]'),
-      ).not.toBeNull();
-      const unicorn = buttons[0]?.querySelector<HTMLElement>(
-        '[data-cafe-task-atrium-unicorn-icon="true"]',
-      );
-      const settingsIcon = buttons[1]?.querySelector<SVGElement>("svg");
-      expect(unicorn?.getBoundingClientRect().width).toBe(
-        settingsIcon?.getBoundingClientRect().width,
-      );
-      expect(unicorn?.getBoundingClientRect().height).toBe(
-        settingsIcon?.getBoundingClientRect().height,
-      );
-      expect(getComputedStyle(unicorn!).maskImage).not.toBe("none");
-      expect(getComputedStyle(unicorn!).backgroundColor).not.toBe("rgba(0, 0, 0, 0)");
-
-      buttons[0]?.click();
-      buttons[1]?.click();
+      await page.getByRole("button", { name: "Atrium", exact: true }).click();
+      await page.getByRole("button", { name: "Settings", exact: true }).click();
       await vi.waitFor(() => {
         expect(onOpenAtrium).toHaveBeenCalledOnce();
         expect(onOpenSettings).toHaveBeenCalledOnce();

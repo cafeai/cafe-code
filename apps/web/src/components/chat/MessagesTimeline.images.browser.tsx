@@ -4,8 +4,8 @@ import { EnvironmentId, MessageId, ProviderDriverKind, ThreadId } from "@cafecod
 import type { LegendListRef } from "@legendapp/list/react";
 import { createRef, useCallback, useState, type ComponentProps } from "react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
-import { cdp } from "vitest/browser";
 import { render } from "vitest-browser-react";
+import { cdp } from "vitest/browser";
 import { MessagesTimeline } from "./MessagesTimeline";
 
 const mocks = vi.hoisted(() => ({ fileRequest: vi.fn() }));
@@ -47,7 +47,11 @@ function ImageTimeline({
   const [following, setFollowing] = useState(true);
   const stopFollowing = useCallback(() => setFollowing(false), []);
   return (
-    <div className="h-full min-h-0" data-image-list-following={following}>
+    <div
+      className="h-full min-h-0"
+      data-image-list-following={following}
+      data-image-list-revision={revision}
+    >
       <MessagesTimeline
         activeThreadId={ThreadId.make("image-chat")}
         activeThreadEnvironmentId={EnvironmentId.make("image-fixture")}
@@ -64,6 +68,9 @@ function ImageTimeline({
         markdownCwd="/repo"
         additionalWorkspaceRoots={[`/repo/related-${revision}`]}
         skills={[{ name: "research", displayName: `Research ${revision}` }]}
+        onDebugScrollEvent={(event) => {
+          if (event.reason === "initial-list-load") initialImageListLoad = true;
+        }}
         onImageExpand={ignore}
         onIsAtEndChange={ignore}
         onRevertUserMessage={ignore}
@@ -78,9 +85,11 @@ function ImageTimeline({
   );
 }
 
+let initialImageListLoad = false;
 let holdTransfers = false;
 beforeEach(() => {
   holdTransfers = false;
+  initialImageListLoad = false;
   const canvas = document.createElement("canvas");
   canvas.width = 640;
   canvas.height = 400;
@@ -165,6 +174,7 @@ it.each(["tail", "review"] as const)(
           20,
         );
       });
+      await vi.waitFor(() => expect(initialImageListLoad).toBe(true));
       const scroller = listRef.current!.getScrollableNode()!;
       if (mode === "review") {
         await reviewWithNativeWheel(scroller);
@@ -178,7 +188,7 @@ it.each(["tail", "review"] as const)(
           host.querySelectorAll(".chat-markdown > p").length,
         );
       });
-      for (let frame = 0; frame < 8; frame++) await paint();
+
       const images = Array.from(host.querySelectorAll<HTMLImageElement>(".chat-markdown img"));
       await Promise.all(images.map((image) => image.decode()));
       const viewport = scroller.getBoundingClientRect();
@@ -203,8 +213,8 @@ it.each(["tail", "review"] as const)(
       // behind instant local responses.
       holdTransfers = true;
       await view.rerender(<ImageTimeline listRef={listRef} revision={1} />);
-      for (let frame = 0; frame < 12; frame++) {
-        await paint();
+      await vi.waitFor(() => {
+        expect(host.querySelector('[data-image-list-revision="1"]')).not.toBeNull();
         expect(
           anchorRow.getBoundingClientRect().height,
           JSON.stringify({
@@ -221,7 +231,7 @@ it.each(["tail", "review"] as const)(
         expect(
           host.querySelector(`[data-image-list-following="${mode === "tail"}"]`),
         ).not.toBeNull();
-      }
+      });
       // LegendList may reorder its retained row containers without replacing
       // their images or moving the visible anchor. Bind the complete image set
       // by object identity rather than the virtualizer's physical DOM order.

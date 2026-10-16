@@ -44,8 +44,13 @@ describe("CI typecheck resource budget", () => {
         (job.steps ?? []).filter((step) => step.run?.includes("yarn typecheck")),
       );
       expect(typecheckSteps, file).toHaveLength(1);
-      expect(typecheckSteps[0]?.run, file).toBe("corepack yarn typecheck --concurrency=1");
-      expect(typecheckSteps[0]?.env?.NODE_OPTIONS, file).toBe("--max-old-space-size=4096");
+      expect(typecheckSteps[0]?.run, file).toMatch(/\byarn typecheck\b/);
+      expect(typecheckSteps[0]?.run, file).toMatch(/--concurrency(?:=| )1\b/);
+      const heap = String(typecheckSteps[0]?.env?.NODE_OPTIONS ?? "").match(
+        /--max-old-space-size(?:=| )(\d+)/,
+      );
+      expect(heap).not.toBeNull();
+      expect(Number(heap![1])).toBe(4096);
 
       // Scope the larger heap to type checking only. Global/job-level options
       // would also affect tests, native packaging, and runtime smoke children.

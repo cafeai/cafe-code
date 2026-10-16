@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState, useSyncExternalStore } from "react";
+import { stepCountUp } from "./countUpValue";
 
 type CountUpFrameListener = (now: number) => boolean;
 
@@ -124,15 +125,10 @@ export function useCountUp(
       // not permanently discard progress and leave exact totals lagging behind.
       const dt = Math.max(0, now - last);
       last = now;
-      const diff = target - displayRef.current;
-      if (Math.abs(diff) < quantum / 2) {
-        displayRef.current = target;
-        setDisplay(quantize(target));
-        return false;
-      }
-      displayRef.current += diff * (1 - Math.exp(-dt / timeConstantMs));
-      setDisplay(quantize(displayRef.current));
-      return true;
+      const next = stepCountUp(displayRef.current, target, dt, quantum, timeConstantMs);
+      displayRef.current = next.value;
+      setDisplay(quantize(next.value));
+      return !next.done;
     };
 
     return subscribeCountUpFrame(step);

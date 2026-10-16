@@ -1,3 +1,6 @@
+import * as Duration from "effect/Duration";
+import * as Fiber from "effect/Fiber";
+import * as Queue from "effect/Queue";
 // @effect-diagnostics nodeBuiltinImport:off
 import fs from "node:fs";
 import * as fsPromises from "node:fs/promises";
@@ -7,32 +10,30 @@ import { performance } from "node:perf_hooks";
 import { setImmediate as waitForEventLoopTurn } from "node:timers/promises";
 
 import {
-  type ChatAttachment,
-  ModelSelection,
-  type ProviderThreadGoal,
-  ProviderRuntimeEvent,
-  ProviderSession,
-  ProviderDriverKind,
-  ProviderInstanceId,
-  SubagentRuntimeId,
-  PROVIDER_SESSION_TITLE_MAX_CHARS,
-  type ServerSettings,
-} from "@cafecode/contracts";
-import { createModelSelection } from "@cafecode/shared/model";
-import {
   ApprovalRequestId,
   CheckpointRef,
   CommandId,
   DEFAULT_PROVIDER_INTERACTION_MODE,
   EventId,
   MessageId,
+  ModelSelection,
   ProjectId,
+  PROVIDER_SESSION_TITLE_MAX_CHARS,
+  ProviderDriverKind,
+  ProviderInstanceId,
+  ProviderRuntimeEvent,
+  ProviderSession,
+  SubagentRuntimeId,
   ThreadId,
   TurnId,
+  type ChatAttachment,
+  type ProviderThreadGoal,
+  type ServerSettings,
 } from "@cafecode/contracts";
-import * as Effect from "effect/Effect";
+import { createModelSelection } from "@cafecode/shared/model";
 import * as Clock from "effect/Clock";
 import * as Deferred from "effect/Deferred";
+import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
 import * as Layer from "effect/Layer";
 import * as Logger from "effect/Logger";
@@ -41,28 +42,22 @@ import * as Option from "effect/Option";
 import * as PubSub from "effect/PubSub";
 import * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
+import * as TestClock from "effect/testing/TestClock";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
 import * as SqlError from "effect/unstable/sql/SqlError";
-import * as TestClock from "effect/testing/TestClock";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { deriveServerPaths, ServerConfig } from "../../config.ts";
 import { TextGenerationError } from "@cafecode/contracts";
-import { ProviderAdapterRequestError } from "../../provider/Errors.ts";
-import {
-  ProviderDaemonRpcResponseError,
-  toRemoteRequestError,
-} from "../../providerDaemon/RemoteProviderService.ts";
-import { buildCodexSteerClientCorrelationId } from "../../provider/codexSteerCorrelation.ts";
-import {
-  buildCodexTransientFailureMarkerPayload,
-  codexRecoveryConversationCommitment,
-  codexTransientAcceptanceCommandId,
-} from "../providerRuntimeRecovery.ts";
-import { OrchestrationEventStoreLive } from "../../persistence/Layers/OrchestrationEventStore.ts";
+import * as NodeServices from "@effect/platform-node/NodeServices";
+import { deriveServerPaths, ServerConfig } from "../../config.ts";
+import { GitWorkflowService, type GitWorkflowServiceShape } from "../../git/GitWorkflowService.ts";
 import { PersistenceSqlError } from "../../persistence/Errors.ts";
 import { OrchestrationCommandReceiptRepositoryLive } from "../../persistence/Layers/OrchestrationCommandReceipts.ts";
+import { OrchestrationEventStoreLive } from "../../persistence/Layers/OrchestrationEventStore.ts";
 import { SqlitePersistenceMemory } from "../../persistence/Layers/Sqlite.ts";
+import { RepositoryIdentityResolverLive } from "../../project/Layers/RepositoryIdentityResolver.ts";
+import { buildCodexSteerClientCorrelationId } from "../../provider/codexSteerCorrelation.ts";
+import { ProviderAdapterRequestError } from "../../provider/Errors.ts";
 import {
   ProviderService,
   type ProviderServiceShape,
@@ -71,29 +66,30 @@ import {
   ProviderSessionDirectory,
   type ProviderRuntimeBindingWithMetadata,
 } from "../../provider/Services/ProviderSessionDirectory.ts";
-import { TextGeneration, type TextGenerationShape } from "../../textGeneration/TextGeneration.ts";
-import { RepositoryIdentityResolverLive } from "../../project/Layers/RepositoryIdentityResolver.ts";
-import { OrchestrationEngineLive } from "./OrchestrationEngine.ts";
-import { OrchestrationProjectionPipelineLive } from "./ProjectionPipeline.ts";
-import { OrchestrationProjectionSnapshotQueryLive } from "./ProjectionSnapshotQuery.ts";
 import {
-  isProviderInstanceMissingError,
-  providerErrorLabel,
-  providerErrorLabelFromInstanceHint,
-  ProviderCommandReactorLive,
-} from "./ProviderCommandReactor.ts";
+  ProviderDaemonRpcResponseError,
+  toRemoteRequestError,
+} from "../../providerDaemon/RemoteProviderService.ts";
+import { ServerSettingsService } from "../../serverSettings.ts";
+import { TextGeneration, type TextGenerationShape } from "../../textGeneration/TextGeneration.ts";
+import { VcsStatusBroadcaster } from "../../vcs/VcsStatusBroadcaster.ts";
+import {
+  buildCodexTransientFailureMarkerPayload,
+  codexRecoveryConversationCommitment,
+  codexTransientAcceptanceCommandId,
+} from "../providerRuntimeRecovery.ts";
+import { seedScheduledFollowUp } from "../scheduledFollowUp.testSupport.ts";
 import { OrchestrationEngineService } from "../Services/OrchestrationEngine.ts";
-import { ProviderCommandReactor } from "../Services/ProviderCommandReactor.ts";
 import {
   ProjectionSnapshotQuery,
   type ProjectionAcceptedCodexSteerCandidate,
   type ProjectionSnapshotQueryShape,
 } from "../Services/ProjectionSnapshotQuery.ts";
-import * as NodeServices from "@effect/platform-node/NodeServices";
-import { ServerSettingsService } from "../../serverSettings.ts";
-import { VcsStatusBroadcaster } from "../../vcs/VcsStatusBroadcaster.ts";
-import { GitWorkflowService, type GitWorkflowServiceShape } from "../../git/GitWorkflowService.ts";
-import { seedScheduledFollowUp } from "../scheduledFollowUp.testSupport.ts";
+import { ProviderCommandReactor } from "../Services/ProviderCommandReactor.ts";
+import { OrchestrationEngineLive } from "./OrchestrationEngine.ts";
+import { OrchestrationProjectionPipelineLive } from "./ProjectionPipeline.ts";
+import { OrchestrationProjectionSnapshotQueryLive } from "./ProjectionSnapshotQuery.ts";
+import { ProviderCommandReactorLive } from "./ProviderCommandReactor.ts";
 
 // Node ESM namespace exports are immutable. Retain the real filesystem by
 // default, with one explicit module seam for the no-progress local-I/O test.
@@ -195,51 +191,6 @@ describe("ProviderCommandReactor", () => {
       fs.rmSync(baseDir, { recursive: true, force: true });
     }
     createdBaseDirs.clear();
-  });
-
-  describe("provider error attribution", () => {
-    it("uses the current provider instance slug when current instance lookup fails", () => {
-      expect(
-        providerErrorLabelFromInstanceHint({
-          instanceId: "codex_personal",
-          modelSelectionInstanceId: "codex",
-          sessionProvider: "codex",
-        }),
-      ).toBe("codex_personal");
-    });
-
-    it("uses the desired provider instance slug when desired instance lookup fails", () => {
-      expect(
-        providerErrorLabelFromInstanceHint({
-          instanceId: "claude_openrouter",
-        }),
-      ).toBe("claude_openrouter");
-    });
-
-    it("uses the unknown driver kind when the resolved driver is not registered locally", () => {
-      expect(providerErrorLabel("third_party_driver")).toBe("third_party_driver");
-    });
-
-    it("preserves provider daemon transport failures as operational errors", () => {
-      const error = new ProviderAdapterRequestError({
-        provider: "provider-daemon",
-        method: "getInstanceInfo",
-        detail: "connect ECONNREFUSED /tmp/provider-daemon.sock",
-      });
-
-      expect(isProviderInstanceMissingError(error)).toBe(false);
-    });
-
-    it("recognizes a typed remote registry miss", () => {
-      const error = new ProviderAdapterRequestError({
-        provider: "provider-daemon",
-        method: "getInstanceInfo",
-        detail: "ProviderUnsupportedError: provider instance is not configured",
-        remoteErrorTag: "ProviderUnsupportedError",
-      });
-
-      expect(isProviderInstanceMissingError(error)).toBe(true);
-    });
   });
 
   async function createHarness(input?: {
@@ -5463,7 +5414,21 @@ describe("ProviderCommandReactor", () => {
     });
 
     it("retries inconclusive preparation with capped backoff without blocking Stop", async () => {
-      const testClock = await createRecoveryTestClock();
+      const clock = await createRecoveryTestClock();
+      const registered = Effect.runSync(Queue.unbounded<number>());
+      const testClock = {
+        ...clock,
+        sleep: (duration: Duration.Duration) =>
+          Effect.gen(function* () {
+            const sleeping = yield* clock
+              .sleep(duration)
+              .pipe(Effect.forkChild({ startImmediately: true }));
+            // The original sleep has installed its latch before this receipt.
+            const delayMs = Duration.toMillis(duration);
+            if ([1_000, 2_000, 4_000].includes(delayMs)) yield* Queue.offer(registered, delayMs);
+            yield* Fiber.join(sleeping);
+          }),
+      };
       const harness = await createHarness({ startReactor: false, testClock });
       harness.startSession.mockImplementation(() =>
         Effect.die(new Error("Preparation unavailable")),
@@ -5473,10 +5438,11 @@ describe("ProviderCommandReactor", () => {
       await harness.drain();
 
       // Each failed preparation completes the serial work item and registers
-      // one scoped timer. Moving the test clock proves the exact cap without
-      // waiting minutes or making Stop race wall-clock scheduling in CI.
-      const delays = [1_000, 2_000, 4_000, 8_000, 16_000, 32_000, 60_000, 60_000];
+      // one scoped timer. Observe the first retries here; the pure policy table
+      // covers the cap without replaying a minute of timers in this fixture.
+      const delays = [1_000, 2_000];
       for (const [index, delayMs] of delays.entries()) {
+        expect(await Effect.runPromise(Queue.take(registered))).toBe(delayMs);
         await Effect.runPromise(testClock.adjust(delayMs - 1));
         await harness.drain();
         expect(harness.startSession).toHaveBeenCalledTimes(index + 1);
@@ -5484,6 +5450,7 @@ describe("ProviderCommandReactor", () => {
         await waitFor(() => harness.startSession.mock.calls.length === index + 2);
         await harness.drain();
       }
+      expect(await Effect.runPromise(Queue.take(registered))).toBe(4_000);
       await interrupt(harness);
       await harness.drain();
       expect(harness.interruptTurn).toHaveBeenCalledTimes(1);
