@@ -3,8 +3,9 @@
 Cafe Code publishes desktop artifacts from version tags. macOS apps are Developer ID signed and
 notarized; Windows and Linux artifacts remain unsigned. Stable tags use
 `vX.Y.Z`; nightly tags use `vX.Y.Z-nightly.YYYYMMDD.N` with `N >= 1`. The release workflow builds
-Windows x64 NSIS, macOS arm64/x64 DMG plus updater ZIP, and Linux x64 AppImage. Linux formats other
-than x64 AppImage are not currently supported.
+Windows x64 NSIS, macOS arm64/x64 DMG plus updater ZIP, and Linux x64 AppImage.
+Published Linux artifacts are limited to x64 AppImage; local Debian and Arch
+build helpers are documented in [Linux packaging](linux-packaging.md).
 
 Before publication, the exact tag commit runs the reusable native quality and reliability
 workflows, including full/focused browser coverage, the immutable release smoke, and an

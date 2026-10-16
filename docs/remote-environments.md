@@ -113,6 +113,39 @@ the host's firewall. The Mac desktop app continues to run its local Cafe helper
 for its own UI, storage and native integrations; project execution can stay on
 the PC.
 
+## LAN access and firewall ports
+
+Enable network/LAN access in Cafe before connecting from another device, then
+allow the selected backend ports through that host's firewall. Built desktop
+defaults are:
+
+- HTTPS/WSS Web UI: `3775/tcp`.
+- HTTP certificate bootstrap page: `3773/tcp`. With HTTPS enabled, external
+  cleartext access does not admit authenticated API, WebSocket, attachment, or
+  MCP traffic. Explicit HTTP-only mode retains its separate policy.
+
+For a host using `ufw`:
+
+```bash
+sudo ufw allow 3775/tcp comment 'Cafe Code HTTPS'
+sudo ufw allow 3773/tcp comment 'Cafe Code HTTP'
+```
+
+For `corepack yarn dev:desktop`, defaults are HTTPS `13775`, backend HTTP
+`13773`, and Vite `5733`. Open only the ports needed for your configured setup:
+
+```bash
+sudo ufw allow 13775/tcp comment 'Cafe Code dev HTTPS'
+sudo ufw allow 13773/tcp comment 'Cafe Code dev backend'
+sudo ufw allow 5733/tcp comment 'Cafe Code dev Vite'
+```
+
+Use the printed ports when a busy port or `CAFE_CODE_PORT`,
+`CAFE_CODE_HTTPS_PORT`, `CAFE_CODE_DEV_INSTANCE`, or `CAFE_CODE_PORT_OFFSET`
+changes them. Firewall rules alone do not configure certificate trust, pairing,
+CORS, a reverse proxy, or a tunnel. Use the server's advertised secure pairing
+details for a remote connection.
+
 ## Qualification
 
 Unit tests cover connection authentication, environment-bound API and access

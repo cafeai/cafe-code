@@ -10,6 +10,57 @@ Codex receives a private stdio server through the existing structured app-server
 
 Management tools have owner authority over Cafe projects, chats, providers and settings. Cafe adds no management approval prompt and does not modify provider approval policy. This is broader than scheduling's proposal/list/pause capability; enabling management never approves a recurring task.
 
+## External MCP clients
+
+External clients can connect to Cafe's authenticated Streamable HTTP endpoint at
+`/mcp` on the Web UI's origin. The management toggle above also controls this
+endpoint. An owner client can inspect projects, chats, and providers; manage
+projects and chats; send or interrupt work; update redacted provider settings;
+and request provider restarts. The resume restart variant records the exact
+active chats and submits durable continuation messages after that provider
+restarts. Restart acknowledgements precede shutdown.
+
+Issue a dedicated owner bearer session against the **same Cafe home and state
+database as the running backend**. A built source desktop normally uses
+`userdata`; development launches with a development URL use `dev` instead.
+
+For a built source checkout, from the repository root:
+
+```bash
+node apps/server/src/bin.ts auth session issue --role owner --label cafe-mcp --ttl 30d --token-only
+```
+
+Only for a backend started with a development URL, pass that exact URL:
+
+```bash
+node apps/server/src/bin.ts auth session issue --dev-url http://127.0.0.1:5733 --role owner --label cafe-mcp --ttl 30d --token-only
+```
+
+Use the URL printed by your development runner if it differs. Do not add
+`--dev-url` solely because the application was built from source: that selects
+a different database. Both commands must inherit the backend's configured
+`CAFE_CODE_HOME`, if any. Where the `cafe-code` CLI is already available,
+`cafe-code auth session issue` accepts the same options; installing the old
+registry package is not required to use these commands from a source checkout.
+
+Configure the client with `http://127.0.0.1:3773/mcp` for the default local built
+desktop, or the actual server origin and `/mcp` path. A development backend
+normally uses port `13773`, not the Vite frontend port `5733`. Use HTTPS for
+non-loopback connections. Send the credential only as
+`Authorization: Bearer <token>`; keep it out of URLs, prompts, logs, and
+source-controlled configuration.
+
+List and revoke sessions against the same home/database:
+
+```bash
+node apps/server/src/bin.ts auth session list
+node apps/server/src/bin.ts auth session revoke <session-id>
+```
+
+For development state, add the same `--dev-url` to each command.
+Owner credentials grant management authority; they are separate from the narrow
+session-only scheduling and visualization credentials below.
+
 ## Separate scheduling and visualization connections
 
 Cafe automatically gives each Codex, Claude and Grok session a private, chat-and-account-bound connection for proposing, listing and pausing follow-ups. Separate account profiles/custom homes are supported without editing saved MCP configuration. Review proposals and the paying account in **Tasks → Scheduled**, then choose **Approve & enable**. Switching accounts requires renewed review. These narrow tools remain independent of the management toggle. See [scheduled follow-ups](scheduled-followups.md) and [session authority](decisions/session-scoped-scheduling-tools.md).

@@ -1,450 +1,187 @@
 # Cafe Code
 
-![Cafe Code desktop screenshot](./docs/images/cafe-code-desktop.png)
+A calm desktop home for your coding agents. Work with Codex, Claude, OpenCode,
+Grok Build, and Axiom in one place, with project and standalone chats, tabs,
+split panes, and a clear view of what your agents are doing.
 
-Made in Japan with love.
+Made in Japan with love. [日本語](README.ja.md)
 
-**Warning**: Large parts of the application are currently under development and have been completely rewritten. It may take some time for the system to become stable.
+![Cafe Code desktop with example projects, chat tabs, and split panes](./docs/images/cafe-code-desktop.png)
 
-_Cafe Code is very small, barely does a thing at all. Chat goes in and chat comes out, soft and sweet, without a shout._
+_Current source UI with synthetic projects and conversations. Provider features
+depend on the selected runtime; source builds can include changes newer than the
+latest release._
 
-Cafe Code is a tiny desktop GUI for coding agents. It is a fork of [T3 Code](https://github.com/pingdotgg/t3code), with a basket of bug fixes, a little sweep-up, and some very opinionated trimming for people who want the agent chat and not much else.
+## Download and install
 
-It is meant to stay light, calm, and out of the way — not freeze, drag, or get all sleepy like so many other clients do.
+Get the latest desktop build from [GitHub Releases](https://github.com/cafeai/cafe-code/releases/latest).
 
-T3 Code said it wanted to be minimal. Cafe Code went even smaller.
+| Platform             | Download      | Installation                                       |
+| -------------------- | ------------- | -------------------------------------------------- |
+| macOS, Apple Silicon | arm64 DMG     | Open the DMG and drag Cafe Code into Applications. |
+| macOS, Intel         | x64 DMG       | Open the DMG and drag Cafe Code into Applications. |
+| Windows, x64         | EXE installer | Run the installer for your user account.           |
+| Linux, x64           | AppImage      | Make the AppImage executable and run it.           |
 
-No terminal drawer. No pretend IDE. No giant dashboard wearing a useful-looking hat. If you want a console, use a real console. If you want to inspect code, open it in VS Code.
+macOS release apps are Developer ID signed and notarized. Windows and Linux
+artifacts are unsigned; Windows may display a publisher or SmartScreen warning.
+Each release includes `SHA256SUMS.txt`. Other Linux formats and architectures
+are available only through local builds, not the published release set.
+
+Packaged apps check for updates, but downloading and installing require your
+action. Windows and supported AppImage builds offer in-app installation.
+macOS releases through **0.2.0** require a manual DMG upgrade; current source
+adds in-app updates for signed packages that opt in. Source checkouts use Git
+branch update diagnostics instead of the packaged updater. See
+[desktop releases and updates](docs/desktop-releases-and-updates.md).
+
+Cafe Code is still in active development. CI includes macOS, Windows, and Linux
+quality jobs and native artifact checks; provider and OS-specific behavior has
+its own qualification limits. Check the release notes for the build you install.
+
+The legacy registry package is behind the desktop releases. Use a release
+download or a source checkout for a current installation.
+
+## Set up a provider
+
+Choose an account and model in the composer or **Settings → Providers**.
+Cafe uses your provider accounts and their native permissions. Authenticate the
+providers you want to use; you do not need to set up every provider.
+
+| Provider   | Setup                                                                                                                     | Cafe support and notes                                                                                                                   |
+| ---------- | ------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------- |
+| Codex      | Install [Codex CLI](https://developers.openai.com/codex/cli) and run `codex login`.                                       | Native app-server integration, skills, advertised service tiers, code review, and subagent history.                                      |
+| Claude     | Install [Claude Code](https://claude.com/product/claude-code) and run `claude auth login`.                                | Native Agent SDK integration, delivery/task controls, selected-message forks, and slash commands.                                        |
+| OpenCode   | Install [OpenCode](https://opencode.ai/docs/) and configure an upstream provider, or connect an existing OpenCode server. | Local runtimes and configured server connections; remote servers have different file-access limits.                                      |
+| Grok Build | Install [Grok Build](https://docs.x.ai/build/overview) and run `grok login`.                                              | Early Access ACP integration. See [setup and limits](docs/grok-build.md).                                                                |
+| Axiom      | Install native AxiomCLI or the Axiom app, then use **Log In** in Cafe when required.                                      | Native ACP integration, account-bound history, and reply/attestation verification. See [setup and verification](docs/axiom-provider.md). |
+
+The Windows installer can prepare a reviewed offline **Node/Codex/Claude runtime
+bundle**, without changing your system PATH. Those bundled providers still need
+authentication. Other installation paths use separately installed provider tools.
+See [Windows managed providers](docs/desktop-releases-and-updates.md#windows-managed-providers).
+
+## What you can do
+
+- **Arrange your workspace.** Use [Desk tabs and split panes](docs/desk-tabs.md)
+  alongside the saved Projects catalog. Open a [standalone chat](docs/standalone-chats.md)
+  without a repository, or duplicate an idle Codex/Claude conversation with its
+  resumable history. Duplicates share workspace files.
+- **Keep work moving.** Queue prompts, edit unsent messages, and steer when the
+  provider supports it. Inspect plans, tool activity, and
+  [subagent history](docs/subagent-activity.md). Provider-specific controls keep
+  their native account and permission boundaries.
+- **Schedule a follow-up.** Create one-time or recurring work in Codex, Claude,
+  and Grok chats through **Tasks → Scheduled**, or review a proposal from an
+  agent. Agent proposals require approval; execution needs the owning backend
+  online and the computer awake. [Scheduling guide](docs/scheduled-followups.md)
+- **Share files and read rich output.** Attach images and other files, view
+  [inline assistant images](docs/inline-images.md) with zoom and pan, render
+  [Mermaid diagrams](docs/mermaid-diagrams.md) and [math](docs/markdown-math.md),
+  and copy or save diagrams and tables as PNG.
+- **Explore interactive output.** Full-access Codex and Claude sessions can
+  publish [live visualizations](docs/agent-visualizations.md). Supported external
+  MCP Apps use the same viewing surface. These execute privileged browser code;
+  the guide explains the access requirements and limits.
+- **Dictate a draft.** Use composer dictation, or optional
+  [global dictation on macOS](docs/global-dictation.md) with an editable review
+  before inserting text. Dictation uses a separately configured OpenAI API key
+  and API credits.
+- **Understand recorded usage.** Inspect token counts, cost quality, and time
+  spent generating in [Usage and Atrium](docs/usage-statistics.md). Standard
+  provider costs are API-rate estimates, not subscription invoices; Axiom uses
+  its native settled cost receipts when available.
+- **Connect from elsewhere.** Use the browser Web UI or save another Cafe server
+  through pairing in Connections. Cafe does not create SSH or Tailscale tunnels.
+  [Remote servers and LAN setup](docs/remote-environments.md)
+- **Choose your language and tools.** English, Japanese, and Korean are available
+  in **Settings → Appearance → Language**. Open local projects in an installed
+  editor, file manager, or external terminal.
+
+## Run from source
+
+Install the exact Node.js LTS version in [`.node-version`](.node-version),
+Corepack, and your platform's native build tools. Cafe tracks the newest LTS
+line and pins Yarn through Corepack. macOS source builds require the Xcode
+Command Line Tools, including Swift.
+
+```bash
+git clone https://github.com/cafeai/cafe-code.git
+cd cafe-code
+corepack enable
+corepack yarn install --immutable
+corepack yarn build:desktop
+corepack yarn workspace @cafecode/desktop start
+```
+
+The start command launches existing build output. Rebuild after source changes,
+or use the development workflow below. See [source setup and native prerequisites](docs/source-development.md).
+
+## Local development
+
+After installing dependencies and native prerequisites, start the desktop app
+with development watchers:
+
+```bash
+corepack yarn dev:desktop
+```
+
+For a built checkout, enable the localhost-only debug endpoint with:
+
+```bash
+corepack yarn start:desktop:debug
+```
+
+Debug mode prints its URL at startup. Development defaults use separate ports
+and state from a built desktop launch; use the URLs printed by the runner.
+
+Required verification uses the pinned Node and Yarn. On macOS/Linux, start
+CPU-heavy checks with `nice -n 10` and retain the existing worker/memory limits.
+The forced desktop build runs last, after tests:
+
+```bash
+corepack yarn fmt
+corepack yarn lint
+corepack yarn typecheck
+corepack yarn test
+corepack yarn build:desktop --force
+```
+
+See [source development](docs/source-development.md) for the scoped CI
+typecheck memory setting, [dependency maintenance](docs/dependency-updates.md)
+for the Node/Yarn update policy, and [Contributing](CONTRIBUTING.md) for project
+scope and contribution expectations.
+
+## Guides
+
+| Topic                | Documentation                                                                                                                                                                                                                              |
+| -------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Workspace            | [Desk and tabs](docs/desk-tabs.md) · [Standalone chats](docs/standalone-chats.md)                                                                                                                                                          |
+| Prompts and activity | [Attachments and editable queues](docs/file-attachments.md) · [Steering](docs/steering-delivery.md) · [Live activity](docs/live-chat-activity.md)                                                                                          |
+| Provider controls    | [Codex models and skills](docs/codex-model-and-skill-picker.md) · [Native review](docs/codex-native-review.md) · [Claude task controls](docs/claude-task-controls.md) · [Claude conversation actions](docs/claude-conversation-actions.md) |
+| Rich output          | [Images](docs/inline-images.md) · [Diagrams and PNG export](docs/mermaid-diagrams.md) · [Math](docs/markdown-math.md) · [Visualizations and MCP Apps](docs/agent-visualizations.md)                                                        |
+| Automation           | [Scheduled follow-ups](docs/scheduled-followups.md) · [Cafe management MCP and external-client setup](docs/cafe-mcp.md)                                                                                                                    |
+| Connections          | [Remote servers, LAN, HTTPS, and firewall ports](docs/remote-environments.md) · [Connection recovery](docs/decisions/persistent-websocket-recovery.md)                                                                                     |
+| Desktop              | [Releases and updates](docs/desktop-releases-and-updates.md) · [Local Linux packaging and AUR maintenance](docs/linux-packaging.md) · [Source development](docs/source-development.md)                                                     |
+| Preferences          | [Usage statistics](docs/usage-statistics.md) · [Global dictation](docs/global-dictation.md) · [Interface languages](docs/internationalization.md)                                                                                          |
+
+## Why Cafe Code?
+
+Cafe Code began as a fork of [T3 Code](https://github.com/pingdotgg/t3code).
+Its focus is a quiet, responsive home for coding-agent conversations: native
+provider behavior, durable work, useful diagnostics, and controls that stay out
+of the way. There is no embedded terminal or code editor. Use your own editor
+and console alongside Cafe.
+
+Bug fixes, performance, reliability, and security matter most. New features
+should make everyday work clearer and calmer. See [Contributing](CONTRIBUTING.md)
+before proposing a change.
 
 <p align="center">
-  <img src="./docs/images/cafe-code-character.png" alt="Cafe Code character" width="360" />
+  <img src="./docs/images/cafe-code-character.png" alt="Cafe Code character" width="240" />
 </p>
-
-Axiom is available through its native ACP runtime, with verification details in the composer tools tab. See [Axiom setup and verification](docs/axiom-provider.md).
-
-## Why Fork?
-
-Because the app should stay small, fast, and predictable.
-
-Bug fixes are welcome. Performance fixes are welcome. Reliability fixes are
-welcome. Security fixes are extra welcome.
-
-Feature requests need to pass the tiny-window test: does this make Cafe Code
-smaller, calmer, faster, easier to understand, lower CPU, lower memory, or less
-annoying when something fails?
-
-If yes, maybe.
-
-If it turns Cafe Code into a pretend IDE, a pretend terminal, a release
-dashboard, a project-management suite, or a museum of buttons, no.
-
-## What Changed From T3 Code
-
-This is the practical working list. It will probably get cleaned up later.
-
-- Completely rewrote the lifecycle system to be more inline with Codex and Claude.
-- Numerous bug fixes.
-- Excessive debugging information.
-- Rebranded the app around Cafe Code.
-- Moved local app data into `~/.cafe-code`.
-- Removed the in-app terminal drawer and terminal UI.
-- Removed hosted web-app assumptions and focused the project on the Electron app.
-- Disabled update checks until Cafe Code has its own release path.
-- Added a queue/follow-up workflow for prompts sent while a provider is running.
-- Added a [Desk working set with compact chat tab groups](docs/desk-tabs.md),
-  keeping the project catalog and existing chat controls intact.
-- Added provider-aware queue actions: steer when supported, interrupt when that
-  is the honest behavior.
-- Added thread moving between project folders and working directories.
-- Added "Move to Recycle Bin", "Recently Deleted", restore, permanent delete,
-  and empty recycle bin flows.
-- Added a default editor setting for VS Code, Antigravity, Finder, or system
-  default.
-- Made file-change rows and path pills open real paths instead of truncated
-  display text.
-- Added a localhost-only debug endpoint behind `--cafe-debug`.
-- Reduced needless Git polling and checkpoint churn.
-- Hardened hidden checkpoint handling, ignored-file capture, and old ref pruning.
-- Fixed provider/session edge cases around reconnects, stale running state,
-  resume metadata, and null checkpoint timestamps.
-- Removed or hid features that do not belong in a minimal coding-agent shell.
-
-## Run From Source
-
-The repository includes a conservative Renovate policy with manual
-review and cross-platform checks. See [dependency maintenance](docs/dependency-updates.md)
-for setup, exclusions, security alerts, and the `main`/`dev` workflow.
-
-For now there are no desktop packages. No DMG, no updater, no notarized bundle,
-no "drag this into Applications" ceremony.
-
-The npm package exists, but do not treat it as the fresh install path yet. It
-will probably be out of date until Cafe Code settles down a little more. The app
-is in pretty good shape now, but the fastest-moving build is still the repo
-itself.
-
-Mostly tested on macOS. Windows seems to work. Linux may need a little tweaking;
-I have not had enough time on it yet.
-
-Install the exact Node.js LTS version in [`.node-version`](.node-version) and
-Corepack, then run Cafe Code from a checkout. Cafe tracks the newest LTS line,
-not the non-LTS Current release, and pins the exact Yarn release through Corepack:
-
-```bash
-git clone https://github.com/cafeai/cafe-code.git
-cd cafe-code
-corepack enable
-yarn install --immutable
-yarn build:desktop
-yarn workspace @cafecode/desktop start
-```
-
-Debug mode:
-
-```bash
-yarn workspace @cafecode/desktop start --cafe-debug
-```
-
-### Browser Web UI Firewall Ports
-
-If you want to open the Cafe Code Web UI from another device on your LAN, first
-enable network/LAN access in Cafe Code, then allow the desktop backend ports
-through your firewall. The default desktop ports are:
-
-- HTTPS/WSS Web UI: `3775/tcp`
-- HTTP/WS fallback and certificate bootstrap page: `3773/tcp`
-
-For `ufw`:
-
-```bash
-sudo ufw allow 3775/tcp comment 'Cafe Code HTTPS'
-sudo ufw allow 3773/tcp comment 'Cafe Code HTTP'
-```
-
-For local development with `yarn dev:desktop`, the default ports are:
-
-```bash
-sudo ufw allow 13775/tcp comment 'Cafe Code dev HTTPS'
-sudo ufw allow 13773/tcp comment 'Cafe Code dev backend'
-sudo ufw allow 5733/tcp comment 'Cafe Code dev Vite'
-```
-
-If Cafe Code prints a different port, or you run with `CAFE_CODE_PORT`,
-`CAFE_CODE_HTTPS_PORT`, `CAFE_CODE_DEV_INSTANCE`, or
-`CAFE_CODE_PORT_OFFSET`, allow the printed port instead.
-
-### Saved Remote Servers
-
-The Connections settings can save direct connections to other reachable Cafe
-Code servers using a pairing URL or a host plus pairing code. Cafe Code scopes
-projects, threads, providers, and live subscriptions to the selected server.
-
-Cafe Code does not create SSH or Tailscale tunnels. Configure the network,
-certificate, firewall, or reverse proxy separately, then use the server's
-pairing details. Desktop credentials are encrypted with Electron safe storage;
-browser credentials are retained only for the current browser session.
-
-Transient server disconnects retry automatically with a capped backoff; the
-connection chip shows attempts and the next retry. Credential or configuration
-rejections still require explicit action. Desktop startup gives observed database
-migrations a finite allowance rather than repeatedly rolling them back under
-load. See [connection recovery](./docs/decisions/persistent-websocket-recovery.md)
-for timing, authentication and runtime-adoption limits.
-
-### Scheduled Follow-ups
-
-Use **Tasks → Scheduled** to schedule one-time or recurring work in a
-Codex, Claude, or Grok chat. Schedules and run history persist across restarts;
-missed checks catch up once after reopening while busy chats wait. Execution
-requires the owning backend online and the computer awake. Agent-created
-proposals need your approval before they run. See the
-[scheduled follow-ups guide](docs/scheduled-followups.md) for model overrides,
-notifications, limits, and recovery behavior.
-
-### Provider Controls
-
-Codex supports [workspace-scoped skill discovery and advertised service tiers](docs/codex-model-and-skill-picker.md),
-plus an explicit [native code-review action](docs/codex-native-review.md).
-Qualified Claude sessions support [Now / Next / Later delivery and individual task controls](docs/claude-task-controls.md).
-Review and delivery choices live in the composer's effort/options menu. Opening a
-Codex or Claude subagent shows its [public history and bounded activity](docs/subagent-activity.md).
-Claude also supports [forking from a selected message and live slash-command suggestions](docs/claude-conversation-actions.md).
-Controls preserve the selected account and native permission boundaries; missing
-capabilities fail visibly instead of silently changing providers or paid tiers.
-See [usage statistics](docs/usage-statistics.md) for the limits of prospective
-Codex child-agent accounting and its separation from the main context window.
-
-### Agent Control over MCP
-
-Cafe Code exposes an authenticated Streamable HTTP MCP endpoint at `/mcp` on
-the same origin as the Web UI. An MCP client can list and inspect projects,
-threads, and providers; create, update, or delete projects; create, update,
-archive, unarchive, restore, or delete threads; send or interrupt work; update
-redacted provider settings; and restart one provider either with interruption
-only or with automatic resume messages for the threads that were running at the
-restart boundary.
-
-Issue a dedicated owner bearer session from the same Cafe Code home directory:
-
-```bash
-cafe-code auth session issue --role owner --label cafe-mcp --ttl 30d --token-only
-```
-
-For a source checkout, the equivalent command is:
-
-```bash
-node apps/server/src/bin.ts auth session issue --dev-url http://127.0.0.1:5733 --role owner --label cafe-mcp --ttl 30d --token-only
-```
-
-Pass the development URL used by that running checkout so the token is issued
-against its `dev` state database.
-
-Configure the MCP client with `http://127.0.0.1:3773/mcp` (or the actual Cafe
-Code server origin) and an `Authorization: Bearer <token>` header. Use HTTPS for
-any non-loopback connection. Treat the token as a secret: do not put it in a
-URL, prompt, log, or source-controlled configuration. Active sessions can be
-listed and revoked with `cafe-code auth session list` and
-`cafe-code auth session revoke <session-id>`.
-
-Provider restarts are acknowledged before shutdown begins, which lets an agent
-safely restart its own provider process. The resume variant records the exact
-threads that are active when shutdown starts and submits a durable continuation
-message to each of them after the runtime has restarted.
-
-If you want Codex, Claude, or Grok Build to do it for you, paste this into the CLI:
-
-```text
-Install Cafe Code from source. Clone https://github.com/cafeai/cafe-code.git, install the exact Node.js LTS version recorded in .node-version and Corepack (not the non-LTS Current release), run corepack enable, run yarn install --immutable, run yarn build:desktop, then start it with yarn workspace @cafecode/desktop start. Also verify Codex CLI is installed and logged in with codex login, Claude Code is installed and logged in with claude auth login if I want Claude support, and Grok Build 1.0.4 or newer is installed and logged in with grok login if I want the Early Access Grok provider.
-```
-
-The old npm path is still here for later, but it may lag behind current work:
-
-```bash
-npx @cafeai/cafe-code
-npm install -g @cafeai/cafe-code
-cafe-code
-```
-
-Cafe Code expects at least one provider to already be installed and
-authenticated:
-
-- Codex: install [Codex CLI](https://developers.openai.com/codex/cli) and run `codex login`
-- Claude: install [Claude Code](https://claude.com/product/claude-code) and run `claude auth login`
-- OpenCode: install [OpenCode](https://opencode.ai/docs/) and configure at least one upstream provider, or configure Cafe Code with an existing OpenCode server URL
-- Grok Build (Early Access): install [Grok Build](https://docs.x.ai/build/overview), run `grok login`, and see [Cafe's Grok integration guide](./docs/grok-build.md)
-
-Cafe Code currently ships Codex, Claude, OpenCode, and Early Access Grok Build provider integrations.
-
-## Local Development
-
-Run the app from a checkout:
-
-```bash
-yarn install --immutable
-yarn start:desktop
-```
-
-Run the desktop package directly:
-
-```bash
-yarn workspace @cafecode/desktop start
-```
-
-Debug mode:
-
-```bash
-yarn start:desktop:debug
-```
-
-The app prints a localhost-only debug URL on startup.
-
-Useful checks:
-
-The interface supports English, Japanese and Korean. Settings → Appearance →
-Language offers System default or a remembered explicit choice. System default
-uses Japanese/Korean only when it is the primary system language; otherwise it
-uses English. See the [internationalization authoring guide](./docs/internationalization.md).
-
-```bash
-yarn fmt
-yarn lint
-yarn typecheck
-yarn test
-```
-
-### Local Arch Package
-
-Build a local pacman package from the Linux AppImage artifact:
-
-```bash
-yarn install --immutable
-yarn dist:arch:local
-sudo pacman -U release/arch/cafe-code-*.pkg.tar.zst
-```
-
-To build and install in one step:
-
-```bash
-yarn dist:arch:local --install
-```
-
-This helper builds a package from the current checkout and does not publish
-anything.
-
-### AUR Source Package
-
-The `cafe-code` AUR target compiles Cafe Code from source and then packages the
-locally built AppImage. On Arch Linux, build it with:
-
-```bash
-yarn dist:aur:cafe-code
-```
-
-The package is written to `packaging/aur/cafe-code/`. Its `PKGBUILD`, generated
-`.SRCINFO`, launcher, desktop entry, and packaging license are kept in that
-directory so it can also be used as the contents of the standalone AUR Git
-repository.
-
-To create the initial AUR listing, first create an AUR account and add your SSH
-public key. Then submit the package metadata:
-
-```bash
-git clone ssh://aur@aur.archlinux.org/cafe-code.git ../aur-cafe-code
-cp -a packaging/aur/cafe-code/. ../aur-cafe-code/
-cd ../aur-cafe-code
-makepkg --printsrcinfo > .SRCINFO
-git add .gitignore .SRCINFO LICENSE PKGBUILD cafe-code.desktop cafe-code.sh
-git commit -m "Initial cafe-code package"
-git push
-```
-
-The current recipe uses the immutable published commit for version `0.0.51`
-because that version has no matching Git tag. For future releases, update
-`pkgver`, reset `pkgrel` to `1`, update the source commit and checksum, and
-regenerate `.SRCINFO` before pushing the AUR repository.
-
-### Debian Package
-
-Build a Debian package for the host architecture:
-
-```bash
-yarn install --immutable
-yarn dist:desktop:deb
-```
-
-Explicit architecture targets are also available:
-
-```bash
-yarn dist:desktop:deb:x64
-yarn dist:desktop:deb:arm64
-```
-
-The package is written to `release/`. Install the emitted file with your
-graphical package installer or with `sudo apt install ./release/<file>.deb`.
-
-## 日本語でちゅ
-
-Cafe Code は、Codex とか Claude とお話するための、
-ちいさめデスクトップアプリだわ。
-
-T3 Code から fork して、
-バグ直して、重いところ軽くして、
-いらない機能はぽいぽいした。
-
-ターミナルいらない。
-でかいダッシュボードいらない。
-ボタンだらけの謎コックピットもいらない。
-
-コード見たいなら VS Code ひらこ。
-コンソール使いたいなら、本物のコンソール使お。
-
-Cafe Code は、チャットする。
-作業を見る。
-邪魔しない。
-それだけ。えらい。
-
-### ソースから動かす
-
-まだ DMG とか、インストーラーとか、アップデーターとかはないよ。
-npm のパッケージもあるけど、今はそれを信じすぎないでね。
-Cafe Code がもう少し落ち着くまでは、npm はたぶん少し古くなる。
-
-[`.node-version`](.node-version) に書かれた Node.js LTS と Corepack を先に入れてね。
-最新の LTS 系列を使う方針で、非 LTS の Current は使わないよ。
-Node の具体的なバージョンと Yarn はリポジトリ側で固定してあるよ。
-
-```bash
-git clone https://github.com/cafeai/cafe-code.git
-cd cafe-code
-corepack enable
-yarn install --immutable
-yarn build:desktop
-yarn workspace @cafecode/desktop start
-```
-
-デバッグしたいならこれ。
-
-```bash
-yarn workspace @cafecode/desktop start --cafe-debug
-```
-
-LAN の別デバイスから Cafe Code の Web UI を開きたいなら、先に Cafe Code
-側でネットワーク/LAN アクセスを有効にして、ファイアウォールでこのポートを開ける。
-
-- HTTPS/WSS Web UI: `3775/tcp`
-- HTTP/WS のフォールバックと証明書案内ページ: `3773/tcp`
-
-`ufw` ならこれ。
-
-```bash
-sudo ufw allow 3775/tcp comment 'Cafe Code HTTPS'
-sudo ufw allow 3773/tcp comment 'Cafe Code HTTP'
-```
-
-`yarn dev:desktop` の開発中は、デフォルトではこっち。
-
-```bash
-sudo ufw allow 13775/tcp comment 'Cafe Code dev HTTPS'
-sudo ufw allow 13773/tcp comment 'Cafe Code dev backend'
-sudo ufw allow 5733/tcp comment 'Cafe Code dev Vite'
-```
-
-Cafe Code が別のポートを表示しているときや、`CAFE_CODE_PORT`、
-`CAFE_CODE_HTTPS_PORT`、`CAFE_CODE_DEV_INSTANCE`、`CAFE_CODE_PORT_OFFSET`
-を使っているときは、その表示されたポートを開けてね。
-
-だいたい macOS で見てる。Windows も動いてそう。
-Linux はまだあまり見れてないから、ちょっと調整がいるかも。
-でも今の Cafe Code は、けっこういいところまで来てる。
-
-Codex とか Claude に丸投げするなら、これを投げてもいいよ。
-
-```text
-Cafe Code をソースから入れてください。https://github.com/cafeai/cafe-code.git を clone して、.node-version に書かれた Node.js LTS と Corepack を入れ（非 LTS の Current は使わない）、corepack enable、yarn install --immutable、yarn build:desktop、yarn workspace @cafecode/desktop start まで実行してください。Codex を使うなら codex login、Claude を使うなら claude auth login も確認してください。
-```
-
-npm 版は残しておくけど、今は古いかもしれない。
-
-```bash
-npx @cafeai/cafe-code
-npm install -g @cafeai/cafe-code
-cafe-code
-```
-
-Codex を使うなら先に `codex login`。
-Claude を使うなら先に `claude auth login`。
-そこは自分でログインしておいてね。
-
-```bash
-yarn fmt
-yarn lint
-yarn typecheck
-yarn test
-```
 
 ## License
 
-Cafe Code is AGPL-3.0-or-later.
-
-The fork keeps the upstream attribution story intact; see the license and notice
-files for details.
+Cafe Code is [AGPL-3.0-or-later](LICENSE). Upstream attribution is preserved in
+[NOTICE.md](NOTICE.md).
