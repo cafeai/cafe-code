@@ -33,6 +33,64 @@ const fixtureLayer = OrchestrationProjectionSnapshotQueryLive.pipe(
 );
 
 it.layer(fixtureLayer)("earlier current-turn work-log pages", (it) => {
+  it.effect("does not count already-inline retention exceptions as earlier work", () =>
+    Effect.gen(function* () {
+      const sql = yield* SqlClient.SqlClient;
+      const query = yield* ProjectionSnapshotQuery;
+      yield* sql`DELETE FROM projection_thread_activities`;
+      yield* sql`INSERT INTO projection_thread_activities
+        (activity_id,thread_id,turn_id,tone,kind,summary,payload_json,sequence,created_at)
+        VALUES ('retained-settings',${threadId},${turnId},'info','provider.turn.configuration','Turn settings','{}',1,${timestamp(1)}),
+          ('retained-live-work',${threadId},${turnId},'tool','tool.updated','Live work','{}',2,${timestamp(2)})`;
+      const before = cursor(600, "raw-floor", timestamp(600));
+      const excludeActivityIds = [
+        EventId.make("retained-settings"),
+        EventId.make("retained-live-work"),
+      ];
+      const presence = () =>
+        query.getThreadTurnWorkLogPresence({
+          threadId,
+          turnIds: [turnId],
+          before,
+          excludeActivityIds,
+        });
+      const page = () =>
+        query.getThreadTurnActivityPage({
+          threadId,
+          turnId,
+          before,
+          excludeActivityIds,
+          offset: 0,
+          limit: 6,
+        });
+      assert.deepStrictEqual((yield* presence()).turnIdsWithWorkLog, []);
+      const empty = yield* page();
+      assert.equal(empty.totalCount, 0);
+      assert.deepStrictEqual(empty.activities, []);
+      assert.deepStrictEqual(empty.excludeActivityIds, excludeActivityIds);
+
+      // Exclusions only narrow an already-scoped query. Genuine evicted work
+      // is still discoverable, and an ordinary offset reader is unchanged.
+      yield* sql`INSERT INTO projection_thread_activities
+        (activity_id,thread_id,turn_id,tone,kind,summary,payload_json,sequence,created_at)
+        VALUES ('evicted-command',${threadId},${turnId},'tool','tool.completed','Saved command','{}',3,${timestamp(3)})`;
+      assert.deepStrictEqual((yield* presence()).turnIdsWithWorkLog, [turnId]);
+      const saved = yield* page();
+      assert.equal(saved.totalCount, 1);
+      assert.deepStrictEqual(
+        saved.activities.map((activity) => activity.id),
+        ["evicted-command"],
+      );
+      const ordinary = yield* query.getThreadTurnActivityPage({
+        threadId,
+        turnId,
+        offset: 0,
+        limit: 6,
+      });
+      assert.equal(ordinary.totalCount, 3);
+    }),
+  );
+
   it.effect("pages beyond the 500-row live window and never crosses the exact thread/turn", () =>
     Effect.gen(function* () {
       const sql = yield* SqlClient.SqlClient;

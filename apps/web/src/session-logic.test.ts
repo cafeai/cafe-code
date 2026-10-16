@@ -847,6 +847,38 @@ describe("deriveHistoricalWorkLogSummaries", () => {
     expect(summaries.get(turnId)?.previewEntries).toEqual([]);
   });
 
+  it("excludes only older current-turn entries already retained inline from earlier-work reads", () => {
+    const turnId = TurnId.make("latest");
+    const retained = makeActivity({
+      id: "retained-settings",
+      sequence: 1,
+      turnId,
+      kind: "provider.turn.configuration",
+    });
+    const foreign = makeActivity({
+      id: "prior-settings",
+      sequence: 2,
+      turnId: "prior",
+      kind: "provider.turn.configuration",
+    });
+    const tail = Array.from({ length: 500 }, (_, index) =>
+      makeActivity({
+        id: `tail-${index}`,
+        sequence: index + 100,
+        turnId,
+        kind: "context-window.updated",
+      }),
+    );
+    const summary = deriveHistoricalWorkLogSummaries({
+      messages: [],
+      activities: [retained, foreign, ...tail],
+      latestTurnId: turnId,
+    }).get(turnId);
+    expect(summary?.before?.sequence).toBe(100);
+    expect(summary?.excludeActivityIds).toEqual([retained.id]);
+    expect(summary?.liveActivities).toContain(retained);
+  });
+
   it("changes the gap witness only when an ordinary operation leaves the window", () => {
     const turnId = TurnId.make("latest");
     const command = makeActivity({

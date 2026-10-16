@@ -5,11 +5,13 @@ import type { VisualizationTimelineEntry } from "@cafecode/contracts/visualizati
 import { uiFormatNumber, uiText } from "@cafecode/shared/i18n";
 import {
   ApprovalRequestId,
+  EventId,
   isToolLifecycleItemType,
   type OrchestrationLatestTurn,
   type OrchestrationThreadActivity,
   type OrchestrationThreadActivityCursor,
   THREAD_DETAIL_ACTIVITY_WINDOW_LIMIT,
+  THREAD_TURN_ACTIVITY_PAGE_MAX_LIMIT,
   type ProviderTurnConfiguration,
   type OrchestrationProposedPlanId,
   ProviderDriverKind,
@@ -159,6 +161,8 @@ export interface HistoricalWorkLogSummary {
   subagentEntries?: ReadonlyArray<WorkLogEntry>;
   /** Immutable exclusive range for the earlier part of the current turn. */
   before?: OrchestrationThreadActivityCursor;
+  /** Retention exceptions before the raw floor are already shown inline. */
+  excludeActivityIds?: ReadonlyArray<OrchestrationThreadActivity["id"]>;
   /** Current received snapshots win over separately fetched older versions. */
   liveActivities?: ReadonlyArray<OrchestrationThreadActivity>;
   /** Changes only when relevant work leaves the ordinary tail, not per token. */
@@ -922,9 +926,10 @@ export function deriveHistoricalWorkLogSummaries(input: {
 
   const entriesByTurnId = new Map<TurnId, WorkLogEntry[]>();
   const knownHistoricalTurnIds = latestTurnId === null ? new Set<TurnId>() : historicalTurnIds;
-  for (const entry of deriveWorkLogEntries(input.activities, undefined, {
+  const workLogEntries = deriveWorkLogEntries(input.activities, undefined, {
     terminalTurnIds: knownHistoricalTurnIds,
-  })) {
+  });
+  for (const entry of workLogEntries) {
     if (
       entry.turnId === null ||
       entry.turnId === undefined ||
@@ -977,6 +982,20 @@ export function deriveHistoricalWorkLogSummaries(input: {
       .slice(-THREAD_DETAIL_ACTIVITY_WINDOW_LIMIT);
     const floor = ordinaryTail[0];
     if (floor) {
+      const retainedBeforeFloor = new Set<string>(
+        input.activities
+          .filter((activity) => compareActivityWindowOrder(activity, floor) < 0)
+          .map((activity) => activity.id),
+      );
+      // Configuration, recovery and live-work retention can keep ordinary
+      // entries older than the raw floor inline. They cannot also prove that
+      // Earlier work exists: the reader intentionally removes those duplicates.
+      // Send only already-visible identities, within the finite query ceiling;
+      // unlisted activity remains eligible rather than hiding unproven history.
+      const excludeActivityIds = workLogEntries
+        .filter((entry) => entry.turnId === latestTurnId && retainedBeforeFloor.has(entry.id))
+        .map((entry) => EventId.make(entry.id))
+        .slice(0, THREAD_TURN_ACTIVITY_PAGE_MAX_LIMIT);
       summaries.set(latestTurnId, {
         turnId: latestTurnId,
         isHistoricalTurn: false,
@@ -988,6 +1007,7 @@ export function deriveHistoricalWorkLogSummaries(input: {
           activityId: floor.id,
         },
         liveActivities: input.activities.filter((activity) => activity.turnId === latestTurnId),
+        ...(excludeActivityIds.length > 0 ? { excludeActivityIds } : {}),
         // An empty current window stays the same through arbitrarily many
         // context-only updates. Losing its first ordinary operation, however,
         // is new evidence that an earlier command might now be available.

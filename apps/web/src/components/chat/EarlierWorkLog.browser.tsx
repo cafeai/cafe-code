@@ -145,7 +145,13 @@ function eventFor(threadId: ThreadId, activity: OrchestrationThreadActivity): Or
   };
 }
 
-function fixture(provider: Provider, oldCount = 8, owner = "original", historicalTurnCount = 0) {
+function fixture(
+  provider: Provider,
+  oldCount = 8,
+  owner = "original",
+  historicalTurnCount = 0,
+  retainConfiguration = false,
+) {
   const environmentId = EnvironmentId.make(`earlier-work-${owner}`);
   const threadId = ThreadId.make(`earlier-work-${provider}-${owner}`);
   const old = Array.from({ length: oldCount }, (_, index) =>
@@ -168,7 +174,32 @@ function fixture(provider: Provider, oldCount = 8, owner = "original", historica
     ),
     toolActivity(provider, recentSequence + 1, `${owner} recent command`, `${owner}-recent`),
   ];
-  const allActivities = [...old, ...hidden, ...recent];
+  const configuration: OrchestrationThreadActivity[] = retainConfiguration
+    ? [
+        {
+          id: EventId.make(`${owner}-configuration`),
+          turnId: TURN_ID,
+          sequence: 0,
+          createdAt: time(0),
+          tone: "info",
+          kind: "provider.turn.configuration",
+          summary: "Turn accepted",
+          payload: {
+            turnConfiguration: {
+              version: 1,
+              provider,
+              providerInstanceId: provider,
+              providerDisplayName: "Synthetic provider",
+              model: "synthetic-model",
+              runtimeMode: DEFAULT_RUNTIME_MODE,
+              interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+              settingsSource: "submitted",
+            },
+          },
+        },
+      ]
+    : [];
+  const allActivities = [...configuration, ...old, ...hidden, ...recent];
   const thread: OrchestrationThread = {
     id: threadId,
     projectId: null,
@@ -287,21 +318,28 @@ function precedes(
 }
 
 function installApi(data: Fixture) {
+  const eligibleActivities = (input: {
+    turnId: TurnId;
+    before?: OrchestrationThreadActivityCursor | undefined;
+    excludeActivityIds?: ReadonlyArray<EventId> | undefined;
+  }) =>
+    data.allActivities.filter(
+      (activity) =>
+        activity.turnId === input.turnId &&
+        (activity.kind.startsWith("tool.") || activity.kind === "provider.turn.configuration") &&
+        precedes(activity, input.before) &&
+        !input.excludeActivityIds?.includes(activity.id),
+    );
   const getThreadTurnWorkLogPresence = vi.fn(
     async (input: OrchestrationThreadTurnWorkLogPresenceInput) => ({
       threadId: data.threadId,
-      turnIdsWithWorkLog: data.old.some((activity) => precedes(activity, input.before))
-        ? [TURN_ID]
-        : [],
+      turnIdsWithWorkLog: input.turnIds.filter(
+        (turnId) => eligibleActivities({ ...input, turnId }).length > 0,
+      ),
     }),
   );
   const validPage = (input: OrchestrationThreadTurnActivityPageInput) => {
-    const eligible = data.allActivities.filter(
-      (activity) =>
-        activity.turnId === input.turnId &&
-        activity.kind.startsWith("tool.") &&
-        precedes(activity, input.before),
-    );
+    const eligible = eligibleActivities(input);
     return {
       threadId: data.threadId,
       turnId: input.turnId,
@@ -312,6 +350,7 @@ function installApi(data: Fixture) {
         ? eligible.slice(-input.limit)
         : eligible.slice(input.offset, input.offset + input.limit),
       ...(input.before ? { before: input.before } : {}),
+      ...(input.excludeActivityIds ? { excludeActivityIds: input.excludeActivityIds } : {}),
     };
   };
   const getThreadTurnActivityPage = vi.fn(async (input: OrchestrationThreadTurnActivityPageInput) =>
@@ -391,6 +430,61 @@ afterEach(async () => {
 });
 
 describe("Earlier work in a retained current turn", () => {
+  it.each(["codex", "claudeAgent"] as const)(
+    "does not rediscover an empty %s log from turn settings retained before the live window",
+    async (provider) => {
+      const data = fixture(provider, 0, "retained-only", 0, true);
+      data.appendContexts(2);
+      const api = installApi(data);
+      const screen = await render(<TimelineFixture data={data} />);
+      try {
+        await vi.waitFor(() => expect(api.getThreadTurnWorkLogPresence).toHaveBeenCalledTimes(1));
+        expect(api.getThreadTurnWorkLogPresence.mock.calls[0]?.[0]).toMatchObject({
+          before: { sequence: 2 },
+          excludeActivityIds: ["retained-only-configuration"],
+        });
+        await expect.element(page.getByText("Synthetic retained-only message 0")).toBeVisible();
+        expect(page.getByRole("button", { name: /^Earlier work/ }).elements()).toHaveLength(0);
+        for (let index = 0; index < 8; index++) {
+          data.appendContexts(1);
+          await screen.rerender(<TimelineFixture data={data} thread={data.readThread()} />);
+        }
+        expect(page.getByRole("button", { name: /^Earlier work/ }).elements()).toHaveLength(0);
+        expect(api.getThreadTurnWorkLogPresence).toHaveBeenCalledTimes(1);
+        expect(api.getThreadTurnActivityPage).not.toHaveBeenCalled();
+      } finally {
+        await screen.unmount();
+      }
+    },
+  );
+
+  it("still reads evicted commands while excluding already-inline retained settings", async () => {
+    const data = fixture("codex", 8, "retained-and-evicted", 0, true);
+    data.appendContexts(1);
+    const api = installApi(data);
+    const screen = await render(<TimelineFixture data={data} />);
+    try {
+      await page.getByRole("button", { name: /^Earlier work/ }).click();
+      await expect
+        .element(page.getByText(/retained-and-evicted earlier command 7/).first())
+        .toBeVisible();
+      expect(api.getThreadTurnActivityPage.mock.calls[0]?.[0].excludeActivityIds).toEqual([
+        "retained-and-evicted-configuration",
+      ]);
+      await page.getByRole("button", { name: "Show older", exact: true }).click();
+      await expect
+        .element(page.getByText(/retained-and-evicted earlier command 1/).first())
+        .toBeVisible();
+      expect(
+        api.getThreadTurnActivityPage.mock.calls.every(
+          ([input]) => input.excludeActivityIds?.[0] === "retained-and-evicted-configuration",
+        ),
+      ).toBe(true);
+    } finally {
+      await screen.unmount();
+    }
+  });
+
   it.each(["codex", "claudeAgent"] as const)(
     "recovers evicted %s commands through the real 500-row store window without duplicating recent work",
     async (provider) => {

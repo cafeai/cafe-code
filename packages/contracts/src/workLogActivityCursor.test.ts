@@ -106,4 +106,38 @@ describe("bounded earlier work-log contracts", () => {
       ).toThrow();
     }
   });
+
+  it("bounds retained-inline exclusions to exact cursor reads and echoes them on pages", () => {
+    const excludeActivityIds = ["retained-settings", "retained-live-work"];
+    const input = decodePageInput({ ...request, before, excludeActivityIds });
+    expect(input.excludeActivityIds).toEqual(excludeActivityIds);
+    expect(decodePage({ ...input, totalCount: 0, activities: [] }).excludeActivityIds).toEqual(
+      excludeActivityIds,
+    );
+    expect(
+      decodePresence({ threadId: "thread", turnIds: ["turn"], before, excludeActivityIds })
+        .excludeActivityIds,
+    ).toEqual(excludeActivityIds);
+    for (const invalidIds of [
+      [""],
+      ["bad\u0000id"],
+      Array(THREAD_TURN_ACTIVITY_PAGE_MAX_LIMIT + 1).fill("id"),
+    ]) {
+      expect(() =>
+        decodePageInput({ ...request, before, excludeActivityIds: invalidIds }),
+      ).toThrow();
+      expect(() =>
+        decodePresence({
+          threadId: "thread",
+          turnIds: ["turn"],
+          before,
+          excludeActivityIds: invalidIds,
+        }),
+      ).toThrow();
+    }
+    expect(() => decodePageInput({ ...request, excludeActivityIds })).toThrow();
+    expect(() =>
+      decodePresence({ threadId: "thread", turnIds: ["turn"], excludeActivityIds }),
+    ).toThrow();
+  });
 });

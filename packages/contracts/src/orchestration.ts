@@ -605,6 +605,11 @@ export const OrchestrationThreadActivityCursor = Schema.Struct({
 });
 export type OrchestrationThreadActivityCursor = typeof OrchestrationThreadActivityCursor.Type;
 
+/** Presentation-only exclusions can narrow an exact earlier-work range. */
+export const EarlierWorkLogExcludedActivityIds = Schema.Array(
+  OrchestrationThreadActivityCursor.fields.activityId,
+).check(Schema.isMaxLength(THREAD_TURN_ACTIVITY_PAGE_MAX_LIMIT));
+
 export const OrchestrationThreadTurnActivityPageInput = Schema.Struct({
   threadId: ThreadId,
   turnId: TurnId,
@@ -613,7 +618,14 @@ export const OrchestrationThreadTurnActivityPageInput = Schema.Struct({
     Schema.withDecodingDefault(Effect.succeed(50)),
   ),
   before: Schema.optional(OrchestrationThreadActivityCursor),
-}).check(Schema.makeFilter((input) => input.before === undefined || input.offset === 0));
+  excludeActivityIds: Schema.optional(EarlierWorkLogExcludedActivityIds),
+}).check(
+  Schema.makeFilter(
+    (input) =>
+      (input.before === undefined || input.offset === 0) &&
+      (input.excludeActivityIds === undefined || input.before !== undefined),
+  ),
+);
 export type OrchestrationThreadTurnActivityPageInput =
   typeof OrchestrationThreadTurnActivityPageInput.Type;
 
@@ -627,6 +639,7 @@ export const OrchestrationThreadTurnActivityPage = Schema.Struct({
   // Echo the exact consumed bound so a newer renderer can detect a saved
   // server which silently ignored its additive cursor field.
   before: Schema.optional(OrchestrationThreadActivityCursor),
+  excludeActivityIds: Schema.optional(EarlierWorkLogExcludedActivityIds),
 });
 export type OrchestrationThreadTurnActivityPage = typeof OrchestrationThreadTurnActivityPage.Type;
 
@@ -968,7 +981,14 @@ export const OrchestrationThreadTurnWorkLogPresenceInput = Schema.Struct({
     Schema.isMaxLength(THREAD_TURN_WORK_LOG_PRESENCE_MAX_TURNS),
   ),
   before: Schema.optional(OrchestrationThreadActivityCursor),
-}).check(Schema.makeFilter((input) => input.before === undefined || input.turnIds.length === 1));
+  excludeActivityIds: Schema.optional(EarlierWorkLogExcludedActivityIds),
+}).check(
+  Schema.makeFilter(
+    (input) =>
+      (input.before === undefined || input.turnIds.length === 1) &&
+      (input.excludeActivityIds === undefined || input.before !== undefined),
+  ),
+);
 export type OrchestrationThreadTurnWorkLogPresenceInput =
   typeof OrchestrationThreadTurnWorkLogPresenceInput.Type;
 

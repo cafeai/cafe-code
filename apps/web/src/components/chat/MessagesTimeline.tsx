@@ -2251,6 +2251,7 @@ interface EarlierWorkLogState {
   readonly lastRequest: {
     readonly before: OrchestrationThreadActivityCursor;
     readonly older: boolean;
+    readonly excludeActivityIds?: ReadonlyArray<OrchestrationThreadActivity["id"]>;
   } | null;
 }
 
@@ -2305,7 +2306,11 @@ const EarlierWorkLogSection = memo(function EarlierWorkLogSection({
   }, [owner]);
 
   const loadPage = useCallback(
-    async (before: OrchestrationThreadActivityCursor, older: boolean) => {
+    async (
+      before: OrchestrationThreadActivityCursor,
+      older: boolean,
+      excludeActivityIds: ReadonlyArray<OrchestrationThreadActivity["id"]> | undefined,
+    ) => {
       if (pendingRef.current === owner) return;
       const generation = ++generationRef.current;
       const threadId = ctx.activeThreadId;
@@ -2317,7 +2322,7 @@ const EarlierWorkLogSection = memo(function EarlierWorkLogSection({
         upper: older && previous.owner === owner ? previous.upper : before,
         loading: true,
         error: false,
-        lastRequest: { before, older },
+        lastRequest: { before, older, ...(excludeActivityIds ? { excludeActivityIds } : {}) },
       }));
       try {
         const api = readEnvironmentApi(ctx.activeThreadEnvironmentId);
@@ -2328,9 +2333,17 @@ const EarlierWorkLogSection = memo(function EarlierWorkLogSection({
           offset: 0,
           limit,
           before,
+          ...(excludeActivityIds ? { excludeActivityIds } : {}),
         });
         if (!stillOwned()) return;
-        validateEarlierWorkLogPage({ page, threadId, turnId: row.turnId, before, limit });
+        validateEarlierWorkLogPage({
+          page,
+          threadId,
+          turnId: row.turnId,
+          before,
+          limit,
+          ...(excludeActivityIds ? { excludeActivityIds } : {}),
+        });
         setState((previous) => {
           if (!stillOwned() || previous.owner !== owner) return previous;
           return {
@@ -2382,6 +2395,8 @@ const EarlierWorkLogSection = memo(function EarlierWorkLogSection({
       visibleEntries.length === 0 &&
       before &&
       current.upper &&
+      JSON.stringify(current.lastRequest?.excludeActivityIds ?? []) ===
+        JSON.stringify(row.summary.excludeActivityIds ?? []) &&
       cursorKey(before) === cursorKey(current.upper)
     ) {
       onHistoricalWorkLogPresenceResolved(row.turnId, false);
@@ -2391,8 +2406,10 @@ const EarlierWorkLogSection = memo(function EarlierWorkLogSection({
     current.loaded,
     current.hasOlder,
     current.upper,
+    current.lastRequest,
     onHistoricalWorkLogPresenceResolved,
     row.turnId,
+    row.summary.excludeActivityIds,
     visibleEntries.length,
   ]);
 
@@ -2408,7 +2425,8 @@ const EarlierWorkLogSection = memo(function EarlierWorkLogSection({
           className="focus-ring flex min-w-0 flex-1 items-center gap-1.5 rounded-xl px-2.5 py-1.5 text-left text-2xs text-subtle-foreground transition-colors duration-(--duration-fast) hover:text-foreground"
           onClick={() => {
             setExpandedOwner(isExpanded ? null : owner);
-            if (!isExpanded && !current.loaded && before) void loadPage(before, false);
+            if (!isExpanded && !current.loaded && before)
+              void loadPage(before, false, row.summary.excludeActivityIds);
           }}
         >
           <ChevronRightIcon
@@ -2438,7 +2456,7 @@ const EarlierWorkLogSection = memo(function EarlierWorkLogSection({
               disabled={current.loading}
               className="focus-ring rounded-sm text-2xs text-subtle-foreground transition-colors duration-(--duration-fast) hover:text-foreground disabled:opacity-50"
               onClick={() => {
-                if (before) void loadPage(before, false);
+                if (before) void loadPage(before, false, row.summary.excludeActivityIds);
               }}
             >
               {uiText("Recent", undefined, undefined, uiLocale)}
@@ -2449,7 +2467,8 @@ const EarlierWorkLogSection = memo(function EarlierWorkLogSection({
                 disabled={current.loading}
                 className="focus-ring rounded-sm text-2xs text-subtle-foreground transition-colors duration-(--duration-fast) hover:text-foreground disabled:opacity-50"
                 onClick={() => {
-                  if (current.next) void loadPage(current.next, true);
+                  if (current.next)
+                    void loadPage(current.next, true, row.summary.excludeActivityIds);
                 }}
               >
                 {current.loading
@@ -2493,7 +2512,11 @@ const EarlierWorkLogSection = memo(function EarlierWorkLogSection({
                 className="focus-ring rounded-sm font-medium text-muted-foreground hover:text-foreground"
                 onClick={() => {
                   if (current.lastRequest)
-                    void loadPage(current.lastRequest.before, current.lastRequest.older);
+                    void loadPage(
+                      current.lastRequest.before,
+                      current.lastRequest.older,
+                      current.lastRequest.excludeActivityIds,
+                    );
                 }}
               >
                 {uiText("Retry", undefined, undefined, uiLocale)}
@@ -2528,6 +2551,7 @@ function validateHistoricalWorkLogPage(input: {
     page.offset !== offset ||
     page.limit !== limit ||
     page.before !== undefined ||
+    page.excludeActivityIds !== undefined ||
     !Number.isSafeInteger(page.totalCount) ||
     page.totalCount < 0 ||
     page.activities.length !== Math.min(limit, Math.max(0, page.totalCount - offset))

@@ -28,7 +28,11 @@ function presenceRevision(
   summary: HistoricalWorkLogSummary | undefined,
   historyRevision?: string,
 ): string {
-  return JSON.stringify([historyRevision ?? "", summary?.presenceRevision ?? ""]);
+  return JSON.stringify([
+    historyRevision ?? "",
+    summary?.presenceRevision ?? "",
+    summary?.excludeActivityIds ?? [],
+  ]);
 }
 
 function useStableTurnIds(turnIds: ReadonlyArray<TurnId>): ReadonlyArray<TurnId> {
@@ -222,10 +226,14 @@ export function useHistoricalWorkLogPresence(input: {
             const cache = requestCacheRef.current;
             const existing = cache.reads.get(key);
             if (existing) return existing;
+            const excludeActivityIds = before
+              ? requestedSummaries?.get(turnIds[0]!)?.excludeActivityIds
+              : undefined;
             const read = api.orchestration.getThreadTurnWorkLogPresence({
               threadId,
               turnIds,
               ...(before ? { before } : {}),
+              ...(excludeActivityIds ? { excludeActivityIds } : {}),
             });
             cache.reads.set(key, read);
             // A focused timeline has a bounded turn set. Retain at most16

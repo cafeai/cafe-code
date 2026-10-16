@@ -26,8 +26,9 @@ export function validateEarlierWorkLogPage(input: {
   readonly turnId: TurnId;
   readonly before: OrchestrationThreadActivityCursor;
   readonly limit: number;
+  readonly excludeActivityIds?: ReadonlyArray<OrchestrationThreadActivity["id"]>;
 }): void {
-  const { page, before, threadId, turnId, limit } = input;
+  const { page, before, threadId, turnId, limit, excludeActivityIds } = input;
   if (
     !page ||
     !Array.isArray(page.activities) ||
@@ -39,6 +40,7 @@ export function validateEarlierWorkLogPage(input: {
     page.limit !== limit ||
     !isActivityCursor(page.before) ||
     cursorKey(page.before) !== cursorKey(before) ||
+    JSON.stringify(page.excludeActivityIds ?? []) !== JSON.stringify(excludeActivityIds ?? []) ||
     !Number.isSafeInteger(page.totalCount) ||
     page.totalCount < page.activities.length ||
     (page.totalCount > 0 && page.activities.length === 0)
@@ -51,6 +53,7 @@ export function validateEarlierWorkLogPage(input: {
     if (
       !isActivityCursor(cursor) ||
       activity.turnId !== turnId ||
+      excludeActivityIds?.includes(activity.id) ||
       ids.has(activity.id) ||
       compareActivityCursors(cursor, before) >= 0 ||
       (previous && compareActivityCursors(previous, cursor) >= 0)

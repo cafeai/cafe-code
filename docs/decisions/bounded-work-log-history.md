@@ -47,6 +47,16 @@ to format its paged rows. No history response enters the live store or grants
 native liveness, task control, Stop/restart or retry authority. Subagents remain
 in their separate authoritative roster.
 
+Earlier-range presence, count and page reads also accept the same bounded
+`excludeActivityIds` filter for entries already retained inline before the raw
+window floor (such as turn configuration and live-work exceptions). These
+identities only narrow the authenticated exact chat/turn cursor range. Pages
+echo the captured exclusions, and the reader validates both the echo and the
+absence of excluded rows. Relevant exclusion changes invalidate cached empty
+presence; token/context-only updates do not. Retained settings alone must not
+create a disclosure that becomes empty on expansion. Ordinary offset history
+remains unchanged.
+
 Presence results publish by completed batch. A bounded exact-owner receipt
 cache prevents duplicate unresolved batch reads across React effect cleanup.
 Negatives are tied to relevant work/new-turn witnesses, not token or context

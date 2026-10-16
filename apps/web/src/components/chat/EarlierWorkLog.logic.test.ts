@@ -60,6 +60,27 @@ const malformedPage = (changes: Record<string, unknown>): OrchestrationThreadTur
   ({ ...validPage(), ...changes }) as OrchestrationThreadTurnActivityPage;
 
 describe("Earlier work page validation", () => {
+  it("requires the captured exclusions to be echoed and refuses excluded rows", () => {
+    const excludeActivityIds = [EventId.make("retained-settings")];
+    const input = { threadId, turnId, before, limit: 4, excludeActivityIds };
+    expect(() =>
+      validateEarlierWorkLogPage({ ...input, page: { ...validPage(), excludeActivityIds } }),
+    ).not.toThrow();
+    expect(() => validateEarlierWorkLogPage({ ...input, page: validPage() })).toThrow();
+    expect(() =>
+      validateEarlierWorkLogPage({
+        ...input,
+        page: { ...validPage(), excludeActivityIds: [EventId.make("foreign-settings")] },
+      }),
+    ).toThrow();
+    expect(() =>
+      validateEarlierWorkLogPage({
+        ...input,
+        page: { ...validPage([activity("retained-settings", 1)]), excludeActivityIds },
+      }),
+    ).toThrow();
+  });
+
   it("admits only exact-scoped echoed chronological pages, including a genuinely empty range", () => {
     expect(() => validate(validPage())).not.toThrow();
     expect(() => validate(validPage([]))).not.toThrow();

@@ -14,6 +14,7 @@ import {
   OrchestrationThreadTurnActivityPageInput,
   OrchestrationThreadTurnSubagentDetailInput,
   OrchestrationThreadActivityCursor,
+  EarlierWorkLogExcludedActivityIds,
   THREAD_DETAIL_ACTIVITY_WINDOW_LIMIT,
   ProviderThreadGoal,
   ProjectScript,
@@ -307,6 +308,7 @@ const ThreadTurnLookupInput = Schema.Struct({
   threadId: ThreadId,
   turnId: TurnId,
   before: Schema.optional(OrchestrationThreadActivityCursor),
+  excludeActivityIds: Schema.optional(EarlierWorkLogExcludedActivityIds),
 });
 const ThreadTurnSubagentLookupInput = OrchestrationThreadTurnSubagentDetailInput;
 const CountRowSchema = Schema.Struct({
@@ -2902,16 +2904,24 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
           (sequence = ${before.sequence} AND ${earlierTie}))`;
   };
 
+  // Exact retained snapshot identities narrow all three earlier-work queries
+  // alike. In particular, a configuration retained before the raw tail must
+  // not create a disclosure whose reader then removes its only duplicate.
+  // Bind the values as SQL parameters inside the existing thread/turn range.
+  const excludedActivityPredicate = (ids: ReadonlyArray<string> | undefined) =>
+    ids?.length ? sql`activity_id NOT IN ${sql.in(ids)}` : sql`1 = 1`;
+
   const countThreadActivityRowsByTurn = SqlSchema.findOne({
     Request: ThreadTurnActivityPageLookupInput,
     Result: CountRowSchema,
-    execute: ({ threadId, turnId, before }) =>
+    execute: ({ threadId, turnId, before, excludeActivityIds }) =>
       sql`
         SELECT COUNT(*) AS "count"
         FROM projection_thread_activities
         WHERE thread_id = ${threadId}
           AND turn_id = ${turnId}
           AND ${activityBeforePredicate(before)}
+          AND ${excludedActivityPredicate(excludeActivityIds)}
           AND ${historicalWorkLogActivityPredicate}
       `,
   });
@@ -2919,7 +2929,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
   const findThreadTurnWorkLogPresence = SqlSchema.findOne({
     Request: ThreadTurnLookupInput,
     Result: WorkLogPresenceRowSchema,
-    execute: ({ threadId, turnId, before }) =>
+    execute: ({ threadId, turnId, before, excludeActivityIds }) =>
       sql`
         SELECT EXISTS(
           SELECT 1
@@ -2927,6 +2937,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
           WHERE thread_id = ${threadId}
             AND turn_id = ${turnId}
             AND ${activityBeforePredicate(before)}
+            AND ${excludedActivityPredicate(excludeActivityIds)}
             AND ${historicalWorkLogActivityPredicate}
           LIMIT 1
         ) AS "hasWorkLog"
@@ -2961,7 +2972,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
   const listThreadActivityRowsByTurnPage = SqlSchema.findAll({
     Request: ThreadTurnActivityPageLookupInput,
     Result: ProjectionThreadActivityDbRowSchema,
-    execute: ({ threadId, turnId, offset, limit, before }) => {
+    execute: ({ threadId, turnId, offset, limit, before, excludeActivityIds }) => {
       // Keyset mode reads the nearest older bounded page, then the service
       // reverses those rows back to ordinary chronological display. Legacy
       // historical readers keep their existing ascending offset behavior.
@@ -2986,6 +2997,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
         WHERE thread_id = ${threadId}
           AND turn_id = ${turnId}
           AND ${activityBeforePredicate(before)}
+          AND ${excludedActivityPredicate(excludeActivityIds)}
           AND ${historicalWorkLogActivityPredicate}
         ORDER BY ${order}
         LIMIT ${limit}
@@ -4679,6 +4691,9 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
             totalCount: countRow.count,
             activities: orderedRows.map(mapActivityRow),
             ...(input.before === undefined ? {} : { before: input.before }),
+            ...(input.excludeActivityIds === undefined
+              ? {}
+              : { excludeActivityIds: input.excludeActivityIds }),
           };
         }),
       )
@@ -4704,6 +4719,9 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
             threadId: input.threadId,
             turnId,
             ...(input.before === undefined ? {} : { before: input.before }),
+            ...(input.excludeActivityIds === undefined
+              ? {}
+              : { excludeActivityIds: input.excludeActivityIds }),
           }).pipe(
             Effect.mapError(
               toPersistenceSqlOrDecodeError(
