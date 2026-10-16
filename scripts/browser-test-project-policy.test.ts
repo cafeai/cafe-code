@@ -3,9 +3,13 @@ import { matchesGlob, resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 
 const root = resolve(import.meta.dirname, "../apps/web");
-const { touchTimelineFile, visualizationFluidFile, reducedMotionFiles, browserStressPattern } = JSON.parse(
-  readFileSync(resolve(root, "browser-test-policy.json"), "utf8"),
-) as { touchTimelineFile: string; visualizationFluidFile: string; reducedMotionFiles: string[]; browserStressPattern: string };
+const { touchTimelineFile, visualizationFluidFile, reducedMotionFiles, browserStressPattern } =
+  JSON.parse(readFileSync(resolve(root, "browser-test-policy.json"), "utf8")) as {
+    touchTimelineFile: string;
+    visualizationFluidFile: string;
+    reducedMotionFiles: string[];
+    browserStressPattern: string;
+  };
 describe("browser feature inventory", () => {
   it("assigns specialized input/media fixtures without duplicate selectors", () => {
     const specialized = [touchTimelineFile, visualizationFluidFile, ...reducedMotionFiles];

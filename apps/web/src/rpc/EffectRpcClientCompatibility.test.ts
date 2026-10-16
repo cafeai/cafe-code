@@ -11,7 +11,9 @@ import { Rpc, RpcClient, RpcGroup, RpcSerialization } from "effect/unstable/rpc"
 import * as Socket from "effect/unstable/socket/Socket";
 import { describe, expect, it } from "vitest";
 const streamRpc = Rpc.make("stream", {
-  payload: Schema.Struct({}), success: Schema.String, stream: true,
+  payload: Schema.Struct({}),
+  success: Schema.String,
+  stream: true,
 });
 const group = RpcGroup.make(
   Rpc.make("unary", { payload: Schema.Struct({}), success: Schema.String }),

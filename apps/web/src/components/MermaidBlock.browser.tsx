@@ -395,20 +395,11 @@ describe("Mermaid block", () => {
     }
   });
 
-  it.each(
-    REAL_CHARTS.flatMap((chart) =>
-      (["dark"] as const).flatMap((theme) =>
-        [100].flatMap((scale) =>
-          [false].map((reducedMotion) => ({ ...chart, theme, scale, reducedMotion })),
-        ),
-      ),
-    ),
-  )(
-    "retains real $name source, copy and expanded controls at $theme/$scale% with reduced motion $reducedMotion",
-    async ({ source, label, theme, scale, reducedMotion }) => {
+  it.each(REAL_CHARTS.map((chart) => ({ ...chart, theme: "dark" as const, scale: 100 })))(
+    "retains real $name source, copy and expanded controls",
+    async ({ source, label, theme, scale }) => {
       await page.viewport(390, 700);
-      const originalMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
-      expect(window.matchMedia("(prefers-reduced-motion: reduce)").matches).toBe(reducedMotion);
+      expect(window.matchMedia("(prefers-reduced-motion: reduce)").matches).toBe(false);
       applyInterfaceScalePercent(scale);
       document.documentElement.classList.toggle("dark", theme === "dark");
       const host = document.createElement("div");
