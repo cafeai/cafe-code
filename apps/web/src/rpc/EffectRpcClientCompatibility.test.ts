@@ -75,10 +75,8 @@ function verifyFreshClients(
       generation.inbox,
       JSON.stringify({ _tag: "Chunk", requestId: retiredId, values: ["stale"] }),
     );
-    // Neither client may accept retired routing even with active fresh work.
-    for (let turn = 0; turn < 10; turn += 1) yield* Effect.yieldNow;
-    expect(first.pollUnsafe()).toBeUndefined();
-    expect(second.pollUnsafe()).toBeUndefined();
+    // The peer delivers stale frames before these valid replies. Exact final
+    // results prove neither client accepted them without counting event-loop turns.
     for (const [index, request] of freshRequests.entries()) {
       yield* Queue.offer(
         generation.inbox,
@@ -95,7 +93,6 @@ function verifyFreshClients(
 }
 async function withClientFixture(
   run: (fixture: ClientFixture) => Effect.Effect<void, unknown, Scope.Scope>,
-  options?: { readonly failBeforeClients?: boolean; readonly failWrites?: boolean },
 ): Promise<void> {
   const generations: SocketGeneration[] = [];
   const socket = Socket.make({
@@ -105,16 +102,6 @@ async function withClientFixture(
       Effect.gen(function* () {
         const inbox = yield* Queue.unbounded<string, Socket.SocketError>();
         generations.push({ inbox, sent: [] });
-        if (options?.failBeforeClients) {
-          return yield* Effect.fail(
-            new Socket.SocketError({
-              reason: new Socket.SocketOpenError({
-                kind: "Unknown",
-                cause: "controlled acquisition failure",
-              }),
-            }),
-          );
-        }
         yield* socketOptions?.onOpen ?? Effect.void;
         return yield* Queue.take(inbox).pipe(
           Effect.flatMap((message) => {
@@ -129,13 +116,6 @@ async function withClientFixture(
         const current = generations.at(-1);
         if (!current) throw new Error("The controlled socket has not opened.");
         current.sent.push(typeof chunk === "string" ? chunk : String(chunk));
-        if (options?.failWrites) {
-          return yield* Effect.fail(
-            new Socket.SocketError({
-              reason: new Socket.SocketWriteError({ cause: "controlled writer failure" }),
-            }),
-          );
-        }
       }),
     ),
   });
@@ -144,15 +124,9 @@ async function withClientFixture(
     Effect.scoped(
       Effect.gen(function* () {
         const protocol = yield* RpcClient.makeProtocolSocket({
-          retryPolicy: options?.failBeforeClients ? Schedule.recurs(0) : Schedule.forever,
+          retryPolicy: Schedule.forever,
           retryTransientErrors: false,
         });
-        if (options?.failBeforeClients) {
-          // Fail acquisition before either client registers its message
-          // consumer. Its later Request fails directly from send instead of
-          // an already-observed broadcast; that path must retire both maps.
-          for (let turn = 0; turn < 20; turn += 1) yield* Effect.yieldNow;
-        }
         const first = yield* makeClient.pipe(Effect.provideService(RpcClient.Protocol, protocol));
         const second = yield* makeClient.pipe(Effect.provideService(RpcClient.Protocol, protocol));
         yield* eventually(() => expect(generations).toHaveLength(1));

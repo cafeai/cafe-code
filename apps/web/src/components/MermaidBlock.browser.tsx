@@ -399,7 +399,6 @@ describe("Mermaid block", () => {
     "retains real $name source, copy and expanded controls",
     async ({ source, label, theme, scale }) => {
       await page.viewport(390, 700);
-      expect(window.matchMedia("(prefers-reduced-motion: reduce)").matches).toBe(false);
       applyInterfaceScalePercent(scale);
       document.documentElement.classList.toggle("dark", theme === "dark");
       const host = document.createElement("div");

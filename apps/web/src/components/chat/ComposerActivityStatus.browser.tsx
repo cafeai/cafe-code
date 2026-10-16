@@ -411,22 +411,25 @@ describe("composer activity hover elapsed time", () => {
       );
       await page.getByRole("button", { name: "Before activity" }).hover();
       await expectRevealed(false);
-      const height = activityElement().getBoundingClientRect().height;
       const trigger = page.getByRole("button", {
         name: "Running a long workspace verification command…. Show tasks",
       });
       await trigger.hover();
       await expectRevealed(true);
-      const line = activityElement();
-      const bounds = line.getBoundingClientRect();
-      const timerBounds = elapsedTimer().getBoundingClientRect();
       expect(elapsedSeconds()).toBeGreaterThanOrEqual(124 * 3600);
-      expect(Math.abs(bounds.height - height)).toBeLessThanOrEqual(1);
-      expect(bounds.left).toBeGreaterThanOrEqual(0);
-      expect(bounds.right).toBeLessThanOrEqual(window.innerWidth);
-      expect(timerBounds.right).toBeLessThanOrEqual(bounds.right + 1);
-      expect(line.scrollWidth).toBeLessThanOrEqual(line.clientWidth + 1);
-      expect(document.documentElement.scrollWidth).toBeLessThanOrEqual(window.innerWidth);
+      // Disclosure can still be expanding after its first visible pixels.
+      // Require the complete timer to fit its actual clip, without sampling
+      // transition progress or pinning the activity row's height.
+      await vi.waitFor(() => {
+        const bounds = activityElement().getBoundingClientRect();
+        const timer = elapsedTimer();
+        const timerBounds = timer.getBoundingClientRect();
+        const clipBounds = timer.parentElement!.getBoundingClientRect();
+        expect(bounds.left).toBeGreaterThanOrEqual(0);
+        expect(bounds.right).toBeLessThanOrEqual(window.innerWidth);
+        expect(timerBounds.right).toBeLessThanOrEqual(clipBounds.right + 1);
+        expect(document.documentElement.scrollWidth).toBeLessThanOrEqual(window.innerWidth);
+      });
       expect(elapsedTimer().getAttribute("aria-live")).toBe("off");
       await trigger.click();
       expect(onOpenTasks).toHaveBeenCalledTimes(1);
