@@ -1,4 +1,3 @@
-import { createHash } from "node:crypto";
 import type {
   ProviderInstanceId,
   SubagentRuntimeId,
@@ -8,6 +7,7 @@ import type {
 } from "@cafecode/contracts";
 import * as Effect from "effect/Effect";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
+import { createHash } from "node:crypto";
 
 import { toPersistenceSqlError } from "../persistence/Errors.ts";
 
@@ -40,6 +40,10 @@ export const buildCodexTransientFailureMarkerPayload = (input: {
 /** Saturate bookkeeping, not retries: there is deliberately no attempt limit. */
 export const saturateRuntimeRecoveryAttempt = (attempt: number) =>
   Math.min(30, Math.max(0, Number.isSafeInteger(attempt) ? attempt : 30));
+
+/** Preparation retries never resubmit paid work and retain their existing cap. */
+export const runtimeRecoveryPreparationDelayMs = (attempt: number) =>
+  Math.min(60_000, 1_000 * 2 ** Math.min(attempt, 6));
 
 /** Exponential backoff with 75–100% jitter always waits and caps at 60 seconds. */
 export const codexTransientRecoveryDelayMs = (attempt: number, jitter: number) => {

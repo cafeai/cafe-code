@@ -7,7 +7,7 @@ import * as Layer from "effect/Layer";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
 
-import { SqlitePersistenceMemory } from "../../persistence/Layers/Sqlite.ts";
+import { SqlitePersistenceTest } from "../../persistence/Sqlite.test.fixture.ts";
 import { RepositoryIdentityResolver } from "../../project/Services/RepositoryIdentityResolver.ts";
 import { ProjectionSnapshotQuery } from "../Services/ProjectionSnapshotQuery.ts";
 import {
@@ -87,7 +87,7 @@ const snapshotLayer = it.layer(
           Effect.die("Standalone workflow snapshot must not resolve a live repository"),
       }),
     ),
-    Layer.provideMerge(SqlitePersistenceMemory),
+    Layer.provideMerge(SqlitePersistenceTest),
     Layer.provideMerge(NodeServices.layer),
   ),
 );

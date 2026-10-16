@@ -48,9 +48,9 @@ jobs:
     with:
       windows_ownership_only: true
 
-  quality:
+  node-checks:
     if: ${{ !inputs.windows_ownership_only && !inputs.reliability_only }}
-    name: Quality (${{ matrix.os }})
+    name: Node checks (${{ matrix.os }})
     strategy:
       fail-fast: false
       matrix:
@@ -128,22 +128,8 @@ jobs:
           NODE_OPTIONS: "--max-old-space-size=4096"
         run: corepack yarn typecheck --concurrency=1
 
-      - name: Test
-        if: runner.os != 'Windows'
-        # Preserve the complete task graph and every runner/timeout bound.
-        # The copied-executable boundary runs after the other workspaces retire;
-        # a repeated native macOS timeout under the combined graph did not
-        # establish whether copy, launch, protocol I/O or cleanup consumed it.
-        run: |
-          corepack yarn test --filter='!effect-codex-app-server'
-          corepack yarn test --filter=effect-codex-app-server
-
-      - name: Test (Windows bounded workers)
-        # Bound both independent workspace runners and their fork pools after
-        # an observed startup exit. Keep the full suite and fail on pool errors;
-        # the original failure did not prove a resource or transport cause.
-        if: runner.os == 'Windows'
-        run: corepack yarn test --concurrency=2 -- --maxWorkers=2
+      - name: Node tests
+        run: corepack yarn test:ci:node
 
       - name: Isolated PDF attachment parser qualification
         # Keep real bounded parser success, malformed-input and page-cap checks
@@ -192,126 +178,75 @@ jobs:
         if: inputs.release_candidate && runner.os == 'Linux'
         run: corepack yarn release:smoke
 
-      - name: Build desktop pipeline
-        run: corepack yarn build:desktop
+      - name: Retain test timings
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: test-timings-node-${{ matrix.os }}-${{ github.run_attempt }}
+          path: .logs/test-timings/
+          include-hidden-files: true
+          if-no-files-found: ignore
+          retention-days: 7
+
+  browser-checks:
+    if: ${{ !inputs.windows_ownership_only && !inputs.reliability_only }}
+    name: Browser checks (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-26.04, windows-2025, macos-15]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.source_ref || github.sha }}
+
+      - name: Setup Node
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: .node-version
+
+      - name: Activate pinned Yarn
+        run: |
+          corepack enable
+          corepack prepare yarn@4.17.1 --activate
+          corepack yarn --version
+
+      - name: Cache Yarn and Turbo
+        # Native build outputs must never cross Ubuntu release/ABI boundaries.
+        # Keep restore prefixes image-specific as well as the exact cache key.
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.yarn/berry
+            .turbo
+          key: ${{ runner.os }}-${{ runner.arch }}-${{ matrix.os }}-yarn-${{ hashFiles('yarn.lock') }}-${{ hashFiles('turbo.json') }}
+          restore-keys: |
+            ${{ runner.os }}-${{ runner.arch }}-${{ matrix.os }}-yarn-${{ hashFiles('yarn.lock') }}-
+
+      - name: Install Linux desktop build dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential
+
+      - name: Install dependencies
+        run: corepack yarn install --immutable
 
       - name: Install browser test runtime
         if: runner.os == 'Linux'
         run: corepack yarn workspace @cafecode/web exec playwright install --with-deps chromium
 
-      - name: Browser tests
-        if: runner.os == 'Linux'
-        # Close each invocation's native browser providers before starting the
-        # next motion policy. groupOrder orders tests inside one invocation,
-        # but Vitest retains those providers until the entire runner exits.
-        # Keep the complete inventory and existing workers/deadlines.
-        run: |
-          corepack yarn workspace @cafecode/web test:browser --project=desktop --project=touch
-          corepack yarn workspace @cafecode/web test:browser --project=visualization-fluid-motion
-          corepack yarn workspace @cafecode/web test:browser --project=context-reduced-motion
-
-      - name: Install focused browser test runtime
+      - name: Install native browser test runtime
         if: runner.os != 'Linux'
         run: corepack yarn workspace @cafecode/web exec playwright install chromium
 
-      - name: Cross-platform Markdown, timeline, menus and file action browser tests
-        # These shared parser/preference changes need real browser coverage on
-        # the other hosts too. Linux retains its full browser suite above; this
-        # focused subset does not claim native file-manager/editor UI success.
-        # Menu focus, secondary-pointer and Desk layout ownership also require
-        # real browser events on each host, including macOS Control-click,
-        # sidebar replacement races and late delete navigation ownership.
-        # Composer tab animation and provider controls use the same host matrix.
-        # Expanded Markdown tables also qualify fit/zoom and titlebar-safe
-        # dialog geometry across the native browser hosts.
-        # Expanded images qualify cursor-anchored wheel zoom, captured pan,
-        # fitted gallery navigation and reduced motion with the same bounds.
-        # Loaded inline images retain their bytes, geometry and physical review
-        # anchors across chat updates using real Markdown and LegendList.
-        # Scheduling civil inputs and viewer-local zone labels must also use
-        # each host's native Intl catalog rather than a foreign default clock.
-        # Passive Claude quota coverage uses native Intl labels and the shared
-        # settings/sidebar presenter without starting an authenticated provider.
-        # Response-limit recovery prepares an editable draft only; qualify its
-        # exact owner/content gates and ordinary Send path on the other hosts.
-        # Public summaries and inert command inspection retain native local
-        # timestamp labels and exact live/replayed timeline admission.
-        # Atrium clicks use the real shared child reader; retain exact history
-        # and server ownership plus popup-local render failure recovery.
-        # Model-picker account rails retain independent native wheel scrolling
-        # and exact keyboard/pointer selection at theme/interface-scale bounds.
-        # Account inheritance keeps override/reset and compact current-to-saved
-        # labels on the same native-host subset without changing its budgets.
-        # Failed-root recovery keeps its compact ongoing footer and real composer
-        # Stop without changing terminal history or native provider authority.
-        # Native iframe-button focus coverage keeps the unchanged app-wide
-        # ambiance owner separate from generated fluid/resource qualification.
-        if: runner.os != 'Linux'
-        run: corepack yarn workspace @cafecode/web test:browser src/components/AmbianceLayer.browser.tsx src/components/DesktopStartupDocument.browser.tsx src/components/WorkspaceEnvironment.browser.tsx src/components/chat/SubagentConcurrencyControl.browser.tsx src/components/chat/CodexContextWindowControl.browser.tsx src/components/chat/useCodexContextWindowOverride.browser.tsx src/components/ChatMarkdown.browser.tsx src/components/MarkdownTableViewerWin.browser.tsx src/components/MermaidBlock.browser.tsx src/components/MermaidPreview.browser.tsx src/components/MermaidRendering.browser.tsx src/components/chat/ChatComposer.browser.tsx src/components/chat/ComposerActivityStatus.browser.tsx src/components/chat/ScrollToBottomControl.browser.tsx src/components/chat/ChatPaneRuntime.browser.tsx src/components/chat/ProviderModelPicker.browser.tsx src/components/chat/MessagesTimelineRealList.browser.tsx src/components/chat/MarkdownImage.browser.tsx src/components/chat/MessagesTimeline.browser.tsx src/components/chat/MessagesTimeline.touch.browser.tsx src/components/chat/ProviderOperationWorkEntry.browser.tsx src/components/chat/ProviderDiagnosticWorkEntry.browser.tsx src/components/chat/ThreadErrorBanner.browser.tsx src/components/ChatView.composer.browser.tsx src/components/ChatView.standalone.browser.tsx src/components/ChatView.recovery-footer.browser.tsx src/components/chat/ScheduledFollowups.browser.tsx src/components/chat/ScheduledFollowupConversation.browser.tsx src/components/chat/ScheduledFollowupNotices.browser.tsx src/components/settings/SettingsPanels.browser.tsx src/components/ContextMenu.browser.tsx src/components/SidebarChromeHeader.browser.tsx src/components/MacTitlebar.browser.tsx src/components/MacBrowserTitlebar.browser.tsx src/components/OnboardingScreen.browser.tsx src/components/desk/DeskWorkspace.browser.tsx src/components/desk/DeskSidebar.browser.tsx src/components/ThreadActions.browser.tsx src/components/Sidebar.standalone.browser.tsx src/components/ChatView.desk.browser.tsx src/components/ProviderAccountQuotaDetails.browser.tsx src/components/chat/useProviderQuota.browser.tsx src/components/chat/ProviderQuotaSurfaces.browser.tsx src/components/chat/ContextWindowDetails.browser.tsx src/components/chat/SessionRail.browser.tsx src/components/chat/ClaudeTaskControls.browser.tsx src/components/chat/TraitsPicker.serviceTiers.browser.tsx src/components/settings/ProviderInstanceCard.layout.browser.tsx src/components/atrium/TaskAtrium.browser.tsx src/components/atrium/AtriumSubagentDetailBoundary.browser.tsx src/components/chat/EarlierWorkLog.browser.tsx src/components/Internationalization.browser.tsx src/components/uiLocaleStartup.browser.tsx src/components/global-dictation/GlobalDictationEntry.browser.tsx src/components/global-dictation/GlobalDictationOverlay.browser.tsx src/components/settings/RetainedSettingsFeedback.browser.tsx src/components/settings/DictationSettings.browser.tsx src/components/settings/McpSettings.browser.tsx src/components/chat/ComposerAsyncQuestionsPanel.browser.tsx src/components/ProviderUpdateLaunchNotification.browser.tsx src/components/DesktopNotificationWatcher.browser.tsx src/components/chat/FollowUpQueueShelf.browser.tsx src/components/visualizations/Visualizations.browser.tsx src/components/chat/ExpandedImageDialog.browser.tsx src/components/chat/ExpandedImageDialogWin.browser.tsx src/components/chat/AxiomSecurityControl.browser.tsx src/components/chat/AxiomMcpControl.browser.tsx src/components/settings/UsageStatsPanel.browser.tsx src/components/chat/MessagesTimeline.images.browser.tsx --project=desktop --project=touch --maxWorkers=2
-
-      - name: Ordinary-motion fluid browser qualification
-        # A new invocation joins the previous providers before this native
-        # WebGL suite opens. Retain all 34 cases and the original limits.
-        if: runner.os != 'Linux'
-        run: corepack yarn workspace @cafecode/web test:browser --project=visualization-fluid-motion src/components/visualizations/VisualizationFluid.browser.tsx --maxWorkers=2
-
-      - name: Reduced-motion browser qualification
-        # Retain all reduced-motion files after the full ordinary-motion file,
-        # with its native provider already closed and the same worker cap.
-        if: runner.os != 'Linux'
-        run: corepack yarn workspace @cafecode/web test:browser --project=context-reduced-motion src/components/chat/CodexContextWindowControl.motion.browser.tsx src/components/chat/ProviderDiagnosticWorkEntry.motion.browser.tsx src/components/visualizations/Visualizations.motion.browser.tsx src/components/chat/ScrollToBottomControl.motion.browser.tsx src/components/chat/ExpandedImageDialog.motion.browser.tsx --maxWorkers=2
-
-      - name: Mermaid source and parsed-graph security browser qualification
-        # Run the complete security file sequentially after the broad native
-        # subset. This scheduling partition retains fresh opaque frames, nonce
-        # and one-use-port admission, the absolute ten-second probe deadline and
-        # the same two-worker cap; it does not establish a runner/CPU cause for
-        # an expired load callback whose last phase was document-constructed.
-        # Linux selects it through its unchanged complete browser suite.
-        if: runner.os != 'Linux'
-        run: corepack yarn workspace @cafecode/web test:browser src/components/MermaidSecurity.browser.tsx --maxWorkers=2
-
-      - name: Generated chart layout and range animation browser qualification
-        # Exact-data synthetic source checks actual-width SVG glyphs, finite
-        # range/KPI transitions and natural unit layout without changing device
-        # policy or qualifying native GPU/pixel/lease behavior. Linux's complete
-        # browser suite already selects this file; retain the native-host bounds.
-        if: runner.os != 'Linux'
-        run: corepack yarn workspace @cafecode/web test:browser src/components/visualizations/VisualizationCommitChart.browser.tsx --maxWorkers=2
-
-      - name: Additional Mermaid family browser qualification
-        # Real local-engine labels/geometry, image decoding, PNG and parsed
-        # admission retain native provider contexts and existing worker budgets.
-        # Linux already covers this file through the complete browser suite.
-        if: runner.os != 'Linux'
-        run: corepack yarn workspace @cafecode/web test:browser src/components/MermaidFamilies.browser.tsx --maxWorkers=2
-
-      - name: Diagram and table PNG browser qualification
-        # Shared image rendering/menu tests retain the same native-host worker
-        # bound; Linux already runs them through the complete browser suite.
-        if: runner.os != 'Linux'
-        run: corepack yarn workspace @cafecode/web test:browser src/components/DiagramImageExport.browser.tsx src/components/MarkdownTableExport.browser.tsx src/components/ImageExportMenu.browser.tsx --maxWorkers=2
-
-      - name: Isolated MCP bridge artifacts
-        # Copied standalone entries use the existing native runtime and private
-        # synthetic peers on every host, never providers or native-control tools.
-        env:
-          CAFE_CODE_MCP_BRIDGE_E2E: "1"
-        run: corepack yarn workspace @cafeai/cafe-code exec vitest run --config vitest.e2e.config.ts integration/CafeMcpBridge.e2e.test.ts
-
-      - name: Full-access inline visualization browser qualification
-        # Ordinary srcdoc frames are the current source execution path. These
-        # fixtures exercise real frame input, natural layout, exact SDK messages,
-        # visibility teardown and bounded current-frame PNG capture. Linux's
-        # complete suite already includes them; keep the native input projects,
-        # worker caps and deadlines unchanged.
-        if: runner.os != 'Linux'
-        run: corepack yarn workspace @cafecode/web test:browser src/components/visualizations/VisualizationHistory.browser.tsx src/components/visualizations/VisualizationOwner.browser.tsx src/components/visualizations/InlineMcpAppBridge.browser.tsx src/components/visualizations/VisualizationInlineCapture.browser.tsx --maxWorkers=2
-
-      - name: Final forced desktop verification
-        # The earlier bundle supplies the isolated MCP bridge fixture. Rebuild
-        # after all platform/browser tests so the final boundary is uncached.
-        run: corepack yarn build:desktop --force
+      - name: Browser feature checks
+        # The same local runner builds fixture artifacts and closes each native
+        # provider before the next input/media/security group starts.
+        run: corepack yarn test:browser:ci
 
       - name: Retain synthetic Desk sidebar failure artifacts
         # Preserve only this credential-free fixture's attachments. Other
@@ -337,7 +272,6 @@ jobs:
         with:
           name: visualization-qualification-failure-${{ matrix.os }}-${{ github.run_attempt }}
           path: |
-            apps/web/.vitest/attachments/failure-screenshots/VisualizationCommitChart.browser.tsx/
             apps/web/.vitest/attachments/failure-screenshots/MermaidFamilies.browser.tsx/
             apps/web/.vitest/attachments/failure-screenshots/MermaidSecurity.browser.tsx/
             apps/web/.vitest/attachments/failure-screenshots/Visualizations.browser.tsx/
@@ -349,6 +283,75 @@ jobs:
           include-hidden-files: true
           if-no-files-found: ignore
           retention-days: 7
+
+      - name: Retain test timings
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: test-timings-browser-${{ matrix.os }}-${{ github.run_attempt }}
+          path: .logs/test-timings/
+          include-hidden-files: true
+          if-no-files-found: ignore
+          retention-days: 7
+
+  quality:
+    # Preserve the existing required check as an explicit failure when either
+    # test matrix fails; a skipped dependent check can otherwise allow merging.
+    if: ${{ always() && !cancelled() && !inputs.windows_ownership_only && !inputs.reliability_only }}
+    name: Quality (${{ matrix.os }})
+    needs: [node-checks, browser-checks]
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-26.04, windows-2025, macos-15]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    steps:
+      - name: Require successful test matrices
+        if: ${{ needs['node-checks'].result != 'success' || needs['browser-checks'].result != 'success' }}
+        run: exit 1
+
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.source_ref || github.sha }}
+
+      - name: Setup Node
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: .node-version
+
+      - name: Activate pinned Yarn
+        run: |
+          corepack enable
+          corepack prepare yarn@4.17.1 --activate
+          corepack yarn --version
+
+      - name: Cache Yarn and Turbo
+        # Native build outputs must never cross Ubuntu release/ABI boundaries.
+        # Keep restore prefixes image-specific as well as the exact cache key.
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.yarn/berry
+            .turbo
+          key: ${{ runner.os }}-${{ runner.arch }}-${{ matrix.os }}-yarn-${{ hashFiles('yarn.lock') }}-${{ hashFiles('turbo.json') }}
+          restore-keys: |
+            ${{ runner.os }}-${{ runner.arch }}-${{ matrix.os }}-yarn-${{ hashFiles('yarn.lock') }}-
+
+      - name: Install Linux desktop build dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential
+
+      - name: Install dependencies
+        run: corepack yarn install --immutable
+
+      - name: Final forced desktop verification
+        # All native Node and browser matrices must pass before this final
+        # uncached build. Artifact publication remains downstream of Quality.
+        run: corepack yarn build:desktop --force
 
   native-artifacts:
     name: Native artifact (${{ matrix.name }})

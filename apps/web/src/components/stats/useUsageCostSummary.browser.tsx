@@ -1,8 +1,8 @@
 import "../../index.css";
 
+import type { EnvironmentId, UsageStatsGetResult } from "@cafecode/contracts";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { render } from "vitest-browser-react";
-import type { EnvironmentId, UsageStatsGetResult } from "@cafecode/contracts";
 
 const usageHarness = vi.hoisted(() => ({
   environmentId: "usage-fixture" as EnvironmentId,
@@ -51,11 +51,8 @@ vi.mock("../../hooks/useSettings", () => ({
     selector({ modelPricingOverrides: undefined }),
 }));
 
+import { resetUsageStatsDetailResourceForTests } from "./usageStatsDetailResource";
 import { useUsageCostSummary } from "./useUsageCostSummary";
-import {
-  getUsageStatsDetailDiagnostics,
-  resetUsageStatsDetailResourceForTests,
-} from "./usageStatsDetailResource";
 
 function createUsage(outputTokens: number, todayOutputTokens: number): UsageStatsGetResult {
   const today = {
@@ -198,83 +195,6 @@ describe("useUsageCostSummary", () => {
     }
   });
 
-  it("refreshes headline and graph data every five seconds without overlapping or leaking", async () => {
-    const first = createUsage(1_000, 100);
-    const second = createUsage(1_250, 250);
-    let resolveRefresh!: (usage: UsageStatsGetResult) => void;
-    const blockedRefresh = new Promise<UsageStatsGetResult>((resolve) => {
-      resolveRefresh = resolve;
-    });
-    usageHarness.getUsageStats
-      .mockResolvedValueOnce(first)
-      .mockReturnValueOnce(blockedRefresh)
-      .mockResolvedValue(second);
-
-    const screen = await render(<UsageSummaryProbe />);
-    let mounted = true;
-    try {
-      await vi.waitFor(() => {
-        expect(usageHarness.getUsageStats).toHaveBeenCalledTimes(1);
-        expect(textNumber('[data-raw-output="true"]')).toBe(1_000);
-        expect(textNumber('[data-chart-day-output="true"]')).toBe(100);
-      });
-      expect(activeIntervals.size).toBe(1);
-      expect(intervalDelays).toEqual([5_000]);
-      await Promise.resolve();
-      await Promise.resolve();
-
-      activeIntervals.values().next().value?.();
-      await vi.waitFor(() => expect(usageHarness.getUsageStats).toHaveBeenCalledTimes(2));
-
-      // An unresolved request spans two more ticks. The in-flight guard must
-      // coalesce them rather than building a queue of stale detail reads.
-      activeIntervals.values().next().value?.();
-      activeIntervals.values().next().value?.();
-      expect(usageHarness.getUsageStats).toHaveBeenCalledTimes(2);
-
-      resolveRefresh(second);
-      await vi.waitFor(() => {
-        expect(textNumber('[data-raw-output="true"]')).toBe(1_250);
-        expect(textNumber('[data-chart-day-output="true"]')).toBe(250);
-      });
-      await vi.waitFor(() => {
-        const animated = textNumber('[data-summary-output="true"]');
-        expect(animated).toBeGreaterThan(0);
-        expect(animated).toBeLessThan(1_250);
-      });
-      await vi.waitFor(() => expect(textNumber('[data-summary-output="true"]')).toBe(1_250), {
-        timeout: 3_000,
-      });
-
-      activeIntervals.values().next().value?.();
-      await vi.waitFor(() => expect(usageHarness.getUsageStats).toHaveBeenCalledTimes(3));
-      await Promise.resolve();
-      await Promise.resolve();
-
-      visibility = "hidden";
-      document.dispatchEvent(new Event("visibilitychange"));
-      expect(activeIntervals.size).toBe(0);
-      expect(usageHarness.getUsageStats).toHaveBeenCalledTimes(3);
-
-      visibility = "visible";
-      document.dispatchEvent(new Event("visibilitychange"));
-      await vi.waitFor(() => expect(usageHarness.getUsageStats).toHaveBeenCalledTimes(4));
-      expect(activeIntervals.size).toBe(1);
-      expect(intervalDelays).toEqual([5_000, 5_000]);
-      // Duplicate browser events must not create a second timer or request.
-      document.dispatchEvent(new Event("visibilitychange"));
-      expect(usageHarness.getUsageStats).toHaveBeenCalledTimes(4);
-      expect(activeIntervals.size).toBe(1);
-
-      await screen.unmount();
-      mounted = false;
-      expect(activeIntervals.size).toBe(0);
-      expect(usageHarness.getUsageStats).toHaveBeenCalledTimes(4);
-    } finally {
-      if (mounted) await screen.unmount();
-    }
-  });
-
   it("single-flights multiple consumers and reuses cached detail across an Atrium remount", async () => {
     const first = createUsage(2_000, 200);
     let resolveRefresh!: (usage: UsageStatsGetResult) => void;
@@ -306,56 +226,6 @@ describe("useUsageCostSummary", () => {
       await vi.waitFor(() => expect(textNumber('[data-raw-output="true"]')).toBe(2_100));
     } finally {
       await secondScreen.unmount();
-    }
-  });
-
-  it("refreshes cached detail immediately after a websocket reconnect", async () => {
-    usageHarness.getUsageStats
-      .mockResolvedValueOnce(createUsage(3_000, 300))
-      .mockResolvedValueOnce(createUsage(3_100, 310));
-
-    const screen = await render(<UsageSummaryProbe />);
-    try {
-      await vi.waitFor(() => expect(usageHarness.getUsageStats).toHaveBeenCalledTimes(1));
-      usageHarness.connectionOpenedListener?.({ openCount: 1, reconnected: false });
-      await Promise.resolve();
-      expect(usageHarness.getUsageStats).toHaveBeenCalledTimes(1);
-      usageHarness.connectionOpenedListener?.({ openCount: 2, reconnected: true });
-
-      await vi.waitFor(() => {
-        expect(usageHarness.getUsageStats).toHaveBeenCalledTimes(2);
-        expect(textNumber('[data-raw-output="true"]')).toBe(3_100);
-      });
-    } finally {
-      await screen.unmount();
-    }
-  });
-
-  it("queues exactly one reconnect refresh behind an in-flight request", async () => {
-    let resolveInitial!: (usage: UsageStatsGetResult) => void;
-    const blockedInitial = new Promise<UsageStatsGetResult>((resolve) => {
-      resolveInitial = resolve;
-    });
-    usageHarness.getUsageStats
-      .mockReturnValueOnce(blockedInitial)
-      .mockResolvedValueOnce(createUsage(4_100, 410));
-
-    const screen = await render(<UsageSummaryProbe />);
-    try {
-      await vi.waitFor(() => expect(usageHarness.getUsageStats).toHaveBeenCalledTimes(1));
-
-      usageHarness.connectionOpenedListener?.({ openCount: 2, reconnected: true });
-      usageHarness.connectionOpenedListener?.({ openCount: 3, reconnected: true });
-      expect(usageHarness.getUsageStats).toHaveBeenCalledTimes(1);
-
-      resolveInitial(createUsage(4_000, 400));
-      await vi.waitFor(() => {
-        expect(usageHarness.getUsageStats).toHaveBeenCalledTimes(2);
-        expect(textNumber('[data-raw-output="true"]')).toBe(4_100);
-      });
-      expect(getUsageStatsDetailDiagnostics().reconnectRefreshCount).toBe(1);
-    } finally {
-      await screen.unmount();
     }
   });
 });

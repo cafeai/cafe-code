@@ -10,7 +10,7 @@ import * as SqlClient from "effect/unstable/sql/SqlClient";
 
 import type { ServerConfigShape } from "../../config.ts";
 import { ServerConfig } from "../../config.ts";
-import { SqlitePersistenceMemory } from "../../persistence/Layers/Sqlite.ts";
+import { SqlitePersistenceTest } from "../../persistence/Sqlite.test.fixture.ts";
 import { SessionCredentialService } from "../Services/SessionCredentialService.ts";
 import { ServerSecretStoreLive } from "./ServerSecretStore.ts";
 import { SessionCredentialServiceLive } from "./SessionCredentialService.ts";
@@ -39,7 +39,7 @@ const makeSessionCredentialLayer = (
   SessionCredentialServiceLive.pipe(
     // Expose this same isolated in-memory database to the identity-change and
     // unreadable-row fixtures below; never connect to a profile database.
-    Layer.provideMerge(SqlitePersistenceMemory),
+    Layer.provideMerge(SqlitePersistenceTest),
     Layer.provide(ServerSecretStoreLive),
     Layer.provide(makeServerConfigLayer(overrides)),
   );

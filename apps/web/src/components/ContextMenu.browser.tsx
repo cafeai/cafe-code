@@ -1,9 +1,9 @@
-import "../index.css";
 import { useState } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { page, userEvent } from "vitest/browser";
 import { render } from "vitest-browser-react";
+import { page, userEvent } from "vitest/browser";
 import { showContextMenuFallback } from "../contextMenuFallback";
+import "../index.css";
 import { applyInterfaceScalePercent } from "../interfaceScale";
 
 afterEach(async () => {
@@ -339,42 +339,5 @@ describe("shared context menu", () => {
     expect(panel.element().getBoundingClientRect().top).toBeGreaterThanOrEqual(0);
     await page.getByRole("menuitem", { name: "Move to group 24", exact: true }).click();
     await expect(promise).resolves.toBe("move-23");
-  });
-
-  it.each([
-    { theme: "light", scale: 80 },
-    { theme: "light", scale: 100 },
-    { theme: "light", scale: 130 },
-    { theme: "dark", scale: 80 },
-    { theme: "dark", scale: 100 },
-    { theme: "dark", scale: 130 },
-  ])("captures the $theme menu at $scale%% for visual review", async ({ theme, scale }) => {
-    await page.viewport(700, 650);
-    document.documentElement.classList.toggle("dark", theme === "dark");
-    applyInterfaceScalePercent(scale);
-    const promise = showContextMenuFallback(
-      [
-        { id: "rename", label: "Rename chat…" },
-        { id: "fork", label: "Duplicate chat" },
-        { id: "copy-path", label: "Copy path" },
-        { id: "copy-thread-id", label: "Copy chat ID" },
-        { id: "archive", label: "Archive chat" },
-        { id: "delete", label: "Move to Recycle Bin", destructive: true },
-        { id: "delete-forever", label: "Delete permanently…", destructive: true },
-        { id: "close", label: "Close tab" },
-      ],
-      { x: 180, y: 100 },
-    );
-    await expect.element(page.getByRole("menu")).toBeVisible();
-    const permanentLabel = page
-      .getByRole("menuitem", { name: "Delete permanently…" })
-      .element()
-      .querySelector("span")!;
-    expect(permanentLabel.scrollWidth).toBeLessThanOrEqual(permanentLabel.clientWidth);
-    await page.screenshot({
-      path: `../../../../.explorations/117-context-menus/${theme}-${scale}.png`,
-    });
-    await userEvent.keyboard("{Escape}");
-    await expect(promise).resolves.toBeNull();
   });
 });

@@ -43,7 +43,7 @@ const EMPTY_SNAPSHOT: UsageStatsDetailSnapshot = Object.freeze({
   lastSuccessAt: null,
 });
 
-function createDetailResource(environmentId: EnvironmentId | null) {
+export function createUsageStatsDetailResource(environmentId: EnvironmentId | null) {
   let snapshot: UsageStatsDetailSnapshot = EMPTY_SNAPSHOT;
   let active = false;
   let intervalId: number | null = null;
@@ -290,12 +290,12 @@ function createDetailResource(environmentId: EnvironmentId | null) {
   return { subscribe, getSnapshot: () => snapshot, getDiagnostics, reset };
 }
 
-const resources = new Map<string, ReturnType<typeof createDetailResource>>();
+const resources = new Map<string, ReturnType<typeof createUsageStatsDetailResource>>();
 function getResource(environmentId: EnvironmentId | null) {
   const key = environmentId ?? "primary";
   let resource = resources.get(key);
   if (!resource) {
-    resource = createDetailResource(environmentId);
+    resource = createUsageStatsDetailResource(environmentId);
     resources.set(key, resource);
   }
   return resource;

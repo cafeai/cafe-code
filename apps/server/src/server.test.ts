@@ -104,7 +104,7 @@ import {
   type ProjectionSnapshotQueryShape,
 } from "./orchestration/Services/ProjectionSnapshotQuery.ts";
 import { ThreadDetailSubscriptionRegistryLive } from "./orchestration/Layers/ThreadDetailSubscriptionRegistry.ts";
-import { SqlitePersistenceMemory } from "./persistence/Layers/Sqlite.ts";
+import { SqlitePersistenceTest } from "./persistence/Sqlite.test.fixture.ts";
 import { PersistenceSqlError } from "./persistence/Errors.ts";
 import {
   CheckpointStore,
@@ -359,7 +359,7 @@ const browserOtlpTracingLayer = Layer.mergeAll(
 );
 
 const makeAuthTestLayer = () =>
-  ServerAuthLive.pipe(Layer.provide(SqlitePersistenceMemory), Layer.provide(ServerSecretStoreLive));
+  ServerAuthLive.pipe(Layer.provide(SqlitePersistenceTest), Layer.provide(ServerSecretStoreLive));
 
 const makeBrowserOtlpPayload = (spanName: string) =>
   Effect.gen(function* () {
@@ -1051,7 +1051,7 @@ const buildAppUnderTest = (options?: {
       Layer.provideMerge(
         options?.layers?.sqlClient
           ? Layer.succeed(SqlClient.SqlClient, options.layers.sqlClient)
-          : SqlitePersistenceMemory,
+          : SqlitePersistenceTest,
       ),
       Layer.provide(workspaceAndProjectServicesLayer),
       Layer.provideMerge(FetchHttpClient.layer),
@@ -7094,10 +7094,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
               commands.map((command) => command.type),
               ["thread.create", "thread.turn.start"],
             );
-          }).pipe(
-            Effect.provide(SqlitePersistenceMemory),
-            Effect.provide(makeHttpServerTestLayer()),
-          ),
+          }).pipe(Effect.provide(SqlitePersistenceTest), Effect.provide(makeHttpServerTestLayer())),
       );
     }
   }

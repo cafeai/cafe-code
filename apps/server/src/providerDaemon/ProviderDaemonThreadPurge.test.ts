@@ -15,7 +15,7 @@ import * as Schema from "effect/Schema";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
 import { describe, expect, it } from "vitest";
 
-import { SqlitePersistenceMemory } from "../persistence/Layers/Sqlite.ts";
+import { SqlitePersistenceTest } from "../persistence/Sqlite.test.fixture.ts";
 import { makeProviderDaemonCommandLedger } from "./CommandLedger.ts";
 import { makePersistentProviderDaemonEventJournal } from "./EventJournal.ts";
 import { purgeProviderDaemonThreadPersistence } from "./ProviderDaemonThreadPurge.ts";
@@ -201,7 +201,7 @@ describe("ProviderDaemonThreadPurge", () => {
         // LIKE is acceptable only as a test assertion. Production deletion
         // authority is exclusively typed sidecar identity.
         expect(lateBodies[0]?.matches).toBe(0);
-      }).pipe(Effect.scoped, Effect.provide(SqlitePersistenceMemory)),
+      }).pipe(Effect.scoped, Effect.provide(SqlitePersistenceTest)),
     );
   });
 
@@ -292,7 +292,7 @@ describe("ProviderDaemonThreadPurge", () => {
           SELECT thread_id AS "threadId" FROM provider_daemon_command_threads
         `;
         expect(identities.map((row) => row.threadId)).toEqual([survivor, survivor]);
-      }).pipe(Effect.scoped, Effect.provide(SqlitePersistenceMemory)),
+      }).pipe(Effect.scoped, Effect.provide(SqlitePersistenceTest)),
     );
   });
 
@@ -357,7 +357,7 @@ describe("ProviderDaemonThreadPurge", () => {
         expect(identities.map((row) => row.threadId)).toEqual(
           [unrelatedSource, unrelatedTarget].toSorted(),
         );
-      }).pipe(Effect.scoped, Effect.provide(SqlitePersistenceMemory)),
+      }).pipe(Effect.scoped, Effect.provide(SqlitePersistenceTest)),
     );
   });
 
@@ -512,7 +512,7 @@ describe("ProviderDaemonThreadPurge", () => {
           )
         `);
         expect(lateSupervisorChild._tag).toBe("Failure");
-      }).pipe(Effect.scoped, Effect.provide(SqlitePersistenceMemory)),
+      }).pipe(Effect.scoped, Effect.provide(SqlitePersistenceTest)),
     );
   });
 });

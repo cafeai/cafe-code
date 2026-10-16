@@ -1,5 +1,12 @@
 # Visualization CI qualification
 
+Current suite design is governed by [Test suite policy](test-suite-policy.md).
+The October 16 overhaul retires the exact fluid inventory, sample commit-chart
+qualification, cosmetic coordinate/animation matrices and fixed frame-count
+readiness below. Historical failure investigations remain useful evidence;
+they do not require reinstating removed tests. Native input/context isolation,
+security admission, worker/deadline limits and feature assertions still apply.
+
 Status: Qualification procedure for the current Full-access browser path
 Created: 2026-10-13 18:22:30 JST (UTC+0900)
 Last updated: 2026-10-15 12:49:47 JST (UTC+0900)

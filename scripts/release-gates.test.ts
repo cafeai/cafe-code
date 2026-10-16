@@ -149,7 +149,7 @@ describe("release publication gates", () => {
       with: { source_ref: "${{ github.sha }}" },
     });
     expect(ci.jobs.quality.if).toBe(
-      "${{ !inputs.windows_ownership_only && !inputs.reliability_only }}",
+      "${{ always() && !cancelled() && !inputs.windows_ownership_only && !inputs.reliability_only }}",
     );
     const reliability = workflow("reliability.yml");
     expect(reliability.on.workflow_call.inputs.source_ref).toEqual({
@@ -187,30 +187,40 @@ describe("release publication gates", () => {
     expect(release.jobs.publish.needs).toEqual(["prepare", "quality", "reliability", "artifacts"]);
     const ci = workflow("ci.yml");
     expect(
-      ci.jobs.quality.steps.some(
+      ci.jobs["node-checks"].steps.some(
         (step: { run?: string }) =>
           step.run === "corepack yarn npm audit --all --recursive --no-deprecations",
       ),
     ).toBe(true);
     expect(
-      ci.jobs.quality.steps.some(
+      ci.jobs["node-checks"].steps.some(
         (step: { run?: string }) => step.run === "corepack yarn release:smoke",
       ),
     ).toBe(true);
     expect(
-      ci.jobs.quality.steps.filter((step: { name?: string }) => step.name === "Browser tests"),
-    ).toEqual([
-      {
-        name: "Browser tests",
-        if: "runner.os == 'Linux'",
-        run: [
-          "corepack yarn workspace @cafecode/web test:browser --project=desktop --project=touch",
-          "corepack yarn workspace @cafecode/web test:browser --project=visualization-fluid-motion",
-          "corepack yarn workspace @cafecode/web test:browser --project=context-reduced-motion",
-          "",
-        ].join("\n"),
-      },
-    ]);
+      ci.jobs["browser-checks"].steps.some(
+        (step: { run?: string }) => step.run === "corepack yarn test:browser:ci",
+      ),
+    ).toBe(true);
+    expect(ci.jobs.quality.needs).toEqual(
+      expect.arrayContaining(["node-checks", "browser-checks"]),
+    );
+    // This stable required check must fail explicitly instead of being
+    // silently skipped when one of its newly parallel prerequisites fails.
+    const failureGate = ci.jobs.quality.steps.find(
+      (step: { run?: string }) => step.run === "exit 1",
+    );
+    expect(failureGate).toMatchObject({
+      if: "${{ needs['node-checks'].result != 'success' || needs['browser-checks'].result != 'success' }}",
+    });
+    expect(failureGate["continue-on-error"]).not.toBe(true);
+    expect(ci.jobs.quality.steps.indexOf(failureGate)).toBeLessThan(
+      ci.jobs.quality.steps.findIndex((step: { uses?: string }) =>
+        step.uses?.startsWith("actions/checkout@"),
+      ),
+    );
+    expect(ci.jobs["node-checks"].needs ?? []).not.toContain("browser-checks");
+    expect(ci.jobs["browser-checks"].needs ?? []).not.toContain("node-checks");
   });
   it("qualifies uploaded bytes before sealing and checks the candidate feed before publishing", () => {
     const release = workflow("release.yml");

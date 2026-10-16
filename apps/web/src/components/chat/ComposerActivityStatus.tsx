@@ -1,12 +1,13 @@
-import { useUiLocale, useUiPresentation } from "~/i18n";
 import { uiText } from "@cafecode/shared/i18n";
 import { ChevronRightIcon, Clock3Icon } from "lucide-react";
 import { useCallback, useEffect, useId, useState } from "react";
-import type { ChatActivityPresentation } from "./chatActivity";
-import { Spinner } from "../ui/spinner";
+import { useUiLocale, useUiPresentation } from "~/i18n";
 import { formatTokensPerSecond, type GenerationRate } from "~/lib/generationRate";
 import { cn } from "~/lib/utils";
 import { formatDuration } from "~/session-logic";
+import { Spinner } from "../ui/spinner";
+import type { ChatActivityPresentation } from "./chatActivity";
+import { startElapsedTimeTicker } from "./elapsedTimeTicker";
 
 export function ComposerActivityStatus({
   activity,
@@ -52,28 +53,13 @@ export function ComposerActivityStatus({
   // latest command's timestamp as a replacement for the whole-turn interval.
   useEffect(() => {
     if (!revealed || !elapsedElement) return;
-    const update = () => {
-      elapsedElement.textContent = uiPresentation.formatDuration(
-        Math.max(0, Date.now() - startedMs),
-      );
-    };
-    // Update only this text node, not the streaming composer React subtree.
-    // Hover/focus exit, hidden documents, a new turn and unmount all retire the
-    // sole interval. Restoring visibility catches up from the same start edge.
-    let interval: ReturnType<typeof setInterval> | undefined;
-    const synchronizeVisibility = () => {
-      clearInterval(interval);
-      interval = undefined;
-      if (document.visibilityState === "hidden") return;
-      update();
-      interval = setInterval(update, 1_000);
-    };
-    synchronizeVisibility();
-    document.addEventListener("visibilitychange", synchronizeVisibility);
-    return () => {
-      clearInterval(interval);
-      document.removeEventListener("visibilitychange", synchronizeVisibility);
-    };
+    return startElapsedTimeTicker({
+      startedMs,
+      publish: (elapsedMs) => {
+        elapsedElement.textContent = uiPresentation.formatDuration(elapsedMs);
+      },
+      visibility: document,
+    });
   }, [revealed, startedMs, elapsedElement]);
   const content = (
     <>

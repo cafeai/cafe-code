@@ -1,3 +1,4 @@
+import { saveAcknowledgedPolicyOverlay } from "../../lib/acknowledgedPolicyOverlay";
 import { useUiLocale, useUiPresentation } from "~/i18n";
 import { uiText } from "@cafecode/shared/i18n";
 import { UiMessage } from "~/i18n";
@@ -1481,63 +1482,24 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
       const current =
         store.getComposerDraft(composerDraftTarget)?.subagentLimits ?? readCanonical();
       const next = withSubagentLimit(current, selectedProvider, value);
-      scope.dispose?.();
-      let acknowledgedSequence: number | null = null;
-      let installedOverlay = false;
-      const dispose = () => {
-        unsubscribe();
-        if (
-          installedOverlay &&
-          subagentLimitsEqual(store.getComposerDraft(composerDraftTarget)?.subagentLimits, next)
-        ) {
-          store.setSubagentLimits(composerDraftTarget, undefined);
-        }
-        installedOverlay = false;
-        if (scope.dispose === dispose) scope.dispose = null;
-      };
-      const unsubscribe = useStore.subscribe(() => {
-        const sequence = readCanonicalSequence();
-        // Earlier-arriving projections may precede our durable save. Only an
-        // exact-thread policy witness at/after its ACK proves canonical policy
-        // has caught up. Equal-policy snapshots also retire the lag bridge.
-        if (
-          acknowledgedSequence !== null &&
-          sequence !== undefined &&
-          sequence >= acknowledgedSequence
-        )
-          dispose();
+      await saveAcknowledgedPolicyOverlay({
+        scope,
+        isCurrent: () => concurrencySaveScope.current === scope,
+        requested: next,
+        readSequence: readCanonicalSequence,
+        readCanonical,
+        readOverlay: () => store.getComposerDraft(composerDraftTarget)?.subagentLimits,
+        writeOverlay: (value) => store.setSubagentLimits(composerDraftTarget, value),
+        equal: subagentLimitsEqual,
+        subscribe: (notify) => useStore.subscribe(notify),
+        dispatch: () =>
+          requireEnvironmentConnection(environmentId).client.orchestration.dispatchCommand({
+            type: "thread.meta.update",
+            commandId: newCommandId(),
+            threadId: activeThreadId,
+            subagentLimits: next,
+          }),
       });
-      scope.dispose = dispose;
-      // Bind this write to the exact owner environment/thread before awaiting;
-      // switching panes cannot redirect a late save into another conversation.
-      try {
-        const acknowledgement = await requireEnvironmentConnection(
-          environmentId,
-        ).client.orchestration.dispatchCommand({
-          type: "thread.meta.update",
-          commandId: newCommandId(),
-          threadId: activeThreadId,
-          subagentLimits: next,
-        });
-        acknowledgedSequence = acknowledgement.sequence;
-        const canonicalSequence = readCanonicalSequence();
-        if (
-          scope.active &&
-          concurrencySaveScope.current === scope &&
-          scope.dispose === dispose &&
-          (canonicalSequence === undefined || canonicalSequence < acknowledgedSequence) &&
-          !subagentLimitsEqual(readCanonical(), next)
-        ) {
-          // Preserve an acknowledged choice until exact-thread canonical
-          // authority catches up to that save. Earlier scalar changes are not
-          // newer policy authority. Queued sends independently omit this optional
-          // replacement and consume the server's current durable preference.
-          installedOverlay = true;
-          store.setSubagentLimits(composerDraftTarget, next);
-        }
-      } finally {
-        if (!installedOverlay) dispose();
-      }
       return;
     }
     const current =

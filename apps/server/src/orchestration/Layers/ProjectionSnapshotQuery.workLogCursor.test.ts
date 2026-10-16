@@ -11,7 +11,7 @@ import * as Layer from "effect/Layer";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
 import type * as Statement from "effect/unstable/sql/Statement";
 
-import { SqlitePersistenceMemory } from "../../persistence/Layers/Sqlite.ts";
+import { SqlitePersistenceTest } from "../../persistence/Sqlite.test.fixture.ts";
 import { RepositoryIdentityResolverLive } from "../../project/Layers/RepositoryIdentityResolver.ts";
 import { ProjectionSnapshotQuery } from "../Services/ProjectionSnapshotQuery.ts";
 import { OrchestrationProjectionSnapshotQueryLive } from "./ProjectionSnapshotQuery.ts";
@@ -28,7 +28,7 @@ const cursor = (sequence: number | null, activityId: string, createdAt = timesta
 
 const fixtureLayer = OrchestrationProjectionSnapshotQueryLive.pipe(
   Layer.provideMerge(RepositoryIdentityResolverLive),
-  Layer.provideMerge(SqlitePersistenceMemory),
+  Layer.provideMerge(SqlitePersistenceTest),
   Layer.provideMerge(NodeServices.layer),
 );
 

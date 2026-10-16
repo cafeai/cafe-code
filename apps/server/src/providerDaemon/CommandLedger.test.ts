@@ -14,7 +14,7 @@ import * as Schema from "effect/Schema";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
 import { describe, expect, it } from "vitest";
 
-import { SqlitePersistenceMemory } from "../persistence/Layers/Sqlite.ts";
+import { SqlitePersistenceTest } from "../persistence/Sqlite.test.fixture.ts";
 import { makeProviderDaemonCommandLedger } from "./CommandLedger.ts";
 
 const encodeProviderDaemonRpcRequestJson = Schema.encodeSync(
@@ -135,7 +135,7 @@ describe("ProviderDaemonCommandLedger", () => {
           error: { tag: "ProviderDaemonCommandIdentityMismatch" },
         });
         expect(yield* Ref.get(calls)).toBe(3);
-      }).pipe(Effect.scoped, Effect.provide(SqlitePersistenceMemory)),
+      }).pipe(Effect.scoped, Effect.provide(SqlitePersistenceTest)),
     );
   });
 
@@ -180,7 +180,7 @@ describe("ProviderDaemonCommandLedger", () => {
           expect(snapshot.runningCommandCount).toBe(0);
         }
         expect(yield* Ref.get(calls)).toBe(2);
-      }).pipe(Effect.scoped, Effect.provide(SqlitePersistenceMemory)),
+      }).pipe(Effect.scoped, Effect.provide(SqlitePersistenceTest)),
     );
   });
 
@@ -253,7 +253,7 @@ describe("ProviderDaemonCommandLedger", () => {
         const bindings =
           yield* sql`SELECT thread_id FROM provider_daemon_command_threads WHERE thread_id = ${identity.threadId}`;
         expect(bindings).toHaveLength(3);
-      }).pipe(Effect.scoped, Effect.provide(SqlitePersistenceMemory)),
+      }).pipe(Effect.scoped, Effect.provide(SqlitePersistenceTest)),
     );
   });
 
@@ -288,7 +288,7 @@ describe("ProviderDaemonCommandLedger", () => {
           expect(JSON.stringify(result)).not.toContain("private-malformed-request");
         }
         expect(count).toBe(1);
-      }).pipe(Effect.scoped, Effect.provide(SqlitePersistenceMemory)),
+      }).pipe(Effect.scoped, Effect.provide(SqlitePersistenceTest)),
     );
   });
 
@@ -328,7 +328,7 @@ describe("ProviderDaemonCommandLedger", () => {
           expect(JSON.stringify(contents)).not.toContain("private-answer");
           expect(JSON.stringify(contents)).not.toContain("private-token");
         }
-      }).pipe(Effect.scoped, Effect.provide(SqlitePersistenceMemory)),
+      }).pipe(Effect.scoped, Effect.provide(SqlitePersistenceTest)),
     );
   });
   it("returns the stored result for duplicate mutating command ids", async () => {
@@ -349,7 +349,7 @@ describe("ProviderDaemonCommandLedger", () => {
         expect(first).toEqual({ ok: true, value: null });
         expect(second).toEqual(first);
         expect(yield* Ref.get(callCount)).toBe(1);
-      }).pipe(Effect.scoped, Effect.provide(SqlitePersistenceMemory)),
+      }).pipe(Effect.scoped, Effect.provide(SqlitePersistenceTest)),
     );
   });
 
@@ -375,7 +375,7 @@ describe("ProviderDaemonCommandLedger", () => {
         yield* ledger.runOnce(request, execute);
         expect(yield* Ref.get(count)).toBe(1);
         expect((yield* ledger.snapshot).recentCompletedCommands[0]?.method).toBe("compactThread");
-      }).pipe(Effect.scoped, Effect.provide(SqlitePersistenceMemory)),
+      }).pipe(Effect.scoped, Effect.provide(SqlitePersistenceTest)),
     );
   });
 
@@ -428,7 +428,7 @@ describe("ProviderDaemonCommandLedger", () => {
           },
         });
         expect(JSON.stringify(snapshot)).not.toContain(objective);
-      }).pipe(Effect.scoped, Effect.provide(SqlitePersistenceMemory)),
+      }).pipe(Effect.scoped, Effect.provide(SqlitePersistenceTest)),
     );
   });
 
@@ -452,7 +452,7 @@ describe("ProviderDaemonCommandLedger", () => {
             tag: "ProviderDaemonMissingCommandId",
           },
         });
-      }).pipe(Effect.scoped, Effect.provide(SqlitePersistenceMemory)),
+      }).pipe(Effect.scoped, Effect.provide(SqlitePersistenceTest)),
     );
   });
 
@@ -479,7 +479,7 @@ describe("ProviderDaemonCommandLedger", () => {
         expect(supervisorResult).toEqual({ ok: true, value: "supervisor" });
         expect((yield* daemonLedger.snapshot).commandCount).toBe(1);
         expect((yield* supervisorLedger.snapshot).commandCount).toBe(1);
-      }).pipe(Effect.scoped, Effect.provide(SqlitePersistenceMemory)),
+      }).pipe(Effect.scoped, Effect.provide(SqlitePersistenceTest)),
     );
   });
 
@@ -508,7 +508,7 @@ describe("ProviderDaemonCommandLedger", () => {
           errorTag: "ProviderDaemonCommandExecutionFailed",
           method: "stopSession",
         });
-      }).pipe(Effect.scoped, Effect.provide(SqlitePersistenceMemory)),
+      }).pipe(Effect.scoped, Effect.provide(SqlitePersistenceTest)),
     );
   });
 
@@ -545,7 +545,7 @@ describe("ProviderDaemonCommandLedger", () => {
           commandId: "provider-daemon:command-abandoned-000000000000",
           errorTag: "ProviderDaemonCommandAbandonedOnStartup",
         });
-      }).pipe(Effect.scoped, Effect.provide(SqlitePersistenceMemory)),
+      }).pipe(Effect.scoped, Effect.provide(SqlitePersistenceTest)),
     );
   });
 });

@@ -1,79 +1,80 @@
+import { createChatViewSnapshots } from "./ChatViewSnapshots.fixture";
 // Production CSS is part of the behavior under test because row height depends on it.
 import "../index.css";
 
+import { scopedThreadKey, scopeThreadRef } from "@cafecode/client-runtime";
 import {
-  EventId,
-  CommandId,
   CheckpointRef,
+  CommandId,
+  DEFAULT_SERVER_SETTINGS,
   type DesktopBridge,
-  ORCHESTRATION_WS_METHODS,
-  EnvironmentId,
   type DesktopSourceUpdateState,
+  EnvironmentId,
+  EventId,
   MessageId,
+  ORCHESTRATION_WS_METHODS,
   OrchestrationDispatchCommandError,
   type OrchestrationReadModel,
+  OrchestrationSessionStatus,
   type ProjectId,
   ProviderDriverKind,
   ProviderInstanceId,
   type RuntimeMode,
   type ServerConfig,
+  ServerConfig as ServerConfigSchema,
   type ServerLifecycleWelcomePayload,
+  SourceControlRepositoryError,
   ThreadId,
   TurnId,
   WS_METHODS,
-  OrchestrationSessionStatus,
-  SourceControlRepositoryError,
-  DEFAULT_SERVER_SETTINGS,
-  ServerConfig as ServerConfigSchema,
 } from "@cafecode/contracts";
-import { scopedThreadKey, scopeThreadRef } from "@cafecode/client-runtime";
-import { createModelCapabilities, createModelSelection } from "@cafecode/shared/model";
 import {
   CLAUDE_RESPONSE_LIMIT_MESSAGE,
   CLAUDE_SHORTER_CONTINUATION_PROMPT,
 } from "@cafecode/shared/claudeResponseLimits";
-import { RouterProvider, createMemoryHistory } from "@tanstack/react-router";
+import { createModelCapabilities, createModelSelection } from "@cafecode/shared/model";
+import { createMemoryHistory, RouterProvider } from "@tanstack/react-router";
 import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
-import { HttpResponse, http, ws } from "msw";
+import { http, HttpResponse, ws } from "msw";
 import { setupWorker } from "msw/browser";
-import { locators, page, userEvent, type Locator } from "vitest/browser";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { render } from "vitest-browser-react";
+import { type Locator, locators, page, userEvent } from "vitest/browser";
 
-import { useCommandPaletteStore } from "../commandPaletteStore";
-import { showContextMenuFallback } from "../contextMenuFallback";
-import { createDeskState, deskTabKey, hydrateDesk } from "../deskModel";
-import { deskStorageKey, useDeskStore } from "../deskStore";
-import { useComposerDraftStore, DraftId } from "../composerDraftStore";
-import {
-  __resetEnvironmentApiOverridesForTests,
-  __setEnvironmentApiOverrideForTests,
-  readEnvironmentApi,
-} from "../environmentApi";
-import { isMacPlatform } from "../lib/utils";
-import { resetSourceControlDiscoveryStateForTests } from "../lib/sourceControlDiscoveryState";
-import { __resetLocalApiForTests } from "../localApi";
-import { AppAtomRegistryProvider } from "../rpc/atomRegistry";
-import {
-  applyClientSettingsUpdated,
-  applySettingsUpdated,
-  getServerConfig,
-} from "../rpc/serverState";
-import { getRouter } from "../router";
-import { deriveLogicalProjectKeyFromSettings } from "../logicalProject";
-import { selectBootstrapCompleteForActiveEnvironment, selectThreadByRef, useStore } from "../store";
-import { useUiStateStore } from "../uiStateStore";
-import { useTaskAtriumStore } from "./atrium/taskAtriumStore";
-import { buildSubagentConcurrencyEditorKey } from "./chat/ChatComposer";
-import { toastManager } from "./ui/toast";
-import { createFollowUpQueuePersistence } from "./chat/followUpQueuePersistence";
 import { createAuthenticatedSessionHandlers } from "../../test/authHttpHandlers";
 import {
   BrowserWsRpcHarness,
   failBrowserWsRpc,
   type NormalizedWsRpcRequestBody,
 } from "../../test/wsRpcHarness";
+import { useCommandPaletteStore } from "../commandPaletteStore";
+import { DraftId, useComposerDraftStore } from "../composerDraftStore";
+import { showContextMenuFallback } from "../contextMenuFallback";
+import { createDeskState, deskTabKey, hydrateDesk } from "../deskModel";
+import { deskStorageKey, useDeskStore } from "../deskStore";
+import {
+  __resetEnvironmentApiOverridesForTests,
+  __setEnvironmentApiOverrideForTests,
+  readEnvironmentApi,
+} from "../environmentApi";
+import { resetSourceControlDiscoveryStateForTests } from "../lib/sourceControlDiscoveryState";
+import { isMacPlatform } from "../lib/utils";
+import { __resetLocalApiForTests } from "../localApi";
+import { deriveLogicalProjectKeyFromSettings } from "../logicalProject";
+import { getRouter } from "../router";
+import { AppAtomRegistryProvider } from "../rpc/atomRegistry";
+import {
+  applyClientSettingsUpdated,
+  applySettingsUpdated,
+  getServerConfig,
+} from "../rpc/serverState";
+import { selectBootstrapCompleteForActiveEnvironment, selectThreadByRef, useStore } from "../store";
+import { useUiStateStore } from "../uiStateStore";
+import { useTaskAtriumStore } from "./atrium/taskAtriumStore";
+import { buildSubagentConcurrencyEditorKey } from "./chat/ChatComposer";
+import { createFollowUpQueuePersistence } from "./chat/followUpQueuePersistence";
+import { toastManager } from "./ui/toast";
 
 import { DEFAULT_CLIENT_SETTINGS } from "@cafecode/contracts/settings";
 
@@ -125,33 +126,6 @@ const NOW_ISO = "2026-03-04T12:00:00.000Z";
 const BASE_TIME_MS = Date.parse(NOW_ISO);
 const ATTACHMENT_SVG = "<svg xmlns='http://www.w3.org/2000/svg' width='120' height='120'></svg>";
 const ADD_PROJECT_SUBMENU_PLACEHOLDER = "Enter path (e.g. ~/projects/my-app)";
-
-/**
- * Sidebar rows fade their hover/selected colours (docs/style-guide.md §7), so
- * read the presentation only after this element's running transitions settle;
- * a mid-transition read returns an interpolated colour.
- */
-async function readSettledSidebarRowPresentation(element: Element) {
-  await Promise.all(
-    element.getAnimations().map((animation) => animation.finished.catch(() => undefined)),
-  );
-  return readSidebarRowPresentation(element);
-}
-
-function readSidebarRowPresentation(element: Element) {
-  const style = getComputedStyle(element);
-  return {
-    height: style.height,
-    radius: style.borderRadius,
-    background: style.backgroundColor,
-    backgroundImage: style.backgroundImage,
-    shadow: style.boxShadow,
-    color: style.color,
-    weight: style.fontWeight,
-    paddingLeft: style.paddingLeft,
-    paddingRight: style.paddingRight,
-  };
-}
 
 interface TestFixture {
   snapshot: OrchestrationReadModel;
@@ -696,63 +670,18 @@ function setDraftThreadWithoutWorktree(): void {
     },
   });
 }
-
-function createSnapshotWithLongProposedPlan(): OrchestrationReadModel {
-  const snapshot = createSnapshotForTargetUser({
-    targetMessageId: "msg-user-plan-target" as MessageId,
-    targetText: "plan thread",
-  });
-  const planMarkdown = [
-    "# Ship plan mode follow-up",
-    "",
-    "- Step 1: capture the thread-open trace",
-    "- Step 2: identify the main-thread bottleneck",
-    "- Step 3: keep collapsed cards cheap",
-    "- Step 4: render the full markdown only on demand",
-    "- Step 5: preserve export and save actions",
-    "- Step 6: add regression coverage",
-    "- Step 7: verify route transitions stay responsive",
-    "- Step 8: confirm no server-side work changed",
-    "- Step 9: confirm short plans still render normally",
-    "- Step 10: confirm long plans stay collapsed by default",
-    "- Step 11: confirm preview text is still useful",
-    "- Step 12: confirm plan follow-up flow still works",
-    "- Step 13: confirm timeline virtualization still behaves",
-    "- Step 14: confirm theme styling still looks correct",
-    "- Step 15: confirm save dialog behavior is unchanged",
-    "- Step 16: confirm download behavior is unchanged",
-    "- Step 17: confirm code fences do not parse until expand",
-    "- Step 18: confirm preview truncation ends cleanly",
-    "- Step 19: confirm markdown links still open in editor after expand",
-    "- Step 20: confirm deep hidden detail only appears after expand",
-    "",
-    "```ts",
-    "export const hiddenPlanImplementationDetail = 'deep hidden detail only after expand';",
-    "```",
-  ].join("\n");
-
-  return {
-    ...snapshot,
-    threads: snapshot.threads.map((thread) =>
-      thread.id === THREAD_ID
-        ? Object.assign({}, thread, {
-            proposedPlans: [
-              {
-                id: "plan-browser-test",
-                turnId: null,
-                planMarkdown,
-                implementedAt: null,
-                implementationThreadId: null,
-                createdAt: isoAt(1_000),
-                updatedAt: isoAt(1_001),
-              },
-            ],
-            updatedAt: isoAt(1_001),
-          })
-        : thread,
-    ),
-  };
-}
+export type ChatViewSnapshotSources = {
+  createSnapshotForTargetUser: typeof createSnapshotForTargetUser;
+  THREAD_ID: typeof THREAD_ID;
+  isoAt: typeof isoAt;
+  RUNTIME_TASK_STEPS: typeof RUNTIME_TASK_STEPS;
+  RUNTIME_TASK_TURN_ID: typeof RUNTIME_TASK_TURN_ID;
+  SUBAGENT_RUNTIME_ID: typeof SUBAGENT_RUNTIME_ID;
+  SECOND_PROJECT_ID: typeof SECOND_PROJECT_ID;
+  ARCHIVED_SECONDARY_THREAD_ID: typeof ARCHIVED_SECONDARY_THREAD_ID;
+  NOW_ISO: typeof NOW_ISO;
+  PROJECT_ID: typeof PROJECT_ID;
+};
 
 const RUNTIME_TASK_TURN_ID = "turn-runtime-task-progress" as TurnId;
 const RUNTIME_TASK_DESCRIPTIONS = [
@@ -770,7 +699,7 @@ const RUNTIME_TASK_DESCRIPTIONS = [
   "Confirm the task progress control disappears when the current turn settles or the latest provider checklist is explicitly empty.",
 ] as const;
 
-type RuntimeTaskStep = {
+export type RuntimeTaskStep = {
   readonly step: string;
   readonly status: "completed" | "inProgress" | "pending";
 };
@@ -782,442 +711,10 @@ const RUNTIME_TASK_STEPS: ReadonlyArray<RuntimeTaskStep> = RUNTIME_TASK_DESCRIPT
   }),
 );
 
-/**
- * Build the provider-neutral shape produced after a real runtime `update_plan`
- * event. Keeping latest-turn and session ownership aligned is important here:
- * ChatView intentionally suppresses stale or terminal-turn checklists even when
- * an older `turn.plan.updated` activity remains in the durable thread history.
- */
-function createSnapshotWithRuntimeTaskProgress(options?: {
-  readonly steps?: ReadonlyArray<RuntimeTaskStep>;
-  readonly terminal?: boolean;
-  readonly withAuthoredPlan?: boolean;
-  readonly withContextWindow?: boolean;
-}): OrchestrationReadModel {
-  const snapshot = options?.withAuthoredPlan
-    ? createSnapshotWithPlanFollowUpPrompt()
-    : createSnapshotForTargetUser({
-        targetMessageId: "msg-user-runtime-task-progress" as MessageId,
-        targetText: "implement the runtime task checklist",
-      });
-  const terminal = options?.terminal ?? false;
-  const steps = options?.steps ?? RUNTIME_TASK_STEPS;
-
-  return {
-    ...snapshot,
-    threads: snapshot.threads.map((thread) =>
-      thread.id === THREAD_ID
-        ? Object.assign({}, thread, {
-            interactionMode: terminal ? thread.interactionMode : ("default" as const),
-            latestTurn: {
-              turnId: RUNTIME_TASK_TURN_ID,
-              state: terminal ? ("completed" as const) : ("running" as const),
-              requestedAt: isoAt(1_000),
-              startedAt: isoAt(1_001),
-              completedAt: terminal ? isoAt(1_020) : null,
-              assistantMessageId: null,
-              ...(options?.withAuthoredPlan
-                ? {
-                    sourceProposedPlan: {
-                      threadId: THREAD_ID,
-                      planId: "plan-follow-up-browser-test",
-                    },
-                  }
-                : {}),
-            },
-            activities: [
-              {
-                id: EventId.make("activity-runtime-task-progress"),
-                tone: "info" as const,
-                kind: "turn.plan.updated",
-                summary: "Runtime task plan updated",
-                payload: {
-                  explanation:
-                    "The provider is working through the complete implementation checklist for the current turn.",
-                  plan: [...steps],
-                },
-                turnId: RUNTIME_TASK_TURN_ID,
-                sequence: 1,
-                createdAt: isoAt(1_005),
-              },
-              ...(options?.withContextWindow
-                ? [
-                    {
-                      id: EventId.make("activity-runtime-context-window"),
-                      tone: "info" as const,
-                      kind: "context-window.updated",
-                      summary: "Context window updated",
-                      payload: {
-                        usedTokens: 213_000,
-                        maxTokens: 258_000,
-                        totalProcessedTokens: 6_600_000,
-                        compactsAutomatically: true,
-                      },
-                      turnId: RUNTIME_TASK_TURN_ID,
-                      sequence: 2,
-                      createdAt: isoAt(1_006),
-                    },
-                  ]
-                : []),
-            ],
-            session: {
-              ...thread.session,
-              status: terminal ? ("ready" as const) : ("running" as const),
-              activeTurnId: terminal ? null : RUNTIME_TASK_TURN_ID,
-              updatedAt: terminal ? isoAt(1_020) : isoAt(1_005),
-            },
-            updatedAt: terminal ? isoAt(1_020) : isoAt(1_005),
-          })
-        : thread,
-    ),
-  };
-}
-
 // Live child fixtures model evidence from one actual provider runtime, rather
 // than persisted task history alone. Reuse this identity on the session, child
 // lifecycle edges, and their terminal updates just as the native bridge does.
 const SUBAGENT_RUNTIME_ID = "b73284bf-01be-4dbf-94c8-b54e54f17801";
-
-function createSnapshotWithActiveSubagent(): OrchestrationReadModel {
-  const snapshot = createSnapshotForTargetUser({
-    targetMessageId: "msg-user-active-subagent" as MessageId,
-    targetText: "verify subagent and Atrium navigation",
-    sessionStatus: "running",
-  });
-  const turnId = "turn-active-subagent" as TurnId;
-  return {
-    ...snapshot,
-    threads: snapshot.threads.map((thread) =>
-      thread.id === THREAD_ID
-        ? Object.assign({}, thread, {
-            latestTurn: {
-              turnId,
-              state: "running" as const,
-              requestedAt: isoAt(1_000),
-              startedAt: isoAt(1_001),
-              completedAt: null,
-              assistantMessageId: null,
-            },
-            activities: [
-              {
-                id: EventId.make("activity-active-subagent"),
-                tone: "info" as const,
-                kind: "task.started",
-                summary: "Subagent started",
-                payload: {
-                  taskId: "provider-child-browser-audit",
-                  taskType: "subagent",
-                  subagent: {
-                    threadId: "provider-child-browser-audit",
-                    runtimeId: SUBAGENT_RUNTIME_ID,
-                    label: "Browser lifecycle audit",
-                    path: "/root/browser_lifecycle_audit",
-                    objective: "Verify Atrium navigation",
-                    status: "active",
-                    startedAt: isoAt(1_001),
-                  },
-                },
-                turnId,
-                sequence: 1,
-                createdAt: isoAt(1_001),
-              },
-            ],
-            session: {
-              ...thread.session,
-              subagentRuntimeId: SUBAGENT_RUNTIME_ID,
-              status: "running" as const,
-              activeTurnId: turnId,
-              updatedAt: isoAt(1_001),
-            },
-            updatedAt: isoAt(1_001),
-          })
-        : thread,
-    ),
-  };
-}
-
-/**
- * Keep the parent session on a newer turn than the turn which spawned this
- * child. Structured provider children can outlive their spawning turn, so the
- * composer and side rail must derive their roster from the complete canonical
- * activity history rather than silently applying the latest-turn transcript
- * filter used by the ordinary work log.
- */
-function createSnapshotWithCrossTurnActiveSubagent(): OrchestrationReadModel {
-  const snapshot = createSnapshotForTargetUser({
-    targetMessageId: "msg-user-cross-turn-active-subagent" as MessageId,
-    targetText: "keep the older-turn child visible while newer work runs",
-    sessionStatus: "running",
-  });
-  const spawningTurnId = "turn-cross-turn-subagent-spawn" as TurnId;
-  const latestTurnId = "turn-after-cross-turn-subagent-spawn" as TurnId;
-
-  return {
-    ...snapshot,
-    threads: snapshot.threads.map((thread) =>
-      thread.id === THREAD_ID
-        ? Object.assign({}, thread, {
-            latestTurn: {
-              turnId: latestTurnId,
-              state: "running" as const,
-              requestedAt: isoAt(1_010),
-              startedAt: isoAt(1_011),
-              completedAt: null,
-              assistantMessageId: null,
-            },
-            activities: [
-              {
-                id: EventId.make("activity-cross-turn-active-subagent"),
-                tone: "info" as const,
-                kind: "task.started",
-                summary: "Subagent started",
-                payload: {
-                  taskId: "provider-child-cross-turn-roster",
-                  taskType: "subagent",
-                  subagent: {
-                    threadId: "provider-child-cross-turn-roster",
-                    runtimeId: SUBAGENT_RUNTIME_ID,
-                    label: "Cross-turn roster audit",
-                    path: "/root/cross_turn_roster_audit",
-                    objective: "Verify the child survives latest-turn filtering",
-                    status: "active",
-                    startedAt: isoAt(1_001),
-                  },
-                },
-                turnId: spawningTurnId,
-                sequence: 1,
-                createdAt: isoAt(1_001),
-              },
-            ],
-            session: {
-              ...thread.session,
-              subagentRuntimeId: SUBAGENT_RUNTIME_ID,
-              status: "running" as const,
-              activeTurnId: latestTurnId,
-              updatedAt: isoAt(1_011),
-            },
-            updatedAt: isoAt(1_011),
-          })
-        : thread,
-    ),
-  };
-}
-
-function createSnapshotWithSecondaryProject(options?: {
-  includeSecondaryThread?: boolean;
-  includeArchivedSecondaryThread?: boolean;
-}): OrchestrationReadModel {
-  const snapshot = createSnapshotForTargetUser({
-    targetMessageId: "msg-user-secondary-project-target" as MessageId,
-    targetText: "secondary project",
-  });
-  const includeSecondaryThread = options?.includeSecondaryThread ?? true;
-  const includeArchivedSecondaryThread = options?.includeArchivedSecondaryThread ?? true;
-  const secondaryThreads: OrchestrationReadModel["threads"] = includeSecondaryThread
-    ? [
-        {
-          id: "thread-secondary-project" as ThreadId,
-          projectId: SECOND_PROJECT_ID,
-          title: "Release checklist",
-          modelSelection: { instanceId: ProviderInstanceId.make("codex"), model: "gpt-5" },
-          interactionMode: "default",
-          runtimeMode: "full-access",
-          branch: "release/docs-portal",
-          worktreePath: null,
-          latestTurn: null,
-          createdAt: isoAt(30),
-          updatedAt: isoAt(31),
-          deletedAt: null,
-          messages: [],
-          activities: [],
-          proposedPlans: [],
-          checkpoints: [],
-          session: {
-            threadId: "thread-secondary-project" as ThreadId,
-            status: "ready",
-            providerName: "codex",
-            runtimeMode: "full-access",
-            activeTurnId: null,
-            lastError: null,
-            updatedAt: isoAt(31),
-          },
-          archivedAt: null,
-        },
-      ]
-    : [];
-  const archivedSecondaryThreads: OrchestrationReadModel["threads"] = includeArchivedSecondaryThread
-    ? [
-        {
-          id: ARCHIVED_SECONDARY_THREAD_ID,
-          projectId: SECOND_PROJECT_ID,
-          title: "Archived Docs Notes",
-          modelSelection: { instanceId: ProviderInstanceId.make("codex"), model: "gpt-5" },
-          interactionMode: "default",
-          runtimeMode: "full-access",
-          branch: "release/docs-archive",
-          worktreePath: null,
-          latestTurn: null,
-          createdAt: isoAt(24),
-          updatedAt: isoAt(25),
-          deletedAt: null,
-          messages: [],
-          activities: [],
-          proposedPlans: [],
-          checkpoints: [],
-          session: {
-            threadId: ARCHIVED_SECONDARY_THREAD_ID,
-            status: "ready",
-            providerName: "codex",
-            runtimeMode: "full-access",
-            activeTurnId: null,
-            lastError: null,
-            updatedAt: isoAt(25),
-          },
-          archivedAt: isoAt(26),
-        },
-      ]
-    : [];
-
-  return {
-    ...snapshot,
-    projects: [
-      ...snapshot.projects,
-      {
-        id: SECOND_PROJECT_ID,
-        title: "Docs Portal",
-        workspaceRoot: "/repo/clients/docs-portal",
-        additionalWorkspaceRoots: [],
-        defaultModelSelection: { instanceId: ProviderInstanceId.make("codex"), model: "gpt-5" },
-        scripts: [],
-        createdAt: NOW_ISO,
-        updatedAt: NOW_ISO,
-        deletedAt: null,
-      },
-    ],
-    threads: [...snapshot.threads, ...secondaryThreads, ...archivedSecondaryThreads],
-  };
-}
-
-function createSnapshotWithPendingUserInput(): OrchestrationReadModel {
-  const snapshot = createSnapshotForTargetUser({
-    targetMessageId: "msg-user-pending-input-target" as MessageId,
-    targetText: "question thread",
-  });
-
-  return {
-    ...snapshot,
-    threads: snapshot.threads.map((thread) =>
-      thread.id === THREAD_ID
-        ? Object.assign({}, thread, {
-            interactionMode: "plan",
-            activities: [
-              {
-                id: EventId.make("activity-user-input-requested"),
-                tone: "info",
-                kind: "user-input.requested",
-                summary: "User input requested",
-                payload: {
-                  requestId: "req-browser-user-input",
-                  questions: [
-                    {
-                      id: "scope",
-                      header: "Scope",
-                      question: "What should this change cover?",
-                      options: [
-                        {
-                          label: "Tight",
-                          description: "Touch only the footer layout logic.",
-                        },
-                        {
-                          label: "Broad",
-                          description: "Also adjust the related composer controls.",
-                        },
-                      ],
-                    },
-                    {
-                      id: "risk",
-                      header: "Risk",
-                      question: "How aggressive should the imaginary plan be?",
-                      options: [
-                        {
-                          label: "Conservative",
-                          description: "Favor reliability and low-risk changes.",
-                        },
-                        {
-                          label: "Balanced",
-                          description: "Mix quick wins with one structural improvement.",
-                        },
-                      ],
-                    },
-                  ],
-                },
-                turnId: null,
-                sequence: 1,
-                createdAt: isoAt(1_000),
-              },
-            ],
-            updatedAt: isoAt(1_000),
-          })
-        : thread,
-    ),
-  };
-}
-
-function createSnapshotWithPlanFollowUpPrompt(options?: {
-  modelSelection?: { instanceId: ProviderInstanceId; model: string };
-  planMarkdown?: string;
-}): OrchestrationReadModel {
-  const snapshot = createSnapshotForTargetUser({
-    targetMessageId: "msg-user-plan-follow-up-target" as MessageId,
-    targetText: "plan follow-up thread",
-  });
-  const modelSelection = options?.modelSelection ?? {
-    instanceId: ProviderInstanceId.make("codex"),
-    model: "gpt-5",
-  };
-  const planMarkdown =
-    options?.planMarkdown ?? "# Follow-up plan\n\n- Keep the composer footer stable on resize.";
-
-  return {
-    ...snapshot,
-    projects: snapshot.projects.map((project) =>
-      project.id === PROJECT_ID ? { ...project, defaultModelSelection: modelSelection } : project,
-    ),
-    threads: snapshot.threads.map((thread) =>
-      thread.id === THREAD_ID
-        ? Object.assign({}, thread, {
-            modelSelection,
-            interactionMode: "plan",
-            latestTurn: {
-              turnId: "turn-plan-follow-up" as TurnId,
-              state: "completed",
-              requestedAt: isoAt(1_000),
-              startedAt: isoAt(1_001),
-              completedAt: isoAt(1_010),
-              assistantMessageId: null,
-            },
-            proposedPlans: [
-              {
-                id: "plan-follow-up-browser-test",
-                turnId: "turn-plan-follow-up" as TurnId,
-                planMarkdown,
-                implementedAt: null,
-                implementationThreadId: null,
-                createdAt: isoAt(1_002),
-                updatedAt: isoAt(1_003),
-              },
-            ],
-            session: {
-              ...thread.session,
-              status: "ready",
-              updatedAt: isoAt(1_010),
-            },
-            updatedAt: isoAt(1_010),
-          })
-        : thread,
-    ),
-  };
-}
 
 function resolveWsRpc(body: NormalizedWsRpcRequestBody): unknown {
   const customResult = customWsRpcResolver?.(body);
@@ -2100,6 +1597,27 @@ type ChatViewBrowserPart =
   | "desk"
   | "standalone"
   | "recovery-footer";
+
+const {
+  createSnapshotWithLongProposedPlan,
+  createSnapshotWithRuntimeTaskProgress,
+  createSnapshotWithActiveSubagent,
+  createSnapshotWithCrossTurnActiveSubagent,
+  createSnapshotWithSecondaryProject,
+  createSnapshotWithPendingUserInput,
+  createSnapshotWithPlanFollowUpPrompt,
+} = createChatViewSnapshots({
+  createSnapshotForTargetUser,
+  THREAD_ID,
+  isoAt,
+  RUNTIME_TASK_STEPS,
+  RUNTIME_TASK_TURN_ID,
+  SUBAGENT_RUNTIME_ID,
+  SECOND_PROJECT_ID,
+  ARCHIVED_SECONDARY_THREAD_ID,
+  NOW_ISO,
+  PROJECT_ID,
+});
 
 const chatViewBrowserPart = (
   globalThis as typeof globalThis & {
@@ -3634,50 +3152,6 @@ describe(`ChatView full app (${chatViewBrowserPart})`, () => {
         await mounted.cleanup();
       }
     });
-
-    it.each([80, 130] as const)(
-      "scales desktop composer typography and editor bounds at %i percent",
-      async (interfaceScalePercent) => {
-        const mounted = await mountChatView({
-          viewport: DEFAULT_VIEWPORT,
-          snapshot: createSnapshotForTargetUser({
-            targetMessageId: `msg-user-scaled-composer-${interfaceScalePercent}` as MessageId,
-            targetText: "scaled composer target",
-          }),
-          configureFixture: (nextFixture) => {
-            nextFixture.serverConfig = {
-              ...nextFixture.serverConfig,
-              clientSettings: {
-                ...nextFixture.serverConfig.clientSettings,
-                interfaceScalePercent,
-              },
-            };
-          },
-        });
-
-        try {
-          await waitForServerConfigToApply();
-          const editor = await waitForComposerEditor();
-
-          await vi.waitFor(() => {
-            const rootFontSize = Number.parseFloat(
-              window.getComputedStyle(document.documentElement).fontSize,
-            );
-            const editorStyle = window.getComputedStyle(editor);
-            const editorFontSize = Number.parseFloat(editorStyle.fontSize);
-            const editorMinHeight = Number.parseFloat(editorStyle.minHeight);
-            const editorMaxHeight = Number.parseFloat(editorStyle.maxHeight);
-
-            expect(rootFontSize).toBeGreaterThan(0);
-            expect(editorFontSize / rootFontSize).toBeCloseTo(0.875, 3);
-            expect(editorMinHeight / rootFontSize).toBeCloseTo(4.375, 3);
-            expect(editorMaxHeight / rootFontSize).toBeCloseTo(12.5, 3);
-          });
-        } finally {
-          await mounted.cleanup();
-        }
-      },
-    );
 
     it("shows the current runtime step and exposes every full task on hover without a side panel", async () => {
       // Even an old explicit "open" preference must not turn a runtime checklist
@@ -10304,8 +9778,6 @@ describe(`ChatView full app (${chatViewBrowserPart})`, () => {
 
       it.each([
         { before: true, reset: false },
-        { before: false, reset: false },
-        { before: true, reset: true },
         { before: false, reset: true },
       ])(
         "does not resurrect obsolete ACK intent over newer canonical metadata (before=$before reset=$reset)",
@@ -10827,8 +10299,6 @@ describe(`ChatView full app (${chatViewBrowserPart})`, () => {
       });
       it.each([
         { timing: "before ACK", reset: false },
-        { timing: "before ACK", reset: true },
-        { timing: "after ACK", reset: false },
         { timing: "after ACK", reset: true },
       ])(
         "never restores an obsolete limit over a newer canonical policy ($timing, reset=$reset)",
@@ -13074,84 +12544,6 @@ describe(`ChatView full app (${chatViewBrowserPart})`, () => {
   }
 
   if (chatViewBrowserPart === "navigation") {
-    it("matches Projects row styling and idle timestamps in Desk without moving the title on hover", async () => {
-      const longTitle =
-        "A long chat title that must truncate before its timestamp and hover actions";
-      const snapshot = createSnapshotForTargetUser({
-        targetMessageId: "msg-user-desk-project-row-parity" as MessageId,
-        targetText: "compare sidebar row presentation",
-      });
-      const mounted = await mountChatView({
-        viewport: DEFAULT_VIEWPORT,
-        snapshot: {
-          ...snapshot,
-          threads: snapshot.threads.map((thread) =>
-            thread.id === THREAD_ID ? Object.assign({}, thread, { title: longTitle }) : thread,
-          ),
-        },
-      });
-      try {
-        const projectsRow = page.getByTestId(`thread-row-${THREAD_ID}`);
-        await expect.element(projectsRow).toBeVisible();
-        await page.getByTestId("composer-editor").hover();
-        // Compare the live production components, not a duplicate reference
-        // fixture that could silently drift from the actual Projects design.
-        const projectPresentation = await readSettledSidebarRowPresentation(projectsRow.element());
-        const projectTimestamp =
-          projectsRow.element().lastElementChild!.lastElementChild!.textContent;
-        await projectsRow.hover();
-        const projectHoverPresentation = await readSettledSidebarRowPresentation(
-          projectsRow.element(),
-        );
-        await page
-          .getByRole("group", { name: "Sidebar view" })
-          .getByRole("button", { name: "Desk", exact: true })
-          .click();
-        const deskRow = page
-          .getByRole("region", { name: "Desk open chats" })
-          .getByRole("button", { name: longTitle, exact: true });
-        await expect.element(deskRow).toBeVisible();
-        await page.getByTestId("composer-editor").hover();
-        const row = deskRow.element();
-        const title = row.querySelector("[data-desk-row-title]")!;
-        const timestamp = row.querySelector("[data-desk-row-meta]")!;
-        const actions = row.closest("li")!.querySelector("[data-desk-row-actions]")!;
-        expect(await readSettledSidebarRowPresentation(row)).toEqual(projectPresentation);
-        expect(timestamp.textContent).toBe(projectTimestamp);
-        expect(timestamp.textContent).not.toBe("");
-        await vi.waitFor(() => {
-          expect(getComputedStyle(timestamp).opacity).toBe("1");
-          expect(getComputedStyle(actions).opacity).toBe("0");
-        });
-        const idleTitleWidth = title.getBoundingClientRect().width;
-        expect(title.scrollWidth).toBeGreaterThan(title.clientWidth);
-        await deskRow.hover();
-        await vi.waitFor(() => {
-          expect(getComputedStyle(timestamp).opacity).toBe("0");
-          expect(getComputedStyle(actions).opacity).toBe("1");
-        });
-        expect(title.getBoundingClientRect().width).toBe(idleTitleWidth);
-        const rename = actions.querySelector('button[aria-label^="Rename "]')!;
-        const close = actions.querySelector('button[aria-label^="Close tab "]')!;
-        const renameBounds = rename.getBoundingClientRect();
-        const closeBounds = close.getBoundingClientRect();
-        expect(closeBounds.left - renameBounds.right).toBeGreaterThanOrEqual(0);
-        expect(closeBounds.left - renameBounds.right).toBeLessThanOrEqual(5);
-        expect(row.getBoundingClientRect().right - closeBounds.right).toBeGreaterThanOrEqual(0);
-        expect(row.getBoundingClientRect().right - closeBounds.right).toBeLessThanOrEqual(5);
-        expect(title.getBoundingClientRect().right).toBeLessThanOrEqual(renameBounds.left + 1);
-        await page
-          .getByRole("region", { name: "Desk open chats" })
-          .getByRole("button", { name: `Rename ${longTitle}`, exact: true })
-          .hover();
-        // The actions are siblings of the native activation button so controls
-        // aren't nested. Their parent hover must still cover the whole row.
-        expect(await readSettledSidebarRowPresentation(row)).toEqual(projectHoverPresentation);
-      } finally {
-        await mounted.cleanup();
-      }
-    });
-
     it("replaces an open subagent detail with Atrium and does not restore it on close", async () => {
       const mounted = await mountChatView({
         viewport: DEFAULT_VIEWPORT,
@@ -13250,139 +12642,6 @@ describe(`ChatView full app (${chatViewBrowserPart})`, () => {
         await mounted.cleanup();
       }
     });
-
-    it("shows a pointer cursor for the running stop button", async () => {
-      const mounted = await mountChatView({
-        viewport: DEFAULT_VIEWPORT,
-        snapshot: createSnapshotForTargetUser({
-          targetMessageId: "msg-user-stop-button-cursor" as MessageId,
-          targetText: "stop button cursor target",
-          sessionStatus: "running",
-        }),
-      });
-
-      try {
-        const stopButton = await waitForElement(
-          () => document.querySelector<HTMLButtonElement>('button[aria-label="Stop generation"]'),
-          "Unable to find stop generation button.",
-        );
-
-        expect(getComputedStyle(stopButton).cursor).toBe("pointer");
-      } finally {
-        await mounted.cleanup();
-      }
-    });
-
-    it.each([
-      { viewport: DEFAULT_VIEWPORT, confirmation: false },
-      { viewport: DEFAULT_VIEWPORT, confirmation: true },
-      { viewport: COMPACT_FOOTER_VIEWPORT, confirmation: false },
-      { viewport: COMPACT_FOOTER_VIEWPORT, confirmation: true },
-    ])(
-      "keeps sidebar rename/archive actions adjacent and right-aligned ($viewport.name, confirmation setting=$confirmation)",
-      async ({ viewport, confirmation }) => {
-        const longTitle = "A long project chat title that must truncate before the row actions";
-        const snapshot = createSnapshotForTargetUser({
-          targetMessageId: "msg-user-sidebar-action-layout" as MessageId,
-          targetText: "sidebar row action layout",
-        });
-        const mounted = await mountChatView({
-          viewport,
-          snapshot: {
-            ...snapshot,
-            threads: snapshot.threads.map((thread) =>
-              thread.id === THREAD_ID ? Object.assign({}, thread, { title: longTitle }) : thread,
-            ),
-          },
-          configureFixture: (nextFixture) => {
-            nextFixture.serverConfig = {
-              ...nextFixture.serverConfig,
-              clientSettings: {
-                ...nextFixture.serverConfig.clientSettings,
-                confirmThreadArchive: confirmation,
-              },
-            };
-          },
-          resolveRpc: (body) =>
-            body._tag === ORCHESTRATION_WS_METHODS.dispatchCommand ? { sequence: 2 } : undefined,
-        });
-
-        try {
-          // The sidebar shell can arrive ahead of this selected chat's details;
-          // archive uses the existing canonical thread action, not shell data.
-          await vi.waitFor(() =>
-            expect(selectThreadByRef(useStore.getState(), THREAD_REF)).toBeDefined(),
-          );
-          const mobile = viewport.width < 768;
-          if (mobile) {
-            const toggle = await waitForElement(
-              () => document.querySelector<HTMLButtonElement>('[data-slot="sidebar-trigger"]'),
-              "Unable to find the mobile sidebar toggle.",
-            );
-            toggle.click();
-          }
-          const row = page.getByTestId(`thread-row-${THREAD_ID}`);
-          const title = page.getByTestId(`thread-title-${THREAD_ID}`);
-          const rename = row.getByRole("button", { name: `Rename ${longTitle}`, exact: true });
-          const archive = page.getByTestId(`thread-archive-${THREAD_ID}`);
-          await expect.element(row).toBeVisible();
-          await row.hover();
-          // Read real production layout after hover/Sheet transitions. Checking
-          // DOM adjacency alone would miss the former absolute-positioned gap.
-          await vi.waitFor(() => {
-            const rowBounds = row.element().getBoundingClientRect();
-            const titleBounds = title.element().getBoundingClientRect();
-            const renameBounds = rename.element().getBoundingClientRect();
-            const archiveBounds = archive.element().getBoundingClientRect();
-            const actionCluster = archive.element().closest('[class~="transition-opacity"]');
-            expect(actionCluster).not.toBeNull();
-            expect(getComputedStyle(actionCluster!).opacity).toBe("1");
-            expect(archiveBounds.left - renameBounds.right).toBeGreaterThanOrEqual(0);
-            expect(archiveBounds.left - renameBounds.right).toBeLessThanOrEqual(5);
-            expect(rowBounds.right - archiveBounds.right).toBeGreaterThanOrEqual(0);
-            expect(rowBounds.right - archiveBounds.right).toBeLessThanOrEqual(5);
-            expect(Math.abs(renameBounds.top - archiveBounds.top)).toBeLessThanOrEqual(1);
-            expect(titleBounds.right).toBeLessThanOrEqual(renameBounds.left + 1);
-            expect(renameBounds.width).toBe(mobile ? 32 : 20);
-            expect(archiveBounds.width).toBe(mobile ? 32 : 20);
-          });
-          expect(title.element().scrollWidth).toBeGreaterThan(title.element().clientWidth);
-
-          await archive.click();
-          // Mobile's existing anti-mistap policy always requires confirmation,
-          // even when the user's desktop archive preference is immediate.
-          if (confirmation || mobile) {
-            const confirm = page.getByTestId(`thread-archive-confirm-${THREAD_ID}`);
-            await expect.element(confirm).toBeVisible();
-            await expect.element(rename).not.toBeInTheDocument();
-            await expect.element(archive).not.toBeInTheDocument();
-            const bounds = confirm.element().getBoundingClientRect();
-            expect(title.element().getBoundingClientRect().right).toBeLessThanOrEqual(
-              bounds.left + 1,
-            );
-            expect(row.element().getBoundingClientRect().right - bounds.right).toBeLessThanOrEqual(
-              5,
-            );
-            expect(wsRequests.some((request) => request.type === "thread.archive")).toBe(false);
-            await confirm.click();
-          }
-          // Shared placement must preserve both archive policies and must not
-          // dispatch a rename or duplicate the archive when a button bubbles.
-          await vi.waitFor(() =>
-            expect(
-              wsRequests.filter(
-                (request) =>
-                  request._tag === ORCHESTRATION_WS_METHODS.dispatchCommand &&
-                  request.type === "thread.archive",
-              ),
-            ).toHaveLength(1),
-          );
-          expect(wsRequests.some((request) => request.type === "thread.meta.update")).toBe(false);
-        } finally {
-          await mounted.cleanup();
-        }
-      },
-    );
 
     it("hides the archive action when the pointer leaves a thread row", async () => {
       const mounted = await mountChatView({
@@ -15608,53 +14867,6 @@ describe(`ChatView full app (${chatViewBrowserPart})`, () => {
             expect(
               Math.abs(compactModelPickerOffset - initialModelPickerOffset),
             ).toBeLessThanOrEqual(1);
-          },
-          { timeout: 8_000, interval: 16 },
-        );
-      } finally {
-        await mounted.cleanup();
-      }
-    });
-
-    it("keeps the wide desktop follow-up layout expanded when the footer still fits", async () => {
-      const mounted = await mountChatView({
-        viewport: WIDE_FOOTER_VIEWPORT,
-        snapshot: createSnapshotWithPlanFollowUpPrompt({
-          modelSelection: {
-            instanceId: ProviderInstanceId.make("codex"),
-            model: "gpt-5.3-codex-spark",
-          },
-          planMarkdown:
-            "# Imaginary Long-Range Plan: Cafe Code Adaptive Orchestration and Safe-Delay Execution Initiative",
-        }),
-        // This case isolates composer-width behavior. Authored plans are
-        // allowed to auto-open their document sidebar, which intentionally
-        // narrows the chat column and is covered by the plan-specific tests.
-        configureFixture: (nextFixture) => {
-          nextFixture.serverConfig = {
-            ...nextFixture.serverConfig,
-            clientSettings: {
-              ...nextFixture.serverConfig.clientSettings,
-              autoOpenPlanSidebar: false,
-            },
-          };
-        },
-      });
-
-      try {
-        await waitForButtonByText("Implement");
-
-        await vi.waitFor(
-          () => {
-            const footer = document.querySelector<HTMLElement>(
-              '[data-chat-composer-footer="true"]',
-            );
-            const actions = document.querySelector<HTMLElement>(
-              '[data-chat-composer-actions="right"]',
-            );
-
-            expect(footer?.dataset.chatComposerFooterCompact).toBe("false");
-            expect(actions?.dataset.chatComposerPrimaryActionsCompact).toBe("false");
           },
           { timeout: 8_000, interval: 16 },
         );

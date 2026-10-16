@@ -75,10 +75,8 @@ import * as NodeServices from "@effect/platform-node/NodeServices";
 import { ProviderSessionRuntimeRepositoryLive } from "../../persistence/Layers/ProviderSessionRuntime.ts";
 import type { ProviderSessionRuntimeRepositoryError } from "../../persistence/Errors.ts";
 import { ProviderSessionRuntimeRepository } from "../../persistence/Services/ProviderSessionRuntime.ts";
-import {
-  makeSqlitePersistenceLive,
-  SqlitePersistenceMemory,
-} from "../../persistence/Layers/Sqlite.ts";
+import { SqlitePersistenceTest } from "../../persistence/Sqlite.test.fixture.ts";
+import { makeSqlitePersistenceLive } from "../../persistence/Layers/Sqlite.ts";
 import { ServerSettingsService } from "../../serverSettings.ts";
 import { makeAdapterRegistryMock } from "../testUtils/providerAdapterRegistryMock.ts";
 import { normalizeClaudeSubagentHistoryRoot } from "../claudeSubagentHistoryRoot.ts";
@@ -461,7 +459,7 @@ function makeTransactionalClaudeRewindFixture(withCallback = true, baseline = fa
     makeAdapterRegistryMock({ [CLAUDE_AGENT_DRIVER]: adapter }),
   );
   const repository = ProviderSessionRuntimeRepositoryLive.pipe(
-    Layer.provide(SqlitePersistenceMemory),
+    Layer.provide(SqlitePersistenceTest),
   );
   const directory = ProviderSessionDirectoryLive.pipe(Layer.provide(repository));
   const layer = Layer.mergeAll(
@@ -473,7 +471,7 @@ function makeTransactionalClaudeRewindFixture(withCallback = true, baseline = fa
     ),
     directory,
     repository,
-    SqlitePersistenceMemory,
+    SqlitePersistenceTest,
     NodeServices.layer,
   );
   const threadId = asThreadId("transactional-rewind");
@@ -907,7 +905,7 @@ function makeReloadableProviderServiceFixture() {
     subscribeChanges: PubSub.subscribe(changes),
   };
   const repositoryLayer = ProviderSessionRuntimeRepositoryLive.pipe(
-    Layer.provide(SqlitePersistenceMemory),
+    Layer.provide(SqlitePersistenceTest),
   );
   const directoryLayer = ProviderSessionDirectoryLive.pipe(Layer.provide(repositoryLayer));
   const layer = Layer.mergeAll(
@@ -1534,7 +1532,7 @@ function makeProviderServiceLayer() {
 
   const providerAdapterLayer = Layer.succeed(ProviderAdapterRegistry, registryWithModels);
   const runtimeRepositoryLayer = ProviderSessionRuntimeRepositoryLive.pipe(
-    Layer.provide(SqlitePersistenceMemory),
+    Layer.provide(SqlitePersistenceTest),
   );
   const directoryLayer = ProviderSessionDirectoryLive.pipe(Layer.provide(runtimeRepositoryLayer));
 
@@ -1554,7 +1552,7 @@ function makeProviderServiceLayer() {
     // Expose the same memoized in-memory SQL client so history-provenance
     // tests can create the projection-thread parent required by migration 64's
     // fail-closed foreign-key fence.
-    SqlitePersistenceMemory,
+    SqlitePersistenceTest,
     NodeServices.layer,
   ).pipe(
     Layer.tap((context) =>
@@ -2084,7 +2082,7 @@ it.effect("ProviderServiceLive catches stopAll failures during shutdown", () =>
     });
     const providerAdapterLayer = Layer.succeed(ProviderAdapterRegistry, registry);
     const runtimeRepositoryLayer = ProviderSessionRuntimeRepositoryLive.pipe(
-      Layer.provide(SqlitePersistenceMemory),
+      Layer.provide(SqlitePersistenceTest),
     );
     const directoryLayer = ProviderSessionDirectoryLive.pipe(Layer.provide(runtimeRepositoryLayer));
     const providerLayer = Layer.mergeAll(
@@ -2614,7 +2612,7 @@ it.effect("ProviderServiceLive rejects new sessions for disabled providers", () 
     };
     const providerAdapterLayer = Layer.succeed(ProviderAdapterRegistry, registry);
     const runtimeRepositoryLayer = ProviderSessionRuntimeRepositoryLive.pipe(
-      Layer.provide(SqlitePersistenceMemory),
+      Layer.provide(SqlitePersistenceTest),
     );
     const directoryLayer = ProviderSessionDirectoryLive.pipe(Layer.provide(runtimeRepositoryLayer));
     const providerLayer = makeProviderServiceLive().pipe(
@@ -2688,7 +2686,7 @@ it.effect(
         },
       });
       const runtimeRepositoryLayer = ProviderSessionRuntimeRepositoryLive.pipe(
-        Layer.provide(SqlitePersistenceMemory),
+        Layer.provide(SqlitePersistenceTest),
       );
       const directoryLayer = ProviderSessionDirectoryLive.pipe(
         Layer.provide(runtimeRepositoryLayer),
@@ -2749,7 +2747,7 @@ it.effect("ProviderServiceLive rejects new sessions for disabled custom instance
     };
     const providerAdapterLayer = Layer.succeed(ProviderAdapterRegistry, registry);
     const runtimeRepositoryLayer = ProviderSessionRuntimeRepositoryLive.pipe(
-      Layer.provide(SqlitePersistenceMemory),
+      Layer.provide(SqlitePersistenceTest),
     );
     const directoryLayer = ProviderSessionDirectoryLive.pipe(Layer.provide(runtimeRepositoryLayer));
     const providerLayer = makeProviderServiceLive().pipe(
@@ -2815,7 +2813,7 @@ it.effect(
         listInstances: () => Effect.succeed([codexInstanceId, secondInstanceId, grokInstanceId]),
       };
       const repositoryLayer = ProviderSessionRuntimeRepositoryLive.pipe(
-        Layer.provide(SqlitePersistenceMemory),
+        Layer.provide(SqlitePersistenceTest),
       );
       const directoryLayer = ProviderSessionDirectoryLive.pipe(Layer.provide(repositoryLayer));
       const layer = Layer.mergeAll(
@@ -2881,7 +2879,7 @@ it.effect("ProviderServiceLive writes canonical events to the emitting thread se
       [ProviderDriverKind.make("codex")]: codex.adapter,
     });
     const runtimeRepositoryLayer = ProviderSessionRuntimeRepositoryLive.pipe(
-      Layer.provide(SqlitePersistenceMemory),
+      Layer.provide(SqlitePersistenceTest),
     );
     const directoryLayer = ProviderSessionDirectoryLive.pipe(Layer.provide(runtimeRepositoryLayer));
     const providerLayer = makeProviderServiceLive({

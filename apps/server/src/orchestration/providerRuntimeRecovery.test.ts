@@ -1,5 +1,5 @@
-import { assert, it as effectIt } from "@effect/vitest";
 import { ProviderInstanceId, SubagentRuntimeId, ThreadId, TurnId } from "@cafecode/contracts";
+import { assert, it as effectIt } from "@effect/vitest";
 import * as Effect from "effect/Effect";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
 import { describe, expect, it } from "vitest";
@@ -7,11 +7,12 @@ import { runMigrations } from "../persistence/Migrations.ts";
 import * as TestSqliteClient from "../persistence/TestSqliteClient.ts";
 import {
   buildCodexTransientFailureMarkerPayload,
-  codexTransientAcceptanceCommandId,
   codexRecoveryConversationCommitment,
+  codexTransientAcceptanceCommandId,
   codexTransientRecoveryDelayMs,
   makeCodexTransientRecoveryChainReader,
   makeRuntimeRecoveryBarrierReader,
+  runtimeRecoveryPreparationDelayMs,
   saturateRuntimeRecoveryAttempt,
 } from "./providerRuntimeRecovery.ts";
 
@@ -667,4 +668,10 @@ effectIt.layer(TestSqliteClient.layerMemory())("transient chain durability", (it
       assert.equal(yield* s.readBarrier(input), false);
     }),
   );
+});
+
+it("caps preparation retry delays without imposing an attempt limit", () => {
+  expect([0, 1, 2, 3, 4, 5, 6, 100].map(runtimeRecoveryPreparationDelayMs)).toEqual([
+    1000, 2000, 4000, 8000, 16000, 32000, 60000, 60000,
+  ]);
 });

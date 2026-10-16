@@ -103,10 +103,17 @@ it.each(["codex", "claudeAgent"] as const)(
           const sql = yield* SqlClient.SqlClient;
           yield* sql`PRAGMA foreign_keys = ON`;
           const images = yield* makeChatImages;
+          // A provider change retires publication authority, not exact image
+          // ownership already committed for this copied assistant message. The
+          // original source is gone and the database was reopened above, so
+          // both manifest and byte reads must use only the persisted binding.
+          yield* sql`UPDATE projection_thread_sessions SET provider_name = 'grok'
+            WHERE thread_id = 'fork'`;
           const request = (
             role: "owner" | "guest" | "anonymous",
             threadId = "fork",
             messageId = "copy:fork:a",
+            imageSource: string | null = source,
           ) =>
             handleChatImageRequest.pipe(
               Effect.provideService(ChatImages, images),
@@ -114,7 +121,11 @@ it.each(["codex", "claudeAgent"] as const)(
                 HttpServerRequest.HttpServerRequest,
                 HttpServerRequest.fromWeb(
                   new Request(
-                    `http://localhost/api/chat-images?${new URLSearchParams({ threadId, messageId, source })}`,
+                    `http://localhost/api/chat-images?${new URLSearchParams({
+                      threadId,
+                      messageId,
+                      ...(imageSource === null ? {} : { source: imageSource }),
+                    })}`,
                   ),
                 ),
               ),
@@ -128,8 +139,16 @@ it.each(["codex", "claudeAgent"] as const)(
               } as never),
             );
           expect((yield* request("anonymous")).status).toBe(401);
+          expect((yield* request("anonymous", "fork", "copy:fork:a", null)).status).toBe(401);
           expect((yield* request("owner", "chat")).status).toBe(404);
           for (const role of ["owner", "guest"] as const) {
+            const manifestResponse = yield* request(role, "fork", "copy:fork:a", null);
+            expect(manifestResponse.status).toBe(200);
+            expect(
+              yield* Effect.promise(() => HttpServerResponse.toWeb(manifestResponse).json()),
+            ).toEqual([
+              { source, mimeType: "image/png", width: 1, height: 1, sizeBytes: png.length },
+            ]);
             const response = yield* request(role);
             expect(response.status).toBe(200);
             expect(response.headers["content-type"]).toBe("image/png");

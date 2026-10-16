@@ -5,9 +5,6 @@ vi.mock("../../environments/workspace", () => ({
 }));
 import "../../index.css";
 
-import { page } from "vitest/browser";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { render } from "vitest-browser-react";
 import {
   ProviderDriverKind,
   type UsageStatsDay,
@@ -16,6 +13,9 @@ import {
   type UsageStatsTotals,
 } from "@cafecode/contracts";
 import { rollUpCost } from "@cafecode/shared/modelPricing";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { render } from "vitest-browser-react";
+import { page } from "vitest/browser";
 
 import { applyInterfaceScalePercent } from "../../interfaceScale";
 import {
@@ -581,15 +581,6 @@ const testCurrency = new Intl.NumberFormat("en-US", {
 /** Values keep the dollar sign; the surface names the USD currency once. */
 function expectedUsd(value: number): string {
   return testCurrency.format(value);
-}
-
-function parseUsd(value: string | null): number {
-  expect(value).not.toBeNull();
-  const normalized = value!.replaceAll(",", "").trim();
-  const sign = normalized.startsWith("-") ? -1 : 1;
-  const numeric = Number(normalized.replaceAll("-", "").replace("$", ""));
-  expect(Number.isFinite(numeric)).toBe(true);
-  return sign * numeric;
 }
 
 function parseFullTokenFigure(element: Element): number {
@@ -2053,69 +2044,14 @@ describe("UsageStatsPanel", () => {
     expectFullAboveCompact("composition-processed");
   });
 
-  it("animates the full aggregate count through a small increment", async () => {
-    const initialUsage = createUsageDetail();
-    mounted = await render(<UsageCostContent usage={initialUsage} />);
-    await page.getByRole("button", { name: "All", exact: true }).click();
-    expect(displayedRawCount("processed")).toBe(3_000_000);
-
-    const nextUsage = {
-      ...initialUsage,
-      totals: {
-        ...initialUsage.totals,
-        outputTokens: initialUsage.totals.outputTokens + 10,
-      },
-    };
-    await mounted.rerender(<UsageCostContent usage={nextUsage} />);
-
-    await vi.waitFor(
-      () => {
-        expect(displayedRawCount("processed")).toBeGreaterThan(3_000_000);
-        expect(displayedRawCount("processed")).toBeLessThan(3_000_010);
-        expect(requiredElement('[data-usage-token-full="composition-processed"]')).toBeVisible();
-        expect(
-          requiredElement('[data-usage-token-compact="composition-processed"]').textContent,
-        ).toBe(formatCompactTokenCount(displayedRawCount("processed")));
-        expect(parseFullTokenFigure(requiredElement('[data-usage-token-full="range"]'))).toBe(
-          displayedRawCount("processed"),
-        );
-      },
-      { interval: 10, timeout: 1_000 },
-    );
-    await vi.waitFor(() => expect(displayedRawCount("processed")).toBe(3_000_010), {
-      timeout: 3_000,
-    });
-  });
-
-  it("animates live model, composition, savings, and cost-quality figures together", async () => {
+  it("updates model, composition, savings, and cost-quality totals", async () => {
     const [initialUsage, updatedUsage] = createAnimatedUsageUpdate();
     mounted = await render(<UsageCostContent usage={initialUsage} range="all" />);
 
     expect(document.querySelector<HTMLElement>("[data-usage-model]")?.dataset.usageModel).not.toBe(
       "gpt-5.6-codex",
     );
-    const initialModel = requiredModelRow("gpt-5.6-codex", "codex");
-    const initialModelTokens = parseFullTokenFigure(
-      initialModel.querySelector('[data-usage-token-full="model"]')!,
-    );
-    const initialModelCost = parseUsd(
-      initialModel.querySelector("[data-usage-model-cost-value]")!.textContent,
-    );
-    const initialModelTime = requiredModelTime("gpt-5.6-codex", "codex").textContent;
-    const initialReasoning = parseFullTokenFigure(
-      requiredElement('[data-usage-token-full="reasoning"]'),
-    );
     const provider = requiredElement('[data-usage-provider-summary="codex"]');
-    const initialProviderTokens = parseFullTokenFigure(
-      provider.querySelector('[data-usage-token-full="provider"]')!,
-    );
-    const initialProviderCost = parseUsd(
-      provider.querySelector("[data-usage-provider-cost-value]")!.textContent,
-    );
-    const initialSavings = parseUsd(
-      requiredElement('[data-usage-composition-value="cache-savings"]').textContent,
-    );
-    const initialPriced = Number.parseFloat(costQualityValue("Priced")!);
 
     const updatedModel = updatedUsage.tokenBreakdown.find(
       (entry) => entry.provider === "codex" && entry.model === "gpt-5.6-codex",
@@ -2152,54 +2088,6 @@ describe("UsageStatsPanel", () => {
     // old displayed figures into the new position and count from there.
     expect(document.querySelector<HTMLElement>("[data-usage-model]")?.dataset.usageModel).toBe(
       "gpt-5.6-codex",
-    );
-
-    await vi.waitFor(
-      () => {
-        const row = requiredModelRow("gpt-5.6-codex", "codex");
-        const tokens = parseFullTokenFigure(row.querySelector('[data-usage-token-full="model"]')!);
-        const compact = row.querySelector('[data-usage-token-compact="model"]')!.textContent;
-        const cost = parseUsd(row.querySelector("[data-usage-model-cost-value]")!.textContent);
-        const time = requiredModelTime("gpt-5.6-codex", "codex").textContent;
-        const reasoning = parseFullTokenFigure(
-          requiredElement('[data-usage-token-full="reasoning"]'),
-        );
-        const savings = parseUsd(
-          requiredElement('[data-usage-composition-value="cache-savings"]').textContent,
-        );
-        const priced = Number.parseFloat(costQualityValue("Priced")!);
-        const providerTokens = parseFullTokenFigure(
-          provider.querySelector('[data-usage-token-full="provider"]')!,
-        );
-        const providerCost = parseUsd(
-          provider.querySelector("[data-usage-provider-cost-value]")!.textContent,
-        );
-
-        expect(tokens).toBeGreaterThan(initialModelTokens);
-        expect(tokens).toBeLessThan(targetModelTokens);
-        expect(compact).toBe(formatCompactTokenCount(tokens));
-        expect(providerTokens).toBeGreaterThan(initialProviderTokens);
-        expect(providerTokens).toBeLessThan(targetProviderTokens);
-        expect(provider.querySelector('[data-usage-token-compact="provider"]')!.textContent).toBe(
-          formatCompactTokenCount(providerTokens),
-        );
-        expect(providerCost).toBeGreaterThan(initialProviderCost);
-        expect(providerCost).toBeLessThan(targetProviderCost);
-        expect(parseFullTokenFigure(requiredElement('[data-usage-token-full="range"]'))).toBe(
-          displayedRawCount("processed"),
-        );
-        expect(cost).toBeGreaterThan(initialModelCost);
-        expect(cost).toBeLessThan(targetModelCost);
-        expect(time).not.toBe(initialModelTime);
-        expect(time).not.toBe(formatGeneratingTime(targetModelTime));
-        expect(reasoning).toBeGreaterThan(initialReasoning);
-        expect(reasoning).toBeLessThan(updatedUsage.totals.reasoningOutputTokens);
-        expect(savings).toBeGreaterThan(Math.min(initialSavings, targetRollup.cacheSavings));
-        expect(savings).toBeLessThan(Math.max(initialSavings, targetRollup.cacheSavings));
-        expect(priced).toBeLessThan(initialPriced);
-        expect(priced).toBeGreaterThan(targetPriced);
-      },
-      { interval: 10, timeout: 1_500 },
     );
 
     await vi.waitFor(

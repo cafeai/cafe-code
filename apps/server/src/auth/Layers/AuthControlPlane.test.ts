@@ -9,7 +9,7 @@ import { BootstrapCredentialServiceLive } from "./BootstrapCredentialService.ts"
 import { AdminPasswordServiceLive } from "./AdminPasswordService.ts";
 import { ServerSecretStoreLive } from "./ServerSecretStore.ts";
 import { SessionCredentialServiceLive } from "./SessionCredentialService.ts";
-import { SqlitePersistenceMemory } from "../../persistence/Layers/Sqlite.ts";
+import { SqlitePersistenceTest } from "../../persistence/Sqlite.test.fixture.ts";
 import { AuthControlPlane } from "../Services/AuthControlPlane.ts";
 import { makeAuthControlPlane } from "./AuthControlPlane.ts";
 import { SessionCredentialService } from "../Services/SessionCredentialService.ts";
@@ -38,7 +38,7 @@ const makeAuthControlPlaneLayer = (
     Layer.provideMerge(SessionCredentialServiceLive),
     Layer.provideMerge(AdminPasswordServiceLive),
     Layer.provideMerge(ServerSecretStoreLive),
-    Layer.provideMerge(SqlitePersistenceMemory),
+    Layer.provideMerge(SqlitePersistenceTest),
     Layer.provide(makeServerConfigLayer(overrides)),
   );
 

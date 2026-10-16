@@ -7,7 +7,7 @@ import * as TestClock from "effect/testing/TestClock";
 
 import type { ServerConfigShape } from "../../config.ts";
 import { ServerConfig } from "../../config.ts";
-import { SqlitePersistenceMemory } from "../../persistence/Layers/Sqlite.ts";
+import { SqlitePersistenceTest } from "../../persistence/Sqlite.test.fixture.ts";
 import { BootstrapCredentialService } from "../Services/BootstrapCredentialService.ts";
 import { BootstrapCredentialServiceLive } from "./BootstrapCredentialService.ts";
 
@@ -31,7 +31,7 @@ const makeBootstrapCredentialLayer = (
   overrides?: Partial<Pick<ServerConfigShape, "desktopBootstrapToken">>,
 ) =>
   BootstrapCredentialServiceLive.pipe(
-    Layer.provide(SqlitePersistenceMemory),
+    Layer.provide(SqlitePersistenceTest),
     Layer.provide(makeServerConfigLayer(overrides)),
   );
 

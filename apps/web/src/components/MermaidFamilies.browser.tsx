@@ -1452,19 +1452,24 @@ describe("new family pre-layout security admission", () => {
     expect(await renderNativeFamilyOutput("info", mutation)).toBeNull();
   });
 
-  it.each(MERMAID_FAMILY_FIXTURES)(
-    "refuses source configuration and callbacks for $family at both boundaries",
-    async ({ source }) => {
-      for (const hostile of [
-        `%%{init: {"securityLevel":"loose"}}%%\n${source}`,
-        `${source}\nclick target "https://example.invalid/diagram"`,
-        `---\nconfig:\n  securityLevel: loose\n---\n${source}`,
-      ]) {
-        expect(() => admitMermaidSource(hostile)).toThrow();
-        expect(await admitsParsedFamily(hostile)).toBe(false);
-      }
-    },
-  );
+  // Exhaustive source/header combinations exercise the exact receiver in
+  // runtimeSourceAdmission.test.ts. Keep native one-use frame proof here for
+  // all three refusal classes; source-only refusal precedes family parsing.
+  it("refuses source configuration and callbacks before native parsing at both boundaries", async () => {
+    const fixture = MERMAID_FAMILY_FIXTURES.find(
+      (entry) => entry.family === "packet relative lengths",
+    );
+    expect(fixture).toBeDefined();
+    const source = fixture!.source;
+    for (const hostile of [
+      `%%{init: {"securityLevel":"loose"}}%%\n${source}`,
+      `${source}\nclick target "https://example.invalid/diagram"`,
+      `---\nconfig:\n  securityLevel: loose\n---\n${source}`,
+    ]) {
+      expect(() => admitMermaidSource(hostile)).toThrow();
+      expect(await admitsParsedFamily(hostile, "", undefined, undefined, 0)).toBe(false);
+    }
+  });
 
   it.each([
     {

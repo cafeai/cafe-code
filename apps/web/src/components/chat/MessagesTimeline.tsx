@@ -1919,9 +1919,12 @@ function AssistantTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "mess
     row.message.id,
     sourceMessageText,
   );
+  // Saved images belong to the exact chat/message, not its selected provider.
+  // Keep their authenticated renderer mounted across provider switches; the
+  // server independently admits new publication only for supported providers.
   const imageContext = useMemo(
     () =>
-      (ctx.activeProvider === "codex" || ctx.activeProvider === "claudeAgent") && ctx.activeThreadId
+      ctx.activeThreadId
         ? {
             environmentId: ctx.activeThreadEnvironmentId,
             threadId: ctx.activeThreadId,
@@ -1931,7 +1934,6 @@ function AssistantTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "mess
           }
         : undefined,
     [
-      ctx.activeProvider,
       ctx.activeThreadEnvironmentId,
       ctx.activeThreadId,
       ctx.onImageExpand,

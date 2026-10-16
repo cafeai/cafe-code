@@ -24,7 +24,7 @@ import { ProjectionSnapshotQuery } from "../orchestration/Services/ProjectionSna
 import { seedScheduledFollowUp } from "../orchestration/scheduledFollowUp.testSupport.ts";
 import { OrchestrationCommandReceiptRepositoryLive } from "../persistence/Layers/OrchestrationCommandReceipts.ts";
 import { OrchestrationEventStoreLive } from "../persistence/Layers/OrchestrationEventStore.ts";
-import { SqlitePersistenceMemory } from "../persistence/Layers/Sqlite.ts";
+import { SqlitePersistenceTest } from "../persistence/Sqlite.test.fixture.ts";
 import { RepositoryIdentityResolverLive } from "../project/Layers/RepositoryIdentityResolver.ts";
 import { ProviderRegistry } from "../provider/Services/ProviderRegistry.ts";
 import { ScheduledFollowups, ScheduledFollowupsLive } from "./service.ts";
@@ -72,7 +72,7 @@ async function harness() {
     Layer.provide(OrchestrationEventStoreLive),
     Layer.provide(OrchestrationCommandReceiptRepositoryLive),
     Layer.provide(RepositoryIdentityResolverLive),
-    Layer.provideMerge(SqlitePersistenceMemory),
+    Layer.provideMerge(SqlitePersistenceTest),
     Layer.provideMerge(
       ServerConfig.layerTest(process.cwd(), { prefix: "scheduled-admission-consistency-" }),
     ),

@@ -12,7 +12,7 @@ import * as Layer from "effect/Layer";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { ServerConfig } from "../config.ts";
-import { SqlitePersistenceMemory } from "../persistence/Layers/Sqlite.ts";
+import { SqlitePersistenceTest } from "../persistence/Sqlite.test.fixture.ts";
 import { makeStandaloneWorkspaceStore } from "./standaloneWorkspace.ts";
 
 // Interpose only an explicitly armed metadata observation. Every operation
@@ -87,7 +87,7 @@ vi.mock("node:fs/promises", async (importOriginal) => {
 const configLayer = ServerConfig.layerTest(process.cwd(), {
   prefix: "standalone-workspace-test-",
 }).pipe(Layer.provide(NodeServices.layer));
-const layer = it.layer(Layer.mergeAll(SqlitePersistenceMemory, configLayer));
+const layer = it.layer(Layer.mergeAll(SqlitePersistenceTest, configLayer));
 const createThread = (threadId: ThreadId, projectId: string | null = null) =>
   Effect.gen(function* () {
     const sql = yield* SqlClient.SqlClient;
