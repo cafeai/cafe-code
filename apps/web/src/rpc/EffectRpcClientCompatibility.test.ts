@@ -222,7 +222,9 @@ describe("typed RPC feature behavior", () => {
           JSON.stringify({
             _tag: "Exit",
             requestId: id,
-            exit: Schema.encodeSync(Schema.toCodecJson(Rpc.exitSchema(streamRpc)))(Exit.void),
+            exit: Schema.encodeUnknownSync(Schema.toCodecJson(Rpc.exitSchema(streamRpc)))(
+              Exit.void,
+            ),
           }),
         );
         expect(yield* Fiber.join(pending)).toEqual(["first", "second"]);

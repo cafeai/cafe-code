@@ -127,33 +127,6 @@ const BASE_TIME_MS = Date.parse(NOW_ISO);
 const ATTACHMENT_SVG = "<svg xmlns='http://www.w3.org/2000/svg' width='120' height='120'></svg>";
 const ADD_PROJECT_SUBMENU_PLACEHOLDER = "Enter path (e.g. ~/projects/my-app)";
 
-/**
- * Sidebar rows fade their hover/selected colours (docs/style-guide.md §7), so
- * read the presentation only after this element's running transitions settle;
- * a mid-transition read returns an interpolated colour.
- */
-async function readSettledSidebarRowPresentation(element: Element) {
-  await Promise.all(
-    element.getAnimations().map((animation) => animation.finished.catch(() => undefined)),
-  );
-  return readSidebarRowPresentation(element);
-}
-
-function readSidebarRowPresentation(element: Element) {
-  const style = getComputedStyle(element);
-  return {
-    height: style.height,
-    radius: style.borderRadius,
-    background: style.backgroundColor,
-    backgroundImage: style.backgroundImage,
-    shadow: style.boxShadow,
-    color: style.color,
-    weight: style.fontWeight,
-    paddingLeft: style.paddingLeft,
-    paddingRight: style.paddingRight,
-  };
-}
-
 interface TestFixture {
   snapshot: OrchestrationReadModel;
   serverConfig: ServerConfig;

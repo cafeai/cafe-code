@@ -19,7 +19,7 @@ afterEach(async () => {
 
 // This file runs only in a provider-owned reduced-motion context. No CDP or
 // matchMedia mutation leaks device policy onto an ordinary desktop worker.
-it("retains accessible context-dialog input and stationary reduced-motion geometry", async () => {
+it("retains accessible context-dialog input under reduced motion", async () => {
   expect(window.matchMedia("(prefers-reduced-motion: reduce)").matches).toBe(true);
   mounted = await render(
     <CodexContextWindowControl
@@ -36,7 +36,7 @@ it("retains accessible context-dialog input and stationary reduced-motion geomet
       onChange={async () => {}}
     />,
   );
-  const dialog = page.getByRole("dialog").element();
+  await expect.element(page.getByRole("dialog")).toBeVisible();
   const estimate = page.getByText("(~450K compaction)", { exact: true });
   await expect.element(estimate).toBeVisible();
   const summary = estimate.element().closest<HTMLElement>("[data-codex-context-window-details]")!;

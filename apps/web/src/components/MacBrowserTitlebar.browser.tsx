@@ -77,7 +77,6 @@ describe("ordinary macOS browser titlebar gate", () => {
     );
     try {
       const header = host.querySelector<HTMLElement>("header")!;
-      const trigger = header.querySelector('[data-sidebar="trigger"]')!;
       expect(header.dataset.macTitlebar).toBe("false");
       await expect
         .element(screen.getByRole("button", { name: "Toggle Sidebar", exact: true }))

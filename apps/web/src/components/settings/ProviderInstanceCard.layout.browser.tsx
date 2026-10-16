@@ -402,30 +402,6 @@ it("keeps runtime settings in a collapsed Advanced section with the reload warni
   expect(fixture.onUpdate).not.toHaveBeenCalled();
 });
 
-function unwrappedTextWidth(element: HTMLElement) {
-  // Measure the same synthetic text/font without wrapping. Deriving the fit
-  // from the rendered row alone would let a stretched half-card column hide
-  // the regression: its extra whitespace would falsely look like text width.
-  const sample = element.cloneNode(true) as HTMLElement;
-  const style = getComputedStyle(element);
-  Object.assign(sample.style, {
-    position: "fixed",
-    visibility: "hidden",
-    display: "inline-block",
-    width: "max-content",
-    maxWidth: "none",
-    whiteSpace: "nowrap",
-    font: style.font,
-    letterSpacing: style.letterSpacing,
-  });
-  document.body.append(sample);
-  try {
-    return sample.getBoundingClientRect().width;
-  } finally {
-    sample.remove();
-  }
-}
-
 function expectContentSizedQuotaWindow(quotaWindow: HTMLElement) {
   expect(quotaWindow).toBeVisible();
   expect(quotaWindow.scrollWidth).toBeLessThanOrEqual(quotaWindow.clientWidth + 1);
