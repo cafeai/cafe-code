@@ -11,12 +11,12 @@ import * as Stdio from "effect/Stdio";
 import * as RpcClient from "effect/unstable/rpc/RpcClient";
 import * as RpcClientError from "effect/unstable/rpc/RpcClientError";
 import * as RpcMessage from "effect/unstable/rpc/RpcMessage";
-import * as RpcSerialization from "effect/unstable/rpc/RpcSerialization";
 import * as RpcServer from "effect/unstable/rpc/RpcServer";
 
 import * as AcpSchema from "./_generated/schema.gen.ts";
 import { CLIENT_METHODS } from "./_generated/meta.gen.ts";
 import * as AcpError from "./errors.ts";
+import { makeAcpRequestIdParser } from "./_internal/requestIds.ts";
 const isAcpError = Schema.is(AcpError.AcpError);
 
 /**
@@ -96,7 +96,6 @@ const decodeSessionUpdate = Schema.decodeUnknownEffect(AcpSchema.SessionNotifica
 const decodeElicitationComplete = Schema.decodeUnknownEffect(
   AcpSchema.ElicitationCompleteNotification,
 );
-const parserFactory = RpcSerialization.ndJsonRpc();
 
 function encodedByteLength(value: string | Uint8Array): number {
   return typeof value === "string" ? textEncoder.encode(value).byteLength : value.byteLength;
@@ -146,7 +145,7 @@ function redactProtocolLogEvent(event: AcpProtocolLogEvent): AcpProtocolLogEvent
 export const makeAcpPatchedProtocol = Effect.fn("makeAcpPatchedProtocol")(function* (
   options: AcpPatchedProtocolOptions,
 ): Effect.fn.Return<AcpPatchedProtocol, never, Scope.Scope> {
-  const parser = parserFactory.makeUnsafe();
+  const parser = makeAcpRequestIdParser(ACP_MAX_PENDING_EXTENSION_REQUESTS);
   const serverQueue = yield* Queue.bounded<RpcMessage.FromClientEncoded>(ACP_SERVER_QUEUE_CAPACITY);
   const clientQueue = yield* Queue.bounded<RpcMessage.FromServerEncoded>(ACP_CLIENT_QUEUE_CAPACITY);
   // Raw notifications are an optional observability surface, not a delivery

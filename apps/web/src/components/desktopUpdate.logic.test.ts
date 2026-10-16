@@ -34,7 +34,7 @@ describe("desktop update presentation", () => {
     expect(resolveDesktopUpdateButtonAction(makeState())).toBe("download");
   });
 
-  it("routes unsigned macOS updates to the exact GitHub release", () => {
+  it("routes manual macOS updates to the exact GitHub release", () => {
     const state = makeState({ installMode: "manual" });
 
     expect(resolveDesktopUpdateButtonAction(state)).toBe("manual");

@@ -254,6 +254,7 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
 
   it("declares why packaged macOS builds request microphone and local network access", () => {
     assert.deepStrictEqual(resolveMacDesktopBuildConfig("dmg", false), {
+      extraMetadata: { cafeCodeMacInAppUpdates: false },
       extraResources: [
         {
           from: "apps/desktop/resources/mac-dictation-target",
@@ -283,6 +284,7 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
 
   it("requires signing, hardened runtime and notarization for signed macOS builds", () => {
     const config = resolveMacDesktopBuildConfig("dmg", true);
+    assert.deepEqual(config.extraMetadata, { cafeCodeMacInAppUpdates: true });
     assert.isTrue(config.forceCodeSigning);
     assert.deepInclude(config.mac, {
       hardenedRuntime: true,

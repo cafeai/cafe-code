@@ -2220,14 +2220,14 @@ describe("settings panels", () => {
       await page.getByLabelText(/Display name/).fill(displayName);
       await expect
         .element(page.getByRole("textbox", { name: /^Instance ID/ }))
-        .toHaveValue("axiom");
+        .toHaveValue("axiom_2");
       await page.getByRole("button", { name: "Next", exact: true }).click();
       await page.getByRole("button", { name: "Add provider", exact: true }).click();
 
       expect(updateSettings).toHaveBeenCalledExactlyOnceWith({
         providerInstances: {
           ...config.settings.providerInstances,
-          axiom: {
+          axiom_2: {
             driver: ProviderDriverKind.make("axiom"),
             enabled: true,
             ...(displayName ? { displayName } : {}),
@@ -2279,7 +2279,7 @@ describe("settings panels", () => {
     });
   });
 
-  it.each(["", "invalid id", "codex"])(
+  it.each(["", "invalid id", "codex", "axiom"])(
     "shows the invalid account ID %j before leaving Identity",
     async (invalidId) => {
       const updateSettings = installProviderAccountSettings(createBaseServerConfig());
@@ -2351,14 +2351,61 @@ describe("settings panels", () => {
     });
   });
 
-  it.each(["axiom", "axiom_personal"])(
+  it("shows the default Axiom account and preserves other accounts through disabling and reset", async () => {
+    const base = createBaseServerConfig();
+    const customId = ProviderInstanceId.make("axiom_custom");
+    const custom = {
+      driver: ProviderDriverKind.make("axiom"),
+      enabled: false,
+      displayName: "Other account",
+    };
+    const config = {
+      ...base,
+      settings: {
+        ...base.settings,
+        providerInstances: { ...base.settings.providerInstances, [customId]: custom },
+      },
+    };
+    const updateSettings = installProviderAccountSettings(config);
+    mounted = await render(
+      <AppAtomRegistryProvider>
+        <ProviderSettingsPanel />
+      </AppAtomRegistryProvider>,
+    );
+    await expect
+      .element(page.getByRole("switch", { name: "Enable Axiom", exact: true }))
+      .toBeChecked();
+    await expect
+      .element(page.getByRole("button", { name: "Delete provider instance axiom", exact: true }))
+      .not.toBeInTheDocument();
+    await page.getByRole("switch", { name: "Enable Axiom", exact: true }).click();
+    expect(updateSettings.mock.calls[0]?.[0].providerInstances).toEqual({
+      axiom: { driver: "axiom", enabled: false },
+      [customId]: custom,
+    });
+    await expect
+      .element(page.getByRole("switch", { name: "Enable Axiom", exact: true }))
+      .not.toBeChecked();
+    await page
+      .getByRole("button", { name: "Reset Axiom provider settings to default", exact: true })
+      .click();
+    await expect
+      .element(page.getByRole("switch", { name: "Enable Axiom", exact: true }))
+      .toBeChecked();
+    expect(updateSettings).toHaveBeenCalledTimes(2);
+    expect(updateSettings.mock.calls[1]?.[0].providerInstances).toEqual({ [customId]: custom });
+    expect(updateSettings.mock.calls.every(([patch]) => !("providers" in patch))).toBe(true);
+    expect(getServerConfig()?.settings.providerInstances[customId]).toEqual(custom);
+  });
+
+  it.each(["axiom_2", "axiom_personal"])(
     "adds and manages an Axiom account %s without legacy provider defaults",
     async (instanceId) => {
       const config = createBaseServerConfig();
       const codexInstance = { driver: ProviderDriverKind.make("codex"), enabled: true };
       const updateSettings = vi.fn<LocalApi["server"]["updateSettings"]>().mockResolvedValue({
         ...config.settings,
-        providerInstances: {},
+        providerInstances: config.settings.providerInstances,
       });
       window.nativeApi = {
         persistence: {
@@ -2371,7 +2418,10 @@ describe("settings panels", () => {
         ...config,
         settings: {
           ...config.settings,
-          providerInstances: { [ProviderInstanceId.make("codex")]: codexInstance },
+          providerInstances: {
+            ...config.settings.providerInstances,
+            [ProviderInstanceId.make("codex")]: codexInstance,
+          },
         },
       });
 
@@ -2381,9 +2431,7 @@ describe("settings panels", () => {
         </AppAtomRegistryProvider>,
       );
 
-      await expect
-        .element(page.getByRole("heading", { name: "Axiom", exact: true }))
-        .not.toBeInTheDocument();
+      await expect.element(page.getByRole("heading", { name: "Axiom", exact: true })).toBeVisible();
       expect(updateSettings).not.toHaveBeenCalled();
       await page.getByRole("button", { name: "Add provider instance", exact: true }).click();
       await page.getByRole("radio", { name: "Axiom", exact: true }).click();
@@ -2404,7 +2452,11 @@ describe("settings panels", () => {
         .element(page.getByRole("heading", { name: "Personal Axiom", exact: true }))
         .toBeVisible();
       expect(updateSettings).toHaveBeenNthCalledWith(1, {
-        providerInstances: { codex: codexInstance, [instanceId]: axiomInstance },
+        providerInstances: {
+          ...config.settings.providerInstances,
+          codex: codexInstance,
+          [instanceId]: axiomInstance,
+        },
       });
       await expect
         .element(
@@ -2418,6 +2470,7 @@ describe("settings panels", () => {
       await page.getByRole("switch", { name: "Enable Personal Axiom", exact: true }).click();
       expect(updateSettings).toHaveBeenNthCalledWith(2, {
         providerInstances: {
+          ...config.settings.providerInstances,
           codex: codexInstance,
           [instanceId]: { ...axiomInstance, enabled: false },
         },
@@ -2429,7 +2482,10 @@ describe("settings panels", () => {
         .element(page.getByRole("heading", { name: "Personal Axiom", exact: true }))
         .not.toBeInTheDocument();
       expect(updateSettings).toHaveBeenCalledTimes(3);
-      expect(updateSettings.mock.calls[2]?.[0].providerInstances).toEqual({ codex: codexInstance });
+      expect(updateSettings.mock.calls[2]?.[0].providerInstances).toEqual({
+        ...config.settings.providerInstances,
+        codex: codexInstance,
+      });
       expect(updateSettings.mock.calls.every(([patch]) => !("providers" in patch))).toBe(true);
       expect(getServerConfig()?.settings.providers).toEqual(config.settings.providers);
     },

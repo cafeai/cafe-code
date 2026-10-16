@@ -13,6 +13,30 @@ import {
 } from "./serverSettings.ts";
 
 describe("serverSettings helpers", () => {
+  it("restores the built-in Axiom account after map replacement without reviving custom accounts", () => {
+    const current = {
+      ...DEFAULT_SERVER_SETTINGS,
+      providerInstances: {
+        [ProviderInstanceId.make("extra")]: {
+          driver: ProviderDriverKind.make("axiom"),
+          enabled: true,
+        },
+      },
+    };
+    expect(applyServerSettingsPatch(current, { providerInstances: {} }).providerInstances).toEqual({
+      axiom: { driver: "axiom", enabled: true },
+    });
+    const disabled = {
+      driver: ProviderDriverKind.make("axiom"),
+      enabled: false,
+      config: { binaryPath: "fixture-axiom" },
+    };
+    expect(
+      applyServerSettingsPatch(current, {
+        providerInstances: { [ProviderInstanceId.make("axiom")]: disabled },
+      }).providerInstances,
+    ).toEqual({ axiom: disabled });
+  });
   it("normalizes optional persisted strings", () => {
     expect(normalizePersistedServerSettingString(undefined)).toBeUndefined();
     expect(normalizePersistedServerSettingString("   ")).toBeUndefined();

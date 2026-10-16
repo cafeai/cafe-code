@@ -154,9 +154,11 @@ These are current incorrect, unreachable, contradictory, crash-prone, or non-por
 - [x] **RB-02 — Packaged automatic updates are unreachable.** Packaged update detection is enabled,
       stable/nightly release feeds are automated, and Linux support is explicitly x64 AppImage-only.
       Tagged releases validate all update manifests and run a lower-version packaged AppImage detection
-      probe against GitHub. Windows NSIS and Linux AppImage installs remain unsigned; macOS detects the
-      update but uses manual DMG replacement because Squirrel.Mac requires signing. Native install,
-      recovery, signing, and notarization certification remain release-hardening work. See
+      probe against GitHub. Windows NSIS and Linux AppImage installs remain unsigned; signed and
+      notarized macOS packages opt into explicit in-app ZIP download/restart through Squirrel.Mac.
+      Unsigned local macOS packages retain manual DMG replacement, and shipped versions through
+      0.2.0 need one manual upgrade to receive the new policy. Native in-place update/recovery
+      qualification remains release-hardening work. See
       [`desktop-releases-and-updates.md`](desktop-releases-and-updates.md).
 
 - [ ] **RB-07 — Provider availability checks accept versions outside a tested contract.** Codex and Claude detect versions without enforcing a supported base range; incompatible binaries can fail mid-turn. Publish/enforce version ranges, produce actionable health failures, regenerate Codex schemas in CI, and add supported-version fixtures/live canaries.

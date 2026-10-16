@@ -907,6 +907,7 @@ export function resolveMacDesktopBuildConfig(
   signed: boolean,
 ): Record<string, unknown> {
   return {
+    extraMetadata: { cafeCodeMacInAppUpdates: signed },
     ...(signed ? { forceCodeSigning: true } : {}),
     // The AX helper cannot run from app.asar. Keep its location stable for the
     // desktop-main resolver and let electron-builder include it in the signed

@@ -8,16 +8,21 @@ scope, conversation presentation, approvals and its own local history.
 
 ## Configure and sign in
 
-In Settings → Providers, add an **Axiom** account. Leave Binary path empty to use
+Cafe includes an enabled **Axiom** account by default in the model picker and
+Settings → Providers. Leave Binary path empty to use
 `axiomcli` from the backend's PATH, or select the native executable. On macOS,
 the Axiom application bundles it at
 `/Applications/Axiom.app/Contents/Resources/bin/axiomcli`; the installer can link
 it as `/usr/local/bin/axiomcli`. A Windows configuration requires a native
 executable, not a batch shim.
 
-The instance is stored in `providerInstances`, rather than adding a legacy
-`providers.axiom` mirror. Existing installations therefore do not automatically
-probe or enable a new provider. Provider entries can have separate presentation,
+The default `axiom` instance is stored in `providerInstances`, rather than adding
+a legacy `providers.axiom` mirror. Missing default accounts are supplied while
+decoding new or existing settings; saved envelopes replace the whole default,
+including disabled accounts or another driver using that slot. Setup now has a
+real bounded Axiom status check to await. The picker shows its icon even when
+the CLI is missing or signed out, and admits models only when the account is ready.
+Additional provider entries can have separate presentation,
 environments, models and processes; entries using the same native Axiom profile
 share that profile's account credentials. Cafe does not create shadow auth homes.
 
@@ -62,6 +67,14 @@ contract is available; integer microUSD is displayed without decimal rounding.
   selects only `allow_exact_session`, never a guessed prefix grant. Cancel uses
   ACP cancellation and clears pending approvals/questions.
 - Typed form questions support text, single choices and multiple choices.
+  Native callback UUIDs are preserved verbatim in both success and error replies.
+  Cafe maps them to private numeric IDs only inside Effect's RPC transport;
+  numeric and string wire IDs remain distinct. The synthetic Axiom peer uses
+  native-style UUID question and approval IDs and waits for the exact matching
+  response before emitting continuation/completion. A submitted answer is not
+  proof of a subsequent model response.
+  Cancellation uses a JSON-RPC notification with no `id` member; an empty-string
+  ID would turn it into a request and leave the native generation waiting.
   Answers remain bound to the pending native session/request and its offered
   schema. URL elicitation and client-owned terminals/filesystems are not advertised.
 - Original images/files travel through Axiom attachment v2. Native limits are

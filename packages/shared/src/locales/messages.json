@@ -57,7 +57,7 @@
   },
   " · Created ": {
     "message": " · Created ",
-    "locations": ["apps/web/src/components/settings/SettingsPanels.tsx:2970"]
+    "locations": ["apps/web/src/components/settings/SettingsPanels.tsx:2985"]
   },
   " · Environment: {value0}": {
     "message": " · Environment: {value0}",
@@ -113,7 +113,7 @@
   },
   "(optional)": {
     "message": "(optional)",
-    "locations": ["apps/web/src/components/settings/AddProviderInstanceDialog.tsx:45"]
+    "locations": ["apps/web/src/components/settings/AddProviderInstanceDialog.tsx:46"]
   },
   "(~{tokens} compaction)": {
     "message": "(~{tokens} compaction)",
@@ -181,7 +181,7 @@
   },
   "12-hour": {
     "message": "12-hour",
-    "locations": ["apps/web/src/components/settings/SettingsPanels.tsx:194"]
+    "locations": ["apps/web/src/components/settings/SettingsPanels.tsx:195"]
   },
   "15m": {
     "message": "15m",
@@ -197,7 +197,7 @@
   },
   "24-hour": {
     "message": "24-hour",
-    "locations": ["apps/web/src/components/settings/SettingsPanels.tsx:197"]
+    "locations": ["apps/web/src/components/settings/SettingsPanels.tsx:198"]
   },
   "30m": {
     "message": "30m",
@@ -305,11 +305,11 @@
   },
   "AI defaults": {
     "message": "AI defaults",
-    "locations": ["apps/web/src/components/settings/SettingsPanels.tsx:2292"]
+    "locations": ["apps/web/src/components/settings/SettingsPanels.tsx:2307"]
   },
   "About": {
     "message": "About",
-    "locations": ["apps/web/src/components/settings/SettingsPanels.tsx:1826"]
+    "locations": ["apps/web/src/components/settings/SettingsPanels.tsx:1827"]
   },
   "About Cafe management tools": {
     "message": "About Cafe management tools",
@@ -442,15 +442,15 @@
   "Accent color": {
     "message": "Accent color",
     "locations": [
-      "apps/web/src/components/OnboardingScreen.tsx:603",
+      "apps/web/src/components/OnboardingScreen.tsx:604",
       "apps/web/src/components/settings/ProviderInstanceCard.tsx:1700",
-      "apps/web/src/components/settings/SettingsPanels.tsx:988",
+      "apps/web/src/components/settings/SettingsPanels.tsx:989",
       "apps/web/src/components/settings/settingsReset.ts:24"
     ]
   },
   "Accent color ": {
     "message": "Accent color ",
-    "locations": ["apps/web/src/components/settings/AddProviderInstanceDialog.tsx:418"]
+    "locations": ["apps/web/src/components/settings/AddProviderInstanceDialog.tsx:420"]
   },
   "Accept Intel OutOfDate for this NEAR provider until AxiomCLI restarts. All other verification checks remain required.": {
     "message": "Accept Intel OutOfDate for this NEAR provider until AxiomCLI restarts. All other verification checks remain required.",
@@ -613,7 +613,7 @@
   },
   "Add another account or install of a provider.": {
     "message": "Add another account or install of a provider.",
-    "locations": ["apps/web/src/components/settings/AddProviderInstanceDialog.tsx:267"]
+    "locations": ["apps/web/src/components/settings/AddProviderInstanceDialog.tsx:269"]
   },
   "Add another project in this environment first.": {
     "message": "Add another project in this environment first.",
@@ -648,20 +648,20 @@
   },
   "Add project base directory": {
     "message": "Add project base directory",
-    "locations": ["apps/web/src/components/settings/SettingsPanels.tsx:702"]
+    "locations": ["apps/web/src/components/settings/SettingsPanels.tsx:703"]
   },
   "Add provider": {
     "message": "Add provider",
     "locations": [
-      "apps/web/src/components/settings/AddProviderInstanceDialog.tsx:265",
-      "apps/web/src/components/settings/AddProviderInstanceDialog.tsx:476"
+      "apps/web/src/components/settings/AddProviderInstanceDialog.tsx:267",
+      "apps/web/src/components/settings/AddProviderInstanceDialog.tsx:478"
     ]
   },
   "Add provider instance": {
     "message": "Add provider instance",
     "locations": [
-      "apps/web/src/components/settings/SettingsPanels.tsx:2307",
-      "apps/web/src/components/settings/SettingsPanels.tsx:2314"
+      "apps/web/src/components/settings/SettingsPanels.tsx:2322",
+      "apps/web/src/components/settings/SettingsPanels.tsx:2329"
     ]
   },
   "Add saved environment": {
@@ -697,7 +697,7 @@
   },
   "Adds an Atrium button above Settings: a read-only overview of chats and subagents.": {
     "message": "Adds an Atrium button above Settings: a read-only overview of chats and subagents.",
-    "locations": ["apps/web/src/components/settings/SettingsPanels.tsx:1367"]
+    "locations": ["apps/web/src/components/settings/SettingsPanels.tsx:1368"]
   },
   "Admin password": {
     "message": "Admin password",
@@ -828,7 +828,7 @@
       "apps/web/src/components/settings/KeybindingsSettings.tsx:1157",
       "apps/web/src/components/settings/KeybindingsSettings.tsx:723",
       "apps/web/src/components/settings/KeybindingsSettings.tsx:967",
-      "apps/web/src/components/settings/SettingsPanels.tsx:220"
+      "apps/web/src/components/settings/SettingsPanels.tsx:221"
     ]
   },
   "Always allow this session": {
@@ -868,15 +868,15 @@
       "apps/web/src/components/ChatMarkdown.tsx:742",
       "apps/web/src/components/PlanSidebar.tsx:95",
       "apps/web/src/components/Sidebar.tsx:2739",
-      "apps/web/src/components/settings/SettingsPanels.tsx:2632",
-      "apps/web/src/components/settings/SettingsPanels.tsx:2726",
-      "apps/web/src/components/settings/SettingsPanels.tsx:2797",
-      "apps/web/src/components/settings/SettingsPanels.tsx:2816"
+      "apps/web/src/components/settings/SettingsPanels.tsx:2647",
+      "apps/web/src/components/settings/SettingsPanels.tsx:2741",
+      "apps/web/src/components/settings/SettingsPanels.tsx:2812",
+      "apps/web/src/components/settings/SettingsPanels.tsx:2831"
     ]
   },
   "An instance named ''{id}'' already exists.": {
     "message": "An instance named ''{id}'' already exists.",
-    "locations": ["apps/web/src/components/settings/AddProviderInstanceDialog.tsx:99"]
+    "locations": ["apps/web/src/components/settings/AddProviderInstanceDialog.tsx:100"]
   },
   "An unexpected error occurred.": {
     "message": "An unexpected error occurred.",
@@ -896,7 +896,7 @@
   "Animate while unfocused": {
     "message": "Animate while unfocused",
     "locations": [
-      "apps/web/src/components/settings/SettingsPanels.tsx:1217",
+      "apps/web/src/components/settings/SettingsPanels.tsx:1218",
       "apps/web/src/components/settings/settingsReset.ts:25"
     ]
   },
@@ -925,7 +925,7 @@
   },
   "App accent color": {
     "message": "App accent color",
-    "locations": ["apps/web/src/components/OnboardingScreen.tsx:589"]
+    "locations": ["apps/web/src/components/OnboardingScreen.tsx:590"]
   },
   "App permission": {
     "message": "App permission",
@@ -934,13 +934,13 @@
   "Appearance": {
     "message": "Appearance",
     "locations": [
-      "apps/web/src/components/settings/SettingsPanels.tsx:915",
+      "apps/web/src/components/settings/SettingsPanels.tsx:916",
       "apps/web/src/components/settings/SettingsSidebarNav.tsx:82"
     ]
   },
   "Applied as session instructions in Codex and Claude.": {
     "message": "Applied as session instructions in Codex and Claude.",
-    "locations": ["apps/web/src/components/settings/SettingsPanels.tsx:1578"]
+    "locations": ["apps/web/src/components/settings/SettingsPanels.tsx:1579"]
   },
   "Applies to the original transcript.": {
     "message": "Applies to the original transcript.",
@@ -1002,7 +1002,7 @@
     "locations": [
       "apps/web/src/components/Sidebar.tsx:1160",
       "apps/web/src/components/Sidebar.tsx:926",
-      "apps/web/src/components/settings/SettingsPanels.tsx:2571"
+      "apps/web/src/components/settings/SettingsPanels.tsx:2586"
     ]
   },
   "Archive chat": {
@@ -1016,7 +1016,7 @@
   "Archive confirmation": {
     "message": "Archive confirmation",
     "locations": [
-      "apps/web/src/components/settings/SettingsPanels.tsx:1608",
+      "apps/web/src/components/settings/SettingsPanels.tsx:1609",
       "apps/web/src/components/settings/settingsReset.ts:51"
     ]
   },
@@ -1029,7 +1029,7 @@
   },
   "Archived {archived} · Created {created}": {
     "message": "Archived {archived} · Created {created}",
-    "locations": ["apps/web/src/components/settings/SettingsPanels.tsx:2693"]
+    "locations": ["apps/web/src/components/settings/SettingsPanels.tsx:2708"]
   },
   "Arguments (JSON array)": {
     "message": "Arguments (JSON array)",
@@ -1078,7 +1078,7 @@
   "Assistant output": {
     "message": "Assistant output",
     "locations": [
-      "apps/web/src/components/settings/SettingsPanels.tsx:1446",
+      "apps/web/src/components/settings/SettingsPanels.tsx:1447",
       "apps/web/src/components/settings/settingsReset.ts:49"
     ]
   },
@@ -1177,7 +1177,7 @@
   "Auto-open plan panel": {
     "message": "Auto-open plan panel",
     "locations": [
-      "apps/web/src/components/settings/SettingsPanels.tsx:1478",
+      "apps/web/src/components/settings/SettingsPanels.tsx:1479",
       "apps/web/src/components/settings/settingsReset.ts:48"
     ]
   },
@@ -1196,7 +1196,7 @@
   "Automatic naming model": {
     "message": "Automatic naming model",
     "locations": [
-      "apps/web/src/components/settings/SettingsPanels.tsx:542",
+      "apps/web/src/components/settings/SettingsPanels.tsx:543",
       "apps/web/src/components/settings/settingsReset.ts:63"
     ]
   },
@@ -1206,11 +1206,11 @@
   },
   "Automatic updates are disabled by the CAFE_CODE_DISABLE_AUTO_UPDATE setting.": {
     "message": "Automatic updates are disabled by the CAFE_CODE_DISABLE_AUTO_UPDATE setting.",
-    "locations": ["apps/desktop/src/updates/updateEligibility.ts:37"]
+    "locations": ["apps/desktop/src/updates/updateEligibility.ts:43"]
   },
   "Automatic updates are not available because no update feed is configured.": {
     "message": "Automatic updates are not available because no update feed is configured.",
-    "locations": ["apps/desktop/src/updates/updateEligibility.ts:33"]
+    "locations": ["apps/desktop/src/updates/updateEligibility.ts:39"]
   },
   "Automatic updates are not available right now.": {
     "message": "Automatic updates are not available right now.",
@@ -1218,11 +1218,11 @@
   },
   "Automatic updates are only available in packaged production builds.": {
     "message": "Automatic updates are only available in packaged production builds.",
-    "locations": ["apps/desktop/src/updates/updateEligibility.ts:35"]
+    "locations": ["apps/desktop/src/updates/updateEligibility.ts:41"]
   },
   "Automatic updates on Linux require running the AppImage build.": {
     "message": "Automatic updates on Linux require running the AppImage build.",
-    "locations": ["apps/desktop/src/updates/updateEligibility.ts:39"]
+    "locations": ["apps/desktop/src/updates/updateEligibility.ts:45"]
   },
   "Available": {
     "message": "Available",
@@ -1276,8 +1276,8 @@
     "locations": [
       "apps/web/src/components/CommandPalette.tsx:1609",
       "apps/web/src/components/CommandPalette.tsx:1837",
-      "apps/web/src/components/OnboardingScreen.tsx:814",
-      "apps/web/src/components/settings/AddProviderInstanceDialog.tsx:468",
+      "apps/web/src/components/OnboardingScreen.tsx:813",
+      "apps/web/src/components/settings/AddProviderInstanceDialog.tsx:470",
       "apps/web/src/components/settings/SettingsSidebarNav.tsx:271"
     ]
   },
@@ -1390,13 +1390,13 @@
   },
   "Branding name": {
     "message": "Branding name",
-    "locations": ["apps/web/src/components/OnboardingScreen.tsx:565"]
+    "locations": ["apps/web/src/components/OnboardingScreen.tsx:566"]
   },
   "Branding prefix": {
     "message": "Branding prefix",
     "locations": [
-      "apps/web/src/components/settings/SettingsPanels.tsx:1016",
-      "apps/web/src/components/settings/SettingsPanels.tsx:1030",
+      "apps/web/src/components/settings/SettingsPanels.tsx:1017",
+      "apps/web/src/components/settings/SettingsPanels.tsx:1031",
       "apps/web/src/components/settings/settingsReset.ts:29"
     ]
   },
@@ -1688,7 +1688,7 @@
       "apps/web/src/components/chat/ThreadGoalControl.tsx:412",
       "apps/web/src/components/chat/ThreadGoalControl.tsx:481",
       "apps/web/src/components/global-dictation/GlobalDictationOverlay.tsx:1020",
-      "apps/web/src/components/settings/AddProviderInstanceDialog.tsx:467",
+      "apps/web/src/components/settings/AddProviderInstanceDialog.tsx:469",
       "apps/web/src/components/settings/ConnectionsSettings.tsx:1015",
       "apps/web/src/components/settings/ConnectionsSettings.tsx:1219",
       "apps/web/src/components/settings/ConnectionsSettings.tsx:1267",
@@ -1779,7 +1779,7 @@
   },
   "Chat click behavior": {
     "message": "Chat click behavior",
-    "locations": ["apps/web/src/components/settings/SettingsPanels.tsx:1424"]
+    "locations": ["apps/web/src/components/settings/SettingsPanels.tsx:1425"]
   },
   "Chat completion notifications": {
     "message": "Chat completion notifications",
@@ -1799,7 +1799,7 @@
   },
   "Chat history": {
     "message": "Chat history",
-    "locations": ["apps/web/src/components/settings/SettingsPanels.tsx:2564"]
+    "locations": ["apps/web/src/components/settings/SettingsPanels.tsx:2579"]
   },
   "Chat override": {
     "message": "Chat override",
@@ -1811,13 +1811,13 @@
   "Chat selection copy": {
     "message": "Chat selection copy",
     "locations": [
-      "apps/web/src/components/settings/SettingsPanels.tsx:1514",
+      "apps/web/src/components/settings/SettingsPanels.tsx:1515",
       "apps/web/src/components/settings/settingsReset.ts:50"
     ]
   },
   "Chat selection copy format": {
     "message": "Chat selection copy format",
-    "locations": ["apps/web/src/components/settings/SettingsPanels.tsx:1544"]
+    "locations": ["apps/web/src/components/settings/SettingsPanels.tsx:1545"]
   },
   "Chat title": {
     "message": "Chat title",
@@ -1864,9 +1864,9 @@
       "apps/web/src/components/CommandPalette.logic.ts:146",
       "apps/web/src/components/CommandPalette.logic.ts:255",
       "apps/web/src/components/Sidebar.tsx:1284",
-      "apps/web/src/components/settings/SettingsPanels.tsx:1363",
-      "apps/web/src/components/settings/SettingsPanels.tsx:2670",
-      "apps/web/src/components/settings/SettingsPanels.tsx:2942",
+      "apps/web/src/components/settings/SettingsPanels.tsx:1364",
+      "apps/web/src/components/settings/SettingsPanels.tsx:2685",
+      "apps/web/src/components/settings/SettingsPanels.tsx:2957",
       "apps/web/src/components/settings/SettingsSidebarNav.tsx:90"
     ]
   },
@@ -1895,7 +1895,7 @@
   },
   "Check for updates": {
     "message": "Check for updates",
-    "locations": ["apps/web/src/components/settings/SettingsPanels.tsx:446"]
+    "locations": ["apps/web/src/components/settings/SettingsPanels.tsx:447"]
   },
   "Check the chat list and connection before trying again. The action was not automatically repeated.": {
     "message": "Check the chat list and connection before trying again. The action was not automatically repeated.",
@@ -1947,8 +1947,8 @@
   "Checked ": {
     "message": "Checked ",
     "locations": [
-      "apps/web/src/components/settings/SettingsPanels.tsx:288",
-      "apps/web/src/components/settings/SettingsPanels.tsx:294"
+      "apps/web/src/components/settings/SettingsPanels.tsx:289",
+      "apps/web/src/components/settings/SettingsPanels.tsx:295"
     ]
   },
   "Checked <duration></duration>": {
@@ -1977,7 +1977,7 @@
   "Checking…": {
     "message": "Checking…",
     "locations": [
-      "apps/web/src/components/settings/SettingsPanels.tsx:335",
+      "apps/web/src/components/settings/SettingsPanels.tsx:336",
       "apps/web/src/components/settings/providerStatus.ts:38"
     ]
   },
@@ -2008,8 +2008,8 @@
   "Choose a PNG, JPEG, GIF, or WebP image.": {
     "message": "Choose a PNG, JPEG, GIF, or WebP image.",
     "locations": [
-      "apps/web/src/components/OnboardingScreen.tsx:520",
-      "apps/web/src/components/settings/SettingsPanels.tsx:877"
+      "apps/web/src/components/OnboardingScreen.tsx:521",
+      "apps/web/src/components/settings/SettingsPanels.tsx:878"
     ]
   },
   "Choose a parent folder or type a destination path and press Enter to clone.": {
@@ -2030,8 +2030,8 @@
   "Choose an image under 1 MB.": {
     "message": "Choose an image under 1 MB.",
     "locations": [
-      "apps/web/src/components/OnboardingScreen.tsx:525",
-      "apps/web/src/components/settings/SettingsPanels.tsx:883"
+      "apps/web/src/components/OnboardingScreen.tsx:526",
+      "apps/web/src/components/settings/SettingsPanels.tsx:884"
     ]
   },
   "Choose another project folder.": {
@@ -2056,7 +2056,7 @@
   },
   "Choose image": {
     "message": "Choose image",
-    "locations": ["apps/web/src/components/settings/SettingsPanels.tsx:1157"]
+    "locations": ["apps/web/src/components/settings/SettingsPanels.tsx:1158"]
   },
   "Choose one remote sign-in method.": {
     "message": "Choose one remote sign-in method.",
@@ -2147,7 +2147,7 @@
   },
   "Click archive twice to confirm.": {
     "message": "Click archive twice to confirm.",
-    "locations": ["apps/web/src/components/settings/SettingsPanels.tsx:1609"]
+    "locations": ["apps/web/src/components/settings/SettingsPanels.tsx:1610"]
   },
   "Click to hide email": {
     "message": "Click to hide email",
@@ -2160,7 +2160,7 @@
   "Clicking a chat": {
     "message": "Clicking a chat",
     "locations": [
-      "apps/web/src/components/settings/SettingsPanels.tsx:1397",
+      "apps/web/src/components/settings/SettingsPanels.tsx:1398",
       "apps/web/src/components/settings/settingsReset.ts:47"
     ]
   },
@@ -2307,7 +2307,7 @@
   },
   "Code name": {
     "message": "Code name",
-    "locations": ["apps/web/src/components/OnboardingScreen.tsx:584"]
+    "locations": ["apps/web/src/components/OnboardingScreen.tsx:585"]
   },
   "Code only": {
     "message": "Code only",
@@ -2327,7 +2327,7 @@
   },
   "Codex applies edits at the next session start or resume. Claude may keep its recorded instructions until compaction or a new session. Other providers add them before the first message.": {
     "message": "Codex applies edits at the next session start or resume. Claude may keep its recorded instructions until compaction or a new session. Other providers add them before the first message.",
-    "locations": ["apps/web/src/components/settings/SettingsPanels.tsx:1569"]
+    "locations": ["apps/web/src/components/settings/SettingsPanels.tsx:1570"]
   },
   "Codex continuation accepted": {
     "message": "Codex continuation accepted",
@@ -2423,7 +2423,7 @@
   },
   "Colors the sidebar stars and glow.": {
     "message": "Colors the sidebar stars and glow.",
-    "locations": ["apps/web/src/components/settings/SettingsPanels.tsx:1046"]
+    "locations": ["apps/web/src/components/settings/SettingsPanels.tsx:1047"]
   },
   "Combined attachments exceed the 80MB limit.": {
     "message": "Combined attachments exceed the 80MB limit.",
@@ -2528,7 +2528,7 @@
   },
   "Complete provider sign-in in the PowerShell window on the server PC, then refresh status.": {
     "message": "Complete provider sign-in in the PowerShell window on the server PC, then refresh status.",
-    "locations": ["apps/web/src/components/settings/SettingsPanels.tsx:2074"]
+    "locations": ["apps/web/src/components/settings/SettingsPanels.tsx:2075"]
   },
   "Complete the login in the window that opened, then refresh status.": {
     "message": "Complete the login in the window that opened, then refresh status.",
@@ -2536,7 +2536,7 @@
   },
   "Complete the provider login in the PowerShell window, then refresh status.": {
     "message": "Complete the provider login in the PowerShell window, then refresh status.",
-    "locations": ["apps/web/src/components/settings/SettingsPanels.tsx:2080"]
+    "locations": ["apps/web/src/components/settings/SettingsPanels.tsx:2081"]
   },
   "Complete the required fields using the requested values and limits.": {
     "message": "Complete the required fields using the requested values and limits.",
@@ -2589,7 +2589,7 @@
   },
   "Config": {
     "message": "Config",
-    "locations": ["apps/web/src/components/settings/AddProviderInstanceDialog.tsx:184"]
+    "locations": ["apps/web/src/components/settings/AddProviderInstanceDialog.tsx:186"]
   },
   "Configure": {
     "message": "Configure",
@@ -2621,11 +2621,11 @@
   },
   "Confirm chat archiving": {
     "message": "Confirm chat archiving",
-    "locations": ["apps/web/src/components/settings/SettingsPanels.tsx:1628"]
+    "locations": ["apps/web/src/components/settings/SettingsPanels.tsx:1629"]
   },
   "Confirm chat deletion": {
     "message": "Confirm chat deletion",
-    "locations": ["apps/web/src/components/settings/SettingsPanels.tsx:1653"]
+    "locations": ["apps/web/src/components/settings/SettingsPanels.tsx:1654"]
   },
   "Confirm password": {
     "message": "Confirm password",
@@ -2633,7 +2633,7 @@
   },
   "Confirmations": {
     "message": "Confirmations",
-    "locations": ["apps/web/src/components/settings/SettingsPanels.tsx:1606"]
+    "locations": ["apps/web/src/components/settings/SettingsPanels.tsx:1607"]
   },
   "Confirmed, but updated usage isn''t available yet. Refresh usage to check.": {
     "message": "Confirmed, but updated usage isn''t available yet. Refresh usage to check.",
@@ -2658,8 +2658,8 @@
   "Connect a provider": {
     "message": "Connect a provider",
     "locations": [
-      "apps/web/src/components/OnboardingScreen.tsx:388",
-      "apps/web/src/components/OnboardingScreen.tsx:713"
+      "apps/web/src/components/OnboardingScreen.tsx:389",
+      "apps/web/src/components/OnboardingScreen.tsx:714"
     ]
   },
   "Connected": {
@@ -2997,7 +2997,7 @@
     "message": "Copy path",
     "locations": [
       "apps/web/src/components/Sidebar.logic.ts:62",
-      "apps/web/src/components/settings/SettingsPanels.tsx:1601"
+      "apps/web/src/components/settings/SettingsPanels.tsx:1602"
     ]
   },
   "Copy public report": {
@@ -3077,7 +3077,7 @@
   },
   "Could not add provider": {
     "message": "Could not add provider",
-    "locations": ["apps/web/src/components/settings/AddProviderInstanceDialog.tsx:240"]
+    "locations": ["apps/web/src/components/settings/AddProviderInstanceDialog.tsx:242"]
   },
   "Could not add this environment. Check the server address and pairing credential, then try again.": {
     "message": "Could not add this environment. Check the server address and pairing credential, then try again.",
@@ -3157,7 +3157,7 @@
     "message": "Could not delete chat",
     "locations": [
       "apps/web/src/components/Sidebar.tsx:1112",
-      "apps/web/src/components/settings/SettingsPanels.tsx:2812"
+      "apps/web/src/components/settings/SettingsPanels.tsx:2827"
     ]
   },
   "Could not delete selected chats": {
@@ -3185,7 +3185,7 @@
   },
   "Could not empty Recycle Bin": {
     "message": "Could not empty Recycle Bin",
-    "locations": ["apps/web/src/components/settings/SettingsPanels.tsx:2860"]
+    "locations": ["apps/web/src/components/settings/SettingsPanels.tsx:2875"]
   },
   "Could not fetch the latest branch hash from origin.": {
     "message": "Could not fetch the latest branch hash from origin.",
@@ -3221,11 +3221,11 @@
   },
   "Could not load archived chats": {
     "message": "Could not load archived chats",
-    "locations": ["apps/web/src/components/settings/SettingsPanels.tsx:2660"]
+    "locations": ["apps/web/src/components/settings/SettingsPanels.tsx:2675"]
   },
   "Could not load deleted chats": {
     "message": "Could not load deleted chats",
-    "locations": ["apps/web/src/components/settings/SettingsPanels.tsx:2932"]
+    "locations": ["apps/web/src/components/settings/SettingsPanels.tsx:2947"]
   },
   "Could not load diagnostic details. Reconnect and try again.": {
     "message": "Could not load diagnostic details. Reconnect and try again.",
@@ -3267,7 +3267,7 @@
     "message": "Could not open {value0} login",
     "locations": [
       "apps/web/src/components/OnboardingScreen.tsx:166",
-      "apps/web/src/components/settings/SettingsPanels.tsx:2091"
+      "apps/web/src/components/settings/SettingsPanels.tsx:2092"
     ]
   },
   "Could not prepare these questions. Reload to try again.": {
@@ -3341,11 +3341,11 @@
   },
   "Could not restart {value0}": {
     "message": "Could not restart {value0}",
-    "locations": ["apps/web/src/components/settings/SettingsPanels.tsx:2014"]
+    "locations": ["apps/web/src/components/settings/SettingsPanels.tsx:2015"]
   },
   "Could not restore chat": {
     "message": "Could not restore chat",
-    "locations": ["apps/web/src/components/settings/SettingsPanels.tsx:2793"]
+    "locations": ["apps/web/src/components/settings/SettingsPanels.tsx:2808"]
   },
   "Could not revoke client access": {
     "message": "Could not revoke client access",
@@ -3431,8 +3431,8 @@
   "Could not unarchive chat": {
     "message": "Could not unarchive chat",
     "locations": [
-      "apps/web/src/components/settings/SettingsPanels.tsx:2628",
-      "apps/web/src/components/settings/SettingsPanels.tsx:2717"
+      "apps/web/src/components/settings/SettingsPanels.tsx:2643",
+      "apps/web/src/components/settings/SettingsPanels.tsx:2732"
     ]
   },
   "Could not update HTTPS": {
@@ -3461,13 +3461,13 @@
   },
   "Could not update {value0}": {
     "message": "Could not update {value0}",
-    "locations": ["apps/web/src/components/settings/SettingsPanels.tsx:1932"]
+    "locations": ["apps/web/src/components/settings/SettingsPanels.tsx:1933"]
   },
   "Could not upload that image.": {
     "message": "Could not upload that image.",
     "locations": [
-      "apps/web/src/components/OnboardingScreen.tsx:537",
-      "apps/web/src/components/settings/SettingsPanels.tsx:899"
+      "apps/web/src/components/OnboardingScreen.tsx:538",
+      "apps/web/src/components/settings/SettingsPanels.tsx:900"
     ]
   },
   "Could not verify <slot1></slot1>. <slot3></slot3>": {
@@ -3662,7 +3662,7 @@
   },
   "Current: {hash} ({dirty})": {
     "message": "Current: {hash} ({dirty})",
-    "locations": ["apps/web/src/components/settings/SettingsPanels.tsx:364"]
+    "locations": ["apps/web/src/components/settings/SettingsPanels.tsx:365"]
   },
   "Currently <slot1></slot1>": {
     "message": "Currently <slot1></slot1>",
@@ -3702,12 +3702,12 @@
     "message": "Custom instructions",
     "locations": [
       "apps/web/src/components/chat/NativeCodexReview.tsx:46",
-      "apps/web/src/components/settings/SettingsPanels.tsx:1565"
+      "apps/web/src/components/settings/SettingsPanels.tsx:1566"
     ]
   },
   "Custom provider accent color": {
     "message": "Custom provider accent color",
-    "locations": ["apps/web/src/components/settings/AddProviderInstanceDialog.tsx:422"]
+    "locations": ["apps/web/src/components/settings/AddProviderInstanceDialog.tsx:424"]
   },
   "Custom style captured. Review the instructions, then choose Apply custom style.": {
     "message": "Custom style captured. Review the instructions, then choose Apply custom style.",
@@ -3760,7 +3760,7 @@
     "message": "Dark",
     "locations": [
       "apps/web/src/components/OnboardingScreen.tsx:79",
-      "apps/web/src/components/settings/SettingsPanels.tsx:169"
+      "apps/web/src/components/settings/SettingsPanels.tsx:170"
     ]
   },
   "Data": {
@@ -3812,7 +3812,7 @@
   },
   "Decrease sidebar star speed": {
     "message": "Decrease sidebar star speed",
-    "locations": ["apps/web/src/components/settings/SettingsPanels.tsx:1278"]
+    "locations": ["apps/web/src/components/settings/SettingsPanels.tsx:1279"]
   },
   "Decrease visible chat count": {
     "message": "Decrease visible chat count",
@@ -3832,7 +3832,7 @@
   },
   "Default chat workspace": {
     "message": "Default chat workspace",
-    "locations": ["apps/web/src/components/settings/SettingsPanels.tsx:732"]
+    "locations": ["apps/web/src/components/settings/SettingsPanels.tsx:733"]
   },
   "Default context window (tokens)": {
     "message": "Default context window (tokens)",
@@ -3841,8 +3841,8 @@
   "Default editor": {
     "message": "Default editor",
     "locations": [
-      "apps/web/src/components/settings/SettingsPanels.tsx:1689",
-      "apps/web/src/components/settings/SettingsPanels.tsx:1715",
+      "apps/web/src/components/settings/SettingsPanels.tsx:1690",
+      "apps/web/src/components/settings/SettingsPanels.tsx:1716",
       "apps/web/src/components/settings/settingsReset.ts:17"
     ]
   },
@@ -3864,7 +3864,7 @@
   "Default project folder": {
     "message": "Default project folder",
     "locations": [
-      "apps/web/src/components/settings/SettingsPanels.tsx:681",
+      "apps/web/src/components/settings/SettingsPanels.tsx:682",
       "apps/web/src/components/settings/settingsReset.ts:16"
     ]
   },
@@ -3878,7 +3878,7 @@
   },
   "Default workspace for new chats.": {
     "message": "Default workspace for new chats.",
-    "locations": ["apps/web/src/components/settings/SettingsPanels.tsx:708"]
+    "locations": ["apps/web/src/components/settings/SettingsPanels.tsx:709"]
   },
   "Defaults to the accent color set in Appearance.": {
     "message": "Defaults to the accent color set in Appearance.",
@@ -3924,13 +3924,13 @@
   "Delete confirmation": {
     "message": "Delete confirmation",
     "locations": [
-      "apps/web/src/components/settings/SettingsPanels.tsx:1634",
+      "apps/web/src/components/settings/SettingsPanels.tsx:1635",
       "apps/web/src/components/settings/settingsReset.ts:52"
     ]
   },
   "Delete forever": {
     "message": "Delete forever",
-    "locations": ["apps/web/src/components/settings/SettingsPanels.tsx:2778"]
+    "locations": ["apps/web/src/components/settings/SettingsPanels.tsx:2793"]
   },
   "Delete its chats first, or delete the project anyway.": {
     "message": "Delete its chats first, or delete the project anyway.",
@@ -3969,11 +3969,11 @@
   },
   "Deleted {count} {count, plural, one {chat} other {chats}} forever.": {
     "message": "Deleted {count} {count, plural, one {chat} other {chats}} forever.",
-    "locations": ["apps/web/src/components/settings/SettingsPanels.tsx:2879"]
+    "locations": ["apps/web/src/components/settings/SettingsPanels.tsx:2894"]
   },
   "Deleted {deleted} of {count} {count, plural, one {chat} other {chats}}. {detail}": {
     "message": "Deleted {deleted} of {count} {count, plural, one {chat} other {chats}}. {detail}",
-    "locations": ["apps/web/src/components/settings/SettingsPanels.tsx:2861"]
+    "locations": ["apps/web/src/components/settings/SettingsPanels.tsx:2876"]
   },
   "Delivery is uncertain. Waiting for a provider update; this action will not be repeated automatically.": {
     "message": "Delivery is uncertain. Waiting for a provider update; this action will not be repeated automatically.",
@@ -4023,7 +4023,7 @@
     "locations": [
       "apps/desktop/src/backend/DesktopServerExposure.ts:65",
       "apps/web/src/components/settings/ConnectionsSettings.tsx:806",
-      "apps/web/src/components/settings/SettingsPanels.tsx:1771",
+      "apps/web/src/components/settings/SettingsPanels.tsx:1772",
       "apps/web/src/components/settings/diagnosticsRuntimeViewModel.ts:14"
     ]
   },
@@ -4078,7 +4078,7 @@
     "message": "Diagnostics",
     "locations": [
       "apps/web/src/components/settings/DiagnosticsSettings.tsx:1773",
-      "apps/web/src/components/settings/SettingsPanels.tsx:1829",
+      "apps/web/src/components/settings/SettingsPanels.tsx:1830",
       "apps/web/src/components/settings/SettingsSidebarNav.tsx:182",
       "apps/web/src/components/visualizations/VisualizationCard.tsx:949"
     ]
@@ -4294,7 +4294,7 @@
   },
   "Display name <slot1></slot1>": {
     "message": "Display name <slot1></slot1>",
-    "locations": ["apps/web/src/components/settings/AddProviderInstanceDialog.tsx:363"]
+    "locations": ["apps/web/src/components/settings/AddProviderInstanceDialog.tsx:365"]
   },
   "Displays the mobile sidebar.": {
     "message": "Displays the mobile sidebar.",
@@ -4403,7 +4403,7 @@
   },
   "During chats": {
     "message": "During chats",
-    "locations": ["apps/web/src/components/settings/SettingsPanels.tsx:217"]
+    "locations": ["apps/web/src/components/settings/SettingsPanels.tsx:218"]
   },
   "Earlier work<slot1></slot1>": {
     "message": "Earlier work<slot1></slot1>",
@@ -4491,7 +4491,7 @@
   },
   "Empty Recycle Bin": {
     "message": "Empty Recycle Bin",
-    "locations": ["apps/web/src/components/settings/SettingsPanels.tsx:2915"]
+    "locations": ["apps/web/src/components/settings/SettingsPanels.tsx:2930"]
   },
   "Enable": {
     "message": "Enable",
@@ -4518,7 +4518,7 @@
   },
   "Enable Task Atrium": {
     "message": "Enable Task Atrium",
-    "locations": ["apps/web/src/components/settings/SettingsPanels.tsx:1391"]
+    "locations": ["apps/web/src/components/settings/SettingsPanels.tsx:1392"]
   },
   "Enable admin password": {
     "message": "Enable admin password",
@@ -4558,10 +4558,10 @@
   "Enable sidebar image": {
     "message": "Enable sidebar image",
     "locations": [
-      "apps/web/src/components/OnboardingScreen.tsx:625",
-      "apps/web/src/components/OnboardingScreen.tsx:631",
-      "apps/web/src/components/settings/SettingsPanels.tsx:1086",
-      "apps/web/src/components/settings/SettingsPanels.tsx:1099",
+      "apps/web/src/components/OnboardingScreen.tsx:626",
+      "apps/web/src/components/OnboardingScreen.tsx:632",
+      "apps/web/src/components/settings/SettingsPanels.tsx:1087",
+      "apps/web/src/components/settings/SettingsPanels.tsx:1100",
       "apps/web/src/components/settings/settingsReset.ts:26"
     ]
   },
@@ -5308,7 +5308,7 @@
     "message": "Files",
     "locations": [
       "apps/web/src/components/CommandPalette.tsx:130",
-      "apps/web/src/components/settings/SettingsPanels.tsx:1687",
+      "apps/web/src/components/settings/SettingsPanels.tsx:1688",
       "apps/web/src/editorOpenOptions.ts:67"
     ]
   },
@@ -5507,7 +5507,7 @@
   "General": {
     "message": "General",
     "locations": [
-      "apps/web/src/components/settings/SettingsPanels.tsx:632",
+      "apps/web/src/components/settings/SettingsPanels.tsx:633",
       "apps/web/src/components/settings/SettingsSidebarNav.tsx:74"
     ]
   },
@@ -5525,7 +5525,7 @@
   },
   "Get started": {
     "message": "Get started",
-    "locations": ["apps/web/src/components/OnboardingScreen.tsx:819"]
+    "locations": ["apps/web/src/components/OnboardingScreen.tsx:818"]
   },
   "Git URL": {
     "message": "Git URL",
@@ -5728,8 +5728,8 @@
     "message": "History",
     "locations": [
       "apps/web/src/components/atrium/TaskAtrium.tsx:645",
-      "apps/web/src/components/settings/SettingsPanels.tsx:2648",
-      "apps/web/src/components/settings/SettingsPanels.tsx:2920",
+      "apps/web/src/components/settings/SettingsPanels.tsx:2663",
+      "apps/web/src/components/settings/SettingsPanels.tsx:2935",
       "apps/web/src/components/settings/SettingsSidebarNav.tsx:167"
     ]
   },
@@ -5790,7 +5790,7 @@
   },
   "Identity": {
     "message": "Identity",
-    "locations": ["apps/web/src/components/settings/AddProviderInstanceDialog.tsx:183"]
+    "locations": ["apps/web/src/components/settings/AddProviderInstanceDialog.tsx:185"]
   },
   "If the sandbox can''t start on this machine, connection checks will fail again.": {
     "message": "If the sandbox can''t start on this machine, connection checks will fail again.",
@@ -5850,7 +5850,7 @@
   },
   "Increase sidebar star speed": {
     "message": "Increase sidebar star speed",
-    "locations": ["apps/web/src/components/settings/SettingsPanels.tsx:1294"]
+    "locations": ["apps/web/src/components/settings/SettingsPanels.tsx:1295"]
   },
   "Increase visible chat count": {
     "message": "Increase visible chat count",
@@ -5917,7 +5917,7 @@
   },
   "Install or sign in to the agents you use. You can change this later in Settings.": {
     "message": "Install or sign in to the agents you use. You can change this later in Settings.",
-    "locations": ["apps/web/src/components/OnboardingScreen.tsx:391"]
+    "locations": ["apps/web/src/components/OnboardingScreen.tsx:392"]
   },
   "Install the CLI or set its binary path in Advanced settings.": {
     "message": "Install the CLI or set its binary path in Advanced settings.",
@@ -5945,19 +5945,19 @@
   },
   "Instance ID": {
     "message": "Instance ID",
-    "locations": ["apps/web/src/components/settings/AddProviderInstanceDialog.tsx:378"]
+    "locations": ["apps/web/src/components/settings/AddProviderInstanceDialog.tsx:380"]
   },
   "Instance ID is required.": {
     "message": "Instance ID is required.",
-    "locations": ["apps/web/src/components/settings/AddProviderInstanceDialog.tsx:92"]
+    "locations": ["apps/web/src/components/settings/AddProviderInstanceDialog.tsx:93"]
   },
   "Instance ID must be 64 characters or fewer.": {
     "message": "Instance ID must be 64 characters or fewer.",
-    "locations": ["apps/web/src/components/settings/AddProviderInstanceDialog.tsx:93"]
+    "locations": ["apps/web/src/components/settings/AddProviderInstanceDialog.tsx:94"]
   },
   "Instance ID must start with a letter and use only letters, digits, ''-'', or ''_''.": {
     "message": "Instance ID must start with a letter and use only letters, digits, ''-'', or ''_''.",
-    "locations": ["apps/web/src/components/settings/AddProviderInstanceDialog.tsx:95"]
+    "locations": ["apps/web/src/components/settings/AddProviderInstanceDialog.tsx:96"]
   },
   "Instance label": {
     "message": "Instance label",
@@ -5983,23 +5983,23 @@
   },
   "Interface": {
     "message": "Interface",
-    "locations": ["apps/web/src/components/settings/SettingsPanels.tsx:916"]
+    "locations": ["apps/web/src/components/settings/SettingsPanels.tsx:917"]
   },
   "Interface language": {
     "message": "Interface language",
-    "locations": ["apps/web/src/components/settings/SettingsPanels.tsx:789"]
+    "locations": ["apps/web/src/components/settings/SettingsPanels.tsx:790"]
   },
   "Interface size": {
     "message": "Interface size",
     "locations": [
-      "apps/web/src/components/settings/SettingsPanels.tsx:957",
-      "apps/web/src/components/settings/SettingsPanels.tsx:975",
+      "apps/web/src/components/settings/SettingsPanels.tsx:958",
+      "apps/web/src/components/settings/SettingsPanels.tsx:976",
       "apps/web/src/components/settings/settingsReset.ts:23"
     ]
   },
   "Internal ID: letters, digits, - or _.": {
     "message": "Internal ID: letters, digits, - or _.",
-    "locations": ["apps/web/src/components/settings/AddProviderInstanceDialog.tsx:404"]
+    "locations": ["apps/web/src/components/settings/AddProviderInstanceDialog.tsx:406"]
   },
   "Interrupt retargeted to provider active turn": {
     "message": "Interrupt retargeted to provider active turn",
@@ -6084,19 +6084,19 @@
   },
   "Keep animations running in background": {
     "message": "Keep animations running in background",
-    "locations": ["apps/web/src/components/settings/SettingsPanels.tsx:1243"]
+    "locations": ["apps/web/src/components/settings/SettingsPanels.tsx:1244"]
   },
   "Keep awake": {
     "message": "Keep awake",
     "locations": [
-      "apps/web/src/components/settings/SettingsPanels.tsx:1773",
-      "apps/web/src/components/settings/SettingsPanels.tsx:1803",
+      "apps/web/src/components/settings/SettingsPanels.tsx:1774",
+      "apps/web/src/components/settings/SettingsPanels.tsx:1804",
       "apps/web/src/components/settings/settingsReset.ts:19"
     ]
   },
   "Keep decorations moving while Cafe is hidden or unfocused.": {
     "message": "Keep decorations moving while Cafe is hidden or unfocused.",
-    "locations": ["apps/web/src/components/settings/SettingsPanels.tsx:1218"]
+    "locations": ["apps/web/src/components/settings/SettingsPanels.tsx:1219"]
   },
   "Keep drafting": {
     "message": "Keep drafting",
@@ -6182,13 +6182,13 @@
   "Language": {
     "message": "Language",
     "locations": [
-      "apps/web/src/components/settings/SettingsPanels.tsx:483",
-      "apps/web/src/components/settings/SettingsPanels.tsx:769"
+      "apps/web/src/components/settings/SettingsPanels.tsx:484",
+      "apps/web/src/components/settings/SettingsPanels.tsx:770"
     ]
   },
   "Language & time": {
     "message": "Language & time",
-    "locations": ["apps/web/src/components/settings/SettingsPanels.tsx:633"]
+    "locations": ["apps/web/src/components/settings/SettingsPanels.tsx:634"]
   },
   "Large workspaces can take a while. Your chats stay saved.": {
     "message": "Large workspaces can take a while. Your chats stay saved.",
@@ -6239,7 +6239,7 @@
   },
   "Latest origin/{branch}: {hash}": {
     "message": "Latest origin/{branch}: {hash}",
-    "locations": ["apps/web/src/components/settings/SettingsPanels.tsx:371"]
+    "locations": ["apps/web/src/components/settings/SettingsPanels.tsx:372"]
   },
   "Latest persisted orchestration sequence minus the slowest projector cursor.": {
     "message": "Latest persisted orchestration sequence minus the slowest projector cursor.",
@@ -6301,7 +6301,7 @@
     "message": "Light",
     "locations": [
       "apps/web/src/components/OnboardingScreen.tsx:73",
-      "apps/web/src/components/settings/SettingsPanels.tsx:163"
+      "apps/web/src/components/settings/SettingsPanels.tsx:164"
     ]
   },
   "Limit reached": {
@@ -6356,7 +6356,7 @@
   },
   "Loading chats": {
     "message": "Loading chats",
-    "locations": ["apps/web/src/components/settings/SettingsPanels.tsx:2518"]
+    "locations": ["apps/web/src/components/settings/SettingsPanels.tsx:2533"]
   },
   "Loading conversation…": {
     "message": "Loading conversation…",
@@ -6431,8 +6431,8 @@
     "message": "Local",
     "locations": [
       "apps/web/src/components/PullRequestThreadDialog.tsx:343",
-      "apps/web/src/components/settings/SettingsPanels.tsx:737",
-      "apps/web/src/components/settings/SettingsPanels.tsx:742"
+      "apps/web/src/components/settings/SettingsPanels.tsx:738",
+      "apps/web/src/components/settings/SettingsPanels.tsx:743"
     ]
   },
   "Local API not found": {
@@ -6528,8 +6528,8 @@
   "Make it yours": {
     "message": "Make it yours",
     "locations": [
-      "apps/web/src/components/OnboardingScreen.tsx:550",
-      "apps/web/src/components/OnboardingScreen.tsx:716"
+      "apps/web/src/components/OnboardingScreen.tsx:551",
+      "apps/web/src/components/OnboardingScreen.tsx:717"
     ]
   },
   "Manual": {
@@ -6546,13 +6546,13 @@
   "Markdown": {
     "message": "Markdown",
     "locations": [
-      "apps/web/src/components/settings/SettingsPanels.tsx:1552",
-      "apps/web/src/components/settings/SettingsPanels.tsx:203"
+      "apps/web/src/components/settings/SettingsPanels.tsx:1553",
+      "apps/web/src/components/settings/SettingsPanels.tsx:204"
     ]
   },
   "Match your system, or pick light or dark.": {
     "message": "Match your system, or pick light or dark.",
-    "locations": ["apps/web/src/components/OnboardingScreen.tsx:614"]
+    "locations": ["apps/web/src/components/OnboardingScreen.tsx:615"]
   },
   "Matching context counts do not prove that the compaction request was applied. Missing or different recorded requests remain pending; unknown runtime support does not promise idle adoption.": {
     "message": "Matching context counts do not prove that the compaction request was applied. Missing or different recorded requests remain pending; unknown runtime support does not promise idle adoption.",
@@ -6796,7 +6796,7 @@
   },
   "Motion": {
     "message": "Motion",
-    "locations": ["apps/web/src/components/settings/SettingsPanels.tsx:1215"]
+    "locations": ["apps/web/src/components/settings/SettingsPanels.tsx:1216"]
   },
   "Move": {
     "message": "Move",
@@ -6840,7 +6840,7 @@
       "apps/web/src/components/Sidebar.logic.ts:74",
       "apps/web/src/components/Sidebar.tsx:1165",
       "apps/web/src/components/desk/useDeskChatActions.ts:32",
-      "apps/web/src/components/settings/SettingsPanels.tsx:2613"
+      "apps/web/src/components/settings/SettingsPanels.tsx:2628"
     ]
   },
   "Move to Recycle Bin ({value0})": {
@@ -6878,7 +6878,7 @@
   },
   "Moved to Recycle Bin": {
     "message": "Moved to Recycle Bin",
-    "locations": ["apps/web/src/components/settings/SettingsPanels.tsx:2968"]
+    "locations": ["apps/web/src/components/settings/SettingsPanels.tsx:2983"]
   },
   "Moving…": {
     "message": "Moving…",
@@ -6926,7 +6926,7 @@
   },
   "Navigation": {
     "message": "Navigation",
-    "locations": ["apps/web/src/components/settings/SettingsPanels.tsx:1364"]
+    "locations": ["apps/web/src/components/settings/SettingsPanels.tsx:1365"]
   },
   "Needs an HTTPS connection to the server.": {
     "message": "Needs an HTTPS connection to the server.",
@@ -7048,7 +7048,7 @@
   },
   "New chats": {
     "message": "New chats",
-    "locations": ["apps/web/src/components/settings/SettingsPanels.tsx:707"]
+    "locations": ["apps/web/src/components/settings/SettingsPanels.tsx:708"]
   },
   "New chats keep the last model used.": {
     "message": "New chats keep the last model used.",
@@ -7081,8 +7081,8 @@
     "message": "New worktree",
     "locations": [
       "apps/web/src/components/BranchToolbar.logic.ts:47",
-      "apps/web/src/components/settings/SettingsPanels.tsx:736",
-      "apps/web/src/components/settings/SettingsPanels.tsx:745"
+      "apps/web/src/components/settings/SettingsPanels.tsx:737",
+      "apps/web/src/components/settings/SettingsPanels.tsx:746"
     ]
   },
   "Newer origin/{branch} commit available.": {
@@ -7099,7 +7099,7 @@
   },
   "Newer {branch} commit available": {
     "message": "Newer {branch} commit available",
-    "locations": ["apps/web/src/components/settings/SettingsPanels.tsx:344"]
+    "locations": ["apps/web/src/components/settings/SettingsPanels.tsx:345"]
   },
   "Newer {value0}": {
     "message": "Newer {value0}",
@@ -7108,13 +7108,13 @@
   "Next": {
     "message": "Next",
     "locations": [
-      "apps/web/src/components/OnboardingScreen.tsx:823",
+      "apps/web/src/components/OnboardingScreen.tsx:822",
       "apps/web/src/components/atrium/TaskAtrium.tsx:783",
       "apps/web/src/components/chat/ClaudeDeliveryPriorityPicker.tsx:29",
       "apps/web/src/components/chat/ComposerPrimaryActions.tsx:49",
       "apps/web/src/components/chat/ProviderTasks.tsx:229",
       "apps/web/src/components/chat/ProviderTasks.tsx:311",
-      "apps/web/src/components/settings/AddProviderInstanceDialog.tsx:472"
+      "apps/web/src/components/settings/AddProviderInstanceDialog.tsx:474"
     ]
   },
   "Next attempt in {value0}": {
@@ -7193,7 +7193,7 @@
   },
   "No archived chats": {
     "message": "No archived chats",
-    "locations": ["apps/web/src/components/settings/SettingsPanels.tsx:2661"]
+    "locations": ["apps/web/src/components/settings/SettingsPanels.tsx:2676"]
   },
   "No available editors found.": {
     "message": "No available editors found.",
@@ -7333,7 +7333,7 @@
   },
   "No other settings needed.": {
     "message": "No other settings needed.",
-    "locations": ["apps/web/src/components/settings/AddProviderInstanceDialog.tsx:447"]
+    "locations": ["apps/web/src/components/settings/AddProviderInstanceDialog.tsx:449"]
   },
   "No output received yet.": {
     "message": "No output received yet.",
@@ -7518,7 +7518,7 @@
   },
   "Not checked yet.": {
     "message": "Not checked yet.",
-    "locations": ["apps/web/src/components/settings/SettingsPanels.tsx:332"]
+    "locations": ["apps/web/src/components/settings/SettingsPanels.tsx:333"]
   },
   "Not configured": {
     "message": "Not configured",
@@ -7644,7 +7644,7 @@
     "locations": [
       "apps/web/src/components/chat/TraitsPicker.tsx:477",
       "apps/web/src/components/settings/ProviderInstanceCard.tsx:859",
-      "apps/web/src/components/settings/SettingsPanels.tsx:214"
+      "apps/web/src/components/settings/SettingsPanels.tsx:215"
     ]
   },
   "Offline": {
@@ -7707,7 +7707,7 @@
   },
   "Only main and dev are tracked.": {
     "message": "Only main and dev are tracked.",
-    "locations": ["apps/web/src/components/settings/SettingsPanels.tsx:338"]
+    "locations": ["apps/web/src/components/settings/SettingsPanels.tsx:339"]
   },
   "Only needed for an external server.": {
     "message": "Only needed for an external server.",
@@ -7729,8 +7729,8 @@
     "locations": [
       "apps/web/src/components/chat/OpenInPicker.tsx:135",
       "apps/web/src/components/desk/useDeskOpenActions.ts:34",
-      "apps/web/src/components/settings/SettingsPanels.tsx:1428",
-      "apps/web/src/components/settings/SettingsPanels.tsx:1437"
+      "apps/web/src/components/settings/SettingsPanels.tsx:1429",
+      "apps/web/src/components/settings/SettingsPanels.tsx:1438"
     ]
   },
   "Open a <slot1></slot1> <slot3></slot3> in a new chat, in the main repo or a worktree.": {
@@ -7761,7 +7761,7 @@
     "message": "Open file",
     "locations": [
       "apps/web/src/components/ChatMarkdown.tsx:760",
-      "apps/web/src/components/settings/SettingsPanels.tsx:1600"
+      "apps/web/src/components/settings/SettingsPanels.tsx:1601"
     ]
   },
   "Open file is unavailable": {
@@ -7826,11 +7826,11 @@
   },
   "Open the plan panel automatically": {
     "message": "Open the plan panel automatically",
-    "locations": ["apps/web/src/components/settings/SettingsPanels.tsx:1503"]
+    "locations": ["apps/web/src/components/settings/SettingsPanels.tsx:1504"]
   },
   "Open the side panel when a provider finishes a plan.": {
     "message": "Open the side panel when a provider finishes a plan.",
-    "locations": ["apps/web/src/components/settings/SettingsPanels.tsx:1479"]
+    "locations": ["apps/web/src/components/settings/SettingsPanels.tsx:1480"]
   },
   "Open this from the Cafe desktop app, or paste a pairing credential.": {
     "message": "Open this from the Cafe desktop app, or paste a pairing credential.",
@@ -7926,7 +7926,7 @@
   },
   "Opens file links from chats.": {
     "message": "Opens file links from chats.",
-    "locations": ["apps/web/src/components/settings/SettingsPanels.tsx:1690"]
+    "locations": ["apps/web/src/components/settings/SettingsPanels.tsx:1691"]
   },
   "Option defaults become editable once the provider reports this model.": {
     "message": "Option defaults become editable once the provider reports this model.",
@@ -7946,7 +7946,7 @@
   },
   "Optional. You can change any of this later in Settings.": {
     "message": "Optional. You can change any of this later in Settings.",
-    "locations": ["apps/web/src/components/OnboardingScreen.tsx:553"]
+    "locations": ["apps/web/src/components/OnboardingScreen.tsx:554"]
   },
   "Orchestrator": {
     "message": "Orchestrator",
@@ -8030,8 +8030,8 @@
   "PNG, JPEG, GIF or WebP, under 1 MB.": {
     "message": "PNG, JPEG, GIF or WebP, under 1 MB.",
     "locations": [
-      "apps/web/src/components/OnboardingScreen.tsx:694",
-      "apps/web/src/components/settings/SettingsPanels.tsx:1107"
+      "apps/web/src/components/OnboardingScreen.tsx:695",
+      "apps/web/src/components/settings/SettingsPanels.tsx:1108"
     ]
   },
   "Page <slot1></slot1>": {
@@ -8166,7 +8166,7 @@
     "message": "Path copied",
     "locations": [
       "apps/web/src/components/settings/KeybindingsSettings.tsx:1252",
-      "apps/web/src/components/settings/SettingsPanels.tsx:1334"
+      "apps/web/src/components/settings/SettingsPanels.tsx:1335"
     ]
   },
   "Pause": {
@@ -8242,8 +8242,8 @@
   "Plain text": {
     "message": "Plain text",
     "locations": [
-      "apps/web/src/components/settings/SettingsPanels.tsx:1555",
-      "apps/web/src/components/settings/SettingsPanels.tsx:206"
+      "apps/web/src/components/settings/SettingsPanels.tsx:1556",
+      "apps/web/src/components/settings/SettingsPanels.tsx:207"
     ]
   },
   "Plain-text preview{truncated, select, yes { (truncated)} other {}}<close></close>": {
@@ -8360,8 +8360,8 @@
   "Preview": {
     "message": "Preview",
     "locations": [
-      "apps/web/src/components/settings/SettingsPanels.tsx:1429",
-      "apps/web/src/components/settings/SettingsPanels.tsx:1434"
+      "apps/web/src/components/settings/SettingsPanels.tsx:1430",
+      "apps/web/src/components/settings/SettingsPanels.tsx:1435"
     ]
   },
   "Preview queued image {value0}": {
@@ -8370,7 +8370,7 @@
   },
   "Preview temporarily, or keep each chat open as a tab.": {
     "message": "Preview temporarily, or keep each chat open as a tab.",
-    "locations": ["apps/web/src/components/settings/SettingsPanels.tsx:1398"]
+    "locations": ["apps/web/src/components/settings/SettingsPanels.tsx:1399"]
   },
   "Preview {value0}": {
     "message": "Preview {value0}",
@@ -8567,7 +8567,7 @@
   },
   "Projects & workspaces": {
     "message": "Projects & workspaces",
-    "locations": ["apps/web/src/components/settings/SettingsPanels.tsx:679"]
+    "locations": ["apps/web/src/components/settings/SettingsPanels.tsx:680"]
   },
   "Projects from the same repository share one sidebar row.": {
     "message": "Projects from the same repository share one sidebar row.",
@@ -8599,8 +8599,8 @@
       "apps/web/src/components/atrium/TaskAtrium.tsx:255",
       "apps/web/src/components/chat/AxiomSecurityControl.tsx:255",
       "apps/web/src/components/chat/ComposerCommandMenu.tsx:103",
-      "apps/web/src/components/settings/AddProviderInstanceDialog.tsx:182",
-      "apps/web/src/components/settings/AddProviderInstanceDialog.tsx:323"
+      "apps/web/src/components/settings/AddProviderInstanceDialog.tsx:184",
+      "apps/web/src/components/settings/AddProviderInstanceDialog.tsx:325"
     ]
   },
   "Provider / inherited default": {
@@ -8772,7 +8772,7 @@
   "Providers": {
     "message": "Providers",
     "locations": [
-      "apps/web/src/components/settings/SettingsPanels.tsx:2291",
+      "apps/web/src/components/settings/SettingsPanels.tsx:2306",
       "apps/web/src/components/settings/SettingsSidebarNav.tsx:118"
     ]
   },
@@ -8896,7 +8896,7 @@
   },
   "Rebuild to apply ({branch})": {
     "message": "Rebuild to apply ({branch})",
-    "locations": ["apps/web/src/components/settings/SettingsPanels.tsx:341"]
+    "locations": ["apps/web/src/components/settings/SettingsPanels.tsx:342"]
   },
   "Rebuild to apply ({value0})": {
     "message": "Rebuild to apply ({value0})",
@@ -8923,7 +8923,7 @@
   },
   "Recently deleted": {
     "message": "Recently deleted",
-    "locations": ["apps/web/src/components/settings/SettingsPanels.tsx:2579"]
+    "locations": ["apps/web/src/components/settings/SettingsPanels.tsx:2594"]
   },
   "Reconnect": {
     "message": "Reconnect",
@@ -9034,11 +9034,11 @@
   },
   "Recycle Bin emptied": {
     "message": "Recycle Bin emptied",
-    "locations": ["apps/web/src/components/settings/SettingsPanels.tsx:2878"]
+    "locations": ["apps/web/src/components/settings/SettingsPanels.tsx:2893"]
   },
   "Recycle Bin is empty": {
     "message": "Recycle Bin is empty",
-    "locations": ["apps/web/src/components/settings/SettingsPanels.tsx:2933"]
+    "locations": ["apps/web/src/components/settings/SettingsPanels.tsx:2948"]
   },
   "Redeem 1 reset": {
     "message": "Redeem 1 reset",
@@ -9068,7 +9068,7 @@
     "message": "Refresh",
     "locations": [
       "apps/web/src/components/ChatView.tsx:8470",
-      "apps/web/src/components/OnboardingScreen.tsx:414",
+      "apps/web/src/components/OnboardingScreen.tsx:415",
       "apps/web/src/components/chat/AxiomMcpControl.tsx:165"
     ]
   },
@@ -9087,8 +9087,8 @@
   "Refresh provider status": {
     "message": "Refresh provider status",
     "locations": [
-      "apps/web/src/components/settings/SettingsPanels.tsx:2326",
-      "apps/web/src/components/settings/SettingsPanels.tsx:2337"
+      "apps/web/src/components/settings/SettingsPanels.tsx:2341",
+      "apps/web/src/components/settings/SettingsPanels.tsx:2352"
     ]
   },
   "Refresh resource history": {
@@ -9345,7 +9345,7 @@
   "Replace": {
     "message": "Replace",
     "locations": [
-      "apps/web/src/components/OnboardingScreen.tsx:663",
+      "apps/web/src/components/OnboardingScreen.tsx:664",
       "apps/web/src/components/chat/ThreadGoalControl.tsx:490"
     ]
   },
@@ -9367,7 +9367,7 @@
   },
   "Replaces ''Cafe'' in the wordmark.": {
     "message": "Replaces ''Cafe'' in the wordmark.",
-    "locations": ["apps/web/src/components/settings/SettingsPanels.tsx:1017"]
+    "locations": ["apps/web/src/components/settings/SettingsPanels.tsx:1018"]
   },
   "Replay ring": {
     "message": "Replay ring",
@@ -9375,7 +9375,7 @@
   },
   "Replies": {
     "message": "Replies",
-    "locations": ["apps/web/src/components/settings/SettingsPanels.tsx:1444"]
+    "locations": ["apps/web/src/components/settings/SettingsPanels.tsx:1445"]
   },
   "Reply check failed": {
     "message": "Reply check failed",
@@ -9441,7 +9441,7 @@
     "locations": [
       "apps/web/src/components/MarkdownTableViewer.tsx:189",
       "apps/web/src/components/MermaidBlock.tsx:154",
-      "apps/web/src/components/OnboardingScreen.tsx:679",
+      "apps/web/src/components/OnboardingScreen.tsx:680",
       "apps/web/src/components/chat/CodexContextWindowControl.tsx:232",
       "apps/web/src/components/chat/SubagentConcurrencyControl.tsx:288"
     ]
@@ -9456,7 +9456,7 @@
   },
   "Reset this page to defaults?\nThis will reset: {settings}.": {
     "message": "Reset this page to defaults?\nThis will reset: {settings}.",
-    "locations": ["apps/web/src/components/settings/SettingsPanels.tsx:490"]
+    "locations": ["apps/web/src/components/settings/SettingsPanels.tsx:491"]
   },
   "Reset to default": {
     "message": "Reset to default",
@@ -9541,11 +9541,11 @@
   },
   "Restart {value0}? Running turns may be interrupted.": {
     "message": "Restart {value0}? Running turns may be interrupted.",
-    "locations": ["apps/web/src/components/settings/SettingsPanels.tsx:1984"]
+    "locations": ["apps/web/src/components/settings/SettingsPanels.tsx:1985"]
   },
   "Restore": {
     "message": "Restore",
-    "locations": ["apps/web/src/components/settings/SettingsPanels.tsx:2775"]
+    "locations": ["apps/web/src/components/settings/SettingsPanels.tsx:2790"]
   },
   "Restore all groups": {
     "message": "Restore all groups",
@@ -9809,7 +9809,7 @@
   },
   "Running build: {hash}": {
     "message": "Running build: {hash}",
-    "locations": ["apps/web/src/components/settings/SettingsPanels.tsx:368"]
+    "locations": ["apps/web/src/components/settings/SettingsPanels.tsx:369"]
   },
   "Running command…": {
     "message": "Running command…",
@@ -10510,7 +10510,7 @@
   },
   "Show an image in the sidebar.": {
     "message": "Show an image in the sidebar.",
-    "locations": ["apps/web/src/components/OnboardingScreen.tsx:626"]
+    "locations": ["apps/web/src/components/OnboardingScreen.tsx:627"]
   },
   "Show code": {
     "message": "Show code",
@@ -10599,15 +10599,15 @@
   },
   "Show replies while they are being written.": {
     "message": "Show replies while they are being written.",
-    "locations": ["apps/web/src/components/settings/SettingsPanels.tsx:1447"]
+    "locations": ["apps/web/src/components/settings/SettingsPanels.tsx:1448"]
   },
   "Show sidebar attribution": {
     "message": "Show sidebar attribution",
-    "locations": ["apps/web/src/components/settings/SettingsPanels.tsx:1210"]
+    "locations": ["apps/web/src/components/settings/SettingsPanels.tsx:1211"]
   },
   "Show sidebar search": {
     "message": "Show sidebar search",
-    "locations": ["apps/web/src/components/settings/SettingsPanels.tsx:1080"]
+    "locations": ["apps/web/src/components/settings/SettingsPanels.tsx:1081"]
   },
   "Show {count, plural, one {{count} more chat} other {{count} more chats}}{hasSummary, select, yes {, {summary}} other {}}": {
     "message": "Show {count, plural, one {{count} more chat} other {{count} more chats}}{hasSummary, select, yes {, {summary}} other {}}",
@@ -10631,7 +10631,7 @@
   },
   "Shown as “{value0} Code” in the sidebar.": {
     "message": "Shown as “{value0} Code” in the sidebar.",
-    "locations": ["apps/web/src/components/OnboardingScreen.tsx:577"]
+    "locations": ["apps/web/src/components/OnboardingScreen.tsx:578"]
   },
   "Shows Cafe’s recorded session setting and requested setting. Changes wait for a safe idle turn; active children can delay them. Cafe can’t independently confirm the limit the provider enforces.": {
     "message": "Shows Cafe’s recorded session setting and requested setting. Changes wait for a safe idle turn; active children can delay them. Cafe can’t independently confirm the limit the provider enforces.",
@@ -10645,36 +10645,36 @@
     "message": "Sidebar",
     "locations": [
       "apps/web/src/components/settings/AmbianceSettings.tsx:76",
-      "apps/web/src/components/settings/SettingsPanels.tsx:1014",
+      "apps/web/src/components/settings/SettingsPanels.tsx:1015",
       "apps/web/src/components/ui/sidebar.tsx:255"
     ]
   },
   "Sidebar attribution": {
     "message": "Sidebar attribution",
     "locations": [
-      "apps/web/src/components/settings/SettingsPanels.tsx:1193",
+      "apps/web/src/components/settings/SettingsPanels.tsx:1194",
       "apps/web/src/components/settings/settingsReset.ts:28"
     ]
   },
   "Sidebar effects color": {
     "message": "Sidebar effects color",
     "locations": [
-      "apps/web/src/components/settings/SettingsPanels.tsx:1045",
+      "apps/web/src/components/settings/SettingsPanels.tsx:1046",
       "apps/web/src/components/settings/settingsReset.ts:33"
     ]
   },
   "Sidebar image": {
     "message": "Sidebar image",
     "locations": [
-      "apps/web/src/components/OnboardingScreen.tsx:698",
-      "apps/web/src/components/settings/SettingsPanels.tsx:1106",
+      "apps/web/src/components/OnboardingScreen.tsx:699",
+      "apps/web/src/components/settings/SettingsPanels.tsx:1107",
       "apps/web/src/components/settings/settingsReset.ts:30",
       "apps/web/src/components/settings/settingsReset.ts:31"
     ]
   },
   "Sidebar image file": {
     "message": "Sidebar image file",
-    "locations": ["apps/web/src/components/settings/SettingsPanels.tsx:1183"]
+    "locations": ["apps/web/src/components/settings/SettingsPanels.tsx:1184"]
   },
   "Sidebar image upload failed ({status}).": {
     "message": "Sidebar image upload failed ({status}).",
@@ -10691,20 +10691,20 @@
   "Sidebar search": {
     "message": "Sidebar search",
     "locations": [
-      "apps/web/src/components/settings/SettingsPanels.tsx:1067",
+      "apps/web/src/components/settings/SettingsPanels.tsx:1068",
       "apps/web/src/components/settings/settingsReset.ts:27"
     ]
   },
   "Sidebar star speed": {
     "message": "Sidebar star speed",
     "locations": [
-      "apps/web/src/components/settings/SettingsPanels.tsx:1254",
+      "apps/web/src/components/settings/SettingsPanels.tsx:1255",
       "apps/web/src/components/settings/settingsReset.ts:32"
     ]
   },
   "Sidebar star speed multiplier": {
     "message": "Sidebar star speed multiplier",
-    "locations": ["apps/web/src/components/settings/SettingsPanels.tsx:1286"]
+    "locations": ["apps/web/src/components/settings/SettingsPanels.tsx:1287"]
   },
   "Sidebar view": {
     "message": "Sidebar view",
@@ -10767,7 +10767,7 @@
   "Skip": {
     "message": "Skip",
     "locations": [
-      "apps/web/src/components/OnboardingScreen.tsx:782",
+      "apps/web/src/components/OnboardingScreen.tsx:781",
       "apps/web/src/components/chat/ComposerAsyncQuestionsPanel.tsx:445"
     ]
   },
@@ -11051,7 +11051,7 @@
   },
   "Step <slot1></slot1>": {
     "message": "Step <slot1></slot1>",
-    "locations": ["apps/web/src/components/settings/AddProviderInstanceDialog.tsx:303"]
+    "locations": ["apps/web/src/components/settings/AddProviderInstanceDialog.tsx:305"]
   },
   "Step {value0} / {value1}": {
     "message": "Step {value0} / {value1}",
@@ -11106,7 +11106,7 @@
   },
   "Stop your computer and screen sleeping while Cafe works.": {
     "message": "Stop your computer and screen sleeping while Cafe works.",
-    "locations": ["apps/web/src/components/settings/SettingsPanels.tsx:1774"]
+    "locations": ["apps/web/src/components/settings/SettingsPanels.tsx:1775"]
   },
   "Stopped": {
     "message": "Stopped",
@@ -11127,7 +11127,7 @@
   },
   "Stopped {count} active {count, plural, one {session} other {sessions}}.": {
     "message": "Stopped {count} active {count, plural, one {session} other {sessions}}.",
-    "locations": ["apps/web/src/components/settings/SettingsPanels.tsx:2003"]
+    "locations": ["apps/web/src/components/settings/SettingsPanels.tsx:2004"]
   },
   "Stops only this task. Stop chat remains a separate control.": {
     "message": "Stops only this task. Stop chat remains a separate control.",
@@ -11143,7 +11143,7 @@
   },
   "Stream assistant messages": {
     "message": "Stream assistant messages",
-    "locations": ["apps/web/src/components/settings/SettingsPanels.tsx:1472"]
+    "locations": ["apps/web/src/components/settings/SettingsPanels.tsx:1473"]
   },
   "Styled: {value0}": {
     "message": "Styled: {value0}",
@@ -11322,8 +11322,8 @@
     "message": "System",
     "locations": [
       "apps/web/src/components/OnboardingScreen.tsx:67",
-      "apps/web/src/components/settings/SettingsPanels.tsx:157",
-      "apps/web/src/components/settings/SettingsPanels.tsx:942",
+      "apps/web/src/components/settings/SettingsPanels.tsx:158",
+      "apps/web/src/components/settings/SettingsPanels.tsx:943",
       "apps/web/src/providerSkillPresentation.ts:39"
     ]
   },
@@ -11337,12 +11337,12 @@
   "System default": {
     "message": "System default",
     "locations": [
-      "apps/web/src/components/settings/SettingsPanels.tsx:1683",
       "apps/web/src/components/settings/SettingsPanels.tsx:1684",
-      "apps/web/src/components/settings/SettingsPanels.tsx:1728",
-      "apps/web/src/components/settings/SettingsPanels.tsx:191",
-      "apps/web/src/components/settings/SettingsPanels.tsx:793",
-      "apps/web/src/components/settings/SettingsPanels.tsx:803"
+      "apps/web/src/components/settings/SettingsPanels.tsx:1685",
+      "apps/web/src/components/settings/SettingsPanels.tsx:1729",
+      "apps/web/src/components/settings/SettingsPanels.tsx:192",
+      "apps/web/src/components/settings/SettingsPanels.tsx:794",
+      "apps/web/src/components/settings/SettingsPanels.tsx:804"
     ]
   },
   "Tab actions": {
@@ -11369,7 +11369,7 @@
     "locations": [
       "apps/web/src/components/atrium/TaskAtriumOverlay.tsx:66",
       "apps/web/src/components/settings/AmbianceSettings.tsx:396",
-      "apps/web/src/components/settings/SettingsPanels.tsx:1366",
+      "apps/web/src/components/settings/SettingsPanels.tsx:1367",
       "apps/web/src/components/settings/settingsReset.ts:46"
     ]
   },
@@ -11614,7 +11614,7 @@
     "message": "The provider login command could not be started.",
     "locations": [
       "apps/web/src/components/OnboardingScreen.tsx:175",
-      "apps/web/src/components/settings/SettingsPanels.tsx:2100"
+      "apps/web/src/components/settings/SettingsPanels.tsx:2101"
     ]
   },
   "The provider reported that this run failed.": {
@@ -11631,11 +11631,11 @@
   },
   "The provider runtime restart could not be started.": {
     "message": "The provider runtime restart could not be started.",
-    "locations": ["apps/web/src/components/settings/SettingsPanels.tsx:2023"]
+    "locations": ["apps/web/src/components/settings/SettingsPanels.tsx:2024"]
   },
   "The provider update command could not be started.": {
     "message": "The provider update command could not be started.",
-    "locations": ["apps/web/src/components/settings/SettingsPanels.tsx:1943"]
+    "locations": ["apps/web/src/components/settings/SettingsPanels.tsx:1944"]
   },
   "The remote Cafe Code server returned an invalid response. Check the server address and port.": {
     "message": "The remote Cafe Code server returned an invalid response. Check the server address and port.",
@@ -11735,11 +11735,11 @@
   },
   "The system prompt file was not opened.": {
     "message": "The system prompt file was not opened.",
-    "locations": ["apps/web/src/components/settings/SettingsPanels.tsx:1352"]
+    "locations": ["apps/web/src/components/settings/SettingsPanels.tsx:1353"]
   },
   "The system prompt path was not copied.": {
     "message": "The system prompt path was not copied.",
-    "locations": ["apps/web/src/components/settings/SettingsPanels.tsx:1353"]
+    "locations": ["apps/web/src/components/settings/SettingsPanels.tsx:1354"]
   },
   "The terminal was not opened.": {
     "message": "The terminal was not opened.",
@@ -11756,15 +11756,15 @@
   "Theme": {
     "message": "Theme",
     "locations": [
-      "apps/web/src/components/OnboardingScreen.tsx:608",
-      "apps/web/src/components/OnboardingScreen.tsx:621",
-      "apps/web/src/components/settings/SettingsPanels.tsx:481",
-      "apps/web/src/components/settings/SettingsPanels.tsx:918"
+      "apps/web/src/components/OnboardingScreen.tsx:609",
+      "apps/web/src/components/OnboardingScreen.tsx:622",
+      "apps/web/src/components/settings/SettingsPanels.tsx:482",
+      "apps/web/src/components/settings/SettingsPanels.tsx:919"
     ]
   },
   "Theme preference": {
     "message": "Theme preference",
-    "locations": ["apps/web/src/components/settings/SettingsPanels.tsx:938"]
+    "locations": ["apps/web/src/components/settings/SettingsPanels.tsx:939"]
   },
   "Then open <code>{origin}</code>": {
     "message": "Then open <code>{origin}</code>",
@@ -12102,7 +12102,7 @@
   "Time format": {
     "message": "Time format",
     "locations": [
-      "apps/web/src/components/settings/SettingsPanels.tsx:636",
+      "apps/web/src/components/settings/SettingsPanels.tsx:637",
       "apps/web/src/components/settings/settingsReset.ts:14"
     ]
   },
@@ -12144,7 +12144,7 @@
   },
   "Timestamp format": {
     "message": "Timestamp format",
-    "locations": ["apps/web/src/components/settings/SettingsPanels.tsx:658"]
+    "locations": ["apps/web/src/components/settings/SettingsPanels.tsx:659"]
   },
   "Timezone": {
     "message": "Timezone",
@@ -12393,7 +12393,7 @@
   },
   "Unable to copy system prompt path": {
     "message": "Unable to copy system prompt path",
-    "locations": ["apps/web/src/components/settings/SettingsPanels.tsx:1347"]
+    "locations": ["apps/web/src/components/settings/SettingsPanels.tsx:1348"]
   },
   "Unable to open file": {
     "message": "Unable to open file",
@@ -12428,7 +12428,7 @@
   },
   "Unable to open system prompt file": {
     "message": "Unable to open system prompt file",
-    "locations": ["apps/web/src/components/settings/SettingsPanels.tsx:1346"]
+    "locations": ["apps/web/src/components/settings/SettingsPanels.tsx:1347"]
   },
   "Unable to open {value0}": {
     "message": "Unable to open {value0}",
@@ -12477,8 +12477,8 @@
   "Unarchive": {
     "message": "Unarchive",
     "locations": [
-      "apps/web/src/components/settings/SettingsPanels.tsx:2610",
-      "apps/web/src/components/settings/SettingsPanels.tsx:2733"
+      "apps/web/src/components/settings/SettingsPanels.tsx:2625",
+      "apps/web/src/components/settings/SettingsPanels.tsx:2748"
     ]
   },
   "Unassigned": {
@@ -12539,7 +12539,7 @@
   },
   "Unknown deletion error.": {
     "message": "Unknown deletion error.",
-    "locations": ["apps/web/src/components/settings/SettingsPanels.tsx:2851"]
+    "locations": ["apps/web/src/components/settings/SettingsPanels.tsx:2866"]
   },
   "Unknown error force-removing project.": {
     "message": "Unknown error force-removing project.",
@@ -12615,7 +12615,7 @@
   },
   "Up to date.": {
     "message": "Up to date.",
-    "locations": ["apps/web/src/components/settings/SettingsPanels.tsx:347"]
+    "locations": ["apps/web/src/components/settings/SettingsPanels.tsx:348"]
   },
   "Upcoming runs": {
     "message": "Upcoming runs",
@@ -12652,8 +12652,8 @@
   "Update checks need the desktop app.": {
     "message": "Update checks need the desktop app.",
     "locations": [
-      "apps/web/src/components/settings/SettingsPanels.tsx:329",
-      "apps/web/src/components/settings/SettingsPanels.tsx:452"
+      "apps/web/src/components/settings/SettingsPanels.tsx:330",
+      "apps/web/src/components/settings/SettingsPanels.tsx:453"
     ]
   },
   "Update downloaded": {
@@ -12666,7 +12666,7 @@
   },
   "Update failed.": {
     "message": "Update failed.",
-    "locations": ["apps/web/src/components/settings/AddProviderInstanceDialog.tsx:244"]
+    "locations": ["apps/web/src/components/settings/AddProviderInstanceDialog.tsx:246"]
   },
   "Update now": {
     "message": "Update now",
@@ -12743,7 +12743,7 @@
   },
   "Upload": {
     "message": "Upload",
-    "locations": ["apps/web/src/components/OnboardingScreen.tsx:662"]
+    "locations": ["apps/web/src/components/OnboardingScreen.tsx:663"]
   },
   "Upload copies of files or images. Workspace @ references stay linked.": {
     "message": "Upload copies of files or images. Workspace @ references stay linked.",
@@ -12876,7 +12876,7 @@
   },
   "Use default": {
     "message": "Use default",
-    "locations": ["apps/web/src/components/settings/SettingsPanels.tsx:1173"]
+    "locations": ["apps/web/src/components/settings/SettingsPanels.tsx:1174"]
   },
   "Use for new chats by default": {
     "message": "Use for new chats by default",
@@ -12929,11 +12929,11 @@
   },
   "Used for buttons, focus rings, and highlights.": {
     "message": "Used for buttons, focus rings, and highlights.",
-    "locations": ["apps/web/src/components/OnboardingScreen.tsx:596"]
+    "locations": ["apps/web/src/components/OnboardingScreen.tsx:597"]
   },
   "Used for buttons, selection and focus.": {
     "message": "Used for buttons, selection and focus.",
-    "locations": ["apps/web/src/components/settings/SettingsPanels.tsx:989"]
+    "locations": ["apps/web/src/components/settings/SettingsPanels.tsx:990"]
   },
   "Used for new chats. “No default” uses the model''s default.": {
     "message": "Used for new chats. “No default” uses the model''s default.",
@@ -13016,7 +13016,7 @@
   },
   "Version": {
     "message": "Version",
-    "locations": ["apps/web/src/components/settings/SettingsPanels.tsx:386"]
+    "locations": ["apps/web/src/components/settings/SettingsPanels.tsx:387"]
   },
   "Version <slot1></slot1>": {
     "message": "Version <slot1></slot1>",
@@ -13031,7 +13031,7 @@
   },
   "Version details": {
     "message": "Version details",
-    "locations": ["apps/web/src/components/settings/SettingsPanels.tsx:429"]
+    "locations": ["apps/web/src/components/settings/SettingsPanels.tsx:430"]
   },
   "Version drift": {
     "message": "Version drift",
@@ -13051,7 +13051,7 @@
   },
   "View diagnostics": {
     "message": "View diagnostics",
-    "locations": ["apps/web/src/components/settings/SettingsPanels.tsx:1833"]
+    "locations": ["apps/web/src/components/settings/SettingsPanels.tsx:1834"]
   },
   "View macOS update": {
     "message": "View macOS update",
@@ -13276,7 +13276,7 @@
   },
   "Welcome": {
     "message": "Welcome",
-    "locations": ["apps/web/src/components/OnboardingScreen.tsx:710"]
+    "locations": ["apps/web/src/components/OnboardingScreen.tsx:711"]
   },
   "Welcome to <slot1></slot1>": {
     "message": "Welcome to <slot1></slot1>",
@@ -13284,11 +13284,11 @@
   },
   "Welcome to {value0}": {
     "message": "Welcome to {value0}",
-    "locations": ["apps/web/src/components/OnboardingScreen.tsx:765"]
+    "locations": ["apps/web/src/components/OnboardingScreen.tsx:764"]
   },
   "What Copy puts on the clipboard for selected message text.": {
     "message": "What Copy puts on the clipboard for selected message text.",
-    "locations": ["apps/web/src/components/settings/SettingsPanels.tsx:1515"]
+    "locations": ["apps/web/src/components/settings/SettingsPanels.tsx:1516"]
   },
   "When": {
     "message": "When",
@@ -13299,7 +13299,7 @@
   },
   "When custom instructions apply": {
     "message": "When custom instructions apply",
-    "locations": ["apps/web/src/components/settings/SettingsPanels.tsx:1567"]
+    "locations": ["apps/web/src/components/settings/SettingsPanels.tsx:1568"]
   },
   "When expression": {
     "message": "When expression",
@@ -13450,7 +13450,7 @@
   },
   "Writes chat titles and branch names.": {
     "message": "Writes chat titles and branch names.",
-    "locations": ["apps/web/src/components/settings/SettingsPanels.tsx:543"]
+    "locations": ["apps/web/src/components/settings/SettingsPanels.tsx:544"]
   },
   "Writing style": {
     "message": "Writing style",
@@ -13582,11 +13582,11 @@
   },
   "accent color": {
     "message": "accent color",
-    "locations": ["apps/web/src/components/settings/SettingsPanels.tsx:998"]
+    "locations": ["apps/web/src/components/settings/SettingsPanels.tsx:999"]
   },
   "add project base directory": {
     "message": "add project base directory",
-    "locations": ["apps/web/src/components/settings/SettingsPanels.tsx:686"]
+    "locations": ["apps/web/src/components/settings/SettingsPanels.tsx:687"]
   },
   "agent": {
     "message": "agent",
@@ -13639,11 +13639,11 @@
   },
   "animations while unfocused": {
     "message": "animations while unfocused",
-    "locations": ["apps/web/src/components/settings/SettingsPanels.tsx:1228"]
+    "locations": ["apps/web/src/components/settings/SettingsPanels.tsx:1229"]
   },
   "archive confirmation": {
     "message": "archive confirmation",
-    "locations": ["apps/web/src/components/settings/SettingsPanels.tsx:1613"]
+    "locations": ["apps/web/src/components/settings/SettingsPanels.tsx:1614"]
   },
   "as": {
     "message": "as",
@@ -13651,7 +13651,7 @@
   },
   "assistant output": {
     "message": "assistant output",
-    "locations": ["apps/web/src/components/settings/SettingsPanels.tsx:1457"]
+    "locations": ["apps/web/src/components/settings/SettingsPanels.tsx:1458"]
   },
   "atrium color": {
     "message": "atrium color",
@@ -13659,11 +13659,11 @@
   },
   "auto-open plan panel": {
     "message": "auto-open plan panel",
-    "locations": ["apps/web/src/components/settings/SettingsPanels.tsx:1488"]
+    "locations": ["apps/web/src/components/settings/SettingsPanels.tsx:1489"]
   },
   "automatic naming model": {
     "message": "automatic naming model",
-    "locations": ["apps/web/src/components/settings/SettingsPanels.tsx:547"]
+    "locations": ["apps/web/src/components/settings/SettingsPanels.tsx:548"]
   },
   "available": {
     "message": "available",
@@ -13682,7 +13682,7 @@
   },
   "branding prefix": {
     "message": "branding prefix",
-    "locations": ["apps/web/src/components/settings/SettingsPanels.tsx:1021"]
+    "locations": ["apps/web/src/components/settings/SettingsPanels.tsx:1022"]
   },
   "by cafeai ": {
     "message": "by cafeai ",
@@ -13702,7 +13702,7 @@
   },
   "chat selection copy": {
     "message": "chat selection copy",
-    "locations": ["apps/web/src/components/settings/SettingsPanels.tsx:1524"]
+    "locations": ["apps/web/src/components/settings/SettingsPanels.tsx:1525"]
   },
   "claude-sonnet-5": {
     "message": "claude-sonnet-5",
@@ -13710,11 +13710,11 @@
   },
   "clean": {
     "message": "clean",
-    "locations": ["apps/web/src/components/settings/SettingsPanels.tsx:362"]
+    "locations": ["apps/web/src/components/settings/SettingsPanels.tsx:363"]
   },
   "clicking a chat": {
     "message": "clicking a chat",
-    "locations": ["apps/web/src/components/settings/SettingsPanels.tsx:1407"]
+    "locations": ["apps/web/src/components/settings/SettingsPanels.tsx:1408"]
   },
   "compact-token-count\u0004{value}m": {
     "message": "{value}m",
@@ -13739,19 +13739,19 @@
   },
   "default editor": {
     "message": "default editor",
-    "locations": ["apps/web/src/components/settings/SettingsPanels.tsx:1694"]
+    "locations": ["apps/web/src/components/settings/SettingsPanels.tsx:1695"]
   },
   "delete confirmation": {
     "message": "delete confirmation",
-    "locations": ["apps/web/src/components/settings/SettingsPanels.tsx:1638"]
+    "locations": ["apps/web/src/components/settings/SettingsPanels.tsx:1639"]
   },
   "dirty": {
     "message": "dirty",
-    "locations": ["apps/web/src/components/settings/SettingsPanels.tsx:361"]
+    "locations": ["apps/web/src/components/settings/SettingsPanels.tsx:362"]
   },
   "dirty state unknown": {
     "message": "dirty state unknown",
-    "locations": ["apps/web/src/components/settings/SettingsPanels.tsx:359"]
+    "locations": ["apps/web/src/components/settings/SettingsPanels.tsx:360"]
   },
   "e.g. Living room iPad": {
     "message": "e.g. Living room iPad",
@@ -13759,7 +13759,7 @@
   },
   "e.g. Work": {
     "message": "e.g. Work",
-    "locations": ["apps/web/src/components/settings/AddProviderInstanceDialog.tsx:370"]
+    "locations": ["apps/web/src/components/settings/AddProviderInstanceDialog.tsx:372"]
   },
   "e.g. {arguments}": {
     "message": "e.g. {arguments}",
@@ -13779,11 +13779,11 @@
   },
   "ignored - not main or dev": {
     "message": "ignored - not main or dev",
-    "locations": ["apps/web/src/components/settings/SettingsPanels.tsx:307"]
+    "locations": ["apps/web/src/components/settings/SettingsPanels.tsx:308"]
   },
   "interface size": {
     "message": "interface size",
-    "locations": ["apps/web/src/components/settings/SettingsPanels.tsx:961"]
+    "locations": ["apps/web/src/components/settings/SettingsPanels.tsx:962"]
   },
   "just now": {
     "message": "just now",
@@ -13796,34 +13796,34 @@
   },
   "keep awake": {
     "message": "keep awake",
-    "locations": ["apps/web/src/components/settings/SettingsPanels.tsx:1783"]
+    "locations": ["apps/web/src/components/settings/SettingsPanels.tsx:1784"]
   },
   "language": {
     "message": "language",
-    "locations": ["apps/web/src/components/settings/SettingsPanels.tsx:773"]
+    "locations": ["apps/web/src/components/settings/SettingsPanels.tsx:774"]
   },
   "language-self-name\u0004English": {
     "message": "English",
     "context": "language-self-name",
     "locations": [
-      "apps/web/src/components/settings/SettingsPanels.tsx:798",
-      "apps/web/src/components/settings/SettingsPanels.tsx:806"
+      "apps/web/src/components/settings/SettingsPanels.tsx:799",
+      "apps/web/src/components/settings/SettingsPanels.tsx:807"
     ]
   },
   "language-self-name\u0004日本語": {
     "message": "日本語",
     "context": "language-self-name",
     "locations": [
-      "apps/web/src/components/settings/SettingsPanels.tsx:795",
-      "apps/web/src/components/settings/SettingsPanels.tsx:809"
+      "apps/web/src/components/settings/SettingsPanels.tsx:796",
+      "apps/web/src/components/settings/SettingsPanels.tsx:810"
     ]
   },
   "language-self-name\u0004한국어": {
     "message": "한국어",
     "context": "language-self-name",
     "locations": [
-      "apps/web/src/components/settings/SettingsPanels.tsx:797",
-      "apps/web/src/components/settings/SettingsPanels.tsx:812"
+      "apps/web/src/components/settings/SettingsPanels.tsx:798",
+      "apps/web/src/components/settings/SettingsPanels.tsx:813"
     ]
   },
   "left": {
@@ -13861,7 +13861,7 @@
   },
   "new chats": {
     "message": "new chats",
-    "locations": ["apps/web/src/components/settings/SettingsPanels.tsx:712"]
+    "locations": ["apps/web/src/components/settings/SettingsPanels.tsx:713"]
   },
   "no punctuation": {
     "message": "no punctuation",
@@ -13943,27 +13943,27 @@
   },
   "sidebar attribution": {
     "message": "sidebar attribution",
-    "locations": ["apps/web/src/components/settings/SettingsPanels.tsx:1197"]
+    "locations": ["apps/web/src/components/settings/SettingsPanels.tsx:1198"]
   },
   "sidebar effects color": {
     "message": "sidebar effects color",
-    "locations": ["apps/web/src/components/settings/SettingsPanels.tsx:1050"]
+    "locations": ["apps/web/src/components/settings/SettingsPanels.tsx:1051"]
   },
   "sidebar image": {
     "message": "sidebar image",
-    "locations": ["apps/web/src/components/settings/SettingsPanels.tsx:1118"]
+    "locations": ["apps/web/src/components/settings/SettingsPanels.tsx:1119"]
   },
   "sidebar image visibility": {
     "message": "sidebar image visibility",
-    "locations": ["apps/web/src/components/settings/SettingsPanels.tsx:1090"]
+    "locations": ["apps/web/src/components/settings/SettingsPanels.tsx:1091"]
   },
   "sidebar search": {
     "message": "sidebar search",
-    "locations": ["apps/web/src/components/settings/SettingsPanels.tsx:1071"]
+    "locations": ["apps/web/src/components/settings/SettingsPanels.tsx:1072"]
   },
   "sidebar star speed": {
     "message": "sidebar star speed",
-    "locations": ["apps/web/src/components/settings/SettingsPanels.tsx:1258"]
+    "locations": ["apps/web/src/components/settings/SettingsPanels.tsx:1259"]
   },
   "source control": {
     "message": "source control",
@@ -13971,7 +13971,7 @@
   },
   "source unavailable": {
     "message": "source unavailable",
-    "locations": ["apps/web/src/components/settings/SettingsPanels.tsx:309"]
+    "locations": ["apps/web/src/components/settings/SettingsPanels.tsx:310"]
   },
   "stopped.": {
     "message": "stopped.",
@@ -13979,7 +13979,7 @@
   },
   "task atrium": {
     "message": "task atrium",
-    "locations": ["apps/web/src/components/settings/SettingsPanels.tsx:1376"]
+    "locations": ["apps/web/src/components/settings/SettingsPanels.tsx:1377"]
   },
   "the workspace": {
     "message": "the workspace",
@@ -13987,7 +13987,7 @@
   },
   "theme": {
     "message": "theme",
-    "locations": ["apps/web/src/components/settings/SettingsPanels.tsx:922"]
+    "locations": ["apps/web/src/components/settings/SettingsPanels.tsx:923"]
   },
   "this Codex account": {
     "message": "this Codex account",
@@ -13999,7 +13999,7 @@
   },
   "time format": {
     "message": "time format",
-    "locations": ["apps/web/src/components/settings/SettingsPanels.tsx:640"]
+    "locations": ["apps/web/src/components/settings/SettingsPanels.tsx:641"]
   },
   "time unavailable": {
     "message": "time unavailable",
@@ -14017,7 +14017,7 @@
   },
   "unknown": {
     "message": "unknown",
-    "locations": ["apps/web/src/components/settings/SettingsPanels.tsx:313"]
+    "locations": ["apps/web/src/components/settings/SettingsPanels.tsx:314"]
   },
   "weather color": {
     "message": "weather color",
@@ -14029,7 +14029,7 @@
   },
   "x": {
     "message": "x",
-    "locations": ["apps/web/src/components/settings/SettingsPanels.tsx:1304"]
+    "locations": ["apps/web/src/components/settings/SettingsPanels.tsx:1305"]
   },
   "yarn test": {
     "message": "yarn test",
@@ -14068,7 +14068,7 @@
   },
   "{branch} branch": {
     "message": "{branch} branch",
-    "locations": ["apps/web/src/components/settings/SettingsPanels.tsx:304"]
+    "locations": ["apps/web/src/components/settings/SettingsPanels.tsx:305"]
   },
   "{bytes} B": {
     "message": "{bytes} B",
@@ -14453,7 +14453,7 @@
   },
   "{provider} Workspace": {
     "message": "{provider} Workspace",
-    "locations": ["apps/web/src/components/settings/AddProviderInstanceDialog.tsx:180"]
+    "locations": ["apps/web/src/components/settings/AddProviderInstanceDialog.tsx:182"]
   },
   "{provider} is not authenticated. Open Settings -'>' Source Control for setup guidance.": {
     "message": "{provider} is not authenticated. Open Settings -'>' Source Control for setup guidance.",
@@ -14652,7 +14652,7 @@
     "message": "{value0} login opened",
     "locations": [
       "apps/web/src/components/OnboardingScreen.tsx:153",
-      "apps/web/src/components/settings/SettingsPanels.tsx:2067"
+      "apps/web/src/components/settings/SettingsPanels.tsx:2068"
     ]
   },
   "{value0} merged": {
@@ -14672,7 +14672,7 @@
   },
   "{value0} provider settings": {
     "message": "{value0} provider settings",
-    "locations": ["apps/web/src/components/settings/SettingsPanels.tsx:2383"]
+    "locations": ["apps/web/src/components/settings/SettingsPanels.tsx:2398"]
   },
   "{value0} quota": {
     "message": "{value0} quota",
@@ -14683,7 +14683,7 @@
   },
   "{value0} restarted": {
     "message": "{value0} restarted",
-    "locations": ["apps/web/src/components/settings/SettingsPanels.tsx:2002"]
+    "locations": ["apps/web/src/components/settings/SettingsPanels.tsx:2003"]
   },
   "{value0} rewrite could not finish. Your draft is unchanged.": {
     "message": "{value0} rewrite could not finish. Your draft is unchanged.",
@@ -14743,7 +14743,7 @@
   },
   "{value0}_work": {
     "message": "{value0}_work",
-    "locations": ["apps/web/src/components/settings/AddProviderInstanceDialog.tsx:383"]
+    "locations": ["apps/web/src/components/settings/AddProviderInstanceDialog.tsx:385"]
   },
   "{value} B": {
     "message": "{value} B",

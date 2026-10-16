@@ -1,4 +1,8 @@
-import { ServerSettings, type ServerSettingsPatch } from "@cafecode/contracts";
+import {
+  DEFAULT_PROVIDER_INSTANCES,
+  ServerSettings,
+  type ServerSettingsPatch,
+} from "@cafecode/contracts";
 import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 import { deepMerge } from "./Struct.ts";
@@ -81,7 +85,7 @@ export function applyServerSettingsPatch(
   const nextWithReplacements = {
     ...next,
     ...(patch.providerInstances !== undefined
-      ? { providerInstances: patch.providerInstances }
+      ? { providerInstances: { ...DEFAULT_PROVIDER_INSTANCES, ...patch.providerInstances } }
       : {}),
     ...(automaticGitFetchInterval !== undefined ? { automaticGitFetchInterval } : {}),
   };

@@ -1,5 +1,11 @@
 import type { DesktopUpdateInstallMode } from "@cafecode/contracts";
 import { uiText } from "@cafecode/shared/i18n";
+import * as Option from "effect/Option";
+import * as Schema from "effect/Schema";
+
+const decodeMacUpdatePackage = Schema.decodeUnknownOption(
+  Schema.fromJsonString(Schema.Struct({ cafeCodeMacInAppUpdates: Schema.Literal(true) })),
+);
 
 export interface DesktopUpdateEligibilityInput {
   readonly isDevelopment: boolean;
@@ -42,10 +48,17 @@ export function autoUpdateDisabledReasonForUi(reason: string): string {
   }
 }
 
-export function resolveUnsignedDesktopUpdateInstallMode(
+export function resolveDesktopUpdateInstallMode(
   platform: NodeJS.Platform,
+  packageJson?: string,
 ): DesktopUpdateInstallMode {
-  // Squirrel.Mac rejects unsigned in-place updates. Keep detection available, but direct
-  // users to the release DMG until Cafe has an Apple Developer ID signing identity.
-  return platform === "darwin" ? "manual" : "in-app";
+  if (platform !== "darwin") return "in-app";
+
+  // Only the signed/notarized packaging path opts into Squirrel.Mac. This is
+  // installation policy, not signature evidence: the native updater still
+  // validates the replacement app. Legacy, unsigned and unreadable packages
+  // keep the manual DMG path instead of attempting an unsupported installation.
+  return packageJson !== undefined && Option.isSome(decodeMacUpdatePackage(packageJson))
+    ? "in-app"
+    : "manual";
 }

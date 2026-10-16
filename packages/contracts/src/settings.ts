@@ -16,7 +16,12 @@ import {
   ProviderOptionSelections,
 } from "./model.ts";
 import { ModelSelection } from "./orchestration.ts";
-import { ProviderInstanceConfig, ProviderInstanceId } from "./providerInstance.ts";
+import {
+  ProviderDriverKind,
+  ProviderInstanceConfig,
+  type ProviderInstanceConfigMap,
+  ProviderInstanceId,
+} from "./providerInstance.ts";
 import { EditorId } from "./editor.ts";
 
 // ── Client Settings (local-only) ───────────────────────────────
@@ -941,6 +946,16 @@ export type ObservabilitySettings = typeof ObservabilitySettings.Type;
 
 export const DEFAULT_AUTOMATIC_GIT_FETCH_INTERVAL = Duration.minutes(5);
 
+/** Built-in accounts without a legacy providers.<driver> settings bucket.
+ * Saved entries replace the whole default envelope, including disabled or
+ * custom-driver entries. No provider profile or credentials are written.
+ */
+export const DEFAULT_PROVIDER_INSTANCES: ProviderInstanceConfigMap = {
+  [ProviderInstanceId.make("axiom")]: { driver: ProviderDriverKind.make("axiom"), enabled: true },
+};
+
+const ProviderInstances = Schema.Record(ProviderInstanceId, ProviderInstanceConfig);
+
 export const ServerSettings = Schema.Struct({
   // Cafe management MCP only; preserve its existing endpoint on upgrade.
   mcpEnabled: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(true))),
@@ -981,7 +996,14 @@ export const ServerSettings = Schema.Struct({
   // is `Schema.Unknown` at this layer so envelopes with unknown drivers
   // (forks, downgrades, in-flight PR branches) round-trip without loss.
   // See providerInstance.ts for the forward/backward compatibility invariant.
-  providerInstances: Schema.Record(ProviderInstanceId, ProviderInstanceConfig).pipe(
+  providerInstances: ProviderInstances.pipe(
+    Schema.decodeTo(
+      Schema.toType(ProviderInstances),
+      SchemaTransformation.transformOrFail({
+        decode: (instances) => Effect.succeed({ ...DEFAULT_PROVIDER_INSTANCES, ...instances }),
+        encode: (instances) => Effect.succeed(instances),
+      }),
+    ),
     Schema.withDecodingDefault(Effect.succeed({})),
   ),
   // The provider instance new chats start on. `null` keeps the historical
