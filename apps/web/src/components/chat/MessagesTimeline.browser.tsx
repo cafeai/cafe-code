@@ -1339,6 +1339,8 @@ describe("MessagesTimeline", () => {
     ["codex", "environment-remote"],
     ["claudeAgent", "environment-local"],
     ["claudeAgent", "environment-remote"],
+    ["grok", "environment-local"],
+    ["grok", "environment-remote"],
   ] as const)(
     "renders saved %s image replies through the selected %s server",
     async (provider, environment) => {
@@ -1385,6 +1387,30 @@ describe("MessagesTimeline", () => {
           expect(selectedEnvironment).toBe(environment);
           expect(endpoint).toBe("/api/chat-images");
           expect(query).toMatchObject({ threadId, messageId: entry.message.id });
+        }
+        const image = page.getByRole("img", { name: "Chart" }).element() as HTMLImageElement;
+        await image.decode();
+        const originalSrc = image.src;
+        expect(originalSrc).toMatch(/^blob:/);
+        const revoke = vi.spyOn(URL, "revokeObjectURL");
+        // Current provider is presentation/session selection, not saved-image
+        // authority. Exercise both retirement and re-selection without hiding
+        // a remount behind a new successful manifest/byte request.
+        for (const selectedProvider of ["grok", "axiom", "opencode", "claudeAgent", "codex"]) {
+          await screen.rerender(
+            <MessagesTimeline
+              {...props}
+              activeProvider={ProviderDriverKind.make(selectedProvider)}
+              activeThreadEnvironmentId={EnvironmentId.make(environment)}
+              activeThreadId={threadId}
+              timelineEntries={[entry]}
+            />,
+          );
+          await expect.element(page.getByRole("img", { name: "Chart" })).toBeVisible();
+          expect(page.getByRole("img", { name: "Chart" }).element()).toBe(image);
+          expect(image.src).toBe(originalSrc);
+          expect(request).toHaveBeenCalledTimes(2);
+          expect(revoke).not.toHaveBeenCalled();
         }
         await page.getByRole("button", { name: "Enlarge Chart" }).click();
         expect(props.onImageExpand).toHaveBeenCalledWith({

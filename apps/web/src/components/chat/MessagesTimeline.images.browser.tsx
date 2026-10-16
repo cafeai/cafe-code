@@ -40,9 +40,11 @@ const entries: TimelineProps["timelineEntries"] = Array.from({ length: 12 }, (_,
 function ImageTimeline({
   listRef,
   revision,
+  provider = "codex",
 }: {
   listRef: TimelineProps["listRef"];
   revision: number;
+  provider?: string;
 }) {
   const [following, setFollowing] = useState(true);
   const stopFollowing = useCallback(() => setFollowing(false), []);
@@ -55,7 +57,7 @@ function ImageTimeline({
       <MessagesTimeline
         activeThreadId={ThreadId.make("image-chat")}
         activeThreadEnvironmentId={EnvironmentId.make("image-fixture")}
-        activeProvider={ProviderDriverKind.make("codex")}
+        activeProvider={ProviderDriverKind.make(provider)}
         activeTurnId={null}
         activeTurnInProgress={false}
         activeTurnStartedAt={null}
@@ -212,7 +214,7 @@ it.each(["tail", "review"] as const)(
       // queue, exposing its placeholder collapse instead of hiding a flicker
       // behind instant local responses.
       holdTransfers = true;
-      await view.rerender(<ImageTimeline listRef={listRef} revision={1} />);
+      await view.rerender(<ImageTimeline listRef={listRef} revision={1} provider="grok" />);
       await vi.waitFor(() => {
         expect(host.querySelector('[data-image-list-revision="1"]')).not.toBeNull();
         expect(
