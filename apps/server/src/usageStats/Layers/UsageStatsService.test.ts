@@ -40,7 +40,7 @@ import {
   type UsageStatsRepositoryShape,
 } from "../../persistence/Services/UsageStats.ts";
 import { UsageStatsRepositoryLive } from "../../persistence/Layers/UsageStats.ts";
-import { SqlitePersistenceMemory } from "../../persistence/Layers/Sqlite.ts";
+import { SqlitePersistenceTest } from "../../persistence/Sqlite.test.fixture.ts";
 import { ServerSettingsService, type ServerSettingsShape } from "../../serverSettings.ts";
 import { localDayKey } from "../dayBuckets.ts";
 import { UsageStatsService, type UsageStatsServiceShape } from "../Services/UsageStatsService.ts";
@@ -154,7 +154,7 @@ const withHarness = <A, E>(
 
       const infraContext = yield* Layer.build(
         UsageStatsRepositoryLive.pipe(
-          Layer.provideMerge(SqlitePersistenceMemory),
+          Layer.provideMerge(SqlitePersistenceTest),
           Layer.provideMerge(AuxiliaryUsageLive),
         ),
       );

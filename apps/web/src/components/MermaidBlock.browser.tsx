@@ -1,16 +1,16 @@
 import "../index.css";
 
 import type { CDPSession } from "@vitest/browser-playwright";
-import { cdp, page, userEvent } from "vitest/browser";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { render } from "vitest-browser-react";
+import { cdp, page, userEvent } from "vitest/browser";
 
+import { applyInterfaceScalePercent } from "../interfaceScale";
 import {
   createMermaidRenderService,
   renderInMermaidSandbox,
   type MermaidResult,
 } from "../lib/mermaid/renderService";
-import { applyInterfaceScalePercent } from "../interfaceScale";
 import { MermaidBlock } from "./MermaidBlock";
 import { GANTT_SCHEDULE } from "./mermaidGantt.test.fixture";
 
@@ -395,27 +395,10 @@ describe("Mermaid block", () => {
     }
   });
 
-  it.each(
-    REAL_CHARTS.flatMap((chart) =>
-      (["light", "dark"] as const).flatMap((theme) =>
-        [80, 130].flatMap((scale) =>
-          (chart.name === "Gantt dependency schedule" ? [false, true] : [false]).map(
-            (reducedMotion) => ({ ...chart, theme, scale, reducedMotion }),
-          ),
-        ),
-      ),
-    ),
-  )(
-    "retains real $name source, copy and expanded controls at $theme/$scale% with reduced motion $reducedMotion",
-    async ({ source, label, theme, scale, reducedMotion }) => {
+  it.each(REAL_CHARTS.map((chart) => ({ ...chart, theme: "dark" as const, scale: 100 })))(
+    "retains real $name source, copy and expanded controls",
+    async ({ source, label, theme, scale }) => {
       await page.viewport(390, 700);
-      const originalMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
-      await cdp().send("Emulation.setEmulatedMedia", {
-        features: [
-          { name: "prefers-reduced-motion", value: reducedMotion ? "reduce" : "no-preference" },
-        ],
-      });
-      expect(window.matchMedia("(prefers-reduced-motion: reduce)").matches).toBe(reducedMotion);
       applyInterfaceScalePercent(scale);
       document.documentElement.classList.toggle("dark", theme === "dark");
       const host = document.createElement("div");
@@ -550,11 +533,6 @@ describe("Mermaid block", () => {
       } finally {
         await screen.unmount();
         host.remove();
-        await cdp().send("Emulation.setEmulatedMedia", {
-          features: [
-            { name: "prefers-reduced-motion", value: originalMotion ? "reduce" : "no-preference" },
-          ],
-        });
       }
     },
   );

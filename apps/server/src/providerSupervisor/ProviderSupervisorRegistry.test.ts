@@ -8,7 +8,7 @@ import {
 import * as Effect from "effect/Effect";
 import { describe, expect, it } from "vitest";
 
-import { SqlitePersistenceMemory } from "../persistence/Layers/Sqlite.ts";
+import { SqlitePersistenceTest } from "../persistence/Sqlite.test.fixture.ts";
 import {
   ProviderSupervisorOwnershipError,
   makeProviderSupervisorRegistry,
@@ -53,7 +53,7 @@ describe("ProviderSupervisorRegistry", () => {
           parserCursor: 0,
           transferState: "running",
         });
-      }).pipe(Effect.scoped, Effect.provide(SqlitePersistenceMemory)),
+      }).pipe(Effect.scoped, Effect.provide(SqlitePersistenceTest)),
     );
   });
 
@@ -91,7 +91,7 @@ describe("ProviderSupervisorRegistry", () => {
         const afterStale = yield* registry.getSession(created.sessionId);
         expect(afterStale?.ownerId).toBe(secondOwnerId);
         expect(afterStale?.transferState).toBe("running");
-      }).pipe(Effect.scoped, Effect.provide(SqlitePersistenceMemory)),
+      }).pipe(Effect.scoped, Effect.provide(SqlitePersistenceTest)),
     );
   });
 
@@ -130,7 +130,7 @@ describe("ProviderSupervisorRegistry", () => {
         expect(snapshot.maxRawByteCursor).toBe(10);
         expect(snapshot.maxParserCursor).toBe(7);
         expect(snapshot.sessions[0]?.sessionId).toBe(created.sessionId);
-      }).pipe(Effect.scoped, Effect.provide(SqlitePersistenceMemory)),
+      }).pipe(Effect.scoped, Effect.provide(SqlitePersistenceTest)),
     );
   });
 });

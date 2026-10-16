@@ -38,7 +38,7 @@ import {
   ProviderAdapterRewindOutcomeUnknownError,
 } from "../provider/Errors.ts";
 import { ProviderValidationError } from "../provider/Errors.ts";
-import { SqlitePersistenceMemory } from "../persistence/Layers/Sqlite.ts";
+import { SqlitePersistenceTest } from "../persistence/Sqlite.test.fixture.ts";
 import {
   ProviderService,
   type ProviderServiceShape,
@@ -309,7 +309,7 @@ const makeProviderDaemonServerTestLayer = (providerService: ProviderServiceShape
     ProviderRuntimeInventoryLocalLive.pipe(Layer.provide(mockProviderAdapterRegistryLayer)),
     mockServerSettingsLayer,
     ProviderSupervisorRegistryLive,
-  ).pipe(Layer.provideMerge(SqlitePersistenceMemory));
+  ).pipe(Layer.provideMerge(SqlitePersistenceTest));
 
 const providerDaemonServerTestLayer = makeProviderDaemonServerTestLayer(mockProviderService);
 
@@ -1771,7 +1771,7 @@ describe("ProviderDaemonServer", () => {
       ProviderRuntimeInventoryLocalLive.pipe(Layer.provide(mockProviderAdapterRegistryLayer)),
       mockServerSettingsLayer,
       ProviderSupervisorRegistryLive,
-    ).pipe(Layer.provideMerge(SqlitePersistenceMemory));
+    ).pipe(Layer.provideMerge(SqlitePersistenceTest));
 
     return Effect.gen(function* () {
       const port = yield* startProviderDaemonServerOnEphemeralPort({
@@ -1922,7 +1922,7 @@ describe("ProviderDaemonServer", () => {
       ProviderRuntimeInventoryLocalLive.pipe(Layer.provide(mockProviderAdapterRegistryLayer)),
       mockServerSettingsLayer,
       ProviderSupervisorRegistryLive,
-    ).pipe(Layer.provideMerge(SqlitePersistenceMemory));
+    ).pipe(Layer.provideMerge(SqlitePersistenceTest));
 
     return Effect.gen(function* () {
       const port = yield* startProviderDaemonServerOnEphemeralPort({
@@ -2077,7 +2077,7 @@ describe("ProviderDaemonServer", () => {
       ProviderRuntimeInventoryLocalLive.pipe(Layer.provide(mockProviderAdapterRegistryLayer)),
       mockServerSettingsLayer,
       ProviderSupervisorRegistryLive,
-    ).pipe(Layer.provideMerge(SqlitePersistenceMemory));
+    ).pipe(Layer.provideMerge(SqlitePersistenceTest));
 
     return Effect.gen(function* () {
       const port = yield* startProviderDaemonServerOnEphemeralPort({
@@ -2185,7 +2185,7 @@ describe("ProviderDaemonServer", () => {
         ProviderRuntimeInventoryLocalLive.pipe(Layer.provide(mockProviderAdapterRegistryLayer)),
         mockServerSettingsLayer,
         ProviderSupervisorRegistryLive,
-      ).pipe(Layer.provideMerge(SqlitePersistenceMemory));
+      ).pipe(Layer.provideMerge(SqlitePersistenceTest));
       let signalCompletedEventJournaled!: () => void;
       const completedEventJournaled = new Promise<void>((resolve) => {
         signalCompletedEventJournaled = resolve;
@@ -2381,7 +2381,7 @@ describe("ProviderDaemonServer", () => {
           ProviderRuntimeInventoryLocalLive.pipe(Layer.provide(mockProviderAdapterRegistryLayer)),
           mockServerSettingsLayer,
           ProviderSupervisorRegistryLive,
-        ).pipe(Layer.provideMerge(SqlitePersistenceMemory));
+        ).pipe(Layer.provideMerge(SqlitePersistenceTest));
         yield* Effect.gen(function* () {
           const sql = yield* SqlClient.SqlClient;
           let insertAttempts = 0;
@@ -2480,7 +2480,7 @@ describe("ProviderDaemonServer", () => {
         ProviderRuntimeInventoryLocalLive.pipe(Layer.provide(mockProviderAdapterRegistryLayer)),
         mockServerSettingsLayer,
         ProviderSupervisorRegistryLive,
-      ).pipe(Layer.provideMerge(SqlitePersistenceMemory));
+      ).pipe(Layer.provideMerge(SqlitePersistenceTest));
       let signalValidEventJournaled!: () => void;
       const validEventJournaled = new Promise<void>((resolve) => {
         signalValidEventJournaled = resolve;

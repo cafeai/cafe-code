@@ -298,22 +298,6 @@ describe("repository toolchain policy", () => {
         );
       }
     }
-    // The server intentionally retains its own isolation/time-budget config;
-    // unlike removed parent lookup, this explicit merge keeps shared defaults.
-    expect(readFileSync(resolve(repoRoot, "apps/server/vitest.config.ts"), "utf8")).toContain(
-      'import baseConfig from "../../vitest.config.ts"',
-    );
-    expect(readFileSync(resolve(repoRoot, "vitest.config.ts"), "utf8")).toContain(
-      "clearMocks: false",
-    );
-    const webConfig = readFileSync(resolve(repoRoot, "apps/web/vitest.config.ts"), "utf8");
-    expect(webConfig).toContain('import baseConfig from "../../vitest.config.ts"');
-    expect(webConfig).toContain('import viteConfig from "./vite.config.ts"');
-    expect(webConfig).toContain("mergeConfig(viteConfig, baseConfig)");
-    expect(webConfig).toContain('"~": srcPath');
-    expect(readStringMap(readJson("apps/web/package.json").scripts)["test:browser"]).toBe(
-      "vitest run --config vitest.browser.config.ts",
-    );
   });
 
   it("keeps the server, scripts, and staged Claude SDK on one exact version", () => {

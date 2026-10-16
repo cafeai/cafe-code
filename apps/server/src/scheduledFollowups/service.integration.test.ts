@@ -28,10 +28,8 @@ import { ServerConfig } from "../config.ts";
 import { OrchestrationCommandInvariantError } from "../orchestration/Errors.ts";
 import { OrchestrationCommandReceiptRepositoryLive } from "../persistence/Layers/OrchestrationCommandReceipts.ts";
 import { OrchestrationEventStoreLive } from "../persistence/Layers/OrchestrationEventStore.ts";
-import {
-  makeSqlitePersistenceLive,
-  SqlitePersistenceMemory,
-} from "../persistence/Layers/Sqlite.ts";
+import { SqlitePersistenceTest } from "../persistence/Sqlite.test.fixture.ts";
+import { makeSqlitePersistenceLive } from "../persistence/Layers/Sqlite.ts";
 import { OrchestrationEngineLive } from "../orchestration/Layers/OrchestrationEngine.ts";
 import { OrchestrationProjectionPipelineLive } from "../orchestration/Layers/ProjectionPipeline.ts";
 import { OrchestrationProjectionSnapshotQueryLive } from "../orchestration/Layers/ProjectionSnapshotQuery.ts";
@@ -115,7 +113,7 @@ async function harness(persistence?: { readonly dbPath: string; readonly baseDir
     Layer.provide(OrchestrationCommandReceiptRepositoryLive),
     Layer.provide(RepositoryIdentityResolverLive),
     Layer.provideMerge(
-      persistence ? makeSqlitePersistenceLive(persistence.dbPath) : SqlitePersistenceMemory,
+      persistence ? makeSqlitePersistenceLive(persistence.dbPath) : SqlitePersistenceTest,
     ),
     Layer.provideMerge(
       ServerConfig.layerTest(

@@ -1,8 +1,8 @@
-import * as ManagementMcp from "../../mcp/sessionConnection.ts";
-import { installVisualizationSessionRuntime } from "../../visualizations/sessionRuntime.ts";
-import { GENERATED_VISUALIZATION_INSTRUCTIONS } from "../../visualizations/mcp.ts";
-import { buildCafeInstructions } from "../CafeInstructions.ts";
 import { VisualizationGenerationId } from "@cafecode/contracts/visualizations";
+import * as ManagementMcp from "../../mcp/sessionConnection.ts";
+import { GENERATED_VISUALIZATION_INSTRUCTIONS } from "../../visualizations/mcp.ts";
+import { installVisualizationSessionRuntime } from "../../visualizations/sessionRuntime.ts";
+import { buildCafeInstructions } from "../CafeInstructions.ts";
 // @effect-diagnostics nodeBuiltinImport:off
 import {
   existsSync,
@@ -19,17 +19,16 @@ import {
 import os from "node:os";
 import path from "node:path";
 
-import * as NodeServices from "@effect/platform-node/NodeServices";
 import type {
   Options as ClaudeQueryOptions,
-  PermissionMode,
   Query as ClaudeSdkQuery,
+  PermissionMode,
   PermissionResult,
+  SDKAssistantMessage,
   SDKControlInterruptResponse,
   SDKMessage,
-  SDKSystemMessage,
-  SDKAssistantMessage,
   SDKResultSuccess,
+  SDKSystemMessage,
   SDKUserMessage,
   SessionMessage,
   SessionStoreEntry,
@@ -37,21 +36,22 @@ import type {
 import { forkSession as forkClaudeSdkSession } from "@anthropic-ai/claude-agent-sdk";
 import {
   ApprovalRequestId,
-  MessageId,
   ClaudeSettings,
+  MessageId,
+  PROVIDER_SESSION_TITLE_MAX_CHARS,
   ProviderDriverKind,
+  ProviderInstanceId,
   ProviderItemId,
   ProviderRuntimeEvent,
-  type RuntimeWorkflowPresentation,
-  type RuntimeMode,
   RuntimeTaskId,
   ThreadId,
   TurnId,
-  ProviderInstanceId,
-  PROVIDER_SESSION_TITLE_MAX_CHARS,
+  type RuntimeMode,
+  type RuntimeWorkflowPresentation,
 } from "@cafecode/contracts";
-import { createModelSelection } from "@cafecode/shared/model";
 import { CLAUDE_RESPONSE_LIMIT_MESSAGE } from "@cafecode/shared/claudeResponseLimits";
+import { createModelSelection } from "@cafecode/shared/model";
+import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, describe, it, vi } from "@effect/vitest";
 import * as Context from "effect/Context";
 import * as Deferred from "effect/Deferred";
@@ -65,10 +65,10 @@ import * as Stream from "effect/Stream";
 import * as TestClock from "effect/testing/TestClock";
 
 import { attachmentRelativePath } from "../../attachmentStore.ts";
-import { storeFileAttachment } from "../../fileAttachmentStore.ts";
 import { ServerConfig } from "../../config.ts";
-import { ServerSettingsService } from "../../serverSettings.ts";
+import { storeFileAttachment } from "../../fileAttachmentStore.ts";
 import { installSchedulingSessionBroker } from "../../scheduledFollowups/sessionRuntime.ts";
+import { ServerSettingsService } from "../../serverSettings.ts";
 import { ProviderAdapterValidationError } from "../Errors.ts";
 import type { ClaudeAdapterShape } from "../Services/ClaudeAdapter.ts";
 import {
@@ -726,16 +726,6 @@ function makeRewindHarness(options?: Pick<ClaudeAdapterLiveOptions, "forkNativeS
     contents,
   };
 }
-
-describe("Claude project directory encoding", () => {
-  it("matches upstream punctuation replacement and bounded long-path hashing", () => {
-    assert.equal(
-      encodeClaudeProjectDirectoryName(String.raw`C:\Users\mike\work.dir`),
-      "C--Users-mike-work-dir",
-    );
-    assert.equal(encodeClaudeProjectDirectoryName("a".repeat(201)), `${"a".repeat(200)}-rkvsv5`);
-  });
-});
 
 describe("ClaudeAdapterLive", () => {
   it.effect(

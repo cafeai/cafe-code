@@ -316,6 +316,16 @@ describe("expanded chat images", () => {
       const img = page
         .getByRole("img", { name: landscape.name, exact: true })
         .element() as HTMLImageElement;
+      // Record an image-space anchor only after the native image reaches its
+      // requested original size and the layout effect applies its initial pan.
+      // A completed click alone does not establish that geometry.
+      await vi.waitFor(() => {
+        const original = img.getBoundingClientRect();
+        expect(original.width).toBe(img.naturalWidth);
+        expect(original.height).toBe(img.naturalHeight);
+        expect(viewport.scrollLeft).toBeGreaterThan(0);
+        expect(viewport.scrollTop).toBeGreaterThan(0);
+      });
       const bounds = viewport.getBoundingClientRect();
       const point = { x: bounds.left + bounds.width * 0.65, y: bounds.top + bounds.height * 0.6 };
       const original = img.getBoundingClientRect();

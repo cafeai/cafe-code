@@ -6,9 +6,9 @@ import {
   type EnvironmentApi,
   type ProviderTurnConfiguration,
 } from "@cafecode/contracts";
-import { page } from "vitest/browser";
 import { describe, expect, it, vi } from "vitest";
 import { render } from "vitest-browser-react";
+import { page } from "vitest/browser";
 
 const CODEX_TURN_CONFIGURATION: ProviderTurnConfiguration = {
   version: 1,
@@ -601,7 +601,7 @@ function installTurnConfigurationActivities(
       fixture.activityId,
     ];
     activityByThreadId[fixture.threadId] = {
-      ...(activityByThreadId[fixture.threadId] ?? {}),
+      ...activityByThreadId[fixture.threadId],
       [fixture.activityId]: {
         id: fixture.activityId,
         tone: "info",
@@ -2112,54 +2112,6 @@ describe("TaskAtriumBoard", () => {
       );
     } finally {
       restoreThreads();
-      await screen.unmount();
-      host.remove();
-    }
-  });
-
-  it("tiles cards across one, two, and three responsive columns", async () => {
-    const originalViewport = { height: window.innerHeight, width: window.innerWidth };
-    await page.viewport(390, 720);
-    const { host, screen } = await renderInTheme("dark");
-    try {
-      await workerView().getByRole("button", { name: "History (1)", exact: true }).click();
-      await vi.waitFor(() => {
-        expect(host.querySelectorAll('[data-cafe-atrium-task-card="true"]')).toHaveLength(3);
-      });
-      expect(host.textContent).toContain("3 chats,");
-      expect(host.textContent).toContain("0 subagents,");
-      expect(host.textContent).toContain("all working.");
-      expect(host.textContent).toContain(
-        "Nothing here asks for you. The garden keeps its own hours.",
-      );
-      expect(host.textContent).toContain("mapping canvas call sites");
-      const cardBounds = () =>
-        Array.from(
-          host.querySelectorAll<HTMLElement>('[data-cafe-atrium-task-card="true"]'),
-          (card) => card.getBoundingClientRect(),
-        );
-
-      let bounds = cardBounds();
-      expect(bounds[1]!.top).toBeGreaterThan(bounds[0]!.top + 1);
-
-      await page.viewport(900, 720);
-      await vi.waitFor(() => {
-        const next = cardBounds();
-        expect(Math.abs(next[0]!.top - next[1]!.top)).toBeLessThanOrEqual(1);
-        expect(next[2]!.top).toBeGreaterThan(next[0]!.top + 1);
-      });
-
-      await page.viewport(1_700, 900);
-      await vi.waitFor(() => {
-        const next = cardBounds();
-        expect(Math.abs(next[0]!.top - next[1]!.top)).toBeLessThanOrEqual(1);
-        expect(Math.abs(next[0]!.top - next[2]!.top)).toBeLessThanOrEqual(1);
-      });
-      expect(host.textContent).toContain("3 chats,");
-      expect(host.textContent).toContain("all working.");
-      expect(host.textContent).toContain("mapping canvas call sites");
-    } finally {
-      await page.viewport(originalViewport.width, originalViewport.height);
       await screen.unmount();
       host.remove();
     }

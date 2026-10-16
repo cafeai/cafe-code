@@ -7,7 +7,6 @@ import {
   type CSSProperties,
   type ReactNode,
   useCallback,
-  useMemo,
   useRef,
   useState,
 } from "react";
@@ -40,9 +39,10 @@ import {
 import { isElectron } from "~/env";
 import { ensureLocalApi } from "~/localApi";
 import { useCopyToClipboard } from "~/hooks/useCopyToClipboard";
+import { useMacDesktopTitlebar } from "~/hooks/useMacDesktopTitlebar";
 import { useSettings, useUpdateSettings } from "~/hooks/useSettings";
 import { useTheme } from "~/hooks/useTheme";
-import { useServerProviders } from "~/rpc/serverState";
+import { useServerConfig } from "~/rpc/serverState";
 import { cn } from "~/lib/utils";
 import { ColorWheelPicker } from "./settings/ColorWheelPicker";
 import { PROVIDER_CLIENT_DEFINITIONS } from "./settings/providerDriverMeta";
@@ -362,7 +362,8 @@ function ProvidersPage() {
   const uiLocale = useUiLocale();
   const uiPresentation = useUiPresentation(UI_PRESENTATION_SOURCES);
 
-  const providers = useServerProviders();
+  const config = useServerConfig();
+  const providers = config?.providers ?? [];
   const [isRefreshing, setIsRefreshing] = useState(false);
 
   const refresh = useCallback(() => {
@@ -729,6 +730,7 @@ export function OnboardingScreen() {
 
   const [stepIndex, setStepIndex] = useState(0);
   const { updateSettings } = useUpdateSettings();
+  const macTitlebar = useMacDesktopTitlebar({ includeNarrowDesktop: true });
 
   const step = ONBOARDING_STEPS[stepIndex] ?? "intro";
   const isFirstStep = stepIndex === 0;
@@ -744,16 +746,13 @@ export function OnboardingScreen() {
     [],
   );
 
-  const headerClassName = useMemo(
-    () =>
-      cn(
-        "relative z-10 flex shrink-0 items-center justify-between gap-2 px-4",
-        // Desktop shares the native title band so the window buttons stay centred.
-        isElectron
-          ? "drag-region h-(--app-titlebar-height) wco:h-[env(titlebar-area-height)] wco:pr-[calc(100vw-env(titlebar-area-width)-env(titlebar-area-x)+1em)]"
-          : "h-[52px]",
-      ),
-    [],
+  const headerClassName = cn(
+    "relative z-10 flex shrink-0 items-center justify-between gap-2 px-4",
+    // Desktop shares the native title band so the window buttons stay centred.
+    isElectron
+      ? "drag-region h-(--app-titlebar-height) wco:h-[env(titlebar-area-height)] wco:pr-[calc(100vw-env(titlebar-area-width)-env(titlebar-area-x)+1em)]"
+      : "h-[52px]",
+    macTitlebar && "pl-(--app-mac-titlebar-leading-space)",
   );
 
   return (
@@ -769,7 +768,7 @@ export function OnboardingScreen() {
         <div className="-translate-x-1/2 absolute top-[-18%] left-1/2 h-[55vh] w-[80vh] rounded-full bg-primary/8 blur-[120px]" />
       </div>
 
-      <header className={headerClassName}>
+      <header className={headerClassName} data-mac-titlebar={macTitlebar}>
         <span className="font-medium text-muted-foreground text-xs tabular-nums">
           {uiPresentation.STEP_HEADER_LABEL[step]}
         </span>

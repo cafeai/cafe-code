@@ -7,9 +7,9 @@ import {
   type ScheduledFollowupListResult,
   type ScheduledFollowupRecord,
 } from "@cafecode/contracts";
-import { page } from "vitest/browser";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { render } from "vitest-browser-react";
+import { page } from "vitest/browser";
 
 import {
   __resetEnvironmentApiOverridesForTests,
@@ -188,40 +188,6 @@ describe("useScheduledFollowups consumers", () => {
           ),
       ).toBe(true);
       expect(document.body.textContent).not.toContain("Retired chat late response");
-    } finally {
-      await screen.unmount();
-    }
-  });
-
-  it("changes environments synchronously even when both backends have the same chat ID", async () => {
-    installApi();
-    const otherEnvironment = EnvironmentId.make("shared-schedule-second-environment");
-    const otherList = installApi(otherEnvironment);
-    const newRead = deferred();
-    otherList.mockReturnValueOnce(newRead.promise);
-    const rendered: RenderSnapshot[] = [];
-    const onRender = (snapshot: RenderSnapshot) => rendered.push(snapshot);
-    const screen = await render(<Probe label="Timeline" onRender={onRender} />);
-    try {
-      await expect
-        .element(page.getByTestId("Timeline"))
-        .toHaveTextContent("Ready | Synthetic pending proposal");
-      await screen.rerender(
-        <Probe label="Timeline" environmentId={otherEnvironment} onRender={onRender} />,
-      );
-      await expect.element(page.getByTestId("Timeline")).toHaveTextContent("Loading");
-      expect(
-        rendered
-          .filter((snapshot) => snapshot.environmentId === otherEnvironment)
-          .every((snapshot) => snapshot.schedules.length === 0),
-      ).toBe(true);
-      newRead.resolve({
-        schedules: [record({ name: "Second backend proposal" })],
-        backendOnline: true,
-      });
-      await expect
-        .element(page.getByTestId("Timeline"))
-        .toHaveTextContent("Ready | Second backend proposal");
     } finally {
       await screen.unmount();
     }

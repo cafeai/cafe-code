@@ -57,8 +57,8 @@ let lastNativeTurn = "";
 let pending:
   | { id: string | number; prompt: string; nativeTurn: string; webEnabled: boolean }
   | undefined;
-let questionId: number | undefined;
-let approvalId: number | undefined;
+let questionId: string | undefined;
+let approvalId: string | undefined;
 const write = (value: unknown) => process.stdout.write(`${JSON.stringify(value)}\n`);
 const result = (id: string | number, value: unknown) =>
   write({ jsonrpc: "2.0", id, result: value });
@@ -181,7 +181,10 @@ createInterface({ input: process.stdin }).on("line", (line) => {
     if (
       message.id === questionId &&
       message.result?.action === "accept" &&
-      JSON.stringify(message.result.content?.choices) === JSON.stringify(["first"])
+      (pending?.prompt.includes("string question")
+        ? message.result.content?.build === "local build" &&
+          message.result.content?.scope === "npm only"
+        : JSON.stringify(message.result.content?.choices) === JSON.stringify(["first"]))
     )
       finish(true);
     if (message.id === approvalId) {
@@ -511,7 +514,7 @@ createInterface({ input: process.stdin }).on("line", (line) => {
         }
       }
       if (prompt.includes("question")) {
-        questionId = 2000000 + turn;
+        questionId = randomUUID();
         write({
           jsonrpc: "2.0",
           id: questionId,
@@ -520,23 +523,40 @@ createInterface({ input: process.stdin }).on("line", (line) => {
             sessionId,
             mode: "form",
             message: "Choose the fixture answer",
-            requestedSchema: {
-              type: "object",
-              required: ["choices"],
-              properties: {
-                choices: {
-                  type: "array",
-                  title: "Choose one or more",
-                  items: { type: "string", enum: ["first", "second"] },
-                  minItems: 1,
-                  maxItems: 2,
+            requestedSchema: prompt.includes("string question")
+              ? {
+                  type: "object",
+                  required: ["build", "scope"],
+                  properties: {
+                    build: {
+                      type: "string",
+                      title: "Choose the build",
+                      enum: ["local build", "CI build"],
+                    },
+                    scope: {
+                      type: "string",
+                      title: "Choose the scope",
+                      enum: ["npm only", "everything"],
+                    },
+                  },
+                }
+              : {
+                  type: "object",
+                  required: ["choices"],
+                  properties: {
+                    choices: {
+                      type: "array",
+                      title: "Choose one or more",
+                      items: { type: "string", enum: ["first", "second"] },
+                      minItems: 1,
+                      maxItems: 2,
+                    },
+                  },
                 },
-              },
-            },
           },
         });
       } else if (prompt.includes("approval")) {
-        approvalId = 1000000 + turn;
+        approvalId = randomUUID();
         write({
           jsonrpc: "2.0",
           id: approvalId,
@@ -570,6 +590,10 @@ createInterface({ input: process.stdin }).on("line", (line) => {
       break;
     }
     case "session/cancel":
+      if (Object.hasOwn(message, "id")) {
+        reject(id, "session/cancel must be a notification");
+        break;
+      }
       if (pending) {
         activity({ kind: "active_turn_changed", turnId: null });
         result(pending.id, { stopReason: "cancelled" });

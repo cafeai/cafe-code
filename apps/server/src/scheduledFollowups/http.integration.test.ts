@@ -12,7 +12,7 @@ import { HttpServerRequest, HttpServerResponse } from "effect/unstable/http";
 import { afterEach, describe, expect, it } from "vitest";
 import { ServerConfig } from "../config.ts";
 import { readBridgeConnection } from "../mcp/localBridge.ts";
-import { SqlitePersistenceMemory } from "../persistence/Layers/Sqlite.ts";
+import { SqlitePersistenceTest } from "../persistence/Sqlite.test.fixture.ts";
 import { handleSchedulingMcpRequest } from "./http.ts";
 import { ScheduledFollowups, type ScheduledFollowupsShape } from "./service.ts";
 import {
@@ -38,7 +38,7 @@ async function harness() {
   cleanups.push(() => fs.rm(root, { recursive: true, force: true }));
   const bridgeSource = path.join(root, "fixture.mjs");
   await fs.writeFile(bridgeSource, "// Synthetic bridge fixture; never executed.\n");
-  const effects = ManagedRuntime.make(SqlitePersistenceMemory);
+  const effects = ManagedRuntime.make(SqlitePersistenceTest);
   cleanups.push(() => effects.dispose());
   const sql = await effects.runPromise(Effect.service(SqlClient.SqlClient));
   const runtime = await effects.runPromise(

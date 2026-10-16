@@ -3,7 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   getAutoUpdateDisabledReason,
   autoUpdateDisabledReasonForUi,
-  resolveUnsignedDesktopUpdateInstallMode,
+  resolveDesktopUpdateInstallMode,
   type DesktopUpdateEligibilityInput,
 } from "./updateEligibility.ts";
 
@@ -60,9 +60,22 @@ describe("desktop update eligibility", () => {
     );
   });
 
-  it("uses manual installation only for unsigned macOS artifacts", () => {
-    expect(resolveUnsignedDesktopUpdateInstallMode("darwin")).toBe("manual");
-    expect(resolveUnsignedDesktopUpdateInstallMode("win32")).toBe("in-app");
-    expect(resolveUnsignedDesktopUpdateInstallMode("linux")).toBe("in-app");
+  it("enables macOS in-app installation only for the signed package opt-in", () => {
+    expect(resolveDesktopUpdateInstallMode("darwin", '{"cafeCodeMacInAppUpdates":true}')).toBe(
+      "in-app",
+    );
+    for (const packageJson of [
+      undefined,
+      "{}",
+      '{"cafeCodeMacInAppUpdates":false}',
+      '{"cafeCodeMacInAppUpdates":"true"}',
+      '{"cafeCodeMacInAppUpdates":1}',
+      "null",
+      "{",
+    ]) {
+      expect(resolveDesktopUpdateInstallMode("darwin", packageJson)).toBe("manual");
+    }
+    expect(resolveDesktopUpdateInstallMode("win32")).toBe("in-app");
+    expect(resolveDesktopUpdateInstallMode("linux")).toBe("in-app");
   });
 });

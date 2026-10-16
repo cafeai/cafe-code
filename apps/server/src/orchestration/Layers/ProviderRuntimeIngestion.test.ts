@@ -51,10 +51,8 @@ import { makeCodexCompactionDiagnosticsTracker } from "@cafecode/shared/codexCom
 
 import { OrchestrationEventStoreLive } from "../../persistence/Layers/OrchestrationEventStore.ts";
 import { OrchestrationCommandReceiptRepositoryLive } from "../../persistence/Layers/OrchestrationCommandReceipts.ts";
-import {
-  makeSqlitePersistenceLive,
-  SqlitePersistenceMemory,
-} from "../../persistence/Layers/Sqlite.ts";
+import { SqlitePersistenceTest } from "../../persistence/Sqlite.test.fixture.ts";
+import { makeSqlitePersistenceLive } from "../../persistence/Layers/Sqlite.ts";
 import {
   ProviderService,
   type ProviderServiceShape,
@@ -378,7 +376,7 @@ describe("ProviderRuntimeIngestion", () => {
     const provider = createProviderServiceHarness();
     const persistenceLayer =
       options?.databasePath === undefined
-        ? SqlitePersistenceMemory
+        ? SqlitePersistenceTest
         : makeSqlitePersistenceLive(options.databasePath);
     const orchestrationLayer = OrchestrationEngineLive.pipe(
       Layer.provide(OrchestrationProjectionSnapshotQueryLive),

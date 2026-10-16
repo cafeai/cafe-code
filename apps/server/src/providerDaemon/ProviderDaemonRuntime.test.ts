@@ -22,7 +22,7 @@ import nodePath from "node:path";
 import { requestProviderDaemonJson } from "@cafecode/shared/providerDaemonHttp";
 
 import { ServerConfig } from "../config.ts";
-import { SqlitePersistenceMemory } from "../persistence/Layers/Sqlite.ts";
+import { SqlitePersistenceTest } from "../persistence/Sqlite.test.fixture.ts";
 import { supportsSubagentConcurrency } from "../provider/Drivers/SubagentConcurrency.ts";
 import {
   NoOpProviderEventLoggers,
@@ -316,7 +316,7 @@ const makeRuntimeLayer = (fixture: Effect.Success<ReturnType<typeof makeFixture>
     };
     const layer = ProviderDaemonLocalRuntimeLive.pipe(
       Layer.provideMerge(fixture.instanceLayer),
-      Layer.provideMerge(SqlitePersistenceMemory),
+      Layer.provideMerge(SqlitePersistenceTest),
       Layer.provide(Layer.succeed(ProviderEventLoggers, NoOpProviderEventLoggers)),
       Layer.provide(Layer.succeed(FileSystem.FileSystem, trackedFs)),
       Layer.provideMerge(Layer.succeedContext(infrastructure)),

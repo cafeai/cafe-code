@@ -3,6 +3,7 @@ import type {
   DesktopUpdateActionResult,
   DesktopUpdateChannel,
   DesktopUpdateCheckResult,
+  DesktopUpdateInstallMode,
   DesktopUpdateState,
 } from "@cafecode/contracts";
 import * as Cause from "effect/Cause";
@@ -30,7 +31,7 @@ import * as DesktopAppSettings from "../settings/DesktopAppSettings.ts";
 import { resolveDefaultDesktopUpdateChannel } from "./updateChannels.ts";
 import {
   getAutoUpdateDisabledReason,
-  resolveUnsignedDesktopUpdateInstallMode,
+  resolveDesktopUpdateInstallMode,
 } from "./updateEligibility.ts";
 import {
   createInitialDesktopUpdateState,
@@ -132,13 +133,14 @@ function createBaseUpdateState(
   channel: DesktopUpdateChannel,
   enabled: boolean,
   environment: DesktopEnvironment.DesktopEnvironmentShape,
+  installMode: DesktopUpdateInstallMode,
 ): DesktopUpdateState {
   return {
     ...createInitialDesktopUpdateState(
       environment.appVersion,
       environment.runtimeInfo,
       channel,
-      resolveUnsignedDesktopUpdateInstallMode(environment.platform),
+      installMode,
     ),
     enabled,
     status: enabled ? "idle" : "disabled",
@@ -181,6 +183,14 @@ const make = Effect.gen(function* () {
   const fileSystem = yield* FileSystem.FileSystem;
   const desktopSettings = yield* DesktopAppSettings.DesktopAppSettings;
 
+  const packageJson =
+    environment.isPackaged && environment.platform === "darwin"
+      ? yield* fileSystem
+          .readFileString(environment.path.join(environment.appRoot, "package.json"), "utf-8")
+          .pipe(Effect.option, Effect.map(Option.getOrUndefined))
+      : undefined;
+  const installMode = resolveDesktopUpdateInstallMode(environment.platform, packageJson);
+
   const appUpdateYmlConfigRef = yield* Ref.make<Option.Option<AppUpdateYmlConfig>>(Option.none());
   const updateCheckInFlightRef = yield* Ref.make(false);
   const updateDownloadInFlightRef = yield* Ref.make(false);
@@ -192,7 +202,7 @@ const make = Effect.gen(function* () {
       environment.appVersion,
       environment.runtimeInfo,
       environment.defaultDesktopSettings.updateChannel,
-      resolveUnsignedDesktopUpdateInstallMode(environment.platform),
+      installMode,
     ),
   );
 
@@ -529,7 +539,9 @@ const make = Effect.gen(function* () {
 
       const settings = yield* desktopSettings.get;
       const enabled = yield* shouldEnableAutoUpdates;
-      yield* setState(createBaseUpdateState(settings.updateChannel, enabled, environment));
+      yield* setState(
+        createBaseUpdateState(settings.updateChannel, enabled, environment, installMode),
+      );
       if (!enabled) {
         return;
       }
@@ -600,7 +612,7 @@ const make = Effect.gen(function* () {
         .pipe(Effect.mapError((cause) => new DesktopUpdatePersistenceError({ cause })));
 
       const enabled = yield* shouldEnableAutoUpdates;
-      yield* setState(createBaseUpdateState(nextChannel, enabled, environment));
+      yield* setState(createBaseUpdateState(nextChannel, enabled, environment, installMode));
 
       if (!enabled || !(yield* Ref.get(updaterConfiguredRef))) {
         return yield* Ref.get(updateStateRef);

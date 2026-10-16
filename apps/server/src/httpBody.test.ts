@@ -8,6 +8,7 @@ import { describe, expect, it } from "vitest";
 import { readHttpBody } from "./httpBody.ts";
 
 async function fixture(task: (port: number) => Promise<void>) {
+  const nodeServer = Http.createServer();
   await Effect.runPromise(
     Effect.scoped(
       Effect.gen(function* () {
@@ -26,12 +27,15 @@ async function fixture(task: (port: number) => Promise<void>) {
           ),
         );
         if (server.address._tag !== "TcpAddress") throw new Error("Expected TCP fixture");
+        // Retire only this fixture's sockets after its assertions, before the
+        // normal server finalizer waits for HTTP keep-alive retirement.
+        yield* Effect.addFinalizer(() => Effect.sync(() => nodeServer.closeAllConnections()));
         yield* Effect.promise(() =>
           task(server.address._tag === "TcpAddress" ? server.address.port : 0),
         );
       }),
     ).pipe(
-      Effect.provide(NodeHttpServer.layer(Http.createServer, { host: "127.0.0.1", port: 0 })),
+      Effect.provide(NodeHttpServer.layer(() => nodeServer, { host: "127.0.0.1", port: 0 })),
       Effect.provide(NodeServices.layer),
     ),
   );

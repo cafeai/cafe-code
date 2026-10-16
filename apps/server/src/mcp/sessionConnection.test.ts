@@ -13,12 +13,12 @@ import { ServerConfig } from "../config.ts";
 import { SessionCredentialService } from "../auth/Services/SessionCredentialService.ts";
 import { SessionCredentialServiceLive } from "../auth/Layers/SessionCredentialService.ts";
 import { ServerSecretStoreLive } from "../auth/Layers/ServerSecretStore.ts";
-import { SqlitePersistenceMemory } from "../persistence/Layers/Sqlite.ts";
+import { SqlitePersistenceTest } from "../persistence/Sqlite.test.fixture.ts";
 import { makeManagementMcpSession } from "./sessionConnection.ts";
 import { readBridgeConnection } from "./localBridge.ts";
 const configLayer = ServerConfig.layerTest(process.cwd(), { prefix: "cafe-session-mcp-test-" });
 const sessionsLayer = SessionCredentialServiceLive.pipe(
-  Layer.provide(SqlitePersistenceMemory),
+  Layer.provide(SqlitePersistenceTest),
   Layer.provide(ServerSecretStoreLive),
   Layer.provide(configLayer),
 );

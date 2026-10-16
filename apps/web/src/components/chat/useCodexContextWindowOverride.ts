@@ -1,3 +1,4 @@
+import { saveAcknowledgedPolicyOverlay } from "../../lib/acknowledgedPolicyOverlay";
 import { useLayoutEffect, useRef } from "react";
 import type { EnvironmentId, ThreadId } from "@cafecode/contracts";
 import { validCodexContextWindowOverride } from "@cafecode/contracts";
@@ -55,46 +56,23 @@ export function useCodexContextWindowOverride(input: {
     const readSequence = () =>
       useStore.getState().environmentStateById[input.environmentId]
         ?.codexContextPolicySequenceByThreadId?.[threadId];
-    scope.dispose?.();
-    let acknowledged: number | null = null;
-    let installed = false;
-    const dispose = () => {
-      unsubscribe();
-      if (installed && store.getComposerDraft(input.target)?.codexContextWindowOverride === value)
-        store.setCodexContextWindowOverride(input.target, undefined);
-      installed = false;
-      if (scope.dispose === dispose) scope.dispose = null;
-    };
-    const unsubscribe = useStore.subscribe(() => {
-      const sequence = readSequence();
-      if (acknowledged !== null && sequence !== undefined && sequence >= acknowledged) dispose();
+    await saveAcknowledgedPolicyOverlay({
+      scope,
+      isCurrent: () => scopeRef.current === scope && latestKey.current === input.key,
+      requested: value,
+      readSequence,
+      readCanonical,
+      readOverlay: () => store.getComposerDraft(input.target)?.codexContextWindowOverride,
+      writeOverlay: (next) => store.setCodexContextWindowOverride(input.target, next),
+      equal: Object.is,
+      subscribe: (notify) => useStore.subscribe(notify),
+      dispatch: () =>
+        requireEnvironmentConnection(input.environmentId).client.orchestration.dispatchCommand({
+          type: "thread.meta.update",
+          commandId: newCommandId(),
+          threadId,
+          codexContextWindowOverride: value,
+        }),
     });
-    scope.dispose = dispose;
-    try {
-      // Capture original authority before awaiting; a late ACK never targets a new pane/account.
-      const acknowledgement = await requireEnvironmentConnection(
-        input.environmentId,
-      ).client.orchestration.dispatchCommand({
-        type: "thread.meta.update",
-        commandId: newCommandId(),
-        threadId,
-        codexContextWindowOverride: value,
-      });
-      acknowledged = acknowledgement.sequence;
-      const sequence = readSequence();
-      if (
-        scope.active &&
-        scopeRef.current === scope &&
-        latestKey.current === input.key &&
-        scope.dispose === dispose &&
-        (sequence === undefined || sequence < acknowledged) &&
-        readCanonical() !== value
-      ) {
-        installed = true;
-        store.setCodexContextWindowOverride(input.target, value);
-      }
-    } finally {
-      if (!installed) dispose();
-    }
   };
 }

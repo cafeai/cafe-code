@@ -1,15 +1,11 @@
+import type { OrchestrationEvent } from "@cafecode/contracts";
+import * as Queue from "effect/Queue";
 // @effect-diagnostics nodeBuiltinImport:off
+import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { execFileSync } from "node:child_process";
 
-import {
-  ProviderDriverKind,
-  ProviderRuntimeEvent,
-  ProviderSession,
-  ProviderInstanceId,
-} from "@cafecode/contracts";
 import {
   CheckpointRef,
   CommandId,
@@ -17,6 +13,10 @@ import {
   EventId,
   MessageId,
   ProjectId,
+  ProviderDriverKind,
+  ProviderInstanceId,
+  ProviderRuntimeEvent,
+  ProviderSession,
   ThreadId,
   TurnId,
 } from "@cafecode/contracts";
@@ -34,42 +34,42 @@ import * as Stream from "effect/Stream";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
+import { CheckpointInvariantError } from "../../checkpointing/Errors.ts";
 import { CheckpointStoreLive } from "../../checkpointing/Layers/CheckpointStore.ts";
 import { CheckpointStore } from "../../checkpointing/Services/CheckpointStore.ts";
-import { CheckpointInvariantError } from "../../checkpointing/Errors.ts";
+import { checkpointRefForThreadTurn } from "../../checkpointing/Utils.ts";
+import { ServerConfig } from "../../config.ts";
+import { OrchestrationCommandReceiptRepositoryLive } from "../../persistence/Layers/OrchestrationCommandReceipts.ts";
+import { OrchestrationEventStoreLive } from "../../persistence/Layers/OrchestrationEventStore.ts";
+import { SqlitePersistenceTest } from "../../persistence/Sqlite.test.fixture.ts";
+import { RepositoryIdentityResolverLive } from "../../project/Layers/RepositoryIdentityResolver.ts";
+import {
+  ProviderAdapterRequestError,
+  ProviderAdapterRewindOutcomeUnknownError,
+} from "../../provider/Errors.ts";
+import {
+  ProviderService,
+  type ProviderServiceShape,
+} from "../../provider/Services/ProviderService.ts";
 import * as VcsDriverRegistry from "../../vcs/VcsDriverRegistry.ts";
 import * as VcsProcess from "../../vcs/VcsProcess.ts";
 import { VcsStatusBroadcaster } from "../../vcs/VcsStatusBroadcaster.ts";
-import { RepositoryIdentityResolverLive } from "../../project/Layers/RepositoryIdentityResolver.ts";
+import { WorkspaceEntriesLive } from "../../workspace/Layers/WorkspaceEntries.ts";
+import { WorkspacePathsLive } from "../../workspace/Layers/WorkspacePaths.ts";
+import { OrchestrationCommandInvariantError } from "../Errors.ts";
+import { CheckpointReactor } from "../Services/CheckpointReactor.ts";
+import {
+  OrchestrationEngineService,
+  type OrchestrationEngineShape,
+} from "../Services/OrchestrationEngine.ts";
+import { ProjectionSnapshotQuery } from "../Services/ProjectionSnapshotQuery.ts";
+import { ProviderRuntimeIngestionService } from "../Services/ProviderRuntimeIngestion.ts";
+import { RuntimeReceiptBus } from "../Services/RuntimeReceiptBus.ts";
 import { CheckpointReactorLive, computeCheckpointRefPrunePlan } from "./CheckpointReactor.ts";
 import { OrchestrationEngineLive } from "./OrchestrationEngine.ts";
 import { OrchestrationProjectionPipelineLive } from "./ProjectionPipeline.ts";
 import { OrchestrationProjectionSnapshotQueryLive } from "./ProjectionSnapshotQuery.ts";
 import { RuntimeReceiptBusLive } from "./RuntimeReceiptBus.ts";
-import { RuntimeReceiptBus } from "../Services/RuntimeReceiptBus.ts";
-import { ProviderRuntimeIngestionService } from "../Services/ProviderRuntimeIngestion.ts";
-import { OrchestrationCommandInvariantError } from "../Errors.ts";
-import { OrchestrationEventStoreLive } from "../../persistence/Layers/OrchestrationEventStore.ts";
-import { OrchestrationCommandReceiptRepositoryLive } from "../../persistence/Layers/OrchestrationCommandReceipts.ts";
-import { SqlitePersistenceMemory } from "../../persistence/Layers/Sqlite.ts";
-import {
-  OrchestrationEngineService,
-  type OrchestrationEngineShape,
-} from "../Services/OrchestrationEngine.ts";
-import { CheckpointReactor } from "../Services/CheckpointReactor.ts";
-import { ProjectionSnapshotQuery } from "../Services/ProjectionSnapshotQuery.ts";
-import {
-  ProviderService,
-  type ProviderServiceShape,
-} from "../../provider/Services/ProviderService.ts";
-import {
-  ProviderAdapterRequestError,
-  ProviderAdapterRewindOutcomeUnknownError,
-} from "../../provider/Errors.ts";
-import { checkpointRefForThreadTurn } from "../../checkpointing/Utils.ts";
-import { ServerConfig } from "../../config.ts";
-import { WorkspaceEntriesLive } from "../../workspace/Layers/WorkspaceEntries.ts";
-import { WorkspacePathsLive } from "../../workspace/Layers/WorkspacePaths.ts";
 
 const asProjectId = (value: string): ProjectId => ProjectId.make(value);
 const asTurnId = (value: string): TurnId => TurnId.make(value);
@@ -250,26 +250,25 @@ async function waitForThread(
   return poll();
 }
 
+const checkpointEvents = new WeakMap<
+  OrchestrationEngineShape,
+  Effect.Effect<OrchestrationEvent, unknown>
+>();
 async function waitForEvent(
   engine: OrchestrationEngineShape,
-  predicate: (event: { type: string }) => boolean,
+  predicate: (event: OrchestrationEvent) => boolean,
   timeoutMs = 15_000,
 ) {
-  const deadline = (await Effect.runPromise(Clock.currentTimeMillis)) + timeoutMs;
-  const poll = async () => {
-    const events = await Effect.runPromise(
-      Stream.runCollect(engine.readEvents(0)).pipe(Effect.map((chunk) => Array.from(chunk))),
-    );
-    if (events.some(predicate)) {
-      return events;
-    }
-    if ((await Effect.runPromise(Clock.currentTimeMillis)) >= deadline) {
-      throw new Error("Timed out waiting for orchestration event.");
-    }
-    await Effect.runPromise(Effect.sleep("10 millis"));
-    return poll();
-  };
-  return poll();
+  const next = checkpointEvents.get(engine);
+  if (!next) throw new Error("Fixture event subscription was not installed before dispatch");
+  return Effect.runPromise(
+    Effect.gen(function* () {
+      while (true) {
+        const event = yield* next;
+        if (predicate(event)) return [event];
+      }
+    }).pipe(Effect.timeout(timeoutMs)),
+  );
 }
 
 function runGit(cwd: string, args: ReadonlyArray<string>) {
@@ -397,11 +396,11 @@ describe("CheckpointReactor", () => {
       Layer.provide(OrchestrationEventStoreLive),
       Layer.provide(OrchestrationCommandReceiptRepositoryLive),
       Layer.provide(RepositoryIdentityResolverLive),
-      Layer.provide(SqlitePersistenceMemory),
+      Layer.provide(SqlitePersistenceTest),
     );
     const projectionSnapshotLayer = OrchestrationProjectionSnapshotQueryLive.pipe(
       Layer.provide(RepositoryIdentityResolverLive),
-      Layer.provide(SqlitePersistenceMemory),
+      Layer.provide(SqlitePersistenceTest),
     );
 
     const ServerConfigLayer = ServerConfig.layerTest(process.cwd(), {
@@ -470,7 +469,7 @@ describe("CheckpointReactor", () => {
       Layer.provideMerge(VcsProcess.layer),
       Layer.provideMerge(ServerConfigLayer),
       Layer.provideMerge(NodeServices.layer),
-      Layer.provideMerge(SqlitePersistenceMemory),
+      Layer.provideMerge(SqlitePersistenceTest),
     );
 
     runtime = ManagedRuntime.make(
@@ -485,6 +484,12 @@ describe("CheckpointReactor", () => {
     const sql = await runtime.runPromise(Effect.service(SqlClient.SqlClient));
     const receiptBus = await runtime.runPromise(Effect.service(RuntimeReceiptBus));
     scope = await Effect.runPromise(Scope.make("sequential"));
+    const events = await Effect.runPromise(
+      Stream.toQueue(engine.streamDomainEvents, { capacity: "unbounded" }).pipe(
+        Scope.provide(scope),
+      ),
+    );
+    checkpointEvents.set(engine, Queue.take(events));
     await Effect.runPromise(reactor.start().pipe(Scope.provide(scope)));
     const drain = () => Effect.runPromise(reactor.drain);
     const publishIngestionReceipt = (event: LegacyProviderRuntimeEvent) => {

@@ -42,6 +42,9 @@
     "vitest.browser.config.ts",
     "../../vitest.config.ts",
     "reactCompilerConfig.ts",
-    "test"
+    "test",
+    "browser-test-policy.json",
+    "vitest.stress.config.ts",
+    "vitest.soak.config.ts"
   ]
 }

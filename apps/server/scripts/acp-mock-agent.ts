@@ -5,8 +5,8 @@ import * as NodePath from "node:path";
 
 import * as Effect from "effect/Effect";
 
-import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as NodeRuntime from "@effect/platform-node/NodeRuntime";
+import * as NodeServices from "@effect/platform-node/NodeServices";
 
 import * as EffectAcpAgent from "effect-acp/agent";
 import * as AcpError from "effect-acp/errors";
@@ -35,7 +35,6 @@ const emitXAiTurnCompletedUpdateThenHang =
 const emitForeignSessionUpdates = process.env.CAFE_CODE_ACP_EMIT_FOREIGN_SESSION_UPDATES === "1";
 const hangPromptForever = process.env.CAFE_CODE_ACP_HANG_PROMPT_FOREVER === "1";
 const hangFirstPromptForever = process.env.CAFE_CODE_ACP_HANG_FIRST_PROMPT_FOREVER === "1";
-const emitLateUpdateAfterCancel = process.env.CAFE_CODE_ACP_EMIT_LATE_UPDATE_AFTER_CANCEL === "1";
 const omitXAiPromptCompleteStopReason =
   process.env.CAFE_CODE_ACP_OMIT_XAI_PROMPT_COMPLETE_STOP_REASON === "1";
 const failLoadSession = process.env.CAFE_CODE_ACP_FAIL_LOAD_SESSION === "1";
@@ -603,18 +602,6 @@ const program = Effect.gen(function* () {
       yield* Effect.sync(() => logRequest("session/cancel", { sessionId }));
       const cancelledSessionId = String(sessionId ?? "mock-session-1");
       cancelledSessions.add(cancelledSessionId);
-      if (emitLateUpdateAfterCancel) {
-        yield* Effect.sleep("50 millis");
-        yield* Effect.sync(() => {
-          writeJsonRpcNotification("session/update", {
-            sessionId: cancelledSessionId,
-            update: {
-              sessionUpdate: "agent_message_chunk",
-              content: { type: "text", text: "late after cancel" },
-            },
-          });
-        });
-      }
     }),
   );
 

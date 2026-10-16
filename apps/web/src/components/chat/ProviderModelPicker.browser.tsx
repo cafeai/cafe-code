@@ -447,6 +447,86 @@ describe("ProviderModelPicker", () => {
     await __resetLocalApiForTests();
   });
 
+  it("shows the default Axiom account and selects its exact native model", async () => {
+    const axiom: ServerProvider = {
+      driver: ProviderDriverKind.make("axiom"),
+      instanceId: ProviderInstanceId.make("axiom"),
+      displayName: "Axiom",
+      enabled: true,
+      installed: true,
+      version: null,
+      status: "ready",
+      auth: { status: "authenticated" },
+      checkedAt: "2026-10-15T00:00:00.000Z",
+      slashCommands: [],
+      skills: [],
+      models: [
+        {
+          slug: "fixture-native-model",
+          name: "Fixture Native Model",
+          isCustom: false,
+          capabilities: createModelCapabilities({ optionDescriptors: [] }),
+        },
+      ],
+    };
+    const mounted = await mountPicker({
+      activeInstanceId: CODEX_INSTANCE_ID,
+      model: "gpt-5-codex",
+      lockedProvider: null,
+      providers: [...TEST_PROVIDERS, axiom],
+    });
+    try {
+      expect(DEFAULT_UNIFIED_SETTINGS.providerInstances[axiom.instanceId]?.driver).toBe("axiom");
+      await page.getByRole("button", { name: "GPT-5 Codex", exact: true }).click();
+      expect(getSidebarProviderOrder()).toContain("axiom");
+      await page.getByRole("button", { name: "Axiom", exact: true }).click();
+      await expect
+        .element(page.getByRole("option", { name: /Fixture Native Model/ }))
+        .toBeVisible();
+      await page.getByRole("option", { name: /Fixture Native Model/ }).click();
+      expect(mounted.onInstanceModelChange).toHaveBeenCalledExactlyOnceWith(
+        axiom.instanceId,
+        "fixture-native-model",
+      );
+    } finally {
+      await mounted.cleanup();
+    }
+  });
+
+  it.each(["warning", "disabled"] as const)(
+    "retains the Axiom icon without granting selection when %s",
+    async (status) => {
+      const mounted = await mountPicker({
+        model: "gpt-5-codex",
+        lockedProvider: null,
+        providers: [
+          ...TEST_PROVIDERS,
+          {
+            driver: ProviderDriverKind.make("axiom"),
+            instanceId: ProviderInstanceId.make("axiom"),
+            enabled: status !== "disabled",
+            installed: false,
+            version: null,
+            status,
+            auth: { status: "unknown" },
+            checkedAt: "2026-10-15T00:00:00.000Z",
+            models: [],
+            slashCommands: [],
+            skills: [],
+          },
+        ],
+      });
+      try {
+        await page.getByRole("button", { name: "GPT-5 Codex", exact: true }).click();
+        await expect.element(page.getByRole("button", { name: /^Axiom —/ })).toBeDisabled();
+        expect(getSidebarProviderOrder()).toContain("axiom");
+        expect(mounted.onInstanceModelChange).not.toHaveBeenCalled();
+      } finally {
+        await mounted.cleanup();
+      }
+    },
+  );
+
   it("requests one bounded catalogue refresh for each closed-to-open transition", async () => {
     const onRequestModelsRefresh = vi.fn();
     const mounted = await mountPicker({

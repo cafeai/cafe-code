@@ -1,10 +1,11 @@
-import { useEffect, useMemo, useState } from "react";
 import type {
   EnvironmentId,
   ProviderCommandCatalog,
   ProviderCommandsInput,
 } from "@cafecode/contracts";
+import { useEffect, useMemo, useState } from "react";
 import { requireEnvironmentConnection } from "../../environments/runtime";
+import { subscribeMetadata } from "./metadataSubscription";
 
 const UNAVAILABLE: ProviderCommandCatalog = { status: "unavailable", commands: [] };
 const LOADING: ProviderCommandCatalog = { status: "loading", commands: [] };
@@ -28,38 +29,17 @@ export function useProviderCommands(
   } | null>(null);
   useEffect(() => {
     if (!open || !input || !connected) return;
-    let current = true;
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    const publish = (catalog: ProviderCommandCatalog) => {
-      if (!current) return;
-      clearTimeout(timer);
-      setState({ request, catalog });
-    };
-    const awaitingSnapshot = () => {
-      publish(LOADING);
-      // Covers a failed/older server endpoint or a transport that cannot yet
-      // deliver its first snapshot. A late valid snapshot may still recover.
-      timer = setTimeout(() => publish(UNAVAILABLE), 6_000);
-    };
-    awaitingSnapshot();
-    let close: (() => void) | undefined;
-    try {
-      close = requireEnvironmentConnection(environmentId).client.server.subscribeProviderCommands(
-        input,
-        publish,
-        {
-          onResubscribe: awaitingSnapshot,
-          retryNonTransportErrors: true,
-        },
-      );
-    } catch {
-      publish(UNAVAILABLE);
-    }
-    return () => {
-      current = false;
-      clearTimeout(timer);
-      close?.();
-    };
+    return subscribeMetadata({
+      loading: LOADING,
+      unavailable: UNAVAILABLE,
+      publish: (catalog) => setState({ request, catalog }),
+      subscribe: (publish, awaitingSnapshot) =>
+        requireEnvironmentConnection(environmentId).client.server.subscribeProviderCommands(
+          input,
+          publish,
+          { onResubscribe: awaitingSnapshot, retryNonTransportErrors: true },
+        ),
+    });
   }, [environmentId, input, open, request, connected]);
   if (!input || !connected) return UNAVAILABLE;
   return state?.request === request ? state.catalog : LOADING;

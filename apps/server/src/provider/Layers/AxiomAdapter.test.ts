@@ -727,6 +727,47 @@ describe("Axiom scoped ACP adapter", () => {
       ).toBe("Failure");
     }).pipe(Effect.provide(layer), Effect.scoped),
   );
+  it.effect("continues after two UUID-bound choice answers and accepts the next prompt", () =>
+    Effect.gen(function* () {
+      const { adapter, question, complete, events } = yield* setup;
+      const first = yield* adapter.sendTurn({ threadId, input: "string question prompt" });
+      const request = yield* Deferred.await(question);
+      if (!request.requestId) return yield* Effect.die("Missing exact question identity");
+      const requestId = ApprovalRequestId.make(request.requestId);
+      expect(request.payload).toMatchObject({ questions: [{ id: "build" }, { id: "scope" }] });
+      expect(
+        (yield* adapter
+          .respondToUserInput(threadId, requestId, {
+            build: "local build",
+          })
+          .pipe(Effect.result))._tag,
+      ).toBe("Failure");
+      expect(events.filter((event) => event.type === "user-input.resolved")).toHaveLength(0);
+      yield* adapter.respondToUserInput(threadId, requestId, {
+        build: "local build",
+        scope: "npm only",
+      });
+      yield* Deferred.await(complete);
+      expect(events.filter((event) => event.type === "turn.completed")).toMatchObject([
+        { turnId: first.turnId, payload: { state: "completed" } },
+      ]);
+      expect(events.filter((event) => event.type === "user-input.resolved")).toMatchObject([
+        { requestId, payload: { answers: { build: "local build", scope: "npm only" } } },
+      ]);
+      expect((yield* adapter.listSessions())[0]?.status).toBe("ready");
+      const nextComplete = yield* Deferred.make<ProviderRuntimeEvent>();
+      yield* Stream.runForEach(adapter.streamEvents, (event) =>
+        event.type === "turn.completed" && event.turnId !== first.turnId
+          ? Deferred.succeed(nextComplete, event).pipe(Effect.asVoid)
+          : Effect.void,
+      ).pipe(Effect.forkScoped({ startImmediately: true }));
+      const next = yield* adapter.sendTurn({ threadId, input: "normal follow-up prompt" });
+      expect(yield* Deferred.await(nextComplete)).toMatchObject({
+        turnId: next.turnId,
+        payload: { state: "completed" },
+      });
+    }).pipe(Effect.provide(layer), Effect.scoped),
+  );
   it.effect("cancels the exact approval without manufacturing a denial option", () =>
     Effect.gen(function* () {
       const { adapter, approval, complete, readReport } = yield* setup;

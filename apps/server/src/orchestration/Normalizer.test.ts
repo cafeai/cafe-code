@@ -16,7 +16,7 @@ import {
   publishFileAttachmentUpload,
   registerFileAttachmentUpload,
 } from "../fileAttachmentLifecycle.ts";
-import { SqlitePersistenceMemory } from "../persistence/Layers/Sqlite.ts";
+import { SqlitePersistenceTest } from "../persistence/Sqlite.test.fixture.ts";
 import { RepositoryIdentityResolverLive } from "../project/Layers/RepositoryIdentityResolver.ts";
 import { WorkspacePathsLive } from "../workspace/Layers/WorkspacePaths.ts";
 import { OrchestrationProjectionSnapshotQueryLive } from "./Layers/ProjectionSnapshotQuery.ts";
@@ -27,7 +27,7 @@ const layer = it.layer(
     WorkspacePathsLive,
     OrchestrationProjectionSnapshotQueryLive.pipe(Layer.provide(RepositoryIdentityResolverLive)),
     ServerConfig.layerTest(process.cwd(), { prefix: "cafe-normalizer-test-" }),
-  ).pipe(Layer.provideMerge(SqlitePersistenceMemory), Layer.provideMerge(NodeServices.layer)),
+  ).pipe(Layer.provideMerge(SqlitePersistenceTest), Layer.provideMerge(NodeServices.layer)),
 );
 
 layer("normalizeDispatchCommand attachment commitments", (it) => {

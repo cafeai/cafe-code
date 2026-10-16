@@ -15,7 +15,7 @@ import {
 } from "../checkpointing/Services/CheckpointStore.ts";
 import { checkpointRefForThreadTurn } from "../checkpointing/Utils.ts";
 import { ServerConfig } from "../config.ts";
-import { SqlitePersistenceMemory } from "../persistence/Layers/Sqlite.ts";
+import { SqlitePersistenceTest } from "../persistence/Sqlite.test.fixture.ts";
 import { RepositoryIdentityResolver } from "../project/Services/RepositoryIdentityResolver.ts";
 import { OrchestrationProjectionSnapshotQueryLive } from "./Layers/ProjectionSnapshotQuery.ts";
 import {
@@ -77,7 +77,7 @@ const testLayer = OrchestrationProjectionSnapshotQueryLive.pipe(
   Layer.provideMerge(repositoryIdentityResolverLayer),
   Layer.provideMerge(checkpointStoreLayer),
   Layer.provideMerge(ServerConfig.layerTest(process.cwd(), { prefix: "cafe-hard-delete-" })),
-  Layer.provideMerge(SqlitePersistenceMemory),
+  Layer.provideMerge(SqlitePersistenceTest),
   Layer.provideMerge(NodeServices.layer),
 );
 

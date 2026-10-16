@@ -62,11 +62,13 @@ one merely because the app exits.
   runs for the current user with Electron Updater's `--updated /S --force-run` arguments. The update
   path does not rerun the fresh-install managed-provider bootstrap. Windows may show Unknown
   Publisher or SmartScreen warnings because there is no Authenticode certificate.
-- macOS arm64/x64: Cafe Code detects the release but opens its exact GitHub release page for manual
-  DMG installation. Replace Cafe Code in `/Applications` from the DMG. Squirrel.Mac requires a
-  signed app. This release retains manual DMG replacement; signing alone does not change the
-  app's update-install policy. Both architecture builds must pass native signature,
-  Gatekeeper and stapled-notarization checks before publication; build-only runs check the ZIP app.
+- macOS arm64/x64: signed and notarized packages opt into in-app updates. The user downloads the
+  update from Cafe Code and confirms restart; Electron Updater selects the matching architecture's
+  ZIP and hands it to Squirrel.Mac for native signature validation, replacement and relaunch.
+  An Intel build running under Rosetta switches to the native Apple Silicon ZIP. Unsigned local
+  packages retain the exact GitHub release link for manual DMG installation. Both architecture
+  builds must pass native signature, Gatekeeper and stapled-notarization checks before publication;
+  build-only runs check the ZIP app.
 - Linux x64 AppImage: update checks run only when Cafe Code was launched from an AppImage and the
   `APPIMAGE` path is available. After an explicit download and restart confirmation, Electron
   Updater replaces the AppImage and relaunches it. The containing directory and AppImage must be
@@ -75,12 +77,23 @@ one merely because the app exits.
 Source checkouts use the separate Git branch update diagnostic. They compare commits on `main` or
 `dev`; they do not consume GitHub Release manifests and cannot install packaged updates.
 
+macOS packages opt in through the bundled `package.json` field `cafeCodeMacInAppUpdates: true`,
+which the signed packaging path writes alongside its required signing/notarization configuration.
+This field selects installation policy; Squirrel.Mac remains responsible for authenticating the
+replacement app. Missing, false, malformed or unreadable metadata retains manual installation.
+The mode is captured from the installed package and preserved when switching update tracks.
+Already released macOS versions through 0.2.0 retain their shipped manual policy and need one
+manual DMG upgrade to a release containing this change before subsequent in-app updates work.
+Native signed-app upgrade/relaunch qualification remains a separate release check; unit tests,
+manifest validation and detection-only probes do not establish a successful Squirrel.Mac install.
+
 ## Trust Model
 
 The feed and artifacts are delivered over GitHub HTTPS, and Electron Updater verifies the SHA-512
-digest recorded in the release manifest before using a downloaded Windows or Linux artifact. This
-detects transport corruption but does not establish publisher identity. Windows artifacts still
-require Authenticode signing before their publisher can be authenticated. macOS release builds
+digest recorded in the release manifest before using a downloaded updater payload. This detects
+transport corruption but does not establish publisher identity. macOS additionally retains
+Squirrel.Mac's native app-signature checks. Windows artifacts still require Authenticode signing
+before their publisher can be authenticated. macOS release builds
 require the registered `MACOS_CERTIFICATE_BASE64`, `MACOS_CERTIFICATE_PASSWORD`, `APPLE_ID`,
 `APPLE_APP_SPECIFIC_PASSWORD` and `APPLE_TEAM_ID` Actions secrets. Only the macOS release build
 step receives them. The builder requires a signing identity and notarization; unsigned fallback

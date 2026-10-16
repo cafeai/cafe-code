@@ -16,7 +16,7 @@ import * as SqlClient from "effect/unstable/sql/SqlClient";
 import { DatabaseSync } from "node:sqlite";
 import { describe, expect, it, vi } from "vitest";
 
-import { SqlitePersistenceMemory } from "../persistence/Layers/Sqlite.ts";
+import { SqlitePersistenceTest } from "../persistence/Sqlite.test.fixture.ts";
 import {
   createProviderDaemonEventJournal,
   makePersistentProviderDaemonEventJournal,
@@ -232,7 +232,7 @@ describe("ProviderDaemonEventJournal", () => {
           ORDER BY cursor
         `;
         expect(rows.map((row) => JSON.parse(row.eventJson))).toEqual(inputs);
-      }).pipe(Effect.scoped, Effect.provide(SqlitePersistenceMemory)),
+      }).pipe(Effect.scoped, Effect.provide(SqlitePersistenceTest)),
     );
   });
 
@@ -287,7 +287,7 @@ describe("ProviderDaemonEventJournal", () => {
             ORDER BY cursor
           `;
           expect(rows.map((row) => JSON.parse(row.eventJson))).toEqual(events);
-        }).pipe(Effect.scoped, Effect.provide(SqlitePersistenceMemory)),
+        }).pipe(Effect.scoped, Effect.provide(SqlitePersistenceTest)),
       );
     },
   );
@@ -334,7 +334,7 @@ describe("ProviderDaemonEventJournal", () => {
         expect((yield* journal.replayAfter(0)).map((record) => record.event.eventId)).toEqual(
           delivered,
         );
-      }).pipe(Effect.scoped, Effect.provide(SqlitePersistenceMemory)),
+      }).pipe(Effect.scoped, Effect.provide(SqlitePersistenceTest)),
     );
   });
   it("assigns monotonic cursors and replays events after a cursor", () => {
@@ -408,7 +408,7 @@ describe("ProviderDaemonEventJournal", () => {
         expect(replayed.map((record) => record.event.eventId)).toEqual([EventId.make("event-2")]);
         expect(snapshot.eventCursor).toBe(2);
         expect(snapshot.retainedEventCount).toBe(2);
-      }).pipe(Effect.scoped, Effect.provide(SqlitePersistenceMemory)),
+      }).pipe(Effect.scoped, Effect.provide(SqlitePersistenceTest)),
     );
   });
 
@@ -437,7 +437,7 @@ describe("ProviderDaemonEventJournal", () => {
         expect(replay.some((record) => record.cursor > subscription.replayBoundaryCursor)).toBe(
           false,
         );
-      }).pipe(Effect.scoped, Effect.provide(SqlitePersistenceMemory)),
+      }).pipe(Effect.scoped, Effect.provide(SqlitePersistenceTest)),
     );
   });
 
@@ -565,7 +565,7 @@ describe("ProviderDaemonEventJournal", () => {
             WHERE owner_key = ${ownerKey} AND cursor = ${beyondBoundary[0]!.cursor}
           `) as unknown as ReadonlyArray<{ readonly eventJson: string }>;
           expect(beyondBoundaryRows[0]?.eventJson).toBe(futureJson);
-        }).pipe(Effect.scoped, Effect.provide(SqlitePersistenceMemory)),
+        }).pipe(Effect.scoped, Effect.provide(SqlitePersistenceTest)),
       );
     } finally {
       prepareObserver.mockRestore();
@@ -612,7 +612,7 @@ describe("ProviderDaemonEventJournal", () => {
         expect(
           replayed.reduce((bytes, record) => bytes + encodedRuntimeEventBytes(record.event), 0),
         ).toBeLessThanOrEqual(PROVIDER_PIPELINE_POLICY.daemonReplayPageBytes);
-      }).pipe(Effect.scoped, Effect.provide(SqlitePersistenceMemory)),
+      }).pipe(Effect.scoped, Effect.provide(SqlitePersistenceTest)),
     );
   });
 
@@ -673,7 +673,7 @@ describe("ProviderDaemonEventJournal", () => {
           expect(
             yield* journal.replayPageThrough(replayed.at(-1)!.cursor, published.at(-1)!.cursor),
           ).toEqual([]);
-        }).pipe(Effect.scoped, Effect.provide(SqlitePersistenceMemory)),
+        }).pipe(Effect.scoped, Effect.provide(SqlitePersistenceTest)),
       );
     } finally {
       prepareObserver.mockRestore();
@@ -716,7 +716,7 @@ describe("ProviderDaemonEventJournal", () => {
           newestCursor: 3,
         });
         expect(supervisorSnapshot.retainedEventCount).toBe(1);
-      }).pipe(Effect.scoped, Effect.provide(SqlitePersistenceMemory)),
+      }).pipe(Effect.scoped, Effect.provide(SqlitePersistenceTest)),
     );
   });
 
@@ -739,7 +739,7 @@ describe("ProviderDaemonEventJournal", () => {
           EventId.make("event-replayed"),
         ]);
         expect(snapshot.retainedEventCount).toBe(1);
-      }).pipe(Effect.scoped, Effect.provide(SqlitePersistenceMemory)),
+      }).pipe(Effect.scoped, Effect.provide(SqlitePersistenceTest)),
     );
   });
 
@@ -768,7 +768,7 @@ describe("ProviderDaemonEventJournal", () => {
         expect(rawPayload?.diffCharLength).toBe(largeDiff.length);
         expect(rawPayload?.diffTruncated).toBe(true);
         expect(rawPayload?.compactedForProviderJournal).toBe(true);
-      }).pipe(Effect.scoped, Effect.provide(SqlitePersistenceMemory)),
+      }).pipe(Effect.scoped, Effect.provide(SqlitePersistenceTest)),
     );
   });
 
@@ -789,7 +789,7 @@ describe("ProviderDaemonEventJournal", () => {
         expect(encodedRuntimeEventBytes(event)).toBeLessThanOrEqual(
           PROVIDER_PIPELINE_POLICY.canonicalEventMaxBytes,
         );
-      }).pipe(Effect.scoped, Effect.provide(SqlitePersistenceMemory)),
+      }).pipe(Effect.scoped, Effect.provide(SqlitePersistenceTest)),
     );
   });
 
@@ -831,7 +831,7 @@ describe("ProviderDaemonEventJournal", () => {
         expect(rawPayload?.diffCharLength).toBe(largeDiff.length);
         expect(rawPayload?.diffTruncated).toBe(true);
         expect(rawPayload?.compactedForProviderJournal).toBe(true);
-      }).pipe(Effect.scoped, Effect.provide(SqlitePersistenceMemory)),
+      }).pipe(Effect.scoped, Effect.provide(SqlitePersistenceTest)),
     );
   });
 
@@ -882,7 +882,7 @@ describe("ProviderDaemonEventJournal", () => {
         expect(rawPayload?.diffCharLength).toBe(largeDiff.length);
         expect(rawPayload?.diffTruncated).toBe(true);
         expect(rawPayload?.compactedForProviderJournal).toBe(true);
-      }).pipe(Effect.scoped, Effect.provide(SqlitePersistenceMemory)),
+      }).pipe(Effect.scoped, Effect.provide(SqlitePersistenceTest)),
     );
   });
 
@@ -912,7 +912,7 @@ describe("ProviderDaemonEventJournal", () => {
         expect(encodedRuntimeEventBytes(compacted)).toBeLessThanOrEqual(
           PROVIDER_PIPELINE_POLICY.canonicalEventMaxBytes,
         );
-      }).pipe(Effect.scoped, Effect.provide(SqlitePersistenceMemory)),
+      }).pipe(Effect.scoped, Effect.provide(SqlitePersistenceTest)),
     );
   });
 
@@ -963,7 +963,7 @@ describe("ProviderDaemonEventJournal", () => {
             category: "schema-decode-failed",
           },
         ]);
-      }).pipe(Effect.scoped, Effect.provide(SqlitePersistenceMemory)),
+      }).pipe(Effect.scoped, Effect.provide(SqlitePersistenceTest)),
     );
   });
 
@@ -996,7 +996,7 @@ describe("ProviderDaemonEventJournal", () => {
           oldestCursor: 3,
           newestCursor: 3,
         });
-      }).pipe(Effect.scoped, Effect.provide(SqlitePersistenceMemory)),
+      }).pipe(Effect.scoped, Effect.provide(SqlitePersistenceTest)),
     );
   });
 
@@ -1026,7 +1026,7 @@ describe("ProviderDaemonEventJournal", () => {
         ]);
         expect((yield* daemonJournal.snapshot).retainedEventCount).toBe(1);
         expect((yield* supervisorJournal.snapshot).retainedEventCount).toBe(1);
-      }).pipe(Effect.scoped, Effect.provide(SqlitePersistenceMemory)),
+      }).pipe(Effect.scoped, Effect.provide(SqlitePersistenceTest)),
     );
   });
 });

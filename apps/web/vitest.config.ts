@@ -1,5 +1,5 @@
 import { fileURLToPath } from "node:url";
-import { defineConfig, mergeConfig } from "vitest/config";
+import { configDefaults, defineConfig, mergeConfig } from "vitest/config";
 
 import baseConfig from "../../vitest.config.ts";
 import viteConfig from "./vite.config.ts";
@@ -13,6 +13,7 @@ const srcPath = fileURLToPath(new URL("./src", import.meta.url));
 export default mergeConfig(
   mergeConfig(viteConfig, baseConfig),
   defineConfig({
+    test: { exclude: [...configDefaults.exclude, "**/*.soak.test.ts"] },
     resolve: {
       alias: {
         "~": srcPath,

@@ -1,17 +1,17 @@
-import { useState } from "react";
 import {
   EnvironmentId,
   ProviderDriverKind,
   ProviderInstanceId,
   ThreadId,
-  type ProviderCommandsInput,
   type ProviderCommandCatalog,
+  type ProviderCommandsInput,
 } from "@cafecode/contracts";
-import { render } from "vitest-browser-react";
+import { useState } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { render } from "vitest-browser-react";
 import { page } from "vitest/browser";
-import { useProviderCommands } from "./useProviderCommands";
 import { ComposerCommandMenu, type ComposerCommandItem } from "./ComposerCommandMenu";
+import { useProviderCommands } from "./useProviderCommands";
 
 const { subscribe } = vi.hoisted(() => ({
   subscribe:
@@ -197,18 +197,5 @@ describe("live Claude command picker", () => {
     await view.rerender(<Harness input={null} />);
     await expect.element(page.getByText("/model", { exact: true })).toBeVisible();
     expect(subscribe).toHaveBeenCalledOnce();
-  });
-  it("bounds a stalled initial snapshot and recovers when metadata eventually arrives", async () => {
-    subscribe.mockReturnValue(vi.fn());
-    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
-    await render(<Harness />);
-    await page.getByRole("button", { name: "Open", exact: true }).click();
-    await expect.element(page.getByTestId("catalog-status")).toHaveTextContent("loading");
-    await vi.advanceTimersByTimeAsync(6_000);
-    await expect
-      .element(page.getByRole("status"))
-      .toHaveTextContent("Claude commands unavailable. Type a command manually.");
-    subscribe.mock.calls[0]![1](catalog("late-valid"));
-    await expect.element(page.getByText("/late-valid", { exact: true })).toBeVisible();
   });
 });

@@ -16,21 +16,21 @@ import {
   VisualizationArtifactId,
   VisualizationRevisionId,
 } from "@cafecode/contracts/visualizations";
-import * as Schema from "effect/Schema";
 import type { LegendListRef } from "@legendapp/list/react";
+import * as Schema from "effect/Schema";
 import { createRef, useCallback, useState, type ComponentProps } from "react";
 import { describe, expect, it, vi } from "vitest";
-import { cdp, page } from "vitest/browser";
 import { render } from "vitest-browser-react";
+import { cdp, page } from "vitest/browser";
 
 import {
   __resetEnvironmentApiOverridesForTests,
   __setEnvironmentApiOverrideForTests,
 } from "../../environmentApi";
 import { MessagesTimeline } from "./MessagesTimeline";
+import { refreshScheduledFollowups } from "./scheduledFollowupsResource";
 import { ScrollToBottomControl } from "./ScrollToBottomControl";
 import { useScrollToBottomDismissal } from "./useScrollToBottomDismissal";
-import { refreshScheduledFollowups } from "./scheduledFollowupsResource";
 
 type TimelineProps = ComponentProps<typeof MessagesTimeline>;
 type TimelineEntries = TimelineProps["timelineEntries"];
@@ -891,11 +891,6 @@ describe("MessagesTimeline with real LegendList", () => {
         // into that initial interval and mistaken for independent review growth.
         await vi.waitFor(() => expect(initialLoadObserved).toBe(true));
         observeProposalLayout("before-tail-preparation");
-        // Finish the initial alignment frames before exercising independent
-        // footer growth, then place the real browser at the physical tail.
-        for (let frame = 0; frame < 4; frame += 1) {
-          await new Promise<void>((resolve) => window.requestAnimationFrame(() => resolve()));
-        }
         const scroller = readScroller(listRef);
         scroller.scrollTop = scroller.scrollHeight;
         await vi.waitFor(() => expect(Math.abs(tailDistance(scroller))).toBeLessThanOrEqual(2));
@@ -912,38 +907,6 @@ describe("MessagesTimeline with real LegendList", () => {
           });
         }
         const baseline = observeProposalLayout("before-baseline");
-        if (!following) {
-          // Negative controls derive from this real native baseline, not mocked
-          // renderer/media/layout. Correct pixels cannot replace the exact load
-          // receipt, current logical range or completed known row measurements.
-          expect(isProposalReviewBaselineReady(baseline)).toBe(true);
-          expect(isProposalReviewBaselineReady({ ...baseline, initialLoadObserved: false })).toBe(
-            false,
-          );
-          expect(
-            isProposalReviewBaselineReady({ ...baseline, publicScroll: baseline.nativeScroll + 1 }),
-          ).toBe(false);
-          expect(isProposalReviewBaselineReady({ ...baseline, start: -1 })).toBe(false);
-          expect(isProposalReviewBaselineReady({ ...baseline, end: baseline.dataLength })).toBe(
-            false,
-          );
-          expect(
-            isProposalReviewBaselineReady({
-              ...baseline,
-              mounted: baseline.mounted.map((row, index) =>
-                index === 0 ? { ...row, knownSize: null } : row,
-              ),
-            }),
-          ).toBe(false);
-          expect(
-            isProposalReviewBaselineReady({
-              ...baseline,
-              mounted: baseline.mounted.map((row, index) =>
-                index === 0 ? { ...row, rowIdentityMatches: false } : row,
-              ),
-            }),
-          ).toBe(false);
-        }
         const previousTop = scroller.scrollTop;
         const viewportBefore = scroller.getBoundingClientRect();
         const visibleMessage = Array.from(

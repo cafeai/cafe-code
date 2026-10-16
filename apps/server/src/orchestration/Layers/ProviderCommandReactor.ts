@@ -95,6 +95,7 @@ import {
 } from "../../systemPromptFile.ts";
 import { makeProviderTurnRecoveryEvidenceReader } from "../providerTurnRecoveryEvidence.ts";
 import {
+  runtimeRecoveryPreparationDelayMs,
   makeRuntimeRecoveryBarrierReader,
   makeCodexTransientRecoveryChainReader,
   buildCodexTransientFailureMarkerPayload,
@@ -6777,7 +6778,7 @@ const make = Effect.gen(function* () {
       // tasks never wait for a reconnect timer. Each wakeup rechecks durable
       // user intent and the same immutable attempt marker before doing I/O.
       if (yield* permitted()) {
-        const delayMs = Math.min(60_000, 1_000 * 2 ** Math.min(attempt, 6));
+        const delayMs = runtimeRecoveryPreparationDelayMs(attempt);
         yield* Effect.logWarning("provider runtime recovery awaiting reconnect", {
           attempt,
           delayMs,

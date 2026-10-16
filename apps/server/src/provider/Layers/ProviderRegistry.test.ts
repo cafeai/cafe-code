@@ -83,11 +83,12 @@ const decodeCodexSettings = Schema.decodeSync(CodexSettings);
 const encodeServerSettings = Schema.encodeSync(ServerSettings);
 const encodeUnknownJsonString = Schema.encodeSync(Schema.fromJsonString(Schema.Unknown));
 // Registry tests provide narrow process-spawner fakes for the provider under
-// test. Keep unrelated OpenCode and Grok probes disabled in that shared fixture
+// test. Keep unrelated Axiom, OpenCode and Grok probes disabled in that shared fixture
 // so tests cannot launch an ambient provider or wait for a protocol handshake
 // that their Codex/Claude-only fake was never designed to emit.
 const encodedDefaultServerSettings = deepMerge(encodeServerSettings(DEFAULT_SERVER_SETTINGS), {
   providers: { opencode: { enabled: false }, grok: { enabled: false } },
+  providerInstances: { axiom: { driver: "axiom", enabled: false } },
 });
 
 const defaultClaudeSettings: ClaudeSettings = Schema.decodeSync(ClaudeSettings)({});

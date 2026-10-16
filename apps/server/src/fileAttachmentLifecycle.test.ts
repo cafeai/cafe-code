@@ -4,7 +4,7 @@ import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
-import { SqlitePersistenceMemory } from "./persistence/Layers/Sqlite.ts";
+import { SqlitePersistenceTest } from "./persistence/Sqlite.test.fixture.ts";
 import { fileAttachmentStoragePaths, storeFileAttachment } from "./fileAttachmentStore.ts";
 import {
   cleanupFileAttachmentUploads,
@@ -28,10 +28,7 @@ const withStore = <A, E, R>(
     const fs = yield* FileSystem.FileSystem;
     const attachmentsDir = yield* fs.makeTempDirectoryScoped({ prefix: "cafe-upload-lifecycle-" });
     return yield* body({ sql, fs, attachmentsDir });
-  }).pipe(
-    Effect.scoped,
-    Effect.provide(Layer.mergeAll(SqlitePersistenceMemory, NodeServices.layer)),
-  );
+  }).pipe(Effect.scoped, Effect.provide(Layer.mergeAll(SqlitePersistenceTest, NodeServices.layer)));
 
 function upload(input: { sql: SqlClient.SqlClient; attachmentsDir: string }, publish = true) {
   return Effect.gen(function* () {
