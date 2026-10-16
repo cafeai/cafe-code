@@ -27,7 +27,7 @@ import type { ProjectionSnapshotQueryShape } from "./Services/ProjectionSnapshot
 import type { ProviderServiceShape } from "../provider/Services/ProviderService.ts";
 import { ProviderAdapterRequestError } from "../provider/Errors.ts";
 import { ServerConfig } from "../config.ts";
-import { SqlitePersistenceMemory } from "../persistence/Layers/Sqlite.ts";
+import { SqlitePersistenceTest } from "../persistence/Sqlite.test.fixture.ts";
 import { PersistenceSqlError } from "../persistence/Errors.ts";
 import { makeStandaloneWorkspaceStore } from "./standaloneWorkspace.ts";
 import { threadForkPrefix } from "./threadForkCutoff.ts";
@@ -511,7 +511,7 @@ it.effect("compensates provisional standalone ownership without releasing the so
 });
 
 const workspaceLayer = Layer.mergeAll(
-  SqlitePersistenceMemory,
+  SqlitePersistenceTest,
   ServerConfig.layerTest(process.cwd(), { prefix: "standalone-fork-compensation-" }).pipe(
     Layer.provide(NodeServices.layer),
   ),

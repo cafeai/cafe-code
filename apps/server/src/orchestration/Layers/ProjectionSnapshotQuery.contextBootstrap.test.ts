@@ -4,7 +4,7 @@ import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
-import { SqlitePersistenceMemory } from "../../persistence/Layers/Sqlite.ts";
+import { SqlitePersistenceTest } from "../../persistence/Sqlite.test.fixture.ts";
 import { RepositoryIdentityResolverLive } from "../../project/Layers/RepositoryIdentityResolver.ts";
 import { ProjectionSnapshotQuery } from "../Services/ProjectionSnapshotQuery.ts";
 import { OrchestrationProjectionSnapshotQueryLive } from "./ProjectionSnapshotQuery.ts";
@@ -44,7 +44,7 @@ it.effect(
       Effect.provide(
         OrchestrationProjectionSnapshotQueryLive.pipe(
           Layer.provideMerge(RepositoryIdentityResolverLive),
-          Layer.provideMerge(SqlitePersistenceMemory),
+          Layer.provideMerge(SqlitePersistenceTest),
           Layer.provideMerge(NodeServices.layer),
         ),
       ),

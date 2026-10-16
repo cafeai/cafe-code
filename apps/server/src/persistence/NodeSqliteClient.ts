@@ -518,8 +518,22 @@ export const layerConfig = (
   ).pipe(Layer.provide(Reactivity.layer));
 
 export const layer = (config: SqliteClientConfig): Layer.Layer<Client.SqlClient> =>
+  layerWithDatabase(
+    config,
+    () =>
+      new DatabaseSync(config.filename, {
+        readOnly: config.readonly ?? false,
+        allowExtension: config.allowExtension ?? false,
+      }),
+  );
+
+/** The layer owns and closes each database returned by the factory. */
+export const layerWithDatabase = (
+  config: SqliteClientConfig,
+  openDatabase: () => DatabaseSync,
+): Layer.Layer<Client.SqlClient> =>
   Layer.effectContext(
-    Effect.map(make(config), (client) =>
+    Effect.map(makeWithDatabase(config, openDatabase), (client) =>
       Context.make(SqliteClient, client).pipe(Context.add(Client.SqlClient, client)),
     ),
   ).pipe(Layer.provide(Reactivity.layer));

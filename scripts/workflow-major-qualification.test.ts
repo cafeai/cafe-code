@@ -103,10 +103,17 @@ describe("workflow security and runtime policy", () => {
       "InlineMcpAppBridge.browser.tsx",
       "VisualizationInlineCapture.browser.tsx",
     ]);
-    for (const step of readWorkflow("ci.yml").jobs.quality?.steps ?? [])
+    for (const step of Object.values(readWorkflow("ci.yml").jobs).flatMap((job) => job.steps ?? []))
       if (step.uses?.startsWith("actions/upload-artifact")) {
-        expect(step.if).toBe("failure()");
+        // Native release artifacts have their own publication assertions.
+        if (step.with?.path === "release/") continue;
         expect(step.with?.["retention-days"]).toBeLessThanOrEqual(7);
+        if (step.with?.path === ".logs/test-timings/") {
+          expect(step.if).toBe("always()");
+          expect(step.with?.name).toMatch(/^test-timings-/);
+          continue;
+        }
+        expect(step.if).toBe("failure()");
         const paths = String(step.with?.path ?? "")
           .trim()
           .split(/\s+/);

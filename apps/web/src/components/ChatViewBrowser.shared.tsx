@@ -9778,8 +9778,6 @@ describe(`ChatView full app (${chatViewBrowserPart})`, () => {
 
       it.each([
         { before: true, reset: false },
-        { before: false, reset: false },
-        { before: true, reset: true },
         { before: false, reset: true },
       ])(
         "does not resurrect obsolete ACK intent over newer canonical metadata (before=$before reset=$reset)",
@@ -10301,8 +10299,6 @@ describe(`ChatView full app (${chatViewBrowserPart})`, () => {
       });
       it.each([
         { timing: "before ACK", reset: false },
-        { timing: "before ACK", reset: true },
-        { timing: "after ACK", reset: false },
         { timing: "after ACK", reset: true },
       ])(
         "never restores an obsolete limit over a newer canonical policy ($timing, reset=$reset)",

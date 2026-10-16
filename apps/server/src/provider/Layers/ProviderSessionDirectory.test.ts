@@ -12,10 +12,8 @@ import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
 
-import {
-  makeSqlitePersistenceLive,
-  SqlitePersistenceMemory,
-} from "../../persistence/Layers/Sqlite.ts";
+import { SqlitePersistenceTest } from "../../persistence/Sqlite.test.fixture.ts";
+import { makeSqlitePersistenceLive } from "../../persistence/Layers/Sqlite.ts";
 import {
   MAX_SUBAGENT_HISTORY_ROOT_BYTES_PER_THREAD,
   ProviderSessionRuntimeRepositoryLive,
@@ -35,7 +33,7 @@ function makeDirectoryLayer<E, R>(persistenceLayer: Layer.Layer<SqlClient.SqlCli
   );
 }
 
-it.layer(makeDirectoryLayer(SqlitePersistenceMemory))("ProviderSessionDirectoryLive", (it) => {
+it.layer(makeDirectoryLayer(SqlitePersistenceTest))("ProviderSessionDirectoryLive", (it) => {
   it("retires unknown complete-observation compaction proof but preserves partial heartbeats", () =>
     Effect.gen(function* () {
       const directory = yield* ProviderSessionDirectory;

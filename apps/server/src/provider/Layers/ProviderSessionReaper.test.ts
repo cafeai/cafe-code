@@ -20,7 +20,7 @@ import {
   ThreadDetailSubscriptionRegistry,
   type ThreadDetailSubscriptionSnapshot,
 } from "../../orchestration/Services/ThreadDetailSubscriptionRegistry.ts";
-import { SqlitePersistenceMemory } from "../../persistence/Layers/Sqlite.ts";
+import { SqlitePersistenceTest } from "../../persistence/Sqlite.test.fixture.ts";
 import { ProviderSessionRuntimeRepositoryLive } from "../../persistence/Layers/ProviderSessionRuntime.ts";
 import { ProviderSessionRuntimeRepository } from "../../persistence/Services/ProviderSessionRuntime.ts";
 import { ProviderValidationError } from "../Errors.ts";
@@ -174,7 +174,7 @@ describe("ProviderSessionReaper", () => {
     };
 
     const runtimeRepositoryLayer = ProviderSessionRuntimeRepositoryLive.pipe(
-      Layer.provide(SqlitePersistenceMemory),
+      Layer.provide(SqlitePersistenceTest),
     );
     const providerSessionDirectoryLayer = ProviderSessionDirectoryLive.pipe(
       Layer.provide(runtimeRepositoryLayer),
@@ -225,7 +225,7 @@ describe("ProviderSessionReaper", () => {
           getThreadDetailSnapshotById: () => Effect.die("unused"),
         }),
       ),
-      Layer.provideMerge(SqlitePersistenceMemory),
+      Layer.provideMerge(SqlitePersistenceTest),
       Layer.provideMerge(NodeServices.layer),
     );
 

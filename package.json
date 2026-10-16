@@ -57,7 +57,9 @@
     "db:compact-activity-payloads": "node scripts/compact-activity-payloads.ts",
     "clean": "node scripts/clean.ts",
     "sync:vscode-icons": "node scripts/sync-vscode-icons.mjs",
-    "sync:mac-icons": "node scripts/build-macos-icons.ts"
+    "sync:mac-icons": "node scripts/build-macos-icons.ts",
+    "test:ci:node": "node scripts/run-node-tests.ts",
+    "test:browser:ci": "node scripts/run-browser-tests.ts"
   },
   "devDependencies": {
     "@effect/language-service": "catalog:",

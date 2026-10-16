@@ -5,7 +5,7 @@ import * as Layer from "effect/Layer";
 
 import type { ServerConfigShape } from "../../config.ts";
 import { ServerConfig } from "../../config.ts";
-import { SqlitePersistenceMemory } from "../../persistence/Layers/Sqlite.ts";
+import { SqlitePersistenceTest } from "../../persistence/Sqlite.test.fixture.ts";
 import { BootstrapCredentialError } from "../Services/BootstrapCredentialService.ts";
 import { ServerAuth, type ServerAuthShape } from "../Services/ServerAuth.ts";
 import { ServerAuthLive, toBootstrapExchangeAuthError } from "./ServerAuth.ts";
@@ -25,7 +25,7 @@ const makeServerConfigLayer = (overrides?: Partial<ServerConfigShape>) =>
 
 const makeServerAuthLayer = (overrides?: Partial<ServerConfigShape>) =>
   ServerAuthLive.pipe(
-    Layer.provide(SqlitePersistenceMemory),
+    Layer.provide(SqlitePersistenceTest),
     Layer.provide(ServerSecretStoreLive),
     Layer.provide(makeServerConfigLayer(overrides)),
   );

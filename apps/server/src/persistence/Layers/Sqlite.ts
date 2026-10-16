@@ -4,7 +4,6 @@ import * as FileSystem from "effect/FileSystem";
 import * as Path from "effect/Path";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
 
-import { runMigrations } from "../Migrations.ts";
 import * as NodeSqliteClient from "../NodeSqliteClient.ts";
 import { ServerConfig } from "../../config.ts";
 
@@ -25,6 +24,7 @@ const setup = Layer.effectDiscard(
     yield* sql`PRAGMA busy_timeout = 15000;`;
     yield* sql`PRAGMA journal_mode = WAL;`;
     yield* sql`PRAGMA foreign_keys = ON;`;
+    const { runMigrations } = yield* Effect.promise(() => import("../Migrations.ts"));
     yield* runMigrations();
   }),
 );

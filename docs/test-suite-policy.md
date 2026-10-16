@@ -28,6 +28,57 @@ Use the pinned Node and Corepack Yarn. Agent-initiated CPU-heavy checks on
 macOS/Linux start with `nice -n 10`. Finish source verification with the forced
 desktop build. Do not restart or push without the existing explicit authorization.
 
+## Efficient execution and timing
+
+CI runs the native Node and browser matrices independently. The existing
+`Quality` matrix waits for both before the final forced desktop build; native
+artifact jobs still depend on that gate. Worker, heap and timeout limits remain
+bounded independently in each runner.
+The required `Quality` check explicitly fails when either prerequisite fails;
+it must not disappear as a skipped dependent job. See GitHub's
+[required-check dependency behavior](https://docs.github.com/en/pull-requests/how-tos/merge-and-close-pull-requests/troubleshooting-required-status-checks#handling-skipped-but-required-checks).
+
+Use the same entrypoints locally with the pinned standalone Node on PATH:
+
+```sh
+nice -n 10 corepack yarn test:ci:node
+nice -n 10 corepack yarn test:browser:ci
+nice -n 10 corepack yarn build:desktop --force
+```
+
+Windows uses the same Corepack commands without `nice`. The Node plan preserves
+the complete Turbo graph and Windows' two-workspace/two-worker cap. The browser
+plan selects Linux's complete suite or the macOS/Windows native subset from
+`apps/web/browser-test-policy.json`. It builds the desktop fixture artifacts,
+then closes each desktop/touch, ordinary-motion, reduced-motion, Mermaid and
+export invocation before opening the next. The isolated MCP bridge and inline
+visualization qualification retain their ordering. Install Chromium first with
+the web workspace's `test:browser:install` command if it is absent locally.
+
+Both runners write timing-only JSON to `.logs/test-timings/` and print the
+slowest files. CI retains that exact directory on success or failure. Reports
+contain relative source labels, durations and states, never received errors,
+assertion values, environment or arbitrary test metadata. Vitest 5.0.2's browser
+`prepareDuration` includes reused page uptime and must not be used for phase
+attribution. Wall-clock, collection and individual test durations remain useful.
+
+Feature SQL fixtures use `SqlitePersistenceTest`: build an immutable snapshot
+from the current real migrations once per isolated module, then initialize a
+fresh scoped in-memory database for every runtime. Copy tables, data, indexes,
+triggers, views, generated columns, sequences and schema metadata. Never share
+mutable connections, cache a snapshot on disk or substitute this fixture in
+migration tests. Recorded seed timestamps belong to the migrated snapshot;
+tests of time boundaries seed their own dates. The fidelity fixture compares
+the current real schema/seed values and exercises independent writes, rollback,
+constraints, triggers and native ownership.
+
+Exhaustive source-only Mermaid refusal combinations execute the exact inert
+receiver in fresh Node VM fixtures and assert zero parser/render calls. Native
+opaque-frame source refusal and every parsed-database/pre-parser allocation
+probe remain browser qualification. ACK overlay timing/owner combinations use
+the shared controller's Node matrix; full-app numeric-save/reset journeys and
+native hook owner-retirement checks qualify the actual wiring.
+
 ## Assertions and fixtures
 
 Keep native input, focus and accessibility semantics. Geometry is appropriate

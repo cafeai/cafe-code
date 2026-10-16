@@ -55,7 +55,7 @@ import { CODEX_HISTORY_RECOVERY_REQUIRED_MESSAGE } from "@cafecode/shared/codexH
 import { ServerConfig } from "../../config.ts";
 import { storeFileAttachment } from "../../fileAttachmentStore.ts";
 import { AssistantStreamTextCommitment } from "../../orchestration/providerAssistantStreamCommitment.ts";
-import { SqlitePersistenceMemory } from "../../persistence/Layers/Sqlite.ts";
+import { SqlitePersistenceTest } from "../../persistence/Sqlite.test.fixture.ts";
 import {
   installSchedulingSessionBroker,
   type SchedulingSessionBinding,
@@ -883,7 +883,7 @@ it.effect(
       yield* adapter.stopSession(threadId);
       assert.equal(disposed, true);
     }).pipe(
-      Effect.provide(SqlitePersistenceMemory),
+      Effect.provide(SqlitePersistenceTest),
       Effect.provide(ServerConfig.layerTest(process.cwd(), { prefix: "cafe-management-codex-" })),
       Effect.provide(ServerSettingsService.layerTest()),
       Effect.provide(providerSessionDirectoryTestLayer),
@@ -913,7 +913,7 @@ it.effect(
       assert.equal(factory.lastRuntime?.options.customInstructions, "Use metric units.");
       assert.equal(Object.hasOwn(factory.lastRuntime!.options, "requireExactResume"), false);
     }).pipe(
-      Effect.provide(SqlitePersistenceMemory),
+      Effect.provide(SqlitePersistenceTest),
       Effect.provide(
         ServerConfig.layerTest(process.cwd(), { prefix: "cafe-custom-instructions-" }),
       ),
@@ -977,7 +977,7 @@ it.effect(
       );
     }).pipe(
       Effect.scoped,
-      Effect.provide(SqlitePersistenceMemory),
+      Effect.provide(SqlitePersistenceTest),
       Effect.provide(ServerConfig.layerTest(process.cwd(), process.cwd())),
       Effect.provide(ServerSettingsService.layerTest()),
       Effect.provide(providerSessionDirectoryTestLayer),

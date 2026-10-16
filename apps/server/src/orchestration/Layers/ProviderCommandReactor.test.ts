@@ -54,7 +54,7 @@ import { GitWorkflowService, type GitWorkflowServiceShape } from "../../git/GitW
 import { PersistenceSqlError } from "../../persistence/Errors.ts";
 import { OrchestrationCommandReceiptRepositoryLive } from "../../persistence/Layers/OrchestrationCommandReceipts.ts";
 import { OrchestrationEventStoreLive } from "../../persistence/Layers/OrchestrationEventStore.ts";
-import { SqlitePersistenceMemory } from "../../persistence/Layers/Sqlite.ts";
+import { SqlitePersistenceTest } from "../../persistence/Sqlite.test.fixture.ts";
 import { RepositoryIdentityResolverLive } from "../../project/Layers/RepositoryIdentityResolver.ts";
 import { buildCodexSteerClientCorrelationId } from "../../provider/codexSteerCorrelation.ts";
 import { ProviderAdapterRequestError } from "../../provider/Errors.ts";
@@ -626,7 +626,7 @@ describe("ProviderCommandReactor", () => {
       Layer.provide(OrchestrationEventStoreLive),
       Layer.provide(OrchestrationCommandReceiptRepositoryLive),
       Layer.provide(RepositoryIdentityResolverLive),
-      Layer.provide(SqlitePersistenceMemory),
+      Layer.provide(SqlitePersistenceTest),
     );
     const providerCommandEngineLayer =
       input?.beforeCodexSteerDeliveryAttemptDispatch === undefined &&
@@ -701,7 +701,7 @@ describe("ProviderCommandReactor", () => {
           ).pipe(Layer.provide(orchestrationLayer));
     const baseProjectionSnapshotLayer = OrchestrationProjectionSnapshotQueryLive.pipe(
       Layer.provide(RepositoryIdentityResolverLive),
-      Layer.provide(SqlitePersistenceMemory),
+      Layer.provide(SqlitePersistenceTest),
     );
     const projectionSnapshotLayer =
       input?.getCodexSteerAcceptanceEvidence === undefined && input?.beforeProjectRead === undefined
@@ -727,7 +727,7 @@ describe("ProviderCommandReactor", () => {
     const layer = ProviderCommandReactorLive.pipe(
       Layer.provideMerge(providerCommandEngineLayer),
       Layer.provideMerge(projectionSnapshotLayer),
-      Layer.provideMerge(SqlitePersistenceMemory),
+      Layer.provideMerge(SqlitePersistenceTest),
       Layer.provideMerge(Layer.succeed(ProviderService, service)),
       Layer.provideMerge(
         Layer.mock(ProviderSessionDirectory)({
