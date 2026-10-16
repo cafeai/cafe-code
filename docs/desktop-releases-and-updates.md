@@ -7,34 +7,33 @@ Windows x64 NSIS, macOS arm64/x64 DMG plus updater ZIP, and Linux x64 AppImage.
 Published Linux artifacts are limited to x64 AppImage; local Debian and Arch
 build helpers are documented in [Linux packaging](linux-packaging.md).
 
-Before publication, the exact tag commit runs the reusable native quality and reliability
-workflows, including full/focused browser coverage, the immutable release smoke, and an
-unfiltered dependency audit. Every artifact passes its native readiness/install checks before
-its source SHA and asset bytes are sealed. Publication rechecks that complete four-target
-evidence set, merges macOS manifests and verifies updater sizes and SHA-512 digests. It publishes
-`SHA256SUMS.txt` for manual downloads. A lower-version packaged AppImage must identify the exact
-candidate through a local feed before GitHub publication; the public GitHub feed is checked
-again afterward. These probes detect updates without downloading or installing them.
+Normal CI is the release quality gate. The exact source commit runs the same reusable
+CI workflow as dev/main, including Node tests, browser checks and desktop builds.
+The release builds all four shipping targets in parallel with CI, and publication
+waits for both to pass. macOS requires Developer ID
+signing, hardened runtime and notarization, with native signature, Gatekeeper and
+stapled-ticket verification. Publication verifies the complete four-target source
+and byte evidence, merges macOS manifests, validates updater sizes and SHA-512
+digests, and publishes `SHA256SUMS.txt` for manual downloads.
 
-A release branch can run the same gated workflow before its tag exists:
-`gh workflow run release.yml --ref release/0.2.0 -f version=v0.2.0 -f publish_release=true`.
-The manual run pins the branch's event commit. It creates the tag only after all quality,
-reliability, signed-artifact, checksum and candidate-feed checks succeed, then publishes the
-qualified bytes. It never force-updates an existing tag. Omitting `publish_release=true` builds
-and qualifies artifacts without creating a tag or GitHub release.
+A release branch can run this workflow before its tag exists:
+`gh workflow run release.yml --ref release/0.2.1 -f version=v0.2.1 -f publish_release=true`.
+The manual run pins the branch's event commit and creates the tag only after
+normal CI, signed builds, artifact identity checks and manifest validation pass.
+It never force-updates an existing tag. Omitting `publish_release=true` builds and
+validates artifacts without creating a tag or GitHub release.
 
-An explicitly requested build-only release adds `-f build_only=true` to that manual command.
-It skips quality/reliability workflows, native runtime/install tests and update-detection probes.
-It still builds all four targets, requires macOS signing and notarization, verifies the ZIP app's
-signature and stapled ticket, and validates exact-source artifact hashes and update manifests
-before creating the tag or publishing. Normal CI and the default gated release path are unchanged.
-Build-only publication does not establish that the skipped runtime/install checks passed.
+Additional process-lifecycle, native installer/runtime and packaged update-feed
+probes run separately as optional qualification. They are not required by the
+normal release workflow, which does not launch the packaged app or create a
+second lower-version probe build.
 
-If the public-feed probe fails, stop promotion and announce the affected tag through the normal
-release process. Inspect the exact version/feed/artifact evidence, then withdraw the broken
-release from the public update feed or publish a corrected higher version after all gates pass.
-Do not move an existing tag, replace qualified binaries silently, or bypass the failed check.
-Withdrawal/replacement is a separately authorized release action.
+An explicitly requested build-only release adds `-f build_only=true` to the
+manual command. It skips normal CI while retaining the same four-target builds,
+macOS signing/notarization, native signature/ticket verification, exact-source
+artifact hashes and update-manifest checks. It does not establish that normal CI
+passed. Never move an existing release tag or silently replace published binaries;
+withdrawal or replacement remains a separately authorized release action.
 
 ## Windows managed providers
 
@@ -99,11 +98,11 @@ require the registered `MACOS_CERTIFICATE_BASE64`, `MACOS_CERTIFICATE_PASSWORD`,
 `APPLE_APP_SPECIFIC_PASSWORD` and `APPLE_TEAM_ID` Actions secrets. Only the macOS release build
 step receives them. The builder requires a signing identity and notarization; unsigned fallback
 is an error. Actual app signatures, Gatekeeper admission and stapled tickets are checked before
-artifact identities are sealed. The default gated path checks both DMG and ZIP copies;
-the explicitly selected build-only path checks the ZIP copy without launching the app.
+artifact identities are sealed. Release verification checks the ZIP app without launching it.
 
-Native CI smoke tests keep Chromium sandboxing and the real safe-storage round
-trip enabled. Linux opts into configuring only its private extracted
+The separate `reliability.yml` workflow runs optional native runtime/install checks
+on disposable CI runners. These checks keep Chromium sandboxing and the real
+safe-storage round trip enabled. Linux opts into configuring only its private extracted
 `chrome-sandbox` helper in the runner workspace's temporary area as root-owned
 mode `4755`, rejecting shared or symlinked
 helpers and checking inode identity afterward. Its fresh D-Bus session owns a private native

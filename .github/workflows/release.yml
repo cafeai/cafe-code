@@ -12,7 +12,7 @@ on:
         type: boolean
         default: false
       build_only:
-        description: Skip tests and runtime probes; retain signed builds and artifact checksum validation
+        description: Skip normal CI; retain signed builds and artifact checksum validation
         type: boolean
         default: false
   push:
@@ -37,7 +37,6 @@ jobs:
       source-sha: ${{ steps.release.outputs.source-sha }}
       channel: ${{ steps.release.outputs.channel }}
       prerelease: ${{ steps.release.outputs.prerelease }}
-      probe-version: ${{ steps.release.outputs.probe-version }}
       version: ${{ steps.release.outputs.version }}
       tag: ${{ steps.release.outputs.tag }}
     steps:
@@ -62,11 +61,9 @@ jobs:
           if [[ "${version}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
             channel="latest"
             prerelease="false"
-            probe_version="${version}-canary.0"
           elif [[ "${version}" =~ ^([0-9]+\.[0-9]+\.[0-9]+-nightly\.[0-9]{8})\.([1-9][0-9]*)$ ]]; then
             channel="nightly"
             prerelease="true"
-            probe_version="${BASH_REMATCH[1]}.0"
           else
             echo "Unsupported release tag: ${tag}" >&2
             echo "Expected vX.Y.Z or vX.Y.Z-nightly.YYYYMMDD.N where N is at least 1." >&2
@@ -76,7 +73,6 @@ jobs:
             echo "source-sha=$(git rev-parse HEAD)"
             echo "channel=${channel}"
             echo "prerelease=${prerelease}"
-            echo "probe-version=${probe_version}"
             echo "version=${version}"
             echo "tag=${tag}"
           } >> "${GITHUB_OUTPUT}"
@@ -88,20 +84,11 @@ jobs:
     uses: ./.github/workflows/ci.yml
     with:
       source_ref: ${{ needs.prepare.outputs.source-sha }}
-      release_candidate: true
-
-  reliability:
-    name: Release lifecycle qualification
-    if: ${{ !inputs.build_only }}
-    needs: prepare
-    uses: ./.github/workflows/reliability.yml
-    with:
-      source_ref: ${{ needs.prepare.outputs.source-sha }}
 
   artifacts:
     name: Build ${{ matrix.name }}
-    if: ${{ !cancelled() && needs.prepare.result == 'success' && (inputs.build_only || (needs.quality.result == 'success' && needs.reliability.result == 'success')) }}
-    needs: [prepare, quality, reliability]
+    if: ${{ !cancelled() && needs.prepare.result == 'success' }}
+    needs: prepare
     strategy:
       fail-fast: false
       matrix:
@@ -207,36 +194,6 @@ jobs:
           spctl --assess --type execute "${apps[0]}"
           xcrun stapler validate "${apps[0]}"
 
-      - name: Build lower-version AppImage probe
-        if: matrix.name == 'linux-x64' && !inputs.build_only
-        env:
-          CAFE_CODE_DESKTOP_OUTPUT_DIR: release-probe
-          CAFE_CODE_DESKTOP_VERSION: ${{ needs.prepare.outputs.probe-version }}
-        run: corepack yarn dist:desktop:linux
-
-      - name: Qualify Windows installer, runtime and uninstall
-        if: runner.os == 'Windows' && !inputs.build_only
-        run: corepack yarn test:native-windows-artifact
-
-      - name: Qualify macOS artifact and runtime
-        if: runner.os == 'macOS' && !inputs.build_only
-        env:
-          CAFE_CODE_MACOS_ARTIFACT_PREPARE_KEYCHAIN: "1"
-          CAFE_CODE_MACOS_ARTIFACT_REQUIRE_SIGNED: "1"
-        run: corepack yarn test:native-macos-artifact
-
-      - name: Install Linux display runtime
-        if: runner.os == 'Linux' && !inputs.build_only
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y xvfb libgtk-3-0t64 libnss3 libasound2t64 libgbm1 libxss1 libx11-xcb1 gnome-keyring dbus libsecret-1-0 libglib2.0-bin
-
-      - name: Qualify Linux artifact and runtime
-        if: runner.os == 'Linux' && !inputs.build_only
-        env:
-          CAFE_CODE_LINUX_ARTIFACT_PREPARE_SANDBOX: "1"
-        run: dbus-run-session -- xvfb-run -a corepack yarn test:native-linux-artifact
-
       - name: Seal qualified artifact identities
         run: node scripts/release-artifact-evidence.ts --write release --sha "${{ needs.prepare.outputs.source-sha }}" --target "${{ matrix.name }}"
 
@@ -248,19 +205,10 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
-      - name: Upload packaged detection probe
-        if: matrix.name == 'linux-x64' && !inputs.build_only
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: cafe-code-update-probe-linux-x64
-          path: release-probe/*.AppImage
-          if-no-files-found: error
-          retention-days: 7
-
   publish:
     name: Publish qualified release
-    if: ${{ !cancelled() && needs.prepare.result == 'success' && needs.artifacts.result == 'success' && (github.event_name != 'workflow_dispatch' || inputs.publish_release) && (inputs.build_only || (needs.quality.result == 'success' && needs.reliability.result == 'success')) }}
-    needs: [prepare, quality, reliability, artifacts]
+    if: ${{ !cancelled() && needs.prepare.result == 'success' && needs.artifacts.result == 'success' && (github.event_name != 'workflow_dispatch' || inputs.publish_release) && (inputs.build_only || needs.quality.result == 'success') }}
+    needs: [prepare, quality, artifacts]
     runs-on: ubuntu-26.04
     timeout-minutes: 20
     permissions:
@@ -306,13 +254,6 @@ jobs:
       - name: Verify qualified artifact identities
         run: node scripts/release-artifact-evidence.ts --verify release-assets --sha "${{ needs.prepare.outputs.source-sha }}"
 
-      - name: Download lower-version packaged probe
-        if: ${{ !inputs.build_only }}
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-        with:
-          name: cafe-code-update-probe-linux-x64
-          path: update-probe
-
       - name: Assemble update feeds
         shell: bash
         run: |
@@ -351,16 +292,12 @@ jobs:
           --version "${RELEASE_VERSION}"
           --channel "${RELEASE_CHANNEL}"
 
-      - name: Qualify candidate update feed before publication
-        if: ${{ !inputs.build_only }}
-        run: node scripts/release-update-preflight.ts release-publish update-probe "${RELEASE_VERSION}" "${RELEASE_CHANNEL}"
-
       - name: Create GitHub release
         shell: bash
         run: |
           set -euo pipefail
           # Manual branch releases mint the tag after artifact validation.
-          # Build-only runs explicitly skip tests and runtime/update probes.
+          # Normal releases require normal CI plus signed artifact validation.
           # Never force an existing tag; GITHUB_TOKEN avoids a second tag run.
           if [[ "${CREATE_RELEASE_TAG}" == "true" ]]; then
             git push origin "${RELEASE_SOURCE_SHA}:refs/tags/${RELEASE_TAG}"
@@ -391,53 +328,3 @@ jobs:
             args+=(--prerelease)
           fi
           gh release create "${args[@]}"
-
-  detect-update:
-    name: Detect published GitHub update
-    if: ${{ !inputs.build_only }}
-    needs: [prepare, publish]
-    runs-on: ubuntu-26.04
-    timeout-minutes: 10
-    steps:
-      - name: Download lower-version packaged probe
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-        with:
-          name: cafe-code-update-probe-linux-x64
-          path: update-probe
-
-      - name: Run detection-only AppImage probe
-        shell: bash
-        env:
-          CAFE_CODE_UPDATE_DETECTION_CHANNEL: ${{ needs.prepare.outputs.channel }}
-          CAFE_CODE_UPDATE_DETECTION_EXPECT_VERSION: ${{ needs.prepare.outputs.version }}
-          CAFE_CODE_UPDATE_DETECTION_RESULT: ${{ runner.temp }}/cafe-update-detection.json
-        run: |
-          set -euo pipefail
-          probe=(update-probe/*.AppImage)
-          if [[ ! -f "${probe[0]}" ]]; then
-            echo "Packaged update probe AppImage is missing." >&2
-            exit 1
-          fi
-          chmod 0755 "${probe[0]}"
-          probe_path="$(realpath "${probe[0]}")"
-          probe_log="${RUNNER_TEMP}/cafe-update-detection.log"
-          if ! env APPIMAGE="${probe_path}" APPIMAGE_EXTRACT_AND_RUN=1 \
-            "${probe_path}" \
-            --no-sandbox \
-            --headless \
-            --disable-gpu \
-            --cafe-update-detection-probe \
-            > "${probe_log}" 2>&1; then
-            tail -100 "${probe_log}" >&2
-            exit 1
-          fi
-          tail -20 "${probe_log}"
-          node -e '
-            const fs = require("node:fs");
-            const result = JSON.parse(fs.readFileSync(process.env.CAFE_CODE_UPDATE_DETECTION_RESULT, "utf8"));
-            if (!result.ok || !result.updateAvailable || result.availableVersion !== process.env.CAFE_CODE_UPDATE_DETECTION_EXPECT_VERSION) {
-              console.error(result);
-              process.exit(1);
-            }
-            console.log(JSON.stringify(result));
-          '

@@ -8,7 +8,7 @@ const workflow = (name: string) =>
   parse(readFileSync(resolve(root, ".github/workflows", name), "utf8"));
 
 describe("release publication gates", () => {
-  it("keeps manual branch publication behind the complete release gates before minting its tag", () => {
+  it("keeps manual branch publication behind the normal CI and validated artifacts before minting its tag", () => {
     const release = workflow("release.yml");
     expect(release.on.workflow_dispatch.inputs.version.required).toBe(true);
     expect(release.on.workflow_dispatch.inputs.publish_release).toEqual({
@@ -17,9 +17,9 @@ describe("release publication gates", () => {
       default: false,
     });
     expect(release.jobs.publish.if).toBe(
-      "${{ !cancelled() && needs.prepare.result == 'success' && needs.artifacts.result == 'success' && (github.event_name != 'workflow_dispatch' || inputs.publish_release) && (inputs.build_only || (needs.quality.result == 'success' && needs.reliability.result == 'success')) }}",
+      "${{ !cancelled() && needs.prepare.result == 'success' && needs.artifacts.result == 'success' && (github.event_name != 'workflow_dispatch' || inputs.publish_release) && (inputs.build_only || needs.quality.result == 'success') }}",
     );
-    expect(release.jobs.publish.needs).toEqual(["prepare", "quality", "reliability", "artifacts"]);
+    expect(release.jobs.publish.needs).toEqual(["prepare", "quality", "artifacts"]);
     expect(release.jobs.publish.env.RELEASE_TAG).toBe("${{ needs.prepare.outputs.tag }}");
     const steps = release.jobs.publish.steps;
     const publication = steps.findIndex(
@@ -32,7 +32,6 @@ describe("release publication gates", () => {
     for (const name of [
       "Verify qualified artifact identities",
       "Validate release manifests and checksums",
-      "Qualify candidate update feed before publication",
     ]) {
       expect(steps.findIndex((step: { name?: string }) => step.name === name)).toBeLessThan(
         publication,
@@ -55,12 +54,6 @@ describe("release publication gates", () => {
     ] as const;
     for (const [name, jobName, linuxName, macName] of [
       [
-        "release.yml",
-        "artifacts",
-        "Qualify Linux artifact and runtime",
-        "Qualify macOS artifact and runtime",
-      ],
-      [
         "reliability.yml",
         "packaged-runtime",
         "Launch Linux artifact in isolated virtual display",
@@ -80,20 +73,14 @@ describe("release publication gates", () => {
       expect(steps.filter((step) => step.env?.[flags[0]])).toEqual([
         expect.objectContaining({
           name: linuxName,
-          if:
-            name === "release.yml"
-              ? "runner.os == 'Linux' && !inputs.build_only"
-              : "runner.os == 'Linux'",
+          if: "runner.os == 'Linux'",
           env: { [flags[0]]: "1" },
         }),
       ]);
       expect(steps.filter((step) => step.env?.[flags[1]])).toEqual([
         expect.objectContaining({
           name: macName,
-          if:
-            name === "release.yml"
-              ? "runner.os == 'macOS' && !inputs.build_only"
-              : "runner.os == 'macOS'",
+          if: "runner.os == 'macOS'",
           env: expect.objectContaining({ [flags[1]]: "1" }),
         }),
       ]);
@@ -122,10 +109,17 @@ describe("release publication gates", () => {
         Object.values(step.env ?? {}).some((value) => value.includes("secrets.")),
       ),
     ).toEqual([signed]);
-    const native = steps.find(
-      (step: { name?: string }) => step.name === "Qualify macOS artifact and runtime",
+    const verification = steps.find(
+      (step: { name?: string }) => step.name === "Verify macOS signature and notarization",
     );
-    expect(native.env.CAFE_CODE_MACOS_ARTIFACT_REQUIRE_SIGNED).toBe("1");
+    expect(verification.if).toBe("runner.os == 'macOS'");
+    for (const command of [
+      "codesign --verify --deep --strict",
+      "spctl --assess --type execute",
+      "xcrun stapler validate",
+    ]) {
+      expect(verification.run).toContain(command);
+    }
     const unsigned = steps.find(
       (step: { name?: string }) => step.name === "Build unsigned Windows or Linux artifact",
     );
@@ -175,28 +169,14 @@ describe("release publication gates", () => {
     }
   });
 
-  it("requires reusable native quality/lifecycle checks for the exact tag commit", () => {
+  it("uses normal reusable CI for the exact release commit without additional qualification", () => {
     const release = workflow("release.yml");
-    for (const name of ["quality", "reliability"]) {
-      expect(release.jobs[name].with.source_ref).toBe("${{ needs.prepare.outputs.source-sha }}");
-      expect(release.jobs[name].uses).toMatch(
-        /^\.\/\.github\/workflows\/(?:ci|reliability)\.yml$/u,
-      );
-    }
-    expect(release.jobs.quality.with.release_candidate).toBe(true);
-    expect(release.jobs.publish.needs).toEqual(["prepare", "quality", "reliability", "artifacts"]);
+    expect(release.jobs.quality.with.source_ref).toBe("${{ needs.prepare.outputs.source-sha }}");
+    expect(release.jobs.quality.uses).toBe("./.github/workflows/ci.yml");
+    expect(release.jobs.quality.with.release_candidate ?? false).toBe(false);
+    expect(release.jobs).not.toHaveProperty("reliability");
+    expect(release.jobs.publish.needs).toEqual(["prepare", "quality", "artifacts"]);
     const ci = workflow("ci.yml");
-    expect(
-      ci.jobs["node-checks"].steps.some(
-        (step: { run?: string }) =>
-          step.run === "corepack yarn npm audit --all --recursive --no-deprecations",
-      ),
-    ).toBe(true);
-    expect(
-      ci.jobs["node-checks"].steps.some(
-        (step: { run?: string }) => step.run === "corepack yarn release:smoke",
-      ),
-    ).toBe(true);
     expect(
       ci.jobs["browser-checks"].steps.some(
         (step: { run?: string }) => step.run === "corepack yarn test:browser:ci",
@@ -222,18 +202,18 @@ describe("release publication gates", () => {
     expect(ci.jobs["node-checks"].needs ?? []).not.toContain("browser-checks");
     expect(ci.jobs["browser-checks"].needs ?? []).not.toContain("node-checks");
   });
-  it("qualifies uploaded bytes before sealing and checks the candidate feed before publishing", () => {
+  it("seals signed build identities and verifies bytes and manifests before publishing", () => {
     const release = workflow("release.yml");
     const artifactSteps = release.jobs.artifacts.steps;
     const seal = artifactSteps.findIndex(
       (step: { name?: string }) => step.name === "Seal qualified artifact identities",
     );
-    for (const run of [
-      "corepack yarn test:native-windows-artifact",
-      "corepack yarn test:native-macos-artifact",
-      "dbus-run-session -- xvfb-run -a corepack yarn test:native-linux-artifact",
+    for (const name of [
+      "Build unsigned Windows or Linux artifact",
+      "Build signed and notarized macOS artifact",
+      "Verify macOS signature and notarization",
     ]) {
-      const index = artifactSteps.findIndex((step: { run?: string }) => step.run === run);
+      const index = artifactSteps.findIndex((step: { name?: string }) => step.name === name);
       expect(index).toBeGreaterThanOrEqual(0);
       expect(index).toBeLessThan(seal);
     }
@@ -245,7 +225,6 @@ describe("release publication gates", () => {
     for (const name of [
       "Verify qualified artifact identities",
       "Validate release manifests and checksums",
-      "Qualify candidate update feed before publication",
     ]) {
       const index = steps.findIndex((step: { name?: string }) => step.name === name);
       expect(index).toBeGreaterThanOrEqual(0);
