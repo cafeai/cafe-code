@@ -502,6 +502,7 @@ export async function runNativeDesktopRuntimeSmoke(options: RuntimeSmokeOptions)
           "Cafe Code",
           "Chromium",
         ],
+        options.appPath,
         qualify,
       );
     } else await qualify();

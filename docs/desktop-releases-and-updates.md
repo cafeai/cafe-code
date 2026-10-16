@@ -114,8 +114,16 @@ and keychain live under that fixture home; existing user preferences remain unto
 keychain is deleted on success or failure, followed by the owned temporary home. Synthetic random
 safe-storage keys in that disposable keychain avoid unsigned CI permission dialogs while
 retaining the real OS-backed encryption/decryption check.
+Each synthetic credential trusts the exact executable through its application ACL
+and admits its native signing partition alongside the owning Apple tool: the
+`codesign` CDHash for ad-hoc artifacts or the verified Developer ID team for signed
+artifacts. The legacy application ACL alone leaves an `apple-tool:` partition
+that blocks Electron's native key access.
+Missing or ambiguous executable identity refuses the launch, and partition setup
+failure still deletes the private keychain. This applies to both ad-hoc and
+Developer ID signed artifacts without modifying their signatures.
 These options are scoped to their respective artifact steps; ordinary launches
-and local smoke commands retain their existing OS policy. No signing identity,
+and local smoke commands retain their existing OS policy. No private signing key,
 provider account or existing keychain contents participate in this setup.
 
 The Windows smoke sends NSIS's final `/D=` tail verbatim, preserving spaces
