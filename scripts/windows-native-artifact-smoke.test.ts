@@ -6,6 +6,7 @@ import {
   buildWindowsCmdCommand,
   buildWindowsCmdInvocation,
   buildManagedProviderProbeEnvironment,
+  inspectWindowsInstallFailure,
   removePathWithRetries,
   selectInstalledWindowsExecutables,
   selectWindowsInstaller,
@@ -14,6 +15,32 @@ import {
 } from "./windows-native-artifact-smoke.ts";
 
 describe("Windows native artifact smoke", () => {
+  it("distinguishes extraction from bootstrap progress using only fixed presence receipts", () => {
+    const install = join(import.meta.dirname, "private-install");
+    const cafe = join(import.meta.dirname, "private-cafe");
+    const present = new Set([
+      join(install, "resources", "app.asar"),
+      join(install, "resources", "managed-runtime", "install-managed-provider-runtime.ps1"),
+      join(cafe, "installer-options.json"),
+    ]);
+    const inspected: string[] = [];
+    const receipt = inspectWindowsInstallFailure(install, cafe, (path) => {
+      inspected.push(path);
+      return present.has(path);
+    });
+    assert.deepEqual(receipt, {
+      appArchive: true,
+      bootstrapScript: true,
+      managedNode: false,
+      installerOptions: true,
+      bootstrapLog: false,
+      installResult: false,
+      activeRuntime: false,
+    });
+    assert.equal(inspected.length, 7);
+    assert.equal(JSON.stringify(receipt).includes("private-"), false);
+  });
+
   it("retains only bounded fixed bootstrap failure receipts", () => {
     const receipt =
       "[2026-10-15T12:00:00.0000000Z] Bootstrap failure phase=prepare nativeExit=1 line=190 hresult=-2146233087";

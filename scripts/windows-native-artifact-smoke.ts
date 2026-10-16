@@ -1,6 +1,6 @@
 import { spawn } from "node:child_process";
 import { existsSync } from "node:fs";
-import { mkdtemp, readFile, readdir, rm, stat } from "node:fs/promises";
+import { mkdtemp, readFile, readdir, rm, stat, statfs } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
@@ -202,6 +202,28 @@ async function readManagedBootstrapFailure(): Promise<string> {
   }
 }
 
+/** Fixed presence receipts survive the owned install-directory cleanup without
+ * publishing installer output, paths, provider data or arbitrary log contents. */
+export function inspectWindowsInstallFailure(
+  installDir: string,
+  cafeRoot: string,
+  pathExists: (path: string) => boolean = existsSync,
+) {
+  return {
+    appArchive: pathExists(join(installDir, "resources", "app.asar")),
+    bootstrapScript: pathExists(
+      join(installDir, "resources", "managed-runtime", "install-managed-provider-runtime.ps1"),
+    ),
+    managedNode: pathExists(
+      join(installDir, "resources", "managed-runtime", "node", "win-x64", "node.exe"),
+    ),
+    installerOptions: pathExists(join(cafeRoot, "installer-options.json")),
+    bootstrapLog: pathExists(join(cafeRoot, "installer-managed-runtime.log")),
+    installResult: pathExists(join(cafeRoot, "managed", "install-result.json")),
+    activeRuntime: pathExists(join(cafeRoot, "managed", "active-runtime.json")),
+  };
+}
+
 async function readUserPathRegistry(): Promise<string> {
   const result = await runProcess("reg.exe", ["query", "HKCU\\Environment", "/v", "Path"], {
     timeoutMs: 30_000,
@@ -341,8 +363,13 @@ export async function runWindowsNativeArtifactSmoke(
       windowsVerbatimArguments: true,
     });
     if (install.exitCode !== 0) {
+      const filesystem = await statfs(smokeRoot).catch(() => undefined);
+      const receipt = {
+        ...inspectWindowsInstallFailure(installDir, join(managedRoot, "..")),
+        availableDiskBytes: filesystem ? filesystem.bavail * filesystem.bsize : null,
+      };
       throw new Error(
-        `NSIS install exited nonzero (${install.exitCode}). ${await readManagedBootstrapFailure()}`,
+        `NSIS install exited nonzero (${install.exitCode}). ${await readManagedBootstrapFailure()} Installation phase: ${JSON.stringify(receipt)}`,
       );
     }
     assertSuccessful(install, "NSIS install");
