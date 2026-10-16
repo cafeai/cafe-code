@@ -1,7 +1,7 @@
 # Maintainer: CafeAI <116491182+cafeai at users dot noreply dot github dot com>
 
 pkgname=cafe-code
-pkgver=0.0.51
+pkgver=0.2.0
 pkgrel=1
 pkgdesc='Desktop GUI for coding agents such as Codex, Claude, and OpenCode'
 arch=('x86_64')
@@ -48,23 +48,21 @@ conflicts=(
 )
 options=('!strip')
 
-# No v0.0.51 tag exists yet. Pin the published source commit so this stable
-# package remains reproducible; replace this with the release tag archive when
-# the next Cafe Code release is tagged.
-_commit='375b6839de96f0415556c3630ab8a5c372a9692c'
+# Build the published source release, with the archive bytes checked below.
+# This recipe does not build whichever revision contains the packaging files.
 source=(
-  "$pkgname-$pkgver.tar.gz::$url/archive/$_commit.tar.gz"
+  "$pkgname-$pkgver.tar.gz::$url/archive/refs/tags/v$pkgver.tar.gz"
   'cafe-code.sh'
   'cafe-code.desktop'
 )
 sha256sums=(
-  '312ad26e2065c89c7aa084d06891a2ebf66ff369fe16c0fb409d4fd64dc4718d'
+  '4c7ec369d23b3fbbe1d8fd1c77ac9e74eb6252c2d1f67556c8f118cff7e219e2'
   '383949547cd494ebfb6c3b13c964a46958e369e30df1164983f4af7ea8214e80'
   '5ea69e60ca4afc9abfa298d2464221d22e5f4c211059c04473ede3bd594c80ff'
 )
 
 prepare() {
-  cd "$srcdir/$pkgname-$_commit"
+  cd "$srcdir/$pkgname-$pkgver"
 
   export HOME="$srcdir/.home"
   export COREPACK_HOME="$srcdir/.corepack"
@@ -73,7 +71,7 @@ prepare() {
 }
 
 build() {
-  cd "$srcdir/$pkgname-$_commit"
+  cd "$srcdir/$pkgname-$pkgver"
 
   export HOME="$srcdir/.home"
   export COREPACK_HOME="$srcdir/.corepack"
@@ -87,7 +85,7 @@ build() {
 }
 
 package() {
-  cd "$srcdir/$pkgname-$_commit"
+  cd "$srcdir/$pkgname-$pkgver"
 
   install -Dm755 \
     "$srcdir/cafe-code-dist/Cafe-Code-$pkgver-x86_64.AppImage" \
