@@ -74,6 +74,22 @@ corepack yarn workspace @cafecode/desktop start --cafe-debug
 The debug endpoint is localhost-only and its URL is printed when debug mode is
 enabled. Ordinary startup does not enable it.
 
+### Startup diagnostics
+
+The desktop manager's `backend exited unexpectedly` line reports the child exit,
+not its cause. Debug mode retains the backend output in `logs/server-child.log`
+under the selected state directory. Inspect the matching startup attempt's error
+before changing data or configuration.
+
+`Web Push disabled; Cafe startup continues` means private push state could not be
+safely initialized. Its fixed `phase` and `detail` explain whether secure reading,
+decoding, or initial owner reconciliation failed. A directory security refusal
+requires owner-controlled, unlinked ancestry without group/other write access;
+Cafe does not weaken that requirement or change home-directory permissions.
+Chat and backend startup remain available, but push operations fail explicitly.
+No replacement keys, subscription reset, background retry or delivery is admitted.
+Preserve the existing state for recovery; do not delete it to hide the warning.
+
 ## Verification
 
 Use the pinned runtime and Corepack Yarn. On macOS/Linux, start CPU-heavy

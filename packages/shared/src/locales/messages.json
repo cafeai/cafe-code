@@ -5353,7 +5353,7 @@
   "Finished running": {
     "message": "Finished running",
     "locations": [
-      "apps/server/src/notifications/WebPushNotifications.ts:102",
+      "apps/server/src/notifications/WebPushNotifications.ts:117",
       "apps/web/src/components/DesktopNotificationWatcher.tsx:98"
     ]
   },

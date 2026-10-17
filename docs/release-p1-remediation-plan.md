@@ -245,6 +245,13 @@ authentication/notification layer cycle.
    private migration. A failed migration must retain recoverable evidence and
    disable delivery rather than publishing an ambiguous owner.
 
+Web Push initialization failures are isolated from core backend startup. The
+unavailable instance refuses every push API and starts no delivery consumers,
+key generation or storage retries. A fixed phase and safe explanation distinguish
+read/security refusal, decode failure and reconciliation failure without exposing
+paths or private state. The failed file/identity remains recovery evidence;
+interruption and defects are not converted into this optional-service fallback.
+
 Test exact-owner changes, another session's endpoint, revocation, bulk revocation,
 expiry, restart, malformed storage, permission repair, and registration/delivery
 races with a synthetic push transport. Already accepted external push deliveries
