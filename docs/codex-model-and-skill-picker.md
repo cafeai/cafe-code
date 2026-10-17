@@ -37,6 +37,13 @@ Older saved Fast on/off settings retain the same Fast/Standard meaning, rather
 than being upgraded to Ultra fast. No account or model preference is rewritten
 merely by opening the menu.
 
+The picker and native daemon can temporarily hold different catalogue formats.
+An exact Fast choice (`priority`) also works when its owning model still exposes
+the equivalent older Fast on/off control. This does not enable Fast for another
+model/account or override a modern catalogue that explicitly removes it. Other
+exact tiers still require the daemon owner's advertised capability. See
+[legacy Fast parity](decisions/codex-legacy-fast-tier-parity.md).
+
 If a saved tier is no longer advertised, Cafe keeps it visible as **Unavailable
 service tier** and rejects its submission. Reopen the model picker to request a
 catalogue refresh, then choose an available tier. Cafe will not silently substitute

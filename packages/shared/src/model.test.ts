@@ -14,6 +14,7 @@ import {
   getModelSelectionBooleanOptionValue,
   getModelSelectionStringOptionValue,
   getProviderOptionDescriptors,
+  getProviderOptionCurrentValue,
   getProviderOptionBooleanSelectionValue,
   getProviderOptionStringSelectionValue,
   isClaudeUltrathinkPrompt,
@@ -114,6 +115,68 @@ describe("native input capabilities", () => {
         }),
       ),
     ).toEqual([{ id: "serviceTier", value: "ultrafast" }]);
+  });
+  it("retains canonical Fast across legacy catalogue presentation without selecting a paid default", () => {
+    const caps: ModelCapabilities = {
+      optionDescriptors: [{ id: "fastMode", label: "Fast Mode", type: "boolean" }],
+    };
+    expect(
+      buildProviderOptionSelectionsFromDescriptors(getProviderOptionDescriptors({ caps })),
+    ).toBeUndefined();
+    const descriptors = getProviderOptionDescriptors({
+      caps,
+      selections: [
+        { id: "serviceTier", value: "priority" },
+        { id: "fastMode", value: false },
+      ],
+    });
+    expect(descriptors).toHaveLength(1);
+    expect(descriptors[0]).toMatchObject({
+      id: "serviceTier",
+      type: "select",
+      currentValue: "priority",
+      options: [
+        { id: "default", label: "Standard" },
+        { id: "priority", label: "Fast" },
+      ],
+    });
+    expect(buildProviderOptionSelectionsFromDescriptors(descriptors)).toEqual([
+      { id: "serviceTier", value: "priority" },
+    ]);
+    const unavailable = getProviderOptionDescriptors({
+      caps,
+      selections: [{ id: "serviceTier", value: "ultrafast" }],
+    });
+    expect(getProviderOptionCurrentValue(unavailable[0])).toBe("ultrafast");
+    expect(
+      unavailable[0]?.type === "select" &&
+        unavailable[0].options.some((option) => option.id === "ultrafast"),
+    ).toBe(false);
+    for (const modern of [[], [{ id: "default", label: "Standard" }]]) {
+      const revoked = getProviderOptionDescriptors({
+        caps: {
+          optionDescriptors: [
+            ...caps.optionDescriptors!,
+            { id: "serviceTier", label: "Tier", type: "select", options: modern },
+          ],
+        },
+        selections: [{ id: "serviceTier", value: "priority" }],
+      });
+      expect(
+        revoked[0]?.type === "select" &&
+          revoked[0].options.some((option) => option.id === "priority"),
+      ).toBe(false);
+      expect(buildProviderOptionSelectionsFromDescriptors(revoked)).toEqual([
+        { id: "serviceTier", value: "priority" },
+      ]);
+    }
+    const noCapability = getProviderOptionDescriptors({
+      caps: { optionDescriptors: [] },
+      selections: [{ id: "serviceTier", value: "priority" }],
+    });
+    expect(
+      noCapability[0]?.type === "select" && noCapability[0].options.map((option) => option.id),
+    ).toEqual(["default"]);
   });
   it("respects explicit modalities, including an empty or audio-only supported subset", () => {
     expect(modelAcceptsImages({ inputModalities: ["text"] }, "future-model")).toBe(false);

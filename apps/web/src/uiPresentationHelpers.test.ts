@@ -6,6 +6,7 @@ import {
   type OrchestrationThreadActivity,
 } from "@cafecode/contracts";
 import { getProviderOptionDescriptors } from "@cafecode/shared/model";
+import { getUiLocale, setUiLocale, uiText } from "@cafecode/shared/i18n";
 import { getLocalizedProviderOptionDescriptors } from "./providerOptionPresentation";
 import { localizeProviderSettingsField } from "./components/settings/providerSettingsPresentation";
 import { DRIVER_OPTION_BY_VALUE } from "./components/settings/providerDriverMeta";
@@ -78,6 +79,44 @@ describe("English-only renderer helper presentation", () => {
       currentValue: "default",
     });
     expect(native.optionDescriptors[0]).not.toHaveProperty("currentValue");
+  });
+
+  it("localizes synthesized legacy Fast without translating native tier names", () => {
+    const previousLocale = getUiLocale();
+    try {
+      setUiLocale("ko");
+      const selections = [{ id: "serviceTier", value: "priority" }];
+      const fallback = getLocalizedProviderOptionDescriptors({
+        caps: { optionDescriptors: [{ id: "fastMode", label: "Received Fast", type: "boolean" }] },
+        selections,
+      });
+      expect(fallback[0]).toMatchObject({
+        currentValue: "priority",
+        options: [
+          { id: "default", label: uiText("Standard") },
+          { id: "priority", label: "빠름" },
+        ],
+      });
+      const native = getLocalizedProviderOptionDescriptors({
+        caps: {
+          optionDescriptors: [
+            {
+              id: "serviceTier",
+              label: "Native tier",
+              type: "select",
+              options: [{ id: "priority", label: "Native Fast" }],
+            },
+          ],
+        },
+        selections,
+      });
+      expect(native[0]).toMatchObject({
+        label: "Native tier",
+        options: [{ id: "priority", label: "Native Fast" }],
+      });
+    } finally {
+      setUiLocale(previousLocale);
+    }
   });
 
   it("uses full count messages without changing live-work counters or ownership", () => {

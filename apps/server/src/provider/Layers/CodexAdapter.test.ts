@@ -1388,6 +1388,25 @@ const advertisedTierModels: readonly ServerProviderModel[] = [
       ],
     },
   },
+  {
+    slug: "legacy-fast-tier-model",
+    name: "Legacy Fast tier model",
+    isCustom: false,
+    capabilities: {
+      optionDescriptors: [{ id: "fastMode", label: "Fast Mode", type: "boolean" }],
+    },
+  },
+  {
+    slug: "revoked-fast-tier-model",
+    name: "Revoked Fast tier model",
+    isCustom: false,
+    capabilities: {
+      optionDescriptors: [
+        { id: "fastMode", label: "Fast Mode", type: "boolean" },
+        { id: "serviceTier", label: "Service tier", type: "select", options: [] },
+      ],
+    },
+  },
 ];
 const validationLayer = it.layer(
   Layer.effect(
@@ -1494,6 +1513,50 @@ validationLayer("CodexAdapterLive validation", (it) => {
         );
         assert.equal(failed._tag, "Failure");
         assert.equal(validationRuntimeFactory.factory.mock.calls.length, count);
+      }),
+  );
+  it.effect(
+    "starts with exact priority from the selected model's legacy Fast capability and rejects unavailable tiers before construction",
+    () =>
+      Effect.gen(function* () {
+        const adapter = yield* CodexAdapter;
+        const instanceId = ProviderInstanceId.make("codex");
+        yield* adapter.startSession({
+          provider: ProviderDriverKind.make("codex"),
+          threadId: asThreadId("legacy-exact-priority-start"),
+          runtimeMode: "full-access",
+          modelSelection: createModelSelection(instanceId, "legacy-fast-tier-model", [
+            { id: "fastMode", value: false },
+            { id: "serviceTier", value: "priority" },
+          ]),
+        });
+        assert.equal(
+          validationRuntimeFactory.factory.mock.calls.at(-1)?.[0].serviceTier,
+          "priority",
+        );
+        assert.equal(
+          validationRuntimeFactory.factory.mock.calls.at(-1)?.[0].model,
+          "legacy-fast-tier-model",
+        );
+        const count = validationRuntimeFactory.factory.mock.calls.length;
+        for (const [index, [model, tier]] of [
+          ["revoked-fast-tier-model", "priority"],
+          ["missing-fast-tier-model", "priority"],
+          ["legacy-fast-tier-model", "ultrafast"],
+        ].entries()) {
+          const result = yield* Effect.exit(
+            adapter.startSession({
+              provider: ProviderDriverKind.make("codex"),
+              threadId: asThreadId(`rejected-legacy-priority-start-${index}`),
+              runtimeMode: "full-access",
+              modelSelection: createModelSelection(instanceId, model!, [
+                { id: "serviceTier", value: tier! },
+              ]),
+            }),
+          );
+          assert.equal(result._tag, "Failure");
+          assert.equal(validationRuntimeFactory.factory.mock.calls.length, count);
+        }
       }),
   );
 
@@ -1649,6 +1712,53 @@ const sessionErrorLayer = it.layer(
 );
 
 sessionErrorLayer("CodexAdapterLive session errors", (it) => {
+  it.effect(
+    "sends exact priority from legacy Fast capability without replacing effort and refuses unavailable model tiers before send",
+    () =>
+      Effect.gen(function* () {
+        const adapter = yield* CodexAdapter;
+        const threadId = asThreadId("legacy-exact-priority-send");
+        const instanceId = ProviderInstanceId.make("codex");
+        yield* adapter.startSession({
+          provider: ProviderDriverKind.make("codex"),
+          threadId,
+          runtimeMode: "full-access",
+        });
+        const runtime = sessionRuntimeFactory.lastRuntime!;
+        runtime.sendTurnImpl.mockClear();
+        yield* adapter.sendTurn({
+          threadId,
+          input: "Continue",
+          modelSelection: createModelSelection(instanceId, "legacy-fast-tier-model", [
+            { id: "fastMode", value: false },
+            { id: "serviceTier", value: "priority" },
+            { id: "reasoningEffort", value: "high" },
+          ]),
+        });
+        assert.equal(runtime.sendTurnImpl.mock.calls.length, 1);
+        assert.equal(runtime.sendTurnImpl.mock.calls[0]?.[0].serviceTier, "priority");
+        assert.equal(runtime.sendTurnImpl.mock.calls[0]?.[0].model, "legacy-fast-tier-model");
+        assert.equal(runtime.sendTurnImpl.mock.calls[0]?.[0].effort, "high");
+        for (const [model, tier] of [
+          ["revoked-fast-tier-model", "priority"],
+          ["missing-fast-tier-model", "priority"],
+          ["legacy-fast-tier-model", "ultrafast"],
+        ]) {
+          const result = yield* Effect.exit(
+            adapter.sendTurn({
+              threadId,
+              input: "Continue",
+              modelSelection: createModelSelection(instanceId, model!, [
+                { id: "serviceTier", value: tier! },
+              ]),
+            }),
+          );
+          assert.equal(result._tag, "Failure");
+          assert.equal(runtime.sendTurnImpl.mock.calls.length, 1);
+        }
+      }),
+  );
+
   it.effect(
     "sends exact advertised tiers and rejects removed or foreign model tiers without a paid turn",
     () =>

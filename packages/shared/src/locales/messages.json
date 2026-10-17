@@ -5214,6 +5214,7 @@
     "locations": [
       "apps/web/src/components/chat/TraitsPicker.tsx:250",
       "apps/web/src/components/chat/schedulePresentation.ts:162",
+      "apps/web/src/providerOptionPresentation.ts:29",
       "apps/web/src/turnConfiguration.ts:127"
     ]
   },
@@ -10369,7 +10370,7 @@
   },
   "Service tier": {
     "message": "Service tier",
-    "locations": ["apps/web/src/providerOptionPresentation.ts:23"]
+    "locations": ["apps/web/src/providerOptionPresentation.ts:24"]
   },
   "Service tier: {tier}": {
     "message": "Service tier: {tier}",
@@ -10932,7 +10933,7 @@
   "Standard": {
     "message": "Standard",
     "locations": [
-      "apps/web/src/providerOptionPresentation.ts:25",
+      "apps/web/src/providerOptionPresentation.ts:27",
       "apps/web/src/turnConfiguration.ts:124"
     ]
   },
