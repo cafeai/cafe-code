@@ -1,9 +1,9 @@
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 
 import { describe, expect, it } from "vitest";
 
-import { macSourceLaunchArgs } from "./mac-source-launch.ts";
+import { macSourceLaunchArgs, resolveMacSourceConfiguredHome } from "./mac-source-launch.ts";
 
 describe("macOS source app launch", () => {
   const root = join(tmpdir(), "Cafe source launch fixture");
@@ -12,6 +12,7 @@ describe("macOS source app launch", () => {
     entryPath: join(root, "dist-electron", "main.cjs"),
     stdoutPath: join(root, "source.stdout.log"),
     stderrPath: join(root, "source.stderr.log"),
+    configuredBaseDir: join(root, "custom Cafe home"),
     args: ["--cafe-debug", "argument with spaces"],
   };
 
@@ -26,6 +27,10 @@ describe("macOS source app launch", () => {
       input.stderrPath,
       "--env",
       "ELECTRON_RUN_AS_NODE",
+      "--env",
+      `CAFE_CODE_HOME=${input.configuredBaseDir}`,
+      "--env",
+      "CAFE_CODE_DATA_PROFILE=debug",
       "--args",
       input.entryPath,
       "--cafe-debug",
@@ -33,7 +38,7 @@ describe("macOS source app launch", () => {
     ]);
   });
 
-  it.each(["appBundlePath", "entryPath", "stdoutPath", "stderrPath"] as const)(
+  it.each(["appBundlePath", "entryPath", "stdoutPath", "stderrPath", "configuredBaseDir"] as const)(
     "rejects a relative %s instead of depending on a LaunchServices working directory",
     (key) => {
       expect(() => macSourceLaunchArgs({ ...input, [key]: "relative path" })).toThrow(
@@ -41,4 +46,21 @@ describe("macOS source app launch", () => {
       );
     },
   );
+
+  it("fixes a configured root to the same absolute spelling before changing launch cwd", () => {
+    const homeDirectory = join(root, "home");
+    expect(resolveMacSourceConfiguredHome(undefined, homeDirectory)).toBe(
+      join(homeDirectory, ".cafe-code"),
+    );
+    expect(resolveMacSourceConfiguredHome("~", homeDirectory)).toBe(homeDirectory);
+    expect(resolveMacSourceConfiguredHome(" ~/Cafe data ", homeDirectory)).toBe(
+      join(homeDirectory, "Cafe data"),
+    );
+    expect(resolveMacSourceConfiguredHome("~\\Cafe data", homeDirectory)).toBe(
+      join(homeDirectory, "Cafe data"),
+    );
+    expect(resolveMacSourceConfiguredHome("fixture/../Cafe data", homeDirectory)).toBe(
+      resolve("fixture/../Cafe data"),
+    );
+  });
 });

@@ -20,27 +20,23 @@ import * as Stream from "effect/Stream";
 import * as TestClock from "effect/testing/TestClock";
 import { HttpClient, HttpClientRequest, HttpClientResponse } from "effect/unstable/http";
 import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process";
-import { vi } from "vitest";
 
 import * as DesktopBackendManager from "./DesktopBackendManager.ts";
 import * as DesktopBackendConfiguration from "./DesktopBackendConfiguration.ts";
 import * as DesktopObservability from "../app/DesktopObservability.ts";
 import * as DesktopState from "../app/DesktopState.ts";
 import * as DesktopWindow from "../window/DesktopWindow.ts";
+import * as ElectronDialog from "../electron/ElectronDialog.ts";
+import * as NodePath from "node:path";
+import { BACKEND_PROFILE_STARTUP_REFUSED_EXIT_CODE } from "@cafecode/shared/backendStartupFailure";
+import { uiText } from "@cafecode/shared/i18n";
 import { encodeBackendMigrationProgress } from "@cafecode/shared/backendStartupProgress";
-
-vi.mock("./DesktopProcessReaper.ts", async (importOriginal) => {
-  const original = await importOriginal<typeof import("./DesktopProcessReaper.ts")>();
-  return {
-    ...original,
-    // These manager fixtures own only synthetic handles. Reading the host's
-    // process catalogue is unrelated to their readiness/restart/Stop assertions
-    // and can stall on a busy host or accidentally admit a real process with a
-    // fixture-shaped command. Keep that OS boundary inert; the separate reaper
-    // fixtures retain the actual process-selection policy tests.
-    reapMatchingUnixProcesses: () => Effect.succeed([]),
-  };
-});
+import {
+  BACKEND_READINESS_CHALLENGE_HEADER,
+  BACKEND_READINESS_PROOF_HEADER,
+  createBackendReadinessProof,
+  isBackendReadinessValue,
+} from "@cafecode/shared/backendReadiness";
 
 const decodeDesktopBackendBootstrap = Schema.decodeEffect(
   Schema.fromJsonString(DesktopBackendBootstrap),
@@ -73,6 +69,7 @@ function makeProcess(options?: {
   readonly stderr?: Stream.Stream<Uint8Array>;
   readonly exitCode?: Effect.Effect<ChildProcessSpawner.ExitCode>;
   readonly kill?: ChildProcessSpawner.ChildProcessHandle["kill"];
+  readonly isRunning?: Effect.Effect<boolean>;
   readonly progress?: Stream.Stream<Uint8Array>;
 }): ChildProcessSpawner.ChildProcessHandle {
   return ChildProcessSpawner.makeHandle({
@@ -81,7 +78,7 @@ function makeProcess(options?: {
     stderr: options?.stderr ?? Stream.empty,
     all: Stream.merge(options?.stdout ?? Stream.empty, options?.stderr ?? Stream.empty),
     exitCode: options?.exitCode ?? Effect.succeed(ChildProcessSpawner.ExitCode(0)),
-    isRunning: Effect.succeed(false),
+    isRunning: options?.isRunning ?? Effect.succeed(true),
     kill: options?.kill ?? (() => Effect.void),
     stdin: Sink.drain,
     getInputFd: () => Sink.drain,
@@ -100,11 +97,12 @@ function responseForRequest(
 function httpClientLayer(
   handler: (
     request: HttpClientRequest.HttpClientRequest,
+    signal: AbortSignal,
   ) => Effect.Effect<HttpClientResponse.HttpClientResponse>,
 ) {
   return Layer.succeed(
     HttpClient.HttpClient,
-    HttpClient.make((request) => handler(request)),
+    HttpClient.make((request, _url, signal) => handler(request, signal)),
   );
 }
 
@@ -122,44 +120,780 @@ function makeManagerLayer(input: {
   readonly backendOutputLog?: Partial<DesktopObservability.DesktopBackendOutputLogShape>;
   readonly desktopState?: DesktopState.DesktopStateShape;
   readonly desktopWindow?: Partial<DesktopWindow.DesktopWindowShape>;
+  readonly electronDialog?: Partial<ElectronDialog.ElectronDialogShape>;
   readonly config?: DesktopBackendManager.DesktopBackendStartConfig;
+  readonly readinessProof?: (token: string, challenge: string) => string | undefined;
+  readonly onBootstrap?: (bootstrap: DesktopBackendBootstrapValue) => void;
 }) {
-  return DesktopBackendManager.layer.pipe(
-    Layer.provide(
-      Layer.mergeAll(
-        FileSystem.layerNoop({
-          exists: () => Effect.succeed(true),
+  // Each layer owns the exact private fd3 opening token of its synthetic child.
+  // No module-global secret or mock-only manager input can qualify readiness.
+  // Capture before returning the real fixture's handle so its first HTTP probe
+  // cannot outrun successful fake-child opening.
+  return Layer.unwrap(
+    Effect.sync(() => {
+      let currentToken: string | undefined;
+      const observedSpawner = Layer.effect(
+        ChildProcessSpawner.ChildProcessSpawner,
+        Effect.gen(function* () {
+          const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
+          return ChildProcessSpawner.make((command) =>
+            Effect.gen(function* () {
+              assert.equal(command._tag, "StandardCommand");
+              if (command._tag !== "StandardCommand")
+                throw new Error("Expected a standard command.");
+              const fd3 = command.options.additionalFds?.fd3;
+              assert.equal(fd3?.type, "input");
+              if (fd3?.type !== "input" || !fd3.stream)
+                throw new Error("Expected private fd3 input.");
+              const bootstrap = yield* decodeBootstrap(
+                yield* fd3.stream.pipe(Stream.decodeText(), Stream.mkString),
+              ).pipe(Effect.orDie);
+              assert.isTrue(isBackendReadinessValue(bootstrap.desktopReadinessToken));
+              currentToken = bootstrap.desktopReadinessToken;
+              input.onBootstrap?.(bootstrap);
+              return yield* spawner.spawn(command);
+            }),
+          );
         }),
-        Layer.succeed(DesktopBackendConfiguration.DesktopBackendConfiguration, {
-          resolve: Effect.succeed(input.config ?? baseConfig),
+      ).pipe(Layer.provide(input.spawnerLayer));
+      const observedHttp = Layer.effect(
+        HttpClient.HttpClient,
+        Effect.gen(function* () {
+          const client = yield* HttpClient.HttpClient;
+          // Transform the existing transport rather than nesting another make:
+          // trace propagation may clone a request, so a second transport would
+          // create a distinct controller instead of observing the probe's scope.
+          return HttpClient.transform(client, (effect, request) =>
+            Effect.suspend(() => {
+              const token = currentToken;
+              const challenge = request.headers[BACKEND_READINESS_CHALLENGE_HEADER];
+              assert.isTrue(isBackendReadinessValue(token));
+              assert.isTrue(isBackendReadinessValue(challenge));
+              return effect.pipe(
+                Effect.map((response) => {
+                  const proof = (input.readinessProof ?? createBackendReadinessProof)(
+                    token!,
+                    challenge!,
+                  );
+                  return HttpClientResponse.fromWeb(
+                    request,
+                    new Response(null, {
+                      status: response.status,
+                      headers: {
+                        ...response.headers,
+                        ...(proof === undefined ? {} : { [BACKEND_READINESS_PROOF_HEADER]: proof }),
+                      },
+                    }),
+                  );
+                }),
+              );
+            }),
+          );
         }),
-        input.spawnerLayer,
-        input.httpClientLayer ?? healthyHttpClientLayer,
-        input.desktopState
-          ? Layer.succeed(DesktopState.DesktopState, input.desktopState)
-          : DesktopState.layer,
-        Layer.succeed(DesktopObservability.DesktopBackendOutputLog, {
-          writeSessionBoundary: () => Effect.void,
-          writeOutputChunk: () => Effect.void,
-          ...input.backendOutputLog,
-        } satisfies DesktopObservability.DesktopBackendOutputLogShape),
-        Layer.succeed(DesktopWindow.DesktopWindow, {
-          createMain: Effect.die("unexpected createMain"),
-          ensureMain: Effect.die("unexpected ensureMain"),
-          revealOrCreateMain: Effect.die("unexpected revealOrCreateMain"),
-          activate: Effect.void,
-          createMainIfBackendReady: Effect.void,
-          handleBackendReady: Effect.void,
-          dispatchMenuAction: () => Effect.void,
-          syncAppearance: Effect.void,
-          ...input.desktopWindow,
-        } satisfies DesktopWindow.DesktopWindowShape),
-      ),
-    ),
+      ).pipe(Layer.provide(input.httpClientLayer ?? healthyHttpClientLayer));
+      return DesktopBackendManager.layer.pipe(
+        Layer.provide(
+          Layer.mergeAll(
+            FileSystem.layerNoop({
+              exists: () => Effect.succeed(true),
+            }),
+            Layer.succeed(DesktopBackendConfiguration.DesktopBackendConfiguration, {
+              resolve: Effect.succeed(input.config ?? baseConfig),
+            }),
+            observedSpawner,
+            observedHttp,
+            Layer.succeed(ElectronDialog.ElectronDialog, {
+              pickFolder: () => Effect.die("unexpected profile-refusal folder picker"),
+              confirm: () => Effect.die("unexpected profile-refusal confirmation"),
+              showMessageBox: () => Effect.die("unexpected profile-refusal message box"),
+              showErrorBox: () => Effect.void,
+              ...input.electronDialog,
+            }),
+            input.desktopState
+              ? Layer.succeed(DesktopState.DesktopState, input.desktopState)
+              : DesktopState.layer,
+            Layer.succeed(DesktopObservability.DesktopBackendOutputLog, {
+              writeSessionBoundary: () => Effect.void,
+              writeOutputChunk: () => Effect.void,
+              ...input.backendOutputLog,
+            } satisfies DesktopObservability.DesktopBackendOutputLogShape),
+            Layer.succeed(DesktopWindow.DesktopWindow, {
+              createMain: Effect.die("unexpected createMain"),
+              ensureMain: Effect.die("unexpected ensureMain"),
+              revealOrCreateMain: Effect.die("unexpected revealOrCreateMain"),
+              activate: Effect.void,
+              createMainIfBackendReady: Effect.void,
+              handleBackendReady: Effect.void,
+              dispatchMenuAction: () => Effect.void,
+              syncAppearance: Effect.void,
+              ...input.desktopWindow,
+            } satisfies DesktopWindow.DesktopWindowShape),
+          ),
+        ),
+      );
+    }),
   );
 }
 
 describe("DesktopBackendManager", () => {
+  const profiledConfig = (
+    profile: "production" | "debug",
+  ): DesktopBackendManager.DesktopBackendStartConfig => {
+    const configuredRoot = NodePath.resolve("backend-startup-refusal-fixture");
+    return {
+      ...baseConfig,
+      bootstrap: {
+        ...baseConfig.bootstrap,
+        dataProfile: profile,
+        configuredCafeCodeHome: configuredRoot,
+        cafeCodeHome:
+          profile === "debug" ? NodePath.join(configuredRoot, ".debug") : configuredRoot,
+      },
+    };
+  };
+
+  it("keeps stale exits and incomplete profile proof inert in the actual exit policy", () => {
+    const bootstrap = profiledConfig("debug").bootstrap;
+    const currentRun = { id: 2, authenticatedReady: false };
+    assert.equal(
+      DesktopBackendManager.classifyDesktopBackendExit({
+        exitingRunId: 1,
+        currentRun,
+        exitCode: BACKEND_PROFILE_STARTUP_REFUSED_EXIT_CODE,
+        bootstrap,
+      }),
+      "stale",
+    );
+    assert.deepEqual(currentRun, { id: 2, authenticatedReady: false });
+    assert.equal(
+      DesktopBackendManager.classifyDesktopBackendExit({
+        exitingRunId: 1,
+        currentRun: undefined,
+        exitCode: BACKEND_PROFILE_STARTUP_REFUSED_EXIT_CODE,
+        bootstrap,
+      }),
+      "stale",
+    );
+    for (const [opening, ready, code] of [
+      [baseConfig.bootstrap, false, BACKEND_PROFILE_STARTUP_REFUSED_EXIT_CODE],
+      [
+        { ...bootstrap, configuredCafeCodeHome: undefined },
+        false,
+        BACKEND_PROFILE_STARTUP_REFUSED_EXIT_CODE,
+      ],
+      [bootstrap, true, BACKEND_PROFILE_STARTUP_REFUSED_EXIT_CODE],
+      [bootstrap, false, 1],
+    ] as const) {
+      assert.equal(
+        DesktopBackendManager.classifyDesktopBackendExit({
+          exitingRunId: 2,
+          currentRun: { id: 2, authenticatedReady: ready },
+          exitCode: code,
+          bootstrap: opening,
+        }),
+        "ordinary",
+      );
+    }
+  });
+
+  for (const profile of ["production", "debug"] as const) {
+    it.effect(
+      `stops automatic retries and shows one safe error only after the exact ${profile} child refuses startup`,
+      () =>
+        Effect.gen(function* () {
+          const started = yield* Deferred.make<void>();
+          const nativeExited = yield* Deferred.make<void>();
+          const notified = yield* Deferred.make<void>();
+          const dialogs: Array<{ title: string; content: string }> = [];
+          let spawns = 0;
+          let readyCount = 0;
+          const managerLayer = makeManagerLayer({
+            config: profiledConfig(profile),
+            spawnerLayer: Layer.succeed(
+              ChildProcessSpawner.ChildProcessSpawner,
+              ChildProcessSpawner.make(() =>
+                Effect.sync(() => {
+                  spawns += 1;
+                  return makeProcess({
+                    exitCode: Deferred.await(nativeExited).pipe(
+                      Effect.as(
+                        ChildProcessSpawner.ExitCode(BACKEND_PROFILE_STARTUP_REFUSED_EXIT_CODE),
+                      ),
+                    ),
+                    kill: () => Deferred.succeed(nativeExited, undefined).pipe(Effect.asVoid),
+                  });
+                }),
+              ),
+            ),
+            httpClientLayer: httpClientLayer(() => Effect.never),
+            // onStarted installs the exact PID and termination handle before
+            // emitting START. A spawner invocation alone precedes ownership.
+            backendOutputLog: {
+              writeSessionBoundary: ({ phase }) =>
+                phase === "START"
+                  ? Deferred.succeed(started, undefined).pipe(Effect.asVoid)
+                  : Effect.void,
+            },
+            desktopWindow: {
+              handleBackendReady: Effect.sync(() => {
+                readyCount += 1;
+              }),
+            },
+            electronDialog: {
+              showErrorBox: (title, content) =>
+                Effect.sync(() => {
+                  dialogs.push({ title, content });
+                }).pipe(Effect.andThen(Deferred.succeed(notified, undefined))),
+            },
+          });
+          yield* Effect.gen(function* () {
+            const manager = yield* DesktopBackendManager.DesktopBackendManager;
+            yield* manager.start;
+            yield* Deferred.await(started);
+            assert.equal(dialogs.length, 0);
+            assert.deepEqual((yield* manager.snapshot).activePid, Option.some(123));
+            yield* manager.start;
+            assert.equal(spawns, 1, "a held child cannot be replaced before native exit");
+            yield* Deferred.succeed(nativeExited, undefined);
+            yield* Deferred.await(notified);
+            const refused = yield* manager.snapshot;
+            assert.equal(refused.desiredRunning, false);
+            assert.equal(refused.ready, false);
+            assert.equal(refused.restartScheduled, false);
+            assert.isTrue(Option.isNone(refused.activePid));
+            assert.equal(readyCount, 0);
+            assert.equal(dialogs.length, 1);
+            const rendered = JSON.stringify(dialogs);
+            assert.equal(dialogs[0]?.title, uiText("Cafe Code data profile could not start"));
+            assert.isTrue((dialogs[0]?.content.length ?? 0) > 0);
+            assert.notInclude(rendered, profiledConfig(profile).bootstrap.cafeCodeHome);
+            assert.notInclude(rendered, "desktopReadinessToken");
+            yield* TestClock.adjust(Duration.seconds(30));
+            assert.equal(spawns, 1);
+            assert.equal(dialogs.length, 1);
+            yield* manager.stop();
+          }).pipe(
+            Effect.ensuring(Deferred.succeed(nativeExited, undefined)),
+            Effect.provide(Layer.merge(TestClock.layer(), managerLayer)),
+          );
+        }),
+    );
+  }
+
+  for (const stopped of ["explicit-stop", "quitting"] as const) {
+    it.effect(`does not surface a startup refusal after ${stopped}`, () =>
+      Effect.gen(function* () {
+        const started = yield* Deferred.make<void>();
+        const nativeExited = yield* Deferred.make<void>();
+        const finished = yield* Deferred.make<void>();
+        const backendReady = yield* Ref.make(false);
+        const quitting = yield* Ref.make(false);
+        let dialogs = 0;
+        const managerLayer = makeManagerLayer({
+          config: profiledConfig("debug"),
+          desktopState: { backendReady, quitting },
+          spawnerLayer: Layer.succeed(
+            ChildProcessSpawner.ChildProcessSpawner,
+            ChildProcessSpawner.make(() =>
+              Effect.sync(() => {
+                return makeProcess({
+                  exitCode: Deferred.await(nativeExited).pipe(
+                    Effect.as(
+                      ChildProcessSpawner.ExitCode(BACKEND_PROFILE_STARTUP_REFUSED_EXIT_CODE),
+                    ),
+                  ),
+                  kill: () => Deferred.succeed(nativeExited, undefined).pipe(Effect.asVoid),
+                });
+              }),
+            ),
+          ),
+          httpClientLayer: httpClientLayer(() => Effect.never),
+          backendOutputLog: {
+            writeSessionBoundary: ({ phase }) =>
+              phase === "START"
+                ? Deferred.succeed(started, undefined).pipe(Effect.asVoid)
+                : phase === "END"
+                  ? Deferred.succeed(finished, undefined).pipe(Effect.asVoid)
+                  : Effect.void,
+          },
+          electronDialog: {
+            showErrorBox: () =>
+              Effect.sync(() => {
+                dialogs += 1;
+              }),
+          },
+        });
+        yield* Effect.gen(function* () {
+          const manager = yield* DesktopBackendManager.DesktopBackendManager;
+          yield* manager.start;
+          yield* Deferred.await(started);
+          if (stopped === "explicit-stop") yield* manager.stop();
+          else {
+            yield* Ref.set(quitting, true);
+            yield* Deferred.succeed(nativeExited, undefined);
+          }
+          yield* Deferred.await(finished);
+          yield* TestClock.adjust(Duration.seconds(30));
+          assert.equal(dialogs, 0);
+          assert.equal((yield* manager.snapshot).restartScheduled, false);
+          yield* manager.stop();
+        }).pipe(
+          Effect.ensuring(Deferred.succeed(nativeExited, undefined)),
+          Effect.provide(Layer.merge(TestClock.layer(), managerLayer)),
+        );
+      }),
+    );
+  }
+
+  for (const firstProbe of ["missing-proof", "http-error", "timeout"] as const) {
+    it.effect(
+      `retires a held ${firstProbe} response before retry and closes the positive probe before Ready`,
+      () =>
+        Effect.gen(function* () {
+          const firstRequested = yield* Deferred.make<void>();
+          const ready = yield* Deferred.make<void>();
+          const nativeExited = yield* Deferred.make<void>();
+          const signals: AbortSignal[] = [];
+          let requestCount = 0;
+          let bodyReads = 0;
+          let readyCount = 0;
+          const managerLayer = makeManagerLayer({
+            spawnerLayer: Layer.succeed(
+              ChildProcessSpawner.ChildProcessSpawner,
+              ChildProcessSpawner.make(() =>
+                Effect.succeed(
+                  makeProcess({
+                    exitCode: Deferred.await(nativeExited).pipe(
+                      Effect.as(ChildProcessSpawner.ExitCode(0)),
+                    ),
+                    kill: () => Deferred.succeed(nativeExited, undefined).pipe(Effect.asVoid),
+                  }),
+                ),
+              ),
+            ),
+            // This is the pinned HttpClient.make's real transport AbortSignal,
+            // not a test-created controller or a mocked cancellation receipt.
+            httpClientLayer: httpClientLayer((request, signal) =>
+              Effect.gen(function* () {
+                if (signals.length > 0) assert.equal(signals.at(-1)?.aborted, true);
+                signals.push(signal);
+                requestCount += 1;
+                yield* Deferred.succeed(firstRequested, undefined);
+                if (requestCount === 1 && firstProbe === "timeout") return yield* Effect.never;
+                const heldBody = new ReadableStream<Uint8Array>(
+                  {
+                    pull: () => {
+                      bodyReads += 1;
+                      throw new Error("Readiness must not consume the held public response body.");
+                    },
+                  },
+                  { highWaterMark: 0 },
+                );
+                return HttpClientResponse.fromWeb(
+                  request,
+                  new Response(heldBody, {
+                    status: requestCount === 1 && firstProbe === "http-error" ? 503 : 200,
+                  }),
+                );
+              }),
+            ),
+            readinessProof: (token, challenge) =>
+              requestCount === 1 && firstProbe === "missing-proof"
+                ? undefined
+                : createBackendReadinessProof(token, challenge),
+            desktopWindow: {
+              handleBackendReady: Effect.sync(() => {
+                assert.equal(
+                  signals.every((signal) => signal.aborted),
+                  true,
+                );
+                assert.equal(
+                  bodyReads,
+                  0,
+                  "a readiness proof must not drain public response bodies",
+                );
+                readyCount += 1;
+              }).pipe(Effect.andThen(Deferred.succeed(ready, undefined))),
+            },
+          });
+          yield* Effect.gen(function* () {
+            const manager = yield* DesktopBackendManager.DesktopBackendManager;
+            yield* manager.start;
+            yield* Deferred.await(firstRequested);
+            yield* TestClock.adjust(Duration.millis(firstProbe === "timeout" ? 1_100 : 100));
+            yield* Deferred.await(ready);
+            assert.equal(requestCount, 2);
+            assert.equal(readyCount, 1);
+            assert.equal(
+              signals.every((signal) => signal.aborted),
+              true,
+            );
+            yield* manager.stop();
+          }).pipe(
+            Effect.ensuring(Deferred.succeed(nativeExited, undefined)),
+            Effect.provide(Layer.merge(TestClock.layer(), managerLayer)),
+          );
+        }),
+    );
+  }
+
+  it.effect("sanitizes invalid private bootstrap before spawn or rendered diagnostics", () =>
+    Effect.gen(function* () {
+      const failureLogged = yield* Deferred.make<void>();
+      const diagnostics: string[] = [];
+      const browserSecret = "private-browser-bootstrap-fixture-sentinel";
+      const staleReadinessSecret = "e".repeat(64);
+      let spawns = 0;
+      let readyCount = 0;
+      const logger = Logger.map(Logger.formatStructured, (record) => {
+        diagnostics.push(JSON.stringify(record));
+        if (record.annotations.reason === "Failed to encode desktop backend bootstrap payload.") {
+          Effect.runSync(Deferred.succeed(failureLogged, undefined));
+        }
+      });
+      const managerLayer = makeManagerLayer({
+        config: {
+          ...baseConfig,
+          bootstrap: {
+            ...baseConfig.bootstrap,
+            port: -1,
+            desktopBootstrapToken: browserSecret,
+            desktopReadinessToken: staleReadinessSecret,
+          },
+        },
+        spawnerLayer: Layer.succeed(
+          ChildProcessSpawner.ChildProcessSpawner,
+          ChildProcessSpawner.make(() =>
+            Effect.sync(() => {
+              spawns += 1;
+              return makeProcess();
+            }),
+          ),
+        ),
+        desktopWindow: {
+          handleBackendReady: Effect.sync(() => {
+            readyCount += 1;
+          }),
+        },
+      });
+      yield* Effect.gen(function* () {
+        const manager = yield* DesktopBackendManager.DesktopBackendManager;
+        yield* manager.start;
+        yield* Deferred.await(failureLogged);
+        const rendered = diagnostics.join("\n");
+        assert.include(rendered, "Failed to encode desktop backend bootstrap payload.");
+        for (const privateValue of [
+          browserSecret,
+          staleReadinessSecret,
+          "desktopBootstrapToken",
+          "desktopReadinessToken",
+        ])
+          assert.notInclude(rendered, privateValue);
+        assert.equal(spawns, 0);
+        assert.equal(readyCount, 0);
+        assert.equal((yield* manager.snapshot).ready, false);
+        yield* manager.stop();
+      }).pipe(
+        Effect.provide(
+          Layer.mergeAll(
+            TestClock.layer(),
+            managerLayer,
+            Logger.layer([logger], { mergeWithExisting: false }),
+          ),
+        ),
+      );
+    }),
+  );
+
+  for (const invalidPeer of ["missing", "wrong-owner", "malformed"] as const) {
+    it.effect(
+      `does not admit a 200 listener with ${invalidPeer} proof or release its live writer`,
+      () =>
+        Effect.gen(function* () {
+          const nativeExited = yield* Deferred.make<void>();
+          const probed = yield* Deferred.make<void>();
+          const killed = yield* Deferred.make<void>();
+          let readyCount = 0;
+          let spawns = 0;
+          const managerLayer = makeManagerLayer({
+            config: { ...baseConfig, readinessTimeout: Duration.seconds(1) },
+            spawnerLayer: Layer.succeed(
+              ChildProcessSpawner.ChildProcessSpawner,
+              ChildProcessSpawner.make(() =>
+                Effect.sync(() => {
+                  spawns += 1;
+                  return makeProcess({
+                    exitCode: Deferred.await(nativeExited).pipe(
+                      Effect.as(ChildProcessSpawner.ExitCode(0)),
+                    ),
+                    kill: () => Deferred.succeed(killed, undefined).pipe(Effect.asVoid),
+                  });
+                }),
+              ),
+            ),
+            httpClientLayer: httpClientLayer((request) =>
+              Deferred.succeed(probed, undefined).pipe(Effect.as(responseForRequest(request, 200))),
+            ),
+            readinessProof: (_token, challenge) => {
+              if (invalidPeer === "missing") return undefined;
+              if (invalidPeer === "malformed") return "not a finite proof";
+              return createBackendReadinessProof("0".repeat(64), challenge);
+            },
+            desktopWindow: {
+              handleBackendReady: Effect.sync(() => {
+                readyCount += 1;
+              }),
+            },
+          });
+          yield* Effect.gen(function* () {
+            const manager = yield* DesktopBackendManager.DesktopBackendManager;
+            yield* manager.start;
+            yield* Deferred.await(probed);
+            yield* TestClock.adjust(Duration.seconds(1));
+            yield* Deferred.await(killed);
+            assert.equal(readyCount, 0);
+            assert.equal((yield* manager.snapshot).ready, false);
+            assert.deepEqual((yield* manager.snapshot).activePid, Option.some(123));
+            yield* manager.start;
+            assert.equal(spawns, 1, "a failed listener proof cannot release an unexited child");
+            yield* Deferred.succeed(nativeExited, undefined);
+            yield* manager.stop();
+          }).pipe(
+            Effect.ensuring(Deferred.succeed(nativeExited, undefined)),
+            Effect.provide(Layer.merge(TestClock.layer(), managerLayer)),
+          );
+        }),
+    );
+  }
+
+  it.effect(
+    "rejects replay of an earlier probe's valid proof before accepting a fresh challenge",
+    () =>
+      Effect.gen(function* () {
+        const probes = yield* Queue.unbounded<number>();
+        const ready = yield* Deferred.make<void>();
+        const nativeExited = yield* Deferred.make<void>();
+        const challenges: string[] = [];
+        const proofs: string[] = [];
+        let readyCount = 0;
+        let requestCount = 0;
+        const managerLayer = makeManagerLayer({
+          spawnerLayer: Layer.succeed(
+            ChildProcessSpawner.ChildProcessSpawner,
+            ChildProcessSpawner.make(() =>
+              Effect.succeed(
+                makeProcess({
+                  exitCode: Deferred.await(nativeExited).pipe(
+                    Effect.as(ChildProcessSpawner.ExitCode(0)),
+                  ),
+                  kill: () => Deferred.succeed(nativeExited, undefined).pipe(Effect.asVoid),
+                }),
+              ),
+            ),
+          ),
+          httpClientLayer: httpClientLayer((request) =>
+            Effect.gen(function* () {
+              requestCount += 1;
+              yield* Queue.offer(probes, requestCount);
+              return responseForRequest(request, requestCount === 1 ? 503 : 200);
+            }),
+          ),
+          readinessProof: (token, challenge) => {
+            challenges.push(challenge);
+            const proof = createBackendReadinessProof(token, challenge);
+            proofs.push(proof);
+            return proofs.length === 2 ? proofs[0] : proof;
+          },
+          desktopWindow: {
+            handleBackendReady: Effect.sync(() => {
+              readyCount += 1;
+            }).pipe(Effect.andThen(Deferred.succeed(ready, undefined))),
+          },
+        });
+        yield* Effect.gen(function* () {
+          const manager = yield* DesktopBackendManager.DesktopBackendManager;
+          yield* manager.start;
+          assert.equal(yield* Queue.take(probes), 1);
+          yield* TestClock.adjust(Duration.millis(100));
+          assert.equal(yield* Queue.take(probes), 2);
+          assert.equal(readyCount, 0, "an old valid HMAC does not qualify a new probe");
+          assert.equal((yield* manager.snapshot).ready, false);
+          yield* TestClock.adjust(Duration.millis(100));
+          assert.equal(yield* Queue.take(probes), 3);
+          yield* Deferred.await(ready);
+          assert.equal(readyCount, 1);
+          assert.equal(new Set(challenges).size, 3);
+          assert.equal((yield* manager.snapshot).ready, true);
+          yield* manager.stop();
+        }).pipe(
+          Effect.ensuring(Deferred.succeed(nativeExited, undefined)),
+          Effect.provide(Layer.merge(TestClock.layer(), managerLayer)),
+        );
+      }),
+  );
+
+  it.effect(
+    "mints a new key per actual spawn and refuses a prior run despite identical saved bootstrap",
+    () =>
+      Effect.gen(function* () {
+        const starts = yield* Queue.unbounded<number>();
+        const probes = yield* Queue.unbounded<number>();
+        const ready = yield* Queue.unbounded<number>();
+        const firstExited = yield* Deferred.make<void>();
+        const secondExited = yield* Deferred.make<void>();
+        const tokens: string[] = [];
+        const challenges: string[] = [];
+        const staleSuppliedToken = "f".repeat(64);
+        let spawns = 0;
+        let readyCount = 0;
+        let secondOwnerMatches = false;
+        const managerLayer = makeManagerLayer({
+          config: {
+            ...baseConfig,
+            bootstrap: { ...baseConfig.bootstrap, desktopReadinessToken: staleSuppliedToken },
+          },
+          onBootstrap: (bootstrap) => tokens.push(bootstrap.desktopReadinessToken!),
+          spawnerLayer: Layer.succeed(
+            ChildProcessSpawner.ChildProcessSpawner,
+            ChildProcessSpawner.make(() =>
+              Effect.gen(function* () {
+                spawns += 1;
+                const exited = spawns === 1 ? firstExited : secondExited;
+                yield* Queue.offer(starts, spawns);
+                return makeProcess({
+                  exitCode: Deferred.await(exited).pipe(Effect.as(ChildProcessSpawner.ExitCode(1))),
+                  kill: () => Deferred.succeed(exited, undefined).pipe(Effect.asVoid),
+                });
+              }),
+            ),
+          ),
+          httpClientLayer: httpClientLayer((request) =>
+            Effect.gen(function* () {
+              const challenge = request.headers[BACKEND_READINESS_CHALLENGE_HEADER];
+              assert.isDefined(challenge);
+              challenges.push(challenge);
+              // Only a public nonce enters HTTP. Neither the actual child key nor
+              // the stale supplied key may appear in URL, headers or other fields.
+              const outgoing = JSON.stringify({ url: request.url, headers: request.headers });
+              for (const token of [...tokens, staleSuppliedToken])
+                assert.notInclude(outgoing, token);
+              yield* Queue.offer(probes, spawns);
+              return responseForRequest(request, 200);
+            }),
+          ),
+          readinessProof: (token, challenge) =>
+            createBackendReadinessProof(
+              tokens.length === 2 && !secondOwnerMatches ? tokens[0]! : token,
+              challenge,
+            ),
+          desktopWindow: {
+            handleBackendReady: Effect.suspend(() => {
+              readyCount += 1;
+              return Queue.offer(ready, readyCount).pipe(Effect.asVoid);
+            }),
+          },
+        });
+        yield* Effect.gen(function* () {
+          const manager = yield* DesktopBackendManager.DesktopBackendManager;
+          yield* manager.start;
+          assert.equal(yield* Queue.take(starts), 1);
+          assert.equal(yield* Queue.take(probes), 1);
+          assert.equal(yield* Queue.take(ready), 1);
+          yield* Deferred.succeed(firstExited, undefined);
+          yield* TestClock.adjust(Duration.millis(500));
+          assert.equal(yield* Queue.take(starts), 2);
+          assert.equal(yield* Queue.take(probes), 2);
+          yield* TestClock.adjust(Duration.millis(100));
+          assert.equal(yield* Queue.take(probes), 2);
+          assert.equal(readyCount, 1);
+          assert.equal((yield* manager.snapshot).ready, false);
+          assert.equal(tokens.length, 2);
+          assert.equal(new Set([...tokens, staleSuppliedToken]).size, 3);
+          secondOwnerMatches = true;
+          yield* TestClock.adjust(Duration.millis(100));
+          assert.equal(yield* Queue.take(ready), 2);
+          assert.equal((yield* manager.snapshot).ready, true);
+          assert.equal(new Set(challenges).size, challenges.length);
+          yield* manager.stop();
+        }).pipe(
+          Effect.ensuring(
+            Effect.all([
+              Deferred.succeed(firstExited, undefined),
+              Deferred.succeed(secondExited, undefined),
+            ]),
+          ),
+          Effect.provide(Layer.merge(TestClock.layer(), managerLayer)),
+        );
+      }),
+  );
+
+  it.effect(
+    "retires watchdog readiness for an unrelated 200 responder without releasing its native child",
+    () =>
+      Effect.gen(function* () {
+        const ready = yield* Deferred.make<void>();
+        const killed = yield* Deferred.make<void>();
+        const nativeExited = yield* Deferred.make<void>();
+        const challenges: string[] = [];
+        let authenticated = true;
+        let spawns = 0;
+        let readyCount = 0;
+        const managerLayer = makeManagerLayer({
+          config: {
+            ...baseConfig,
+            healthCheckInterval: Duration.seconds(1),
+            healthFailureThreshold: 3,
+          },
+          spawnerLayer: Layer.succeed(
+            ChildProcessSpawner.ChildProcessSpawner,
+            ChildProcessSpawner.make(() =>
+              Effect.sync(() => {
+                spawns += 1;
+                return makeProcess({
+                  exitCode: Deferred.await(nativeExited).pipe(
+                    Effect.as(ChildProcessSpawner.ExitCode(0)),
+                  ),
+                  kill: () => Deferred.succeed(killed, undefined).pipe(Effect.asVoid),
+                });
+              }),
+            ),
+          ),
+          readinessProof: (token, challenge) => {
+            challenges.push(challenge);
+            return authenticated ? createBackendReadinessProof(token, challenge) : undefined;
+          },
+          desktopWindow: {
+            handleBackendReady: Effect.sync(() => {
+              readyCount += 1;
+            }).pipe(Effect.andThen(Deferred.succeed(ready, undefined))),
+          },
+        });
+        yield* Effect.gen(function* () {
+          const manager = yield* DesktopBackendManager.DesktopBackendManager;
+          yield* manager.start;
+          yield* Deferred.await(ready);
+          assert.equal((yield* manager.snapshot).ready, true);
+          authenticated = false;
+          yield* TestClock.adjust(Duration.seconds(3));
+          yield* Deferred.await(killed);
+          assert.equal(readyCount, 1);
+          assert.equal(challenges.length, 4);
+          assert.equal(new Set(challenges).size, challenges.length);
+          const retained = yield* manager.snapshot;
+          assert.equal(retained.ready, false);
+          assert.equal(retained.restartScheduled, false);
+          assert.deepEqual(retained.activePid, Option.some(123));
+          yield* manager.start;
+          assert.equal(spawns, 1);
+          yield* Deferred.succeed(nativeExited, undefined);
+          yield* manager.stop();
+        }).pipe(
+          Effect.ensuring(Deferred.succeed(nativeExited, undefined)),
+          Effect.provide(Layer.merge(TestClock.layer(), managerLayer)),
+        );
+      }),
+  );
+
   it.effect("spawns the backend with fd3 bootstrap JSON and reports HTTP readiness", () =>
     Effect.gen(function* () {
       let spawnedCommand: ChildProcess.Command | undefined;
@@ -228,8 +962,11 @@ describe("DesktopBackendManager", () => {
           2_000,
         );
 
-        assert.deepEqual(yield* decodeBootstrap(bootstrapJson), {
+        const receivedBootstrap = yield* decodeBootstrap(bootstrapJson);
+        assert.isTrue(isBackendReadinessValue(receivedBootstrap.desktopReadinessToken));
+        assert.deepEqual(receivedBootstrap, {
           ...configWithObservability,
+          desktopReadinessToken: receivedBootstrap.desktopReadinessToken,
           startupProgressFd: 4,
         });
         assert.deepEqual(spawnedCommand.options.additionalFds?.fd4, { type: "output" });
@@ -375,14 +1112,19 @@ describe("DesktopBackendManager", () => {
         messages.push(String(message));
       });
       const started = yield* Deferred.make<void>();
+      const nativeExited = yield* Deferred.make<void>();
+      let startCount = 0;
 
       const spawnerLayer = Layer.succeed(
         ChildProcessSpawner.ChildProcessSpawner,
         ChildProcessSpawner.make(() =>
           Effect.gen(function* () {
+            startCount += 1;
             yield* Deferred.succeed(started, void 0);
             return makeProcess({
-              exitCode: Effect.never,
+              exitCode: Deferred.await(nativeExited).pipe(
+                Effect.as(ChildProcessSpawner.ExitCode(0)),
+              ),
               kill: () => Effect.never,
             });
           }),
@@ -402,7 +1144,7 @@ describe("DesktopBackendManager", () => {
         const stoppingSnapshot = yield* manager.snapshot;
         assert.equal(stoppingSnapshot.desiredRunning, false);
         assert.equal(stoppingSnapshot.ready, false);
-        assert.equal(Option.isNone(stoppingSnapshot.activePid), true);
+        assert.deepEqual(stoppingSnapshot.activePid, Option.some(123));
 
         yield* TestClock.adjust(Duration.seconds(1));
         yield* Fiber.join(stopFiber);
@@ -410,8 +1152,13 @@ describe("DesktopBackendManager", () => {
         assert.isTrue(
           messages.some((message) => message.includes("backend close timed out during stop")),
         );
+        yield* manager.start;
+        assert.equal(startCount, 1);
+        assert.deepEqual((yield* manager.snapshot).activePid, Option.some(123));
+        yield* Deferred.succeed(nativeExited, undefined);
         yield* TestClock.adjust(Duration.seconds(5));
       }).pipe(
+        Effect.ensuring(Deferred.succeed(nativeExited, undefined)),
         Effect.provide(
           Layer.mergeAll(
             TestClock.layer(),
@@ -466,9 +1213,10 @@ describe("DesktopBackendManager", () => {
     }),
   );
 
-  it.effect("restarts a backend that never becomes ready or exits after termination", () =>
+  it.effect("does not replace a readiness-failed owner until its exact native exit", () =>
     Effect.gen(function* () {
       const starts = yield* Queue.unbounded<number>();
+      const nativeExited = yield* Deferred.make<void>();
       let startCount = 0;
       let killCount = 0;
       let readinessRequests = 0;
@@ -480,7 +1228,9 @@ describe("DesktopBackendManager", () => {
             startCount += 1;
             yield* Queue.offer(starts, startCount);
             return makeProcess({
-              exitCode: Effect.never,
+              exitCode: Deferred.await(nativeExited).pipe(
+                Effect.as(ChildProcessSpawner.ExitCode(0)),
+              ),
               kill: () =>
                 Effect.sync(() => {
                   killCount += 1;
@@ -532,8 +1282,19 @@ describe("DesktopBackendManager", () => {
           yield* TestClock.adjust(Duration.millis(100));
           yield* Effect.yieldNow;
         }
+        assert.equal(yield* Queue.size(starts), 0);
+        assert.equal(startCount, 1);
+        assert.deepEqual((yield* manager.snapshot).activePid, Option.some(123));
+        assert.equal((yield* manager.snapshot).restartScheduled, false);
+        yield* manager.start;
+        assert.equal(startCount, 1);
+        yield* Deferred.succeed(nativeExited, undefined);
+        yield* TestClock.adjust(Duration.millis(500));
         assert.equal(yield* Queue.take(starts), 2);
-      }).pipe(Effect.provide(Layer.merge(TestClock.layer(), managerLayer)));
+      }).pipe(
+        Effect.ensuring(Deferred.succeed(nativeExited, undefined)),
+        Effect.provide(Layer.merge(TestClock.layer(), managerLayer)),
+      );
     }),
   );
 
@@ -613,6 +1374,7 @@ describe("DesktopBackendManager", () => {
     () =>
       Effect.gen(function* () {
         const progress = yield* Queue.unbounded<Uint8Array>();
+        const nativeExited = yield* Deferred.make<void>();
         let killCount = 0;
         const managerLayer = makeManagerLayer({
           spawnerLayer: Layer.succeed(
@@ -620,11 +1382,16 @@ describe("DesktopBackendManager", () => {
             ChildProcessSpawner.make(() =>
               Effect.succeed(
                 makeProcess({
-                  exitCode: Effect.never,
+                  exitCode: Deferred.await(nativeExited).pipe(
+                    Effect.as(ChildProcessSpawner.ExitCode(0)),
+                  ),
                   kill: () =>
                     Effect.sync(() => {
                       killCount += 1;
-                    }),
+                    }).pipe(
+                      Effect.andThen(Deferred.succeed(nativeExited, undefined)),
+                      Effect.asVoid,
+                    ),
                   progress: Stream.fromQueue(progress),
                 }),
               ),
@@ -646,13 +1413,17 @@ describe("DesktopBackendManager", () => {
           yield* TestClock.adjust(Duration.seconds(1));
           yield* Effect.yieldNow;
           assert.equal(killCount > 0, true);
-        }).pipe(Effect.provide(Layer.merge(TestClock.layer(), managerLayer)));
+        }).pipe(
+          Effect.ensuring(Deferred.succeed(nativeExited, undefined)),
+          Effect.provide(Layer.merge(TestClock.layer(), managerLayer)),
+        );
       }),
   );
 
   it.effect("does not grant migration time to stdout or malformed private frames", () =>
     Effect.gen(function* () {
       let killCount = 0;
+      const nativeExited = yield* Deferred.make<void>();
       const frame = new TextEncoder().encode(
         encodeBackendMigrationProgress({ phase: "start", migrationId: 92 }),
       );
@@ -662,11 +1433,13 @@ describe("DesktopBackendManager", () => {
           ChildProcessSpawner.make(() =>
             Effect.succeed(
               makeProcess({
-                exitCode: Effect.never,
+                exitCode: Deferred.await(nativeExited).pipe(
+                  Effect.as(ChildProcessSpawner.ExitCode(0)),
+                ),
                 kill: () =>
                   Effect.sync(() => {
                     killCount += 1;
-                  }),
+                  }).pipe(Effect.andThen(Deferred.succeed(nativeExited, undefined)), Effect.asVoid),
                 stdout: Stream.make(frame),
                 progress: Stream.make(new TextEncoder().encode("x".repeat(97))),
               }),
@@ -682,7 +1455,10 @@ describe("DesktopBackendManager", () => {
         yield* TestClock.adjust(Duration.seconds(2));
         yield* Effect.yieldNow;
         assert.equal(killCount > 0, true);
-      }).pipe(Effect.provide(Layer.merge(TestClock.layer(), managerLayer)));
+      }).pipe(
+        Effect.ensuring(Deferred.succeed(nativeExited, undefined)),
+        Effect.provide(Layer.merge(TestClock.layer(), managerLayer)),
+      );
     }),
   );
 
@@ -804,10 +1580,11 @@ describe("DesktopBackendManager", () => {
     }),
   );
 
-  it.effect("restarts a health-failed backend even when the child process does not exit", () =>
+  it.effect("retires health readiness without replacing an owner that has not exited", () =>
     Effect.gen(function* () {
       const starts = yield* Queue.unbounded<number>();
       const firstReady = yield* Deferred.make<void>();
+      const nativeExited = yield* Deferred.make<void>();
       let startCount = 0;
       let killCount = 0;
       let healthy = true;
@@ -819,7 +1596,9 @@ describe("DesktopBackendManager", () => {
             startCount += 1;
             yield* Queue.offer(starts, startCount);
             return makeProcess({
-              exitCode: Effect.never,
+              exitCode: Deferred.await(nativeExited).pipe(
+                Effect.as(ChildProcessSpawner.ExitCode(0)),
+              ),
               kill: () =>
                 Effect.sync(() => {
                   killCount += 1;
@@ -855,8 +1634,19 @@ describe("DesktopBackendManager", () => {
         assert.equal(killCount > 0, true);
 
         yield* TestClock.adjust(Duration.millis(500));
-        assert.equal(yield* Queue.take(starts), 2);
-      }).pipe(Effect.provide(Layer.merge(TestClock.layer(), managerLayer)));
+        assert.equal(yield* Queue.size(starts), 0);
+        assert.equal(startCount, 1);
+        const retained = yield* manager.snapshot;
+        assert.equal(retained.ready, false);
+        assert.equal(retained.restartScheduled, false);
+        assert.deepEqual(retained.activePid, Option.some(123));
+        yield* manager.start;
+        assert.equal(startCount, 1);
+        yield* Deferred.succeed(nativeExited, undefined);
+      }).pipe(
+        Effect.ensuring(Deferred.succeed(nativeExited, undefined)),
+        Effect.provide(Layer.merge(TestClock.layer(), managerLayer)),
+      );
     }),
   );
 

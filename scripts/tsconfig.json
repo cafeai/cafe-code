@@ -6,6 +6,10 @@
     "lib": ["ESNext", "esnext.disposable"]
   },
   "include": [
+    "../apps/desktop/src/app/DesktopProfileControl.ts",
+    "../packages/shared/src/dataProfile.ts",
+    "../packages/shared/src/dataProfileStorage.ts",
+    "../packages/shared/src/sourceDebugBuild.ts",
     "**/*.ts",
     "../apps/web/browser-test-policy.json",
     "../packages/shared/src/nativeRuntime.ts",

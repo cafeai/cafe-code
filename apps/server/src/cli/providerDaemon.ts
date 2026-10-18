@@ -1,4 +1,6 @@
 import { ProviderDaemonBootstrap } from "@cafecode/contracts";
+import { resolveBootstrappedDataProfile } from "@cafecode/shared/dataProfile";
+import { prepareDebugDataProfile } from "@cafecode/shared/dataProfileStorage";
 import * as Data from "effect/Data";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
@@ -34,13 +36,30 @@ export const resolveProviderDaemonServerConfig = (input: {
   readonly providerSupervisor?: ServerConfigShape["providerSupervisor"];
 }): Effect.Effect<
   ServerConfigShape,
-  PlatformError.PlatformError,
+  PlatformError.PlatformError | ProviderDaemonCliError,
   FileSystem.FileSystem | Path.Path
 > =>
   Effect.gen(function* () {
-    const baseDir = input.bootstrap.cafeCodeHome;
     const path = yield* Path.Path;
-    const derivedPaths = yield* deriveServerPaths(baseDir, undefined);
+    const { dataProfile, configuredBaseDir, baseDir } = yield* Effect.try({
+      try: () => resolveBootstrappedDataProfile(input.bootstrap, path),
+      catch: () =>
+        new ProviderDaemonCliError({
+          message:
+            "Provider runtime data profile bootstrap is incomplete or inconsistent. No profile was opened.",
+        }),
+    });
+    if (dataProfile === "debug") {
+      yield* Effect.tryPromise({
+        try: () => prepareDebugDataProfile(configuredBaseDir),
+        catch: () =>
+          new ProviderDaemonCliError({
+            message:
+              "Debug data profile is unavailable or unsafe. Production data was not selected.",
+          }),
+      });
+    }
+    const derivedPaths = yield* deriveServerPaths(baseDir, undefined, dataProfile);
     yield* ensureServerDirectories(derivedPaths);
 
     return {
@@ -60,6 +79,7 @@ export const resolveProviderDaemonServerConfig = (input: {
       httpsPort: undefined,
       cwd: process.cwd(),
       baseDir,
+      ...(dataProfile === undefined ? {} : { dataProfile, configuredBaseDir }),
       ...derivedPaths,
       // Detached provider runtimes cannot safely depend on Electron-owned
       // stdout/stderr pipes. Give each runtime role a child-owned trace file so

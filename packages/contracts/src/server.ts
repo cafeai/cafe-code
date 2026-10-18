@@ -862,7 +862,21 @@ export const ServerSignalProcessResult = Schema.Struct({
 });
 export type ServerSignalProcessResult = typeof ServerSignalProcessResult.Type;
 
+/** Owner-facing startup policy, not proof of a live native owner or login. */
+export const ServerProviderDataProfile = Schema.Struct({
+  scope: Schema.Literals(["profile-local", "shared", "unconfigured"]),
+  // A proposed private home is useful for deliberate manual sign-in even when
+  // its disabled provider has not created the directory. Never include tokens.
+  nativeHome: Schema.optionalKey(TrimmedNonEmptyString),
+});
+export type ServerProviderDataProfile = typeof ServerProviderDataProfile.Type;
+
 export const ServerConfig = Schema.Struct({
+  dataProfile: Schema.optional(Schema.Literals(["production", "debug"])),
+  dataDirectoryPath: Schema.optional(TrimmedNonEmptyString),
+  providerDataProfiles: Schema.optional(
+    Schema.Record(ProviderInstanceId, ServerProviderDataProfile),
+  ),
   environment: ExecutionEnvironmentDescriptor,
   auth: ServerAuthDescriptor,
   cwd: TrimmedNonEmptyString,
@@ -940,6 +954,11 @@ export type ServerConfigProviderStatusesPayload = typeof ServerConfigProviderSta
 
 export const ServerConfigSettingsUpdatedPayload = Schema.Struct({
   settings: ServerSettings,
+  // Derived from these exact settings by the authenticated selected server.
+  // Legacy omission means unknown and retires any previous setup metadata.
+  providerDataProfiles: Schema.optional(
+    Schema.Record(ProviderInstanceId, ServerProviderDataProfile),
+  ),
 });
 export type ServerConfigSettingsUpdatedPayload = typeof ServerConfigSettingsUpdatedPayload.Type;
 

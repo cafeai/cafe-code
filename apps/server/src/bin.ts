@@ -14,6 +14,7 @@ import { killallCommand } from "./cli/killall.ts";
 import { projectCommand } from "./cli/project.ts";
 import { providerDaemonCommand, providerSupervisorCommand } from "./cli/providerDaemon.ts";
 import { runServerCommand, serveCommand, startCommand } from "./cli/server.ts";
+import { backendStartupTeardown } from "./backendStartupTeardown.ts";
 
 function resolveStartupProfilerRole(argv: readonly string[]): string {
   if (argv.includes("provider-daemon")) return "provider-daemon";
@@ -46,6 +47,6 @@ if (import.meta.main) {
   Command.run(cli, { version: packageJson.version }).pipe(
     Effect.scoped,
     Effect.provide(CliRuntimeLayer),
-    NodeRuntime.runMain,
+    NodeRuntime.runMain({ teardown: backendStartupTeardown }),
   );
 }

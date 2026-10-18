@@ -1,37 +1,29 @@
-import { assert, describe, it } from "@effect/vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { isPidAlive } from "./DesktopProcessReaper.ts";
 
-import {
-  matchesDesktopBackendProcess,
-  matchesProviderRuntimeProcess,
-  parseUnixProcessList,
-} from "./DesktopProcessReaper.ts";
+afterEach(() => vi.restoreAllMocks());
 
-describe("DesktopProcessReaper", () => {
-  it("parses ps output and classifies Cafe Code backend processes", () => {
-    const backendEntryPath = "/repo/apps/server/dist/bin.mjs";
-    const processes = parseUnixProcessList(`
-      101     1 /Electron ${backendEntryPath} provider-daemon --bootstrap-fd 3
-      102   101 /Electron ${backendEntryPath} provider-supervisor --bootstrap-fd 3
-      103   200 /Electron ${backendEntryPath} --bootstrap-fd 3
-      104   200 /Electron /other/apps/server/dist/bin.mjs provider-daemon --bootstrap-fd 3
-    `);
+describe("DesktopProcessReaper observational liveness", () => {
+  it.each([0, -1, Number.NaN, Number.POSITIVE_INFINITY, 1.5])(
+    "does not even probe an invalid PID %s",
+    (pid) => {
+      const signal = vi.spyOn(process, "kill").mockReturnValue(true);
+      expect(isPidAlive(pid)).toBe(false);
+      expect(signal).not.toHaveBeenCalled();
+    },
+  );
 
-    assert.equal(processes.length, 4);
-    assert.deepEqual(
-      processes
-        .filter((processSnapshot) =>
-          matchesProviderRuntimeProcess(processSnapshot, backendEntryPath),
-        )
-        .map((processSnapshot) => processSnapshot.pid),
-      [101, 102],
-    );
-    assert.deepEqual(
-      processes
-        .filter((processSnapshot) =>
-          matchesDesktopBackendProcess(processSnapshot, backendEntryPath),
-        )
-        .map((processSnapshot) => processSnapshot.pid),
-      [103],
-    );
+  it("probes presence without obtaining process-control authority", () => {
+    const signal = vi.spyOn(process, "kill").mockReturnValue(true);
+    expect(isPidAlive(12345)).toBe(true);
+    expect(signal.mock.calls).toEqual([[12345, 0]]);
+  });
+
+  it("treats denied or absent liveness as inconclusive without sending a signal", () => {
+    const signal = vi.spyOn(process, "kill").mockImplementation(() => {
+      throw new Error("synthetic absent or denied owner");
+    });
+    expect(isPidAlive(12345)).toBe(false);
+    expect(signal.mock.calls).toEqual([[12345, 0]]);
   });
 });

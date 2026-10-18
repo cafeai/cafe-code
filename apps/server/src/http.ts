@@ -20,6 +20,12 @@ import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
 import { cast } from "effect/Function";
 import { isHttpsProxyRequest } from "./httpTransport.ts";
+import {
+  BACKEND_READINESS_CHALLENGE_HEADER,
+  BACKEND_READINESS_PROOF_HEADER,
+  createBackendReadinessProof,
+  isBackendReadinessValue,
+} from "@cafecode/shared/backendReadiness";
 import { readHttpBody, readHttpJson, respondToHttpBodyError } from "./httpBody.ts";
 import {
   HttpBody,
@@ -375,12 +381,27 @@ const requireAuthenticatedRequest = Effect.gen(function* () {
 });
 
 const serverEnvironmentRouteHandler = Effect.gen(function* () {
+  const config = yield* ServerConfig;
+  const request = yield* HttpServerRequest.HttpServerRequest;
   const descriptor = yield* Effect.service(ServerEnvironment).pipe(
     Effect.flatMap((serverEnvironment) => serverEnvironment.getDescriptor),
   );
+  const challenge = request.headers[BACKEND_READINESS_CHALLENGE_HEADER];
+  // Keep the public descriptor and its CORS policy unchanged. Only a private
+  // desktop child with an admitted key answers a finite native challenge;
+  // the secret itself never appears in a request, response, URL or log.
+  const proof =
+    config.mode === "desktop" &&
+    isBackendReadinessValue(config.desktopReadinessToken) &&
+    isBackendReadinessValue(challenge)
+      ? createBackendReadinessProof(config.desktopReadinessToken, challenge)
+      : undefined;
   return HttpServerResponse.jsonUnsafe(descriptor, {
     status: 200,
-    headers: browserApiCorsHeaders,
+    headers: {
+      ...browserApiCorsHeaders,
+      ...(proof === undefined ? {} : { [BACKEND_READINESS_PROOF_HEADER]: proof }),
+    },
   });
 });
 

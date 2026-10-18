@@ -1,5 +1,6 @@
 import { getSettingsPageReset } from "./settingsReset";
 import { AmbianceSettingsSections } from "./AmbianceSettings";
+import { DataProfileSettings } from "./DataProfileSettings";
 import { useUiLocale, useUiPresentation } from "~/i18n";
 import { uiFormatList, uiText } from "@cafecode/shared/i18n";
 import {
@@ -750,6 +751,7 @@ export function GeneralSettingsPanel() {
           }
         />
       </SettingsSection>
+      <DataProfileSettings />
       <FilesSettingsSection />
       <SystemSettingsSections />
     </SettingsPageContainer>

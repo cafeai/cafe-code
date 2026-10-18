@@ -68,6 +68,7 @@ import {
   enrichProviderSnapshotWithVersionAdvisory,
   makePackageManagedProviderMaintenanceResolver,
   resolveProviderMaintenanceCapabilitiesEffect,
+  makeManualOnlyProviderMaintenanceCapabilities,
 } from "../providerMaintenance.ts";
 import { resolveProviderRuntimeEnvironment } from "../managedProviderRuntime.ts";
 import {
@@ -176,7 +177,15 @@ export const CodexDriver: ProviderDriver<CodexSettings, CodexDriverEnv> = {
   },
   configSchema: CodexSettings,
   defaultConfig: (): CodexSettings => decodeCodexSettings({}),
-  create: ({ instanceId, displayName, accentColor, environment, enabled, config }) =>
+  create: ({
+    instanceId,
+    displayName,
+    accentColor,
+    environment,
+    processEnvironment,
+    enabled,
+    config,
+  }) =>
     Effect.gen(function* () {
       const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
       const fileSystem = yield* FileSystem.FileSystem;
@@ -184,7 +193,7 @@ export const CodexDriver: ProviderDriver<CodexSettings, CodexDriverEnv> = {
       const httpClient = yield* HttpClient.HttpClient;
       const eventLoggers = yield* ProviderEventLoggers;
       const serverConfig = yield* ServerConfig;
-      const processEnv = mergeProviderInstanceEnvironment(environment);
+      const processEnv = processEnvironment ?? mergeProviderInstanceEnvironment(environment);
       const layoutConfig = withDefaultCodexShadowHome({ instanceId, config });
       const homeLayout = yield* resolveCodexHomeLayout(layoutConfig);
       // A default Cafe-created shadow overlays the user's normal ~/.codex auth
@@ -256,12 +265,17 @@ export const CodexDriver: ProviderDriver<CodexSettings, CodexDriverEnv> = {
       // helpers must agree on the SQLite index for their shared rollouts.
       const effectiveEnvironment = withCodexHomeLayoutEnvironment(homeLayout, runtime.env);
       const maintenanceCapabilities =
-        effectiveConfig.runtimeSource === "bundled"
-          ? runtime.maintenanceCapabilities
-          : yield* resolveProviderMaintenanceCapabilitiesEffect(UPDATE, {
-              binaryPath: effectiveConfig.binaryPath,
-              env: effectiveEnvironment,
-            });
+        serverConfig.dataProfile === "debug"
+          ? makeManualOnlyProviderMaintenanceCapabilities({
+              provider: DRIVER_KIND,
+              packageName: UPDATE_DEFINITION.npmPackageName,
+            })
+          : effectiveConfig.runtimeSource === "bundled"
+            ? runtime.maintenanceCapabilities
+            : yield* resolveProviderMaintenanceCapabilitiesEffect(UPDATE, {
+                binaryPath: effectiveConfig.binaryPath,
+                env: effectiveEnvironment,
+              });
       const refreshCodexShadowHome = materializeCodexShadowHome(homeLayout, { authSource }).pipe(
         Effect.provideService(FileSystem.FileSystem, fileSystem),
         Effect.provideService(Path.Path, path),

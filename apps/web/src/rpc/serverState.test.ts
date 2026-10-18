@@ -22,6 +22,9 @@ import {
   onWelcome,
   resetServerStateForTests,
   startServerStateSync,
+  applyServerConfigEvent,
+  applySettingsUpdated,
+  setServerConfigSnapshot,
 } from "./serverState";
 
 function registerListener<T>(listeners: Set<(event: T) => void>, listener: (event: T) => void) {
@@ -131,6 +134,104 @@ afterEach(() => {
 });
 
 describe("serverState", () => {
+  it("projects provider setup targets with exact settings updates and retires omitted legacy or optimistic metadata", () => {
+    const first = ProviderInstanceId.make("first-debug");
+    const added = ProviderInstanceId.make("added-debug");
+    const firstProviderConfig = { driver: ProviderDriverKind.make("codex"), enabled: true };
+    const firstSettings = {
+      ...DEFAULT_SERVER_SETTINGS,
+      providerInstances: { [first]: firstProviderConfig },
+    };
+    setServerConfigSnapshot({
+      ...baseServerConfig,
+      dataProfile: "debug",
+      settings: firstSettings,
+      providerDataProfiles: {
+        [first]: { scope: "profile-local", nativeHome: "first-private-target" },
+      },
+    });
+    const addedSettings = {
+      ...firstSettings,
+      providerInstances: {
+        ...firstSettings.providerInstances,
+        [added]: { driver: ProviderDriverKind.make("grok"), enabled: false },
+      },
+    };
+    applyServerConfigEvent({
+      version: 1,
+      type: "settingsUpdated",
+      payload: {
+        settings: addedSettings,
+        providerDataProfiles: {
+          [first]: { scope: "profile-local", nativeHome: "first-private-target" },
+          [added]: { scope: "unconfigured", nativeHome: "added-private-target" },
+        },
+      },
+    });
+    expect(getServerConfig()?.settings).toBe(addedSettings);
+    expect(getServerConfig()?.providerDataProfiles?.[added]).toEqual({
+      scope: "unconfigured",
+      nativeHome: "added-private-target",
+    });
+    const sharedSettings = {
+      ...addedSettings,
+      providerInstances: {
+        ...addedSettings.providerInstances,
+        [first]: { ...firstProviderConfig, debugStateSharing: true },
+      },
+    };
+    applyServerConfigEvent({
+      version: 1,
+      type: "settingsUpdated",
+      payload: {
+        settings: sharedSettings,
+        providerDataProfiles: {
+          [first]: { scope: "shared" },
+          [added]: { scope: "unconfigured", nativeHome: "added-private-target" },
+        },
+      },
+    });
+    expect(getServerConfig()?.providerDataProfiles?.[first]).toEqual({ scope: "shared" });
+    expect(JSON.stringify(getServerConfig()?.providerDataProfiles)).not.toContain(
+      "first-private-target",
+    );
+    applyServerConfigEvent({
+      version: 1,
+      type: "settingsUpdated",
+      payload: { settings: { ...sharedSettings, providerInstances: {} }, providerDataProfiles: {} },
+    });
+    expect(getServerConfig()?.providerDataProfiles).toEqual({});
+    applyServerConfigEvent({
+      version: 1,
+      type: "settingsUpdated",
+      payload: {
+        settings: firstSettings,
+        providerDataProfiles: {
+          [first]: { scope: "profile-local", nativeHome: "renewed-private-target" },
+        },
+      },
+    });
+    applyServerConfigEvent({
+      version: 1,
+      type: "settingsUpdated",
+      payload: { settings: firstSettings },
+    });
+    expect(getServerConfig()?.providerDataProfiles).toBeUndefined();
+    expect(Object.hasOwn(getServerConfig()!, "providerDataProfiles")).toBe(false);
+    expect(getServerConfig()?.dataProfile).toBe("debug");
+    setServerConfigSnapshot({
+      ...baseServerConfig,
+      dataProfile: "debug",
+      providerDataProfiles: {
+        [first]: { scope: "profile-local", nativeHome: "retired-before-write" },
+      },
+    });
+    applySettingsUpdated(firstSettings);
+    expect(getServerConfig()?.providerDataProfiles).toBeUndefined();
+    setServerConfigSnapshot(baseServerConfig);
+    expect(getServerConfig()?.dataProfile).toBeUndefined();
+    expect(getServerConfig()?.providerDataProfiles).toBeUndefined();
+  });
   it("uses default keybindings before a server config snapshot is available", () => {
     expect(getServerConfig()).toBeNull();
     expect(getServerKeybindings()).toEqual(DEFAULT_RESOLVED_KEYBINDINGS);

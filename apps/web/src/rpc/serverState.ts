@@ -24,6 +24,7 @@ import { appAtomRegistry, resetAppAtomRegistryForTests } from "./atomRegistry";
 import { usePrimaryEnvironmentId } from "../environments/primary";
 import { useSavedEnvironmentRuntimeStore } from "../environments/runtime/catalog";
 import { useWorkspaceContextEnvironmentId } from "../environments/workspace";
+import { projectServerConfigSettings } from "./serverConfigSettingsProjection";
 
 export type ServerConfigUpdateSource = ServerConfigStreamEvent["type"];
 
@@ -138,7 +139,7 @@ export function applyServerConfigEvent(event: ServerConfigStreamEvent): void {
       return;
     }
     case "settingsUpdated": {
-      applySettingsUpdated(event.payload.settings);
+      applySettingsUpdated(event.payload.settings, event.payload.providerDataProfiles);
       return;
     }
     case "clientSettingsUpdated": {
@@ -164,16 +165,19 @@ export function applyProvidersUpdated(payload: ServerProviderUpdatedPayload): vo
   emitServerConfigUpdated(toServerConfigUpdatedPayload(nextConfig), "providerStatuses");
 }
 
-export function applySettingsUpdated(settings: ServerSettings): void {
+export function applySettingsUpdated(
+  settings: ServerSettings,
+  providerDataProfiles?: ServerConfig["providerDataProfiles"],
+): void {
   const latestServerConfig = getServerConfig();
   if (!latestServerConfig) {
     return;
   }
 
-  const nextConfig = {
-    ...latestServerConfig,
+  const nextConfig = projectServerConfigSettings(latestServerConfig, {
     settings,
-  } satisfies ServerConfig;
+    providerDataProfiles,
+  });
   resolveServerConfig(nextConfig);
   emitServerConfigUpdated(toServerConfigUpdatedPayload(nextConfig), "settingsUpdated");
 }

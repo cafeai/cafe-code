@@ -77,14 +77,23 @@ export const GrokDriver: ProviderDriver<GrokSettings, GrokDriverEnv> = {
   },
   configSchema: GrokSettings,
   defaultConfig: (): GrokSettings => decodeGrokSettings({}),
-  create: ({ instanceId, displayName, accentColor, environment, enabled, config }) =>
+  create: ({
+    instanceId,
+    displayName,
+    accentColor,
+    environment,
+    processEnvironment: admittedEnvironment,
+    enabled,
+    config,
+  }) =>
     Effect.gen(function* () {
       const childProcessSpawner = yield* ChildProcessSpawner.ChildProcessSpawner;
       const fileSystem = yield* FileSystem.FileSystem;
       const path = yield* Path.Path;
       const serverConfig = yield* ServerConfig;
       const eventLoggers = yield* ProviderEventLoggers;
-      const processEnvironment = mergeProviderInstanceEnvironment(environment);
+      const processEnvironment =
+        admittedEnvironment ?? mergeProviderInstanceEnvironment(environment);
       const effectiveConfig = { ...config, enabled } satisfies GrokSettings;
       const continuationKey = makeGrokContinuationGroupKey(instanceId, effectiveConfig.homePath);
       const stampIdentity = withInstanceIdentity({

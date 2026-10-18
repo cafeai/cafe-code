@@ -19,6 +19,8 @@ import * as ElectronDialog from "../electron/ElectronDialog.ts";
 import * as ElectronWindow from "../electron/ElectronWindow.ts";
 import * as ElectronTheme from "../electron/ElectronTheme.ts";
 import * as DesktopState from "./DesktopState.ts";
+import { DesktopDataProfileStartup } from "./DesktopDataProfile.ts";
+import { acceptsDesktopRestartRequest, desktopRelaunchArguments } from "./DesktopProfileControl.ts";
 import * as DesktopWindow from "../window/DesktopWindow.ts";
 import * as IpcChannels from "../ipc/channels.ts";
 
@@ -262,37 +264,41 @@ function quitFromSignal(
   );
 }
 
+const relaunchDesktop = Effect.fn("desktop.lifecycle.relaunch")(function* (reason: string) {
+  const electronApp = yield* ElectronApp.ElectronApp;
+  const environment = yield* DesktopEnvironment.DesktopEnvironment;
+  const state = yield* DesktopState.DesktopState;
+  // A burst of same-profile restart requests must have one shutdown owner.
+  // Reserve it before forking, while keeping all existing shutdown budgets.
+  if (yield* Ref.getAndSet(state.quitting, true)) return;
+  yield* logLifecycleInfo("desktop relaunch requested", { reason });
+  yield* Effect.gen(function* () {
+    yield* Effect.yieldNow;
+    yield* requestDesktopShutdownAndWait();
+    if (environment.isDevelopment) {
+      yield* electronApp.exit(75);
+      return;
+    }
+    yield* electronApp.relaunch({
+      execPath: process.execPath,
+      args: [...desktopRelaunchArguments(process.argv.slice(1))],
+    });
+    yield* electronApp.exit(0);
+  }).pipe(
+    Effect.catchCause((cause) =>
+      logLifecycleError("desktop relaunch failed", {
+        cause: Cause.pretty(cause),
+      }),
+    ),
+    Effect.forkDetach,
+    Effect.asVoid,
+  );
+});
+
 export const layer = Layer.succeed(
   DesktopLifecycle,
   DesktopLifecycle.of({
-    relaunch: Effect.fn("desktop.lifecycle.relaunch")(function* (reason) {
-      const electronApp = yield* ElectronApp.ElectronApp;
-      const environment = yield* DesktopEnvironment.DesktopEnvironment;
-      const state = yield* DesktopState.DesktopState;
-      yield* logLifecycleInfo("desktop relaunch requested", { reason });
-      yield* Effect.gen(function* () {
-        yield* Effect.yieldNow;
-        yield* Ref.set(state.quitting, true);
-        yield* requestDesktopShutdownAndWait();
-        if (environment.isDevelopment) {
-          yield* electronApp.exit(75);
-          return;
-        }
-        yield* electronApp.relaunch({
-          execPath: process.execPath,
-          args: process.argv.slice(1),
-        });
-        yield* electronApp.exit(0);
-      }).pipe(
-        Effect.catchCause((cause) =>
-          logLifecycleError("desktop relaunch failed", {
-            cause: Cause.pretty(cause),
-          }),
-        ),
-        Effect.forkDetach,
-        Effect.asVoid,
-      );
-    }),
+    relaunch: relaunchDesktop,
     register: Effect.gen(function* () {
       const desktopWindow = yield* DesktopWindow.DesktopWindow;
       const electronApp = yield* ElectronApp.ElectronApp;
@@ -349,11 +355,25 @@ export const layer = Layer.succeed(
                 workingDirectoryProvided: workingDirectory.length > 0,
                 additionalDataKeyCount,
               });
+              // userData was selected before taking the native instance lock.
+              // Never turn an argv substring, another profile, or an unknown
+              // legacy payload into process-termination authority.
+              if (acceptsDesktopRestartRequest(additionalData, environment)) {
+                yield* relaunchDesktop("profile-restart");
+                return;
+              }
               yield* desktopWindow.activate;
             }).pipe(Effect.withSpan("desktop.lifecycle.secondInstance")),
           );
         },
       );
+      // The native lock is taken before foundation IO. Retire its minimal
+      // early listener only after this receiver exists, draining one coalesced
+      // accepted request synchronously so startup has no lost-control window.
+      const earlyProfileStartup = yield* Effect.serviceOption(DesktopDataProfileStartup);
+      if (Option.isSome(earlyProfileStartup) && earlyProfileStartup.value.finishEarlyCapture()) {
+        yield* relaunchDesktop("profile-restart");
+      }
       yield* electronApp.on("window-all-closed", () => {
         void runEffect(
           Effect.gen(function* () {

@@ -1,5 +1,8 @@
 import type { ProviderDaemonClientConfig, ProviderDaemonLiveness } from "@cafecode/contracts";
+import * as NetService from "@cafecode/shared/Net";
+import { SourceDebugBuildError } from "@cafecode/shared/sourceDebugBuild";
 import { assert, describe, it } from "@effect/vitest";
+import * as path from "node:path";
 import * as Cause from "effect/Cause";
 import * as Duration from "effect/Duration";
 import * as Deferred from "effect/Deferred";
@@ -16,9 +19,12 @@ import type {
 } from "../backend/DesktopProviderDaemonManager.ts";
 import {
   fatalStartupCause,
+  resolveDesktopBackendPort,
+  resolveDesktopBackendHttpsPort,
   runProviderDaemonHealthWatchdog,
   runDesktopStartupUntilShutdown,
   startBackendAfterProviderDaemonReady,
+  verifyDesktopSourceBuilds,
 } from "./DesktopApp.ts";
 import * as DesktopLifecycle from "./DesktopLifecycle.ts";
 import * as DesktopState from "./DesktopState.ts";
@@ -146,6 +152,289 @@ function pendingWindowsRecoveryFixture(input?: {
     observations: () => observations,
   };
 }
+
+function portProbeFixture(available: (port: number, host: string) => boolean) {
+  const probes: Array<{ port: number; host: string }> = [];
+  const service: NetService.NetServiceShape = {
+    canListenOnHost: (port, host) =>
+      Effect.sync(() => {
+        probes.push({ port, host });
+        return available(port, host);
+      }),
+    isPortAvailableOnLoopback: () =>
+      Effect.die("desktop port policy must probe every existing host"),
+    reserveLoopbackPort: () => Effect.die("configured port must not be substituted"),
+    findAvailablePort: () => Effect.die("desktop port policy owns its bounded scan"),
+  };
+  return { probes, service };
+}
+
+describe("DesktopApp source-build startup admission", () => {
+  const environment = {
+    dataProfile: "debug" as const,
+    isPackaged: false,
+    appRoot: path.resolve("desktop-source-build-fixture"),
+    path,
+  };
+
+  it.effect(
+    "executes the source receipt check before admitting daemon and backend continuations",
+    () =>
+      Effect.gen(function* () {
+        const actions: string[] = [];
+        const admission = verifyDesktopSourceBuilds(environment, (directory) => {
+          assert.equal(directory, path.join(environment.appRoot, "apps", "desktop"));
+          actions.push("verify");
+        });
+        assert.deepEqual(actions, [], "constructing the effect does not perform profile IO");
+        yield* admission.pipe(
+          Effect.andThen(Effect.sync(() => actions.push("daemon"))),
+          Effect.andThen(Effect.sync(() => actions.push("backend"))),
+        );
+        assert.deepEqual(actions, ["verify", "daemon", "backend"]);
+      }),
+  );
+
+  it.effect(
+    "refuses a thrown source check before either continuation with only the fixed safe error",
+    () =>
+      Effect.gen(function* () {
+        const actions: string[] = [];
+        const error = yield* verifyDesktopSourceBuilds(environment, () => {
+          actions.push("verify");
+          throw new Error("private fixture path and diagnostic sentinel");
+        }).pipe(
+          Effect.andThen(Effect.sync(() => actions.push("daemon"))),
+          Effect.andThen(Effect.sync(() => actions.push("backend"))),
+          Effect.flip,
+        );
+        assert.deepEqual(actions, ["verify"]);
+        assert.instanceOf(error, SourceDebugBuildError);
+        assert.equal(error.message, new SourceDebugBuildError().message);
+        assert.equal(error.message.includes("private fixture"), false);
+        assert.equal(error.cause, undefined);
+      }),
+  );
+
+  for (const input of [
+    { dataProfile: "production" as const, isPackaged: true },
+    { dataProfile: "production" as const, isPackaged: false },
+    { dataProfile: "debug" as const, isPackaged: true },
+  ]) {
+    it.effect(
+      `does not inspect source receipts for ${input.dataProfile} packaged=${input.isPackaged}`,
+      () =>
+        Effect.gen(function* () {
+          let verified = false;
+          let continued = false;
+          yield* verifyDesktopSourceBuilds({ ...environment, ...input }, () => {
+            verified = true;
+            throw new Error("source verifier must remain uncalled");
+          }).pipe(
+            Effect.andThen(
+              Effect.sync(() => {
+                continued = true;
+              }),
+            ),
+          );
+          assert.equal(verified, false);
+          assert.equal(continued, true);
+        }),
+    );
+  }
+});
+
+describe("DesktopApp backend listener selection", () => {
+  for (const order of [
+    ["debug", "production"],
+    ["production", "debug"],
+  ] as const) {
+    it.effect(`keeps independent preferred listeners when ${order.join(" then ")} starts`, () =>
+      Effect.gen(function* () {
+        const occupied = new Set<number>();
+        const selected: Partial<Record<"production" | "debug", number>> = {};
+        const fixture = portProbeFixture((port) => !occupied.has(port));
+        for (const profile of order) {
+          const result = yield* resolveDesktopBackendPort(Option.none(), profile).pipe(
+            Effect.provideService(NetService.NetService, fixture.service),
+          );
+          assert.equal(result.selectedByScan, true);
+          selected[profile] = result.port;
+          occupied.add(result.port);
+        }
+        assert.equal(selected.production, 3773);
+        assert.equal(selected.debug, 13773);
+        assert.deepEqual(
+          fixture.probes,
+          order.flatMap((profile) =>
+            ["127.0.0.1", "0.0.0.0", "::"].map((host) => ({
+              port: profile === "debug" ? 13773 : 3773,
+              host,
+            })),
+          ),
+        );
+      }),
+    );
+  }
+
+  for (const profile of ["production", "debug"] as const) {
+    const preferred = profile === "debug" ? 13773 : 3773;
+    it.effect(`scans only upward from the ${profile} preference when that port is occupied`, () =>
+      Effect.gen(function* () {
+        const fixture = portProbeFixture((port) => port !== preferred);
+        const result = yield* resolveDesktopBackendPort(Option.none(), profile).pipe(
+          Effect.provideService(NetService.NetService, fixture.service),
+        );
+        assert.deepEqual(result, { port: preferred + 1, selectedByScan: true });
+        assert.deepEqual(fixture.probes, [
+          { port: preferred, host: "127.0.0.1" },
+          { port: preferred + 1, host: "127.0.0.1" },
+          { port: preferred + 1, host: "0.0.0.0" },
+          { port: preferred + 1, host: "::" },
+        ]);
+      }),
+    );
+
+    it.effect(
+      `retains an explicit ${profile} HTTP override without substituting its preferred port`,
+      () =>
+        Effect.gen(function* () {
+          // An explicitly selected release-range port is still deliberate user
+          // intent for Debug; only automatic preferences are profile-separated.
+          const fixture = portProbeFixture(() => true);
+          const result = yield* resolveDesktopBackendPort(Option.some(3773), profile).pipe(
+            Effect.provideService(NetService.NetService, fixture.service),
+          );
+          assert.deepEqual(result, { port: 3773, selectedByScan: false });
+          assert.deepEqual(fixture.probes, [
+            { port: 3773, host: "127.0.0.1" },
+            { port: 3773, host: "0.0.0.0" },
+            { port: 3773, host: "::" },
+          ]);
+        }),
+    );
+
+    for (const occupiedHost of ["127.0.0.1", "0.0.0.0", "::"] as const) {
+      it.effect(
+        `refuses an explicit ${profile} collision on ${occupiedHost} without fallback or startup`,
+        () =>
+          Effect.gen(function* () {
+            const fixture = portProbeFixture((_port, host) => host !== occupiedHost);
+            let startups = 0;
+            const error = yield* resolveDesktopBackendPort(Option.some(4888), profile).pipe(
+              Effect.andThen(
+                Effect.sync(() => {
+                  startups += 1;
+                }),
+              ),
+              Effect.flip,
+              Effect.provideService(NetService.NetService, fixture.service),
+            );
+            assert.equal(error._tag, "DesktopBackendPortUnavailableError");
+            assert.equal(error.startPort, 4888);
+            assert.equal(error.maxPort, 4888);
+            assert.equal(startups, 0);
+            assert.equal(
+              fixture.probes.every(({ port }) => port === 4888),
+              true,
+            );
+            assert.equal(fixture.probes.at(-1)?.host, occupiedHost);
+          }),
+      );
+    }
+
+    it.effect(`retains ${profile} HTTPS offset and upward fallback with the same host probes`, () =>
+      Effect.gen(function* () {
+        const fixture = portProbeFixture((port) => port !== preferred + 2);
+        const port = yield* resolveDesktopBackendHttpsPort(preferred, profile).pipe(
+          Effect.provideService(NetService.NetService, fixture.service),
+        );
+        assert.equal(port, preferred + 3);
+        assert.deepEqual(fixture.probes, [
+          { port: preferred + 2, host: "127.0.0.1" },
+          { port: preferred + 3, host: "127.0.0.1" },
+          { port: preferred + 3, host: "0.0.0.0" },
+          { port: preferred + 3, host: "::" },
+        ]);
+      }),
+    );
+
+    it.effect(
+      `uses the ${profile} HTTPS base if a high explicit HTTP port cannot retain its offset`,
+      () =>
+        Effect.gen(function* () {
+          const fixture = portProbeFixture(() => true);
+          const port = yield* resolveDesktopBackendHttpsPort(65_535, profile).pipe(
+            Effect.provideService(NetService.NetService, fixture.service),
+          );
+          assert.equal(port, preferred + 2);
+          assert.deepEqual(fixture.probes, [
+            { port: preferred + 2, host: "127.0.0.1" },
+            { port: preferred + 2, host: "0.0.0.0" },
+            { port: preferred + 2, host: "::" },
+          ]);
+        }),
+    );
+  }
+
+  it.effect("admits the exact configured port only after every existing host probe succeeds", () =>
+    Effect.gen(function* () {
+      const fixture = portProbeFixture(() => true);
+      const selected = yield* resolveDesktopBackendPort(Option.some(4888), "production").pipe(
+        Effect.provideService(NetService.NetService, fixture.service),
+      );
+      assert.deepEqual(selected, { port: 4888, selectedByScan: false });
+      assert.deepEqual(fixture.probes, [
+        { port: 4888, host: "127.0.0.1" },
+        { port: 4888, host: "0.0.0.0" },
+        { port: 4888, host: "::" },
+      ]);
+    }),
+  );
+
+  for (const occupiedHost of ["127.0.0.1", "0.0.0.0", "::"] as const) {
+    it.effect(`refuses a configured collision on ${occupiedHost} before startup can proceed`, () =>
+      Effect.gen(function* () {
+        const fixture = portProbeFixture((_port, host) => host !== occupiedHost);
+        let admittedStartup = 0;
+        const error = yield* resolveDesktopBackendPort(Option.some(4888), "production").pipe(
+          Effect.andThen(
+            Effect.sync(() => {
+              admittedStartup += 1;
+            }),
+          ),
+          Effect.flip,
+          Effect.provideService(NetService.NetService, fixture.service),
+        );
+        assert.equal(error._tag, "DesktopBackendPortUnavailableError");
+        assert.equal(error.startPort, 4888);
+        assert.equal(error.maxPort, 4888);
+        assert.equal(admittedStartup, 0);
+        assert.equal(
+          fixture.probes.every(({ port }) => port === 4888),
+          true,
+        );
+        assert.equal(fixture.probes.at(-1)?.host, occupiedHost);
+      }),
+    );
+  }
+
+  it.effect("retains the existing automatic scan instead of changing an explicit choice", () =>
+    Effect.gen(function* () {
+      const fixture = portProbeFixture((port) => port !== 3773);
+      const selected = yield* resolveDesktopBackendPort(Option.none(), "production").pipe(
+        Effect.provideService(NetService.NetService, fixture.service),
+      );
+      assert.deepEqual(selected, { port: 3774, selectedByScan: true });
+      assert.deepEqual(fixture.probes, [
+        { port: 3773, host: "127.0.0.1" },
+        { port: 3774, host: "127.0.0.1" },
+        { port: 3774, host: "0.0.0.0" },
+        { port: 3774, host: "::" },
+      ]);
+    }),
+  );
+});
 
 describe("DesktopApp provider daemon bootstrap credentials", () => {
   it.effect("delivers fatal Quit even after its shutdown request wakes startup cancellation", () =>

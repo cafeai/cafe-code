@@ -8,6 +8,7 @@ import {
   ProviderDaemonLiveness,
 } from "@cafecode/contracts";
 import { requestProviderDaemonJson } from "@cafecode/shared/providerDaemonHttp";
+import { dataProfileIdentity } from "@cafecode/shared/dataProfileIdentity";
 import type { ProviderDaemonStartupProgress } from "@cafecode/shared/backendStartupProgress";
 import { CAFE_CODE_SHELL_ENV_HYDRATED } from "@cafecode/shared/shell";
 import {
@@ -39,13 +40,18 @@ const unavailable =
 const decodeHealth = Schema.decodeUnknownSync(ProviderDaemonHealth);
 const decodeLiveness = Schema.decodeUnknownSync(ProviderDaemonLiveness);
 
-// Never trust a response from a different owner. A migrated legacy daemon
-// cannot echo metadata it was never bootstrapped with, so retains its existing
-// authenticated PID check after initial native-identity verification.
+// Never trust a response from a different owner or profile. Native generation
+// and birth identity remain independent proof; neither substitutes for the
+// exact actual-opening profile receipt required by this desktop adapter.
 const matches = (
   result: WindowsProviderRuntimeResult,
   health: ProviderDaemonLiveness | ProviderDaemonHealth,
+  profile: { readonly dataProfile: "production" | "debug"; readonly dataProfileId: string },
 ) =>
+  result.marker.dataProfile === profile.dataProfile &&
+  result.marker.dataProfileId === profile.dataProfileId &&
+  health.dataProfile === profile.dataProfile &&
+  health.dataProfileId === profile.dataProfileId &&
   health.pid === result.marker.pid &&
   health.mode === "provider-daemon" &&
   (result.marker.windowsOwnershipId === undefined ||
@@ -74,6 +80,10 @@ export const makeWindowsDesktopProviderDaemonManager = Effect.fn(function* (
   const safeStorage = yield* ElectronSafeStorage.ElectronSafeStorage;
   const context = yield* Effect.context<never>();
   const run = Effect.runPromiseWith(context);
+  const profile = {
+    dataProfile: environment.dataProfile,
+    dataProfileId: dataProfileIdentity(environment.dataProfile, environment.baseDir),
+  };
   const mutex = yield* Semaphore.make(1);
   // A single sanitized replay frame lets the inert startup window attach after
   // spawning. Sliding capacity bounds observers without delaying ownership.
@@ -116,9 +126,12 @@ export const makeWindowsDesktopProviderDaemonManager = Effect.fn(function* (
     appVersion: environment.appVersion,
     protocolVersion: 1,
     runtimeBuildId,
+    ...profile,
     cafeMcpPort: () => cafeMcpPort,
     bootstrap: {
       cafeCodeHome: environment.baseDir,
+      configuredCafeCodeHome: environment.configuredBaseDir,
+      dataProfile: environment.dataProfile,
       ...Option.match(environment.otlpTracesUrl, {
         onNone: () => ({}),
         onSome: (otlpTracesUrl) => ({ otlpTracesUrl }),
@@ -147,6 +160,8 @@ export const makeWindowsDesktopProviderDaemonManager = Effect.fn(function* (
     spawn: (bootstrap, startupProgress) => {
       const childEnvironment = { ...process.env };
       for (const name of [
+        "CAFE_CODE_HOME",
+        "CAFE_CODE_DATA_PROFILE",
         "CAFE_CODE_PORT",
         "CAFE_CODE_MODE",
         "CAFE_CODE_NO_BROWSER",
@@ -275,7 +290,15 @@ export const makeWindowsDesktopProviderDaemonManager = Effect.fn(function* (
           yield* Ref.update(state, (current) => ({ ...current, status: "starting" as const }));
           yield* PubSub.publish(startupUpdates, { phase: "starting" });
           yield* publish;
-          const result = yield* Effect.tryPromise({ try: action, catch: failure }).pipe(
+          const result = yield* Effect.tryPromise({
+            try: async () => {
+              const admitted = await action();
+              if (!matches(admitted, admitted.health, profile))
+                throw new WindowsProviderRuntimeError("profile-mismatch");
+              return admitted;
+            },
+            catch: failure,
+          }).pipe(
             Effect.catch((error) =>
               Effect.gen(function* () {
                 yield* Ref.update(state, (current) => ({
@@ -308,7 +331,7 @@ export const makeWindowsDesktopProviderDaemonManager = Effect.fn(function* (
       });
       if (response.statusCode !== 200) return Option.none<ProviderDaemonLiveness>();
       const health = decodeLiveness(JSON.parse(response.body));
-      return runtime.current() === current && matches(current, health)
+      return runtime.current() === current && matches(current, health, profile)
         ? Option.some(health)
         : Option.none<ProviderDaemonLiveness>();
     },
@@ -328,7 +351,7 @@ export const makeWindowsDesktopProviderDaemonManager = Effect.fn(function* (
           });
           if (response.statusCode !== 200) throw new Error(unavailable);
           const health = decodeHealth(JSON.parse(response.body));
-          if (!matches(current, health)) throw new Error(unavailable);
+          if (!matches(current, health, profile)) throw new Error(unavailable);
           return health;
         },
         catch: failure,

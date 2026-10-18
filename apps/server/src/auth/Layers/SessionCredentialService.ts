@@ -112,10 +112,14 @@ export const makeSessionCredentialService = Effect.gen(function* () {
   const cookieName = resolveSessionCookieName({
     mode: serverConfig.mode,
     port: serverConfig.port,
+    dataProfile: serverConfig.dataProfile,
   });
   const httpsCookieName =
     serverConfig.httpsEnabled && serverConfig.httpsPort !== undefined
-      ? resolveHttpsSessionCookieName({ port: serverConfig.httpsPort })
+      ? resolveHttpsSessionCookieName({
+          port: serverConfig.httpsPort,
+          dataProfile: serverConfig.dataProfile,
+        })
       : undefined;
 
   const emitUpsert = (clientSession: AuthClientSession) =>

@@ -69,6 +69,7 @@ import {
 import { useUiStateStore } from "~/uiStateStore";
 import type { WsProtocolCloseContext } from "../../rpc/protocol";
 import { getServerConfig } from "../../rpc/serverState";
+import { projectServerConfigSettings } from "../../rpc/serverConfigSettingsProjection";
 import { WsTransport } from "../../rpc/wsTransport";
 import { getWsConnectionStatus } from "../../rpc/wsConnectionState";
 import { createWsRpcClient, type WsRpcClient } from "../../rpc/wsRpcClient";
@@ -1590,6 +1591,14 @@ async function ensureSavedEnvironmentConnection(
             descriptor: config.environment,
             serverConfig: config,
           });
+        },
+        onSettingsUpdated: (payload) => {
+          const store = useSavedEnvironmentRuntimeStore.getState();
+          const current = store.byId[activeRecord.environmentId]?.serverConfig;
+          if (current)
+            store.patch(activeRecord.environmentId, {
+              serverConfig: projectServerConfigSettings(current, payload),
+            });
         },
         onWelcome: (payload) => {
           useSavedEnvironmentRuntimeStore.getState().patch(activeRecord.environmentId, {

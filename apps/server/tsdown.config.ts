@@ -1,4 +1,6 @@
 import { defineConfig } from "tsdown";
+import { resolve } from "node:path";
+import { publishSourceDebugBuildManifest } from "../../packages/shared/src/sourceDebugBuild.ts";
 
 const internalPackagePrefixes = ["@cafecode/", "effect-acp", "effect-codex-app-server"];
 
@@ -8,6 +10,20 @@ export default defineConfig([
     outDir: "dist",
     sourcemap: true,
     clean: true,
+    hooks: {
+      "build:done": ({ options, chunks }) => {
+        const root = resolve(options.cwd, options.outDir);
+        const output = chunks.filter((chunk) => chunk.type === "chunk");
+        publishSourceDebugBuildManifest(
+          resolve(root, "bin.mjs"),
+          "server",
+          output.map((chunk) => resolve(options.cwd, chunk.outDir, chunk.fileName)),
+          Object.fromEntries(
+            output.map((chunk) => [resolve(options.cwd, chunk.outDir, chunk.fileName), chunk.code]),
+          ),
+        );
+      },
+    },
     deps: {
       alwaysBundle: (id) => internalPackagePrefixes.some((prefix) => id.startsWith(prefix)),
       onlyBundle: false,

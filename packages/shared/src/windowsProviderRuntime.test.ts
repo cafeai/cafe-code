@@ -1,5 +1,6 @@
 // @effect-diagnostics nodeBuiltinImport:off
 import type { ChildProcess, spawn as nodeSpawn } from "node:child_process";
+import { createHash } from "node:crypto";
 import { EventEmitter } from "node:events";
 import { PassThrough } from "node:stream";
 import { describe, expect, it, vi } from "vitest";
@@ -16,6 +17,7 @@ import {
   encodeBackendMigrationProgress,
   makeProviderDaemonStartupProgressTracker,
 } from "./backendStartupProgress.ts";
+import { dataProfileIdentity } from "./dataProfileIdentity.ts";
 
 const ownershipId = "be5b2b29-72ef-4d31-9571-50856776e18b";
 const identity: WindowsProcessIdentity = { pid: 101, creationTime100ns: "134032074530123456" };
@@ -103,6 +105,8 @@ function fixture(initial: ProviderDaemonMarker | null = marker()) {
     return {
       ok: true,
       mode: record.mode ?? "provider-daemon",
+      ...(record.dataProfile === undefined ? {} : { dataProfile: record.dataProfile }),
+      ...(record.dataProfileId === undefined ? {} : { dataProfileId: record.dataProfileId }),
       pid: record.pid,
       ppid: 42,
       protocolVersion: 1,
@@ -258,6 +262,316 @@ function fixture(initial: ProviderDaemonMarker | null = marker()) {
     health,
   };
 }
+
+const profileRoot = "C:\\fixture\\.debug";
+const profileId = dataProfileIdentity("debug", profileRoot);
+const profileSocketPath = `\\\\.\\pipe\\cafecode-provider-daemon-${createHash("sha256").update(profileRoot).digest("hex").slice(0, 24)}`;
+const profileMarker = (overrides: Partial<ProviderDaemonMarker> = {}) =>
+  marker({
+    dataProfile: "debug",
+    dataProfileId: profileId,
+    socketPath: profileSocketPath,
+    credentialPath: `${profileRoot}\\userdata\\provider-daemon-token.bin.${ownershipId}`,
+    ...overrides,
+  });
+function profileOptions(f: ReturnType<typeof fixture>): WindowsProviderRuntimeOptions {
+  return {
+    ...f.options,
+    dataProfile: "debug",
+    dataProfileId: profileId,
+    markerPath: `${profileRoot}\\userdata\\provider-daemon.json`,
+    legacyCredentialPath: `${profileRoot}\\userdata\\provider-daemon-token.bin`,
+    socketPath: profileSocketPath,
+    bootstrap: {
+      cafeCodeHome: profileRoot,
+      configuredCafeCodeHome: "C:\\fixture",
+      dataProfile: "debug",
+    },
+  };
+}
+
+describe("Windows runtime exact data-profile admission", () => {
+  it.each(["marker", "credential", "pipe", "configured-root"] as const)(
+    "refuses a profiled %s namespace inconsistent with the admitted effective root",
+    (phase) => {
+      const f = fixture(profileMarker());
+      const options = profileOptions(f);
+      const foreign = {
+        ...options,
+        ...(phase === "marker" ? { markerPath: "C:\\foreign\\provider-daemon.json" } : {}),
+        ...(phase === "credential" ? { legacyCredentialPath: "C:\\foreign\\token" } : {}),
+        ...(phase === "pipe" ? { socketPath: "\\\\.\\pipe\\foreign" } : {}),
+        ...(phase === "configured-root"
+          ? { bootstrap: { ...options.bootstrap, configuredCafeCodeHome: "C:\\foreign" } }
+          : {}),
+      };
+      expect(() => createWindowsProviderRuntime(foreign)).toThrow("profile-mismatch");
+      expect(f.options.openSession).not.toHaveBeenCalled();
+      expect(f.spawn).not.toHaveBeenCalled();
+      expect(f.session.publish).not.toHaveBeenCalled();
+    },
+  );
+  it.each([
+    { field: "markerPath", value: "\\\\?\\C:\\fixture\\.debug\\userdata\\provider-daemon.json" },
+    { field: "markerPath", value: "\\\\server\\share\\provider-daemon.json" },
+    { field: "markerPath", value: "C:/fixture/.debug/userdata/provider-daemon.json" },
+    {
+      field: "markerPath",
+      value: "C:\\fixture\\.debug\\userdata\\..\\userdata\\provider-daemon.json",
+    },
+    { field: "markerPath", value: "C:\\fixture\\.debug\\userdata.\\provider-daemon.json" },
+    {
+      field: "legacyCredentialPath",
+      value: "C:\\fixture\\.debug\\userdata\\provider-daemon-token.bin:stream",
+    },
+    {
+      field: "legacyCredentialPath",
+      value: "C:\\fixture\\.debug\\userdata\\..\\userdata\\provider-daemon-token.bin",
+    },
+  ] as const)("refuses unsafe $field spelling before native helper access", ({ field, value }) => {
+    const f = fixture(profileMarker());
+    expect(() => createWindowsProviderRuntime({ ...profileOptions(f), [field]: value })).toThrow(
+      "profile-mismatch",
+    );
+    expect(f.options.openSession).not.toHaveBeenCalled();
+    expect(f.options.fetchHealth).not.toHaveBeenCalled();
+    expect(f.session.read).not.toHaveBeenCalled();
+    expect(f.session.publish).not.toHaveBeenCalled();
+    expect(f.spawn).not.toHaveBeenCalled();
+  });
+  it.each([
+    "missing-id",
+    "missing-profile",
+    "foreign-id",
+    "foreign-bootstrap",
+    "foreign-home",
+    "missing-parent",
+  ] as const)("refuses %s opening policy before native guard or credential work", (phase) => {
+    const f = fixture(profileMarker());
+    const options = profileOptions(f);
+    const changed = {
+      ...options,
+      ...(phase === "missing-id" ? { dataProfileId: undefined } : {}),
+      ...(phase === "missing-profile" ? { dataProfile: undefined } : {}),
+      ...(phase === "foreign-id"
+        ? { dataProfileId: dataProfileIdentity("production", profileRoot) }
+        : {}),
+      bootstrap: {
+        ...options.bootstrap,
+        ...(phase === "foreign-bootstrap" ? { dataProfile: "production" as const } : {}),
+        ...(phase === "foreign-home" ? { cafeCodeHome: "C:\\another" } : {}),
+        ...(phase === "missing-parent" ? { configuredCafeCodeHome: undefined } : {}),
+      },
+    };
+    expect(() => createWindowsProviderRuntime(changed)).toThrow("profile-mismatch");
+    expect(f.options.openSession).not.toHaveBeenCalled();
+    expect(f.spawn).not.toHaveBeenCalled();
+    expect(f.session.publish).not.toHaveBeenCalled();
+    expect(f.options.fetchHealth).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    { credentialPath: undefined },
+    { credentialPath: "C:\\foreign\\provider-daemon-token.bin" },
+    { credentialPath: `${profileRoot}\\userdata\\secrets\\provider-supervisor-token` },
+    { credentialPath: `${profileRoot}\\userdata\\provider-daemon-token.bin:stream` },
+    { socketPath: "\\\\.\\pipe\\cafecode-provider-supervisor-foreign" },
+    { transport: "tcp" as const, httpBaseUrl: "http://127.0.0.1:3773" },
+  ])(
+    "preserves a profile-labeled record outside its role's credential/pipe namespace",
+    async (override) => {
+      const initial = profileMarker(override);
+      const f = fixture(initial);
+      const decode = vi.fn(f.options.decodeCredential);
+      const runtime = createWindowsProviderRuntime({
+        ...profileOptions(f),
+        decodeCredential: decode,
+      });
+      await expect(runtime.ensure()).rejects.toMatchObject({ reason: "profile-mismatch" });
+      await expect(runtime.stop()).rejects.toMatchObject({ reason: "profile-mismatch" });
+      await expect(runtime.recover()).rejects.toMatchObject({ reason: "profile-mismatch" });
+      expect(decode).not.toHaveBeenCalled();
+      expect(f.options.fetchHealth).not.toHaveBeenCalled();
+      expect(f.options.issueLease).not.toHaveBeenCalled();
+      expect(f.session.capture).not.toHaveBeenCalled();
+      expect(f.session.observe).not.toHaveBeenCalled();
+      expect(f.session.terminate).not.toHaveBeenCalled();
+      expect(f.session.publish).not.toHaveBeenCalled();
+      expect(f.session.retire).not.toHaveBeenCalled();
+      expect(f.spawn).not.toHaveBeenCalled();
+      expect(f.record).toEqual(initial);
+    },
+  );
+
+  it.each(["legacy", "profile-only", "id-only", "foreign-profile", "foreign-root"] as const)(
+    "preserves a %s record before decryption, endpoint contact or native identity mutation",
+    async (phase) => {
+      const receipt =
+        phase === "legacy"
+          ? {}
+          : phase === "profile-only"
+            ? { dataProfile: "debug" as const }
+            : phase === "id-only"
+              ? { dataProfileId: profileId }
+              : phase === "foreign-profile"
+                ? { dataProfile: "production" as const, dataProfileId: profileId }
+                : {
+                    dataProfile: "debug" as const,
+                    dataProfileId: dataProfileIdentity("debug", "C:\\foreign"),
+                  };
+      const initial = marker(receipt);
+      const f = fixture(initial);
+      const decode = vi.fn(f.options.decodeCredential);
+      const runtime = createWindowsProviderRuntime({
+        ...profileOptions(f),
+        decodeCredential: decode,
+      });
+      await expect(runtime.ensure()).rejects.toMatchObject({ reason: "profile-mismatch" });
+      await expect(runtime.stop()).rejects.toMatchObject({ reason: "profile-mismatch" });
+      await expect(runtime.recover()).rejects.toMatchObject({ reason: "profile-mismatch" });
+      expect(decode).not.toHaveBeenCalled();
+      expect(f.options.fetchHealth).not.toHaveBeenCalled();
+      expect(f.options.issueLease).not.toHaveBeenCalled();
+      expect(f.session.capture).not.toHaveBeenCalled();
+      expect(f.session.observe).not.toHaveBeenCalled();
+      expect(f.session.terminate).not.toHaveBeenCalled();
+      expect(f.session.publish).not.toHaveBeenCalled();
+      expect(f.session.retire).not.toHaveBeenCalled();
+      expect(f.spawn).not.toHaveBeenCalled();
+      expect(f.record).toEqual(initial);
+    },
+  );
+
+  it.each(["committed", "prepared", "legacy-native-identity"] as const)(
+    "requires native profile proof before %s admission can publish or lease",
+    async (phase) => {
+      let initial = profileMarker(
+        phase === "prepared" ? { windowsOwnershipState: "prepared" } : {},
+      );
+      if (phase === "legacy-native-identity") {
+        const {
+          windowsOwnershipId: _id,
+          windowsOwnershipState: _state,
+          windowsProcessIdentity: _identity,
+          ...legacy
+        } = initial;
+        initial = {
+          ...legacy,
+          credentialPath: `${profileRoot}\\userdata\\provider-daemon-token.bin`,
+        };
+      }
+      const f = fixture(initial);
+      const runtime = createWindowsProviderRuntime(profileOptions(f));
+      f.setResponse({
+        ...f.health(),
+        dataProfile: "production",
+        dataProfileId: dataProfileIdentity("production", "C:\\foreign"),
+      });
+      await expect(runtime.ensure()).rejects.toMatchObject({ reason: "profile-mismatch" });
+      expect(f.options.fetchHealth).toHaveBeenCalledTimes(1);
+      expect(f.options.issueLease).not.toHaveBeenCalled();
+      expect(f.session.publish).not.toHaveBeenCalled();
+      expect(f.session.retire).not.toHaveBeenCalled();
+      expect(f.session.terminate).not.toHaveBeenCalled();
+      expect(f.spawn).not.toHaveBeenCalled();
+      expect(f.record).toEqual(initial);
+    },
+  );
+
+  it("does not substitute missing native profile proof from a matching saved marker", async () => {
+    const f = fixture(profileMarker());
+    const { dataProfile: _profile, dataProfileId: _id, ...legacyHealth } = f.health();
+    f.setResponse(legacyHealth);
+    await expect(createWindowsProviderRuntime(profileOptions(f)).ensure()).rejects.toMatchObject({
+      reason: "profile-mismatch",
+    });
+    expect(f.session.publish).not.toHaveBeenCalled();
+    expect(f.options.issueLease).not.toHaveBeenCalled();
+    expect(f.session.terminate).not.toHaveBeenCalled();
+  });
+
+  it("preserves a foreign authenticated responder even after the recorded native owner exited", async () => {
+    const f = fixture(profileMarker());
+    const health = f.health();
+    f.processes.delete(identity.pid);
+    f.setResponse({ ...health, dataProfileId: dataProfileIdentity("debug", "C:\\foreign") });
+    await expect(createWindowsProviderRuntime(profileOptions(f)).ensure()).rejects.toMatchObject({
+      reason: "profile-mismatch",
+    });
+    expect(f.session.retire).not.toHaveBeenCalled();
+    expect(f.session.terminate).not.toHaveBeenCalled();
+    expect(f.spawn).not.toHaveBeenCalled();
+    expect(f.record).toEqual(profileMarker());
+  });
+
+  it("does not let a cached FILETIME/generation authorize a later foreign-profile record", async () => {
+    const f = fixture(profileMarker());
+    const runtime = createWindowsProviderRuntime(profileOptions(f));
+    const accepted = await runtime.ensure();
+    const foreign = profileMarker({ dataProfileId: dataProfileIdentity("debug", "C:\\foreign") });
+    f.setRecord(foreign);
+    await expect(runtime.stop(accepted.ownershipId)).rejects.toMatchObject({
+      reason: "profile-mismatch",
+    });
+    await expect(runtime.recover(accepted.ownershipId)).rejects.toMatchObject({
+      reason: "profile-mismatch",
+    });
+    expect((await runtime.observe()).status).toBe("unknown");
+    expect(f.session.terminate).not.toHaveBeenCalled();
+    expect(f.session.retire).not.toHaveBeenCalled();
+    expect(f.spawn).not.toHaveBeenCalled();
+    expect(f.record).toEqual(foreign);
+  });
+
+  it("preserves legacy callers without letting omitted expectation adopt a labeled profile", async () => {
+    const legacy = fixture();
+    await expect(legacy.runtime.ensure()).resolves.toMatchObject({ adopted: true });
+    const labeled = fixture(profileMarker());
+    await expect(labeled.runtime.ensure()).rejects.toMatchObject({ reason: "profile-mismatch" });
+    expect(labeled.options.fetchHealth).not.toHaveBeenCalled();
+    expect(labeled.session.publish).not.toHaveBeenCalled();
+    expect(labeled.session.terminate).not.toHaveBeenCalled();
+  });
+
+  it("carries the immutable opening profile through each fresh reservation and private bootstrap", async () => {
+    const f = fixture(null);
+    const options = profileOptions(f);
+    const runtime = createWindowsProviderRuntime(options);
+    Object.assign(options, {
+      dataProfile: "production",
+      dataProfileId: dataProfileIdentity("production", "C:\\another"),
+      markerPath: "C:\\another\\userdata\\provider-daemon.json",
+      legacyCredentialPath: "C:\\another\\userdata\\provider-daemon-token.bin",
+      socketPath: "\\\\.\\pipe\\foreign",
+    });
+    Object.assign(options.bootstrap, { cafeCodeHome: "C:\\another", dataProfile: "production" });
+    const result = await runtime.ensure();
+    expect(result.marker.dataProfile).toBe("debug");
+    expect(result.marker.dataProfileId).toBe(profileId);
+    expect(result.marker.windowsProcessIdentity).toEqual(f.processes.get(201));
+    expect(f.spawn).toHaveBeenCalledTimes(1);
+    expect(f.options.openSession).toHaveBeenCalledWith({
+      markerPath: `${profileRoot}\\userdata\\provider-daemon.json`,
+      legacyCredentialPath: `${profileRoot}\\userdata\\provider-daemon-token.bin`,
+      role: "provider-daemon",
+    });
+    expect(f.spawn.mock.calls[0]?.[0]).toMatchObject({
+      dataProfile: "debug",
+      configuredCafeCodeHome: "C:\\fixture",
+      cafeCodeHome: profileRoot,
+    });
+    for (const [publication] of vi.mocked(f.session.publish).mock.calls) {
+      expect(JSON.parse(publication.markerJson)).toMatchObject({
+        dataProfile: "debug",
+        dataProfileId: profileId,
+      });
+    }
+    await runtime.stop(result.ownershipId);
+    expect(f.session.terminate).toHaveBeenCalledWith(
+      f.processes.get(201) ?? result.marker.windowsProcessIdentity,
+    );
+  });
+});
 
 describe("Windows provider runtime ownership lifecycle", () => {
   it("releases the guard during an exact fresh migration and re-admits only its unchanged prepared revision", async () => {

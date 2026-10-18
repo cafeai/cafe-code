@@ -8,7 +8,9 @@ import * as Layer from "effect/Layer";
 import * as Electron from "electron";
 
 import * as NetService from "@cafecode/shared/Net";
+import { resolveUiLocale, uiText } from "@cafecode/shared/i18n";
 import { startStartupCpuProfiler } from "@cafecode/shared/startupProfiler";
+import { assertSourceDebugDesktopBuilds } from "@cafecode/shared/sourceDebugBuild";
 
 import * as DesktopIpc from "./ipc/DesktopIpc.ts";
 import * as ElectronApp from "./electron/ElectronApp.ts";
@@ -29,6 +31,10 @@ import * as DesktopBackendConfiguration from "./backend/DesktopBackendConfigurat
 import * as DesktopBackendManager from "./backend/DesktopBackendManager.ts";
 import * as DesktopProviderDaemonManager from "./backend/DesktopProviderDaemonManager.ts";
 import * as DesktopEnvironment from "./app/DesktopEnvironment.ts";
+import {
+  DesktopDataProfileStartup,
+  initializeDesktopDataProfile,
+} from "./app/DesktopDataProfile.ts";
 import * as DesktopLifecycle from "./app/DesktopLifecycle.ts";
 import * as DesktopObservability from "./app/DesktopObservability.ts";
 import * as DesktopPowerSaveBlocker from "./app/DesktopPowerSaveBlocker.ts";
@@ -74,13 +80,89 @@ const desktopEnvironmentLayer = Layer.unwrap(
     const metadata = yield* Effect.service(ElectronApp.ElectronApp).pipe(
       Effect.flatMap((app) => app.metadata),
     );
-    return DesktopEnvironment.layer({
-      dirname: __dirname,
-      homeDirectory: NodeOS.homedir(),
-      platform: process.platform,
-      processArch: process.arch,
-      ...metadata,
-    });
+    const environment = yield* Effect.service(DesktopEnvironment.DesktopEnvironment).pipe(
+      Effect.provide(
+        DesktopEnvironment.layer({
+          dirname: __dirname,
+          homeDirectory: NodeOS.homedir(),
+          platform: process.platform,
+          processArch: process.arch,
+          ...metadata,
+        }),
+      ),
+    );
+    // Publishing this context admits every settings/secret/logging foundation
+    // consumer. Validate Debug storage and select Electron's native data/lock
+    // identity first; a secondary or refused startup never builds those layers.
+    const admitted = yield* Effect.promise(() =>
+      initializeDesktopDataProfile(
+        {
+          environment,
+          argv: process.argv,
+          ...(!environment.isPackaged
+            ? {
+                verifySourceBuilds: () =>
+                  assertSourceDebugDesktopBuilds(
+                    environment.path.join(environment.appRoot, "apps", "desktop"),
+                  ),
+              }
+            : {}),
+          native: {
+            setName: (name) => Electron.app.setName(name),
+            setPath: (name, value) => Electron.app.setPath(name, value),
+            requestSingleInstanceLock: (request) => Electron.app.requestSingleInstanceLock(request),
+            onSecondInstance: (receive) => {
+              const listener = (
+                _event: Electron.Event,
+                _argv: string[],
+                _cwd: string,
+                additionalData: unknown,
+              ) => receive(additionalData);
+              Electron.app.on("second-instance", listener);
+              return () => {
+                Electron.app.removeListener("second-instance", listener);
+              };
+            },
+            showFailure: (reason) => {
+              // The refused namespace cannot supply a saved locale safely. Use only
+              // the native primary system language for this pre-foundation notice.
+              let languages: readonly string[] = [];
+              try {
+                languages = Electron.app.getPreferredSystemLanguages();
+              } catch {
+                /* safe English fallback */
+              }
+              const locale = resolveUiLocale("system", languages);
+              Electron.dialog.showErrorBox(
+                uiText("Cafe Code failed to start", undefined, undefined, locale),
+                reason === "build"
+                  ? uiText(
+                      "Source Debug build is missing, outdated or inconsistent. Rebuild using yarn build:desktop before starting Cafe Code. No application or provider was started.",
+                      undefined,
+                      undefined,
+                      locale,
+                    )
+                  : uiText(
+                      "The application data profile could not be initialized safely. Check its permissions and free space. No other data profile was selected.",
+                      undefined,
+                      undefined,
+                      locale,
+                    ),
+              );
+            },
+            quit: () => Electron.app.quit(),
+          },
+        },
+        (startup) =>
+          Layer.mergeAll(
+            Layer.succeed(DesktopEnvironment.DesktopEnvironment, environment),
+            Layer.succeed(DesktopDataProfileStartup, startup),
+          ),
+      ),
+    );
+    // app.quit() owns the secondary/refusal exit. Do not let pending async
+    // foundation construction continue while Electron is draining that exit.
+    return admitted ?? (yield* Effect.never);
   }),
 );
 

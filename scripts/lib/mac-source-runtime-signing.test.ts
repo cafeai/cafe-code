@@ -4,7 +4,12 @@ import { join } from "node:path";
 
 import { afterEach, describe, expect, it } from "vitest";
 
-import { signMacSourceRuntime } from "./mac-source-runtime-signing.ts";
+import {
+  MAC_SOURCE_APP_NAME,
+  MAC_SOURCE_BUNDLE_IDENTIFIER,
+  resolveMacSourceRuntimeDirectory,
+  signMacSourceRuntime,
+} from "./mac-source-runtime-signing.ts";
 
 const directories: string[] = [];
 
@@ -43,15 +48,15 @@ describe("macOS source runtime signing", () => {
       },
     });
 
-    const mainIndex = captured.findIndex((args) => args.includes("com.cafeai.cafecode"));
+    const mainIndex = captured.findIndex((args) => args.includes("com.cafeai.cafecode.debug"));
     const main = captured[mainIndex];
     expect(main?.at(-1)).toBe(app);
     expect(main).toContain("--preserve-metadata=entitlements,flags,runtime");
     for (const [name, id] of [
-      ["Electron Helper.app", "com.cafeai.cafecode.helper"],
-      ["Electron Helper (Renderer).app", "com.cafeai.cafecode.helper.renderer"],
-      ["Electron Helper (GPU).app", "com.cafeai.cafecode.helper.gpu"],
-      ["Electron Helper (Plugin).app", "com.cafeai.cafecode.helper.plugin"],
+      ["Electron Helper.app", "com.cafeai.cafecode.debug.helper"],
+      ["Electron Helper (Renderer).app", "com.cafeai.cafecode.debug.helper.renderer"],
+      ["Electron Helper (GPU).app", "com.cafeai.cafecode.debug.helper.gpu"],
+      ["Electron Helper (Plugin).app", "com.cafeai.cafecode.debug.helper.plugin"],
     ] as const) {
       const callIndex = captured.findIndex((args) => args.includes(id));
       const call = captured[callIndex];
@@ -66,6 +71,12 @@ describe("macOS source runtime signing", () => {
     expect(framework).not.toContain("--identifier");
     expect(captured.some((args) => args.at(-1)?.endsWith("unrelated.framework"))).toBe(false);
     expect(captured.at(-1)).toEqual(["--verify", "--deep", "--strict", app]);
+    expect(captured.some((args) => args.includes("com.cafeai.cafecode"))).toBe(false);
+    expect(MAC_SOURCE_APP_NAME).toBe("Cafe Code (Debug)");
+    expect(MAC_SOURCE_BUNDLE_IDENTIFIER).toBe("com.cafeai.cafecode.debug");
+    const debugCache = resolveMacSourceRuntimeDirectory(app);
+    expect(debugCache).toBe(join(app, ".electron-runtime", "debug"));
+    expect(debugCache).not.toBe(join(app, ".electron-runtime"));
   });
 
   it("stops before sealing the parent when a nested signature fails", () => {

@@ -51,13 +51,8 @@ import * as DesktopObservability from "../app/DesktopObservability.ts";
 import * as ElectronSafeStorage from "../electron/ElectronSafeStorage.ts";
 import { makeWindowsDesktopProviderDaemonManager } from "./WindowsDesktopProviderDaemonManager.ts";
 import * as NetService from "@cafecode/shared/Net";
-import {
-  isPidAlive,
-  matchesProviderRuntimeProcess,
-  reapMatchingUnixProcesses,
-  terminatePid as terminateDesktopPid,
-  type DesktopProcessSnapshot,
-} from "./DesktopProcessReaper.ts";
+import { dataProfileIdentity } from "@cafecode/shared/dataProfileIdentity";
+import { isPidAlive } from "./DesktopProcessReaper.ts";
 
 const PROVIDER_DAEMON_READINESS_TIMEOUT_MS = 30_000;
 const PROVIDER_DAEMON_READINESS_INTERVAL_MS = 100;
@@ -68,6 +63,8 @@ const PROVIDER_DAEMON_SPAWN_ATTEMPTS = 2;
 const PROVIDER_DAEMON_ADOPTION_RETRY_DELAY_MS = 250;
 
 const DESKTOP_PROVIDER_DAEMON_ENV_NAMES = [
+  "CAFE_CODE_HOME",
+  "CAFE_CODE_DATA_PROFILE",
   "CAFE_CODE_PORT",
   "CAFE_CODE_MODE",
   "CAFE_CODE_NO_BROWSER",
@@ -299,13 +296,6 @@ function isLoopbackEndpoint(rawUrl: string): boolean {
 function makeProviderDaemonToken(): string {
   return crypto.randomBytes(32).toString("hex");
 }
-
-const terminateExternalPid = (pid: number): Effect.Effect<void> =>
-  terminateDesktopPid({
-    pid,
-    ppid: 0,
-    command: "provider daemon process",
-  }).pipe(Effect.asVoid);
 
 const computeProviderDaemonRuntimeBuildId = (
   environment: DesktopEnvironment.DesktopEnvironmentShape,
@@ -607,36 +597,20 @@ const makeDesktopProviderDaemonManager = Effect.gen(function* () {
   });
   yield* Effect.addFinalizer(() => PubSub.shutdown(startupUpdates));
   const runtimeBuildId = yield* computeProviderDaemonRuntimeBuildId(environment);
+  const expectedProfileId = dataProfileIdentity(environment.dataProfile, environment.baseDir);
+  const matchesCurrentProfile = (receipt: {
+    readonly dataProfile?: "production" | "debug" | undefined;
+    readonly dataProfileId?: string | undefined;
+  }) =>
+    receipt.dataProfile === environment.dataProfile && receipt.dataProfileId === expectedProfileId;
 
-  const reapStaleProviderRuntimeProcesses = (
-    keepPids: ReadonlyArray<number | undefined>,
-  ): Effect.Effect<void> => {
-    const keepPidSet = new Set(
-      keepPids.filter((pid): pid is number => pid !== undefined && pid > 0),
-    );
-    return reapMatchingUnixProcesses({
-      keepPids: keepPidSet,
-      matches: (processSnapshot: DesktopProcessSnapshot) =>
-        matchesProviderRuntimeProcess(processSnapshot, environment.backendEntryPath),
-    }).pipe(
-      Effect.flatMap((results) =>
-        Effect.forEach(
-          results,
-          (result) =>
-            logWarning("reaped stale provider runtime process", {
-              pid: result.pid,
-              ppid: result.ppid,
-              signalSent: result.signalSent,
-              escalated: result.escalated,
-              stillAlive: result.stillAlive,
-              ...(result.error !== null ? { error: result.error } : {}),
-            }),
-          { concurrency: 1 },
-        ),
-      ),
-      Effect.asVoid,
-    );
-  };
+  const refuseUnownedControl = Effect.gen(function* () {
+    const message =
+      "Provider runtime control requires its retained native child handle. The adopted or unproved process and its recovery files were preserved; stop that runtime explicitly before replacing it.";
+    yield* Ref.update(state, (current) => ({ ...current, lastError: Option.some(message) }));
+    yield* publishDebugSnapshot;
+    return yield* Effect.die(new Error(message));
+  });
 
   const publishDebugSnapshot = Effect.gen(function* () {
     const current = yield* Ref.get(state);
@@ -701,7 +675,9 @@ const makeDesktopProviderDaemonManager = Effect.gen(function* () {
   ): Effect.Effect<Option.Option<ProviderDaemonClientConfig>> =>
     Effect.gen(function* () {
       const adoptionStartedAtMs = performance.now();
-      const preserveInconclusiveOwner = (phase: "credential" | "health" | "lease") =>
+      const preserveInconclusiveOwner = (
+        phase: "credential" | "health" | "lease" | "profile" | "namespace" | "compatibility",
+      ) =>
         Effect.gen(function* () {
           // A live PID plus an unreadable response is not evidence that this
           // daemon is obsolete. Keep its marker/credential and do not fall
@@ -737,11 +713,19 @@ const makeDesktopProviderDaemonManager = Effect.gen(function* () {
         transport === "ipc"
           ? typeof socketPath === "string" && socketPath.length > 0
           : isLoopbackEndpoint(marker.httpBaseUrl);
+      if (!matchesCurrentProfile(marker) || marker.mode !== "provider-daemon") {
+        return yield* preserveInconclusiveOwner("profile");
+      }
       if (
-        (marker.mode ?? "provider-daemon") !== "provider-daemon" ||
+        credentialPath !== environment.providerDaemonCredentialPath ||
         !hasValidEndpoint ||
-        !isPidAlive(marker.pid)
+        (transport === "ipc" && socketPath !== providerDaemonIpcSocketPath(environment))
       ) {
+        // Refuse before decrypting a foreign credential or contacting a foreign
+        // endpoint. Neither marker presence nor an argv/path match is authority.
+        return yield* preserveInconclusiveOwner("namespace");
+      }
+      if (!isPidAlive(marker.pid)) {
         yield* removeMarker(environment.providerDaemonMarkerPath);
         return Option.none();
       }
@@ -757,6 +741,9 @@ const makeDesktopProviderDaemonManager = Effect.gen(function* () {
       if (Option.isNone(health)) {
         return yield* preserveInconclusiveOwner("health");
       }
+      if (!matchesCurrentProfile(health.value)) {
+        return yield* preserveInconclusiveOwner("profile");
+      }
       if (
         health.value.pid !== marker.pid ||
         health.value.mode !== "provider-daemon" ||
@@ -768,15 +755,9 @@ const makeDesktopProviderDaemonManager = Effect.gen(function* () {
         marker.runtimeBuildId !== runtimeBuildId ||
         (cafeMcpPort !== undefined && marker.cafeMcpPort !== cafeMcpPort)
       ) {
-        if (Option.isSome(health)) {
-          const supervisorPid = health.value.upstreamSupervisor?.pid;
-          if (supervisorPid !== undefined && supervisorPid !== marker.pid) {
-            yield* terminateExternalPid(supervisorPid);
-          }
-        }
-        yield* terminateExternalPid(marker.pid);
-        yield* removeMarker(environment.providerDaemonMarkerPath);
-        return Option.none();
+        // An authenticated response proves a runtime is present, not that a
+        // recycled PID may be signaled. Older/incompatible owners remain intact.
+        return yield* preserveInconclusiveOwner("compatibility");
       }
 
       const lease = yield* observeForAdoption(() => issueProviderDaemonLease(rootEndpoint));
@@ -795,7 +776,7 @@ const makeDesktopProviderDaemonManager = Effect.gen(function* () {
         pid: Option.some(marker.pid),
         endpoint: Option.some(endpoint),
         adoptedExistingProcess: true,
-        terminate: Option.some(terminateExternalPid(marker.pid)),
+        terminate: Option.none(),
         ownedChild: Option.none(),
         lastHealth: Option.some(health.value),
         lastHealthObservedAt: Option.some(healthObservedAt),
@@ -819,7 +800,6 @@ const makeDesktopProviderDaemonManager = Effect.gen(function* () {
         transport,
         runtimeBuildId,
       });
-      yield* reapStaleProviderRuntimeProcesses([marker.pid, health.value.upstreamSupervisor?.pid]);
       return Option.some(endpoint);
     });
 
@@ -842,6 +822,8 @@ const makeDesktopProviderDaemonManager = Effect.gen(function* () {
       transport: "ipc",
       socketPath,
       cafeCodeHome: environment.baseDir,
+      configuredCafeCodeHome: environment.configuredBaseDir,
+      dataProfile: environment.dataProfile,
       ...(cafeMcpPort !== undefined ? { cafeMcpPort } : {}),
       token,
       runtimeBuildId,
@@ -981,6 +963,8 @@ const makeDesktopProviderDaemonManager = Effect.gen(function* () {
         const marker: ProviderDaemonMarkerValue = {
           version: 2,
           mode: "provider-daemon",
+          dataProfile: environment.dataProfile,
+          dataProfileId: expectedProfileId,
           protocolVersion: PROVIDER_DAEMON_PROTOCOL_VERSION,
           pid: handle.pid,
           ppid: process.pid,
@@ -1015,6 +999,17 @@ const makeDesktopProviderDaemonManager = Effect.gen(function* () {
       elapsedMs,
       handle,
     ).pipe(
+      Effect.flatMap((receipt) =>
+        matchesCurrentProfile(receipt)
+          ? Effect.succeed(receipt)
+          : Effect.fail(
+              new ProviderDaemonSpawnError({
+                cause: new Error(
+                  "Provider daemon profile receipt did not match its admitted bootstrap.",
+                ),
+              }),
+            ),
+      ),
       Effect.catch((error) =>
         retireOwnedChild.pipe(
           Effect.andThen(removeMarker(environment.providerDaemonMarkerPath)),
@@ -1063,7 +1058,6 @@ const makeDesktopProviderDaemonManager = Effect.gen(function* () {
       transport: endpoint.transport,
       runtimeBuildId,
     });
-    yield* reapStaleProviderRuntimeProcesses([handle.pid, health.upstreamSupervisor?.pid]);
     return endpoint;
   }).pipe(Effect.scoped);
 
@@ -1171,6 +1165,8 @@ const makeDesktopProviderDaemonManager = Effect.gen(function* () {
       const livenessResult = yield* Effect.tryPromise({
         try: async () => {
           const liveness = await fetchProviderDaemonLiveness(endpoint);
+          if (!matchesCurrentProfile(liveness))
+            throw new Error("provider daemon liveness profile mismatch");
           const expectedPid = Option.getOrUndefined(current.pid);
           if (expectedPid !== undefined && liveness.pid !== expectedPid) {
             throw new Error(
@@ -1223,7 +1219,12 @@ const makeDesktopProviderDaemonManager = Effect.gen(function* () {
 
       const refreshStartedAtMs = performance.now();
       const healthResult = yield* Effect.tryPromise({
-        try: () => fetchProviderDaemonHealth(endpoint),
+        try: async () => {
+          const receipt = await fetchProviderDaemonHealth(endpoint);
+          if (!matchesCurrentProfile(receipt))
+            throw new Error("provider daemon health profile mismatch");
+          return receipt;
+        },
         catch: (cause) => new ProviderDaemonHealthError({ cause }),
       }).pipe(Effect.result);
 
@@ -1268,18 +1269,16 @@ const makeDesktopProviderDaemonManager = Effect.gen(function* () {
 
   const stopUnlocked = Effect.gen(function* () {
     const current = yield* Ref.get(state);
-    const endpoint = Option.getOrUndefined(current.endpoint);
-    const latestHealth =
-      Option.getOrUndefined(current.lastHealth) ??
-      (endpoint === undefined
-        ? undefined
-        : yield* Effect.tryPromise({
-            try: () => fetchProviderDaemonHealth(endpoint),
-            catch: (cause) => new ProviderDaemonHealthError({ cause }),
-          }).pipe(Effect.option, Effect.map(Option.getOrUndefined)));
-    const supervisorPid = latestHealth?.upstreamSupervisor?.pid;
-    if (supervisorPid !== undefined && supervisorPid !== Option.getOrUndefined(current.pid)) {
-      yield* terminateExternalPid(supervisorPid);
+    if (Option.isNone(current.ownedChild)) {
+      if (Option.isSome(current.pid) || Option.isSome(current.endpoint)) {
+        return yield* refuseUnownedControl;
+      }
+      // A manager that never admitted an owner cannot delete ambient recovery
+      // files simply because Stop was requested before its first ensure.
+      return;
+    }
+    if (Option.getOrUndefined(current.lastHealth)?.upstreamSupervisor !== undefined) {
+      return yield* refuseUnownedControl;
     }
     yield* Option.match(current.terminate, {
       onNone: () => Effect.void,
@@ -1288,7 +1287,6 @@ const makeDesktopProviderDaemonManager = Effect.gen(function* () {
     yield* removeMarker(environment.providerDaemonMarkerPath);
     yield* removeCredential(environment.providerDaemonCredentialPath);
     yield* removeProviderDaemonIpcSocket(environment);
-    yield* reapStaleProviderRuntimeProcesses([]);
     yield* Ref.set(state, initialState);
     yield* publishDebugSnapshot;
   });
@@ -1300,15 +1298,17 @@ const makeDesktopProviderDaemonManager = Effect.gen(function* () {
         const current = yield* Ref.get(state);
         const normalizedReason = reason.replace(/\s+/g, " ").trim().slice(0, 256);
         const recoveryAt = DateTime.formatIso(yield* DateTime.now);
-        const supervisorPid = Option.getOrUndefined(current.lastHealth)?.upstreamSupervisor?.pid;
+        if (
+          Option.isNone(current.ownedChild) ||
+          Option.getOrUndefined(current.lastHealth)?.upstreamSupervisor !== undefined
+        ) {
+          return yield* refuseUnownedControl;
+        }
 
         // A replacement daemon has a new root token and issues a new lease. Tear
         // down every stale process and private credential before spawning so a
         // reused PID, socket file, or credential cannot be mistaken for the new
         // authenticated runtime.
-        if (supervisorPid !== undefined && supervisorPid !== Option.getOrUndefined(current.pid)) {
-          yield* terminateExternalPid(supervisorPid);
-        }
         yield* Option.match(current.terminate, {
           onNone: () => Effect.void,
           onSome: (terminate) => terminate,
@@ -1316,7 +1316,6 @@ const makeDesktopProviderDaemonManager = Effect.gen(function* () {
         yield* removeMarker(environment.providerDaemonMarkerPath);
         yield* removeCredential(environment.providerDaemonCredentialPath);
         yield* removeProviderDaemonIpcSocket(environment);
-        yield* reapStaleProviderRuntimeProcesses([]);
         yield* Ref.set(state, {
           ...initialState,
           recoveryCount: current.recoveryCount + 1,

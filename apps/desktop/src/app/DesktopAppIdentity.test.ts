@@ -33,6 +33,8 @@ interface ElectronAppCalls {
   readonly setAboutPanelOptions: Array<Electron.AboutPanelOptionsOptions>;
   readonly setDockIcon: string[];
   readonly setName: string[];
+  readonly setAppUserModelId: string[];
+  readonly setDesktopName: string[];
 }
 
 const makeElectronAppLayer = (calls: ElectronAppCalls) =>
@@ -53,8 +55,14 @@ const makeElectronAppLayer = (calls: ElectronAppCalls) =>
       Effect.sync(() => {
         calls.setAboutPanelOptions.push(options);
       }),
-    setAppUserModelId: () => Effect.void,
-    setDesktopName: () => Effect.void,
+    setAppUserModelId: (id) =>
+      Effect.sync(() => {
+        calls.setAppUserModelId.push(id);
+      }),
+    setDesktopName: (name) =>
+      Effect.sync(() => {
+        calls.setDesktopName.push(name);
+      }),
     setDockIcon: (iconPath) =>
       Effect.sync(() => {
         calls.setDockIcon.push(iconPath);
@@ -110,6 +118,8 @@ const withIdentity = <A, E, R>(
     setAboutPanelOptions: [],
     setDockIcon: [],
     setName: [],
+    setAppUserModelId: [],
+    setDesktopName: [],
   };
 
   return effect.pipe(
@@ -138,7 +148,10 @@ describe("DesktopAppIdentity", () => {
         const environment = yield* DesktopEnvironment.DesktopEnvironment;
         const userDataPath = yield* identity.resolveUserDataPath;
 
-        assert.equal(userDataPath, environment.path.join("/Users/alice", ".cafe-code", "userdata"));
+        assert.equal(
+          userDataPath,
+          environment.path.join(environment.path.resolve("/Users/alice"), ".cafe-code", "userdata"),
+        );
       }),
     ),
   );
@@ -148,6 +161,8 @@ describe("DesktopAppIdentity", () => {
       setAboutPanelOptions: [],
       setDockIcon: [],
       setName: [],
+      setAppUserModelId: [],
+      setDesktopName: [],
     };
 
     return withIdentity(
@@ -172,4 +187,73 @@ describe("DesktopAppIdentity", () => {
       },
     );
   });
+
+  it.effect("keeps Debug browser storage and native app name separate from Production", () => {
+    const calls: ElectronAppCalls = {
+      setAboutPanelOptions: [],
+      setDockIcon: [],
+      setName: [],
+      setAppUserModelId: [],
+      setDesktopName: [],
+    };
+
+    return withIdentity(
+      Effect.gen(function* () {
+        const identity = yield* DesktopAppIdentity.DesktopAppIdentity;
+        const environment = yield* DesktopEnvironment.DesktopEnvironment;
+        assert.equal(
+          yield* identity.resolveUserDataPath,
+          environment.path.join(
+            environment.path.resolve("/Users/alice"),
+            ".cafe-code",
+            ".debug",
+            "userdata",
+          ),
+        );
+        yield* identity.configure;
+        assert.deepEqual(calls.setName, ["Cafe Code (Debug)"]);
+        assert.equal(calls.setAboutPanelOptions[0]?.applicationName, "Cafe Code (Debug)");
+        assert.equal(calls.setAboutPanelOptions[0]?.version, "unknown");
+      }),
+      { calls, environment: { isPackaged: false } },
+    );
+  });
+
+  for (const platform of ["win32", "linux"] as const) {
+    for (const isPackaged of [true, false]) {
+      it.effect(
+        `configures ${platform} ${isPackaged ? "Production" : "Debug"} native identity`,
+        () => {
+          const calls: ElectronAppCalls = {
+            setAboutPanelOptions: [],
+            setDockIcon: [],
+            setName: [],
+            setAppUserModelId: [],
+            setDesktopName: [],
+          };
+
+          return withIdentity(
+            Effect.gen(function* () {
+              const identity = yield* DesktopAppIdentity.DesktopAppIdentity;
+              yield* identity.configure;
+              assert.deepEqual(calls.setName, [isPackaged ? "Cafe Code" : "Cafe Code (Debug)"]);
+              assert.deepEqual(
+                calls.setAppUserModelId,
+                platform === "win32"
+                  ? [isPackaged ? "com.cafeai.cafecode" : "com.cafeai.cafecode.debug"]
+                  : [],
+              );
+              assert.deepEqual(
+                calls.setDesktopName,
+                platform === "linux"
+                  ? [isPackaged ? "cafecode.desktop" : "cafecode-debug.desktop"]
+                  : [],
+              );
+            }),
+            { calls, environment: { platform, isPackaged } },
+          );
+        },
+      );
+    }
+  }
 });

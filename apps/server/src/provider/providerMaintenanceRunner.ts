@@ -30,6 +30,7 @@ import { makeProviderMaintenanceCommandCoordinator } from "./providerMaintenance
 import { enrichProviderSnapshotWithVersionAdvisory } from "./providerMaintenance.ts";
 import type { ProviderMaintenanceCapabilities } from "./providerMaintenance.ts";
 import { collectUint8StreamText } from "../stream/collectUint8StreamText.ts";
+import { ServerConfig } from "../config.ts";
 const isServerProviderUpdateError = Schema.is(ServerProviderUpdateError);
 
 const UPDATE_TIMEOUT_MS = 5 * 60_000;
@@ -292,6 +293,9 @@ export const make = Effect.fn("ProviderMaintenanceRunner.make")(function* () {
   const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
   const httpClient = yield* HttpClient.HttpClient;
   const runnerScope = yield* Effect.scope;
+  const configuration = yield* Effect.serviceOption(ServerConfig);
+  const isDebugProfile =
+    Option.isSome(configuration) && configuration.value.dataProfile === "debug";
   const runMaintenanceCommand = (command: string, args: ReadonlyArray<string>) =>
     runProviderMaintenanceCommandWithSpawner({
       spawner,
@@ -375,6 +379,15 @@ export const make = Effect.fn("ProviderMaintenanceRunner.make")(function* () {
     "ProviderMaintenanceRunner.updateProvider",
   )(function* (target) {
     const provider = typeof target === "string" ? target : target.provider;
+    // Profile-local account state does not make a system/managed executable
+    // installation private. Refuse before capability lookup, refresh or spawn.
+    if (isDebugProfile) {
+      return yield* new ServerProviderUpdateError({
+        provider,
+        reason:
+          "Provider updates are disabled in Debug because the installed executable may be shared with Production. Update it deliberately outside Debug.",
+      });
+    }
     const instanceId =
       typeof target === "string"
         ? defaultInstanceIdForDriver(provider)

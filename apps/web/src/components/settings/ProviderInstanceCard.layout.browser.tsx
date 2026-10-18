@@ -23,10 +23,29 @@ import { ProviderInstanceCard } from "./ProviderInstanceCard";
 import { DRIVER_OPTION_BY_VALUE } from "./providerDriverMeta";
 
 const api = vi.hoisted(() => ({
+  dataProfile: undefined as "production" | "debug" | undefined,
+  providerDataProfiles: {} as Record<
+    string,
+    { scope: "profile-local" | "shared" | "unconfigured"; nativeHome?: string }
+  >,
   ensureLocalApi: vi.fn(() => {
     throw new Error("Layout fixtures must not contact a provider or redeem usage resets");
   }),
 }));
+vi.mock("../../rpc/serverState", async (importOriginal) => {
+  const original = await importOriginal<typeof import("../../rpc/serverState")>();
+  return {
+    ...original,
+    useServerConfig: () =>
+      api.dataProfile
+        ? {
+            dataProfile: api.dataProfile,
+            providerDataProfiles: api.providerDataProfiles,
+            environment: { platform: { os: "unknown" } },
+          }
+        : null,
+  };
+});
 vi.mock("../../localApi", () => ({ ensureLocalApi: api.ensureLocalApi }));
 
 const privateEmail = `${"private-account".repeat(10)}@example.invalid`;
@@ -181,6 +200,8 @@ afterEach(async () => {
   applyInterfaceScalePercent(undefined);
   expect(api.ensureLocalApi).not.toHaveBeenCalled();
   api.ensureLocalApi.mockClear();
+  api.dataProfile = undefined;
+  api.providerDataProfiles = {};
 });
 
 async function mountCards(
@@ -234,6 +255,60 @@ async function mountCards(
 function expectNoHorizontalOverflow(element: HTMLElement) {
   expect(element.scrollWidth).toBeLessThanOrEqual(element.clientWidth + 1);
 }
+
+it("requires an explicit Debug native-state sharing choice and keeps it out of Production", async () => {
+  api.dataProfile = "debug";
+  const fixture = cardFixture("minimal", true);
+  const privateHome = "fixture-private-debug-provider-home";
+  api.providerDataProfiles[fixture.instanceId] = { scope: "unconfigured", nativeHome: privateHome };
+  const card = (instance: ProviderInstanceConfig) => (
+    <TooltipProvider>
+      <ProviderInstanceCard
+        instanceId={fixture.instanceId}
+        instance={instance}
+        driverOption={DRIVER_OPTION_BY_VALUE[fixture.instance.driver]}
+        liveProvider={fixture.provider}
+        isSettingsOpen
+        onSettingsOpenChange={fixture.onSettingsOpenChange}
+        isDefaultProvider={false}
+        onSetDefaultProvider={fixture.onSetDefaultProvider}
+        onUpdate={fixture.onUpdate}
+        onRestartRuntime={fixture.onRestartRuntime}
+        hiddenModels={[]}
+        favoriteModels={[]}
+        modelOrder={[]}
+        onHiddenModelsChange={vi.fn()}
+        onFavoriteModelsChange={vi.fn()}
+        onModelOrderChange={vi.fn()}
+      />
+    </TooltipProvider>
+  );
+  mounted = await render(card(fixture.instance));
+  const sharing = page.getByRole("switch", {
+    name: "Allow shared native provider state",
+    exact: true,
+  });
+  await expect.element(sharing).not.toBeChecked();
+  await expect.element(page.getByText("Private Debug native home", { exact: true })).toBeVisible();
+  await expect.element(page.getByText(privateHome, { exact: true })).toBeVisible();
+  await expect.element(page.getByText("Debug-only opt-in:", { exact: false })).toBeVisible();
+  await sharing.click();
+  expect(fixture.onUpdate).toHaveBeenLastCalledWith({
+    ...fixture.instance,
+    debugStateSharing: true,
+  });
+  await mounted.rerender(card({ ...fixture.instance, debugStateSharing: true }));
+  await expect.element(sharing).toBeChecked();
+  await sharing.click();
+  expect(fixture.onUpdate).toHaveBeenLastCalledWith({
+    ...fixture.instance,
+    debugStateSharing: false,
+  });
+  api.dataProfile = "production";
+  await mounted.rerender(card(fixture.instance));
+  await expect.element(sharing).not.toBeInTheDocument();
+  expect(fixture.onRestartRuntime).not.toHaveBeenCalled();
+});
 
 it("edits a scoped account concurrency default without changing runtime config or restarting", async () => {
   const fixture = cardFixture("minimal", true);

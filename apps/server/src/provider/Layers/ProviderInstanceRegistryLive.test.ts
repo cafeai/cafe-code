@@ -33,6 +33,7 @@ import {
   ProviderInstanceId,
   type ProviderSession,
   type ServerProvider,
+  ServerSettings,
   ThreadId,
   TurnId,
 } from "@cafecode/contracts";
@@ -56,6 +57,8 @@ import type { ProviderDriver } from "../ProviderDriver.ts";
 import type { ProviderAdapterShape } from "../Services/ProviderAdapter.ts";
 import { NoOpProviderEventLoggers, ProviderEventLoggers } from "./ProviderEventLoggers.ts";
 import { makeProviderInstanceRegistry } from "./ProviderInstanceRegistryLive.ts";
+import { deriveProviderInstanceConfigMap } from "./ProviderInstanceRegistryHydration.ts";
+import { applyDebugProviderSettingsDefaults } from "../debugProviderProfile.ts";
 
 const TestHttpClientLive = Layer.succeed(
   HttpClient.HttpClient,
@@ -203,6 +206,64 @@ const makeLifecycleDriver = Effect.gen(function* () {
       }),
   };
   return { driver, counters, subscribed, publications };
+});
+
+describe("Debug profile provider construction boundary", () => {
+  it.effect(
+    "does not construct any fresh built-in, so constructors cannot probe global auth or spawn",
+    () =>
+      Effect.gen(function* () {
+        let constructions = 0;
+        const driverKinds = ["codex", "claudeAgent", "grok", "opencode", "axiom"];
+        const drivers = driverKinds.map((kind): ProviderDriver<unknown> => ({
+          driverKind: ProviderDriverKind.make(kind),
+          metadata: { displayName: kind },
+          configSchema: Schema.Unknown,
+          defaultConfig: () => ({}),
+          create: () =>
+            Effect.sync(() => {
+              constructions += 1;
+              throw new Error("Fresh Debug must not enter a provider constructor");
+            }),
+        }));
+        const settings = Schema.decodeUnknownSync(ServerSettings)(
+          applyDebugProviderSettingsDefaults({}),
+        );
+        const { registry } = yield* makeProviderInstanceRegistry({
+          drivers,
+          configMap: deriveProviderInstanceConfigMap(settings),
+          profile: { dataProfile: "debug", baseDir: ".debug-unused-no-io" },
+        });
+        expect(constructions).toBe(0);
+        expect(yield* registry.listInstances).toEqual([]);
+        expect(yield* registry.listUnavailable).toHaveLength(driverKinds.length);
+      }).pipe(Effect.scoped),
+  );
+
+  it.effect(
+    "requires deliberate unsupported-driver sharing and retires its exact owner when consent is revoked",
+    () =>
+      Effect.gen(function* () {
+        const { driver, counters } = yield* makeLifecycleDriver;
+        const instanceId = ProviderInstanceId.make("debug-external");
+        const entry = { driver: driver.driverKind, enabled: true };
+        const { registry, mutator } = yield* makeProviderInstanceRegistry({
+          drivers: [driver],
+          configMap: { [instanceId]: entry },
+          profile: { dataProfile: "debug", baseDir: ".debug-unused-no-io" },
+        });
+        expect(counters.created).toBe(0);
+        expect(yield* registry.getInstance(instanceId)).toBeUndefined();
+        yield* mutator.reconcile({ [instanceId]: { ...entry, debugStateSharing: true } });
+        expect(counters.created).toBe(1);
+        const owner = yield* registry.getInstance(instanceId);
+        expect(owner).toBeDefined();
+        yield* mutator.reconcile({ [instanceId]: { ...entry, debugStateSharing: false } });
+        expect(counters.closed).toBe(1);
+        expect(counters.created).toBe(1);
+        expect(yield* registry.getInstance(instanceId)).toBeUndefined();
+      }).pipe(Effect.scoped),
+  );
 });
 
 describe("ProviderInstanceRegistryLive — non-runtime settings", () => {

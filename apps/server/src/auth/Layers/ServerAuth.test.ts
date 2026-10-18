@@ -49,6 +49,111 @@ const requestMetadata = {
 };
 
 it.layer(NodeServices.layer)("ServerAuthLive", (it) => {
+  it.effect(
+    "keeps Production and Debug browser credentials independent when both cookies arrive",
+    () =>
+      Effect.gen(function* () {
+        const production = yield* ServerAuth;
+        const productionPairing = yield* production.issuePairingCredential();
+        const productionSession = yield* production.exchangeBootstrapCredential(
+          productionPairing.credential,
+          requestMetadata,
+        );
+
+        yield* Effect.gen(function* () {
+          const debug = yield* ServerAuth;
+          const debugPairing = yield* debug.issuePairingCredential();
+          const debugSession = yield* debug.exchangeBootstrapCredential(
+            debugPairing.credential,
+            requestMetadata,
+          );
+          expect(debugSession.sessionToken).not.toBe(productionSession.sessionToken);
+          expect((yield* debug.getDescriptor()).sessionCookieName).toBe("t3_debug_session_13773");
+          expect((yield* production.getDescriptor()).sessionCookieName).toBe("t3_session");
+
+          // Browsers send same-host cookies across ports. Each profile selects
+          // only its own cookie, for both the HTTP and HTTPS sibling names.
+          for (const [productionCookie, debugCookie] of [
+            ["t3_session", "t3_debug_session_13773"],
+            ["t3_session_https_3774", "t3_debug_session_https_13774"],
+          ] as const) {
+            const both = {
+              ...makeCookieRequest(debugSession.sessionToken, debugCookie),
+              cookies: {
+                [productionCookie]: productionSession.sessionToken,
+                [debugCookie]: debugSession.sessionToken,
+              },
+            };
+            const productionAccepted = yield* production.authenticateHttpRequest(both);
+            const debugAccepted = yield* debug.authenticateHttpRequest(both);
+            expect(productionAccepted.sessionId).not.toBe(debugAccepted.sessionId);
+
+            // The other profile's name is not an alias, even when its value is
+            // an otherwise valid token for this exact recipient.
+            const debugWrongName = yield* Effect.flip(
+              debug.authenticateHttpRequest(
+                makeCookieRequest(debugSession.sessionToken, productionCookie),
+              ),
+            );
+            const productionWrongName = yield* Effect.flip(
+              production.authenticateHttpRequest(
+                makeCookieRequest(productionSession.sessionToken, debugCookie),
+              ),
+            );
+            expect(debugWrongName.status).toBe(401);
+            expect(productionWrongName.status).toBe(401);
+
+            // Correct names do not weaken signature/session ownership. A token
+            // issued by the other isolated credential store remains invalid.
+            const debugForeignToken = yield* Effect.flip(
+              debug.authenticateHttpRequest(
+                makeCookieRequest(productionSession.sessionToken, debugCookie),
+              ),
+            );
+            const productionForeignToken = yield* Effect.flip(
+              production.authenticateHttpRequest(
+                makeCookieRequest(debugSession.sessionToken, productionCookie),
+              ),
+            );
+            expect(debugForeignToken.status).toBe(401);
+            expect(productionForeignToken.status).toBe(401);
+            expect((yield* debug.authenticateHttpRequest(both)).sessionId).toBe(
+              debugAccepted.sessionId,
+            );
+            expect((yield* production.authenticateHttpRequest(both)).sessionId).toBe(
+              productionAccepted.sessionId,
+            );
+          }
+        }).pipe(
+          // Build a distinct credential store and in-memory session database;
+          // neither profile may borrow the other's secrets through layer reuse.
+          Effect.provide(
+            Layer.fresh(
+              makeServerAuthLayer({
+                dataProfile: "debug",
+                mode: "web",
+                port: 13773,
+                httpsEnabled: true,
+                httpsPort: 13774,
+              }),
+            ),
+          ),
+        );
+      }).pipe(
+        Effect.provide(
+          Layer.fresh(
+            makeServerAuthLayer({
+              dataProfile: "production",
+              mode: "web",
+              port: 3773,
+              httpsEnabled: true,
+              httpsPort: 3774,
+            }),
+          ),
+        ),
+      ),
+  );
+
   it.effect("maps invalid bootstrap credential failures to 401", () =>
     Effect.sync(() => {
       const error = toBootstrapExchangeAuthError(

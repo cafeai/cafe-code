@@ -22,18 +22,103 @@ import {
   ServerSettingsService,
 } from "./serverSettings.ts";
 
-const makeServerSettingsLayer = () =>
+const makeServerSettingsLayer = (dataProfile?: "production" | "debug") =>
   ServerSettingsLive.pipe(
     Layer.provideMerge(
       Layer.fresh(
-        ServerConfig.layerTest(process.cwd(), {
-          prefix: "t3code-server-settings-test-",
-        }),
+        Layer.effect(
+          ServerConfig,
+          Effect.gen(function* () {
+            const config = yield* ServerConfig;
+            return { ...config, ...(dataProfile ? { dataProfile } : {}) };
+          }),
+        ).pipe(
+          Layer.provide(
+            ServerConfig.layerTest(process.cwd(), {
+              prefix: "t3code-server-settings-test-",
+            }),
+          ),
+        ),
       ),
     ),
   );
 
 it.layer(NodeServices.layer)("server settings", (it) => {
+  it.effect(
+    "refuses malformed existing Debug settings without fallback, overwrite or received-content disclosure",
+    () =>
+      Effect.gen(function* () {
+        const service = yield* ServerSettingsService;
+        const config = yield* ServerConfig;
+        const fs = yield* FileSystem.FileSystem;
+        const original = "{ invalid-private-fixture-content";
+        yield* fs.writeFileString(config.settingsPath, original);
+        const failure = yield* service.getSettings.pipe(Effect.flip);
+        assert.strictEqual(failure._tag, "ServerSettingsError");
+        assert.include(failure.detail, "original file was preserved");
+        assert.notInclude(failure.detail, "invalid-private-fixture-content");
+        const updateFailure = yield* service
+          .updateSettings({ enableAssistantStreaming: false })
+          .pipe(Effect.flip);
+        assert.strictEqual(updateFailure._tag, "ServerSettingsError");
+        assert.strictEqual(yield* fs.readFileString(config.settingsPath), original);
+      }).pipe(Effect.provide(makeServerSettingsLayer("debug"))),
+  );
+  it.effect(
+    "retains Production's existing malformed-settings fallback without rewriting the file",
+    () =>
+      Effect.gen(function* () {
+        const service = yield* ServerSettingsService;
+        const config = yield* ServerConfig;
+        const fs = yield* FileSystem.FileSystem;
+        const original = "{ invalid-production-fixture";
+        yield* fs.writeFileString(config.settingsPath, original);
+        assert.deepEqual(yield* service.getSettings, DEFAULT_SERVER_SETTINGS);
+        assert.strictEqual(yield* fs.readFileString(config.settingsPath), original);
+      }).pipe(Effect.provide(makeServerSettingsLayer("production"))),
+  );
+  it.effect("keeps fresh Debug providers disabled and persists only deliberate account setup", () =>
+    Effect.gen(function* () {
+      const service = yield* ServerSettingsService;
+      const config = yield* ServerConfig;
+      const fs = yield* FileSystem.FileSystem;
+      const fresh = yield* service.getSettings;
+      assert.isTrue(Object.values(fresh.providers).every((provider) => provider.enabled === false));
+      assert.isTrue(
+        Object.values(fresh.providerInstances).every((provider) => provider.enabled === false),
+      );
+      yield* service.updateSettings({ enableAssistantStreaming: false });
+      const axiom = ProviderInstanceId.make("axiom");
+      const partial = yield* service.updateSettings({
+        providerInstances: {
+          [ProviderInstanceId.make("private-codex")]: {
+            driver: ProviderDriverKind.make("codex"),
+            enabled: true,
+          },
+        },
+      });
+      assert.strictEqual(partial.providerInstances[axiom]?.enabled, false);
+      const enabled = yield* service.updateSettings({
+        providerInstances: {
+          [axiom]: {
+            driver: ProviderDriverKind.make("axiom"),
+            enabled: true,
+            debugStateSharing: true,
+          },
+        },
+      });
+      assert.strictEqual(enabled.providerInstances[axiom]?.debugStateSharing, true);
+      assert.strictEqual(enabled.providerInstances[axiom]?.enabled, true);
+      assert.strictEqual(enabled.providers.codex.enabled, false);
+      const persisted = JSON.parse(yield* fs.readFileString(config.settingsPath));
+      assert.strictEqual(persisted.providerInstances.axiom.debugStateSharing, true);
+      assert.strictEqual(persisted.providers.codex.enabled, false);
+      yield* service.start;
+      const loaded = yield* service.getSettings;
+      assert.strictEqual(loaded.providerInstances[axiom]?.enabled, true);
+      assert.strictEqual(loaded.providers.codex.enabled, false);
+    }).pipe(Effect.provide(makeServerSettingsLayer("debug"))),
+  );
   it.effect(
     "adds the default Axiom account to existing settings and preserves saved disabling",
     () =>

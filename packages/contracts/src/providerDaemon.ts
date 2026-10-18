@@ -146,6 +146,8 @@ export const ProviderDaemonBootstrap = Schema.Struct({
   host: Schema.optional(Schema.String),
   socketPath: Schema.optional(Schema.String),
   cafeCodeHome: Schema.String,
+  dataProfile: Schema.optional(Schema.Literals(["production", "debug"])),
+  configuredCafeCodeHome: Schema.optional(Schema.String),
   // Main backend loopback port used by provider-owned Cafe MCP clients. The
   // provider daemon's own transport is not the Cafe application listener.
   cafeMcpPort: Schema.optional(PortSchema),
@@ -162,6 +164,9 @@ export type ProviderDaemonBootstrap = typeof ProviderDaemonBootstrap.Type;
 export const ProviderDaemonMarker = Schema.Struct({
   version: Schema.Literals([1, 2]),
   mode: Schema.optional(ProviderRuntimeProcessMode),
+  // Missing is legacy unknown, not evidence of the reader's current profile.
+  dataProfile: Schema.optional(Schema.Literals(["production", "debug"])),
+  dataProfileId: Schema.optional(Schema.String.check(Schema.isPattern(/^[a-f0-9]{64}$/))),
   protocolVersion: Schema.optional(NonNegativeInt),
   pid: NonNegativeInt,
   ppid: Schema.optional(NonNegativeInt),
@@ -393,6 +398,8 @@ export type ProviderDaemonQualificationSummary = typeof ProviderDaemonQualificat
 export const ProviderDaemonHealth = Schema.Struct({
   ok: Schema.Literal(true),
   mode: ProviderRuntimeProcessMode,
+  dataProfile: Schema.optional(Schema.Literals(["production", "debug"])),
+  dataProfileId: Schema.optional(Schema.String.check(Schema.isPattern(/^[a-f0-9]{64}$/))),
   protocolVersion: Schema.optional(NonNegativeInt),
   pid: NonNegativeInt,
   ppid: NonNegativeInt,
@@ -440,6 +447,8 @@ export type ProviderDaemonHealth = typeof ProviderDaemonHealth.Type;
 export const ProviderDaemonLiveness = Schema.Struct({
   ok: Schema.Literal(true),
   mode: ProviderRuntimeProcessMode,
+  dataProfile: Schema.optional(Schema.Literals(["production", "debug"])),
+  dataProfileId: Schema.optional(Schema.String.check(Schema.isPattern(/^[a-f0-9]{64}$/))),
   protocolVersion: Schema.optional(NonNegativeInt),
   pid: NonNegativeInt,
   ppid: NonNegativeInt,

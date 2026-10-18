@@ -3,6 +3,10 @@ import * as NodeHttpServer from "@effect/platform-node/NodeHttpServer";
 import * as NodeSocket from "@effect/platform-node/NodeSocket";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as NodeCrypto from "node:crypto";
+import {
+  BACKEND_READINESS_CHALLENGE_HEADER,
+  BACKEND_READINESS_PROOF_HEADER,
+} from "@cafecode/shared/backendReadiness";
 // @effect-diagnostics-next-line nodeBuiltinImport:off - The compression test must construct the production Node HTTP server layer directly.
 import * as NodeHttp from "node:http";
 import * as NodeNet from "node:net";
@@ -1990,6 +1994,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
       )) as typeof testEnvironmentDescriptor;
 
       assert.equal(response.status, 200);
+      assert.isNull(response.headers.get(BACKEND_READINESS_PROOF_HEADER));
       assert.deepEqual(body, testEnvironmentDescriptor);
     }).pipe(Effect.provide(makeHttpServerTestLayer())),
   );
@@ -2015,6 +2020,93 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
       assert.deepEqual(body, testEnvironmentDescriptor);
     }).pipe(Effect.provide(makeHttpServerTestLayer())),
   );
+
+  it.effect(
+    "proves exact desktop child readiness without changing or disclosing the public descriptor",
+    () =>
+      Effect.gen(function* () {
+        const desktopReadinessToken = "ab".repeat(32);
+        yield* buildAppUnderTest({ config: { desktopReadinessToken } });
+        const url = yield* getHttpServerUrl("/.well-known/cafe-code/environment");
+        const proofs: string[] = [];
+        for (const challenge of ["cd".repeat(32), "ef".repeat(32)]) {
+          const response = yield* Effect.promise(() =>
+            fetch(url, {
+              headers: {
+                origin: crossOriginClientOrigin,
+                [BACKEND_READINESS_CHALLENGE_HEADER]: challenge,
+              },
+            }),
+          );
+          const proof = response.headers.get(BACKEND_READINESS_PROOF_HEADER);
+          const expected = NodeCrypto.createHmac(
+            "sha256",
+            Buffer.from(desktopReadinessToken, "hex"),
+          )
+            .update("cafecode.backend-readiness.v1\0", "utf8")
+            .update(challenge, "ascii")
+            .digest("hex");
+          assert.equal(response.status, 200);
+          assert.equal(proof, expected);
+          assert.notEqual(proof, desktopReadinessToken);
+          assertBrowserApiCorsHeaders(response.headers);
+          assert.isNull(response.headers.get("access-control-expose-headers"));
+          assert.notInclude(
+            response.headers.get("access-control-allow-headers") ?? "",
+            BACKEND_READINESS_CHALLENGE_HEADER,
+          );
+          assert.deepEqual(yield* Effect.promise(() => response.json()), testEnvironmentDescriptor);
+          proofs.push(expected);
+        }
+        assert.notEqual(proofs[0], proofs[1]);
+      }).pipe(Effect.provide(makeHttpServerTestLayer())),
+  );
+
+  it.effect("omits readiness proof for absent or malformed desktop challenges", () =>
+    Effect.gen(function* () {
+      yield* buildAppUnderTest({ config: { desktopReadinessToken: "ab".repeat(32) } });
+      const url = yield* getHttpServerUrl("/.well-known/cafe-code/environment");
+      for (const challenge of [
+        undefined,
+        "",
+        "a".repeat(63),
+        "a".repeat(65),
+        "A".repeat(64),
+        "g".repeat(64),
+        `${"ab".repeat(32)}, ${"cd".repeat(32)}`,
+        "a".repeat(4096),
+      ]) {
+        const response = yield* Effect.promise(() =>
+          fetch(url, {
+            headers:
+              challenge === undefined ? {} : { [BACKEND_READINESS_CHALLENGE_HEADER]: challenge },
+          }),
+        );
+        assert.equal(response.status, 200);
+        assert.isNull(response.headers.get(BACKEND_READINESS_PROOF_HEADER));
+        assert.deepEqual(yield* Effect.promise(() => response.json()), testEnvironmentDescriptor);
+      }
+    }).pipe(Effect.provide(makeHttpServerTestLayer())),
+  );
+
+  for (const [name, config] of [
+    ["legacy desktop without a private key", {}],
+    ["desktop with a malformed key", { desktopReadinessToken: "not-a-private-key" }],
+    ["web mode even with a private key", { mode: "web", desktopReadinessToken: "ab".repeat(32) }],
+  ] satisfies ReadonlyArray<readonly [string, Partial<ServerConfigShape>]>) {
+    it.effect(`keeps public environment behavior without readiness proof for ${name}`, () =>
+      Effect.gen(function* () {
+        yield* buildAppUnderTest({ config });
+        const url = yield* getHttpServerUrl("/.well-known/cafe-code/environment");
+        const response = yield* Effect.promise(() =>
+          fetch(url, { headers: { [BACKEND_READINESS_CHALLENGE_HEADER]: "cd".repeat(32) } }),
+        );
+        assert.equal(response.status, 200);
+        assert.isNull(response.headers.get(BACKEND_READINESS_PROOF_HEADER));
+        assert.deepEqual(yield* Effect.promise(() => response.json()), testEnvironmentDescriptor);
+      }).pipe(Effect.provide(makeHttpServerTestLayer())),
+    );
+  }
 
   it.effect(
     "keeps client debug log ingestion disabled unless server debug logging is enabled",
@@ -5333,6 +5425,74 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
         payload: { providers: nextProviders },
       });
     }).pipe(Effect.provide(makeHttpServerTestLayer())),
+  );
+
+  it.effect(
+    "streams provider setup targets atomically with authenticated settings add, sharing change and removal",
+    () =>
+      Effect.gen(function* () {
+        const id = ProviderInstanceId.make("debug-setup-account");
+        const entry = {
+          driver: ProviderDriverKind.make("codex"),
+          enabled: false,
+          environment: [
+            { name: "OPENAI_API_KEY", value: "private-setup-fixture-secret", sensitive: true },
+          ],
+        };
+        const initial = DEFAULT_SERVER_SETTINGS;
+        const added = {
+          ...initial,
+          providerInstances: { ...initial.providerInstances, [id]: entry },
+        };
+        const shared = {
+          ...added,
+          providerInstances: {
+            ...added.providerInstances,
+            [id]: { ...entry, enabled: true, debugStateSharing: true },
+          },
+        };
+        const removed = { ...initial, providerInstances: {} };
+        yield* buildAppUnderTest({
+          config: { dataProfile: "debug" },
+          layers: {
+            keybindings: { streamChanges: Stream.empty },
+            providerRegistry: { getProviders: Effect.succeed([]), streamChanges: Stream.empty },
+            serverSettings: {
+              getSettings: Effect.succeed(initial),
+              streamChanges: Stream.make(added, shared, removed),
+            },
+          },
+        });
+        const wsUrl = yield* getWsServerUrl("/ws");
+        const events = yield* Effect.scoped(
+          withWsRpcClient(wsUrl, (client) =>
+            client[WS_METHODS.subscribeServerConfig]({}).pipe(Stream.take(4), Stream.runCollect),
+          ),
+        );
+        const [snapshot, add, change, remove] = Array.from(events);
+        assert.strictEqual(snapshot?.type, "snapshot");
+        assert.strictEqual(add?.type, "settingsUpdated");
+        assert.strictEqual(change?.type, "settingsUpdated");
+        assert.strictEqual(remove?.type, "settingsUpdated");
+        if (
+          add?.type !== "settingsUpdated" ||
+          change?.type !== "settingsUpdated" ||
+          remove?.type !== "settingsUpdated"
+        )
+          throw new Error("Expected settings receipts");
+        assert.deepEqual(add.payload.providerDataProfiles?.[id]?.scope, "unconfigured");
+        assert.isString(add.payload.providerDataProfiles?.[id]?.nativeHome);
+        assert.strictEqual(add.payload.settings.providerInstances[id]?.enabled, false);
+        assert.strictEqual(
+          add.payload.settings.providerInstances[id]?.environment?.[0]?.valueRedacted,
+          true,
+        );
+        assert.deepEqual(change.payload.providerDataProfiles?.[id], { scope: "shared" });
+        assert.strictEqual(change.payload.settings.providerInstances[id]?.debugStateSharing, true);
+        assert.isUndefined(remove.payload.providerDataProfiles?.[id]);
+        assert.isUndefined(remove.payload.settings.providerInstances[id]);
+        assert.notInclude(JSON.stringify(events), "private-setup-fixture-secret");
+      }).pipe(Effect.provide(makeHttpServerTestLayer())),
   );
 
   it.effect(

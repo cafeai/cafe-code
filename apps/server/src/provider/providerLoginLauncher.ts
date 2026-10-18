@@ -20,11 +20,16 @@ import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
 
 import { ServerSettingsService } from "../serverSettings.ts";
+import { ServerConfig } from "../config.ts";
+import {
+  prepareDebugProviderHome,
+  resolveProviderProfileAdmission,
+  type ProviderDataProfile,
+} from "./debugProviderProfile.ts";
 import { deriveProviderInstanceConfigMap } from "./Layers/ProviderInstanceRegistryHydration.ts";
 import { makeClaudeNonChatEnvironment } from "./Drivers/ClaudeHome.ts";
 import { materializeCodexShadowHome, resolveCodexHomeLayout } from "./Drivers/CodexHomeLayout.ts";
 import { withDefaultCodexShadowHome } from "./Drivers/CodexDriver.ts";
-import { mergeProviderInstanceEnvironment } from "./ProviderInstanceEnvironment.ts";
 import {
   resolveProviderRuntimeEnvironment,
   type ResolveManagedProviderRuntimeOptions,
@@ -65,6 +70,7 @@ export interface ResolveProviderLoginLaunchPlanOptions {
   readonly settings: ServerSettings;
   readonly baseEnv?: NodeJS.ProcessEnv | undefined;
   readonly platform?: NodeJS.Platform | undefined;
+  readonly profile?: ProviderDataProfile | undefined;
 }
 
 function loginError(
@@ -428,22 +434,49 @@ export const resolveProviderLoginLaunchPlan = Effect.fn(
     return yield* loginError(instanceId, `Provider instance '${instanceId}' is disabled.`);
   }
 
-  const environment = mergeProviderInstanceEnvironment(instanceConfig.environment, options.baseEnv);
+  const admission = resolveProviderProfileAdmission({
+    profile: options.profile,
+    instanceId,
+    entry: instanceConfig,
+    config: instanceConfig.config ?? {},
+    enabled: instanceConfig.enabled ?? true,
+    baseEnvironment: options.baseEnv,
+  });
+  if (admission.kind === "refused") return yield* loginError(instanceId, admission.reason);
+  if (admission.nativeHome && options.profile) {
+    yield* Effect.tryPromise({
+      try: () => prepareDebugProviderHome(options.profile!, admission.nativeHome!),
+      catch: () =>
+        loginError(
+          instanceId,
+          "Debug provider home could not be prepared safely. No login was started.",
+        ),
+    });
+  }
+  const environment = admission.processEnvironment;
   switch (instanceConfig.driver) {
     case CODEX_DRIVER:
       return yield* resolveCodexLoginPlan({
         instanceId,
-        config: instanceConfig.config,
+        config: admission.config,
         environment,
         platform,
-      });
+      }).pipe(
+        Effect.map((plan) =>
+          admission.nativeHome ? { ...plan, cwd: admission.nativeHome } : plan,
+        ),
+      );
     case CLAUDE_DRIVER:
       return yield* resolveClaudeLoginPlan({
         instanceId,
-        config: instanceConfig.config,
+        config: admission.config,
         environment,
         platform,
-      });
+      }).pipe(
+        Effect.map((plan) =>
+          admission.nativeHome ? { ...plan, cwd: admission.nativeHome } : plan,
+        ),
+      );
     default:
       return yield* loginError(
         instanceId,
@@ -478,10 +511,15 @@ export const loginProvider = Effect.fn("ProviderLoginLauncher.loginProvider")(fu
   ServerSettingsService | FileSystem.FileSystem | Path.Path
 > {
   const serverSettings = yield* ServerSettingsService;
+  const profile = yield* Effect.serviceOption(ServerConfig);
   const settings = yield* serverSettings.getSettings.pipe(
     Effect.mapError((cause) => loginError(input.instanceId, cause.detail, cause)),
   );
-  const plan = yield* resolveProviderLoginLaunchPlan({ input, settings });
+  const plan = yield* resolveProviderLoginLaunchPlan({
+    input,
+    settings,
+    ...(profile._tag === "Some" ? { profile: profile.value } : {}),
+  });
   yield* launchProviderLoginPlan(plan);
   return {
     instanceId: plan.instanceId,

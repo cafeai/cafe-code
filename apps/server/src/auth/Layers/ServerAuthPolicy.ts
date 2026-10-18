@@ -34,6 +34,7 @@ export const makeServerAuthPolicy = Effect.gen(function* () {
     sessionCookieName: resolveSessionCookieName({
       mode: config.mode,
       port: config.port,
+      dataProfile: config.dataProfile,
     }),
   };
 

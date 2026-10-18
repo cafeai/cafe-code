@@ -18,7 +18,7 @@ import * as NetService from "@cafecode/shared/Net";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { deriveServerPaths } from "../config.ts";
 import { resolveBaseDir } from "../os-jank.ts";
-import { resolveServerConfig } from "./config.ts";
+import { resolveServerConfig, type CliServerFlags } from "./config.ts";
 
 const encodeDesktopBootstrap = Schema.encodeEffect(Schema.fromJsonString(DesktopBackendBootstrap));
 
@@ -47,10 +47,9 @@ it.layer(NodeServices.layer)("cli config resolution", (it) => {
     otlpServiceName: "cafe-code-server",
   } as const;
 
-  const openBootstrapFd = Effect.fn(function* (payload: DesktopBackendBootstrapValue) {
+  const openBootstrapTextFd = Effect.fn(function* (encoded: string) {
     const fs = yield* FileSystem.FileSystem;
     const filePath = yield* fs.makeTempFileScoped({ prefix: "t3-bootstrap-", suffix: ".ndjson" });
-    const encoded = yield* encodeDesktopBootstrap(payload);
     yield* fs.writeFileString(filePath, `${encoded}\n`);
     if (process.platform === "win32") {
       // Windows cannot duplicate an inherited descriptor through
@@ -61,6 +60,118 @@ it.layer(NodeServices.layer)("cli config resolution", (it) => {
     const { fd } = yield* fs.open(filePath, { flag: "r" });
     return fd;
   });
+
+  const openBootstrapFd = Effect.fn(function* (payload: DesktopBackendBootstrapValue) {
+    return yield* openBootstrapTextFd(yield* encodeDesktopBootstrap(payload));
+  });
+
+  const readinessServerFlags: CliServerFlags = {
+    mode: Option.none(),
+    port: Option.none(),
+    httpsPort: Option.none(),
+    host: Option.none(),
+    baseDir: Option.none(),
+    cwd: Option.none(),
+    devUrl: Option.none(),
+    noBrowser: Option.none(),
+    noHttps: Option.some(true),
+    bootstrapFd: Option.none(),
+    autoBootstrapProjectFromCwd: Option.none(),
+    logWebSocketEvents: Option.none(),
+  };
+
+  it.effect("takes readiness keys only from an exact private desktop bootstrap", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const baseDir = yield* fs.makeTempDirectoryScoped({ prefix: "t3-readiness-config-" });
+      const desktopReadinessToken = "ab".repeat(32);
+      for (const mode of ["desktop", "web"] as const) {
+        const fd = yield* openBootstrapFd(
+          makeDesktopBootstrap({ cafeCodeHome: baseDir, desktopReadinessToken }),
+        );
+        const resolved = yield* resolveServerConfig(
+          { ...readinessServerFlags, mode: Option.some(mode) },
+          Option.none(),
+        ).pipe(
+          Effect.provide(
+            Layer.mergeAll(
+              ConfigProvider.layer(
+                ConfigProvider.fromEnv({
+                  env: {
+                    CAFE_CODE_BOOTSTRAP_FD: String(fd),
+                    CAFE_CODE_DESKTOP_READINESS_TOKEN: "cd".repeat(32),
+                  },
+                }),
+              ),
+              NetService.layer,
+            ),
+          ),
+        );
+        expect(resolved.desktopReadinessToken).toBe(
+          mode === "desktop" ? desktopReadinessToken : undefined,
+        );
+        expect(resolved.desktopBootstrapToken).toBe("desktop-bootstrap-token");
+      }
+    }),
+  );
+
+  it.effect("does not accept an ambient readiness key without private bootstrap", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const baseDir = yield* fs.makeTempDirectoryScoped({ prefix: "t3-readiness-ambient-" });
+      const resolved = yield* resolveServerConfig(
+        { ...readinessServerFlags, mode: Option.some("desktop"), baseDir: Option.some(baseDir) },
+        Option.none(),
+      ).pipe(
+        Effect.provide(
+          Layer.mergeAll(
+            ConfigProvider.layer(
+              ConfigProvider.fromEnv({
+                env: { CAFE_CODE_DESKTOP_READINESS_TOKEN: "ab".repeat(32) },
+              }),
+            ),
+            NetService.layer,
+          ),
+        ),
+      );
+      expect(resolved.desktopReadinessToken).toBeUndefined();
+    }),
+  );
+
+  it.effect(
+    "refuses malformed private readiness without disclosing envelope values or opening data",
+    () =>
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const parent = yield* fs.makeTempDirectoryScoped({ prefix: "t3-readiness-invalid-" });
+        const baseDir = path.join(parent, "must-remain-unopened");
+        const privateValue = "malformed-private-readiness-value";
+        const fd = yield* openBootstrapTextFd(
+          JSON.stringify(
+            makeDesktopBootstrap({ cafeCodeHome: baseDir, desktopReadinessToken: privateValue }),
+          ),
+        );
+        const error = yield* Effect.flip(
+          resolveServerConfig(readinessServerFlags, Option.none()).pipe(
+            Effect.provide(
+              Layer.mergeAll(
+                ConfigProvider.layer(
+                  ConfigProvider.fromEnv({ env: { CAFE_CODE_BOOTSTRAP_FD: String(fd) } }),
+                ),
+                NetService.layer,
+              ),
+            ),
+          ),
+        );
+        expect(error.message).toBe(
+          "Desktop backend private bootstrap is invalid or unavailable. No profile was opened.",
+        );
+        expect(JSON.stringify(error)).not.toContain(privateValue);
+        expect(JSON.stringify(error)).not.toContain("desktop-bootstrap-token");
+        expect(yield* fs.exists(baseDir)).toBe(false);
+      }),
+  );
 
   it.effect("defaults Cafe Code home to ~/.cafe-code", () =>
     Effect.gen(function* () {
@@ -289,6 +400,7 @@ it.layer(NodeServices.layer)("cli config resolution", (it) => {
       const fd = yield* openBootstrapFd(
         makeDesktopBootstrap({
           noBrowser: true,
+          cafeCodeHome: baseDir,
         }),
       );
       const derivedPaths = yield* deriveServerPaths(baseDir, new URL("http://127.0.0.1:4173"));
@@ -475,7 +587,7 @@ it.layer(NodeServices.layer)("cli config resolution", (it) => {
     }),
   );
 
-  it.effect("applies flag then env precedence over bootstrap envelope values", () =>
+  it.effect("applies non-storage flag then env precedence while retaining the private root", () =>
     Effect.gen(function* () {
       const { join } = yield* Path.Path;
       const baseDir = join(NodeOS.tmpdir(), "t3-cli-config-env-wins");
@@ -483,7 +595,7 @@ it.layer(NodeServices.layer)("cli config resolution", (it) => {
         makeDesktopBootstrap({
           port: 4888,
           host: "127.0.0.2",
-          cafeCodeHome: "/tmp/t3-bootstrap-home",
+          cafeCodeHome: baseDir,
           noBrowser: false,
           desktopBootstrapToken: "desktop-token",
         }),

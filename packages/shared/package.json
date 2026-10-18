@@ -64,6 +64,14 @@
       "types": "./src/backendStartupProgress.ts",
       "import": "./src/backendStartupProgress.ts"
     },
+    "./backendReadiness": {
+      "types": "./src/backendReadiness.ts",
+      "import": "./src/backendReadiness.ts"
+    },
+    "./backendStartupFailure": {
+      "types": "./src/backendStartupFailure.ts",
+      "import": "./src/backendStartupFailure.ts"
+    },
     "./liveWork": {
       "types": "./src/liveWork.ts",
       "import": "./src/liveWork.ts"
@@ -243,6 +251,22 @@
     "./providerRuntimeEventCompaction": {
       "types": "./src/providerRuntimeEventCompaction.ts",
       "import": "./src/providerRuntimeEventCompaction.ts"
+    },
+    "./dataProfile": {
+      "types": "./src/dataProfile.ts",
+      "import": "./src/dataProfile.ts"
+    },
+    "./dataProfileIdentity": {
+      "types": "./src/dataProfileIdentity.ts",
+      "import": "./src/dataProfileIdentity.ts"
+    },
+    "./dataProfileStorage": {
+      "types": "./src/dataProfileStorage.ts",
+      "import": "./src/dataProfileStorage.ts"
+    },
+    "./sourceDebugBuild": {
+      "types": "./src/sourceDebugBuild.ts",
+      "import": "./src/sourceDebugBuild.ts"
     },
     "./startupProfiler": {
       "types": "./src/startupProfiler.ts",

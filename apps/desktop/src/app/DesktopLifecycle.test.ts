@@ -22,6 +22,8 @@ import * as DesktopLifecycle from "./DesktopLifecycle.ts";
 import * as DesktopState from "./DesktopState.ts";
 import * as DesktopWindow from "../window/DesktopWindow.ts";
 import * as IpcChannels from "../ipc/channels.ts";
+import { createDesktopRestartRequest } from "./DesktopProfileControl.ts";
+import { DesktopDataProfileStartup } from "./DesktopDataProfile.ts";
 import {
   runDesktopStartupUntilShutdown,
   startBackendAfterProviderDaemonReady,
@@ -71,6 +73,9 @@ function makeLifecycleHarness(options?: {
   readonly providerDaemonDialogResponse?: number;
   readonly backendReady?: boolean;
   readonly daemonHealthRead?: Effect.Effect<Option.Option<ProviderDaemonHealth>>;
+  readonly dataProfile?: "production" | "debug";
+  readonly stateDir?: string;
+  readonly pendingEarlyRestart?: boolean;
 }) {
   let beforeQuitListener: BeforeQuitListener | undefined;
   let secondInstanceListener: SecondInstanceListener | undefined;
@@ -79,9 +84,13 @@ function makeLifecycleHarness(options?: {
   let shutdownOverlayCount = 0;
   let providerDaemonStopCount = 0;
   let providerDaemonDialogCount = 0;
+  let relaunchCount = 0;
+  let earlyCaptureFinishCount = 0;
+  const exitCodes: number[] = [];
 
   return Effect.gen(function* () {
     const overlaySent = yield* Deferred.make<void>();
+    const relaunched = yield* Deferred.make<void>();
 
     const electronAppLayer = Layer.succeed(ElectronApp.ElectronApp, {
       metadata: Effect.die("unexpected metadata"),
@@ -90,9 +99,16 @@ function makeLifecycleHarness(options?: {
       quit: Effect.sync(() => {
         quitCount += 1;
       }),
-      exit: () => Effect.void,
+      exit: (code) =>
+        Effect.sync(() => {
+          exitCodes.push(code);
+        }),
       requestSingleInstanceLock: Effect.succeed(true),
-      relaunch: () => Effect.void,
+      relaunch: () =>
+        Effect.gen(function* () {
+          relaunchCount += 1;
+          yield* Deferred.succeed(relaunched, undefined);
+        }),
       setPath: () => Effect.void,
       setName: () => Effect.void,
       setAboutPanelOptions: () => Effect.void,
@@ -168,6 +184,9 @@ function makeLifecycleHarness(options?: {
     const desktopEnvironmentLayer = Layer.succeed(DesktopEnvironment.DesktopEnvironment, {
       platform: "darwin",
       isDevelopment: false,
+      dataProfile: options?.dataProfile ?? "debug",
+      configuredBaseDir: "/synthetic/cafe",
+      stateDir: options?.stateDir ?? "/synthetic/cafe/.debug/userdata",
     } as DesktopEnvironment.DesktopEnvironmentShape);
 
     const providerDaemonLayer = Layer.succeed(
@@ -206,12 +225,21 @@ function makeLifecycleHarness(options?: {
       electronDialogLayer,
       electronThemeLayer,
       electronWindowLayer,
+      options?.pendingEarlyRestart === undefined
+        ? Layer.empty
+        : Layer.succeed(DesktopDataProfileStartup, {
+            finishEarlyCapture: () => {
+              earlyCaptureFinishCount += 1;
+              return options.pendingEarlyRestart === true;
+            },
+          }),
       TestClock.layer(),
     );
 
     return {
       layer,
       overlaySent,
+      relaunched,
       getBeforeQuitListener: () => beforeQuitListener,
       getSecondInstanceListener: () => secondInstanceListener,
       getActivateCount: () => activateCount,
@@ -219,6 +247,9 @@ function makeLifecycleHarness(options?: {
       getShutdownOverlayCount: () => shutdownOverlayCount,
       getProviderDaemonStopCount: () => providerDaemonStopCount,
       getProviderDaemonDialogCount: () => providerDaemonDialogCount,
+      getRelaunchCount: () => relaunchCount,
+      getExitCodes: () => [...exitCodes],
+      getEarlyCaptureFinishCount: () => earlyCaptureFinishCount,
     };
   });
 }
@@ -378,6 +409,114 @@ describe("DesktopLifecycle", () => {
         yield* flushMicrotasks;
 
         assert.equal(harness.getActivateCount(), 1);
+      }).pipe(Effect.scoped, Effect.provide(harness.layer));
+    }),
+  );
+
+  it.effect("lets only the exact native profile owner perform one graceful relaunch", () =>
+    Effect.gen(function* () {
+      const harness = yield* makeLifecycleHarness();
+      yield* Effect.gen(function* () {
+        const lifecycle = yield* DesktopLifecycle.DesktopLifecycle;
+        const shutdown = yield* DesktopLifecycle.DesktopShutdown;
+        yield* lifecycle.register;
+        const secondInstance = harness.getSecondInstanceListener();
+        if (!secondInstance) throw new Error("second-instance listener was not registered.");
+        const request = createDesktopRestartRequest({
+          dataProfile: "debug",
+          stateDir: "/synthetic/cafe/.debug/userdata",
+        });
+        secondInstance(
+          {} as Electron.Event,
+          ["Cafe Code", "--cafe-restart-existing"],
+          "/repo",
+          request,
+        );
+        secondInstance(
+          {} as Electron.Event,
+          ["Cafe Code", "--cafe-restart-existing"],
+          "/repo",
+          request,
+        );
+        yield* shutdown.awaitRequest;
+        assert.equal(harness.getRelaunchCount(), 0);
+        assert.deepEqual(harness.getExitCodes(), []);
+        // Relaunch is owned by the existing lifecycle shutdown completion,
+        // never a timer or the external helper's belief that a PID has exited.
+        yield* shutdown.markComplete;
+        yield* Deferred.await(harness.relaunched);
+        yield* flushMicrotasks;
+        assert.equal(harness.getRelaunchCount(), 1);
+        assert.deepEqual(harness.getExitCodes(), [0]);
+        assert.equal(harness.getActivateCount(), 0);
+        assert.equal(harness.getProviderDaemonStopCount(), 0);
+      }).pipe(Effect.scoped, Effect.provide(harness.layer));
+    }),
+  );
+
+  it.effect("does not stop Production for a Debug request or an unproved argv flag", () =>
+    Effect.gen(function* () {
+      const harness = yield* makeLifecycleHarness({
+        dataProfile: "production",
+        stateDir: "/synthetic/cafe/userdata",
+      });
+      yield* Effect.gen(function* () {
+        const lifecycle = yield* DesktopLifecycle.DesktopLifecycle;
+        const state = yield* DesktopState.DesktopState;
+        yield* lifecycle.register;
+        const secondInstance = harness.getSecondInstanceListener();
+        if (!secondInstance) throw new Error("second-instance listener was not registered.");
+        secondInstance(
+          {} as Electron.Event,
+          ["Cafe Code", "--cafe-restart-existing"],
+          "/repo",
+          createDesktopRestartRequest({
+            dataProfile: "debug",
+            stateDir: "/synthetic/cafe/.debug/userdata",
+          }),
+        );
+        secondInstance(
+          {} as Electron.Event,
+          ["Cafe Code", "--cafe-restart-existing"],
+          "/repo",
+          undefined,
+        );
+        secondInstance(
+          {} as Electron.Event,
+          ["Cafe Code"],
+          "/repo",
+          createDesktopRestartRequest({
+            dataProfile: "production",
+            stateDir: "/synthetic/another/userdata",
+          }),
+        );
+        yield* flushMicrotasks;
+        assert.equal(harness.getActivateCount(), 3);
+        assert.equal(harness.getRelaunchCount(), 0);
+        assert.deepEqual(harness.getExitCodes(), []);
+        assert.equal(yield* Ref.get(state.quitting), false);
+        assert.equal(harness.getProviderDaemonStopCount(), 0);
+      }).pipe(Effect.scoped, Effect.provide(harness.layer));
+    }),
+  );
+
+  it.effect("drains an admitted startup request after the permanent receiver is registered", () =>
+    Effect.gen(function* () {
+      const harness = yield* makeLifecycleHarness({ pendingEarlyRestart: true });
+      yield* Effect.gen(function* () {
+        const lifecycle = yield* DesktopLifecycle.DesktopLifecycle;
+        const shutdown = yield* DesktopLifecycle.DesktopShutdown;
+        yield* lifecycle.register;
+        assert.isDefined(harness.getSecondInstanceListener());
+        assert.equal(harness.getEarlyCaptureFinishCount(), 1);
+        yield* shutdown.awaitRequest;
+        assert.equal(harness.getRelaunchCount(), 0);
+        yield* shutdown.markComplete;
+        yield* Deferred.await(harness.relaunched);
+        yield* flushMicrotasks;
+        assert.equal(harness.getRelaunchCount(), 1);
+        assert.equal(harness.getActivateCount(), 0);
+        assert.deepEqual(harness.getExitCodes(), [0]);
       }).pipe(Effect.scoped, Effect.provide(harness.layer));
     }),
   );

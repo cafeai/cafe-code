@@ -81,7 +81,11 @@ const make = ElectronApp.of({
     Effect.sync(() => {
       Electron.app.exit(code);
     }),
-  requestSingleInstanceLock: Effect.sync(() => Electron.app.requestSingleInstanceLock()),
+  // The profile gate acquires this before foundation-layer IO. Startup retains
+  // its existing abstract check without issuing a second native request.
+  requestSingleInstanceLock: Effect.sync(
+    () => Electron.app.hasSingleInstanceLock() || Electron.app.requestSingleInstanceLock(),
+  ),
   relaunch: (options) =>
     Effect.sync(() => {
       Electron.app.relaunch(options);

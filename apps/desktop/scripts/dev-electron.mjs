@@ -7,6 +7,7 @@ import { ensureMacDictationHelper } from "./build-mac-dictation-helper.mjs";
 import { terminateDesktopDevApps } from "./dev-process-cleanup.mjs";
 import { linuxSafeStorageElectronArgs } from "./linux-safe-storage.mjs";
 import { waitForResources } from "./wait-for-resources.mjs";
+import { assertSourceDebugDesktopBuilds } from "../../../packages/shared/src/sourceDebugBuild.ts";
 
 const devServerUrl = process.env.VITE_DEV_SERVER_URL?.trim();
 if (!devServerUrl) {
@@ -27,10 +28,12 @@ const requiredFiles = [
   "dist-electron/main.cjs",
   "dist-electron/preload.cjs",
   "../server/dist/bin.mjs",
+  "dist-electron/main.cjs.debug-profile.json",
+  "../server/dist/bin.mjs.debug-profile.json",
 ];
 const watchedDirectories = [
-  { directory: "dist-electron", files: new Set(["main.cjs", "preload.cjs"]) },
-  { directory: "../server/dist", files: new Set(["bin.mjs"]) },
+  { directory: "dist-electron", files: new Set(["main.cjs.debug-profile.json", "preload.cjs"]) },
+  { directory: "../server/dist", files: new Set(["bin.mjs.debug-profile.json"]) },
 ];
 const forcedShutdownTimeoutMs = 1_500;
 const restartDebounceMs = 120;
@@ -48,6 +51,7 @@ await waitForResources({
 const childEnv = { ...process.env };
 delete childEnv.ELECTRON_RUN_AS_NODE;
 childEnv.CAFE_CODE_DESKTOP_DEV = "true";
+childEnv.CAFE_CODE_DATA_PROFILE = "debug";
 
 let shuttingDown = false;
 let restartTimer = null;
@@ -74,6 +78,14 @@ function killChildTreeByPid(pid, signal) {
 
 function startApp() {
   if (shuttingDown || currentApp !== null) {
+    return;
+  }
+  try {
+    assertSourceDebugDesktopBuilds(desktopDir);
+  } catch (error) {
+    // Watch writes precede their atomic successful-build receipt. Wait for the
+    // next receipt event instead of executing inconsistent or legacy code.
+    console.error(error instanceof Error ? error.message : "Rebuild using yarn build:desktop.");
     return;
   }
 
@@ -252,6 +264,7 @@ async function shutdown(exitCode) {
 }
 
 startWatchers();
+assertSourceDebugDesktopBuilds(desktopDir);
 terminateDesktopDevApps({ force: true });
 startApp();
 

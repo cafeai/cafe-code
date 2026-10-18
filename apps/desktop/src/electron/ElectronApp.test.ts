@@ -8,6 +8,7 @@ const {
   exitMock,
   getAppPathMock,
   getVersionMock,
+  hasSingleInstanceLockMock,
   isPackagedState,
   onMock,
   quitMock,
@@ -26,6 +27,7 @@ const {
   exitMock: vi.fn(),
   getAppPathMock: vi.fn(() => "/app"),
   getVersionMock: vi.fn(() => "1.2.3"),
+  hasSingleInstanceLockMock: vi.fn(() => false),
   isPackagedState: { current: true },
   onMock: vi.fn(),
   quitMock: vi.fn(),
@@ -51,6 +53,7 @@ vi.mock("electron", () => ({
     },
     getAppPath: getAppPathMock,
     getVersion: getVersionMock,
+    hasSingleInstanceLock: hasSingleInstanceLockMock,
     get isPackaged() {
       return isPackagedState.current;
     },
@@ -81,6 +84,8 @@ describe("ElectronApp", () => {
     quitMock.mockClear();
     relaunchMock.mockClear();
     removeListenerMock.mockClear();
+    hasSingleInstanceLockMock.mockClear();
+    hasSingleInstanceLockMock.mockReturnValue(false);
     requestSingleInstanceLockMock.mockClear();
     requestSingleInstanceLockMock.mockReturnValue(true);
     setPathMock.mockClear();
@@ -128,6 +133,35 @@ describe("ElectronApp", () => {
       const acquired = yield* electronApp.requestSingleInstanceLock;
 
       assert.isFalse(acquired);
+      assert.deepEqual(hasSingleInstanceLockMock.mock.calls, [[]]);
+      assert.deepEqual(requestSingleInstanceLockMock.mock.calls, [[]]);
+    }).pipe(Effect.provide(ElectronApp.layer)),
+  );
+
+  it.effect(
+    "retains a lock acquired during early profile admission without requesting it again",
+    () =>
+      Effect.gen(function* () {
+        hasSingleInstanceLockMock.mockReturnValue(true);
+        // If the wrapper called this despite existing ownership, a failed second
+        // native request would incorrectly retire the already-admitted desktop.
+        requestSingleInstanceLockMock.mockReturnValue(false);
+        const electronApp = yield* ElectronApp.ElectronApp;
+        assert.isTrue(yield* electronApp.requestSingleInstanceLock);
+        assert.isTrue(yield* electronApp.requestSingleInstanceLock);
+        assert.deepEqual(hasSingleInstanceLockMock.mock.calls, [[], []]);
+        assert.deepEqual(requestSingleInstanceLockMock.mock.calls, []);
+      }).pipe(Effect.provide(ElectronApp.layer)),
+  );
+
+  it.effect("requests an unheld lock once and then observes the acquired native ownership", () =>
+    Effect.gen(function* () {
+      hasSingleInstanceLockMock.mockReturnValueOnce(false).mockReturnValue(true);
+      requestSingleInstanceLockMock.mockReturnValue(true);
+      const electronApp = yield* ElectronApp.ElectronApp;
+      assert.isTrue(yield* electronApp.requestSingleInstanceLock);
+      assert.isTrue(yield* electronApp.requestSingleInstanceLock);
+      assert.deepEqual(hasSingleInstanceLockMock.mock.calls, [[], []]);
       assert.deepEqual(requestSingleInstanceLockMock.mock.calls, [[]]);
     }).pipe(Effect.provide(ElectronApp.layer)),
   );

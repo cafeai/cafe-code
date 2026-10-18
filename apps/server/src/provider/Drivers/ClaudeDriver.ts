@@ -56,6 +56,7 @@ import {
   makePackageManagedProviderMaintenanceResolver,
   normalizeCommandPath,
   resolveProviderMaintenanceCapabilitiesEffect,
+  makeManualOnlyProviderMaintenanceCapabilities,
 } from "../providerMaintenance.ts";
 import { resolveProviderRuntimeEnvironment } from "../managedProviderRuntime.ts";
 import { makeClaudeCapabilitiesCacheKey, makeClaudeContinuationGroupKey } from "./ClaudeHome.ts";
@@ -141,13 +142,22 @@ export const ClaudeDriver: ProviderDriver<ClaudeSettings, ClaudeDriverEnv> = {
   },
   configSchema: ClaudeSettings,
   defaultConfig: (): ClaudeSettings => decodeClaudeSettings({}),
-  create: ({ instanceId, displayName, accentColor, environment, enabled, config }) =>
+  create: ({
+    instanceId,
+    displayName,
+    accentColor,
+    environment,
+    processEnvironment,
+    enabled,
+    config,
+  }) =>
     Effect.gen(function* () {
       const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
       const path = yield* Path.Path;
       const httpClient = yield* HttpClient.HttpClient;
       const eventLoggers = yield* ProviderEventLoggers;
-      const processEnv = mergeProviderInstanceEnvironment(environment);
+      const serverConfig = yield* ServerConfig;
+      const processEnv = processEnvironment ?? mergeProviderInstanceEnvironment(environment);
       const fallbackContinuationIdentity = defaultProviderContinuationIdentity({
         driverKind: DRIVER_KIND,
         instanceId,
@@ -170,12 +180,17 @@ export const ClaudeDriver: ProviderDriver<ClaudeSettings, ClaudeDriverEnv> = {
         effectiveEnvironment,
       );
       const maintenanceCapabilities =
-        effectiveConfig.runtimeSource === "bundled"
-          ? runtime.maintenanceCapabilities
-          : yield* resolveProviderMaintenanceCapabilitiesEffect(UPDATE, {
-              binaryPath: effectiveConfig.binaryPath,
-              env: effectiveEnvironment,
-            });
+        serverConfig.dataProfile === "debug"
+          ? makeManualOnlyProviderMaintenanceCapabilities({
+              provider: DRIVER_KIND,
+              packageName: UPDATE_DEFINITION.npmPackageName,
+            })
+          : effectiveConfig.runtimeSource === "bundled"
+            ? runtime.maintenanceCapabilities
+            : yield* resolveProviderMaintenanceCapabilitiesEffect(UPDATE, {
+                binaryPath: effectiveConfig.binaryPath,
+                env: effectiveEnvironment,
+              });
       const continuationGroupKey = yield* makeClaudeContinuationGroupKey(effectiveConfig);
       let observedCliVersion: string | null = null;
       const stampInstanceIdentity = withInstanceIdentity({

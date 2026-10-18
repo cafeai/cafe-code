@@ -23,6 +23,8 @@ import {
 } from "../../../scripts/lib/mac-app-privacy.ts";
 import {
   MAC_SOURCE_BUNDLE_IDENTIFIER,
+  MAC_SOURCE_APP_NAME,
+  resolveMacSourceRuntimeDirectory,
   signMacSourceRuntime,
 } from "../../../scripts/lib/mac-source-runtime-signing.ts";
 
@@ -30,12 +32,14 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 
 export const desktopDir = resolve(__dirname, "..");
 
-const macAppName = "Cafe Code";
+const macAppName = MAC_SOURCE_APP_NAME;
 const macBundleIdentifier = MAC_SOURCE_BUNDLE_IDENTIFIER;
 // Rebuild cached bundles with signatures matching their branded plists. A
 // leftover Electron signing identity can fail macOS Local Network admission.
-const macRuntimeLauncherVersion = 4;
-const macRuntimeDir = join(desktopDir, ".electron-runtime");
+const macRuntimeLauncherVersion = 5;
+// Keep pre-profile source runtimes untouched. The new cache namespace binds
+// its plist/signature identity and cannot reuse Production-branded metadata.
+const macRuntimeDir = resolveMacSourceRuntimeDirectory(desktopDir);
 const macRuntimeMetadataPath = join(macRuntimeDir, "metadata.json");
 const macRuntimeAppBundlePath = join(macRuntimeDir, `${macAppName}.app`);
 const macRuntimeExecutablePath = join(macRuntimeAppBundlePath, "Contents", "MacOS", "Electron");
@@ -150,6 +154,7 @@ function resolveBrandedMacElectronPath(electronExecutablePath) {
   const sourceAppBundlePath = resolveMacSourceAppBundlePath(electronExecutablePath);
   const expectedMetadata = {
     launcherVersion: macRuntimeLauncherVersion,
+    dataProfile: "debug",
     appName: macAppName,
     bundleIdentifier: macBundleIdentifier,
     sourceAppBundlePath,

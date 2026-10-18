@@ -1,4 +1,9 @@
 import { uiText } from "@cafecode/shared/i18n";
+import { preferredDataProfileHttpPort, type DataProfile } from "@cafecode/shared/dataProfile";
+import {
+  assertSourceDebugDesktopBuilds,
+  SourceDebugBuildError,
+} from "@cafecode/shared/sourceDebugBuild";
 import * as Cause from "effect/Cause";
 import * as Data from "effect/Data";
 import * as Duration from "effect/Duration";
@@ -35,8 +40,6 @@ import * as DesktopSourceUpdates from "../updates/DesktopSourceUpdates.ts";
 import * as DesktopDebugServer from "../debug/DesktopDebugServer.ts";
 import * as DesktopStartupWindow from "../window/DesktopStartupWindow.ts";
 
-const DEFAULT_DESKTOP_BACKEND_PORT = 3773;
-const DEFAULT_DESKTOP_BACKEND_HTTPS_PORT = 3775;
 const MAX_TCP_PORT = 65_535;
 const DESKTOP_BACKEND_PORT_PROBE_HOSTS = ["127.0.0.1", "0.0.0.0", "::"] as const;
 const DESKTOP_SHUTDOWN_BACKEND_STOP_TIMEOUT = Duration.seconds(5);
@@ -74,6 +77,26 @@ const { logInfo: logBootstrapInfo, logWarning: logBootstrapWarning } =
 const { logInfo: logDaemonWatchdogInfo, logWarning: logDaemonWatchdogWarning } =
   DesktopObservability.makeComponentLogger("desktop-provider-daemon-watchdog");
 
+/** A source watcher may replace bundles after the early native admission.
+ * Recheck before daemon/backend startup through the actual typed Effect path;
+ * raw filesystem/bundler exceptions must not disclose local paths in startup
+ * diagnostics. Packaged Production never consumes source-build receipts. */
+export function verifyDesktopSourceBuilds(
+  environment: Pick<
+    DesktopEnvironment.DesktopEnvironmentShape,
+    "dataProfile" | "isPackaged" | "appRoot"
+  > & {
+    readonly path: Pick<DesktopEnvironment.DesktopEnvironmentShape["path"], "join">;
+  },
+  verify: (desktopDirectory: string) => void = assertSourceDebugDesktopBuilds,
+): Effect.Effect<void, SourceDebugBuildError> {
+  if (environment.dataProfile !== "debug" || environment.isPackaged) return Effect.void;
+  return Effect.try({
+    try: () => verify(environment.path.join(environment.appRoot, "apps", "desktop")),
+    catch: () => new SourceDebugBuildError(),
+  });
+}
+
 const {
   logInfo: logStartupInfo,
   logWarning: logStartupWarning,
@@ -95,18 +118,36 @@ const acquireSingleInstanceLock = Effect.fn("desktop.startup.acquireSingleInstan
   },
 );
 
-const resolveDesktopBackendPort = Effect.fn("resolveDesktopBackendPort")(function* (
+export const resolveDesktopBackendPort = Effect.fn("resolveDesktopBackendPort")(function* (
   configuredPort: Option.Option<number>,
+  dataProfile: DataProfile,
 ) {
+  const net = yield* NetService.NetService;
   if (Option.isSome(configuredPort)) {
+    // A configured endpoint is not permission to adopt a listener already on
+    // that port. Refuse before provider/backend startup instead of letting a
+    // failed child bind be confused with another profile's readiness response.
+    // This preflight does not claim to reserve the port against later races.
+    for (const host of DESKTOP_BACKEND_PORT_PROBE_HOSTS) {
+      if (!(yield* net.canListenOnHost(configuredPort.value, host))) {
+        return yield* new DesktopBackendPortUnavailableError({
+          startPort: configuredPort.value,
+          maxPort: configuredPort.value,
+          hosts: DESKTOP_BACKEND_PORT_PROBE_HOSTS,
+        });
+      }
+    }
     return {
       port: configuredPort.value,
       selectedByScan: false,
     } as const;
   }
 
-  const net = yield* NetService.NetService;
-  for (let port = DEFAULT_DESKTOP_BACKEND_PORT; port <= MAX_TCP_PORT; port += 1) {
+  // Debug never takes the installed app's preferred port merely because it
+  // launched first. These are listener preferences, not new exposure or owner
+  // authority: every candidate still passes the same existing host probes.
+  const startPort = preferredDataProfileHttpPort(dataProfile);
+  for (let port = startPort; port <= MAX_TCP_PORT; port += 1) {
     let availableOnEveryHost = true;
 
     for (const host of DESKTOP_BACKEND_PORT_PROBE_HOSTS) {
@@ -125,43 +166,45 @@ const resolveDesktopBackendPort = Effect.fn("resolveDesktopBackendPort")(functio
   }
 
   return yield* new DesktopBackendPortUnavailableError({
-    startPort: DEFAULT_DESKTOP_BACKEND_PORT,
-    maxPort: MAX_TCP_PORT,
-    hosts: DESKTOP_BACKEND_PORT_PROBE_HOSTS,
-  });
-});
-
-const resolveDesktopBackendHttpsPort = Effect.fn("resolveDesktopBackendHttpsPort")(function* (
-  backendPort: number,
-) {
-  const net = yield* NetService.NetService;
-  const startPort =
-    backendPort + 2 <= MAX_TCP_PORT ? backendPort + 2 : DEFAULT_DESKTOP_BACKEND_HTTPS_PORT;
-
-  for (let port = startPort; port <= MAX_TCP_PORT; port += 1) {
-    if (port === backendPort) {
-      continue;
-    }
-
-    let availableOnEveryHost = true;
-    for (const host of DESKTOP_BACKEND_PORT_PROBE_HOSTS) {
-      if (!(yield* net.canListenOnHost(port, host))) {
-        availableOnEveryHost = false;
-        break;
-      }
-    }
-
-    if (availableOnEveryHost) {
-      return port;
-    }
-  }
-
-  return yield* new DesktopBackendPortUnavailableError({
     startPort,
     maxPort: MAX_TCP_PORT,
     hosts: DESKTOP_BACKEND_PORT_PROBE_HOSTS,
   });
 });
+
+export const resolveDesktopBackendHttpsPort = Effect.fn("resolveDesktopBackendHttpsPort")(
+  function* (backendPort: number, dataProfile: DataProfile) {
+    const net = yield* NetService.NetService;
+    const startPort =
+      backendPort + 2 <= MAX_TCP_PORT
+        ? backendPort + 2
+        : preferredDataProfileHttpPort(dataProfile) + 2;
+
+    for (let port = startPort; port <= MAX_TCP_PORT; port += 1) {
+      if (port === backendPort) {
+        continue;
+      }
+
+      let availableOnEveryHost = true;
+      for (const host of DESKTOP_BACKEND_PORT_PROBE_HOSTS) {
+        if (!(yield* net.canListenOnHost(port, host))) {
+          availableOnEveryHost = false;
+          break;
+        }
+      }
+
+      if (availableOnEveryHost) {
+        return port;
+      }
+    }
+
+    return yield* new DesktopBackendPortUnavailableError({
+      startPort,
+      maxPort: MAX_TCP_PORT,
+      hosts: DESKTOP_BACKEND_PORT_PROBE_HOSTS,
+    });
+  },
+);
 
 const handleFatalStartupError = Effect.fn("desktop.startup.handleFatalStartupError")(function* (
   stage: string,
@@ -427,6 +470,7 @@ const bootstrap = Effect.gen(function* () {
   const environment = yield* DesktopEnvironment.DesktopEnvironment;
   const desktopSettings = yield* DesktopAppSettings.DesktopAppSettings;
   const serverExposure = yield* DesktopServerExposure.DesktopServerExposure;
+  yield* verifyDesktopSourceBuilds(environment);
   const startupWindow = yield* Effect.serviceOption(DesktopStartupWindow.DesktopStartupWindow);
   if (Option.isSome(startupWindow) && providerDaemonManager.startupProgress) {
     yield* Stream.runForEach(
@@ -441,13 +485,16 @@ const bootstrap = Effect.gen(function* () {
     return yield* new DesktopDevelopmentBackendPortRequiredError();
   }
 
-  const backendPortSelection = yield* resolveDesktopBackendPort(environment.configuredBackendPort);
+  const backendPortSelection = yield* resolveDesktopBackendPort(
+    environment.configuredBackendPort,
+    environment.dataProfile,
+  );
   const backendPort = backendPortSelection.port;
   const settings = yield* desktopSettings.get;
   const desktopHttpsSupported = isDesktopHttpsSupported();
   const backendHttpsPort =
     settings.serverHttpsEnabled && desktopHttpsSupported
-      ? yield* resolveDesktopBackendHttpsPort(backendPort)
+      ? yield* resolveDesktopBackendHttpsPort(backendPort, environment.dataProfile)
       : undefined;
   yield* logBootstrapInfo(
     backendPortSelection.selectedByScan
@@ -455,7 +502,9 @@ const bootstrap = Effect.gen(function* () {
       : "using configured backend port",
     {
       port: backendPort,
-      ...(backendPortSelection.selectedByScan ? { startPort: DEFAULT_DESKTOP_BACKEND_PORT } : {}),
+      ...(backendPortSelection.selectedByScan
+        ? { startPort: preferredDataProfileHttpPort(environment.dataProfile) }
+        : {}),
     },
   );
   if (backendHttpsPort !== undefined) {

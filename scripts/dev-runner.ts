@@ -6,6 +6,7 @@ import { fileURLToPath } from "node:url";
 import * as NodeRuntime from "@effect/platform-node/NodeRuntime";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as NetService from "@cafecode/shared/Net";
+import { preferredDataProfileHttpPort } from "@cafecode/shared/dataProfile";
 import {
   deleteCafeCodeEnv,
   cafeCodeOptionalValueConfig,
@@ -23,7 +24,7 @@ import * as Schema from "effect/Schema";
 import { Argument, Command, Flag } from "effect/unstable/cli";
 import { ChildProcess } from "effect/unstable/process";
 
-const BASE_SERVER_PORT = 13773;
+const BASE_SERVER_PORT = preferredDataProfileHttpPort("debug");
 const BASE_WEB_PORT = 5733;
 const MAX_HASH_OFFSET = 3000;
 const MAX_PORT = 65535;
@@ -199,6 +200,9 @@ export function createDevRunnerEnv({
     };
     writeCafeCodeEnv(output, "CAFE_CODE_DEV_URL", output.VITE_DEV_SERVER_URL);
     writeCafeCodeEnv(output, "CAFE_CODE_HOME", resolvedBaseDir);
+    // Every repository dev launcher belongs to the same Debug data profile,
+    // independently of whether its renderer uses Vite or built assets.
+    writeCafeCodeEnv(output, "CAFE_CODE_DATA_PROFILE", "debug");
 
     if (!isDesktopMode) {
       writeCafeCodeEnv(output, "CAFE_CODE_PORT", String(serverPort));

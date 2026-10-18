@@ -3,6 +3,7 @@ import type {
   OrchestrationShellSnapshot,
   OrchestrationShellStreamEvent,
   ServerConfig,
+  ServerConfigSettingsUpdatedPayload,
   ServerLifecycleWelcomePayload,
 } from "@cafecode/contracts";
 import type { KnownEnvironment } from "@cafecode/client-runtime";
@@ -36,6 +37,7 @@ interface EnvironmentConnectionInput extends OrchestrationHandlers {
   readonly client: WsRpcClient;
   readonly refreshMetadata?: () => Promise<void>;
   readonly onConfigSnapshot?: (config: ServerConfig) => void;
+  readonly onSettingsUpdated?: (payload: ServerConfigSettingsUpdatedPayload) => void;
   readonly onWelcome?: (payload: ServerLifecycleWelcomePayload) => void;
 }
 
@@ -80,6 +82,7 @@ export function createEnvironmentConnection(
   }
 
   let disposed = false;
+  let observedConfigSnapshot = false;
   const bootstrapGate = createBootstrapGate();
   const shouldObserveLifecycle = input.kind === "saved" || input.onWelcome !== undefined;
   const shouldObserveConfig = input.kind === "saved" || input.onConfigSnapshot !== undefined;
@@ -110,6 +113,17 @@ export function createEnvironmentConnection(
   const unsubConfig = shouldObserveConfig
     ? input.client.server.subscribeConfig(
         (event: Parameters<Parameters<WsRpcClient["server"]["subscribeConfig"]>[0]>[0]) => {
+          if (disposed) return;
+          if (
+            event.type === "settingsUpdated" &&
+            input.kind === "saved" &&
+            observedConfigSnapshot
+          ) {
+            // The owner patches its current selected-server config, not an old
+            // connection-local snapshot which could overwrite newer settings.
+            input.onSettingsUpdated?.(event.payload);
+            return;
+          }
           if (event.type !== "snapshot") {
             return;
           }
@@ -117,6 +131,7 @@ export function createEnvironmentConnection(
             event.config.environment.environmentId,
             "server config snapshot",
           );
+          observedConfigSnapshot = true;
           input.onConfigSnapshot?.(event.config);
         },
       )

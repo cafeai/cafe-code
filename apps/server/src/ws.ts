@@ -143,6 +143,8 @@ import {
   type SessionCredentialChange,
 } from "./auth/Services/SessionCredentialService.ts";
 import { respondToAuthError } from "./auth/http.ts";
+import { describeProviderDataProfiles } from "./provider/debugProviderProfile.ts";
+import { deriveProviderInstanceConfigMap } from "./provider/Layers/ProviderInstanceRegistryHydration.ts";
 import { ensureSystemPromptFile } from "./systemPromptFile.ts";
 import { makeWebSocketConnectionFlowControl } from "./websocket/ConnectionFlowControl.ts";
 import { encodeThreadDetailSnapshotStreamItems } from "./websocket/ThreadDetailSnapshotStream.ts";
@@ -779,7 +781,12 @@ const makeWsRpcLayer = (
       const loadServerConfig = Effect.gen(function* () {
         const keybindingsConfig = yield* keybindings.loadConfigState;
         const providers = yield* providerRegistry.getProviders;
-        const settings = redactServerSettingsForClient(yield* serverSettings.getSettings);
+        const privateSettings = yield* serverSettings.getSettings;
+        const settings = redactServerSettingsForClient(privateSettings);
+        const providerDataProfiles = describeProviderDataProfiles(
+          config,
+          deriveProviderInstanceConfigMap(privateSettings),
+        );
         const syncedClientSettings = yield* clientSettings.getSettings;
         const environment = yield* serverEnvironment.getDescriptor;
         const auth = yield* serverAuth.getDescriptor();
@@ -787,6 +794,10 @@ const makeWsRpcLayer = (
         return {
           environment,
           auth,
+          ...(config.dataProfile === undefined
+            ? {}
+            : { dataProfile: config.dataProfile, dataDirectoryPath: config.stateDir }),
+          ...(providerDataProfiles ? { providerDataProfiles } : {}),
           cwd: config.cwd,
           keybindingsConfigPath: config.keybindingsConfigPath,
           systemPromptPath: config.systemPromptPath,
@@ -2251,12 +2262,20 @@ const makeWsRpcLayer = (
                 Stream.debounce(Duration.millis(PROVIDER_STATUS_DEBOUNCE_MS)),
               );
               const settingsUpdates = serverSettings.streamChanges.pipe(
-                Stream.map((settings) => redactServerSettingsForClient(settings)),
-                Stream.map((settings) => ({
-                  version: 1 as const,
-                  type: "settingsUpdated" as const,
-                  payload: { settings },
-                })),
+                Stream.map((settings) => {
+                  const providerDataProfiles = describeProviderDataProfiles(
+                    config,
+                    deriveProviderInstanceConfigMap(settings),
+                  );
+                  return {
+                    version: 1 as const,
+                    type: "settingsUpdated" as const,
+                    payload: {
+                      settings: redactServerSettingsForClient(settings),
+                      ...(providerDataProfiles ? { providerDataProfiles } : {}),
+                    },
+                  };
+                }),
               );
               const clientSettingsUpdates = clientSettings.streamChanges.pipe(
                 Stream.map((settings) => ({

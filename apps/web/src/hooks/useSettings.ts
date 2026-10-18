@@ -325,14 +325,21 @@ export function useUpdateSettings(options?: SettingsEnvironment) {
         const current = getWorkspaceServerConfig(environmentId);
         if (Object.keys(serverPatch).length) {
           const settings = current ? applyServerSettingsPatch(current.settings, serverPatch) : null;
-          if (settings) patchWorkspaceServerConfig(environmentId, { settings });
+          if (settings)
+            patchWorkspaceServerConfig(environmentId, {
+              settings,
+              providerDataProfiles: undefined,
+            });
           void api.server.updateSettings(serverPatch).catch(() => {
             if (
               current &&
               settings &&
               getWorkspaceServerConfig(environmentId)?.settings === settings
             )
-              patchWorkspaceServerConfig(environmentId, { settings: current.settings });
+              patchWorkspaceServerConfig(environmentId, {
+                settings: current.settings,
+                providerDataProfiles: current.providerDataProfiles,
+              });
             reportRemoteSettingsWriteFailure("server");
           });
         }

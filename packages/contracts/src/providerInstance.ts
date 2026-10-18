@@ -161,6 +161,10 @@ export const ProviderInstanceConfig = Schema.Struct({
   accentColor: Schema.optional(TrimmedNonEmptyString),
   environment: Schema.optionalKey(ProviderInstanceEnvironment),
   enabled: Schema.optionalKey(Schema.Boolean),
+  // Debug never assumes that an arbitrary native provider supports relocating
+  // auth/history. This opt-in is a deliberate sharing choice, not isolation
+  // proof; it is ignored for Production's existing account behavior.
+  debugStateSharing: Schema.optionalKey(Schema.Boolean),
   config: Schema.optionalKey(Schema.Unknown),
   defaultModel: Schema.optionalKey(TrimmedNonEmptyString),
   defaultModelOptions: Schema.optionalKey(Schema.Array(ProviderInstanceDefaultOption)),

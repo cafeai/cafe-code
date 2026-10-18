@@ -27,6 +27,34 @@ const makeServerAuthPolicyLayer = (overrides?: Partial<ServerConfigShape>) =>
   );
 
 it.layer(NodeServices.layer)("ServerAuthPolicyLive", (it) => {
+  for (const mode of ["web", "desktop"] as const) {
+    it.effect(
+      `reports the explicit Debug listener's cookie without changing ${mode} admission`,
+      () =>
+        Effect.gen(function* () {
+          const policy = yield* ServerAuthPolicy;
+          const descriptor = yield* policy.getDescriptor();
+
+          expect(descriptor.sessionCookieName).toBe("t3_debug_session_13773");
+          expect(descriptor.policy).toBe(
+            mode === "desktop" ? "desktop-managed-local" : "loopback-browser",
+          );
+          expect(descriptor.bootstrapMethods).toEqual(
+            mode === "desktop" ? ["desktop-bootstrap"] : ["one-time-token"],
+          );
+        }).pipe(
+          Effect.provide(
+            makeServerAuthPolicyLayer({
+              dataProfile: "debug",
+              mode,
+              port: 13773,
+              host: "127.0.0.1",
+            }),
+          ),
+        ),
+    );
+  }
+
   it.effect("uses desktop-managed-local policy for desktop mode", () =>
     Effect.gen(function* () {
       const policy = yield* ServerAuthPolicy;

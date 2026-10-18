@@ -4,6 +4,7 @@ import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import type * as Electron from "electron";
 import { vi } from "vitest";
+import { resolve } from "node:path";
 import type { MacDictationTargetResult } from "./MacDictationTarget.ts";
 
 const electronHarness = vi.hoisted(() => {
@@ -205,6 +206,8 @@ function coordinatorTestLayer(
   return Layer.mergeAll(
     Layer.succeed(DesktopEnvironment.DesktopEnvironment, {
       platform: "darwin",
+      dataProfile: "production",
+      configuredBaseDir: resolve("/repo"),
       isDevelopment: true,
       preloadPath: "/repo/apps/desktop/dist-electron/preload.cjs",
       devServerUrl: Option.some(new URL(rendererUrl)),

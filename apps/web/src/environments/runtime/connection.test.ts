@@ -1,4 +1,9 @@
-import { EnvironmentId } from "@cafecode/contracts";
+import {
+  DEFAULT_SERVER_SETTINGS,
+  EnvironmentId,
+  ProviderInstanceId,
+  type ServerConfigStreamEvent,
+} from "@cafecode/contracts";
 import { describe, expect, it, vi } from "vitest";
 
 import { createEnvironmentConnection } from "./connection";
@@ -115,6 +120,9 @@ function createTestClient() {
         });
       }
     },
+    emitConfigEvent: (event: ServerConfigStreamEvent) => {
+      for (const listener of configListeners) listener(event);
+    },
     emitShellSnapshot: (snapshotSequence: number) => {
       for (const listener of shellListeners) {
         listener({
@@ -132,6 +140,55 @@ function createTestClient() {
 }
 
 describe("createEnvironmentConnection", () => {
+  it("delivers selected saved-server settings metadata after its snapshot and retires disposed callbacks", async () => {
+    const environmentId = EnvironmentId.make("env-1");
+    const { client, emitConfigEvent, emitConfigSnapshot } = createTestClient();
+    const onSettingsUpdated = vi.fn();
+    const connection = createEnvironmentConnection({
+      kind: "saved",
+      knownEnvironment: {
+        id: "env-1",
+        label: "Remote env",
+        source: "manual",
+        target: { httpBaseUrl: "http://example.test", wsBaseUrl: "ws://example.test" },
+        environmentId,
+      },
+      client,
+      applyShellEvent: vi.fn(),
+      syncShellSnapshot: vi.fn(),
+      onSettingsUpdated,
+    });
+    const id = ProviderInstanceId.make("saved-debug-account");
+    const update: ServerConfigStreamEvent = {
+      version: 1,
+      type: "settingsUpdated",
+      payload: {
+        settings: DEFAULT_SERVER_SETTINGS,
+        providerDataProfiles: {
+          [id]: { scope: "unconfigured", nativeHome: "saved-server-private-target" },
+        },
+      },
+    };
+    emitConfigEvent(update);
+    expect(onSettingsUpdated).not.toHaveBeenCalled();
+    emitConfigSnapshot(environmentId);
+    emitConfigEvent(update);
+    expect(onSettingsUpdated).toHaveBeenLastCalledWith(update.payload);
+    const legacy: ServerConfigStreamEvent = {
+      version: 1,
+      type: "settingsUpdated",
+      payload: { settings: DEFAULT_SERVER_SETTINGS },
+    };
+    emitConfigEvent(legacy);
+    expect(onSettingsUpdated).toHaveBeenLastCalledWith({ settings: DEFAULT_SERVER_SETTINGS });
+    expect(onSettingsUpdated).toHaveBeenCalledTimes(2);
+    expect(client.server.getConfig).not.toHaveBeenCalled();
+    expect(client.server.refreshProviders).not.toHaveBeenCalled();
+    const retainedCallback = vi.mocked(client.server.subscribeConfig).mock.calls[0]?.[0];
+    await connection.dispose();
+    retainedCallback?.(update);
+    expect(onSettingsUpdated).toHaveBeenCalledTimes(2);
+  });
   it("bootstraps from the shell subscription snapshot", async () => {
     const environmentId = EnvironmentId.make("env-1");
     const { client, readShellSubscribeOptions } = createTestClient();

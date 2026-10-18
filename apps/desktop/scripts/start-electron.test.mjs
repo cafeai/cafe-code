@@ -35,6 +35,7 @@ describe("start-electron launcher", () => {
       CAFE_CODE_DESKTOP_DEV: "1",
       VITE_DEV_SERVER_URL: "http://127.0.0.1:5173",
       CAFE_CODE_DEV_URL: "http://127.0.0.1:5173",
+      CAFE_CODE_DATA_PROFILE: "production",
       PATH: "/bin",
     });
 
@@ -42,13 +43,15 @@ describe("start-electron launcher", () => {
     assert.equal(env.CAFE_CODE_DESKTOP_DEV, undefined);
     assert.equal(env.VITE_DEV_SERVER_URL, undefined);
     assert.equal(env.CAFE_CODE_DEV_URL, undefined);
+    assert.equal(env.CAFE_CODE_DATA_PROFILE, "debug");
     assert.equal(env.PATH, "/bin");
   });
 
   it("routes displayless Linux launches to the headless server", () => {
+    const environment = buildDesktopChildEnv({ CAFE_CODE_DATA_PROFILE: "production" });
     const plan = resolveLaunchPlan({
       args: ["--cafe-debug", "--port", "3888"],
-      environment: {},
+      environment,
       platform: "linux",
       runtimeDesktopDir: fixtureDesktopDir,
       cwd: fixtureDesktopDir,
@@ -67,6 +70,7 @@ describe("start-electron launcher", () => {
       "3888",
     ]);
     assert.equal(plan.cwd, fixtureRepositoryRoot);
+    assert.equal(environment.CAFE_CODE_DATA_PROFILE, "debug");
   });
 
   it("preserves the original invocation directory for headless server cwd when available", () => {
@@ -97,6 +101,26 @@ describe("start-electron launcher", () => {
     assert.equal(plan.cwd, fixtureDesktopDir);
   });
 
+  it("refuses a profile restart instead of treating it as a headless server launch", () => {
+    let resolvedElectron = false;
+    assert.throws(
+      () =>
+        resolveLaunchPlan({
+          args: ["--cafe-restart-existing"],
+          environment: buildDesktopChildEnv({}),
+          platform: "linux",
+          runtimeDesktopDir: fixtureDesktopDir,
+          serverEntrypoint: fixtureServerEntrypoint,
+          electronPath: () => {
+            resolvedElectron = true;
+            return "/electron";
+          },
+        }),
+      /No headless backend was started/u,
+    );
+    assert.equal(resolvedElectron, false);
+  });
+
   it("resolves the staged or source server entrypoint next to the desktop runtime", () => {
     assert.equal(
       resolveHeadlessServerEntrypoint(
@@ -118,6 +142,26 @@ describe("start-electron launcher", () => {
       "desktop",
       "--host",
       "127.0.0.1",
+    ]);
+  });
+
+  it("refuses conflicting headless profile flags instead of overriding the source Debug selection", () => {
+    for (const args of [
+      ["--data-profile", "production"],
+      ["--data-profile=production"],
+      ["--data-profile=unknown"],
+    ]) {
+      assert.throws(
+        () => resolveHeadlessServerArgs(args),
+        /Source launches require the Debug data profile/u,
+      );
+    }
+    assert.deepEqual(resolveHeadlessServerArgs(["--data-profile", "debug"]), [
+      "serve",
+      "--mode",
+      "desktop",
+      "--data-profile",
+      "debug",
     ]);
   });
 

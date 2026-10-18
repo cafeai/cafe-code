@@ -4,6 +4,7 @@ import type {
   DesktopRuntimeArch,
   DesktopRuntimeInfo,
 } from "@cafecode/contracts";
+import { type DataProfile, resolveDataProfileRoot } from "@cafecode/shared/dataProfile";
 import * as Config from "effect/Config";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
@@ -42,6 +43,11 @@ export interface DesktopEnvironmentShape {
   readonly resourcesPath: string;
   readonly homeDirectory: string;
   readonly appDataDirectory: string;
+  /** Selected from trusted packaged/source metadata, never diagnostic flags. */
+  readonly dataProfile: DataProfile;
+  /** Public Cafe home before the immutable profile suffix is applied. */
+  readonly configuredBaseDir: string;
+  /** Effective profile root; child bootstrap must not apply its suffix again. */
   readonly baseDir: string;
   readonly stateDir: string;
   readonly desktopSettingsPath: string;
@@ -86,10 +92,10 @@ export class DesktopEnvironment extends Context.Service<
 const APP_BASE_NAME = "Cafe Code";
 
 function resolveDesktopAppStageLabel(input: {
-  readonly isDevelopment: boolean;
+  readonly dataProfile: DataProfile;
   readonly appVersion: string;
 }): DesktopAppStageLabel {
-  if (input.isDevelopment) {
+  if (input.dataProfile === "debug") {
     return "Dev";
   }
 
@@ -97,14 +103,17 @@ function resolveDesktopAppStageLabel(input: {
 }
 
 function resolveDesktopAppBranding(input: {
-  readonly isDevelopment: boolean;
+  readonly dataProfile: DataProfile;
   readonly appVersion: string;
 }): DesktopAppBranding {
   const stageLabel = resolveDesktopAppStageLabel(input);
   return {
     baseName: APP_BASE_NAME,
     stageLabel,
-    displayName: `${APP_BASE_NAME} (${stageLabel})`,
+    displayName:
+      input.dataProfile === "debug"
+        ? `${APP_BASE_NAME} (Debug)`
+        : `${APP_BASE_NAME} (${stageLabel})`,
   };
 }
 
@@ -146,6 +155,10 @@ const makeDesktopEnvironment = Effect.fn("desktop.environment.make")(function* (
   const homeDirectory = input.homeDirectory;
   const devServerUrl = config.devServerUrl;
   const isDevelopment = config.desktopDevelopmentMode;
+  // Source executables always use fresh Debug data, whether their renderer is
+  // built or watched. A packaged release retains Production even if diagnostic
+  // logging is enabled or it inherits a source launcher's environment.
+  const dataProfile: DataProfile = input.isPackaged ? "production" : "debug";
   const appDataDirectory =
     input.platform === "win32"
       ? Option.getOrElse(config.appDataDirectory, () =>
@@ -154,20 +167,34 @@ const makeDesktopEnvironment = Effect.fn("desktop.environment.make")(function* (
       : input.platform === "darwin"
         ? path.join(homeDirectory, "Library", "Application Support")
         : Option.getOrElse(config.xdgConfigHome, () => path.join(homeDirectory, ".config"));
-  const baseDir = yield* Option.match(config.cafeCodeHome, {
+  const configuredRoot = yield* Option.match(config.cafeCodeHome, {
     onSome: (value) => Effect.succeed(value),
     onNone: () => Effect.succeed(path.join(homeDirectory, ".cafe-code")),
   });
+  // Children have their own cwd. Freeze this public path choice as an absolute
+  // host-native name before either Electron or private bootstrap can use it.
+  // This is lexical normalization only; namespace/identity admission happens
+  // before foundation IO and never follows an alias into Production.
+  const configuredBaseDir = path.resolve(
+    configuredRoot === "~"
+      ? homeDirectory
+      : configuredRoot.startsWith("~/") || configuredRoot.startsWith("~\\")
+        ? path.join(homeDirectory, configuredRoot.slice(2))
+        : configuredRoot,
+  );
+  const baseDir = resolveDataProfileRoot(configuredBaseDir, dataProfile, path);
   const rootDir = path.resolve(input.dirname, "../../..");
   const appRoot = input.isPackaged ? input.appPath : rootDir;
   const branding = resolveDesktopAppBranding({
-    isDevelopment,
+    dataProfile,
     appVersion: input.appVersion,
   });
   const displayName = branding.displayName;
-  const stateDir = path.join(baseDir, isDevelopment ? "dev" : "userdata");
-  const userDataDirName = isDevelopment ? "cafecode-dev" : "cafecode";
-  const legacyUserDataDirName = isDevelopment ? "Cafe Code (Dev)" : "Cafe Code (Alpha)";
+  // Vite URLs control renderer loading, not persistence. Both source entry
+  // paths must resolve the same Debug database and native Electron profile.
+  const stateDir = path.join(baseDir, "userdata");
+  const userDataDirName = dataProfile === "debug" ? "cafecode-debug" : "cafecode";
+  const legacyUserDataDirName = dataProfile === "debug" ? "Cafe Code (Debug)" : "Cafe Code (Alpha)";
   const resourcesPath = input.resourcesPath;
 
   return DesktopEnvironment.of({
@@ -182,6 +209,8 @@ const makeDesktopEnvironment = Effect.fn("desktop.environment.make")(function* (
     resourcesPath,
     homeDirectory,
     appDataDirectory,
+    dataProfile,
+    configuredBaseDir,
     baseDir,
     stateDir,
     desktopSettingsPath: path.join(stateDir, "desktop-settings.json"),
@@ -208,9 +237,9 @@ const makeDesktopEnvironment = Effect.fn("desktop.environment.make")(function* (
     otlpExportIntervalMs: config.otlpExportIntervalMs,
     branding,
     displayName,
-    appUserModelId: isDevelopment ? "com.cafeai.cafecode.dev" : "com.cafeai.cafecode",
-    linuxDesktopEntryName: isDevelopment ? "cafecode-dev.desktop" : "cafecode.desktop",
-    linuxWmClass: isDevelopment ? "cafecode-dev" : "cafecode",
+    appUserModelId: dataProfile === "debug" ? "com.cafeai.cafecode.debug" : "com.cafeai.cafecode",
+    linuxDesktopEntryName: dataProfile === "debug" ? "cafecode-debug.desktop" : "cafecode.desktop",
+    linuxWmClass: dataProfile === "debug" ? "cafecode-debug" : "cafecode",
     userDataDirName,
     legacyUserDataDirName,
     defaultDesktopSettings: resolveDefaultDesktopSettings(input.appVersion),

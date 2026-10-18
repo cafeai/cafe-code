@@ -1,5 +1,6 @@
 #!/usr/bin/env node
-import { homedir } from "node:os";
+import { resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { DatabaseSync } from "node:sqlite";
 import * as NodeRuntime from "@effect/platform-node/NodeRuntime";
 import * as NodeServices from "@effect/platform-node/NodeServices";
@@ -7,7 +8,6 @@ import * as Console from "effect/Console";
 import * as Data from "effect/Data";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
-import * as Path from "effect/Path";
 
 import {
   sanitizeActivityPayload,
@@ -40,11 +40,13 @@ class CompactActivityPayloadsError extends Data.TaggedError("CompactActivityPayl
   }
 }
 
-const parseOptions = Effect.fn(function* (
+/** A maintenance target must be deliberate even for read-only estimates. No
+ * profile, home directory, settings or SQLite handle is inspected to guess it. */
+export function parseOptions(
   argv: ReadonlyArray<string>,
-): Effect.fn.Return<Options, CompactActivityPayloadsError, Path.Path> {
-  const path = yield* Path.Path;
-  let dbPath = `${homedir()}/.cafe-code/userdata/state.sqlite`;
+  resolvePath: (value: string) => string = resolve,
+): Options {
+  let dbPath: string | undefined;
   let write = false;
   let vacuum = false;
   let minBytes = 2_048;
@@ -61,8 +63,10 @@ const parseOptions = Effect.fn(function* (
     }
     if (arg === "--db") {
       const next = argv[index + 1];
-      if (!next) {
-        return yield* new CompactActivityPayloadsError({ detail: "--db requires a path" });
+      if (!next || next.trim().length === 0 || next.startsWith("--")) {
+        throw new CompactActivityPayloadsError({
+          detail: "--db requires an explicit database path. No database was opened.",
+        });
       }
       dbPath = next;
       index += 1;
@@ -71,7 +75,7 @@ const parseOptions = Effect.fn(function* (
     if (arg === "--min-bytes") {
       const next = argv[index + 1];
       if (!next || !/^\d+$/u.test(next)) {
-        return yield* new CompactActivityPayloadsError({
+        throw new CompactActivityPayloadsError({
           detail: "--min-bytes requires a non-negative integer",
         });
       }
@@ -79,16 +83,23 @@ const parseOptions = Effect.fn(function* (
       index += 1;
       continue;
     }
-    return yield* new CompactActivityPayloadsError({ detail: `Unknown argument: ${arg}` });
+    throw new CompactActivityPayloadsError({ detail: `Unknown argument: ${arg}` });
+  }
+
+  if (dbPath === undefined) {
+    throw new CompactActivityPayloadsError({
+      detail:
+        "An explicit --db <path> is required, including for a dry run. No database was opened.",
+    });
   }
 
   return {
-    dbPath: path.resolve(dbPath),
+    dbPath: resolvePath(dbPath),
     write,
     vacuum,
     minBytes,
   };
-});
+}
 
 function parseJson(value: string): unknown {
   try {
@@ -108,7 +119,16 @@ function compactJson(value: string, sanitizer: (payload: unknown) => unknown): s
 }
 
 const main = Effect.gen(function* () {
-  const options = yield* parseOptions(process.argv.slice(2));
+  const options = yield* Effect.try({
+    try: () => parseOptions(process.argv.slice(2)),
+    catch: (cause) =>
+      cause instanceof CompactActivityPayloadsError
+        ? cause
+        : new CompactActivityPayloadsError({
+            detail: "Invalid activity-payload maintenance options.",
+            cause,
+          }),
+  });
   const fs = yield* FileSystem.FileSystem;
   if (!(yield* fs.exists(options.dbPath))) {
     return yield* new CompactActivityPayloadsError({
@@ -221,4 +241,8 @@ const main = Effect.gen(function* () {
   db.close();
 });
 
-main.pipe(Effect.provide(NodeServices.layer), NodeRuntime.runMain);
+// Importing the option parser must not run a maintenance operation. This guard
+// compares lexical module/entry names only and does not inspect either DB.
+if (process.argv[1] !== undefined && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  main.pipe(Effect.provide(NodeServices.layer), NodeRuntime.runMain);
+}

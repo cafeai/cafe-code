@@ -34,6 +34,8 @@ const emptyBackendObservabilitySettings: BackendObservabilitySettings = {
 };
 
 const DESKTOP_BACKEND_ENV_NAMES = [
+  "CAFE_CODE_HOME",
+  "CAFE_CODE_DATA_PROFILE",
   "CAFE_CODE_PORT",
   "CAFE_CODE_HTTPS_ENABLED",
   "CAFE_CODE_HTTPS_PORT",
@@ -182,6 +184,8 @@ const resolveBackendStartConfig = Effect.fn("desktop.backendConfiguration.resolv
           ? { httpsPort: backendExposure.httpsPort }
           : {}),
         cafeCodeHome: environment.baseDir,
+        configuredCafeCodeHome: environment.configuredBaseDir,
+        dataProfile: environment.dataProfile,
         host: backendExposure.bindHost,
         desktopBootstrapToken: input.bootstrapToken,
         ...Option.match(input.observabilitySettings.otlpTracesUrl, {
