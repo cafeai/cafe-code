@@ -1,8 +1,17 @@
 import { defineConfig } from "tsdown";
-import { resolve } from "node:path";
+import { relative, resolve, sep } from "node:path";
 import { publishSourceDebugBuildManifest } from "../../packages/shared/src/sourceDebugBuild.ts";
+import {
+  publishApplicationBuildVersionManifest,
+  resolveApplicationBuildVersion,
+} from "../../packages/shared/src/applicationBuildVersion.ts";
+import packageJson from "./package.json" with { type: "json" };
 
 const internalPackagePrefixes = ["@cafecode/", "effect-acp", "effect-codex-app-server"];
+const applicationVersion = resolveApplicationBuildVersion(
+  process.env.APP_VERSION,
+  packageJson.version,
+);
 
 export default defineConfig([
   {
@@ -10,6 +19,12 @@ export default defineConfig([
     outDir: "dist",
     sourcemap: true,
     clean: true,
+    // Bake identity into the emitted module, not the provider/backend's later
+    // environment. Daemon health and native-client identification must agree
+    // with the selected artifact even when source manifests have not been bumped.
+    define: {
+      __CAFE_CODE_BUILD_VERSION__: JSON.stringify(applicationVersion),
+    },
     hooks: {
       "build:done": ({ options, chunks }) => {
         const root = resolve(options.cwd, options.outDir);
@@ -20,6 +35,19 @@ export default defineConfig([
           output.map((chunk) => resolve(options.cwd, chunk.outDir, chunk.fileName)),
           Object.fromEntries(
             output.map((chunk) => [resolve(options.cwd, chunk.outDir, chunk.fileName), chunk.code]),
+          ),
+        );
+        publishApplicationBuildVersionManifest(
+          root,
+          "server",
+          applicationVersion,
+          Object.fromEntries(
+            output.map((chunk) => [
+              relative(root, resolve(options.cwd, chunk.outDir, chunk.fileName))
+                .split(sep)
+                .join("/"),
+              chunk.code,
+            ]),
           ),
         );
       },

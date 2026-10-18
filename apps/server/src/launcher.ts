@@ -4,7 +4,7 @@ import { existsSync, realpathSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
-import packageJson from "../package.json" with { type: "json" };
+import { APPLICATION_VERSION } from "./applicationVersion.ts";
 
 const packageRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const repoRoot = resolve(packageRoot, "../..");
@@ -88,7 +88,7 @@ export function isCliEntrypoint(
 }
 
 function printHelp() {
-  process.stdout.write(`Cafe Code ${packageJson.version}
+  process.stdout.write(`Cafe Code ${APPLICATION_VERSION}
 
 Usage:
   cafe-code                 Launch the Electron desktop app
@@ -146,7 +146,7 @@ export function runLauncher(args: readonly string[]) {
 
   switch (action.type) {
     case "version": {
-      process.stdout.write(`${packageJson.version}\n`);
+      process.stdout.write(`${APPLICATION_VERSION}\n`);
       process.exit(0);
     }
     case "help": {

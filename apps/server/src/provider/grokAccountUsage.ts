@@ -25,7 +25,7 @@ import * as Option from "effect/Option";
 import * as Path from "effect/Path";
 
 import { expandHomePath } from "../pathExpansion.ts";
-import packageJson from "../../package.json" with { type: "json" };
+import { APPLICATION_VERSION } from "../applicationVersion.ts";
 
 const GROK_CLI_BILLING_URL = "https://cli-chat-proxy.grok.com/v1/billing?format=credits";
 const GROK_BILLING_TIMEOUT_MS = 5_000;
@@ -214,7 +214,7 @@ async function fetchGrokAccountRateLimits(input: {
         authorization: `Bearer ${input.credentials.accessToken}`,
         "x-xai-token-auth": "xai-grok-cli",
         "x-userid": input.credentials.userId,
-        "user-agent": `CafeCode/${packageJson.version}`,
+        "user-agent": `CafeCode/${APPLICATION_VERSION}`,
         ...(input.clientVersion ? { "x-grok-client-version": input.clientVersion } : {}),
         accept: "application/json",
       },

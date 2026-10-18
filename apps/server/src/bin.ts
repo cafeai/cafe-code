@@ -7,7 +7,7 @@ import { FetchHttpClient } from "effect/unstable/http";
 
 import * as NetService from "@cafecode/shared/Net";
 import { startStartupCpuProfiler } from "@cafecode/shared/startupProfiler";
-import packageJson from "../package.json" with { type: "json" };
+import { APPLICATION_VERSION } from "./applicationVersion.ts";
 import { authCommand } from "./cli/auth.ts";
 import { sharedServerCommandFlags } from "./cli/config.ts";
 import { killallCommand } from "./cli/killall.ts";
@@ -44,7 +44,7 @@ export const cli = Command.make("cafe-code", { ...sharedServerCommandFlags }).pi
 );
 
 if (import.meta.main) {
-  Command.run(cli, { version: packageJson.version }).pipe(
+  Command.run(cli, { version: APPLICATION_VERSION }).pipe(
     Effect.scoped,
     Effect.provide(CliRuntimeLayer),
     NodeRuntime.runMain({ teardown: backendStartupTeardown }),

@@ -22,7 +22,7 @@ import { runProviderDaemonServerForever } from "../providerDaemon/ProviderDaemon
 import { ProviderDaemonRuntimeLive } from "../providerDaemon/ProviderDaemonRuntime.ts";
 import { PROVIDER_SUPERVISOR_PROTOCOL_VERSION } from "../providerDaemon/ProviderSupervisorProcessManager.ts";
 import { ObservabilityLive } from "../observability/Layers/Observability.ts";
-import packageJson from "../../package.json" with { type: "json" };
+import { APPLICATION_VERSION } from "../applicationVersion.ts";
 import { bootstrapFdFlag } from "./config.ts";
 
 class ProviderDaemonCliError extends Data.TaggedError("ProviderDaemonCliError")<{
@@ -150,7 +150,7 @@ export const runProviderDaemonCommand = (flags: { readonly bootstrapFd: Option.O
       ...(bootstrap.port !== undefined ? { port: bootstrap.port } : {}),
       ...(bootstrap.socketPath !== undefined ? { socketPath: bootstrap.socketPath } : {}),
       token: bootstrap.token,
-      version: packageJson.version,
+      version: APPLICATION_VERSION,
       protocolVersion: PROVIDER_SUPERVISOR_PROTOCOL_VERSION,
       ...(bootstrap.runtimeBuildId !== undefined
         ? { runtimeBuildId: bootstrap.runtimeBuildId }
@@ -205,7 +205,7 @@ export const runProviderSupervisorCommand = (flags: {
       ...(bootstrap.port !== undefined ? { port: bootstrap.port } : {}),
       ...(bootstrap.socketPath !== undefined ? { socketPath: bootstrap.socketPath } : {}),
       token: bootstrap.token,
-      version: packageJson.version,
+      version: APPLICATION_VERSION,
       protocolVersion: PROVIDER_SUPERVISOR_PROTOCOL_VERSION,
       ...(bootstrap.runtimeBuildId !== undefined
         ? { runtimeBuildId: bootstrap.runtimeBuildId }
