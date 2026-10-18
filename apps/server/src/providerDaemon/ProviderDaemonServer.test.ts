@@ -76,6 +76,7 @@ import { VisualizationGenerationId } from "@cafecode/contracts/visualizations";
 import * as McpAppOwner from "../mcpApps/owner.ts";
 import { privateVisualizationDaemonRequestCount } from "../visualizations/privateDaemonBody.ts";
 import { MCP_APP_JSON_MAX_TRANSPORT_BYTES } from "@cafecode/shared/mcpAppJson";
+import { dataProfileIdentity } from "@cafecode/shared/dataProfileIdentity";
 
 const TEST_TOKEN = "provider-daemon-test-token-000000000000000000000000";
 
@@ -314,6 +315,61 @@ const makeProviderDaemonServerTestLayer = (providerService: ProviderServiceShape
 const providerDaemonServerTestLayer = makeProviderDaemonServerTestLayer(mockProviderService);
 
 describe("ProviderDaemonServer", () => {
+  for (const profile of ["production", "debug", undefined] as const) {
+    it.effect(
+      `echoes only actual admitted ${profile ?? "legacy-unknown"} profile in native health and liveness`,
+      () => {
+        const profileLayer = Layer.effect(
+          ServerConfig,
+          Effect.gen(function* () {
+            const config = yield* ServerConfig;
+            const { dataProfile: _previousProfile, ...legacy } = config;
+            return { ...legacy, ...(profile === undefined ? {} : { dataProfile: profile }) };
+          }),
+        ).pipe(
+          Layer.provide(
+            ServerConfig.layerTest(process.cwd(), { prefix: "cafe-native-profile-receipt-" }).pipe(
+              Layer.provide(NodeServices.layer),
+            ),
+          ),
+        );
+        return Effect.gen(function* () {
+          const config = yield* ServerConfig;
+          const port = yield* startProviderDaemonServerOnEphemeralPort({
+            host: "127.0.0.1",
+            token: TEST_TOKEN,
+            version: "0.0.0-test",
+            protocolVersion: 1,
+          });
+          for (const route of [PROVIDER_DAEMON_HEALTH_PATH, PROVIDER_DAEMON_LIVENESS_PATH]) {
+            const unauthenticated = yield* Effect.promise(() =>
+              fetch(`http://127.0.0.1:${port}${route}`),
+            );
+            assert.equal(unauthenticated.status, 401);
+            const response = yield* Effect.promise(() =>
+              fetch(`http://127.0.0.1:${port}${route}`, {
+                headers: { authorization: `Bearer ${TEST_TOKEN}` },
+              }),
+            );
+            const text = yield* Effect.promise(() => response.text());
+            const receipt = JSON.parse(text) as Record<string, unknown>;
+            assert.equal(response.status, 200);
+            assert.equal(receipt.dataProfile, profile);
+            assert.equal(
+              receipt.dataProfileId,
+              profile === undefined ? undefined : dataProfileIdentity(profile, config.baseDir),
+            );
+            assert.notInclude(text, config.baseDir);
+            assert.notInclude(text, TEST_TOKEN);
+          }
+        }).pipe(
+          Effect.scoped,
+          Effect.provide(Layer.merge(providerDaemonServerTestLayer, profileLayer)),
+        );
+      },
+    );
+  }
+
   it.effect(
     "carries only exact native reconfiguration refusals through the guarded remote start transport",
     () => {

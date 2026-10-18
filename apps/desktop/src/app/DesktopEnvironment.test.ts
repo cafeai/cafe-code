@@ -59,8 +59,10 @@ describe("DesktopEnvironment", () => {
         environment.appDataDirectory,
         path.join("/Users/alice", "Library", "Application Support"),
       );
-      assert.equal(environment.baseDir, "/tmp/t3");
-      assert.equal(environment.stateDir, path.join(environment.baseDir, "dev"));
+      assert.equal(environment.dataProfile, "debug");
+      assert.equal(environment.configuredBaseDir, path.resolve("/tmp/t3"));
+      assert.equal(environment.baseDir, path.join(environment.configuredBaseDir, ".debug"));
+      assert.equal(environment.stateDir, path.join(environment.baseDir, "userdata"));
       assert.equal(
         environment.desktopSettingsPath,
         path.join(environment.stateDir, "desktop-settings.json"),
@@ -89,8 +91,8 @@ describe("DesktopEnvironment", () => {
         environment.developmentDockIconPath,
         path.join(environment.rootDir, "assets", "app-icon", "cafe-code-app-icon-macos-1024.png"),
       );
-      assert.equal(environment.appUserModelId, "com.cafeai.cafecode.dev");
-      assert.equal(environment.linuxWmClass, "cafecode-dev");
+      assert.equal(environment.appUserModelId, "com.cafeai.cafecode.debug");
+      assert.equal(environment.linuxWmClass, "cafecode-debug");
       assert.deepEqual(
         Option.map(environment.devServerUrl, (url) => url.href),
         Option.some("http://localhost:5173/"),
@@ -103,7 +105,7 @@ describe("DesktopEnvironment", () => {
     }),
   );
 
-  it.effect("does not switch app identity to development from an inherited Vite URL", () =>
+  it.effect("keeps built source data and identity independent of an inherited Vite URL", () =>
     Effect.gen(function* () {
       const environment = yield* makeEnvironment(
         {},
@@ -114,30 +116,46 @@ describe("DesktopEnvironment", () => {
       );
 
       assert.equal(environment.isDevelopment, false);
+      assert.equal(environment.dataProfile, "debug");
+      assert.equal(
+        environment.baseDir,
+        environment.path.join(environment.path.resolve("/tmp/t3"), ".debug"),
+      );
       assert.equal(environment.stateDir, environment.path.join(environment.baseDir, "userdata"));
-      assert.equal(environment.branding.stageLabel, "Alpha");
-      assert.equal(environment.displayName, "Cafe Code (Alpha)");
-      assert.equal(environment.userDataDirName, "cafecode");
-      assert.equal(environment.appUserModelId, "com.cafeai.cafecode");
+      assert.equal(environment.branding.stageLabel, "Dev");
+      assert.equal(environment.displayName, "Cafe Code (Debug)");
+      assert.equal(environment.userDataDirName, "cafecode-debug");
+      assert.equal(environment.appUserModelId, "com.cafeai.cafecode.debug");
     }),
   );
 
   it.effect("derives production state paths under userdata", () =>
     Effect.gen(function* () {
       const environment = yield* makeEnvironment(
-        {},
+        { isPackaged: true },
         {
           CAFE_CODE_HOME: "/tmp/t3",
+          // Packaged metadata, not inherited source/debug switches, owns the
+          // profile. This must not relocate an installed release's state.
+          CAFE_CODE_DATA_PROFILE: "debug",
+          CAFE_CODE_DESKTOP_DEV: "true",
+          VITE_DEV_SERVER_URL: "http://localhost:5173",
         },
       );
 
-      assert.equal(environment.isDevelopment, false);
+      assert.equal(environment.dataProfile, "production");
+      assert.equal(environment.configuredBaseDir, environment.path.resolve("/tmp/t3"));
+      assert.equal(environment.baseDir, environment.path.resolve("/tmp/t3"));
       assert.equal(environment.stateDir, environment.path.join(environment.baseDir, "userdata"));
       assert.equal(environment.logDir, environment.path.join(environment.stateDir, "logs"));
       assert.equal(
         environment.serverSettingsPath,
         environment.path.join(environment.stateDir, "settings.json"),
       );
+      assert.equal(environment.displayName, "Cafe Code (Alpha)");
+      assert.equal(environment.appUserModelId, "com.cafeai.cafecode");
+      assert.equal(environment.linuxDesktopEntryName, "cafecode.desktop");
+      assert.equal(environment.linuxWmClass, "cafecode");
     }),
   );
 
@@ -145,10 +163,98 @@ describe("DesktopEnvironment", () => {
     Effect.gen(function* () {
       const environment = yield* makeEnvironment();
 
-      assert.equal(environment.baseDir, environment.path.join("/Users/alice", ".cafe-code"));
+      assert.equal(
+        environment.configuredBaseDir,
+        environment.path.resolve("/Users/alice", ".cafe-code"),
+      );
+      assert.equal(
+        environment.baseDir,
+        environment.path.join(environment.configuredBaseDir, ".debug"),
+      );
       assert.equal(environment.stateDir, environment.path.join(environment.baseDir, "userdata"));
     }),
   );
+
+  it.effect("uses one persistent Debug profile for watched and built source launches", () =>
+    Effect.gen(function* () {
+      const built = yield* makeEnvironment({}, { CAFE_CODE_HOME: "/fixture/cafe" });
+      const watched = yield* makeEnvironment(
+        {},
+        {
+          CAFE_CODE_HOME: "/fixture/cafe",
+          CAFE_CODE_DESKTOP_DEV: "true",
+          VITE_DEV_SERVER_URL: "http://localhost:5173",
+        },
+      );
+
+      assert.equal(built.isDevelopment, false);
+      assert.equal(watched.isDevelopment, true);
+      assert.equal(built.dataProfile, watched.dataProfile);
+      for (const field of [
+        "baseDir",
+        "stateDir",
+        "desktopSettingsPath",
+        "clientSettingsPath",
+        "savedEnvironmentRegistryPath",
+        "providerDaemonMarkerPath",
+        "providerDaemonCredentialPath",
+        "providerDaemonIpcDir",
+        "serverSettingsPath",
+        "logDir",
+        "displayName",
+        "appUserModelId",
+      ] as const) {
+        assert.equal(built[field], watched[field]);
+      }
+      assert.equal(
+        built.stateDir,
+        built.path.join(built.path.resolve("/fixture/cafe"), ".debug", "userdata"),
+      );
+    }),
+  );
+
+  for (const isPackaged of [true, false]) {
+    it.effect(
+      `normalizes a relative ${isPackaged ? "Production" : "Debug"} root before child bootstrap`,
+      () =>
+        Effect.gen(function* () {
+          const environment = yield* makeEnvironment(
+            { isPackaged },
+            { CAFE_CODE_HOME: "fixture-home/../Cafe data" },
+          );
+          const expectedRoot = environment.path.resolve("fixture-home/../Cafe data");
+          assert.equal(environment.configuredBaseDir, expectedRoot);
+          assert.equal(
+            environment.baseDir,
+            isPackaged ? expectedRoot : environment.path.join(expectedRoot, ".debug"),
+          );
+          assert.equal(environment.path.isAbsolute(environment.configuredBaseDir), true);
+          assert.equal(environment.path.isAbsolute(environment.stateDir), true);
+        }),
+    );
+
+    for (const configuredRoot of ["~", "~/Cafe data", "~\\Cafe data"]) {
+      it.effect(
+        `expands ${configuredRoot} in the ${isPackaged ? "Production" : "Debug"} root exactly once`,
+        () =>
+          Effect.gen(function* () {
+            const environment = yield* makeEnvironment(
+              { isPackaged },
+              { CAFE_CODE_HOME: configuredRoot },
+            );
+            const expectedRoot = environment.path.resolve(
+              "/Users/alice",
+              ...(configuredRoot === "~" ? [] : ["Cafe data"]),
+            );
+            assert.equal(environment.configuredBaseDir, expectedRoot);
+            assert.equal(
+              environment.baseDir,
+              isPackaged ? expectedRoot : environment.path.join(expectedRoot, ".debug"),
+            );
+          }),
+      );
+    }
+  }
 
   it.effect("resolves picker defaults without nullish sentinels", () =>
     Effect.gen(function* () {

@@ -25,6 +25,17 @@ import {
   type DesktopBackendBootstrap as DesktopBackendBootstrapValue,
 } from "@cafecode/contracts";
 import { CAFE_CODE_ENVIRONMENT_ENDPOINT_PATH } from "@cafecode/shared/environmentEndpoint";
+import { resolveBootstrappedDataProfile } from "@cafecode/shared/dataProfile";
+import { BACKEND_PROFILE_STARTUP_REFUSED_EXIT_CODE } from "@cafecode/shared/backendStartupFailure";
+import { uiText } from "@cafecode/shared/i18n";
+import * as NodePath from "node:path";
+import {
+  BACKEND_READINESS_CHALLENGE_HEADER,
+  BACKEND_READINESS_PROOF_HEADER,
+  mintBackendReadinessChallenge,
+  mintBackendReadinessToken,
+  verifyBackendReadinessProof,
+} from "@cafecode/shared/backendReadiness";
 import {
   BACKEND_STARTUP_PROGRESS_FD,
   makeBackendMigrationProgressDecoder,
@@ -35,11 +46,7 @@ import * as DesktopBackendConfiguration from "./DesktopBackendConfiguration.ts";
 import * as DesktopObservability from "../app/DesktopObservability.ts";
 import * as DesktopState from "../app/DesktopState.ts";
 import * as DesktopWindow from "../window/DesktopWindow.ts";
-import {
-  matchesDesktopBackendProcess,
-  reapMatchingUnixProcesses,
-  type DesktopProcessSnapshot,
-} from "./DesktopProcessReaper.ts";
+import * as ElectronDialog from "../electron/ElectronDialog.ts";
 
 const INITIAL_RESTART_DELAY = Duration.millis(500);
 const MAX_RESTART_DELAY = Duration.seconds(10);
@@ -91,11 +98,11 @@ export class BackendTimeoutError extends Data.TaggedError("BackendTimeoutError")
 
 class BackendProcessBootstrapEncodeError extends Data.TaggedError(
   "BackendProcessBootstrapEncodeError",
-)<{
-  readonly cause: Schema.SchemaError;
-}> {
+)<{}> {
   override get message() {
-    return `Failed to encode desktop backend bootstrap payload: ${this.cause.message}`;
+    // The payload contains private one-run credentials. A schema exception may
+    // quote received values, so retain neither it nor its message as a cause.
+    return "Failed to encode desktop backend bootstrap payload.";
   }
 }
 
@@ -119,7 +126,10 @@ class BackendHealthCheckFailedError extends Data.TaggedError("BackendHealthCheck
 type BackendProcessError = BackendProcessBootstrapEncodeError | BackendProcessSpawnError;
 
 interface RunBackendProcessOptions extends DesktopBackendStartConfig {
-  readonly onStarted?: (pid: number, terminate: Effect.Effect<void>) => Effect.Effect<void>;
+  readonly onStarted?: (
+    pid: number,
+    terminate: (grace?: Duration.Duration) => Effect.Effect<void>,
+  ) => Effect.Effect<void>;
   readonly onReady?: () => Effect.Effect<void>;
   readonly onReadinessFailure?: (error: BackendTimeoutError) => Effect.Effect<void>;
   readonly onHealthFailure?: (error: BackendHealthCheckFailedError) => Effect.Effect<void>;
@@ -152,42 +162,39 @@ export class DesktopBackendManager extends Context.Service<
 const { logWarning: logBackendManagerWarning, logError: logBackendManagerError } =
   DesktopObservability.makeComponentLogger("desktop-backend-manager");
 
-const reapStaleDesktopBackendProcesses = (
-  entryPath: string,
-  keepPids: ReadonlyArray<number | undefined>,
-): Effect.Effect<void> => {
-  const keepPidSet = new Set(keepPids.filter((pid): pid is number => pid !== undefined && pid > 0));
-  return reapMatchingUnixProcesses({
-    keepPids: keepPidSet,
-    matches: (processSnapshot: DesktopProcessSnapshot) =>
-      matchesDesktopBackendProcess(processSnapshot, entryPath),
-  }).pipe(
-    Effect.flatMap((results) =>
-      Effect.forEach(
-        results,
-        (result) =>
-          logBackendManagerWarning("reaped stale desktop backend process", {
-            pid: result.pid,
-            ppid: result.ppid,
-            signalSent: result.signalSent,
-            escalated: result.escalated,
-            stillAlive: result.stillAlive,
-            ...(result.error !== null ? { error: result.error } : {}),
-          }),
-        { concurrency: 1 },
-      ),
-    ),
-    Effect.asVoid,
-  );
-};
-
 interface ActiveBackendRun {
   readonly id: number;
+  readonly authenticatedReady: boolean;
   readonly closeScope: Effect.Effect<void>;
   readonly fiber: Option.Option<Fiber.Fiber<void, never>>;
   readonly pid: Option.Option<number>;
-  readonly terminate: Option.Option<Effect.Effect<void>>;
+  readonly terminate: Option.Option<(grace?: Duration.Duration) => Effect.Effect<void>>;
   readonly exited: Deferred.Deferred<void>;
+}
+
+/** Native-exit classification only. A retired run cannot affect a newer owner,
+ * and a numeric exit from legacy/unprofiled or previously-ready code is not a
+ * new startup-refusal capability. This policy performs no profile IO. */
+export function classifyDesktopBackendExit(input: {
+  readonly exitingRunId: number;
+  readonly currentRun: { readonly id: number; readonly authenticatedReady: boolean } | undefined;
+  readonly exitCode: number | undefined;
+  readonly bootstrap: DesktopBackendBootstrapValue;
+}): "stale" | "ordinary" | "profile-startup-refused" {
+  if (input.currentRun === undefined || input.currentRun.id !== input.exitingRunId) return "stale";
+  if (
+    input.exitCode !== BACKEND_PROFILE_STARTUP_REFUSED_EXIT_CODE ||
+    input.currentRun.authenticatedReady ||
+    input.bootstrap.mode !== "desktop" ||
+    input.bootstrap.dataProfile === undefined
+  )
+    return "ordinary";
+  try {
+    resolveBootstrappedDataProfile(input.bootstrap, NodePath);
+    return "profile-startup-refused";
+  } catch {
+    return "ordinary";
+  }
 }
 
 interface BackendManagerState {
@@ -223,26 +230,14 @@ const withActiveRun =
 const calculateRestartDelay = (attempt: number): Duration.Duration =>
   Duration.min(Duration.times(INITIAL_RESTART_DELAY, 2 ** attempt), MAX_RESTART_DELAY);
 
-const signalBackendPid = (run: ActiveBackendRun, signal: NodeJS.Signals): Effect.Effect<void> =>
-  Option.match(run.pid, {
-    onNone: () => Effect.void,
-    onSome: (pid) =>
-      Effect.sync(() => {
-        try {
-          process.kill(pid, signal);
-        } catch {
-          // Ignore races with backend processes that already exited.
-        }
-      }),
-  });
-
 const closeRun = (
   run: ActiveBackendRun,
   options?: { readonly timeout?: Duration.Duration },
 ): Effect.Effect<"closed" | "timed-out"> => {
   const terminate = Option.match(run.terminate, {
     onNone: () => Effect.void,
-    onSome: (kill) => kill,
+    onSome: (kill) =>
+      kill(options?.timeout ? Duration.min(options.timeout, Duration.seconds(1)) : undefined),
   });
   const waitForFiber = Option.match(run.fiber, {
     onNone: () => Effect.void,
@@ -266,12 +261,7 @@ const closeRun = (
     if (Option.isNone(run.terminate)) {
       yield* run.closeScope.pipe(Effect.ignore, Effect.forkDetach);
     }
-    yield* signalBackendPid(run, "SIGTERM");
     yield* terminate.pipe(Effect.ignore, Effect.forkDetach);
-    yield* Effect.sleep(Duration.min(timeout, Duration.seconds(1))).pipe(
-      Effect.andThen(signalBackendPid(run, "SIGKILL")),
-      Effect.forkDetach,
-    );
     yield* Deferred.await(run.exited);
   });
 
@@ -288,23 +278,43 @@ const readinessUrlFor = (baseUrl: URL): URL => new URL(BACKEND_READINESS_PATH, b
 
 const checkHttpReadyOnce = Effect.fn("desktop.backendManager.checkHttpReadyOnce")(function* (
   baseUrl: URL,
+  readinessToken: string,
   requestTimeout: Duration.Duration = DEFAULT_BACKEND_READINESS_REQUEST_TIMEOUT,
 ): Effect.fn.Return<boolean, never, HttpClient.HttpClient> {
   const readinessUrl = readinessUrlFor(baseUrl);
   const client = (yield* HttpClient.HttpClient).pipe(
     HttpClient.filterStatusOk,
     HttpClient.transformResponse(Effect.timeout(requestTimeout)),
+    HttpClient.withScope,
   );
 
-  return yield* client.get(readinessUrl).pipe(
-    Effect.timeout(requestTimeout),
-    Effect.as(true),
-    Effect.catch(() => Effect.succeed(false)),
-  );
+  const challenge = mintBackendReadinessChallenge();
+  return yield* client
+    .get(readinessUrl, {
+      headers: { [BACKEND_READINESS_CHALLENGE_HEADER]: challenge },
+    })
+    .pipe(
+      Effect.timeout(requestTimeout),
+      // A public environment endpoint's status alone is never ownership proof:
+      // a listener winning the bind race must not open another profile's UI.
+      Effect.map((response) =>
+        verifyBackendReadinessProof(
+          readinessToken,
+          challenge,
+          response.headers[BACKEND_READINESS_PROOF_HEADER],
+        ),
+      ),
+      Effect.catch(() => Effect.succeed(false)),
+      // Header-only ownership probes do not consume the public JSON body. Bind
+      // each exact request to this finite scope so success, refusal and timeout
+      // abort any held response stream immediately instead of relying on GC.
+      Effect.scoped,
+    );
 });
 
 const waitForHttpReady = Effect.fn("desktop.backendManager.waitForHttpReady")(function* (
   baseUrl: URL,
+  readinessToken: string,
   deadline: ReturnType<typeof makeBackendStartupDeadline>,
   elapsedMs: Effect.Effect<number>,
 ): Effect.fn.Return<void, BackendTimeoutError, HttpClient.HttpClient> {
@@ -314,6 +324,7 @@ const waitForHttpReady = Effect.fn("desktop.backendManager.waitForHttpReady")(fu
     const remainingMs = Math.max(0, deadline.deadlineMs - beforeProbeMs);
     const healthy = yield* checkHttpReadyOnce(
       baseUrl,
+      readinessToken,
       Duration.min(DEFAULT_BACKEND_READINESS_REQUEST_TIMEOUT, Duration.millis(remainingMs)),
     );
     const afterProbeMs = yield* elapsedMs;
@@ -335,6 +346,7 @@ const waitForHttpReady = Effect.fn("desktop.backendManager.waitForHttpReady")(fu
 
 const monitorHttpHealth = Effect.fn("desktop.backendManager.monitorHttpHealth")(function* (
   baseUrl: URL,
+  readinessToken: string,
   interval: Duration.Duration,
   requestTimeout: Duration.Duration,
   failureThreshold: number,
@@ -345,7 +357,7 @@ const monitorHttpHealth = Effect.fn("desktop.backendManager.monitorHttpHealth")(
 
   while (true) {
     yield* Effect.sleep(interval);
-    const healthy = yield* checkHttpReadyOnce(baseUrl, requestTimeout);
+    const healthy = yield* checkHttpReadyOnce(baseUrl, readinessToken, requestTimeout);
     if (healthy) {
       if (consecutiveFailures > 0) {
         yield* Effect.logInfo("desktop.backend.health-check.recovered", {
@@ -391,13 +403,6 @@ function describeProcessExit(
   };
 }
 
-function describeSyntheticProcessExit(reason: string): BackendProcessExit {
-  return {
-    code: Option.none(),
-    reason,
-  };
-}
-
 function drainBackendOutput(
   streamName: BackendProcessOutputStream,
   stream: Stream.Stream<Uint8Array, PlatformError.PlatformError>,
@@ -416,10 +421,14 @@ const runBackendProcess = Effect.fn("runBackendProcess")(function* (
 ): Effect.fn.Return<BackendProcessExit, BackendProcessError, BackendProcessRunRequirements> {
   const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
   const processScope = yield* Scope.Scope;
+  // Mint for the actual spawn, never for saved manager configuration. Retries
+  // using the same bootstrap intent must not accept a previous child's proof.
+  const readinessToken = mintBackendReadinessToken();
   const bootstrapJson = yield* encodeBootstrapJson({
     ...options.bootstrap,
+    desktopReadinessToken: readinessToken,
     startupProgressFd: BACKEND_STARTUP_PROGRESS_FD,
-  }).pipe(Effect.mapError((cause) => new BackendProcessBootstrapEncodeError({ cause })));
+  }).pipe(Effect.mapError(() => new BackendProcessBootstrapEncodeError()));
   const onOutput = options.onOutput ?? (() => Effect.void);
   const command = ChildProcess.make(
     options.executablePath,
@@ -460,7 +469,41 @@ const runBackendProcess = Effect.fn("runBackendProcess")(function* (
     .spawn(command)
     .pipe(Effect.mapError((cause) => new BackendProcessSpawnError({ cause })));
 
-  const terminate = handle.kill().pipe(Effect.ignore);
+  const nativeExit = Effect.result(handle.exitCode).pipe(Effect.asVoid);
+  const terminationStarted = yield* Ref.make(false);
+  const terminate = (grace: Duration.Duration = DEFAULT_BACKEND_TERMINATE_GRACE) =>
+    Effect.gen(function* () {
+      yield* Effect.gen(function* () {
+        if (!(yield* Ref.getAndSet(terminationStarted, true))) {
+          // Signal only this retained native child handle. Neither a process
+          // catalogue entry nor a recycled bare PID can grant cleanup authority.
+          const signalOwnedChild = (killSignal: NodeJS.Signals) =>
+            handle.isRunning.pipe(
+              // Uncertain native-handle observation cannot authorize signaling.
+              Effect.orElseSucceed(() => false),
+              Effect.flatMap((running) =>
+                running ? handle.kill({ killSignal }).pipe(Effect.ignore) : Effect.void,
+              ),
+            );
+          // Stop may run after runScope begins closing. This one-shot native
+          // control must survive that scope's cancellation; otherwise the close
+          // would cancel its own signal before the exact exit can be observed.
+          // The reservation remains active until nativeExit, so this independent
+          // request cannot authorize or accumulate replacement writers.
+          yield* signalOwnedChild("SIGTERM").pipe(Effect.interruptible, Effect.forkDetach);
+          yield* Effect.race(
+            nativeExit,
+            Effect.sleep(grace).pipe(Effect.andThen(signalOwnedChild("SIGKILL")), Effect.ignore),
+          ).pipe(Effect.interruptible, Effect.forkDetach);
+        }
+        // Reservation plus starting its exact-child control fibers is atomic;
+        // cancellation may not leave a claimed but never-signaled owner behind.
+        // Only this synchronous handoff is fenced, never the native exit wait.
+      }).pipe(Effect.uninterruptible);
+      // A completed signal request is not proof that the native child exited.
+      // Retain ownership until its actual exit receipt, including on failure.
+      yield* nativeExit;
+    });
   const progressDecoder = makeBackendMigrationProgressDecoder();
   yield* handle.getOutputFd(BACKEND_STARTUP_PROGRESS_FD).pipe(
     Stream.runForEach((bytes) =>
@@ -482,20 +525,13 @@ const runBackendProcess = Effect.fn("runBackendProcess")(function* (
     ),
     Effect.forkIn(processScope),
   );
-  const terminalFailureExit = yield* Deferred.make<BackendProcessExit>();
   const terminateFailedRun = Effect.fn("desktop.backendManager.terminateFailedRun")(function* (
-    reason: string,
+    _reason: string,
   ) {
-    // ChildProcessHandle.kill normally waits for process termination. A wedged Node child can
-    // acknowledge SIGTERM while keeping inherited handles alive indefinitely, so waiting for that
-    // effect before publishing terminal state would reproduce the same manager deadlock this path
-    // exists to recover from. Start termination independently, then let the manager finalize this
-    // run immediately. Before the replacement binds, start() performs a narrowly scoped backend
-    // process reap that excludes provider daemons and supervisors.
-    yield* handle.kill().pipe(Effect.ignore, Effect.forkDetach);
-    yield* Deferred.succeed(terminalFailureExit, describeSyntheticProcessExit(reason)).pipe(
-      Effect.ignore,
-    );
+    // Failure immediately retires readiness, but cannot release writer
+    // ownership. Start bounded native-handle termination without blocking the
+    // health observer; replacement still waits for the exact exit below.
+    yield* terminate().pipe(Effect.forkIn(processScope));
   });
   yield* options.onStarted?.(handle.pid, terminate) ?? Effect.void;
   if (options.captureOutput) {
@@ -509,11 +545,12 @@ const runBackendProcess = Effect.fn("runBackendProcess")(function* (
   const healthCheckInterval = options.healthCheckInterval ?? DEFAULT_BACKEND_HEALTH_CHECK_INTERVAL;
   const healthCheckRequestTimeout =
     options.healthCheckRequestTimeout ?? DEFAULT_BACKEND_HEALTH_REQUEST_TIMEOUT;
-  yield* waitForHttpReady(options.httpBaseUrl, deadline, elapsedMs).pipe(
+  yield* waitForHttpReady(options.httpBaseUrl, readinessToken, deadline, elapsedMs).pipe(
     Effect.tap(() => options.onReady?.() ?? Effect.void),
     Effect.tap(() =>
       monitorHttpHealth(
         options.httpBaseUrl,
+        readinessToken,
         healthCheckInterval,
         healthCheckRequestTimeout,
         healthFailureThreshold,
@@ -523,8 +560,8 @@ const runBackendProcess = Effect.fn("runBackendProcess")(function* (
             // A backend can lose its HTTP listener while process-level liveness remains true. In
             // that split-brain state the renderer cannot reconnect, and waiting only for exitCode can
             // wedge the desktop manager forever if the child ignores SIGTERM or has lingering fibers.
-            // Treat the health failure itself as a terminal run signal so the manager clears active
-            // state and starts a fresh backend; the next spawn reaps the stale child before binding.
+            // Retire readiness and request termination while retaining this
+            // active writer until its exact native exit receipt arrives.
             yield* terminateFailedRun(error.message);
           }),
       ).pipe(Effect.forkIn(processScope)),
@@ -532,8 +569,7 @@ const runBackendProcess = Effect.fn("runBackendProcess")(function* (
     Effect.catch((error) =>
       Effect.gen(function* () {
         yield* (options.onReadinessFailure?.(error) ?? Effect.void).pipe(Effect.ignore);
-        // Readiness timeout is terminal for this run even when the spawned child remains alive.
-        // Otherwise the outer race waits forever on exitCode and the scheduled restart never runs.
+        // A readiness timeout retires availability, not native ownership.
         yield* terminateFailedRun(error.message);
       }),
     ),
@@ -549,10 +585,7 @@ const runBackendProcess = Effect.fn("runBackendProcess")(function* (
     Effect.forkIn(processScope),
   );
 
-  return yield* Effect.race(
-    Effect.result(handle.exitCode).pipe(Effect.map(describeProcessExit)),
-    Deferred.await(terminalFailureExit),
-  );
+  return yield* Effect.result(handle.exitCode).pipe(Effect.map(describeProcessExit));
 });
 
 const makeDesktopBackendManager = Effect.fn("makeDesktopBackendManager")(function* () {
@@ -562,6 +595,7 @@ const makeDesktopBackendManager = Effect.fn("makeDesktopBackendManager")(functio
   const backendOutputLog = yield* DesktopObservability.DesktopBackendOutputLog;
   const desktopState = yield* DesktopState.DesktopState;
   const desktopWindow = yield* DesktopWindow.DesktopWindow;
+  const electronDialog = yield* ElectronDialog.ElectronDialog;
   const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
   const httpClient = yield* HttpClient.HttpClient;
   const state = yield* Ref.make(initialState);
@@ -623,17 +657,8 @@ const makeDesktopBackendManager = Effect.fn("makeDesktopBackendManager")(functio
           return;
         }
 
-        // If the previous backend lost its HTTP listener but kept the process alive, it may still
-        // hold SQLite files, inherited pipes, or the intended port. Clear stale backend children
-        // before spawning the replacement. Provider daemon/supervisor processes are excluded by the
-        // matcher, so long-running provider sessions are left alone.
-        yield* reapStaleDesktopBackendProcesses(config.entryPath, []).pipe(
-          Effect.catchCause((cause) =>
-            logBackendManagerWarning("failed to reap stale desktop backend processes", {
-              cause: Cause.pretty(cause),
-            }),
-          ),
-        );
+        // An executable path is shared by Debug and Production. No ambient
+        // process scan may turn that path into authority to terminate a child.
 
         const runScope = yield* Scope.make("sequential");
         const runScopeClosed = yield* Ref.make(false);
@@ -649,6 +674,7 @@ const makeDesktopBackendManager = Effect.fn("makeDesktopBackendManager")(functio
             ...latest,
             active: Option.some({
               id: latest.nextRunId,
+              authenticatedReady: false,
               closeScope: closeRunScope,
               fiber: Option.none(),
               pid: Option.none(),
@@ -661,10 +687,11 @@ const makeDesktopBackendManager = Effect.fn("makeDesktopBackendManager")(functio
 
         const finalizeRun = Effect.fn("desktop.backendManager.finalizeRun")(function* (
           reason: string,
+          exitCode: number | undefined = undefined,
         ) {
           yield* mutex.withPermits(1)(
             Effect.gen(function* () {
-              const { isCurrentRun, nextState, pid } = yield* Ref.modify(
+              const { isCurrentRun, nextState, pid, notifyProfileRefusal } = yield* Ref.modify(
                 state,
                 (
                   latest,
@@ -673,16 +700,24 @@ const makeDesktopBackendManager = Effect.fn("makeDesktopBackendManager")(functio
                     readonly isCurrentRun: boolean;
                     readonly nextState: BackendManagerState;
                     readonly pid: Option.Option<number>;
+                    readonly notifyProfileRefusal: boolean;
                   },
                   BackendManagerState,
                 ] => {
                   const currentRun = Option.getOrUndefined(latest.active);
-                  if (currentRun?.id !== runId) {
+                  const disposition = classifyDesktopBackendExit({
+                    exitingRunId: runId,
+                    currentRun,
+                    exitCode,
+                    bootstrap: config.bootstrap,
+                  });
+                  if (disposition === "stale" || currentRun === undefined) {
                     return [
                       {
                         isCurrentRun: false,
                         nextState: latest,
                         pid: Option.none<number>(),
+                        notifyProfileRefusal: false,
                       },
                       latest,
                     ] as const;
@@ -690,6 +725,8 @@ const makeDesktopBackendManager = Effect.fn("makeDesktopBackendManager")(functio
 
                   const next = {
                     ...latest,
+                    desiredRunning:
+                      disposition === "profile-startup-refused" ? false : latest.desiredRunning,
                     active: Option.none<ActiveBackendRun>(),
                     ready: false,
                   };
@@ -698,6 +735,8 @@ const makeDesktopBackendManager = Effect.fn("makeDesktopBackendManager")(functio
                       isCurrentRun: true,
                       nextState: next,
                       pid: currentRun.pid,
+                      notifyProfileRefusal:
+                        disposition === "profile-startup-refused" && latest.desiredRunning,
                     },
                     next,
                   ] as const;
@@ -712,6 +751,24 @@ const makeDesktopBackendManager = Effect.fn("makeDesktopBackendManager")(functio
                   });
                 }
                 yield* Ref.set(desktopState.backendReady, false);
+              }
+
+              // The mutex still fences this exact exited owner while notifying.
+              // A concurrent manual start cannot supersede it between admission
+              // and the fixed local error. Explicit stop/quit never pops a new UI.
+              if (notifyProfileRefusal && !(yield* Ref.get(desktopState.quitting))) {
+                yield* electronDialog
+                  .showErrorBox(
+                    uiText("Cafe Code data profile could not start"),
+                    uiText(
+                      "This data profile is already in use, unavailable or unsafe. No other profile was selected and automatic restart has stopped. Close the other Cafe Code instance using this profile, or check permissions, free space and startup recovery files. After resolving the problem, quit and reopen this Cafe Code instance. Do not delete ownership files to bypass this refusal.",
+                    ),
+                  )
+                  .pipe(
+                    Effect.catchCause(() =>
+                      logBackendManagerError("failed to show data profile startup refusal"),
+                    ),
+                  );
               }
 
               if (isCurrentRun && nextState.desiredRunning) {
@@ -733,15 +790,6 @@ const makeDesktopBackendManager = Effect.fn("makeDesktopBackendManager")(functio
               phase: "START",
               details: `pid=${pid} port=${config.bootstrap.port} cwd=${config.cwd}`,
             });
-            yield* reapStaleDesktopBackendProcesses(config.entryPath, [pid]).pipe(
-              Effect.catchCause((cause) =>
-                logBackendManagerWarning("failed to reap stale desktop backend processes", {
-                  cause: Cause.pretty(cause),
-                }),
-              ),
-              Effect.forkIn(parentScope),
-              Effect.asVoid,
-            );
           }),
           onReady: Effect.fn("desktop.backendManager.onReady")(function* () {
             const isCurrentRun = yield* Ref.modify(state, (latest) => {
@@ -754,6 +802,7 @@ const makeDesktopBackendManager = Effect.fn("makeDesktopBackendManager")(functio
                 true,
                 {
                   ...latest,
+                  active: Option.some({ ...activeRun, authenticatedReady: true }),
                   restartAttempt: 0,
                   ready: true,
                 },
@@ -777,8 +826,17 @@ const makeDesktopBackendManager = Effect.fn("makeDesktopBackendManager")(functio
               error: error.message,
             }),
           onHealthFailure: (error) =>
-            logBackendManagerWarning("backend health check failed; terminating backend", {
-              error: error.message,
+            Effect.gen(function* () {
+              const currentOwner = yield* Ref.modify(state, (latest) =>
+                Option.getOrUndefined(latest.active)?.id === runId
+                  ? ([true, { ...latest, ready: false }] as const)
+                  : ([false, latest] as const),
+              );
+              if (!currentOwner) return;
+              yield* Ref.set(desktopState.backendReady, false);
+              yield* logBackendManagerWarning("backend health check failed; terminating backend", {
+                error: error.message,
+              });
             }),
           onOutput: (streamName, chunk) => backendOutputLog.writeOutputChunk(streamName, chunk),
         }).pipe(
@@ -789,7 +847,9 @@ const makeDesktopBackendManager = Effect.fn("makeDesktopBackendManager")(functio
             onFailure: (error) =>
               Deferred.succeed(exited, undefined).pipe(Effect.andThen(finalizeRun(error.message))),
             onSuccess: (exit) =>
-              Deferred.succeed(exited, undefined).pipe(Effect.andThen(finalizeRun(exit.reason))),
+              Deferred.succeed(exited, undefined).pipe(
+                Effect.andThen(finalizeRun(exit.reason, Option.getOrUndefined(exit.code))),
+              ),
           }),
           Effect.ensuring(closeRunScope.pipe(Effect.ignore)),
         );
@@ -877,7 +937,9 @@ const makeDesktopBackendManager = Effect.fn("makeDesktopBackendManager")(functio
             ...latest,
             desiredRunning: false,
             ready: false,
-            active: Option.none<ActiveBackendRun>(),
+            // Retain the exact owner while closing. In particular, a timeout
+            // must not authorize a manual start to create a second DB writer.
+            active: latest.active,
             restartFiber: Option.none<Fiber.Fiber<void, never>>(),
           },
         ]);
@@ -895,6 +957,18 @@ const makeDesktopBackendManager = Effect.fn("makeDesktopBackendManager")(functio
       onSome: (run) =>
         Effect.gen(function* () {
           const result = yield* closeRun(run, options);
+          if (result === "closed") {
+            // A completed close joins the run's native-exit path (or cancels a
+            // preparation which never published a child). Clear only this
+            // retained generation; a timed-out close deliberately keeps it.
+            yield* mutex.withPermits(1)(
+              Ref.update(state, (latest) =>
+                Option.getOrUndefined(latest.active)?.id === run.id
+                  ? { ...latest, active: Option.none<ActiveBackendRun>() }
+                  : latest,
+              ),
+            );
+          }
           if (result !== "timed-out" || !options?.timeout) {
             return;
           }

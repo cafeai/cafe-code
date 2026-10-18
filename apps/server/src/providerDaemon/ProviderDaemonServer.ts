@@ -54,6 +54,8 @@ import {
   WindowsOwnershipId,
 } from "@cafecode/contracts";
 import { captureWindowsProcessIdentity } from "@cafecode/shared/windowsProcessOwnership";
+import { dataProfileIdentity } from "@cafecode/shared/dataProfileIdentity";
+import { ServerConfig } from "../config.ts";
 import { PROVIDER_PIPELINE_POLICY, utf8ByteLength } from "@cafecode/shared/providerPipelinePolicy";
 import {
   addProviderDaemonStreamDiagnostics,
@@ -1395,6 +1397,16 @@ export const runProviderDaemonServer = (
         captureProviderDaemonProcessIdentity(options.windowsOwnershipId, identityDependencies),
       catch: () => new Error("Windows provider runtime could not verify its own process identity."),
     }).pipe(Effect.orDie);
+    const config = yield* Effect.serviceOption(ServerConfig);
+    // Mint profile proof only from the actual admitted runtime configuration,
+    // never caller-provided health options or ambient environment defaults.
+    const profileIdentity =
+      Option.isSome(config) && config.value.dataProfile !== undefined
+        ? {
+            dataProfile: config.value.dataProfile,
+            dataProfileId: dataProfileIdentity(config.value.dataProfile, config.value.baseDir),
+          }
+        : {};
     installProviderDaemonProcessDiagnosticListeners();
     startProviderPipelineEventLoopMonitor();
 
@@ -1741,6 +1753,7 @@ export const runProviderDaemonServer = (
           writeJson(response, 200, {
             ok: true,
             mode,
+            ...profileIdentity,
             protocolVersion: options.protocolVersion,
             pid: process.pid,
             ppid: process.ppid,
@@ -1785,6 +1798,7 @@ export const runProviderDaemonServer = (
               return {
                 ok: true,
                 mode,
+                ...profileIdentity,
                 protocolVersion: options.protocolVersion,
                 pid: process.pid,
                 ppid: process.ppid,

@@ -16,7 +16,11 @@ import { uiText } from "@cafecode/shared/i18n";
 import { AuthSessionId } from "@cafecode/contracts/auth";
 import { SessionCredentialService } from "../auth/Services/SessionCredentialService.ts";
 import type { AuthenticatedSession } from "../auth/Services/ServerAuth.ts";
-import { readPrivatePushState, writePrivatePushState } from "./privateState.ts";
+import {
+  PrivatePushStatePathError,
+  readPrivatePushState,
+  writePrivatePushState,
+} from "./privateState.ts";
 import { ThreadId, TurnId } from "@cafecode/contracts";
 import { ScheduledFollowups } from "../scheduledFollowups/service.ts";
 import * as Cause from "effect/Cause";
@@ -45,10 +49,21 @@ import { ProviderService } from "../provider/Services/ProviderService.ts";
 const VAPID_SUBJECT = "mailto:notifications@cafe-code.invalid";
 const PUSH_TTL_SECONDS = 3600;
 
-export class WebPushNotificationsError extends Data.TaggedError("WebPushNotificationsError")<{
+interface WebPushNotificationsErrorFields {
   readonly detail: string;
   readonly cause?: unknown;
-}> {}
+  readonly initializationStage?: "read" | "decode" | "reconcile";
+}
+export class WebPushNotificationsError extends Data.TaggedError(
+  "WebPushNotificationsError",
+)<WebPushNotificationsErrorFields> {
+  constructor(fields: WebPushNotificationsErrorFields) {
+    super(fields);
+    // Effect's error renderer reads Error.message, not the domain detail field.
+    // Keep the fixed safe explanation visible instead of a blank tagged error.
+    this.message = fields.detail;
+  }
+}
 
 const VapidKeyPair = Schema.Struct({
   publicKey: Schema.String,
@@ -169,7 +184,7 @@ function deliveryStatusCode(cause: unknown): number | null {
   return null;
 }
 
-export const makeWebPushNotifications = Effect.gen(function* () {
+const initializeWebPushNotifications = Effect.gen(function* () {
   const config = yield* ServerConfig;
   const providerService = yield* ProviderService;
   const sessions = yield* SessionCredentialService;
@@ -184,20 +199,33 @@ export const makeWebPushNotifications = Effect.gen(function* () {
   let persisted: string | undefined;
   const readStateFromDisk = Effect.tryPromise({
     try: () => readPrivatePushState(statePath),
-    catch: () => new WebPushNotificationsError({ detail: "Failed to read private push state" }),
+    catch: (error) =>
+      new WebPushNotificationsError({
+        detail:
+          error instanceof PrivatePushStatePathError
+            ? error.message
+            : "Failed to read private push state",
+        initializationStage: "read",
+      }),
   }).pipe(
     Effect.flatMap((contents) => {
       persisted = contents;
       return contents === undefined
         ? Effect.succeed(EMPTY_WEB_PUSH_STATE)
-        : decodeWebPushState(contents);
+        : decodeWebPushState(contents).pipe(
+            Effect.mapError(
+              () =>
+                new WebPushNotificationsError({
+                  detail: "Failed to decode private push state",
+                  initializationStage: "decode",
+                }),
+            ),
+          );
     }),
-    Effect.mapError(
-      () => new WebPushNotificationsError({ detail: "Failed to decode private push state" }),
-    ),
   );
   // A failed migration must preserve evidence and stop delivery, not replace it
-  // with an apparently new identity. Startup fails with a fixed safe error.
+  // with an apparently new identity. The outer initializer isolates this
+  // optional service's typed failures without admitting unsafe state.
   const initial = yield* readStateFromDisk;
   const stateRef = yield* Ref.make<WebPushState>(initial);
   const persistState = (state: WebPushState) =>
@@ -532,6 +560,38 @@ export const makeWebPushNotifications = Effect.gen(function* () {
     start,
   } satisfies WebPushNotificationsShape;
 });
+
+/** Push storage is optional to chat startup, but its security checks are not.
+ * Retain the failed namespace/state and never generate a replacement identity,
+ * start delivery consumers or retry writes after initialization is refused.
+ * Only this service's typed errors are isolated: interruption and defects keep
+ * their ordinary failure semantics instead of being disguised as availability.
+ */
+export const makeWebPushNotifications = initializeWebPushNotifications.pipe(
+  Effect.catchTag("WebPushNotificationsError", (error) => {
+    const phase = error.initializationStage ?? "reconcile";
+    // Fixed phase metadata is sufficient for diagnosis. Never log the private
+    // input, filesystem path, VAPID keys, endpoints or raw decoder/I/O cause.
+    const unavailable = () =>
+      Effect.fail(
+        new WebPushNotificationsError({
+          detail: "Web Push is unavailable until its private state can be safely loaded.",
+        }),
+      );
+    return Effect.logWarning("Web Push disabled; Cafe startup continues", {
+      phase,
+      detail: error.detail,
+    }).pipe(
+      Effect.as({
+        getPublicKey: unavailable,
+        saveSubscription: unavailable,
+        removeSubscription: unavailable,
+        updateSubscriptionLocale: unavailable,
+        start: () => Effect.void,
+      } satisfies WebPushNotificationsShape),
+    );
+  }),
+);
 
 export const WebPushNotificationsLive = Layer.effect(
   WebPushNotifications,

@@ -6,11 +6,13 @@ import { readCafeCodeEnv } from "@cafecode/shared/compatEnv";
 import { defineConfig } from "vite";
 import { reactCompilerConfig } from "./reactCompilerConfig.ts";
 import pkg from "./package.json" with { type: "json" };
+import { resolveApplicationBuildVersion } from "../../packages/shared/src/applicationBuildVersion.ts";
+import { createApplicationBuildVersionPlugin } from "./buildVersionPlugin.ts";
 
 const port = Number(process.env.PORT ?? 5733);
 const host = process.env.HOST?.trim() || "localhost";
 const configuredWsUrl = process.env.VITE_WS_URL?.trim();
-const configuredAppVersion = process.env.APP_VERSION?.trim() || pkg.version;
+const configuredAppVersion = resolveApplicationBuildVersion(process.env.APP_VERSION, pkg.version);
 const sourcemapEnv = readCafeCodeEnv(process.env, "CAFE_CODE_WEB_SOURCEMAP")?.trim().toLowerCase();
 
 const buildSourcemap =
@@ -44,7 +46,13 @@ function resolveDevProxyTarget(wsUrl: string | undefined): string | undefined {
 const devProxyTarget = resolveDevProxyTarget(configuredWsUrl);
 
 export default defineConfig({
-  plugins: [tanstackRouter(), react(), babel(reactCompilerConfig), tailwindcss()],
+  plugins: [
+    tanstackRouter(),
+    react(),
+    babel(reactCompilerConfig),
+    tailwindcss(),
+    createApplicationBuildVersionPlugin(configuredAppVersion),
+  ],
   optimizeDeps: {
     include: [
       "@pierre/diffs",

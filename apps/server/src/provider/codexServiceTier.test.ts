@@ -32,6 +32,14 @@ const models: ServerProviderModel[] = [
     },
   },
 ];
+const legacyFastModels: ServerProviderModel[] = [
+  {
+    ...models[0]!,
+    capabilities: {
+      optionDescriptors: [{ id: "fastMode", label: "Fast Mode", type: "boolean" }],
+    },
+  },
+];
 const selection = (options: ModelSelection["options"], model = "sol"): ModelSelection => ({
   instanceId: instance,
   model,
@@ -151,6 +159,88 @@ describe("exact Codex service tier admission", () => {
       ),
     ).toEqual({ serviceTier: "default" });
   });
+  it("admits the same legacy Fast capability for an exact priority choice without upgrading it", () => {
+    const explicit = selection([
+      { id: "fastMode", value: false },
+      { id: "serviceTier", value: "priority" },
+    ]);
+    const saved = JSON.parse(JSON.stringify(explicit));
+    expect(resolveCodexServiceTier(saved, instance, legacyFastModels)).toEqual({
+      serviceTier: "priority",
+    });
+    expect(
+      resolveCodexServiceTier(
+        selection([{ id: "fastMode", value: true }]),
+        instance,
+        legacyFastModels,
+      ),
+    ).toEqual({ serviceTier: "priority" });
+    expect(
+      resolveCodexServiceTier(saved, ProviderInstanceId.make("other"), legacyFastModels),
+    ).toEqual({});
+  });
+  it("does not let legacy Fast capability override a modern tier descriptor", () => {
+    for (const descriptor of [
+      { id: "serviceTier", label: "Tier", type: "select" as const, options: [] },
+      { id: "serviceTier", label: "Tier", type: "boolean" as const },
+    ]) {
+      const modernModels: ServerProviderModel[] = [
+        {
+          ...legacyFastModels[0]!,
+          capabilities: {
+            optionDescriptors: [
+              ...legacyFastModels[0]!.capabilities!.optionDescriptors!,
+              descriptor,
+            ],
+          },
+        },
+      ];
+      for (const options of [
+        [{ id: "serviceTier", value: "priority" }],
+        [{ id: "fastMode", value: true }],
+      ]) {
+        expect(resolveCodexServiceTier(selection(options), instance, modernModels).error).toContain(
+          "no longer advertises",
+        );
+      }
+    }
+  });
+  it("requires exact legacy capability rather than a missing model or malformed control", () => {
+    const explicit = selection([{ id: "serviceTier", value: "priority" }]);
+    for (const unavailableModels of [
+      undefined,
+      [],
+      [{ ...legacyFastModels[0]!, slug: "another-model" }],
+      [{ ...legacyFastModels[0]!, capabilities: null }],
+      [{ ...legacyFastModels[0]!, capabilities: { optionDescriptors: [] } }],
+      [
+        {
+          ...legacyFastModels[0]!,
+          capabilities: {
+            optionDescriptors: [
+              { id: "fastMode", label: "Fast", type: "select" as const, options: [] },
+            ],
+          },
+        },
+      ],
+    ]) {
+      expect(resolveCodexServiceTier(explicit, instance, unavailableModels).error).toContain(
+        "no longer advertises",
+      );
+    }
+  });
+  it.each(["fast", "ultrafast", "unknown"])(
+    "does not infer the explicit %s tier from legacy Fast capability",
+    (tier) => {
+      expect(
+        resolveCodexServiceTier(
+          selection([{ id: "serviceTier", value: tier }]),
+          instance,
+          legacyFastModels,
+        ).error,
+      ).toContain("no longer advertises");
+    },
+  );
   it("rejects unknown/removed model/account tiers without borrowing another capability", () => {
     const requested = selection([{ id: "serviceTier", value: "ultrafast" }]);
     expect(resolveCodexServiceTier(requested, instance, []).error).toContain(

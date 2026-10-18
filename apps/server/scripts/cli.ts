@@ -22,6 +22,7 @@ import {
   resolveNpmOverrides,
 } from "../../../scripts/lib/resolve-catalog.ts";
 import { fromJsonStringPretty } from "@cafecode/shared/schemaJson";
+import { stageSourceDesktopLauncherFiles } from "../../../scripts/lib/stage-source-desktop-launchers.ts";
 import rootPackageJson from "../../../package.json" with { type: "json" };
 import desktopPackageJson from "../../desktop/package.json" with { type: "json" };
 import serverPackageJson from "../package.json" with { type: "json" };
@@ -264,12 +265,9 @@ const stagePublishedDesktopRuntime = Effect.fn("stagePublishedDesktopRuntime")(f
     },
   );
   yield* fs.makeDirectory(path.join(stagedDesktopRoot, "scripts"), { recursive: true });
-  for (const scriptName of ["start-electron.mjs", "electron-launcher.mjs"]) {
-    yield* fs.copyFile(
-      path.join(desktopDir, "scripts", scriptName),
-      path.join(stagedDesktopRoot, "scripts", scriptName),
-    );
-  }
+  yield* Effect.tryPromise(() =>
+    stageSourceDesktopLauncherFiles(repoRoot, path.dirname(stageRoot)),
+  );
   yield* fs.copy(path.join(desktopDir, "resources"), path.join(stagedDesktopRoot, "resources"), {
     overwrite: true,
     preserveTimestamps: true,

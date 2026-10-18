@@ -95,6 +95,8 @@ function fixture(
           NodeServices.layer,
           Logger.layer([logger], { mergeWithExisting: false }),
           Layer.succeed(DesktopEnvironment.DesktopEnvironment, {
+            dataProfile: "production",
+            configuredBaseDir: directory,
             savedEnvironmentRegistryPath: path.join(directory, "saved-environments.json"),
           } as DesktopEnvironment.DesktopEnvironmentShape),
           Layer.succeed(ElectronDialog.ElectronDialog, {

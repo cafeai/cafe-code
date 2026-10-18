@@ -69,11 +69,20 @@ export const AxiomDriver: ProviderDriver<AxiomSettings, AxiomDriverEnv> = {
   metadata: { displayName: "Axiom", supportsMultipleInstances: true },
   configSchema: AxiomSettings,
   defaultConfig: () => decodeSettings({}),
-  create: ({ instanceId, displayName, accentColor, environment, enabled, config }) =>
+  create: ({
+    instanceId,
+    displayName,
+    accentColor,
+    environment,
+    processEnvironment: admittedEnvironment,
+    enabled,
+    config,
+  }) =>
     Effect.gen(function* () {
       const server = yield* ServerConfig;
       const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
-      const processEnvironment = mergeProviderInstanceEnvironment(environment);
+      const processEnvironment =
+        admittedEnvironment ?? mergeProviderInstanceEnvironment(environment);
       const continuationIdentity = defaultProviderContinuationIdentity({
         driverKind: DRIVER,
         instanceId,

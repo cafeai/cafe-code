@@ -7,6 +7,8 @@ import { desktopDir, resolveElectronPath } from "./electron-launcher.mjs";
 import { ensureMacDictationHelper } from "./build-mac-dictation-helper.mjs";
 import { linuxSafeStorageElectronArgs } from "./linux-safe-storage.mjs";
 import { forwardChromiumStderr } from "./chromium-tls-log-filter.mjs";
+import { DESKTOP_RESTART_EXISTING_FLAG } from "../src/app/DesktopProfileControl.ts";
+import { assertSourceDebugDesktopBuilds } from "../../../packages/shared/src/sourceDebugBuild.ts";
 
 const isolateChildProcessGroup = process.platform !== "win32";
 const forcedShutdownTimeoutMs = 5_000;
@@ -25,6 +27,9 @@ export function buildDesktopChildEnv(env) {
   delete childEnv.CAFE_CODE_DESKTOP_DEV;
   delete childEnv.VITE_DEV_SERVER_URL;
   delete childEnv.CAFE_CODE_DEV_URL;
+  // These are source-only launchers. Retain an explicit profile when Linux
+  // selects its headless server branch, where Electron metadata is unavailable.
+  childEnv.CAFE_CODE_DATA_PROFILE = "debug";
   return childEnv;
 }
 
@@ -45,6 +50,19 @@ export function resolveHeadlessServerEntrypoint(
 }
 
 export function resolveHeadlessServerArgs(args) {
+  for (let index = 0; index < args.length; index += 1) {
+    const argument = args[index];
+    const selected =
+      argument === "--data-profile"
+        ? args[index + 1]
+        : argument.startsWith("--data-profile=")
+          ? argument.slice("--data-profile=".length)
+          : undefined;
+    if (selected !== undefined && selected !== "debug")
+      throw new Error(
+        "Source launches require the Debug data profile. No headless backend was started.",
+      );
+  }
   const serverArgs = args.filter((arg) => !ELECTRON_ONLY_ARGS.has(arg));
   return ["serve", ...(hasServerModeArg(serverArgs) ? [] : ["--mode", "desktop"]), ...serverArgs];
 }
@@ -68,6 +86,13 @@ export function resolveLaunchPlan({
   serverEntrypoint = resolveHeadlessServerEntrypoint(runtimeDesktopDir),
 }) {
   if (!hasDisplayServer(environment, platform)) {
+    // This is a control request for Electron's existing userData-scoped owner,
+    // not permission to start another writer when no desktop channel exists.
+    if (args.includes(DESKTOP_RESTART_EXISTING_FLAG)) {
+      throw new Error(
+        "A profile-specific desktop restart requires a graphical desktop session. No headless backend was started.",
+      );
+    }
     return {
       type: "headless-server",
       command: process.execPath,
@@ -118,6 +143,7 @@ export function runStartElectron({
   environment = process.env,
   cwd = process.cwd(),
 } = {}) {
+  assertSourceDebugDesktopBuilds(desktopDir);
   const childEnv = buildDesktopChildEnv(environment);
   const plan = resolveLaunchPlan({ args, environment: childEnv, cwd });
   if (plan.type === "electron") {

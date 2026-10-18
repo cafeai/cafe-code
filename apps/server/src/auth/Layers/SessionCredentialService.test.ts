@@ -17,7 +17,10 @@ import { SessionCredentialServiceLive } from "./SessionCredentialService.ts";
 
 const makeServerConfigLayer = (
   overrides?: Partial<
-    Pick<ServerConfigShape, "desktopBootstrapToken" | "httpsEnabled" | "httpsPort">
+    Pick<
+      ServerConfigShape,
+      "desktopBootstrapToken" | "httpsEnabled" | "httpsPort" | "mode" | "port" | "dataProfile"
+    >
   >,
 ) =>
   Layer.effect(
@@ -33,7 +36,10 @@ const makeServerConfigLayer = (
 
 const makeSessionCredentialLayer = (
   overrides?: Partial<
-    Pick<ServerConfigShape, "desktopBootstrapToken" | "httpsEnabled" | "httpsPort">
+    Pick<
+      ServerConfigShape,
+      "desktopBootstrapToken" | "httpsEnabled" | "httpsPort" | "mode" | "port" | "dataProfile"
+    >
   >,
 ) =>
   SessionCredentialServiceLive.pipe(
@@ -45,6 +51,31 @@ const makeSessionCredentialLayer = (
   );
 
 it.layer(NodeServices.layer)("SessionCredentialServiceLive", (it) => {
+  for (const mode of ["web", "desktop"] as const) {
+    it.effect(`uses explicit Debug HTTP and HTTPS cookie names in ${mode} mode`, () =>
+      Effect.gen(function* () {
+        const sessions = yield* SessionCredentialService;
+
+        expect(sessions.cookieName).toBe("t3_debug_session_13773");
+        expect(sessions.httpsCookieName).toBe("t3_debug_session_https_13774");
+        const issued = yield* sessions.issue({ subject: "debug-browser", role: "client" });
+        const verified = yield* sessions.verify(issued.token);
+        expect(verified.sessionId).toBe(issued.sessionId);
+        expect(verified.role).toBe("client");
+      }).pipe(
+        Effect.provide(
+          makeSessionCredentialLayer({
+            dataProfile: "debug",
+            mode,
+            port: 13773,
+            httpsEnabled: true,
+            httpsPort: 13774,
+          }),
+        ),
+      ),
+    );
+  }
+
   it.effect("uses a distinct cookie name for the HTTPS sibling listener", () =>
     Effect.gen(function* () {
       const sessions = yield* SessionCredentialService;

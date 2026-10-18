@@ -1,4 +1,6 @@
 import { defineConfig } from "tsdown";
+import { resolve } from "node:path";
+import { publishSourceDebugBuildManifest } from "../../packages/shared/src/sourceDebugBuild.ts";
 
 const shared = {
   format: "cjs" as const,
@@ -12,6 +14,20 @@ export default defineConfig([
     ...shared,
     entry: ["src/main.ts"],
     clean: true,
+    hooks: {
+      "build:done": ({ options, chunks }) => {
+        const root = resolve(options.cwd, options.outDir);
+        const output = chunks.filter((chunk) => chunk.type === "chunk");
+        publishSourceDebugBuildManifest(
+          resolve(root, "main.cjs"),
+          "desktop",
+          output.map((chunk) => resolve(options.cwd, chunk.outDir, chunk.fileName)),
+          Object.fromEntries(
+            output.map((chunk) => [resolve(options.cwd, chunk.outDir, chunk.fileName), chunk.code]),
+          ),
+        );
+      },
+    },
     deps: {
       alwaysBundle: (id) => id.startsWith("@cafecode/"),
     },

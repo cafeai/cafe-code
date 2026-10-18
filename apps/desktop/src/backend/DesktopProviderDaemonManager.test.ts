@@ -1,6 +1,7 @@
 // @effect-diagnostics nodeBuiltinImport:off
 import * as crypto from "node:crypto";
 import * as http from "node:http";
+import * as fs from "node:fs/promises";
 
 import {
   PROVIDER_DAEMON_HEALTH_PATH,
@@ -11,7 +12,7 @@ import {
 } from "@cafecode/contracts";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, describe, it } from "@effect/vitest";
-import { afterEach, beforeEach, vi } from "vitest";
+import { afterEach, vi } from "vitest";
 import type * as Context from "effect/Context";
 import * as Data from "effect/Data";
 import * as Deferred from "effect/Deferred";
@@ -30,12 +31,21 @@ import * as TestClock from "effect/testing/TestClock";
 import { ChildProcessSpawner } from "effect/unstable/process";
 
 import * as NetService from "@cafecode/shared/Net";
+import { dataProfileIdentity } from "@cafecode/shared/dataProfileIdentity";
 import * as ElectronSafeStorage from "../electron/ElectronSafeStorage.ts";
 import * as DesktopEnvironment from "../app/DesktopEnvironment.ts";
 import * as DesktopObservability from "../app/DesktopObservability.ts";
 import * as DesktopDebugServer from "../debug/DesktopDebugServer.ts";
 import * as DesktopProviderDaemonManager from "./DesktopProviderDaemonManager.ts";
-import * as DesktopProcessReaper from "./DesktopProcessReaper.ts";
+
+// Native ESM namespace bindings are not configurable. Keep the real filesystem
+// implementation and record its calls through the imported module boundary;
+// never replace successful reads with invented bytes or omit forbidden-access
+// assertions merely because a namespace cannot be spied on directly.
+vi.mock("node:fs/promises", async (importOriginal) => {
+  const original = await importOriginal<typeof import("node:fs/promises")>();
+  return { ...original, readFile: vi.fn(original.readFile) };
+});
 
 const TEST_TOKEN = "provider-daemon-test-token-000000000000000000000000";
 const TEST_LEASE_TOKEN = "provider-daemon-lease-token-000000000000000000000000";
@@ -76,8 +86,10 @@ function makeRuntimeBuildId(input: {
 }
 
 const startFakeProviderDaemon = (
+  baseDir: string,
   runtimeBuildId: string,
   failRequest?: (pathname: string) => boolean,
+  proof: "matching" | "missing" | "foreign" = "matching",
 ): Effect.Effect<FakeProviderDaemon, FakeProviderDaemonError> =>
   Effect.tryPromise({
     try: () =>
@@ -117,6 +129,15 @@ const startFakeProviderDaemon = (
             `${encodeProviderDaemonHealthJson({
               ok: true,
               mode: "provider-daemon",
+              ...(proof === "missing"
+                ? {}
+                : {
+                    dataProfile: "production" as const,
+                    dataProfileId: dataProfileIdentity(
+                      "production",
+                      proof === "foreign" ? `${baseDir}/foreign` : baseDir,
+                    ),
+                  }),
               pid: process.pid,
               ppid: process.ppid,
               version: "0.0.0-test",
@@ -157,6 +178,8 @@ const startFakeProviderDaemon = (
 function makeEnvironmentLayer(baseDir: string, markerPath: string, backendEntryPath: string) {
   return Layer.succeed(DesktopEnvironment.DesktopEnvironment, {
     baseDir,
+    configuredBaseDir: baseDir,
+    dataProfile: "production",
     providerDaemonMarkerPath: markerPath,
     providerDaemonCredentialPath: `${baseDir}/provider-daemon-token.bin`,
     providerDaemonIpcDir: `${baseDir}/provider-daemon-ipc`,
@@ -209,17 +232,202 @@ function makeManagerLayer(
 }
 
 describe("DesktopProviderDaemonManager", () => {
-  beforeEach(() => {
-    // These authenticated peers and owned-child handles are synthetic. A
-    // successful adoption still passes through the production stale-runtime
-    // hook, but this default fixture must neither enumerate host command lines
-    // nor gain authority to reap any ambient user process. Process policy has
-    // its separate DesktopProcessReaper.test.ts qualification boundary.
-    vi.spyOn(DesktopProcessReaper, "reapMatchingUnixProcesses").mockImplementation(() =>
-      Effect.succeed([]),
-    );
+  afterEach(() => {
+    vi.clearAllMocks();
+    vi.restoreAllMocks();
   });
-  afterEach(() => vi.restoreAllMocks());
+
+  for (const phase of [
+    "foreign-socket",
+    "foreign-credential",
+    "legacy-profile",
+    "foreign-profile",
+  ] as const) {
+    it.effect(`preserves ${phase} markers before credential, network or process access`, () =>
+      Effect.gen(function* () {
+        const fileSystem = yield* FileSystem.FileSystem;
+        const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
+        const baseDir = yield* fileSystem.makeTempDirectoryScoped({
+          prefix: "cafe-profile-admission-",
+        });
+        const markerPath = `${baseDir}/provider-daemon.json`;
+        const credentialPath = `${baseDir}/provider-daemon-token.bin`;
+        const backendEntryPath = `${baseDir}/backend.mjs`;
+        const socketPath = `${baseDir}/provider-daemon-ipc/provider-daemon.sock`;
+        const foreignCredentialPath = `${baseDir}/foreign-token.bin`;
+        yield* fileSystem.writeFileString(backendEntryPath, "// synthetic profile boundary\n");
+        yield* fileSystem.writeFileString(credentialPath, TEST_TOKEN);
+        yield* fileSystem.writeFileString(foreignCredentialPath, TEST_TOKEN);
+        yield* fileSystem.makeDirectory(`${baseDir}/provider-daemon-ipc`);
+        yield* fileSystem.writeFileString(socketPath, "profile-socket-preserved");
+        let requests = 0;
+        let spawnCalls = 0;
+        const runtimeBuildId = makeRuntimeBuildId({
+          appVersion: "0.0.0-test",
+          backendEntryPath,
+          backendBundle: "// synthetic profile boundary\n",
+        });
+        const fake = yield* startFakeProviderDaemon(baseDir, runtimeBuildId, () => {
+          requests += 1;
+          return false;
+        });
+        yield* Effect.addFinalizer(() => fake.close);
+        const marker = encodeProviderDaemonMarkerJson({
+          version: 2,
+          mode: "provider-daemon",
+          ...(phase === "legacy-profile"
+            ? {}
+            : {
+                dataProfile: "production" as const,
+                dataProfileId: dataProfileIdentity(
+                  "production",
+                  phase === "foreign-profile" ? `${baseDir}/other` : baseDir,
+                ),
+              }),
+          pid: process.pid,
+          ppid: process.ppid,
+          protocolVersion: 1,
+          transport: phase === "foreign-socket" ? "ipc" : "tcp",
+          ...(phase === "foreign-socket" ? { socketPath: `${baseDir}/foreign.sock` } : {}),
+          httpBaseUrl: `http://127.0.0.1:${fake.port}`,
+          credentialPath: phase === "foreign-credential" ? foreignCredentialPath : credentialPath,
+          createdAt: "1970-01-01T00:00:00.000Z",
+          updatedAt: "1970-01-01T00:00:00.000Z",
+          appVersion: "0.0.0-test",
+          runtimeBuildId,
+        });
+        yield* fileSystem.writeFileString(markerPath, marker);
+        const read = vi.mocked(fs.readFile);
+        read.mockClear();
+        const signals = vi.spyOn(process, "kill").mockReturnValue(true);
+        const guardedSpawner: TestProcessSpawner = {
+          ...spawner,
+          spawn: () =>
+            Effect.sync(() => {
+              spawnCalls += 1;
+            }).pipe(Effect.andThen(Effect.die("Unexpected competing owner"))),
+        };
+        yield* Effect.gen(function* () {
+          const manager = yield* DesktopProviderDaemonManager.DesktopProviderDaemonManager;
+          const refused = yield* manager.ensureRunning.pipe(Effect.exit);
+          assert.isTrue(Exit.isFailure(refused));
+          assert.equal(requests, 0);
+          assert.equal(spawnCalls, 0);
+          assert.equal(
+            read.mock.calls.filter(
+              ([path]) => path === credentialPath || path === foreignCredentialPath,
+            ).length,
+            0,
+          );
+          assert.equal(signals.mock.calls.length, 0);
+          assert.isTrue(Exit.isFailure(yield* manager.stop.pipe(Effect.exit)));
+          assert.equal(yield* fileSystem.readFileString(markerPath), marker);
+          assert.equal(yield* fileSystem.readFileString(credentialPath), TEST_TOKEN);
+          assert.equal(yield* fileSystem.readFileString(foreignCredentialPath), TEST_TOKEN);
+          assert.equal(yield* fileSystem.readFileString(socketPath), "profile-socket-preserved");
+        }).pipe(
+          Effect.provide(
+            makeManagerLayer(baseDir, markerPath, backendEntryPath, undefined, {
+              fileSystem,
+              spawner: guardedSpawner,
+            }),
+          ),
+        );
+      }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+    );
+  }
+
+  for (const proof of ["missing", "foreign", "matching"] as const) {
+    it.effect(
+      `requires matching native profile proof and never signals an adopted ${proof} owner`,
+      () =>
+        Effect.gen(function* () {
+          const fileSystem = yield* FileSystem.FileSystem;
+          const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
+          const baseDir = yield* fileSystem.makeTempDirectoryScoped({
+            prefix: "cafe-profile-receipt-",
+          });
+          const markerPath = `${baseDir}/provider-daemon.json`;
+          const credentialPath = `${baseDir}/provider-daemon-token.bin`;
+          const backendEntryPath = `${baseDir}/backend.mjs`;
+          const backendBundle = "// synthetic native receipt\n";
+          yield* fileSystem.writeFileString(backendEntryPath, backendBundle);
+          yield* fileSystem.writeFileString(credentialPath, TEST_TOKEN);
+          const runtimeBuildId = makeRuntimeBuildId({
+            appVersion: "0.0.0-test",
+            backendEntryPath,
+            backendBundle,
+          });
+          let requests = 0;
+          let leaseRequests = 0;
+          let spawnCalls = 0;
+          const fake = yield* startFakeProviderDaemon(
+            baseDir,
+            runtimeBuildId,
+            (pathname) => {
+              requests += 1;
+              if (pathname === PROVIDER_DAEMON_LEASES_PATH) leaseRequests += 1;
+              return false;
+            },
+            proof,
+          );
+          yield* Effect.addFinalizer(() => fake.close);
+          const marker = encodeProviderDaemonMarkerJson({
+            version: 2,
+            mode: "provider-daemon",
+            dataProfile: "production",
+            dataProfileId: dataProfileIdentity("production", baseDir),
+            pid: process.pid,
+            ppid: process.ppid,
+            protocolVersion: 1,
+            transport: "tcp",
+            httpBaseUrl: `http://127.0.0.1:${fake.port}`,
+            credentialPath,
+            createdAt: "1970-01-01T00:00:00.000Z",
+            updatedAt: "1970-01-01T00:00:00.000Z",
+            appVersion: "0.0.0-test",
+            runtimeBuildId,
+          });
+          yield* fileSystem.writeFileString(markerPath, marker);
+          const signals = vi.spyOn(process, "kill").mockReturnValue(true);
+          const guardedSpawner: TestProcessSpawner = {
+            ...spawner,
+            spawn: () =>
+              Effect.sync(() => {
+                spawnCalls += 1;
+              }).pipe(Effect.andThen(Effect.die("Unexpected competing owner"))),
+          };
+          yield* Effect.gen(function* () {
+            const manager = yield* DesktopProviderDaemonManager.DesktopProviderDaemonManager;
+            const result = yield* manager.ensureRunning.pipe(Effect.exit);
+            assert.equal(Exit.isSuccess(result), proof === "matching");
+            assert.equal(requests, proof === "matching" ? 2 : 1);
+            assert.equal(leaseRequests, proof === "matching" ? 1 : 0);
+            assert.equal(spawnCalls, 0);
+            assert.isTrue(Exit.isFailure(yield* manager.stop.pipe(Effect.exit)));
+            assert.isTrue(
+              Exit.isFailure(yield* manager.recover("synthetic failure").pipe(Effect.exit)),
+            );
+            assert.isTrue(signals.mock.calls.every(([, signal]) => signal === 0));
+            assert.equal(yield* fileSystem.readFileString(markerPath), marker);
+            assert.equal(yield* fileSystem.readFileString(credentialPath), TEST_TOKEN);
+            if (proof === "matching") {
+              const snapshot = yield* manager.snapshot;
+              assert.equal(snapshot.status, "running");
+              assert.isTrue(snapshot.adoptedExistingProcess);
+              assert.isTrue(Option.isSome(yield* manager.currentConfig));
+            }
+          }).pipe(
+            Effect.provide(
+              makeManagerLayer(baseDir, markerPath, backendEntryPath, undefined, {
+                fileSystem,
+                spawner: guardedSpawner,
+              }),
+            ),
+          );
+        }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+    );
+  }
 
   for (const phase of ["spawn", "publication"] as const) {
     it.effect(
@@ -415,13 +623,16 @@ describe("DesktopProviderDaemonManager", () => {
           backendBundle,
         });
         let requests = 0;
-        const fakeDaemon = yield* startFakeProviderDaemon(runtimeBuildId, () => {
+        const fakeDaemon = yield* startFakeProviderDaemon(baseDir, runtimeBuildId, () => {
           requests += 1;
           return false;
         });
         yield* Effect.addFinalizer(() => fakeDaemon.close);
         const markerJson = encodeProviderDaemonMarkerJson({
           version: 2,
+          mode: "provider-daemon",
+          dataProfile: "production",
+          dataProfileId: dataProfileIdentity("production", baseDir),
           protocolVersion: 1,
           pid: process.pid,
           ppid: process.ppid,
@@ -572,17 +783,25 @@ describe("DesktopProviderDaemonManager", () => {
             yield* fileSystem.writeFileString(backendEntryPath, backendBundle);
             let failuresRemaining = initialFailures;
             let observedRequests = 0;
-            const fakeDaemon = yield* startFakeProviderDaemon(runtimeBuildId, (pathname) => {
-              if ((pathname === PROVIDER_DAEMON_LEASES_PATH) !== (phase === "lease")) return false;
-              observedRequests += 1;
-              if (failuresRemaining === 0) return false;
-              failuresRemaining -= 1;
-              return true;
-            });
+            const fakeDaemon = yield* startFakeProviderDaemon(
+              baseDir,
+              runtimeBuildId,
+              (pathname) => {
+                if ((pathname === PROVIDER_DAEMON_LEASES_PATH) !== (phase === "lease"))
+                  return false;
+                observedRequests += 1;
+                if (failuresRemaining === 0) return false;
+                failuresRemaining -= 1;
+                return true;
+              },
+            );
             yield* Effect.addFinalizer(() => fakeDaemon.close);
             yield* fileSystem.writeFileString(credentialPath, TEST_TOKEN);
             const markerJson = encodeProviderDaemonMarkerJson({
               version: 2,
+              mode: "provider-daemon",
+              dataProfile: "production",
+              dataProfileId: dataProfileIdentity("production", baseDir),
               protocolVersion: 1,
               pid: process.pid,
               ppid: process.ppid,
@@ -642,6 +861,7 @@ describe("DesktopProviderDaemonManager", () => {
       yield* fileSystem.writeFileString(backendEntryPath, backendBundle);
       let failHealth = false;
       const fakeDaemon = yield* startFakeProviderDaemon(
+        baseDir,
         runtimeBuildId,
         (pathname) => failHealth && pathname === PROVIDER_DAEMON_HEALTH_PATH,
       );
@@ -663,6 +883,9 @@ describe("DesktopProviderDaemonManager", () => {
         markerPath,
         `${encodeProviderDaemonMarkerJson({
           version: 2,
+          mode: "provider-daemon",
+          dataProfile: "production",
+          dataProfileId: dataProfileIdentity("production", baseDir),
           protocolVersion: 1,
           pid: process.pid,
           ppid: process.ppid,
@@ -690,9 +913,6 @@ describe("DesktopProviderDaemonManager", () => {
         assert.equal(Option.getOrUndefined(snapshot.pid), process.pid);
         assert.equal(Option.getOrUndefined(snapshot.lastHealth)?.activeSessionCount, 3);
         assert.equal(snapshot.runtimeBuildId, runtimeBuildId);
-        const reaperCalls = vi.mocked(DesktopProcessReaper.reapMatchingUnixProcesses).mock.calls;
-        assert.equal(reaperCalls.length, 1);
-        assert.isTrue(reaperCalls[0]?.[0].keepPids.has(process.pid));
         const adoptedHealthObservedAt = publishedSnapshot.lastHealthObservedAt;
         assert.isString(adoptedHealthObservedAt);
 
@@ -729,7 +949,7 @@ describe("DesktopProviderDaemonManager", () => {
         backendBundle,
       });
       yield* fileSystem.writeFileString(backendEntryPath, backendBundle);
-      const fakeDaemon = yield* startFakeProviderDaemon(runtimeBuildId);
+      const fakeDaemon = yield* startFakeProviderDaemon(baseDir, runtimeBuildId);
       yield* Effect.addFinalizer(() => fakeDaemon.close);
       const httpBaseUrl = `http://127.0.0.1:${fakeDaemon.port}`;
 
@@ -741,6 +961,9 @@ describe("DesktopProviderDaemonManager", () => {
         markerPath,
         `${encodeProviderDaemonMarkerJson({
           version: 2,
+          mode: "provider-daemon",
+          dataProfile: "production",
+          dataProfileId: dataProfileIdentity("production", baseDir),
           protocolVersion: 1,
           pid: process.pid,
           ppid: process.ppid,

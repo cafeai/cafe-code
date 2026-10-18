@@ -44,6 +44,7 @@
     "src/components/settings/TwoFactorManagementRow.browser.tsx",
     "src/components/settings/SavedEnvironmentsSettings.browser.tsx",
     "src/components/auth/PairingRouteSurface.browser.tsx",
+    "src/components/settings/DataProfileSettings.browser.tsx",
     "src/components/ContextMenu.browser.tsx",
     "src/components/SidebarChromeHeader.browser.tsx",
     "src/components/MacTitlebar.browser.tsx",

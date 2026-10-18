@@ -8,7 +8,7 @@ import * as Random from "effect/Random";
 import { ServerConfig } from "../../config.ts";
 import { layer as ProcessRunnerLive } from "../../processRunner.ts";
 import { ServerEnvironment, type ServerEnvironmentShape } from "../Services/ServerEnvironment.ts";
-import packageJson from "../../../package.json" with { type: "json" };
+import { APPLICATION_VERSION } from "../../applicationVersion.ts";
 import { resolveServerEnvironmentLabel } from "./ServerEnvironmentLabel.ts";
 
 function platformOs(): ExecutionEnvironmentDescriptor["platform"]["os"] {
@@ -82,7 +82,7 @@ export const makeServerEnvironment = Effect.fn("makeServerEnvironment")(function
       os: platformOs(),
       arch: platformArch(),
     },
-    serverVersion: packageJson.version,
+    serverVersion: APPLICATION_VERSION,
     capabilities: {
       repositoryIdentity: true,
       standaloneChats: true,

@@ -20,6 +20,7 @@ export {
 } from "./lib/mac-app-privacy.ts";
 
 import { createHash } from "node:crypto";
+import { resolve } from "node:path";
 import { stripTypeScriptTypes } from "node:module";
 import {
   stageManagedProviders,
@@ -45,6 +46,10 @@ import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
 import { Command, Flag } from "effect/unstable/cli";
 import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process";
+import {
+  resolveApplicationBuildVersion,
+  verifyApplicationBuildVersionManifest,
+} from "@cafecode/shared/applicationBuildVersion";
 
 const BuildPlatform = Schema.Literals(["mac", "linux", "win"]);
 const BuildArch = Schema.Literals(["arm64", "x64", "universal"]);
@@ -459,6 +464,38 @@ const commandOutputOptions = (verbose: boolean) =>
     stdout: verbose ? "inherit" : "ignore",
     stderr: "inherit",
   }) as const;
+
+/** The requested artifact version is a build input, not a late filename edit.
+ * Keep it on the exact build child so Turbo hashes it and both compilers bake
+ * the same scalar. Parent environment, package sources and running apps remain
+ * unchanged. The original host-specific Yarn invocation policy is retained.
+ */
+export function createDesktopApplicationBuildCommand(
+  repoRoot: string,
+  applicationVersion: string,
+  verbose: boolean,
+): ChildProcess.Command {
+  const version = resolveApplicationBuildVersion(applicationVersion, serverPackageJson.version);
+  return ChildProcess.make("corepack", ["yarn", "build:desktop"], {
+    cwd: repoRoot,
+    ...commandOutputOptions(verbose),
+    shell: process.platform === "win32",
+    env: { APP_VERSION: version },
+    extendEnv: true,
+  });
+}
+
+/** Qualify actual reused/copied version-bearing bytes, not saved build intent.
+ * Missing receipts intentionally refuse old --skip-build outputs. A source
+ * package version or a matching filename cannot attest an already-built client.
+ */
+export function verifyDesktopApplicationBuildVersions(
+  serverDist: string,
+  applicationVersion: string,
+): void {
+  verifyApplicationBuildVersionManifest(serverDist, "server", applicationVersion);
+  verifyApplicationBuildVersionManifest(resolve(serverDist, "client"), "web", applicationVersion);
+}
 
 const runCommand = Effect.fn("runCommand")(function* (command: ChildProcess.Command) {
   const commandSpawner = yield* ChildProcessSpawner.ChildProcessSpawner;
@@ -1109,7 +1146,10 @@ const buildDesktopArtifact = Effect.fn("buildDesktopArtifact")(function* (
     });
   }
 
-  const appVersion = options.version ?? serverPackageJson.version;
+  const appVersion = yield* Effect.try({
+    try: () => resolveApplicationBuildVersion(options.version, serverPackageJson.version),
+    catch: () => new BuildScriptError({ message: "Invalid desktop application build version." }),
+  });
   const iconAssets = resolveDesktopBuildIconAssets(appVersion);
   const commitHash = yield* resolveGitCommitHash(repoRoot);
   const mkdir = options.keepStage ? fs.makeTempDirectory : fs.makeTempDirectoryScoped;
@@ -1129,13 +1169,7 @@ const buildDesktopArtifact = Effect.fn("buildDesktopArtifact")(function* (
 
   if (!options.skipBuild) {
     yield* Effect.log("[desktop-artifact] Building desktop/server/web artifacts...");
-    yield* runCommand(
-      ChildProcess.make("corepack", ["yarn", "build:desktop"], {
-        cwd: repoRoot,
-        ...commandOutputOptions(options.verbose),
-        shell: process.platform === "win32",
-      }),
-    );
+    yield* runCommand(createDesktopApplicationBuildCommand(repoRoot, appVersion, options.verbose));
   }
 
   for (const [label, dir] of Object.entries(distDirs)) {
@@ -1153,6 +1187,14 @@ const buildDesktopArtifact = Effect.fn("buildDesktopArtifact")(function* (
   }
 
   yield* validateBundledClientAssets(path.dirname(bundledClientEntry));
+  yield* Effect.try({
+    try: () => verifyDesktopApplicationBuildVersions(distDirs.serverDist, appVersion),
+    catch: () =>
+      new BuildScriptError({
+        message:
+          "Desktop renderer/backend build versions or bytes do not match the requested artifact. Rebuild without --skip-build.",
+      }),
+  });
 
   yield* copyStagedYarnProject(repoRoot, stageProjectDir);
   yield* fs.makeDirectory(path.join(stageAppDir, "apps/desktop"), { recursive: true });
@@ -1162,6 +1204,15 @@ const buildDesktopArtifact = Effect.fn("buildDesktopArtifact")(function* (
   yield* fs.copy(distDirs.desktopDist, path.join(stageAppDir, "apps/desktop/dist-electron"));
   yield* fs.copy(distDirs.desktopResources, stageResourcesDir);
   yield* fs.copy(distDirs.serverDist, path.join(stageAppDir, "apps/server/dist"));
+  // Requalify the destination, not only the source, before installers or signing
+  // can consume it. The same expected version is also written into native app
+  // metadata below; no later source-manifest fallback may select another one.
+  yield* Effect.try({
+    try: () =>
+      verifyDesktopApplicationBuildVersions(path.join(stageAppDir, "apps/server/dist"), appVersion),
+    catch: () =>
+      new BuildScriptError({ message: "Copied desktop application version evidence is invalid." }),
+  });
 
   yield* assertPlatformBuildResources(
     options.platform,

@@ -193,6 +193,25 @@ function withDescriptorCurrentValue(
   };
 }
 
+/**
+ * The old Codex Fast Boolean and the exact `priority` tier request identical
+ * native routing (Codex 0.163.0 protocol/config_types.rs). Backend picker
+ * discovery and the daemon's cheap status catalogue are independently owned,
+ * so a picker can serialize the exact tier while its owner still exposes the
+ * legacy control. Recognize only that existing model's Boolean capability;
+ * any modern descriptor, including an empty or malformed one, takes precedence.
+ * This is compatibility evidence, never current native entitlement or pricing.
+ */
+export function supportsLegacyCodexFastTier(
+  capabilities: ModelCapabilities | null | undefined,
+): boolean {
+  const descriptors = capabilities?.optionDescriptors ?? [];
+  return (
+    !descriptors.some((descriptor) => descriptor.id === "serviceTier") &&
+    descriptors.some((descriptor) => descriptor.id === "fastMode" && descriptor.type === "boolean")
+  );
+}
+
 export function getProviderOptionDescriptors(input: {
   caps: ModelCapabilities;
   selections?: ReadonlyArray<ProviderOptionSelection> | null | undefined;
@@ -204,12 +223,17 @@ export function getProviderOptionDescriptors(input: {
     typeof getRawSelectionValueById(selections, "serviceTier") === "string"
   ) {
     // Losing a model/account capability is not consent to erase a persisted
-    // tier. Keep an inert selector with only the safe explicit-standard escape.
+    // tier. Keep the safe explicit-standard escape, plus canonical Fast only
+    // when this very model already exposes its equivalent legacy capability.
+    // Never infer arbitrary tiers from a known model name or another account.
     baseDescriptors.push({
       id: "serviceTier",
       label: "Service tier",
       type: "select",
-      options: [{ id: "default", label: "Standard" }],
+      options: [
+        { id: "default", label: "Standard" },
+        ...(supportsLegacyCodexFastTier(caps) ? [{ id: "priority", label: "Fast" }] : []),
+      ],
     });
   }
 

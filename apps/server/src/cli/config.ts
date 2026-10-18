@@ -2,7 +2,15 @@ import * as NetService from "@cafecode/shared/Net";
 import { cafeCodeConfigWithDefault, cafeCodeOptionalValueConfig } from "@cafecode/shared/compatEnv";
 import { parsePersistedServerObservabilitySettings } from "@cafecode/shared/serverSettings";
 import { DesktopBackendBootstrap, PortSchema } from "@cafecode/contracts";
+import {
+  preferredDataProfileHttpPort,
+  resolveBootstrappedDataProfile,
+  resolveDataProfileRoot,
+  type DataProfile,
+} from "@cafecode/shared/dataProfile";
+import { prepareDebugDataProfile } from "@cafecode/shared/dataProfileStorage";
 import * as Config from "effect/Config";
+import * as Data from "effect/Data";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
@@ -48,6 +56,17 @@ export const baseDirFlag = Flag.string("base-dir").pipe(
   Flag.withDescription("Base directory path (env: CAFE_CODE_HOME)."),
   Flag.optional,
 );
+const DataProfileSchema = Schema.Literals(["production", "debug"]);
+export const dataProfileFlag = Flag.choice("data-profile", DataProfileSchema.literals).pipe(
+  Flag.withDescription(
+    "Data profile beneath the configured Cafe home (env: CAFE_CODE_DATA_PROFILE).",
+  ),
+  Flag.optional,
+);
+
+export class DataProfileSelectionError extends Data.TaggedError("DataProfileSelectionError")<{
+  readonly message: string;
+}> {}
 export const devUrlFlag = Flag.string("dev-url").pipe(
   Flag.withSchema(Schema.URLFromString),
   Flag.withDescription("Development web URL to proxy/redirect to."),
@@ -114,6 +133,9 @@ const EnvServerConfig = Config.all({
   httpsPort: cafeCodeOptionalValueConfig("CAFE_CODE_HTTPS_PORT", Config.port),
   host: cafeCodeOptionalValueConfig("CAFE_CODE_HOST", Config.string),
   cafeCodeHome: cafeCodeOptionalValueConfig("CAFE_CODE_HOME", Config.string),
+  dataProfile: cafeCodeOptionalValueConfig("CAFE_CODE_DATA_PROFILE", (name) =>
+    Config.schema(DataProfileSchema, name),
+  ),
   devUrl: Config.url("CAFE_CODE_DEV_URL").pipe(Config.option, Config.map(Option.getOrUndefined)),
   noBrowser: cafeCodeOptionalValueConfig("CAFE_CODE_NO_BROWSER", Config.boolean),
   bootstrapFd: cafeCodeOptionalValueConfig("CAFE_CODE_BOOTSTRAP_FD", Config.int),
@@ -125,6 +147,7 @@ const EnvServerConfig = Config.all({
 });
 
 export interface CliServerFlags {
+  readonly dataProfile?: Option.Option<DataProfile>;
   readonly mode: Option.Option<RuntimeMode>;
   readonly port: Option.Option<number>;
   readonly httpsPort: Option.Option<number>;
@@ -140,20 +163,24 @@ export interface CliServerFlags {
 }
 
 export interface CliAuthLocationFlags {
+  readonly dataProfile?: Option.Option<DataProfile>;
   readonly baseDir: Option.Option<string>;
   readonly devUrl?: Option.Option<URL>;
 }
 
 export const sharedServerLocationFlags = {
+  dataProfile: dataProfileFlag,
   baseDir: baseDirFlag,
   devUrl: devUrlFlag,
 } as const;
 
 export const projectLocationFlags = {
+  dataProfile: dataProfileFlag,
   baseDir: baseDirFlag,
 } as const;
 
 export const sharedServerCommandFlags = {
+  dataProfile: dataProfileFlag,
   mode: modeFlag,
   port: portFlag,
   httpsPort: httpsPortFlag,
@@ -179,11 +206,38 @@ const resolveOptionPrecedence = <Value>(
   ...values: ReadonlyArray<Option.Option<Value>>
 ): Option.Option<Value> => Option.firstSomeOf(values);
 
-const defaultHttpsPortStart = (mode: RuntimeMode, httpPort: number): number => {
+const defaultHttpsPortStart = (
+  mode: RuntimeMode,
+  httpPort: number,
+  dataProfile: DataProfile | undefined,
+): number => {
   const offset = mode === "desktop" ? 2 : 1;
   const preferred = httpPort + offset;
-  return preferred <= 65_535 ? preferred : DEFAULT_PORT + offset;
+  return preferred <= 65_535 ? preferred : preferredDataProfileHttpPort(dataProfile) + offset;
 };
+
+/** Debug defaults never fall back into the release's preferred range, even
+ * when an OS has a customized ephemeral-port range. These probes are only a
+ * preflight, not a reservation; the real listener still owns final admission.
+ * A later bind race must fail, never adopt a service found on that endpoint. */
+const findAvailableDebugPort = Effect.fn(function* (startPort: number, excludedPort?: number) {
+  const net = yield* NetService.NetService;
+  for (let port = startPort; port <= 65_535; port += 1) {
+    if (port === excludedPort) continue;
+    let available = true;
+    for (const host of ["127.0.0.1", "0.0.0.0", "::"] as const) {
+      if (!(yield* net.canListenOnHost(port, host))) {
+        available = false;
+        break;
+      }
+    }
+    if (available) return port;
+  }
+  return yield* new DataProfileSelectionError({
+    message:
+      "No Debug server port is available. No other data profile or listening service was selected.",
+  });
+});
 
 const loadPersistedObservabilitySettings = Effect.fn(function* (settingsPath: string) {
   const fs = yield* FileSystem.FileSystem;
@@ -210,6 +264,7 @@ export const resolveServerConfig = (
     const fs = yield* FileSystem.FileSystem;
     const env = yield* EnvServerConfig;
     const normalizedFlags = {
+      dataProfile: flags.dataProfile ?? Option.none(),
       mode: flags.mode ?? Option.none(),
       port: flags.port ?? Option.none(),
       httpsPort: flags.httpsPort ?? Option.none(),
@@ -226,9 +281,65 @@ export const resolveServerConfig = (
     const bootstrapFd = Option.getOrUndefined(normalizedFlags.bootstrapFd) ?? env.bootstrapFd;
     const bootstrapEnvelope =
       bootstrapFd !== undefined
-        ? yield* readBootstrapEnvelope(DesktopBackendBootstrap, bootstrapFd)
+        ? yield* readBootstrapEnvelope(DesktopBackendBootstrap, bootstrapFd).pipe(
+            // Schema/IO causes can contain the private envelope. Keep its
+            // per-spawn readiness key out of startup logs and public errors.
+            Effect.mapError(
+              () =>
+                new DataProfileSelectionError({
+                  message:
+                    "Desktop backend private bootstrap is invalid or unavailable. No profile was opened.",
+                }),
+            ),
+          )
         : Option.none();
     const bootstrap = Option.getOrUndefined(bootstrapEnvelope);
+    const admittedBootstrap =
+      bootstrap === undefined
+        ? undefined
+        : yield* Effect.try({
+            try: () => resolveBootstrappedDataProfile(bootstrap, path),
+            catch: () =>
+              new DataProfileSelectionError({
+                message:
+                  "Desktop data profile bootstrap is incomplete or inconsistent. No profile was opened.",
+              }),
+          });
+    const dataProfile =
+      bootstrap === undefined
+        ? (Option.getOrUndefined(normalizedFlags.dataProfile) ?? env.dataProfile)
+        : admittedBootstrap!.dataProfile;
+    // A private desktop bootstrap is authoritative. Reject conflicting ambient
+    // selectors before settings, SQLite, logging or directory creation. A legacy
+    // private bootstrap already names its effective root: ambient profile intent
+    // cannot retroactively attest that parent or append another Debug suffix.
+    // Only standalone invocations preserve public flag/environment precedence.
+    if (bootstrap !== undefined) {
+      const profileCandidates = [
+        Option.getOrUndefined(normalizedFlags.dataProfile),
+        env.dataProfile,
+      ];
+      if (
+        profileCandidates.some((value) => value !== undefined && value !== bootstrap.dataProfile)
+      ) {
+        return yield* new DataProfileSelectionError({
+          message:
+            "Desktop data profile conflicts with its private bootstrap. No profile was opened.",
+        });
+      }
+      for (const candidate of [Option.getOrUndefined(normalizedFlags.baseDir), env.cafeCodeHome]) {
+        if (
+          candidate !== undefined &&
+          path.resolve(yield* resolveBaseDir(candidate)) !==
+            path.resolve(admittedBootstrap!.configuredBaseDir)
+        ) {
+          return yield* new DataProfileSelectionError({
+            message:
+              "Desktop data root conflicts with its private bootstrap. No profile was opened.",
+          });
+        }
+      }
+    }
 
     const mode: RuntimeMode = Option.getOrElse(
       resolveOptionPrecedence(
@@ -248,10 +359,14 @@ export const resolveServerConfig = (
       {
         onSome: (value) => Effect.succeed(value),
         onNone: () => {
-          if (mode === "desktop") {
+          if (mode === "desktop" && dataProfile !== "debug") {
             return Effect.succeed(DEFAULT_PORT);
           }
-          return findAvailablePort(DEFAULT_PORT);
+          // Debug never consumes the release's preferred listener merely
+          // because it started first. Explicit operator ports remain exact.
+          return dataProfile === "debug"
+            ? findAvailableDebugPort(preferredDataProfileHttpPort(dataProfile))
+            : findAvailablePort(DEFAULT_PORT);
         },
       },
     );
@@ -259,19 +374,36 @@ export const resolveServerConfig = (
       resolveOptionPrecedence(normalizedFlags.devUrl, Option.fromUndefinedOr(env.devUrl)),
       () => undefined,
     );
-    const baseDir = yield* resolveBaseDir(
+    const configuredBaseDir = yield* resolveBaseDir(
       Option.getOrUndefined(
         resolveOptionPrecedence(
+          admittedBootstrap !== undefined
+            ? Option.some(admittedBootstrap!.configuredBaseDir)
+            : Option.none(),
           normalizedFlags.baseDir,
           Option.fromUndefinedOr(env.cafeCodeHome),
           Option.fromUndefinedOr(bootstrap?.cafeCodeHome),
         ),
       ),
     );
+    const baseDir =
+      dataProfile === undefined
+        ? configuredBaseDir
+        : resolveDataProfileRoot(configuredBaseDir, dataProfile, path);
+    if (dataProfile === "debug") {
+      yield* Effect.tryPromise({
+        try: () => prepareDebugDataProfile(configuredBaseDir),
+        catch: () =>
+          new DataProfileSelectionError({
+            message:
+              "Debug data profile is unavailable or unsafe. Check its permissions and free space. Production data was not selected.",
+          }),
+      });
+    }
     const rawCwd = Option.getOrElse(normalizedFlags.cwd, () => process.cwd());
     const cwd = path.resolve(yield* expandHomePath(rawCwd.trim()));
     yield* fs.makeDirectory(cwd, { recursive: true });
-    const derivedPaths = yield* deriveServerPaths(baseDir, devUrl);
+    const derivedPaths = yield* deriveServerPaths(baseDir, devUrl, dataProfile);
     yield* ensureServerDirectories(derivedPaths);
     const persistedObservabilitySettings = yield* loadPersistedObservabilitySettings(
       derivedPaths.settingsPath,
@@ -305,7 +437,10 @@ export const resolveServerConfig = (
           ),
           {
             onSome: (value) => Effect.succeed(value),
-            onNone: () => findAvailablePort(defaultHttpsPortStart(mode, port)),
+            onNone: () =>
+              dataProfile === "debug"
+                ? findAvailableDebugPort(defaultHttpsPortStart(mode, port, dataProfile), port)
+                : findAvailablePort(defaultHttpsPortStart(mode, port, dataProfile)),
           },
         )
       : undefined;
@@ -333,7 +468,10 @@ export const resolveServerConfig = (
         Option.fromUndefinedOr(env.host),
         Option.fromUndefinedOr(bootstrap?.host),
       ),
-      () => (mode === "desktop" ? "127.0.0.1" : undefined),
+      // Source/headless Debug is private by default too. A separate profile
+      // must not inherit standalone web's wildcard listener as implicit LAN
+      // consent; an explicit host remains the operator's deliberate override.
+      () => (mode === "desktop" || dataProfile === "debug" ? "127.0.0.1" : undefined),
     );
     const logLevel = Option.getOrElse(cliLogLevel, () => env.logLevel);
 
@@ -360,6 +498,7 @@ export const resolveServerConfig = (
       httpsPort,
       cwd,
       baseDir,
+      ...(dataProfile === undefined ? {} : { dataProfile, configuredBaseDir }),
       ...derivedPaths,
       serverTracePath,
       host,
@@ -368,6 +507,9 @@ export const resolveServerConfig = (
       noBrowser,
       startupPresentation,
       desktopBootstrapToken,
+      ...(mode === "desktop" && bootstrap?.desktopReadinessToken !== undefined
+        ? { desktopReadinessToken: bootstrap.desktopReadinessToken }
+        : {}),
       ...(mode === "desktop" && bootstrap?.startupProgressFd === 4
         ? { startupProgressFd: 4 as const }
         : {}),
@@ -391,6 +533,7 @@ export const resolveCliAuthConfig = (
       httpsPort: Option.none(),
       host: Option.none(),
       baseDir: flags.baseDir,
+      dataProfile: flags.dataProfile ?? Option.none(),
       cwd: Option.none(),
       devUrl: flags.devUrl ?? Option.none(),
       noBrowser: Option.none(),

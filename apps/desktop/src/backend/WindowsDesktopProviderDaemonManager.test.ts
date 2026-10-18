@@ -10,6 +10,7 @@ import type {
   WindowsProviderRuntimeResult,
 } from "@cafecode/shared/windowsProviderRuntime";
 import { WindowsProviderRuntimeError } from "@cafecode/shared/windowsProviderRuntime";
+import { dataProfileIdentity } from "@cafecode/shared/dataProfileIdentity";
 import type { DesktopEnvironmentShape } from "../app/DesktopEnvironment.ts";
 import * as DesktopDebugServer from "../debug/DesktopDebugServer.ts";
 import * as ElectronSafeStorage from "../electron/ElectronSafeStorage.ts";
@@ -17,6 +18,8 @@ import { makeWindowsDesktopProviderDaemonManager } from "./WindowsDesktopProvide
 
 const environment = {
   platform: "win32",
+  dataProfile: "production",
+  configuredBaseDir: "C:\\CafeTest",
   baseDir: "C:\\CafeTest",
   stateDir: "C:\\CafeTest\\userdata",
   providerDaemonMarkerPath: "C:\\CafeTest\\userdata\\provider-daemon.json",
@@ -28,6 +31,10 @@ const environment = {
 } as DesktopEnvironmentShape;
 const generation = "12345678-1234-4234-8234-123456789012";
 const identity = { pid: 41, creationTime100ns: "134192244880123456" };
+const profile = {
+  dataProfile: "production" as const,
+  dataProfileId: dataProfileIdentity("production", environment.baseDir),
+};
 const result: WindowsProviderRuntimeResult = {
   adopted: true,
   ownershipId: generation,
@@ -43,6 +50,7 @@ const result: WindowsProviderRuntimeResult = {
     token: "synthetic-root-private-token-000000",
   },
   marker: {
+    ...profile,
     version: 2,
     mode: "provider-daemon",
     pid: 41,
@@ -59,6 +67,7 @@ const result: WindowsProviderRuntimeResult = {
     windowsProcessIdentity: identity,
   },
   health: {
+    ...profile,
     ok: true,
     mode: "provider-daemon",
     pid: 41,
@@ -161,6 +170,13 @@ describe("Windows desktop daemon authority adapter", () => {
     expect(daemon.stop).not.toHaveBeenCalled();
     expect(configurations[1]!.markerPath).toContain("provider-supervisor.json");
     expect(configurations[1]!.legacyCredentialPath).toContain("provider-supervisor-token");
+    expect(configurations[0]).toMatchObject(profile);
+    expect(configurations[1]).toMatchObject(profile);
+    expect(configurations[1]!.bootstrap).toMatchObject({
+      dataProfile: environment.dataProfile,
+      configuredCafeCodeHome: environment.configuredBaseDir,
+      cafeCodeHome: environment.baseDir,
+    });
     expect(
       await configurations[1]!.decodeCredential(
         Buffer.from("synthetic-supervisor-token\n").toString("base64"),
@@ -181,6 +197,12 @@ describe("Windows desktop daemon authority adapter", () => {
     expect(encoded.encrypted).toBe(true);
     expect(await options.decodeCredential(encoded.base64, true)).toBe("synthetic-secret");
     expect(options.socketPath).toMatch(/^\\\\\.\\pipe\\cafecode-provider-daemon-/);
+    expect(options).toMatchObject(profile);
+    expect(options.bootstrap).toMatchObject({
+      dataProfile: environment.dataProfile,
+      configuredCafeCodeHome: environment.configuredBaseDir,
+      cafeCodeHome: environment.baseDir,
+    });
     expect(await Effect.runPromise(manager.ensureRunning)).toEqual(result.endpoint);
     expect(Option.getOrThrow(await Effect.runPromise(manager.currentConfig))).toEqual(
       result.endpoint,
@@ -278,4 +300,50 @@ describe("Windows desktop daemon authority adapter", () => {
     expect(runtime.observe).not.toHaveBeenCalled();
     expect(requestJson).toHaveBeenCalledTimes(2);
   });
+
+  it.each(["omitted", "foreign-profile", "foreign-root"] as const)(
+    "does not publish an admitted lease with %s native profile proof",
+    async (phase) => {
+      const { manager, runtime } = await setup();
+      const receipt =
+        phase === "omitted"
+          ? { dataProfile: undefined, dataProfileId: undefined }
+          : phase === "foreign-profile"
+            ? { dataProfile: "debug" as const, dataProfileId: profile.dataProfileId }
+            : {
+                dataProfile: profile.dataProfile,
+                dataProfileId: dataProfileIdentity("production", "C:\\foreign"),
+              };
+      runtime.ensure.mockResolvedValueOnce({ ...result, health: { ...result.health, ...receipt } });
+      await expect(Effect.runPromise(manager.ensureRunning)).rejects.toThrow("profile-mismatch");
+      expect(Option.isNone(await Effect.runPromise(manager.currentConfig))).toBe(true);
+      expect(runtime.stop).not.toHaveBeenCalled();
+      expect(runtime.recover).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each(["omitted", "foreign-profile", "foreign-root"] as const)(
+    "refuses %s later health without discarding the exact admitted owner",
+    async (phase) => {
+      const receipt =
+        phase === "omitted"
+          ? { dataProfile: undefined, dataProfileId: undefined }
+          : phase === "foreign-profile"
+            ? { dataProfile: "debug" as const, dataProfileId: profile.dataProfileId }
+            : {
+                dataProfile: profile.dataProfile,
+                dataProfileId: dataProfileIdentity("production", "C:\\foreign"),
+              };
+      const { manager, runtime } = await setup(undefined, { ...result.health, ...receipt });
+      await Effect.runPromise(manager.ensureRunning);
+      expect(Option.isNone(await Effect.runPromise(manager.probeLiveness))).toBe(true);
+      expect(Option.isNone(await Effect.runPromise(manager.refreshHealth))).toBe(true);
+      expect(Option.getOrThrow(await Effect.runPromise(manager.currentConfig))).toEqual(
+        result.endpoint,
+      );
+      expect(runtime.stop).not.toHaveBeenCalled();
+      expect(runtime.recover).not.toHaveBeenCalled();
+      expect(runtime.observe).not.toHaveBeenCalled();
+    },
+  );
 });

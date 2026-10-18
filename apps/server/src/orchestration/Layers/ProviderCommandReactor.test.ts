@@ -1401,6 +1401,10 @@ describe("ProviderCommandReactor", () => {
       key: string,
       fails = false,
       modelSelection?: ModelSelection,
+      failurePreparation?: {
+        readonly receipt: Deferred.Deferred<ProviderInstanceId>;
+        readonly instanceId: ProviderInstanceId;
+      },
     ) {
       const sentBefore = harness.sendTurn.mock.calls.length;
       const turnId = asTurnId(`${key}-native-turn`);
@@ -1438,6 +1442,17 @@ describe("ProviderCommandReactor", () => {
       // positive readiness boundary under the unchanged enclosing test budget;
       // the generic two-second failure-activity observer remains unchanged.
       if (fails) {
+        if (failurePreparation !== undefined) {
+          // The live PubSub subscriber admits work after durable dispatch.
+          // Drain alone could see zero outstanding work before that admission.
+          // This one-use successful capability effect belongs to this fresh
+          // exact-account preparation, so the worker is known to be active;
+          // drain now owns its remaining local preparation/refusal writes.
+          expect(await Effect.runPromise(Deferred.await(failurePreparation.receipt))).toBe(
+            failurePreparation.instanceId,
+          );
+          await harness.drain();
+        }
         await waitFor(
           async () =>
             (await harness.readThreadDetail(threadId))?.activities.some(
@@ -1460,6 +1475,17 @@ describe("ProviderCommandReactor", () => {
           return session?.status === "running" && session.activeTurnId === turnId;
         });
       }
+    }
+
+    function observeFreshFailurePreparation(harness: Awaited<ReturnType<typeof createHarness>>) {
+      const receipt = Effect.runSync(Deferred.make<ProviderInstanceId>());
+      const original = harness.getCapabilities.getMockImplementation()!;
+      // Arm before dispatch and retain the original effect. A mock call is
+      // not successful preparation, and a missing capability stays missing.
+      harness.getCapabilities.mockImplementationOnce((instanceId) =>
+        original(instanceId).pipe(Effect.tap(() => Deferred.succeed(receipt, instanceId))),
+      );
+      return { receipt, instanceId: ProviderInstanceId.make("codex") };
     }
     async function change(
       harness: Awaited<ReturnType<typeof createHarness>>,
@@ -2602,15 +2628,78 @@ describe("ProviderCommandReactor", () => {
       async (support) => {
         const harness = await createHarness({ standalone: true, codexContextCompaction: support });
         await contextOverride(harness, "paired-unqualified-seed", 800_000);
-        await send(harness, `paired-unqualified-${support}`, true);
+        const preparation = observeFreshFailurePreparation(harness);
+        await send(harness, `paired-unqualified-${support}`, true, undefined, preparation);
         expect(harness.startSession).not.toHaveBeenCalled();
         expect(harness.sendTurn).not.toHaveBeenCalled();
         expect(harness.stopSession).not.toHaveBeenCalled();
         expect((await harness.readThreadDetail(threadId))?.codexContextWindowOverride).toBe(
           800_000,
         );
+        expect(
+          (await harness.readThreadDetail(threadId))?.activities.find(
+            (activity) => activity.kind === "provider.turn.start.failed",
+          )?.payload,
+        ).toMatchObject({
+          detail: expect.stringContaining(
+            "This Codex owner does not support paired context and compaction configuration.",
+          ),
+        });
       },
     );
+
+    it("waits for exact held capability preparation before observing a paired-owner refusal without provider calls", async () => {
+      const entered = Effect.runSync(Deferred.make<ProviderInstanceId>());
+      const release = Effect.runSync(Deferred.make<void>());
+      const harness = await createHarness({ standalone: true, codexContextCompaction: "unknown" });
+      // Register owned release before dispatch so failure/timeout cleanup can
+      // never leave the reactor suspended on a fixture-owned preparation gate.
+      await Effect.runPromise(Scope.addFinalizer(scope!, Deferred.succeed(release, undefined)));
+      await contextOverride(harness, "paired-held-unqualified-seed", 800_000);
+      const original = harness.getCapabilities.getMockImplementation()!;
+      harness.getCapabilities.mockImplementation((instanceId) =>
+        original(instanceId).pipe(
+          Effect.tap((capabilities) => {
+            expect(capabilities).not.toHaveProperty("codexContextCompaction");
+            return Deferred.succeed(entered, instanceId);
+          }),
+          Effect.tap(() => Deferred.await(release)),
+        ),
+      );
+      const preparation = observeFreshFailurePreparation(harness);
+      const sending = send(harness, "paired-held-unqualified", true, undefined, preparation);
+      try {
+        expect(await Effect.runPromise(Deferred.await(entered))).toBe(
+          ProviderInstanceId.make("codex"),
+        );
+        expect(harness.startSession).not.toHaveBeenCalled();
+        expect(harness.sendTurn).not.toHaveBeenCalled();
+        expect(harness.steerTurn).not.toHaveBeenCalled();
+        expect(harness.stopSession).not.toHaveBeenCalled();
+        expect(
+          (await harness.readThreadDetail(threadId))?.activities.some(
+            (activity) => activity.kind === "provider.turn.start.failed",
+          ),
+        ).toBe(false);
+      } finally {
+        await Effect.runPromise(Deferred.succeed(release, undefined));
+        await sending;
+      }
+      expect(harness.startSession).not.toHaveBeenCalled();
+      expect(harness.sendTurn).not.toHaveBeenCalled();
+      expect(harness.steerTurn).not.toHaveBeenCalled();
+      expect(harness.stopSession).not.toHaveBeenCalled();
+      const detail = await harness.readThreadDetail(threadId);
+      expect(detail?.codexContextWindowOverride).toBe(800_000);
+      expect(
+        detail?.activities.find((activity) => activity.kind === "provider.turn.start.failed")
+          ?.payload,
+      ).toMatchObject({
+        detail: expect.stringContaining(
+          "This Codex owner does not support paired context and compaction configuration.",
+        ),
+      });
+    });
 
     it.each([false, "unknown"] as const)(
       "does not reopen an idle legacy 800K session into a %s paired-compaction owner",

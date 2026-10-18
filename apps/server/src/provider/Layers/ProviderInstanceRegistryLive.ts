@@ -63,6 +63,11 @@ import {
   type ProviderInstanceRegistryMutatorShape,
 } from "../Services/ProviderInstanceRegistryMutator.ts";
 import type { AnyProviderDriver, ProviderInstance } from "../ProviderDriver.ts";
+import {
+  prepareDebugProviderHome,
+  resolveProviderProfileAdmission,
+  type ProviderDataProfile,
+} from "../debugProviderProfile.ts";
 
 /**
  * Live registry entry: the materialized `ProviderInstance` + the fresh
@@ -146,6 +151,7 @@ const closeUnpublishedScopes = (state: RegistryState) =>
 const runtimeEntryEqual = (a: ProviderInstanceConfig, b: ProviderInstanceConfig): boolean =>
   a.driver === b.driver &&
   a.enabled === b.enabled &&
+  a.debugStateSharing === b.debugStateSharing &&
   Equal.equals(a.environment, b.environment) &&
   Equal.equals(a.config, b.config);
 
@@ -246,6 +252,7 @@ const buildEntry = <R>(input: {
   readonly instanceId: ProviderInstanceId;
   readonly rawInstanceId: string;
   readonly entry: ProviderInstanceConfig;
+  readonly profile?: ProviderDataProfile | undefined;
   readonly registerUnpublishedScope: (close: Effect.Effect<void>) => void;
 }): Effect.Effect<
   | { readonly kind: "live"; readonly live: LiveEntry }
@@ -292,6 +299,44 @@ const buildEntry = <R>(input: {
     }
 
     const typedConfig = decodeResult.success;
+    const enabled = entry.enabled ?? decodedConfigEnabled(typedConfig) ?? true;
+    const admission = resolveProviderProfileAdmission({
+      profile: input.profile,
+      instanceId,
+      entry,
+      config: typedConfig,
+      enabled,
+    });
+    if (admission.kind === "refused") {
+      return {
+        kind: "unavailable" as const,
+        snapshot: yield* buildUnavailableProviderSnapshot({
+          driverKind: entry.driver,
+          instanceId,
+          displayName: entry.displayName,
+          accentColor: entry.accentColor,
+          reason: admission.reason,
+        }),
+      };
+    }
+    if (admission.nativeHome && input.profile) {
+      const prepared = yield* Effect.tryPromise({
+        try: () => prepareDebugProviderHome(input.profile!, admission.nativeHome!),
+        catch: () => "Debug provider home could not be prepared safely. No provider was started.",
+      }).pipe(Effect.result);
+      if (prepared._tag === "Failure") {
+        return {
+          kind: "unavailable" as const,
+          snapshot: yield* buildUnavailableProviderSnapshot({
+            driverKind: entry.driver,
+            instanceId,
+            displayName: entry.displayName,
+            accentColor: entry.accentColor,
+            reason: prepared.failure,
+          }),
+        };
+      }
+    }
     // Reserve cleanup ownership before entering interruptible driver code. A
     // cancelled/defective create may already own resources even though it never
     // returns an instance. The reconcile permit cannot be released until every
@@ -317,8 +362,9 @@ const buildEntry = <R>(input: {
         displayName: entry.displayName,
         accentColor: entry.accentColor,
         environment: entry.environment ?? [],
-        enabled: entry.enabled ?? decodedConfigEnabled(typedConfig) ?? true,
-        config: typedConfig,
+        processEnvironment: admission.processEnvironment,
+        enabled,
+        config: admission.config,
       })
       .pipe(Effect.provideService(Scope.Scope, childScope), Effect.result);
     if (createResult._tag === "Failure") {
@@ -364,6 +410,7 @@ const makeReconcile = <R>(input: {
   readonly state: RegistryState;
   readonly driversById: ReadonlyMap<ProviderDriverKind, AnyProviderDriver<R>>;
   readonly parentScope: Scope.Scope;
+  readonly profile?: ProviderDataProfile | undefined;
 }): ((configMap: ProviderInstanceConfigMap) => Effect.Effect<void, never, R>) => {
   const { state, driversById, parentScope } = input;
   return (configMap: ProviderInstanceConfigMap) =>
@@ -449,6 +496,7 @@ const makeReconcile = <R>(input: {
           }
 
           const result = yield* buildEntry({
+            profile: input.profile,
             driversById,
             parentScope,
             instanceId,
@@ -536,6 +584,7 @@ const makeReconcile = <R>(input: {
 export const makeProviderInstanceRegistry = <R>(input: {
   readonly drivers: ReadonlyArray<AnyProviderDriver<R>>;
   readonly configMap: ProviderInstanceConfigMap;
+  readonly profile?: ProviderDataProfile | undefined;
 }): Effect.Effect<
   {
     readonly registry: ProviderInstanceRegistryShape;
@@ -576,7 +625,12 @@ export const makeProviderInstanceRegistry = <R>(input: {
       reconcileSemaphore,
       unpublishedScopes: new Map(),
     };
-    const reconcileWithR = makeReconcile({ state, driversById, parentScope });
+    const reconcileWithR = makeReconcile({
+      state,
+      driversById,
+      parentScope,
+      profile: input.profile,
+    });
     const reconcile: ProviderInstanceRegistryMutatorShape["reconcile"] = (configMap) =>
       reconcileWithR(configMap).pipe(Effect.provideContext(driverContext));
 
@@ -645,6 +699,7 @@ export const makeProviderInstanceRegistry = <R>(input: {
 export const ProviderInstanceRegistryLayer = <R>(input: {
   readonly drivers: ReadonlyArray<AnyProviderDriver<R>>;
   readonly configMap: ProviderInstanceConfigMap;
+  readonly profile?: ProviderDataProfile | undefined;
 }): Layer.Layer<ProviderInstanceRegistry, never, R> =>
   Layer.effect(
     ProviderInstanceRegistry,
@@ -660,6 +715,7 @@ export const ProviderInstanceRegistryLayer = <R>(input: {
 export const ProviderInstanceRegistryMutableLayer = <R>(input: {
   readonly drivers: ReadonlyArray<AnyProviderDriver<R>>;
   readonly configMap: ProviderInstanceConfigMap;
+  readonly profile?: ProviderDataProfile | undefined;
 }): Layer.Layer<ProviderInstanceRegistry | ProviderInstanceRegistryMutator, never, R> =>
   Layer.effectContext(
     makeProviderInstanceRegistry(input).pipe(

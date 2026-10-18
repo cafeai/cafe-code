@@ -107,6 +107,8 @@ export interface ProviderDriverCreateInput<Config> {
   readonly displayName: string | undefined;
   readonly accentColor?: string | undefined;
   readonly environment: ProviderInstanceEnvironment;
+  /** Exact child-local environment admitted by the data-profile boundary. */
+  readonly processEnvironment?: NodeJS.ProcessEnv | undefined;
   readonly enabled: boolean;
   readonly config: Config;
 }

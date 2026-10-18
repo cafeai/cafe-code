@@ -2,13 +2,21 @@ import { trustedClientAddress } from "../httpTransport.ts";
 import type { AuthClientMetadata, AuthClientMetadataDeviceType } from "@cafecode/contracts/auth";
 import type * as HttpServerRequest from "effect/unstable/http/HttpServerRequest";
 import * as Crypto from "node:crypto";
+import type { DataProfile } from "@cafecode/shared/dataProfile";
 
 const SESSION_COOKIE_NAME = "t3_session";
 
 export function resolveSessionCookieName(input: {
   readonly mode: "web" | "desktop";
   readonly port: number;
+  readonly dataProfile?: DataProfile | undefined;
 }): string {
+  // Cookies are scoped to the hostname, not its port. Explicit Debug web and
+  // desktop listeners must never replace a Production/legacy browser login.
+  // Preserve all existing names for Production and unprofiled standalone use.
+  if (input.dataProfile === "debug") {
+    return `t3_debug_session_${input.port}`;
+  }
   if (input.mode !== "desktop") {
     return SESSION_COOKIE_NAME;
   }
@@ -16,7 +24,13 @@ export function resolveSessionCookieName(input: {
   return `${SESSION_COOKIE_NAME}_${input.port}`;
 }
 
-export function resolveHttpsSessionCookieName(input: { readonly port: number }): string {
+export function resolveHttpsSessionCookieName(input: {
+  readonly port: number;
+  readonly dataProfile?: DataProfile | undefined;
+}): string {
+  if (input.dataProfile === "debug") {
+    return `t3_debug_session_https_${input.port}`;
+  }
   return `${SESSION_COOKIE_NAME}_https_${input.port}`;
 }
 

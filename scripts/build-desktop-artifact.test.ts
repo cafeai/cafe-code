@@ -9,10 +9,15 @@ import * as Path from "effect/Path";
 import * as Sink from "effect/Sink";
 import * as Stream from "effect/Stream";
 import { getUiTranslator } from "@cafecode/shared/i18n";
+import {
+  APPLICATION_BUILD_VERSION_MANIFEST_FILENAME,
+  publishApplicationBuildVersionManifest,
+} from "@cafecode/shared/applicationBuildVersion";
 import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process";
 
 import {
   MANAGED_WINDOWS_NODE_VERSION,
+  createDesktopApplicationBuildCommand,
   desktopArtifactListSatisfiesTarget,
   extractManagedWindowsNodeArchive,
   resolveBuildOptions,
@@ -29,6 +34,7 @@ import {
   renderMacPrivacyStrings,
   stageMacPrivacyLocalizations,
   shouldStageWindowsManagedRuntime,
+  verifyDesktopApplicationBuildVersions,
 } from "./build-desktop-artifact.ts";
 import { BRAND_ASSET_PATHS } from "./lib/brand-assets.ts";
 import { REPOSITORY_NODE_VERSION } from "./lib/node-version.ts";
@@ -89,6 +95,70 @@ function completedExtractionHandle() {
 }
 
 it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
+  it("passes the exact release version to the build child without rewriting source metadata", () => {
+    for (const version of ["9.8.7", "9.8.7-nightly.20261019.42"]) {
+      const command = createDesktopApplicationBuildCommand("fixture-repo", version, false);
+      assert.isTrue(ChildProcess.isStandardCommand(command));
+      if (!ChildProcess.isStandardCommand(command)) throw new Error("Expected build command.");
+      assert.equal(command.command, "corepack");
+      assert.deepEqual(command.args, ["yarn", "build:desktop"]);
+      assert.equal(command.options.cwd, "fixture-repo");
+      assert.deepEqual(command.options.env, { APP_VERSION: version });
+      assert.equal(command.options.extendEnv, true);
+      assert.equal(command.options.shell, process.platform === "win32");
+    }
+    assert.throws(() =>
+      createDesktopApplicationBuildCommand("fixture-repo", "not-a-version", false),
+    );
+  });
+
+  it.effect(
+    "refuses mixed or changed renderer/backend builds before packaging and requalifies copied output",
+    () =>
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const fixture = yield* fs.makeTempDirectoryScoped({ prefix: "cafe-artifact-version-" });
+        const server = path.join(fixture, "server");
+        const web = path.join(server, "client");
+        yield* fs.makeDirectory(web, { recursive: true });
+        const version = "9.8.7";
+        const serverFiles = {
+          "bin.mjs": "export const v='9.8.7';",
+          "launcher.mjs": "export const v='9.8.7';",
+        };
+        const webFiles = {
+          "index.html": "<script src='app.js'></script>",
+          "app.js": "globalThis.v='9.8.7';",
+        };
+        for (const [name, code] of Object.entries(serverFiles))
+          yield* fs.writeFileString(path.join(server, name), code);
+        for (const [name, code] of Object.entries(webFiles))
+          yield* fs.writeFileString(path.join(web, name), code);
+        publishApplicationBuildVersionManifest(server, "server", version, serverFiles);
+        // A coherent but older renderer is not qualified by the backend's newer
+        // identity or the outer artifact filename.
+        publishApplicationBuildVersionManifest(web, "web", "0.2.1", webFiles);
+        assert.throws(() => verifyDesktopApplicationBuildVersions(server, version));
+        publishApplicationBuildVersionManifest(web, "web", version, webFiles);
+        assert.doesNotThrow(() => verifyDesktopApplicationBuildVersions(server, version));
+
+        const copied = path.join(fixture, "stage/server");
+        yield* fs.copy(server, copied);
+        assert.doesNotThrow(() => verifyDesktopApplicationBuildVersions(copied, version));
+        // Same-length changes require hash verification rather than size-only
+        // evidence, and mutating the stage cannot qualify from the source copy.
+        yield* fs.writeFileString(
+          path.join(copied, "client/app.js"),
+          webFiles["app.js"].replace("9.8.7", "8.7.6"),
+        );
+        assert.throws(() => verifyDesktopApplicationBuildVersions(copied, version));
+        assert.doesNotThrow(() => verifyDesktopApplicationBuildVersions(server, version));
+        yield* fs.remove(path.join(web, APPLICATION_BUILD_VERSION_MANIFEST_FILENAME));
+        assert.throws(() => verifyDesktopApplicationBuildVersions(server, version));
+      }),
+  );
+
   it("parses the Windows extraction fixture on every host with exact structured arguments and literal quoted paths", () => {
     const archivePath = "C:\\cache with spaces and ' quotes\\verified-extract-123\\node.zip";
     const destination = "C:\\cache with spaces and ' quotes\\verified-extract-123";

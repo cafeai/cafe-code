@@ -4,10 +4,15 @@
 // @effect-diagnostics globalDate:off
 // @effect-diagnostics globalTimers:off
 import { spawn } from "node:child_process";
-import { closeSync, mkdirSync, openSync } from "node:fs";
+import { closeSync, constants, mkdirSync, openSync } from "node:fs";
+import { randomUUID } from "node:crypto";
 import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
 import { fileURLToPath } from "node:url";
+
+import { DESKTOP_RESTART_EXISTING_FLAG } from "../apps/desktop/src/app/DesktopProfileControl.ts";
+import { resolveDataProfileRoot } from "../packages/shared/src/dataProfile.ts";
+import { prepareDebugDataProfile } from "../packages/shared/src/dataProfileStorage.ts";
 
 export const DEFAULT_RESTART_WAIT_MS = 1_500;
 export const DEFAULT_RESTART_DELAY_MS = 750;
@@ -26,27 +31,32 @@ interface NormalizedRestartOptions extends RestartCafeCodeArgs {
   readonly repoRoot: string;
   readonly scriptPath: string;
   readonly resolvedLogDir: string;
+  readonly configuredBaseDir: string;
 }
 
 const usage = `Usage:
   yarn restart:desktop [options] [-- command ...]
 
-Schedules a detached Node helper that waits briefly, runs Cafe Code's killall --graceful entrypoint, then
-relaunches Cafe Code. The default launch command is:
+Schedules a detached Node helper that requests a restart through the Debug
+profile's native single-instance owner. It never scans or terminates Production
+processes. If no Debug owner exists, the same command starts Debug normally.
+The source launch command is:
   node apps/desktop/scripts/start-electron-launchservices.mjs (macOS)
   node apps/desktop/scripts/start-electron.mjs (other hosts)
 
 Options:
-  --wait-ms <n>           Delay before killing the current app (default: 1500)
-  --restart-delay-ms <n>  Delay between killall and relaunch (default: 750)
-  --log-dir <path>        Restart log directory (default: $CAFE_CODE_HOME/restart-logs)
+  --wait-ms <n>           Delay before requesting Debug restart (default: 1500)
+  --restart-delay-ms <n>  Additional handoff delay (default: 750)
+  --log-dir <path>        Restart log directory (default: $CAFE_CODE_HOME/.debug/restart-logs)
   --dry-run               Print what would be scheduled without starting helper
   --help                  Show this help
 
 Examples:
   yarn restart:desktop
-  yarn restart:desktop -- yarn dev:desktop
-  yarn restart:desktop -- node apps/desktop/scripts/start-electron.mjs --cafe-debug
+
+Custom replacement commands after -- are refused. Close the selected Debug
+profile explicitly before starting a different development launcher. The global
+killall command remains a separate, explicitly global emergency operation.
 `;
 
 function parseIntegerFlag(value: string | undefined, flag: string): number {
@@ -159,6 +169,27 @@ export function defaultLaunchCommand(
   ];
 }
 
+/**
+ * Native relaunch preserves the exact existing owner's launch configuration.
+ * An arbitrary replacement command cannot be authorized by that receipt. Fail
+ * before scheduling any helper instead of recovering with a global killall.
+ */
+export function profileRestartCommand(input: {
+  readonly launchCommand: ReadonlyArray<string> | undefined;
+  readonly nodePath?: string;
+  readonly platform?: NodeJS.Platform;
+}): ReadonlyArray<string> {
+  if (input.launchCommand !== undefined) {
+    throw new Error(
+      "Custom launch commands cannot be used for a profile-scoped restart. Close that Debug profile explicitly before starting a different launcher.",
+    );
+  }
+  return [
+    ...defaultLaunchCommand(input.nodePath ?? process.execPath, input.platform ?? process.platform),
+    DESKTOP_RESTART_EXISTING_FLAG,
+  ];
+}
+
 export function resolveRestartLogDir(input: {
   readonly explicitLogDir: string | undefined;
   readonly env: NodeJS.ProcessEnv;
@@ -170,8 +201,27 @@ export function resolveRestartLogDir(input: {
     return NodePath.resolve(input.cwd, configured);
   }
 
-  const cafeHome = input.env.CAFE_CODE_HOME?.trim() || NodePath.join(input.homeDir, ".cafe-code");
-  return NodePath.join(cafeHome, "restart-logs");
+  const configuredBaseDir = NodePath.resolve(
+    input.cwd,
+    input.env.CAFE_CODE_HOME?.trim() || NodePath.join(input.homeDir, ".cafe-code"),
+  );
+  const effectiveRoot = resolveDataProfileRoot(configuredBaseDir, "debug", NodePath);
+  return NodePath.join(effectiveRoot, "restart-logs");
+}
+
+/** A new private file, never an append/reopen of a pre-existing path alias. */
+export function openRestartLog(path: string): number {
+  try {
+    return openSync(
+      path,
+      constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | (constants.O_NOFOLLOW ?? 0),
+      0o600,
+    );
+  } catch {
+    throw new Error(
+      "Unable to create a private Debug restart log. Existing files and Production data were preserved.",
+    );
+  }
 }
 
 export function buildHelperProcessArgs(input: {
@@ -217,35 +267,6 @@ function commandSummary(command: ReadonlyArray<string>): string {
   return `${String(executable)} (${args.length} arg${args.length === 1 ? "" : "s"})`;
 }
 
-function spawnOptions(cwd: string): { readonly cwd: string; readonly shell: boolean } {
-  return {
-    cwd,
-    shell: process.platform === "win32",
-  };
-}
-
-async function runCommand(command: ReadonlyArray<string>, cwd: string): Promise<number> {
-  const [executable, ...args] = command;
-  if (executable === undefined) {
-    throw new Error("Cannot run an empty command.");
-  }
-
-  return await new Promise<number>((resolve, reject) => {
-    const child = spawn(executable, args, {
-      ...spawnOptions(cwd),
-      stdio: ["ignore", "inherit", "inherit"],
-    });
-    child.once("error", reject);
-    child.once("exit", (code, signal) => {
-      if (signal !== null) {
-        resolve(128);
-        return;
-      }
-      resolve(code ?? 0);
-    });
-  });
-}
-
 function spawnDetached(command: ReadonlyArray<string>, cwd: string): void {
   const [executable, ...args] = command;
   if (executable === undefined) {
@@ -253,7 +274,10 @@ function spawnDetached(command: ReadonlyArray<string>, cwd: string): void {
   }
 
   const child = spawn(executable, args, {
-    ...spawnOptions(cwd),
+    cwd,
+    // The sole executable is the current native Node, including on Windows.
+    // No shell or batch-command resolution is needed for this fixed request.
+    shell: false,
     stdio: ["ignore", "inherit", "inherit"],
     detached: true,
   });
@@ -261,6 +285,7 @@ function spawnDetached(command: ReadonlyArray<string>, cwd: string): void {
 }
 
 function normalizeOptions(args: RestartCafeCodeArgs): NormalizedRestartOptions {
+  profileRestartCommand({ launchCommand: args.launchCommand });
   const scriptPath = fileURLToPath(import.meta.url);
   const repoRoot = NodePath.resolve(NodePath.dirname(scriptPath), "..");
   const resolvedLogDir = resolveRestartLogDir({
@@ -269,18 +294,23 @@ function normalizeOptions(args: RestartCafeCodeArgs): NormalizedRestartOptions {
     homeDir: NodeOS.homedir(),
     cwd: repoRoot,
   });
+  const configuredBaseDir = NodePath.resolve(
+    repoRoot,
+    process.env.CAFE_CODE_HOME?.trim() || NodePath.join(NodeOS.homedir(), ".cafe-code"),
+  );
   return {
     ...args,
     repoRoot,
     scriptPath,
     resolvedLogDir,
+    configuredBaseDir,
   };
 }
 
 async function scheduleRestart(options: NormalizedRestartOptions): Promise<void> {
   const logPath = NodePath.join(
     options.resolvedLogDir,
-    `restart-${formatTimestamp()}-${process.pid}.log`,
+    `restart-${formatTimestamp()}-${process.pid}-${randomUUID()}.log`,
   );
   const helperArgs = buildHelperProcessArgs({
     scriptPath: options.scriptPath,
@@ -291,7 +321,7 @@ async function scheduleRestart(options: NormalizedRestartOptions): Promise<void>
   });
 
   if (options.dryRun) {
-    const launchCommand = options.launchCommand ?? defaultLaunchCommand();
+    const launchCommand = profileRestartCommand(options);
     console.log("Cafe Code restart dry run.");
     console.log(`helper: ${process.execPath} (${helperArgs.length} args)`);
     console.log(`launch: ${commandSummary(launchCommand)}`);
@@ -299,9 +329,16 @@ async function scheduleRestart(options: NormalizedRestartOptions): Promise<void>
     return;
   }
 
-  mkdirSync(options.resolvedLogDir, { recursive: true });
-  const outFd = openSync(logPath, "a");
-  const errFd = openSync(logPath, "a");
+  if (options.logDir?.trim()) {
+    // This is an explicit operator-selected destination, not an inferred
+    // Production path. Existing log files still cannot be followed/reused.
+    mkdirSync(options.resolvedLogDir, { recursive: true, mode: 0o700 });
+  } else {
+    // Admit the Debug root and fixed restart-log directory before opening any
+    // default log. A .debug/restart-logs alias cannot redirect output to release.
+    await prepareDebugDataProfile(options.configuredBaseDir);
+  }
+  const logFd = openRestartLog(logPath);
 
   try {
     const helper = spawn(process.execPath, helperArgs, {
@@ -309,39 +346,31 @@ async function scheduleRestart(options: NormalizedRestartOptions): Promise<void>
       env: {
         ...process.env,
       },
-      stdio: ["ignore", outFd, errFd],
+      stdio: ["ignore", logFd, logFd],
       detached: true,
     });
     helper.unref();
   } finally {
-    closeSync(outFd);
-    closeSync(errFd);
+    closeSync(logFd);
   }
 
   console.log(`Scheduled Cafe Code restart helper. Log: ${logPath}`);
 }
 
 async function runHelper(options: NormalizedRestartOptions): Promise<void> {
-  const launchCommand = options.launchCommand ?? defaultLaunchCommand();
-  const killallCommand = [process.execPath, "apps/server/src/bin.ts", "killall", "--graceful"];
+  const launchCommand = profileRestartCommand(options);
 
   console.log(`[restart] helper pid=${process.pid}`);
   console.log(`[restart] waitMs=${options.waitMs} restartDelayMs=${options.restartDelayMs}`);
-  console.log(`[restart] killall=${commandSummary(killallCommand)}`);
   console.log(`[restart] launch=${commandSummary(launchCommand)}`);
 
   await sleep(options.waitMs);
 
-  const killallExitCode = await runCommand(killallCommand, options.repoRoot);
-  console.log(`[restart] killall exited with code ${killallExitCode}`);
-  if (killallExitCode !== 0) {
-    process.exitCode = killallExitCode;
-    return;
-  }
-
   await sleep(options.restartDelayMs);
   spawnDetached(launchCommand, options.repoRoot);
-  console.log("[restart] launch command spawned.");
+  console.log(
+    "[restart] Debug profile restart request spawned; the native owner controls shutdown.",
+  );
 }
 
 async function main(): Promise<void> {

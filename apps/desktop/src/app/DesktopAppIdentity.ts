@@ -88,7 +88,9 @@ const make = Effect.gen(function* () {
 
   const configure = Effect.gen(function* () {
     const commitHash = yield* resolveAboutCommitHash;
-    yield* electronApp.setName(environment.branding.baseName);
+    yield* electronApp.setName(
+      environment.dataProfile === "debug" ? environment.displayName : environment.branding.baseName,
+    );
     yield* electronApp.setAboutPanelOptions({
       applicationName: environment.displayName,
       applicationVersion: environment.appVersion,

@@ -16,8 +16,9 @@ stapled-ticket verification. Publication verifies the complete four-target sourc
 and byte evidence, merges macOS manifests, validates updater sizes and SHA-512
 digests, and publishes `SHA256SUMS.txt` for manual downloads.
 
-A release branch can run this workflow before its tag exists:
-`gh workflow run release.yml --ref release/0.2.1 -f version=v0.2.1 -f publish_release=true`.
+A release branch can run this workflow before its tag exists. Substitute the
+deliberately selected, unused version and prepared branch in this template:
+`gh workflow run release.yml --ref release/X.Y.Z -f version=vX.Y.Z -f publish_release=true`.
 The manual run pins the branch's event commit and creates the tag only after
 normal CI, signed builds, artifact identity checks and manifest validation pass.
 It never force-updates an existing tag. Omitting `publish_release=true` builds and
@@ -34,6 +35,86 @@ macOS signing/notarization, native signature/ticket verification, exact-source
 artifact hashes and update-manifest checks. It does not establish that normal CI
 passed. Never move an existing release tag or silently replace published binaries;
 withdrawal or replacement remains a separately authorized release action.
+
+## Application version identity
+
+The release version is a build input, not just a filename or native package
+label. `scripts/build-desktop-artifact.ts` resolves and validates it once from
+the requested packaging version, falling back to the server source package
+version only when no override was supplied. It passes that resolved value as
+`APP_VERSION` to its `yarn build:desktop` child and uses the same value for the
+staged native package. Turbo already includes `APP_VERSION` in its hashed
+`globalEnv`, so outputs built for another version cannot satisfy the same cache
+key merely because the source files are unchanged.
+
+The web build bakes `import.meta.env.APP_VERSION` into the renderer. The server
+build bakes its shared `APPLICATION_VERSION` scalar into the backend, including
+CLI version reporting and runtime/environment metadata. Changing an installed
+process's environment cannot relabel either compiled component. Unoverridden
+source builds retain their source-package version fallback.
+
+Each successful web/server build emits an `application-build-version.json`
+manifest from its actual emitted entrypoints and chunks. The manifest records
+the component, application version, file byte counts and SHA-256 digests.
+Packaging checks those bytes and the expected component/version before staging
+and again after copying the staged backend and bundled web payload. Missing,
+malformed, wrong-version, wrong-component or changed-byte evidence refuses
+packaging, including `--skip-build`: that option permits verified reuse, not a
+version override on stale outputs. Rebuild with the intended version rather
+than editing a receipt or bypassing the check.
+
+The server can prefer precompressed `.br` or `.gz` web assets. Every existing
+compressed representation of a recorded payload must therefore decode to that
+payload's exact byte count and digest, within the same bounded verification
+budget. A current raw bundle beside stale, corrupt or oversized compressed
+assets refuses packaging too; missing compressed assets may use the raw file.
+
+Release packaging does not need to rewrite source `package.json` versions.
+`scripts/update-release-package-versions.ts` remains an optional, deliberate
+source-version update for maintainers who want one; it is not a mandatory
+pre-release step or a substitute for versioned compilation. A source-version
+change must be reviewed and qualified like any other source change.
+
+These manifests close a local component-consistency gap. They do not
+authenticate a publisher against someone who can change both build outputs and
+receipts, replace normal CI/signature/checksum gates, or prove a successful
+native install/update. See the [release-version decision](decisions/release-version-identity.md)
+for the design and evidence boundary. Already published artifacts are immutable:
+a repair to a published version such as `0.2.2` belongs in a separately
+authorized, unused newer release, not replacement payloads under its old tag.
+
+## Pre-release checklist
+
+1. Obtain approval for the specific release and choose an unused stable or
+   nightly version. Check the existing remote tag and GitHub release before
+   selecting it; never force a tag or overwrite published assets.
+2. Freeze the intended release source commit. If using a release branch, bind
+   that branch and the workflow's prepared source SHA to this commit; do not
+   qualify a moving branch name against results from an older head. Updating
+   `main` to the release source is a separate, explicitly requested operation,
+   not an automatic side effect of publishing from `dev` or a release branch.
+3. Use normal release mode for normal publication: require its exact-source
+   reusable CI gate and all four release artifacts
+   (`cafe-code-release-windows-x64`, `cafe-code-release-macos-arm64`,
+   `cafe-code-release-macos-x64`, `cafe-code-release-linux-x64`). A build-only
+   run or optional probe does not establish that normal CI passed.
+4. Require one version across the native package, compiled renderer and compiled
+   backend, with valid byte-bound component manifests. Retain the platform's
+   existing signing/notarization, artifact source/identity, updater manifest,
+   size and digest checks. Validate the Windows, macOS and Linux update-feed
+   payloads for the selected channel; do not substitute a diagnostic archive
+   or a result from a different source commit.
+5. Let the workflow publish only the artifacts qualified by that exact run and
+   commit. Record the final version, tag, source commit, workflow result and
+   download/update artifacts. Do not silently rebuild or replace the published
+   payload after verification. Real native upgrade/relaunch tests, when run,
+   are separate qualification and must be reported as such.
+6. Treat `CafeCode.sh` updates as separate scope and inspect the website's own
+   repository and deployment configuration.
+   This desktop workflow does not establish that website downloads, release
+   text or deployment changed. Verify the website's actual release/deployment
+   procedure and obtain its required authority before making those changes;
+   do not assume a desktop tag deploys the website.
 
 ## Windows managed providers
 

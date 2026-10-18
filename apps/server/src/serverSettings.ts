@@ -53,6 +53,7 @@ import { fromJsonStringPretty, fromLenientJson } from "@cafecode/shared/schemaJs
 import { applyServerSettingsPatch } from "@cafecode/shared/serverSettings";
 import { ServerSecretStoreLive } from "./auth/Layers/ServerSecretStore.ts";
 import { ServerSecretStore } from "./auth/Services/ServerSecretStore.ts";
+import { applyDebugProviderSettingsDefaults } from "./provider/debugProviderProfile.ts";
 
 const encodeServerSettings = Schema.encodeEffect(ServerSettings);
 const encodeServerSettingsJson = Schema.encodeUnknownEffect(fromJsonStringPretty(ServerSettings));
@@ -259,6 +260,8 @@ export class ServerSettingsService extends Context.Service<
 
 const ServerSettingsJson = fromLenientJson(ServerSettings);
 const decodeServerSettingsJsonExit = Schema.decodeUnknownExit(ServerSettingsJson);
+const decodeRawSettingsJsonExit = Schema.decodeUnknownExit(fromLenientJson(Schema.Unknown));
+const decodeServerSettingsValueExit = Schema.decodeUnknownExit(ServerSettings);
 
 type LegacyProviderSettings = ServerSettings["providers"][keyof ServerSettings["providers"]];
 
@@ -384,7 +387,11 @@ function stripDefaultServerSettings(current: unknown, defaults: unknown): unknow
 }
 
 const makeServerSettings = Effect.gen(function* () {
-  const { settingsPath } = yield* ServerConfig;
+  const { settingsPath, dataProfile } = yield* ServerConfig;
+  const defaultSettings =
+    dataProfile === "debug"
+      ? Schema.decodeUnknownSync(ServerSettings)(applyDebugProviderSettingsDefaults({}))
+      : DEFAULT_SERVER_SETTINGS;
   const fs = yield* FileSystem.FileSystem;
   const pathService = yield* Path.Path;
   const secretStore = yield* ServerSecretStore;
@@ -423,17 +430,28 @@ const makeServerSettings = Effect.gen(function* () {
 
   const loadSettingsFromDisk = Effect.gen(function* () {
     if (!(yield* readConfigExists)) {
-      return DEFAULT_SERVER_SETTINGS;
+      return defaultSettings;
     }
 
     const raw = yield* readRawConfig;
-    const decoded = decodeServerSettingsJsonExit(raw);
+    const parsed = dataProfile === "debug" ? decodeRawSettingsJsonExit(raw) : undefined;
+    const decoded =
+      parsed?._tag === "Success"
+        ? decodeServerSettingsValueExit(applyDebugProviderSettingsDefaults(parsed.value))
+        : decodeServerSettingsJsonExit(raw);
     if (decoded._tag === "Failure") {
+      if (dataProfile === "debug") {
+        return yield* new ServerSettingsError({
+          settingsPath,
+          detail:
+            "Existing Debug settings could not be decoded safely. The original file was preserved; repair it explicitly before continuing. No other data profile was selected.",
+        });
+      }
       yield* Effect.logWarning("failed to parse settings.json, using defaults", {
         path: settingsPath,
         issues: Cause.pretty(decoded.cause),
       });
-      return DEFAULT_SERVER_SETTINGS;
+      return defaultSettings;
     }
     return yield* validateClaudeOutputCaps(
       stripRetiredProviderInstances(decoded.value),
@@ -854,8 +872,23 @@ const makeServerSettings = Effect.gen(function* () {
       writeSemaphore.withPermits(1)(
         Effect.gen(function* () {
           const current = yield* getSettingsFromCache;
+          // The shared patch helper intentionally seeds Production's default
+          // Axiom entry when a whole instance map is replaced. Debug must seed
+          // its own disabled defaults instead, including API clients which do
+          // not echo every built-in card in their replacement map.
+          const profilePatch =
+            dataProfile === "debug" && patch.providerInstances !== undefined
+              ? {
+                  ...patch,
+                  providerInstances: Schema.decodeUnknownSync(ServerSettings)(
+                    applyDebugProviderSettingsDefaults({
+                      providerInstances: patch.providerInstances,
+                    }),
+                  ).providerInstances,
+                }
+              : patch;
           const candidate = yield* validateClaudeOutputCaps(
-            stripRetiredProviderInstances(applyServerSettingsPatch(current, patch)),
+            stripRetiredProviderInstances(applyServerSettingsPatch(current, profilePatch)),
             settingsPath,
           );
           const nextWithProviderSecrets = yield* persistOpenCodeServerPasswords(current, candidate);

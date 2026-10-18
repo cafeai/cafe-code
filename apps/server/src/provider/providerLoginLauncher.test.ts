@@ -20,6 +20,7 @@ import {
   resolveProviderLoginLaunchPlan,
 } from "./providerLoginLauncher.ts";
 import { CAFE_CODE_MANAGED_RUNTIME_ROOT_ENV } from "./managedProviderRuntime.ts";
+import { debugProviderHome, type ProviderDataProfile } from "./debugProviderProfile.ts";
 
 const CODEX_DRIVER = ProviderDriverKind.make("codex");
 const CLAUDE_DRIVER = ProviderDriverKind.make("claudeAgent");
@@ -56,6 +57,7 @@ function runResolve(
   settings: ServerSettings,
   instanceId: ProviderInstanceId,
   baseEnv: NodeJS.ProcessEnv,
+  profile?: ProviderDataProfile,
 ) {
   return Effect.runPromise(
     resolveProviderLoginLaunchPlan({
@@ -63,11 +65,68 @@ function runResolve(
       settings,
       baseEnv,
       platform: "win32",
+      profile,
     }).pipe(Effect.provide(NodeServices.layer)),
   );
 }
 
 describe("providerLoginLauncher", () => {
+  it("uses the same private Debug Codex account for login, history index and ordinary driver admission", async () => {
+    const profile = { dataProfile: "debug" as const, baseDir: tempDir("debug-login-profile") };
+    const settings = settingsWithInstance(CODEX_INSTANCE_ID, {
+      driver: CODEX_DRIVER,
+      enabled: true,
+      config: { runtimeSource: "bundled", binaryPath: "codex" },
+    });
+    const plan = await runResolve(
+      settings,
+      CODEX_INSTANCE_ID,
+      {
+        [CAFE_CODE_MANAGED_RUNTIME_ROOT_ENV]: "D:\\CafeManaged",
+        CODEX_HOME: "production-home",
+        CODEX_SQLITE_HOME: "production-index",
+        OPENAI_API_KEY: "inherited-private-key",
+        PATH: "C:\\Windows\\System32",
+      },
+      profile,
+    );
+    const home = debugProviderHome(profile, "codex", CODEX_INSTANCE_ID);
+    expect(plan.env.CODEX_HOME).toBe(home);
+    expect(plan.env.CODEX_SQLITE_HOME).toBe(home);
+    expect(plan.env.OPENAI_API_KEY).toBeUndefined();
+    expect(plan.cwd).toBe(home);
+    expect(plan.binaryPath).toContain("CafeManaged");
+  });
+
+  it("pins Debug Claude login to its private config directory without terminal account fallback", async () => {
+    const profile = {
+      dataProfile: "debug" as const,
+      baseDir: tempDir("debug-claude-login-profile"),
+    };
+    const settings = settingsWithInstance(CLAUDE_INSTANCE_ID, {
+      driver: CLAUDE_DRIVER,
+      enabled: true,
+      config: { runtimeSource: "bundled", binaryPath: "claude" },
+    });
+    const plan = await runResolve(
+      settings,
+      CLAUDE_INSTANCE_ID,
+      {
+        [CAFE_CODE_MANAGED_RUNTIME_ROOT_ENV]: "D:\\CafeManaged",
+        CLAUDE_CONFIG_DIR: "production-config",
+        CLAUDE_SECURESTORAGE_CONFIG_DIR: "production-keychain",
+        ANTHROPIC_AUTH_TOKEN: "inherited-private-token",
+      },
+      profile,
+    );
+    const home = debugProviderHome(profile, "claudeAgent", CLAUDE_INSTANCE_ID);
+    expect(plan.env.HOME).toBe(home);
+    expect(plan.env.CLAUDE_CONFIG_DIR).toBe(NodePath.join(home, ".claude"));
+    expect(plan.env.CLAUDE_SECURESTORAGE_CONFIG_DIR).toBeUndefined();
+    expect(plan.env.ANTHROPIC_AUTH_TOKEN).toBeUndefined();
+    expect(plan.env.DISABLE_AUTOUPDATER).toBe("1");
+    expect(plan.cwd).toBe(home);
+  });
   it("resolves bundled Codex login to the managed shim and shared auth home", async () => {
     const sharedHome = tempDir("codex-shared");
     const shadowHome = tempDir("codex-shadow");

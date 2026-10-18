@@ -18,8 +18,10 @@ changes newer than those releases.
   package also needs the libraries and utilities for its selected target.
   Windows native dependency builds need the supported Visual Studio C++ tools
   and Python required by node-gyp.
-- Install and authenticate the providers you want to use. A source build does
-  not install the Windows release's managed provider bundle.
+- Install the provider executables you want to use. A source build does not
+  install the Windows release's managed provider bundle. Debug provider setup
+  is separate from release accounts; an installed executable is not an account
+  or permission to reuse its default authentication store.
 
 ## Build and run
 
@@ -37,6 +39,15 @@ built desktop. Neither start command builds the app. Run `build:desktop` again
 after changing source; launching an existing desktop package directly also
 requires built output.
 
+Source launchers require successful Debug-profile build receipts for both the
+desktop and server bundles. These bind their exact emitted JavaScript bytes,
+including shared chunks; missing, legacy or inconsistent output refuses with a
+`yarn build:desktop` rebuild instruction before launching an app or provider.
+Watch builds publish each receipt only after their successful output settles.
+Diagnostic flags and ambient profile variables cannot make an old bundle safe;
+there is no automatic rebuild or Production fallback. Packaged release behavior
+is unchanged.
+
 On Linux without `DISPLAY` or `WAYLAND_DISPLAY`, the source launcher starts the
 built backend in headless server mode. Use its browser Web UI rather than
 expecting an Electron window.
@@ -52,12 +63,55 @@ backend is HTTP `13773`, HTTPS `13775`, with Vite at `5733`. A busy port or
 `CAFE_CODE_DEV_INSTANCE` / `CAFE_CODE_PORT_OFFSET` can select another instance;
 always use the printed URLs.
 
-Built launches normally use `~/.cafe-code/userdata`; launches with a development
-URL use `~/.cafe-code/dev` under the same Cafe home. A configured
-`CAFE_CODE_HOME` changes that base. Use the exact same home and development-mode
-selection when issuing an [external MCP credential](cafe-mcp.md#external-mcp-clients).
+All source desktop launches use a persistent **Debug data profile**, including
+normal built `start:desktop`, explicit diagnostic starts and development
+watchers. Their database is `~/.cafe-code/.debug/userdata/state.sqlite` on
+macOS/Linux, or `%USERPROFILE%\.cafe-code\.debug\userdata\state.sqlite` on
+Windows. Built and watched source runs share that Debug profile; the Vite URL
+does not select another database. A leading-dot directory is supported on
+Windows but is not automatically hidden there.
 
-## Debug mode
+Installed packaged releases retain the standard Production database at
+`~/.cafe-code/userdata/state.sqlite` (the equivalent home-root path on Windows).
+Starting a release with diagnostic logging does not change its profile. Source
+windows and their native app identity are labeled **Cafe Code (Debug)**. The
+copied macOS source app/helpers use `com.cafeai.cafecode.debug` and a separate
+Debug runtime cache; installed release identities and Electron dependencies
+are not modified. A new native identity can require separate OS consent; no
+release consent, browser profile or credentials are copied.
+
+`CAFE_CODE_HOME` remains the configured parent root. Debug appends `.debug`
+exactly once before deriving its settings, secrets, caches, attachments,
+workspaces and runtime state. Debug starts fresh and then persists normally;
+neither Production nor the older `dev/` directory is imported or moved. There
+is no automatic fallback to Production if Debug startup fails. Use the same
+configured root and an explicit Debug profile when issuing an
+[external MCP credential](cafe-mcp.md#external-mcp-clients).
+
+The separate profile is not an OS sandbox. Explicitly selected project folders
+are still shared files. Connecting the Debug desktop to an existing remote
+server uses that server's own data, not a Debug copy. Provider executables can
+also be shared; reusing the same online provider account shares its quota.
+Do not run older source controllers from the same checkout concurrently: their
+pre-profile cleanup logic cannot be changed by a new Debug instance.
+
+### Explicit maintenance targets
+
+Developer maintenance must not guess which profile you meant. The existing
+activity-payload cleanup utility requires `--db` even for its default dry run:
+
+```bash
+nice -n 15 corepack yarn db:compact-activity-payloads --db "/absolute/path/to/selected/state.sqlite"
+```
+
+Choose the exact Production or Debug database deliberately; the command does
+not derive a target from `CAFE_CODE_HOME`, diagnostic flags or a running app.
+Omitting the target refuses before inspecting a database. Its existing
+`--write`, `--vacuum` and minimum-payload options are unchanged; no automatic
+maintenance, database copying or compression service is introduced by profile
+separation. Do not use maintenance to import Production into Debug.
+
+## Diagnostic logging
 
 After building:
 
@@ -71,8 +125,25 @@ The direct equivalent is:
 corepack yarn workspace @cafecode/desktop start --cafe-debug
 ```
 
-The debug endpoint is localhost-only and its URL is printed when debug mode is
-enabled. Ordinary startup does not enable it.
+The debug endpoint is localhost-only and its URL is printed when diagnostics
+are enabled. Ordinary source startup uses Debug data but does not enable that
+endpoint. Storage profile and diagnostic logging are independent.
+
+### Startup diagnostics
+
+The desktop manager's `backend exited unexpectedly` line reports the child exit,
+not its cause. Debug mode retains the backend output in `logs/server-child.log`
+under the selected state directory. Inspect the matching startup attempt's error
+before changing data or configuration.
+
+`Web Push disabled; Cafe startup continues` means private push state could not be
+safely initialized. Its fixed `phase` and `detail` explain whether secure reading,
+decoding, or initial owner reconciliation failed. A directory security refusal
+requires owner-controlled, unlinked ancestry without group/other write access;
+Cafe does not weaken that requirement or change home-directory permissions.
+Chat and backend startup remain available, but push operations fail explicitly.
+No replacement keys, subscription reset, background retry or delivery is admitted.
+Preserve the existing state for recovery; do not delete it to hide the warning.
 
 ## Verification
 

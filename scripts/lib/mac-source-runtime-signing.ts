@@ -2,7 +2,16 @@ import { spawnSync } from "node:child_process";
 import { existsSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 
-export const MAC_SOURCE_BUNDLE_IDENTIFIER = "com.cafeai.cafecode";
+// Only copied source runtimes consume this identity. Production's signed
+// bundle and installed Electron are deliberately outside this module's scope.
+export const MAC_SOURCE_APP_NAME = "Cafe Code (Debug)";
+export const MAC_SOURCE_BUNDLE_IDENTIFIER = "com.cafeai.cafecode.debug";
+export const MAC_SOURCE_RUNTIME_CACHE_KEY = "debug";
+
+/** Never reuse or delete a pre-profile cache while staging the new identity. */
+export function resolveMacSourceRuntimeDirectory(desktopDirectory: string): string {
+  return join(desktopDirectory, ".electron-runtime", MAC_SOURCE_RUNTIME_CACHE_KEY);
+}
 
 const HELPERS = [
   ["Electron Helper.app", `${MAC_SOURCE_BUNDLE_IDENTIFIER}.helper`],

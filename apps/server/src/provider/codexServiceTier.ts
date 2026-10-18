@@ -1,5 +1,5 @@
 import type { ModelSelection, ProviderInstanceId, ServerProviderModel } from "@cafecode/contracts";
-import { getModelSelectionOptionValue } from "@cafecode/shared/model";
+import { getModelSelectionOptionValue, supportsLegacyCodexFastTier } from "@cafecode/shared/model";
 
 /** Private, runtime-bound native routing evidence; never a billing receipt. */
 export interface CodexServiceTierSnapshot {
@@ -59,7 +59,8 @@ export function acknowledgeCodexServiceTier(input: {
 
 /** Resolve only this account's selection. Native ids are opaque catalogue
  * values, never aliases or inferred prices. Legacy Fast retains its exact old
- * mapping; explicit modern choices require model-specific catalogue evidence. */
+ * mapping; canonical Fast accepts its equivalent legacy capability, while new
+ * exact tiers still require model-specific modern catalogue evidence. */
 export function resolveCodexServiceTier(
   selection: ModelSelection | undefined,
   instanceId: ProviderInstanceId,
@@ -76,10 +77,19 @@ export function resolveCodexServiceTier(
     };
   }
   if (tier === "default") return { serviceTier: tier };
-  const descriptor = models
-    ?.find((model) => model.slug === selection.model)
-    ?.capabilities?.optionDescriptors?.find((option) => option.id === "serviceTier");
+  const model = models?.find((candidate) => candidate.slug === selection.model);
+  const descriptor = model?.capabilities?.optionDescriptors?.find(
+    (option) => option.id === "serviceTier",
+  );
   if (descriptor?.type === "select" && descriptor.options.some((option) => option.id === tier)) {
+    return { serviceTier: tier };
+  }
+  // A backend-native picker can emit `priority` while this daemon still has
+  // its independently owned legacy status catalogue. Rejecting that encoding
+  // while admitting Fast=true loses the first send for identical native routing.
+  // Use only the exact selected model's existing capability, never caller-sent
+  // catalogue data. Modern revocation and unadvertised/new tiers remain refused.
+  if (tier === "priority" && supportsLegacyCodexFastTier(model?.capabilities)) {
     return { serviceTier: tier };
   }
   // Cached legacy fallback catalogues predate the advertised-tier descriptor.

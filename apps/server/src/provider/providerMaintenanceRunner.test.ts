@@ -1,4 +1,5 @@
 import { afterEach, describe, it, assert } from "@effect/vitest";
+import * as NodeServices from "@effect/platform-node/NodeServices";
 import {
   ProviderDriverKind,
   ProviderInstanceId,
@@ -20,6 +21,7 @@ import { ChildProcessSpawner } from "effect/unstable/process";
 
 import { ProviderRegistry, type ProviderRegistryShape } from "./Services/ProviderRegistry.ts";
 import * as ProviderMaintenanceRunner from "./providerMaintenanceRunner.ts";
+import { ServerConfig } from "../config.ts";
 import {
   clearLatestProviderVersionCacheForTests,
   makeProviderMaintenanceCapabilities,
@@ -223,6 +225,51 @@ const makeTestRunner = (registry: ProviderRegistryShape) =>
   ProviderMaintenanceRunner.make().pipe(Effect.provideService(ProviderRegistry, registry));
 
 describe("providerMaintenanceRunner", () => {
+  it.effect(
+    "refuses Debug updates before capability lookup, refresh, network or process work",
+    () => {
+      let lookups = 0;
+      let spawns = 0;
+      let requests = 0;
+      return Effect.gen(function* () {
+        const config = yield* ServerConfig;
+        const { registry, updateStatesRef } = yield* makeRegistry();
+        const updater = yield* makeTestRunner({
+          ...registry,
+          getProviderMaintenanceCapabilitiesForInstance: () =>
+            Effect.sync(() => {
+              lookups += 1;
+              return lifecycleFor(CODEX_DRIVER);
+            }),
+        }).pipe(Effect.provideService(ServerConfig, { ...config, dataProfile: "debug" }));
+        const result = yield* updater.updateProvider(CODEX_DRIVER).pipe(Effect.result);
+        assert.strictEqual(result._tag, "Failure");
+        if (result._tag === "Failure") assert.include(result.failure.reason, "disabled in Debug");
+        assert.strictEqual(lookups, 0);
+        assert.strictEqual(spawns, 0);
+        assert.strictEqual(requests, 0);
+        assert.deepStrictEqual(yield* Ref.get(updateStatesRef), []);
+      }).pipe(
+        Effect.scoped,
+        Effect.provide(
+          Layer.mergeAll(
+            ServerConfig.layerTest(process.cwd(), { prefix: "cafe-debug-maintenance-test-" }),
+            mockSpawnerLayer(() => {
+              spawns += 1;
+              return {};
+            }),
+            Layer.succeed(
+              HttpClient.HttpClient,
+              HttpClient.make(() => {
+                requests += 1;
+                return Effect.die("Unexpected Debug update request");
+              }),
+            ),
+          ).pipe(Layer.provide(NodeServices.layer)),
+        ),
+      );
+    },
+  );
   it.effect("runs the allowlisted provider update command and records success", () => {
     const calls: Array<{ command: string; args: ReadonlyArray<string> }> = [];
     return Effect.gen(function* () {

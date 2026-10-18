@@ -5,6 +5,7 @@ Created: 2026-10-05 06:18:59 JST (UTC+0900)
 Last updated: 2026-10-05 16:58:09 JST (UTC+0900)
 Implementation status: Implemented and released; integrated local and exact-head platform CI gates verified on 36c64874.
 Supersedes: None; extends the existing Fast selection without changing its meaning.
+Superseded in part: [Canonical legacy Fast parity](codex-legacy-fast-tier-parity.md) permits the equivalent exact `priority` choice against that model's existing legacy Boolean capability; modern revocations remain authoritative.
 
 ## Decision and authority
 

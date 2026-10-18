@@ -1096,6 +1096,9 @@ export function ProviderInstanceCard({
 }: ProviderInstanceCardProps) {
   const uiLocale = useUiLocale();
   const uiPresentation = useUiPresentation(UI_PRESENTATION_SOURCES);
+  const serverConfiguration = useServerConfig();
+  const isDebugDataProfile = serverConfiguration?.dataProfile === "debug";
+  const providerDataProfile = serverConfiguration?.providerDataProfiles?.[instanceId];
 
   const sessionQuota = useProviderQuota(quotaContext, true, instance.driver === "claudeAgent");
   const enabled = instance.enabled ?? true;
@@ -1677,6 +1680,86 @@ export function ProviderInstanceCard({
           </DialogHeader>
           <DialogPanel className="px-0 pb-4">
             <div>
+              {isDebugDataProfile ? (
+                <div className={DIALOG_SECTION_CLASS_NAME}>
+                  {instance.debugStateSharing !== true && providerDataProfile?.nativeHome ? (
+                    <div className="mb-3 space-y-1 text-xs">
+                      <p className="font-medium">
+                        {uiText("Private Debug native home", undefined, undefined, uiLocale)}
+                      </p>
+                      <code className="block break-all text-muted-foreground">
+                        {providerDataProfile.nativeHome}
+                      </code>
+                      <p className="text-muted-foreground">
+                        {driverKind === "codex"
+                          ? uiText(
+                              "For manual sign-in, set CODEX_HOME to this folder when running codex login. Cafe creates the private home only after you enable the provider.",
+                              undefined,
+                              undefined,
+                              uiLocale,
+                            )
+                          : driverKind === "claudeAgent"
+                            ? uiText(
+                                "For manual sign-in, set HOME to this folder and CLAUDE_CONFIG_DIR to its .claude subfolder. Cafe does not reuse your default terminal login. Enable the provider first to create its private home.",
+                                undefined,
+                                undefined,
+                                uiLocale,
+                              )
+                            : uiText(
+                                "For manual sign-in, set GROK_HOME to this folder when running grok login. Enable the provider first to create its private home.",
+                                undefined,
+                                undefined,
+                                uiLocale,
+                              )}
+                      </p>
+                    </div>
+                  ) : null}
+                  <div className="flex items-start justify-between gap-4">
+                    <div className="space-y-1">
+                      <label
+                        htmlFor={`provider-instance-${instanceId}-debug-sharing`}
+                        className="text-xs font-medium text-foreground"
+                      >
+                        {uiText(
+                          "Allow shared native provider state",
+                          undefined,
+                          undefined,
+                          uiLocale,
+                        )}
+                      </label>
+                      <p className="text-xs text-muted-foreground">
+                        {uiText(
+                          "Debug-only opt-in: this provider may use external or Production sign-in, configuration and history. The same online account still shares quota. Changing this setting reloads the provider and can end its active sessions.",
+                          undefined,
+                          undefined,
+                          uiLocale,
+                        )}
+                      </p>
+                    </div>
+                    <Switch
+                      id={`provider-instance-${instanceId}-debug-sharing`}
+                      aria-label={uiText(
+                        "Allow shared native provider state",
+                        undefined,
+                        undefined,
+                        uiLocale,
+                      )}
+                      checked={instance.debugStateSharing === true}
+                      onCheckedChange={(checked) =>
+                        onUpdate({ ...instance, debugStateSharing: Boolean(checked) })
+                      }
+                    />
+                  </div>
+                  <p className="mt-2 text-xs text-muted-foreground">
+                    {uiText(
+                      "Leave this off for private Debug Codex, Claude and Grok homes. Other drivers require explicit sharing. Provider executable updates are disabled in Debug because installations may be shared.",
+                      undefined,
+                      undefined,
+                      uiLocale,
+                    )}
+                  </p>
+                </div>
+              ) : null}
               <div className={DIALOG_SECTION_CLASS_NAME}>
                 <div className="grid gap-4">
                   <div className="grid gap-1.5">

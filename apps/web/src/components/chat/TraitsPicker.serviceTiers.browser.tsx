@@ -30,12 +30,15 @@ const models: ServerProviderModel[] = [
     },
   },
 ];
-async function mount(options?: readonly ProviderOptionSelection[]) {
+async function mount(
+  options?: readonly ProviderOptionSelection[],
+  catalogue: readonly ServerProviderModel[] = models,
+) {
   const onModelOptionsChange = vi.fn();
   const screen = await render(
     <TraitsPicker
       provider={ProviderDriverKind.make("codex")}
-      models={models}
+      models={catalogue}
       model="sol"
       prompt=""
       onPromptChange={vi.fn()}
@@ -82,6 +85,29 @@ describe("advertised Codex service tier selector", () => {
     await page.getByRole("menuitemradio", { name: "Fast", exact: true }).click();
     expect(onModelOptionsChange).toHaveBeenLastCalledWith([
       { id: "serviceTier", value: "priority" },
+    ]);
+  });
+  it("keeps exact Fast usable with its owning legacy catalogue without rewriting the selection", async () => {
+    const { screen, onModelOptionsChange } = await mount(
+      [{ id: "serviceTier", value: "priority" }],
+      [
+        {
+          ...models[0]!,
+          capabilities: {
+            optionDescriptors: [{ id: "fastMode", label: "Fast Mode", type: "boolean" }],
+          },
+        },
+      ],
+    );
+    await expect.element(screen.getByRole("button")).toHaveTextContent("Fast");
+    expect(onModelOptionsChange).not.toHaveBeenCalled();
+    await screen.getByRole("button").click();
+    await expect
+      .element(page.getByRole("menuitemradio", { name: "Fast", exact: true }))
+      .toHaveAttribute("aria-checked", "true");
+    await page.getByRole("menuitemradio", { name: "Standard", exact: true }).click();
+    expect(onModelOptionsChange).toHaveBeenLastCalledWith([
+      { id: "serviceTier", value: "default" },
     ]);
   });
 });

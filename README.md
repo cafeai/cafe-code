@@ -164,6 +164,7 @@ scope and contribution expectations.
 | Connections          | [Remote servers, LAN, HTTPS, and firewall ports](docs/remote-environments.md) · [Connection recovery](docs/decisions/persistent-websocket-recovery.md)                                                                                     |
 | Desktop              | [Releases and updates](docs/desktop-releases-and-updates.md) · [Local Linux packaging and AUR maintenance](docs/linux-packaging.md) · [Source development](docs/source-development.md)                                                     |
 | Preferences          | [Usage statistics](docs/usage-statistics.md) · [Global dictation](docs/global-dictation.md) · [Interface languages](docs/internationalization.md)                                                                                          |
+| Data profiles        | [Separate Debug and Production data](docs/data-profiles.md) · [Startup profile decision](docs/decisions/debug-data-profiles.md)                                                                                                            |
 
 ## Why Cafe Code?
 

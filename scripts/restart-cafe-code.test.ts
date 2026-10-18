@@ -1,5 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { join } from "node:path";
+import { closeSync, linkSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 
 import {
   DEFAULT_RESTART_DELAY_MS,
@@ -7,6 +9,8 @@ import {
   buildHelperProcessArgs,
   defaultLaunchCommand,
   parseRestartCafeCodeArgs,
+  profileRestartCommand,
+  openRestartLog,
   resolveRestartLogDir,
 } from "./restart-cafe-code.ts";
 
@@ -82,7 +86,7 @@ describe("restart-cafe-code", () => {
     ]);
   });
 
-  it("uses Cafe Code home for restart logs by default", () => {
+  it("keeps restart logs inside Debug rather than Production", () => {
     expect(
       resolveRestartLogDir({
         explicitLogDir: undefined,
@@ -90,6 +94,52 @@ describe("restart-cafe-code", () => {
         homeDir: "/home/me",
         cwd: "/repo",
       }),
-    ).toBe(join("/tmp/cafe-home", "restart-logs"));
+    ).toBe(join("/tmp/cafe-home", ".debug", "restart-logs"));
+  });
+
+  it.each(["darwin", "linux", "win32"] as const)(
+    "requests the native Debug owner without a global termination command on %s",
+    (platform) => {
+      expect(
+        profileRestartCommand({ launchCommand: undefined, nodePath: "native-node", platform }),
+      ).toEqual([...defaultLaunchCommand("native-node", platform), "--cafe-restart-existing"]);
+    },
+  );
+
+  it("refuses arbitrary replacement commands instead of using broad process discovery", () => {
+    expect(() => profileRestartCommand({ launchCommand: ["yarn", "dev:desktop"] })).toThrow(
+      "Custom launch commands",
+    );
+    expect(() => profileRestartCommand({ launchCommand: [] })).toThrow("profile-scoped restart");
+  });
+
+  it("honors an explicit log destination without reinterpreting it as a Cafe root", () => {
+    expect(
+      resolveRestartLogDir({
+        explicitLogDir: "logs",
+        env: { CAFE_CODE_HOME: "/other" },
+        homeDir: "/home/me",
+        cwd: "/repo",
+      }),
+    ).toBe(join("/repo", "logs"));
+  });
+
+  it("creates a new private log and never appends through a pre-existing file or hardlink", () => {
+    const directory = mkdtempSync(join(tmpdir(), "cafe-restart-log-"));
+    try {
+      const existing = join(directory, "retained.log");
+      const alias = join(directory, "alias.log");
+      writeFileSync(existing, "retained synthetic log");
+      linkSync(existing, alias);
+      expect(() => openRestartLog(existing)).toThrow("private Debug restart log");
+      expect(() => openRestartLog(alias)).toThrow("private Debug restart log");
+      expect(readFileSync(existing, "utf8")).toBe("retained synthetic log");
+      const created = join(directory, "new.log");
+      const fd = openRestartLog(created);
+      closeSync(fd);
+      expect(readFileSync(created, "utf8")).toBe("");
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
   });
 });

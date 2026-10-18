@@ -14,8 +14,9 @@ import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
 import * as Context from "effect/Context";
 import type { ProviderDaemonClientConfig } from "@cafecode/contracts";
+import { preferredDataProfileHttpPort, type DataProfile } from "@cafecode/shared/dataProfile";
 
-export const DEFAULT_PORT = 3773;
+export const DEFAULT_PORT = preferredDataProfileHttpPort("production");
 
 export const RuntimeMode = Schema.Literals(["web", "desktop"]);
 export type RuntimeMode = typeof RuntimeMode.Type;
@@ -70,11 +71,16 @@ export interface ServerConfigShape extends ServerDerivedPaths {
   readonly host: string | undefined;
   readonly cwd: string;
   readonly baseDir: string;
+  /** baseDir is already the effective root; only this parent is bootstrapped. */
+  readonly configuredBaseDir?: string;
+  readonly dataProfile?: DataProfile;
   readonly staticDir: string | undefined;
   readonly devUrl: URL | undefined;
   readonly noBrowser: boolean;
   readonly startupPresentation: StartupPresentation;
   readonly desktopBootstrapToken: string | undefined;
+  /** Exact-child readiness key, admitted only through private desktop bootstrap. */
+  readonly desktopReadinessToken?: string;
   readonly startupProgressFd?: 4;
   readonly autoBootstrapProjectFromCwd: boolean;
   readonly logWebSocketEvents: boolean;
@@ -88,9 +94,15 @@ export interface ServerConfigShape extends ServerDerivedPaths {
 export const deriveServerPaths = Effect.fn(function* (
   baseDir: ServerConfigShape["baseDir"],
   devUrl: ServerConfigShape["devUrl"],
+  dataProfile?: DataProfile,
 ): Effect.fn.Return<ServerDerivedPaths, never, Path.Path> {
   const { join } = yield* Path.Path;
-  const stateDir = join(baseDir, devUrl !== undefined ? "dev" : "userdata");
+  // Explicit desktop profiles have one persistent leaf across built/watch
+  // launches. Legacy standalone server deployments retain their dev URL rule.
+  const stateDir = join(
+    baseDir,
+    dataProfile === undefined && devUrl !== undefined ? "dev" : "userdata",
+  );
   const dbPath = join(stateDir, "state.sqlite");
   const attachmentsDir = join(stateDir, "attachments");
   const logsDir = join(stateDir, "logs");

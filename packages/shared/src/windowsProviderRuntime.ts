@@ -1,5 +1,6 @@
 // @effect-diagnostics nodeBuiltinImport:off
-import { randomBytes, randomUUID } from "node:crypto";
+import { createHash, randomBytes, randomUUID } from "node:crypto";
+import { win32 as windowsPath } from "node:path";
 import { spawn } from "node:child_process";
 import type { SpawnOptions } from "node:child_process";
 import * as Schema from "effect/Schema";
@@ -14,6 +15,8 @@ import {
   type ProviderRuntimeProcessMode,
 } from "@cafecode/contracts";
 import { requestProviderDaemonJson } from "./providerDaemonHttp.ts";
+import { dataProfileIdentity } from "./dataProfileIdentity.ts";
+import { resolveDataProfileRoot, type DataProfile } from "./dataProfile.ts";
 import {
   BACKEND_STARTUP_PROGRESS_FD,
   makeProviderDaemonStartupProgressTracker,
@@ -44,7 +47,8 @@ export type WindowsProviderRuntimeFailure =
   | "prepared-attempt-uncertain"
   | "child-admission-uncertain"
   | "upstream-ownership-unknown"
-  | "termination-uncertain";
+  | "termination-uncertain"
+  | "profile-mismatch";
 
 export class WindowsProviderRuntimeError extends Error {
   readonly reason: WindowsProviderRuntimeFailure;
@@ -97,6 +101,9 @@ export interface WindowsProviderRuntimeOptions {
   readonly appVersion: string;
   readonly protocolVersion: number;
   readonly runtimeBuildId?: string;
+  /** Paired actual-opening profile proof; omission is genuinely legacy only. */
+  readonly dataProfile?: DataProfile | undefined;
+  readonly dataProfileId?: string | undefined;
   readonly cafeMcpPort?: () => number | undefined;
   readonly bootstrap: Omit<
     ProviderDaemonBootstrap,
@@ -238,6 +245,25 @@ const decodeMarker = Schema.decodeUnknownSync(ProviderDaemonMarker);
 const decodeHealth = Schema.decodeUnknownSync(ProviderDaemonHealth);
 const decodeLease = Schema.decodeUnknownSync(ProviderDaemonLeaseResponse);
 
+/**
+ * Match the native helper's lexical drive-path admission before invoking it.
+ * Normalization must not erase a device namespace, alternate stream, traversal
+ * component or trailing alias before the exact profile namespace comparison.
+ * The helper still performs its own canonical handle/reparse checks afterward.
+ */
+const hasWindowsOwnershipPathSpelling = (value: string): boolean =>
+  value.length >= 3 &&
+  value.length <= 1_024 &&
+  /^[a-z]:\\/i.test(value) &&
+  !/[/:\0]/.test(value.slice(2)) &&
+  // A configured parent may be a drive root, but record paths never are: their
+  // exact role-specific leaf is independently checked below.
+  (value.length === 3 ||
+    value
+      .slice(3)
+      .split("\\")
+      .every((part) => part.length > 0 && !part.endsWith(".") && !part.endsWith(" ")));
+
 async function readHealth(endpoint: ProviderDaemonClientConfig): Promise<ProviderDaemonHealth> {
   const response = await requestProviderDaemonJson(endpoint, PROVIDER_DAEMON_HEALTH_PATH, {
     timeoutMs: 3_000,
@@ -310,8 +336,76 @@ class AwaitFreshChildOutsideGuard extends Error {
  * the conditional file mutations. This process never writes ownership files.
  */
 export function createWindowsProviderRuntime(
-  options: WindowsProviderRuntimeOptions,
+  inputOptions: WindowsProviderRuntimeOptions,
 ): WindowsProviderRuntime {
+  // Copy immutable opening intent before any native guard or asynchronous work.
+  // A later mutation of a caller's namespace, callbacks or bootstrap cannot
+  // reprofile this controller after its one-time opening admission.
+  const options = { ...inputOptions, bootstrap: { ...inputOptions.bootstrap } };
+  const bootstrap = options.bootstrap;
+  const expectedProfile = options.dataProfile;
+  const expectedProfileId = options.dataProfileId;
+  const profiled =
+    expectedProfile !== undefined ||
+    expectedProfileId !== undefined ||
+    bootstrap.dataProfile !== undefined ||
+    bootstrap.configuredCafeCodeHome !== undefined;
+  if (
+    profiled &&
+    ((expectedProfile !== "production" && expectedProfile !== "debug") ||
+      bootstrap.dataProfile !== expectedProfile ||
+      typeof bootstrap.configuredCafeCodeHome !== "string" ||
+      bootstrap.configuredCafeCodeHome.length === 0 ||
+      typeof bootstrap.cafeCodeHome !== "string" ||
+      bootstrap.cafeCodeHome.length === 0 ||
+      expectedProfileId !== dataProfileIdentity(expectedProfile, bootstrap.cafeCodeHome))
+  )
+    return fail("profile-mismatch");
+  if (profiled) {
+    if (expectedProfile === undefined || bootstrap.configuredCafeCodeHome === undefined)
+      return fail("profile-mismatch");
+    const root = bootstrap.cafeCodeHome;
+    const state = windowsPath.join(root, "userdata");
+    const selectedRoot = resolveDataProfileRoot(
+      bootstrap.configuredCafeCodeHome,
+      expectedProfile,
+      windowsPath,
+    );
+    const markerPath = windowsPath.join(state, `${options.role}.json`);
+    const credentialPath =
+      options.role === "provider-daemon"
+        ? windowsPath.join(state, "provider-daemon-token.bin")
+        : windowsPath.join(state, "secrets", "provider-supervisor-token");
+    const pipe = `\\\\.\\pipe\\cafecode-${options.role}-${createHash("sha256").update(root).digest("hex").slice(0, 24)}`;
+    if (
+      ![
+        root,
+        bootstrap.configuredCafeCodeHome,
+        options.markerPath,
+        options.legacyCredentialPath,
+      ].every(hasWindowsOwnershipPathSpelling) ||
+      windowsPath.resolve(root) !== windowsPath.resolve(selectedRoot) ||
+      windowsPath.resolve(options.markerPath) !== windowsPath.resolve(markerPath) ||
+      windowsPath.resolve(options.legacyCredentialPath) !== windowsPath.resolve(credentialPath) ||
+      options.socketPath !== pipe
+    )
+      return fail("profile-mismatch");
+  }
+  const profileReceiptMatches = (receipt: {
+    readonly dataProfile?: DataProfile | undefined;
+    readonly dataProfileId?: string | undefined;
+  }) =>
+    profiled
+      ? receipt.dataProfile === expectedProfile && receipt.dataProfileId === expectedProfileId
+      : // A legacy caller can continue legacy owners, not silently adopt a newly
+        // labeled profile whose expected namespace it never supplied.
+        receipt.dataProfile === undefined && receipt.dataProfileId === undefined;
+  const assertProfileReceipt = (receipt: {
+    readonly dataProfile?: DataProfile | undefined;
+    readonly dataProfileId?: string | undefined;
+  }) => {
+    if (!profileReceiptMatches(receipt)) return fail("profile-mismatch");
+  };
   const open = options.openSession ?? openWindowsOwnershipSession;
   const healthRequest = options.fetchHealth ?? readHealth;
   const leaseRequest = options.issueLease ?? defaultLease(options.role);
@@ -427,6 +521,34 @@ export function createWindowsProviderRuntime(
     } catch {
       return fail("invalid-record");
     }
+    // Native guard/read pins its namespace; this additional opening-profile
+    // admission must precede decryption, endpoint contact and native mutation.
+    // Missing or foreign metadata cannot be repaired from caller defaults.
+    assertProfileReceipt(marker);
+    if (profiled) {
+      // A matching label/hash does not authorize an arbitrary token file or
+      // listener. Admit only this role's configured private pipe and credential
+      // namespace; native generation/file-identity checks remain independent.
+      let generationCredential: string | undefined;
+      try {
+        if (marker.windowsOwnershipId !== undefined)
+          generationCredential = windowsOwnershipCredentialPath(
+            options.legacyCredentialPath,
+            marker.windowsOwnershipId,
+          );
+      } catch {
+        return fail("profile-mismatch");
+      }
+      if (
+        marker.transport !== "ipc" ||
+        marker.socketPath !== options.socketPath ||
+        marker.credentialPath === undefined ||
+        !hasWindowsOwnershipPathSpelling(marker.credentialPath) ||
+        (marker.credentialPath !== options.legacyCredentialPath &&
+          marker.credentialPath !== generationCredential)
+      )
+        return fail("profile-mismatch");
+    }
     const transport = marker.transport ?? "tcp";
     let validEndpoint = false;
     if (transport === "ipc") {
@@ -468,6 +590,7 @@ export function createWindowsProviderRuntime(
     }
   };
   const rootEndpoint = async (record: RecordSnapshot): Promise<ProviderDaemonClientConfig> => {
+    assertProfileReceipt(record.marker);
     let token: string;
     try {
       if (record.credentialBase64 === undefined) {
@@ -495,8 +618,12 @@ export function createWindowsProviderRuntime(
   const observeHealth = async (endpoint: ProviderDaemonClientConfig) => {
     for (let attempt = 0; attempt < 2; attempt += 1) {
       try {
-        return decodeHealth(await healthRequest(endpoint));
-      } catch {
+        const health = decodeHealth(await healthRequest(endpoint));
+        assertProfileReceipt(health);
+        return health;
+      } catch (error) {
+        if (error instanceof WindowsProviderRuntimeError && error.reason === "profile-mismatch")
+          throw error;
         if (attempt === 0) await sleep(150);
       }
     }
@@ -506,6 +633,8 @@ export function createWindowsProviderRuntime(
     const marker = record.marker;
     return (
       health.mode === options.role &&
+      profileReceiptMatches(marker) &&
+      profileReceiptMatches(health) &&
       health.pid === marker.pid &&
       (marker.windowsOwnershipId === undefined ||
         (health.windowsOwnershipId === marker.windowsOwnershipId &&
@@ -516,6 +645,8 @@ export function createWindowsProviderRuntime(
     );
   };
   const compatible = (marker: ProviderDaemonMarker, health: ProviderDaemonHealth) =>
+    profileReceiptMatches(marker) &&
+    profileReceiptMatches(health) &&
     marker.appVersion === options.appVersion &&
     health.version === options.appVersion &&
     marker.protocolVersion === options.protocolVersion &&
@@ -529,6 +660,7 @@ export function createWindowsProviderRuntime(
     marker: ProviderDaemonMarker,
     credentialBase64?: string,
   ): Promise<RecordSnapshot> => {
+    assertProfileReceipt(marker);
     try {
       const revision = await session.publish({
         expectedRevision: record?.revision ?? null,
@@ -551,6 +683,7 @@ export function createWindowsProviderRuntime(
     }
   };
   const retire = async (session: WindowsOwnershipSession, record: RecordSnapshot) => {
+    assertProfileReceipt(record.marker);
     try {
       await session.retire(record.revision);
     } catch (error) {
@@ -562,13 +695,19 @@ export function createWindowsProviderRuntime(
     let endpoint: ProviderDaemonClientConfig;
     try {
       endpoint = await rootEndpoint(record);
-    } catch {
+    } catch (error) {
+      // A completed foreign-profile authentication is contradictory evidence,
+      // not an unreachable stale endpoint that permits ownership retirement.
+      if (error instanceof WindowsProviderRuntimeError && error.reason === "profile-mismatch")
+        throw error;
       return;
     }
     let health: ProviderDaemonHealth;
     try {
       health = await observeHealth(endpoint);
-    } catch {
+    } catch (error) {
+      if (error instanceof WindowsProviderRuntimeError && error.reason === "profile-mismatch")
+        throw error;
       return;
     }
     // A successfully authenticated responder contradicts a dead/reused owner.
@@ -577,6 +716,7 @@ export function createWindowsProviderRuntime(
     if (health.ok) return fail("endpoint-conflict");
   };
   const terminate = async (session: WindowsOwnershipSession, record: RecordSnapshot) => {
+    assertProfileReceipt(record.marker);
     const identity = record.marker.windowsProcessIdentity;
     if (!identity) return fail("identity-unknown");
     const outcome = await session.terminate(identity);
@@ -633,6 +773,8 @@ export function createWindowsProviderRuntime(
     health: ProviderDaemonHealth,
     adopted: boolean,
   ) => {
+    assertProfileReceipt(record.marker);
+    assertProfileReceipt(health);
     let lease: ProviderDaemonLeaseResponse;
     try {
       lease = decodeLease(await leaseRequest(endpoint));
@@ -684,7 +826,10 @@ export function createWindowsProviderRuntime(
     let health: ProviderDaemonHealth;
     try {
       health = observedHealth ?? (await observeHealth(endpoint));
-    } catch {
+      assertProfileReceipt(health);
+    } catch (error) {
+      if (error instanceof WindowsProviderRuntimeError && error.reason === "profile-mismatch")
+        throw error;
       return fail(
         prepared
           ? "prepared-attempt-uncertain"
@@ -756,8 +901,11 @@ export function createWindowsProviderRuntime(
       if (attempt.progress.elapsedMs() >= attempt.progress.tracker.deadlineMs) break;
       try {
         const health = decodeHealth(await healthRequest(endpoint));
+        assertProfileReceipt(health);
         if (attempt.progress.elapsedMs() < attempt.progress.tracker.deadlineMs) return health;
-      } catch {
+      } catch (error) {
+        if (error instanceof WindowsProviderRuntimeError && error.reason === "profile-mismatch")
+          throw error;
         // Readiness transport failures grant no process/file authority. Only
         // exact-child validated migration frames can adjust the finite budget.
       }
@@ -813,6 +961,7 @@ export function createWindowsProviderRuntime(
     const marker: ProviderDaemonMarker = {
       version: 2,
       mode: options.role,
+      ...(profiled ? { dataProfile: expectedProfile, dataProfileId: expectedProfileId } : {}),
       pid: 0,
       ppid: process.pid,
       protocolVersion: options.protocolVersion,
@@ -849,7 +998,7 @@ export function createWindowsProviderRuntime(
     try {
       child = await options.spawn(
         {
-          ...options.bootstrap,
+          ...bootstrap,
           mode: options.role,
           transport: "ipc",
           socketPath: options.socketPath,

@@ -51,7 +51,7 @@ import {
   codexAuthWithSubscriptionPlan,
   formatCodexSubscriptionLabel,
 } from "../codexSubscription.ts";
-import packageJson from "../../../package.json" with { type: "json" };
+import { APPLICATION_VERSION } from "../../applicationVersion.ts";
 const isCodexAppServerSpawnError = Schema.is(CodexErrors.CodexAppServerSpawnError);
 
 const CODEX_PRESENTATION = {
@@ -665,7 +665,7 @@ async function fetchCodexAccountRateLimits(input: {
     const headers: Record<string, string> = {
       authorization: `Bearer ${input.credentials.accessToken}`,
       originator: CODEX_ORIGINATOR,
-      "user-agent": `${CODEX_ORIGINATOR}/${packageJson.version}`,
+      "user-agent": `${CODEX_ORIGINATOR}/${APPLICATION_VERSION}`,
     };
     if (input.credentials.accountId) {
       headers["ChatGPT-Account-ID"] = input.credentials.accountId;
@@ -1287,7 +1287,7 @@ export function buildCodexInitializeParams(): CodexSchema.V1InitializeParams {
     clientInfo: {
       name: "cafecode_desktop",
       title: "Cafe Code Desktop",
-      version: packageJson.version,
+      version: APPLICATION_VERSION,
     },
     capabilities: {
       experimentalApi: true,

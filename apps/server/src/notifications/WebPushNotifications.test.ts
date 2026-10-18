@@ -1,11 +1,12 @@
 import { withSessionAdmission } from "../auth/sessionAdmission.ts";
 // @effect-diagnostics nodeBuiltinImport:off
-import { mkdtemp, readFile, writeFile, chmod, stat, realpath, rm } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, writeFile, chmod, stat, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as Effect from "effect/Effect";
 import * as DateTime from "effect/DateTime";
+import * as Logger from "effect/Logger";
 import * as Option from "effect/Option";
 import * as PubSub from "effect/PubSub";
 import * as Stream from "effect/Stream";
@@ -13,7 +14,7 @@ import type * as Scope from "effect/Scope";
 import { describe, expect, it, vi } from "vitest";
 import { AuthSessionId } from "@cafecode/contracts/auth";
 import { ThreadId } from "@cafecode/contracts";
-import { writePrivatePushState } from "./privateState.ts";
+import * as privateState from "./privateState.ts";
 import {
   SessionCredentialService,
   SessionCredentialError,
@@ -31,9 +32,12 @@ import {
 } from "./WebPushNotifications.ts";
 
 const send = vi.hoisted(() => vi.fn(async () => ({ statusCode: 201 })));
+const generateVAPIDKeys = vi.hoisted(() =>
+  vi.fn(() => ({ publicKey: "public", privateKey: "private" })),
+);
 vi.mock("web-push", () => ({
   default: {
-    generateVAPIDKeys: () => ({ publicKey: "public", privateKey: "private" }),
+    generateVAPIDKeys,
     sendNotification: send,
   },
 }));
@@ -53,12 +57,16 @@ async function fixture(
   task: (input: {
     root: string;
     service: WebPushNotificationsShape;
-    restart: () => Effect.Effect<WebPushNotificationsShape, WebPushNotificationsError>;
+    restart: (
+      stateDir?: string,
+    ) => Effect.Effect<WebPushNotificationsShape, WebPushNotificationsError>;
     complete: () => Effect.Effect<void>;
     revoke: () => Effect.Effect<void>;
+    reactorStarts: () => { sessions: number; provider: number };
   }) => Effect.Effect<void, unknown, Scope.Scope>,
 ) {
   send.mockClear();
+  generateVAPIDKeys.mockClear();
   const root = await realpath(await mkdtemp(join(tmpdir(), "cafe-push-owner-")));
   try {
     await Effect.runPromise(
@@ -70,36 +78,50 @@ async function fixture(
             threadId: ThreadId;
           }>();
           const active = new Set([owner.sessionId]);
-          const serviceEffect = makeWebPushNotifications.pipe(
-            Effect.provideService(ServerConfig, { stateDir: root } as never),
-            Effect.provideService(SessionCredentialService, {
-              validateActiveSession: (identity: typeof owner) =>
-                Effect.suspend(() =>
-                  active.has(identity.sessionId)
-                    ? Effect.void
-                    : Effect.fail(new SessionCredentialError({ message: "Revoked" })),
+          const reactorStarts = { sessions: 0, provider: 0 };
+          const serviceEffect = (stateDir = root) =>
+            makeWebPushNotifications.pipe(
+              Effect.provideService(ServerConfig, { stateDir } as never),
+              Effect.provideService(SessionCredentialService, {
+                validateActiveSession: (identity: typeof owner) =>
+                  Effect.suspend(() =>
+                    active.has(identity.sessionId)
+                      ? Effect.void
+                      : Effect.fail(new SessionCredentialError({ message: "Revoked" })),
+                  ),
+                streamChanges: Stream.unwrap(
+                  Effect.sync(() => {
+                    reactorStarts.sessions += 1;
+                    return Stream.fromPubSub(changes);
+                  }),
                 ),
-              streamChanges: Stream.fromPubSub(changes),
-            } as never),
-            Effect.provideService(ProviderService, {
-              streamEvents: Stream.fromPubSub(completions),
-            } as never),
-            Effect.provideService(ScheduledFollowups, {
-              notification: () => Effect.succeed({ notify: true }),
-            } as never),
-            Effect.provideService(ProjectionSnapshotQuery, {
-              getThreadShellById: () => Effect.succeed(Option.some({ title: "Synthetic thread" })),
-            } as never),
-            Effect.provideService(ServerEnvironment, {
-              getDescriptor: Effect.succeed({ environmentId: "fixture" }),
-            } as never),
-            Effect.provide(NodeServices.layer),
-          );
-          const service = yield* serviceEffect;
+              } as never),
+              Effect.provideService(ProviderService, {
+                streamEvents: Stream.unwrap(
+                  Effect.sync(() => {
+                    reactorStarts.provider += 1;
+                    return Stream.fromPubSub(completions);
+                  }),
+                ),
+              } as never),
+              Effect.provideService(ScheduledFollowups, {
+                notification: () => Effect.succeed({ notify: true }),
+              } as never),
+              Effect.provideService(ProjectionSnapshotQuery, {
+                getThreadShellById: () =>
+                  Effect.succeed(Option.some({ title: "Synthetic thread" })),
+              } as never),
+              Effect.provideService(ServerEnvironment, {
+                getDescriptor: Effect.succeed({ environmentId: "fixture" }),
+              } as never),
+              Effect.provide(NodeServices.layer),
+            );
+          const service = yield* serviceEffect();
           yield* task({
             root,
             service,
-            restart: () => serviceEffect,
+            restart: serviceEffect,
+            reactorStarts: () => ({ ...reactorStarts }),
             complete: () =>
               PubSub.publish(completions, {
                 type: "turn.completed" as const,
@@ -121,6 +143,50 @@ async function fixture(
   }
 }
 
+/** Unavailable push storage never authorizes a fresh identity or delivery. These
+ * checks exercise every exposed operation, including repeat calls on the same
+ * disabled instance, rather than accepting a success-valued dummy service. */
+const assertUnavailable = (
+  service: WebPushNotificationsShape,
+  complete: () => Effect.Effect<void>,
+  revoke: () => Effect.Effect<void>,
+  reactorStarts: () => { sessions: number; provider: number },
+) =>
+  Effect.acquireUseRelease(
+    Effect.sync(() => vi.spyOn(privateState, "readPrivatePushState")),
+    (reader) =>
+      Effect.gen(function* () {
+        const operations: ReadonlyArray<Effect.Effect<unknown, WebPushNotificationsError>> = [
+          service.getPublicKey(),
+          service.saveSubscription({ owner, subscription }),
+          service.removeSubscription(subscription.endpoint, owner),
+          service.updateSubscriptionLocale({ ...subscription, uiLocale: "ja" }, owner),
+        ];
+        for (const operation of operations) {
+          expect(yield* Effect.flip(operation)).toMatchObject({
+            _tag: "WebPushNotificationsError",
+            detail: "Web Push is unavailable until its private state can be safely loaded.",
+            message: "Web Push is unavailable until its private state can be safely loaded.",
+          });
+        }
+        yield* service.start();
+        yield* complete();
+        yield* revoke();
+        yield* Effect.yieldNow;
+        expect(reactorStarts()).toEqual({ sessions: 0, provider: 0 });
+        expect(send).not.toHaveBeenCalled();
+        expect(generateVAPIDKeys).not.toHaveBeenCalled();
+        expect(yield* Effect.flip(service.getPublicKey())).toHaveProperty(
+          "detail",
+          "Web Push is unavailable until its private state can be safely loaded.",
+        );
+        // A later request cannot silently re-admit changed storage through the
+        // failed instance; recovery requires a separately initialized service.
+        expect(reader).not.toHaveBeenCalled();
+      }),
+    (reader) => Effect.sync(() => reader.mockRestore()),
+  );
+
 describe("session-owned Web Push", () => {
   it("refuses oversized UTF-8 state before replacing the last restartable identity", async () => {
     await fixture(({ root, service, restart }) =>
@@ -134,7 +200,7 @@ describe("session-owned Web Push", () => {
         });
         expect(oversized.length).toBeLessThan(1024 * 1024);
         yield* Effect.promise(() =>
-          expect(writePrivatePushState(state, oversized, previous)).rejects.toThrow(
+          expect(privateState.writePrivatePushState(state, oversized, previous)).rejects.toThrow(
             "storage limit",
           ),
         );
@@ -179,14 +245,118 @@ describe("session-owned Web Push", () => {
     }
   });
   it("preserves malformed state as recovery evidence instead of resetting identity", async () => {
-    await fixture(({ root, restart }) =>
+    await fixture(({ root, restart, complete, revoke, reactorStarts }) =>
       Effect.gen(function* () {
         const state = join(root, "web-push.json");
         yield* Effect.promise(() => writeFile(state, "malformed private state"));
-        expect(yield* Effect.exit(restart())).toHaveProperty("_tag", "Failure");
+        const unavailable = yield* restart();
+        yield* assertUnavailable(unavailable, complete, revoke, reactorStarts);
         expect(yield* Effect.promise(() => readFile(state, "utf8"))).toBe(
           "malformed private state",
         );
+      }),
+    );
+  });
+
+  it("preserves oversized stored state while keeping push unavailable", async () => {
+    await fixture(({ root, restart, complete, revoke, reactorStarts }) =>
+      Effect.gen(function* () {
+        const state = join(root, "web-push.json");
+        const oversized = JSON.stringify({
+          vapid: { publicKey: "old-public", privateKey: "é".repeat(512 * 1024) },
+          subscriptions: [],
+        });
+        // The byte limit must still reject valid JSON with fewer UTF-16 code
+        // units than bytes; unavailable startup cannot rewrite it as empty.
+        expect(oversized.length).toBeLessThan(1024 * 1024);
+        yield* Effect.promise(() => writeFile(state, oversized));
+        const unavailable = yield* restart();
+        yield* assertUnavailable(unavailable, complete, revoke, reactorStarts);
+        expect(yield* Effect.promise(() => readFile(state, "utf8"))).toBe(oversized);
+      }),
+    );
+  });
+
+  it.skipIf(process.platform === "win32")(
+    "refuses unsafe ancestor permissions without creating push state or repairing the ancestor",
+    async () => {
+      await fixture(({ root, restart, complete, revoke, reactorStarts }) =>
+        Effect.gen(function* () {
+          const stateDir = join(root, "state");
+          const state = join(stateDir, "web-push.json");
+          const previous = yield* Effect.promise(() =>
+            readFile(join(root, "web-push.json"), "utf8"),
+          );
+          yield* Effect.promise(() => mkdir(stateDir, { mode: 0o700 }));
+          // Only this fixture-owned temporary ancestor receives the refused
+          // legacy mode. No workstation home or existing application state is
+          // inspected or changed to manufacture the admission failure.
+          yield* Effect.promise(() => chmod(root, 0o770));
+          const messages: unknown[] = [];
+          const logCapture = Logger.make<unknown, void>(({ message }) => {
+            if (Array.isArray(message)) messages.push(...message);
+            else messages.push(message);
+          });
+          // Capture only this rejected initialization, using the real private
+          // reader. Diagnostics explain the fixed admission rule without
+          // revealing the rejected namespace or any persisted secret material.
+          const unavailable = yield* restart(stateDir).pipe(
+            Effect.provide(Logger.layer([logCapture], { mergeWithExisting: false })),
+          );
+          expect(messages).toEqual([
+            "Web Push disabled; Cafe startup continues",
+            {
+              phase: "read",
+              detail:
+                "Web Push private-state directories must be owner-controlled, unlinked and not group/other-writable.",
+            },
+          ]);
+          const diagnostic = JSON.stringify(messages);
+          for (const privateValue of [
+            root,
+            state,
+            previous,
+            subscription.keys.auth,
+            subscription.keys.p256dh,
+          ]) {
+            expect(diagnostic).not.toContain(privateValue);
+          }
+          yield* assertUnavailable(unavailable, complete, revoke, reactorStarts);
+          expect((yield* Effect.promise(() => stat(root))).mode & 0o777).toBe(0o770);
+          yield* Effect.promise(() =>
+            expect(readFile(state, "utf8")).rejects.toMatchObject({ code: "ENOENT" }),
+          );
+          expect(yield* Effect.promise(() => readFile(join(root, "web-push.json"), "utf8"))).toBe(
+            previous,
+          );
+        }),
+      );
+    },
+  );
+
+  it("preserves the loaded identity when initial owner reconciliation cannot be saved", async () => {
+    await fixture(({ root, restart, complete, revoke, reactorStarts }) =>
+      Effect.gen(function* () {
+        const state = join(root, "web-push.json");
+        const previous = JSON.stringify({
+          vapid: { publicKey: "old-public", privateKey: "old-private" },
+          subscriptions: [{ ...subscription, createdAt: "2026-01-01" }],
+        });
+        yield* Effect.promise(() => writeFile(state, previous));
+        // Fail only the exact next initialization write, after the real bounded
+        // private reader has admitted and decoded this fixture's existing file.
+        const writer = vi
+          .spyOn(privateState, "writePrivatePushState")
+          .mockRejectedValueOnce(new Error("Synthetic private push write failure"));
+        try {
+          const unavailable = yield* restart();
+          expect(writer).toHaveBeenCalledExactlyOnceWith(state, expect.any(String), previous);
+          yield* assertUnavailable(unavailable, complete, revoke, reactorStarts);
+          expect(writer).toHaveBeenCalledOnce();
+          expect(yield* Effect.promise(() => readFile(state, "utf8"))).toBe(previous);
+        } finally {
+          writer.mockRestore();
+        }
       }),
     );
   });
