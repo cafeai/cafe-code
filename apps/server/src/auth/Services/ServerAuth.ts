@@ -32,7 +32,9 @@ export interface AuthenticatedSession {
 
 export class AuthError extends Data.TaggedError("AuthError")<{
   readonly message: string;
-  readonly status?: 400 | 401 | 403 | 500;
+  readonly status?: 400 | 401 | 403 | 429 | 500;
+  readonly retryAfterSeconds?: number;
+  readonly reason?: "two-factor-locked";
   readonly cause?: unknown;
 }> {}
 
@@ -44,6 +46,7 @@ export interface ServerAuthShape {
   readonly exchangeBootstrapCredential: (
     credential: string,
     requestMetadata: AuthClientMetadata,
+    secondFactor?: string,
   ) => Effect.Effect<
     {
       readonly response: AuthBootstrapResult;
@@ -54,6 +57,7 @@ export interface ServerAuthShape {
   readonly exchangeBootstrapCredentialForBearerSession: (
     credential: string,
     requestMetadata: AuthClientMetadata,
+    secondFactor?: string,
   ) => Effect.Effect<AuthBearerBootstrapResult, AuthError>;
   readonly exchangePasswordCredential: (
     input: AuthPasswordBootstrapInput,

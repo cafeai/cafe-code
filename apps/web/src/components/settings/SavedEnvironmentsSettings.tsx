@@ -10,6 +10,7 @@ import {
   UnplugIcon,
 } from "lucide-react";
 import { type FormEvent, useMemo, useState } from "react";
+import { SecondFactorInput } from "../auth/SecondFactorInput";
 
 import {
   type SavedEnvironmentRecord,
@@ -360,6 +361,7 @@ function AddSavedEnvironmentDialog({ actions }: { actions: SavedEnvironmentActio
   const [host, setHost] = useState("");
   const [pairingCode, setPairingCode] = useState("");
   const [password, setPassword] = useState("");
+  const [secondFactor, setSecondFactor] = useState("");
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -370,6 +372,7 @@ function AddSavedEnvironmentDialog({ actions }: { actions: SavedEnvironmentActio
     setHost("");
     setPairingCode("");
     setPassword("");
+    setSecondFactor("");
     setError(null);
   };
 
@@ -380,6 +383,7 @@ function AddSavedEnvironmentDialog({ actions }: { actions: SavedEnvironmentActio
     setPairingUrl("");
     setPairingCode("");
     setPassword("");
+    setSecondFactor("");
     setError(null);
   };
 
@@ -400,25 +404,29 @@ function AddSavedEnvironmentDialog({ actions }: { actions: SavedEnvironmentActio
     const submittedHost = host;
     const submittedCode = pairingCode;
     const submittedPassword = password;
+    const factor = secondFactor.trim() ? { secondFactor: secondFactor.trim() } : {};
     const submittedTab = tab;
 
     setPairingUrl("");
     setPairingCode("");
     setPassword("");
+    setSecondFactor("");
     try {
       if (submittedTab === "url") {
-        await actions.add({ label: submittedLabel, pairingUrl: submittedUrl });
+        await actions.add({ label: submittedLabel, pairingUrl: submittedUrl, ...factor });
       } else if (submittedTab === "code") {
         await actions.add({
           label: submittedLabel,
           host: submittedHost,
           pairingCode: submittedCode,
+          ...factor,
         });
       } else {
         await actions.add({
           label: submittedLabel,
           host: submittedHost,
           password: submittedPassword,
+          ...factor,
         });
       }
       resetForm();
@@ -577,6 +585,20 @@ function AddSavedEnvironmentDialog({ actions }: { actions: SavedEnvironmentActio
               </>
             )}
 
+            <SecondFactorInput
+              id="env-second-factor"
+              value={secondFactor}
+              onChange={setSecondFactor}
+              disabled={isSubmitting}
+            />
+            <p className="text-xs text-muted-foreground">
+              {uiText(
+                "Leave the authentication code empty if this server has two-factor authentication turned off.",
+                undefined,
+                undefined,
+                uiLocale,
+              )}
+            </p>
             {error ? <p className="text-sm text-destructive-foreground">{error}</p> : null}
           </DialogPanel>
 

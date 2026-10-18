@@ -322,11 +322,22 @@ function installApi(data: Fixture) {
     turnId: TurnId;
     before?: OrchestrationThreadActivityCursor | undefined;
     excludeActivityIds?: ReadonlyArray<EventId> | undefined;
+    excludeTurnStartAck?: boolean | undefined;
   }) =>
     data.allActivities.filter(
       (activity) =>
         activity.turnId === input.turnId &&
-        (activity.kind.startsWith("tool.") || activity.kind === "provider.turn.configuration") &&
+        (activity.kind.startsWith("tool.") ||
+          activity.kind === "provider.turn.configuration" ||
+          activity.kind === "task.progress") &&
+        !(
+          input.excludeTurnStartAck &&
+          activity.kind === "task.progress" &&
+          typeof activity.payload === "object" &&
+          activity.payload !== null &&
+          "taskId" in activity.payload &&
+          activity.payload?.taskId === `codex-turn-start:${input.turnId}`
+        ) &&
         precedes(activity, input.before) &&
         !input.excludeActivityIds?.includes(activity.id),
     );
@@ -351,6 +362,9 @@ function installApi(data: Fixture) {
         : eligible.slice(input.offset, input.offset + input.limit),
       ...(input.before ? { before: input.before } : {}),
       ...(input.excludeActivityIds ? { excludeActivityIds: input.excludeActivityIds } : {}),
+      ...(input.excludeTurnStartAck !== undefined
+        ? { excludeTurnStartAck: input.excludeTurnStartAck }
+        : {}),
     };
   };
   const getThreadTurnActivityPage = vi.fn(async (input: OrchestrationThreadTurnActivityPageInput) =>
@@ -430,11 +444,135 @@ afterEach(async () => {
 });
 
 describe("Earlier work in a retained current turn", () => {
+  it.each(["disconnected", "failed"] as const)(
+    "keeps an unverified Earlier work section hidden after a %s availability check",
+    async (failure) => {
+      const data = fixture("codex");
+      data.appendContexts(1);
+      const api = installApi(data);
+      if (failure === "disconnected") __resetEnvironmentApiOverridesForTests();
+      else
+        api.getThreadTurnWorkLogPresence.mockRejectedValueOnce(
+          new Error("private synthetic presence failure"),
+        );
+      const screen = await render(<TimelineFixture data={data} />);
+      try {
+        await expect.element(page.getByText("Synthetic original message 0")).toBeVisible();
+        if (failure === "failed")
+          await vi.waitFor(() =>
+            expect(api.getThreadTurnWorkLogPresence.mock.settledResults[0]?.type).toBe("rejected"),
+          );
+        for (let index = 0; index < 3; index++) {
+          data.appendContexts(1);
+          await screen.rerender(<TimelineFixture data={data} thread={data.readThread()} />);
+          expect(page.getByRole("button", { name: /^Earlier work/ }).elements()).toHaveLength(0);
+        }
+        expect(api.getThreadTurnWorkLogPresence).toHaveBeenCalledTimes(
+          failure === "failed" ? 1 : 0,
+        );
+        expect(api.getThreadTurnActivityPage).not.toHaveBeenCalled();
+        expect(document.body.textContent).not.toContain("private synthetic presence failure");
+      } finally {
+        await screen.unmount();
+      }
+    },
+  );
+
+  it("removes an exhausted empty disclosure without displaying its empty message or rediscovering it on context updates", async () => {
+    const data = fixture("codex");
+    data.appendContexts(1);
+    const api = installApi(data);
+    api.getThreadTurnActivityPage.mockImplementationOnce(async (input) => ({
+      ...api.validPage(input),
+      totalCount: 0,
+      activities: [],
+    }));
+    const screen = await render(<TimelineFixture data={data} />);
+    const emptyMessages: string[] = [];
+    const observer = new MutationObserver((records) => {
+      for (const record of records)
+        for (const node of record.addedNodes)
+          if (node.textContent?.includes("No earlier commands in this page."))
+            emptyMessages.push(node.textContent);
+    });
+    observer.observe(document.body, { childList: true, subtree: true });
+    try {
+      await page.getByRole("button", { name: /^Earlier work/ }).click();
+      await vi.waitFor(() =>
+        expect(page.getByRole("button", { name: /^Earlier work/ }).elements()).toHaveLength(0),
+      );
+      for (let index = 0; index < 3; index++) {
+        data.appendContexts(1);
+        await screen.rerender(<TimelineFixture data={data} thread={data.readThread()} />);
+      }
+      expect(page.getByRole("button", { name: /^Earlier work/ }).elements()).toHaveLength(0);
+      expect(emptyMessages).toEqual([]);
+      expect(api.getThreadTurnWorkLogPresence).toHaveBeenCalledTimes(1);
+      expect(api.getThreadTurnActivityPage).toHaveBeenCalledTimes(1);
+    } finally {
+      observer.disconnect();
+      await screen.unmount();
+    }
+  });
+
+  it("keeps a stale empty page hidden while allowing genuinely newly evicted work to be opened", async () => {
+    const data = fixture("codex");
+    data.appendContexts(1);
+    const api = installApi(data);
+    let release!: (page: ReturnType<typeof api.validPage>) => void;
+    let captured!: OrchestrationThreadTurnActivityPageInput;
+    api.getThreadTurnActivityPage.mockImplementationOnce((input) => {
+      captured = input;
+      return new Promise((resolve) => {
+        release = resolve;
+      });
+    });
+    const screen = await render(<TimelineFixture data={data} />);
+    try {
+      await page.getByRole("button", { name: /^Earlier work/ }).click();
+      await vi.waitFor(() => expect(api.getThreadTurnActivityPage).toHaveBeenCalledTimes(1));
+      data.appendContexts(1);
+      await screen.rerender(<TimelineFixture data={data} thread={data.readThread()} />);
+      release({ ...api.validPage(captured), totalCount: 0, activities: [] });
+      await vi.waitFor(() =>
+        expect(page.getByRole("button", { name: /^Earlier work/ }).elements()).toHaveLength(0),
+      );
+      data.appendContexts(1);
+      await screen.rerender(<TimelineFixture data={data} thread={data.readThread()} />);
+      expect(page.getByRole("button", { name: /^Earlier work/ }).elements()).toHaveLength(0);
+      expect(api.getThreadTurnActivityPage).toHaveBeenCalledTimes(1);
+
+      // Context receipts now actually evict the command that was still inline
+      // at the captured empty range. That new history must remain accessible.
+      data.appendContexts(500);
+      await screen.rerender(<TimelineFixture data={data} thread={data.readThread()} />);
+      const earlier = page.getByRole("button", { name: /^Earlier work/ });
+      await expect.element(earlier).toHaveAttribute("aria-expanded", "false");
+      expect(api.getThreadTurnActivityPage).toHaveBeenCalledTimes(1);
+      await earlier.click();
+      await expect.element(page.getByText(/original recent command/).first()).toBeVisible();
+      expect(api.getThreadTurnActivityPage).toHaveBeenCalledTimes(2);
+    } finally {
+      if (captured) release?.({ ...api.validPage(captured), totalCount: 0, activities: [] });
+      await screen.unmount();
+    }
+  });
+
   it.each(["codex", "claudeAgent"] as const)(
     "does not rediscover an empty %s log from turn settings retained before the live window",
     async (provider) => {
       const data = fixture(provider, 0, "retained-only", 0, true);
       data.appendContexts(2);
+      if (provider === "codex") {
+        // This separate persisted receipt has already left the real store
+        // window. Excluding the retained settings id alone cannot remove it.
+        data.allActivities.unshift({
+          ...contextActivity(0),
+          id: EventId.make("evicted-turn-start-ack"),
+          kind: "task.progress",
+          payload: { taskId: `codex-turn-start:${TURN_ID}` },
+        });
+      }
       const api = installApi(data);
       const screen = await render(<TimelineFixture data={data} />);
       try {
@@ -442,6 +580,7 @@ describe("Earlier work in a retained current turn", () => {
         expect(api.getThreadTurnWorkLogPresence.mock.calls[0]?.[0]).toMatchObject({
           before: { sequence: 2 },
           excludeActivityIds: ["retained-only-configuration"],
+          ...(provider === "codex" ? { excludeTurnStartAck: true } : {}),
         });
         await expect.element(page.getByText("Synthetic retained-only message 0")).toBeVisible();
         expect(page.getByRole("button", { name: /^Earlier work/ }).elements()).toHaveLength(0);
@@ -480,6 +619,50 @@ describe("Earlier work in a retained current turn", () => {
           ([input]) => input.excludeActivityIds?.[0] === "retained-and-evicted-configuration",
         ),
       ).toBe(true);
+    } finally {
+      await screen.unmount();
+    }
+  });
+
+  it("rechecks positive earlier-work presence when received settings replace its only saved receipt", async () => {
+    const data = fixture("codex", 0, "late-settings", 0, true);
+    data.appendContexts(2);
+    data.allActivities.unshift({
+      ...contextActivity(0),
+      id: EventId.make("late-settings-start-ack"),
+      kind: "task.progress",
+      payload: { taskId: `codex-turn-start:${TURN_ID}` },
+    });
+    const thread = data.readThread();
+    const withoutSettings = {
+      ...thread,
+      activities: thread.activities.filter(
+        (activity) => activity.kind !== "provider.turn.configuration",
+      ),
+    };
+    const api = installApi(data);
+    const screen = await render(<TimelineFixture data={data} thread={withoutSettings} />);
+    try {
+      await expect.element(page.getByRole("button", { name: /^Earlier work/ })).toBeVisible();
+      expect(api.getThreadTurnWorkLogPresence).toHaveBeenCalledTimes(1);
+
+      // The settings arrive after a positive availability result. They now
+      // replace the saved ACK, so its old positive cannot keep an empty row
+      // visible until the user clicks it.
+      await screen.rerender(<TimelineFixture data={data} thread={thread} />);
+      await vi.waitFor(() =>
+        expect(page.getByRole("button", { name: /^Earlier work/ }).elements()).toHaveLength(0),
+      );
+      expect(api.getThreadTurnWorkLogPresence).toHaveBeenCalledTimes(2);
+      expect(api.getThreadTurnWorkLogPresence.mock.calls[1]?.[0]).toMatchObject({
+        excludeActivityIds: ["late-settings-configuration"],
+        excludeTurnStartAck: true,
+      });
+      data.appendContexts(1);
+      await screen.rerender(<TimelineFixture data={data} thread={data.readThread()} />);
+      expect(page.getByRole("button", { name: /^Earlier work/ }).elements()).toHaveLength(0);
+      expect(api.getThreadTurnWorkLogPresence).toHaveBeenCalledTimes(2);
+      expect(api.getThreadTurnActivityPage).not.toHaveBeenCalled();
     } finally {
       await screen.unmount();
     }
@@ -537,6 +720,14 @@ describe("Earlier work in a retained current turn", () => {
           limit: 6,
           before: { sequence: 8, activityId: data.old[7]!.id },
         });
+        const openedDisclosure = earlier.element();
+        data.appendContexts(500);
+        await screen.rerender(<TimelineFixture data={data} thread={data.readThread()} />);
+        await expect.element(earlier).toHaveAttribute("aria-expanded", "true");
+        expect(earlier.element()).toBe(openedDisclosure);
+        await expect.element(page.getByText(/original earlier command 7/).first()).toBeVisible();
+        expect(api.getThreadTurnWorkLogPresence).toHaveBeenCalledTimes(1);
+        expect(api.getThreadTurnActivityPage).toHaveBeenCalledTimes(3);
       } finally {
         await screen.unmount();
       }

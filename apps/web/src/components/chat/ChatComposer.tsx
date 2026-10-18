@@ -83,6 +83,7 @@ import { ProviderModelPicker } from "./ProviderModelPicker";
 import { type ComposerCommandItem, ComposerCommandMenu } from "./ComposerCommandMenu";
 import { ComposerPendingApprovalActions } from "./ComposerPendingApprovalActions";
 import { CompactComposerControlsMenu } from "./CompactComposerControlsMenu";
+import { GlideControl } from "./GlideControl";
 import { NativeCodexReview } from "./NativeCodexReview";
 import { ClaudeDeliveryPriorityPicker } from "./ClaudeDeliveryPriorityPicker";
 import { AxiomSecurityControl } from "./AxiomSecurityControl";
@@ -381,6 +382,7 @@ export interface ChatComposerHandle {
     codexContextWindowOverride?: number | null;
     deliveryPriority?: ProviderDeliveryPriority;
     axiomWebEnabled?: boolean;
+    computerUseEnabled?: boolean;
     axiomMcpRevision?: number | undefined;
   };
 }
@@ -829,6 +831,8 @@ export function FollowUpQueueShelf(props: {
 // --------------------------------------------------------------------------
 
 export interface ChatComposerProps extends ComposerInteractionCallbacks {
+  /** Anchored to the input frame rather than the message viewport above it. */
+  scrollToBottomControl?: ReactNode;
   /** The native review dispatch remains owned by the active chat. */
   onStartCodeReview?: (target: CodexReviewTarget) => Promise<void>;
   codeReviewDisabled?: boolean;
@@ -1278,6 +1282,10 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
   // Eligibility still binds dispatch to the exact account and session above.
   const showNativeReviewControl = selectedProvider === "codex";
   const showAxiomSecurityControl = selectedProvider === "axiom";
+  const supportsGlide =
+    selectedProvider === "codex" ||
+    selectedProvider === "claudeAgent" ||
+    selectedProvider === "grok";
   const axiomInspectorKey = JSON.stringify([
     environmentId,
     activeThreadId,
@@ -1974,6 +1982,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     selectedProvider === "claudeAgent"
       ? {
           environmentId,
+          selectedModel,
           input: commandsInput
             ? {
                 instanceId: commandsInput.instanceId,
@@ -3509,6 +3518,13 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
         selectedProvider,
         selectedModel,
         selectedProviderModels,
+        ...(!isServerThread && supportsGlide
+          ? {
+              computerUseEnabled:
+                useComposerDraftStore.getState().getComposerDraft(composerDraftTarget)
+                  ?.computerUseEnabled === true,
+            }
+          : {}),
         ...(selectedProvider === "axiom"
           ? {
               axiomMcpRevision: useComposerDraftStore
@@ -3554,6 +3570,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
       selectedProviderModels,
       desiredSubagentLimits,
       desiredContextOverride,
+      supportsGlide,
       isServerThread,
       deliveryPriority,
     ],
@@ -3602,6 +3619,11 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
         onDragLeave={onComposerDragLeave}
         onDrop={onComposerDrop}
       >
+        {props.scrollToBottomControl ? (
+          <div className="pointer-events-none absolute bottom-full left-1/2 z-30 mb-2 flex w-max max-w-full -translate-x-1/2 justify-center">
+            {props.scrollToBottomControl}
+          </div>
+        ) : null}
         {activity || hasComposerTab ? (
           <div
             data-chat-composer-tab={hasComposerTab ? "true" : undefined}
@@ -4392,6 +4414,25 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                   onRuntimeModeChange={handleRuntimeModeChange}
                   onOpenGoal={onOpenGoalDialog}
                 />
+                {supportsGlide ? (
+                  <GlideControl
+                    key={`${environmentId}:${activeThreadId}`}
+                    environmentId={environmentId}
+                    threadId={isServerThread ? activeThreadId : null}
+                    runtimeMode={runtimeMode}
+                    draftEnabled={composerDraft.computerUseEnabled === true}
+                    onDraftEnabledChange={(enabled) =>
+                      useComposerDraftStore
+                        .getState()
+                        .setComputerUseEnabled(composerDraftTarget, enabled)
+                    }
+                    refreshKey={`${isSendBusy}:${activeThread?.session?.createdAt ?? ""}`}
+                    disabled={
+                      environmentUnavailable !== null ||
+                      (!isServerThread && (isSendBusy || isConnecting || isPreparingWorktree))
+                    }
+                  />
+                ) : null}
                 {selectedProvider === "axiom" ? (
                   <AxiomWebSearchControl
                     enabled={composerDraft.axiomWebEnabled === true}

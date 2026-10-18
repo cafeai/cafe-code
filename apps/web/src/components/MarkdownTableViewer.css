@@ -53,6 +53,18 @@
   );
 }
 
+/* macOS traffic lights sit above all renderer z-index values in the fixed
+   --app-mac-titlebar-height band (see lib/macTrafficLights.ts). Start this
+   full-height dialog below that band. Its padding already reserves the band,
+   so it opts out of the shared dialog top-row floor in index.css. */
+.mac-traffic-lights [data-slot="dialog-viewport"]:has(> .markdown-table-expanded-dialog) {
+  --markdown-table-inset-top: max(
+    var(--markdown-table-safe-top, max(1rem, env(safe-area-inset-top, 0px))),
+    var(--app-mac-titlebar-height)
+  );
+  --dialog-mac-titlebar-floor: 0px;
+}
+
 [data-slot="dialog-popup"].markdown-table-expanded-dialog {
   width: calc(100vw - var(--markdown-table-inset-left) - var(--markdown-table-inset-right));
   height: calc(100dvh - var(--markdown-table-inset-top) - var(--markdown-table-inset-bottom));

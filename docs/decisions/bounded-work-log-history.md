@@ -57,6 +57,29 @@ presence; token/context-only updates do not. Retained settings alone must not
 create a disclosure that becomes empty on expansion. Ordinary offset history
 remains unchanged.
 
+Valid same-turn Codex settings also supply `excludeTurnStartAck` on the exact
+earlier cursor range. Presence, count and pages omit only that turn's
+`codex-turn-start:<turnId>` task-progress receipt, which the renderer already
+folds into the accepted settings. Pages echo this filter; the reader rejects a
+missing/changed echo or a returned excluded receipt. Absent, malformed,
+foreign-turn and non-Codex settings do not request it, preserving legacy ACKs.
+Earlier-range positives belong to their exclusion witness. Received settings
+that replace a previously counted receipt invalidate that positive without
+requiring expansion. A growing earlier range preserves positive proof and its
+opened reader; negative/inconclusive reads still expire on newly evicted work.
+Context-only updates do not invalidate either. Historical snapshot proof remains
+discoverable after eviction.
+Presence, count and pages also omit ambient tasks, reserved workflow task rows
+and legacy collaboration tool rows that belong to other presentation surfaces.
+
+An unavailable Earlier work presence read is cached as inconclusive for the
+current work witness and stays hidden. It does not manufacture positive or
+empty evidence, emit a toast, fetch a page or retry in a loop. Relevant new work
+or a remounted timeline can check again. Previous-turn fallback behavior is
+unchanged. An exhausted empty reader renders no disclosure or empty-state
+flash while its scoped negative is published; newly evicted work can reset
+only that empty reader without eagerly reading history.
+
 Presence results publish by completed batch. A bounded exact-owner receipt
 cache prevents duplicate unresolved batch reads across React effect cleanup.
 Negatives are tied to relevant work/new-turn witnesses, not token or context

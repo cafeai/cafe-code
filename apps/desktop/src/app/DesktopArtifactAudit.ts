@@ -162,12 +162,19 @@ export async function auditPackagedDesktopArtifact(
   if (appFiles.length === 0 || !(await auditTextFiles(appArchive, appFiles))) return false;
 
   const resourceEntries = await readdir(resourcesPath, { withFileTypes: true });
+  if (
+    platform === "darwin" &&
+    !resourceEntries.some(
+      (entry) => entry.name === "mac-glide" && entry.isFile() && !entry.isSymbolicLink(),
+    )
+  )
+    return false;
   const expectedTopLevelEntries = new Set([
     "app.asar",
     "app.asar.unpacked",
     "app-update.yml",
     ...(platform === "darwin"
-      ? ["icon.icns", "mac-dictation-target", "en.lproj", "ja.lproj", "ko.lproj"]
+      ? ["icon.icns", "mac-dictation-target", "mac-glide", "en.lproj", "ja.lproj", "ko.lproj"]
       : []),
     ...(platform === "win32" ? ["elevate.exe", "managed-runtime"] : []),
   ]);

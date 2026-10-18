@@ -170,6 +170,53 @@ function Card() {
   );
 }
 describe("shared passive quota surfaces", () => {
+  it.each(["rail", "popover"] as const)(
+    "switches %s weekly bars with the selected model without refreshing metadata",
+    async (surface) => {
+      subscribe.mockReturnValue(vi.fn());
+      const view = (selectedModel: string) =>
+        surface === "rail" ? (
+          <SessionRail
+            plan={null}
+            usage={usage}
+            quotaContext={{ ...context, selectedModel }}
+            onShowInComposer={() => {}}
+          />
+        ) : (
+          <ContextWindowMeter usage={usage} quotaContext={{ ...context, selectedModel }} />
+        );
+      mounted = await render(view("claude-sonnet-5-5"));
+      if (surface === "popover")
+        await page.getByRole("button", { name: "Context window 20% used", exact: true }).click();
+      await expect.poll(() => subscribe.mock.calls.length).toBe(1);
+      const native = result();
+      subscribe.mock.calls[0]![1]({
+        report: native.report
+          ? {
+              ...native.report,
+              meters:
+                native.report.meters?.map((meter) =>
+                  meter.kind === "weekly_scoped"
+                    ? { ...meter, modelLabel: "Fable", usedPercent: 25, severity: "normal" }
+                    : meter,
+                ) ?? null,
+            }
+          : null,
+      });
+      await expect.element(page.getByText("60% left", { exact: true })).toBeVisible();
+      await mounted.rerender(view("claude-fable-5-1"));
+      await expect.element(page.getByText("Weekly · Fable", { exact: true })).toBeVisible();
+      await expect.element(page.getByText("75% left", { exact: true }).last()).toBeVisible();
+      await expect.element(page.getByText("60% left", { exact: true })).not.toBeInTheDocument();
+      expect(subscribe).toHaveBeenCalledOnce();
+      await mounted.rerender(view("claude-opus-5-5"));
+      await expect
+        .element(page.getByText("Weekly · Fable", { exact: true }))
+        .not.toBeInTheDocument();
+      await expect.element(page.getByText("60% left", { exact: true })).toBeVisible();
+      expect(subscribe).toHaveBeenCalledOnce();
+    },
+  );
   it("uses instance-only Settings and exact chat/runtime rail input, with the same common report presentation", async () => {
     subscribe.mockReturnValue(vi.fn());
     mounted = await render(
@@ -195,10 +242,10 @@ describe("shared passive quota surfaces", () => {
     await expect.element(page.getByTestId("rail")).toMatchTextContent(/75% left/u);
     for (const surface of ["settings", "rail"]) {
       const element = page.getByTestId(surface).element();
-      expect(element.querySelectorAll("[data-claude-quota-meter]")).toHaveLength(3);
+      expect(element.querySelectorAll("[data-claude-quota-meter]")).toHaveLength(2);
       expect(element.textContent).toContain("60% left");
-      expect(element.textContent).toContain("1% left");
-      expect(element.textContent).toContain("Session-reported · not account-verified");
+      expect(element.textContent).not.toContain("1% left");
+      expect(element.textContent).not.toContain("Session-reported · not account-verified");
     }
     expect(page.getByTestId("rail").element().textContent).toContain("20%⋅200/1k context used");
   });
@@ -297,12 +344,38 @@ describe("shared passive quota surfaces", () => {
         await page.screenshot({
           path: `../../../../../.explorations/130-claude-quota/unavailable-${dark ? "dark" : "light"}-${scale}.png`,
         });
-      const report = result();
+      const native = result();
+      const report: ProviderSessionQuotaResult = {
+        report: native.report
+          ? {
+              ...native.report,
+              source: "claude-cli",
+              extraUsage: {
+                enabled: true,
+                monthlyLimit: 10000,
+                usedCredits: 2500,
+                usedPercent: 25,
+                currency: "USD",
+              },
+              meters:
+                native.report.meters?.map((meter) =>
+                  meter.kind === "weekly_scoped"
+                    ? { ...meter, usedPercent: 0, modelLabel: "Fable", severity: "normal" }
+                    : meter,
+                ) ?? null,
+            }
+          : null,
+      };
       for (const call of subscribe.mock.calls) call[1](report);
       await expect
         .poll(() => document.querySelectorAll("[data-claude-quota-meter]").length)
-        .toBe(6);
+        .toBe(4);
       for (const element of document.querySelectorAll<HTMLElement>("[data-claude-session-quota]")) {
+        expect(element.textContent).not.toContain("Fable");
+        expect(element.textContent).not.toContain("Reported by Claude Code");
+        expect(element.textContent).not.toContain("Updates automatically while this view is open.");
+        expect(element.textContent).not.toContain("normal");
+        expect(element.textContent).toContain("25% of extra usage used");
         expect(element.scrollWidth).toBeLessThanOrEqual(element.clientWidth + 1);
         expect(element.querySelectorAll("[data-account-quota-scroll]")).toHaveLength(1);
       }

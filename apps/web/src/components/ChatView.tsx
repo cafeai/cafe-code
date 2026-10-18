@@ -545,6 +545,7 @@ type ChatViewProps = {
 );
 
 interface ComposerSendSnapshot {
+  readonly computerUseEnabled?: boolean;
   readonly axiomWebEnabled?: boolean;
   readonly axiomMcpRevision?: number;
   readonly deliveryPriority?: import("@cafecode/contracts").ProviderDeliveryPriority;
@@ -1072,6 +1073,9 @@ export default function ChatView(props: ChatViewProps) {
   );
   const composerActiveProvider = useComposerDraftStore(
     (store) => store.getComposerDraft(composerDraftTarget)?.activeProvider ?? null,
+  );
+  const composerQuotaModels = useComposerDraftStore(
+    (store) => store.getComposerDraft(composerDraftTarget)?.modelSelectionByProvider,
   );
   const setComposerDraftModelSelection = useComposerDraftStore((store) => store.setModelSelection);
   const setComposerDraftRuntimeMode = useComposerDraftStore((store) => store.setRuntimeMode);
@@ -4786,6 +4790,9 @@ export default function ChatView(props: ChatViewProps) {
       providerModels: sendCtx.selectedProviderModels,
       promptEffort: sendCtx.selectedPromptEffort,
       modelSelection: sendCtx.selectedModelSelection,
+      ...(sendCtx.computerUseEnabled !== undefined
+        ? { computerUseEnabled: sendCtx.computerUseEnabled }
+        : {}),
       ...(sendCtx.selectedProvider === "axiom"
         ? {
             axiomWebEnabled: sendCtx.axiomWebEnabled === true,
@@ -6300,6 +6307,7 @@ export default function ChatView(props: ChatViewProps) {
               ...(isLocalDraftThread
                 ? {
                     createThread: {
+                      ...(snapshot.computerUseEnabled === true ? { computerUseEnabled: true } : {}),
                       projectId: activeThread.projectId,
                       title,
                       modelSelection: threadCreateModelSelection,
@@ -8340,6 +8348,9 @@ export default function ChatView(props: ChatViewProps) {
     }) === "claudeAgent"
       ? {
           environmentId,
+          selectedModel:
+            composerQuotaModels?.[activeThread.modelSelection.instanceId]?.model ??
+            activeThread.modelSelection.model,
           input:
             activeThread.session?.provider === "claudeAgent" &&
             activeThread.session.providerInstanceId === activeThread.modelSelection.instanceId &&
@@ -8531,6 +8542,7 @@ export default function ChatView(props: ChatViewProps) {
               skills={activeProviderStatus?.skills ?? EMPTY_PROVIDER_SKILLS}
               stickToEndRevision={stickTimelineToEndRevision}
               autoFollowTail={timelineAutoFollowTail}
+              fadeBottomEdge={showScrollToBottom}
               initialViewPosition={initialTimelinePosition}
               viewPositionCache={timelineViews}
               viewPositionKey={routeThreadKey}
@@ -8548,16 +8560,6 @@ export default function ChatView(props: ChatViewProps) {
                 ? { onDebugScrollEvent: recordTimelineScrollDebugEvent }
                 : {})}
             />
-
-            {/* scroll to bottom pill — shown when user has scrolled away from the bottom */}
-            {showScrollToBottom && !scrollControlDismissal.dismissed && (
-              <div className="pointer-events-none absolute bottom-1 left-1/2 z-30 flex -translate-x-1/2 justify-center py-1.5">
-                <ScrollToBottomControl
-                  onScrollToBottom={() => scrollToEnd(true)}
-                  onHideUntilBottom={scrollControlDismissal.hideUntilBottom}
-                />
-              </div>
-            )}
           </div>
 
           {/* Input bar */}
@@ -8598,6 +8600,14 @@ export default function ChatView(props: ChatViewProps) {
               <ComposerBannerStack className="relative z-0" items={composerBannerItems} />
               <div className="relative z-10">
                 <ChatComposer
+                  scrollToBottomControl={
+                    showScrollToBottom && !scrollControlDismissal.dismissed ? (
+                      <ScrollToBottomControl
+                        onScrollToBottom={() => scrollToEnd(true)}
+                        onHideUntilBottom={scrollControlDismissal.hideUntilBottom}
+                      />
+                    ) : undefined
+                  }
                   activity={chatActivity}
                   activityStartedAt={
                     // Background children and failed-root recovery are not a

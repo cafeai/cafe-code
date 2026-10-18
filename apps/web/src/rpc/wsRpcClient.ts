@@ -49,6 +49,7 @@ type RpcInputStreamMethod<TTag extends RpcTag> =
     : never;
 
 export interface WsRpcClient {
+  readonly glide: { readonly control: RpcUnaryMethod<typeof WS_METHODS.glideControl> };
   readonly mcpApps: {
     readonly prepare: RpcUnaryMethod<typeof WS_METHODS.mcpAppsPrepare>;
     readonly resolve: RpcUnaryMethod<typeof WS_METHODS.mcpAppsResolve>;
@@ -435,6 +436,9 @@ export function createWsRpcClient(transport: WsTransport): WsRpcClient {
       prepare: (input) => transport.request((client) => client[WS_METHODS.mcpAppsPrepare](input)),
       resolve: (input) => transport.request((client) => client[WS_METHODS.mcpAppsResolve](input)),
       details: (input) => transport.request((client) => client[WS_METHODS.mcpAppsDetails](input)),
+    },
+    glide: {
+      control: (input) => transport.request((client) => client[WS_METHODS.glideControl](input)),
     },
     scheduledFollowups: {
       list: (input) =>

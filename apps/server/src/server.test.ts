@@ -1,4 +1,5 @@
 import { readProviderMcpCredentialIssuer } from "./auth/ProviderMcpCredentialBroker.ts";
+import { installGlideSessionRuntime } from "./glide/sessionRuntime.ts";
 import * as NodeHttpServer from "@effect/platform-node/NodeHttpServer";
 import * as NodeSocket from "@effect/platform-node/NodeSocket";
 import * as NodeServices from "@effect/platform-node/NodeServices";
@@ -671,6 +672,7 @@ const buildAppUnderTest = (options?: {
       Layer.provide(
         Layer.mock(ProviderRegistry)({
           getProviders: Effect.succeed([]),
+          readInstanceAccountQuota: () => Effect.succeed(null),
           refresh: () => Effect.succeed([]),
           refreshInstance: () => Effect.succeed([]),
           refreshInstanceAccountUsage: () => Effect.succeed([]),
@@ -3317,6 +3319,108 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
         );
         assert.equal(inventoryReads, 2);
       }).pipe(Effect.provide(makeProductionHttpServerTestLayer())),
+  );
+
+  it.effect("streams native Claude allowances for an owner before any chat exists", () =>
+    Effect.gen(function* () {
+      const instanceId = ProviderInstanceId.make("claudeAgent");
+      const report = {
+        source: "claude-cli" as const,
+        observedAt: "2026-10-16T00:00:00.000Z",
+        meters: [],
+      };
+      let calls = 0;
+      let enabled = true;
+      let replaceDuringRead = false;
+      yield* buildAppUnderTest({
+        layers: {
+          providerRegistry: {
+            readInstanceAccountQuota: (selected) =>
+              Effect.sync(() => {
+                assert.equal(selected, instanceId);
+                calls++;
+                if (replaceDuringRead) enabled = false;
+                return report;
+              }),
+            refresh: () => Effect.die("quota must not refresh health"),
+            refreshInstance: () => Effect.die("quota must not refresh health"),
+          },
+          providerService: {
+            listSessions: () => Effect.die("a native allowance needs no query inventory"),
+            sendTurn: () => Effect.die("quota must not submit prompts"),
+          },
+          serverSettings: {
+            getSettings: Effect.sync(() => ({
+              ...DEFAULT_SERVER_SETTINGS,
+              providerInstances: {
+                [instanceId]: {
+                  driver: ProviderDriverKind.make("claudeAgent"),
+                  enabled,
+                  config: DEFAULT_SERVER_SETTINGS.providers.claudeAgent,
+                },
+              },
+            })),
+          },
+          projectionSnapshotQuery: {
+            getShellSnapshot: () =>
+              Effect.succeed({
+                ...makeDefaultOrchestrationReadModel(),
+                threads: [],
+                snapshotSequence: 0,
+              }),
+            getSnapshotSequence: () => Effect.succeed({ snapshotSequence: 0 }),
+          },
+        },
+      });
+      const cookie = yield* getAuthenticatedSessionCookieHeader();
+      const wsUrl = appendSessionCookieToWsUrl(
+        yield* getWsServerUrl("/ws", { authenticated: false }),
+        cookie,
+      );
+      const first = (
+        url: string,
+        input: {
+          instanceId: ProviderInstanceId;
+          session?: { threadId: ThreadId; runtimeId: string };
+        },
+      ) =>
+        Effect.scoped(
+          withWsRpcClient(url, (client) =>
+            client[WS_METHODS.serverSubscribeProviderQuota](input).pipe(
+              Stream.take(1),
+              Stream.runCollect,
+              Effect.map(Array.from),
+            ),
+          ),
+        );
+      assert.deepEqual(yield* first(wsUrl, { instanceId }), [{ report }]);
+      assert.equal(calls, 1);
+      assert.deepEqual(
+        yield* first(wsUrl, { instanceId: ProviderInstanceId.make("different-account") }),
+        [{ report: null }],
+      );
+      assert.deepEqual(
+        yield* first(wsUrl, {
+          instanceId,
+          session: { threadId: defaultThreadId, runtimeId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa" },
+        }),
+        [{ report: null }],
+      );
+      assert.equal(calls, 1);
+      const pairing = yield* HttpClient.post("/api/auth/pairing-token", { headers: { cookie } });
+      const { credential } = (yield* pairing.json) as { credential: string };
+      const guestUrl = appendSessionCookieToWsUrl(
+        yield* getWsServerUrl("/ws", { authenticated: false }),
+        yield* getAuthenticatedSessionCookieHeader(credential),
+      );
+      assert.deepEqual(yield* first(guestUrl, { instanceId }), [{ report: null }]);
+      assert.equal(calls, 1);
+      replaceDuringRead = true;
+      assert.deepEqual(yield* first(wsUrl, { instanceId }), [{ report: null }]);
+      assert.equal(calls, 2);
+      assert.deepEqual(yield* first(wsUrl, { instanceId }), [{ report: null }]);
+      assert.equal(calls, 2);
+    }).pipe(Effect.provide(makeProductionHttpServerTestLayer())),
   );
 
   it.effect("streams passive quota only for owner-authorized current Claude session metadata", () =>
@@ -6785,10 +6889,67 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
   );
 
   it.effect(
-    "bootstraps first-send worktree turns and chat-local context policy before dispatching turn start",
+    "refuses a paired client's forged computer-use bootstrap before creating a chat or starting a turn",
+    () =>
+      Effect.gen(function* () {
+        const dispatch = vi.fn((_: OrchestrationCommand) => Effect.succeed({ sequence: 1 }));
+        yield* buildAppUnderTest({
+          layers: { orchestrationEngine: { dispatch, readEvents: () => Stream.empty } },
+        });
+        const pairing = yield* HttpClient.post("/api/auth/pairing-token", {
+          headers: { cookie: yield* getAuthenticatedSessionCookieHeader() },
+        });
+        const { credential } = (yield* pairing.json) as { credential: string };
+        const cookie = yield* getAuthenticatedSessionCookieHeader(credential);
+        const wsUrl = appendSessionCookieToWsUrl(
+          yield* getWsServerUrl("/ws", { authenticated: false }),
+          cookie,
+        );
+        const createdAt = "2026-01-01T00:00:00.000Z";
+        const error = yield* Effect.scoped(
+          withWsRpcClient(wsUrl, (client) =>
+            client[ORCHESTRATION_WS_METHODS.dispatchCommand]({
+              type: "thread.turn.start",
+              commandId: CommandId.make("forged-computer-bootstrap"),
+              threadId: ThreadId.make("forged-computer-thread"),
+              message: {
+                messageId: MessageId.make("forged-message"),
+                role: "user",
+                text: "Not authorized",
+                attachments: [],
+              },
+              modelSelection: defaultModelSelection,
+              runtimeMode: "full-access",
+              interactionMode: "default",
+              createdAt,
+              bootstrap: {
+                createThread: {
+                  computerUseEnabled: true,
+                  projectId: defaultProjectId,
+                  title: "Forged computer permission",
+                  modelSelection: defaultModelSelection,
+                  runtimeMode: "full-access",
+                  interactionMode: "default",
+                  branch: null,
+                  worktreePath: null,
+                  createdAt,
+                },
+              },
+            }).pipe(Effect.flip),
+          ),
+        );
+        assert.equal(error.message, "Computer use requires a current owner connection.");
+        assert.equal(dispatch.mock.calls.length, 0);
+      }).pipe(Effect.provide(makeProductionHttpServerTestLayer())),
+  );
+
+  it.effect(
+    "awaits computer-use permission and first-send worktree/context bootstrap before dispatching turn start",
     () =>
       Effect.gen(function* () {
         const dispatchedCommands: Array<OrchestrationCommand> = [];
+        const permissionEntered = Promise.withResolvers<void>();
+        const permissionCompleted = Promise.withResolvers<void>();
         const refreshStatus = vi.fn((_: string) =>
           Effect.succeed({
             isRepo: true,
@@ -6845,43 +7006,71 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
           },
         });
 
+        yield* Effect.acquireRelease(
+          Effect.sync(() =>
+            installGlideSessionRuntime({
+              bind: async () => undefined,
+              operation: async (operation) => {
+                assert.deepEqual(operation, {
+                  kind: "initialize-thread",
+                  threadId: "thread-bootstrap",
+                });
+                permissionEntered.resolve();
+                await permissionCompleted.promise;
+                return null;
+              },
+            }),
+          ),
+          (uninstall) => Effect.sync(uninstall),
+        );
         const createdAt = "2026-01-01T00:00:00.000Z";
         const wsUrl = yield* getWsServerUrl("/ws");
         const response = yield* Effect.scoped(
           withWsRpcClient(wsUrl, (client) =>
-            client[ORCHESTRATION_WS_METHODS.dispatchCommand]({
-              type: "thread.turn.start",
-              commandId: CommandId.make("cmd-bootstrap-turn-start"),
-              threadId: ThreadId.make("thread-bootstrap"),
-              message: {
-                messageId: MessageId.make("msg-bootstrap"),
-                role: "user",
-                text: "hello",
-                attachments: [],
-              },
-              modelSelection: defaultModelSelection,
-              runtimeMode: "full-access",
-              interactionMode: "default",
-              bootstrap: {
-                createThread: {
-                  projectId: defaultProjectId,
-                  title: "Bootstrap Thread",
-                  codexContextWindowOverride: 500_000,
-                  modelSelection: defaultModelSelection,
-                  runtimeMode: "full-access",
-                  interactionMode: "default",
-                  branch: "main",
-                  worktreePath: null,
-                  createdAt,
+            Effect.gen(function* () {
+              yield* Effect.addFinalizer(() => Effect.sync(() => permissionCompleted.resolve()));
+              const pending = yield* client[ORCHESTRATION_WS_METHODS.dispatchCommand]({
+                type: "thread.turn.start",
+                commandId: CommandId.make("cmd-bootstrap-turn-start"),
+                threadId: ThreadId.make("thread-bootstrap"),
+                message: {
+                  messageId: MessageId.make("msg-bootstrap"),
+                  role: "user",
+                  text: "hello",
+                  attachments: [],
                 },
-                prepareWorktree: {
-                  projectCwd: "/tmp/project",
-                  baseBranch: "main",
-                  branch: "t3code/bootstrap-refName",
+                modelSelection: defaultModelSelection,
+                runtimeMode: "full-access",
+                interactionMode: "default",
+                bootstrap: {
+                  createThread: {
+                    computerUseEnabled: true,
+                    projectId: defaultProjectId,
+                    title: "Bootstrap Thread",
+                    codexContextWindowOverride: 500_000,
+                    modelSelection: defaultModelSelection,
+                    runtimeMode: "full-access",
+                    interactionMode: "default",
+                    branch: "main",
+                    worktreePath: null,
+                    createdAt,
+                  },
+                  prepareWorktree: {
+                    projectCwd: "/tmp/project",
+                    baseBranch: "main",
+                    branch: "t3code/bootstrap-refName",
+                  },
+                  runSetupScript: true,
                 },
-                runSetupScript: true,
-              },
-              createdAt,
+                createdAt,
+              }).pipe(Effect.forkChild);
+              yield* Effect.promise(() => permissionEntered.promise);
+              assert.deepEqual(
+                dispatchedCommands.map((command) => command.type),
+                ["thread.create", "thread.meta.update"],
+              );
+              permissionCompleted.resolve();
+              return yield* Fiber.join(pending);
             }),
           ),
         );
@@ -6915,7 +7104,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
         if (finalCommand?.type === "thread.turn.start") {
           assert.equal(finalCommand.bootstrap, undefined);
         }
-      }).pipe(Effect.provide(makeHttpServerTestLayer())),
+      }).pipe(Effect.scoped, Effect.provide(makeHttpServerTestLayer())),
   );
 
   for (const target of ["standalone", "missing"] as const) {

@@ -84,6 +84,13 @@
   -webkit-app-region: no-drag;
 }
 
+/* On macOS the shared dialog viewport keeps the popup below the traffic-light
+   band (index.css); shorten this explicit cap by the same band so the diagram
+   viewport shrinks instead of the dialog running past the window bottom. */
+.mac-traffic-lights .mermaid-expanded-dialog {
+  max-height: calc(100dvh - 1rem - var(--app-mac-titlebar-height));
+}
+
 .mermaid-expanded-heading {
   display: flex;
   flex-direction: column;

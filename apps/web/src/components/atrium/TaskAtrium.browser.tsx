@@ -367,6 +367,7 @@ vi.mock("@tanstack/react-router", async (importOriginal) => ({
   },
 }));
 
+import { MAC_TRAFFIC_LIGHTS_CLASS_NAME } from "../../lib/macTrafficLights";
 import { TaskAtriumBoard } from "./TaskAtrium";
 import { TaskAtriumOverlay } from "./TaskAtriumOverlay";
 import { useTaskAtriumStore } from "./taskAtriumStore";
@@ -2393,6 +2394,39 @@ describe("TaskAtriumOverlay", () => {
       }
     },
   );
+
+  it("keeps provider filters clear of the macOS traffic lights", async () => {
+    const root = document.documentElement;
+    const originalViewport = { width: window.innerWidth, height: window.innerHeight };
+    const originalMacTrafficLights = root.classList.contains(MAC_TRAFFIC_LIGHTS_CLASS_NAME);
+    // A narrow window stands in for a wide pill row: without the reservation,
+    // the centred filters would start inside the traffic-light corner.
+    await page.viewport(300, 640);
+    // main.tsx sets this root class for ordinary macOS Electron windows.
+    root.classList.add(MAC_TRAFFIC_LIGHTS_CLASS_NAME);
+    useTaskAtriumStore.getState().setOpen(true);
+    const { host, screen } = await mountOverlay();
+    try {
+      await vi.waitFor(() => {
+        const leadingSpace = Number.parseFloat(
+          getComputedStyle(root).getPropertyValue("--app-mac-titlebar-leading-space"),
+        );
+        const filters = page.getByRole("group", { name: "Filter by provider" }).element();
+        const close = page.getByRole("button", { name: "Close Task Atrium" }).element();
+        expect(leadingSpace).toBeGreaterThan(0);
+        expect(filters.getBoundingClientRect().left).toBeGreaterThanOrEqual(leadingSpace - 1);
+        expect(filters.getBoundingClientRect().right).toBeLessThanOrEqual(
+          close.getBoundingClientRect().left,
+        );
+      });
+    } finally {
+      useTaskAtriumStore.getState().setOpen(false);
+      await screen.unmount();
+      host.remove();
+      root.classList.toggle(MAC_TRAFFIC_LIGHTS_CLASS_NAME, originalMacTrafficLights);
+      await page.viewport(originalViewport.width, originalViewport.height);
+    }
+  });
 
   it("stays closed until it is opened", async () => {
     useTaskAtriumStore.getState().setOpen(false);

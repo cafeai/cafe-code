@@ -38,12 +38,15 @@ const assertWorkflowRetention = (sql: SqlClient.SqlClient) =>
     );
   });
 
+// Qualify these historical collision/reconciliation paths through migration 99.
+// Later feature tables are independent of this schema/ledger contract.
+
 describe("092_LiveWork", () => {
   it.effect("adds live work after the upstream migrations and preserves workflow retention", () =>
     Effect.gen(function* () {
       const sql = yield* SqlClient.SqlClient;
       yield* runMigrations({ toMigrationInclusive: 91 });
-      const ran = yield* runMigrations();
+      const ran = yield* runMigrations({ toMigrationInclusive: 99 });
       assert.deepEqual(ran, [
         [92, "LiveWork"],
         [93, "RecoveryPresentationIndex"],
@@ -74,7 +77,7 @@ describe("092_LiveWork", () => {
       );
       assert.deepEqual(yield* sql`SELECT * FROM projection_live_work`, []);
       yield* assertWorkflowRetention(sql);
-      assert.deepEqual(yield* runMigrations(), []);
+      assert.deepEqual(yield* runMigrations({ toMigrationInclusive: 99 }), []);
     }).pipe(Effect.provide(TestSqliteClient.layerMemory())),
   );
 
@@ -94,7 +97,7 @@ describe("092_LiveWork", () => {
           42, ${at}, 'local-terminal')
       `;
       const before = yield* sql`SELECT * FROM projection_live_work`;
-      assert.deepEqual(yield* runMigrations(), [
+      assert.deepEqual(yield* runMigrations({ toMigrationInclusive: 99 }), [
         [91, "CodexTransientRecoveryIntents"],
         [92, "LiveWork"],
         [93, "RecoveryPresentationIndex"],

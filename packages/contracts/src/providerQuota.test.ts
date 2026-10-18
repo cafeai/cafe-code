@@ -40,6 +40,7 @@ describe("passive session quota contracts", () => {
       report: null,
     });
     expect(decodeJson(encodeJson(report))).toEqual(report);
+    expect(decodeJson(encodeJson({ ...report, source: "claude-cli" })).source).toBe("claude-cli");
   });
 
   it("accepts safe minor-unit amounts without assuming a currency", () => {

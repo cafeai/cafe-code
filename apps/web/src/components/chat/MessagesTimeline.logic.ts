@@ -244,7 +244,7 @@ export interface HistoricalWorkLogDisplayState {
 
 export function filterHistoricalWorkLogSummariesByPresence(input: {
   summaries: ReadonlyMap<TurnId, HistoricalWorkLogSummary>;
-  presenceByTurnId: ReadonlyMap<TurnId, boolean>;
+  presenceByTurnId: ReadonlyMap<TurnId, boolean | undefined>;
 }): ReadonlyMap<TurnId, HistoricalWorkLogSummary> {
   const visible = new Map<TurnId, HistoricalWorkLogSummary>();
   for (const [turnId, summary] of input.summaries) {
@@ -265,7 +265,7 @@ export function filterHistoricalWorkLogSummariesByPresence(input: {
 
 export function findHistoricalWorkLogPresenceCandidates(input: {
   summaries: ReadonlyMap<TurnId, HistoricalWorkLogSummary>;
-  presenceByTurnId: ReadonlyMap<TurnId, boolean>;
+  presenceByTurnId: ReadonlyMap<TurnId, boolean | undefined>;
 }): TurnId[] {
   const candidates: TurnId[] = [];
   for (const [turnId, summary] of input.summaries) {

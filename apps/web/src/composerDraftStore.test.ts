@@ -236,6 +236,29 @@ describe("composer file and queue edit durability", () => {
     },
   );
 
+  it("persists an empty draft's computer-use choice without giving it to another draft or environment", () => {
+    const store = useComposerDraftStore.getState();
+    store.setComputerUseEnabled(ref, true);
+    store.clearComposerContent(ref);
+    const options = useComposerDraftStore.persist.getOptions();
+    const persisted = options.partialize!(useComposerDraftStore.getState());
+    useComposerDraftStore.setState(
+      options.merge!(JSON.parse(JSON.stringify(persisted)), useComposerDraftStore.getState()),
+    );
+    expect(store.getComposerDraft(ref)?.computerUseEnabled).toBe(true);
+    expect(
+      store.getComposerDraft(
+        scopeThreadRef(TEST_ENVIRONMENT_ID, ThreadId.make("other-computer-draft")),
+      )?.computerUseEnabled,
+    ).not.toBe(true);
+    expect(
+      store.getComposerDraft(scopeThreadRef(OTHER_TEST_ENVIRONMENT_ID, threadId))
+        ?.computerUseEnabled,
+    ).not.toBe(true);
+    store.setComputerUseEnabled(ref, false);
+    expect(store.getComposerDraft(ref)?.computerUseEnabled).toBe(false);
+  });
+
   it.each([false, true])("round-trips an empty chat's %s web preference", (enabled) => {
     const store = useComposerDraftStore.getState();
     const account = ProviderInstanceId.make("axiom-personal");

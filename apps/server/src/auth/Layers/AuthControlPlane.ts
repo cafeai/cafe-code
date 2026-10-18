@@ -5,6 +5,7 @@ import * as Layer from "effect/Layer";
 
 import { BootstrapCredentialServiceLive } from "./BootstrapCredentialService.ts";
 import { AdminPasswordServiceLive } from "./AdminPasswordService.ts";
+import { TwoFactorServiceLive } from "./TwoFactorService.ts";
 import { ServerSecretStoreLive } from "./ServerSecretStore.ts";
 import { SessionCredentialServiceLive } from "./SessionCredentialService.ts";
 import { AdminPasswordService } from "../Services/AdminPasswordService.ts";
@@ -187,6 +188,7 @@ export const AuthCoreLive = Layer.mergeAll(
   BootstrapCredentialServiceLive,
   SessionCredentialServiceLive,
   AdminPasswordServiceLive,
+  TwoFactorServiceLive,
 );
 
 export const AuthStorageLive = Layer.mergeAll(ServerSecretStoreLive, SqlitePersistenceLayerLive);

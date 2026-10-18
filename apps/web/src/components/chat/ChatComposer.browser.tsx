@@ -3,6 +3,8 @@ import {
   ProviderDriverKind,
   ProviderInstanceId,
   ThreadId,
+  type EnvironmentApi,
+  type GlideControlResult,
   type ServerProvider,
 } from "@cafecode/contracts";
 import { DEFAULT_UNIFIED_SETTINGS } from "@cafecode/contracts/settings";
@@ -20,6 +22,11 @@ import { applyInterfaceScalePercent } from "../../interfaceScale";
 import type { Thread } from "../../types";
 import { useUiStateStore } from "../../uiStateStore";
 import { ChatComposer, type ChatComposerHandle, type ChatComposerProps } from "./ChatComposer";
+import { ScrollToBottomControl } from "./ScrollToBottomControl";
+import {
+  __setEnvironmentApiOverrideForTests,
+  __resetEnvironmentApiOverridesForTests,
+} from "../../environmentApi";
 
 // Only the unrelated external environment integrations are replaced. Provider
 // selection, draft resolution, menu placement, dialog ownership and outgoing
@@ -307,6 +314,159 @@ async function waitForTabEntrance() {
 }
 
 describe("provider-specific composer menu actions", () => {
+  it("enables computer use before the first message, retains the exact draft choice, and starts another draft off", async () => {
+    const control = vi.fn(async (_input: unknown) => ({
+      available: true,
+      connected: false,
+      enabled: false,
+      fullAccess: false,
+      busy: false,
+      paused: false,
+      accessibility: true,
+      screenRecording: true,
+      apps: [],
+      runningApps: [],
+      message: "Background desktop control",
+    }));
+    __setEnvironmentApiOverrideForTests(environmentId, {
+      glide: { control },
+    } as unknown as EnvironmentApi);
+    try {
+      const draftRef = { environmentId, threadId: ThreadId.make("computer-use-local-draft") };
+      await using fixture = await mountComposer(860, {
+        runtimeMode: "full-access",
+        isServerThread: false,
+        isLocalDraftThread: true,
+        composerDraftTarget: draftRef,
+        activeThreadId: draftRef.threadId,
+      });
+      const button = page.getByRole("button", { name: "Computer use", exact: true });
+      await expect.element(button).toBeEnabled();
+      await button.click();
+      await expect.element(button).toHaveAttribute("aria-pressed", "true");
+      expect(fixture.composerRef.current?.getSendContext().computerUseEnabled).toBe(true);
+      expect(control.mock.calls.map(([input]) => input)).toEqual([{ action: "status" }]);
+      expect(fixture.onSend).not.toHaveBeenCalled();
+      await fixture.update({ isSendBusy: true });
+      await expect.element(button).toBeDisabled();
+      await fixture.update({ isSendBusy: false });
+      await expect.element(button).toBeEnabled();
+      await button.click();
+      await expect.element(button).toHaveAttribute("aria-pressed", "false");
+      await button.click();
+      await expect.element(button).toHaveAttribute("aria-pressed", "true");
+      const nextRef = { environmentId, threadId: ThreadId.make("other-local-computer-draft") };
+      await fixture.update({ composerDraftTarget: nextRef, activeThreadId: nextRef.threadId });
+      await expect.element(button).toHaveAttribute("aria-pressed", "false");
+      expect(fixture.composerRef.current?.getSendContext().computerUseEnabled).toBe(false);
+      expect(useComposerDraftStore.getState().getComposerDraft(draftRef)?.computerUseEnabled).toBe(
+        true,
+      );
+    } finally {
+      __resetEnvironmentApiOverridesForTests();
+    }
+  });
+  it("switches computer use from its own composer button after thinking without submitting the draft", async () => {
+    const state: GlideControlResult = {
+      available: true,
+      connected: true,
+      enabled: false,
+      fullAccess: true,
+      busy: false,
+      paused: false,
+      accessibility: true,
+      screenRecording: true,
+      apps: [],
+      runningApps: [],
+      message: "Background desktop control",
+    };
+    const control = vi.fn(async (input: { action: string; enabled?: boolean }) => ({
+      ...state,
+      enabled: input.action === "set-enabled" && input.enabled === true,
+    }));
+    __setEnvironmentApiOverrideForTests(environmentId, {
+      glide: { control },
+    } as unknown as EnvironmentApi);
+    try {
+      const codex = {
+        ...providers[0]!,
+        models: providers[0]!.models.map((model) => ({
+          ...model,
+          slug: "gpt-5.4",
+          name: "GPT-5.4",
+          capabilities: createModelCapabilities({
+            optionDescriptors: [
+              {
+                id: "effort",
+                label: "Thinking",
+                type: "select",
+                options: [
+                  { id: "low", label: "Low" },
+                  { id: "high", label: "High", isDefault: true },
+                ],
+              },
+            ],
+          }),
+        })),
+      };
+      await using fixture = await mountComposer(860, {
+        runtimeMode: "full-access",
+        providerStatuses: [codex, ...providers.slice(1)],
+      });
+      const computer = page.getByRole("button", { name: "Computer use", exact: true });
+      await expect.element(computer).toBeEnabled();
+      const thinking = fixture.host.querySelector('[aria-label="More composer controls"]')!;
+      await expect.element(page.elementLocator(thinking)).toHaveTextContent("High");
+      expect(thinking.nextElementSibling?.getAttribute("data-computer-use")).toBe("true");
+      const prompt = fixture.props.promptRef.current;
+      await computer.click();
+      await expect.element(computer).toHaveAttribute("aria-pressed", "true");
+      expect(control.mock.calls.at(-1)?.[0]).toEqual({
+        action: "set-enabled",
+        threadId: fixture.props.activeThreadId,
+        enabled: true,
+      });
+      const composer = page.elementLocator(
+        fixture.host.querySelector('[data-chat-composer-form="true"]')!,
+      );
+      await composer.screenshot({ path: "../../../../../.logs/computer-use-composer.png" });
+      await computer.click();
+      await expect.element(computer).toHaveAttribute("aria-pressed", "false");
+      await composer.screenshot({ path: "../../../../../.logs/computer-use-composer-off.png" });
+      expect(fixture.onSend).not.toHaveBeenCalled();
+      expect(fixture.props.promptRef.current).toBe(prompt);
+      await page.getByRole("button", { name: "More composer controls", exact: true }).click();
+      await expect
+        .element(page.getByRole("menuitem", { name: "Glide", exact: true }))
+        .not.toBeInTheDocument();
+      await closeComposerControlsWithKeyboard();
+    } finally {
+      __resetEnvironmentApiOverridesForTests();
+    }
+  });
+  it("keeps scroll controls from submitting or changing the composer draft", async () => {
+    const onScrollToBottom = vi.fn();
+    const onHideUntilBottom = vi.fn();
+    await using fixture = await mountComposer(860, {
+      scrollToBottomControl: (
+        <ScrollToBottomControl
+          onScrollToBottom={onScrollToBottom}
+          onHideUntilBottom={onHideUntilBottom}
+        />
+      ),
+    });
+    const prompt = fixture.props.promptRef.current;
+    await page.getByRole("button", { name: "Scroll to bottom", exact: true }).click();
+    expect(onScrollToBottom).toHaveBeenCalledOnce();
+    expect(fixture.onSend).not.toHaveBeenCalled();
+    expect(fixture.props.promptRef.current).toBe(prompt);
+    await page.getByRole("button", { name: "Scroll to bottom options", exact: true }).click();
+    await page.getByRole("button", { name: "Hide until bottom", exact: true }).click();
+    expect(onHideUntilBottom).toHaveBeenCalledOnce();
+    expect(fixture.onSend).not.toHaveBeenCalled();
+    expect(fixture.props.promptRef.current).toBe(prompt);
+  });
+
   it.each([
     { width: 860, scale: 100, dark: true },
     { width: 860, scale: 100, dark: false },

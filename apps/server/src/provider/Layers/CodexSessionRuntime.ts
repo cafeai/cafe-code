@@ -360,6 +360,7 @@ export interface CodexAppServerLaunchOptions {
   readonly schedulingMcp?: Pick<SchedulingSessionBinding, "name" | "launch"> | undefined;
   readonly managementMcp?: Pick<SchedulingSessionBinding, "name" | "launch"> | undefined;
   readonly visualizationMcp?: Pick<SchedulingSessionBinding, "name" | "launch"> | undefined;
+  readonly glideMcp?: Pick<SchedulingSessionBinding, "name" | "launch"> | undefined;
   readonly maxConcurrentSubagents?: number | undefined;
   readonly transportPolicy?: CodexTransportPolicy | undefined;
 }
@@ -456,6 +457,7 @@ export function buildCodexAppServerArgs(
     ...(options.managementMcp ? ["-c", schedulingMcpOverride(options.managementMcp, false)] : []),
     ...(options.schedulingMcp ? ["-c", schedulingMcpOverride(options.schedulingMcp)] : []),
     ...(options.visualizationMcp ? ["-c", schedulingMcpOverride(options.visualizationMcp)] : []),
+    ...(options.glideMcp ? ["-c", schedulingMcpOverride(options.glideMcp)] : []),
   ] as const;
 
   if (options.transportPolicy?.responsesWebsockets !== "disabled") {
@@ -487,6 +489,7 @@ export function buildCodexAppServerArgs(
 export interface CodexSessionRuntimeOptions {
   readonly customInstructions?: string | undefined;
   readonly visualizationMcp?: Pick<SchedulingSessionBinding, "name" | "launch"> | undefined;
+  readonly glideMcp?: Pick<SchedulingSessionBinding, "name" | "launch"> | undefined;
   /** Exact Cafe chat/account-bound durable guard; never a native history writer. */
   readonly historySafety?: CodexHistorySafetyCallbacks<CodexSessionRuntimeError>;
   readonly schedulingMcp?: Pick<SchedulingSessionBinding, "name" | "launch"> | undefined;
@@ -6586,6 +6589,7 @@ export const makeCodexSessionRuntime = (
       schedulingMcp: options.schedulingMcp,
       managementMcp: options.managementMcp,
       visualizationMcp: options.visualizationMcp,
+      glideMcp: options.glideMcp,
       maxConcurrentSubagents: options.maxConcurrentSubagents,
       transportPolicy: options.transportPolicy,
     });

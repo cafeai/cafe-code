@@ -2,7 +2,7 @@ import * as Schema from "effect/Schema";
 import { SubagentRuntimeId, ThreadId } from "./baseSchemas.ts";
 import { ProviderInstanceId } from "./providerInstance.ts";
 
-/** A bounded, volatile level from one native session, not authenticated account
+/** A bounded, volatile native observation, not authenticated account
  * identity, a billing ledger, or permission to fetch provider metadata. */
 export const PROVIDER_SESSION_QUOTA_MAX_METERS = 128;
 export const PROVIDER_SESSION_QUOTA_MAX_CLASSIFICATION_CHARS = 64;
@@ -60,7 +60,7 @@ export const ProviderSessionQuotaExtraUsage = Schema.Struct({
 export type ProviderSessionQuotaExtraUsage = typeof ProviderSessionQuotaExtraUsage.Type;
 
 export const ProviderSessionQuotaReport = Schema.Struct({
-  source: Schema.Literal("claude-session"),
+  source: Schema.Literals(["claude-session", "claude-cli"]),
   // This is Cafe's receipt time, never an asserted endpoint fetch timestamp.
   observedAt: ProviderSessionQuotaTimestamp,
   // Null is unavailable/no current rows. [] is an explicitly empty server level.
@@ -73,7 +73,7 @@ export const ProviderSessionQuotaReport = Schema.Struct({
 });
 export type ProviderSessionQuotaReport = typeof ProviderSessionQuotaReport.Type;
 
-/** Read-only subscription to owner-held session metadata. The optional exact
+/** Allowance subscription using the owner's configured native login. The optional exact
  * Cafe session/query binding prevents selecting a different chat by accident;
  * no native id, authentication identity, cwd, or provider prompt is accepted. */
 export const ProviderSessionQuotaInput = Schema.Struct({

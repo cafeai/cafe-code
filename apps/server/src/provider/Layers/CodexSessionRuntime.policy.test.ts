@@ -21,7 +21,7 @@ import {
   selectCodexActiveSnapshotTurn,
 } from "./CodexSessionRuntime.ts";
 describe("buildCodexAppServerArgs", () => {
-  it.each(["visualizationMcp", "managementMcp"] as const)(
+  it.each(["visualizationMcp", "managementMcp", "glideMcp"] as const)(
     "adds only the admitted %s catalog without changing permissions",
     (kind) => {
       // Inspect the real structured launch builder without starting a provider or

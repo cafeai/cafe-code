@@ -1,4 +1,11 @@
 // @effect-diagnostics nodeBuiltinImport:off
+import {
+  bindGlideSession,
+  activateGlideSession,
+  cancelGlideSession,
+  disposeGlideSession,
+  type GlideSessionBinding,
+} from "../../glide/providerBinding.ts";
 import * as NodeConstants from "node:constants";
 import * as NodeFS from "node:fs/promises";
 import * as NodeOS from "node:os";
@@ -171,6 +178,7 @@ interface GrokSessionContext {
   readonly sandboxProfile: GrokSandboxProfile;
   readonly mcpAuthSessionId: AuthSessionId | undefined;
   readonly schedulingBinding: SchedulingSessionBinding | undefined;
+  readonly glideBinding?: GlideSessionBinding | undefined;
   notificationFiber: Fiber.Fiber<void, never> | undefined;
   readonly pendingApprovals: Map<ApprovalRequestId, PendingApproval>;
   readonly pendingUserInputs: Map<ApprovalRequestId, PendingUserInput>;
@@ -1216,6 +1224,7 @@ export function makeGrokAdapter(grokSettings: GrokSettings, options?: GrokAdapte
     ) =>
       Effect.gen(function* () {
         if (ctx.stopped) return;
+        yield* disposeGlideSession(ctx.glideBinding);
         // Retire scheduling authority immediately, including paths that defer
         // process-scope closure to avoid interrupting their own callback.
         yield* Effect.promise(() => ctx.schedulingBinding?.dispose() ?? Promise.resolve()).pipe(
@@ -1403,6 +1412,15 @@ export function makeGrokAdapter(grokSettings: GrokSettings, options?: GrokAdapte
                   ),
               ).pipe(Effect.provideService(Scope.Scope, sessionScope))
             : undefined;
+          const glideBinding = yield* Effect.acquireRelease(
+            bindGlideSession({
+              threadId: input.threadId,
+              providerInstanceId: boundInstanceId,
+              provider: "grok",
+              runtimeMode: input.runtimeMode,
+            }),
+            disposeGlideSession,
+          ).pipe(Effect.provideService(Scope.Scope, sessionScope));
           const acp = yield* (options?.makeRuntime ?? makeGrokAcpRuntime)({
             grokSettings,
             ...(options?.environment ? { environment: options.environment } : {}),
@@ -1414,6 +1432,19 @@ export function makeGrokAdapter(grokSettings: GrokSettings, options?: GrokAdapte
             ...(resumeSessionId ? { resumeSessionId } : {}),
             clientInfo: { name: "cafe-code", version: "0.0.0" },
             mcpServers: [
+              ...(glideBinding
+                ? [
+                    {
+                      name: glideBinding.name,
+                      command: glideBinding.launch.command,
+                      args: [...glideBinding.launch.args],
+                      env: Object.entries(glideBinding.launch.env).map(([name, value]) => ({
+                        name,
+                        value,
+                      })),
+                    },
+                  ]
+                : []),
               {
                 type: "http" as const,
                 name: "cafe-code",
@@ -1755,6 +1786,7 @@ export function makeGrokAdapter(grokSettings: GrokSettings, options?: GrokAdapte
             mcpAuthSessionId: mcpCredential?.sessionId,
             schedulingBinding,
             notificationFiber: undefined,
+            glideBinding,
             pendingApprovals,
             pendingUserInputs,
             turns: [],
@@ -1905,6 +1937,7 @@ export function makeGrokAdapter(grokSettings: GrokSettings, options?: GrokAdapte
             });
           }
           sessions.set(input.threadId, ctx);
+          yield* activateGlideSession(glideBinding, { threadId: input.threadId, provider: "grok" });
 
           yield* offerRuntimeEvent({
             type: "session.started",
@@ -1952,6 +1985,7 @@ export function makeGrokAdapter(grokSettings: GrokSettings, options?: GrokAdapte
               });
             }
             const turnId = TurnId.make(yield* randomUUIDv4);
+            ctx.glideBinding?.resume();
             ctx.promptsInFlight += 1;
             // Bind the turn id before cooperative yields so interruptTurn can
             // settle this prompt even if stop arrives during preparation.
@@ -2454,6 +2488,7 @@ export function makeGrokAdapter(grokSettings: GrokSettings, options?: GrokAdapte
             }
             const interruptedTurnId =
               observed.interruptedTurnId ?? turnId ?? activeTurnId ?? ctx.session.activeTurnId;
+            yield* cancelGlideSession(ctx.glideBinding);
             yield* settlePendingApprovalsAsCancelled(ctx.pendingApprovals);
             yield* settlePendingUserInputsAsCancelled(ctx.pendingUserInputs);
             yield* Effect.ignore(

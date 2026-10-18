@@ -14,6 +14,7 @@
     "@opencode-ai/sdk": "^1.17.18",
     "@pierre/diffs": "catalog:",
     "@types/web-push": "^3.6.4",
+    "acorn": "8.18.0",
     "effect": "catalog:",
     "electron-updater": "^6.6.2",
     "jsonc-parser": "3.3.1",

@@ -33,6 +33,137 @@ const fixtureLayer = OrchestrationProjectionSnapshotQueryLive.pipe(
 );
 
 it.layer(fixtureLayer)("earlier current-turn work-log pages", (it) => {
+  it.effect("does not advertise task-card or roster-only activity as historical work", () =>
+    Effect.gen(function* () {
+      const sql = yield* SqlClient.SqlClient;
+      const query = yield* ProjectionSnapshotQuery;
+      yield* sql`DELETE FROM projection_thread_activities`;
+      const hidden = [
+        ["task.progress", { taskId: "ambient", visibility: "ambient" }],
+        ["task.completed", { taskId: "ambient", visibility: "ambient" }],
+        ["task.progress", { taskId: "workflow", workflow: { version: 1 } }],
+        ["task.completed", { taskId: "workflow", workflow: null }],
+        ["tool.updated", { itemType: "collab_agent_tool_call" }],
+        ["tool.completed", { itemType: "collab_agent_tool_call" }],
+      ] as const;
+      for (const [index, [kind, payload]] of hidden.entries()) {
+        yield* sql`INSERT INTO projection_thread_activities
+          (activity_id,thread_id,turn_id,tone,kind,summary,payload_json,sequence,created_at)
+          VALUES (${`hidden-${index}`},${threadId},${turnId},'info',${kind},'Task',${JSON.stringify(payload)},${index + 1},${timestamp(index + 1)})`;
+      }
+      const before = cursor(500, "live-floor", timestamp(500));
+      for (const range of [{}, { before }]) {
+        assert.deepStrictEqual(
+          (yield* query.getThreadTurnWorkLogPresence({ threadId, turnIds: [turnId], ...range }))
+            .turnIdsWithWorkLog,
+          [],
+        );
+        const page = yield* query.getThreadTurnActivityPage({
+          threadId,
+          turnId,
+          offset: 0,
+          limit: 6,
+          ...range,
+        });
+        assert.equal(page.totalCount, 0);
+        assert.deepStrictEqual(page.activities, []);
+      }
+
+      // Ordinary task progress remains visible, including the same summary.
+      yield* sql`INSERT INTO projection_thread_activities
+        (activity_id,thread_id,turn_id,tone,kind,summary,payload_json,sequence,created_at)
+        VALUES ('visible-task',${threadId},${turnId},'info','task.progress','Task',${JSON.stringify({ taskId: "visible", visibility: "visible" })},10,${timestamp(10)})`;
+      assert.deepStrictEqual(
+        (yield* query.getThreadTurnWorkLogPresence({ threadId, turnIds: [turnId], before }))
+          .turnIdsWithWorkLog,
+        [turnId],
+      );
+      const page = yield* query.getThreadTurnActivityPage({
+        threadId,
+        turnId,
+        offset: 0,
+        limit: 6,
+        before,
+      });
+      assert.equal(page.totalCount, 1);
+      assert.deepStrictEqual(
+        page.activities.map((activity) => activity.id),
+        ["visible-task"],
+      );
+    }),
+  );
+
+  it.effect(
+    "omits only the configured current turn's redundant start receipt from presence/count/pages",
+    () =>
+      Effect.gen(function* () {
+        const sql = yield* SqlClient.SqlClient;
+        const query = yield* ProjectionSnapshotQuery;
+        yield* sql`DELETE FROM projection_thread_activities`;
+        yield* sql`INSERT INTO projection_thread_activities
+        (activity_id,thread_id,turn_id,tone,kind,summary,payload_json,sequence,created_at)
+        VALUES ('saved-start-ack',${threadId},${turnId},'info','task.progress','Turn accepted',${JSON.stringify({ taskId: `codex-turn-start:${turnId}` })},1,${timestamp(1)})`;
+        const before = cursor(500, "live-floor", timestamp(500));
+        for (const excludeTurnStartAck of [undefined, false, true]) {
+          const filters = {
+            before,
+            ...(excludeTurnStartAck === undefined ? {} : { excludeTurnStartAck }),
+          };
+          const presence = yield* query.getThreadTurnWorkLogPresence({
+            threadId,
+            turnIds: [turnId],
+            ...filters,
+          });
+          const page = yield* query.getThreadTurnActivityPage({
+            threadId,
+            turnId,
+            offset: 0,
+            limit: 6,
+            ...filters,
+          });
+          assert.deepStrictEqual(presence.turnIdsWithWorkLog, excludeTurnStartAck ? [] : [turnId]);
+          assert.equal(page.totalCount, excludeTurnStartAck ? 0 : 1);
+          assert.deepStrictEqual(
+            page.activities.map((activity) => activity.id),
+            excludeTurnStartAck ? [] : ["saved-start-ack"],
+          );
+          assert.equal(page.excludeTurnStartAck, excludeTurnStartAck);
+        }
+        // A different task or an absent task id remains real historical work.
+        // Neither shared wording nor a sibling native-turn suffix is a match.
+        for (const [id, payload] of [
+          ["ordinary-task", {}],
+          ["different-turn-suffix", { taskId: "codex-turn-start:other-turn" }],
+        ] as const) {
+          yield* sql`INSERT INTO projection_thread_activities
+          (activity_id,thread_id,turn_id,tone,kind,summary,payload_json,sequence,created_at)
+          VALUES (${id},${threadId},${turnId},'info','task.progress','Turn accepted',${JSON.stringify(payload)},2,${timestamp(2)})`;
+        }
+        const visible = yield* query.getThreadTurnActivityPage({
+          threadId,
+          turnId,
+          offset: 0,
+          limit: 6,
+          before,
+          excludeTurnStartAck: true,
+        });
+        assert.equal(visible.totalCount, 2);
+        assert.deepStrictEqual(
+          new Set(visible.activities.map((activity) => activity.id)),
+          new Set(["ordinary-task", "different-turn-suffix"]),
+        );
+        assert.deepStrictEqual(
+          (yield* query.getThreadTurnWorkLogPresence({
+            threadId,
+            turnIds: [turnId],
+            before,
+            excludeTurnStartAck: true,
+          })).turnIdsWithWorkLog,
+          [turnId],
+        );
+      }),
+  );
+
   it.effect("does not count already-inline retention exceptions as earlier work", () =>
     Effect.gen(function* () {
       const sql = yield* SqlClient.SqlClient;

@@ -1,12 +1,33 @@
 import { useUiLocale } from "~/i18n";
 import { uiText } from "@cafecode/shared/i18n";
-import { UiMessage } from "~/i18n";
 import { useEffect, useState, type ReactNode } from "react";
 
 import type { CodexRateLimitPresentation } from "../lib/codexRateLimits";
 import { cn } from "../lib/utils";
 import { CLAUDE_QUOTA_STALE_AFTER_MS, formatClaudeSessionQuota } from "../lib/claudeSessionQuota";
 import type { ProviderQuotaState } from "./chat/useProviderQuota";
+import type { ClaudeSessionQuotaPresentation } from "../lib/claudeSessionQuota";
+
+type ClaudeQuotaMeter = NonNullable<ClaudeSessionQuotaPresentation["meters"]>[number];
+
+function ClaudeQuotaMeterRow({ meter }: { readonly meter: ClaudeQuotaMeter }) {
+  const uiLocale = useUiLocale();
+  return (
+    <section
+      aria-label={uiText("{value0} quota", { value0: meter.label }, undefined, uiLocale)}
+      className="min-w-0 space-y-1"
+      data-claude-quota-meter={meter.id}
+    >
+      <div className="flex min-w-0 flex-wrap items-baseline justify-between gap-x-3 gap-y-1">
+        <span>{meter.label}</span>
+        <span className="font-medium text-foreground tabular-nums">{meter.value}</span>
+      </div>
+      <UsageMeterBar percent={meter.remainingPercent} testId={`claude-${meter.id}`} />
+      {meter.reset ? <p className="text-2xs text-subtle-foreground">{meter.reset}</p> : null}
+      {meter.severity !== "normal" && meter.severity !== "unknown" ? <p>{meter.severity}</p> : null}
+    </section>
+  );
+}
 
 export function UsageMeterBar(props: { readonly percent: number; readonly testId: string }) {
   const normalized = Math.max(0, Math.min(100, props.percent));
@@ -31,6 +52,7 @@ export function UsageMeterBar(props: { readonly percent: number; readonly testId
 export function ProviderAccountQuotaDetails(props: {
   readonly presentation?: CodexRateLimitPresentation | null;
   readonly sessionQuota?: ProviderQuotaState | undefined;
+  readonly selectedModel?: string | null | undefined;
   readonly layout?: "compact" | "popover" | "panel" | "settings";
   readonly action?: ReactNode;
 }) {
@@ -58,7 +80,9 @@ export function ProviderAccountQuotaDetails(props: {
     );
     return () => clearTimeout(timer);
   }, [report, clock]);
-  const session = report ? formatClaudeSessionQuota(report) : null;
+  const session = report
+    ? formatClaudeSessionQuota(report, { selectedModel: props.selectedModel })
+    : null;
   // Anonymous historical event windows have no current query/config binding.
   // They must not reappear beneath a newly scoped unavailable/offline report.
   // Existing unscoped consumers and other provider drivers remain unchanged.
@@ -94,22 +118,8 @@ export function ProviderAccountQuotaDetails(props: {
               <div className="label-overline">
                 {uiText("Account usage", undefined, undefined, uiLocale)}
               </div>
-              <p>
-                {uiText("Session-reported · not account-verified", undefined, undefined, uiLocale)}
-              </p>
-              <p>
-                {uiText(
-                  "{observed} · local time{stale, select, yes { · Stale reading} other {}}",
-                  {
-                    observed: session.observed,
-                    stale: session.stale ? "yes" : "no",
-                  },
-                  undefined,
-                  uiLocale,
-                )}
-              </p>
               <div
-                className="focus-ring min-h-0 min-w-0 max-h-[40vh] space-y-2.5 overflow-y-auto rounded-sm"
+                className="focus-ring min-h-0 min-w-0 max-h-[40vh] space-y-3 overflow-y-auto rounded-sm"
                 data-account-quota-scroll
                 tabIndex={0}
                 role="region"
@@ -134,71 +144,14 @@ export function ProviderAccountQuotaDetails(props: {
                     {uiText("Claude reported no quota meters.", undefined, undefined, uiLocale)}
                   </p>
                 ) : (
-                  session.meters.map((meter, index) => (
-                    <section
-                      key={meter.id}
-                      aria-label={uiText(
-                        "{value0} quota",
-                        { value0: meter.label },
-                        undefined,
-                        uiLocale,
-                      )}
-                      className="min-w-0 space-y-1.5"
-                      data-claude-quota-meter={meter.id}
-                    >
-                      {index === 0 || session.meters?.[index - 1]?.group !== meter.group ? (
-                        <div className="font-medium text-foreground">{meter.group}</div>
-                      ) : null}
-                      <div className="flex min-w-0 flex-wrap items-baseline justify-between gap-x-3 gap-y-1">
-                        <span>{meter.label}</span>
-                        <span className="font-medium text-foreground tabular-nums">
-                          {meter.value}
-                        </span>
-                      </div>
-                      <UsageMeterBar
-                        percent={meter.remainingPercent}
-                        testId={`claude-${meter.id}`}
-                      />
-                      {meter.reset ? <p>{meter.reset}</p> : null}
-                      <p>
-                        {meter.severity}
-                        {meter.isActive
-                          ? uiText(" · Provider headline", undefined, undefined, uiLocale)
-                          : ""}
-                        {meter.stale
-                          ? uiText(" · Stale; request a new report", undefined, undefined, uiLocale)
-                          : ""}
-                      </p>
-                    </section>
+                  session.meters.map((meter) => (
+                    <ClaudeQuotaMeterRow key={meter.id} meter={meter} />
                   ))
                 )}
-                {session.extraUsage ? (
-                  <section
-                    aria-label={uiText("Extra usage", undefined, undefined, uiLocale)}
-                    className="min-w-0 space-y-1.5 border-t border-border-subtle pt-2"
-                  >
-                    <div className="font-medium text-foreground">
-                      {uiText(
-                        "Extra usage (separate from plan quota)",
-                        undefined,
-                        undefined,
-                        uiLocale,
-                      )}
-                    </div>
-                    {session.extraUsage.map((line) => (
-                      <p key={line}>{line}</p>
-                    ))}
-                  </section>
+                {session.extraUsageSummary ? (
+                  <p className="text-2xs text-subtle-foreground">{session.extraUsageSummary}</p>
                 ) : null}
               </div>
-              <p>
-                {uiText(
-                  "Request /usage in Claude to update. Opening this view does not refresh it.",
-                  undefined,
-                  undefined,
-                  uiLocale,
-                )}
-              </p>
             </>
           ) : (
             <p>

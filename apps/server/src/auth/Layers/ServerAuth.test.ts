@@ -2,6 +2,11 @@ import * as NodeServices from "@effect/platform-node/NodeServices";
 import { expect, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
+import * as Clock from "effect/Clock";
+import * as TestClock from "effect/testing/TestClock";
+import { AuthSessionId } from "@cafecode/contracts/auth";
+import { TwoFactorService } from "../Services/TwoFactorService.ts";
+import { totpAtStep } from "../totp.ts";
 
 import type { ServerConfigShape } from "../../config.ts";
 import { ServerConfig } from "../../config.ts";
@@ -49,6 +54,138 @@ const requestMetadata = {
 };
 
 it.layer(NodeServices.layer)("ServerAuthLive", (it) => {
+  it.effect(
+    "requires second-factor proof for both cookie and bearer password and pairing logins",
+    () =>
+      Effect.gen(function* () {
+        const auth = yield* ServerAuth;
+        const factor = yield* TwoFactorService;
+        yield* auth.setAdminPassword({ password: "test-admin-password" });
+        const setup = yield* factor.begin(AuthSessionId.make("fixture-owner"));
+        const enabled = yield* factor.enable(
+          AuthSessionId.make("fixture-owner"),
+          totpAtStep(setup.secret, Math.floor((yield* Clock.currentTimeMillis) / 30_000)),
+        );
+        expect((yield* auth.getDescriptor()).twoFactorRequired).toBe(true);
+        const pairing = yield* auth.issuePairingCredential();
+        for (const attempt of [
+          auth.exchangePasswordCredential({ password: "test-admin-password" }, requestMetadata),
+          auth.exchangePasswordCredentialForBearerSession(
+            { password: "test-admin-password" },
+            requestMetadata,
+          ),
+          auth.exchangeBootstrapCredential(pairing.credential, requestMetadata),
+          auth.exchangeBootstrapCredentialForBearerSession(pairing.credential, requestMetadata),
+        ].map(
+          (attempt) =>
+            attempt as Effect.Effect<unknown, import("../Services/ServerAuth.ts").AuthError>,
+        ))
+          expect((yield* attempt.pipe(Effect.flip)).status).toBe(401);
+        expect((yield* auth.listPairingLinks()).map((entry) => entry.id)).toContain(pairing.id);
+        yield* TestClock.adjust("30 seconds");
+        const code = totpAtStep(
+          setup.secret,
+          Math.floor((yield* Clock.currentTimeMillis) / 30_000),
+        );
+        // Wrong first-factor verification cannot spend the correct OTP.
+        expect(
+          (yield* auth
+            .exchangePasswordCredential({ password: "wrong", secondFactor: code }, requestMetadata)
+            .pipe(Effect.flip)).status,
+        ).toBe(401);
+        const cookie = yield* auth.exchangePasswordCredential(
+          { password: "test-admin-password", secondFactor: code },
+          requestMetadata,
+        );
+        expect(
+          (yield* auth.authenticateHttpRequest(makeCookieRequest(cookie.sessionToken))).role,
+        ).toBe("owner");
+        expect(
+          (yield* auth
+            .exchangePasswordCredentialForBearerSession(
+              { password: "test-admin-password", secondFactor: code },
+              requestMetadata,
+            )
+            .pipe(Effect.flip)).status,
+        ).toBe(401);
+        const bearer = yield* auth.exchangePasswordCredentialForBearerSession(
+          { password: "test-admin-password", secondFactor: enabled.recoveryCodes[0]! },
+          requestMetadata,
+        );
+        expect(bearer.sessionMethod).toBe("bearer-session-token");
+        const pairedCookie = yield* auth.exchangeBootstrapCredential(
+          pairing.credential,
+          requestMetadata,
+          enabled.recoveryCodes[1],
+        );
+        expect(
+          (yield* auth.authenticateHttpRequest(makeCookieRequest(pairedCookie.sessionToken))).role,
+        ).toBe("client");
+        const second = yield* auth.issuePairingCredential();
+        expect(
+          (yield* auth.exchangeBootstrapCredentialForBearerSession(
+            second.credential,
+            requestMetadata,
+            enabled.recoveryCodes[2],
+          )).role,
+        ).toBe("client");
+        // An enabled second factor never turns the exact native handoff into an
+        // interactive remote login, including when a client forges its metadata.
+        expect(
+          (yield* auth.exchangeBootstrapCredential("native-desktop-capability", {
+            ...requestMetadata,
+            ipAddress: "203.0.113.7",
+          })).response.role,
+        ).toBe("owner");
+      }).pipe(
+        Effect.provide(makeServerAuthLayer({ desktopBootstrapToken: "native-desktop-capability" })),
+      ),
+  );
+
+  it.effect("shares the second-factor budget across IPs, usernames, cookie and bearer paths", () =>
+    Effect.gen(function* () {
+      const auth = yield* ServerAuth;
+      const factor = yield* TwoFactorService;
+      yield* auth.setAdminPassword({ password: "test-admin-password" });
+      const setup = yield* factor.begin(AuthSessionId.make("fixture-owner"));
+      const enabled = yield* factor.enable(
+        AuthSessionId.make("fixture-owner"),
+        totpAtStep(setup.secret, Math.floor((yield* Clock.currentTimeMillis) / 30_000)),
+      );
+      for (let index = 0; index < 5; index++) {
+        const input = {
+          password: "test-admin-password",
+          secondFactor: "wrong-code",
+          username: `name-${index}`,
+        };
+        const metadata = { ...requestMetadata, ipAddress: `203.0.113.${index}` };
+        const attempt: Effect.Effect<unknown, import("../Services/ServerAuth.ts").AuthError> =
+          index % 2 === 0
+            ? auth.exchangePasswordCredential(input, metadata)
+            : auth.exchangePasswordCredentialForBearerSession(input, metadata);
+        expect((yield* attempt.pipe(Effect.flip)).status).toBe(401);
+      }
+      const pairing = yield* auth.issuePairingCredential();
+      const blocked = yield* auth
+        .exchangeBootstrapCredentialForBearerSession(
+          pairing.credential,
+          requestMetadata,
+          enabled.recoveryCodes[0],
+        )
+        .pipe(Effect.flip);
+      expect(blocked.status).toBe(429);
+      expect(blocked.retryAfterSeconds).toBe(30);
+      yield* TestClock.adjust("30 seconds");
+      expect(
+        (yield* auth.exchangeBootstrapCredential(
+          pairing.credential,
+          requestMetadata,
+          enabled.recoveryCodes[0],
+        )).response.authenticated,
+      ).toBe(true);
+    }).pipe(Effect.provide(makeServerAuthLayer())),
+  );
+
   it.effect("maps invalid bootstrap credential failures to 401", () =>
     Effect.sync(() => {
       const error = toBootstrapExchangeAuthError(

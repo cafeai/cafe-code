@@ -1829,6 +1829,7 @@ export async function addSavedEnvironment(input: {
   readonly host?: string;
   readonly pairingCode?: string;
   readonly password?: string;
+  readonly secondFactor?: string;
 }): Promise<SavedEnvironmentRecord> {
   const password = input.password?.trim();
   if (password !== undefined && !password) {
@@ -1863,10 +1864,12 @@ export async function addSavedEnvironment(input: {
     ? await bootstrapRemoteBearerSession({
         httpBaseUrl: resolvedTarget.httpBaseUrl,
         credential: pairingTarget.credential,
+        ...(input.secondFactor ? { secondFactor: input.secondFactor } : {}),
       })
     : await bootstrapRemotePasswordBearerSession({
         httpBaseUrl: resolvedTarget.httpBaseUrl,
         password: password!,
+        ...(input.secondFactor ? { secondFactor: input.secondFactor } : {}),
       });
 
   const record: SavedEnvironmentRecord = {

@@ -54,12 +54,14 @@ export interface ClaudeSessionQuotaPresentation {
       }[]
     | null;
   readonly extraUsage: readonly string[];
+  readonly extraUsageSummary: string | null;
 }
 
 interface FormatOptions {
   readonly now?: number;
   readonly locale?: string;
   readonly timeZone?: string;
+  readonly selectedModel?: string | null | undefined;
 }
 
 function localTime(instant: string, options: FormatOptions): string | null {
@@ -137,6 +139,7 @@ export function formatClaudeSessionQuota(
 ): ClaudeSessionQuotaPresentation {
   const now = options.now ?? Date.now();
   const received = Date.parse(report.observedAt);
+  const fableSelected = /^(?:claude-)?fable(?:$|-|\[|:)/i.test(options.selectedModel?.trim() ?? "");
   const stale =
     !Number.isFinite(received) || now < received || now - received >= CLAUDE_QUOTA_STALE_AFTER_MS;
   return {
@@ -145,7 +148,16 @@ export function formatClaudeSessionQuota(
     }),
     stale,
     meters:
-      report.meters?.map((meter, index) => {
+      report.meters?.flatMap((meter, index) => {
+        // This is the selected model's allowance view, not evidence of which
+        // models have been used. Never substitute the general weekly bucket
+        // for a missing Fable allowance or show Fable beside another model.
+        if (meter.kind === "weekly_all" && fableSelected) return [];
+        if (
+          meter.kind === "weekly_scoped" &&
+          !(fableSelected && /^fable(?:$|\s|-|:)/i.test(meter.modelLabel?.trim() ?? ""))
+        )
+          return [];
         const expired = meter.resetsAt !== null && Date.parse(meter.resetsAt) <= now;
         const rowStale = stale || expired;
         const remaining = 100 - meter.usedPercent;
@@ -161,7 +173,7 @@ export function formatClaudeSessionQuota(
             meter.kind === "session"
               ? uiText("Session window")
               : meter.kind === "weekly_all"
-                ? uiText("Weekly (all models)")
+                ? uiText("Weekly")
                 : meter.kind === "weekly_scoped"
                   ? uiText("Weekly")
                   : meter.kind,
@@ -186,6 +198,12 @@ export function formatClaudeSessionQuota(
           isActive: meter.isActive,
         };
       }) ?? null,
+    extraUsageSummary:
+      report.extraUsage?.enabled && report.extraUsage.usedPercent !== null
+        ? uiText("{percent}% of extra usage used", {
+            percent: percent(report.extraUsage.usedPercent, options.locale),
+          })
+        : null,
     extraUsage:
       report.extraUsage === undefined
         ? [uiText("Extra usage not reported.")]

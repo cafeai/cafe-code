@@ -1,3 +1,9 @@
+import {
+  GLIDE_OWNER_PATH,
+  glideOwnerOperationSchema,
+  dispatchGlideOwnerOperation,
+} from "../glide/sessionRuntime.ts";
+import { runPrivateGlideRequest } from "../glide/privateDaemon.ts";
 import { ProviderAdapterValidationError } from "../provider/Errors.ts";
 import {
   SCHEDULING_SESSION_DAEMON_PATH,
@@ -1692,6 +1698,17 @@ export const runProviderDaemonServer = (
                 error: "Visualization session is unavailable.",
               });
             },
+          );
+          return;
+        }
+        if (url.pathname === GLIDE_OWNER_PATH && method === "POST") {
+          if (!hasCapability(request, "rpc")) {
+            writeJson(response, 401, { error: "unauthorized" });
+            return;
+          }
+          // Ephemeral control traffic never enters command/event diagnostics.
+          await runPrivateGlideRequest(request, response, (body, signal) =>
+            dispatchGlideOwnerOperation(glideOwnerOperationSchema.parse(body), signal),
           );
           return;
         }

@@ -32,6 +32,7 @@ import { AuthSessionId } from "@cafecode/contracts/auth";
 import { ServerConfig } from "../../config.ts";
 import { storeFileAttachment } from "../../fileAttachmentStore.ts";
 import { installSchedulingSessionBroker } from "../../scheduledFollowups/sessionRuntime.ts";
+import { installGlideSessionRuntime } from "../../glide/sessionRuntime.ts";
 import type { AcpSessionRuntime } from "../acp/AcpSessionRuntime.ts";
 import type { GrokAdapterShape } from "../Services/GrokAdapter.ts";
 import {
@@ -438,6 +439,74 @@ it("auto-approves only edit-like requests in Cafe's auto-accept mode", () => {
 });
 
 it.layer(grokAdapterTestLayer)("GrokAdapterLive", (it) => {
+  it.effect("attaches the exact Glide owner through ACP without changing Grok permissions", () =>
+    Effect.gen(function* () {
+      const fixture = makeSchedulingRuntimeFixture();
+      yield* Effect.addFinalizer(() => Effect.sync(fixture.release));
+      const threadId = ThreadId.make("grok-glide-thread");
+      const instance = ProviderInstanceId.make("grok-glide-owner");
+      const launch = {
+        command: process.execPath,
+        args: [NodePath.join(process.cwd(), "synthetic-glide-bridge.mjs")],
+        env: { ELECTRON_RUN_AS_NODE: "1" },
+      };
+      let activations = 0,
+        disposals = 0,
+        binds = 0;
+      const release = installGlideSessionRuntime({
+        bind: async (identity) => {
+          assert.deepEqual(identity, {
+            threadId,
+            providerInstanceId: instance,
+            provider: "grok",
+            runtimeMode: "approval-required",
+          });
+          binds++;
+          return {
+            name: "cafe-glide",
+            launch,
+            activate: async () => {
+              activations++;
+            },
+            dispose: async () => {
+              disposals++;
+            },
+            cancel: async () => {},
+            resume: () => {},
+          };
+        },
+        operation: async () => {
+          throw new Error("No HTTP authority in ACP fixture.");
+        },
+      });
+      yield* Effect.addFinalizer(() => Effect.sync(release));
+      const adapter = yield* makeGrokAdapter(decodeGrokSettings({}), {
+        makeRuntime: fixture.makeRuntime,
+        sessionCredentials: testSessionCredentials,
+        instanceId: instance,
+      });
+      yield* adapter.startSession({
+        threadId,
+        cwd: process.cwd(),
+        runtimeMode: "approval-required",
+      });
+      assert.equal(binds, 1);
+      assert.equal(activations, 1);
+      assert.deepEqual(
+        fixture.launches[0]!.mcpServers?.find((server) => server.name === "cafe-glide"),
+        {
+          name: "cafe-glide",
+          command: launch.command,
+          args: launch.args,
+          env: [{ name: "ELECTRON_RUN_AS_NODE", value: "1" }],
+        },
+      );
+      assert.equal(fixture.launches[0]!.permissionMode, "default");
+      assert.equal(fixture.launches[0]!.sandboxProfile, "read-only");
+      yield* adapter.stopSession(threadId);
+      assert.equal(disposals, 2);
+    }),
+  );
   for (const account of [undefined, ProviderInstanceId.make("grok-work-account")]) {
     it.effect(
       `injects scheduling beside management MCP for ${account ?? "the default account"}`,

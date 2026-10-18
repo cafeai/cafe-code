@@ -192,6 +192,64 @@ export function mapClaudeSessionQuotaReport(
   }
 }
 
+/** get_usage in CLI 2.1.301 returns the endpoint's ordered limits as well as
+ * legacy five_hour/seven_day windows. Prefer the complete native rows. Older
+ * replies may carry only named windows; null utilization is unknown, not zero.
+ * SDK 0.3.295 documents this control separately from the /usage sibling. */
+export function mapClaudeAccountQuotaReport(
+  raw: unknown,
+  observedAt: string,
+): ProviderSessionQuotaReport | null {
+  try {
+    const response = record(raw);
+    if (own(response, "rate_limits_available") !== true) return null;
+    const limits = record(own(response, "rate_limits"));
+    const nativeRows = own(limits, "limits");
+    let projected: unknown = { rate_limits: limits };
+    if (nativeRows === undefined || nativeRows === null) {
+      const rows: object[] = [];
+      for (const [key, kind, group, modelLabel, surfaceLabel] of [
+        ["five_hour", "session", "session"],
+        ["seven_day", "weekly_all", "weekly"],
+        ["seven_day_oauth_apps", "weekly_scoped", "weekly", undefined, "OAuth apps"],
+        ["seven_day_opus", "weekly_scoped", "weekly", "Opus"],
+        ["seven_day_sonnet", "weekly_scoped", "weekly", "Sonnet"],
+      ] as const) {
+        const window = own(limits, key);
+        if (window === undefined || window === null) continue;
+        const data = record(window);
+        const utilization = own(data, "utilization");
+        if (utilization === null) continue;
+        rows.push({
+          kind,
+          group,
+          percent: percent(utilization),
+          resets_at: own(data, "resets_at"),
+          severity: "unknown",
+          is_active: false,
+          scope: {
+            ...(modelLabel ? { model: { display_name: modelLabel } } : {}),
+            ...(surfaceLabel ? { surface: { display_name: surfaceLabel } } : {}),
+          },
+        });
+      }
+      // Do not label an absent legacy level as an explicitly empty complete list.
+      if (rows.length === 0) return null;
+      const extra = own(limits, "extra_usage");
+      projected = {
+        rate_limits: {
+          limits: rows,
+          ...(extra === undefined ? {} : { extra_usage: extra }),
+        },
+      };
+    }
+    const report = mapClaudeSessionQuotaReport(projected, observedAt);
+    return report.meters === null ? null : { ...report, source: "claude-cli" };
+  } catch {
+    return null;
+  }
+}
+
 /** Remove the structured sibling at SDK ingress, before native logging,
  * accounting, transcript snapshots, raw events, or canonical projection. The
  * ordinary /usage assistant text remains unchanged. Data is captured without

@@ -118,6 +118,7 @@ export function ContextWindowMeter(props: {
           usage={usage}
           rateLimits={props.codexRateLimits}
           sessionQuota={sessionQuota}
+          selectedModel={props.quotaContext?.selectedModel}
           layout="popover"
           subagentConcurrency={props.subagentConcurrency}
           codexContextWindow={props.codexContextWindow}

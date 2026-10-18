@@ -22,7 +22,7 @@ export async function makeSessionMcpFiles(input: {
   readonly bridgeSource: string;
   readonly port: number;
   readonly token: string;
-  readonly audience?: "cafe-code" | "cafe-scheduling" | "cafe-visualizations";
+  readonly audience?: "cafe-code" | "cafe-scheduling" | "cafe-visualizations" | "cafe-glide";
 }): Promise<SessionMcpFiles> {
   if (!Number.isInteger(input.port) || input.port < 1 || input.port > 65535) throw unavailable();
   // Read the trusted bundled asset before allocating anything. Missing build
@@ -88,7 +88,7 @@ export async function makeSessionMcpFiles(input: {
     const connection = (token: string) =>
       JSON.stringify({
         audience: input.audience ?? "cafe-scheduling",
-        url: `http://127.0.0.1:${input.port}${input.audience === "cafe-code" ? "/mcp" : input.audience === "cafe-visualizations" ? "/mcp/visualizations" : "/mcp/scheduling"}`,
+        url: `http://127.0.0.1:${input.port}${input.audience === "cafe-code" ? "/mcp" : input.audience === "cafe-visualizations" ? "/mcp/visualizations" : input.audience === "cafe-glide" ? "/mcp/glide" : "/mcp/scheduling"}`,
         token,
       });
     const connectionPath = await publish("connection.json", connection(input.token));

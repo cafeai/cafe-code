@@ -1,4 +1,11 @@
 import {
+  bindGlideSession,
+  activateGlideSession,
+  cancelGlideSession,
+  disposeGlideSession,
+  type GlideSessionBinding,
+} from "../../glide/providerBinding.ts";
+import {
   makeManagementMcpSession,
   type ManagementMcpBinding,
 } from "../../mcp/sessionConnection.ts";
@@ -684,6 +691,7 @@ interface ClaudeSessionContext {
   readonly schedulingBinding: SchedulingSessionBinding | undefined;
   readonly managementBinding: ManagementMcpBinding | undefined;
   readonly visualizationBinding: VisualizationSessionBinding | undefined;
+  readonly glideBinding?: GlideSessionBinding | undefined;
   readonly archivedToolPrivacy?: ArchivedToolPayloadRedactor | undefined;
   readonly visualizationPrivacy?: VisualizationNativePrivacy | undefined;
   readonly visualizationCompletion?: ClaudeVisualizationCompletionObserver | undefined;
@@ -9180,6 +9188,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     // Revoke before any asynchronous provider teardown. Even an uncertain
     // native close must not leave a stopped query able to schedule new work.
     yield* context.managementBinding?.dispose ?? Effect.void;
+    yield* disposeGlideSession(context.glideBinding);
     yield* Effect.promise(() => context.schedulingBinding?.dispose() ?? Promise.resolve()).pipe(
       Effect.catchCause(() => Effect.logWarning("Claude scheduling cleanup remains pending.")),
     );
@@ -9332,6 +9341,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     let schedulingBinding: SchedulingSessionBinding | undefined;
     let managementBinding: ManagementMcpBinding | undefined;
     let visualizationBinding: VisualizationSessionBinding | undefined;
+    let glideBinding: GlideSessionBinding | undefined;
     let startedQuery: ClaudeQueryRuntime | undefined;
     let startedContext: ClaudeSessionContext | undefined;
     let sessionTransferred = false;
@@ -10074,10 +10084,22 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
               }),
           }),
         );
+      yield* Effect.uninterruptible(
+        Effect.gen(function* () {
+          glideBinding = yield* bindGlideSession({
+            threadId,
+            providerInstanceId: boundInstanceId,
+            provider: "claudeAgent",
+            runtimeMode: input.runtimeMode,
+          });
+          yield* activateGlideSession(glideBinding, { threadId, provider: "claudeAgent" });
+        }),
+      );
       const providerMcpBindings = [
         managementBinding,
         schedulingBinding,
         visualizationBinding,
+        glideBinding,
       ].filter((binding) => binding !== undefined);
       const queryOptions: ClaudeQueryOptions = {
         ...(input.cwd ? { cwd: input.cwd } : {}),
@@ -10320,6 +10342,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         managementBinding,
         visualizationBinding,
         archivedToolPrivacy: new ArchivedToolPayloadRedactor(),
+        glideBinding,
         visualizationPrivacy: new VisualizationNativePrivacy(),
         visualizationCompletion: new ClaudeVisualizationCompletionObserver(),
         runFork,
@@ -10470,6 +10493,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         // cancellation during publication before ownership is transferred.
         return Effect.gen(function* () {
           yield* managementBinding?.dispose ?? Effect.void;
+          yield* disposeGlideSession(glideBinding);
           yield* Effect.promise(() => schedulingBinding?.dispose() ?? Promise.resolve()).pipe(
             Effect.catchCause(() =>
               Effect.logWarning("Claude scheduling cleanup remains pending."),
@@ -10955,6 +10979,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     });
 
     context.promptLifecycleByUuid.set(turnId, "submitted");
+    context.glideBinding?.resume();
     yield* Queue.offer(context.promptQueue, {
       type: "message",
       message,
@@ -10992,6 +11017,8 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
   const interruptTurn: ClaudeAdapterShape["interruptTurn"] = Effect.fn("interruptTurn")(
     function* (threadId, _turnId) {
       const context = yield* requireSession(threadId);
+      if (_turnId === undefined || context.turnState?.turnId === _turnId)
+        yield* cancelGlideSession(context.glideBinding);
       const receipt = yield* Effect.tryPromise({
         try: () => context.query.interrupt(),
         catch: (cause) => toRequestError(threadId, "turn/interrupt", cause),

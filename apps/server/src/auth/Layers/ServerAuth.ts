@@ -35,6 +35,7 @@ import {
   SessionCredentialService,
 } from "../Services/SessionCredentialService.ts";
 import { AuthControlPlaneLive, AuthCoreLive } from "./AuthControlPlane.ts";
+import { TwoFactorService } from "../Services/TwoFactorService.ts";
 
 type BootstrapExchangeResult = {
   readonly response: AuthBootstrapResult;
@@ -81,6 +82,7 @@ export const makeServerAuth = Effect.gen(function* () {
   const adminPassword = yield* AdminPasswordService;
   const authControlPlane = yield* AuthControlPlane;
   const sessions = yield* SessionCredentialService;
+  const twoFactor = yield* TwoFactorService;
   const baseDescriptor = yield* policy.getDescriptor();
   const passwordFailuresRef = yield* Ref.make(
     new Map<string, { readonly count: number; readonly resetAt: number }>(),
@@ -99,6 +101,13 @@ export const makeServerAuth = Effect.gen(function* () {
         } satisfies ServerAuthDescriptor;
       }),
       Effect.catch(() => Effect.succeed(baseDescriptor)),
+      Effect.flatMap((descriptor) =>
+        twoFactor.status.pipe(
+          Effect.map(({ enabled }) => ({ ...descriptor, twoFactorRequired: enabled })),
+          // An unreadable store must not advertise that 2FA is disabled.
+          Effect.catch(() => Effect.succeed({ ...descriptor, twoFactorRequired: true })),
+        ),
+      ),
     );
 
   const issuePasswordSession = (
@@ -235,12 +244,28 @@ export const makeServerAuth = Effect.gen(function* () {
       ),
     );
 
+  // Check the first factor without consuming it. An absent/incorrect OTP must
+  // not burn a one-time pairing link. The original atomic consume still fences
+  // revocation, expiry and competing use before issuing any real session.
+  const verifyAndConsumeBootstrap = (credential: string, secondFactor?: string) =>
+    Effect.gen(function* () {
+      const grant = yield* bootstrapCredentials
+        .inspect(credential)
+        .pipe(Effect.mapError(toBootstrapExchangeAuthError));
+      // Only the exact short-lived native capability is exempt, never an IP,
+      // forwarded header, subject label or client-selected auth method.
+      if (grant.method !== "desktop-bootstrap") yield* twoFactor.verify(secondFactor);
+      return yield* bootstrapCredentials
+        .consume(credential)
+        .pipe(Effect.mapError(toBootstrapExchangeAuthError));
+    });
+
   const exchangeBootstrapCredential: ServerAuthShape["exchangeBootstrapCredential"] = (
     credential,
     requestMetadata,
+    secondFactor,
   ) =>
-    bootstrapCredentials.consume(credential).pipe(
-      Effect.mapError(toBootstrapExchangeAuthError),
+    verifyAndConsumeBootstrap(credential, secondFactor).pipe(
       Effect.flatMap((grant) =>
         sessions
           .issue({
@@ -277,9 +302,8 @@ export const makeServerAuth = Effect.gen(function* () {
     );
 
   const exchangeBootstrapCredentialForBearerSession: ServerAuthShape["exchangeBootstrapCredentialForBearerSession"] =
-    (credential, requestMetadata) =>
-      bootstrapCredentials.consume(credential).pipe(
-        Effect.mapError(toBootstrapExchangeAuthError),
+    (credential, requestMetadata, secondFactor) =>
+      verifyAndConsumeBootstrap(credential, secondFactor).pipe(
         Effect.flatMap((grant) =>
           sessions
             .issue({
@@ -337,6 +361,7 @@ export const makeServerAuth = Effect.gen(function* () {
         });
       }
 
+      yield* twoFactor.verify(input.secondFactor);
       yield* clearPasswordFailures(requestMetadata);
       const session = yield* issuePasswordSession(
         "browser-session-cookie",
@@ -386,6 +411,7 @@ export const makeServerAuth = Effect.gen(function* () {
           });
         }
 
+        yield* twoFactor.verify(input.secondFactor);
         yield* clearPasswordFailures(requestMetadata);
         const session = yield* issuePasswordSession(
           "bearer-session-token",

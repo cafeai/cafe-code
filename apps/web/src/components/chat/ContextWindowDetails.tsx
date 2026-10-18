@@ -41,6 +41,7 @@ export function ContextWindowDetails(props: {
   readonly usage: ContextWindowSnapshot | null | undefined;
   readonly rateLimits?: ServerProviderAccountRateLimits | null | undefined;
   readonly sessionQuota?: ProviderQuotaState | undefined;
+  readonly selectedModel?: string | null | undefined;
   readonly layout?: "popover" | "panel";
   readonly headerAction?: ReactNode;
   readonly usageResetAction?: ReactNode;
@@ -194,6 +195,7 @@ export function ContextWindowDetails(props: {
           <ProviderAccountQuotaDetails
             presentation={quota}
             sessionQuota={props.sessionQuota}
+            selectedModel={props.selectedModel}
             layout={layout}
             action={props.usageResetAction}
           />

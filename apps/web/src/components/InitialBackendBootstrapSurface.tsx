@@ -85,9 +85,7 @@ export function useStartupSkeletonShown(): boolean {
 }
 
 function StartupSidebarSkeleton() {
-  const open = useUiStateStore((state) => state.navigationSidebarOpen);
   const [width] = useState(readPersistedSidebarWidth);
-  if (!open) return null;
   return (
     <aside
       aria-hidden="true"
@@ -98,7 +96,9 @@ function StartupSidebarSkeleton() {
         } as CSSProperties
       }
     >
-      <div className="h-[52px] shrink-0 border-border border-b px-3 py-3">
+      {/* macOS draws the traffic lights over this corner. Match the real
+          sidebar header's fixed band and leading clearance. */}
+      <div className="h-[52px] shrink-0 border-border border-b px-3 py-3 mac-traffic-lights:h-(--app-mac-titlebar-height) mac-traffic-lights:pl-(--app-mac-titlebar-leading-space)">
         <Skeleton className="h-5 w-28 rounded-md" />
       </div>
       <div className="grid gap-2 px-3 py-3">
@@ -157,6 +157,7 @@ export function StartupSkeleton({
   const showStatus = useDelayedFlag(true, { delayMs: STARTUP_STATUS_DELAY_MS });
   const showProblem = useDelayedFlag(problem !== null, { delayMs: STARTUP_PROBLEM_DELAY_MS });
   const copy = uiPresentation.describeBootstrapStatus({ problem: showProblem ? problem : null });
+  const sidebarOpen = useUiStateStore((state) => state.navigationSidebarOpen);
 
   return (
     <div
@@ -166,9 +167,17 @@ export function StartupSkeleton({
       )}
       data-testid="initial-backend-bootstrap-loading"
     >
-      <StartupSidebarSkeleton />
+      {sidebarOpen ? <StartupSidebarSkeleton /> : null}
       <main className="flex min-h-0 min-w-0 flex-1 flex-col">
-        <header className="flex h-[52px] shrink-0 items-center border-border border-b px-4 md:px-5">
+        {/* Like the real content header, reserve the macOS traffic-light corner
+            only while the sidebar is hidden and this header reaches it. */}
+        <header
+          className={cn(
+            "flex h-[52px] shrink-0 items-center border-border border-b px-4 md:px-5",
+            "mac-traffic-lights:h-(--app-mac-titlebar-height)",
+            !sidebarOpen && "mac-traffic-lights:pl-(--app-mac-titlebar-leading-space)",
+          )}
+        >
           <Skeleton aria-hidden="true" className="h-4 w-40 rounded-full" />
         </header>
         <section className="flex min-h-0 flex-1 items-center justify-center px-6 py-8">

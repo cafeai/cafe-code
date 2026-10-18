@@ -14,6 +14,7 @@ import * as Stream from "effect/Stream";
 import * as TestClock from "effect/testing/TestClock";
 import {
   readBoundProviderQuota,
+  readBoundInstanceQuota,
   subscribeProviderQuota,
   UNAVAILABLE_SESSION_QUOTA,
   unavailableProviderQuotaStream,
@@ -53,6 +54,107 @@ const authority: ProviderQuotaAuthority = {
 };
 
 describe("passive session quota subscriptions", () => {
+  it.effect("reads native allowances without a chat and retains passive compatibility", () =>
+    Effect.gen(function* () {
+      const nativeReport = { ...report, source: "claude-cli" as const };
+      const noChats = { ...authority, sessions: [] };
+      let calls = 0;
+      const native = Effect.sync(() => {
+        calls++;
+        return nativeReport;
+      });
+      assert.deepEqual(
+        yield* readBoundProviderQuota(
+          { instanceId: input.instanceId },
+          Effect.succeed(noChats),
+          Effect.succeed([]),
+          native,
+        ),
+        { report: nativeReport },
+      );
+      assert.equal(calls, 1);
+      assert.deepEqual(
+        yield* readBoundProviderQuota(input, Effect.succeed(noChats), Effect.succeed([]), native),
+        UNAVAILABLE_SESSION_QUOTA,
+      );
+      assert.equal(calls, 1);
+      assert.deepEqual(
+        yield* readBoundProviderQuota(
+          input,
+          Effect.succeed(authority),
+          Effect.succeed([session]),
+          Effect.succeed(null),
+        ),
+        available,
+      );
+    }),
+  );
+
+  it.effect("rejects native results across authority changes and never probes a denied scope", () =>
+    Effect.gen(function* () {
+      let current: ProviderQuotaAuthority | undefined = authority;
+      let calls = 0;
+      const read = Effect.sync(() => {
+        calls++;
+        current = { ...authority, configuration: "changed" };
+        return { ...report, source: "claude-cli" as const };
+      });
+      assert.deepEqual(
+        yield* readBoundProviderQuota(
+          input,
+          Effect.sync(() => current),
+          Effect.succeed([session]),
+          read,
+        ),
+        UNAVAILABLE_SESSION_QUOTA,
+      );
+      assert.equal(calls, 1);
+      current = undefined;
+      assert.deepEqual(
+        yield* readBoundProviderQuota(
+          input,
+          Effect.sync(() => current),
+          Effect.succeed([session]),
+          read,
+        ),
+        UNAVAILABLE_SESSION_QUOTA,
+      );
+      assert.equal(calls, 1);
+    }),
+  );
+
+  it.effect("binds native reads to the exact enabled Claude instance generation", () =>
+    Effect.gen(function* () {
+      let calls = 0;
+      const original = {
+        enabled: true,
+        driverKind: ProviderDriverKind.make("claudeAgent"),
+        readAccountQuota: Effect.sync(() => {
+          calls++;
+          return report;
+        }),
+      };
+      const { readAccountQuota: _read, ...unsupported } = original;
+      for (const instance of [
+        undefined,
+        { ...original, enabled: false },
+        { ...original, driverKind: ProviderDriverKind.make("codex") },
+        unsupported,
+      ])
+        assert.equal(yield* readBoundInstanceQuota(Effect.succeed(instance)), null);
+      assert.equal(calls, 0);
+      assert.deepEqual(yield* readBoundInstanceQuota(Effect.succeed(original)), report);
+      let reads = 0;
+      assert.equal(
+        yield* readBoundInstanceQuota(
+          Effect.sync(() => (++reads === 1 ? original : { ...original })),
+        ),
+        null,
+      );
+      assert.equal(calls, 2);
+    }),
+  );
+
   it.effect("holds one denied null without work or completion until the consumer cancels", () =>
     Effect.gen(function* () {
       const initial = yield* Deferred.make<void>();

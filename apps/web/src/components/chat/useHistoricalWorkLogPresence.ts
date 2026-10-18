@@ -18,20 +18,27 @@ type HistoricalWorkLogSummaries = ReadonlyMap<TurnId, HistoricalWorkLogSummary>;
 
 interface HistoricalWorkLogPresenceState {
   readonly scopeKey: string;
-  readonly presenceByTurnId: ReadonlyMap<TurnId, boolean>;
+  /** Undefined is an attempted but inconclusive read, never presence proof. */
+  readonly presenceByTurnId: ReadonlyMap<TurnId, boolean | undefined>;
   readonly revisionByTurnId: ReadonlyMap<TurnId, string>;
 }
 
-const EMPTY_HISTORICAL_WORK_LOG_PRESENCE = new Map<TurnId, boolean>();
+const EMPTY_HISTORICAL_WORK_LOG_PRESENCE = new Map<TurnId, boolean | undefined>();
 
 function presenceRevision(
   summary: HistoricalWorkLogSummary | undefined,
   historyRevision?: string,
+  hasWorkLog = false,
 ): string {
+  // A growing earlier range cannot invalidate positive proof. Its exclusions
+  // can: received settings may make that proof redundant with inline content.
+  // Negatives/inconclusive reads still expire when actual work is evicted.
+  const growingPositiveRange = hasWorkLog && summary?.before !== undefined;
   return JSON.stringify([
-    historyRevision ?? "",
-    summary?.presenceRevision ?? "",
+    growingPositiveRange ? "" : (historyRevision ?? ""),
+    growingPositiveRange ? "" : (summary?.presenceRevision ?? ""),
     summary?.excludeActivityIds ?? [],
+    summary?.excludeTurnStartAck ?? false,
   ]);
 }
 
@@ -86,7 +93,8 @@ export function useHistoricalWorkLogPresence(input: {
     revisionByTurnId: new Map(),
   });
   const revisionForTurn = useCallback(
-    (turnId: TurnId) => presenceRevision(input.summaries?.get(turnId), input.historyRevision),
+    (turnId: TurnId, hasWorkLog = false) =>
+      presenceRevision(input.summaries?.get(turnId), input.historyRevision, hasWorkLog),
     [input.historyRevision, input.summaries],
   );
   const snapshotPositiveIds = useStableTurnIds(
@@ -122,17 +130,22 @@ export function useHistoricalWorkLogPresence(input: {
   }, [scopeKey, snapshotPositiveIds]);
   const presenceByTurnId = useMemo(() => {
     if (presenceState.scopeKey !== scopeKey) return EMPTY_HISTORICAL_WORK_LOG_PRESENCE;
-    const valid = new Map<TurnId, boolean>();
+    const valid = new Map<TurnId, boolean | undefined>();
     for (const [turnId, present] of presenceState.presenceByTurnId) {
-      // Positive evidence stays discoverable. A negative is only valid for its
-      // exact history/work witness, not forever after that turn's window moves.
-      // The witness ignores context-only updates and streamed message tokens.
-      if (present || presenceState.revisionByTurnId.get(turnId) === revisionForTurn(turnId)) {
+      // Earlier-work positives also belong to their exact filters: newly
+      // received settings can replace the only saved start receipt. Keeping
+      // that old positive would advertise an empty reader until expansion.
+      // Previous-turn snapshot proof stays discoverable after eviction. The
+      // witness still ignores context-only updates and message tokens.
+      if (
+        (present && !input.summaries?.get(turnId)?.before) ||
+        presenceState.revisionByTurnId.get(turnId) === revisionForTurn(turnId, present === true)
+      ) {
         valid.set(turnId, present);
       }
     }
     return valid;
-  }, [presenceState, revisionForTurn, scopeKey]);
+  }, [input.summaries, presenceState, revisionForTurn, scopeKey]);
   const presenceCandidates = useStableTurnIds(
     useMemo(
       () =>
@@ -173,7 +186,11 @@ export function useHistoricalWorkLogPresence(input: {
       )
     )
       return;
-    const publish = (turnIds: ReadonlyArray<TurnId>, presentTurnIds: ReadonlySet<TurnId>) => {
+    const publish = (
+      turnIds: ReadonlyArray<TurnId>,
+      presentTurnIds: ReadonlySet<TurnId>,
+      unavailable = false,
+    ) => {
       if (cancelled || metadataRef.current.scopeKey !== scopeKey) return;
       setPresenceState((current) => {
         if (cancelled || metadataRef.current.scopeKey !== scopeKey) return current;
@@ -183,10 +200,14 @@ export function useHistoricalWorkLogPresence(input: {
         );
         const revisions = new Map(sameOwner ? current.revisionByTurnId : []);
         for (const turnId of turnIds) {
-          merged.set(turnId, presentTurnIds.has(turnId));
+          const present =
+            unavailable && requestedSummaries?.get(turnId)?.before
+              ? undefined
+              : presentTurnIds.has(turnId);
+          merged.set(turnId, present);
           revisions.set(
             turnId,
-            presenceRevision(requestedSummaries?.get(turnId), requestedRevision),
+            presenceRevision(requestedSummaries?.get(turnId), requestedRevision, present === true),
           );
         }
         // Bound cache ownership to the same retained candidate set; an old
@@ -204,9 +225,11 @@ export function useHistoricalWorkLogPresence(input: {
       const unresolved = new Set(presenceCandidates);
       const api = readEnvironmentApi(input.environmentId);
       if (!api) {
-        // A disconnected environment cannot prove a row empty. Preserve the
-        // old discoverable fallback so reconnecting users can still expand it.
-        publish(presenceCandidates, new Set(presenceCandidates));
+        // No result is not evidence of earlier work. Remember an inconclusive
+        // attempt for this witness without displaying an empty disclosure or
+        // starting a history retry loop. A new witness/remount can check again.
+        // Preserve the existing previous-turn fallback independently.
+        publish(presenceCandidates, new Set(presenceCandidates), true);
       } else {
         try {
           const readPresence = (
@@ -229,11 +252,15 @@ export function useHistoricalWorkLogPresence(input: {
             const excludeActivityIds = before
               ? requestedSummaries?.get(turnIds[0]!)?.excludeActivityIds
               : undefined;
+            const excludeTurnStartAck = before
+              ? requestedSummaries?.get(turnIds[0]!)?.excludeTurnStartAck
+              : undefined;
             const read = api.orchestration.getThreadTurnWorkLogPresence({
               threadId,
               turnIds,
               ...(before ? { before } : {}),
               ...(excludeActivityIds ? { excludeActivityIds } : {}),
+              ...(excludeTurnStartAck !== undefined ? { excludeTurnStartAck } : {}),
             });
             cache.reads.set(key, read);
             // A focused timeline has a bounded turn set. Retain at most16
@@ -277,9 +304,10 @@ export function useHistoricalWorkLogPresence(input: {
             unresolved.delete(turnId);
           }
         } catch {
-          // Transport failure is recoverable and should not erase access to a
-          // possibly persisted log. Expansion will retry through the page RPC.
-          publish([...unresolved], unresolved);
+          // An inconclusive Earlier work check stays hidden rather than
+          // manufacturing a positive. Already proven rows remain untouched;
+          // previous-turn Work logs retain their existing fallback behavior.
+          publish([...unresolved], unresolved, true);
         }
       }
     };
@@ -305,7 +333,11 @@ export function useHistoricalWorkLogPresence(input: {
     (turnId: TurnId, hasWorkLog: boolean) => {
       const metadata = metadataRef.current;
       if (metadata.scopeKey !== scopeKey) return;
-      const revision = presenceRevision(metadata.summaries?.get(turnId), metadata.historyRevision);
+      const revision = presenceRevision(
+        metadata.summaries?.get(turnId),
+        metadata.historyRevision,
+        hasWorkLog,
+      );
       setPresenceState((current) => {
         if (metadataRef.current.scopeKey !== scopeKey) return current;
         const previous =

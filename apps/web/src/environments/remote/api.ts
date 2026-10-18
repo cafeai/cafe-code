@@ -13,9 +13,11 @@ class RemoteEnvironmentNetworkError extends RemoteEnvironmentConnectionError {}
 export function remoteEnvironmentErrorMessage(error: unknown, fallback: string): string {
   if (error instanceof RemoteEnvironmentConnectionError) return error.message;
   if (isRemoteEnvironmentAuthHttpError(error)) {
+    if (error.reason === "two-factor-locked")
+      return uiText("Authenticator codes are locked. Use an unused recovery code.");
     if (error.status === 401 || error.status === 403) {
       return uiText(
-        "The server rejected the sign-in credential. Check the admin password or pairing credential, then try again.",
+        "The server rejected the sign-in credential. Check the password, pairing credential, and authentication code, then try again.",
       );
     }
     if (error.status === 404) {
@@ -32,11 +34,13 @@ export function remoteEnvironmentErrorMessage(error: unknown, fallback: string):
 
 class RemoteEnvironmentAuthHttpError extends Error {
   readonly status: number;
+  readonly reason: "two-factor-locked" | undefined;
 
-  constructor(message: string, status: number) {
+  constructor(message: string, status: number, reason?: "two-factor-locked") {
     super(message);
     this.name = "RemoteEnvironmentAuthHttpError";
     this.status = status;
+    this.reason = reason;
   }
 }
 
@@ -103,6 +107,9 @@ export async function fetchRemoteJson<T>(input: {
     throw new RemoteEnvironmentAuthHttpError(
       uiText("Remote auth request failed ({status}).", { status: response.status }),
       response.status,
+      response.headers.get("x-cafe-auth-reason") === "two-factor-locked"
+        ? "two-factor-locked"
+        : undefined,
     );
   }
 
@@ -120,6 +127,7 @@ export async function fetchRemoteJson<T>(input: {
 export async function bootstrapRemoteBearerSession(input: {
   readonly httpBaseUrl: string;
   readonly credential: string;
+  readonly secondFactor?: string;
 }): Promise<AuthBearerBootstrapResult> {
   return fetchRemoteJson<AuthBearerBootstrapResult>({
     httpBaseUrl: input.httpBaseUrl,
@@ -127,6 +135,7 @@ export async function bootstrapRemoteBearerSession(input: {
     method: "POST",
     body: {
       credential: input.credential,
+      ...(input.secondFactor ? { secondFactor: input.secondFactor } : {}),
     },
   });
 }
@@ -134,6 +143,7 @@ export async function bootstrapRemoteBearerSession(input: {
 export async function bootstrapRemotePasswordBearerSession(input: {
   readonly password: string;
   readonly httpBaseUrl: string;
+  readonly secondFactor?: string;
 }): Promise<AuthBearerBootstrapResult> {
   // Use the bearer endpoint rather than the primary server's cookie login.
   // Only the resulting session is retained; passwords never enter saved metadata.
@@ -143,6 +153,7 @@ export async function bootstrapRemotePasswordBearerSession(input: {
     method: "POST",
     body: {
       password: input.password,
+      ...(input.secondFactor ? { secondFactor: input.secondFactor } : {}),
     },
   });
 }

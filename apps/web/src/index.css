@@ -8,6 +8,9 @@
 @custom-variant dark (&:is(.dark, .dark *));
 /* Window Controls Overlay: active when Electron exposes native titlebar control geometry. */
 @custom-variant wco (&:is(.wco, .wco *));
+/* macOS Electron app windows: the traffic lights occupy a fixed native band at
+   the top-left. See lib/macTrafficLights.ts. */
+@custom-variant mac-traffic-lights (&:is(.mac-traffic-lights, .mac-traffic-lights *));
 
 @theme inline {
   /* Quantize recurring status indicators to at most 60 visual updates/second.
@@ -567,6 +570,17 @@ body::after {
     [data-window-left="false"]
   ):not([data-window-top="false"]) {
   padding-left: var(--app-mac-titlebar-leading-space);
+}
+
+/* Dialogs centre in 1fr/auto/3fr rows inside the viewport's 1rem padding. On
+   macOS, floor the top row so a tall or wide dialog cannot rise under the
+   traffic lights. An ordinary dialog's 1fr row already exceeds the floor, so it
+   does not move. A dialog viewport that reserves the band itself (the expanded
+   table) sets --dialog-mac-titlebar-floor to 0px. */
+.mac-traffic-lights :is([data-slot="dialog-viewport"], [data-slot="alert-dialog-viewport"]) {
+  grid-template-rows:
+    minmax(var(--dialog-mac-titlebar-floor, calc(var(--app-mac-titlebar-height) - 1rem)), 1fr)
+    auto 3fr;
 }
 
 .thread-status-dot {
@@ -1580,6 +1594,39 @@ code {
   to {
     opacity: 1;
     transform: translateY(0) scaleY(1);
+  }
+}
+
+/* The chat timeline fades out where it meets the composer while content sits
+   below the edge, instead of clipping at a hard line. A mask (rather than a
+   background-coloured overlay) stays correct over any pane background or the
+   ambiance layer. The gradient's end alpha is a registered number so the fade
+   eases in and out; at alpha 1 the mask is fully opaque and changes nothing,
+   which keeps the newest line crisp at the tail. All overlays inside timeline
+   rows are portalled, so the mask cannot clip them. */
+@property --cafe-timeline-fade-end-alpha {
+  syntax: "<number>";
+  inherits: false;
+  initial-value: 1;
+}
+
+.cafe-timeline-bottom-fade {
+  --cafe-timeline-fade-end-alpha: 1;
+  mask-image: linear-gradient(
+    to bottom,
+    #000 calc(100% - 1.5rem),
+    rgb(0 0 0 / var(--cafe-timeline-fade-end-alpha))
+  );
+  transition: --cafe-timeline-fade-end-alpha var(--duration-slow) var(--ease-out);
+}
+
+.cafe-timeline-bottom-fade[data-bottom-fade="true"] {
+  --cafe-timeline-fade-end-alpha: 0;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .cafe-timeline-bottom-fade {
+    transition: none;
   }
 }
 

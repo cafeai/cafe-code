@@ -9,6 +9,7 @@ import "./index.css";
 import { isElectron } from "./env";
 import { APP_DISPLAY_NAME } from "./branding";
 import { syncDocumentWindowControlsOverlayClass } from "./lib/windowControlsOverlay";
+import { syncDocumentMacTrafficLightsClass } from "./lib/macTrafficLights";
 import { installMobileDebugLogging } from "./lib/mobileDebugLog";
 import { initializeApplicationLanguage } from "./uiLocaleStartup";
 import { installWebPushLocaleSynchronization } from "./lib/webPushNotifications";
@@ -68,6 +69,7 @@ if (recordingOverlay) {
 
       if (isElectron) {
         syncDocumentWindowControlsOverlayClass();
+        syncDocumentMacTrafficLightsClass();
       }
 
       document.title = APP_DISPLAY_NAME;

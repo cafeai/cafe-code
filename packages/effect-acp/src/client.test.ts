@@ -1,5 +1,6 @@
 import * as Path from "effect/Path";
 import * as Cause from "effect/Cause";
+import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
 import * as Fiber from "effect/Fiber";
@@ -356,75 +357,113 @@ it.layer(NodeServices.layer)("effect-acp client", (it) => {
     }),
   );
 
-  childProcessTest("continues dispatching session updates after one handler fails", () =>
+  it.effect("continues dispatching session updates after one handler fails", () =>
     Effect.gen(function* () {
+      const failedHandlers = yield* Ref.make(0);
       const successfulHandlers = yield* Ref.make(0);
-      const handle = yield* makeHandle();
-      const scope = yield* Scope.make();
-      const acpLayer = AcpClient.layerChildProcess(handle);
-      const context = yield* Layer.buildWithScope(acpLayer, scope);
-
-      yield* Effect.gen(function* () {
-        const acp = yield* AcpClient.AcpClient;
-
-        yield* acp.handleRequestPermission(() =>
-          Effect.succeed({
-            outcome: {
-              outcome: "selected",
-              optionId: "allow",
-            },
-          }),
-        );
-        yield* acp.handleElicitation(() =>
-          Effect.succeed({
-            action: {
-              action: "accept",
-              content: {
-                approved: true,
-              },
-            },
-          }),
-        );
-        yield* acp.handleExtRequest(
-          "x/typed_request",
-          Schema.Struct({ message: Schema.String }),
-          () => Effect.succeed({ ok: true }),
-        );
-        yield* acp.handleExtNotification(
-          "x/typed_notification",
-          Schema.Struct({ count: Schema.Number }),
-          () => Effect.void,
-        );
-        yield* acp.handleSessionUpdate(() =>
-          Effect.fail(AcpError.AcpRequestError.internalError("session update handler failed")),
-        );
-        yield* acp.handleSessionUpdate(() => Ref.update(successfulHandlers, (count) => count + 1));
-
-        yield* acp.agent.initialize({
-          protocolVersion: 1,
-          clientCapabilities: {
-            fs: { readTextFile: false, writeTextFile: false },
-            terminal: false,
+      const first = yield* Deferred.make<void>();
+      const second = yield* Deferred.make<void>();
+      const { stdio, input } = yield* makeInMemoryStdio();
+      const acp = yield* AcpClient.make(stdio);
+      yield* acp.handleSessionUpdate(() =>
+        Ref.update(failedHandlers, (count) => count + 1).pipe(
+          Effect.andThen(
+            Effect.fail(AcpError.AcpRequestError.internalError("session update handler failed")),
+          ),
+        ),
+      );
+      yield* acp.handleSessionUpdate(() =>
+        Ref.updateAndGet(successfulHandlers, (count) => count + 1).pipe(
+          Effect.flatMap((count) => Deferred.succeed(count === 1 ? first : second, undefined)),
+          Effect.asVoid,
+        ),
+      );
+      const notification = yield* encodeJsonl(
+        jsonRpcNotification("session/update", AcpSchema.SessionNotification),
+        {
+          jsonrpc: "2.0",
+          method: "session/update",
+          params: {
+            sessionId: "handler-failure-fixture",
+            update: { sessionUpdate: "plan", entries: [] },
           },
-          clientInfo: {
-            name: "effect-acp-test",
-            version: "0.0.0",
-          },
-        });
-        yield* acp.agent.authenticate({ methodId: "cursor_login" });
-
-        const session = yield* acp.agent.createSession({
-          cwd: process.cwd(),
-          mcpServers: [],
-        });
-        yield* acp.agent.prompt({
-          sessionId: session.sessionId,
-          prompt: [{ type: "text", text: "hello" }],
-        });
-
-        assert.equal(yield* Ref.get(successfulHandlers), 1);
-      }).pipe(Effect.provide(context), Effect.ensuring(Scope.close(scope, Exit.void)));
+        },
+      );
+      // Exercise the real wire decoder and dispatcher, without making pure
+      // handler-failure behavior depend on another native process starting.
+      yield* Queue.offer(input, notification);
+      yield* Deferred.await(first);
+      assert.equal(yield* Ref.get(failedHandlers), 1);
+      assert.equal(yield* Ref.get(successfulHandlers), 1);
+      yield* Queue.offer(input, notification);
+      yield* Deferred.await(second);
+      assert.equal(yield* Ref.get(failedHandlers), 2);
+      assert.equal(yield* Ref.get(successfulHandlers), 2);
     }),
+  );
+
+  it.effect(
+    "ignores uncorrelatable response IDs while preserving live calls and textual callback identities",
+    () =>
+      Effect.gen(function* () {
+        const encoder = new TextEncoder();
+        const { stdio, input, output } = yield* makeInMemoryStdio();
+        const acp = yield* AcpClient.make(stdio);
+        yield* acp.handleUnknownExtRequest(() => Effect.succeed({ ok: true }));
+        const pending = yield* acp.agent
+          .initialize({
+            protocolVersion: 1,
+            clientCapabilities: {
+              fs: { readTextFile: false, writeTextFile: false },
+              terminal: false,
+            },
+            clientInfo: { name: "response-id-fixture", version: "1" },
+          })
+          .pipe(Effect.forkScoped);
+        const request = JSON.parse(yield* Queue.take(output));
+        const valid = {
+          jsonrpc: "2.0",
+          id: request.id,
+          result: {
+            protocolVersion: 1,
+            agentCapabilities: {},
+            agentInfo: { name: "fixture", version: "1" },
+          },
+        };
+        yield* Queue.offer(
+          input,
+          encoder.encode(
+            JSON.stringify([
+              { jsonrpc: "2.0", id: "skills-reload", result: null },
+              {
+                jsonrpc: "2.0",
+                id: "skills-reload",
+                error: { code: -32601, message: "Unknown callback" },
+              },
+              { jsonrpc: "2.0", id: "1.5", result: null },
+              { jsonrpc: "2.0", id: "9".repeat(1025), result: null },
+              valid,
+            ]) + "\n",
+          ),
+        );
+        assert.deepEqual(yield* Fiber.join(pending), valid.result);
+        yield* Queue.offer(
+          input,
+          encoder.encode(
+            JSON.stringify({
+              jsonrpc: "2.0",
+              id: "skills-reload",
+              method: "x/id-check",
+              params: {},
+            }) + "\n",
+          ),
+        );
+        assert.deepEqual(JSON.parse(yield* Queue.take(output)), {
+          jsonrpc: "2.0",
+          id: "skills-reload",
+          result: { ok: true },
+        });
+      }),
   );
 
   it.effect("uses distinct ids for RPC calls and extension requests", () =>

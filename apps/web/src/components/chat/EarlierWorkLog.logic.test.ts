@@ -60,6 +60,30 @@ const malformedPage = (changes: Record<string, unknown>): OrchestrationThreadTur
   ({ ...validPage(), ...changes }) as OrchestrationThreadTurnActivityPage;
 
 describe("Earlier work page validation", () => {
+  it("requires the captured start-receipt filter echo and refuses a filtered receipt", () => {
+    const input = { threadId, turnId, before, limit: 4, excludeTurnStartAck: true };
+    expect(() =>
+      validateEarlierWorkLogPage({ ...input, page: { ...validPage(), excludeTurnStartAck: true } }),
+    ).not.toThrow();
+    expect(() => validateEarlierWorkLogPage({ ...input, page: validPage() })).toThrow();
+    expect(() =>
+      validateEarlierWorkLogPage({
+        ...input,
+        page: { ...validPage(), excludeTurnStartAck: false },
+      }),
+    ).toThrow();
+    const ack = activity("hidden-start-ack", 1, {
+      kind: "task.progress",
+      payload: { taskId: `codex-turn-start:${turnId}` },
+    });
+    expect(() =>
+      validateEarlierWorkLogPage({
+        ...input,
+        page: { ...validPage([ack]), excludeTurnStartAck: true },
+      }),
+    ).toThrow();
+  });
+
   it("requires the captured exclusions to be echoed and refuses excluded rows", () => {
     const excludeActivityIds = [EventId.make("retained-settings")];
     const input = { threadId, turnId, before, limit: 4, excludeActivityIds };

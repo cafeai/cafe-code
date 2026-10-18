@@ -5,6 +5,7 @@ import {
   ProviderSecurityResult,
 } from "./providerSecurity.ts";
 import * as Schema from "effect/Schema";
+import { GlideControlInput, GlideControlResult, GlideError } from "./glide.ts";
 import {
   VisualizationApiError,
   VisualizationListInput,
@@ -165,6 +166,7 @@ import { UsageStatsGetResult, UsageStatsSnapshot } from "./usageStats.ts";
 import { VcsError } from "./vcs.ts";
 
 export const WS_METHODS = {
+  glideControl: "glide.control",
   visualizationsList: "visualizations.list",
   visualizationsDetails: "visualizations.details",
   visualizationsInline: "visualizations.inline",
@@ -736,6 +738,11 @@ export const WsSubscribeUsageStatsRpc = Rpc.make(WS_METHODS.subscribeUsageStats,
 });
 
 export const WsRpcGroup = RpcGroup.make(
+  Rpc.make("glide.control", {
+    payload: GlideControlInput,
+    success: GlideControlResult,
+    error: GlideError,
+  }),
   Rpc.make(WS_METHODS.visualizationsList, {
     payload: VisualizationListInput,
     success: VisualizationListResult,

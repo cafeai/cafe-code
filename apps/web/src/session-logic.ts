@@ -163,6 +163,8 @@ export interface HistoricalWorkLogSummary {
   before?: OrchestrationThreadActivityCursor;
   /** Retention exceptions before the raw floor are already shown inline. */
   excludeActivityIds?: ReadonlyArray<OrchestrationThreadActivity["id"]>;
+  /** Valid same-turn Codex settings already replace the native start receipt. */
+  excludeTurnStartAck?: boolean;
   /** Current received snapshots win over separately fetched older versions. */
   liveActivities?: ReadonlyArray<OrchestrationThreadActivity>;
   /** Changes only when relevant work leaves the ordinary tail, not per token. */
@@ -1008,6 +1010,11 @@ export function deriveHistoricalWorkLogSummaries(input: {
         },
         liveActivities: input.activities.filter((activity) => activity.turnId === latestTurnId),
         ...(excludeActivityIds.length > 0 ? { excludeActivityIds } : {}),
+        ...(workLogEntries.some(
+          (entry) => entry.turnId === latestTurnId && entry.turnConfiguration?.provider === "codex",
+        )
+          ? { excludeTurnStartAck: true }
+          : {}),
         // An empty current window stays the same through arbitrarily many
         // context-only updates. Losing its first ordinary operation, however,
         // is new evidence that an earlier command might now be available.

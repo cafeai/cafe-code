@@ -26,6 +26,7 @@ import type {
   ProviderInstanceEnvironment,
   ProviderInstanceId,
   ProviderSkillsResult,
+  ProviderSessionQuotaReport,
 } from "@cafecode/contracts";
 import type * as Effect from "effect/Effect";
 import type * as Schema from "effect/Schema";
@@ -74,6 +75,8 @@ export interface ProviderInstance {
   readonly adapter: ProviderAdapterShape<ProviderAdapterError>;
   readonly textGeneration: TextGenerationShape;
   readonly usageReset?: ProviderUsageResetCapability;
+  /** Bounded control-only allowance read using this instance's selected login. */
+  readonly readAccountQuota?: Effect.Effect<ProviderSessionQuotaReport | null>;
   /** Explicit metadata read scoped to a server-resolved cwd; never a snapshot. */
   readonly discoverSkills?: (cwd: string) => Effect.Effect<ProviderSkillsResult>;
 }

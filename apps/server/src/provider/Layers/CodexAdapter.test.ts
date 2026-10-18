@@ -53,6 +53,7 @@ import * as SqlClient from "effect/unstable/sql/SqlClient";
 import { VisualizationGenerationId } from "@cafecode/contracts/visualizations";
 import { CODEX_HISTORY_RECOVERY_REQUIRED_MESSAGE } from "@cafecode/shared/codexHistorySafety";
 import { ServerConfig } from "../../config.ts";
+import { installGlideSessionRuntime, type GlideSessionBroker } from "../../glide/sessionRuntime.ts";
 import { storeFileAttachment } from "../../fileAttachmentStore.ts";
 import { AssistantStreamTextCommitment } from "../../orchestration/providerAssistantStreamCommitment.ts";
 import { SqlitePersistenceTest } from "../../persistence/Sqlite.test.fixture.ts";
@@ -9013,6 +9014,75 @@ function schedulingCase(
     ),
   );
 }
+
+it.effect(
+  "attaches Glide to exact Codex owners and joins activation, turn resume and interruption cleanup",
+  () =>
+    schedulingCase(({ createAdapter }) =>
+      Effect.gen(function* () {
+        const launch = {
+          command: process.execPath,
+          args: ["/synthetic/glide-bridge.mjs"],
+          env: { ELECTRON_RUN_AS_NODE: "1" },
+        };
+        const bindings = Array.from({ length: 2 }, (_, index) => ({
+          name: `cafe-glide-fixture-${index}`,
+          launch,
+          activate: vi.fn(async () => {}),
+          cancel: vi.fn(async () => {}),
+          resume: vi.fn(() => {}),
+          dispose: vi.fn(async () => {}),
+        }));
+        let nextBinding = 0;
+        const bind = vi.fn<GlideSessionBroker["bind"]>(async () => bindings[nextBinding++]);
+        const uninstall = installGlideSessionRuntime({
+          bind,
+          operation: async () => {
+            throw new Error("No HTTP authority in adapter fixture.");
+          },
+        });
+        yield* Effect.addFinalizer(() => Effect.sync(uninstall));
+        const factory = makeRuntimeFactory();
+        const instance = ProviderInstanceId.make("codex-glide-owner");
+        const adapter = yield* createAdapter(instance, factory.factory);
+        const first = asThreadId("glide-first"),
+          second = asThreadId("glide-second");
+        yield* adapter.startSession({ threadId: first, runtimeMode: "approval-required" });
+        yield* adapter.startSession({ threadId: second, runtimeMode: "full-access" });
+        assert.deepEqual(
+          bind.mock.calls.map(([identity]) => identity),
+          [
+            {
+              threadId: first,
+              providerInstanceId: instance,
+              provider: "codex",
+              runtimeMode: "approval-required",
+            },
+            {
+              threadId: second,
+              providerInstanceId: instance,
+              provider: "codex",
+              runtimeMode: "full-access",
+            },
+          ],
+        );
+        for (let index = 0; index < 2; index++) {
+          assert.deepEqual(factory.runtimes[index]!.options.glideMcp, bindings[index]);
+          assert.equal(bindings[index]!.activate.mock.calls.length, 1);
+        }
+        yield* adapter.sendTurn({ threadId: second, input: "owned turn" });
+        assert.equal(bindings[1]!.resume.mock.calls.length, 1);
+        assert.equal(bindings[0]!.resume.mock.calls.length, 0);
+        yield* adapter.interruptTurn(second);
+        assert.equal(bindings[1]!.cancel.mock.calls.length, 1);
+        assert.equal(bindings[1]!.dispose.mock.calls.length, 2);
+        assert.equal(bindings[0]!.cancel.mock.calls.length, 0);
+        assert.equal(bindings[0]!.dispose.mock.calls.length, 0);
+        yield* adapter.stopSession(first);
+        assert.equal(bindings[0]!.dispose.mock.calls.length, 2);
+      }),
+    ),
+);
 
 it.effect("registers visualization MCP only for the actual Codex Full-access launch", () =>
   schedulingCase(({ createAdapter }) =>

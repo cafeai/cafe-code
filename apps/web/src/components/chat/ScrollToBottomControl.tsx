@@ -1,5 +1,5 @@
 import { uiText } from "@cafecode/shared/i18n";
-import { ChevronDownIcon, ChevronUpIcon, EyeOffIcon } from "lucide-react";
+import { ChevronDownIcon, EllipsisIcon, EyeOffIcon } from "lucide-react";
 import { useId, useRef, useState, type ComponentProps, type FocusEvent } from "react";
 
 import { useUiLocale } from "~/i18n";
@@ -147,7 +147,7 @@ export function ScrollToBottomControl({
             />
           }
         >
-          <ChevronUpIcon className="size-3.5" aria-hidden="true" />
+          <EllipsisIcon className="size-3.5" aria-hidden="true" />
         </PopoverTrigger>
       </div>
       <PopoverPopup

@@ -37,7 +37,16 @@ export const respondToAuthError = (error: AuthError) =>
       {
         error: error.message,
       },
-      { status: error.status ?? 500, headers: browserApiCorsHeaders },
+      {
+        status: error.status ?? 500,
+        headers: {
+          ...browserApiCorsHeaders,
+          "cache-control": "no-store",
+          "access-control-expose-headers": "Retry-After, X-Cafe-Auth-Reason",
+          ...(error.retryAfterSeconds ? { "retry-after": String(error.retryAfterSeconds) } : {}),
+          ...(error.reason ? { "x-cafe-auth-reason": error.reason } : {}),
+        },
+      },
     );
   });
 
@@ -111,6 +120,7 @@ export const authBootstrapRouteLayer = HttpRouter.add(
     const result = yield* serverAuth.exchangeBootstrapCredential(
       payload.credential,
       deriveAuthClientMetadata({ request }),
+      payload.secondFactor,
     );
 
     return yield* HttpServerResponse.jsonUnsafe(result.response, {
@@ -145,6 +155,7 @@ export const authBearerBootstrapRouteLayer = HttpRouter.add(
     const result = yield* serverAuth.exchangeBootstrapCredentialForBearerSession(
       payload.credential,
       deriveAuthClientMetadata({ request }),
+      payload.secondFactor,
     );
     return HttpServerResponse.jsonUnsafe(result satisfies AuthBearerBootstrapResult, {
       status: 200,

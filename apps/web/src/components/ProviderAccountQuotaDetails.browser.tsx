@@ -15,6 +15,90 @@ describe("ProviderAccountQuotaDetails bounds", () => {
     mounted = undefined;
   });
 
+  it("swaps the weekly allowance with the selected model and keeps extra usage inline", async () => {
+    const report: ProviderSessionQuotaReport = {
+      source: "claude-cli",
+      observedAt: new Date().toISOString(),
+      meters: [
+        {
+          kind: "session",
+          group: "session",
+          usedPercent: 57,
+          resetsAt: "2099-10-16T22:40:00.143Z",
+          severity: "normal",
+          isActive: false,
+        },
+        {
+          kind: "weekly_all",
+          group: "weekly",
+          usedPercent: 18,
+          resetsAt: "2099-10-20T11:00:00.143Z",
+          severity: "normal",
+          isActive: false,
+        },
+        {
+          kind: "weekly_scoped",
+          group: "weekly",
+          modelLabel: "Fable",
+          usedPercent: 25,
+          resetsAt: "2099-10-20T11:00:00.143Z",
+          severity: "normal",
+          isActive: false,
+        },
+      ],
+      extraUsage: {
+        enabled: true,
+        monthlyLimit: 10_000,
+        usedCredits: 2500,
+        usedPercent: 25,
+        currency: "USD",
+      },
+    };
+    mounted = await render(
+      <ProviderAccountQuotaDetails
+        selectedModel="claude-sonnet-5-5"
+        sessionQuota={{ status: "available", report }}
+      />,
+    );
+    await expect.element(page.getByText("43% left", { exact: true })).toBeVisible();
+    await expect.element(page.getByText("82% left", { exact: true })).toBeVisible();
+    await expect.element(page.getByText("Weekly", { exact: true })).toBeVisible();
+    await expect.element(page.getByText("Weekly · Fable", { exact: true })).not.toBeInTheDocument();
+    await expect.element(page.getByText("25% of extra usage used", { exact: true })).toBeVisible();
+    const text = document.querySelector("[data-claude-session-quota]")!.textContent!;
+    for (const absent of [
+      "all models",
+      "Reported by",
+      "Received:",
+      "normal",
+      "Provider headline",
+      "Monthly limit",
+      "USD",
+    ])
+      expect(text).not.toContain(absent);
+    await expect
+      .element(page.getByRole("button", { name: "Details", exact: true }))
+      .not.toBeInTheDocument();
+    await mounted.rerender(
+      <ProviderAccountQuotaDetails
+        selectedModel="claude-fable-5-1"
+        sessionQuota={{ status: "available", report }}
+      />,
+    );
+    await expect.element(page.getByText("Weekly · Fable", { exact: true })).toBeVisible();
+    await expect.element(page.getByText("75% left", { exact: true })).toBeVisible();
+    await expect.element(page.getByText("82% left", { exact: true })).not.toBeInTheDocument();
+    await expect.element(page.getByText("Weekly", { exact: true })).not.toBeInTheDocument();
+    await mounted.rerender(
+      <ProviderAccountQuotaDetails
+        selectedModel="claude-opus-5-5"
+        sessionQuota={{ status: "available", report }}
+      />,
+    );
+    await expect.element(page.getByText("82% left", { exact: true })).toBeVisible();
+    await expect.element(page.getByText("Weekly · Fable", { exact: true })).not.toBeInTheDocument();
+  });
+
   it.each(["compact", "popover", "settings"] as const)(
     "bounds all buckets in %s layout while keeping the reset count outside scrolling",
     async (layout) => {
@@ -77,14 +161,14 @@ describe("ProviderAccountQuotaDetails bounds", () => {
   });
 
   it.each(["popover", "panel", "settings"] as const)(
-    "shows every independent session row with provenance, local time and bounded scrolling in %s",
+    "keeps applicable meters and inline extra usage in one bounded scroll owner in %s",
     async (layout) => {
       await page.viewport(700, 650);
       const report: ProviderSessionQuotaReport = {
         source: "claude-session",
         observedAt: new Date().toISOString(),
         meters: Array.from({ length: 24 }, (_, index) => ({
-          kind: index === 0 ? "session" : "weekly_scoped",
+          kind: index === 0 ? "session" : "future_meter",
           group: index === 0 ? "session" : "weekly",
           usedPercent: index === 0 ? 23.456 : 25,
           resetsAt: "2099-10-09T05:00:00.000Z",
@@ -94,10 +178,10 @@ describe("ProviderAccountQuotaDetails bounds", () => {
           isActive: index === 0,
         })),
         extraUsage: {
-          enabled: false,
-          monthlyLimit: 0,
-          usedCredits: 0,
-          usedPercent: 0,
+          enabled: true,
+          monthlyLimit: 100,
+          usedCredits: 25,
+          usedPercent: 25,
           currency: null,
         },
       };
@@ -110,17 +194,7 @@ describe("ProviderAccountQuotaDetails bounds", () => {
         </div>,
       );
       expect(document.querySelectorAll("[data-claude-quota-meter]")).toHaveLength(24);
-      await expect.element(page.getByText("Session-reported · not account-verified")).toBeVisible();
       await expect.element(page.getByText("76.544% left", { exact: true })).toBeVisible();
-      const local = new Intl.DateTimeFormat(undefined, {
-        year: "numeric",
-        month: "short",
-        day: "numeric",
-        hour: "numeric",
-        minute: "2-digit",
-        timeZoneName: "short",
-      }).format(new Date(report.observedAt));
-      expect(document.querySelector("[data-claude-session-quota]")?.textContent).toContain(local);
       const scroll = document.querySelector<HTMLElement>("[data-account-quota-scroll]")!;
       expect(scroll.scrollHeight).toBeGreaterThan(scroll.clientHeight);
       expect(scroll.clientHeight).toBeLessThanOrEqual(window.innerHeight * 0.4 + 1);
@@ -131,8 +205,9 @@ describe("ProviderAccountQuotaDetails bounds", () => {
       await expect
         .poll(() => scroll.scrollTop + scroll.clientHeight)
         .toBeGreaterThanOrEqual(scroll.scrollHeight - 1);
-      await expect.element(page.getByText("Extra usage: Disabled", { exact: true })).toBeVisible();
-      expect(scroll.textContent).toContain("0 minor units (currency unavailable)");
+      await expect
+        .element(page.getByText("25% of extra usage used", { exact: true }))
+        .toBeVisible();
       expect(document.querySelectorAll("[data-account-quota-scroll]")).toHaveLength(1);
       expect(document.querySelector("[data-claude-session-quota]")?.textContent).not.toContain(
         "Refresh",

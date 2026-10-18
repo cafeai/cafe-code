@@ -1,5 +1,6 @@
 import { SchedulingSessionRuntimeLive } from "../scheduledFollowups/sessionRuntime.ts";
 import { VisualizationSessionRuntimeLive } from "../visualizations/sessionRuntime.ts";
+import { GlideSessionRuntimeLive } from "../glide/sessionRuntime.ts";
 import { VisualizationArtifactsLive } from "../visualizations/service.ts";
 import { ServerEnvironmentLive } from "../environment/Layers/ServerEnvironment.ts";
 import { FetchHttpClient } from "effect/unstable/http";
@@ -90,6 +91,7 @@ export const ProviderDaemonRuntimeLive = Layer.unwrap(
 ).pipe(
   Layer.provideMerge(SchedulingSessionRuntimeLive),
   Layer.provideMerge(VisualizationSessionRuntimeLive),
+  Layer.provideMerge(GlideSessionRuntimeLive),
   Layer.provideMerge(VisualizationArtifactsLive),
   Layer.provideMerge(ServerEnvironmentLive),
   Layer.provideMerge(PersistenceLayerLive),

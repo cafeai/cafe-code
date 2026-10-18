@@ -4,11 +4,12 @@ import { readMcpFile } from "./privateFiles.ts";
 const MAX_MESSAGE_BYTES = 16 * 1024 * 1024;
 const MAX_IN_FLIGHT = 4;
 
-type BridgeTarget = "cafe-code" | "cafe-scheduling" | "cafe-visualizations";
+type BridgeTarget = "cafe-code" | "cafe-scheduling" | "cafe-visualizations" | "cafe-glide";
 const BRIDGE_PATHS: Record<BridgeTarget, string> = {
   "cafe-code": "/mcp",
   "cafe-scheduling": "/mcp/scheduling",
   "cafe-visualizations": "/mcp/visualizations",
+  "cafe-glide": "/mcp/glide",
 };
 
 type RequestId = string | number;
@@ -92,6 +93,7 @@ export async function runLocalBridge(options: {
   const pending = new Map<RequestId, AbortController>();
   const controllers = new Set<AbortController>();
   const tasks = new Set<Promise<void>>();
+  const lanes = { execution: 0, control: 0 };
   let protocolVersion = "2025-03-26";
   let writes = Promise.resolve();
   const send = (message: unknown) => {
@@ -215,7 +217,17 @@ export async function runLocalBridge(options: {
             pending.get(requestId)?.abort();
           continue;
         }
-        if (tasks.size >= MAX_IN_FLIGHT || (message.id !== undefined && pending.has(message.id))) {
+        // Glide reset must remain reachable while its four JS calls are held.
+        // Other internal bridges retain their existing four-request allowance.
+        const lane =
+          message.method === "tools/call" && object(message.params)?.name !== "js_reset"
+            ? "execution"
+            : "control";
+        const full =
+          options.target === "cafe-glide"
+            ? lanes[lane] >= MAX_IN_FLIGHT
+            : tasks.size >= MAX_IN_FLIGHT;
+        if (full || (message.id !== undefined && pending.has(message.id))) {
           if (message.id !== undefined)
             await fail(message.id, "Cafe MCP is busy. Wait for the pending requests.");
           continue;
@@ -224,8 +236,14 @@ export async function runLocalBridge(options: {
         controllers.add(controller);
         if (message.id !== undefined) pending.set(message.id, controller);
         const task = forward(message, controller);
+        lanes[lane]++;
         tasks.add(task);
-        void task.finally(() => tasks.delete(task)).catch(() => undefined);
+        void task
+          .finally(() => {
+            lanes[lane]--;
+            tasks.delete(task);
+          })
+          .catch(() => undefined);
       }
     }
   } finally {

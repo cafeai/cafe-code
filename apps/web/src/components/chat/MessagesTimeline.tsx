@@ -45,6 +45,7 @@ import {
   formatElapsed,
   workLogDisplayLabel,
   workLogDisplayToolTitle,
+  type HistoricalWorkLogSummary,
   type WorkLogEntry,
 } from "../../session-logic";
 import type { SubagentRuntimeContext } from "../../subagent-activity";
@@ -329,6 +330,11 @@ interface MessagesTimelineProps {
   skills?: ReadonlyArray<Pick<ServerProviderSkill, "name" | "displayName">>;
   stickToEndRevision: number;
   autoFollowTail: boolean;
+  /**
+   * Fade the bottom edge while content sits below it (the reader has scrolled
+   * away from the tail). Presentation only; it never affects scroll state.
+   */
+  fadeBottomEdge?: boolean;
   initialViewPosition?: TimelineViewPosition | null;
   viewPositionCache?: Map<string, TimelineViewPosition>;
   viewPositionKey?: string;
@@ -379,6 +385,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
   skills = EMPTY_TIMELINE_SKILLS,
   stickToEndRevision,
   autoFollowTail,
+  fadeBottomEdge = false,
   initialViewPosition = null,
   viewPositionCache,
   viewPositionKey,
@@ -1399,10 +1406,11 @@ export const MessagesTimeline = memo(function MessagesTimeline({
         <TimelineRowActivityCtx value={activityState}>
           <div
             className={cn(
-              "h-full min-h-0",
+              "cafe-timeline-bottom-fade h-full min-h-0",
               isSubagentDetailOpen && "pointer-events-none invisible",
               !isSubagentDetailOpen && returnedFromSubagentDetail && "animate-enter-from-start",
             )}
+            data-bottom-fade={fadeBottomEdge ? "true" : "false"}
             aria-hidden={isSubagentDetailOpen ? true : undefined}
             inert={isSubagentDetailOpen ? true : undefined}
           >
@@ -2240,6 +2248,11 @@ function compareHistoricalActivityRows(
   return left.id.localeCompare(right.id);
 }
 
+type EarlierWorkLogFilters = Pick<
+  HistoricalWorkLogSummary,
+  "excludeActivityIds" | "excludeTurnStartAck" | "presenceRevision"
+>;
+
 interface EarlierWorkLogState {
   readonly owner: string;
   readonly upper: OrchestrationThreadActivityCursor | null;
@@ -2250,11 +2263,12 @@ interface EarlierWorkLogState {
   readonly truncated: boolean;
   readonly loading: boolean;
   readonly error: boolean;
-  readonly lastRequest: {
-    readonly before: OrchestrationThreadActivityCursor;
-    readonly older: boolean;
-    readonly excludeActivityIds?: ReadonlyArray<OrchestrationThreadActivity["id"]>;
-  } | null;
+  readonly lastRequest:
+    | ({
+        readonly before: OrchestrationThreadActivityCursor;
+        readonly older: boolean;
+      } & EarlierWorkLogFilters)
+    | null;
 }
 
 function emptyEarlierWorkLog(owner: string): EarlierWorkLogState {
@@ -2311,7 +2325,7 @@ const EarlierWorkLogSection = memo(function EarlierWorkLogSection({
     async (
       before: OrchestrationThreadActivityCursor,
       older: boolean,
-      excludeActivityIds: ReadonlyArray<OrchestrationThreadActivity["id"]> | undefined,
+      { excludeActivityIds, excludeTurnStartAck, presenceRevision }: EarlierWorkLogFilters,
     ) => {
       if (pendingRef.current === owner) return;
       const generation = ++generationRef.current;
@@ -2324,7 +2338,13 @@ const EarlierWorkLogSection = memo(function EarlierWorkLogSection({
         upper: older && previous.owner === owner ? previous.upper : before,
         loading: true,
         error: false,
-        lastRequest: { before, older, ...(excludeActivityIds ? { excludeActivityIds } : {}) },
+        lastRequest: {
+          before,
+          older,
+          ...(excludeActivityIds ? { excludeActivityIds } : {}),
+          ...(excludeTurnStartAck !== undefined ? { excludeTurnStartAck } : {}),
+          ...(presenceRevision !== undefined ? { presenceRevision } : {}),
+        },
       }));
       try {
         const api = readEnvironmentApi(ctx.activeThreadEnvironmentId);
@@ -2336,6 +2356,7 @@ const EarlierWorkLogSection = memo(function EarlierWorkLogSection({
           limit,
           before,
           ...(excludeActivityIds ? { excludeActivityIds } : {}),
+          ...(excludeTurnStartAck !== undefined ? { excludeTurnStartAck } : {}),
         });
         if (!stillOwned()) return;
         validateEarlierWorkLogPage({
@@ -2345,6 +2366,7 @@ const EarlierWorkLogSection = memo(function EarlierWorkLogSection({
           before,
           limit,
           ...(excludeActivityIds ? { excludeActivityIds } : {}),
+          ...(excludeTurnStartAck !== undefined ? { excludeTurnStartAck } : {}),
         });
         setState((previous) => {
           if (!stillOwned() || previous.owner !== owner) return previous;
@@ -2388,6 +2410,35 @@ const EarlierWorkLogSection = memo(function EarlierWorkLogSection({
   );
   const showLoading = useDelayedFlag(isExpanded && current.loading && visibleEntries.length === 0);
   const before = row.summary.before;
+  const exhaustedEmpty =
+    current.loaded &&
+    !current.loading &&
+    !current.error &&
+    !current.hasOlder &&
+    visibleEntries.length === 0;
+  useLayoutEffect(() => {
+    if (
+      exhaustedEmpty &&
+      current.lastRequest &&
+      (current.lastRequest.presenceRevision !== row.summary.presenceRevision ||
+        current.lastRequest.excludeTurnStartAck !== row.summary.excludeTurnStartAck ||
+        JSON.stringify(current.lastRequest.excludeActivityIds ?? []) !==
+          JSON.stringify(row.summary.excludeActivityIds ?? []))
+    ) {
+      // A captured empty range stays hidden through context-only movement.
+      // Actual newly evicted work or changed settings may make this row useful
+      // again. Reset only the empty reader, without fetching an activity page.
+      setState(emptyEarlierWorkLog(owner));
+      setExpandedOwner(null);
+    }
+  }, [
+    exhaustedEmpty,
+    current.lastRequest,
+    owner,
+    row.summary.presenceRevision,
+    row.summary.excludeTurnStartAck,
+    row.summary.excludeActivityIds,
+  ]);
   useEffect(() => {
     // An exhausted *captured* range cannot prove a later, larger range empty.
     // Only publish a negative when it still matches the current disclosure.
@@ -2397,6 +2448,7 @@ const EarlierWorkLogSection = memo(function EarlierWorkLogSection({
       visibleEntries.length === 0 &&
       before &&
       current.upper &&
+      current.lastRequest?.excludeTurnStartAck === row.summary.excludeTurnStartAck &&
       JSON.stringify(current.lastRequest?.excludeActivityIds ?? []) ===
         JSON.stringify(row.summary.excludeActivityIds ?? []) &&
       cursorKey(before) === cursorKey(current.upper)
@@ -2412,8 +2464,13 @@ const EarlierWorkLogSection = memo(function EarlierWorkLogSection({
     onHistoricalWorkLogPresenceResolved,
     row.turnId,
     row.summary.excludeActivityIds,
+    row.summary.excludeTurnStartAck,
     visibleEntries.length,
   ]);
+
+  // An exhausted empty page must not paint an empty disclosure while its
+  // negative presence receipt propagates to the owning virtualized list.
+  if (exhaustedEmpty) return null;
 
   return (
     <div
@@ -2427,8 +2484,7 @@ const EarlierWorkLogSection = memo(function EarlierWorkLogSection({
           className="focus-ring flex min-w-0 flex-1 items-center gap-1.5 rounded-xl px-2.5 py-1.5 text-left text-2xs text-subtle-foreground transition-colors duration-(--duration-fast) hover:text-foreground"
           onClick={() => {
             setExpandedOwner(isExpanded ? null : owner);
-            if (!isExpanded && !current.loaded && before)
-              void loadPage(before, false, row.summary.excludeActivityIds);
+            if (!isExpanded && !current.loaded && before) void loadPage(before, false, row.summary);
           }}
         >
           <ChevronRightIcon
@@ -2458,7 +2514,7 @@ const EarlierWorkLogSection = memo(function EarlierWorkLogSection({
               disabled={current.loading}
               className="focus-ring rounded-sm text-2xs text-subtle-foreground transition-colors duration-(--duration-fast) hover:text-foreground disabled:opacity-50"
               onClick={() => {
-                if (before) void loadPage(before, false, row.summary.excludeActivityIds);
+                if (before) void loadPage(before, false, row.summary);
               }}
             >
               {uiText("Recent", undefined, undefined, uiLocale)}
@@ -2469,8 +2525,7 @@ const EarlierWorkLogSection = memo(function EarlierWorkLogSection({
                 disabled={current.loading}
                 className="focus-ring rounded-sm text-2xs text-subtle-foreground transition-colors duration-(--duration-fast) hover:text-foreground disabled:opacity-50"
                 onClick={() => {
-                  if (current.next)
-                    void loadPage(current.next, true, row.summary.excludeActivityIds);
+                  if (current.next) void loadPage(current.next, true, row.summary);
                 }}
               >
                 {current.loading
@@ -2517,7 +2572,7 @@ const EarlierWorkLogSection = memo(function EarlierWorkLogSection({
                     void loadPage(
                       current.lastRequest.before,
                       current.lastRequest.older,
-                      current.lastRequest.excludeActivityIds,
+                      current.lastRequest,
                     );
                 }}
               >
@@ -2554,6 +2609,7 @@ function validateHistoricalWorkLogPage(input: {
     page.limit !== limit ||
     page.before !== undefined ||
     page.excludeActivityIds !== undefined ||
+    page.excludeTurnStartAck !== undefined ||
     !Number.isSafeInteger(page.totalCount) ||
     page.totalCount < 0 ||
     page.activities.length !== Math.min(limit, Math.max(0, page.totalCount - offset))

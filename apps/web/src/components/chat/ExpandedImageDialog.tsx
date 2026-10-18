@@ -70,10 +70,12 @@ export const ExpandedImageDialog = memo(function ExpandedImageDialog({
 
   // A chat pane may clip its content or establish a fixed-position containing
   // block. Keep this full-window viewer outside that layout while retaining
-  // the pane's React ownership and keyboard guards.
+  // the pane's React ownership and keyboard guards. Native window controls sit
+  // above all renderer content: Windows reserves its visible caption band, and
+  // macOS starts the card below the fixed traffic-light band.
   return createPortal(
     <div
-      className={`fixed inset-0 z-50 flex items-center justify-center bg-black/75 p-4 animate-enter-fade [-webkit-app-region:no-drag] ${reserveNativeTitlebar ? "wco:pt-[calc(env(titlebar-area-y,0px)+env(titlebar-area-height,40px)+1rem)]" : ""}`}
+      className={`fixed inset-0 z-50 flex items-center justify-center bg-black/75 p-4 animate-enter-fade [-webkit-app-region:no-drag] mac-traffic-lights:pt-(--app-mac-titlebar-height) ${reserveNativeTitlebar ? "wco:pt-[calc(env(titlebar-area-y,0px)+env(titlebar-area-height,40px)+1rem)]" : ""}`}
       role="dialog"
       aria-modal="true"
       aria-label={uiText("Expanded image preview", undefined, undefined, uiLocale)}

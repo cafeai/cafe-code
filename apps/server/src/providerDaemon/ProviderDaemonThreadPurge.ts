@@ -43,6 +43,7 @@ export class ProviderDaemonThreadPurgeError extends Data.TaggedError(
 )<{
   readonly operation:
     | "install-fence"
+    | "purge-glide-permissions"
     | "decode-legacy-event"
     | "hydrate-legacy-event"
     | "decode-legacy-command"
@@ -102,6 +103,11 @@ export const purgeProviderDaemonThreadPersistence = Effect.fn(
     VALUES (${input.threadId}, ${deletedAt})
     ON CONFLICT(thread_id) DO NOTHING
   `.pipe(Effect.mapError(() => new ProviderDaemonThreadPurgeError({ operation: "install-fence" })));
+  yield* sql`DELETE FROM glide_thread_preferences WHERE thread_id = ${input.threadId}`.pipe(
+    Effect.mapError(
+      () => new ProviderDaemonThreadPurgeError({ operation: "purge-glide-permissions" }),
+    ),
+  );
 
   // Hydrate all retained legacy events. Cursor pagination uses the existing
   // primary key and reads at most one potentially-large JSON value at a time;

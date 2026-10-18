@@ -1,6 +1,10 @@
 import { describe, expect, it } from "vitest";
 import { PROVIDER_SESSION_QUOTA_MAX_METERS } from "@cafecode/contracts";
-import { mapClaudeSessionQuotaReport, stripClaudeUsageReport } from "./claudeSessionQuota.ts";
+import {
+  mapClaudeAccountQuotaReport,
+  mapClaudeSessionQuotaReport,
+  stripClaudeUsageReport,
+} from "./claudeSessionQuota.ts";
 
 const observedAt = "2026-10-09T01:00:00.000Z";
 const row = {
@@ -15,6 +19,78 @@ const row = {
 const raw = { session: { private_total: "not-a-quota-field" }, rate_limits: { limits: [row] } };
 const map = (value: unknown) => mapClaudeSessionQuotaReport(value, observedAt);
 const unavailable = { source: "claude-session", observedAt, meters: null };
+
+describe("Claude get_usage allowance projection", () => {
+  const legacy = {
+    rate_limits_available: true,
+    rate_limits: {
+      five_hour: { utilization: 57, resets_at: "2026-10-16T22:40:00.143878+00:00" },
+      seven_day: { utilization: 18.25, resets_at: "2026-10-20T11:00:00Z" },
+    },
+  };
+  it("maps numeric five-hour and seven-day allowances without changing percentage units", () => {
+    const report = mapClaudeAccountQuotaReport(legacy, observedAt)!;
+    expect(report.source).toBe("claude-cli");
+    expect(report.observedAt).toBe(observedAt);
+    expect(report.meters?.map((meter) => [meter.kind, meter.usedPercent, meter.resetsAt])).toEqual([
+      ["session", 57, "2026-10-16T22:40:00.143Z"],
+      ["weekly_all", 18.25, "2026-10-20T11:00:00.000Z"],
+    ]);
+  });
+  it("prefers the complete ordered endpoint meters, including empty and future rows", () => {
+    for (const limits of [[], [row, { ...row, kind: "future", percent: 99 }]]) {
+      const report = mapClaudeAccountQuotaReport(
+        {
+          ...legacy,
+          session: { private: "discard" },
+          behaviors: { private: "discard" },
+          rate_limits: { ...legacy.rate_limits, limits, extra_usage: null },
+        },
+        observedAt,
+      )!;
+      expect(report.meters?.map((meter) => meter.usedPercent)).toEqual(
+        limits.map((meter) => meter.percent),
+      );
+      expect(report.extraUsage).toBeNull();
+      expect(JSON.stringify(report)).not.toContain("private");
+    }
+  });
+  it("preserves unavailable, null and malformed values without inventing zero usage", () => {
+    for (const value of [
+      null,
+      {},
+      { ...legacy, rate_limits_available: false },
+      { ...legacy, rate_limits: null },
+      { ...legacy, rate_limits: { five_hour: { utilization: null, resets_at: null } } },
+      { ...legacy, rate_limits: { five_hour: { utilization: 101, resets_at: null } } },
+      { ...legacy, rate_limits: { ...legacy.rate_limits, limits: [{ ...row, percent: NaN }] } },
+      { ...legacy, rate_limits: { ...legacy.rate_limits, limits: {} } },
+      Object.create(legacy),
+    ])
+      expect(mapClaudeAccountQuotaReport(value, observedAt)).toBeNull();
+    const report = mapClaudeAccountQuotaReport(
+      {
+        ...legacy,
+        rate_limits: {
+          ...legacy.rate_limits,
+          five_hour: { utilization: 0, resets_at: null },
+        },
+      },
+      observedAt,
+    )!;
+    expect(report.meters?.[0]?.usedPercent).toBe(0);
+    expect(report.meters?.[0]?.resetsAt).toBeNull();
+    let reads = 0;
+    const hostile = Object.defineProperty({}, "rate_limits_available", {
+      get() {
+        reads++;
+        return true;
+      },
+    });
+    expect(mapClaudeAccountQuotaReport(hostile, observedAt)).toBeNull();
+    expect(reads).toBe(0);
+  });
+});
 
 describe("Claude passive session quota projection", () => {
   it("preserves all ordered model/surface meters without conflating decimal units or duplicate labels", () => {

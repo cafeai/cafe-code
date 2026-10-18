@@ -31,6 +31,21 @@ export default defineConfig([
     "mcp-bridge": "src/mcp/localBridgeEntry.ts",
     "scheduling-mcp-bridge": "src/mcp/schedulingBridgeEntry.ts",
     "visualization-mcp-bridge": "src/mcp/visualizationBridgeEntry.ts",
+    "glide-mcp-bridge": "src/mcp/glideBridgeEntry.ts",
+  }).map(([name, entry]) => ({
+    entry: { [name]: entry },
+    outDir: "dist",
+    clean: false,
+    deps: { alwaysBundle: () => true },
+    outputOptions: { codeSplitting: false },
+    dts: false,
+    checks: { pluginTimings: false },
+  })),
+  // Glide is explicitly configured as its own stdio server. The kernel
+  // remains a separate disposable process; neither entry starts the Cafe app.
+  ...Object.entries({
+    "glide-mcp": "src/glide/entry.ts",
+    "glide-worker": "src/glide/worker.ts",
   }).map(([name, entry]) => ({
     entry: { [name]: entry },
     outDir: "dist",

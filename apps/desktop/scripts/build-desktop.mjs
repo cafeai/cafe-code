@@ -7,6 +7,7 @@ import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { ensureMacDictationHelper } from "./build-mac-dictation-helper.mjs";
+import { ensureMacGlideHelper } from "./build-mac-glide-helper.mjs";
 import { assertSandboxedPreloadBundles } from "./assert-sandboxed-preloads.mjs";
 
 const scriptsDirectory = dirname(fileURLToPath(import.meta.url));
@@ -16,6 +17,7 @@ const require = createRequire(import.meta.url);
 // considered usable. Invoke the locked bundler through Node, without a shell
 // or any alternate JavaScript runtime.
 ensureMacDictationHelper();
+ensureMacGlideHelper();
 
 const packagePath = require.resolve("tsdown/package.json");
 const packageJson = JSON.parse(readFileSync(packagePath, "utf8"));

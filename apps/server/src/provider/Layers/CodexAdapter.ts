@@ -1,4 +1,11 @@
 import {
+  bindGlideSession,
+  activateGlideSession,
+  cancelGlideSession,
+  disposeGlideSession,
+  type GlideSessionBinding,
+} from "../../glide/providerBinding.ts";
+import {
   makeManagementMcpSession,
   type ManagementMcpBinding,
 } from "../../mcp/sessionConnection.ts";
@@ -528,6 +535,7 @@ interface CodexAdapterSessionContext {
   readonly schedulingBinding?: SchedulingSessionBinding | undefined;
   readonly managementBinding?: ManagementMcpBinding | undefined;
   readonly visualizationBinding?: VisualizationSessionBinding | undefined;
+  readonly glideBinding?: GlideSessionBinding | undefined;
   readonly threadId: ThreadId;
   readonly scope: Scope.Closeable;
   readonly runtime: CodexSessionRuntimeShape;
@@ -5368,6 +5376,7 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
         const exit = yield* Effect.gen(function* () {
           // Revoke management authority before the exact native owner retires.
           yield* session.managementBinding?.dispose ?? Effect.void;
+          yield* disposeGlideSession(session.glideBinding);
           yield* disposeSchedulingSession(session.schedulingBinding);
           yield* Effect.promise(
             () => session.visualizationBinding?.dispose() ?? Promise.resolve(),
@@ -5606,6 +5615,15 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
                 ),
             ).pipe(Effect.provideService(Scope.Scope, sessionScope))
           : undefined;
+        const glideBinding = yield* Effect.acquireRelease(
+          bindGlideSession({
+            threadId: input.threadId,
+            providerInstanceId: boundInstanceId,
+            provider: "codex",
+            runtimeMode: input.runtimeMode,
+          }),
+          disposeGlideSession,
+        ).pipe(Effect.provideService(Scope.Scope, sessionScope));
         const currentTransportPolicy = toRuntimeTransportPolicy(yield* Ref.get(transportPolicyRef));
         const runtimeInput: CodexSessionRuntimeOptions = {
           customInstructions: yield* readSystemPromptFileForInjection(
@@ -5664,6 +5682,7 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
                   ),
           },
           ...(managementBinding ? { managementMcp: managementBinding } : {}),
+          ...(glideBinding ? { glideMcp: glideBinding } : {}),
           ...(schedulingBinding
             ? { schedulingMcp: { name: schedulingBinding.name, launch: schedulingBinding.launch } }
             : {}),
@@ -6080,6 +6099,10 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
                   }),
               });
 
+            yield* activateGlideSession(glideBinding, {
+              threadId: input.threadId,
+              provider: "codex",
+            });
             return { runtime, eventFiber, started, activeAuthRecoveryTasksById };
           },
         ).pipe(
@@ -6108,6 +6131,7 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
 
         sessions.set(input.threadId, {
           visualizationBinding,
+          glideBinding,
           startInput: input,
           openingPolicy: {
             cwd: runtimeInput.cwd,
@@ -6385,6 +6409,7 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
       input.modelSelection?.instanceId === boundInstanceId
         ? getModelSelectionStringOptionValue(input.modelSelection, "reasoningEffort")
         : undefined;
+    session.glideBinding?.resume();
     const turn = yield* session.runtime
       .sendTurn({
         ...(input.expectedSubagentPolicySession !== undefined
@@ -6564,6 +6589,11 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
   const interruptTurn: CodexAdapterShape["interruptTurn"] = (threadId, turnId) =>
     Effect.gen(function* () {
       const session = yield* requireSession(threadId);
+      if (
+        session.glideBinding &&
+        (turnId === undefined || (yield* session.runtime.getSession).activeTurnId === turnId)
+      )
+        yield* cancelGlideSession(session.glideBinding);
       yield* session.runtime.interruptTurn(turnId);
       // Codex app-server can remain superficially healthy after an interrupt:
       // it may still ACK a later `turn/start` while never delivering the

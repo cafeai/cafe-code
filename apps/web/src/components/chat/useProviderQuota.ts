@@ -14,6 +14,8 @@ export interface ProviderQuotaContext {
   readonly input: ProviderSessionQuotaInput | null;
   readonly scopeRevision: string;
   readonly connected: boolean;
+  /** Presentation only; changing models reuses the same account observation. */
+  readonly selectedModel?: string | null | undefined;
 }
 
 export interface ProviderQuotaState {
@@ -21,7 +23,7 @@ export interface ProviderQuotaState {
   readonly report: ProviderSessionQuotaReport | null;
 }
 
-/** Metadata subscription only: it never refreshes a provider or submits /usage.
+/** Metadata subscription: the owner may read native allowances without a prompt.
  * Scope/visibility changes clear in render, before old effect cleanup. Each
  * reconnect clears the previous reading while the authenticated transport
  * revalidates its subscription; transport delivery owns its connection fence. */
@@ -30,7 +32,16 @@ export function useProviderQuota(
   visible: boolean,
   expectedClaude = false,
 ): ProviderQuotaState | undefined {
-  const key = JSON.stringify(context ?? null);
+  const key = JSON.stringify(
+    context
+      ? {
+          environmentId: context.environmentId,
+          input: context.input,
+          scopeRevision: context.scopeRevision,
+          connected: context.connected,
+        }
+      : null,
+  );
   const request = useMemo(() => ({ key, visible }), [key, visible]);
   const [state, setState] = useState<{ request: typeof request; value: ProviderQuotaState } | null>(
     null,

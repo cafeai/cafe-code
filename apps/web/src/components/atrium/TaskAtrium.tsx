@@ -1191,7 +1191,10 @@ export function TaskAtriumBoard() {
         aria-label={uiText("Task Atrium content", undefined, undefined, uiLocale)}
         tabIndex={0}
       >
-        <div className="sticky top-0 z-30 flex min-w-0 justify-center bg-gradient-to-b from-background/65 via-background/25 to-transparent py-4 pr-14 pl-3 sm:pl-4">
+        {/* macOS draws the traffic lights over this full-window surface. Clear
+            them on both sides so the centred pills stay centred and scroll
+            horizontally instead of reaching under the window buttons. */}
+        <div className="sticky top-0 z-30 flex min-w-0 justify-center bg-gradient-to-b from-background/65 via-background/25 to-transparent py-4 pr-14 pl-3 sm:pl-4 mac-traffic-lights:px-(--app-mac-titlebar-leading-space)">
           <div className="flex min-w-0 max-w-full items-center gap-2">
             <div
               ref={providerTrackRef}

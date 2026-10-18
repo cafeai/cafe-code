@@ -1,6 +1,8 @@
 import { httpSecurityLayer } from "./httpSecurity.ts";
 import { SchedulingSessionRuntimeLive } from "./scheduledFollowups/sessionRuntime.ts";
 import { VisualizationSessionRuntimeLive } from "./visualizations/sessionRuntime.ts";
+import { GlideSessionRuntimeLive } from "./glide/sessionRuntime.ts";
+import { glideMcpRouteLayer } from "./glide/http.ts";
 import { VisualizationArtifactsLive } from "./visualizations/service.ts";
 import {
   visualizationMcpRouteLayer,
@@ -98,6 +100,7 @@ import * as SourceControlRepositoryService from "./sourceControl/SourceControlRe
 import { ProjectSetupScriptRunnerLive } from "./project/Layers/ProjectSetupScriptRunner.ts";
 import { ObservabilityLive } from "./observability/Layers/Observability.ts";
 import { ServerEnvironmentLive } from "./environment/Layers/ServerEnvironment.ts";
+import { authTwoFactorRouteLayer } from "./auth/twoFactorHttp.ts";
 import {
   authAdminPasswordClearRouteLayer,
   authAdminPasswordSetRouteLayer,
@@ -298,7 +301,13 @@ const RuntimeCoreDependenciesLive = ReactorLayerLive.pipe(
   Layer.provideMerge(GitLayerLive),
   Layer.provideMerge(VcsLayerLive),
   Layer.provideMerge(ProviderRuntimeLayerLive),
-  Layer.provideMerge(Layer.mergeAll(SchedulingSessionRuntimeLive, VisualizationSessionRuntimeLive)),
+  Layer.provideMerge(
+    Layer.mergeAll(
+      SchedulingSessionRuntimeLive,
+      VisualizationSessionRuntimeLive,
+      GlideSessionRuntimeLive,
+    ),
+  ),
   Layer.provideMerge(PersistenceLayerLive),
   Layer.provideMerge(KeybindingsLive),
   Layer.provideMerge(ProviderRegistryLive),
@@ -350,6 +359,7 @@ const RuntimeServicesLive = ServerRuntimeStartupLive.pipe(
 );
 
 export const makeRoutesLayer = Layer.mergeAll(
+  authTwoFactorRouteLayer,
   authAdminPasswordClearRouteLayer,
   authAdminPasswordSetRouteLayer,
   authAdminPasswordStatusRouteLayer,
@@ -374,6 +384,7 @@ export const makeRoutesLayer = Layer.mergeAll(
   clientDebugLogRouteLayer,
   cafeMcpRouteLayer,
   schedulingMcpRouteLayer,
+  glideMcpRouteLayer,
   visualizationMcpRouteLayer,
   orchestrationDispatchRouteLayer,
   orchestrationSnapshotRouteLayer,

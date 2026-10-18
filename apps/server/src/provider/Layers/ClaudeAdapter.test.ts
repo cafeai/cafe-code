@@ -2,6 +2,7 @@ import { VisualizationGenerationId } from "@cafecode/contracts/visualizations";
 import * as ManagementMcp from "../../mcp/sessionConnection.ts";
 import { GENERATED_VISUALIZATION_INSTRUCTIONS } from "../../visualizations/mcp.ts";
 import { installVisualizationSessionRuntime } from "../../visualizations/sessionRuntime.ts";
+import { installGlideSessionRuntime } from "../../glide/sessionRuntime.ts";
 import { buildCafeInstructions } from "../CafeInstructions.ts";
 // @effect-diagnostics nodeBuiltinImport:off
 import {
@@ -2406,6 +2407,66 @@ describe("ClaudeAdapterLive", () => {
       }
     }
   }
+
+  it.effect("attaches and retires the exact Glide binding through Claude SDK session options", () =>
+    Effect.gen(function* () {
+      const fileSystem = yield* FileSystem.FileSystem;
+      const directory = yield* fileSystem.makeTempDirectoryScoped({ prefix: "claude-glide-" });
+      const instance = ProviderInstanceId.make("claude-glide-owner");
+      const harness = makeHarness({
+        environment: {},
+        cwd: directory,
+        baseDir: directory,
+        claudeConfig: { homePath: directory },
+        instanceId: instance,
+      });
+      yield* Effect.gen(function* () {
+        const launch = {
+          command: process.execPath,
+          args: [path.join(directory, "synthetic-glide-bridge.mjs")],
+          env: { ELECTRON_RUN_AS_NODE: "1" },
+        };
+        const activate = vi.fn(async () => {}),
+          dispose = vi.fn(async () => {});
+        const bind = vi.fn(async (identity: unknown) => {
+          assert.deepEqual(identity, {
+            threadId: THREAD_ID,
+            providerInstanceId: instance,
+            provider: "claudeAgent",
+            runtimeMode: "approval-required",
+          });
+          return {
+            name: "cafe-glide",
+            launch,
+            activate,
+            dispose,
+            cancel: async () => {},
+            resume: () => {},
+          };
+        });
+        const release = installGlideSessionRuntime({
+          bind,
+          operation: async () => {
+            throw new Error("No HTTP authority in SDK fixture.");
+          },
+        });
+        yield* Effect.addFinalizer(() => Effect.sync(release));
+        const adapter = yield* ClaudeAdapter;
+        yield* adapter.startSession({ threadId: THREAD_ID, runtimeMode: "approval-required" });
+        assert.equal(bind.mock.calls.length, 1);
+        assert.equal(activate.mock.calls.length, 1);
+        assert.deepEqual(harness.createInputs[0]!.options.mcpServers?.["cafe-glide"], {
+          type: "stdio",
+          ...launch,
+          alwaysLoad: true,
+        });
+        assert.equal(harness.createInputs[0]!.options.permissionMode, "default");
+        yield* adapter.stopSession(THREAD_ID);
+        yield* adapter.stopAll();
+        assert.equal(dispose.mock.calls.length, 1);
+      }).pipe(Effect.scoped, Effect.provide(harness.layer));
+    }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+  );
 
   it.effect("revokes scheduling when Claude query creation fails", () => {
     const harness = makeHarness({

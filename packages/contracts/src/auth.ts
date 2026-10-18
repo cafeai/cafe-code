@@ -102,19 +102,44 @@ export const ServerAuthDescriptor = Schema.Struct({
   bootstrapMethods: Schema.Array(ServerAuthBootstrapMethod),
   sessionMethods: Schema.Array(ServerAuthSessionMethod),
   sessionCookieName: TrimmedNonEmptyString,
+  twoFactorRequired: Schema.optionalKey(Schema.Boolean),
 });
 export type ServerAuthDescriptor = typeof ServerAuthDescriptor.Type;
 
 export const AuthBootstrapInput = Schema.Struct({
   credential: TrimmedNonEmptyString,
+  secondFactor: Schema.optionalKey(Schema.String.check(Schema.isMaxLength(64))),
 });
 export type AuthBootstrapInput = typeof AuthBootstrapInput.Type;
 
 export const AuthPasswordBootstrapInput = Schema.Struct({
   username: Schema.optionalKey(TrimmedNonEmptyString),
   password: TrimmedNonEmptyString,
+  secondFactor: Schema.optionalKey(Schema.String.check(Schema.isMaxLength(64))),
 });
 export type AuthPasswordBootstrapInput = typeof AuthPasswordBootstrapInput.Type;
+
+export const AuthTwoFactorCodeInput = Schema.Struct({
+  code: Schema.String.check(Schema.isMaxLength(64)),
+});
+export type AuthTwoFactorCodeInput = typeof AuthTwoFactorCodeInput.Type;
+
+export const AuthTwoFactorStatus = Schema.Struct({
+  enabled: Schema.Boolean,
+  recoveryCodesRemaining: Schema.Number,
+});
+export type AuthTwoFactorStatus = typeof AuthTwoFactorStatus.Type;
+
+export const AuthTwoFactorEnrollment = Schema.Struct({
+  secret: TrimmedNonEmptyString,
+  uri: TrimmedNonEmptyString,
+});
+export type AuthTwoFactorEnrollment = typeof AuthTwoFactorEnrollment.Type;
+
+export const AuthTwoFactorEnabled = Schema.Struct({
+  recoveryCodes: Schema.Array(TrimmedNonEmptyString),
+});
+export type AuthTwoFactorEnabled = typeof AuthTwoFactorEnabled.Type;
 
 export const AuthAdminPasswordStatus = Schema.Struct({
   configured: Schema.Boolean,

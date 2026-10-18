@@ -335,6 +335,8 @@ const assertServerRuntimeBuildAssets = Effect.fn("assertServerRuntimeBuildAssets
     "dist/launcher.mjs",
     "dist/mcp-bridge.mjs",
     "dist/scheduling-mcp-bridge.mjs",
+    "dist/glide-mcp-bridge.mjs",
+    "dist/glide-worker.mjs",
   ]) {
     const abs = path.join(serverDir, relPath);
     if (!(yield* fs.exists(abs))) {

@@ -121,6 +121,8 @@ import Migration0096 from "./Migrations/096_GeneratedVisualizations.ts";
 import Migration0097 from "./Migrations/097_ChatImages.ts";
 import Migration0098 from "./Migrations/098_ReportedUsageCosts.ts";
 import Migration0099 from "./Migrations/099_UsageAndCompactionReconciliation.ts";
+import Migration0100 from "./Migrations/100_GlideThreadPreferences.ts";
+import Migration0101 from "./Migrations/101_GlideDesktopPermission.ts";
 
 /**
  * Migration loader with all migrations defined inline.
@@ -236,6 +238,8 @@ export const migrationEntries = [
   [97, "ChatImages", Migration0097],
   [98, "ReportedUsageCosts", Migration0098],
   [99, "UsageAndCompactionReconciliation", Migration0099],
+  [100, "GlideThreadPreferences", Migration0100],
+  [101, "GlideDesktopPermission", Migration0101],
 ] as const;
 
 export const makeMigrationLoader = (

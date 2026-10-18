@@ -115,6 +115,7 @@ const PersistedComposerThreadDraftState = Schema.Struct({
   files: Schema.optionalKey(Schema.Array(PersistedComposerFileAttachment)),
   queueEditingItemId: Schema.optionalKey(Schema.String),
   axiomWebEnabled: Schema.optionalKey(Schema.Boolean),
+  computerUseEnabled: Schema.optionalKey(Schema.Boolean),
   axiomMcpRevision: Schema.optionalKey(
     Schema.Number.check(
       Schema.isInt(),
@@ -242,6 +243,8 @@ export interface ComposerThreadDraftState {
   prompt: string;
   /** Chat-local web preference; account changes clear it and new chats start off. */
   axiomWebEnabled?: boolean | undefined;
+  /** Unsent chat's computer-use choice; first-send bootstrap owns its grant. */
+  computerUseEnabled?: boolean | undefined;
   axiomMcpRevision?: number | undefined;
   images: ComposerImageAttachment[];
   files: ComposerFileAttachment[];
@@ -431,6 +434,7 @@ interface ComposerDraftStoreState {
   clearDraftThread: (threadRef: ComposerThreadTarget) => void;
   setStickyModelSelection: (modelSelection: ModelSelection | null | undefined) => void;
   setPrompt: (threadRef: ComposerThreadTarget, prompt: string) => void;
+  setComputerUseEnabled: (threadRef: ComposerThreadTarget, enabled: boolean) => void;
   setAxiomMcpRevision: (
     threadRef: ComposerThreadTarget,
     revision: number,
@@ -746,6 +750,7 @@ function shouldRemoveDraft(draft: ComposerThreadDraftState): boolean {
     draft.subagentLimits === undefined &&
     draft.codexContextWindowOverride === undefined &&
     draft.axiomWebEnabled !== true &&
+    draft.computerUseEnabled !== true &&
     draft.axiomMcpRevision === undefined
   );
 }
@@ -1718,7 +1723,8 @@ function normalizePersistedDraftsByThreadId(
       !runtimeMode &&
       !interactionMode &&
       subagentLimits === undefined &&
-      codexContextWindowOverride === undefined
+      codexContextWindowOverride === undefined &&
+      draftCandidate.computerUseEnabled !== true
     ) {
       continue;
     }
@@ -1745,6 +1751,9 @@ function normalizePersistedDraftsByThreadId(
         ? {
             axiomWebEnabled: draftCandidate.axiomWebEnabled,
           }
+        : {}),
+      ...(typeof draftCandidate.computerUseEnabled === "boolean"
+        ? { computerUseEnabled: draftCandidate.computerUseEnabled }
         : {}),
       ...(draftCandidate.queueEditingItemId &&
       typeof draftCandidate.axiomMcpRevision === "number" &&
@@ -1840,7 +1849,8 @@ function partializeComposerDraftStoreState(
       draft.runtimeMode === null &&
       draft.interactionMode === null &&
       draft.subagentLimits === undefined &&
-      draft.codexContextWindowOverride === undefined
+      draft.codexContextWindowOverride === undefined &&
+      draft.computerUseEnabled !== true
     ) {
       continue;
     }
@@ -1850,6 +1860,9 @@ function partializeComposerDraftStoreState(
       files: draft.files.map(persistComposerFile),
       ...(draft.queueEditingItemId ? { queueEditingItemId: draft.queueEditingItemId } : {}),
       ...(draft.axiomWebEnabled !== undefined ? { axiomWebEnabled: draft.axiomWebEnabled } : {}),
+      ...(draft.computerUseEnabled !== undefined
+        ? { computerUseEnabled: draft.computerUseEnabled }
+        : {}),
       ...(draft.queueEditingItemId && draft.axiomMcpRevision !== undefined
         ? { axiomMcpRevision: draft.axiomMcpRevision }
         : {}),
@@ -2093,6 +2106,9 @@ function toHydratedThreadDraft(
       : {}),
     ...(persistedDraft.axiomWebEnabled !== undefined
       ? { axiomWebEnabled: persistedDraft.axiomWebEnabled }
+      : {}),
+    ...(persistedDraft.computerUseEnabled !== undefined
+      ? { computerUseEnabled: persistedDraft.computerUseEnabled }
       : {}),
     ...(persistedDraft.queueEditingItemId && persistedDraft.axiomMcpRevision !== undefined
       ? { axiomMcpRevision: persistedDraft.axiomMcpRevision }
@@ -2626,6 +2642,20 @@ const composerDraftStore = create<ComposerDraftStoreState>()(
                   axiomWebEnabled: enabled,
                   ...(instanceId ? { activeProvider: instanceId } : {}),
                 },
+              },
+            };
+          });
+        },
+        setComputerUseEnabled: (threadRef, enabled) => {
+          const threadKey = resolveComposerDraftKey(get(), threadRef);
+          if (!threadKey) return;
+          set((state) => {
+            const current = state.draftsByThreadKey[threadKey] ?? createEmptyThreadDraft();
+            if ((current.computerUseEnabled === true) === enabled) return state;
+            return {
+              draftsByThreadKey: {
+                ...state.draftsByThreadKey,
+                [threadKey]: { ...current, computerUseEnabled: enabled },
               },
             };
           });

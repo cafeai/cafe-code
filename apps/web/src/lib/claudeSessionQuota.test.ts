@@ -90,19 +90,9 @@ describe("Claude session quota presentation", () => {
   });
   it("preserves provider row order, duplicate scope labels and reported precision", () => {
     const result = formatClaudeSessionQuota(report, options);
-    expect(result.meters?.map((row) => row.label)).toEqual([
-      "Session window",
-      "Weekly (all models)",
-      "Weekly · Same label · CLI",
-      "Weekly · Same label · CLI",
-    ]);
-    expect(new Set(result.meters?.map((row) => row.id)).size).toBe(4);
-    expect(result.meters?.map((row) => row.value)).toEqual([
-      "76.544% left",
-      "0% left",
-      "100% left",
-      "100% left",
-    ]);
+    expect(result.meters?.map((row) => row.label)).toEqual(["Session window", "Weekly"]);
+    expect(new Set(result.meters?.map((row) => row.id)).size).toBe(2);
+    expect(result.meters?.map((row) => row.value)).toEqual(["76.544% left", "0% left"]);
     expect(result.meters?.[0]).toMatchObject({
       severity: "normal",
       isActive: true,
@@ -130,6 +120,50 @@ describe("Claude session quota presentation", () => {
   it("keeps missing and explicitly empty meters distinct", () => {
     expect(formatClaudeSessionQuota({ ...report, meters: null }, options).meters).toBeNull();
     expect(formatClaudeSessionQuota({ ...report, meters: [] }, options).meters).toEqual([]);
+  });
+  it("selects only the chosen model's weekly meter, independently of usage or headline", () => {
+    const { surfaceLabel: _surface, ...scope } = report.meters![2]!;
+    const fable = { ...scope, modelLabel: "Fable" };
+    const native = { ...report, meters: [report.meters![0]!, report.meters![1]!, fable] };
+    for (const model of [undefined, "claude-sonnet-5-5", "claude-opus-5-5", "custom-fable-model"])
+      expect(
+        formatClaudeSessionQuota(native, { ...options, selectedModel: model }).meters?.map(
+          (row) => row.id,
+        ),
+      ).toEqual(["meter-0", "meter-1"]);
+    for (const model of ["fable", "claude-fable-5", "claude-fable-5-1", "Fable[1m]"])
+      expect(
+        formatClaudeSessionQuota(native, { ...options, selectedModel: model }).meters?.map(
+          (row) => row.id,
+        ),
+      ).toEqual(["meter-0", "meter-2"]);
+    expect(
+      formatClaudeSessionQuota(report, {
+        ...options,
+        selectedModel: "claude-fable-5-1",
+      }).meters?.map((row) => row.id),
+    ).toEqual(["meter-0"]);
+    expect(
+      formatClaudeSessionQuota(
+        {
+          ...native,
+          extraUsage: { enabled: true, usedPercent: 12.5, monthlyLimit: 100, usedCredits: 12 },
+        },
+        options,
+      ).extraUsageSummary,
+    ).toBe("12.5% of extra usage used");
+    for (const extraUsage of [
+      undefined,
+      null,
+      { enabled: false, usedPercent: 0, monthlyLimit: 0, usedCredits: 0 },
+      { enabled: true, usedPercent: null, monthlyLimit: null, usedCredits: null },
+    ])
+      expect(
+        formatClaudeSessionQuota(
+          { ...native, ...(extraUsage === undefined ? {} : { extraUsage }) },
+          options,
+        ).extraUsageSummary,
+      ).toBeNull();
   });
   it("keeps extra usage separate and preserves zero, disabled and exact currency units", () => {
     const extra = {

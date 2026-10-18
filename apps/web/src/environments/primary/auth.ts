@@ -149,6 +149,8 @@ function parseBootstrapErrorMessage(message: string): string {
 
 function toFriendlyBootstrapErrorMessage(status: number, message: string): string {
   const parsedMessage = parseBootstrapErrorMessage(message);
+  if (status === 429 && parsedMessage === "Authenticator codes are locked. Use a recovery code.")
+    return uiText("Authenticator codes are locked. Use an unused recovery code.");
   if (status === 401 && INVALID_BOOTSTRAP_CREDENTIAL_MESSAGES.has(parsedMessage)) {
     return uiText("Invalid pairing token. Check the token and try again.");
   }
@@ -156,9 +158,12 @@ function toFriendlyBootstrapErrorMessage(status: number, message: string): strin
   return parsedMessage;
 }
 
-async function exchangeBootstrapCredential(credential: string): Promise<AuthBootstrapResult> {
+async function exchangeBootstrapCredential(
+  credential: string,
+  secondFactor?: string,
+): Promise<AuthBootstrapResult> {
   return retryTransientBootstrap(async () => {
-    const payload: AuthBootstrapInput = { credential };
+    const payload: AuthBootstrapInput = { credential, ...(secondFactor ? { secondFactor } : {}) };
     const response = await fetch(resolvePrimaryEnvironmentHttpUrl("/api/auth/bootstrap"), {
       body: JSON.stringify(payload),
       credentials: "include",
@@ -184,6 +189,15 @@ async function exchangeBootstrapCredential(credential: string): Promise<AuthBoot
 
 function toFriendlyPasswordBootstrapErrorMessage(status: number, message: string): string {
   const parsedMessage = parseBootstrapErrorMessage(message);
+  if (status === 429 && parsedMessage === "Authenticator codes are locked. Use a recovery code.")
+    return uiText("Authenticator codes are locked. Use an unused recovery code.");
+  if (
+    status === 401 &&
+    (parsedMessage === "Invalid or already used authentication code." ||
+      parsedMessage === "Enter an authenticator code or recovery code.")
+  ) {
+    return uiText("Check your authenticator code or use an unused recovery code.");
+  }
   if (status === 401) {
     return uiText("Invalid password. Check the password and try again.");
   }
@@ -308,14 +322,17 @@ async function bootstrapServerAuth(): Promise<ServerAuthGateState> {
   }
 }
 
-export async function submitServerAuthCredential(credential: string): Promise<void> {
+export async function submitServerAuthCredential(
+  credential: string,
+  secondFactor?: string,
+): Promise<void> {
   const trimmedCredential = credential.trim();
   if (!trimmedCredential) {
     throw new Error(uiText("Enter a pairing token to continue."));
   }
 
   resolvedAuthenticatedGateState = null;
-  await exchangeBootstrapCredential(trimmedCredential);
+  await exchangeBootstrapCredential(trimmedCredential, secondFactor);
   bootstrapPromise = null;
   stripPairingTokenFromUrl();
 }
@@ -323,6 +340,7 @@ export async function submitServerAuthCredential(credential: string): Promise<vo
 export async function submitServerPasswordCredential(input: {
   readonly username?: string;
   readonly password: string;
+  readonly secondFactor?: string;
 }): Promise<void> {
   const password = input.password.trim();
   const username = input.username?.trim();
@@ -333,6 +351,7 @@ export async function submitServerPasswordCredential(input: {
   await exchangePasswordCredential({
     ...(username ? { username } : {}),
     password,
+    ...(input.secondFactor ? { secondFactor: input.secondFactor } : {}),
   });
   await waitForAuthenticatedSessionAfterBootstrap();
   resolvedAuthenticatedGateState = { status: "authenticated" };

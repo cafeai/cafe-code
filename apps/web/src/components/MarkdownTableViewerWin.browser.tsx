@@ -9,19 +9,24 @@ import { render } from "vitest-browser-react";
 // can be qualified without changing the rest of ChatMarkdown's tests.
 vi.mock("../env", () => ({ isElectron: true }));
 
+import { MAC_TRAFFIC_LIGHTS_CLASS_NAME } from "../lib/macTrafficLights";
 import { MarkdownTable } from "./MarkdownTableViewer";
 
 describe("Expanded Markdown table native titlebar", () => {
+  // The safe top inset is 28px below. Windows adds its 40px caption fallback
+  // to it; macOS starts below the fixed 50px traffic-light band instead.
   it.each([
-    { platform: "Win32", scale: 80, captionInset: 40 },
-    { platform: "Win32", scale: 130, captionInset: 40 },
-    { platform: "MacIntel", scale: 100, captionInset: 0 },
-    { platform: "Linux x86_64", scale: 100, captionInset: 0 },
+    { platform: "Win32", scale: 80, usableTop: 68 },
+    { platform: "Win32", scale: 130, usableTop: 68 },
+    { platform: "MacIntel", scale: 80, usableTop: 50 },
+    { platform: "MacIntel", scale: 130, usableTop: 50 },
+    { platform: "Linux x86_64", scale: 100, usableTop: 28 },
   ])(
     "keeps popup, heading and close within the usable window on $platform at $scale%",
-    async ({ platform, scale, captionInset }) => {
+    async ({ platform, scale, usableTop }) => {
       const root = document.documentElement;
       const originalWco = root.classList.contains("wco");
+      const originalMacTrafficLights = root.classList.contains(MAC_TRAFFIC_LIGHTS_CLASS_NAME);
       const originalFontSize = root.style.fontSize;
       const originalViewport = { width: window.innerWidth, height: window.innerHeight };
       const platformSpy = vi.spyOn(navigator, "platform", "get").mockReturnValue(platform);
@@ -34,6 +39,8 @@ describe("Expanded Markdown table native titlebar", () => {
       const originalInsets = safeInsets.map(([property]) => root.style.getPropertyValue(property));
       for (const [property, value] of safeInsets) root.style.setProperty(property, value);
       root.classList.add("wco");
+      // main.tsx sets this root class for ordinary macOS Electron windows.
+      root.classList.toggle(MAC_TRAFFIC_LIGHTS_CLASS_NAME, platform === "MacIntel");
       root.style.fontSize = `${scale}%`;
       await page.viewport(640, 320);
       const screen = await render(
@@ -65,10 +72,11 @@ describe("Expanded Markdown table native titlebar", () => {
         expect(heading).not.toBeNull();
         expect(close).not.toBeNull();
         expect(viewport).not.toBeNull();
-        expect(popup.classList.contains("markdown-table-native-titlebar")).toBe(captionInset > 0);
+        expect(popup.classList.contains("markdown-table-native-titlebar")).toBe(
+          platform === "Win32",
+        );
         await vi.waitFor(() => {
           const bounds = popup.getBoundingClientRect();
-          const usableTop = 28 + captionInset;
           expect(bounds.left).toBeGreaterThanOrEqual(24);
           expect(bounds.right).toBeLessThanOrEqual(window.innerWidth - 22 + 1);
           expect(bounds.top).toBeGreaterThanOrEqual(usableTop);
@@ -82,6 +90,7 @@ describe("Expanded Markdown table native titlebar", () => {
       } finally {
         await screen.unmount();
         root.classList.toggle("wco", originalWco);
+        root.classList.toggle(MAC_TRAFFIC_LIGHTS_CLASS_NAME, originalMacTrafficLights);
         root.style.fontSize = originalFontSize;
         safeInsets.forEach(([property], index) => {
           const original = originalInsets[index];

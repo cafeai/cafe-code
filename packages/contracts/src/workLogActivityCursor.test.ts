@@ -22,6 +22,24 @@ const decodeCursor = Schema.decodeUnknownSync(OrchestrationThreadActivityCursor)
 const decodePresence = Schema.decodeUnknownSync(OrchestrationThreadTurnWorkLogPresenceInput);
 
 describe("bounded earlier work-log contracts", () => {
+  it("restricts start-receipt exclusions to cursor reads and preserves the explicit echo", () => {
+    for (const excludeTurnStartAck of [true, false]) {
+      const input = decodePageInput({ ...request, before, excludeTurnStartAck });
+      expect(decodePage({ ...input, totalCount: 0, activities: [] }).excludeTurnStartAck).toBe(
+        excludeTurnStartAck,
+      );
+      expect(
+        decodePresence({ threadId: "thread", turnIds: ["turn"], before, excludeTurnStartAck })
+          .excludeTurnStartAck,
+      ).toBe(excludeTurnStartAck);
+      expect(() => decodePageInput({ ...request, excludeTurnStartAck })).toThrow();
+      expect(() =>
+        decodePresence({ threadId: "thread", turnIds: ["turn"], excludeTurnStartAck }),
+      ).toThrow();
+    }
+    expect(() => decodePageInput({ ...request, before, excludeTurnStartAck: "true" })).toThrow();
+  });
+
   it("preserves offset readers and admits an echoed exclusive ordering cursor", () => {
     expect(decodePageInput(request)).toEqual(request);
     const input = decodePageInput({

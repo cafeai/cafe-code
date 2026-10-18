@@ -756,6 +756,54 @@ describe("findSidebarProposedPlan", () => {
 });
 
 describe("deriveHistoricalWorkLogSummaries", () => {
+  it("requests start-receipt exclusion only for valid same-turn Codex settings", () => {
+    const turnId = TurnId.make("configured-current-turn");
+    const configuration = {
+      version: 1,
+      provider: "codex",
+      providerInstanceId: "synthetic-codex",
+      providerDisplayName: "Synthetic Codex",
+      runtimeMode: "full-access",
+      settingsSource: "submitted",
+    };
+    const tail = Array.from({ length: 500 }, (_, index) =>
+      makeActivity({
+        id: `context-${index}`,
+        sequence: index + 100,
+        turnId,
+        kind: "context-window.updated",
+      }),
+    );
+    for (const [provider, configurationTurn, version, expected] of [
+      ["codex", turnId, 1, true],
+      ["codex", turnId, 2, undefined],
+      ["claudeAgent", turnId, 1, undefined],
+      ["codex", "other-turn", 1, undefined],
+    ] as const) {
+      const settings = makeActivity({
+        id: "settings",
+        sequence: 1,
+        turnId: configurationTurn,
+        kind: "provider.turn.configuration",
+        payload: { turnConfiguration: { ...configuration, provider, version } },
+      });
+      expect(
+        deriveHistoricalWorkLogSummaries({
+          messages: [],
+          activities: [settings, ...tail],
+          latestTurnId: turnId,
+        }).get(turnId)?.excludeTurnStartAck,
+      ).toBe(expected);
+    }
+    expect(
+      deriveHistoricalWorkLogSummaries({
+        messages: [],
+        activities: tail,
+        latestTurnId: turnId,
+      }).get(turnId)?.excludeTurnStartAck,
+    ).toBeUndefined();
+  });
+
   it("keeps exact known turns discoverable when latest-turn metadata is missing", () => {
     const turnId = TurnId.make("known-turn");
     const summaries = deriveHistoricalWorkLogSummaries({

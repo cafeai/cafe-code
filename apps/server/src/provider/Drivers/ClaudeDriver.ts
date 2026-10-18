@@ -60,6 +60,7 @@ import {
 import { resolveProviderRuntimeEnvironment } from "../managedProviderRuntime.ts";
 import { makeClaudeCapabilitiesCacheKey, makeClaudeContinuationGroupKey } from "./ClaudeHome.ts";
 import { makeClaudeAuthenticationEnvironment } from "./ClaudeAuthenticationEnvironment.ts";
+import { makeClaudeAccountQuotaReader } from "../claudeAccountQuota.ts";
 const decodeClaudeSettings = Schema.decodeSync(ClaudeSettings);
 
 const DRIVER_KIND = ProviderDriverKind.make("claudeAgent");
@@ -168,6 +169,10 @@ export const ClaudeDriver: ProviderDriver<ClaudeSettings, ClaudeDriverEnv> = {
       const resolveEnvironment = yield* makeClaudeAuthenticationEnvironment(
         effectiveConfig,
         effectiveEnvironment,
+      );
+      const readAccountQuota = yield* makeClaudeAccountQuotaReader(
+        effectiveConfig.binaryPath,
+        resolveEnvironment,
       );
       const maintenanceCapabilities =
         effectiveConfig.runtimeSource === "bundled"
@@ -330,6 +335,7 @@ export const ClaudeDriver: ProviderDriver<ClaudeSettings, ClaudeDriverEnv> = {
         snapshot,
         adapter,
         textGeneration,
+        readAccountQuota,
       } satisfies ProviderInstance;
     }),
 };

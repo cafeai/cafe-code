@@ -6,6 +6,9 @@ import { runMigrations } from "../Migrations.ts";
 import * as TestSqliteClient from "../TestSqliteClient.ts";
 import codexAutoCompactRequest from "./098_CodexAutoCompactRequest.ts";
 
+// Qualify these historical collision/reconciliation paths through migration 99.
+// Later feature tables are independent of this schema/ledger contract.
+
 describe("099_UsageAndCompactionReconciliation", () => {
   for (const lineage of ["fresh", "ReportedUsageCosts", "CodexAutoCompactRequest"] as const) {
     it.effect(`upgrades ${lineage} without rewriting history or measured usage`, () =>
@@ -32,7 +35,7 @@ describe("099_UsageAndCompactionReconciliation", () => {
         const ledger = yield* sql`SELECT * FROM effect_sql_migrations ORDER BY migration_id`;
         const objects = yield* sql`SELECT name, type, sql FROM sqlite_schema
           WHERE type IN ('index', 'trigger') ORDER BY name`;
-        yield* runMigrations();
+        yield* runMigrations({ toMigrationInclusive: 99 });
         assert.deepEqual(
           yield* sql`SELECT * FROM effect_sql_migrations
             WHERE migration_id <= ${lineage === "fresh" ? 97 : 98} ORDER BY migration_id`,
@@ -62,7 +65,7 @@ describe("099_UsageAndCompactionReconciliation", () => {
           WHERE type IN ('index', 'trigger') ORDER BY name`,
           objects,
         );
-        assert.deepEqual(yield* runMigrations(), []);
+        assert.deepEqual(yield* runMigrations({ toMigrationInclusive: 99 }), []);
         assert.deepEqual(yield* sql`PRAGMA foreign_key_check`, []);
       }).pipe(Effect.provide(TestSqliteClient.layerMemory())),
     );
@@ -73,7 +76,7 @@ describe("099_UsageAndCompactionReconciliation", () => {
       const sql = yield* SqlClient.SqlClient;
       yield* runMigrations({ toMigrationInclusive: 97 });
       yield* sql`INSERT INTO effect_sql_migrations(migration_id, name) VALUES (98, 'UnknownFixture')`;
-      const result = yield* Effect.exit(runMigrations());
+      const result = yield* Effect.exit(runMigrations({ toMigrationInclusive: 99 }));
       assert.equal(result._tag, "Failure");
       assert.deepEqual(yield* sql`SELECT * FROM effect_sql_migrations WHERE migration_id = 99`, []);
       const columns = yield* sql<{

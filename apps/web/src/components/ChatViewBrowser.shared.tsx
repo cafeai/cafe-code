@@ -4228,7 +4228,7 @@ describe(`ChatView full app (${chatViewBrowserPart})`, () => {
       }
     });
 
-    it("sends bootstrap turn-starts and waits for server setup on first-send worktree drafts", async () => {
+    it("carries the computer-use switch through first-send worktree bootstrap before any separate turn", async () => {
       useComposerDraftStore.setState({
         draftThreadsByThreadKey: {
           [THREAD_KEY]: {
@@ -4261,6 +4261,20 @@ describe(`ChatView full app (${chatViewBrowserPart})`, () => {
           },
         ]),
         resolveRpc: (body) => {
+          if (body._tag === "glide.control")
+            return {
+              available: true,
+              connected: false,
+              enabled: false,
+              fullAccess: false,
+              busy: false,
+              paused: false,
+              accessibility: true,
+              screenRecording: true,
+              apps: [],
+              runningApps: [],
+              message: "Background desktop control",
+            };
           if (body._tag === ORCHESTRATION_WS_METHODS.dispatchCommand) {
             return {
               sequence: fixture.snapshot.snapshotSequence + 1,
@@ -4271,6 +4285,16 @@ describe(`ChatView full app (${chatViewBrowserPart})`, () => {
       });
 
       try {
+        const computerUse = page.getByRole("button", { name: "Computer use", exact: true });
+        await expect.element(computerUse).toBeEnabled();
+        await computerUse.click();
+        await expect.element(computerUse).toHaveAttribute("aria-pressed", "true");
+        await page
+          .elementLocator(document.querySelector('[data-chat-composer-form="true"]')!)
+          .screenshot({ path: "../../../../.logs/computer-use-new-thread.png" });
+        expect(
+          wsRequests.some((request) => request._tag === ORCHESTRATION_WS_METHODS.dispatchCommand),
+        ).toBe(false);
         useComposerDraftStore.getState().setPrompt(THREAD_REF, "Ship it");
         await waitForLayout();
 
@@ -4298,6 +4322,7 @@ describe(`ChatView full app (${chatViewBrowserPart})`, () => {
               type: "thread.turn.start",
               bootstrap: {
                 createThread: {
+                  computerUseEnabled: true,
                   projectId: PROJECT_ID,
                 },
                 prepareWorktree: {

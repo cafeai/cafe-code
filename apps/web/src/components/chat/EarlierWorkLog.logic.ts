@@ -27,6 +27,7 @@ export function validateEarlierWorkLogPage(input: {
   readonly before: OrchestrationThreadActivityCursor;
   readonly limit: number;
   readonly excludeActivityIds?: ReadonlyArray<OrchestrationThreadActivity["id"]>;
+  readonly excludeTurnStartAck?: boolean;
 }): void {
   const { page, before, threadId, turnId, limit, excludeActivityIds } = input;
   if (
@@ -41,6 +42,7 @@ export function validateEarlierWorkLogPage(input: {
     !isActivityCursor(page.before) ||
     cursorKey(page.before) !== cursorKey(before) ||
     JSON.stringify(page.excludeActivityIds ?? []) !== JSON.stringify(excludeActivityIds ?? []) ||
+    page.excludeTurnStartAck !== input.excludeTurnStartAck ||
     !Number.isSafeInteger(page.totalCount) ||
     page.totalCount < page.activities.length ||
     (page.totalCount > 0 && page.activities.length === 0)
@@ -54,6 +56,9 @@ export function validateEarlierWorkLogPage(input: {
       !isActivityCursor(cursor) ||
       activity.turnId !== turnId ||
       excludeActivityIds?.includes(activity.id) ||
+      (input.excludeTurnStartAck &&
+        activity.kind === "task.progress" &&
+        activity.payload?.taskId === `codex-turn-start:${turnId}`) ||
       ids.has(activity.id) ||
       compareActivityCursors(cursor, before) >= 0 ||
       (previous && compareActivityCursors(previous, cursor) >= 0)

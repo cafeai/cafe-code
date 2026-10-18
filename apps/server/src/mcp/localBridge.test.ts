@@ -33,6 +33,59 @@ async function fixture() {
 }
 
 describe("local MCP bridge", () => {
+  it.each(["cafe-code", "cafe-glide"] as const)(
+    "preserves bounded execution while reserving reset only for %s",
+    async (target) => {
+      const f = await fixture();
+      await fs.writeFile(
+        f.connectionPath,
+        JSON.stringify({
+          url: `http://127.0.0.1:12345/mcp${target === "cafe-glide" ? "/glide" : ""}`,
+          audience: target,
+          token: "a".repeat(64),
+        }),
+      );
+      const entered = Promise.withResolvers<void>();
+      const signals: AbortSignal[] = [];
+      const request = vi.fn<typeof fetch>(async (_url, init) => {
+        const message = JSON.parse(String(init!.body));
+        if (message.params.name === "js_reset")
+          return Response.json({ jsonrpc: "2.0", id: message.id, result: {} });
+        const signal = init!.signal!;
+        signals.push(signal);
+        if (signals.length === 4) entered.resolve();
+        return new Promise((_yes, no) => {
+          signal.addEventListener("abort", () => no(new Error("Owned bridge closed.")), {
+            once: true,
+          });
+        });
+      });
+      const running = runLocalBridge({ ...f, target, fetch: request });
+      const send = (id: number, name: string) =>
+        f.input.write(
+          `${JSON.stringify({ jsonrpc: "2.0", id, method: "tools/call", params: { name, arguments: {} } })}\n`,
+        );
+      try {
+        for (let id = 1; id <= 4; id++) send(id, "js");
+        await entered.promise;
+        send(5, "js_reset");
+        send(6, "js");
+        send(1, "js_reset");
+        await vi.waitFor(() => expect(f.replies).toHaveLength(3));
+        expect(f.replies.find((reply) => reply.id === 5)?.error !== undefined).toBe(
+          target === "cafe-code",
+        );
+        expect(f.replies.find((reply) => reply.id === 6)?.error).toBeDefined();
+        expect(f.replies.find((reply) => reply.id === 1)?.error).toBeDefined();
+        expect(request).toHaveBeenCalledTimes(target === "cafe-glide" ? 5 : 4);
+        expect(signals.every((signal) => !signal.aborted)).toBe(true);
+      } finally {
+        f.input.end();
+        await running;
+      }
+      expect(signals.every((signal) => signal.aborted)).toBe(true);
+    },
+  );
   it("requires the scheduling audience and exact endpoint without admitting owner/desktop credentials", async () => {
     const f = await fixture();
     await expect(readBridgeConnection(f.connectionPath, "cafe-scheduling")).rejects.toThrow();

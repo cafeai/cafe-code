@@ -6,6 +6,9 @@ import { runMigrations } from "../Migrations.ts";
 import * as TestSqliteClient from "../TestSqliteClient.ts";
 import { chatImageSchema } from "./097_ChatImages.ts";
 
+// Qualify these historical collision/reconciliation paths through migration 99.
+// Later feature tables are independent of this schema/ledger contract.
+
 describe("097_ChatImages", () => {
   for (const history of ["upstream-95", "local-93", "local-96", "upstream-96"] as const) {
     const legacyImages = history === "local-93" || history === "local-96";
@@ -44,7 +47,7 @@ describe("097_ChatImages", () => {
           yield* sql`SELECT migration_id, name FROM effect_sql_migrations ORDER BY migration_id`;
         const before = legacyImages ? yield* sql`SELECT * FROM chat_image_assets` : [];
         assert.deepEqual(
-          yield* runMigrations(),
+          yield* runMigrations({ toMigrationInclusive: 99 }),
           history === "local-93"
             ? [
                 [94, "CodexContextWindowOverride"],
@@ -90,7 +93,7 @@ describe("097_ChatImages", () => {
           yield* sql`DELETE FROM projection_thread_messages WHERE message_id = 'image-message'`;
           assert.deepEqual(yield* sql`SELECT * FROM chat_image_assets`, []);
         }
-        assert.deepEqual(yield* runMigrations(), []);
+        assert.deepEqual(yield* runMigrations({ toMigrationInclusive: 99 }), []);
       }).pipe(Effect.provide(TestSqliteClient.layerMemory())),
     );
   }

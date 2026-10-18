@@ -14,6 +14,47 @@ Browser local storage contains connection metadata; bearer sessions live in
 session storage. Reconnect uses the bearer and mints a fresh short-lived WS token.
 An expired or revoked session requires signing in again.
 
+Owners can optionally enable **Two-factor authentication** in Settings →
+Connections & remote access on the selected server. Scan the QR code in an
+authenticator app (or enter the manual key), then confirm a working six-digit
+code. Enrollment expires after ten minutes and belongs to the exact owner
+session that started it. Ten recovery codes are shown once; save them privately.
+Each recovery code has 128 random bits and works once. Cafe stores only their
+SHA-256 hashes in its private server secret store.
+
+Once enabled, every new password or pairing login requires an authenticator
+code or an unused recovery code, through either the browser-cookie or bearer
+endpoint. A wrong code does not consume a pairing link. The exact short-lived
+native desktop bootstrap capability remains exempt. Existing authenticated
+sessions keep working; owners can revoke devices separately. Disabling 2FA
+requires an owner session plus a fresh code or recovery code. Changing or
+clearing the admin password does not disable 2FA.
+
+The second-factor budget belongs to this server, across IP addresses, usernames,
+cookie/bearer logins, recovery attempts, enrollment confirmation and disabling.
+The first five failed guesses trigger a 30-second cooldown. Each further
+failure doubles that cooldown, capped at one hour. Requests refused during a
+cooldown do not extend it. After 100 consecutive failures, active six-digit
+codes remain locked until an unused recovery code succeeds after the cooldown.
+Only successful second-factor verification resets the failure counter. New
+enrollments cannot reset it. Before enrollment is complete, the same cooldown
+applies without the recovery-only lock, since no recovery codes exist yet.
+
+Attempt reservations, cooldowns, accepted TOTP steps and recovery-code
+consumption are committed together through a serialized private secret-file
+lane before returning success. They survive backend restart. At most 16
+operations enter the lane; overload gets an immediate `429`, rather than an
+unbounded queue. Cooldown replies use `429` with `Retry-After`. Missing codes do
+not spend guesses. Malformed/unreadable storage fails closed. Only a validated
+password or unconsumed pairing credential reaches the second-factor verifier,
+so arbitrary unauthenticated traffic cannot spend its guessing budget. Native
+TLS admission and bounded request-body readers continue to apply.
+
+TOTP uses RFC 6238 SHA-1, six digits, a 30-second period, and at most one adjacent
+time step in each direction. Accepted steps (including the enrollment proof)
+cannot be reused. See [RFC 6238](https://www.rfc-editor.org/rfc/rfc6238) and
+[NIST's OTP and rate-limiting guidance](https://pages.nist.gov/800-63-4/sp800-63b.html).
+
 macOS also controls the desktop app's access to servers on your local network.
 Both source launches and packaged apps declare this use in their app metadata;
 the declaration does not grant access. Allow Cafe Code when macOS asks. If LAN

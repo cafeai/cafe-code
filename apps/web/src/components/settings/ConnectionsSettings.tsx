@@ -87,6 +87,7 @@ import {
 import { useWorkspaceEnvironmentId } from "~/environments/workspace";
 import { readPrimaryEnvironmentDescriptor } from "~/environments/primary";
 import { createWorkspaceAuthApi } from "~/environments/workspaceAuth";
+import { TwoFactorManagementRow } from "./TwoFactorManagementRow";
 import { useUiStateStore } from "~/uiStateStore";
 import { resolveServerConfigVersionMismatch } from "~/versionSkew";
 import { useServerConfig } from "~/rpc/serverState";
@@ -2270,6 +2271,10 @@ export function ConnectionsSettings() {
               }
               onSetPassword={handleSetAdminPassword}
               onClearPassword={handleClearAdminPassword}
+            />
+            <TwoFactorManagementRow
+              key={environmentId ?? "primary"}
+              environmentId={environmentId}
             />
           </SettingsSection>
 

@@ -27,6 +27,62 @@ beforeEach(() => {
 });
 
 describe("remote environment api", () => {
+  it("distinguishes the recovery-only lock without exposing remote error text", async () => {
+    globalThis.fetch = vi.fn().mockResolvedValue(
+      new Response("private response text", {
+        status: 429,
+        headers: { "x-cafe-auth-reason": "two-factor-locked" },
+      }),
+    );
+    const error = await bootstrapRemotePasswordBearerSession({
+      httpBaseUrl: "https://remote.example/",
+      password: "first-factor",
+      secondFactor: "123456",
+    }).catch((error: unknown) => error);
+    expect(remoteEnvironmentErrorMessage(error, "fallback")).toBe(
+      "Authenticator codes are locked. Use an unused recovery code.",
+    );
+    expect(String(error)).not.toContain("private response text");
+  });
+  it.each(["password", "pairing"])(
+    "sends the second factor only in the explicit %s bootstrap body and never replays a refusal",
+    async (kind) => {
+      const fetchMock = vi
+        .fn()
+        .mockResolvedValue(
+          new Response(JSON.stringify({ error: "private received text" }), { status: 429 }),
+        );
+      globalThis.fetch = fetchMock;
+      const error = await (
+        kind === "password"
+          ? bootstrapRemotePasswordBearerSession({
+              httpBaseUrl: "https://remote.example/",
+              password: "first-factor",
+              secondFactor: "123456",
+            })
+          : bootstrapRemoteBearerSession({
+              httpBaseUrl: "https://remote.example/",
+              credential: "first-factor",
+              secondFactor: "123456",
+            })
+      ).catch((error: unknown) => error);
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      const [url, request] = fetchMock.mock.calls[0]!;
+      expect(url).toBe(
+        `https://remote.example/api/auth/bootstrap/${kind === "password" ? "password/bearer" : "bearer"}`,
+      );
+      expect(request).toMatchObject({ method: "POST", credentials: "omit", redirect: "error" });
+      expect(JSON.parse(request.body)).toEqual(
+        kind === "password"
+          ? { password: "first-factor", secondFactor: "123456" }
+          : { credential: "first-factor", secondFactor: "123456" },
+      );
+      expect(remoteEnvironmentErrorMessage(error, "fallback")).toContain(
+        "Too many sign-in attempts",
+      );
+      expect(String(error)).not.toContain("private received text");
+    },
+  );
   it.each([null, {}, { token: 42 }, { token: "  " }])(
     "rejects malformed successful socket capability %j",
     async (value) => {

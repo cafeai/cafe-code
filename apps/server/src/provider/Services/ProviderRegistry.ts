@@ -17,6 +17,7 @@ import type {
   ProviderUsageResetResult,
   ProviderUsageResetError,
   ProviderSkillsResult,
+  ProviderSessionQuotaReport,
 } from "@cafecode/contracts";
 import * as Context from "effect/Context";
 import type * as Effect from "effect/Effect";
@@ -28,6 +29,9 @@ import type { ProviderAdapterRequestError } from "../Errors.ts";
 export type ProviderMaintenanceActionKind = "update";
 
 export interface ProviderRegistryShape {
+  readonly readInstanceAccountQuota?: (
+    instanceId: ProviderInstanceId,
+  ) => Effect.Effect<ProviderSessionQuotaReport | null>;
   readonly discoverSkills?: (
     instanceId: ProviderInstanceId,
     cwd: string,

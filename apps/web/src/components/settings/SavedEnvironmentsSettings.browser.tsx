@@ -94,7 +94,9 @@ describe("SavedEnvironmentsSettings", () => {
     await dialog
       .getByLabelText("Pairing URL")
       .fill("https://test.local/pair#token=secret-pairing-token");
+    await dialog.getByLabelText("Authenticator or recovery code").fill("123456");
     const nativeDialog = document.querySelector<HTMLElement>('[role="dialog"]');
+    const nativeFactorInput = nativeDialog?.querySelector<HTMLInputElement>("#env-second-factor");
     const nativePairingInput = Array.from(nativeDialog?.querySelectorAll("input") ?? []).find(
       (input) => input.value.includes("secret-pairing-token"),
     );
@@ -103,6 +105,7 @@ describe("SavedEnvironmentsSettings", () => {
 
     await vi.waitFor(() => {
       expect(nativePairingInput?.value).toBe("");
+      expect(nativeFactorInput?.value).toBe("");
       expect(submitButton.disabled).toBe(true);
       // The label keeps its width while pending; the button reports busy instead.
       expect(submitButton.getAttribute("aria-busy")).toBe("true");
@@ -122,6 +125,7 @@ describe("SavedEnvironmentsSettings", () => {
     expect(runtimeMocks.addSavedEnvironment).toHaveBeenCalledWith({
       label: "My test environment",
       pairingUrl: "https://test.local/pair#token=secret-pairing-token",
+      secondFactor: "123456",
     });
   });
 

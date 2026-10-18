@@ -284,6 +284,7 @@ export const SessionRail = memo(
             usage={props.usage}
             rateLimits={props.rateLimits}
             sessionQuota={sessionQuota}
+            selectedModel={props.quotaContext?.selectedModel}
             usageResetAction={props.usageResetAction}
             layout="panel"
             subagentConcurrency={props.subagentConcurrency}

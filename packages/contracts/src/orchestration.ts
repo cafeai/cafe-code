@@ -619,11 +619,15 @@ export const OrchestrationThreadTurnActivityPageInput = Schema.Struct({
   ),
   before: Schema.optional(OrchestrationThreadActivityCursor),
   excludeActivityIds: Schema.optional(EarlierWorkLogExcludedActivityIds),
+  // The exact current turn's accepted settings already render its start ACK.
+  // This only narrows presentation history; it grants no provider authority.
+  excludeTurnStartAck: Schema.optional(Schema.Boolean),
 }).check(
   Schema.makeFilter(
     (input) =>
       (input.before === undefined || input.offset === 0) &&
-      (input.excludeActivityIds === undefined || input.before !== undefined),
+      (input.excludeActivityIds === undefined || input.before !== undefined) &&
+      (input.excludeTurnStartAck === undefined || input.before !== undefined),
   ),
 );
 export type OrchestrationThreadTurnActivityPageInput =
@@ -640,6 +644,7 @@ export const OrchestrationThreadTurnActivityPage = Schema.Struct({
   // server which silently ignored its additive cursor field.
   before: Schema.optional(OrchestrationThreadActivityCursor),
   excludeActivityIds: Schema.optional(EarlierWorkLogExcludedActivityIds),
+  excludeTurnStartAck: Schema.optional(Schema.Boolean),
 });
 export type OrchestrationThreadTurnActivityPage = typeof OrchestrationThreadTurnActivityPage.Type;
 
@@ -982,11 +987,13 @@ export const OrchestrationThreadTurnWorkLogPresenceInput = Schema.Struct({
   ),
   before: Schema.optional(OrchestrationThreadActivityCursor),
   excludeActivityIds: Schema.optional(EarlierWorkLogExcludedActivityIds),
+  excludeTurnStartAck: Schema.optional(Schema.Boolean),
 }).check(
   Schema.makeFilter(
     (input) =>
       (input.before === undefined || input.turnIds.length === 1) &&
-      (input.excludeActivityIds === undefined || input.before !== undefined),
+      (input.excludeActivityIds === undefined || input.before !== undefined) &&
+      (input.excludeTurnStartAck === undefined || input.before !== undefined),
   ),
 );
 export type OrchestrationThreadTurnWorkLogPresenceInput =
@@ -1133,6 +1140,7 @@ const ThreadInteractionModeSetCommand = Schema.Struct({
 });
 
 const ThreadTurnStartBootstrapCreateThread = Schema.Struct({
+  computerUseEnabled: Schema.optional(Schema.Boolean),
   projectId: Schema.NullOr(ProjectId),
   title: TrimmedNonEmptyString,
   modelSelection: ModelSelection,

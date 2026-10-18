@@ -16,6 +16,7 @@ const environmentApisByConnection = new WeakMap<EnvironmentConnection, Environme
 
 export function createEnvironmentApi(rpcClient: WsRpcClient): EnvironmentApi {
   return {
+    glide: rpcClient.glide,
     mcpApps: rpcClient.mcpApps,
     visualizations: rpcClient.visualizations,
     providerInteractions: {

@@ -1644,6 +1644,7 @@ export function ProviderInstanceCard({
               <ProviderAccountQuotaDetails
                 presentation={accountQuota}
                 sessionQuota={sessionQuota}
+                selectedModel={quotaContext?.selectedModel}
                 layout="settings"
               />
             </div>

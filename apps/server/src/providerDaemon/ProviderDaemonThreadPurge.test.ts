@@ -106,6 +106,8 @@ describe("ProviderDaemonThreadPurge", () => {
         });
         const target = ThreadId.make("thread-private-purge");
         const survivor = ThreadId.make("thread-survivor-purge");
+        yield* sql`INSERT INTO glide_thread_preferences (thread_id,enabled,apps_json)
+          VALUES (${target},1,'["fixture.private"]'),(${survivor},1,'["fixture.survivor"]')`;
         const executeCount = yield* Ref.make(0);
         const execute = Ref.update(executeCount, (count) => count + 1).pipe(
           Effect.as({ ok: true, value: null } as const),
@@ -142,6 +144,9 @@ describe("ProviderDaemonThreadPurge", () => {
         );
 
         yield* purgeProviderDaemonThreadPersistence({ threadId: target });
+        expect(yield* sql`SELECT thread_id, apps_json FROM glide_thread_preferences`).toEqual([
+          { thread_id: survivor, apps_json: '["fixture.survivor"]' },
+        ]);
 
         const bodies = yield* sql<{ readonly body: string }>`
           SELECT event_json AS body FROM provider_daemon_events

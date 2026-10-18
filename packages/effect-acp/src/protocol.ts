@@ -101,6 +101,14 @@ function encodedByteLength(value: string | Uint8Array): number {
   return typeof value === "string" ? textEncoder.encode(value).byteLength : value.byteLength;
 }
 
+// Every request issued by our typed client or extension channel has a numeric
+// internal ID. A peer's unsolicited response cannot match one with a textual
+// ID. Effect converts responses to BigInt before looking up pending requests;
+// keep uncorrelatable IDs out of that decoder without changing inbound request
+// aliases or terminating unrelated live calls.
+const isInternalResponseId = (value: string): boolean =>
+  value.length <= 1024 && /^-?\d+$/u.test(value);
+
 function summarizeDecodedMessage(value: unknown): Record<string, unknown> {
   if (typeof value !== "object" || value === null) {
     return { valueType: typeof value };
@@ -451,6 +459,11 @@ export const makeAcpPatchedProtocol = Effect.fn("makeAcpPatchedProtocol")(functi
   const routeDecodedMessage = (
     message: RpcMessage.FromClientEncoded | RpcMessage.FromServerEncoded,
   ): Effect.Effect<void, AcpError.AcpError> => {
+    if (
+      (message._tag === "Exit" || message._tag === "Chunk") &&
+      !isInternalResponseId(message.requestId)
+    )
+      return Effect.void;
     switch (message._tag) {
       case "Request":
         return handleRequestEncoded(message);

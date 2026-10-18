@@ -73,4 +73,56 @@ describe("PairingRouteSurface", () => {
       await screen.unmount();
     }
   });
+
+  it("requires and sends an authentication code, then clears a refused code", async () => {
+    submitPasswordMock.mockRejectedValueOnce(new Error("Check your authentication code."));
+    const onAuthenticated = vi.fn();
+    const screen = await render(
+      <PairingRouteSurface
+        auth={{ ...auth, twoFactorRequired: true }}
+        onAuthenticated={onAuthenticated}
+      />,
+    );
+    try {
+      await page
+        .getByLabelText("Admin password", { exact: true })
+        .fill("correct horse battery staple");
+      await page.getByLabelText("Authenticator or recovery code").fill("123456");
+      await page.getByRole("button", { name: "Continue", exact: true }).click();
+      await expect
+        .element(page.getByRole("alert"))
+        .toHaveTextContent("Check your authentication code.");
+      expect(submitPasswordMock).toHaveBeenCalledExactlyOnceWith({
+        password: "correct horse battery staple",
+        secondFactor: "123456",
+      });
+      await expect.element(page.getByLabelText("Authenticator or recovery code")).toHaveValue("");
+      expect(onAuthenticated).not.toHaveBeenCalled();
+    } finally {
+      await screen.unmount();
+    }
+  });
+
+  it("sends recovery proof together with a pairing credential", async () => {
+    const onAuthenticated = vi.fn();
+    const screen = await render(
+      <PairingRouteSurface
+        auth={{ ...auth, twoFactorRequired: true }}
+        onAuthenticated={onAuthenticated}
+      />,
+    );
+    try {
+      await page.getByRole("button", { name: "Pairing token", exact: true }).click();
+      await page.getByLabelText("Pairing token", { exact: true }).fill("PAIRING-TOKEN");
+      await page.getByLabelText("Authenticator or recovery code").fill("synthetic-recovery-code");
+      await page.getByRole("button", { name: "Continue", exact: true }).click();
+      await vi.waitFor(() => expect(onAuthenticated).toHaveBeenCalledTimes(1));
+      expect(submitPairingMock).toHaveBeenCalledExactlyOnceWith(
+        "PAIRING-TOKEN",
+        "synthetic-recovery-code",
+      );
+    } finally {
+      await screen.unmount();
+    }
+  });
 });

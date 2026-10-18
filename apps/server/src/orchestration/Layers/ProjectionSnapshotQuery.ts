@@ -309,6 +309,7 @@ const ThreadTurnLookupInput = Schema.Struct({
   turnId: TurnId,
   before: Schema.optional(OrchestrationThreadActivityCursor),
   excludeActivityIds: Schema.optional(EarlierWorkLogExcludedActivityIds),
+  excludeTurnStartAck: Schema.optional(Schema.Boolean),
 });
 const ThreadTurnSubagentLookupInput = OrchestrationThreadTurnSubagentDetailInput;
 const CountRowSchema = Schema.Struct({
@@ -706,6 +707,12 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
   const historicalWorkLogActivityPredicate = sql.and([
     "kind != 'context-window.updated'",
     "kind != 'checkpoint.captured'",
+    // These records render in task cards or the subagent roster. Match the
+    // ordinary renderer before advertising history, including null/future
+    // workflow metadata, which must never fall through to a generic task.
+    "(kind NOT GLOB 'task.*' OR json_type(payload_json, '$.workflow') IS NULL)",
+    "NOT (kind IN ('task.started', 'task.progress', 'task.completed') AND COALESCE(json_extract(payload_json, '$.visibility'), '') = 'ambient')",
+    "COALESCE(json_extract(payload_json, '$.itemType'), '') != 'collab_agent_tool_call'",
     // Guardian approval reviews already have a public live Work Log start.
     // Preserve that exact exception in historical discovery without admitting
     // ordinary starts, ambient work, reserved workflow metadata or collab rows.
@@ -2908,20 +2915,32 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
   // alike. In particular, a configuration retained before the raw tail must
   // not create a disclosure whose reader then removes its only duplicate.
   // Bind the values as SQL parameters inside the existing thread/turn range.
-  const excludedActivityPredicate = (ids: ReadonlyArray<string> | undefined) =>
-    ids?.length ? sql`activity_id NOT IN ${sql.in(ids)}` : sql`1 = 1`;
+  const excludedActivityPredicate = (
+    ids: ReadonlyArray<string> | undefined,
+    turnId: string,
+    excludeTurnStartAck: boolean | undefined,
+  ) =>
+    sql.and([
+      ids?.length ? sql`activity_id NOT IN ${sql.in(ids)}` : sql`1 = 1`,
+      // Match the renderer's exact configured-turn suppression even after the
+      // separate ACK row leaves the live tail. Keep legacy ACKs eligible when
+      // accepted Codex settings are absent, malformed or from another turn.
+      excludeTurnStartAck
+        ? sql`NOT (kind = 'task.progress' AND COALESCE(json_extract(payload_json, '$.taskId'), '') = ${`codex-turn-start:${turnId}`})`
+        : sql`1 = 1`,
+    ]);
 
   const countThreadActivityRowsByTurn = SqlSchema.findOne({
     Request: ThreadTurnActivityPageLookupInput,
     Result: CountRowSchema,
-    execute: ({ threadId, turnId, before, excludeActivityIds }) =>
+    execute: ({ threadId, turnId, before, excludeActivityIds, excludeTurnStartAck }) =>
       sql`
         SELECT COUNT(*) AS "count"
         FROM projection_thread_activities
         WHERE thread_id = ${threadId}
           AND turn_id = ${turnId}
           AND ${activityBeforePredicate(before)}
-          AND ${excludedActivityPredicate(excludeActivityIds)}
+          AND ${excludedActivityPredicate(excludeActivityIds, turnId, excludeTurnStartAck)}
           AND ${historicalWorkLogActivityPredicate}
       `,
   });
@@ -2929,7 +2948,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
   const findThreadTurnWorkLogPresence = SqlSchema.findOne({
     Request: ThreadTurnLookupInput,
     Result: WorkLogPresenceRowSchema,
-    execute: ({ threadId, turnId, before, excludeActivityIds }) =>
+    execute: ({ threadId, turnId, before, excludeActivityIds, excludeTurnStartAck }) =>
       sql`
         SELECT EXISTS(
           SELECT 1
@@ -2937,7 +2956,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
           WHERE thread_id = ${threadId}
             AND turn_id = ${turnId}
             AND ${activityBeforePredicate(before)}
-            AND ${excludedActivityPredicate(excludeActivityIds)}
+            AND ${excludedActivityPredicate(excludeActivityIds, turnId, excludeTurnStartAck)}
             AND ${historicalWorkLogActivityPredicate}
           LIMIT 1
         ) AS "hasWorkLog"
@@ -2972,7 +2991,15 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
   const listThreadActivityRowsByTurnPage = SqlSchema.findAll({
     Request: ThreadTurnActivityPageLookupInput,
     Result: ProjectionThreadActivityDbRowSchema,
-    execute: ({ threadId, turnId, offset, limit, before, excludeActivityIds }) => {
+    execute: ({
+      threadId,
+      turnId,
+      offset,
+      limit,
+      before,
+      excludeActivityIds,
+      excludeTurnStartAck,
+    }) => {
       // Keyset mode reads the nearest older bounded page, then the service
       // reverses those rows back to ordinary chronological display. Legacy
       // historical readers keep their existing ascending offset behavior.
@@ -2997,7 +3024,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
         WHERE thread_id = ${threadId}
           AND turn_id = ${turnId}
           AND ${activityBeforePredicate(before)}
-          AND ${excludedActivityPredicate(excludeActivityIds)}
+          AND ${excludedActivityPredicate(excludeActivityIds, turnId, excludeTurnStartAck)}
           AND ${historicalWorkLogActivityPredicate}
         ORDER BY ${order}
         LIMIT ${limit}
@@ -4694,6 +4721,9 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
             ...(input.excludeActivityIds === undefined
               ? {}
               : { excludeActivityIds: input.excludeActivityIds }),
+            ...(input.excludeTurnStartAck === undefined
+              ? {}
+              : { excludeTurnStartAck: input.excludeTurnStartAck }),
           };
         }),
       )
@@ -4722,6 +4752,9 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
             ...(input.excludeActivityIds === undefined
               ? {}
               : { excludeActivityIds: input.excludeActivityIds }),
+            ...(input.excludeTurnStartAck === undefined
+              ? {}
+              : { excludeTurnStartAck: input.excludeTurnStartAck }),
           }).pipe(
             Effect.mapError(
               toPersistenceSqlOrDecodeError(

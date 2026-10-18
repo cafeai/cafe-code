@@ -1,3 +1,4 @@
+import type { GlideControlInput, GlideControlResult } from "./glide.ts";
 import type {
   ProviderTaskControlInput,
   ProviderTaskControlResult,
@@ -582,6 +583,7 @@ export interface LocalApi {
  * `environmentId` rather than reaching through the local desktop bridge.
  */
 export interface EnvironmentApi {
+  glide?: { control: (input: GlideControlInput) => Promise<GlideControlResult> };
   /** App actions retain fresh one-operation consent, separate from provider approvals. */
   mcpApps?: {
     prepare: (input: McpAppPrepareInput) => Promise<McpAppPrepareResult>;

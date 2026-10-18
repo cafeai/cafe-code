@@ -572,6 +572,7 @@ __metadata:
     "@types/node": "catalog:"
     "@types/web-push": "npm:^3.6.4"
     "@types/yauzl": "npm:3.4.0"
+    acorn: "npm:8.18.0"
     effect: "catalog:"
     effect-acp: "workspace:*"
     effect-codex-app-server: "workspace:*"
@@ -636,6 +637,7 @@ __metadata:
     "@opencode-ai/sdk": "npm:^1.17.18"
     "@pierre/diffs": "catalog:"
     "@types/web-push": "npm:^3.6.4"
+    acorn: "npm:8.18.0"
     effect: "catalog:"
     electron: "npm:42.10.0"
     electron-builder: "npm:26.15.3"
@@ -3952,6 +3954,15 @@ __metadata:
     mime-types: "npm:^3.0.0"
     negotiator: "npm:^1.0.0"
   checksum: 10c0/98374742097e140891546076215f90c32644feacf652db48412329de4c2a529178a81aa500fbb13dd3e6cbf6e68d829037b123ac037fc9a08bcec4b87b358eef
+  languageName: node
+  linkType: hard
+
+"acorn@npm:8.18.0":
+  version: 8.18.0
+  resolution: "acorn@npm:8.18.0"
+  bin:
+    acorn: bin/acorn
+  checksum: 10c0/be771be2135cc07910cf76f444ad514d7dcfd6d4a8026e597e93155275abc8ef61eee12211d52146e9d962874269b634f397464942087be013c89d0c54c5f8e5
   languageName: node
   linkType: hard
 

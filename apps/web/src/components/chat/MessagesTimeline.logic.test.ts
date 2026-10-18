@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import type { TurnId } from "@cafecode/contracts";
 import {
   computeStableMessagesTimelineRows,
   computeMessageDurationStart,
@@ -432,6 +433,18 @@ describe("historical work-log presence", () => {
     });
 
     expect(candidates).toEqual([unresolvedTurnId]);
+  });
+
+  it("keeps an inconclusive attempt hidden without treating it as an unresolved request to repeat", () => {
+    const presenceByTurnId = new Map<TurnId, boolean | undefined>([
+      [persistedTurnId, true],
+      [emptyTurnId, false],
+      [unresolvedTurnId, undefined],
+    ]);
+    expect([
+      ...filterHistoricalWorkLogSummariesByPresence({ summaries, presenceByTurnId }).keys(),
+    ]).toEqual([snapshotTurnId, persistedTurnId]);
+    expect(findHistoricalWorkLogPresenceCandidates({ summaries, presenceByTurnId })).toEqual([]);
   });
 });
 

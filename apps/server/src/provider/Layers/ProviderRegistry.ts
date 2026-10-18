@@ -35,6 +35,7 @@ import {
 import * as Cause from "effect/Cause";
 import { makeProviderUsageReset } from "../ProviderUsageReset.ts";
 import { discoverBoundProviderSkills } from "../providerSkillsDiscovery.ts";
+import { readBoundInstanceQuota } from "../providerQuotaSubscription.ts";
 import * as Effect from "effect/Effect";
 import * as Deferred from "effect/Deferred";
 import * as Equal from "effect/Equal";
@@ -1267,6 +1268,8 @@ const makeProviderRegistry = (options?: ProviderRegistryOptions) =>
 
     return {
       getProviders: Ref.get(providersRef),
+      readInstanceAccountQuota: (instanceId) =>
+        readBoundInstanceQuota(instanceRegistry.getInstance(instanceId)),
       awaitInstanceInitialRefresh,
       discoverSkills: (instanceId, cwd) =>
         discoverBoundProviderSkills(instanceRegistry.getInstance(instanceId), cwd),

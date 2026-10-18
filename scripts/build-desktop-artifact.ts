@@ -917,6 +917,7 @@ export function resolveMacDesktopBuildConfig(
         from: "apps/desktop/resources/mac-dictation-target",
         to: "mac-dictation-target",
       },
+      { from: "apps/desktop/resources/mac-glide", to: "mac-glide" },
       ...(["en", "ja", "ko"] as const).map((locale) => ({
         from: `apps/desktop/resources/ui-locales/${locale}.lproj`,
         to: `${locale}.lproj`,
@@ -1206,6 +1207,20 @@ const buildDesktopArtifact = Effect.fn("buildDesktopArtifact")(function* (
           ...commandOutputOptions(options.verbose),
           shell: false,
         },
+      ),
+    );
+    yield* runCommand(
+      ChildProcess.make(
+        process.execPath,
+        [
+          path.join(repoRoot, "apps/desktop/scripts/build-mac-glide-helper.mjs"),
+          "--arch",
+          options.arch,
+          "--output",
+          path.join(stageResourcesDir, "mac-glide"),
+          "--force",
+        ],
+        { cwd: repoRoot, ...commandOutputOptions(options.verbose), shell: false },
       ),
     );
   }

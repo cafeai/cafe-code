@@ -174,7 +174,7 @@ export const makeBootstrapCredentialService = Effect.gen(function* () {
       return issued;
     }).pipe(Effect.mapError(toBootstrapCredentialError("Failed to issue pairing credential.")));
 
-  const consume: BootstrapCredentialServiceShape["consume"] = (credential) =>
+  const resolveCredential = (credential: string, consume: boolean) =>
     Effect.gen(function* () {
       const now = yield* DateTime.now;
       const seededResult: ConsumeResult = yield* Ref.modify(
@@ -206,7 +206,7 @@ export const makeBootstrapCredentialService = Effect.gen(function* () {
           }
 
           const remainingUses = grant.remainingUses;
-          if (typeof remainingUses === "number") {
+          if (consume && typeof remainingUses === "number") {
             if (remainingUses <= 1) {
               next.delete(credential);
             } else {
@@ -240,11 +240,13 @@ export const makeBootstrapCredentialService = Effect.gen(function* () {
         return yield* seededResult.error;
       }
 
-      const consumed = yield* pairingLinks.consumeAvailable({
-        credential,
-        consumedAt: now,
-        now,
-      });
+      const consumed = consume
+        ? yield* pairingLinks.consumeAvailable({
+            credential,
+            consumedAt: now,
+            now,
+          })
+        : Option.none();
 
       if (Option.isSome(consumed)) {
         yield* emitRemoved(consumed.value.id);
@@ -276,6 +278,16 @@ export const makeBootstrapCredentialService = Effect.gen(function* () {
         return yield* invalidBootstrapCredentialError("Bootstrap credential expired.");
       }
 
+      if (!consume) {
+        return {
+          method: matching.value.method,
+          role: matching.value.role,
+          subject: matching.value.subject,
+          ...(matching.value.label ? { label: matching.value.label } : {}),
+          expiresAt: matching.value.expiresAt,
+        } satisfies BootstrapGrant;
+      }
+
       return yield* invalidBootstrapCredentialError("Bootstrap credential is no longer available.");
     }).pipe(
       Effect.mapError((cause) =>
@@ -292,7 +304,8 @@ export const makeBootstrapCredentialService = Effect.gen(function* () {
       return Stream.fromPubSub(changesPubSub);
     },
     revoke,
-    consume,
+    consume: (credential: string) => resolveCredential(credential, true),
+    inspect: (credential: string) => resolveCredential(credential, false),
   } satisfies BootstrapCredentialServiceShape;
 });
 

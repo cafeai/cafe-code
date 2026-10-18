@@ -1,3 +1,5 @@
+import { makeGlideService, glideOwnerOperationSchema } from "./glide/sessionRuntime.ts";
+import { GlideControlResult, GlideError } from "@cafecode/contracts";
 import { axiomConfigurationKey } from "./provider/acp/AxiomAcpSupport.ts";
 import {
   readOwnedProviderSecurity,
@@ -288,6 +290,7 @@ const makeWsRpcLayer = (
       const sourceControlRepositories = yield* SourceControlRepositoryService;
       const bootstrapCredentials = yield* BootstrapCredentialService;
       const sessions = yield* SessionCredentialService;
+      const glideOperation = yield* makeGlideService;
       // Ordinary server seams need not construct a renderer host/store. Missing
       // capability refuses only these methods; production provides the actual
       // single shared private artifact service, never a successful substitute.
@@ -567,11 +570,30 @@ const makeWsRpcLayer = (
         }
       };
 
+      const requireComputerUseOwner = () =>
+        Effect.gen(function* () {
+          if (currentSession.role !== "owner" || !secureSecretTransport) {
+            return yield* new OrchestrationDispatchCommandError({
+              message: "Computer use requires a current owner connection.",
+            });
+          }
+          yield* sessions.validateActiveSession(currentSession).pipe(
+            Effect.mapError(
+              () =>
+                new OrchestrationDispatchCommandError({
+                  message: "Computer use owner session expired.",
+                }),
+            ),
+          );
+        });
+
       const dispatchBootstrapTurnStart = (
         command: Extract<ClientOrchestrationCommand, { type: "thread.turn.start" }>,
       ): Effect.Effect<{ readonly sequence: number }, OrchestrationDispatchCommandError> =>
         Effect.gen(function* () {
           const bootstrap = command.bootstrap;
+          if (bootstrap?.createThread?.computerUseEnabled === true)
+            yield* requireComputerUseOwner();
           const { bootstrap: _bootstrap, ...finalTurnStartCommand } = command;
           let createdThread = false;
           let targetProjectId = bootstrap?.createThread?.projectId;
@@ -733,6 +755,17 @@ const makeWsRpcLayer = (
 
             yield* runSetupProgram();
 
+            if (bootstrap?.createThread?.computerUseEnabled === true) {
+              yield* requireComputerUseOwner();
+              yield* Effect.tryPromise({
+                try: () =>
+                  glideOperation({ kind: "initialize-thread", threadId: command.threadId }),
+                catch: (cause) =>
+                  toDispatchCommandError(cause, "Could not enable computer use for the new chat."),
+              });
+              yield* requireComputerUseOwner();
+            }
+
             return yield* orchestrationEngine.dispatch(normalizedCommand);
           });
 
@@ -767,8 +800,28 @@ const makeWsRpcLayer = (
                   ),
                 );
 
+        const retiresGlide =
+          normalizedCommand.type === "thread.delete" ||
+          normalizedCommand.type === "thread.archive" ||
+          normalizedCommand.type === "thread.session.stop" ||
+          (normalizedCommand.type === "thread.runtime-mode.set" &&
+            normalizedCommand.runtimeMode !== "full-access");
+        const guardedDispatch = retiresGlide
+          ? Effect.tryPromise({
+              try: () =>
+                glideOperation({
+                  kind: "retire-thread",
+                  threadId: "threadId" in normalizedCommand ? normalizedCommand.threadId : "",
+                }),
+              catch: () =>
+                toDispatchCommandError(
+                  undefined,
+                  "Could not retire Glide before changing this chat's access.",
+                ),
+            }).pipe(Effect.andThen(dispatchEffect))
+          : dispatchEffect;
         return startup
-          .enqueueCommand(dispatchEffect)
+          .enqueueCommand(guardedDispatch)
           .pipe(
             Effect.mapError((cause) =>
               toDispatchCommandError(cause, "Failed to dispatch orchestration command"),
@@ -848,6 +901,27 @@ const makeWsRpcLayer = (
           };
         }).pipe(Effect.catchCause(() => Effect.succeed(undefined)));
       return WsRpcGroup.of({
+        "glide.control": (input) =>
+          Effect.gen(function* () {
+            if (currentSession.role !== "owner" || !secureSecretTransport)
+              return yield* new GlideError({
+                message: "Glide controls require a current owner connection.",
+              });
+            yield* sessions
+              .validateActiveSession(currentSession)
+              .pipe(Effect.mapError(() => new GlideError({ message: "Owner session expired." })));
+            return yield* Effect.tryPromise({
+              try: async () =>
+                Schema.decodeUnknownSync(GlideControlResult)(
+                  await glideOperation(glideOwnerOperationSchema.parse({ kind: "control", input })),
+                ),
+              catch: () =>
+                new GlideError({
+                  message:
+                    "Glide controls are unavailable. Check the desktop helper and chat access mode.",
+                }),
+            });
+          }),
         [WS_METHODS.visualizationsList]: (input) =>
           privateVisualizationRead(withVisualizations((service) => service.list(input))),
         [WS_METHODS.visualizationsDetails]: (input) =>
@@ -1611,6 +1685,7 @@ const makeWsRpcLayer = (
         [WS_METHODS.serverSubscribeProviderQuota]: (input) => {
           if (currentSession.role !== "owner") return unavailableProviderQuotaStream();
           const resolveAuthority = Effect.gen(function* () {
+            yield* sessions.validateActiveSession(currentSession);
             const settings = yield* serverSettings.getSettings;
             const explicit = settings.providerInstances[input.instanceId];
             const legacy =
@@ -1678,8 +1753,16 @@ const makeWsRpcLayer = (
           // This is a read-only, volatile stream: report values never enter a
           // command ledger, activity event, durable status cache or RPC trace.
           return subscribeProviderQuota(
-            readBoundProviderQuota(input, resolveAuthority, providerService.listSessions()),
+            readBoundProviderQuota(
+              input,
+              resolveAuthority,
+              providerService.listSessions(),
+              providerRegistry.readInstanceAccountQuota?.(input.instanceId),
+            ),
             [
+              // Only visible subscriptions refresh. The owning instance shares
+              // one cached control-only read across settings/rail/popovers.
+              Stream.tick("60 seconds"),
               providerService.streamEvents.pipe(
                 Stream.filter(
                   (event) =>

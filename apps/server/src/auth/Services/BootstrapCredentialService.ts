@@ -53,6 +53,7 @@ export interface BootstrapCredentialServiceShape {
   readonly streamChanges: Stream.Stream<BootstrapCredentialChange>;
   readonly revoke: (id: string) => Effect.Effect<boolean, BootstrapCredentialError>;
   readonly consume: (credential: string) => Effect.Effect<BootstrapGrant, BootstrapCredentialError>;
+  readonly inspect: (credential: string) => Effect.Effect<BootstrapGrant, BootstrapCredentialError>;
 }
 
 export class BootstrapCredentialService extends Context.Service<
