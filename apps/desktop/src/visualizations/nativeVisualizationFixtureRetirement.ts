@@ -34,7 +34,7 @@ export interface NativeFixtureRetirementSurface {
  * fixed FATAL message. A matching log alone is never a witness. This recorder
  * observes, but neither requests a crash nor changes any production admission,
  * kill/close fallback, retirement budget or uncertainty handling.
- * https://github.com/electron/electron/blob/v42.10.0/shell/browser/api/electron_api_web_contents.cc#L3058
+ * https://github.com/electron/electron/blob/v42.11.15/shell/browser/api/electron_api_web_contents.cc#L3101
  * https://github.com/chromium/chromium/blob/148.0.7778.280/content/child/child_thread_impl.cc#L375 */
 export class NativeFixtureRetirementRecorder {
   private readonly proven = new Set<number>();

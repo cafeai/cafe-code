@@ -15,25 +15,25 @@ import {
 // The default graph deliberately tests pure boundaries only. Actual installed
 // Electron execution belongs to the explicitly selected standalone command in
 // CI, not an ambient process/native-runtime assumption in a unit fixture.
-const validReport = { electron: "42.10.0", node: "24.18.1", modules: "146" };
+const validReport = { electron: "42.11.15", node: "24.19.0", modules: "146" };
 const isolatedRoot = join(tmpdir(), "cafe-electron-pure-environment-fixture");
 
 describe("installed Electron qualification validation", () => {
   it("requires the three exact synchronized and reviewed package declarations", () => {
     expect(
       validateElectronQualificationPins({
-        desktop: "42.10.0",
-        server: "42.10.0",
-        packaging: "42.10.0",
+        desktop: "42.11.15",
+        server: "42.11.15",
+        packaging: "42.11.15",
       }),
-    ).toBe("42.10.0");
+    ).toBe("42.11.15");
     for (const field of ["desktop", "server", "packaging"] as const) {
-      for (const invalid of [undefined, null, "42.5.1", "^42.10.0", "43.0.0"]) {
+      for (const invalid of [undefined, null, "42.5.1", "42.10.0", "^42.11.15", "43.0.0"]) {
         expect(() =>
           validateElectronQualificationPins({
-            desktop: "42.10.0",
-            server: "42.10.0",
-            packaging: "42.10.0",
+            desktop: "42.11.15",
+            server: "42.11.15",
+            packaging: "42.11.15",
             [field]: invalid,
           }),
         ).toThrow(/All three Electron declarations/u);
@@ -41,35 +41,39 @@ describe("installed Electron qualification validation", () => {
     }
     expect(() =>
       validateElectronQualificationPins({
-        desktop: "42.5.1",
-        server: "42.5.1",
-        packaging: "42.5.1",
+        desktop: "42.10.0",
+        server: "42.10.0",
+        packaging: "42.10.0",
       }),
-    ).toThrow(/reviewed 42\.10\.0/u);
+    ).toThrow(/reviewed 42\.11\.15/u);
   });
 
   it("verifies actual Electron, bundled Node floor and native ABI rather than standalone Node", () => {
     expect(validateElectronRuntimeReport(JSON.stringify(validReport))).toEqual(validReport);
-    for (const node of ["24.18.2", "24.19.0"]) {
+    for (const node of ["24.19.1", "24.20.0"]) {
       expect(validateElectronRuntimeReport(JSON.stringify({ ...validReport, node })).node).toBe(
         node,
       );
     }
-    expect(() =>
-      validateElectronRuntimeReport(JSON.stringify({ ...validReport, electron: "42.5.1" })),
-    ).toThrow(/Installed Electron/u);
+    for (const electron of ["42.5.1", "42.10.0"]) {
+      expect(() =>
+        validateElectronRuntimeReport(JSON.stringify({ ...validReport, electron })),
+      ).toThrow(/Installed Electron/u);
+    }
     expect(() =>
       validateElectronRuntimeReport(JSON.stringify({ ...validReport, modules: "147" })),
     ).toThrow(/unqualified native addon ABI/u);
     for (const node of [
       "24.13.1",
       "24.18.0",
+      "24.18.1",
+      "24.18.99",
       "23.99.99",
       "25.0.0",
       "26.0.0",
-      "24.18.1-beta.1",
-      "v24.18.1",
-      "024.18.1",
+      "24.19.0-beta.1",
+      "v24.19.0",
+      "024.19.0",
       "24.9007199254740992.0",
       "not a version",
     ]) {

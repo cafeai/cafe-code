@@ -570,7 +570,7 @@ it.runIf(
       retainCompletedNativeDiagnostics(stderr, "fixture");
       const report = JSON.parse(stdout.trim()) as Record<string, unknown>;
       expect(report).toMatchObject({
-        electron: "42.10.0",
+        electron: "42.11.15",
         platform: process.platform,
         arch: process.arch,
         graphics:
@@ -604,7 +604,7 @@ it.runIf(
         consent: "passed",
         watchdog: "passed",
       });
-      expect(report.electronNode).toMatch(/^\d+\.\d+\.\d+$/);
+      expect(report.electronNode).toBe("24.19.0");
       expect(report.electronAbi).toBe("146");
       // Retain only fixed fixture outcomes and native runtime provenance. No
       // source, profile path, bridge credential or received private JSON is logged.
@@ -738,7 +738,7 @@ it.runIf(
         ].sort(),
       );
       expect(report).toMatchObject({
-        electron: "42.10.0",
+        electron: "42.11.15",
         electronAbi: "146",
         platform: process.platform,
         arch: process.arch,
@@ -757,7 +757,7 @@ it.runIf(
         offscreenRetirement: "passed",
         genuineVisibilityReplay: "authored",
       });
-      expect(report.electronNode).toMatch(/^\d+\.\d+\.\d+$/);
+      expect(report.electronNode).toBe("24.19.0");
       expect((report.retirementCrashPids as number[]).length).toBe(
         process.platform === "linux" ? 1 : 0,
       );
@@ -884,7 +884,7 @@ it.runIf(
         ].sort(),
       );
       expect(report).toMatchObject({
-        electron: "42.10.0",
+        electron: "42.11.15",
         electronAbi: "146",
         platform: process.platform,
         arch: process.arch,
@@ -903,7 +903,7 @@ it.runIf(
         fontReadyCapture: "passed",
         retirement: "passed",
       });
-      expect(report.electronNode).toMatch(/^\d+\.\d+\.\d+$/);
+      expect(report.electronNode).toBe("24.19.0");
       expect((report.retirementCrashPids as number[]).length).toBe(
         process.platform === "linux" ? 3 : 0,
       );

@@ -147,12 +147,12 @@ describe("repository toolchain policy", () => {
     // release rather than accepting a matching but vulnerable pair of pins.
     for (const packagePath of ["apps/desktop/package.json", "apps/server/package.json"]) {
       expect(readStringMap(readJson(packagePath).dependencies).electron, packagePath).toBe(
-        "42.10.0",
+        "42.11.15",
       );
     }
     expect(
       readStringMap(readJson("packaging/desktop-runtime/package.json").devDependencies).electron,
-    ).toBe("42.10.0");
+    ).toBe("42.11.15");
   });
 
   it("retains fixed security floors throughout the installed dependency graph", () => {
@@ -178,6 +178,13 @@ describe("repository toolchain policy", () => {
       "http-cache-semantics": { 4: [3, 0] },
       katex: { 0: [18, 2] },
       "source-map-js": { 1: [2, 2] },
+      // These servers run only during development/verification, but their
+      // filesystem admission still protects the machine running Cafe's tools.
+      // A fixed direct pin must not hide a vulnerable transitive server copy.
+      vite: { 8: [3, 3] },
+      vitest: { 5: [0, 5] },
+      "@vitest/browser": { 5: [0, 5] },
+      "@vitest/ui": { 5: [0, 5] },
     };
     for (const [name, branches] of Object.entries(minimums)) {
       const entries = Object.entries(lock).filter(([descriptor]) =>
@@ -232,9 +239,9 @@ describe("repository toolchain policy", () => {
     // The beta.59 adapter's upstream peer metadata predates Vitest 5. Its
     // narrow backport is qualified for this exact runner, not all future v5
     // releases and not a coordinated migration of the protected Effect graph.
-    expect(yarnConfig).toMatch(/^  vitest: 5\.0\.2$/m);
+    expect(yarnConfig).toMatch(/^  vitest: 5\.0\.5$/m);
     expect(yarnConfig).toMatch(/^  "@effect\/vitest": 4\.0\.0-beta\.59$/m);
-    expect(readStringMap(webPackage.devDependencies)["@vitest/browser-playwright"]).toBe("5.0.2");
+    expect(readStringMap(webPackage.devDependencies)["@vitest/browser-playwright"]).toBe("5.0.5");
     expect(resolutions["@effect/vitest"]).toBe(
       "patch:@effect/vitest@npm%3A4.0.0-beta.59#./.yarn/patches/effect-vitest.patch",
     );
@@ -247,9 +254,9 @@ describe("repository toolchain policy", () => {
       version: string;
       peerDependencies: { vitest: string };
     };
-    expect(installedRunner.version).toBe("5.0.2");
+    expect(installedRunner.version).toBe("5.0.5");
     expect(installedAdapter.version).toBe("4.0.0-beta.59");
-    expect(installedAdapter.peerDependencies.vitest).toBe("^3.0.0 || ^4.0.0 || 5.0.2");
+    expect(installedAdapter.peerDependencies.vitest).toBe("^3.0.0 || ^4.0.0 || 5.0.5");
 
     // Qualification exercises these public APIs in the normal adapter tests
     // and proves timed-out scopes retire before the next case in the isolated

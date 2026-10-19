@@ -5,7 +5,7 @@ diff --git a/package.json b/package.json
    },
    "peerDependencies": {
 -    "vitest": "^3.0.0 || ^4.0.0",
-+    "vitest": "^3.0.0 || ^4.0.0 || 5.0.2",
++    "vitest": "^3.0.0 || ^4.0.0 || 5.0.5",
      "effect": "^4.0.0-beta.59"
    },
    "devDependencies": {

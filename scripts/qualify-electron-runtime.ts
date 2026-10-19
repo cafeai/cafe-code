@@ -11,8 +11,13 @@ import { fileURLToPath } from "node:url";
 // unit-test graph. Synchronizing package declarations alone cannot detect a
 // stale/skipped Electron download. Invoke the executable resolved from the
 // desktop workspace and verify its own runtime report instead.
-const REVIEWED_ELECTRON_VERSION = "42.10.0";
-const REVIEWED_NODE_FLOOR = [24, 18, 1] as const;
+// The release's DEPS names Node24.19.0; its build arguments retain ABI146.
+// These reviewed source identities are expectations, not a substitute for the
+// installed executable's own bounded report below.
+// https://github.com/electron/electron/blob/v42.11.15/DEPS
+// https://github.com/electron/electron/blob/v42.11.15/build/args/all.gn
+const REVIEWED_ELECTRON_VERSION = "42.11.15";
+const REVIEWED_NODE_FLOOR = [24, 19, 0] as const;
 const REVIEWED_NATIVE_ABI = "146";
 const PROCESS_TIMEOUT_MS = 30_000;
 const OUTPUT_LIMIT_BYTES = 4096;
@@ -56,7 +61,7 @@ export function validateElectronQualificationPins(pins: ElectronPins): string {
     [pins.desktop, pins.server, pins.packaging].some((pin) => pin !== REVIEWED_ELECTRON_VERSION)
   ) {
     throw new ElectronQualificationError(
-      "All three Electron declarations must match the reviewed 42.10.0 release.",
+      "All three Electron declarations must match the reviewed 42.11.15 release.",
     );
   }
   return REVIEWED_ELECTRON_VERSION;
@@ -96,7 +101,7 @@ export function validateElectronRuntimeReport(stdout: string): ElectronRuntimeRe
     minor < REVIEWED_NODE_FLOOR[1] ||
     (minor === REVIEWED_NODE_FLOOR[1] && patch < REVIEWED_NODE_FLOOR[2])
   ) {
-    throw new ElectronQualificationError("Bundled Node must remain Node 24 at or above 24.18.1.");
+    throw new ElectronQualificationError("Bundled Node must remain Node 24 at or above 24.19.0.");
   }
   if (report.modules !== REVIEWED_NATIVE_ABI) {
     throw new ElectronQualificationError("Installed Electron has an unqualified native addon ABI.");

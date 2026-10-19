@@ -1,7 +1,7 @@
 # Dependency maintenance with Renovate
 
 Created: 2026-10-03 01:30:40 JST (UTC+0900)
-Last updated: 2026-10-19 17:16:03 JST (UTC+0900)
+Last updated: 2026-10-20 05:31:30 JST (UTC+0900)
 
 Cafe is configured to use the Mend-hosted [Renovate GitHub App](https://github.com/apps/renovate)
 to propose dependency updates once activated. The checked-in repository policy is
@@ -233,6 +233,11 @@ checking every approval or schedule-override box. See the
 The separately authorized [major migration follow-up](dependency-majors-2026-10-03.md)
 records coordinated compatibility fixes and measured deferrals; historical holds
 in the earlier batch are not claims that those later migrations remain impossible.
+The [October 20 security batch](dependency-security-2026-10-20.md) records the
+separately reviewed Vite 8.3.3, matched Vitest 5.0.5 and Electron 42.11.15 updates,
+their actual/conditional exposure and required resulting-source qualification.
+Its status distinguishes prepared pins from observed installation, tests and
+publication; routine dashboard proposals do not establish those security floors.
 
 After the reviewed commit is pushed, use the dashboard's **run Renovate again**
 checkbox at the bottom (the `manual job` control). This requests another hosted

@@ -1035,7 +1035,7 @@ async function qualify(): Promise<void> {
         fullCapture.height !== child.height ||
         !hasClippedFixtureContent(fullCapture.png)
       ) {
-        // Electron 42.10.0 CapturePage requests the child DIP rectangle, scales
+        // Electron 42.11.15 CapturePage requests the child DIP rectangle, scales
         // its temporary bitmap by the native display DPR above one, and wraps
         // that bitmap as a 1x NativeImage. The production surface independently
         // preflights that tuple and normalizes it to the same child DIP width/
@@ -1044,7 +1044,7 @@ async function qualify(): Promise<void> {
         // The old Linux failure did not reveal which clause failed: preserve a
         // fixed finite tuple (and any real PNG) without guessing a cause or
         // relaxing dimensions, opaque invariant-black RGBA, or ownership.
-        // https://github.com/electron/electron/blob/v42.10.0/shell/browser/api/electron_api_web_contents.cc#L3854
+        // https://github.com/electron/electron/blob/v42.11.15/shell/browser/api/electron_api_web_contents.cc#L3901
         const image = fullCapture
           ? Electron.nativeImage.createFromBuffer(Buffer.from(fullCapture.png))
           : null;

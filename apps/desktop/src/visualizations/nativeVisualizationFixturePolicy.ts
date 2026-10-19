@@ -11,7 +11,8 @@ export type NativeVisualizationFixtureKind =
 export type NativeVisualizationFixtureGraphics = "native-default" | "sandboxed-swiftshader";
 
 /** The explicit full GLES driver exercises actual GL on GPU-less Linux bots.
- * Electron 42.10.0 pins Chromium 148.0.7778.280. Its docs/gpu/swiftshader.md
+ * Electron 42.11.15 retains Chromium 148.0.7778.280's base with backported
+ * security fixes. Its docs/gpu/swiftshader.md
  * distinguishes this mode from the unsafe WebGL-only fallback, and
  * ui/gl/gl_features.cc:IsSwiftShaderAllowedByCommandLine plus
  * gpu/config/gpu_util.cc:ComputeGpuFeatureInfo admit the explicit driver without
@@ -19,7 +20,7 @@ export type NativeVisualizationFixtureGraphics = "native-default" | "sandboxed-s
  * it to trusted synthetic fixture bytes, retain the GPU/renderer sandbox, and
  * require actual native mode/sandbox observations before any source is run.
  * https://github.com/chromium/chromium/blob/148.0.7778.280/docs/gpu/swiftshader.md
- * https://github.com/electron/electron/blob/v42.10.0/DEPS
+ * https://github.com/electron/electron/blob/v42.11.15/DEPS
  * Unknown future kinds are deliberately not equivalent to synthetic source. */
 export function nativeVisualizationFixtureDriver(
   platform: string,
