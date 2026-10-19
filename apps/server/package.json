@@ -1,6 +1,6 @@
 {
   "name": "@cafeai/cafe-code",
-  "version": "0.2.1",
+  "version": "0.2.3",
   "description": "A minimal AI chat harness for coding agents.",
   "keywords": [
     "agent",
