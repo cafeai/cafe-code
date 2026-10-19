@@ -1,3 +1,4 @@
+import { ProviderDaemonFailedRootRetirementRefusal } from "@cafecode/contracts";
 import * as Schema from "effect/Schema";
 
 import type { CheckpointServiceError } from "../checkpointing/Errors.ts";
@@ -68,6 +69,10 @@ export class ProviderAdapterRequestError extends Schema.TaggedErrorClass<Provide
      * error strings. The field carries no provider payload or credentials.
      */
     remoteErrorTag: Schema.optional(Schema.String),
+    /** Finite native refusal before failed-root retirement and paid input.
+     * This is separate from prose/tags: only its exact authenticated cold-send
+     * transport may preserve the witness for another guarded preparation. */
+    failedRootRetirementRefusal: Schema.optional(ProviderDaemonFailedRootRetirementRefusal),
     cause: Schema.optional(Schema.Defect),
   },
 ) {

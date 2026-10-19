@@ -60,6 +60,83 @@ it("retains only finite configuration-refusal evidence through current and legac
   }
 });
 
+it("keeps failed-root retirement refusals finite and legacy omission unknown across RPC and diagnostics", () => {
+  const schemas: ReadonlyArray<{
+    readonly schema: Schema.Codec<unknown, unknown>;
+    readonly legacy: unknown;
+    readonly withReason: (reason: unknown) => unknown;
+  }> = [
+    {
+      schema: ProviderDaemonRpcEnvelope,
+      legacy: { ok: false, error: { tag: "ProviderAdapterRequestError", message: "Refused." } },
+      withReason: (reason: unknown) => ({
+        ok: false,
+        error: {
+          tag: "ProviderAdapterRequestError",
+          message: "Refused.",
+          failedRootRetirementRefusal: reason,
+        },
+      }),
+    },
+    {
+      schema: ProviderDaemonCommandDiagnostic,
+      legacy: {
+        commandId: "command",
+        method: "sendTurn",
+        createdAt: "2026-10-19T01:00:00.000Z",
+        updatedAt: "2026-10-19T01:00:00.001Z",
+      },
+      withReason: (reason: unknown) => ({
+        commandId: "command",
+        method: "sendTurn",
+        createdAt: "2026-10-19T01:00:00.000Z",
+        updatedAt: "2026-10-19T01:00:00.001Z",
+        failedRootRetirementRefusal: reason,
+      }),
+    },
+    {
+      schema: ProviderDaemonRecentRpcFailure,
+      legacy: {
+        failedAt: "2026-10-19T01:00:00.001Z",
+        method: "sendTurn",
+        tag: "ProviderAdapterRequestError",
+        message: "Refused.",
+      },
+      withReason: (reason: unknown) => ({
+        failedAt: "2026-10-19T01:00:00.001Z",
+        method: "sendTurn",
+        tag: "ProviderAdapterRequestError",
+        message: "Refused.",
+        failedRootRetirementRefusal: reason,
+      }),
+    },
+  ];
+  for (const fixture of schemas) {
+    const json = Schema.fromJsonString(fixture.schema);
+    const decode = Schema.decodeUnknownSync(json);
+    const encode = Schema.encodeSync(json);
+    assert.deepEqual(decode(JSON.stringify(fixture.legacy)), fixture.legacy);
+    for (const reason of [
+      "invalid-request",
+      "owner-changed",
+      "native-context-unavailable",
+      "history-unavailable",
+      "compaction-pending",
+      "root-start-pending",
+      "closed",
+      "root-proof-changed",
+      "notifications-pending",
+    ]) {
+      const value = fixture.withReason(reason);
+      assert.deepEqual(decode(JSON.stringify(value)), value);
+      assert.deepEqual(JSON.parse(encode(decode(JSON.stringify(value)))), value);
+    }
+    for (const reason of [null, false, 7, {}, [], "unknown", "notifications-pending "]) {
+      assert.throws(() => decode(JSON.stringify(fixture.withReason(reason))));
+    }
+  }
+});
+
 it("preserves finite refusal codes through bounded command diagnostic JSON without changing legacy fields", () => {
   const schema = Schema.fromJsonString(ProviderDaemonCommandDiagnostic);
   const decode = Schema.decodeUnknownSync(schema);

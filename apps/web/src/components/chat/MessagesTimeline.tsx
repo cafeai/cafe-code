@@ -37,7 +37,7 @@ import {
   type TouchEvent as ReactTouchEvent,
   type WheelEvent as ReactWheelEvent,
 } from "react";
-import { LegendList, type LegendListRef } from "@legendapp/list/react";
+import { LegendList, type LegendListRef, type OnViewableItemsChanged } from "@legendapp/list/react";
 import {
   deriveTimelineEntries,
   deriveSubagentWorkEntries,
@@ -97,6 +97,8 @@ import {
 } from "@cafecode/contracts/settings";
 import { formatTimestamp } from "../../timestampFormat";
 import { VisualizationCard } from "../visualizations/VisualizationCard";
+import { visualizationEntryIdentity } from "../visualizations/visualizationEntryIdentity";
+import type { VisualizationHistoryViewport } from "../visualizations/visualizationHistoryController";
 import type { VisualizationPane } from "../visualizations/VisualizationViewerProvider";
 import { createVisualizationTimelineScrollOwner } from "../visualizations/visualizationTimelineScroll";
 import { hasOnScreenKeyboard } from "../../hooks/useMediaQuery";
@@ -344,6 +346,8 @@ interface MessagesTimelineProps {
   onIsAtEndChange: (isAtEnd: boolean) => void;
   /** Fresh loaded-list native geometry only, not optimistic follow/submit state. */
   onObservedBottom?: (() => void) | undefined;
+  /** Exact loaded native-list visibility; only compact history read positioning. */
+  onVisualizationHistoryViewport?: (viewport: VisualizationHistoryViewport) => void;
   onUserScrollIntent: () => void;
   onDebugScrollEvent?: (event: TimelineScrollDebugEventInput) => void;
   selectedSubagent?: SubagentDetailSelection | null;
@@ -399,6 +403,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
   viewPositionKey,
   onIsAtEndChange,
   onObservedBottom,
+  onVisualizationHistoryViewport,
   onUserScrollIntent,
   onDebugScrollEvent,
   selectedSubagent: controlledSelectedSubagent,
@@ -580,6 +585,14 @@ export const MessagesTimeline = memo(function MessagesTimeline({
   >(null);
   const generatedVisualizationAdmissionReady =
     willRenderTimelineList && loadedVisualizationAdmissionScope === visualizationAdmissionScope;
+  const historyLoadedScope = useRef<object | null>(null);
+  const historyVisibleRows = useRef<{ scope: object; rows: readonly MessagesTimelineRow[] } | null>(
+    null,
+  );
+  const historyRowIndices = useMemo(
+    () => new Map(rows.map((row, index) => [row.id, index])),
+    [rows],
+  );
   useLayoutEffect(() => {
     currentVisualizationAdmissionScope.current = willRenderTimelineList
       ? visualizationAdmissionScope
@@ -589,6 +602,84 @@ export const MessagesTimeline = memo(function MessagesTimeline({
         currentVisualizationAdmissionScope.current = null;
     };
   }, [visualizationAdmissionScope, willRenderTimelineList]);
+  const publishHistoryViewport = useCallback(() => {
+    const visible = historyVisibleRows.current;
+    if (
+      !onVisualizationHistoryViewport ||
+      currentVisualizationAdmissionScope.current !== visualizationAdmissionScope ||
+      historyLoadedScope.current !== visualizationAdmissionScope ||
+      visible?.scope !== visualizationAdmissionScope
+    )
+      return;
+    const canonicalTime = (value: string | null) => {
+      if (!value || value.length > 64) return null;
+      const millis = Date.parse(value);
+      if (!Number.isFinite(millis)) return null;
+      const normalized = new Date(millis).toISOString();
+      return /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/.test(normalized) ? normalized : null;
+    };
+    const times = visible.rows
+      .flatMap((row) => {
+        const time = canonicalTime(row.createdAt);
+        return time ? [time] : [];
+      })
+      .toSorted();
+    const oldestAt = times[0];
+    const visibleNewestAt = times.at(-1);
+    if (!oldestAt || !visibleNewestAt) return;
+    let lastVisibleIndex = -1;
+    for (const row of visible.rows)
+      lastVisibleIndex = Math.max(lastVisibleIndex, historyRowIndices.get(row.id) ?? -1);
+    if (lastVisibleIndex < 0) return;
+    // A long visible message is dated at its start, whereas a chart can be
+    // published later during that message. Seek through the next actual row's
+    // chronological boundary, not only the visible message's starting time.
+    // At the final row, the finite maximum requests only one newest page.
+    let newestAt = "9999-12-31T23:59:59.999Z";
+    for (let index = lastVisibleIndex + 1; index < rows.length; index += 1) {
+      const time = canonicalTime(rows[index]!.createdAt);
+      if (time && time >= visibleNewestAt) {
+        newestAt = time;
+        break;
+      }
+    }
+    const node = listRef.current?.getScrollableNode?.();
+    onVisualizationHistoryViewport({
+      oldestAt,
+      newestAt,
+      visibleEntryKeys: visible.rows
+        .flatMap((row) =>
+          row.kind === "visualization" ? [visualizationEntryIdentity(row.visualization)] : [],
+        )
+        .slice(0, 128),
+      atEnd: node?.isConnected === true && isTimelinePhysicallyAtEnd(node),
+    });
+  }, [
+    historyRowIndices,
+    listRef,
+    onVisualizationHistoryViewport,
+    rows,
+    visualizationAdmissionScope,
+  ]);
+  const handleHistoryViewableItems = useCallback<
+    NonNullable<OnViewableItemsChanged<MessagesTimelineRow>>
+  >(
+    (info) => {
+      if (currentVisualizationAdmissionScope.current !== visualizationAdmissionScope) return;
+      // Native visibility can arrive before onLoad. Retain only this exact list's
+      // compact rows and publish once that public initial-load boundary commits.
+      historyVisibleRows.current = {
+        scope: visualizationAdmissionScope,
+        rows: info.viewableItems.filter((token) => token.isViewable).map((token) => token.item),
+      };
+      publishHistoryViewport();
+    },
+    [publishHistoryViewport, visualizationAdmissionScope],
+  );
+  // Inserting a compact reference can change the next chronological boundary
+  // without changing which message keys are visible. Re-evaluate that same
+  // received visibility after the actual row model commits.
+  useLayoutEffect(publishHistoryViewport, [publishHistoryViewport]);
   // Returning from a subagent detail slides the (still mounted) timeline back
   // in from the start edge. Adjusting state during render restarts the CSS
   // animation exactly once per open→closed transition.
@@ -898,11 +989,19 @@ export const MessagesTimeline = memo(function MessagesTimeline({
       return;
     }
     setLoadedVisualizationAdmissionScope(visualizationAdmissionScope);
+    historyLoadedScope.current = visualizationAdmissionScope;
+    publishHistoryViewport();
     // Finite source-free breadcrumb; no transcript or private source bytes.
     emitScrollDebugEvent("initial-list-load", {
       state: onDebugScrollEvent ? (listRef.current?.getState?.() ?? null) : null,
     });
-  }, [emitScrollDebugEvent, listRef, onDebugScrollEvent, visualizationAdmissionScope]);
+  }, [
+    emitScrollDebugEvent,
+    listRef,
+    onDebugScrollEvent,
+    publishHistoryViewport,
+    visualizationAdmissionScope,
+  ]);
   const cancelSubmitStickToEnd = useCallback(() => {
     // Invalidate every already-scheduled initial/submit hard-scroll callback.
     // Clearing only the deadline is insufficient because the animation-frame
@@ -1441,6 +1540,9 @@ export const MessagesTimeline = memo(function MessagesTimeline({
               }
               onItemSizeChanged={handleItemSizeChanged}
               onLoad={handleInitialListLoad}
+              onViewableItemsChanged={
+                onVisualizationHistoryViewport ? handleHistoryViewableItems : undefined
+              }
               {...(scheduledFollowups ? { onMetricsChange: handleItemSizeChanged } : {})}
               onScroll={handleScroll}
               onWheel={handleWheel}

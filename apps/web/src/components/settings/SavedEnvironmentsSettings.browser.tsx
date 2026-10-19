@@ -109,6 +109,8 @@ describe("SavedEnvironmentsSettings", () => {
       expect(submitButton.disabled).toBe(true);
       // The label keeps its width while pending; the button reports busy instead.
       expect(submitButton.getAttribute("aria-busy")).toBe("true");
+      expect(nativeDialog?.isConnected).toBe(true);
+      expect(nativeDialog?.hasAttribute("data-open")).toBe(true);
     });
 
     resolveAdd({
@@ -120,8 +122,15 @@ describe("SavedEnvironmentsSettings", () => {
       lastConnectedAt: null,
     });
     await vi.waitFor(() => {
-      expect(document.querySelector('[role="dialog"]')).toBeNull();
+      const remainingDialog = document.querySelector('[role="dialog"]');
+      if (remainingDialog === null) return;
+      // Base UI may retain the closed popup for its native exit transition.
+      // Test the successful closure, not compositor-dependent portal removal.
+      expect(remainingDialog).toBe(nativeDialog);
+      expect(remainingDialog.hasAttribute("data-closed")).toBe(true);
+      expect(remainingDialog.hasAttribute("data-open")).toBe(false);
     });
+    expect(runtimeMocks.addSavedEnvironment).toHaveBeenCalledOnce();
     expect(runtimeMocks.addSavedEnvironment).toHaveBeenCalledWith({
       label: "My test environment",
       pairingUrl: "https://test.local/pair#token=secret-pairing-token",

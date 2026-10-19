@@ -9,6 +9,7 @@ import {
   VisualizationInlineFrameInput,
   VisualizationInlineFrameResult,
   VisualizationInlineFrameRetireResult,
+  VisualizationListInput,
 } from "./visualizationApi.ts";
 
 const decodeInput = Schema.decodeUnknownResult(VisualizationDiscardViewerTicketInput);
@@ -18,6 +19,38 @@ const tuple = {
   artifactId: "00000000-0000-4000-8000-000000000001",
   revisionId: "00000000-0000-4000-8000-000000000002",
 };
+
+describe("bounded visualization viewport read positions", () => {
+  it("admits canonical finite UTC positions without accepting source or owner authority", () => {
+    const decode = Schema.decodeUnknownResult(VisualizationListInput);
+    for (const atOrBefore of [
+      "0000-01-01T00:00:00.000Z",
+      "2026-10-01T00:00:00.000Z",
+      "9999-12-31T23:59:59.999Z",
+    ])
+      expect(Result.isSuccess(decode({ threadId: tuple.threadId, atOrBefore }))).toBe(true);
+    for (const atOrBefore of [
+      "2026-02-31T00:00:00.000Z",
+      "2026-10-01T00:00:00Z",
+      "2026-10-01T00:00:00.000+00:00",
+      "Invalid Date",
+      0,
+      null,
+    ])
+      expect(Result.isFailure(decode({ threadId: tuple.threadId, atOrBefore }))).toBe(true);
+    for (const patch of [
+      { source: "private" },
+      { fullAccess: true },
+      { limit: 1_000 },
+      { owner: {} },
+    ])
+      expect(
+        Result.isFailure(
+          decode({ threadId: tuple.threadId, atOrBefore: "2026-10-01T00:00:00.000Z", ...patch }),
+        ),
+      ).toBe(true);
+  });
+});
 
 describe("exact unused visualization ticket contracts", () => {
   it("admits only an opaque ticket and the complete owned tuple", () => {

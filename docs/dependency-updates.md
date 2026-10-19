@@ -1,7 +1,7 @@
 # Dependency maintenance with Renovate
 
 Created: 2026-10-03 01:30:40 JST (UTC+0900)
-Last updated: 2026-10-03 20:56:23 JST (UTC+0900)
+Last updated: 2026-10-19 17:16:03 JST (UTC+0900)
 
 Cafe is configured to use the Mend-hosted [Renovate GitHub App](https://github.com/apps/renovate)
 to propose dependency updates once activated. The checked-in repository policy is
@@ -249,6 +249,32 @@ reconciling the dashboard against the new `dev` lockfile.
 
 Official references: [Dependency Dashboard](https://docs.renovatebot.com/key-concepts/dashboard/)
 and [Mend job processing](https://docs.mend.io/wsk/renovate-ee-job-processing-in-renovate).
+
+## LegendList review-anchor compatibility patch
+
+The web workspace pins `@legendapp/list` 3.0.0-beta.44 through a checked-in Yarn
+patch. It changes only the ESM and CommonJS `@legendapp/list/react` entrypoints
+used by Cafe; React Native and the package's other entrypoints are not qualified
+or changed. There is no package version upgrade or new public API.
+
+In the upstream visible-range pass, maintain-visible-content-position can
+synchronously move logical/native scroll after row positions are rebuilt. The
+pass must select visible keys using that adjusted viewport, not the earlier
+scroll bounds. Otherwise it can unmount the retained review anchor and measure
+unrelated rows, allowing later size adjustments to preserve a different key.
+The patch rebases only this pass's synchronous scroll delta, retaining captured
+initial-scroll/pending-padding semantics, existing clamps, sticky-header updates,
+draw distance and anchor-lock budgets. It does not add polling or Cafe-side
+compensating scroll loops.
+
+The real-list browser regression in `MessagesTimelineRealList.browser.tsx`
+retains an exact visible anchor while a bounded 1,000-artifact history window
+slides. Keep its native scrolling, identity, offset and mounted-row/resource
+assertions when rebasing or removing this patch. Qualify the actual bundled
+entrypoint with the complete applicable browser suite and the forced desktop
+build; a copied arithmetic model or a patch-text assertion is not that evidence.
+Any upstream replacement must demonstrate the same functional behavior before
+removing the patch and refreshing the reviewed lockfile.
 
 ## Rollback
 

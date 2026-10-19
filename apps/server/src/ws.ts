@@ -68,6 +68,7 @@ import {
   makeOrchestrationSubscriptionHub,
   type OrchestrationSubscriptionHubShape,
 } from "./orchestration/Services/OrchestrationSubscriptionHub.ts";
+import { doesOrchestrationEventAffectShell } from "./orchestration/shellEventPolicy.ts";
 import {
   observeRpcEffect,
   observeRpcStream,
@@ -169,22 +170,6 @@ function isStreamingAssistantMessageEvent(event: OrchestrationEvent): boolean {
     event.payload.role === "assistant" &&
     event.payload.streaming
   );
-}
-
-function doesActivityAffectShellStream(
-  event: Extract<OrchestrationEvent, { readonly type: "thread.activity-appended" }>,
-): boolean {
-  switch (event.payload.activity.kind) {
-    case "approval.requested":
-    case "approval.resolved":
-    case "provider.approval.respond.failed":
-    case "user-input.requested":
-    case "user-input.resolved":
-    case "provider.user-input.respond.failed":
-      return true;
-    default:
-      return false;
-  }
 }
 
 const PROVIDER_STATUS_DEBOUNCE_MS = 200;
@@ -510,7 +495,7 @@ const makeWsRpcLayer = (
         if (isStreamingAssistantMessageEvent(event)) {
           return Effect.succeed(Option.none());
         }
-        if (event.type === "thread.activity-appended" && !doesActivityAffectShellStream(event)) {
+        if (!doesOrchestrationEventAffectShell(event)) {
           return Effect.succeed(Option.none());
         }
 

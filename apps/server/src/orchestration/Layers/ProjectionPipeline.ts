@@ -1759,6 +1759,8 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
               [
                 "codex-transient-recovery-waiting",
                 "codex-transient-continuation-attempted",
+                "codex-transient-continuation-resubmit-attempted",
+                "codex-transient-continuation-unsubmitted",
                 "codex-transient-continuation-accepted",
                 "codex-transient-recovery-cancelled",
                 "codex-transient-recovery-uncertain",

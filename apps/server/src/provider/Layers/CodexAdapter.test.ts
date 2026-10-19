@@ -13,6 +13,7 @@ import {
   ThreadId,
   TurnId,
   type ProviderApprovalDecision,
+  type ProviderDaemonFailedRootRetirementRefusal,
   type ProviderEvent,
   type ProviderSession,
   type ProviderTaskOwner,
@@ -35,6 +36,7 @@ import path from "node:path";
 
 import * as CodexErrors from "effect-codex-app-server/errors";
 import * as EffectCodexSchema from "effect-codex-app-server/schema";
+import * as Cause from "effect/Cause";
 import * as Context from "effect/Context";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
@@ -68,6 +70,8 @@ import {
   type VisualizationSessionBroker,
 } from "../../visualizations/sessionRuntime.ts";
 import {
+  ProviderAdapterProcessError,
+  ProviderAdapterRequestError,
   ProviderAdapterRewindOutcomeUnknownError,
   ProviderAdapterValidationError,
 } from "../Errors.ts";
@@ -83,6 +87,7 @@ import {
   type CodexAdapterLiveOptions,
 } from "./CodexAdapter.ts";
 import {
+  type CodexFailedRootRetirementResult,
   type CodexSessionRuntimeError,
   type CodexSessionRuntimeOptions,
   type CodexSessionRuntimeSendTurnInput,
@@ -288,12 +293,14 @@ class FakeCodexRuntime implements CodexSessionRuntimeShape {
   // Recovery tests may refuse the exact failed-owner retirement without ever
   // authorizing unconditional teardown of a newer synthetic native session.
   public readonly closeIfFailedRootImpl = vi.fn(
-    (_expected: NonNullable<CodexSessionRuntimeSendTurnInput["expectedFailedRoot"]>) =>
-      Promise.resolve(false),
+    (
+      _expected: NonNullable<CodexSessionRuntimeSendTurnInput["expectedFailedRoot"]>,
+    ): Promise<CodexFailedRootRetirementResult> =>
+      Promise.resolve({ retired: false, reason: "root-proof-changed" }),
   );
   closeIfFailedRoot(expected: NonNullable<CodexSessionRuntimeSendTurnInput["expectedFailedRoot"]>) {
     return Effect.promise(() => this.closeIfFailedRootImpl(expected)).pipe(
-      Effect.tap((admitted) => (admitted ? this.close : Effect.void)),
+      Effect.tap((result) => (result.retired ? this.close : Effect.void)),
     );
   }
 
@@ -318,7 +325,9 @@ class FakeCodexRuntime implements CodexSessionRuntimeShape {
 
   getSession = Effect.promise(() => this.getSessionImpl());
 
-  sendTurn(input: CodexSessionRuntimeSendTurnInput) {
+  sendTurn(
+    input: CodexSessionRuntimeSendTurnInput,
+  ): Effect.Effect<ProviderTurnStartResult, CodexSessionRuntimeError> {
     return Effect.promise(() => this.sendTurnImpl(input));
   }
 
@@ -540,7 +549,7 @@ it.effect(
       yield* Effect.addFinalizer(() =>
         Deferred.succeed(releaseClose, undefined).pipe(Effect.asVoid),
       );
-      oldRuntime.closeIfFailedRootImpl.mockResolvedValue(true);
+      oldRuntime.closeIfFailedRootImpl.mockResolvedValue({ retired: true });
       const originalCloseImpl = oldRuntime.closeImpl.getMockImplementation()!;
       oldRuntime.closeImpl.mockImplementation(() =>
         originalCloseImpl().then(() => {
@@ -637,7 +646,11 @@ for (const scenario of [
     const fixture = makeFailedRootRecoveryFixture();
     return Effect.gen(function* () {
       const { adapter, oldRuntime } = yield* fixture.prepare;
-      oldRuntime.closeIfFailedRootImpl.mockResolvedValue(scenario !== "atomic retirement refused");
+      oldRuntime.closeIfFailedRootImpl.mockResolvedValue(
+        scenario === "atomic retirement refused"
+          ? { retired: false, reason: "notifications-pending" }
+          : { retired: true },
+      );
       if (scenario === "legacy runtime")
         Object.defineProperty(oldRuntime, "closeIfFailedRoot", { value: undefined });
       const current = yield* oldRuntime.getSession;
@@ -670,6 +683,13 @@ for (const scenario of [
         })
         .pipe(Effect.exit);
       assert.equal(Exit.isFailure(outcome), true);
+      assert.ok(Exit.isFailure(outcome));
+      const failure = outcome.cause.reasons.find(Cause.isFailReason)?.error;
+      assert.ok(failure instanceof ProviderAdapterRequestError);
+      assert.equal(
+        failure.failedRootRetirementRefusal,
+        scenario === "atomic retirement refused" ? "notifications-pending" : undefined,
+      );
       assert.equal(fixture.factory.runtimes.length, 1);
       assert.equal(oldRuntime.closeImpl.mock.calls.length, 0);
       assert.equal(oldRuntime.sendTurnImpl.mock.calls.length, 0);
@@ -681,6 +701,145 @@ for (const scenario of [
       );
     }).pipe(Effect.provide(fixture.layer));
   });
+}
+
+for (const reason of [
+  "invalid-request",
+  "owner-changed",
+  "native-context-unavailable",
+  "history-unavailable",
+  "compaction-pending",
+  "root-start-pending",
+  "closed",
+  "root-proof-changed",
+  "notifications-pending",
+] satisfies ReadonlyArray<ProviderDaemonFailedRootRetirementRefusal>) {
+  it.effect(
+    `cold retirement witnesses ${reason} only before any teardown, reopening or native send`,
+    () => {
+      const fixture = makeFailedRootRecoveryFixture();
+      return Effect.gen(function* () {
+        const { adapter, oldRuntime } = yield* fixture.prepare;
+        oldRuntime.closeIfFailedRootImpl.mockResolvedValue({ retired: false, reason });
+        const outcome = yield* adapter
+          .sendTurn({
+            threadId: fixture.threadId,
+            input: "Continue existing work.",
+            expectedFailedRoot: fixture.expectedFailedRoot,
+          })
+          .pipe(Effect.exit);
+        assert.ok(Exit.isFailure(outcome));
+        const failure = outcome.cause.reasons.find(Cause.isFailReason)?.error;
+        assert.ok(failure instanceof ProviderAdapterRequestError);
+        assert.equal(failure.provider, "codex");
+        assert.equal(failure.method, "turn/start");
+        assert.equal(failure.failedRootRetirementRefusal, reason);
+        assert.deepEqual(oldRuntime.closeIfFailedRootImpl.mock.calls, [
+          [fixture.expectedFailedRoot],
+        ]);
+        assert.equal(fixture.factory.runtimes.length, 1);
+        assert.equal(oldRuntime.closeImpl.mock.calls.length, 0);
+        assert.equal(oldRuntime.closeIfIdleImpl.mock.calls.length, 0);
+        assert.equal(oldRuntime.sendTurnImpl.mock.calls.length, 0);
+        assert.equal(oldRuntime.steerTurnImpl.mock.calls.length, 0);
+      }).pipe(Effect.provide(fixture.layer));
+    },
+  );
+}
+
+for (const scenario of [
+  "legacy true",
+  "legacy false",
+  "missing reason",
+  "unknown reason",
+  "ambiguous success",
+  "inherited refusal",
+  "retired accessor",
+  "reason accessor",
+  "descriptor failure",
+  "proxy retirement",
+  "proxy refusal",
+  "revoked proxy",
+] as const) {
+  it.effect(
+    `cold retirement rejects ${scenario} without minting refusal or continuation authority`,
+    () => {
+      const fixture = makeFailedRootRecoveryFixture();
+      return Effect.gen(function* () {
+        const { adapter, oldRuntime } = yield* fixture.prepare;
+        const accessor = vi.fn(() => "notifications-pending");
+        const proxyTrap = vi.fn(() => {
+          throw new Error("a retirement Proxy trap must never execute");
+        });
+        const proxy = Proxy.revocable(
+          scenario === "proxy retirement"
+            ? { retired: true }
+            : { retired: false, reason: "notifications-pending" },
+          {
+            get: proxyTrap,
+            getPrototypeOf: proxyTrap,
+            getOwnPropertyDescriptor: proxyTrap,
+            ownKeys: proxyTrap,
+          },
+        );
+        if (scenario === "revoked proxy") proxy.revoke();
+        const value: unknown =
+          scenario === "legacy true"
+            ? true
+            : scenario === "legacy false"
+              ? false
+              : scenario === "missing reason"
+                ? { retired: false }
+                : scenario === "unknown reason"
+                  ? { retired: false, reason: "native prose is not proof" }
+                  : scenario === "ambiguous success"
+                    ? { retired: true, reason: "notifications-pending" }
+                    : scenario === "inherited refusal"
+                      ? Object.create({ retired: false, reason: "notifications-pending" })
+                      : scenario === "retired accessor"
+                        ? Object.defineProperty({ reason: "notifications-pending" }, "retired", {
+                            get: accessor,
+                          })
+                        : scenario === "reason accessor"
+                          ? Object.defineProperty({ retired: false }, "reason", { get: accessor })
+                          : scenario === "proxy retirement" ||
+                              scenario === "proxy refusal" ||
+                              scenario === "revoked proxy"
+                            ? proxy.proxy
+                            : new Proxy(
+                                {},
+                                {
+                                  ownKeys: () => {
+                                    throw new Error("synthetic malformed boundary");
+                                  },
+                                },
+                              );
+        // This deliberately malformed runtime seam bypasses the correctly typed
+        // fake's close wrapper. Reading an accessor here would itself be a bug.
+        const closeIfFailedRoot = vi.fn(() => Effect.succeed(value));
+        Object.defineProperty(oldRuntime, "closeIfFailedRoot", { value: closeIfFailedRoot });
+        const outcome = yield* adapter
+          .sendTurn({
+            threadId: fixture.threadId,
+            input: "Continue existing work.",
+            expectedFailedRoot: fixture.expectedFailedRoot,
+          })
+          .pipe(Effect.exit);
+        assert.ok(Exit.isFailure(outcome));
+        const failure = outcome.cause.reasons.find(Cause.isFailReason)?.error;
+        assert.ok(failure instanceof ProviderAdapterRequestError);
+        assert.equal(failure.failedRootRetirementRefusal, undefined);
+        assert.equal(accessor.mock.calls.length, 0);
+        assert.equal(proxyTrap.mock.calls.length, 0);
+        assert.deepEqual(closeIfFailedRoot.mock.calls, [[fixture.expectedFailedRoot]]);
+        assert.equal(fixture.factory.runtimes.length, 1);
+        assert.equal(oldRuntime.closeImpl.mock.calls.length, 0);
+        assert.equal(oldRuntime.closeIfIdleImpl.mock.calls.length, 0);
+        assert.equal(oldRuntime.sendTurnImpl.mock.calls.length, 0);
+        assert.equal(oldRuntime.steerTurnImpl.mock.calls.length, 0);
+      }).pipe(Effect.provide(fixture.layer));
+    },
+  );
 }
 
 it.effect(
@@ -705,7 +864,7 @@ it.effect(
             ),
           ),
         );
-        oldRuntime.closeIfFailedRootImpl.mockResolvedValue(true);
+        oldRuntime.closeIfFailedRootImpl.mockResolvedValue({ retired: true });
         const originalClose = oldRuntime.close;
         let emittedClosed = false;
         oldRuntime.close = Effect.suspend(() => {
@@ -758,7 +917,7 @@ it.effect(
       const reached = yield* Deferred.make<void>();
       const release = yield* Deferred.make<void>();
       yield* Effect.addFinalizer(() => Deferred.succeed(release, undefined).pipe(Effect.asVoid));
-      oldRuntime.closeIfFailedRootImpl.mockResolvedValue(true);
+      oldRuntime.closeIfFailedRootImpl.mockResolvedValue({ retired: true });
       const originalClose = oldRuntime.close;
       oldRuntime.close = Deferred.succeed(reached, undefined).pipe(
         Effect.andThen(Deferred.await(release)),
@@ -799,7 +958,7 @@ for (const mismatch of [
       const fixture = makeFailedRootRecoveryFixture();
       return Effect.gen(function* () {
         const { adapter, oldRuntime } = yield* fixture.prepare;
-        oldRuntime.closeIfFailedRootImpl.mockResolvedValue(true);
+        oldRuntime.closeIfFailedRootImpl.mockResolvedValue({ retired: true });
         const makeRuntime = fixture.factory.factory.getMockImplementation()!;
         fixture.factory.factory.mockImplementationOnce((options) =>
           makeRuntime(options).pipe(
@@ -833,6 +992,10 @@ for (const mismatch of [
           })
           .pipe(Effect.exit);
         assert.equal(Exit.isFailure(outcome), true);
+        assert.ok(Exit.isFailure(outcome));
+        const failure = outcome.cause.reasons.find(Cause.isFailReason)?.error;
+        assert.ok(failure instanceof ProviderAdapterRequestError);
+        assert.equal(failure.failedRootRetirementRefusal, undefined);
         assert.equal(fixture.factory.runtimes.length, 2);
         assert.equal(oldRuntime.sendTurnImpl.mock.calls.length, 0);
         assert.equal(fixture.factory.runtimes[1]!.sendTurnImpl.mock.calls.length, 0);
@@ -841,6 +1004,64 @@ for (const mismatch of [
         assert.deepEqual(fixture.factory.runtimes[1]!.options.resumeCursor, {
           threadId: fixture.nativeThreadId,
         });
+      }).pipe(Effect.provide(fixture.layer));
+    },
+  );
+}
+
+for (const phase of ["opening", "send"] as const) {
+  it.effect(
+    `cold recovery ${phase} errors cannot borrow pre-retirement refusal proof from native text or fields`,
+    () => {
+      const fixture = makeFailedRootRecoveryFixture();
+      return Effect.gen(function* () {
+        const { adapter, oldRuntime } = yield* fixture.prepare;
+        oldRuntime.closeIfFailedRootImpl.mockResolvedValue({ retired: true });
+        const nativeError = CodexErrors.CodexAppServerRequestError.internalError(
+          "The failed Codex root changed before retirement.",
+        );
+        Object.defineProperty(nativeError, "failedRootRetirementRefusal", {
+          value: "notifications-pending",
+        });
+        const makeRuntime = fixture.factory.factory.getMockImplementation()!;
+        fixture.factory.factory.mockImplementationOnce((options) =>
+          makeRuntime(options).pipe(
+            Effect.map((runtime) => {
+              if (phase === "opening") runtime.start = () => Effect.fail(nativeError);
+              else {
+                const send = runtime.sendTurn.bind(runtime);
+                runtime.sendTurn = (input) =>
+                  send(input).pipe(Effect.andThen(Effect.fail(nativeError)));
+              }
+              return runtime;
+            }),
+          ),
+        );
+        const outcome = yield* adapter
+          .sendTurn({
+            threadId: fixture.threadId,
+            input: "Continue existing work.",
+            expectedFailedRoot: fixture.expectedFailedRoot,
+          })
+          .pipe(Effect.exit);
+        assert.ok(Exit.isFailure(outcome));
+        const failure = outcome.cause.reasons.find(Cause.isFailReason)?.error;
+        if (phase === "opening") assert.ok(failure instanceof ProviderAdapterProcessError);
+        else assert.ok(failure instanceof ProviderAdapterRequestError);
+        assert.ok(
+          failure instanceof ProviderAdapterProcessError ||
+            failure instanceof ProviderAdapterRequestError,
+        );
+        assert.equal(Object.hasOwn(failure, "failedRootRetirementRefusal"), false);
+        assert.equal(failure.cause, nativeError);
+        assert.equal(fixture.factory.runtimes.length, 2);
+        assert.equal(oldRuntime.closeIfFailedRootImpl.mock.calls.length, 1);
+        assert.equal(oldRuntime.closeImpl.mock.calls.length > 0, true);
+        assert.equal(oldRuntime.sendTurnImpl.mock.calls.length, 0);
+        assert.equal(oldRuntime.steerTurnImpl.mock.calls.length, 0);
+        const replacement = fixture.factory.runtimes[1]!;
+        assert.equal(replacement.sendTurnImpl.mock.calls.length, phase === "send" ? 1 : 0);
+        assert.equal(replacement.steerTurnImpl.mock.calls.length, 0);
       }).pipe(Effect.provide(fixture.layer));
     },
   );

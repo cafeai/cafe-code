@@ -5,7 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { render } from "vitest-browser-react";
 import { page } from "vitest/browser";
 
-const fixture = vi.hoisted(() => ({ unread: true }));
+const fixture = vi.hoisted(() => ({ unread: true, newChat: vi.fn(async () => {}) }));
 
 // Host identity is fixed at module load, matching the real preload bridge.
 // Ordinary Mac browser coverage lives in the separate fixed-false fixture.
@@ -30,8 +30,14 @@ vi.mock("../uiStateStore", () => ({
   ) => select({ threadLastVisitedAtById: {} }),
 }));
 vi.mock("../hooks/useHandleNewThread", () => ({
-  useNewThreadHandler: () => ({ handleNewStandaloneChat: vi.fn(async () => {}) }),
+  useNewThreadHandler: () => ({ handleNewStandaloneChat: fixture.newChat }),
 }));
+vi.mock("./sidebar/ContentSidebarNewChatButton", async () => {
+  const { SidebarNewChatButton } = await import("./sidebar/SidebarNewChatButton");
+  return {
+    ContentSidebarNewChatButton: () => <SidebarNewChatButton onClick={fixture.newChat} />,
+  };
+});
 
 import { useMacDesktopTitlebar } from "../hooks/useMacDesktopTitlebar";
 import { applyInterfaceScalePercent } from "../interfaceScale";
@@ -136,6 +142,13 @@ function assertMacGeometry(host: HTMLElement) {
   expect(toggleBounds.top).toBeGreaterThan(headerBounds.top + 3);
   expect(toggleBounds.bottom).toBeLessThan(headerBounds.bottom - 3);
   expect(getComputedStyle(toggle).getPropertyValue("-webkit-app-region")).toBe("no-drag");
+  const newChat = header.querySelector<HTMLButtonElement>('button[aria-label="New chat"]')!;
+  const newChatBounds = newChat.getBoundingClientRect();
+  expect(newChatBounds.left).toBeGreaterThanOrEqual(toggleBounds.right);
+  expect(newChatBounds.right).toBeLessThanOrEqual(headerBounds.right);
+  expect(newChatBounds.top).toBeGreaterThanOrEqual(headerBounds.top);
+  expect(newChatBounds.bottom).toBeLessThanOrEqual(headerBounds.bottom);
+  expect(getComputedStyle(newChat).getPropertyValue("-webkit-app-region")).toBe("no-drag");
   const dot = header.querySelector<HTMLElement>('[data-testid="unseen-completions-dot"]')!;
   const dotBounds = dot.getBoundingClientRect();
   expect(dot.getAttribute("aria-hidden")).toBe("true");
@@ -147,6 +160,7 @@ function assertMacGeometry(host: HTMLElement) {
 
 beforeEach(async () => {
   fixture.unread = true;
+  fixture.newChat.mockClear();
   applyInterfaceScalePercent(100);
   vi.spyOn(navigator, "platform", "get").mockReturnValue("MacIntel");
   await page.viewport(1100, 800);
@@ -176,10 +190,17 @@ describe("macOS Electron titlebar clearance", () => {
     const { host, screen, cleanup } = await setup("settings");
     try {
       assertMacGeometry(host);
+      const newChat = host.querySelector<HTMLButtonElement>('button[aria-label="New chat"]')!;
       await expect.element(screen.getByTestId("sidebar-state")).toHaveTextContent("closed");
       await screen.getByRole("button", { name: "Toggle Sidebar", exact: true }).click();
       await expect.element(screen.getByTestId("sidebar-state")).toHaveTextContent("open");
-      expect(host.querySelector('[data-sidebar="trigger"]')).toBeNull();
+      const controls = host.querySelector<HTMLElement>('[data-sidebar="content-controls"]')!;
+      expect(controls.hidden).toBe(true);
+      expect(controls.inert).toBe(true);
+      expect(controls.getAttribute("aria-hidden")).toBe("true");
+      // Role lookup intentionally excludes the now aria-hidden control. Keep
+      // the admitted native node so visibility can observe its actual exit.
+      await expect.element(newChat).not.toBeVisible();
       expect(host.querySelector('[data-testid="unseen-completions-dot"]')).toBeNull();
     } finally {
       await cleanup();
@@ -213,7 +234,11 @@ describe("macOS Electron titlebar clearance", () => {
       try {
         const header = host.querySelector<HTMLElement>("header")!;
         const toggle = header.querySelector('[data-sidebar="trigger"]')!;
-        expect(getComputedStyle(toggle).display).toBe("none");
+        const controls = header.querySelector<HTMLElement>('[data-sidebar="content-controls"]')!;
+        const newChat = header.querySelector('button[aria-label="New chat"]')!;
+        expect(getComputedStyle(controls).display).toBe("none");
+        expect(toggle.getClientRects()).toHaveLength(0);
+        expect(newChat.getClientRects()).toHaveLength(0);
       } finally {
         await cleanup();
       }

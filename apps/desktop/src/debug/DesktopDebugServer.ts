@@ -10,16 +10,19 @@ import {
   DICTATION_PROVIDER_ERROR_TYPES,
   DICTATION_SESSION_PROFILE,
   DICTATION_TRANSCRIPTION_MODELS,
+  ProviderDaemonFailedRootRetirementRefusal,
   type DesktopDebugEndpointState,
   type DesktopRendererDebugSnapshot,
 } from "@cafecode/contracts";
 import * as Data from "effect/Data";
 import * as Effect from "effect/Effect";
+import * as Schema from "effect/Schema";
 import type * as Scope from "effect/Scope";
 import * as NodeHttp from "node:http";
 import type * as NodeNet from "node:net";
 import * as NodePath from "node:path";
 import { performance as nodePerformance } from "node:perf_hooks";
+import { types as nodeTypes } from "node:util";
 
 const DEBUG_HOST = "127.0.0.1";
 const DEBUG_PATH = "/debug";
@@ -37,6 +40,8 @@ const PROCESS_DIAGNOSTIC_MESSAGE_LIMIT = 4_000;
 const PROCESS_DIAGNOSTIC_STACK_LIMIT = 16_000;
 const COMPACT_STRING_LIMIT = 240;
 const COMPACT_ARRAY_LIMIT = 12;
+const RPC_FAILURE_DEBUG_LOOKBACK = 20;
+const isFailedRootRetirementRefusal = Schema.is(ProviderDaemonFailedRootRetirementRefusal);
 const DICTATION_REQUEST_ID_PATTERN = /^req_[A-Za-z0-9_-]+$/u;
 const DICTATION_TIMELINE_LIMIT = 32;
 const DICTATION_MAX_DURATION_MS = 24 * 60 * 60 * 1_000;
@@ -1088,6 +1093,98 @@ function summarizeProcessForCompactDebug(): Record<string, unknown> {
   };
 }
 
+interface FailedRootRetirementRefusalDebugSummary {
+  readonly reason: ProviderDaemonFailedRootRetirementRefusal;
+  readonly method: "sendTurn";
+  readonly failedAt: string;
+  readonly durationMs: number;
+}
+
+/** RPC diagnostics are received observations, not retry or native-owner proof.
+ * Avoid even proxy descriptor traps while reconstructing their finite fields;
+ * accessor and inherited values never qualify as received data properties. */
+function readRpcDebugRecord(value: unknown): Record<string, unknown> | null {
+  return value !== null &&
+    typeof value === "object" &&
+    !nodeTypes.isProxy(value) &&
+    !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : null;
+}
+
+function ownRpcDebugField(value: unknown, key: string): unknown {
+  const record = readRpcDebugRecord(value);
+  if (record === null) return undefined;
+  try {
+    const descriptor = Object.getOwnPropertyDescriptor(record, key);
+    return descriptor && "value" in descriptor ? descriptor.value : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function readRecentRpcFailuresForCompactDebug(value: unknown): {
+  readonly count: number;
+  readonly newestFirst: readonly unknown[];
+} {
+  // Reading length/index through ordinary property access would invoke a
+  // received getter or proxy before the bounded failure projection can refuse it.
+  if (
+    value === null ||
+    typeof value !== "object" ||
+    nodeTypes.isProxy(value) ||
+    !Array.isArray(value)
+  ) {
+    return { count: 0, newestFirst: [] };
+  }
+  const lengthDescriptor = Object.getOwnPropertyDescriptor(value, "length");
+  const count = readBoundedInteger(
+    lengthDescriptor && "value" in lengthDescriptor ? lengthDescriptor.value : undefined,
+    0,
+    Number.MAX_SAFE_INTEGER,
+  );
+  if (count === null) return { count: 0, newestFirst: [] };
+  const newestFirst: unknown[] = [];
+  for (
+    let index = count - 1;
+    index >= Math.max(0, count - RPC_FAILURE_DEBUG_LOOKBACK);
+    index -= 1
+  ) {
+    const descriptor = Object.getOwnPropertyDescriptor(value, String(index));
+    newestFirst.push(descriptor && "value" in descriptor ? descriptor.value : undefined);
+  }
+  return { count, newestFirst };
+}
+
+function summarizeLatestFailedRootRetirementRefusal(
+  newestFirst: readonly unknown[],
+): FailedRootRetirementRefusalDebugSummary | null {
+  for (const failure of newestFirst) {
+    const method = ownRpcDebugField(failure, "method");
+    const reason = ownRpcDebugField(failure, "failedRootRetirementRefusal");
+    const failedAt = ownRpcDebugField(failure, "failedAt");
+    const durationMs = ownRpcDebugField(failure, "durationMs");
+    if (
+      method !== "sendTurn" ||
+      typeof reason !== "string" ||
+      !isFailedRootRetirementRefusal(reason) ||
+      typeof failedAt !== "string" ||
+      failedAt.length !== 24 ||
+      readCanonicalIsoTimestamp(failedAt) !== failedAt ||
+      typeof durationMs !== "number" ||
+      !Number.isFinite(durationMs) ||
+      durationMs < 0 ||
+      durationMs > Number.MAX_SAFE_INTEGER
+    ) {
+      continue;
+    }
+    // Keep only one newest received refusal, not arbitrary error text, command
+    // IDs, native/session identity, diagnostics, paths or provider payloads.
+    return { reason, method, failedAt, durationMs };
+  }
+  return null;
+}
+
 function summarizeProviderDaemonHealthForCompactDebug(
   value: unknown,
 ): Record<string, unknown> | null {
@@ -1097,7 +1194,13 @@ function summarizeProviderDaemonHealthForCompactDebug(
   }
   const runtimeEvents = readRecord(health.runtimeEvents);
   const providerQualification = readRecord(health.providerQualification);
-  const rpc = readRecord(health.rpc);
+  const rpc = readRpcDebugRecord(ownRpcDebugField(health, "rpc"));
+  const recentRpcFailures = readRecentRpcFailuresForCompactDebug(
+    ownRpcDebugField(rpc, "recentFailures"),
+  );
+  const latestFailedRootRetirementRefusal = summarizeLatestFailedRootRetirementRefusal(
+    recentRpcFailures.newestFirst,
+  );
   const supervisor = readRecord(health.supervisor);
   const supervisorProcess = readRecord(health.supervisorProcess);
   const processDiagnostics = readRecord(health.processDiagnostics);
@@ -1205,15 +1308,18 @@ function summarizeProviderDaemonHealthForCompactDebug(
       rpc === null
         ? null
         : {
-            totalRpcCount: readNumber(rpc.totalRpcCount),
-            mutatingRpcCount: readNumber(rpc.mutatingRpcCount),
-            failedRpcCount: readNumber(rpc.failedRpcCount),
-            maxRpcDurationMs: readNumber(rpc.maxRpcDurationMs),
-            meanRpcDurationMs: readNumber(rpc.meanRpcDurationMs),
-            lastRpcMethod: readString(rpc.lastRpcMethod),
-            lastRpcAt: readString(rpc.lastRpcAt),
-            lastRpcDurationMs: readNumber(rpc.lastRpcDurationMs),
-            recentFailureCount: Array.isArray(rpc.recentFailures) ? rpc.recentFailures.length : 0,
+            totalRpcCount: readNumber(ownRpcDebugField(rpc, "totalRpcCount")),
+            mutatingRpcCount: readNumber(ownRpcDebugField(rpc, "mutatingRpcCount")),
+            failedRpcCount: readNumber(ownRpcDebugField(rpc, "failedRpcCount")),
+            maxRpcDurationMs: readNumber(ownRpcDebugField(rpc, "maxRpcDurationMs")),
+            meanRpcDurationMs: readNumber(ownRpcDebugField(rpc, "meanRpcDurationMs")),
+            lastRpcMethod: readString(ownRpcDebugField(rpc, "lastRpcMethod")),
+            lastRpcAt: readString(ownRpcDebugField(rpc, "lastRpcAt")),
+            lastRpcDurationMs: readNumber(ownRpcDebugField(rpc, "lastRpcDurationMs")),
+            recentFailureCount: recentRpcFailures.count,
+            ...(latestFailedRootRetirementRefusal === null
+              ? {}
+              : { latestFailedRootRetirementRefusal }),
           },
     runtimeEvents:
       runtimeEvents === null

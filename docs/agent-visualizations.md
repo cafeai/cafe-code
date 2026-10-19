@@ -1,7 +1,7 @@
 # Agent visualizations and MCP Apps
 
 Status: Full-access inline-browser implementation
-Last updated: 2026-10-14 03:54:42 JST (UTC+0900)
+Last updated: 2026-10-19 12:42:24 JST (UTC+0900)
 
 Visualizations are live, ordinary same-origin browser documents embedded in the
 conversation. They are not image previews. They fill the available chat width,
@@ -45,6 +45,24 @@ Ordinary history contains compact references, not source, raw JSON, credentials
 or executable authority. Existing immutable artifacts need no migration or
 poster deletion; old poster metadata remains decodable but is never a live-display
 fallback. Exact authenticated historical source loading does not start a provider.
+
+## Automatic historical positioning
+
+Scrolling back automatically reads compact visualization references at the
+conversation's actual visible positions; there is no separate older-visualization
+button. A far-old jump seeks through the existing thread/time index instead of
+walking all intervening pages. The upper position includes the next chronological
+row, so charts published during a long visible message are not omitted merely
+because that message's starting timestamp is earlier.
+
+One owner-scoped metadata request runs at a time, with bounded page/cache and
+coalesced invalidation state. Current visible references retain their identity;
+evicted older windows can be read again as needed. Newest updates and historical
+review receive fair turns without changing native conversation anchoring or tail
+follow. A failed read retains admitted rows and offers the quiet Refresh action.
+Reading references never grants Full access, fetches hidden source, starts a
+provider or increases the existing frame/source pool. See
+[the automatic-history decision](decisions/agent-visualization-automatic-history.md).
 
 ## Browser lifecycle and layout
 
@@ -194,6 +212,7 @@ Current decisions: [Full-access embedding](decisions/agent-visualization-inline-
 [data/provenance](decisions/agent-visualization-foundations.md),
 [execution](decisions/agent-visualization-execution-host.md),
 [viewport pool](decisions/agent-visualization-viewport-pool.md),
+[automatic history](decisions/agent-visualization-automatic-history.md),
 [inline flow](decisions/agent-visualization-inline-flow.md),
 [visible lifetime](decisions/agent-visualization-visible-lifetime.md),
 [fluid](decisions/agent-visualization-fluid-background.md),

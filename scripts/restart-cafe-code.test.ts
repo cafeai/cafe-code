@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { closeSync, linkSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 
@@ -87,14 +87,17 @@ describe("restart-cafe-code", () => {
   });
 
   it("keeps restart logs inside Debug rather than Production", () => {
+    // Windows root-relative paths omit their drive; use native absolute fixture inputs.
+    const fixtureRoot = resolve(tmpdir(), "cafe-restart-log-paths");
+    const cafeHome = join(fixtureRoot, "cafe-home");
     expect(
       resolveRestartLogDir({
         explicitLogDir: undefined,
-        env: { CAFE_CODE_HOME: "/tmp/cafe-home" },
-        homeDir: "/home/me",
-        cwd: "/repo",
+        env: { CAFE_CODE_HOME: cafeHome },
+        homeDir: join(fixtureRoot, "home", "me"),
+        cwd: join(fixtureRoot, "repo"),
       }),
-    ).toBe(join("/tmp/cafe-home", ".debug", "restart-logs"));
+    ).toBe(join(cafeHome, ".debug", "restart-logs"));
   });
 
   it.each(["darwin", "linux", "win32"] as const)(
@@ -114,14 +117,16 @@ describe("restart-cafe-code", () => {
   });
 
   it("honors an explicit log destination without reinterpreting it as a Cafe root", () => {
+    const fixtureRoot = resolve(tmpdir(), "cafe-restart-log-paths");
+    const cwd = join(fixtureRoot, "repo");
     expect(
       resolveRestartLogDir({
         explicitLogDir: "logs",
-        env: { CAFE_CODE_HOME: "/other" },
-        homeDir: "/home/me",
-        cwd: "/repo",
+        env: { CAFE_CODE_HOME: join(fixtureRoot, "other") },
+        homeDir: join(fixtureRoot, "home", "me"),
+        cwd,
       }),
-    ).toBe(join("/repo", "logs"));
+    ).toBe(join(cwd, "logs"));
   });
 
   it("creates a new private log and never appends through a pre-existing file or hardlink", () => {

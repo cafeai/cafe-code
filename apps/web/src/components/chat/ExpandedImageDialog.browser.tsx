@@ -1,7 +1,7 @@
 import "../../index.css";
 import "../desk/desk.css";
 
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, onTestFinished, vi } from "vitest";
 import { cdp, page, userEvent } from "vitest/browser";
 import { render } from "vitest-browser-react";
 import { ChatPaneContext } from "../../chatPaneContext";
@@ -228,6 +228,62 @@ describe("expanded chat images", () => {
   it("zooms to original pixels, pans with captured pointer input and keyboard, then fits again", async () => {
     await page.viewport(1100, 800);
     const onClose = vi.fn();
+    let observedViewport: HTMLElement | null = null;
+    let retired = false;
+    let sequence = 0;
+    const observations: Record<string, string | number | boolean | null>[] = [];
+    const observe = (phase: string, event?: Event) => {
+      if (retired) return;
+      const viewport = observedViewport;
+      const key = event instanceof KeyboardEvent ? event : null;
+      observations.push({
+        sequence: ++sequence,
+        phase,
+        at: performance.now(),
+        focused: document.hasFocus(),
+        visible: document.visibilityState === "visible",
+        exactActiveElement: document.activeElement === viewport,
+        exactTarget: event ? event.target === viewport : null,
+        trusted: event?.isTrusted ?? null,
+        prevented: event?.defaultPrevented ?? null,
+        ctrl: key?.ctrlKey ?? null,
+        alt: key?.altKey ?? null,
+        meta: key?.metaKey ?? null,
+        shift: key?.shiftKey ?? null,
+        left: viewport?.scrollLeft ?? null,
+        top: viewport?.scrollTop ?? null,
+        maxLeft: viewport ? viewport.scrollWidth - viewport.clientWidth : null,
+        maxTop: viewport ? viewport.scrollHeight - viewport.clientHeight : null,
+        dragging: viewport ? getComputedStyle(viewport).cursor === "grabbing" : null,
+      });
+      if (observations.length > 16) observations.shift();
+    };
+    const observeKeyState = (event: KeyboardEvent) => {
+      if (event.key !== "ArrowRight") return;
+      // Read final dispatch state without consuming native scrolling. Retired
+      // continuations cannot append after the one-shot completion receipt.
+      queueMicrotask(() => observe(event.type, event));
+    };
+    const observeFocus = (event: FocusEvent) => {
+      if (event.target === window || event.target === observedViewport) observe(event.type, event);
+    };
+    const observeScroll = (event: Event) => {
+      if (event.target === observedViewport) observe("scroll", event);
+    };
+    const retireObservations = () => {
+      if (retired) return;
+      observe("final");
+      retired = true;
+      window.removeEventListener("keydown", observeKeyState, true);
+      window.removeEventListener("keyup", observeKeyState, true);
+      window.removeEventListener("focus", observeFocus, true);
+      window.removeEventListener("blur", observeFocus, true);
+      observedViewport?.removeEventListener("scroll", observeScroll);
+      console.info("image-viewer-native-key-diagnostic", JSON.stringify({ observations }));
+    };
+    // Own observations before render/input awaits. They are bounded scalar
+    // diagnostics only: no focus, scroll, key, timer or readiness is added.
+    onTestFinished(retireObservations);
     const view = await render(<PreviewInPane onClose={onClose} />);
     try {
       await expectFitted(landscape.name);
@@ -247,10 +303,60 @@ describe("expanded chat images", () => {
       expect(img.getBoundingClientRect().width).toBe(7500);
       await page.getByRole("button", { name: "Zoom out", exact: true }).click();
       expect(img.getBoundingClientRect().width).toBe(6000);
-      viewport.focus();
+      // Activate the native page through the owning region's real pointer/focus
+      // path, then observe its released, zoomed keyboard-scroll preconditions.
+      await page
+        .getByRole("region", { name: "Expanded image; scroll to zoom or drag to pan", exact: true })
+        .click();
+      await vi.waitFor(() => {
+        expect(document.activeElement).toBe(viewport);
+        expect(img.getBoundingClientRect().width).toBe(6000);
+        expect(
+          page.getByRole("status", { name: "Zoom level", exact: true }).element().textContent,
+        ).toBe("100%");
+        expect(viewport.scrollLeft).toBeGreaterThan(0);
+        expect(viewport.scrollLeft).toBeLessThan(viewport.scrollWidth - viewport.clientWidth);
+      });
       const beforeKey = viewport.scrollLeft;
-      await userEvent.keyboard("{ArrowRight}");
-      await vi.waitFor(() => expect(viewport.scrollLeft).toBeGreaterThan(beforeKey));
+      // Hard-timeout completion can retire this observer during an earlier
+      // native await. Never attach listeners after its one-shot cleanup ran.
+      if (retired) return;
+      observedViewport = viewport;
+      window.addEventListener("keydown", observeKeyState, true);
+      window.addEventListener("keyup", observeKeyState, true);
+      window.addEventListener("focus", observeFocus, true);
+      window.addEventListener("blur", observeFocus, true);
+      viewport.addEventListener("scroll", observeScroll);
+      observe("before-key");
+      let keyReceipt: { trusted: boolean; exactTarget: boolean; defaultPrevented: boolean } | null =
+        null;
+      const observeKey = (event: KeyboardEvent) => {
+        if (event.key !== "ArrowRight") return;
+        retireKeyReceipt();
+        // Observe final dispatch state without consuming or preventing native
+        // scrolling, which remains the behavior under test.
+        queueMicrotask(() => {
+          keyReceipt = {
+            trusted: event.isTrusted,
+            exactTarget: event.target === viewport,
+            defaultPrevented: event.defaultPrevented,
+          };
+        });
+      };
+      const retireKeyReceipt = () => window.removeEventListener("keydown", observeKey, true);
+      onTestFinished(retireKeyReceipt);
+      window.addEventListener("keydown", observeKey, true);
+      try {
+        await userEvent.keyboard("{ArrowRight}");
+        observe("after-key");
+        await vi.waitFor(() =>
+          expect(keyReceipt).toEqual({ trusted: true, exactTarget: true, defaultPrevented: false }),
+        );
+        await vi.waitFor(() => expect(viewport.scrollLeft).toBeGreaterThan(beforeKey));
+      } finally {
+        retireKeyReceipt();
+        retireObservations();
+      }
       await expect
         .element(page.getByRole("img", { name: landscape.name, exact: true }))
         .toBeInTheDocument();

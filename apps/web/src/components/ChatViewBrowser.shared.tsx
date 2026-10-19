@@ -38,7 +38,17 @@ import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 import { http, HttpResponse, ws } from "msw";
 import { setupWorker } from "msw/browser";
-import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import {
+  afterAll,
+  afterEach,
+  beforeAll,
+  beforeEach,
+  describe,
+  expect,
+  it,
+  onTestFinished,
+  vi,
+} from "vitest";
 import { render } from "vitest-browser-react";
 import { type Locator, locators, page, userEvent } from "vitest/browser";
 
@@ -8797,12 +8807,103 @@ describe(`ChatView full app (${chatViewBrowserPart})`, () => {
           const originalRead = FileReader.prototype.readAsDataURL;
           const prepared: { reader: FileReader; blob: Blob }[] = [];
           let restoreReadSpy: (() => void) | undefined;
+          let restorePersistenceSpy: (() => void) | undefined;
+          let retirePersistenceRead: () => void = () => undefined;
+          let retired = false;
           const releaseReaders = () => {
             for (const { reader, blob } of prepared.splice(0)) originalRead.call(reader, blob);
           };
+          const cleanup = async () => {
+            if (retired) return;
+            retired = true;
+            retirePersistenceRead();
+            restorePersistenceSpy?.();
+            restoreReadSpy?.();
+            // Retire the owning UI before releasing any held submission bytes.
+            // The same one-shot cleanup also owns hard-timeout retirement.
+            try {
+              await mounted.cleanup();
+            } finally {
+              releaseReaders();
+            }
+          };
+          onTestFinished(cleanup);
           try {
             await waitForServerConfigToApply();
             useComposerDraftStore.getState().setPrompt(THREAD_REF, prompt);
+            await vi.waitFor(() =>
+              expect(document.querySelector('[contenteditable="true"]')?.textContent).toContain(
+                prompt,
+              ),
+            );
+            const imageFile = new File(["x"], "draft.png", { type: "image/png" });
+            let resolvePersistenceRead!: () => void;
+            let rejectPersistenceRead!: (error: Error) => void;
+            const persistenceRead = new Promise<void>((resolve, reject) => {
+              resolvePersistenceRead = resolve;
+              rejectPersistenceRead = reject;
+            });
+            // Setup/timeout cleanup can retire this receipt before its await;
+            // retain rejection for that await without an unhandled tail.
+            void persistenceRead.catch(() => undefined);
+            let persistenceStarted = false;
+            let persistenceSettled = false;
+            let detachPersistenceRead: () => void = () => undefined;
+            retirePersistenceRead = () => {
+              detachPersistenceRead();
+              if (persistenceSettled) return;
+              persistenceSettled = true;
+              rejectPersistenceRead(new Error("The exact fixture image read was retired."));
+            };
+            const persistenceSpy = vi
+              .spyOn(FileReader.prototype, "readAsDataURL")
+              .mockImplementation(function (this: FileReader, blob: Blob) {
+                if (blob === imageFile && !persistenceStarted) {
+                  persistenceStarted = true;
+                  const reader = this;
+                  const complete = () => {
+                    if (persistenceSettled) return;
+                    persistenceSettled = true;
+                    detachPersistenceRead();
+                    if (typeof reader.result === "string") resolvePersistenceRead();
+                    else
+                      rejectPersistenceRead(
+                        new Error("The exact fixture image read returned no data."),
+                      );
+                  };
+                  const fail = () => {
+                    if (persistenceSettled) return;
+                    persistenceSettled = true;
+                    detachPersistenceRead();
+                    rejectPersistenceRead(
+                      new Error("The exact fixture image read failed or was aborted."),
+                    );
+                  };
+                  detachPersistenceRead = () => {
+                    reader.removeEventListener("load", complete);
+                    reader.removeEventListener("error", fail);
+                    reader.removeEventListener("abort", fail);
+                  };
+                  reader.addEventListener("load", complete, { once: true });
+                  reader.addEventListener("error", fail, { once: true });
+                  reader.addEventListener("abort", fail, { once: true });
+                }
+                // Observe the real effect-owned native read; do not replace its
+                // result, force storage, or borrow a later submission read.
+                try {
+                  return originalRead.call(this, blob);
+                } catch (error) {
+                  if (blob === imageFile && !persistenceSettled) {
+                    persistenceSettled = true;
+                    detachPersistenceRead();
+                    rejectPersistenceRead(
+                      new Error("The exact fixture image read could not start."),
+                    );
+                  }
+                  throw error;
+                }
+              });
+            restorePersistenceSpy = () => persistenceSpy.mockRestore();
             useComposerDraftStore.getState().addImages(THREAD_REF, [
               {
                 id: "continuation-race-image",
@@ -8811,9 +8912,15 @@ describe(`ChatView full app (${chatViewBrowserPart})`, () => {
                 mimeType: "image/png",
                 sizeBytes: 1,
                 previewUrl: "data:image/png;base64,eA==",
-                file: new File(["x"], "draft.png", { type: "image/png" }),
+                file: imageFile,
               },
             ]);
+            await persistenceRead;
+            if (retired) throw new Error("The exact continuation fixture was retired.");
+            restorePersistenceSpy();
+            restorePersistenceSpy = undefined;
+            // The original state observer now starts after the exact native
+            // persistence read, not before the image effect's React admission.
             await vi.waitFor(() =>
               expect(
                 useComposerDraftStore
@@ -8828,11 +8935,6 @@ describe(`ChatView full app (${chatViewBrowserPart})`, () => {
                 prepared.push({ reader: this, blob });
               });
             restoreReadSpy = () => readSpy.mockRestore();
-            await vi.waitFor(() =>
-              expect(document.querySelector('[contenteditable="true"]')?.textContent).toContain(
-                prompt,
-              ),
-            );
             if (action === "steer") {
               (await waitForComposerEditor()).focus();
               await userEvent.keyboard("{Control>}{Enter}{/Control}");
@@ -8891,9 +8993,7 @@ describe(`ChatView full app (${chatViewBrowserPart})`, () => {
             expect(persisted.ok).toBe(true);
             if (persisted.ok) expect(persisted.value.claimed).toHaveLength(0);
           } finally {
-            restoreReadSpy?.();
-            releaseReaders();
-            await mounted.cleanup();
+            await cleanup();
           }
         },
       );
@@ -11347,6 +11447,35 @@ describe(`ChatView full app (${chatViewBrowserPart})`, () => {
         expect(useDeskStore.getState().desk.sidebarMode).toBe("desk");
         expect(document.querySelector("[data-desk-chat-row]")).toBeNull();
         expect(useDeskStore.getState().desk.groups.g1?.tabs).toEqual([]);
+        // The collapsed header is another entrypoint to the exact same draft,
+        // not a project-derived creation path or an implicit first submission.
+        const closeSidebar = document.querySelector<HTMLButtonElement>(
+          '[data-slot="sidebar-header"] [data-sidebar="trigger"]',
+        )!;
+        await page.elementLocator(closeSidebar).click();
+        const headerNewChat = await waitForElement(
+          () =>
+            document.querySelector<HTMLButtonElement>(
+              '[data-sidebar="content-controls"]:not([hidden]) button[aria-label="New chat"]',
+            ),
+          "Collapsed-header New chat action missing",
+        );
+        await expect.element(headerNewChat).toBeEnabled();
+        await page.elementLocator(headerNewChat).click();
+        await waitForStandaloneComposerText("First standalone conversation");
+        expect(mounted.router.state.location.pathname).toBe(`/draft/${draftId}`);
+        expect(Object.keys(useComposerDraftStore.getState().draftThreadsByThreadKey)).toEqual([
+          draftId,
+        ]);
+        expect(useComposerDraftStore.getState().getDraftSession(draftId)?.environmentId).toBe(
+          LOCAL_ENVIRONMENT_ID,
+        );
+        expect(useDeskStore.getState().draftEditors[draftId]?.groupId).toBe("g1");
+        expect(useComposerDraftStore.getState().getComposerDraft(draftId)?.subagentLimits).toEqual({
+          codex: 5,
+        });
+        expect(useDeskStore.getState().desk.sidebarMode).toBe("desk");
+        expect(useDeskStore.getState().desk.groups.g1?.tabs).toEqual([]);
         expect(
           wsRequests.some((body) => body._tag === ORCHESTRATION_WS_METHODS.dispatchCommand),
         ).toBe(false);
@@ -11396,6 +11525,10 @@ describe(`ChatView full app (${chatViewBrowserPart})`, () => {
           expect(mounted.router.state.location.pathname).toBe(serverThreadPath(threadId));
         });
         expect(useDeskStore.getState().desk.sidebarMode).toBe("desk");
+        const reopenSidebar = document.querySelector<HTMLButtonElement>(
+          '[data-sidebar="content-controls"]:not([hidden]) [data-sidebar="trigger"]',
+        )!;
+        await page.elementLocator(reopenSidebar).click();
         await page.getByRole("button", { name: "Projects", exact: true }).click();
         await expect.element(page.getByTestId(`thread-row-${threadId}`)).toBeVisible();
         expect(document.querySelectorAll('[data-testid^="thread-row-"]')).toHaveLength(1);

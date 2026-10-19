@@ -3,6 +3,7 @@ import {
   ProviderDaemonRpcRequest,
   type ProviderDaemonCommandDiagnostic,
   type ProviderDaemonSessionReconfigurationRefusal,
+  type ProviderDaemonFailedRootRetirementRefusal,
   type ProviderDaemonRpcEnvelope as ProviderDaemonRpcEnvelopeValue,
   type ProviderDaemonRpcRequest as ProviderDaemonRpcRequestValue,
 } from "@cafecode/contracts";
@@ -56,6 +57,10 @@ const IDENTITY_BOUND_MUTATING_METHODS = new Set<string>([
   // caller-chosen command id cannot lend that receipt to another account,
   // policy, thread or method, even though no replacement was admitted.
   "startSession",
+  // Failed-root cold sends can carry a definite pre-submission refusal. Bind
+  // every send receipt in both directions so a caller-selected command id
+  // cannot lend that witness to changed input, failure identity or another RPC.
+  "sendTurn",
   "controlTask",
   "prepareConversationRollback",
   "commitConversationRollback",
@@ -141,6 +146,7 @@ function storedEnvelopeError(errorJson: string | null): {
   readonly tag?: string;
   readonly message?: string;
   readonly sessionReconfigurationRefusal?: ProviderDaemonSessionReconfigurationRefusal;
+  readonly failedRootRetirementRefusal?: ProviderDaemonFailedRootRetirementRefusal;
 } {
   if (errorJson === null) {
     return {};
@@ -154,6 +160,9 @@ function storedEnvelopeError(errorJson: string | null): {
           message: envelope.error.message,
           ...(envelope.error.sessionReconfigurationRefusal !== undefined
             ? { sessionReconfigurationRefusal: envelope.error.sessionReconfigurationRefusal }
+            : {}),
+          ...(envelope.error.failedRootRetirementRefusal !== undefined
+            ? { failedRootRetirementRefusal: envelope.error.failedRootRetirementRefusal }
             : {}),
         };
   } catch {
@@ -358,6 +367,9 @@ function toCommandDiagnostic(row: CommandDiagnosticRow): ProviderDaemonCommandDi
     ...(error.sessionReconfigurationRefusal === undefined
       ? {}
       : { sessionReconfigurationRefusal: error.sessionReconfigurationRefusal }),
+    ...(error.failedRootRetirementRefusal === undefined
+      ? {}
+      : { failedRootRetirementRefusal: error.failedRootRetirementRefusal }),
     ...(error.message === undefined ? {} : { errorMessage: error.message }),
   };
 }

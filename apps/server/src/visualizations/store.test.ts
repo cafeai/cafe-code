@@ -934,7 +934,76 @@ it.layer(services)("immutable private visualization store", (it) => {
         );
       }),
   );
-  it.effect("retains bounded explicit history pages beyond the activity tail", () =>
+  it.effect(
+    "seeks a bounded old viewport through the thread index and preserves exact tie cursors",
+    () =>
+      Effect.gen(function* () {
+        const { sql, service, binding, input, witness } = yield* fixture;
+        const receipt = yield* service.publish(binding.authority, input);
+        yield* Effect.promise(() => binding.claimNativeCompletion(witness, receipt.proof));
+        const oldTime = "2020-01-01T00:00:00.000Z";
+        // More than one complete tied page lies far behind the current activity
+        // tail. The viewport reads it directly, with the original fifty-row cap.
+        yield* sql`WITH RECURSIVE sequence(value) AS (SELECT 1 UNION ALL SELECT value+1 FROM sequence WHERE value<120)
+      INSERT INTO visualization_history(id,thread_id,turn_id,message_id,origin_item_id,occurred_at,actor_json,reference_json,revision_id,native_call_key,byte_length)
+      SELECT printf('70000000-0000-4000-8000-%012d',value),${witness.threadId},${witness.turnId},${witness.messageId},'viewport-history-'||value,${oldTime},'{"type":"root"}',${JSON.stringify(receipt.reference)},${receipt.reference.revisionId},'viewport-window-'||value,4096 FROM sequence`;
+        const first = yield* service.list({ threadId: witness.threadId, atOrBefore: oldTime });
+        assert.equal(first.entries.length, 50);
+        assert.ok(first.entries.every((entry) => entry.occurredAt === oldTime));
+        assert.equal(first.entries[0]?.originItemId, "viewport-history-120");
+        assert.ok(first.nextCursor);
+        const second = yield* service.list({
+          threadId: witness.threadId,
+          cursor: first.nextCursor,
+        });
+        assert.equal(second.entries.length, 50);
+        assert.equal(second.entries[0]?.originItemId, "viewport-history-70");
+        assert.equal(
+          new Set([...first.entries, ...second.entries].map((entry) => entry.originItemId)).size,
+          100,
+        );
+        assert.equal(
+          (yield* Effect.exit(
+            service.list({
+              threadId: witness.threadId,
+              cursor: first.nextCursor,
+              atOrBefore: oldTime,
+            }),
+          ))._tag,
+          "Failure",
+        );
+        assert.equal(
+          (yield* Effect.exit(
+            service.list({
+              threadId: ThreadId.make("foreign-viewport-chat"),
+              cursor: first.nextCursor,
+            }),
+          ))._tag,
+          "Failure",
+        );
+        assert.deepEqual(
+          yield* service.list({
+            threadId: ThreadId.make("foreign-viewport-chat"),
+            atOrBefore: oldTime,
+          }),
+          { entries: [] },
+        );
+        assert.deepEqual(
+          yield* service.list({
+            threadId: witness.threadId,
+            atOrBefore: "2019-12-31T23:59:59.999Z",
+          }),
+          { entries: [] },
+        );
+        yield* sql`INSERT INTO hard_deleted_threads(thread_id,deleted_at) VALUES(${witness.threadId},${new Date().toISOString()})`;
+        assert.equal(
+          (yield* Effect.exit(service.list({ threadId: witness.threadId, atOrBefore: oldTime })))
+            ._tag,
+          "Failure",
+        );
+      }),
+  );
+  it.effect("retains bounded history pages beyond the activity tail", () =>
     Effect.gen(function* () {
       const { sql, service, binding, input, witness } = yield* fixture;
       const receipt = yield* service.publish(binding.authority, input);

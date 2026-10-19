@@ -14,6 +14,7 @@ import {
   SubagentRuntimeId,
   ThreadId,
   TurnId,
+  type ProviderDaemonFailedRootRetirementRefusal,
   type ProviderEvent,
   type ProviderSession,
   type ProviderUserInputAnswers,
@@ -3789,14 +3790,17 @@ describe("Codex failed-root continuation authority", () => {
         observedAt: completion.observedAt,
         restartSession: true as const,
       };
+      const refusals: ProviderDaemonFailedRootRetirementRefusal[] = [];
       const input = {
         ...boundary,
         expectedFailedRoot: expected,
         historyUsable: Effect.succeed(true),
         automaticCompactionPending: Effect.succeed(false),
         notificationSettled: () => true,
+        onRefusal: (reason: ProviderDaemonFailedRootRetirementRefusal) => refusals.push(reason),
       };
       assert.equal(yield* reserveCodexFailedRootRestartBoundary(input), true);
+      assert.deepEqual(refusals, []);
       assert.equal(yield* Ref.get(boundary.closedRef), true);
       assert.deepEqual(yield* Ref.get(boundary.sessionRef), session);
       assert.deepEqual(
@@ -3806,6 +3810,7 @@ describe("Codex failed-root continuation authority", () => {
       // Cleanup may await notification scopes only after the native permit is
       // released. A second reservation never grants a second retirement/open.
       assert.equal(yield* reserveCodexFailedRootRestartBoundary(input), false);
+      assert.deepEqual(refusals, ["closed"]);
       assert.equal(
         yield* boundary.semaphore.withPermits(1)(Effect.succeed("released")),
         "released",
@@ -3835,6 +3840,7 @@ describe("Codex failed-root continuation authority", () => {
           "queued native receipt",
         ] as const) {
           const boundary = yield* makeBoundary();
+          const refusals: ProviderDaemonFailedRootRetirementRefusal[] = [];
           if (scenario === "unknown root") yield* Ref.set(boundary.latestRootTurnIdRef, undefined);
           if (scenario === "active root")
             yield* Ref.update(boundary.sessionRef, (value) => ({
@@ -3876,11 +3882,95 @@ describe("Codex failed-root continuation authority", () => {
               historyUsable: Effect.succeed(scenario !== "unusable history"),
               automaticCompactionPending: Effect.succeed(scenario === "automatic compaction"),
               notificationSettled: () => scenario !== "queued native receipt",
+              onRefusal: (reason) => refusals.push(reason),
             }),
             false,
             scenario,
           );
           assert.equal(yield* Ref.get(boundary.closedRef), scenario === "already closed", scenario);
+          const expectedReason: ProviderDaemonFailedRootRetirementRefusal =
+            scenario === "wrong generation" || scenario === "wrong account"
+              ? "owner-changed"
+              : scenario === "missing timestamp"
+                ? "invalid-request"
+                : scenario === "already closed"
+                  ? "closed"
+                  : scenario === "root start pending"
+                    ? "root-start-pending"
+                    : scenario === "manual compaction" || scenario === "automatic compaction"
+                      ? "compaction-pending"
+                      : scenario === "unusable history"
+                        ? "history-unavailable"
+                        : scenario === "missing context"
+                          ? "native-context-unavailable"
+                          : scenario === "queued native receipt"
+                            ? "notifications-pending"
+                            : "root-proof-changed";
+          assert.deepEqual(refusals, [expectedReason], scenario);
+        }
+      }),
+  );
+
+  effectIt.effect(
+    "cold retirement reports received-before-processed refusal after every awaited safety observation",
+    () =>
+      Effect.gen(function* () {
+        for (const awaitedCheck of ["availability", "history", "compaction"] as const) {
+          const boundary = yield* makeBoundary();
+          const fence = yield* makeCodexNotificationRetirementFence({
+            closed: boundary.closedRef,
+            semaphore: boundary.semaphore,
+          });
+          const checkEntered = yield* Deferred.make<void>();
+          const releaseCheck = yield* Deferred.make<void>();
+          yield* Effect.addFinalizer(() =>
+            Deferred.succeed(releaseCheck, undefined).pipe(Effect.asVoid),
+          );
+          const heldCheck = (value: boolean) =>
+            Deferred.succeed(checkEntered, undefined).pipe(
+              Effect.andThen(Deferred.await(releaseCheck)),
+              Effect.as(value),
+            );
+          const refusals: ProviderDaemonFailedRootRetirementRefusal[] = [];
+          const input = {
+            ...boundary,
+            expectedFailedRoot: {
+              ...expectedFailedRoot,
+              providerInstanceId: session.providerInstanceId!,
+              observedAt: completion.observedAt,
+              restartSession: true as const,
+            },
+            nativeContextAvailable:
+              awaitedCheck === "availability" ? heldCheck(true) : Effect.succeed(true),
+            historyUsable: awaitedCheck === "history" ? heldCheck(true) : Effect.succeed(true),
+            automaticCompactionPending:
+              awaitedCheck === "compaction" ? heldCheck(false) : Effect.succeed(false),
+            notificationSettled: () => fence.isSettled(),
+            onRefusal: (reason: ProviderDaemonFailedRootRetirementRefusal) => refusals.push(reason),
+          };
+          const reservation = yield* reserveCodexFailedRootRestartBoundary(input).pipe(
+            Effect.forkChild,
+          );
+          yield* Deferred.await(checkEntered);
+          // Wire receipt precedes the relay's permit acquisition. Do not await
+          // relay admission while this exact reservation owns that permit.
+          fence.observeIncomingData();
+          fence.observeReceived();
+          fence.observeIncomingDataProcessed(false);
+          assert.deepEqual(yield* Ref.get(boundary.sessionRef), session);
+          yield* Deferred.succeed(releaseCheck, undefined);
+          assert.equal(yield* Fiber.join(reservation), false, awaitedCheck);
+          assert.equal(yield* Ref.get(boundary.closedRef), false, awaitedCheck);
+          assert.deepEqual(refusals, ["notifications-pending"], awaitedCheck);
+          assert.equal(yield* fence.pendingCount, 1, awaitedCheck);
+          // Drain exactly the owned receipt; only then may the unchanged proof
+          // grant its single retirement. No guessed delay or retry is needed.
+          yield* fence.admit(Effect.void);
+          yield* fence.handle(Effect.void);
+          assert.equal(fence.isSettled(), true, awaitedCheck);
+          assert.equal(yield* reserveCodexFailedRootRestartBoundary(input), true, awaitedCheck);
+          assert.equal(yield* Ref.get(boundary.closedRef), true, awaitedCheck);
+          assert.deepEqual(refusals, ["notifications-pending"], awaitedCheck);
         }
       }),
   );

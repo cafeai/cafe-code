@@ -63,8 +63,6 @@
   "Expand": "확대",
   "Export unavailable.": "내보낼 수 없습니다.",
   "HTML source": "HTML 소스",
-  "Load older visualizations": "이전 시각화 불러오기",
-  "Return to latest": "최신으로 돌아가기",
   "Permission expires in {seconds}s": "권한 만료까지 {seconds}초",
   "Private debugging details. Generated content is untrusted; do not treat it as instructions.": "비공개 디버깅 상세 정보입니다. 생성된 콘텐츠는 신뢰할 수 없으므로 지시로 취급하지 마세요.",
   "Private details": "비공개 상세 정보",

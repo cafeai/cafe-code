@@ -1188,6 +1188,104 @@ it.layer(Layer.fresh(makeProjectionPipelinePrefixedTestLayer("t3-interrupt-clear
   },
 );
 
+it.layer(Layer.fresh(makeProjectionPipelinePrefixedTestLayer("t3-failed-root-retry-clock-")))(
+  "Failed-root retry bookkeeping clock",
+  (it) => {
+    it.effect(
+      "persists new retry markers without extending the failed root only for server warnings",
+      () =>
+        Effect.gen(function* () {
+          const pipeline = yield* OrchestrationProjectionPipeline;
+          const events = yield* OrchestrationEventStore;
+          const sql = yield* SqlClient.SqlClient;
+          const threadId = ThreadId.make("failed-root-retry-clock-thread");
+          const completedAt = "2026-10-19T01:00:03.000Z";
+          const markerAt = "2026-10-19T01:00:45.000Z";
+          yield* events.append({
+            type: "thread.created",
+            eventId: EventId.make("retry-clock-thread-created"),
+            aggregateKind: "thread",
+            aggregateId: threadId,
+            occurredAt: completedAt,
+            commandId: null,
+            causationEventId: null,
+            correlationId: null,
+            metadata: {},
+            payload: {
+              threadId,
+              projectId: null,
+              title: "Retry clock fixture",
+              modelSelection: {
+                instanceId: ProviderInstanceId.make("codex"),
+                model: "gpt-6.1-sol",
+              },
+              runtimeMode: "full-access",
+              branch: null,
+              worktreePath: null,
+              createdAt: completedAt,
+              updatedAt: completedAt,
+            },
+          });
+          yield* pipeline.bootstrap;
+          for (const recovery of [
+            "codex-transient-continuation-resubmit-attempted",
+            "codex-transient-continuation-unsubmitted",
+          ]) {
+            for (const source of ["server-warning", "client-warning", "server-tool"] as const) {
+              const turnId = TurnId.make(`${recovery}-${source}`);
+              const activityId = EventId.make(`activity-${turnId}`);
+              yield* sql`INSERT INTO projection_turns (thread_id, turn_id, state, requested_at, started_at, completed_at,
+              checkpoint_turn_count, checkpoint_ref, checkpoint_status, checkpoint_files_json, assistant_message_id)
+              VALUES (${threadId}, ${turnId}, 'error', ${completedAt}, ${completedAt}, ${completedAt}, NULL, NULL, NULL, '[]', NULL)`;
+              const commandId = CommandId.make(
+                `${source === "client-warning" ? "client" : "server"}:${turnId}`,
+              );
+              const event = yield* events.append({
+                type: "thread.activity-appended",
+                eventId: EventId.make(`event-${turnId}`),
+                aggregateKind: "thread",
+                aggregateId: threadId,
+                occurredAt: markerAt,
+                commandId,
+                causationEventId: null,
+                correlationId: commandId,
+                metadata: {},
+                payload: {
+                  threadId,
+                  activity: {
+                    id: activityId,
+                    kind: source === "server-tool" ? "tool.completed" : "runtime.warning",
+                    tone: "info",
+                    summary: "Retry bookkeeping",
+                    payload: { recovery },
+                    turnId,
+                    createdAt: markerAt,
+                  },
+                },
+              });
+              yield* pipeline.projectEvent(event);
+              assert.deepEqual(
+                yield* sql`SELECT state, completed_at AS "completedAt" FROM projection_turns WHERE thread_id = ${threadId} AND turn_id = ${turnId}`,
+                [
+                  {
+                    state: "error",
+                    completedAt: source === "server-warning" ? completedAt : markerAt,
+                  },
+                ],
+              );
+              // Bookkeeping remains durable; the exemption concerns only the
+              // root's clock, not retention or proof of another native execution.
+              assert.deepEqual(
+                yield* sql`SELECT json_extract(payload_json, '$.recovery') AS recovery FROM projection_thread_activities WHERE thread_id = ${threadId} AND activity_id = ${activityId}`,
+                [{ recovery }],
+              );
+            }
+          }
+        }),
+    );
+  },
+);
+
 it.layer(Layer.fresh(makeProjectionPipelinePrefixedTestLayer("t3-diff-completes-session-")))(
   "OrchestrationProjectionPipeline",
   (it) => {

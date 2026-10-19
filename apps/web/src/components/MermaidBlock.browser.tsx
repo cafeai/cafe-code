@@ -324,7 +324,132 @@ describe("Mermaid block", () => {
     }
   });
 
-  it("expands with fit, zoom, native scroll and pointer pan, then restores trigger focus", async () => {
+  it("expands with fit, zoom, native scroll and pointer pan, then restores trigger focus", async ({
+    onTestFinished,
+  }) => {
+    let observedViewport: HTMLElement | null = null;
+    let observingArrow = false;
+    let retired = false;
+    let sequence = 0;
+    const started = performance.now();
+    const finite = (value: unknown) =>
+      typeof value === "number" && Number.isFinite(value) ? value : null;
+    const readKeyboardViewport = (
+      phase: string,
+      extra: Record<string, string | number | boolean | null> = {},
+    ) => {
+      const base = {
+        sequence: ++sequence,
+        phase,
+        elapsedMs: performance.now() - started,
+        ...extra,
+      };
+      try {
+        const viewport = observedViewport;
+        const imageBounds = viewport?.querySelector("img")?.getBoundingClientRect();
+        const frame = window.frameElement;
+        return {
+          ...base,
+          documentFocused: document.hasFocus(),
+          visibility: document.visibilityState === "visible" ? "visible" : "hidden",
+          activeViewport: document.activeElement === viewport,
+          parentDocumentFocused: frame ? frame.ownerDocument.hasFocus() : null,
+          parentActiveFrame: frame ? frame.ownerDocument.activeElement === frame : null,
+          connected: viewport?.isConnected === true,
+          inert: viewport ? viewport.closest("[inert]") !== null : null,
+          scrollLeft: finite(viewport?.scrollLeft),
+          scrollTop: finite(viewport?.scrollTop),
+          scrollWidth: finite(viewport?.scrollWidth),
+          scrollHeight: finite(viewport?.scrollHeight),
+          clientWidth: finite(viewport?.clientWidth),
+          clientHeight: finite(viewport?.clientHeight),
+          imageWidth: finite(imageBounds?.width),
+          imageHeight: finite(imageBounds?.height),
+        };
+      } catch {
+        return { ...base, receiptUnavailable: true };
+      }
+    };
+    type KeyboardViewportReceipt = ReturnType<typeof readKeyboardViewport>;
+    let baseline: KeyboardViewportReceipt | null = null;
+    const events: KeyboardViewportReceipt[] = [];
+    const recordKeyboardViewport = (
+      phase: string,
+      extra: Record<string, string | number | boolean | null> = {},
+    ) => {
+      if (!observingArrow || retired) return;
+      events.push(readKeyboardViewport(phase, extra));
+      if (events.length > 16) events.shift();
+    };
+    const observeKeyboard = (event: KeyboardEvent) => {
+      if (event.key !== "ArrowRight" || !observingArrow || retired) return;
+      const fields = () => ({
+        trusted: event.isTrusted,
+        exactTarget: event.target === observedViewport,
+        defaultPrevented: event.defaultPrevented,
+        code: event.code === "ArrowRight" ? "ArrowRight" : "other",
+        keyCode: finite(event.keyCode),
+        location: finite(event.location),
+        ctrl: event.ctrlKey,
+        meta: event.metaKey,
+        alt: event.altKey,
+        shift: event.shiftKey,
+        repeat: event.repeat,
+        composing: event.isComposing,
+      });
+      recordKeyboardViewport(
+        event.type === "keydown" ? "keydown-capture" : "keyup-capture",
+        fields(),
+      );
+      // Default prevention and focus can change during dispatch. Observe the
+      // settled event without preventing input, retaining text, or replaying it.
+      queueMicrotask(() => {
+        if (retired) return;
+        recordKeyboardViewport(
+          event.type === "keydown" ? "keydown-final" : "keyup-final",
+          fields(),
+        );
+      });
+    };
+    const observeNativeFocus = (event: FocusEvent) => {
+      recordKeyboardViewport(event.type === "focus" ? "native-focus" : "native-blur", {
+        trusted: event.isTrusted,
+        exactTarget: event.target === observedViewport,
+        windowTarget: event.target === window,
+      });
+    };
+    const observeNativeScroll = (event: Event) => {
+      if (event.target !== observedViewport) return;
+      recordKeyboardViewport(event.type === "scroll" ? "native-scroll" : "native-scrollend", {
+        trusted: event.isTrusted,
+      });
+    };
+    const retireKeyboardDiagnostic = () => {
+      if (retired) return;
+      retired = true;
+      observingArrow = false;
+      window.removeEventListener("keydown", observeKeyboard, true);
+      window.removeEventListener("keyup", observeKeyboard, true);
+      window.removeEventListener("focus", observeNativeFocus, true);
+      window.removeEventListener("blur", observeNativeFocus, true);
+      observedViewport?.removeEventListener("scroll", observeNativeScroll);
+      observedViewport?.removeEventListener("scrollend", observeNativeScroll);
+      // One bounded source-free receipt on both ordinary and hard-timeout
+      // retirement. Late microtasks cannot publish into a later test's realm.
+      console.info(
+        "mermaid-keyboard-pan-diagnostic",
+        JSON.stringify({
+          baseline,
+          events,
+          final: readKeyboardViewport("final"),
+        }),
+      );
+    };
+    onTestFinished(retireKeyboardDiagnostic);
+    window.addEventListener("keydown", observeKeyboard, true);
+    window.addEventListener("keyup", observeKeyboard, true);
+    window.addEventListener("focus", observeNativeFocus, true);
+    window.addEventListener("blur", observeNativeFocus, true);
     mocks.render.mockResolvedValue(diagram("Large diagram", 3000, 1600));
     const screen = await render(<MermaidBlock code="flowchart LR\nA-->B" complete theme="dark" />);
     try {
@@ -334,6 +459,12 @@ describe("Mermaid block", () => {
         .element(page.getByRole("dialog", { name: "Expanded Mermaid diagram" }))
         .toBeVisible();
       const viewport = document.querySelector<HTMLElement>(".mermaid-expanded-viewport")!;
+      // Completion may retire observations while render/input is still pending;
+      // a resumed body must not attach listeners after that one-shot cleanup.
+      if (retired) return;
+      observedViewport = viewport;
+      viewport.addEventListener("scroll", observeNativeScroll);
+      viewport.addEventListener("scrollend", observeNativeScroll);
       await vi.waitFor(() => {
         expect(viewport.scrollWidth).toBeLessThanOrEqual(viewport.clientWidth + 1);
         expect(viewport.scrollHeight).toBeLessThanOrEqual(viewport.clientHeight + 1);
@@ -345,8 +476,13 @@ describe("Mermaid block", () => {
       expect(document.querySelector(".mermaid-zoom-value")?.textContent).toBe("125%");
       await page.getByRole("button", { name: "Zoom out", exact: true }).click();
       viewport.focus();
+      observingArrow = true;
+      baseline = readKeyboardViewport("baseline");
       await userEvent.keyboard("{ArrowRight}");
+      recordKeyboardViewport("after-key-command");
       await vi.waitFor(() => expect(viewport.scrollLeft).toBeGreaterThan(0));
+      recordKeyboardViewport("arrow-observed");
+      observingArrow = false;
       viewport.scrollTo(100, 100);
       const rect = viewport.getBoundingClientRect();
       const start = browserPoint({ x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 });
@@ -391,6 +527,7 @@ describe("Mermaid block", () => {
       await userEvent.keyboard("{Escape}");
       await expect.element(page.getByRole("button", { name: "Expand diagram" })).toHaveFocus();
     } finally {
+      retireKeyboardDiagnostic();
       await screen.unmount();
     }
   });

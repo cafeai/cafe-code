@@ -1,16 +1,22 @@
 # Chats without projects
 
-Last updated: 2026-10-15 23:47:54 JST (UTC+0900)
+Last updated: 2026-10-20 00:17:07 JST (UTC+0900)
 
 Cafe chats can exist without a project or repository. **Desk** organizes open
 tabs; **Projects** contains the saved project/chat catalog. A tab's group does
 not determine its project association.
 
 - Click the New chat pencil immediately beside **Open chats** in Desk or beside
-  **Chats** in Projects, or use the global New chat shortcut, to open a standalone
-  editor in the active group. Both headings use the same action.
+  **Chats** in Projects, use the pencil beside the sidebar reopen button when
+  navigation is closed, or use the global New chat shortcut, to open a standalone
+  editor in the active group. These entrypoints use the same action.
   The selected sidebar view stays selected.
   No folder is required, even when you have no projects.
+- The collapsed-header pencil slides/fades in as the sidebar closes and out as
+  it opens, and is removed from keyboard/pointer interaction immediately on
+  opening. Reduced motion removes travel. It is also available in Settings and
+  the empty-chat header; split Desk layouts keep these controls in the top-left
+  pane only. The mobile sheet retains its normal reopen control.
 - To create a project-associated chat, use that project's existing New chat
   action. The standalone New chat icon does not choose the current project.
 - A new chat stays in a pending editor until you press **Send**, just like a
@@ -74,3 +80,5 @@ See [the architecture decision](decisions/standalone-chats.md) for persistence,
 provider-context, security and compatibility boundaries, and the
 [Desk creation entrypoint decision](decisions/desk-open-chats-new-action.md)
 for the shared heading action.
+The [collapsed-sidebar entrypoint decision](decisions/collapsed-sidebar-new-chat.md)
+describes its header placement and presentation lifecycle.

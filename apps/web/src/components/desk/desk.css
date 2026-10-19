@@ -102,9 +102,10 @@
     )
   );
 }
-.desk-group-bar[data-window-left="false"] [data-sidebar="trigger"],
-.desk-group-bar[data-window-top="false"] [data-sidebar="trigger"] {
+.desk-group-bar[data-window-left="false"] [data-sidebar="content-controls"],
+.desk-group-bar[data-window-top="false"] [data-sidebar="content-controls"] {
   display: none;
+  transition: none;
 }
 .desk-group-bar.drag-region .desk-tab-cell {
   -webkit-app-region: no-drag;

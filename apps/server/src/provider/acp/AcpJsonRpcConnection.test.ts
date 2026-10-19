@@ -4,6 +4,7 @@ import * as NodeURL from "node:url";
 
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { it } from "@effect/vitest";
+import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
 import * as Option from "effect/Option";
@@ -12,6 +13,7 @@ import * as Stream from "effect/Stream";
 import { describe, expect } from "vitest";
 
 import * as AcpSessionRuntime from "./AcpSessionRuntime.ts";
+import type * as EffectAcpErrors from "effect-acp/errors";
 import type * as EffectAcpProtocol from "effect-acp/protocol";
 
 const __dirname = NodePath.dirname(NodeURL.fileURLToPath(import.meta.url));
@@ -566,41 +568,54 @@ describe("AcpSessionRuntime", () => {
 
   it.effect("completes session/load after replay becomes idle while its RPC stays pending", () =>
     Effect.gen(function* () {
-      const runtime = yield* AcpSessionRuntime.AcpSessionRuntime;
-      const started = yield* runtime.start().pipe(Effect.timeout("2 seconds"));
+      const loadStarted = yield* Deferred.make<void, EffectAcpErrors.AcpError>();
+      yield* Effect.gen(function* () {
+        const runtime = yield* AcpSessionRuntime.AcpSessionRuntime;
+        const startup = yield* runtime.start().pipe(
+          // A failed native handshake must reject the admission wait rather
+          // than strand it until the enclosing test deadline.
+          Effect.onError((cause) => Deferred.failCause(loadStarted, cause).pipe(Effect.asVoid)),
+          Effect.forkScoped({ startImmediately: true }),
+        );
+        // The replay budget starts at the actual admitted load request, after
+        // initialize/authentication, not during unrelated native bootstrap.
+        yield* Deferred.await(loadStarted);
+        const started = yield* Fiber.join(startup).pipe(Effect.timeout("2 seconds"));
 
-      expect(started.sessionId).toBe("mock-session-1");
-      expect(started.sessionSetupResult._meta).toMatchObject({
-        cafeCodeSessionLoadReady: "replay_idle",
-      });
+        expect(started.sessionId).toBe("mock-session-1");
+        expect(started.sessionSetupResult._meta).toMatchObject({
+          cafeCodeSessionLoadReady: "replay_idle",
+        });
 
-      const unexpectedReplayEvent = yield* Stream.runHead(runtime.getEvents()).pipe(
-        Effect.timeoutOption("100 millis"),
-      );
-      expect(Option.isNone(unexpectedReplayEvent)).toBe(true);
-    }).pipe(
-      Effect.provide(
-        AcpSessionRuntime.layer({
-          authMethodId: "test",
-          spawn: {
-            command: mockAgentCommand,
-            args: mockAgentArgs,
-            env: {
-              CAFE_CODE_ACP_HANG_LOAD_SESSION_AFTER_REPLAY: "1",
-              CAFE_CODE_ACP_LOAD_SESSION_DELAY_MS: "10000",
+        const unexpectedReplayEvent = yield* Stream.runHead(runtime.getEvents()).pipe(
+          Effect.timeoutOption("100 millis"),
+        );
+        expect(Option.isNone(unexpectedReplayEvent)).toBe(true);
+      }).pipe(
+        Effect.provide(
+          AcpSessionRuntime.layer({
+            authMethodId: "test",
+            spawn: {
+              command: mockAgentCommand,
+              args: mockAgentArgs,
+              env: {
+                CAFE_CODE_ACP_HANG_LOAD_SESSION_AFTER_REPLAY: "1",
+                CAFE_CODE_ACP_LOAD_SESSION_DELAY_MS: "10000",
+              },
             },
-          },
-          cwd: process.cwd(),
-          resumeSessionId: "mock-session-1",
-          sessionLoadReplayIdleGap: "50 millis",
-          sessionLoadTimeout: "1 second",
-          clientInfo: { name: "cafecode-test", version: "0.0.0" },
-        }),
-      ),
-      Effect.scoped,
-      Effect.provide(NodeServices.layer),
-      TestClock.withLive,
-    ),
+            cwd: process.cwd(),
+            resumeSessionId: "mock-session-1",
+            sessionLoadReplayIdleGap: "50 millis",
+            sessionLoadTimeout: "1 second",
+            clientInfo: { name: "cafecode-test", version: "0.0.0" },
+            requestLogger: (event) =>
+              event.method === "session/load" && event.status === "started"
+                ? Deferred.succeed(loadStarted, undefined).pipe(Effect.asVoid)
+                : Effect.void,
+          }),
+        ),
+      );
+    }).pipe(Effect.scoped, Effect.provide(NodeServices.layer), TestClock.withLive),
   );
 
   it.effect("rejects invalid config option values before sending session/set_config_option", () => {

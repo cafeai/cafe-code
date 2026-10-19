@@ -11,6 +11,7 @@ import {
   ProviderDaemonRpcRequest,
   ProviderDaemonRpcResultByMethod,
   ProviderDaemonSessionReconfigurationRefusal,
+  ProviderDaemonFailedRootRetirementRefusal,
   type ThreadId,
   type ProviderInstanceId,
   type ProviderRuntimeEvent,
@@ -30,6 +31,7 @@ import {
   setProviderBackendBridgeDiagnostics,
 } from "@cafecode/shared/providerPipelineDiagnostics";
 import * as crypto from "node:crypto";
+import { types as utilTypes } from "node:util";
 import * as Cause from "effect/Cause";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
@@ -137,17 +139,22 @@ function providerDaemonUrl(config: ProviderDaemonClientConfig, path: string): UR
 export class ProviderDaemonRpcResponseError extends Error {
   readonly remoteErrorTag: string;
   readonly sessionReconfigurationRefusal?: ProviderDaemonSessionReconfigurationRefusal;
+  readonly failedRootRetirementRefusal?: ProviderDaemonFailedRootRetirementRefusal;
 
   constructor(
     remoteErrorTag: string,
     message: string,
     sessionReconfigurationRefusal?: ProviderDaemonSessionReconfigurationRefusal,
+    failedRootRetirementRefusal?: ProviderDaemonFailedRootRetirementRefusal,
   ) {
     super(message);
     this.name = "ProviderDaemonRpcResponseError";
     this.remoteErrorTag = remoteErrorTag;
     if (sessionReconfigurationRefusal !== undefined) {
       this.sessionReconfigurationRefusal = sessionReconfigurationRefusal;
+    }
+    if (failedRootRetirementRefusal !== undefined) {
+      this.failedRootRetirementRefusal = failedRootRetirementRefusal;
     }
   }
 }
@@ -194,7 +201,16 @@ function remoteAuthenticationStatus(cause: unknown): 401 | 403 | undefined {
   return undefined;
 }
 
-export function toRemoteRequestError(method: string, cause: unknown): ProviderAdapterRequestError {
+export function toRemoteRequestError(
+  method: string,
+  cause: unknown,
+  request?: ProviderDaemonRpcRequest,
+): ProviderAdapterRequestError {
+  // Even a Proxy around a real typed error may fabricate own descriptors, and
+  // a revoked one throws during instanceof. Never inspect or retain that
+  // executable object as a decoded semantic receipt or diagnostic cause.
+  if (typeof cause === "object" && cause !== null && utilTypes.isProxy(cause))
+    cause = new Error("The provider request failed without a trusted error receipt.");
   if (
     cause instanceof ProviderDaemonHttpStatusError &&
     (cause.statusCode === 401 || cause.statusCode === 403)
@@ -233,6 +249,28 @@ export function toRemoteRequestError(method: string, cause: unknown): ProviderAd
     Schema.is(ProviderDaemonSessionReconfigurationRefusal)(refusalDescriptor.value)
       ? refusalDescriptor.value
       : undefined;
+  const retirementDescriptor =
+    cause instanceof ProviderDaemonRpcResponseError
+      ? Object.getOwnPropertyDescriptor(cause, "failedRootRetirementRefusal")
+      : undefined;
+  const expected = request?.method === "sendTurn" ? request.payload.expectedFailedRoot : undefined;
+  // Only the decoded response to this complete cold-recovery request can prove
+  // zero retirement/input. The command ledger separately binds the entire
+  // schema-canonical body, including input and failure identity. A generic RPC
+  // error, similarly named native tag, getter or legacy omission is unknown.
+  const failedRootRetirementRefusal =
+    method === "sendTurn" &&
+    request?.method === "sendTurn" &&
+    expected?.restartSession === true &&
+    expected.providerInstanceId !== undefined &&
+    expected.observedAt !== undefined &&
+    cause instanceof ProviderDaemonRpcResponseError &&
+    remoteErrorTag === "ProviderAdapterRequestError" &&
+    retirementDescriptor !== undefined &&
+    "value" in retirementDescriptor &&
+    Schema.is(ProviderDaemonFailedRootRetirementRefusal)(retirementDescriptor.value)
+      ? retirementDescriptor.value
+      : undefined;
   // These two reserved values are facts, never outer exception classes. A
   // legacy/arbitrary envelope spelling one directly cannot bypass the additive
   // witness or borrow start-only authority for another operation.
@@ -248,6 +286,7 @@ export function toRemoteRequestError(method: string, cause: unknown): ProviderAd
     ...(cause instanceof ProviderDaemonRpcResponseError
       ? { remoteErrorTag: sessionReconfigurationRefusal ?? genericRemoteErrorTag }
       : {}),
+    ...(failedRootRetirementRefusal === undefined ? {} : { failedRootRetirementRefusal }),
     cause,
   });
 }
@@ -500,6 +539,7 @@ const rpc = <M extends ProviderDaemonRpcRequest["method"]>(
             ? `${envelope.error.tag}: ${envelope.error.message}`
             : `${envelope.error.tag}: ${envelope.error.message}; caused by ${rootCause.message}`,
           envelope.error.sessionReconfigurationRefusal,
+          envelope.error.failedRootRetirementRefusal,
         );
       }
       if (isVoidProviderDaemonRpcMethod(request.method)) {
@@ -515,7 +555,7 @@ const rpc = <M extends ProviderDaemonRpcRequest["method"]>(
       (cause instanceof ProviderAdapterRewindOutcomeUnknownError ||
         cause instanceof ProviderAdapterRequestError)
         ? cause
-        : toRemoteRequestError(request.method, cause),
+        : toRemoteRequestError(request.method, cause, request),
   });
 
 /**

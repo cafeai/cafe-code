@@ -50,6 +50,16 @@ export type VisualizationTimelineEntry = typeof VisualizationTimelineEntry.Type;
 export const VisualizationListInput = Schema.Struct({
   threadId: ThreadId.check(Schema.isMaxLength(200)),
   cursor: Schema.optionalKey(Schema.String.check(Schema.isPattern(/^[a-f0-9-]{36}$/))),
+  // A viewport time is a bounded read-position hint, never ownership or source
+  // authority. Cursor continuation still authenticates its exact stored row.
+  atOrBefore: Schema.optionalKey(
+    timestamp.check(
+      Schema.makeFilter((value) => {
+        const millis = Date.parse(value);
+        return Number.isFinite(millis) && new Date(millis).toISOString() === value;
+      }),
+    ),
+  ),
 }).annotate(strict);
 export type VisualizationListInput = typeof VisualizationListInput.Type;
 export const VisualizationListResult = Schema.Struct({

@@ -10,6 +10,7 @@ import {
   ProviderDaemonRpcEnvelope,
   ProviderDriverKind,
   ProviderInstanceId,
+  SubagentRuntimeId,
   type ProviderDaemonEventRecord,
   type ProviderRuntimeEvent,
   RuntimeTaskId,
@@ -369,6 +370,309 @@ describe("ProviderDaemonServer", () => {
       },
     );
   }
+
+  it.effect(
+    "carries only exact pre-retirement refusals through a real authenticated cold-send RPC",
+    () => {
+      const account = ProviderInstanceId.make("codex");
+      const threadId = ThreadId.make("synthetic-cold-retirement-thread");
+      const privateExtra = "private-retirement-payload-must-not-enter-rpc";
+      const coldInput = {
+        threadId,
+        input: "Continue preserved work.",
+        expectedFailedRoot: {
+          turnId: TurnId.make("synthetic-cold-retirement-turn"),
+          providerThreadId: "synthetic-private-native-history",
+          subagentRuntimeId: SubagentRuntimeId.make("00000000-0000-4000-8000-000000000211"),
+          providerInstanceId: account,
+          observedAt: "2026-10-19T01:00:00.000Z",
+          restartSession: true as const,
+        },
+      };
+      let getterReads = 0;
+      let proxyReads = 0;
+      const requestError = (options?: { provider?: string; method?: string; reason?: unknown }) => {
+        const error = Object.assign(
+          new ProviderAdapterRequestError({
+            provider: options?.provider ?? "codex",
+            method: options?.method ?? "turn/start",
+            detail: "The failed Codex root changed before retirement.",
+          }),
+          { privateProviderPayload: { content: privateExtra } },
+        );
+        // Preserve a real typed producer while exercising the mapper's own-data
+        // finite-value checks, rather than failing in the schema constructor.
+        if (options?.reason !== undefined)
+          Object.defineProperty(error, "failedRootRetirementRefusal", {
+            value: options.reason,
+            configurable: true,
+          });
+        return error;
+      };
+      const cases = [
+        {
+          name: "definite",
+          error: () => requestError({ reason: "notifications-pending" }),
+          expected: "notifications-pending",
+        },
+        {
+          name: "unknown-reason",
+          error: () => requestError({ reason: "unrecognized-native-reason" }),
+        },
+        {
+          name: "other-provider",
+          error: () => requestError({ provider: "claudeAgent", reason: "notifications-pending" }),
+        },
+        {
+          name: "other-native-method",
+          error: () => requestError({ method: "turn/steer", reason: "notifications-pending" }),
+        },
+        { name: "prose-only", error: () => requestError() },
+        {
+          name: "tag-only",
+          error: () => Object.assign(requestError(), { remoteErrorTag: "notifications-pending" }),
+        },
+        {
+          name: "other-error-class",
+          error: () =>
+            Object.assign(
+              new ProviderValidationError({ operation: "Synthetic.send", issue: "Fixed refusal." }),
+              {
+                provider: "codex",
+                method: "turn/start",
+                failedRootRetirementRefusal: "notifications-pending",
+              },
+            ),
+        },
+        {
+          name: "accessor-reason",
+          error: () =>
+            Object.defineProperty(requestError(), "failedRootRetirementRefusal", {
+              get: () => {
+                getterReads += 1;
+                return "notifications-pending";
+              },
+            }),
+        },
+        {
+          name: "inherited-reason",
+          error: () => {
+            const error = requestError();
+            return Object.setPrototypeOf(
+              error,
+              Object.create(Object.getPrototypeOf(error), {
+                failedRootRetirementRefusal: { value: "notifications-pending" },
+              }),
+            );
+          },
+        },
+        {
+          name: "proxy-reason",
+          error: () =>
+            new Proxy(requestError({ reason: "notifications-pending" }), {
+              get: () => {
+                proxyReads += 1;
+                throw Error("Must not inspect proxy.");
+              },
+              getOwnPropertyDescriptor: () => {
+                proxyReads += 1;
+                throw Error("Must not inspect proxy.");
+              },
+              getPrototypeOf: () => {
+                proxyReads += 1;
+                throw Error("Must not inspect proxy.");
+              },
+            }),
+        },
+        {
+          name: "revoked-proxy",
+          error: () => {
+            const pair = Proxy.revocable(requestError({ reason: "notifications-pending" }), {});
+            pair.revoke();
+            return pair.proxy;
+          },
+        },
+      ] as const;
+      let current = 0;
+      let sendCalls = 0;
+      let startCalls = 0;
+      let stopCalls = 0;
+      const capabilityOwners: ProviderInstanceId[] = [];
+      const providerService: ProviderServiceShape = {
+        ...mockProviderService,
+        sendTurn: () =>
+          Effect.suspend(() => {
+            sendCalls += 1;
+            return Effect.fail(cases[current]!.error());
+          }),
+        startSession: () =>
+          Effect.suspend(() => {
+            startCalls += 1;
+            return Effect.fail(requestError({ reason: "notifications-pending" }));
+          }),
+        stopSession: () =>
+          Effect.sync(() => {
+            stopCalls += 1;
+          }),
+        getCapabilities: (instanceId) =>
+          Effect.sync(() => {
+            capabilityOwners.push(instanceId);
+            return {
+              sessionModelSwitch: "in-session" as const,
+              liveSteer: "supported" as const,
+              codexFailedRootRestart: true,
+            };
+          }),
+      };
+      return Effect.gen(function* () {
+        const port = yield* startProviderDaemonServerOnEphemeralPort({
+          host: "127.0.0.1",
+          token: TEST_TOKEN,
+          version: "0.0.0-test",
+        });
+        yield* Effect.gen(function* () {
+          const eventsRefused = yield* Deferred.make<void>();
+          const facade = yield* makeFiniteRemoteControlFacade(port, eventsRefused);
+          const remoteConfigLayer = Layer.effect(
+            ServerConfig,
+            Effect.gen(function* () {
+              const config = yield* ServerConfig;
+              return { ...config, providerDaemon: facade.endpoint };
+            }),
+          ).pipe(
+            Layer.provide(
+              ServerConfig.layerTest(process.cwd(), {
+                prefix: "cafe-retirement-refusal-rpc-",
+              }).pipe(Layer.provide(NodeServices.layer)),
+            ),
+          );
+          const remoteLayer = RemoteProviderServiceLive.pipe(Layer.provide(remoteConfigLayer));
+          yield* Effect.gen(function* () {
+            const remote = yield* ProviderService;
+            yield* Deferred.await(eventsRefused);
+            for (current = 0; current < cases.length; current += 1) {
+              const testCase = cases[current]!;
+              const result = yield* remote.sendTurn(coldInput).pipe(Effect.flip);
+              assert.instanceOf(result, ProviderAdapterRequestError);
+              if (!(result instanceof ProviderAdapterRequestError))
+                return yield* Effect.die("Expected typed remote refusal");
+              assert.equal(result.method, "sendTurn");
+              assert.equal(
+                result.failedRootRetirementRefusal,
+                "expected" in testCase ? testCase.expected : undefined,
+              );
+              assert.instanceOf(result.cause, ProviderDaemonRpcResponseError);
+              if (!(result.cause instanceof ProviderDaemonRpcResponseError))
+                return yield* Effect.die("Expected actual decoded RPC response");
+              assert.equal(
+                result.cause.failedRootRetirementRefusal,
+                "expected" in testCase ? testCase.expected : undefined,
+              );
+              assert.notInclude(JSON.stringify(result.cause), privateExtra);
+              assert.equal(sendCalls, current + 1);
+              assert.equal(stopCalls, 0);
+              if ("expected" in testCase) {
+                // Observe this exact receipt before unrelated later failures can
+                // legitimately evict it from the existing bounded health tail.
+                const healthResponse = yield* Effect.promise(() =>
+                  fetch(`http://127.0.0.1:${port}/api/provider-daemon/health`, {
+                    headers: { authorization: `Bearer ${TEST_TOKEN}` },
+                  }),
+                );
+                assert.equal(healthResponse.status, 200);
+                const rawHealth = yield* Effect.promise(() => healthResponse.text());
+                assert.notInclude(rawHealth, privateExtra);
+                const health = decodeProviderDaemonHealth(JSON.parse(rawHealth));
+                assert.isTrue(
+                  health.rpc?.recentFailures?.some(
+                    (failure) =>
+                      failure.method === "sendTurn" &&
+                      failure.failedRootRetirementRefusal === testCase.expected,
+                  ),
+                );
+                assert.isTrue(
+                  health.recentFailedCommands?.some(
+                    (failure) =>
+                      failure.method === "sendTurn" &&
+                      failure.failedRootRetirementRefusal === testCase.expected,
+                  ),
+                );
+              }
+            }
+            // A definite producer error cannot lend its witness to another RPC
+            // or an ordinary same-account send without cold-recovery identity.
+            const start = yield* remote
+              .startSession(threadId, {
+                threadId,
+                provider: ProviderDriverKind.make("codex"),
+                providerInstanceId: account,
+                runtimeMode: "full-access",
+              })
+              .pipe(Effect.flip);
+            assert.instanceOf(start, ProviderAdapterRequestError);
+            if (start instanceof ProviderAdapterRequestError)
+              assert.equal(start.failedRootRetirementRefusal, undefined);
+            current = 0;
+            const ordinary = yield* remote
+              .sendTurn({ threadId, input: coldInput.input })
+              .pipe(Effect.flip);
+            assert.instanceOf(ordinary, ProviderAdapterRequestError);
+            if (ordinary instanceof ProviderAdapterRequestError)
+              assert.equal(ordinary.failedRootRetirementRefusal, undefined);
+          }).pipe(Effect.provide(remoteLayer), Effect.scoped);
+          assert.deepEqual(capabilityOwners, Array(cases.length).fill(account));
+          assert.equal(sendCalls, cases.length + 1);
+          assert.equal(startCalls, 1);
+          assert.equal(stopCalls, 0);
+          assert.equal(getterReads, 0);
+          assert.equal(proxyReads, 0);
+          assert.equal(facade.eventRequestCount(), 1);
+        }).pipe(Effect.scoped);
+        // Bypass only the remote capability guard with a direct synthetic RPC to
+        // qualify the daemon's independent completeness fence. These requests
+        // still pass real authentication, schema decoding and the command ledger.
+        for (const [index, expectedFailedRoot] of [
+          { ...coldInput.expectedFailedRoot, observedAt: undefined },
+          { ...coldInput.expectedFailedRoot, providerInstanceId: undefined },
+          { ...coldInput.expectedFailedRoot, restartSession: undefined },
+        ].entries()) {
+          const response = yield* Effect.promise(() =>
+            fetch(`http://127.0.0.1:${port}/api/provider-daemon/rpc`, {
+              method: "POST",
+              headers: {
+                authorization: `Bearer ${TEST_TOKEN}`,
+                "content-type": "application/json",
+              },
+              body: encodeProviderDaemonRpcRequestJson({
+                method: "sendTurn",
+                commandId: `incomplete-cold-refusal-${index}`,
+                payload: { ...coldInput, expectedFailedRoot },
+              }),
+            }),
+          );
+          assert.equal(response.status, 400);
+          const envelope = decodeProviderDaemonRpcEnvelopeJson(
+            yield* Effect.promise(() => response.text()),
+          );
+          assert.isFalse(envelope.ok);
+          if (!envelope.ok) assert.equal(envelope.error.failedRootRetirementRefusal, undefined);
+        }
+        const healthResponse = yield* Effect.promise(() =>
+          fetch(`http://127.0.0.1:${port}/api/provider-daemon/health`, {
+            headers: { authorization: `Bearer ${TEST_TOKEN}` },
+          }),
+        );
+        assert.equal(healthResponse.status, 200);
+        const rawHealth = yield* Effect.promise(() => healthResponse.text());
+        assert.notInclude(rawHealth, privateExtra);
+        const health = decodeProviderDaemonHealth(JSON.parse(rawHealth));
+        assert.equal(health.rpc?.failedRpcCount, cases.length + 5);
+        assert.equal(sendCalls, cases.length + 4);
+        assert.equal(startCalls, 1);
+        assert.equal(stopCalls, 0);
+      }).pipe(Effect.scoped, Effect.provide(makeProviderDaemonServerTestLayer(providerService)));
+    },
+  );
 
   it.effect(
     "carries only exact native reconfiguration refusals through the guarded remote start transport",

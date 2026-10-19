@@ -37,6 +37,7 @@ import {
  */
 import * as Crypto from "node:crypto";
 import * as NodeFs from "node:fs";
+import { types as NodeUtilTypes } from "node:util";
 
 import {
   type CanonicalItemType,
@@ -46,6 +47,7 @@ import {
   EventId,
   MessageId,
   ProviderDriverKind,
+  ProviderDaemonFailedRootRetirementRefusal,
   type ProviderEvent,
   ProviderInstanceId,
   type ProviderRuntimeEvent,
@@ -143,6 +145,7 @@ import {
   isCodexPrivateMetadataNotification,
   makeCodexSessionRuntime,
   readCodexSubagentThreadTransient,
+  type CodexFailedRootRetirementResult,
   type CodexSessionRuntimeError,
   type CodexSessionRuntimeOptions,
   type CodexSessionRuntimeShape,
@@ -173,6 +176,41 @@ const isCodexSessionRuntimeThreadIdMissingError = Schema.is(
   CodexSessionRuntimeThreadIdMissingError,
 );
 const isCodexResumeCursorSchema = Schema.is(CodexResumeCursorSchema);
+const isFailedRootRetirementRefusal = Schema.is(ProviderDaemonFailedRootRetirementRefusal);
+
+/**
+ * Only a finite, own-data native boundary result can witness a pre-send refusal.
+ * Do not promote a legacy boolean, accessor, native error message or malformed
+ * result into either retirement authority or safe-to-retry proof.
+ */
+const readFailedRootRetirementResult = (
+  value: unknown,
+): CodexFailedRootRetirementResult | undefined => {
+  // Proxy descriptor/prototype traps can fabricate proof or run arbitrary code.
+  // Node's native predicate is inert even for a revoked Proxy; reject it before
+  // touching any descriptor or performing a prototype-based classification.
+  if (value === null || typeof value !== "object" || NodeUtilTypes.isProxy(value)) return undefined;
+  try {
+    const descriptors = Object.getOwnPropertyDescriptors(value);
+    const keys = Reflect.ownKeys(descriptors);
+    const retired = descriptors.retired;
+    if (retired === undefined || !("value" in retired)) return undefined;
+    if (retired.value === true && keys.length === 1) return { retired: true };
+    const reason = descriptors.reason;
+    if (
+      retired.value === false &&
+      keys.length === 2 &&
+      reason !== undefined &&
+      "value" in reason &&
+      typeof reason.value === "string" &&
+      isFailedRootRetirementRefusal(reason.value)
+    )
+      return { retired: false, reason: reason.value };
+  } catch {
+    // A malformed test/extension seam is uncertainty, never continuation proof.
+  }
+  return undefined;
+};
 
 const PROVIDER = ProviderDriverKind.make("codex");
 const CODEX_TRANSPORT_POLICY_FILENAME = "codex-transport-policy.json";
@@ -6390,11 +6428,17 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
       // next interruptible opening, never while old teardown is unfinished.
       yield* Effect.uninterruptible(
         Effect.gen(function* () {
-          if (!(yield* context.runtime.closeIfFailedRoot!(expected)))
+          const retirement = readFailedRootRetirementResult(
+            yield* context.runtime.closeIfFailedRoot!(expected),
+          );
+          if (retirement?.retired !== true)
             return yield* new ProviderAdapterRequestError({
               provider: PROVIDER,
               method: "turn/start",
               detail: "The failed Codex root changed before retirement.",
+              ...(retirement?.retired === false
+                ? { failedRootRetirementRefusal: retirement.reason }
+                : {}),
             });
           yield* stopSessionInternal(context);
         }),

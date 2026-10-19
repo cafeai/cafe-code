@@ -19,7 +19,7 @@ import {
 import type { LegendListRef } from "@legendapp/list/react";
 import * as Schema from "effect/Schema";
 import { createRef, useCallback, useState, type ComponentProps } from "react";
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, it, onTestFinished, vi } from "vitest";
 import { render } from "vitest-browser-react";
 import { cdp, page } from "vitest/browser";
 
@@ -502,27 +502,73 @@ describe("MessagesTimeline with real LegendList", () => {
       ...Array.from({ length: 1_000 }, (_, index) => compactVisualization(scope, first + index)),
       ...userRows,
     ];
+    let initialLoadObserved = false;
+    let observeSlideDebug: NonNullable<TimelineProps["onDebugScrollEvent"]> | undefined;
+    let retireSlideTrace: () => void = () => undefined;
+    let flushSlideTrace: () => void = () => undefined;
+    // Register ownership before the first render await. A hard timeout must
+    // disconnect the same observations and emit at most one finite receipt.
+    onTestFinished(() => {
+      try {
+        flushSlideTrace();
+      } finally {
+        retireSlideTrace();
+      }
+    });
+    const observeInitialLoad: NonNullable<TimelineProps["onDebugScrollEvent"]> = (event) => {
+      if (event.source !== "MessagesTimeline" || event.activeThreadId !== ThreadId.make(scope))
+        return;
+      if (event.reason === "initial-list-load") initialLoadObserved = true;
+      observeSlideDebug?.(event);
+    };
     const view = await render(
-      <TimelineFixture entries={windowEntries(50)} listRef={listRef} scope={scope} />,
+      <TimelineFixture
+        entries={windowEntries(50)}
+        listRef={listRef}
+        scope={scope}
+        onDebugScrollEvent={observeInitialLoad}
+      />,
       { container: host },
     );
     const started = performance.now();
     try {
+      await vi.waitFor(() => expect(initialLoadObserved).toBe(true));
       await expectTail(host, listRef, `${scope}-message-39`);
       const scroller = readScroller(listRef);
+      const completeReviewGesture = async (delta: number) => {
+        const previousScroll = scroller.scrollTop;
+        let completed = false;
+        const observeScrollEnd = (event: Event) => {
+          if (
+            event.isTrusted &&
+            event.target === scroller &&
+            scroller.scrollTop !== previousScroll &&
+            tailDistance(scroller) > 400
+          )
+            completed = true;
+        };
+        // Dispatch completion is not native scroll completion. Bind this
+        // gesture to the exact owning scroll node before issuing real input,
+        // then retire its listener before any subsequent gesture or slide.
+        const retireScrollEnd = () => scroller.removeEventListener("scrollend", observeScrollEnd);
+        onTestFinished(retireScrollEnd);
+        scroller.addEventListener("scrollend", observeScrollEnd);
+        try {
+          await reviewWithNativeWheel(scroller, delta);
+          await vi.waitFor(() => expect(completed).toBe(true));
+        } finally {
+          retireScrollEnd();
+        }
+      };
       // Traverse with ordinary finite wheel gestures, allowing the real list
       // to measure each newly mounted slice. A single huge synthetic jump can
       // land in an estimated, not yet measured window and is not a review anchor.
       for (let gesture = 0; gesture < 12; gesture += 1) {
-        await reviewWithNativeWheel(scroller, -1_500);
-        for (let frame = 0; frame < 4; frame += 1)
-          await new Promise<void>((resolve) => window.requestAnimationFrame(() => resolve()));
+        await completeReviewGesture(-1_500);
       }
       await vi.waitFor(() =>
         expect(host.querySelector('[data-real-list-following="false"]')).not.toBeNull(),
       );
-      for (let frame = 0; frame < 4; frame += 1)
-        await new Promise<void>((resolve) => window.requestAnimationFrame(() => resolve()));
       // A finite wheel traversal can stop between cards even after all mounted
       // rows have real measurements. Establish the fully-contained precondition
       // with one measured native gesture, rather than waiting for a stationary
@@ -562,31 +608,59 @@ describe("MessagesTimeline with real LegendList", () => {
         const margin = (viewportBeforeAlignment.height - bounds.height) / 2;
         const delta = bounds.top - viewportBeforeAlignment.top - margin;
         expect(Math.abs(delta)).toBeLessThanOrEqual(viewportBeforeAlignment.height);
-        await reviewWithNativeWheel(scroller, delta);
+        await completeReviewGesture(delta);
       }
       let anchor: HTMLElement | undefined;
       await vi.waitFor(() => {
         const viewport = scroller.getBoundingClientRect();
+        const state = listRef.current!.getState();
+        expect(state.scroll).toBe(scroller.scrollTop);
+        expect(state.start).toBeGreaterThanOrEqual(0);
+        expect(state.end).toBeGreaterThanOrEqual(state.start);
+        expect(state.end).toBeLessThan(state.data.length);
         anchor = Array.from(host.querySelectorAll<HTMLElement>("[data-visualization-card]")).find(
           (row) => {
             const bounds = row.getBoundingClientRect();
-            return bounds.top >= viewport.top && bounds.bottom <= viewport.bottom;
+            if (
+              bounds.width <= 0 ||
+              bounds.height <= 0 ||
+              bounds.top < viewport.top ||
+              bounds.bottom > viewport.bottom
+            )
+              return false;
+            // A recycled inner card can be physically visible before the
+            // public logical slice adopts its new owner. Capture only the
+            // exact committed visible row, without pinning size estimates or
+            // implementation-specific virtualization coordinates.
+            for (let index = state.start; index <= state.end; index += 1) {
+              const fullRow = state.elementAtIndex(index);
+              if (!fullRow?.contains(row)) continue;
+              expect(
+                row.closest<HTMLElement>("[data-timeline-row-id]")?.dataset.timelineRowId,
+              ).toBe(state.data[index].id);
+              return true;
+            }
+            return false;
           },
         );
         expect(
           anchor,
           JSON.stringify({
+            initialLoadObserved,
             scrollTop: scroller.scrollTop,
+            publicScroll: state.scroll,
+            start: state.start,
+            end: state.end,
             scrollHeight: scroller.scrollHeight,
             mountedCards: host.querySelectorAll("[data-visualization-card]").length,
             viewport: { top: viewport.top, bottom: viewport.bottom },
-            cards: Array.from(host.querySelectorAll<HTMLElement>("[data-visualization-card]")).map(
-              (row) => ({
+            cards: Array.from(host.querySelectorAll<HTMLElement>("[data-visualization-card]"))
+              .slice(0, 25)
+              .map((row) => ({
                 id: row.dataset.visualizationCard,
                 top: row.getBoundingClientRect().top,
                 bottom: row.getBoundingClientRect().bottom,
-              }),
-            ),
+              })),
           }),
         ).toBeDefined();
       });
@@ -595,14 +669,217 @@ describe("MessagesTimeline with real LegendList", () => {
       expect(ordinal).toBeGreaterThan(50);
       expect(ordinal).toBeLessThanOrEqual(1_000);
       const anchorTop = anchor!.getBoundingClientRect().top;
-      await view.rerender(
-        <TimelineFixture entries={windowEntries(0)} listRef={listRef} scope={scope} />,
+      const anchorKey = `visualization:${scope}:${ordinal - 1}`;
+      const finite = (value: unknown) =>
+        typeof value === "number" && Number.isFinite(value) ? value : null;
+      const ownedKey = (value: unknown): string | null => {
+        if (typeof value !== "string") return null;
+        const visualizationPrefix = `visualization:${scope}:`;
+        const messagePrefix = `${scope}-entry-`;
+        const suffix = value.startsWith(visualizationPrefix)
+          ? value.slice(visualizationPrefix.length)
+          : value.startsWith(messagePrefix)
+            ? value.slice(messagePrefix.length)
+            : "";
+        if (!/^\d{1,4}$/.test(suffix)) return null;
+        const index = Number(suffix);
+        return index < (value.startsWith(visualizationPrefix) ? 1_050 : 40) ? value : null;
+      };
+      let traceSequence = 0;
+      let traceClosed = false;
+      let traceEmitted = false;
+      type TracePhase =
+        | "baseline"
+        | "after-rerender"
+        | "final"
+        | "anchor-position"
+        | "native-scroll"
+        | "row-resize"
+        | "row-mutation"
+        | "cafe-scroll";
+      const readSlideReceipt = (
+        phase: TracePhase,
+        extra: Record<string, string | number | boolean | null> = {},
+      ) => {
+        const base = {
+          sequence: ++traceSequence,
+          phase,
+          ...extra,
+          elapsedMs: finite(performance.now() - started),
+        };
+        try {
+          const state = listRef.current?.getState();
+          const readRow = (key: string | null) => {
+            if (!state || !key) return null;
+            // Read only this fixture's bounded row IDs and scalar list metadata,
+            // never the message/source fields or arbitrary native payloads.
+            const index = state.data.slice(0, 1_040).findIndex((row) => row.id === key);
+            if (index < 0) return { key, index: -1 };
+            const element = state.elementAtIndex(index);
+            const wrapper = element instanceof HTMLElement ? element : null;
+            const row = wrapper?.matches("[data-timeline-row-id]")
+              ? wrapper
+              : wrapper?.querySelector<HTMLElement>("[data-timeline-row-id]");
+            const bounds = wrapper?.isConnected ? wrapper.getBoundingClientRect() : null;
+            return {
+              key,
+              index,
+              positionByKey: finite(state.positionByKey(key)),
+              positionAtIndex: finite(state.positionAtIndex(index)),
+              reportedSize: finite(state.sizeAtIndex(index)),
+              knownSize: finite(state.sizes.get(key)),
+              ownerKey: ownedKey(row?.dataset.timelineRowId),
+              connected: wrapper?.isConnected === true,
+              wrapper: bounds
+                ? {
+                    top: finite(bounds.top),
+                    bottom: finite(bounds.bottom),
+                    height: finite(bounds.height),
+                  }
+                : null,
+            };
+          };
+          const visible = [];
+          if (state) {
+            for (
+              let index = Math.max(0, state.start);
+              index <= Math.min(state.end, state.data.length - 1) && visible.length < 3;
+              index += 1
+            )
+              visible.push(readRow(ownedKey(state.data[index]?.id)));
+          }
+          return {
+            ...base,
+            nativeScroll: finite(scroller.scrollTop),
+            nativeScrollHeight: finite(scroller.scrollHeight),
+            nativeViewportHeight: finite(scroller.clientHeight),
+            nativeViewportTop: finite(scroller.getBoundingClientRect().top),
+            nativeViewportBottom: finite(scroller.getBoundingClientRect().bottom),
+            publicScroll: finite(state?.scroll),
+            publicContentLength: finite(state?.contentLength),
+            start: finite(state?.start),
+            end: finite(state?.end),
+            dataLength: finite(state?.data.length),
+            anchor: readRow(anchorKey),
+            visible,
+          };
+        } catch {
+          // An in-flight partial public receipt is unknown, not test behavior
+          // or cause evidence. Never let diagnostics throw into native input.
+          return { ...base, receiptUnavailable: true };
+        }
+      };
+      type SlideReceipt = ReturnType<typeof readSlideReceipt>;
+      const checkpoints: SlideReceipt[] = [readSlideReceipt("baseline")];
+      const events: SlideReceipt[] = [];
+      const recordSlideEvent = (
+        phase: TracePhase,
+        extra: Record<string, string | number | boolean | null> = {},
+      ) => {
+        if (traceClosed) return;
+        events.push(readSlideReceipt(phase, extra));
+        if (events.length > 29) events.shift();
+      };
+      // These observations do not prepare or change geometry, dispatch work,
+      // wait for measurements, or grant any native/provider ownership. Three
+      // explicit checkpoints plus a 29-entry event ring cap output at 32.
+      flushSlideTrace = () => {
+        if (traceEmitted) return;
+        traceEmitted = true;
+        checkpoints.push(readSlideReceipt("final"));
+        console.info(
+          "visualization-sliding-list-diagnostic",
+          JSON.stringify({
+            events: [...checkpoints, ...events].toSorted((a, b) => a.sequence - b.sequence),
+          }),
+        );
+      };
+      const observeNativeScroll = (event: Event) => {
+        if (event.target === scroller)
+          recordSlideEvent("native-scroll", { trusted: event.isTrusted });
+      };
+      const resizeObserver = new ResizeObserver(() => recordSlideEvent("row-resize"));
+      const mutationObserver = new MutationObserver(() => recordSlideEvent("row-mutation"));
+      let unsubscribePosition: () => void = () => undefined;
+      retireSlideTrace = () => {
+        if (traceClosed) return;
+        traceClosed = true;
+        observeSlideDebug = undefined;
+        unsubscribePosition();
+        scroller.removeEventListener("scroll", observeNativeScroll);
+        resizeObserver.disconnect();
+        mutationObserver.disconnect();
+      };
+      observeSlideDebug = (event) => {
+        // The caller already bound source and exact thread. Admit only finite
+        // code-owned reason labels; do not serialize details or raw payloads.
+        if (!/^[a-z][a-z0-9-]{0,79}$/.test(event.reason)) return;
+        recordSlideEvent("cafe-scroll", {
+          reason: event.reason,
+          autoFollowTail: event.metrics?.autoFollowTail ?? null,
+          scroll: finite(event.metrics?.scroll),
+          remainingScrollDistance: finite(event.metrics?.remainingScrollDistance),
+        });
+      };
+      const stateBeforeSlide = listRef.current!.getState();
+      unsubscribePosition = stateBeforeSlide.listenToPosition(anchorKey, (position) =>
+        recordSlideEvent("anchor-position", { reportedPosition: finite(position) }),
       );
+      scroller.addEventListener("scroll", observeNativeScroll);
+      resizeObserver.observe(scroller);
+      const observedWrappers = new Set<HTMLElement>();
+      const anchorIndex = stateBeforeSlide.data.findIndex((row) => row.id === anchorKey);
+      for (const index of [
+        anchorIndex,
+        stateBeforeSlide.start,
+        stateBeforeSlide.start + 1,
+        stateBeforeSlide.start + 2,
+      ]) {
+        if (index < 0 || index >= stateBeforeSlide.data.length) continue;
+        const wrapper = stateBeforeSlide.elementAtIndex(index);
+        if (!wrapper || observedWrappers.has(wrapper)) continue;
+        observedWrappers.add(wrapper);
+        resizeObserver.observe(wrapper);
+      }
+      mutationObserver.observe(scroller, {
+        subtree: true,
+        childList: true,
+        attributes: true,
+        attributeFilter: ["data-timeline-row-id", "data-visualization-card", "style"],
+      });
+      await view.rerender(
+        <TimelineFixture
+          entries={windowEntries(0)}
+          listRef={listRef}
+          scope={scope}
+          onDebugScrollEvent={observeInitialLoad}
+        />,
+      );
+      checkpoints.push(readSlideReceipt("after-rerender"));
       await vi.waitFor(() => {
         const currentAnchor = host.querySelector<HTMLElement>(
           `[data-visualization-card="${identifier}"]`,
         );
-        expect(currentAnchor).not.toBeNull();
+        const state = listRef.current!.getState();
+        expect(
+          currentAnchor,
+          JSON.stringify({
+            identifier,
+            anchorTop,
+            scrollTop: scroller.scrollTop,
+            publicScroll: state.scroll,
+            start: state.start,
+            end: state.end,
+            dataLength: state.data.length,
+            cards: Array.from(host.querySelectorAll<HTMLElement>("[data-visualization-card]"))
+              .slice(0, 25)
+              .map((row) => ({
+                id: row.dataset.visualizationCard,
+                top: row.getBoundingClientRect().top,
+                bottom: row.getBoundingClientRect().bottom,
+              })),
+          }),
+        ).not.toBeNull();
         expect(currentAnchor!.getBoundingClientRect().top).toBeCloseTo(anchorTop, 0);
         expect(host.querySelector('[data-real-list-following="false"]')).not.toBeNull();
       });
@@ -627,6 +904,8 @@ describe("MessagesTimeline with real LegendList", () => {
         }),
       );
     } finally {
+      flushSlideTrace();
+      retireSlideTrace();
       await view.unmount();
       host.remove();
     }

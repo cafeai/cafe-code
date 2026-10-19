@@ -2,6 +2,7 @@ import {
   ProviderDaemonRpcRequest,
   CommandId,
   ProviderInstanceId,
+  SubagentRuntimeId,
   ThreadId,
   ApprovalRequestId,
   TurnId,
@@ -30,6 +31,121 @@ const stopRequest = {
 } satisfies ProviderDaemonRpcRequestValue;
 
 describe("ProviderDaemonCommandLedger", () => {
+  it("binds cold-send refusal receipts to exact input and failure identity in both directions", async () => {
+    await Effect.runPromise(
+      Effect.gen(function* () {
+        const ownerKey = "synthetic-cold-send-receipts";
+        const ledger = yield* makeProviderDaemonCommandLedger({ ownerKey });
+        const calls = yield* Ref.make(0);
+        const request = {
+          method: "sendTurn" as const,
+          commandId: "bound-failed-root-send-command",
+          payload: {
+            threadId: ThreadId.make("owned-failed-root-thread"),
+            input: "Continue preserved work.",
+            attachments: [],
+            expectedFailedRoot: {
+              turnId: TurnId.make("owned-failed-root-turn"),
+              providerThreadId: "owned-private-history",
+              subagentRuntimeId: SubagentRuntimeId.make("00000000-0000-4000-8000-000000000199"),
+              providerInstanceId: ProviderInstanceId.make("codex"),
+              observedAt: "2026-10-19T01:00:00.000Z",
+              restartSession: true as const,
+            },
+          },
+        } satisfies ProviderDaemonRpcRequestValue;
+        const refusal = {
+          ok: false as const,
+          error: {
+            tag: "ProviderAdapterRequestError",
+            message: "Fixed refusal.",
+            failedRootRetirementRefusal: "notifications-pending" as const,
+          },
+        };
+        const execute = Ref.update(calls, (n) => n + 1).pipe(Effect.as(refusal));
+        expect(yield* ledger.runOnce(request, execute)).toEqual(refusal);
+        // Native transport reset retry returns only the exact durable result.
+        expect(yield* ledger.runOnce(request, execute)).toEqual(refusal);
+        const expected = request.payload.expectedFailedRoot;
+        for (const changed of [
+          { ...request, payload: { ...request.payload, threadId: ThreadId.make("other-thread") } },
+          { ...request, payload: { ...request.payload, input: "Different input." } },
+          {
+            ...request,
+            payload: {
+              ...request.payload,
+              attachments: [
+                {
+                  type: "image" as const,
+                  id: "different-image",
+                  name: "image.png",
+                  mimeType: "image/png",
+                  sizeBytes: 1,
+                },
+              ],
+            },
+          },
+          ...[
+            { ...expected, turnId: TurnId.make("other-turn") },
+            { ...expected, providerThreadId: "other-history" },
+            {
+              ...expected,
+              subagentRuntimeId: SubagentRuntimeId.make("00000000-0000-4000-8000-000000000200"),
+            },
+            { ...expected, providerInstanceId: ProviderInstanceId.make("other-account") },
+            { ...expected, observedAt: "2026-10-19T01:00:00.001Z" },
+            { ...expected, restartSession: undefined },
+          ].map((expectedFailedRoot) => ({
+            ...request,
+            payload: { ...request.payload, expectedFailedRoot },
+          })),
+          {
+            ...request,
+            payload: { threadId: request.payload.threadId, input: request.payload.input },
+          },
+          {
+            ...stopRequest,
+            commandId: request.commandId,
+            payload: { threadId: request.payload.threadId },
+          },
+        ]) {
+          const result = yield* ledger.runOnce(changed, execute);
+          expect(result).toMatchObject({
+            ok: false,
+            error: { tag: "ProviderDaemonCommandIdentityMismatch" },
+          });
+          if (!result.ok) expect(result.error).not.toHaveProperty("failedRootRetirementRefusal");
+        }
+        expect(yield* Ref.get(calls)).toBe(1);
+        expect((yield* ledger.snapshot).recentFailedCommands).toContainEqual(
+          expect.objectContaining({
+            commandId: `${ownerKey}:${request.commandId}`,
+            method: "sendTurn",
+            failedRootRetirementRefusal: "notifications-pending",
+          }),
+        );
+        const ack = { ok: true as const, value: null };
+        const executeAck = Ref.update(calls, (n) => n + 1).pipe(Effect.as(ack));
+        expect(yield* ledger.runOnce(stopRequest, executeAck)).toEqual(ack);
+        expect(
+          yield* ledger.runOnce({ ...request, commandId: stopRequest.commandId }, execute),
+        ).toMatchObject({ ok: false, error: { tag: "ProviderDaemonCommandIdentityMismatch" } });
+        // Missing/corrupt legacy request JSON cannot attest either a refusal or
+        // success for a new cold send, even with an identical command id.
+        const sql = yield* SqlClient.SqlClient;
+        const storedId = `${ownerKey}:${request.commandId}`;
+        yield* sql`UPDATE provider_daemon_commands SET request_json = '{}' WHERE command_id = ${storedId}`;
+        const legacy = yield* ledger.runOnce(request, execute);
+        expect(legacy).toMatchObject({
+          ok: false,
+          error: { tag: "ProviderDaemonCommandIdentityMismatch" },
+        });
+        if (!legacy.ok) expect(legacy.error).not.toHaveProperty("failedRootRetirementRefusal");
+        expect(yield* Ref.get(calls)).toBe(2);
+      }).pipe(Effect.scoped, Effect.provide(SqlitePersistenceTest)),
+    );
+  });
+
   it("binds session opening receipts in both directions and refuses missing legacy request identity", async () => {
     await Effect.runPromise(
       Effect.gen(function* () {
