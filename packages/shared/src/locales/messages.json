@@ -53,7 +53,7 @@
   },
   " new · Jump to latest": {
     "message": " new · Jump to latest",
-    "locations": ["apps/web/src/components/chat/MessagesTimeline.tsx:3348"]
+    "locations": ["apps/web/src/components/chat/MessagesTimeline.tsx:3389"]
   },
   " · Created ": {
     "message": " · Created ",
@@ -113,7 +113,7 @@
   },
   "+{count} more": {
     "message": "+{count} more",
-    "locations": ["apps/web/src/components/chat/MessagesTimeline.tsx:3957"]
+    "locations": ["apps/web/src/components/chat/MessagesTimeline.tsx:3998"]
   },
   ", unexpanded": {
     "message": ", unexpanded",
@@ -2338,7 +2338,10 @@
   },
   "Clipboard write failed.": {
     "message": "Clipboard write failed.",
-    "locations": ["apps/web/src/components/chat/MessagesTimeline.tsx:2114"]
+    "locations": [
+      "apps/web/src/components/chat/MessagesTimeline.tsx:2133",
+      "apps/web/src/components/chat/MessagesTimeline.tsx:2155"
+    ]
   },
   "Clone": {
     "message": "Clone",
@@ -3040,7 +3043,7 @@
       "apps/web/src/components/chat/GlideSetupDialog.tsx:224",
       "apps/web/src/components/chat/MessageCopyButton.tsx:58",
       "apps/web/src/components/chat/MessageCopyButton.tsx:75",
-      "apps/web/src/components/chat/MessagesTimeline.tsx:2169",
+      "apps/web/src/components/chat/MessagesTimeline.tsx:2210",
       "apps/web/src/components/chat/ProposedPlanCard.tsx:190",
       "apps/web/src/components/chat/ProviderDiagnosticWorkEntry.tsx:532",
       "apps/web/src/components/settings/DiagnosticsSettings.tsx:363",
@@ -3096,7 +3099,7 @@
   },
   "Copy a file from this command": {
     "message": "Copy a file from this command",
-    "locations": ["apps/web/src/components/chat/MessagesTimeline.tsx:4107"]
+    "locations": ["apps/web/src/components/chat/MessagesTimeline.tsx:4148"]
   },
   "Copy chat ID": {
     "message": "Copy chat ID",
@@ -3150,6 +3153,10 @@
       "apps/web/src/components/settings/KeybindingsSettings.tsx:1425"
     ]
   },
+  "Copy link": {
+    "message": "Copy link",
+    "locations": ["apps/web/src/components/chat/MessagesTimeline.tsx:2104"]
+  },
   "Copy logs folder path": {
     "message": "Copy logs folder path",
     "locations": [
@@ -3162,7 +3169,7 @@
     "locations": [
       "apps/web/src/components/chat/MessageCopyButton.tsx:59",
       "apps/web/src/components/chat/MessageCopyButton.tsx:76",
-      "apps/web/src/components/chat/MessagesTimeline.tsx:2095"
+      "apps/web/src/components/chat/MessagesTimeline.tsx:2108"
     ]
   },
   "Copy options": {
@@ -3223,9 +3230,9 @@
   "Copy {path}": {
     "message": "Copy {path}",
     "locations": [
-      "apps/web/src/components/chat/MessagesTimeline.tsx:3997",
-      "apps/web/src/components/chat/MessagesTimeline.tsx:4046",
-      "apps/web/src/components/chat/MessagesTimeline.tsx:4077"
+      "apps/web/src/components/chat/MessagesTimeline.tsx:4038",
+      "apps/web/src/components/chat/MessagesTimeline.tsx:4087",
+      "apps/web/src/components/chat/MessagesTimeline.tsx:4118"
     ]
   },
   "Copying isn''t available here, so copy this code by hand.": {
@@ -3715,19 +3722,19 @@
   },
   "Couldn’t load earlier work.": {
     "message": "Couldn’t load earlier work.",
-    "locations": ["apps/web/src/components/chat/MessagesTimeline.tsx:2693"]
+    "locations": ["apps/web/src/components/chat/MessagesTimeline.tsx:2734"]
   },
   "Couldn’t load older entries.": {
     "message": "Couldn’t load older entries.",
-    "locations": ["apps/web/src/components/chat/MessagesTimeline.tsx:2771"]
+    "locations": ["apps/web/src/components/chat/MessagesTimeline.tsx:2812"]
   },
   "Couldn’t load the full work log.": {
     "message": "Couldn’t load the full work log.",
-    "locations": ["apps/web/src/components/chat/MessagesTimeline.tsx:2773"]
+    "locations": ["apps/web/src/components/chat/MessagesTimeline.tsx:2814"]
   },
   "Couldn’t load the work log.": {
     "message": "Couldn’t load the work log.",
-    "locations": ["apps/web/src/components/chat/MessagesTimeline.tsx:2769"]
+    "locations": ["apps/web/src/components/chat/MessagesTimeline.tsx:2810"]
   },
   "Couldn’t open System Settings.": {
     "message": "Couldn’t open System Settings.",
@@ -4673,7 +4680,7 @@
   },
   "Earlier work<slot1></slot1>": {
     "message": "Earlier work<slot1></slot1>",
-    "locations": ["apps/web/src/components/chat/MessagesTimeline.tsx:2625"]
+    "locations": ["apps/web/src/components/chat/MessagesTimeline.tsx:2666"]
   },
   "Early Access": {
     "message": "Early Access",
@@ -5748,8 +5755,8 @@
   "Fork from this message": {
     "message": "Fork from this message",
     "locations": [
-      "apps/web/src/components/chat/MessagesTimeline.tsx:1936",
-      "apps/web/src/components/chat/MessagesTimeline.tsx:1937"
+      "apps/web/src/components/chat/MessagesTimeline.tsx:1937",
+      "apps/web/src/components/chat/MessagesTimeline.tsx:1938"
     ]
   },
   "Fork from this message?": {
@@ -6643,6 +6650,10 @@
     "message": "Limited",
     "locations": ["apps/web/src/components/chat/ModelPickerSidebar.tsx:26"]
   },
+  "Link copied": {
+    "message": "Link copied",
+    "locations": ["apps/web/src/components/chat/MessagesTimeline.tsx:2122"]
+  },
   "Link created at {timestamp}": {
     "message": "Link created at {timestamp}",
     "locations": ["apps/web/src/components/settings/ConnectionsSettings.tsx:588"]
@@ -6687,7 +6698,7 @@
   },
   "Loading conversation…": {
     "message": "Loading conversation…",
-    "locations": ["apps/web/src/components/chat/MessagesTimeline.tsx:1635"]
+    "locations": ["apps/web/src/components/chat/MessagesTimeline.tsx:1636"]
   },
   "Loading diagnostic details…": {
     "message": "Loading diagnostic details…",
@@ -6695,7 +6706,7 @@
   },
   "Loading earlier work": {
     "message": "Loading earlier work",
-    "locations": ["apps/web/src/components/chat/MessagesTimeline.tsx:2677"]
+    "locations": ["apps/web/src/components/chat/MessagesTimeline.tsx:2718"]
   },
   "Loading image…": {
     "message": "Loading image…",
@@ -6743,13 +6754,13 @@
   },
   "Loading work log": {
     "message": "Loading work log",
-    "locations": ["apps/web/src/components/chat/MessagesTimeline.tsx:3198"]
+    "locations": ["apps/web/src/components/chat/MessagesTimeline.tsx:3239"]
   },
   "Loading…": {
     "message": "Loading…",
     "locations": [
-      "apps/web/src/components/chat/MessagesTimeline.tsx:2659",
-      "apps/web/src/components/chat/MessagesTimeline.tsx:3185",
+      "apps/web/src/components/chat/MessagesTimeline.tsx:2700",
+      "apps/web/src/components/chat/MessagesTimeline.tsx:3226",
       "apps/web/src/components/visualizations/InlineMcpAppBridge.tsx:289",
       "apps/web/src/components/visualizations/VisualizationCard.tsx:969"
     ]
@@ -7574,7 +7585,7 @@
   },
   "No commands or tools.": {
     "message": "No commands or tools.",
-    "locations": ["apps/web/src/components/chat/MessagesTimeline.tsx:3207"]
+    "locations": ["apps/web/src/components/chat/MessagesTimeline.tsx:3248"]
   },
   "No default": {
     "message": "No default",
@@ -7590,7 +7601,7 @@
   },
   "No earlier commands in this page.": {
     "message": "No earlier commands in this page.",
-    "locations": ["apps/web/src/components/chat/MessagesTimeline.tsx:2685"]
+    "locations": ["apps/web/src/components/chat/MessagesTimeline.tsx:2726"]
   },
   "No environment is available.": {
     "message": "No environment is available.",
@@ -8129,7 +8140,7 @@
   },
   "Open a file from this command": {
     "message": "Open a file from this command",
-    "locations": ["apps/web/src/components/chat/MessagesTimeline.tsx:4106"]
+    "locations": ["apps/web/src/components/chat/MessagesTimeline.tsx:4147"]
   },
   "Open a pairing link, or paste a one-time pairing token.": {
     "message": "Open a pairing link, or paste a one-time pairing token.",
@@ -8237,9 +8248,9 @@
   "Open {path}": {
     "message": "Open {path}",
     "locations": [
-      "apps/web/src/components/chat/MessagesTimeline.tsx:3989",
-      "apps/web/src/components/chat/MessagesTimeline.tsx:4045",
-      "apps/web/src/components/chat/MessagesTimeline.tsx:4076"
+      "apps/web/src/components/chat/MessagesTimeline.tsx:4030",
+      "apps/web/src/components/chat/MessagesTimeline.tsx:4086",
+      "apps/web/src/components/chat/MessagesTimeline.tsx:4117"
     ]
   },
   "Open {value0}": {
@@ -8781,7 +8792,7 @@
     "message": "Preview {value0}",
     "locations": [
       "apps/web/src/components/chat/ChatComposer.tsx:4140",
-      "apps/web/src/components/chat/MessagesTimeline.tsx:1792"
+      "apps/web/src/components/chat/MessagesTimeline.tsx:1793"
     ]
   },
   "Previous": {
@@ -9342,7 +9353,7 @@
   },
   "Recent": {
     "message": "Recent",
-    "locations": ["apps/web/src/components/chat/MessagesTimeline.tsx:2647"]
+    "locations": ["apps/web/src/components/chat/MessagesTimeline.tsx:2688"]
   },
   "Recent chats": {
     "message": "Recent chats",
@@ -10045,7 +10056,7 @@
       "apps/web/src/codexRecovery.ts:326",
       "apps/web/src/components/chat/ConnectionStatusIndicator.tsx:291",
       "apps/web/src/components/chat/MarkdownImage.tsx:186",
-      "apps/web/src/components/chat/MessagesTimeline.tsx:2706",
+      "apps/web/src/components/chat/MessagesTimeline.tsx:2747",
       "apps/web/src/components/chat/SubagentDetailView.tsx:798",
       "apps/web/src/components/chat/SubagentDetailView.tsx:847",
       "apps/web/src/components/settings/DictationSettings.tsx:524",
@@ -10090,7 +10101,7 @@
   },
   "Revert to this message": {
     "message": "Revert to this message",
-    "locations": ["apps/web/src/components/chat/MessagesTimeline.tsx:1911"]
+    "locations": ["apps/web/src/components/chat/MessagesTimeline.tsx:1912"]
   },
   "Review & enable": {
     "message": "Review & enable",
@@ -10776,7 +10787,7 @@
   },
   "Send a message to start the conversation.": {
     "message": "Send a message to start the conversation.",
-    "locations": ["apps/web/src/components/chat/MessagesTimeline.tsx:1499"]
+    "locations": ["apps/web/src/components/chat/MessagesTimeline.tsx:1500"]
   },
   "Send answer": {
     "message": "Send answer",
@@ -11006,7 +11017,7 @@
   },
   "Show all": {
     "message": "Show all",
-    "locations": ["apps/web/src/components/chat/MessagesTimeline.tsx:3174"]
+    "locations": ["apps/web/src/components/chat/MessagesTimeline.tsx:3215"]
   },
   "Show all {value0} models": {
     "message": "Show all {value0} models",
@@ -11061,7 +11072,7 @@
   "Show full message": {
     "message": "Show full message",
     "locations": [
-      "apps/web/src/components/chat/MessagesTimeline.tsx:3534",
+      "apps/web/src/components/chat/MessagesTimeline.tsx:3575",
       "apps/web/src/components/settings/DiagnosticsSettings.tsx:1047",
       "apps/web/src/components/settings/DiagnosticsSettings.tsx:2729"
     ]
@@ -11081,8 +11092,8 @@
   "Show less": {
     "message": "Show less",
     "locations": [
-      "apps/web/src/components/chat/MessagesTimeline.tsx:3403",
-      "apps/web/src/components/chat/MessagesTimeline.tsx:3533",
+      "apps/web/src/components/chat/MessagesTimeline.tsx:3444",
+      "apps/web/src/components/chat/MessagesTimeline.tsx:3574",
       "apps/web/src/components/settings/DiagnosticsSettings.tsx:258"
     ]
   },
@@ -11097,8 +11108,8 @@
   "Show older": {
     "message": "Show older",
     "locations": [
-      "apps/web/src/components/chat/MessagesTimeline.tsx:2660",
-      "apps/web/src/components/chat/MessagesTimeline.tsx:3186"
+      "apps/web/src/components/chat/MessagesTimeline.tsx:2701",
+      "apps/web/src/components/chat/MessagesTimeline.tsx:3227"
     ]
   },
   "Show on the side": {
@@ -11135,7 +11146,7 @@
   },
   "Show {value0} more": {
     "message": "Show {value0} more",
-    "locations": ["apps/web/src/components/chat/MessagesTimeline.tsx:3404"]
+    "locations": ["apps/web/src/components/chat/MessagesTimeline.tsx:3445"]
   },
   "Showing the full value instead.": {
     "message": "Showing the full value instead.",
@@ -11759,7 +11770,7 @@
   },
   "Subagents": {
     "message": "Subagents",
-    "locations": ["apps/web/src/components/chat/MessagesTimeline.tsx:3256"]
+    "locations": ["apps/web/src/components/chat/MessagesTimeline.tsx:3297"]
   },
   "Subagents for {value0}": {
     "message": "Subagents for {value0}",
@@ -12876,7 +12887,7 @@
   },
   "Tool calls": {
     "message": "Tool calls",
-    "locations": ["apps/web/src/components/chat/MessagesTimeline.tsx:3377"]
+    "locations": ["apps/web/src/components/chat/MessagesTimeline.tsx:3418"]
   },
   "Tool started": {
     "message": "Tool started",
@@ -13054,13 +13065,17 @@
     "message": "Unable to copy keybindings path",
     "locations": ["apps/web/src/components/settings/KeybindingsSettings.tsx:1259"]
   },
+  "Unable to copy link": {
+    "message": "Unable to copy link",
+    "locations": ["apps/web/src/components/chat/MessagesTimeline.tsx:2129"]
+  },
   "Unable to copy logs folder path.": {
     "message": "Unable to copy logs folder path.",
     "locations": ["apps/web/src/components/settings/DiagnosticsSettings.tsx:1655"]
   },
   "Unable to copy message": {
     "message": "Unable to copy message",
-    "locations": ["apps/web/src/components/chat/MessagesTimeline.tsx:2110"]
+    "locations": ["apps/web/src/components/chat/MessagesTimeline.tsx:2151"]
   },
   "Unable to copy system prompt path": {
     "message": "Unable to copy system prompt path",
@@ -14011,15 +14026,15 @@
   },
   "Work log": {
     "message": "Work log",
-    "locations": ["apps/web/src/components/chat/MessagesTimeline.tsx:3378"]
+    "locations": ["apps/web/src/components/chat/MessagesTimeline.tsx:3419"]
   },
   "Work log unavailable while disconnected.": {
     "message": "Work log unavailable while disconnected.",
-    "locations": ["apps/web/src/components/chat/MessagesTimeline.tsx:2767"]
+    "locations": ["apps/web/src/components/chat/MessagesTimeline.tsx:2808"]
   },
   "Work log<slot1></slot1>": {
     "message": "Work log<slot1></slot1>",
-    "locations": ["apps/web/src/components/chat/MessagesTimeline.tsx:3156"]
+    "locations": ["apps/web/src/components/chat/MessagesTimeline.tsx:3197"]
   },
   "Worked for {elapsed}": {
     "message": "Worked for {elapsed}",
@@ -14065,12 +14080,12 @@
   },
   "Working for ": {
     "message": "Working for ",
-    "locations": ["apps/web/src/components/chat/MessagesTimeline.tsx:2250"]
+    "locations": ["apps/web/src/components/chat/MessagesTimeline.tsx:2291"]
   },
   "Working…": {
     "message": "Working…",
     "locations": [
-      "apps/web/src/components/chat/MessagesTimeline.tsx:2254",
+      "apps/web/src/components/chat/MessagesTimeline.tsx:2295",
       "apps/web/src/components/chat/chatActivity.ts:110",
       "apps/web/src/components/chat/chatActivity.ts:81"
     ]
@@ -15160,7 +15175,7 @@
   },
   "{count, plural, one {# more changed file} other {# more changed files}}": {
     "message": "{count, plural, one {# more changed file} other {# more changed files}}",
-    "locations": ["apps/web/src/components/chat/MessagesTimeline.tsx:3950"]
+    "locations": ["apps/web/src/components/chat/MessagesTimeline.tsx:3991"]
   },
   "{count, plural, one {# needs approval} other {# need approval}}": {
     "message": "{count, plural, one {# needs approval} other {# need approval}}",
@@ -15194,7 +15209,7 @@
     "message": "{count, plural, one {# subagent} other {# subagents}}",
     "locations": [
       "apps/web/src/components/atrium/TaskAtrium.tsx:412",
-      "apps/web/src/components/chat/MessagesTimeline.tsx:3243"
+      "apps/web/src/components/chat/MessagesTimeline.tsx:3284"
     ]
   },
   "{count, plural, one {Clear {displayCount} error} other {Clear {displayCount} errors}}": {
@@ -15203,7 +15218,7 @@
   },
   "{count, plural, one {Provider error} other {Provider errors}} · {count}": {
     "message": "{count, plural, one {Provider error} other {Provider errors}} · {count}",
-    "locations": ["apps/web/src/components/chat/MessagesTimeline.tsx:3451"]
+    "locations": ["apps/web/src/components/chat/MessagesTimeline.tsx:3492"]
   },
   "{count, plural, one {Provider still needs an update} other {Providers still need updates}}": {
     "message": "{count, plural, one {Provider still needs an update} other {Providers still need updates}}",
@@ -15461,7 +15476,7 @@
   },
   "{path} +{count} more": {
     "message": "{path} +{count} more",
-    "locations": ["apps/web/src/components/chat/MessagesTimeline.tsx:3657"]
+    "locations": ["apps/web/src/components/chat/MessagesTimeline.tsx:3698"]
   },
   "{path} is inside another configured directory.": {
     "message": "{path} is inside another configured directory.",
@@ -15605,7 +15620,7 @@
   },
   "{timestamp} • {duration}": {
     "message": "{timestamp} • {duration}",
-    "locations": ["apps/web/src/components/chat/MessagesTimeline.tsx:3604"]
+    "locations": ["apps/web/src/components/chat/MessagesTimeline.tsx:3645"]
   },
   "{title} (copy)": {
     "message": "{title} (copy)",

@@ -3604,6 +3604,67 @@ describe("MessagesTimeline", () => {
     }
   });
 
+  it("offers Copy link for a web link and copies its URL", async () => {
+    const showContextMenu = vi.fn(
+      async (
+        _items: readonly unknown[],
+        _position?: { x: number; y: number },
+      ): Promise<string | null> => "copy-link",
+    );
+    setNativeContextMenuMock(showContextMenu);
+    const writeText = vi.spyOn(navigator.clipboard, "writeText").mockResolvedValue(undefined);
+
+    const screen = await render(
+      <MessagesTimeline
+        {...buildProps()}
+        activeThreadId={ThreadId.make("thread-1")}
+        timelineEntries={[
+          buildAssistantTimelineEntry({
+            text: "Read [the release notes](https://example.com/notes?v=2) before updating.",
+          }),
+        ]}
+      />,
+    );
+
+    try {
+      const link = await vi.waitFor(() => {
+        const element = document.querySelector<HTMLAnchorElement>(
+          "[data-chat-copy-region='assistant'] a[href]",
+        );
+        expect(element).not.toBeNull();
+        return element!;
+      });
+      link.dispatchEvent(
+        new MouseEvent("contextmenu", {
+          bubbles: true,
+          cancelable: true,
+          clientX: 40,
+          clientY: 50,
+        }),
+      );
+      await vi.waitFor(() => {
+        expect(writeText).toHaveBeenCalledWith("https://example.com/notes?v=2");
+      });
+      const items = showContextMenu.mock.calls[0]?.[0] as unknown as ReadonlyArray<{ id: string }>;
+      expect(items.map((item) => item.id)).toEqual(["copy-link", "copy-message"]);
+
+      // Plain message text keeps the message-only menu.
+      showContextMenu.mockClear();
+      showContextMenu.mockResolvedValue(null);
+      link.parentElement?.dispatchEvent(
+        new MouseEvent("contextmenu", { bubbles: true, cancelable: true, clientX: 5, clientY: 5 }),
+      );
+      await vi.waitFor(() => expect(showContextMenu).toHaveBeenCalledTimes(1));
+      const plainItems = showContextMenu.mock.calls[0]?.[0] as unknown as ReadonlyArray<{
+        id: string;
+      }>;
+      expect(plainItems.map((item) => item.id)).toEqual(["copy-message"]);
+      expect(writeText).toHaveBeenCalledTimes(1);
+    } finally {
+      await screen.unmount();
+    }
+  });
+
   it("does not open the assistant context menu while text is selected", async () => {
     const showContextMenu = vi.fn(
       async (_items: readonly unknown[], _position?: { x: number; y: number }) =>

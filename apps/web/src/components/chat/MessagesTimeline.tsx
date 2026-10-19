@@ -75,7 +75,8 @@ import { useDelayedFlag } from "../../hooks/useDelayedFlag";
 import { buildExpandedImagePreview, ExpandedImagePreview } from "./ExpandedImagePreview";
 import { ProposedPlanCard } from "./ProposedPlanCard";
 import { MessageCopyButton } from "./MessageCopyButton";
-import { stackedThreadToast, toastManager } from "../ui/toast";
+import { anchoredToastManager, stackedThreadToast, toastManager } from "../ui/toast";
+import { findCopyableMessageLink } from "./messageLinkContextMenu";
 import { copyTextToClipboard } from "../../lib/copyToClipboard";
 import {
   computeStableMessagesTimelineRows,
@@ -1691,7 +1692,7 @@ type TimelineRow = MessagesTimelineRow;
 const SYNTHETIC_ASSISTANT_STREAM_MIN_JUMP_CHARS = 80;
 const SYNTHETIC_ASSISTANT_STREAM_FRAME_MS = 24;
 const SYNTHETIC_ASSISTANT_STREAM_MAX_FRAMES = 36;
-type AssistantMessageContextMenuAction = "copy-message";
+type AssistantMessageContextMenuAction = "copy-link" | "copy-message";
 
 function hasActiveTextSelection(): boolean {
   if (typeof window === "undefined") {
@@ -2091,10 +2092,50 @@ function AssistantTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "mess
       event.preventDefault();
       event.stopPropagation();
 
+      // This menu replaces the native one, so offer the link under the pointer
+      // too (file links have their own menu and never reach this handler).
+      const link = findCopyableMessageLink(event.target, event.currentTarget);
       const clicked = await localApi.contextMenu.show<AssistantMessageContextMenuAction>(
-        [{ id: "copy-message", label: uiText("Copy message", undefined, undefined, uiLocale) }],
+        [
+          ...(link
+            ? [
+                {
+                  id: "copy-link" as const,
+                  label: uiText("Copy link", undefined, undefined, uiLocale),
+                },
+              ]
+            : []),
+          { id: "copy-message", label: uiText("Copy message", undefined, undefined, uiLocale) },
+        ],
         { x: event.clientX, y: event.clientY },
       );
+
+      if (clicked === "copy-link" && link) {
+        try {
+          await copyTextToClipboard(link.url);
+          // Confirm beside the link itself, like copied file paths.
+          if (link.anchor.isConnected) {
+            anchoredToastManager.add({
+              data: { tooltipStyle: true },
+              positionerProps: { anchor: link.anchor },
+              timeout: 1200,
+              title: uiText("Link copied", undefined, undefined, uiLocale),
+            });
+          }
+        } catch (error) {
+          toastManager.add(
+            stackedThreadToast({
+              type: "error",
+              title: uiText("Unable to copy link", undefined, undefined, uiLocale),
+              description:
+                error instanceof Error
+                  ? error.message
+                  : uiText("Clipboard write failed.", undefined, undefined, uiLocale),
+            }),
+          );
+        }
+        return;
+      }
 
       if (clicked === "copy-message") {
         const copyText = prepareChatMessageMarkdownCopyText(row.message.text ?? "", {

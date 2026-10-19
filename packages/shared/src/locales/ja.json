@@ -3426,5 +3426,8 @@
   "{count, plural, one {# result} other {# results}}": "{count, plural, one {#件の結果} other {#件の結果}}",
   "{label} · after {count, plural, one {# reconnect} other {# reconnects}}": "{label} · {count, plural, one {#回の再接続後} other {#回の再接続後}}",
   "{label} · after {count}+ reconnects": "{label} · {count}回以上の再接続後",
-  "{value0} is signed in": "{value0} にログインしています"
+  "{value0} is signed in": "{value0} にログインしています",
+  "Copy link": "リンクをコピー",
+  "Link copied": "リンクをコピーしました",
+  "Unable to copy link": "リンクをコピーできません"
 }
