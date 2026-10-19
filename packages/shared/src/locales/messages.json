@@ -3206,7 +3206,8 @@
     "message": "Could not create chat",
     "locations": [
       "apps/web/src/components/NoActiveThreadState.tsx:36",
-      "apps/web/src/components/Sidebar.tsx:4594"
+      "apps/web/src/components/Sidebar.tsx:4594",
+      "apps/web/src/components/sidebar/ContentSidebarNewChatButton.tsx:29"
     ]
   },
   "Could not create pairing URL": {
@@ -7138,6 +7139,7 @@
       "apps/web/src/components/NoActiveThreadState.tsx:75",
       "apps/web/src/components/Sidebar.tsx:3144",
       "apps/web/src/components/desk/useDeskTabMetadata.ts:23",
+      "apps/web/src/components/sidebar/ContentSidebarNewChatButton.tsx:43",
       "apps/web/src/components/sidebar/SidebarNewChatButton.tsx:32",
       "apps/web/src/components/sidebar/SidebarNewChatButton.tsx:7"
     ]
@@ -9067,7 +9069,10 @@
   },
   "Reconnect to Cafe Code and try again.": {
     "message": "Reconnect to Cafe Code and try again.",
-    "locations": ["apps/web/src/components/NoActiveThreadState.tsx:37"]
+    "locations": [
+      "apps/web/src/components/NoActiveThreadState.tsx:37",
+      "apps/web/src/components/sidebar/ContentSidebarNewChatButton.tsx:30"
+    ]
   },
   "Reconnect to a compatible Cafe server before trying again.": {
     "message": "Reconnect to a compatible Cafe server before trying again.",

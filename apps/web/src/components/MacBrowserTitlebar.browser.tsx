@@ -9,6 +9,12 @@ import { page } from "vitest/browser";
 // fixture separate from the desktop fixture rather than mutating an export
 // after the hook has already imported the preload-host decision.
 vi.mock("../env", () => ({ isElectron: false }));
+vi.mock("./sidebar/ContentSidebarNewChatButton", async () => {
+  const { SidebarNewChatButton } = await import("./sidebar/SidebarNewChatButton");
+  return {
+    ContentSidebarNewChatButton: () => <SidebarNewChatButton onClick={() => {}} />,
+  };
+});
 vi.mock("../rpc/serverState", () => ({ useServerConfig: () => null }));
 vi.mock("../hooks/useSettings", () => ({
   useSettings: (select: (settings: UnifiedSettings) => unknown) => select(DEFAULT_UNIFIED_SETTINGS),
@@ -81,6 +87,12 @@ describe("ordinary macOS browser titlebar gate", () => {
       await expect
         .element(screen.getByRole("button", { name: "Toggle Sidebar", exact: true }))
         .toBeVisible();
+      const newChat = screen.getByRole("button", { name: "New chat", exact: true });
+      await expect.element(newChat).toBeVisible();
+      const toggle = header.querySelector('[data-sidebar="trigger"]')!;
+      const newChatBounds = newChat.element().getBoundingClientRect();
+      expect(newChatBounds.left).toBeGreaterThanOrEqual(toggle.getBoundingClientRect().right);
+      expect(newChatBounds.right).toBeLessThanOrEqual(header.getBoundingClientRect().right);
     } finally {
       await screen.unmount();
       host.remove();

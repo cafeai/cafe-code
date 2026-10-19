@@ -46,6 +46,10 @@ export default mergeConfig(
         // not an assertion or browser-input policy failure.
         "@base-ui/react/collapsible",
         "@base-ui/react/popover",
+        // Collapsed sidebar controls also run in the native reduced-motion
+        // context. Admit their separator dependency before collection rather
+        // than reoptimizing React's graph underneath an executing fixture.
+        "@base-ui/react/separator",
         "@base-ui/react/toast",
         "@effect/atom-react",
         "@tanstack/react-query",

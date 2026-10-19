@@ -201,21 +201,22 @@ The entrance utilities `animate-enter-rise`, `animate-enter-fade`,
 
 ### Patterns
 
-| Situation                                 | Motion                                                                                                                                                     |
-| ----------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Menu, select, popover, tooltip            | Fade + scale from 0.96 at the anchor (`origin-(--transform-origin)`): base/ease-out in, fast/ease-in out                                                   |
-| Dialog, command palette                   | Backdrop fade; panel fade + slight scale and rise: slow in, fast out                                                                                       |
-| Sheet, side panel, session rail           | Slide from its edge + fade                                                                                                                                 |
-| Sidebar collapse                          | The existing 200ms width/position slide (a documented exception, required by `AGENTS.md`) with `ease-out`; the chrome stays mounted while it exits         |
-| Switching chat, Desk tab or settings page | New content `animate-enter-rise` once it is ready; the old view leaves instantly                                                                           |
-| Push/back views (subagent detail)         | `animate-enter-from-end` in; back uses `animate-enter-from-start`                                                                                          |
-| List add, remove, reorder                 | `@formkit/auto-animate`                                                                                                                                    |
-| Expand/collapse                           | Rotate the chevron; revealed content `animate-enter-rise`                                                                                                  |
-| Live activity elapsed time                | Hover/focus expands a clipped grid column and fades its text using base/ease-out; keep the line height steady and disable transitions under reduced motion |
-| Segmented control, tabs                   | Indicator slides with `transform`                                                                                                                          |
-| Toast                                     | Slide + fade: emphasis in, fast out                                                                                                                        |
-| New chat message                          | `animate-enter-rise`, only for rows appended live — never for rows a virtualized list re-mounts while scrolling                                            |
-| Looping status (spin, pulse)              | The existing stepped `animate-*` tokens only                                                                                                               |
+| Situation                                 | Motion                                                                                                                                                                                   |
+| ----------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Menu, select, popover, tooltip            | Fade + scale from 0.96 at the anchor (`origin-(--transform-origin)`): base/ease-out in, fast/ease-in out                                                                                 |
+| Dialog, command palette                   | Backdrop fade; panel fade + slight scale and rise: slow in, fast out                                                                                                                     |
+| Sheet, side panel, session rail           | Slide from its edge + fade                                                                                                                                                               |
+| Sidebar collapse                          | The existing 200ms width/position slide (a documented exception, required by `AGENTS.md`) with `ease-out`; the chrome stays mounted while it exits                                       |
+| Collapsed sidebar header actions          | The reopen/New chat pair slides and fades over the same 200ms interval in both directions; hidden controls become inert immediately; reduced motion fades entrance and exits immediately |
+| Switching chat, Desk tab or settings page | New content `animate-enter-rise` once it is ready; the old view leaves instantly                                                                                                         |
+| Push/back views (subagent detail)         | `animate-enter-from-end` in; back uses `animate-enter-from-start`                                                                                                                        |
+| List add, remove, reorder                 | `@formkit/auto-animate`                                                                                                                                                                  |
+| Expand/collapse                           | Rotate the chevron; revealed content `animate-enter-rise`                                                                                                                                |
+| Live activity elapsed time                | Hover/focus expands a clipped grid column and fades its text using base/ease-out; keep the line height steady and disable transitions under reduced motion                               |
+| Segmented control, tabs                   | Indicator slides with `transform`                                                                                                                                                        |
+| Toast                                     | Slide + fade: emphasis in, fast out                                                                                                                                                      |
+| New chat message                          | `animate-enter-rise`, only for rows appended live — never for rows a virtualized list re-mounts while scrolling                                                                          |
+| Looping status (spin, pulse)              | The existing stepped `animate-*` tokens only                                                                                                                                             |
 
 ### Rules
 
@@ -227,6 +228,10 @@ The entrance utilities `animate-enter-rise`, `animate-enter-fade`,
   changing composer height. Never animate its per-second text updates.
 - A minimized composer tools tab is a shallow lip. Its decoration may animate
   height and its caret may lower; keep the larger click area and editor steady.
+- Mac content-header leading padding coordinates with the sidebar's own 200ms
+  layout slide only while its collapsed controls change state. This native
+  traffic-light compensation keeps retained exit paint out of the system
+  buttons; it is disabled with immediate exit under reduced motion.
 - Every overlay animates in **and** out, and exits are faster than entrances.
 - Animations are interruptible, and controls are usable immediately.
 - Never animate streaming tokens, per-event updates or virtualized re-mounts.

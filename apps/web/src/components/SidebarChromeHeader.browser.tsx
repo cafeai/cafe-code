@@ -3,9 +3,18 @@ import "../index.css";
 import type { CSSProperties } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { render } from "vitest-browser-react";
-import { page } from "vitest/browser";
+import { page, userEvent } from "vitest/browser";
 
 vi.mock("../env", () => ({ isElectron: true }));
+const actions = vi.hoisted(() => ({ newChat: vi.fn(async () => {}) }));
+vi.mock("./sidebar/ContentSidebarNewChatButton", async () => {
+  const { SidebarNewChatButton } = await import("./sidebar/SidebarNewChatButton");
+  return {
+    // Keep native button and sidebar behavior without borrowing router,
+    // bootstrap or draft ownership for this isolated chrome fixture.
+    ContentSidebarNewChatButton: () => <SidebarNewChatButton onClick={actions.newChat} />,
+  };
+});
 
 import { APP_STAGE_LABEL } from "../branding";
 import { useMacDesktopTitlebar } from "../hooks/useMacDesktopTitlebar";
@@ -15,6 +24,7 @@ import { ContentSidebarTriggerWithUnreadDot } from "./sidebar/unseenCompletions"
 import { Sidebar, SidebarProvider } from "./ui/sidebar";
 
 beforeEach(async () => {
+  actions.newChat.mockClear();
   applyInterfaceScalePercent(100);
   await page.viewport(1100, 800);
 });
@@ -60,6 +70,7 @@ describe("desktop sidebar header", () => {
           </Sidebar>
           <main className="min-w-0 flex-1">
             <TransitionContentHeader />
+            <button type="button">After content controls</button>
           </main>
         </SidebarProvider>,
         { container: host },
@@ -72,39 +83,72 @@ describe("desktop sidebar header", () => {
         const contentHeader = host.querySelector<HTMLElement>(
           '[data-testid="transition-content-header"]',
         )!;
-        expect(contentHeader.querySelector('[data-sidebar="trigger"]')).toBeNull();
+        const controls = contentHeader.querySelector<HTMLElement>(
+          '[data-sidebar="content-controls"]',
+        )!;
+        expect(controls.hidden).toBe(true);
+        expect(controls.inert).toBe(true);
+        expect(controls.getAttribute("aria-hidden")).toBe("true");
 
         await screen.getByRole("button", { name: "Toggle Sidebar", exact: true }).click();
         await vi.waitFor(() => {
           expect(sidebar.dataset.state).toBe("collapsed");
-          expect(contentHeader.querySelector('[data-sidebar="trigger"]')).not.toBeNull();
+          expect(controls.hidden).toBe(false);
+          expect(controls.inert).toBe(false);
         });
-        // The same mounted nodes survive closing. In particular, content's
-        // trigger is never remounted to fabricate the close-only entrance state.
+        // Navigation chrome survives closing, while its content counterpart
+        // becomes an immediately usable native control group.
         expect(container.isConnected).toBe(true);
         expect(container.querySelector('[aria-label="Cafe Code"]')).toBe(wordmark);
         const reopen = contentHeader.querySelector<HTMLButtonElement>('[data-sidebar="trigger"]')!;
-        const entrance = reopen.parentElement!;
-        expect(entrance.classList.contains("animate-enter-fade")).toBe(true);
+        const newChat = screen
+          .getByTestId("transition-content-header")
+          .getByRole("button", { name: "New chat", exact: true });
+        await expect.element(newChat).toBeVisible();
         await vi.waitFor(() => {
           // Observe the existing transition's settled geometry; do not add a
           // separate sleep, deadline, or wider retry budget to qualify it.
           expect(gap.getBoundingClientRect().width).toBe(0);
           expect(container.getBoundingClientRect().right).toBe(0);
           expect(contentHeader.getBoundingClientRect().left).toBe(0);
-          const bounds = reopen.getBoundingClientRect();
+          const newChatBounds = newChat.element().getBoundingClientRect();
+          expect(newChatBounds.left).toBeGreaterThanOrEqual(reopen.getBoundingClientRect().right);
+          expect(newChatBounds.right).toBeLessThanOrEqual(
+            contentHeader.getBoundingClientRect().right,
+          );
         });
         expect(getComputedStyle(reopen).getPropertyValue("-webkit-app-region")).toBe("no-drag");
+        expect(getComputedStyle(newChat.element()).getPropertyValue("-webkit-app-region")).toBe(
+          "no-drag",
+        );
+        await newChat.click();
+        expect(actions.newChat).toHaveBeenCalledOnce();
+        // Shift-Tab from the following native sentinel reaches the final
+        // content action without assigning focus or replaying input.
+        await screen.getByRole("button", { name: "After content controls", exact: true }).click();
+        await userEvent.keyboard("{Shift>}{Tab}{/Shift}");
+        await expect.element(newChat).toHaveFocus();
+        await userEvent.keyboard("{Enter}");
+        expect(actions.newChat).toHaveBeenCalledTimes(2);
         await screen
           .getByTestId("transition-content-header")
           .getByRole("button", { name: "Toggle Sidebar", exact: true })
           .click();
         await vi.waitFor(() => {
           expect(sidebar.dataset.state).toBe("expanded");
-          expect(contentHeader.querySelector('[data-sidebar="trigger"]')).toBeNull();
+          expect(controls.hidden).toBe(true);
+          expect(controls.inert).toBe(true);
+          expect(controls.getAttribute("aria-hidden")).toBe("true");
           expect(container.getBoundingClientRect().left).toBe(0);
           expect(gap.getBoundingClientRect().width).toBe(320);
         });
+        await screen.getByRole("button", { name: "After content controls", exact: true }).click();
+        await userEvent.keyboard("{Shift>}{Tab}{/Shift}");
+        await vi.waitFor(() => {
+          expect(document.activeElement).toBe(container.querySelector('[data-sidebar="trigger"]'));
+          expect(controls.contains(document.activeElement)).toBe(false);
+        });
+        expect(actions.newChat).toHaveBeenCalledTimes(2);
         expect(container.querySelector('[aria-label="Cafe Code"]')).toBe(wordmark);
       } finally {
         await screen.unmount();

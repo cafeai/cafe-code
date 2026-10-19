@@ -35,6 +35,7 @@ const mocks = vi.hoisted(() => ({
   palette: vi.fn(),
   macPlatform: false,
   showSidebarTrigger: false,
+  newChat: vi.fn(async () => {}),
   openInEditor: vi.fn(async () => undefined),
   openTerminal: vi.fn(async () => undefined),
   // Status rendered by every tab's metadata; null keeps the fixture idle.
@@ -87,6 +88,12 @@ vi.mock("../../environments/primary", () => ({
   getPrimaryKnownEnvironment: () => null,
 }));
 vi.mock("../../env", () => ({ isElectron: true }));
+vi.mock("../sidebar/ContentSidebarNewChatButton", async () => {
+  const { SidebarNewChatButton } = await import("../sidebar/SidebarNewChatButton");
+  return {
+    ContentSidebarNewChatButton: () => <SidebarNewChatButton onClick={mocks.newChat} />,
+  };
+});
 vi.mock("../../environments/workspaceData", () => ({
   // This layout fixture has no transcript inventory. Keep its real sidebar
   // control isolated from backend bootstrap and unrelated chat subscriptions.
@@ -259,6 +266,7 @@ beforeEach(async () => {
   mocks.primaryEnvironmentId = environmentId;
   mocks.macPlatform = false;
   mocks.showSidebarTrigger = false;
+  mocks.newChat.mockClear();
   mocks.openInEditor.mockClear();
   mocks.openTerminal.mockClear();
   mocks.composer.draftThreadsByThreadKey = {};
@@ -745,15 +753,23 @@ describe("Desk workspace navigation chrome", () => {
           const right = bars.find((bar) => bar.dataset.windowLeft === "false")!;
           const lower = bars.find((bar) => bar.dataset.windowTop === "false")!;
           const bounds = left.querySelector('[data-sidebar="trigger"]')!.getBoundingClientRect();
+          const newChat = left.querySelector('button[aria-label="New chat"]')!;
+          const newChatBounds = newChat.getBoundingClientRect();
           expect(bounds.left).toBeGreaterThanOrEqual(left.getBoundingClientRect().left + 70);
           expect(bounds.top).toBeGreaterThan(2);
           expect(bounds.bottom).toBeLessThan(48);
+          expect(newChatBounds.left).toBeGreaterThanOrEqual(bounds.right);
+          expect(newChatBounds.right).toBeLessThanOrEqual(left.getBoundingClientRect().right);
+          expect(getComputedStyle(newChat).getPropertyValue("-webkit-app-region")).toBe("no-drag");
           expect(parseFloat(getComputedStyle(right).paddingLeft)).toBe(0);
           expect(parseFloat(getComputedStyle(lower).paddingLeft)).toBe(0);
           for (const bar of [right, lower]) {
-            expect(getComputedStyle(bar.querySelector('[data-sidebar="trigger"]')!).display).toBe(
-              "none",
-            );
+            const controls = bar.querySelector<HTMLElement>('[data-sidebar="content-controls"]')!;
+            expect(getComputedStyle(controls).display).toBe("none");
+            expect(bar.querySelector('[data-sidebar="trigger"]')!.getClientRects()).toHaveLength(0);
+            expect(
+              bar.querySelector('button[aria-label="New chat"]')!.getClientRects(),
+            ).toHaveLength(0);
           }
         });
       } finally {

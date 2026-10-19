@@ -6,6 +6,7 @@ import { useUiStateStore } from "../../uiStateStore";
 import { hasUnseenCompletion } from "../Sidebar.logic";
 import { SidebarTrigger, useSidebar } from "../ui/sidebar";
 import { cn } from "~/lib/utils";
+import { ContentSidebarNewChatButton } from "./ContentSidebarNewChatButton";
 
 /** True when any thread has a completed turn the user hasn't viewed yet. */
 export function useHasUnseenThreadCompletions(): boolean {
@@ -65,30 +66,37 @@ export function SidebarTriggerWithUnreadDot({ className }: { className?: string 
  * mobile always needs it because the sidebar lives in a modal sheet.
  */
 export function ContentSidebarTriggerWithUnreadDot({ className }: { className?: string }) {
-  const { isMobile, open } = useSidebar();
-  // Only a real close animates the trigger in. A chat view that mounts while
-  // the sidebar is already hidden (switching tabs) shows it immediately.
-  const [previousOpen, setPreviousOpen] = useState(open);
-  const [animateEntrance, setAnimateEntrance] = useState(false);
-  if (previousOpen !== open) {
-    setPreviousOpen(open);
-    setAnimateEntrance(!open);
+  const { isMobile, open, openMobile } = useSidebar();
+  const sidebarOpen = isMobile ? openMobile : open;
+  // Arm motion only after a real toggle. Switching chats with navigation
+  // already closed must not replay an entrance on every header mount.
+  const [previousOpen, setPreviousOpen] = useState(sidebarOpen);
+  const [animate, setAnimate] = useState(false);
+  if (previousOpen !== sidebarOpen) {
+    setPreviousOpen(sidebarOpen);
+    setAnimate(true);
   }
-  if (!isMobile && open) {
-    return null;
-  }
+  const hidden = !isMobile && sidebarOpen;
   return (
-    <SidebarTriggerWithUnreadDot
-      className={cn(
-        // The actual titlebar owns native clearance. This control is shared
-        // by flush Desk bars and padded chat/settings headers, so a child
-        // margin cannot safely assume any particular parent padding.
-        // Desktop: the trigger appears as soon as the sidebar starts its 200ms
-        // slide out, so fade it in as the slide finishes instead of popping it
-        // into the header mid-slide. Mobile (a modal sheet) keeps it static.
-        !isMobile && animateEntrance && "animate-enter-fade [animation-delay:150ms]",
-        className,
-      )}
-    />
+    <span
+      data-sidebar="content-controls"
+      data-animate={!isMobile && animate}
+      className={cn("content-sidebar-controls", className)}
+      hidden={hidden}
+      aria-hidden={hidden || undefined}
+      inert={hidden}
+    >
+      {/* Native CSS retains the exit paint while hidden/inert revoke focus and
+          activation immediately. No timer or late completion can resurrect it.
+          The parent header, not these shared controls, owns native clearance. */}
+      <SidebarTriggerWithUnreadDot />
+      <span
+        hidden={isMobile && sidebarOpen}
+        aria-hidden={sidebarOpen || undefined}
+        inert={sidebarOpen}
+      >
+        <ContentSidebarNewChatButton />
+      </span>
+    </span>
   );
 }

@@ -566,10 +566,69 @@ body::after {
      draws its divider with an inset shadow and needs no border compensation. */
   padding-top: 1px;
 }
-[data-mac-titlebar="true"]:has([data-sidebar="trigger"]):not([data-slot="sidebar-header"]):not(
-    [data-window-left="false"]
-  ):not([data-window-top="false"]) {
+[data-mac-titlebar="true"]:has([data-sidebar="content-controls"]:not([hidden])):not(
+    [data-slot="sidebar-header"]
+  ):not([data-window-left="false"]):not([data-window-top="false"]) {
   padding-left: var(--app-mac-titlebar-leading-space);
+}
+
+/* Coordinate native clearance with the sidebar's own layout slide. Dropping
+   the reservation instantly would move the retained exit paint under the
+   traffic lights before the sidebar gap has moved the content header away.
+   This is native-window layout compensation, not a general padding animation. */
+[data-mac-titlebar="true"]:has([data-sidebar="content-controls"][data-animate="true"]):not(
+    [data-slot="sidebar-header"]
+  ):not([data-window-left="false"]):not([data-window-top="false"]) {
+  transition: padding-left 200ms var(--ease-out);
+}
+
+/* Match the off-canvas sidebar's 200ms slide. A discrete display transition
+   retains both controls for exit painting, but the React hidden/inert state
+   withdraws them from interaction immediately. Rapid reversals are native CSS
+   transitions, not delayed React callbacks or queued chat actions. */
+.content-sidebar-controls {
+  display: inline-flex;
+  flex-shrink: 0;
+  align-items: center;
+  gap: 0.25rem;
+  opacity: 1;
+  transform: translateX(0);
+}
+.content-sidebar-controls[data-animate="true"] {
+  transition:
+    opacity 200ms var(--ease-out),
+    transform 200ms var(--ease-out),
+    display 200ms allow-discrete;
+}
+.content-sidebar-controls[hidden] {
+  display: none;
+  opacity: 0;
+  transform: translateX(-0.5rem);
+}
+@starting-style {
+  .content-sidebar-controls[data-animate="true"]:not([hidden]) {
+    opacity: 0;
+    transform: translateX(-0.5rem);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .content-sidebar-controls,
+  .content-sidebar-controls[hidden] {
+    transform: none;
+  }
+  /* Entrance is a plain fade. Exit is immediate, so no retained paint needs
+     animated native clearance when movement has been disabled. */
+  .content-sidebar-controls[hidden],
+  [data-mac-titlebar="true"]:has([data-sidebar="content-controls"][data-animate="true"]):not(
+      [data-slot="sidebar-header"]
+    ):not([data-window-left="false"]):not([data-window-top="false"]) {
+    transition: none;
+  }
+  @starting-style {
+    .content-sidebar-controls[data-animate="true"]:not([hidden]) {
+      transform: none;
+    }
+  }
 }
 
 /* Dialogs centre in 1fr/auto/3fr rows inside the viewport's 1rem padding. On

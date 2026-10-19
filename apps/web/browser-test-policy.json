@@ -4,6 +4,7 @@
   "reducedMotionFiles": [
     "src/components/chat/CodexContextWindowControl.motion.browser.tsx",
     "src/components/chat/ProviderDiagnosticWorkEntry.motion.browser.tsx",
+    "src/components/sidebar/ContentSidebarNewChatButton.motion.browser.tsx",
     "src/components/visualizations/Visualizations.motion.browser.tsx",
     "src/components/chat/ScrollToBottomControl.motion.browser.tsx",
     "src/components/chat/ExpandedImageDialog.motion.browser.tsx"
@@ -47,6 +48,7 @@
     "src/components/settings/DataProfileSettings.browser.tsx",
     "src/components/ContextMenu.browser.tsx",
     "src/components/SidebarChromeHeader.browser.tsx",
+    "src/components/sidebar/ContentSidebarNewChatButton.browser.tsx",
     "src/components/MacTitlebar.browser.tsx",
     "src/components/MacBrowserTitlebar.browser.tsx",
     "src/components/OnboardingScreen.browser.tsx",

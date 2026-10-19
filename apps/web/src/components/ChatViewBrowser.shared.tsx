@@ -11305,6 +11305,35 @@ describe(`ChatView full app (${chatViewBrowserPart})`, () => {
         expect(useDeskStore.getState().desk.sidebarMode).toBe("desk");
         expect(document.querySelector("[data-desk-chat-row]")).toBeNull();
         expect(useDeskStore.getState().desk.groups.g1?.tabs).toEqual([]);
+        // The collapsed header is another entrypoint to the exact same draft,
+        // not a project-derived creation path or an implicit first submission.
+        const closeSidebar = document.querySelector<HTMLButtonElement>(
+          '[data-slot="sidebar-header"] [data-sidebar="trigger"]',
+        )!;
+        await page.elementLocator(closeSidebar).click();
+        const headerNewChat = await waitForElement(
+          () =>
+            document.querySelector<HTMLButtonElement>(
+              '[data-sidebar="content-controls"]:not([hidden]) button[aria-label="New chat"]',
+            ),
+          "Collapsed-header New chat action missing",
+        );
+        await expect.element(headerNewChat).toBeEnabled();
+        await page.elementLocator(headerNewChat).click();
+        await waitForStandaloneComposerText("First standalone conversation");
+        expect(mounted.router.state.location.pathname).toBe(`/draft/${draftId}`);
+        expect(Object.keys(useComposerDraftStore.getState().draftThreadsByThreadKey)).toEqual([
+          draftId,
+        ]);
+        expect(useComposerDraftStore.getState().getDraftSession(draftId)?.environmentId).toBe(
+          LOCAL_ENVIRONMENT_ID,
+        );
+        expect(useDeskStore.getState().draftEditors[draftId]?.groupId).toBe("g1");
+        expect(useComposerDraftStore.getState().getComposerDraft(draftId)?.subagentLimits).toEqual({
+          codex: 5,
+        });
+        expect(useDeskStore.getState().desk.sidebarMode).toBe("desk");
+        expect(useDeskStore.getState().desk.groups.g1?.tabs).toEqual([]);
         expect(
           wsRequests.some((body) => body._tag === ORCHESTRATION_WS_METHODS.dispatchCommand),
         ).toBe(false);
@@ -11354,6 +11383,10 @@ describe(`ChatView full app (${chatViewBrowserPart})`, () => {
           expect(mounted.router.state.location.pathname).toBe(serverThreadPath(threadId));
         });
         expect(useDeskStore.getState().desk.sidebarMode).toBe("desk");
+        const reopenSidebar = document.querySelector<HTMLButtonElement>(
+          '[data-sidebar="content-controls"]:not([hidden]) [data-sidebar="trigger"]',
+        )!;
+        await page.elementLocator(reopenSidebar).click();
         await page.getByRole("button", { name: "Projects", exact: true }).click();
         await expect.element(page.getByTestId(`thread-row-${threadId}`)).toBeVisible();
         expect(document.querySelectorAll('[data-testid^="thread-row-"]')).toHaveLength(1);
