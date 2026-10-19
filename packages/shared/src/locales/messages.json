@@ -2195,7 +2195,7 @@
   },
   "Choose one remote sign-in method.": {
     "message": "Choose one remote sign-in method.",
-    "locations": ["apps/web/src/environments/runtime/service.ts:1851"]
+    "locations": ["apps/web/src/environments/runtime/service.ts:1859"]
   },
   "Choose question": {
     "message": "Choose question",
@@ -5016,7 +5016,7 @@
   },
   "Enter the server admin password.": {
     "message": "Enter the server admin password.",
-    "locations": ["apps/web/src/environments/runtime/service.ts:1845"]
+    "locations": ["apps/web/src/environments/runtime/service.ts:1853"]
   },
   "Enter {source} repository ({pathHint})": {
     "message": "Enter {source} repository ({pathHint})",
@@ -7847,7 +7847,7 @@
   },
   "No websocket client registered for environment {environmentId}.": {
     "message": "No websocket client registered for environment {environmentId}.",
-    "locations": ["apps/web/src/environments/runtime/service.ts:1770"]
+    "locations": ["apps/web/src/environments/runtime/service.ts:1778"]
   },
   "No workspace directory is available.": {
     "message": "No workspace directory is available.",
@@ -10468,7 +10468,7 @@
   },
   "Saved environment not found.": {
     "message": "Saved environment not found.",
-    "locations": ["apps/web/src/environments/runtime/service.ts:1799"]
+    "locations": ["apps/web/src/environments/runtime/service.ts:1807"]
   },
   "Saved environment {environmentId} connection was cancelled.": {
     "message": "Saved environment {environmentId} connection was cancelled.",
@@ -13126,7 +13126,7 @@
   },
   "Unable to persist saved environment credentials.": {
     "message": "Unable to persist saved environment credentials.",
-    "locations": ["apps/web/src/environments/runtime/service.ts:1900"]
+    "locations": ["apps/web/src/environments/runtime/service.ts:1908"]
   },
   "Unable to remove keybinding": {
     "message": "Unable to remove keybinding",

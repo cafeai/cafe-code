@@ -150,7 +150,11 @@ workspaces. Primary-only desktop and browser sessions keep their existing contro
 wording and settings save behavior. Selecting a server switches the whole app:
 chat and project lists, search, new chats/projects, Archive, Recycle Bin, task
 activity, unread indicators, provider updates, usage, diagnostics and server-backed
-settings all belong to that server. Emptying the Recycle Bin affects only its
+settings all belong to that server. Saved connections apply streamed provider
+status changes to that server's current configuration after its identity snapshot.
+Enabling a provider, completing login or refreshing status updates its availability,
+models and last-checked time without reconnecting, while retaining newer settings
+and leaving other servers unchanged. Emptying the Recycle Bin affects only its
 history. Other connected servers keep their work and cached data, and do not
 appear in the selected server's catalogs or activity indicators.
 

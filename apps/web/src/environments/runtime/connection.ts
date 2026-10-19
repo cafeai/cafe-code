@@ -3,6 +3,7 @@ import type {
   OrchestrationShellSnapshot,
   OrchestrationShellStreamEvent,
   ServerConfig,
+  ServerConfigProviderStatusesPayload,
   ServerConfigSettingsUpdatedPayload,
   ServerLifecycleWelcomePayload,
 } from "@cafecode/contracts";
@@ -37,6 +38,7 @@ interface EnvironmentConnectionInput extends OrchestrationHandlers {
   readonly client: WsRpcClient;
   readonly refreshMetadata?: () => Promise<void>;
   readonly onConfigSnapshot?: (config: ServerConfig) => void;
+  readonly onProviderStatuses?: (payload: ServerConfigProviderStatusesPayload) => void;
   readonly onSettingsUpdated?: (payload: ServerConfigSettingsUpdatedPayload) => void;
   readonly onWelcome?: (payload: ServerLifecycleWelcomePayload) => void;
 }
@@ -114,6 +116,14 @@ export function createEnvironmentConnection(
     ? input.client.server.subscribeConfig(
         (event: Parameters<Parameters<WsRpcClient["server"]["subscribeConfig"]>[0]>[0]) => {
           if (disposed) return;
+          if (
+            event.type === "providerStatuses" &&
+            input.kind === "saved" &&
+            observedConfigSnapshot
+          ) {
+            input.onProviderStatuses?.(event.payload);
+            return;
+          }
           if (
             event.type === "settingsUpdated" &&
             input.kind === "saved" &&

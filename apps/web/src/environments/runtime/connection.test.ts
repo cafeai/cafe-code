@@ -1,8 +1,10 @@
 import {
   DEFAULT_SERVER_SETTINGS,
   EnvironmentId,
+  ProviderDriverKind,
   ProviderInstanceId,
   type ServerConfigStreamEvent,
+  type ServerProvider,
 } from "@cafecode/contracts";
 import { describe, expect, it, vi } from "vitest";
 
@@ -140,6 +142,57 @@ function createTestClient() {
 }
 
 describe("createEnvironmentConnection", () => {
+  it("delivers saved-provider status changes after the identity snapshot and retires disposed callbacks", async () => {
+    const environmentId = EnvironmentId.make("env-1");
+    const { client, emitConfigEvent, emitConfigSnapshot } = createTestClient();
+    const onProviderStatuses = vi.fn();
+    const connection = createEnvironmentConnection({
+      kind: "saved",
+      knownEnvironment: {
+        id: "env-1",
+        label: "Remote env",
+        source: "manual",
+        target: { httpBaseUrl: "http://example.test", wsBaseUrl: "ws://example.test" },
+        environmentId,
+      },
+      client,
+      applyShellEvent: vi.fn(),
+      syncShellSnapshot: vi.fn(),
+      onProviderStatuses,
+    });
+    const provider: ServerProvider = {
+      instanceId: ProviderInstanceId.make("codex"),
+      driver: ProviderDriverKind.make("codex"),
+      enabled: true,
+      installed: true,
+      version: "0.159.3",
+      status: "ready",
+      auth: { status: "authenticated" },
+      checkedAt: "2026-10-19T22:33:38.151Z",
+      models: [],
+      slashCommands: [],
+      skills: [],
+    };
+    const update: ServerConfigStreamEvent = {
+      version: 1,
+      type: "providerStatuses",
+      payload: { providers: [provider] },
+    };
+    emitConfigEvent(update);
+    expect(onProviderStatuses).not.toHaveBeenCalled();
+    emitConfigSnapshot(environmentId);
+    emitConfigEvent(update);
+    expect(onProviderStatuses).toHaveBeenCalledExactlyOnceWith(update.payload);
+    emitConfigEvent({ ...update, payload: { providers: [] } });
+    expect(onProviderStatuses).toHaveBeenLastCalledWith({ providers: [] });
+    expect(client.server.getConfig).not.toHaveBeenCalled();
+    expect(client.server.refreshProviders).not.toHaveBeenCalled();
+    const retainedCallback = vi.mocked(client.server.subscribeConfig).mock.calls[0]?.[0];
+    await connection.dispose();
+    retainedCallback?.(update);
+    expect(onProviderStatuses).toHaveBeenCalledTimes(2);
+  });
+
   it("delivers selected saved-server settings metadata after its snapshot and retires disposed callbacks", async () => {
     const environmentId = EnvironmentId.make("env-1");
     const { client, emitConfigEvent, emitConfigSnapshot } = createTestClient();

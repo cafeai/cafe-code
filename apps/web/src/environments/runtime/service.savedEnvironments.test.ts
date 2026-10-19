@@ -1,5 +1,11 @@
 import { QueryClient } from "@tanstack/react-query";
-import { EnvironmentId } from "@cafecode/contracts";
+import {
+  DEFAULT_SERVER_SETTINGS,
+  EnvironmentId,
+  ProviderDriverKind,
+  ProviderInstanceId,
+  type ServerProvider,
+} from "@cafecode/contracts";
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
 const mockCreateEnvironmentConnection = vi.fn();
@@ -10,6 +16,13 @@ const mockListSavedEnvironmentRecords = vi.fn();
 const mockSavedEnvironmentRegistrySubscribe = vi.fn();
 const mockReadSavedEnvironmentBearerToken = vi.fn();
 const mockGetSavedEnvironmentRecord = vi.fn();
+const mockSavedRuntimeById: Record<string, any> = {};
+const mockPatchSavedRuntime = vi.fn((environmentId: string, patch: Record<string, unknown>) => {
+  mockSavedRuntimeById[environmentId] = {
+    ...mockSavedRuntimeById[environmentId],
+    ...patch,
+  };
+});
 
 function MockWsTransport() {
   return undefined;
@@ -54,8 +67,9 @@ vi.mock("./catalog", () => ({
   },
   useSavedEnvironmentRuntimeStore: {
     getState: () => ({
+      byId: mockSavedRuntimeById,
       ensure: vi.fn(),
-      patch: vi.fn(),
+      patch: mockPatchSavedRuntime,
       clear: vi.fn(),
     }),
   },
@@ -235,6 +249,9 @@ describe("saved environment startup", () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    for (const environmentId of Object.keys(mockSavedRuntimeById)) {
+      delete mockSavedRuntimeById[environmentId];
+    }
 
     savedConnectionCreated = new Promise<void>((resolve) => {
       signalSavedConnectionCreated = resolve;
@@ -302,6 +319,58 @@ describe("saved environment startup", () => {
 
     stop();
     await resetEnvironmentServiceForTests();
+  });
+
+  it("updates the remote provider catalogue while retaining its latest settings and other environments", async () => {
+    const { startEnvironmentConnectionService } = await import("./service");
+    const stop = startEnvironmentConnectionService(new QueryClient());
+    await savedConnectionCreated;
+    await remoteSessionStateRequested;
+    const input = mockCreateEnvironmentConnection.mock.calls.find(
+      ([candidate]) => candidate.kind === "saved",
+    )?.[0];
+    expect(input).toBeDefined();
+    const provider: ServerProvider = {
+      instanceId: ProviderInstanceId.make("codex"),
+      driver: ProviderDriverKind.make("codex"),
+      enabled: true,
+      installed: true,
+      version: "0.159.3",
+      status: "ready",
+      auth: { status: "authenticated" },
+      checkedAt: "2026-10-19T22:33:38.151Z",
+      models: [],
+      slashCommands: [],
+      skills: [],
+    };
+    input.onConfigSnapshot({
+      ...configSnapshot,
+      providers: [{ ...provider, enabled: false, status: "disabled" }],
+    });
+    const settings = {
+      ...DEFAULT_SERVER_SETTINGS,
+      providerInstances: {
+        [provider.instanceId]: { driver: provider.driver, enabled: true, debugStateSharing: true },
+      },
+    };
+    const providerDataProfiles = { [provider.instanceId]: { scope: "shared" } };
+    input.onSettingsUpdated({ settings, providerDataProfiles });
+    const otherConfig = { providers: [{ ...provider, enabled: false }] };
+    mockSavedRuntimeById["another-remote"] = { serverConfig: otherConfig };
+
+    const providers = [provider];
+    input.onProviderStatuses?.({ providers });
+    expect(mockSavedRuntimeById[savedRecord.environmentId].serverConfig).toMatchObject({
+      environment: configSnapshot.environment,
+      providers,
+      settings,
+      providerDataProfiles,
+    });
+    expect(mockSavedRuntimeById[savedRecord.environmentId].serverConfig.providers).toBe(providers);
+    expect(mockSavedRuntimeById["another-remote"].serverConfig).toBe(otherConfig);
+    expect(input.client.server.getConfig).not.toHaveBeenCalled();
+    expect(input.client.server.refreshProviders).not.toHaveBeenCalled();
+    stop();
   });
 
   it("coalesces hydration and registry sync so the initial saved connection only starts once", async () => {

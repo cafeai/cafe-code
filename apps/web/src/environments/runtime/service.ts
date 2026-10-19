@@ -1600,6 +1600,14 @@ async function ensureSavedEnvironmentConnection(
               serverConfig: projectServerConfigSettings(current, payload),
             });
         },
+        onProviderStatuses: (payload) => {
+          const store = useSavedEnvironmentRuntimeStore.getState();
+          const current = store.byId[activeRecord.environmentId]?.serverConfig;
+          if (current)
+            store.patch(activeRecord.environmentId, {
+              serverConfig: { ...current, providers: payload.providers },
+            });
+        },
         onWelcome: (payload) => {
           useSavedEnvironmentRuntimeStore.getState().patch(activeRecord.environmentId, {
             descriptor: payload.environment,
