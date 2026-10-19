@@ -25,7 +25,9 @@ export function stagedYarnProjectFiles(manifest: string, lockfile: string): read
   const patches = new Set<string>();
   for (const match of `${manifest}\n${lockfile}`.matchAll(/\.yarn\/patches\/[^\s"'#&:]+/gu)) {
     const relative = match[0];
-    if (!/^\.yarn\/patches\/[A-Za-z0-9_-]+\.patch$/u.test(relative)) {
+    // Yarn's generated names retain a scope marker and dots in the version.
+    // Admit one filename only; parent segments and nested paths stay refused.
+    if (!/^\.yarn\/patches\/@?[A-Za-z0-9][A-Za-z0-9._-]*\.patch$/u.test(relative)) {
       throw new Error("Invalid staged Yarn patch path.");
     }
     patches.add(relative);
