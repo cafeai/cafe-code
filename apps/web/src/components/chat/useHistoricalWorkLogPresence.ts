@@ -12,6 +12,8 @@ import { readEnvironmentApi } from "../../environmentApi";
 import {
   filterHistoricalWorkLogSummariesByPresence,
   findHistoricalWorkLogPresenceCandidates,
+  preservesEarlierWorkLogPresence,
+  type EarlierWorkLogPresenceFilters,
 } from "./MessagesTimeline.logic";
 
 type HistoricalWorkLogSummaries = ReadonlyMap<TurnId, HistoricalWorkLogSummary>;
@@ -20,7 +22,12 @@ interface HistoricalWorkLogPresenceState {
   readonly scopeKey: string;
   /** Undefined is an attempted but inconclusive read, never presence proof. */
   readonly presenceByTurnId: ReadonlyMap<TurnId, boolean | undefined>;
-  readonly revisionByTurnId: ReadonlyMap<TurnId, string>;
+  readonly revisionByTurnId: ReadonlyMap<TurnId, HistoricalWorkLogPresenceRevision>;
+}
+
+interface HistoricalWorkLogPresenceRevision {
+  readonly key: string;
+  readonly filters: EarlierWorkLogPresenceFilters;
 }
 
 const EMPTY_HISTORICAL_WORK_LOG_PRESENCE = new Map<TurnId, boolean | undefined>();
@@ -38,8 +45,26 @@ function presenceRevision(
     growingPositiveRange ? "" : (historyRevision ?? ""),
     growingPositiveRange ? "" : (summary?.presenceRevision ?? ""),
     summary?.excludeActivityIds ?? [],
+    summary?.excludeOperations ?? [],
     summary?.excludeTurnStartAck ?? false,
   ]);
+}
+
+function capturePresenceRevision(
+  summary: HistoricalWorkLogSummary | undefined,
+  historyRevision: string | undefined,
+  hasWorkLog: boolean,
+): HistoricalWorkLogPresenceRevision {
+  return {
+    key: presenceRevision(summary, historyRevision, hasWorkLog),
+    filters: {
+      ...(summary?.excludeActivityIds ? { excludeActivityIds: summary.excludeActivityIds } : {}),
+      ...(summary?.excludeOperations ? { excludeOperations: summary.excludeOperations } : {}),
+      ...(summary?.excludeTurnStartAck !== undefined
+        ? { excludeTurnStartAck: summary.excludeTurnStartAck }
+        : {}),
+    },
+  };
 }
 
 function useStableTurnIds(turnIds: ReadonlyArray<TurnId>): ReadonlyArray<TurnId> {
@@ -132,14 +157,22 @@ export function useHistoricalWorkLogPresence(input: {
     if (presenceState.scopeKey !== scopeKey) return EMPTY_HISTORICAL_WORK_LOG_PRESENCE;
     const valid = new Map<TurnId, boolean | undefined>();
     for (const [turnId, present] of presenceState.presenceByTurnId) {
+      const summary = input.summaries?.get(turnId);
+      const revision = presenceState.revisionByTurnId.get(turnId);
       // Earlier-work positives also belong to their exact filters: newly
       // received settings can replace the only saved start receipt. Keeping
       // that old positive would advertise an empty reader until expansion.
       // Previous-turn snapshot proof stays discoverable after eviction. The
-      // witness still ignores context-only updates and message tokens.
+      // witness still ignores context-only updates and message tokens. Removing
+      // exclusions only widens a proven earlier range; retaining that positive
+      // also preserves an already-open reader instead of unmounting it briefly.
       if (
-        (present && !input.summaries?.get(turnId)?.before) ||
-        presenceState.revisionByTurnId.get(turnId) === revisionForTurn(turnId, present === true)
+        (present && !summary?.before) ||
+        revision?.key === revisionForTurn(turnId, present === true) ||
+        (present &&
+          summary?.before &&
+          revision &&
+          preservesEarlierWorkLogPresence(revision.filters, summary))
       ) {
         valid.set(turnId, present);
       }
@@ -207,7 +240,11 @@ export function useHistoricalWorkLogPresence(input: {
           merged.set(turnId, present);
           revisions.set(
             turnId,
-            presenceRevision(requestedSummaries?.get(turnId), requestedRevision, present === true),
+            capturePresenceRevision(
+              requestedSummaries?.get(turnId),
+              requestedRevision,
+              present === true,
+            ),
           );
         }
         // Bound cache ownership to the same retained candidate set; an old
@@ -255,11 +292,15 @@ export function useHistoricalWorkLogPresence(input: {
             const excludeTurnStartAck = before
               ? requestedSummaries?.get(turnIds[0]!)?.excludeTurnStartAck
               : undefined;
+            const excludeOperations = before
+              ? requestedSummaries?.get(turnIds[0]!)?.excludeOperations
+              : undefined;
             const read = api.orchestration.getThreadTurnWorkLogPresence({
               threadId,
               turnIds,
               ...(before ? { before } : {}),
               ...(excludeActivityIds ? { excludeActivityIds } : {}),
+              ...(excludeOperations ? { excludeOperations } : {}),
               ...(excludeTurnStartAck !== undefined ? { excludeTurnStartAck } : {}),
             });
             cache.reads.set(key, read);
@@ -333,7 +374,7 @@ export function useHistoricalWorkLogPresence(input: {
     (turnId: TurnId, hasWorkLog: boolean) => {
       const metadata = metadataRef.current;
       if (metadata.scopeKey !== scopeKey) return;
-      const revision = presenceRevision(
+      const revision = capturePresenceRevision(
         metadata.summaries?.get(turnId),
         metadata.historyRevision,
         hasWorkLog,
@@ -346,7 +387,7 @@ export function useHistoricalWorkLogPresence(input: {
             : EMPTY_HISTORICAL_WORK_LOG_PRESENCE;
         if (
           previous.get(turnId) === hasWorkLog &&
-          current.revisionByTurnId.get(turnId) === revision
+          current.revisionByTurnId.get(turnId)?.key === revision.key
         ) {
           return current;
         }

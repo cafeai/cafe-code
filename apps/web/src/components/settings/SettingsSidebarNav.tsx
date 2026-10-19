@@ -1,6 +1,6 @@
 import { useUiLocale, useUiPresentation } from "~/i18n";
 import { uiText } from "@cafecode/shared/i18n";
-import { useCallback, type ComponentType } from "react";
+import { useCallback, useId, useMemo, type ComponentType } from "react";
 import {
   ActivityIcon,
   ArchiveIcon,
@@ -18,7 +18,13 @@ import {
   Settings2Icon,
 } from "lucide-react";
 import { useNavigate } from "@tanstack/react-router";
+import { cn } from "../../lib/utils";
 import { useSettingsBackNavigation } from "../../hooks/useSettingsBackNavigation";
+import {
+  SettingsSearchField,
+  SettingsSearchResults,
+  useSettingsSearchController,
+} from "./SettingsSearch";
 
 import {
   SidebarContent,
@@ -210,52 +216,28 @@ export function SettingsSidebarNav({ pathname }: { pathname: string }) {
     }
     navigateBackWithinApp();
   }, [isMobile, navigateBackWithinApp, setOpenMobile]);
+  const navItems = useMemo(
+    () => uiPresentation.SETTINGS_NAV_GROUPS.flatMap((group) => group.items),
+    [uiPresentation],
+  );
+  const search = useSettingsSearchController({ navItems });
+  const listboxId = useId();
 
   return (
     <>
+      <SettingsSearchField search={search} listboxId={listboxId} />
       <SidebarContent className="overflow-x-hidden">
-        {uiPresentation.SETTINGS_NAV_GROUPS.map((group) => (
-          <SidebarGroup key={group.label} className="px-2 py-2 first:pt-3">
-            {/* Same section-label treatment as the sidebar's Chats/Projects
-                headings; size and colour are explicit so they win over the
-                primitive's text-xs/text-sidebar-foreground. */}
-            <SidebarGroupLabel className="label-overline h-6 px-2 text-2xs text-subtle-foreground">
-              {group.label}
-            </SidebarGroupLabel>
-            <SidebarMenu>
-              {group.items.map((item) => {
-                const Icon = item.icon;
-                const isActive =
-                  pathname === item.to || (item.activePaths?.includes(pathname) ?? false);
-                return (
-                  <SidebarMenuItem key={item.to}>
-                    <SidebarMenuButton
-                      size="sm"
-                      isActive={isActive}
-                      // text-(length:--text-ui): `cn` would treat a bare
-                      // `text-ui` as a colour and drop it beside the colour.
-                      className={
-                        isActive
-                          ? "gap-2.5 px-2.5 py-2 text-left text-(length:--text-ui) font-medium text-foreground"
-                          : "gap-2.5 px-2.5 py-2 text-left text-(length:--text-ui) text-muted-foreground hover:text-foreground"
-                      }
-                      onClick={() => handleSectionClick(item.to)}
-                    >
-                      <Icon
-                        className={
-                          isActive
-                            ? "size-4 shrink-0 text-foreground"
-                            : "size-4 shrink-0 text-subtle-foreground"
-                        }
-                      />
-                      <span className="truncate">{item.label}</span>
-                    </SidebarMenuButton>
-                  </SidebarMenuItem>
-                );
-              })}
-            </SidebarMenu>
-          </SidebarGroup>
-        ))}
+        {search.active ? (
+          <SettingsSearchResults search={search} listboxId={listboxId} navItems={navItems} />
+        ) : (
+          <SettingsNavGroups
+            pathname={pathname}
+            groups={uiPresentation.SETTINGS_NAV_GROUPS}
+            // Returning from results fades the menu back in; the first render does not animate.
+            className={search.hasSearched ? "animate-enter-fade" : undefined}
+            onSectionClick={handleSectionClick}
+          />
+        )}
       </SidebarContent>
 
       <SidebarSeparator />
@@ -274,6 +256,65 @@ export function SettingsSidebarNav({ pathname }: { pathname: string }) {
         </SidebarMenu>
       </SidebarFooter>
     </>
+  );
+}
+
+function SettingsNavGroups({
+  pathname,
+  groups,
+  className,
+  onSectionClick,
+}: {
+  readonly pathname: string;
+  readonly groups: ReadonlyArray<SettingsNavGroup>;
+  readonly className: string | undefined;
+  readonly onSectionClick: (to: SettingsSectionPath) => void;
+}) {
+  return (
+    <div className={cn("flex w-full min-w-0 flex-col gap-2", className)}>
+      {groups.map((group) => (
+        <SidebarGroup key={group.label} className="px-2 py-2 first:pt-3">
+          {/* Same section-label treatment as the sidebar's Chats/Projects
+                headings; size and colour are explicit so they win over the
+                primitive's text-xs/text-sidebar-foreground. */}
+          <SidebarGroupLabel className="label-overline h-6 px-2 text-2xs text-subtle-foreground">
+            {group.label}
+          </SidebarGroupLabel>
+          <SidebarMenu>
+            {group.items.map((item) => {
+              const Icon = item.icon;
+              const isActive =
+                pathname === item.to || (item.activePaths?.includes(pathname) ?? false);
+              return (
+                <SidebarMenuItem key={item.to}>
+                  <SidebarMenuButton
+                    size="sm"
+                    isActive={isActive}
+                    // text-(length:--text-ui): `cn` would treat a bare
+                    // `text-ui` as a colour and drop it beside the colour.
+                    className={
+                      isActive
+                        ? "gap-2.5 px-2.5 py-2 text-left text-(length:--text-ui) font-medium text-foreground"
+                        : "gap-2.5 px-2.5 py-2 text-left text-(length:--text-ui) text-muted-foreground hover:text-foreground"
+                    }
+                    onClick={() => onSectionClick(item.to)}
+                  >
+                    <Icon
+                      className={
+                        isActive
+                          ? "size-4 shrink-0 text-foreground"
+                          : "size-4 shrink-0 text-subtle-foreground"
+                      }
+                    />
+                    <span className="truncate">{item.label}</span>
+                  </SidebarMenuButton>
+                </SidebarMenuItem>
+              );
+            })}
+          </SidebarMenu>
+        </SidebarGroup>
+      ))}
+    </div>
   );
 }
 

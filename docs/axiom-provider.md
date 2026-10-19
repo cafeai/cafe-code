@@ -35,7 +35,12 @@ provider-owned temporary process scope. Desktop-chat delegates browser opening
 to Cafe, which admits only the configured authentication origin and exact native
 authorization route. Tokens, the authorization URL and private login handle stay
 in AxiomCLI/the server, never the renderer, diagnostics or command ledger.
-Completion refreshes provider status. Close this account's Cafe sessions before
+Completion refreshes the main backend's provider status, which Settings observes,
+even when chats run in a separate provider daemon. Sign-in's temporary connection
+belongs to that same backend instance; the daemon's actual session inventory still
+guards account changes. A probe begun before sign-in is drained before the fresh
+completion check, so a stale signed-out result cannot satisfy the refresh.
+Close this account's Cafe sessions before
 changing its native sign-in. Signing in through the installed Axiom application
 and refreshing the provider is also supported. Provider warnings remain inside
 the chat column so that the docked Tasks panel retains its full height.

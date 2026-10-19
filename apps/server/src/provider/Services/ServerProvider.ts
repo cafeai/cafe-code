@@ -15,6 +15,8 @@ export interface ServerProviderShape {
    */
   readonly getCurrentSnapshot?: Effect.Effect<ServerProvider>;
   readonly refresh: Effect.Effect<ServerProvider>;
+  /** A completed credential change must not borrow a probe begun before it. */
+  readonly refreshAfterAccountChange?: Effect.Effect<ServerProvider>;
   /**
    * Refresh account-scoped usage metadata without executing the provider's
    * binary health/authentication probes. Providers that do not expose a

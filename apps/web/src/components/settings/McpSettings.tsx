@@ -76,6 +76,7 @@ export function McpSettings() {
           ) : null
         ) : (
           <SettingsRow
+            searchId="mcp.managementTools"
             title={
               <span className="inline-flex items-center gap-1.5">
                 {uiText("Enable Cafe management tools", undefined, undefined, uiLocale)}

@@ -106,7 +106,7 @@ const baseProps = {
   createdAt,
   timestampFormat: "24-hour" as const,
 };
-const triggerName = "Inspect provider diagnostic: Layout reviewer · Provider retry · 12";
+const triggerName = "Inspect provider diagnostic: Layout reviewer · Reconnecting · 12";
 
 function installReader(
   read: Mock<(input: unknown) => Promise<unknown>> = vi.fn(async (input: unknown) => ({
@@ -188,20 +188,32 @@ describe("expandable private provider diagnostic work entries", () => {
       await expect.element(trigger).toHaveAttribute("aria-expanded", "true");
       await expect.element(page.getByText(snapshot.message!, { exact: true })).toBeVisible();
       expect(read).toHaveBeenCalledExactlyOnceWith({ threadId, turnId, activityId });
+      // Retry rows lead with fixed Cafe guidance; IDs/JSON stay behind an
+      // explicit "Technical details" toggle and are not mounted until then.
+      await expect
+        .element(
+          page.getByText(
+            "The provider lost its connection and is reconnecting. This usually recovers without any action.",
+            { exact: true },
+          ),
+        )
+        .toBeVisible();
+      expect(document.querySelector("[data-provider-diagnostic-json]")).toBeNull();
+      expect(document.body.innerHTML).not.toContain("private-native");
+      const technical = page.getByRole("button", { name: "Technical details", exact: true });
+      await expect.element(technical).toHaveAttribute("aria-expanded", "false");
+      await technical.click();
+      await expect.element(technical).toHaveAttribute("aria-expanded", "true");
       expect(document.querySelector("[data-provider-diagnostic-json]")?.textContent).toBe(
         snapshot.json,
       );
       await expect.element(page.getByText("Native request ID", { exact: true })).toBeVisible();
       await expect
         .element(
-          page.getByText("Diagnostic content was truncated to the retained size limit.", {
-            exact: true,
-          }),
-        )
-        .toBeVisible();
-      await expect
-        .element(
-          page.getByText("Some fields were omitted from this diagnostic copy.", { exact: true }),
+          page.getByText(
+            "Diagnostic copy with secrets removed before storage; secret values redacted; some fields omitted; truncated to the size limit. Not the complete provider payload.",
+            { exact: true },
+          ),
         )
         .toBeVisible();
       const row = document.querySelector<HTMLElement>("[data-provider-diagnostic]")!;
@@ -255,6 +267,7 @@ describe("expandable private provider diagnostic work entries", () => {
       })
       .click();
     await expect.element(page.getByText(snapshot.message!, { exact: true })).toBeVisible();
+    await page.getByRole("button", { name: "Technical details", exact: true }).click();
     for (const [locale, name, copyName, copyHeading] of [
       [
         "ja",
@@ -527,5 +540,73 @@ describe("expandable private provider diagnostic work entries", () => {
     expect(document.querySelector("[data-provider-diagnostic-json]")).toBeNull();
     expect(copyTextToClipboard).not.toHaveBeenCalled();
     expect(read).toHaveBeenCalledOnce();
+  });
+
+  it("leads categorized errors with Cafe guidance and a navigation-only action", async () => {
+    const read = installReader();
+    const onAction = vi.fn();
+    mounted = await render(
+      <ProviderDiagnosticWorkEntry
+        {...baseProps}
+        onAction={onAction}
+        diagnostic={{
+          recorded: true,
+          category: "cyber-policy",
+          turnDaybreak: false,
+          retriesBefore: { count: 3, countLimited: false },
+          summary: { version: 1, status: "error", subject: { kind: "root" } },
+        }}
+      />,
+    );
+    const trigger = page.getByRole("button", {
+      name: "Inspect provider diagnostic: Root · Blocked by cybersecurity policy · after 3 reconnects",
+      exact: true,
+    });
+    await expect.element(trigger).toHaveAttribute("aria-expanded", "false");
+    // The collapsed row names the category but never the provider prose.
+    expect(document.body.textContent).not.toContain(snapshot.message);
+    await trigger.click();
+    await expect
+      .element(page.getByText("Daybreak was off for this turn.", { exact: true }))
+      .toBeVisible();
+    await expect
+      .element(page.getByText("Cafe saw 3 reconnect attempts before this error.", { exact: true }))
+      .toBeVisible();
+    await page.getByRole("button", { name: "Open model options", exact: true }).click();
+    expect(onAction).toHaveBeenCalledExactlyOnceWith("model-options");
+    await expect.element(page.getByText(snapshot.message!, { exact: true })).toBeVisible();
+    expect(read).toHaveBeenCalledOnce();
+  });
+
+  it("derives guidance for an older uncategorized row from its admitted private copy", async () => {
+    installReader(
+      vi.fn(async (input: unknown) => ({
+        ...(input as object),
+        diagnostic: {
+          ...snapshot,
+          json: JSON.stringify({ error: { message: "x", codexErrorInfo: "serverOverloaded" } }),
+        },
+      })),
+    );
+    mounted = await render(
+      <ProviderDiagnosticWorkEntry
+        {...baseProps}
+        diagnostic={{
+          recorded: true,
+          summary: { version: 1, status: "error", subject: { kind: "root" } },
+        }}
+      />,
+    );
+    await page
+      .getByRole("button", {
+        name: "Inspect provider diagnostic: Root · Provider error",
+        exact: true,
+      })
+      .click();
+    await expect.element(page.getByText("Model at capacity", { exact: true })).toBeVisible();
+    // Without an owning chat there is no composer to open: no dead button.
+    await expect
+      .element(page.getByRole("button", { name: "Choose another model", exact: true }))
+      .not.toBeInTheDocument();
   });
 });

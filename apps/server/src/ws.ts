@@ -93,6 +93,8 @@ import {
 import * as ProviderMaintenanceRunner from "./provider/providerMaintenanceRunner.ts";
 import * as ProviderLoginLauncher from "./provider/providerLoginLauncher.ts";
 import { axiomLoginFailureMessage } from "./provider/axiomAccount.ts";
+import { codexLoginFailureMessage } from "./provider/codexLogin.ts";
+import { canLoginProvider } from "./websocket/providerLoginAccess.ts";
 import { ServerLifecycleEvents } from "./serverLifecycleEvents.ts";
 import { UsageStatsService } from "./usageStats/Services/UsageStatsService.ts";
 import { ScheduledFollowups } from "./scheduledFollowups/service.ts";
@@ -1886,29 +1888,37 @@ const makeWsRpcLayer = (
             WS_METHODS.serverLoginProvider,
             Effect.gen(function* () {
               const settings = yield* serverSettings.getSettings;
-              const instance = settings.providerInstances[input.instanceId];
-              if (instance?.driver !== "axiom")
-                return yield* ProviderLoginLauncher.loginProvider(input);
+              const instance = deriveProviderInstanceConfigMap(settings)[input.instanceId];
               if (
-                currentSession.role !== "owner" ||
-                !secureSecretTransport ||
-                instance.enabled === false ||
-                !providerService.loginProvider
+                !instance ||
+                !canLoginProvider({ role: currentSession.role, secureSecretTransport, instance })
               )
                 return yield* new ServerProviderLoginError({
                   instanceId: input.instanceId,
                   reason:
-                    "Axiom sign-in requires the enabled account and an owner connection over HTTPS or the same machine.",
+                    "Provider sign-in requires the enabled account and an owner connection over HTTPS or the same machine.",
                 });
-              return yield* providerService.loginProvider(input).pipe(
-                Effect.mapError(
-                  (error) =>
-                    new ServerProviderLoginError({
-                      instanceId: input.instanceId,
-                      reason: axiomLoginFailureMessage(error),
-                    }),
-                ),
-              );
+              if (instance.driver !== "axiom" && instance.driver !== "codex")
+                return yield* ProviderLoginLauncher.loginProvider(input);
+              if (!providerRegistry.loginProvider)
+                return yield* new ServerProviderLoginError({
+                  instanceId: input.instanceId,
+                  reason: "Native account sign-in is unavailable on this server.",
+                });
+              return yield* providerRegistry
+                .loginProvider(input, providerService.listSessions())
+                .pipe(
+                  Effect.mapError(
+                    (error) =>
+                      new ServerProviderLoginError({
+                        instanceId: input.instanceId,
+                        reason:
+                          instance.driver === "codex"
+                            ? codexLoginFailureMessage(error)
+                            : axiomLoginFailureMessage(error),
+                      }),
+                  ),
+                );
             }).pipe(
               Effect.mapError((error) =>
                 error instanceof ServerProviderLoginError

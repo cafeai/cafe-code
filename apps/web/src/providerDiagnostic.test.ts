@@ -8,7 +8,9 @@ import {
 import { describe, expect, it } from "vitest";
 import {
   deriveProviderDiagnosticWorkLogRecord,
+  providerDiagnosticCategoryPresentation,
   providerDiagnosticCopyDetails,
+  providerDiagnosticEchoKey,
   providerDiagnosticSubjectLabel,
   providerDiagnosticWorkLogLabel,
   readMatchingProviderDiagnosticResponse,
@@ -69,13 +71,15 @@ describe("provider diagnostic received-data presentation", () => {
     );
     expect(record?.recorded).toBe(true);
     expect(providerDiagnosticSubjectLabel(record!.summary)).toBe("Layout reviewer");
-    expect(providerDiagnosticWorkLogLabel(record!.summary)).toBe("Provider retry · 12");
+    expect(providerDiagnosticWorkLogLabel(record!)).toBe("Reconnecting · 12");
     expect(JSON.stringify(record)).not.toContain("private");
     expect(
       providerDiagnosticSubjectLabel({ version: 1, status: "error", subject: { kind: "root" } }),
     ).toBe("Root");
     expect(
-      providerDiagnosticWorkLogLabel({ version: 1, status: "error", subject: { kind: "unknown" } }),
+      providerDiagnosticWorkLogLabel({
+        summary: { version: 1, status: "error", subject: { kind: "unknown" } },
+      }),
     ).toBe("Provider error");
   });
 
@@ -98,7 +102,7 @@ describe("provider diagnostic received-data presentation", () => {
       },
     });
     expect(providerDiagnosticSubjectLabel(retry!.summary)).toBe("Agent not recorded");
-    expect(providerDiagnosticWorkLogLabel(retry!.summary)).toBe("Provider retry · 1024+");
+    expect(providerDiagnosticWorkLogLabel(retry!)).toBe("Reconnecting · 1024+");
     expect(
       deriveProviderDiagnosticWorkLogRecord(activity({ message: "Reconnecting 3/5" })),
     ).toBeNull();
@@ -161,7 +165,7 @@ describe("provider diagnostic received-data presentation", () => {
       countLimited: true,
     });
     expect(summary).toBeDefined();
-    expect(providerDiagnosticWorkLogLabel(summary!)).toBe("Provider retry · 1008+");
+    expect(providerDiagnosticWorkLogLabel({ summary: summary! })).toBe("Reconnecting · 1008+");
   });
 
   it("admits only exact echoed occurrence identity and bounded inert private snapshots", () => {
@@ -229,5 +233,74 @@ describe("provider diagnostic received-data presentation", () => {
     expect(details).toContain("Truncated: true");
     expect(details).toContain("Fields omitted: true");
     expect(details).not.toContain("Copy JSON");
+  });
+
+  it("names published categories in collapsed labels without provider prose", () => {
+    const record = deriveProviderDiagnosticWorkLogRecord(
+      activity(
+        {
+          providerDiagnostic: { version: 1, status: "error", subject: { kind: "root" } },
+          providerDiagnosticCategory: "cyber-policy",
+        },
+        "runtime.error",
+      ),
+    );
+    expect(record?.category).toBe("cyber-policy");
+    expect(providerDiagnosticWorkLogLabel(record!)).toBe("Blocked by cybersecurity policy");
+    expect(
+      providerDiagnosticWorkLogLabel({
+        ...record!,
+        retriesBefore: { count: 5, countLimited: false },
+      }),
+    ).toBe("Blocked by cybersecurity policy · after 5 reconnects");
+    expect(
+      providerDiagnosticWorkLogLabel({
+        ...record!,
+        retriesBefore: { count: 1, countLimited: false },
+      }),
+    ).toBe("Blocked by cybersecurity policy · after 1 reconnect");
+    expect(providerDiagnosticCategoryPresentation("cyber-policy").action).toBe("model-options");
+    expect(providerDiagnosticCategoryPresentation("model-at-capacity").action).toBe("model-picker");
+    expect(providerDiagnosticCategoryPresentation("sign-in-required").action).toBe(
+      "provider-settings",
+    );
+    // Unknown/forged category values are ignored rather than displayed.
+    expect(
+      deriveProviderDiagnosticWorkLogRecord(
+        activity(
+          {
+            providerDiagnostic: { version: 1, status: "error", subject: { kind: "root" } },
+            providerDiagnosticCategory: "private provider prose",
+          },
+          "runtime.error",
+        ),
+      )?.category,
+    ).toBeUndefined();
+  });
+
+  it("derives a duplicate-occurrence key only from exact content-free hashes", () => {
+    const errorHash = "a".repeat(64);
+    const ownerHash = "b".repeat(64);
+    expect(
+      providerDiagnosticEchoKey(
+        activity(
+          { providerErrorHash: errorHash, providerErrorOwnerHash: ownerHash },
+          "runtime.error",
+        ),
+      ),
+    ).toBe(`${ownerHash}:${errorHash}`);
+    expect(
+      providerDiagnosticEchoKey(
+        activity({ providerErrorHash: errorHash, providerErrorOwnerHash: ownerHash }),
+      ),
+    ).toBeNull();
+    expect(
+      providerDiagnosticEchoKey(
+        activity(
+          { providerErrorHash: "private message", providerErrorOwnerHash: ownerHash },
+          "runtime.error",
+        ),
+      ),
+    ).toBeNull();
   });
 });

@@ -610,6 +610,21 @@ export const EarlierWorkLogExcludedActivityIds = Schema.Array(
   OrchestrationThreadActivityCursor.fields.activityId,
 ).check(Schema.isMaxLength(THREAD_TURN_ACTIVITY_PAGE_MAX_LIMIT));
 
+/** A received operation identity narrows presentation history, never ownership. */
+export const WORK_LOG_OPERATION_ID_MAX_LENGTH = 4_096;
+export const WorkLogOperationIdentity = Schema.Struct({
+  kind: Schema.Literals(["tool", "summary"]),
+  id: Schema.String.check(
+    Schema.isNonEmpty(),
+    Schema.isMaxLength(WORK_LOG_OPERATION_ID_MAX_LENGTH),
+    Schema.isPattern(/^[^\p{Cc}\p{Bidi_Control}]+$/u),
+  ),
+});
+export type WorkLogOperationIdentity = typeof WorkLogOperationIdentity.Type;
+export const EarlierWorkLogExcludedOperations = Schema.Array(WorkLogOperationIdentity).check(
+  Schema.isMaxLength(THREAD_TURN_ACTIVITY_PAGE_MAX_LIMIT),
+);
+
 export const OrchestrationThreadTurnActivityPageInput = Schema.Struct({
   threadId: ThreadId,
   turnId: TurnId,
@@ -619,6 +634,7 @@ export const OrchestrationThreadTurnActivityPageInput = Schema.Struct({
   ),
   before: Schema.optional(OrchestrationThreadActivityCursor),
   excludeActivityIds: Schema.optional(EarlierWorkLogExcludedActivityIds),
+  excludeOperations: Schema.optional(EarlierWorkLogExcludedOperations),
   // The exact current turn's accepted settings already render its start ACK.
   // This only narrows presentation history; it grants no provider authority.
   excludeTurnStartAck: Schema.optional(Schema.Boolean),
@@ -627,6 +643,7 @@ export const OrchestrationThreadTurnActivityPageInput = Schema.Struct({
     (input) =>
       (input.before === undefined || input.offset === 0) &&
       (input.excludeActivityIds === undefined || input.before !== undefined) &&
+      (input.excludeOperations === undefined || input.before !== undefined) &&
       (input.excludeTurnStartAck === undefined || input.before !== undefined),
   ),
 );
@@ -644,6 +661,7 @@ export const OrchestrationThreadTurnActivityPage = Schema.Struct({
   // server which silently ignored its additive cursor field.
   before: Schema.optional(OrchestrationThreadActivityCursor),
   excludeActivityIds: Schema.optional(EarlierWorkLogExcludedActivityIds),
+  excludeOperations: Schema.optional(EarlierWorkLogExcludedOperations),
   excludeTurnStartAck: Schema.optional(Schema.Boolean),
 });
 export type OrchestrationThreadTurnActivityPage = typeof OrchestrationThreadTurnActivityPage.Type;
@@ -987,12 +1005,14 @@ export const OrchestrationThreadTurnWorkLogPresenceInput = Schema.Struct({
   ),
   before: Schema.optional(OrchestrationThreadActivityCursor),
   excludeActivityIds: Schema.optional(EarlierWorkLogExcludedActivityIds),
+  excludeOperations: Schema.optional(EarlierWorkLogExcludedOperations),
   excludeTurnStartAck: Schema.optional(Schema.Boolean),
 }).check(
   Schema.makeFilter(
     (input) =>
       (input.before === undefined || input.turnIds.length === 1) &&
       (input.excludeActivityIds === undefined || input.before !== undefined) &&
+      (input.excludeOperations === undefined || input.before !== undefined) &&
       (input.excludeTurnStartAck === undefined || input.before !== undefined),
   ),
 );

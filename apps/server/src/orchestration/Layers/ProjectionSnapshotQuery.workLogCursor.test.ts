@@ -3,6 +3,7 @@ import {
   ThreadId,
   TurnId,
   type OrchestrationThreadActivityCursor,
+  type WorkLogOperationIdentity,
 } from "@cafecode/contracts";
 import { assert, it } from "@effect/vitest";
 import * as NodeServices from "@effect/platform-node/NodeServices";
@@ -33,6 +34,172 @@ const fixtureLayer = OrchestrationProjectionSnapshotQueryLive.pipe(
 );
 
 it.layer(fixtureLayer)("earlier current-turn work-log pages", (it) => {
+  it.effect(
+    "excludes already-inline operations consistently for every provider without hiding other work",
+    () =>
+      Effect.gen(function* () {
+        const sql = yield* SqlClient.SqlClient;
+        const query = yield* ProjectionSnapshotQuery;
+        const cases = [
+          [
+            "Claude",
+            "tool.started",
+            {
+              itemId: "inline-id",
+              itemType: "command_execution",
+              data: {
+                toolName: "Bash",
+                commandInspectionVersion: 1,
+                inspectionProvider: "claudeAgent",
+              },
+            },
+            "tool",
+          ],
+          [
+            "Codex compaction",
+            "tool.started",
+            { itemId: "inline-id", itemType: "context_compaction" },
+            "tool",
+          ],
+          [
+            "Grok",
+            "tool.updated",
+            {
+              itemId: "other-native-id",
+              itemType: "command_execution",
+              data: { toolCallId: "inline-id" },
+            },
+            "tool",
+          ],
+          [
+            "Axiom",
+            "tool.updated",
+            { itemId: "inline-id", itemType: "web_search", data: { toolCallId: "inline-id" } },
+            "tool",
+          ],
+          [
+            "OpenCode",
+            "tool.updated",
+            { itemId: "inline-id", itemType: "command_execution", data: { tool: "bash" } },
+            "tool",
+          ],
+          [
+            "Claude summary",
+            "reasoning.summary",
+            {
+              itemId: "inline-id",
+              provider: "claudeAgent",
+              summaryVersion: 1,
+              streamKind: "reasoning_summary_text",
+              detail: "Public summary",
+              truncated: false,
+              status: "inProgress",
+            },
+            "summary",
+          ],
+        ] as const;
+        for (const [provider, kind, payload, operationKind] of cases) {
+          yield* sql`DELETE FROM projection_thread_activities`;
+          yield* sql`INSERT INTO projection_thread_activities
+          (activity_id,thread_id,turn_id,tone,kind,summary,payload_json,sequence,created_at)
+          VALUES ('older-receipt',${threadId},${turnId},'tool',${kind},'Saved work',${JSON.stringify(payload)},1,${timestamp(1)})`;
+          const before = cursor(500, "inline-floor");
+          const excludeOperations: WorkLogOperationIdentity[] = [
+            { kind: operationKind, id: "inline-id" },
+          ];
+          const presence = () =>
+            query.getThreadTurnWorkLogPresence({
+              threadId,
+              turnIds: [turnId],
+              before,
+              excludeOperations,
+            });
+          const page = () =>
+            query.getThreadTurnActivityPage({
+              threadId,
+              turnId,
+              before,
+              excludeOperations,
+              offset: 0,
+              limit: 6,
+            });
+          assert.deepStrictEqual((yield* presence()).turnIdsWithWorkLog, [], provider);
+          const empty = yield* page();
+          assert.equal(empty.totalCount, 0, provider);
+          assert.deepStrictEqual(empty.activities, [], provider);
+          assert.deepStrictEqual(empty.excludeOperations, excludeOperations);
+          // Offset history still exposes the saved row. Operation exclusions
+          // only narrow the explicit cursor reader, not durable history.
+          assert.equal(
+            (yield* query.getThreadTurnActivityPage({ threadId, turnId, offset: 0, limit: 6 }))
+              .totalCount,
+            1,
+            provider,
+          );
+
+          yield* sql`INSERT INTO projection_thread_activities
+          (activity_id,thread_id,turn_id,tone,kind,summary,payload_json,sequence,created_at)
+          VALUES ('independent-work',${threadId},${turnId},'tool','tool.completed','Saved work',${JSON.stringify({ itemId: "other-operation", itemType: "command_execution" })},2,${timestamp(2)}),
+            ('same-id-warning',${threadId},${turnId},'info','runtime.warning','Visible warning',${JSON.stringify({ itemId: "inline-id" })},3,${timestamp(3)}),
+            ('foreign-turn',${threadId},'other-turn','tool','tool.completed','Foreign work','{}',4,${timestamp(4)}),
+            ('foreign-thread','other-thread',${turnId},'tool','tool.completed','Foreign work','{}',4,${timestamp(4)})`;
+          assert.deepStrictEqual((yield* presence()).turnIdsWithWorkLog, [turnId], provider);
+          const visible = yield* page();
+          assert.equal(visible.totalCount, 2, provider);
+          assert.deepStrictEqual(
+            visible.activities.map(({ id }) => id),
+            ["independent-work", "same-id-warning"],
+            provider,
+          );
+        }
+      }),
+  );
+
+  it.effect(
+    "matches native/ACP identity precedence and Unicode trim without confusing summary and tool ids",
+    () =>
+      Effect.gen(function* () {
+        const sql = yield* SqlClient.SqlClient;
+        const query = yield* ProjectionSnapshotQuery;
+        yield* sql`DELETE FROM projection_thread_activities`;
+        const payloads = [
+          ["native-trim", { itemId: "\u3000inline-id\ufeff" }],
+          ["explicit-trim", { itemId: "other", data: { toolCallId: "\u00a0inline-id\u2029" } }],
+          ["blank-fallback", { itemId: "inline-id", data: { toolCallId: "\t " } }],
+          ["explicit-other", { itemId: "inline-id", data: { toolCallId: "other" } }],
+          ["malformed-explicit", { itemId: "inline-id", data: { toolCallId: "bad\u0000id" } }],
+          ["unidentified", {}],
+        ] as const;
+        for (const [index, [id, payload]] of payloads.entries()) {
+          yield* sql`INSERT INTO projection_thread_activities
+          (activity_id,thread_id,turn_id,tone,kind,summary,payload_json,sequence,created_at)
+          VALUES (${id},${threadId},${turnId},'tool','tool.updated','Tool',${JSON.stringify(payload)},${index + 1},${timestamp(index + 1)})`;
+        }
+        const page = yield* query.getThreadTurnActivityPage({
+          threadId,
+          turnId,
+          before: cursor(500, "floor"),
+          excludeOperations: [{ kind: "tool", id: "inline-id" }],
+          offset: 0,
+          limit: 24,
+        });
+        assert.equal(page.totalCount, 3);
+        assert.deepStrictEqual(
+          page.activities.map(({ id }) => id),
+          ["explicit-other", "malformed-explicit", "unidentified"],
+        );
+        const separateKinds = yield* query.getThreadTurnActivityPage({
+          threadId,
+          turnId,
+          before: cursor(500, "floor"),
+          excludeOperations: [{ kind: "summary", id: "inline-id" }],
+          offset: 0,
+          limit: 24,
+        });
+        assert.equal(separateKinds.totalCount, payloads.length);
+      }),
+  );
+
   it.effect("does not advertise task-card or roster-only activity as historical work", () =>
     Effect.gen(function* () {
       const sql = yield* SqlClient.SqlClient;

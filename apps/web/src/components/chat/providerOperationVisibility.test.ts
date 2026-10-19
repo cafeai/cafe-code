@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  compactCommandPreview,
   mergeClaudeCommandInspections,
   readClaudeCommandInspection,
   readClaudePublicSummary,
@@ -241,5 +242,23 @@ describe("admitted Claude operation presentation", () => {
       startedAt: "2026-10-09T00:00:00.000Z",
       completedAt: "2026-10-09T00:00:02.000Z",
     });
+  });
+});
+
+describe("compactCommandPreview", () => {
+  const root = "/Users/me/repo";
+
+  it("drops only a leading cd into the exact workspace root", () => {
+    expect(compactCommandPreview(`cd ${root}; rg -n foo src`, root)).toBe("rg -n foo src");
+    expect(compactCommandPreview(`cd "${root}/" && git status`, root)).toBe("git status");
+    expect(compactCommandPreview(`cd '${root}' &&git diff`, root)).toBe("git diff");
+  });
+
+  it("keeps other directories, bare cd and commands without a remainder", () => {
+    expect(compactCommandPreview(`cd ${root}/apps; ls`, root)).toBe(`cd ${root}/apps; ls`);
+    expect(compactCommandPreview(`cd /tmp && ls`, root)).toBe("cd /tmp && ls");
+    expect(compactCommandPreview(`cd ${root};  `, root)).toBe(`cd ${root};  `);
+    expect(compactCommandPreview(`echo hi; cd ${root}; ls`, root)).toBe(`echo hi; cd ${root}; ls`);
+    expect(compactCommandPreview(`cd ${root}; ls`, undefined)).toBe(`cd ${root}; ls`);
   });
 });

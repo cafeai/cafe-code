@@ -5,6 +5,8 @@ import {
   ThreadId,
   type EnvironmentApi,
   type GlideControlResult,
+  type ProviderSessionQuotaInput,
+  type ProviderSessionQuotaResult,
   type ServerProvider,
 } from "@cafecode/contracts";
 import { DEFAULT_UNIFIED_SETTINGS } from "@cafecode/contracts/settings";
@@ -28,6 +30,17 @@ import {
   __resetEnvironmentApiOverridesForTests,
 } from "../../environmentApi";
 
+const { quotaConnection, subscribeQuota } = vi.hoisted(() => ({
+  quotaConnection: { connected: false },
+  subscribeQuota:
+    vi.fn<
+      (
+        input: ProviderSessionQuotaInput,
+        listener: (result: ProviderSessionQuotaResult) => void,
+      ) => () => void
+    >(),
+}));
+
 // Only the unrelated external environment integrations are replaced. Provider
 // selection, draft resolution, menu placement, dialog ownership and outgoing
 // composer snapshots all execute their production code without a live server.
@@ -43,6 +56,7 @@ vi.mock("../../environments/runtime", () => {
   const connection = {
     client: {
       server: {
+        subscribeProviderQuota: subscribeQuota,
         refreshProviders: vi.fn().mockResolvedValue(undefined),
         getClientSettings: vi.fn().mockResolvedValue(null),
         updateClientSettings: vi.fn().mockResolvedValue(undefined),
@@ -58,8 +72,13 @@ vi.mock("../../environments/runtime", () => {
     resolveEnvironmentHttpUrl: () => null,
     subscribeEnvironmentConnections: () => () => {},
     useSavedEnvironmentRuntimeStore: (
-      select: (state: { byId: Record<string, never> }) => unknown,
-    ) => select({ byId: {} }),
+      select: (state: { byId: Record<string, { connectionState: string }> }) => unknown,
+    ) =>
+      select({
+        byId: quotaConnection.connected
+          ? { "composer-test-environment": { connectionState: "connected" } }
+          : {},
+      }),
   };
 });
 
@@ -314,6 +333,60 @@ async function waitForTabEntrance() {
 }
 
 describe("provider-specific composer menu actions", () => {
+  it.each(["draft", "server"] as const)(
+    "opens Claude account limits from the %s composer before sending a prompt",
+    async (routeKind) => {
+      quotaConnection.connected = true;
+      subscribeQuota.mockReturnValue(vi.fn());
+      const modelSelection = createModelSelection(
+        ProviderInstanceId.make("claude-work"),
+        "claude-opus-4-6",
+      );
+      const showOnSide = vi.fn();
+      await using fixture = await mountComposer(860, {
+        routeKind,
+        isServerThread: routeKind === "server",
+        isLocalDraftThread: routeKind === "draft",
+        activeThread: { ...thread(), session: null, modelSelection },
+        activeThreadModelSelection: modelSelection,
+        activeThreadActivities: [],
+        onShowSessionRail: showOnSide,
+      });
+      expect(subscribeQuota).not.toHaveBeenCalled();
+      await page.getByRole("button", { name: "Usage", exact: true }).click();
+      await expect.poll(() => subscribeQuota.mock.calls.length).toBe(1);
+      expect(subscribeQuota).toHaveBeenCalledWith(
+        { instanceId: modelSelection.instanceId },
+        expect.any(Function),
+        expect.any(Object),
+      );
+      subscribeQuota.mock.calls[0]![1]({
+        report: {
+          source: "claude-cli",
+          observedAt: new Date().toISOString(),
+          meters: [
+            {
+              kind: "session",
+              group: "session",
+              usedPercent: 25,
+              resetsAt: null,
+              severity: "normal",
+              isActive: true,
+            },
+          ],
+        },
+      });
+      await expect.element(page.getByText("75% left", { exact: true })).toBeVisible();
+      expect(fixture.composerRef.current?.getSendContext().prompt).toBe(
+        "Unsent prompt must remain here",
+      );
+      expect(fixture.onSend).not.toHaveBeenCalled();
+      expect(subscribeQuota).toHaveBeenCalledOnce();
+      await page.getByRole("button", { name: "Show on the side", exact: true }).click();
+      expect(showOnSide).toHaveBeenCalledOnce();
+    },
+  );
+
   it("enables computer use before the first message, retains the exact draft choice, and starts another draft off", async () => {
     const control = vi.fn(async (_input: unknown) => ({
       available: true,
@@ -602,6 +675,8 @@ describe("provider-specific composer menu actions", () => {
     expect(fixture.onSend).not.toHaveBeenCalled();
   });
   afterEach(() => {
+    quotaConnection.connected = false;
+    subscribeQuota.mockReset();
     useUiStateStore.setState({ composerTabCollapsed: false });
     applyInterfaceScalePercent(100);
     document.documentElement.classList.remove("dark");

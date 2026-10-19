@@ -60,6 +60,30 @@ const malformedPage = (changes: Record<string, unknown>): OrchestrationThreadTur
   ({ ...validPage(), ...changes }) as OrchestrationThreadTurnActivityPage;
 
 describe("Earlier work page validation", () => {
+  it("requires the operation exclusion echo and refuses returned snapshots of excluded operations", () => {
+    const excludeOperations = [{ kind: "tool" as const, id: "already-inline" }];
+    const input = { threadId, turnId, before, limit: 4, excludeOperations };
+    expect(() =>
+      validateEarlierWorkLogPage({ ...input, page: { ...validPage(), excludeOperations } }),
+    ).not.toThrow();
+    expect(() => validateEarlierWorkLogPage({ ...input, page: validPage() })).toThrow();
+    expect(() =>
+      validateEarlierWorkLogPage({
+        ...input,
+        page: { ...validPage(), excludeOperations: [{ kind: "summary", id: "already-inline" }] },
+      }),
+    ).toThrow();
+    const duplicate = activity("different-receipt", 1, {
+      kind: "tool.updated",
+      payload: { itemId: "already-inline" },
+    });
+    expect(() =>
+      validateEarlierWorkLogPage({
+        ...input,
+        page: { ...validPage([duplicate]), excludeOperations },
+      }),
+    ).toThrow();
+  });
   it("requires the captured start-receipt filter echo and refuses a filtered receipt", () => {
     const input = { threadId, turnId, before, limit: 4, excludeTurnStartAck: true };
     expect(() =>
@@ -335,6 +359,69 @@ const publicSummary = (
   });
 
 describe("Earlier work lifecycle folding", () => {
+  it.each([
+    ["Codex compaction", "tool.started", { itemId: "native", itemType: "context_compaction" }],
+    [
+      "Grok",
+      "tool.updated",
+      { itemId: "native", itemType: "command_execution", data: { toolCallId: "native" } },
+    ],
+    [
+      "Axiom",
+      "tool.updated",
+      { itemId: "native", itemType: "web_search", data: { toolCallId: "native" } },
+    ],
+    [
+      "OpenCode",
+      "tool.updated",
+      { itemId: "native", itemType: "command_execution", data: { tool: "bash" } },
+    ],
+  ])(
+    "recognizes an already-inline %s operation across different activity ids",
+    (_provider, kind, payload) => {
+      const older = activity("older-snapshot", 1, { kind, payload });
+      const current = activity("inline-snapshot", 3, { payload });
+      expect(
+        deriveEarlierWorkLogEntries({ activities: [older], liveActivities: [current], turnId }),
+      ).toEqual([]);
+      expect(
+        deriveEarlierWorkLogEntries({
+          activities: [older],
+          liveActivities: [{ ...current, turnId: TurnId.make("foreign") }],
+          turnId,
+        }),
+      ).toHaveLength(1);
+    },
+  );
+
+  it("retains unidentified legacy work instead of erasing it through a matching live label", () => {
+    const older = activity("legacy-older", 1, {
+      kind: "tool.updated",
+      payload: { itemType: "command_execution", title: "same" },
+    });
+    const current = activity("legacy-current", 3, { kind: "tool.updated", payload: older.payload });
+    expect(
+      deriveEarlierWorkLogEntries({ activities: [older], liveActivities: [current], turnId }).map(
+        ({ id }) => id,
+      ),
+    ).toEqual([older.id]);
+  });
+
+  it("does not collapse distinct native operations with identical titles and details", () => {
+    const older = activity("older", 1, {
+      kind: "tool.updated",
+      payload: { itemId: "first", itemType: "command_execution", title: "same" },
+    });
+    const current = activity("current", 3, {
+      kind: "tool.updated",
+      payload: { itemId: "second", itemType: "command_execution", title: "same" },
+    });
+    expect(
+      deriveEarlierWorkLogEntries({ activities: [older], liveActivities: [current], turnId }).map(
+        ({ id }) => id,
+      ),
+    ).toEqual([older.id]);
+  });
   it("omits a paged Claude command start when the same operation completion is already inline", () => {
     const start = claudeCommand("paged-start", 1, "tool.started");
     const completed = claudeCommand("inline-completed", 4, "tool.completed");

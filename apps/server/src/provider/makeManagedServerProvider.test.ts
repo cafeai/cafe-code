@@ -124,6 +124,38 @@ const enrichedSnapshotSecond: ServerProvider = {
 };
 
 describe("makeManagedServerProvider", () => {
+  it.effect("observes credentials afresh after an older probe that overlaps native login", () =>
+    Effect.gen(function* () {
+      const entered = yield* Deferred.make<void>();
+      const release = yield* Deferred.make<void>();
+      let checks = 0;
+      const provider = yield* makeManagedServerProvider<TestSettings>({
+        maintenanceCapabilities,
+        getSettings: Effect.succeed({ enabled: true }),
+        streamSettings: Stream.never,
+        haveSettingsChanged: () => false,
+        initialSnapshot: () => Effect.succeed(initialSnapshot),
+        checkProvider: Effect.suspend(() => {
+          checks++;
+          return checks === 1
+            ? Deferred.succeed(entered, undefined).pipe(
+                Effect.andThen(Deferred.await(release)),
+                Effect.as(initialSnapshot),
+              )
+            : Effect.succeed(refreshedSnapshot);
+        }),
+        refreshInterval: "1 hour",
+      });
+      yield* Deferred.await(entered);
+      const afterLogin = yield* Effect.forkChild(provider.refreshAfterAccountChange!, {
+        startImmediately: true,
+      });
+      yield* Deferred.succeed(release, undefined);
+      const snapshot = yield* Fiber.join(afterLogin);
+      assert.strictEqual(snapshot.auth.status, "authenticated");
+      assert.strictEqual(checks, 2);
+    }),
+  );
   it("never retains native catalogues using missing, changed, or foreign owner metadata", () => {
     const native: ServerProvider = {
       ...refreshedSnapshot,

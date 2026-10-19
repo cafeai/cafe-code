@@ -1273,6 +1273,32 @@ describe("settings panels", () => {
     });
   });
 
+  it("persists hiding chat tabs from Chat settings and resets it to shown", async () => {
+    const desktopBridge = createDesktopBridgeStub();
+    window.desktopBridge = desktopBridge;
+    const { updateClientSettings } = installClientSettingsNativeApi(desktopBridge);
+    updateClientSettings.mockImplementation(async (patch) => ({
+      ...DEFAULT_CLIENT_SETTINGS,
+      ...patch,
+    }));
+    setServerConfigSnapshot(createBaseServerConfig());
+    mounted = await renderWithTestRouter(
+      <AppAtomRegistryProvider>
+        <ChatSettingsPanel />
+      </AppAtomRegistryProvider>,
+    );
+    await page.getByLabelText("Show chat tabs").click();
+    await vi.waitFor(() => {
+      expect(updateClientSettings).toHaveBeenCalledWith({ showDeskTabs: false });
+      expect(getServerConfig()?.clientSettings.showDeskTabs).toBe(false);
+    });
+    await page.getByRole("button", { name: "Reset chat tabs to default" }).click();
+    await vi.waitFor(() => {
+      expect(updateClientSettings).toHaveBeenLastCalledWith({ showDeskTabs: true });
+      expect(getServerConfig()?.clientSettings.showDeskTabs).toBe(true);
+    });
+  });
+
   it("groups project defaults in General and hides desktop-only controls in browsers", async () => {
     Reflect.deleteProperty(window, "desktopBridge");
     setServerConfigSnapshot(createBaseServerConfig());
@@ -2202,6 +2228,94 @@ describe("settings panels", () => {
       writeText.mockRestore();
     }
   });
+
+  it.each(["started", "authenticated"] as const)(
+    "opens the selected Codex browser login and presents its %s outcome",
+    async (outcome) => {
+      const base = createBaseServerConfig();
+      const instanceId = ProviderInstanceId.make("codex_work");
+      const config = {
+        ...base,
+        settings: {
+          ...base.settings,
+          providerInstances: {
+            [instanceId]: {
+              driver: ProviderDriverKind.make("codex"),
+              enabled: true,
+              displayName: "Work Codex",
+            },
+          },
+        },
+        providers: [
+          {
+            ...createOutdatedProvider("codex"),
+            instanceId,
+            displayName: "Work Codex",
+            auth: { status: "unauthenticated" as const },
+            authActions: { login: true },
+          },
+        ],
+      };
+      installProviderAccountSettings(config);
+      let acknowledge!: (value: Awaited<ReturnType<LocalApi["server"]["loginProvider"]>>) => void;
+      const loginProvider = vi.fn<LocalApi["server"]["loginProvider"]>().mockImplementation(
+        () =>
+          new Promise((resolve) => {
+            acknowledge = resolve;
+          }),
+      );
+      window.nativeApi!.server.loginProvider = loginProvider;
+      const toast = vi.spyOn(toastManager, "add");
+      try {
+        mounted = await render(
+          <AppAtomRegistryProvider>
+            <ProviderSettingsPanel />
+          </AppAtomRegistryProvider>,
+        );
+        const button = page.getByRole("button", { name: "Log in", exact: true });
+        await button.click();
+        expect(loginProvider).toHaveBeenCalledExactlyOnceWith({ instanceId });
+        await expect.element(button).toBeDisabled();
+        expect(toast).not.toHaveBeenCalled();
+        acknowledge({
+          instanceId,
+          provider: ProviderDriverKind.make("codex"),
+          command: "codex login",
+          message: "Native fixture acknowledgement",
+          outcome,
+        });
+        await vi.waitFor(() =>
+          expect(toast).toHaveBeenCalledWith(
+            expect.objectContaining({
+              type: "success",
+              title:
+                outcome === "authenticated" ? "Work Codex is signed in" : "Work Codex login opened",
+              description:
+                outcome === "authenticated"
+                  ? "Provider status has been refreshed."
+                  : "Complete sign-in in your browser. Provider status refreshes automatically when sign-in succeeds.",
+            }),
+          ),
+        );
+        await expect.element(button).toBeEnabled();
+        setServerConfigSnapshot({
+          ...config,
+          providers: [{ ...config.providers[0]!, auth: { status: "authenticated" } }],
+        });
+        await expect.element(button).not.toBeInTheDocument();
+        expect(loginProvider).toHaveBeenCalledOnce();
+      } finally {
+        acknowledge?.({
+          instanceId,
+          provider: ProviderDriverKind.make("codex"),
+          command: "codex login",
+          message: "Retire fixture",
+          outcome,
+        });
+        toast.mockRestore();
+      }
+    },
+  );
 
   it.each(["", "仕事"])(
     "generates an Axiom account ID with display name %j",

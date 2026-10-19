@@ -2374,6 +2374,35 @@ function runtimeEventBase(
  * https://learn.chatgpt.com/docs/app-server#turn-events
  */
 function codexErrorDiagnostic(event: ProviderEvent): ProviderRuntimeEvent["diagnostic"] {
+  if (event.method === "process/exitedUnexpectedly" && event.kind === "error") {
+    // The app-server process hosts this whole Codex runtime, so the loss is
+    // the root's. The fixed Cafe-authored message and finite exit facts are
+    // the entire envelope; no native output or environment is copied.
+    const detail = readRecordValue(event.payload);
+    const exitCode = detail?.exitCode;
+    const protocolErrorTag = detail?.protocolErrorTag;
+    return makeProviderDiagnostic({
+      observedAt: event.createdAt,
+      source: eventRawSource(event),
+      method: event.method,
+      status: "error",
+      subject: { kind: "root" },
+      native: {
+        eventId: event.id,
+        ...(event.subagentRuntimeId ? { subagentRuntimeId: event.subagentRuntimeId } : {}),
+      },
+      ...(event.message ? { message: event.message } : {}),
+      payload: {
+        error: {
+          ...(event.message ? { message: event.message } : {}),
+          detail: {
+            exitCode: typeof exitCode === "number" ? exitCode : null,
+            protocolErrorTag: typeof protocolErrorTag === "string" ? protocolErrorTag : null,
+          },
+        },
+      },
+    });
+  }
   const child =
     event.method === "codex.subagent/error" || event.method === "codex.subagent/turnCompleted";
   const notification = event.method === "error" || event.method === "codex.subagent/error";

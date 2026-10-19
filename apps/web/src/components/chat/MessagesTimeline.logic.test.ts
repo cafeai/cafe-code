@@ -1,11 +1,12 @@
 import { describe, expect, it } from "vitest";
-import type { TurnId } from "@cafecode/contracts";
+import { EventId, type TurnId } from "@cafecode/contracts";
 import {
   computeStableMessagesTimelineRows,
   computeMessageDurationStart,
   deriveHistoricalWorkLogDisplayState,
   deriveMessagesTimelineRows,
   filterHistoricalWorkLogSummariesByPresence,
+  preservesEarlierWorkLogPresence,
   findHistoricalWorkLogPresenceCandidates,
   mergeHistoricalSubagentEntries,
   normalizeCompactToolLabel,
@@ -385,6 +386,44 @@ describe("deriveHistoricalWorkLogDisplayState", () => {
 });
 
 describe("historical work-log presence", () => {
+  it("retains positive proof through removed/reordered exclusions but invalidates newly excluded work", () => {
+    const previous = {
+      excludeActivityIds: [EventId.make("retained-settings")],
+      excludeOperations: [
+        { kind: "tool" as const, id: "one" },
+        { kind: "summary" as const, id: "two" },
+      ],
+      excludeTurnStartAck: true,
+    };
+    expect(preservesEarlierWorkLogPresence(previous, {})).toBe(true);
+    expect(
+      preservesEarlierWorkLogPresence(previous, {
+        ...previous,
+        excludeOperations: previous.excludeOperations.toReversed(),
+      }),
+    ).toBe(true);
+    expect(
+      preservesEarlierWorkLogPresence(previous, {
+        excludeOperations: [previous.excludeOperations[0]!],
+      }),
+    ).toBe(true);
+    expect(
+      preservesEarlierWorkLogPresence(previous, {
+        excludeOperations: [{ kind: "tool", id: "new" }],
+      }),
+    ).toBe(false);
+    expect(
+      preservesEarlierWorkLogPresence(previous, {
+        excludeOperations: [{ kind: "summary", id: "one" }],
+      }),
+    ).toBe(false);
+    expect(
+      preservesEarlierWorkLogPresence(previous, {
+        excludeActivityIds: [EventId.make("new-settings")],
+      }),
+    ).toBe(false);
+    expect(preservesEarlierWorkLogPresence({}, { excludeTurnStartAck: true })).toBe(false);
+  });
   const snapshotTurnId = "turn-snapshot" as never;
   const persistedTurnId = "turn-persisted" as never;
   const emptyTurnId = "turn-empty" as never;

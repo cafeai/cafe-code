@@ -1,31 +1,30 @@
 import { useUiLocale, useUiPresentation } from "~/i18n";
 import { uiText } from "@cafecode/shared/i18n";
 import { UiMessage } from "~/i18n";
-import { memo, useId, useState } from "react";
-import { ChevronRightIcon, MessageSquareTextIcon, TerminalIcon } from "lucide-react";
+import { memo } from "react";
+import { MessageSquareTextIcon, TerminalIcon } from "lucide-react";
 import type { TimestampFormat } from "@cafecode/contracts/settings";
-import { cn } from "~/lib/utils";
 import { formatElapsed } from "../../session-logic";
 import { formatTimestamp } from "../../timestampFormat";
-import { Collapsible, CollapsiblePanel, CollapsibleTrigger } from "../ui/collapsible";
 import { InspectableWorkEntry } from "./InspectableWorkEntry";
-import type { ClaudeCommandInspection, ClaudePublicSummary } from "./providerOperationVisibility";
+import {
+  compactCommandPreview,
+  type ClaudeCommandInspection,
+  type ClaudePublicSummary,
+} from "./providerOperationVisibility";
 
-/** Public summaries stay separate from canonical assistant prose and answers. */
+/**
+ * Public summaries stay separate from canonical assistant prose and answers.
+ * The text is already bounded (4,096 characters) and is the whole point of
+ * the row, so it is always shown in full: a disclosure would only repeat it.
+ */
 export const ClaudeSummaryWorkEntry = memo(function ClaudeSummaryWorkEntry(props: {
   readonly summary: ClaudePublicSummary;
 }) {
   const uiLocale = useUiLocale();
 
-  const panelId = useId();
-  const [expanded, setExpanded] = useState(false);
   return (
-    <Collapsible
-      className="rounded-lg px-1 py-1"
-      data-claude-public-summary="true"
-      open={expanded}
-      onOpenChange={setExpanded}
-    >
+    <div className="rounded-lg px-1 py-1" data-claude-public-summary="true">
       <div className="flex items-center gap-2 text-xs leading-5 text-muted-foreground">
         <span className="flex size-5 shrink-0 items-center justify-center">
           <MessageSquareTextIcon className="size-3" aria-hidden />
@@ -41,45 +40,32 @@ export const ClaudeSummaryWorkEntry = memo(function ClaudeSummaryWorkEntry(props
           </span>
         ) : null}
       </div>
-      {!expanded ? (
-        <p
-          className="line-clamp-3 pl-7 text-xs leading-5 whitespace-pre-wrap wrap-break-word text-chat-foreground"
-          data-summary-preview="true"
-        >
-          {props.summary.text}
+      <p
+        className="pl-7 text-xs leading-5 whitespace-pre-wrap wrap-break-word text-chat-foreground"
+        data-summary-text="true"
+      >
+        {props.summary.text}
+      </p>
+      {props.summary.truncated ? (
+        <p className="pl-7 text-2xs text-muted-foreground">
+          {uiText("Summary truncated to the retained preview.", undefined, undefined, uiLocale)}
         </p>
       ) : null}
-      <CollapsibleTrigger
-        aria-controls={panelId}
-        className="focus-ring group ml-7 inline-flex min-h-7 items-center gap-1 rounded-sm text-2xs text-muted-foreground hover:text-foreground"
-      >
-        <ChevronRightIcon
-          className="size-3 transition-transform duration-(--duration-fast) group-data-[panel-open]:rotate-90"
-          aria-hidden
-        />
-        {uiText("Inspect summary", undefined, undefined, uiLocale)}
-      </CollapsibleTrigger>
-      <CollapsiblePanel id={panelId}>
-        <p
-          className="mt-1 pl-7 text-xs leading-5 whitespace-pre-wrap wrap-break-word text-chat-foreground"
-          data-summary-full-text="true"
-        >
-          {props.summary.text}
-        </p>
-        {props.summary.truncated ? (
-          <p className="pl-7 text-2xs text-muted-foreground">
-            {uiText("Summary truncated to the retained preview.", undefined, undefined, uiLocale)}
-          </p>
-        ) : null}
-      </CollapsiblePanel>
-    </Collapsible>
+    </div>
   );
 });
 
-/** Inert, bounded command text; opening this disclosure never executes it. */
+/**
+ * Inert, bounded command text; opening this disclosure never executes it.
+ * The collapsed row deliberately mirrors an ordinary (Codex) command row:
+ * a muted "Ran command" verb plus a dim preview, with only an in-progress or
+ * failed outcome surfaced. The complete status, command, output and timing
+ * stay inside the disclosure.
+ */
 export const ClaudeCommandWorkEntry = memo(function ClaudeCommandWorkEntry(props: {
   readonly inspection: ClaudeCommandInspection;
   readonly timestampFormat: TimestampFormat;
+  readonly workspaceRoot?: string | undefined;
 }) {
   const uiLocale = useUiLocale();
   const uiPresentation = useUiPresentation(UI_PRESENTATION_SOURCES);
@@ -97,9 +83,17 @@ export const ClaudeCommandWorkEntry = memo(function ClaudeCommandWorkEntry(props
     inspection.startedAt && inspection.completedAt
       ? uiPresentation.formatElapsed(inspection.startedAt, inspection.completedAt)
       : null;
+  const verb =
+    inspection.status === "inProgress"
+      ? uiText("Running command…", undefined, undefined, uiLocale)
+      : uiText("Ran command", undefined, undefined, uiLocale);
+  const preview =
+    inspection.description ??
+    (inspection.command ? compactCommandPreview(inspection.command, props.workspaceRoot) : null);
   return (
     <InspectableWorkEntry
       kind="claude-command"
+      compact
       icon={<TerminalIcon className="size-3" aria-hidden />}
       accessibleLabel={uiText(
         "Inspect command: {value0}",
@@ -113,23 +107,18 @@ export const ClaudeCommandWorkEntry = memo(function ClaudeCommandWorkEntry(props
         uiLocale,
       )}
       heading={
-        <span className="min-w-0 flex-1 truncate text-foreground">
-          {inspection.description ??
-            inspection.command ??
-            uiText("Command", undefined, undefined, uiLocale)}
+        <span className="min-w-0 flex-1 truncate text-muted-foreground">
+          {verb}
+          {preview ? <span className="text-subtle-foreground"> - {preview}</span> : null}
         </span>
       }
       metadata={
-        <span
-          className={cn(
-            "shrink-0 text-2xs",
-            inspection.status === "failed"
-              ? "text-destructive-foreground"
-              : "text-muted-foreground",
-          )}
-        >
-          {status}
-        </span>
+        inspection.status === "failed" ? (
+          // Hidden while open: the disclosure's own status line then says it.
+          <span className="shrink-0 text-2xs text-destructive-foreground group-data-[panel-open]:hidden">
+            {status}
+          </span>
+        ) : undefined
       }
     >
       {inspection.description ? (
@@ -186,6 +175,12 @@ export const ClaudeCommandWorkEntry = memo(function ClaudeCommandWorkEntry(props
         className="flex flex-wrap gap-x-3 gap-y-1 text-2xs tabular-nums"
         data-command-inspection-timing="true"
       >
+        <span
+          className={inspection.status === "failed" ? "text-destructive-foreground" : undefined}
+          data-command-inspection-status="true"
+        >
+          {status}
+        </span>
         {inspection.startedAt ? (
           <span>
             <UiMessage

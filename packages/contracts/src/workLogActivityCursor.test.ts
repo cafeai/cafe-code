@@ -158,4 +158,43 @@ describe("bounded earlier work-log contracts", () => {
       decodePresence({ threadId: "thread", turnIds: ["turn"], excludeActivityIds }),
     ).toThrow();
   });
+
+  it("bounds operation exclusions to exact earlier-turn reads and echoes their complete identity", () => {
+    const excludeOperations = [
+      { kind: "tool", id: "native-tool" },
+      { kind: "summary", id: "native-tool" },
+    ];
+    const input = decodePageInput({ ...request, before, excludeOperations });
+    expect(decodePage({ ...input, totalCount: 0, activities: [] }).excludeOperations).toEqual(
+      excludeOperations,
+    );
+    expect(
+      decodePresence({ threadId: "thread", turnIds: ["turn"], before, excludeOperations })
+        .excludeOperations,
+    ).toEqual(excludeOperations);
+    for (const invalid of [
+      [{ kind: "unknown", id: "native-tool" }],
+      [{ kind: "tool", id: "" }],
+      [{ kind: "tool", id: "bad\u0000id" }],
+      [{ kind: "tool", id: "x".repeat(4_097) }],
+      Array(THREAD_TURN_ACTIVITY_PAGE_MAX_LIMIT + 1).fill({ kind: "tool", id: "native-tool" }),
+    ]) {
+      expect(() => decodePageInput({ ...request, before, excludeOperations: invalid })).toThrow();
+      expect(() =>
+        decodePresence({
+          threadId: "thread",
+          turnIds: ["turn"],
+          before,
+          excludeOperations: invalid,
+        }),
+      ).toThrow();
+    }
+    expect(() => decodePageInput({ ...request, excludeOperations })).toThrow();
+    expect(() =>
+      decodePresence({ threadId: "thread", turnIds: ["turn"], excludeOperations }),
+    ).toThrow();
+    expect(() =>
+      decodePresence({ threadId: "thread", turnIds: ["turn", "other"], before, excludeOperations }),
+    ).toThrow();
+  });
 });

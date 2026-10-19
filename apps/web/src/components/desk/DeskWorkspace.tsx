@@ -477,54 +477,23 @@ function ChatTab({
   );
 }
 
-function GroupTabs({
+function TabStrip({
   group,
   hint,
-  restoreGroups,
-  canRestoreGroups,
-  onToggleFocus,
+  pendingEditor,
   onMenu,
   onRename,
-  onRenameGroup,
-  pendingEditor = false,
-  controls,
-  rect,
 }: {
   group: DeskGroup;
   hint: DropHint;
-  restoreGroups: boolean;
-  canRestoreGroups: boolean;
-  onToggleFocus: () => void;
+  pendingEditor: boolean;
   onMenu: (key: string | null, position: { x: number; y: number }) => void;
   onRename: (target: ThreadRouteTarget) => void;
-  onRenameGroup: () => void;
-  pendingEditor?: boolean;
-  controls: ReactNode;
-  rect: DeskRect;
 }) {
   const uiLocale = useUiLocale();
 
   const desk = useDeskStore((s) => s.desk);
   const strip = useRef<HTMLDivElement>(null);
-  const titlebar = useRef<HTMLDivElement>(null);
-  const isMacDesktopTitlebar = useMacDesktopTitlebar({ includeNarrowDesktop: true });
-  useLayoutEffect(() => {
-    const bar = titlebar.current;
-    if (!bar || !isElectron || rect.y !== 0) return;
-    const measure = () => {
-      const bounds = bar.getBoundingClientRect();
-      bar.style.setProperty("--desk-window-left-gap", `${bounds.left}px`);
-      bar.style.setProperty("--desk-window-right-gap", `${window.innerWidth - bounds.right}px`);
-    };
-    measure();
-    const observer = new ResizeObserver(measure);
-    observer.observe(bar);
-    window.addEventListener("resize", measure);
-    return () => {
-      observer.disconnect();
-      window.removeEventListener("resize", measure);
-    };
-  }, [rect.x, rect.y, rect.width]);
   const insertionIndex = hint?.kind === "insert" && hint.groupId === group.id ? hint.index : null;
   const drop = useDroppable({
     id: `strip:${group.id}`,
@@ -590,6 +559,101 @@ function GroupTabs({
   }, [group.activeTabKey, group.tabs]);
   return (
     <div
+      ref={(element) => {
+        strip.current = element;
+        drop.setNodeRef(element);
+      }}
+      className="desk-tab-strip"
+      style={tabStripStyle}
+      role="tablist"
+      aria-label={uiText("{value0} tabs", { value0: group.name }, undefined, uiLocale)}
+    >
+      {group.tabs.map((key, index) => {
+        const target = desk.targets[key];
+        return target ? (
+          <Fragment key={key}>
+            {insertionIndex === index && (
+              <span className="desk-tab-insertion" data-desk-insertion-index={index} aria-hidden />
+            )}
+            <ChatTab
+              target={target}
+              tabKey={key}
+              group={pendingEditor ? { ...group, activeTabKey: null } : group}
+              index={index}
+              onMenu={onMenu}
+              onRename={onRename}
+            />
+          </Fragment>
+        ) : null;
+      })}
+      {insertionIndex === group.tabs.length && (
+        <span
+          className="desk-tab-insertion"
+          data-desk-insertion-index={group.tabs.length}
+          aria-hidden
+        />
+      )}
+    </div>
+  );
+}
+
+function GroupTabs({
+  group,
+  hint,
+  restoreGroups,
+  canRestoreGroups,
+  showFocusToggle,
+  onToggleFocus,
+  onMenu,
+  onRename,
+  onRenameGroup,
+  pendingEditor = false,
+  showTabs,
+  preview,
+  controls,
+  rect,
+}: {
+  group: DeskGroup;
+  hint: DropHint;
+  restoreGroups: boolean;
+  canRestoreGroups: boolean;
+  /** Focus/restore has a visible effect only with several groups or an active focus. */
+  showFocusToggle: boolean;
+  onToggleFocus: () => void;
+  onMenu: (key: string | null, position: { x: number; y: number }) => void;
+  onRename: (target: ThreadRouteTarget) => void;
+  onRenameGroup: () => void;
+  pendingEditor?: boolean;
+  /** Settings → Chats → Chat tabs. Off keeps this bar but shows the chat header. */
+  showTabs: boolean;
+  /** The displayed chat is this group's temporary preview (italic, like its tab). */
+  preview: boolean;
+  controls: ReactNode;
+  rect: DeskRect;
+}) {
+  const uiLocale = useUiLocale();
+
+  const titlebar = useRef<HTMLDivElement>(null);
+  const isMacDesktopTitlebar = useMacDesktopTitlebar({ includeNarrowDesktop: true });
+  useLayoutEffect(() => {
+    const bar = titlebar.current;
+    if (!bar || !isElectron || rect.y !== 0) return;
+    const measure = () => {
+      const bounds = bar.getBoundingClientRect();
+      bar.style.setProperty("--desk-window-left-gap", `${bounds.left}px`);
+      bar.style.setProperty("--desk-window-right-gap", `${window.innerWidth - bounds.right}px`);
+    };
+    measure();
+    const observer = new ResizeObserver(measure);
+    observer.observe(bar);
+    window.addEventListener("resize", measure);
+    return () => {
+      observer.disconnect();
+      window.removeEventListener("resize", measure);
+    };
+  }, [rect.x, rect.y, rect.width]);
+  return (
+    <div
       ref={titlebar}
       className={`desk-group-bar${isElectron && rect.y === 0 ? " drag-region" : ""}`}
       data-desktop-titlebar={isElectron && rect.y === 0}
@@ -597,82 +661,64 @@ function GroupTabs({
       data-window-left={rect.x === 0}
       data-window-top={rect.y === 0}
       data-window-right={rect.x + rect.width >= 0.999}
+      data-tabs={showTabs ? "shown" : "hidden"}
     >
-      <div className="desk-header-controls">{controls}</div>
-      <div className="desk-group-identity">
-        <GroupGrip group={group} />
-        <Tooltip>
-          <TooltipTrigger
-            render={
-              <button className="desk-group-name" onClick={onRenameGroup}>
-                {group.name}
-              </button>
-            }
-          />
-          <TooltipPopup side="bottom">
-            {uiText("Rename group", undefined, undefined, uiLocale)}
-          </TooltipPopup>
-        </Tooltip>
-      </div>
-      <div
-        ref={(element) => {
-          strip.current = element;
-          drop.setNodeRef(element);
-        }}
-        className="desk-tab-strip"
-        style={tabStripStyle}
-        role="tablist"
-        aria-label={uiText("{value0} tabs", { value0: group.name }, undefined, uiLocale)}
-      >
-        {group.tabs.map((key, index) => {
-          const target = desk.targets[key];
-          return target ? (
-            <Fragment key={key}>
-              {insertionIndex === index && (
-                <span
-                  className="desk-tab-insertion"
-                  data-desk-insertion-index={index}
-                  aria-hidden
-                />
-              )}
-              <ChatTab
-                target={target}
-                tabKey={key}
-                group={pendingEditor ? { ...group, activeTabKey: null } : group}
-                index={index}
-                onMenu={onMenu}
-                onRename={onRename}
+      {showTabs ? (
+        <>
+          <div className="desk-header-controls">{controls}</div>
+          <div className="desk-group-identity">
+            <GroupGrip group={group} />
+            <Tooltip>
+              <TooltipTrigger
+                render={
+                  <button className="desk-group-name" onClick={onRenameGroup}>
+                    {group.name}
+                  </button>
+                }
               />
-            </Fragment>
-          ) : null;
-        })}
-        {insertionIndex === group.tabs.length && (
-          <span
-            className="desk-tab-insertion"
-            data-desk-insertion-index={group.tabs.length}
-            aria-hidden
+              <TooltipPopup side="bottom">
+                {uiText("Rename group", undefined, undefined, uiLocale)}
+              </TooltipPopup>
+            </Tooltip>
+          </div>
+          <TabStrip
+            group={group}
+            hint={hint}
+            pendingEditor={pendingEditor}
+            onMenu={onMenu}
+            onRename={onRename}
           />
-        )}
-      </div>
-      <button
-        className="desk-icon"
-        aria-label={
-          restoreGroups
-            ? uiText("Restore all groups", undefined, undefined, uiLocale)
-            : uiText("Focus {value0}", { value0: group.name }, undefined, uiLocale)
-        }
-        title={
-          restoreGroups
-            ? canRestoreGroups
+        </>
+      ) : (
+        // Hidden tabs keep this bar's native window geometry, drag area and
+        // group actions; ChatView supplies its full header, so the visible
+        // title (and project/Open-in controls) replaces the tab strip. Group
+        // rename/swap stay available from the actions menu and Desk sidebar.
+        <div className="desk-title-header" data-preview={preview}>
+          {controls}
+        </div>
+      )}
+      {showFocusToggle && (
+        <button
+          className="desk-icon"
+          aria-label={
+            restoreGroups
               ? uiText("Restore all groups", undefined, undefined, uiLocale)
-              : uiText("Enlarge the window to restore all groups", undefined, undefined, uiLocale)
-            : uiText("Focus group", undefined, undefined, uiLocale)
-        }
-        disabled={restoreGroups && !canRestoreGroups}
-        onClick={onToggleFocus}
-      >
-        {restoreGroups ? <Minimize2 size={13} /> : <Maximize2 size={13} />}
-      </button>
+              : uiText("Focus {value0}", { value0: group.name }, undefined, uiLocale)
+          }
+          title={
+            restoreGroups
+              ? canRestoreGroups
+                ? uiText("Restore all groups", undefined, undefined, uiLocale)
+                : uiText("Enlarge the window to restore all groups", undefined, undefined, uiLocale)
+              : uiText("Focus group", undefined, undefined, uiLocale)
+          }
+          disabled={restoreGroups && !canRestoreGroups}
+          onClick={onToggleFocus}
+        >
+          {restoreGroups ? <Minimize2 size={13} /> : <Maximize2 size={13} />}
+        </button>
+      )}
       <Tooltip>
         <TooltipTrigger
           render={
@@ -846,7 +892,11 @@ export default function DeskWorkspace() {
 
   useDeskRouteSync();
   const isMobile = useIsMobile();
+  // Narrow web clients use the chat's own header with no Desk bar at all. The
+  // Chat tabs setting is separate: it keeps the Desk bar (and its splits and
+  // window geometry) but swaps the tab strip for the chat's visible title.
   const compactNavigation = !isElectron && isMobile;
+  const showDeskTabs = useSettings((s) => s.showDeskTabs);
   const desk = useDeskStore((s) => s.desk);
   const draftEditors = useDeskStore((s) => s.draftEditors);
   const activeDraftId = useDeskStore((s) => s.activeDraftId);
@@ -916,6 +966,10 @@ export default function DeskWorkspace() {
     : (desk.focusedGroupId ?? (narrow ? desk.activeGroupId : null));
   const restoreGroups = desk.focusedGroupId !== null || (narrow && groupIds.length > 1);
   const canRestoreGroups = groupIds.length < 2 || !narrow;
+  // With one group and nothing focused, Focus/Restore would change nothing on
+  // screen, so the bar hides that button. A focus left over from a merge stays
+  // reachable so the user can always restore it; the menu item is unchanged.
+  const showFocusToggle = groupIds.length > 1 || desk.focusedGroupId !== null;
   const toggleGroupFocus = (groupId: string) => {
     if (restoreGroups && !canRestoreGroups) return;
     dispatch({ type: "focus", groupId: restoreGroups ? null : groupId });
@@ -1275,6 +1329,7 @@ export default function DeskWorkspace() {
           threadId={target.threadRef.threadId}
           routeKind="server"
           navigationSlot={navigationSlot}
+          navigationShowsTitle={!showDeskTabs}
         />
       ) : null;
     }
@@ -1287,6 +1342,7 @@ export default function DeskWorkspace() {
         draftId={target.draftId}
         routeKind="draft"
         navigationSlot={navigationSlot}
+        navigationShowsTitle={!showDeskTabs}
       />
     );
   }
@@ -1369,9 +1425,16 @@ export default function DeskWorkspace() {
                                 rect={rect}
                                 group={group}
                                 pendingEditor={pendingEditor}
+                                showTabs={showDeskTabs}
+                                preview={
+                                  !pendingEditor &&
+                                  group.previewTabKey !== undefined &&
+                                  group.previewTabKey === group.activeTabKey
+                                }
                                 hint={hint}
                                 restoreGroups={restoreGroups}
                                 canRestoreGroups={canRestoreGroups}
+                                showFocusToggle={showFocusToggle}
                                 onToggleFocus={() => toggleGroupFocus(groupId)}
                                 onMenu={(key, pos) => {
                                   void showMenu(groupId, key, pos);

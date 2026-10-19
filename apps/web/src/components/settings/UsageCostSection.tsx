@@ -1147,7 +1147,10 @@ export function UsageCostSection({
   const uiLocale = useUiLocale();
 
   return (
-    <SettingsSection title={uiText("Cost (USD)", undefined, undefined, uiLocale)}>
+    <SettingsSection
+      searchId="usage.cost"
+      title={uiText("Cost (USD)", undefined, undefined, uiLocale)}
+    >
       <UsageCostContent
         usage={usage}
         range={range}

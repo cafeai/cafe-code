@@ -224,22 +224,87 @@ describe("Claude control-only account allowances", () => {
       }),
   );
 
-  it.effect("joins disposable child retirement when a cached read is cancelled", () =>
-    Effect.gen(function* () {
-      const reading = yield* Deferred.make<void>();
-      const peer = fixture(() =>
-        Stream.fromEffect(Deferred.succeed(reading, undefined)).pipe(
-          Stream.flatMap(() => Stream.never),
-        ),
-      );
-      const reader = yield* makeClaudeAccountQuotaReader(
-        "selected-claude",
-        Effect.succeed(environment),
-      ).pipe(Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, peer.spawner));
-      const fiber = yield* reader.pipe(Effect.forkChild);
-      yield* Deferred.await(reading);
-      yield* Fiber.interrupt(fiber);
-      expect(peer.kills).toEqual(["SIGTERM"]);
-    }),
+  it.effect(
+    "coalesces concurrent visible consumers and reuses successful reads for one minute",
+    () =>
+      Effect.gen(function* () {
+        const reading = yield* Deferred.make<void>();
+        const release = yield* Deferred.make<void>();
+        const peer = fixture((request_id) =>
+          Stream.fromEffect(
+            Deferred.succeed(reading, undefined).pipe(Effect.andThen(Deferred.await(release))),
+          ).pipe(
+            Stream.flatMap(() =>
+              Stream.make(
+                encoder.encode(
+                  JSON.stringify({
+                    type: "control_response",
+                    response: { subtype: "success", request_id, response: native },
+                  }) + "\n",
+                ),
+              ),
+            ),
+          ),
+        );
+        const reader = yield* makeClaudeAccountQuotaReader(
+          "selected-claude",
+          Effect.succeed(environment),
+        ).pipe(Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, peer.spawner));
+        const consumers = yield* Effect.all([reader, reader, reader], {
+          concurrency: "unbounded",
+        }).pipe(Effect.forkChild);
+        yield* Deferred.await(reading);
+        expect(peer.commands).toHaveLength(1);
+        yield* Deferred.succeed(release, undefined);
+        const reports = yield* Fiber.join(consumers);
+        expect(reports[0]?.meters?.map((meter) => meter.usedPercent)).toEqual([57, 18]);
+        expect(reports).toEqual([reports[0], reports[0], reports[0]]);
+        yield* TestClock.adjust(59_000);
+        expect(yield* reader).toEqual(reports[0]);
+        expect(peer.commands).toHaveLength(1);
+        yield* TestClock.adjust(1_001);
+        yield* reader;
+        expect(peer.commands).toHaveLength(2);
+        expect(peer.kills).toEqual(["SIGTERM", "SIGTERM"]);
+      }),
+  );
+
+  it.effect(
+    "retires a cancelled read and prevents reopen/reconnect bursts from probing again",
+    () =>
+      Effect.gen(function* () {
+        const reading = yield* Deferred.make<void>();
+        let attempts = 0;
+        const peer = fixture(() =>
+          ++attempts === 1
+            ? Stream.fromEffect(Deferred.succeed(reading, undefined)).pipe(
+                Stream.flatMap(() => Stream.never),
+              )
+            : Stream.empty,
+        );
+        const reader = yield* makeClaudeAccountQuotaReader(
+          "selected-claude",
+          Effect.succeed(environment),
+        ).pipe(Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, peer.spawner));
+        const fiber = yield* reader.pipe(Effect.forkChild);
+        yield* Deferred.await(reading);
+        yield* Fiber.interrupt(fiber);
+        expect(peer.kills).toEqual(["SIGTERM"]);
+        // Interrupted exits also retain the pinned Effect cache's TTL. Repeated
+        // subscribers may observe unavailable, but cannot restart the probe.
+        yield* Effect.all(
+          Array.from({ length: 12 }, () => Effect.exit(reader)),
+          {
+            concurrency: "unbounded",
+          },
+        );
+        yield* TestClock.adjust(59_000);
+        yield* Effect.exit(reader);
+        expect(peer.commands).toHaveLength(1);
+        yield* TestClock.adjust(1_001);
+        expect(yield* reader).toBeNull();
+        expect(peer.commands).toHaveLength(2);
+        expect(peer.kills).toEqual(["SIGTERM", "SIGTERM"]);
+      }),
   );
 });

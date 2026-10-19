@@ -104,6 +104,18 @@ export function snapshotProviderTurnConfiguration(input: {
     session.provider === "codex"
       ? safeLabel(getModelSelectionStringOptionValue(selection, "serviceTier"), 64)
       : undefined;
+  // Daybreak values are Cafe's persisted cyberAccessProgram choices (see
+  // provider/codexDaybreak.ts). Unknown spellings stay unrecorded.
+  const cyberAccessProgram =
+    session.provider === "codex"
+      ? getModelSelectionStringOptionValue(selection, "cyberAccessProgram")
+      : undefined;
+  const daybreak =
+    cyberAccessProgram === "standard"
+      ? false
+      : cyberAccessProgram === "daybreakBlue" || cyberAccessProgram === "daybreakRed"
+        ? true
+        : undefined;
   const interactionMode =
     input.settingsSource === "session"
       ? session.interactionMode
@@ -121,6 +133,7 @@ export function snapshotProviderTurnConfiguration(input: {
     ...(fastMode !== undefined ? { fastMode } : {}),
     ...(ultracode !== undefined ? { ultracode } : {}),
     ...(serviceTier !== undefined ? { serviceTier } : {}),
+    ...(daybreak !== undefined ? { daybreak } : {}),
     runtimeMode: session.runtimeMode,
     ...(interactionMode !== undefined ? { interactionMode } : {}),
     // A request can inherit its model options while explicitly submitting a

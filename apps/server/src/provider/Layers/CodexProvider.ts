@@ -1217,7 +1217,7 @@ export function finalizeCodexModelListRefresh(
 
 /**
  * Run one explicitly requested metadata/account operation in a disposable
- * app-server. Model discovery and earned-reset dialogs share the same startup,
+ * app-server. Model discovery, browser login and earned-reset dialogs share startup,
  * initialization and tree-aware cleanup; the callback selects the narrow RPCs
  * appropriate to that gesture. No thread is started here. The caller owns the
  * scope and timeout so an unresponsive child is interrupted and reaped.
@@ -1229,6 +1229,7 @@ export const withCodexMetadataClient = <A, E, R>(
     readonly cwd: string;
     readonly customModels?: ReadonlyArray<string>;
     readonly environment?: NodeJS.ProcessEnv;
+    readonly onTermination?: () => Effect.Effect<void>;
   },
   use: (client: CodexClient.CodexAppServerClientShape) => Effect.Effect<A, E, R>,
 ) =>
@@ -1253,6 +1254,7 @@ export const withCodexMetadataClient = <A, E, R>(
               // content-free on success AND malformed responses. Callers retain
               // their fixed phase/outcome diagnostics without provider payloads.
               logger: () => Effect.void,
+              ...(input.onTermination ? { onTermination: input.onTermination } : {}),
             }),
           );
           const client = yield* Effect.service(CodexClient.CodexAppServerClient).pipe(

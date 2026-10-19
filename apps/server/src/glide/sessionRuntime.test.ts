@@ -5,7 +5,11 @@ import { describe, expect, it, vi } from "vitest";
 import { ProviderInstanceId, ThreadId } from "@cafecode/contracts";
 import { readBridgeConnection } from "../mcp/localBridge.ts";
 import { GlideNativeHost } from "./nativeHost.ts";
-import { makeGlideSessionRuntime, type GlideSessionBinding } from "./sessionRuntime.ts";
+import {
+  glideHostAppFromExecutable,
+  makeGlideSessionRuntime,
+  type GlideSessionBinding,
+} from "./sessionRuntime.ts";
 import { GlideExecutionError } from "./runtime.ts";
 import { unknownActionReceipt } from "./protocol.ts";
 
@@ -309,6 +313,121 @@ describe("Cafe Glide session authority", () => {
       await run(4);
       expect(f.kernels[0]!.close).toHaveBeenCalledOnce();
       expect(f.kernels).toHaveLength(5);
+    } finally {
+      await f.cleanup();
+    }
+  });
+});
+
+const responsible = {
+  path: "/Users/dev/cafe/apps/desktop/.electron-runtime/debug/Cafe Code (Debug).app",
+  name: "Cafe Code (Debug)",
+  bundleId: "com.cafeai.cafecode.debug",
+};
+async function setup(status: () => Promise<unknown>) {
+  const root = await realpath(await mkdtemp(join(tmpdir(), "glide-host-fixture-")));
+  const bridgeSource = join(root, "bridge.mjs");
+  await writeFile(bridgeSource, "// Fixture only, never executed.\n");
+  const reveal = vi.fn(async (_path: string) => undefined);
+  const nativeStatus = vi.fn(status);
+  const runtime = makeGlideSessionRuntime({
+    helperPath: "/synthetic/helper",
+    bridgeSource,
+    mcpPort: 12345,
+    nativeHost: new GlideNativeHost(() => {
+      throw new Error("No native child is allowed in this fixture.");
+    }),
+    readPolicy: async () => ({ enabled: false, apps: [], fullAccess: true }),
+    writePolicy: async () => undefined,
+    status: nativeStatus as never,
+    hostExecutablePath: "/Applications/Cafe Code.app/Contents/MacOS/Cafe Code",
+    reveal,
+  });
+  return {
+    runtime,
+    reveal,
+    nativeStatus,
+    cleanup: async () => {
+      await runtime.close();
+      await rm(root, { recursive: true, force: true });
+    },
+  };
+}
+
+describe("Glide permission setup host identity", () => {
+  it("derives the outermost bundle of a host executable and refuses bare binaries", () => {
+    expect(
+      glideHostAppFromExecutable(
+        "/Applications/Cafe Code.app/Contents/Frameworks/Cafe Code Helper.app/Contents/MacOS/Cafe Code Helper",
+      ),
+    ).toEqual({ path: "/Applications/Cafe Code.app", name: "Cafe Code" });
+    expect(glideHostAppFromExecutable("/usr/local/bin/node")).toBeUndefined();
+    expect(glideHostAppFromExecutable("relative/Cafe.app/Contents/MacOS/Cafe")).toBeUndefined();
+  });
+
+  it("reports the native responsible app and macOS version, preferring it over the host executable", async () => {
+    const f = await setup(async () => ({
+      accessibility: false,
+      screenRecording: true,
+      osMajorVersion: 27,
+      responsibleApp: responsible,
+      apps: [],
+    }));
+    try {
+      await expect(
+        f.runtime.operation({ kind: "control", input: { action: "status" } }),
+      ).resolves.toMatchObject({
+        accessibility: false,
+        screenRecording: true,
+        osMajorVersion: 27,
+        hostApp: responsible,
+      });
+    } finally {
+      await f.cleanup();
+    }
+  });
+
+  it("falls back to the owner executable bundle when the responsible process is unknown", async () => {
+    const f = await setup(async () => ({
+      accessibility: false,
+      screenRecording: false,
+      responsibleApp: null,
+      apps: [],
+    }));
+    try {
+      const result = (await f.runtime.operation({
+        kind: "control",
+        input: { action: "status" },
+      })) as Record<string, unknown>;
+      expect(result.hostApp).toEqual({ path: "/Applications/Cafe Code.app", name: "Cafe Code" });
+      expect(result).not.toHaveProperty("osMajorVersion");
+    } finally {
+      await f.cleanup();
+    }
+  });
+
+  it("reveals only the freshly observed native host bundle and never accepts a client path", async () => {
+    const f = await setup(async () => ({
+      accessibility: true,
+      screenRecording: true,
+      responsibleApp: responsible,
+      apps: [],
+    }));
+    try {
+      await f.runtime.operation({ kind: "control", input: { action: "reveal-host-app" } });
+      expect(f.reveal).toHaveBeenCalledExactlyOnceWith(responsible.path);
+      await expect(
+        f.runtime.operation({
+          kind: "control",
+          input: { action: "reveal-host-app", path: "/tmp/Other.app" },
+        } as never),
+      ).rejects.toThrow();
+      expect(f.reveal).toHaveBeenCalledTimes(1);
+      f.nativeStatus.mockRejectedValueOnce(new Error("helper unavailable"));
+      await expect(
+        f.runtime.operation({ kind: "control", input: { action: "reveal-host-app" } }),
+      ).rejects.toThrow();
+      expect(f.reveal).toHaveBeenCalledTimes(1);
     } finally {
       await f.cleanup();
     }

@@ -28,7 +28,11 @@ import {
 } from "./debugProviderProfile.ts";
 import { deriveProviderInstanceConfigMap } from "./Layers/ProviderInstanceRegistryHydration.ts";
 import { makeClaudeNonChatEnvironment } from "./Drivers/ClaudeHome.ts";
-import { materializeCodexShadowHome, resolveCodexHomeLayout } from "./Drivers/CodexHomeLayout.ts";
+import {
+  codexLoginHomePath,
+  materializeCodexShadowHome,
+  resolveCodexHomeLayout,
+} from "./Drivers/CodexHomeLayout.ts";
 import { withDefaultCodexShadowHome } from "./Drivers/CodexDriver.ts";
 import {
   resolveProviderRuntimeEnvironment,
@@ -360,10 +364,7 @@ const resolveCodexLoginPlan = Effect.fn("ProviderLoginLauncher.resolveCodex")(fu
   yield* materializeCodexShadowHome(homeLayout, { authSource }).pipe(
     Effect.mapError((cause) => loginError(input.instanceId, cause.message, cause)),
   );
-  const authHomePath =
-    authSource === "shadow"
-      ? (homeLayout.effectiveHomePath ?? homeLayout.sharedHomePath)
-      : homeLayout.sharedHomePath;
+  const authHomePath = codexLoginHomePath(homeLayout, authSource);
 
   return {
     instanceId: input.instanceId,

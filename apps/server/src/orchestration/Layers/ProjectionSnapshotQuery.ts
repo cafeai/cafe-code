@@ -15,6 +15,8 @@ import {
   OrchestrationThreadTurnSubagentDetailInput,
   OrchestrationThreadActivityCursor,
   EarlierWorkLogExcludedActivityIds,
+  EarlierWorkLogExcludedOperations,
+  type WorkLogOperationIdentity,
   THREAD_DETAIL_ACTIVITY_WINDOW_LIMIT,
   ProviderThreadGoal,
   ProjectScript,
@@ -39,6 +41,7 @@ import {
   CODEX_STEER_PROGRESS_TASK_PREFIXES,
   CODEX_STEER_WAIT_MESSAGE,
   CODEX_TURN_RUNNING_MESSAGE,
+  HIDDEN_PROVIDER_WARNING_MESSAGES,
 } from "@cafecode/shared/providerWorkLog";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
@@ -309,6 +312,7 @@ const ThreadTurnLookupInput = Schema.Struct({
   turnId: TurnId,
   before: Schema.optional(OrchestrationThreadActivityCursor),
   excludeActivityIds: Schema.optional(EarlierWorkLogExcludedActivityIds),
+  excludeOperations: Schema.optional(EarlierWorkLogExcludedOperations),
   excludeTurnStartAck: Schema.optional(Schema.Boolean),
 });
 const ThreadTurnSubagentLookupInput = OrchestrationThreadTurnSubagentDetailInput;
@@ -682,9 +686,11 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
     ),
   ]);
   const routineRuntimeWarningPredicate = sql.or([
-    ...[CODEX_STEER_WAIT_MESSAGE, CODEX_TURN_RUNNING_MESSAGE].map(
-      (message) => sql`json_extract(payload_json, '$.message') = ${message}`,
-    ),
+    ...[
+      CODEX_STEER_WAIT_MESSAGE,
+      CODEX_TURN_RUNNING_MESSAGE,
+      ...HIDDEN_PROVIDER_WARNING_MESSAGES,
+    ].map((message) => sql`json_extract(payload_json, '$.message') = ${message}`),
     ...CODEX_ROUTINE_WARNING_FORMATS.map(
       (format) =>
         sql`COALESCE(json_extract(payload_json, '$.message'), '') GLOB ${`${format.prefix}*${format.suffix}`}`,
@@ -2919,9 +2925,32 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
     ids: ReadonlyArray<string> | undefined,
     turnId: string,
     excludeTurnStartAck: boolean | undefined,
-  ) =>
-    sql.and([
+    operations: ReadonlyArray<WorkLogOperationIdentity> | undefined,
+  ) => {
+    const tools = operations?.filter((operation) => operation.kind === "tool").map(({ id }) => id);
+    const summaries = operations
+      ?.filter((operation) => operation.kind === "summary")
+      .map(({ id }) => id);
+    // These are static application-owned expressions. Values remain bound,
+    // and native identity never widens the authenticated thread/turn range.
+    // Match readWorkLogOperationIdentity: a nonblank explicit toolCallId wins
+    // over itemId, with the exact ECMAScript trim set. Invalid/nonmatching ids
+    // cannot borrow a valid fallback's exclusion or hide unidentified work.
+    const trimCharacters = sql.unsafe(ecmaTrimCharacters);
+    const itemId = sql`CASE WHEN json_type(payload_json, '$.itemId') = 'text'
+      THEN trim(json_extract(payload_json, '$.itemId'), ${trimCharacters}) END`;
+    const toolId = sql`COALESCE(NULLIF(CASE
+      WHEN json_type(payload_json, '$.data.toolCallId') = 'text'
+      THEN trim(json_extract(payload_json, '$.data.toolCallId'), ${trimCharacters}) END, ''), ${itemId})`;
+    return sql.and([
       ids?.length ? sql`activity_id NOT IN ${sql.in(ids)}` : sql`1 = 1`,
+      tools?.length
+        ? sql`NOT (kind IN ('tool.started', 'tool.updated', 'tool.completed')
+            AND COALESCE(${toolId} IN ${sql.in(tools)}, 0))`
+        : sql`1 = 1`,
+      summaries?.length
+        ? sql`NOT (kind = 'reasoning.summary' AND COALESCE(${itemId} IN ${sql.in(summaries)}, 0))`
+        : sql`1 = 1`,
       // Match the renderer's exact configured-turn suppression even after the
       // separate ACK row leaves the live tail. Keep legacy ACKs eligible when
       // accepted Codex settings are absent, malformed or from another turn.
@@ -2929,18 +2958,26 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
         ? sql`NOT (kind = 'task.progress' AND COALESCE(json_extract(payload_json, '$.taskId'), '') = ${`codex-turn-start:${turnId}`})`
         : sql`1 = 1`,
     ]);
+  };
 
   const countThreadActivityRowsByTurn = SqlSchema.findOne({
     Request: ThreadTurnActivityPageLookupInput,
     Result: CountRowSchema,
-    execute: ({ threadId, turnId, before, excludeActivityIds, excludeTurnStartAck }) =>
+    execute: ({
+      threadId,
+      turnId,
+      before,
+      excludeActivityIds,
+      excludeTurnStartAck,
+      excludeOperations,
+    }) =>
       sql`
         SELECT COUNT(*) AS "count"
         FROM projection_thread_activities
         WHERE thread_id = ${threadId}
           AND turn_id = ${turnId}
           AND ${activityBeforePredicate(before)}
-          AND ${excludedActivityPredicate(excludeActivityIds, turnId, excludeTurnStartAck)}
+          AND ${excludedActivityPredicate(excludeActivityIds, turnId, excludeTurnStartAck, excludeOperations)}
           AND ${historicalWorkLogActivityPredicate}
       `,
   });
@@ -2948,7 +2985,14 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
   const findThreadTurnWorkLogPresence = SqlSchema.findOne({
     Request: ThreadTurnLookupInput,
     Result: WorkLogPresenceRowSchema,
-    execute: ({ threadId, turnId, before, excludeActivityIds, excludeTurnStartAck }) =>
+    execute: ({
+      threadId,
+      turnId,
+      before,
+      excludeActivityIds,
+      excludeTurnStartAck,
+      excludeOperations,
+    }) =>
       sql`
         SELECT EXISTS(
           SELECT 1
@@ -2956,7 +3000,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
           WHERE thread_id = ${threadId}
             AND turn_id = ${turnId}
             AND ${activityBeforePredicate(before)}
-            AND ${excludedActivityPredicate(excludeActivityIds, turnId, excludeTurnStartAck)}
+            AND ${excludedActivityPredicate(excludeActivityIds, turnId, excludeTurnStartAck, excludeOperations)}
             AND ${historicalWorkLogActivityPredicate}
           LIMIT 1
         ) AS "hasWorkLog"
@@ -2999,6 +3043,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
       before,
       excludeActivityIds,
       excludeTurnStartAck,
+      excludeOperations,
     }) => {
       // Keyset mode reads the nearest older bounded page, then the service
       // reverses those rows back to ordinary chronological display. Legacy
@@ -3024,7 +3069,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
         WHERE thread_id = ${threadId}
           AND turn_id = ${turnId}
           AND ${activityBeforePredicate(before)}
-          AND ${excludedActivityPredicate(excludeActivityIds, turnId, excludeTurnStartAck)}
+          AND ${excludedActivityPredicate(excludeActivityIds, turnId, excludeTurnStartAck, excludeOperations)}
           AND ${historicalWorkLogActivityPredicate}
         ORDER BY ${order}
         LIMIT ${limit}
@@ -4721,6 +4766,9 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
             ...(input.excludeActivityIds === undefined
               ? {}
               : { excludeActivityIds: input.excludeActivityIds }),
+            ...(input.excludeOperations === undefined
+              ? {}
+              : { excludeOperations: input.excludeOperations }),
             ...(input.excludeTurnStartAck === undefined
               ? {}
               : { excludeTurnStartAck: input.excludeTurnStartAck }),
@@ -4752,6 +4800,9 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
             ...(input.excludeActivityIds === undefined
               ? {}
               : { excludeActivityIds: input.excludeActivityIds }),
+            ...(input.excludeOperations === undefined
+              ? {}
+              : { excludeOperations: input.excludeOperations }),
             ...(input.excludeTurnStartAck === undefined
               ? {}
               : { excludeTurnStartAck: input.excludeTurnStartAck }),

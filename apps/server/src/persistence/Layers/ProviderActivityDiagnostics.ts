@@ -7,6 +7,10 @@ import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
 import type * as SqlClient from "effect/unstable/sql/SqlClient";
 import { createHash } from "node:crypto";
+import {
+  providerDiagnosticTextHasCaptureMarker,
+  readProviderDiagnosticErrorBody,
+} from "@cafecode/shared/providerDiagnostic";
 import { PersistenceDecodeError, PersistenceSqlError } from "../Errors.ts";
 
 const decodeSnapshot = Schema.decodeUnknownSync(Schema.fromJsonString(ProviderDiagnosticSnapshot));
@@ -16,40 +20,58 @@ const validateSnapshot = Schema.decodeUnknownSync(ProviderDiagnosticSnapshot);
 const privateSqlError = (operation: string) => () =>
   new PersistenceSqlError({ operation, detail: "Private diagnostic operation failed" });
 
-/** Only equal, fully captured native error bodies may coalesce a terminal echo. */
+/**
+ * Only equal, fully captured native error bodies may coalesce a terminal echo.
+ *
+ * Completeness is judged on the copied error object itself. Terminal envelopes
+ * deliberately leave out unrelated turn data (items, native timestamps such as
+ * `startedAt`/`completedAt`/`durationMs`, `itemsView`, `rootTurnId`), which
+ * sets the snapshot-wide `omittedFields` flag but cannot change the error that
+ * both observations report. Codex 0.157+ always sends those turn fields, so
+ * the old snapshot-wide check made every failed turn render twice. A capture
+ * marker inside the error object (redaction, omission, truncation) still makes
+ * the copy ambiguous, so it keeps a distinct occurrence.
+ */
 export function providerDiagnosticOccurrenceKey(diagnostic: ProviderDiagnostic): string | null {
   const { snapshot, summary } = diagnostic;
   if (
     summary.status !== "error" ||
-    snapshot.truncated ||
-    snapshot.redacted ||
-    snapshot.omittedFields ||
     !snapshot.native.threadId ||
     !snapshot.native.turnId ||
     !snapshot.native.subagentRuntimeId
   )
     return null;
-  try {
-    // This is our already bounded inert JSON copy, never a provider object.
-    const copied = JSON.parse(snapshot.json) as Record<string, unknown>;
-    const turn = copied.turn;
-    const error =
-      copied.error ??
-      (turn && typeof turn === "object" ? (turn as Record<string, unknown>).error : undefined);
-    if (!error || typeof error !== "object") return null;
-    return createHash("sha256")
-      .update(
-        JSON.stringify([
-          snapshot.native.threadId,
-          snapshot.native.turnId,
-          snapshot.native.subagentRuntimeId,
-          error,
-        ]),
-      )
-      .digest("hex");
-  } catch {
-    return null;
-  }
+  // This is our already bounded inert JSON copy, never a provider object.
+  const error = readProviderDiagnosticErrorBody(snapshot.json);
+  if (!error) return null;
+  const encodedError = JSON.stringify(error);
+  if (providerDiagnosticTextHasCaptureMarker(encodedError)) return null;
+  return createHash("sha256")
+    .update(
+      JSON.stringify([
+        snapshot.native.threadId,
+        snapshot.native.turnId,
+        snapshot.native.subagentRuntimeId,
+        error,
+      ]),
+    )
+    .digest("hex");
+}
+
+function messageOnlyTerminalCopy(diagnostic: ProviderDiagnostic): string | undefined {
+  const { snapshot, summary } = diagnostic;
+  if (summary.status !== "error" || snapshot.truncated || snapshot.message === undefined)
+    return undefined;
+  const error = readProviderDiagnosticErrorBody(snapshot.json);
+  if (!error) return undefined;
+  const keys = Object.keys(error);
+  return keys.length === 1 &&
+    keys[0] === "message" &&
+    error.message === snapshot.message &&
+    snapshot.message.length > 0 &&
+    !providerDiagnosticTextHasCaptureMarker(snapshot.message)
+    ? snapshot.message
+    : undefined;
 }
 
 /** Private store: no transcript snapshots, activity scans, or native provider reads. */
@@ -133,14 +155,34 @@ export function makeProviderActivityDiagnosticStore(sql: SqlClient.SqlClient) {
     diagnostic: ProviderDiagnostic,
   ) =>
     Effect.gen(function* () {
+      if (input.turnId === null) return false;
       const key = providerDiagnosticOccurrenceKey(diagnostic);
-      if (key === null || input.turnId === null) return false;
+      if (key !== null) {
+        const rows = yield* sql<{ readonly present: number }>`SELECT EXISTS (
+          SELECT 1 FROM provider_activity_diagnostics AS diagnostic
+          INNER JOIN projection_thread_activities AS activity ON activity.activity_id = diagnostic.activity_id
+            AND activity.thread_id = diagnostic.thread_id AND activity.turn_id IS diagnostic.turn_id
+          WHERE diagnostic.thread_id = ${input.threadId} AND diagnostic.turn_id IS ${input.turnId}
+            AND diagnostic.occurrence_key = ${key} AND activity.kind = 'runtime.error'
+        ) AS present`;
+        if (rows[0]?.present === 1) return true;
+      }
+      // Providers without native error envelopes reach ingestion as a plain
+      // terminal `errorMessage`. That copy carries nothing except the message,
+      // so folding it into an earlier error with the exact same complete
+      // message, Cafe thread/turn and runtime generation loses no evidence.
+      // Any other field, capture marker or cut keeps a distinct occurrence.
+      const message = messageOnlyTerminalCopy(diagnostic);
+      if (message === undefined) return false;
+      const runtimeId = diagnostic.snapshot.native.subagentRuntimeId ?? null;
       const rows = yield* sql<{ readonly present: number }>`SELECT EXISTS (
         SELECT 1 FROM provider_activity_diagnostics AS diagnostic
         INNER JOIN projection_thread_activities AS activity ON activity.activity_id = diagnostic.activity_id
           AND activity.thread_id = diagnostic.thread_id AND activity.turn_id IS diagnostic.turn_id
         WHERE diagnostic.thread_id = ${input.threadId} AND diagnostic.turn_id IS ${input.turnId}
-          AND diagnostic.occurrence_key = ${key} AND activity.kind = 'runtime.error'
+          AND activity.kind = 'runtime.error'
+          AND json_extract(diagnostic.snapshot_json, '$.message') = ${message}
+          AND json_extract(diagnostic.snapshot_json, '$.native.subagentRuntimeId') IS ${runtimeId}
       ) AS present`;
       return rows[0]?.present === 1;
     }).pipe(Effect.mapError(privateSqlError("ProviderActivityDiagnostics.hasTerminalEcho")));

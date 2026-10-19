@@ -43,7 +43,10 @@ import * as Stream from "effect/Stream";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
 import { makeConversationRewindStore } from "../../persistence/Layers/ConversationRewinds.ts";
 import { makeProviderActivityDiagnosticStore } from "../../persistence/Layers/ProviderActivityDiagnostics.ts";
-import { makeProviderDiagnostic } from "@cafecode/shared/providerDiagnostic";
+import {
+  deriveProviderDiagnosticCategory,
+  makeProviderDiagnostic,
+} from "@cafecode/shared/providerDiagnostic";
 import { makeDrainableWorker } from "@cafecode/shared/DrainableWorker";
 
 import { ProviderService } from "../../provider/Services/ProviderService.ts";
@@ -3913,7 +3916,14 @@ const make = Effect.gen(function* () {
                 turnId: event.turnId,
                 subagentRuntimeId: event.subagentRuntimeId,
               },
-              payload: { error: { message: event.payload.message, detail: event.payload.detail } },
+              // An absent detail is absent, not an "omitted" field: keep the
+              // copy complete so an exact terminal echo can still fold.
+              payload: {
+                error: {
+                  message: event.payload.message,
+                  ...(event.payload.detail !== undefined ? { detail: event.payload.detail } : {}),
+                },
+              },
               message: event.payload.message,
             })
           : event.type === "turn.completed" &&
@@ -4020,11 +4030,16 @@ const make = Effect.gen(function* () {
                   : event.type === "turn.completed"
                     ? event.payload.errorMessage
                     : undefined;
+              // Closed Cafe category from structured fields of the private
+              // copy only. Kept beside the strict v1 summary so older
+              // renderers still read it; it selects copy, never authority.
+              const category = deriveProviderDiagnosticCategory(capturedDiagnostic.snapshot);
               activity = {
                 ...activity,
                 payload: {
                   ...payload,
                   providerDiagnostic: capturedDiagnostic.summary,
+                  ...(category !== undefined ? { providerDiagnosticCategory: category } : {}),
                   ...(capturedDiagnostic.summary.status === "error" &&
                   capturedDiagnostic.summary.subject.kind === "root" &&
                   typeof message === "string" &&

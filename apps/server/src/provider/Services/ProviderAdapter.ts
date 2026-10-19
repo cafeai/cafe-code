@@ -140,7 +140,11 @@ export interface ProviderSubagentDetail {
 }
 
 export interface ProviderAdapterShape<TError> {
-  readonly login?: () => Effect.Effect<"authenticated" | "started", TError>;
+  /** Account control can live beside the UI snapshot while chats belong to a
+   * daemon. The caller supplies that actual owner's read-only session fence. */
+  readonly login?: (
+    hasOwnedSessions?: Effect.Effect<boolean, unknown>,
+  ) => Effect.Effect<"authenticated" | "started", TError>;
   readonly manageMcp?: (input: ProviderMcpNativeInput) => Effect.Effect<ProviderMcpResult, TError>;
   readonly readSecurity?: (
     input: ProviderSecurityReadInput,

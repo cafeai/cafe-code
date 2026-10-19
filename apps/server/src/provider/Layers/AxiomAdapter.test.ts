@@ -90,6 +90,29 @@ const loginFixture = (scenario: string, browserFailure = false, withSession = fa
   });
 
 describe("Axiom native sign-in", () => {
+  it.effect("refuses sign-in while the separate daemon owns this account's sessions", () =>
+    Effect.gen(function* () {
+      const fixture = yield* loginFixture("login-signed-out");
+      expect(yield* fixture.adapter.login!(Effect.succeed(true)).pipe(Effect.flip)).toMatchObject({
+        issue: AXIOM_LOGIN_ERRORS.busy,
+      });
+      expect(fixture.methods()).toEqual(["initialize", "_axiom/account/status"]);
+      expect(fixture.opened).toEqual([]);
+      expect(yield* Deferred.isDone(fixture.refreshed)).toBe(false);
+    }).pipe(Effect.provide(layer), Effect.scoped),
+  );
+  it.effect("does not treat unavailable daemon inventory as an empty account", () =>
+    Effect.gen(function* () {
+      const fixture = yield* loginFixture("login-signed-out");
+      expect(
+        yield* fixture.adapter.login!(Effect.die(new Error("private fixture failure"))).pipe(
+          Effect.flip,
+        ),
+      ).toMatchObject({ issue: AXIOM_LOGIN_ERRORS.account });
+      expect(fixture.methods()).toEqual(["initialize", "_axiom/account/status"]);
+      expect(fixture.opened).toEqual([]);
+    }).pipe(Effect.provide(layer), Effect.scoped),
+  );
   it.effect("refreshes an already valid account while retaining its open Cafe session", () =>
     Effect.gen(function* () {
       const fixture = yield* loginFixture("login-valid", false, true);

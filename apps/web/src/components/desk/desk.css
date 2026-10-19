@@ -74,6 +74,12 @@
 .desk-group-bar[data-desktop-titlebar="true"][data-window-right="true"] > .desk-icon {
   order: 1;
 }
+/* With Chat tabs off there is no tab strip to overflow into the actions, and
+   the chat title already drags the window, so the separating strip would only
+   leave an empty gap between the header's Open control and the bar actions. */
+.desk-group-bar[data-desktop-titlebar="true"][data-window-right="true"][data-tabs="hidden"]::after {
+  content: none;
+}
 /* Native Mac controls do not grow with root-rem interface scaling. Keep this
    more specific than the general desktop band so every top pane shares the
    same vertical center as the sidebar, Settings and empty-state headers. */
@@ -102,6 +108,29 @@
 }
 .desk-group-bar.drag-region .desk-tab-cell {
   -webkit-app-region: no-drag;
+}
+/* Settings → Chats → Chat tabs off: the bar keeps its window geometry and
+   actions, and the chat's full header (visible title, project and Open-in
+   controls) fills the tab strip's place. The title text stays part of the
+   window drag area like a native title; its buttons are no-drag. */
+.desk-title-header {
+  display: flex;
+  flex: 1 1 0;
+  align-items: center;
+  align-self: stretch;
+  min-width: 0;
+  /* The bar's actions button always follows, so the trailing Open control
+     sits beside it instead of leaving a second gap. */
+  padding-inline: 0.75rem 0.25rem;
+}
+/* A visible sidebar trigger starts at the bar edge exactly as in the tab
+   layout; the macOS traffic-light reservation stays on the bar itself. */
+.desk-group-bar[data-window-left="true"][data-window-top="true"]
+  .desk-title-header:has([data-sidebar="trigger"]) {
+  padding-inline-start: 0;
+}
+.desk-title-header[data-preview="true"] [data-chat-header-title] {
+  font-style: italic;
 }
 .desk-icon,
 .desk-group-name,

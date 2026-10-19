@@ -57,6 +57,8 @@ import {
   withCodexMetadataClient,
 } from "../Layers/CodexProvider.ts";
 import { requestCodexSkills } from "../codexSkills.ts";
+import { makeCodexLogin } from "../codexLogin.ts";
+import { launchBrowser } from "../../process/externalLauncher.ts";
 import { ProviderEventLoggers } from "../Layers/ProviderEventLoggers.ts";
 import { makeManagedServerProvider } from "../makeManagedServerProvider.ts";
 import type { ProviderDriver, ProviderInstance } from "../ProviderDriver.ts";
@@ -73,6 +75,7 @@ import {
 import { resolveProviderRuntimeEnvironment } from "../managedProviderRuntime.ts";
 import {
   codexContinuationIdentity,
+  codexLoginHomePath,
   materializeCodexShadowHome,
   resolveCodexHomeLayout,
   withCodexHomeLayoutEnvironment,
@@ -211,10 +214,7 @@ export const CodexDriver: ProviderDriver<CodexSettings, CodexDriverEnv> = {
         displayName,
         accentColor,
         continuationGroupKey: continuationIdentity.continuationKey,
-        authActions:
-          layoutConfig.runtimeSource === "bundled" && process.platform === "win32"
-            ? { login: true }
-            : undefined,
+        authActions: { login: true },
       });
       const stampIdentity = (snapshot: ServerProviderDraft): ServerProvider => {
         observedCliVersion = snapshot.version;
@@ -445,6 +445,27 @@ export const CodexDriver: ProviderDriver<CodexSettings, CodexDriverEnv> = {
       );
 
       const skillReadPermit = yield* Semaphore.make(1);
+      const login = yield* makeCodexLogin({
+        withClient: (use, onTermination) =>
+          withCodexMetadataClient(
+            {
+              binaryPath: effectiveConfig.binaryPath,
+              // Default overlays refresh from the shared source. Signing into the
+              // overlay would lose the new credentials on the next status probe.
+              homePath: codexLoginHomePath(homeLayout, authSource),
+              cwd: serverConfig.stateDir,
+              environment: effectiveEnvironment,
+              onTermination: () => onTermination,
+            },
+            use,
+          ).pipe(Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner)),
+        hasSessions: adapter.listSessions().pipe(Effect.map((sessions) => sessions.length > 0)),
+        refresh: snapshot.refreshAfterAccountChange ?? snapshot.refresh,
+        openUrl: (url) =>
+          launchBrowser(url).pipe(
+            Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
+          ),
+      });
       const discoverSkills: NonNullable<ProviderInstance["discoverSkills"]> = (cwd) =>
         Effect.gen(function* () {
           const current = yield* snapshot.getSnapshot;
@@ -489,7 +510,7 @@ export const CodexDriver: ProviderDriver<CodexSettings, CodexDriverEnv> = {
         accentColor,
         enabled,
         snapshot,
-        adapter,
+        adapter: { ...adapter, login },
         textGeneration,
         discoverSkills,
         usageReset: {

@@ -639,6 +639,7 @@ export function SavedEnvironmentsSettings({
 
   return (
     <SettingsSection
+      searchId="connections.savedEnvironments"
       title={uiText("Saved environments", undefined, undefined, uiLocale)}
       headerAction={<AddSavedEnvironmentDialog actions={actions} />}
     >

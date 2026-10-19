@@ -127,8 +127,8 @@ export function nativeRetryWorkLogLabel(payloadValue: unknown): string | null {
     (retry.observedCount as number) > 1_024 ||
     (Object.hasOwn(retry, "countLimited") && retry.countLimited !== true)
   )
-    return uiText("Provider retry");
-  return uiText("Provider retry · {count}{lowerBound, select, yes {+} other {}}", {
+    return uiText("Reconnecting");
+  return uiText("Reconnecting · {count}{lowerBound, select, yes {+} other {}}", {
     count: retry.observedCount as number,
     lowerBound: retry.countLimited === true ? "yes" : "no",
   });

@@ -15,6 +15,7 @@ import { projectCommand } from "./cli/project.ts";
 import { providerDaemonCommand, providerSupervisorCommand } from "./cli/providerDaemon.ts";
 import { runServerCommand, serveCommand, startCommand } from "./cli/server.ts";
 import { backendStartupTeardown } from "./backendStartupTeardown.ts";
+import { installProcessShutdownObservation } from "./processShutdownObservation.ts";
 
 function resolveStartupProfilerRole(argv: readonly string[]): string {
   if (argv.includes("provider-daemon")) return "provider-daemon";
@@ -44,6 +45,9 @@ export const cli = Command.make("cafe-code", { ...sharedServerCommandFlags }).pi
 );
 
 if (import.meta.main) {
+  // Lets provider exit observers distinguish a planned stop from a crash. It
+  // is installed beside runMain, which still owns signal-driven termination.
+  installProcessShutdownObservation();
   Command.run(cli, { version: APPLICATION_VERSION }).pipe(
     Effect.scoped,
     Effect.provide(CliRuntimeLayer),

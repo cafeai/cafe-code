@@ -2,10 +2,12 @@ import { describe, expect, it } from "vitest";
 import {
   ProviderDriverKind,
   ProviderInstanceId,
+  ThreadId,
   type ProviderSessionQuotaReport,
 } from "@cafecode/contracts";
 import {
   CLAUDE_QUOTA_STALE_AFTER_MS,
+  claudeChatQuotaScope,
   formatClaudeSessionQuota,
   selectedQuotaDriver,
 } from "./claudeSessionQuota";
@@ -59,6 +61,43 @@ const localZoneLabel = (timeZone: string) =>
     .formatToParts(new Date(observedAt))
     .find((part) => part.type === "timeZoneName")!.value;
 describe("Claude session quota presentation", () => {
+  it("reads native account allowances before a query exists without borrowing a passive report", () => {
+    const instanceId = ProviderInstanceId.make("claude-personal");
+    const threadId = ThreadId.make("new-chat");
+    const session = {
+      provider: ProviderDriverKind.make("claudeAgent"),
+      providerInstanceId: instanceId,
+      subagentRuntimeId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      orchestrationStatus: "ready" as const,
+    };
+    for (const input of [
+      { instanceId, threadId: null, session },
+      { instanceId, threadId, session: null },
+      { instanceId, threadId },
+      { instanceId, threadId, session: { ...session, subagentRuntimeId: undefined } },
+      { instanceId, threadId, session: { ...session, subagentRuntimeId: null } },
+      { instanceId, threadId, session: { ...session, providerInstanceId: undefined } },
+      {
+        instanceId,
+        threadId,
+        session: { ...session, providerInstanceId: ProviderInstanceId.make("other-account") },
+      },
+      {
+        instanceId,
+        threadId,
+        session: { ...session, provider: ProviderDriverKind.make("codex") },
+      },
+      { instanceId, threadId, session: { ...session, orchestrationStatus: "stopped" as const } },
+      { instanceId, threadId, session: { ...session, orchestrationStatus: "error" as const } },
+    ]) {
+      expect(claudeChatQuotaScope(input)).toEqual({ input: { instanceId }, nativeOnly: true });
+    }
+    expect(claudeChatQuotaScope({ instanceId, threadId, session })).toEqual({
+      input: { instanceId, session: { threadId, runtimeId: session.subagentRuntimeId } },
+      nativeOnly: false,
+    });
+  });
+
   it("does not borrow an old Claude driver when the selected account has changed", () => {
     const old = {
       instanceId: ProviderInstanceId.make("claude-personal"),

@@ -121,6 +121,7 @@ export function AmbianceSettingsSections() {
     <>
       <SettingsSection title={uiText("Weather effects", undefined, undefined, uiLocale)}>
         <SettingsRow
+          searchId="appearance.weatherLayer"
           title={uiText("Weather layer", undefined, undefined, uiLocale)}
           description={uiText(
             "Animated weather over the app. Off keeps the sidebar stars.",
@@ -138,6 +139,7 @@ export function AmbianceSettingsSections() {
         />
 
         <SettingsRow
+          searchId="appearance.weatherEffect"
           title={uiText("Effect", undefined, undefined, uiLocale)}
           description={uiText("Heavier effects use more battery.", undefined, undefined, uiLocale)}
           resetAction={
@@ -209,6 +211,7 @@ export function AmbianceSettingsSections() {
         </SettingsRow>
 
         <SettingsRow
+          searchId="appearance.weatherIntensity"
           title={uiText("Intensity", undefined, undefined, uiLocale)}
           description={uiText(
             "Base density; chat activity can add more.",
@@ -249,6 +252,7 @@ export function AmbianceSettingsSections() {
         />
 
         <SettingsRow
+          searchId="appearance.weatherOpacity"
           title={uiText("Opacity", undefined, undefined, uiLocale)}
           description={uiText(
             "How visible the weather is, without changing its density.",
@@ -289,6 +293,7 @@ export function AmbianceSettingsSections() {
         />
 
         <SettingsRow
+          searchId="appearance.weatherReact"
           title={uiText("React to chat", undefined, undefined, uiLocale)}
           description={uiText(
             "How much chat activity changes the weather.",
@@ -337,6 +342,7 @@ export function AmbianceSettingsSections() {
         />
 
         <SettingsRow
+          searchId="appearance.weatherSurfaces"
           title={uiText("Surfaces", undefined, undefined, uiLocale)}
           description={uiText(
             "Composer tints the prompt frame instead of drawing weather.",
@@ -366,6 +372,7 @@ export function AmbianceSettingsSections() {
         />
 
         <SettingsRow
+          searchId="appearance.weatherColor"
           title={uiText("Weather color", undefined, undefined, uiLocale)}
           description={uiText(
             "Defaults to the accent color set in Appearance.",
@@ -395,6 +402,7 @@ export function AmbianceSettingsSections() {
 
       <SettingsSection title={uiText("Task Atrium", undefined, undefined, uiLocale)}>
         <SettingsRow
+          searchId="appearance.atriumColor"
           title={uiText("Atrium color", undefined, undefined, uiLocale)}
           description={uiText("Defaults to the weather color.", undefined, undefined, uiLocale)}
           resetAction={

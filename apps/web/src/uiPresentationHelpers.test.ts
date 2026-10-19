@@ -169,12 +169,12 @@ describe("English-only renderer helper presentation", () => {
         retrying: true,
         nativeRetry: { timing: "unknown", observedCount: 2, countLimited: true },
       }),
-    ).toBe("Provider retry · 2+");
+    ).toBe("Reconnecting · 2+");
     expect(
       nativeRetryWorkLogLabel({
         retrying: true,
         nativeRetry: { timing: "unknown", observedCount: Number.NaN },
       }),
-    ).toBe("Provider retry");
+    ).toBe("Reconnecting");
   });
 });

@@ -1109,6 +1109,7 @@ const AdminPasswordManagementRow = memo(function AdminPasswordManagementRow({
   return (
     <>
       <SettingsRow
+        searchId="connections.adminPassword"
         title={uiText("Admin password", undefined, undefined, uiLocale)}
         description={uiText(
           "Lets owners sign in from the pairing screen with a password.",
@@ -2104,6 +2105,7 @@ export function ConnectionsSettings() {
   );
   const renderNetworkAccessRow = () => (
     <SettingsRow
+      searchId="connections.networkAccess"
       title={uiText("Network access", undefined, undefined, uiLocale)}
       description={
         isLocalBackendNetworkAccessible ? (
@@ -2148,6 +2150,7 @@ export function ConnectionsSettings() {
   );
   const renderHttpsRow = () => (
     <SettingsRow
+      searchId="connections.https"
       title={uiText("HTTPS", undefined, undefined, uiLocale)}
       description={
         desktopServerExposureState ? (
@@ -2185,6 +2188,7 @@ export function ConnectionsSettings() {
   );
   const renderDisabledNetworkAccessRow = () => (
     <SettingsRow
+      searchId="connections.networkAccess"
       title={uiText("Network access", undefined, undefined, uiLocale)}
       description={
         currentAuthPolicy === "remote-reachable"
@@ -2280,6 +2284,7 @@ export function ConnectionsSettings() {
 
           {isLocalBackendRemotelyReachable ? (
             <SettingsSection
+              searchId="connections.pairedDevices"
               title={uiText("Paired devices", undefined, undefined, uiLocale)}
               headerAction={
                 <AuthorizedClientsHeaderAction

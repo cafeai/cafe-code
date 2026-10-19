@@ -423,6 +423,7 @@ function AboutVersionSection() {
 
   return (
     <SettingsRow
+      searchId="general.version"
       title={<AboutVersionTitle state={sourceUpdateState} />}
       description={
         <span className="inline-flex items-center gap-1.5">
@@ -541,6 +542,7 @@ export function TextGenerationModelSettingsRow() {
 
   return (
     <SettingsRow
+      searchId="providers.namingModel"
       title={uiText("Automatic naming model", undefined, undefined, uiLocale)}
       description={uiText("Writes chat titles and branch names.", undefined, undefined, uiLocale)}
       resetAction={
@@ -635,6 +637,7 @@ export function GeneralSettingsPanel() {
       <SettingsSection title={uiText("Language & time", undefined, undefined, uiLocale)}>
         <LanguageSettingsRow />
         <SettingsRow
+          searchId="general.timeFormat"
           title={uiText("Time format", undefined, undefined, uiLocale)}
           resetAction={
             settings.timestampFormat !== DEFAULT_UNIFIED_SETTINGS.timestampFormat ? (
@@ -680,6 +683,7 @@ export function GeneralSettingsPanel() {
       </SettingsSection>
       <SettingsSection title={uiText("Projects & workspaces", undefined, undefined, uiLocale)}>
         <SettingsRow
+          searchId="general.defaultProjectFolder"
           title={uiText("Default project folder", undefined, undefined, uiLocale)}
           resetAction={
             settings.addProjectBaseDirectory !==
@@ -706,6 +710,7 @@ export function GeneralSettingsPanel() {
           }
         />
         <SettingsRow
+          searchId="general.newChats"
           title={uiText("New chats", undefined, undefined, uiLocale)}
           description={uiText("Default workspace for new chats.", undefined, undefined, uiLocale)}
           resetAction={
@@ -769,6 +774,7 @@ export function LanguageSettingsRow() {
   const { updateSettings } = useUpdateSettings({ environmentId: null });
   return (
     <SettingsRow
+      searchId="general.language"
       title={uiText("Language", undefined, undefined, uiLocale)}
       resetAction={
         settings.languagePreference !== "system" ? (
@@ -918,6 +924,7 @@ export function AppearanceSettingsPanel() {
     <SettingsPageContainer title={uiText("Appearance", undefined, undefined, uiLocale)}>
       <SettingsSection title={uiText("Interface", undefined, undefined, uiLocale)}>
         <SettingsRow
+          searchId="appearance.theme"
           title={uiText("Theme", undefined, undefined, uiLocale)}
           resetAction={
             theme !== "system" ? (
@@ -957,6 +964,7 @@ export function AppearanceSettingsPanel() {
         />
 
         <SettingsRow
+          searchId="appearance.interfaceSize"
           title={uiText("Interface size", undefined, undefined, uiLocale)}
           resetAction={
             settings.interfaceScalePercent !== DEFAULT_INTERFACE_SCALE_PERCENT ? (
@@ -988,6 +996,7 @@ export function AppearanceSettingsPanel() {
         />
 
         <SettingsRow
+          searchId="appearance.accentColor"
           title={uiText("Accent color", undefined, undefined, uiLocale)}
           description={uiText(
             "Used for buttons, selection and focus.",
@@ -1016,6 +1025,7 @@ export function AppearanceSettingsPanel() {
       </SettingsSection>
       <SettingsSection title={uiText("Sidebar", undefined, undefined, uiLocale)}>
         <SettingsRow
+          searchId="appearance.brandingPrefix"
           title={uiText("Branding prefix", undefined, undefined, uiLocale)}
           description={uiText("Replaces ''Cafe'' in the wordmark.", undefined, undefined, uiLocale)}
           resetAction={
@@ -1045,6 +1055,7 @@ export function AppearanceSettingsPanel() {
         />
 
         <SettingsRow
+          searchId="appearance.sidebarEffectsColor"
           title={uiText("Sidebar effects color", undefined, undefined, uiLocale)}
           description={uiText("Colors the sidebar stars and glow.", undefined, undefined, uiLocale)}
           resetAction={
@@ -1067,6 +1078,7 @@ export function AppearanceSettingsPanel() {
         />
 
         <SettingsRow
+          searchId="appearance.sidebarSearch"
           title={uiText("Sidebar search", undefined, undefined, uiLocale)}
           resetAction={
             settings.showSidebarSearch !== DEFAULT_UNIFIED_SETTINGS.showSidebarSearch ? (
@@ -1086,6 +1098,7 @@ export function AppearanceSettingsPanel() {
         />
 
         <SettingsRow
+          searchId="appearance.sidebarImageEnabled"
           title={uiText("Enable sidebar image", undefined, undefined, uiLocale)}
           resetAction={
             settings.showSidebarMascot !== DEFAULT_UNIFIED_SETTINGS.showSidebarMascot ? (
@@ -1105,6 +1118,7 @@ export function AppearanceSettingsPanel() {
         />
 
         <SettingsRow
+          searchId="appearance.sidebarImage"
           className={settings.showSidebarMascot ? undefined : "opacity-50"}
           title={uiText("Sidebar image", undefined, undefined, uiLocale)}
           description={uiText(
@@ -1193,6 +1207,7 @@ export function AppearanceSettingsPanel() {
         />
 
         <SettingsRow
+          searchId="appearance.sidebarAttribution"
           title={uiText("Sidebar attribution", undefined, undefined, uiLocale)}
           resetAction={
             settings.showSidebarAttribution !== DEFAULT_UNIFIED_SETTINGS.showSidebarAttribution ? (
@@ -1217,6 +1232,7 @@ export function AppearanceSettingsPanel() {
       </SettingsSection>
       <SettingsSection title={uiText("Motion", undefined, undefined, uiLocale)}>
         <SettingsRow
+          searchId="appearance.animateWhileUnfocused"
           title={uiText("Animate while unfocused", undefined, undefined, uiLocale)}
           description={uiText(
             "Keep decorations moving while Cafe is hidden or unfocused.",
@@ -1254,6 +1270,7 @@ export function AppearanceSettingsPanel() {
         />
 
         <SettingsRow
+          searchId="appearance.sidebarStarSpeed"
           title={uiText("Sidebar star speed", undefined, undefined, uiLocale)}
           resetAction={
             settings.sidebarStarSpeed !== DEFAULT_UNIFIED_SETTINGS.sidebarStarSpeed ? (
@@ -1366,6 +1383,7 @@ export function ChatSettingsPanel() {
     <SettingsPageContainer title={uiText("Chats", undefined, undefined, uiLocale)}>
       <SettingsSection title={uiText("Navigation", undefined, undefined, uiLocale)}>
         <SettingsRow
+          searchId="chats.taskAtrium"
           title={uiText("Task Atrium", undefined, undefined, uiLocale)}
           description={uiText(
             "Adds an Atrium button above Settings: a read-only overview of chats and subagents.",
@@ -1397,6 +1415,7 @@ export function ChatSettingsPanel() {
         />
 
         <SettingsRow
+          searchId="chats.clickBehavior"
           title={uiText("Clicking a chat", undefined, undefined, uiLocale)}
           description={uiText(
             "Preview temporarily, or keep each chat open as a tab.",
@@ -1443,9 +1462,38 @@ export function ChatSettingsPanel() {
             </Select>
           }
         />
+
+        <SettingsRow
+          searchId="chats.tabs"
+          title={uiText("Chat tabs", undefined, undefined, uiLocale)}
+          description={uiText(
+            "Show open chats as tabs at the top. When off, the top bar shows the current chat's name.",
+            undefined,
+            undefined,
+            uiLocale,
+          )}
+          resetAction={
+            settings.showDeskTabs !== DEFAULT_UNIFIED_SETTINGS.showDeskTabs ? (
+              <SettingResetButton
+                label={uiText("chat tabs", undefined, undefined, uiLocale)}
+                onClick={() =>
+                  updateSettings({ showDeskTabs: DEFAULT_UNIFIED_SETTINGS.showDeskTabs })
+                }
+              />
+            ) : null
+          }
+          control={
+            <Switch
+              checked={settings.showDeskTabs}
+              onCheckedChange={(checked) => updateSettings({ showDeskTabs: Boolean(checked) })}
+              aria-label={uiText("Show chat tabs", undefined, undefined, uiLocale)}
+            />
+          }
+        />
       </SettingsSection>
       <SettingsSection title={uiText("Replies", undefined, undefined, uiLocale)}>
         <SettingsRow
+          searchId="chats.assistantOutput"
           title={uiText("Assistant output", undefined, undefined, uiLocale)}
           description={uiText(
             "Show replies while they are being written.",
@@ -1478,6 +1526,7 @@ export function ChatSettingsPanel() {
         />
 
         <SettingsRow
+          searchId="chats.autoOpenPlan"
           title={uiText("Auto-open plan panel", undefined, undefined, uiLocale)}
           description={uiText(
             "Open the side panel when a provider finishes a plan.",
@@ -1514,6 +1563,7 @@ export function ChatSettingsPanel() {
         />
 
         <SettingsRow
+          searchId="chats.selectionCopy"
           title={uiText("Chat selection copy", undefined, undefined, uiLocale)}
           description={uiText(
             "What Copy puts on the clipboard for selected message text.",
@@ -1563,6 +1613,7 @@ export function ChatSettingsPanel() {
         />
 
         <SettingsRow
+          searchId="chats.customInstructions"
           title={
             <span className="inline-flex items-center gap-1.5">
               {uiText("Custom instructions", undefined, undefined, uiLocale)}
@@ -1608,6 +1659,7 @@ export function ChatSettingsPanel() {
       </SettingsSection>
       <SettingsSection title={uiText("Confirmations", undefined, undefined, uiLocale)}>
         <SettingsRow
+          searchId="chats.archiveConfirmation"
           title={uiText("Archive confirmation", undefined, undefined, uiLocale)}
           description={uiText("Click archive twice to confirm.", undefined, undefined, uiLocale)}
           resetAction={
@@ -1634,6 +1686,7 @@ export function ChatSettingsPanel() {
         />
 
         <SettingsRow
+          searchId="chats.deleteConfirmation"
           title={uiText("Delete confirmation", undefined, undefined, uiLocale)}
           resetAction={
             settings.confirmThreadDelete !== DEFAULT_UNIFIED_SETTINGS.confirmThreadDelete ? (
@@ -1689,6 +1742,7 @@ function FilesSettingsSection() {
   return (
     <SettingsSection title={uiText("Files", undefined, undefined, uiLocale)}>
       <SettingsRow
+        searchId="general.defaultEditor"
         title={uiText("Default editor", undefined, undefined, uiLocale)}
         description={uiText("Opens file links from chats.", undefined, undefined, uiLocale)}
         resetAction={
@@ -1773,6 +1827,7 @@ function SystemSettingsSections() {
       {typeof window.desktopBridge?.setPowerSaveBlockerState === "function" ? (
         <SettingsSection title={uiText("Desktop", undefined, undefined, uiLocale)}>
           <SettingsRow
+            searchId="general.keepAwake"
             title={uiText("Keep awake", undefined, undefined, uiLocale)}
             description={uiText(
               "Stop your computer and screen sleeping while Cafe works.",
@@ -2046,7 +2101,11 @@ export function ProviderSettingsPanel() {
   );
 
   const logInProvider = useCallback(
-    async (input: { readonly instanceId: ProviderInstanceId; readonly displayName: string }) => {
+    async (input: {
+      readonly instanceId: ProviderInstanceId;
+      readonly displayName: string;
+      readonly browser: boolean;
+    }) => {
       let started = false;
       setLoggingInProviderInstanceIds((previous) => {
         if (previous.has(input.instanceId)) {
@@ -2062,30 +2121,45 @@ export function ProviderSettingsPanel() {
       }
 
       try {
-        await ensureWorkspaceApi().server.loginProvider({
+        const result = await ensureWorkspaceApi().server.loginProvider({
           instanceId: input.instanceId,
         });
         toastManager.add({
           type: "success",
-          title: uiText(
-            "{value0} login opened",
-            { value0: input.displayName },
-            undefined,
-            uiLocale,
-          ),
-          description: remote
-            ? uiText(
-                "Complete provider sign-in in the PowerShell window on the server PC, then refresh status.",
-                undefined,
-                undefined,
-                uiLocale,
-              )
-            : uiText(
-                "Complete the provider login in the PowerShell window, then refresh status.",
-                undefined,
-                undefined,
-                uiLocale,
-              ),
+          title:
+            result.outcome === "authenticated"
+              ? uiText("{value0} is signed in", { value0: input.displayName }, undefined, uiLocale)
+              : uiText("{value0} login opened", { value0: input.displayName }, undefined, uiLocale),
+          description:
+            result.outcome === "authenticated"
+              ? uiText("Provider status has been refreshed.", undefined, undefined, uiLocale)
+              : input.browser
+                ? remote
+                  ? uiText(
+                      "Complete sign-in in the browser on the server computer. Provider status refreshes automatically when sign-in succeeds.",
+                      undefined,
+                      undefined,
+                      uiLocale,
+                    )
+                  : uiText(
+                      "Complete sign-in in your browser. Provider status refreshes automatically when sign-in succeeds.",
+                      undefined,
+                      undefined,
+                      uiLocale,
+                    )
+                : remote
+                  ? uiText(
+                      "Complete provider sign-in in the PowerShell window on the server PC, then refresh status.",
+                      undefined,
+                      undefined,
+                      uiLocale,
+                    )
+                  : uiText(
+                      "Complete the provider login in the PowerShell window, then refresh status.",
+                      undefined,
+                      undefined,
+                      uiLocale,
+                    ),
         });
       } catch (error) {
         toastManager.add(
@@ -2310,6 +2384,7 @@ export function ProviderSettingsPanel() {
         <TextGenerationModelSettingsRow />
       </SettingsSection>
       <SettingsSection
+        searchId="providers.accounts"
         headerAction={
           <div className="flex items-center gap-1.5">
             <ProviderLastChecked lastCheckedAt={lastCheckedAt} />
@@ -2492,6 +2567,7 @@ export function ProviderSettingsPanel() {
                       void logInProvider({
                         instanceId: row.instanceId,
                         displayName: providerDisplayName,
+                        browser: row.driver === "axiom" || row.driver === "codex",
                       })
                   : undefined
               }

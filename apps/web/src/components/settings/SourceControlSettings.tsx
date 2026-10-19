@@ -548,6 +548,7 @@ export function SourceControlSettingsPanel() {
         <>
           {result.versionControlSystems.length > 0 ? (
             <SettingsSection
+              searchId="sourceControl.versionControl"
               title={uiText("Version control", undefined, undefined, uiLocale)}
               headerAction={scanButton}
             >
@@ -561,6 +562,7 @@ export function SourceControlSettingsPanel() {
 
           {result.sourceControlProviders.length > 0 ? (
             <SettingsSection
+              searchId="sourceControl.providers"
               title={uiText("Source control providers", undefined, undefined, uiLocale)}
               headerAction={result.versionControlSystems.length === 0 ? scanButton : null}
             >

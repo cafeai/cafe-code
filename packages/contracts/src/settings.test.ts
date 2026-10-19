@@ -116,6 +116,15 @@ describe("client settings", () => {
     }
     expect(() => decodeClientSettingsPatch({ chatClickBehavior: "closed" })).toThrow();
   });
+  it("shows Desk tabs by default and accepts only booleans", () => {
+    expect(decodeClientSettings({}).showDeskTabs).toBe(true);
+    expect(DEFAULT_CLIENT_SETTINGS.showDeskTabs).toBe(true);
+    for (const showDeskTabs of [true, false]) {
+      expect(decodeClientSettingsPatch({ showDeskTabs })).toEqual({ showDeskTabs });
+      expect(decodeClientSettings({ showDeskTabs }).showDeskTabs).toBe(showDeskTabs);
+    }
+    expect(() => decodeClientSettingsPatch({ showDeskTabs: "hidden" })).toThrow();
+  });
 
   it("defaults power-save blocking to off", () => {
     expect(DEFAULT_CLIENT_SETTINGS.powerSaveBlockerMode).toBe(DEFAULT_POWER_SAVE_BLOCKER_MODE);

@@ -22,6 +22,17 @@ chat header above them. Native window controls retain their own space. Project
 context remains in each tab's hover title and the sidebar. Source-build badges
 such as **Newer dev** sit beside **Settings** at the bottom of the sidebar.
 
+To hide the tabs, turn off **Settings → Chats → Chat tabs**. The top bar stays
+(with the same window-control space, focus and `…` actions), but it shows each
+pane's chat name, project and Open-in controls instead of tabs. The chat name
+drags the window, so the Open-in controls sit directly beside the `…` actions
+without the extra drag strip used next to tabs.
+Previews keep their italic title. Splits, saved tabs and previews are unchanged;
+switch chats from the Desk sidebar, Projects or search, and use the `…` menu for
+close, reopen, split, move, merge and rename actions. Dragging tabs and the
+group grip are unavailable while tabs are hidden. Turning tabs back on restores
+the strip exactly as it was.
+
 Web clients narrower than 768px show one chat with its normal title and sidebar
 button, without a tab strip or group controls. Open the sidebar to switch chats
 in Projects or Desk. Saved tabs, drafts and split layouts remain intact; tabs and
@@ -105,7 +116,8 @@ remains a separate desktop smoke check.
 - Dividers stop at usable pane sizes, including nested groups. Use the existing
   focus/restore icon to expand one group and return to the split layout. Saved
   ratios that no longer fit are adjusted for display without losing your layout
-  preference. If the window cannot fit all groups, the restore icon explains
+  preference. The focus icon appears only when there is more than one group (or a
+  group is still focused). If the window cannot fit all groups, the restore icon explains
   that you need to enlarge the window; the split returns once there is room.
 - Click a sidebar row's pencil or press F2 on a tab/row to rename an existing chat.
   Top tabs show only an always-visible close X; rename also remains in their

@@ -1,7 +1,9 @@
-import type {
-  ProviderDiagnostic,
-  ProviderDiagnosticSubject,
-  ProviderDiagnosticSummary,
+import {
+  PROVIDER_DIAGNOSTIC_CATEGORIES,
+  type ProviderDiagnostic,
+  type ProviderDiagnosticCategory,
+  type ProviderDiagnosticSubject,
+  type ProviderDiagnosticSummary,
 } from "@cafecode/contracts";
 
 export const PROVIDER_DIAGNOSTIC_MAX_JSON_BYTES = 32_768;
@@ -307,4 +309,151 @@ export function makeProviderDiagnostic(input: ProviderDiagnosticCaptureInput): P
       omittedFields,
     },
   };
+}
+
+/** Own enumerable data only; the copied JSON is inert, but stay defensive. */
+function jsonRecord(value: unknown): Record<string, unknown> | undefined {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) return undefined;
+  return value as Record<string, unknown>;
+}
+
+function ownJsonValue(value: Record<string, unknown> | undefined, key: string): unknown {
+  return value !== undefined && Object.hasOwn(value, key) ? value[key] : undefined;
+}
+
+/**
+ * Locate the copied native error object inside our own bounded diagnostic
+ * JSON. Codex notifications copy `{ error }`, terminal turns `{ turn: { error } }`;
+ * Claude/fallback captures use `{ error }`. Parse failures are not evidence.
+ */
+export function readProviderDiagnosticErrorBody(json: string): Record<string, unknown> | undefined {
+  if (json.length === 0 || json.length > PROVIDER_DIAGNOSTIC_MAX_JSON_BYTES) return undefined;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(json);
+  } catch {
+    return undefined;
+  }
+  const root = jsonRecord(parsed);
+  return (
+    jsonRecord(ownJsonValue(root, "error")) ??
+    jsonRecord(ownJsonValue(jsonRecord(ownJsonValue(root, "turn")), "error"))
+  );
+}
+
+/**
+ * True when Cafe's capture changed this text (secret redaction, unrelated or
+ * unsupported omission, or a size cut). Such a copy cannot prove that two
+ * observations carried the same complete error body.
+ */
+export function providerDiagnosticTextHasCaptureMarker(text: string): boolean {
+  return (
+    text.includes(REDACTED) ||
+    text.includes(OMITTED) ||
+    text.includes(TRUNCATED) ||
+    text.includes("[Redacted]@") ||
+    text.includes("[Omitted key ")
+  );
+}
+
+export function readProviderDiagnosticCategory(
+  value: unknown,
+): ProviderDiagnosticCategory | undefined {
+  return typeof value === "string" &&
+    (PROVIDER_DIAGNOSTIC_CATEGORIES as ReadonlyArray<string>).includes(value)
+    ? (value as ProviderDiagnosticCategory)
+    : undefined;
+}
+
+// Codex app-server `codexErrorInfo` (generated protocol, rust-v0.162.1). The
+// unit variants are exact protocol codes; unknown/future codes stay
+// uncategorized rather than being guessed from accompanying prose.
+const CODEX_ERROR_CATEGORIES: Readonly<Record<string, ProviderDiagnosticCategory>> = {
+  contextWindowExceeded: "context-window",
+  sessionBudgetExceeded: "session-budget",
+  usageLimitExceeded: "usage-limit",
+  rateLimitExceeded: "rate-limit",
+  flexUnavailable: "speed-tier-unavailable",
+  serverOverloaded: "model-at-capacity",
+  cyberPolicy: "cyber-policy",
+  misalignmentPolicyViolation: "usage-policy",
+  tooManyDenials: "too-many-denials",
+  internalServerError: "server-error",
+  unauthorized: "sign-in-required",
+  badRequest: "request-rejected",
+  sandboxError: "sandbox",
+  httpConnectionFailed: "connection",
+  responseStreamConnectionFailed: "connection",
+  responseStreamDisconnected: "connection",
+  responseTooManyFailedAttempts: "connection",
+};
+
+// Claude Agent SDK `SDKAssistantMessageError` (0.3.295 typed codes).
+const CLAUDE_ERROR_CATEGORIES: Readonly<Record<string, ProviderDiagnosticCategory>> = {
+  authentication_failed: "sign-in-required",
+  oauth_org_not_allowed: "sign-in-required",
+  cloud_credential_error: "sign-in-required",
+  account_on_hold: "account-on-hold",
+  verification_required: "verification-required",
+  billing_error: "billing",
+  rate_limit: "rate-limit",
+  overloaded: "model-at-capacity",
+  invalid_request: "request-rejected",
+  model_not_found: "model-unavailable",
+  server_error: "server-error",
+  max_output_tokens: "response-limit",
+};
+
+/** Cafe-authored process-exit methods; their fixed copy is Cafe-owned. */
+export const PROVIDER_DIAGNOSTIC_PROCESS_EXIT_METHODS = [
+  "process/exitedUnexpectedly",
+  "claude/stream/failed",
+] as const;
+
+function httpStatusCategory(value: unknown): ProviderDiagnosticCategory | undefined {
+  if (typeof value !== "number" || !Number.isInteger(value)) return undefined;
+  if (value === 401 || value === 403) return "sign-in-required";
+  if (value === 429) return "rate-limit";
+  if (value === 529) return "model-at-capacity";
+  return undefined;
+}
+
+/**
+ * Derive the closed presentation category from structured fields of the
+ * bounded private copy. Never reads `message`, `additionalDetails` or other
+ * prose: a word such as "unauthorized" inside provider text is not evidence.
+ * Shared by server publication and renderer expansion of older rows.
+ */
+export function deriveProviderDiagnosticCategory(snapshot: {
+  readonly method?: string | undefined;
+  readonly json: string;
+}): ProviderDiagnosticCategory | undefined {
+  if (
+    snapshot.method !== undefined &&
+    (PROVIDER_DIAGNOSTIC_PROCESS_EXIT_METHODS as ReadonlyArray<string>).includes(snapshot.method)
+  )
+    return "process-exit";
+  const error = readProviderDiagnosticErrorBody(snapshot.json);
+  if (!error) return undefined;
+  const codexInfo = ownJsonValue(error, "codexErrorInfo");
+  if (typeof codexInfo === "string") {
+    return Object.hasOwn(CODEX_ERROR_CATEGORIES, codexInfo)
+      ? CODEX_ERROR_CATEGORIES[codexInfo]
+      : undefined;
+  }
+  const codexVariant = jsonRecord(codexInfo);
+  if (codexVariant) {
+    const keys = Object.keys(codexVariant);
+    const variant = keys.length === 1 ? keys[0] : undefined;
+    if (variant === undefined || !Object.hasOwn(CODEX_ERROR_CATEGORIES, variant)) return undefined;
+    const status = httpStatusCategory(
+      ownJsonValue(jsonRecord(codexVariant[variant]), "httpStatusCode"),
+    );
+    return status ?? CODEX_ERROR_CATEGORIES[variant];
+  }
+  const claudeType = ownJsonValue(error, "errorType");
+  if (typeof claudeType === "string" && Object.hasOwn(CLAUDE_ERROR_CATEGORIES, claudeType)) {
+    return CLAUDE_ERROR_CATEGORIES[claudeType];
+  }
+  return httpStatusCategory(ownJsonValue(error, "apiErrorStatus"));
 }

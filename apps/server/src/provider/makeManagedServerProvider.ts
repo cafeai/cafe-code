@@ -712,6 +712,14 @@ export const makeManagedServerProvider = Effect.fn("makeManagedServerProvider")(
     ),
     getCurrentSnapshot: Ref.get(snapshotStateRef).pipe(Effect.map((state) => state.snapshot)),
     refresh: refreshSnapshot().pipe(Effect.tapError(Effect.logError), Effect.orDie),
+    refreshAfterAccountChange: Effect.gen(function* () {
+      // Ordinary refreshes deliberately coalesce. After a native credential
+      // commit, drain any earlier flight before requesting a new observation;
+      // a pre-login signed-out response cannot satisfy this invalidation.
+      const previous = yield* fullRefreshSingleFlight.current;
+      if (previous) yield* Deferred.await(previous).pipe(Effect.ignore);
+      return yield* refreshSnapshot();
+    }).pipe(Effect.tapError(Effect.logError), Effect.orDie),
     ...(input.refreshAccountUsage
       ? {
           refreshAccountUsage: refreshAccountUsageSnapshot().pipe(

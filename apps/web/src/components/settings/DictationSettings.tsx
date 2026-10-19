@@ -477,6 +477,7 @@ export function DictationSettings() {
     >
       <SettingsSection>
         <SettingsRow
+          searchId="dictation.apiKey"
           title={
             <span className="inline-flex items-center gap-1.5">
               <UiMessage
@@ -614,6 +615,7 @@ export function DictationSettings() {
 
       {isMacDesktop ? (
         <SettingsSection
+          searchId="dictation.global"
           title={uiText("Global dictation", undefined, undefined, uiLocale)}
           icon={<KeyboardIcon className="size-3.5" />}
         >
@@ -686,6 +688,7 @@ export function DictationSettings() {
             }
           />
           <SettingsRow
+            searchId="dictation.shortcut"
             title={uiText("Shortcut", undefined, undefined, uiLocale)}
             description={
               capturingShortcut

@@ -9275,6 +9275,94 @@ describe("ProviderRuntimeIngestion", () => {
     },
   );
 
+  it("publishes one categorized row when a Codex terminal echo omits unrelated turn fields", async () => {
+    const harness = await createHarness();
+    const threadId = asThreadId("thread-1");
+    const turnId = asTurnId("turn-cyber-policy");
+    const error = {
+      message: "This content was flagged for possible cybersecurity risk.",
+      codexErrorInfo: "cyberPolicy",
+      additionalDetails: null,
+      misalignment: null,
+    };
+    const runtimeId = SubagentRuntimeId.make("00000000-0000-4000-8000-000000000072");
+    const identity = {
+      provider: ProviderDriverKind.make("codex"),
+      providerInstanceId: ProviderInstanceId.make("codex"),
+      subagentRuntimeId: runtimeId,
+      threadId,
+      turnId,
+    };
+    const native = { threadId: "native-root", turnId: "native-turn", subagentRuntimeId: runtimeId };
+    const startAt = "2026-01-01T00:00:01.000Z";
+    const completedAt = "2026-01-01T00:00:03.000Z";
+    harness.setProviderSession({
+      ...identity,
+      status: "ready",
+      runtimeMode: "approval-required",
+      createdAt: startAt,
+      updatedAt: completedAt,
+      lastError: error.message,
+      codexRootTurnFailure: { turnId, providerThreadId: native.threadId, observedAt: completedAt },
+    });
+    harness.emit({
+      ...identity,
+      type: "turn.started",
+      eventId: asEventId("cyber-start"),
+      createdAt: startAt,
+      payload: {},
+    });
+    await harness.drain();
+    harness.emit({
+      ...identity,
+      type: "runtime.error",
+      eventId: asEventId("cyber-error"),
+      createdAt: "2026-01-01T00:00:02.000Z",
+      payload: { message: error.message },
+      diagnostic: makeProviderDiagnostic({
+        status: "error",
+        subject: { kind: "root" },
+        observedAt: "2026-01-01T00:00:02.000Z",
+        source: "codex.app-server.notification",
+        method: "error",
+        native,
+        message: error.message,
+        payload: { threadId: native.threadId, turnId: native.turnId, willRetry: false, error },
+      }),
+    });
+    await harness.drain();
+    // Codex 0.157+ terminal turns carry items and native timing; the adapter
+    // copies only the error envelope and marks the omitted remainder.
+    harness.emit({
+      ...identity,
+      type: "turn.completed",
+      eventId: asEventId("cyber-completion"),
+      createdAt: completedAt,
+      payload: { state: "failed", errorMessage: error.message },
+      diagnostic: makeProviderDiagnostic({
+        status: "error",
+        subject: { kind: "root" },
+        observedAt: completedAt,
+        source: "codex.app-server.notification",
+        method: "turn/completed",
+        native,
+        message: error.message,
+        payload: {
+          threadId: native.threadId,
+          turn: { id: native.turnId, status: "failed", error },
+        },
+        omittedFields: true,
+      }),
+    });
+    await harness.drain();
+    const thread = (await harness.readModel()).threads[0]!;
+    const errors = thread.activities.filter((entry) => entry.kind === "runtime.error");
+    expect(errors).toHaveLength(1);
+    expect(errors[0]?.id).toBe("cyber-error");
+    expect(errors[0]?.payload).toMatchObject({ providerDiagnosticCategory: "cyber-policy" });
+    expect(JSON.stringify(errors)).not.toContain(error.message);
+  });
+
   it("does not publish a recorded marker or lose canonical failure when private occurrence persistence refuses a collision", async () => {
     const harness = await createHarness();
     const threadId = asThreadId("thread-1");

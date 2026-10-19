@@ -7,7 +7,12 @@ import { useSettingsBackNavigation } from "../hooks/useSettingsBackNavigation";
 
 import { useSettingsRestore } from "../components/settings/SettingsPanels";
 import { Button } from "../components/ui/button";
-import { SidebarInset } from "../components/ui/sidebar";
+import { SidebarInset, useSidebar } from "../components/ui/sidebar";
+import {
+  isSettingsSearchShortcut,
+  SETTINGS_SEARCH_INPUT_ATTRIBUTE,
+} from "../components/settings/SettingsSearch";
+import { useSettingsSearchFocusStore } from "../components/settings/settingsSearchStore";
 import { ContentSidebarTriggerWithUnreadDot } from "../components/sidebar/unseenCompletions";
 import { isElectron } from "../env";
 import { useMacDesktopTitlebar } from "../hooks/useMacDesktopTitlebar";
@@ -39,13 +44,33 @@ function SettingsContentLayout() {
   const environmentId = useWorkspaceEnvironmentId();
   const location = useLocation();
   const navigateBackWithinApp = useSettingsBackNavigation();
+  const { isMobile, open: sidebarOpen, setOpen: setSidebarOpen, setOpenMobile } = useSidebar();
   const [restoreSignal, setRestoreSignal] = useState(0);
   const showRestoreDefaults = SETTINGS_RESTORE_DEFAULTS_PATHS.has(location.pathname);
   const handleRestored = () => setRestoreSignal((value) => value + 1);
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
-      if (event.defaultPrevented) return;
+      if (event.defaultPrevented || event.isComposing) return;
+      // The Keybindings page keeps ⌘F for its own filter (its handler owns it).
+      if (isSettingsSearchShortcut(event) && location.pathname !== "/settings/keybindings") {
+        // A second press while the search field is focused falls through to
+        // the browser's own find, so page find stays reachable on the web.
+        // Inside a dialog it must not move focus behind the modal either.
+        const target = event.target;
+        if (
+          target instanceof HTMLElement &&
+          (target.hasAttribute(SETTINGS_SEARCH_INPUT_ATTRIBUTE) ||
+            target.closest('[role="dialog"], [role="alertdialog"]'))
+        ) {
+          return;
+        }
+        event.preventDefault();
+        if (isMobile) setOpenMobile(true);
+        else if (!sidebarOpen) setSidebarOpen(true);
+        useSettingsSearchFocusStore.getState().requestFocus();
+        return;
+      }
       if (event.key === "Escape") {
         event.preventDefault();
         navigateBackWithinApp();
@@ -56,7 +81,14 @@ function SettingsContentLayout() {
     return () => {
       window.removeEventListener("keydown", onKeyDown);
     };
-  }, [navigateBackWithinApp]);
+  }, [
+    isMobile,
+    location.pathname,
+    navigateBackWithinApp,
+    setOpenMobile,
+    setSidebarOpen,
+    sidebarOpen,
+  ]);
 
   return (
     <SidebarInset className="h-dvh min-h-0 overflow-hidden overscroll-y-none bg-background text-foreground isolate">

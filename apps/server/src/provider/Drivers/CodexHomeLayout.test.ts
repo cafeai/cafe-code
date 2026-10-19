@@ -8,6 +8,7 @@ import * as Schema from "effect/Schema";
 import { CodexSettings } from "@cafecode/contracts";
 import {
   CodexShadowHomeError,
+  codexLoginHomePath,
   isCodexShadowLocalEntryName,
   materializeCodexShadowHome,
   resolveCodexHomeLayout,
@@ -57,6 +58,8 @@ it.layer(NodeServices.layer)("CodexHomeLayout", (it) => {
           effectiveHomePath: homePath,
           continuationKey: `codex:home:${homePath}`,
         });
+        expect(codexLoginHomePath(layout, "shared")).toBe(homePath);
+        expect(codexLoginHomePath(layout, "shadow")).toBe(homePath);
       }),
     );
 
@@ -80,6 +83,8 @@ it.layer(NodeServices.layer)("CodexHomeLayout", (it) => {
           effectiveHomePath: shadowHome,
           continuationKey: `codex:home:${sharedHome}`,
         });
+        expect(codexLoginHomePath(layout, "shared")).toBe(sharedHome);
+        expect(codexLoginHomePath(layout, "shadow")).toBe(shadowHome);
       }),
     );
   });

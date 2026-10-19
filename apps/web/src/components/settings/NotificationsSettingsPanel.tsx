@@ -92,6 +92,7 @@ export function NotificationsSettingsPanel() {
     <SettingsPageContainer title={uiText("Notifications", undefined, undefined, uiLocale)}>
       <SettingsSection>
         <SettingsRow
+          searchId="notifications.chatCompletion"
           title={uiText("Chat completion notifications", undefined, undefined, uiLocale)}
           description={uiText(
             "Notify when a chat finishes, even in the background. This device only.",

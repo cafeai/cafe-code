@@ -2224,3 +2224,55 @@ html[data-cafe-background-animations="paused"][data-cafe-window-focus="blurred"]
     animation-name: cafe-enter-fade !important;
   }
 }
+
+/* Settings search landing (settingsSearchLanding.ts): the found row or provider
+   card is tinted with the accent and the found section's card gets an accent
+   ring. 160ms in (base, ease-out), 1.2s hold, 300ms out (emphasis, ease-in);
+   total 1660ms, matching HIGHLIGHT_MS. Colour only, so reduced motion keeps it. */
+@keyframes cafe-settings-search-tint {
+  0% {
+    background-color: transparent;
+    animation-timing-function: cubic-bezier(0.2, 0.8, 0.2, 1);
+  }
+  9.64% {
+    background-color: color-mix(in oklab, var(--primary) 14%, transparent);
+  }
+  81.93% {
+    background-color: color-mix(in oklab, var(--primary) 14%, transparent);
+    animation-timing-function: cubic-bezier(0.4, 0, 1, 1);
+  }
+  100% {
+    background-color: transparent;
+  }
+}
+
+@keyframes cafe-settings-search-ring {
+  0% {
+    outline-color: transparent;
+    animation-timing-function: cubic-bezier(0.2, 0.8, 0.2, 1);
+  }
+  9.64% {
+    outline-color: color-mix(in oklab, var(--primary) 55%, transparent);
+  }
+  81.93% {
+    outline-color: color-mix(in oklab, var(--primary) 55%, transparent);
+    animation-timing-function: cubic-bezier(0.4, 0, 1, 1);
+  }
+  100% {
+    outline-color: transparent;
+  }
+}
+
+[data-settings-search-highlight]:is(
+  [data-settings-search-target="row"],
+  [data-settings-search-target="card"]
+) {
+  animation: cafe-settings-search-tint 1660ms both;
+}
+
+[data-settings-search-highlight][data-settings-search-target="section"]
+  > [data-slot="settings-card"] {
+  outline: 2px solid transparent;
+  outline-offset: 2px;
+  animation: cafe-settings-search-ring 1660ms both;
+}

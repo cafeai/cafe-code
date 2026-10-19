@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
+import { awaitProcessShutdownEvidence } from "../../processShutdownObservation.ts";
 import { redactVisualizationNativePayload } from "../../visualizations/nativePrivacy.ts";
 import { readMcpAppModelContext } from "../../mcpApps/owner.ts";
 import { readCodexAutoCompactTokenLimit } from "../codexContextWindowPolicy.ts";
@@ -2735,24 +2736,78 @@ export function buildCodexActiveContextCompactionSteerError(input: {
   });
 }
 
-function classifyCodexStderrLine(rawLine: string): { readonly message: string } | null {
-  const line = rawLine.replaceAll(ANSI_ESCAPE_REGEX, "").trim();
-  if (!line) {
-    return null;
-  }
+/**
+ * Codex tracing targets whose ERROR/WARN records are background noise for a
+ * chat: the model already receives tool failures as tool results, and model
+ * catalog refreshes are Codex's own background work. They stay in the native
+ * provider log; turning each into a durable chat activity only crowded the
+ * bounded activity window (hundreds per day in practice).
+ */
+const LOW_VALUE_CODEX_STDERR_TARGETS = [
+  "codex_core::tools::router:",
+  "codex_models_manager::manager:",
+  "codex_core::util: Custom tool call output is missing",
+];
+/** Identical records within this window are one observation, not a flood. */
+const CODEX_STDERR_REPEAT_WINDOW_MS = 5 * 60_000;
+const CODEX_STDERR_REPEAT_MEMORY = 64;
+const CODEX_PANIC_LINE_REGEX = /^thread '.*' panicked at /;
 
-  const match = line.match(CODEX_STDERR_LOG_REGEX);
-  if (match) {
-    const level = match[1];
-    if (level && level !== "WARN" && level !== "ERROR") {
+/**
+ * Stateful per-process stderr classifier.
+ *
+ * Codex writes `tracing` records as `<timestamp> <LEVEL> <target>: <message>`.
+ * A multi-line message (for example `apply_patch verification failed` quoting
+ * the expected source lines) continues on following lines without that
+ * prefix. Those continuation lines belong to the record above them and were
+ * previously emitted as separate warnings: one row per line of the user's
+ * code. Once any tracing record has been seen, untagged lines are treated as
+ * continuations and dropped; a Rust panic header remains a standalone record.
+ */
+export function makeCodexStderrClassifier(now: () => number = Date.now) {
+  let sawTracingRecord = false;
+  const recentRecords = new Map<string, number>();
+  return (rawLine: string): { readonly message: string } | null => {
+    const line = rawLine.replaceAll(ANSI_ESCAPE_REGEX, "").trim();
+    if (!line) {
       return null;
     }
-    if (BENIGN_ERROR_LOG_SNIPPETS.some((snippet) => line.includes(snippet))) {
+
+    const match = line.match(CODEX_STDERR_LOG_REGEX);
+    if (match) {
+      sawTracingRecord = true;
+      const level = match[1];
+      if (level && level !== "WARN" && level !== "ERROR") {
+        return null;
+      }
+      if (BENIGN_ERROR_LOG_SNIPPETS.some((snippet) => line.includes(snippet))) {
+        return null;
+      }
+      if (LOW_VALUE_CODEX_STDERR_TARGETS.some((target) => line.includes(target))) {
+        return null;
+      }
+      // Rate-limit identical records (timestamp excluded), such as the
+      // repeated "Failed to refresh token" line emitted on every request.
+      const recordKey = line.slice(line.indexOf(" ") + 1);
+      const observedAt = now();
+      const previous = recentRecords.get(recordKey);
+      if (previous !== undefined && observedAt - previous < CODEX_STDERR_REPEAT_WINDOW_MS) {
+        return null;
+      }
+      recentRecords.delete(recordKey);
+      recentRecords.set(recordKey, observedAt);
+      if (recentRecords.size > CODEX_STDERR_REPEAT_MEMORY) {
+        const oldest = recentRecords.keys().next().value;
+        if (oldest !== undefined) recentRecords.delete(oldest);
+      }
+      return { message: line };
+    }
+
+    if (sawTracingRecord && !CODEX_PANIC_LINE_REGEX.test(line)) {
       return null;
     }
-  }
-
-  return { message: line };
+    return { message: line };
+  };
 }
 
 export function isRecoverableThreadResumeError(error: unknown): boolean {
@@ -9182,6 +9237,7 @@ export const makeCodexSessionRuntime = (
     );
 
     const stderrRemainderRef = yield* Ref.make("");
+    const classifyStderrLine = makeCodexStderrClassifier();
     yield* child.stderr.pipe(
       Stream.decodeText(),
       Stream.runForEach((chunk) =>
@@ -9195,7 +9251,7 @@ export const makeCodexSessionRuntime = (
             Effect.forEach(
               lines,
               (line) => {
-                const classified = classifyCodexStderrLine(line);
+                const classified = classifyStderrLine(line);
                 if (!classified) {
                   return Effect.void;
                 }
@@ -9222,6 +9278,23 @@ export const makeCodexSessionRuntime = (
               return Effect.void;
             }
             return Effect.gen(function* () {
+              // A planned Cafe restart can signal this child slightly before
+              // the owner observes its own shutdown signal or closes the
+              // runtime. Give that ownership evidence a short bounded window;
+              // a real crash is still reported, only slightly later.
+              const shuttingDown = yield* awaitProcessShutdownEvidence;
+              if (yield* Ref.get(closedRef)) return;
+              if (shuttingDown) {
+                // Not a provider failure: mark the runtime stopped without an
+                // error so no chat shows a false crash after a restart. The
+                // durable resume cursor is untouched; the next turn resumes.
+                yield* updateSession(sessionRef, { status: "closed", activeTurnId: undefined });
+                yield* emitSessionEvent(
+                  "session/closed",
+                  "Codex App Server stopped because Cafe is shutting down.",
+                );
+                return;
+              }
               const termination = yield* Ref.get(protocolTerminationRef);
               const exitMessage =
                 termination?.tag === "CodexAppServerIncomingMessageTooLargeError"

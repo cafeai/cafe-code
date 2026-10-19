@@ -18,6 +18,7 @@ import { TooltipProvider } from "../ui/tooltip";
 import { SessionRail } from "./SessionRail";
 import { ContextWindowMeter } from "./ContextWindowMeter";
 import type { ProviderQuotaContext } from "./useProviderQuota";
+import { claudeChatQuotaScope } from "../../lib/claudeSessionQuota";
 
 const { subscribe, unexpected } = vi.hoisted(() => ({
   subscribe:
@@ -170,6 +171,42 @@ function Card() {
   );
 }
 describe("shared passive quota surfaces", () => {
+  it.each(["composer", "rail"] as const)(
+    "shows native Claude allowances in the %s before any context usage or native query exists",
+    async (surface) => {
+      subscribe.mockReturnValue(vi.fn());
+      const scope: ProviderQuotaContext = {
+        ...context,
+        ...claudeChatQuotaScope({ instanceId, threadId: null }),
+      };
+      mounted = await render(
+        surface === "composer" ? (
+          <ContextWindowMeter usage={null} quotaContext={scope} />
+        ) : (
+          <SessionRail plan={null} usage={null} quotaContext={scope} onShowInComposer={() => {}} />
+        ),
+      );
+      if (surface === "composer") {
+        expect(subscribe).not.toHaveBeenCalled();
+        await page.getByRole("button", { name: "Usage", exact: true }).click();
+      }
+      await expect.poll(() => subscribe.mock.calls.length).toBe(1);
+      expect(subscribe).toHaveBeenCalledWith(
+        { instanceId },
+        expect.any(Function),
+        expect.any(Object),
+      );
+      subscribe.mock.calls[0]![1](result());
+      await expect
+        .element(page.getByText("Claude limits are unavailable.", { exact: true }))
+        .toBeVisible();
+      subscribe.mock.calls[0]![1]({ report: { ...result().report!, source: "claude-cli" } });
+      await expect.element(page.getByText("75% left", { exact: true })).toBeVisible();
+      expect(document.querySelector("[data-context-window-facts]")).toBeNull();
+      expect(subscribe).toHaveBeenCalledOnce();
+    },
+  );
+
   it.each(["rail", "popover"] as const)(
     "switches %s weekly bars with the selected model without refreshing metadata",
     async (surface) => {

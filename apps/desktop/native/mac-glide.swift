@@ -153,6 +153,48 @@ private func processIdentity(_ pid: pid_t) -> ProcessIdentity? {
   return ProcessIdentity(seconds: info.pbi_start_tvsec, microseconds: info.pbi_start_tvusec)
 }
 
+/// The app bundle macOS privacy (TCC) attributes this helper's requests to.
+/// TCC charges the *responsible* process, which child processes inherit from
+/// the ancestor that launched them; it is not necessarily this helper, the
+/// provider daemon or whichever Cafe copy is installed in /Applications. A
+/// source desktop launched from a terminal is attributed to that terminal.
+/// `responsibility_get_pid_responsible_for_pid` is the libsystem query TCC
+/// itself uses; resolve it dynamically so an absent symbol degrades to "unknown"
+/// rather than guessing. A PID can be reused after the original responsible
+/// process exits (for example a detached daemon outliving the desktop), so the
+/// candidate must have started no later than our parent: responsibility is
+/// inherited at spawn, never adopted from a later process.
+private func responsibleApplication() -> [String: Any]? {
+  typealias ResponsibleFor = @convention(c) (pid_t) -> pid_t
+  guard let symbol = dlsym(UnsafeMutableRawPointer(bitPattern: -2), "responsibility_get_pid_responsible_for_pid") else { return nil }
+  let pid = unsafeBitCast(symbol, to: ResponsibleFor.self)(getpid())
+  guard pid > 0, pid != getpid(), let start = processIdentity(pid), let parent = processIdentity(getppid()),
+    (start.seconds, start.microseconds) <= (parent.seconds, parent.microseconds) else { return nil }
+  var buffer = [CChar](repeating: 0, count: 4 * Int(MAXPATHLEN))
+  guard proc_pidpath(pid, &buffer, UInt32(buffer.count)) > 0 else { return nil }
+  // Revalidate after reading the path so an exit/reuse between calls is refused.
+  guard let again = processIdentity(pid), again.seconds == start.seconds, again.microseconds == start.microseconds else { return nil }
+  let executable = URL(fileURLWithPath: String(cString: buffer)).resolvingSymlinksInPath()
+  // Nested helper bundles (Contents/Frameworks/... Helper.app) belong to the
+  // outermost application, which is the entry users see in Settings.
+  var bundle = URL(fileURLWithPath: "/")
+  var found = false
+  for component in executable.pathComponents.dropFirst() {
+    bundle.appendPathComponent(component)
+    if component.hasSuffix(".app") { found = true; break }
+  }
+  let target = found ? bundle : executable
+  guard target.path.utf8.count <= 1024 else { return nil }
+  var result: [String: Any] = ["path": target.path, "name": String(target.deletingPathExtension().lastPathComponent.prefix(128))]
+  if found, let info = Bundle(url: target) {
+    if let id = info.bundleIdentifier, id.utf8.count <= 255 { result["bundleId"] = id }
+    if let name = (info.object(forInfoDictionaryKey: "CFBundleDisplayName") ?? info.object(forInfoDictionaryKey: "CFBundleName")) as? String, !name.isEmpty {
+      result["name"] = String(name.prefix(128))
+    }
+  }
+  return result
+}
+
 private struct NodeRecord {
   let element: AXUIElement
   let role: String
@@ -2302,7 +2344,9 @@ private struct Main {
       try? FileHandle.standardOutput.write(contentsOf: data)
       return
     }
-    if arguments == ["--status"] {
+    // `--with-host` is additive: servers built before host identity existed
+    // still request plain `--status` and strictly decode its original shape.
+    if arguments == ["--status"] || arguments == ["--status", "--with-host"] {
       let application = NSApplication.shared
       application.setActivationPolicy(.prohibited)
       let running = NSWorkspace.shared.runningApplications.filter { $0.activationPolicy == .regular && !$0.isTerminated && processIdentity($0.processIdentifier) != nil }
@@ -2320,7 +2364,12 @@ private struct Main {
       }.sorted { ($0.localizedName ?? "") < ($1.localizedName ?? "") }.prefix(256).map { app in
         ["name": String((app.localizedName ?? "Application").prefix(128)), "bundleId": app.bundleIdentifier!, "path": app.bundleURL!.resolvingSymlinksInPath().path, "pid": Int(app.processIdentifier)] as [String: Any]
       }
-      guard let data = try? JSONSerialization.data(withJSONObject: ["accessibility": AXIsProcessTrusted(), "screenRecording": CGPreflightScreenCaptureAccess(), "apps": apps], options: [.sortedKeys]), data.count <= 512 * 1024 else { exit(64) }
+      var status: [String: Any] = ["accessibility": AXIsProcessTrusted(), "screenRecording": CGPreflightScreenCaptureAccess(), "apps": apps]
+      if arguments.count == 2 {
+        status["osMajorVersion"] = ProcessInfo.processInfo.operatingSystemVersion.majorVersion
+        status["responsibleApp"] = responsibleApplication() ?? NSNull()
+      }
+      guard let data = try? JSONSerialization.data(withJSONObject: status, options: [.sortedKeys]), data.count <= 512 * 1024 else { exit(64) }
       try? FileHandle.standardOutput.write(contentsOf: data)
       return
     }

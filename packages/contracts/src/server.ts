@@ -1074,6 +1074,7 @@ export const ServerProviderLoginResult = Schema.Struct({
   provider: ProviderDriverKind,
   command: TrimmedNonEmptyString,
   message: TrimmedNonEmptyString,
+  outcome: Schema.optional(Schema.Literals(["authenticated", "started"])),
 });
 export type ServerProviderLoginResult = typeof ServerProviderLoginResult.Type;
 

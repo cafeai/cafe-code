@@ -73,7 +73,7 @@ import { readPrimaryEnvironmentDescriptor, usePrimaryEnvironmentId } from "../en
 import { getWsConnectionStatus, useWsConnectionStatus } from "../rpc/wsConnectionState";
 import { providerSkillsScopeRevision } from "./chat/useProviderSkills";
 import type { ProviderQuotaContext } from "./chat/useProviderQuota";
-import { selectedQuotaDriver } from "../lib/claudeSessionQuota";
+import { claudeChatQuotaScope, selectedQuotaDriver } from "../lib/claudeSessionQuota";
 import { readEnvironmentApi } from "../environmentApi";
 import { deskTabKey } from "../deskModel";
 import { useDeskStore } from "../deskStore";
@@ -290,6 +290,7 @@ import {
   waitForStartedServerThread,
 } from "./ChatView.logic";
 import { useComposerHandleContext } from "../composerHandleContext";
+import type { ProviderDiagnosticAction } from "../providerDiagnostic";
 import type { TimelineViewPosition } from "./chat/timelineViewState";
 import {
   useChatPane,
@@ -529,6 +530,12 @@ function formatOutgoingPrompt(params: {
 }
 type ChatViewProps = {
   readonly navigationSlot?: ((controls: ReactNode) => ReactNode) | undefined;
+  /**
+   * With a navigation slot, the header controls are normally compact because
+   * the slot's tabs already name the chat. Desk sets this when its tab strip is
+   * hidden, so the slot receives the full header with a visible chat title.
+   */
+  readonly navigationShowsTitle?: boolean | undefined;
 } & (
   | {
       environmentId: EnvironmentId;
@@ -5284,7 +5291,9 @@ export default function ChatView(props: ChatViewProps) {
         return;
       }
     }
-    const messageCreatedAt = item.automaticSteerRetry ? new Date().toISOString() : item.queuedAt;
+    // Queue age belongs to the shelf. The transcript and dispatch observation
+    // must start at delivery, after any replies received while this item waited.
+    const messageCreatedAt = new Date().toISOString();
     const outgoingMessageText = outgoingTextForSnapshot(item);
     const optimisticAttachments = optimisticAttachmentsForSnapshot(item);
     const turnAttachmentsPromise = buildAttachmentsForSnapshot(item);
@@ -5670,8 +5679,9 @@ export default function ChatView(props: ChatViewProps) {
         return;
       }
     }
-    const messageCreatedAt =
-      claim && options?.queuedItem ? options.queuedItem.queuedAt : new Date().toISOString();
+    // Sending a saved queue row creates its transcript position now, just like
+    // a direct steer; its original queue timestamp is not a send timestamp.
+    const messageCreatedAt = new Date().toISOString();
     const outgoingMessageText = outgoingTextForSnapshot(snapshot);
     const optimisticAttachments = optimisticAttachmentsForSnapshot(snapshot);
     updatePendingSteerDispatches((current) => {
@@ -7867,6 +7877,22 @@ export default function ChatView(props: ChatViewProps) {
     ],
   );
 
+  // Navigation-only shortcuts from provider error guidance. They open this
+  // chat's own composer controls (never another Desk pane's) or provider
+  // settings; nothing is retried, sent or changed on the person's behalf.
+  const onProviderDiagnosticAction = useCallback(
+    (action: ProviderDiagnosticAction) => {
+      if (action === "provider-settings") {
+        void navigate({ to: "/settings/providers" });
+        return;
+      }
+      const composer = readComposerHandle(composerRef);
+      if (!composer) return;
+      if (action === "model-picker") composer.openModelPicker();
+      else composer.openModelOptions();
+    },
+    [composerRef, navigate],
+  );
   const onExpandTimelineImage = useCallback((preview: ExpandedImagePreview) => {
     setExpandedImage(preview);
   }, []);
@@ -8351,18 +8377,11 @@ export default function ChatView(props: ChatViewProps) {
           selectedModel:
             composerQuotaModels?.[activeThread.modelSelection.instanceId]?.model ??
             activeThread.modelSelection.model,
-          input:
-            activeThread.session?.provider === "claudeAgent" &&
-            activeThread.session.providerInstanceId === activeThread.modelSelection.instanceId &&
-            activeThread.session.subagentRuntimeId
-              ? {
-                  instanceId: activeThread.modelSelection.instanceId,
-                  session: {
-                    threadId: activeThread.id,
-                    runtimeId: activeThread.session.subagentRuntimeId,
-                  },
-                }
-              : null,
+          ...claudeChatQuotaScope({
+            instanceId: activeThread.modelSelection.instanceId,
+            threadId: activeThread.id,
+            session: activeThread.session,
+          }),
           scopeRevision: providerSkillsScopeRevision({
             cwd: gitCwd,
             instanceId: activeThread.modelSelection.instanceId,
@@ -8380,7 +8399,7 @@ export default function ChatView(props: ChatViewProps) {
 
   const headerControls = (
     <ChatHeader
-      compact={Boolean(props.navigationSlot)}
+      compact={Boolean(props.navigationSlot) && !props.navigationShowsTitle}
       activeThreadEnvironmentId={activeThread.environmentId}
       activeThreadTitle={activeThread.title}
       activeProjectName={activeProject?.name}
@@ -8556,6 +8575,7 @@ export default function ChatView(props: ChatViewProps) {
               selectedSubagent={selectedSubagent}
               onOpenSubagentDetail={openSubagentDetail}
               onCloseSubagentDetail={closeSubagentDetail}
+              onProviderDiagnosticAction={onProviderDiagnosticAction}
               {...(desktopDebugEnabled
                 ? { onDebugScrollEvent: recordTimelineScrollDebugEvent }
                 : {})}

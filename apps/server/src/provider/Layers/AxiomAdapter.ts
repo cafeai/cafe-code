@@ -596,7 +596,7 @@ export const makeAxiomAdapter = Effect.fn("makeAxiomAdapter")(function* (
 
   const adapter: ProviderAdapterShape<ProviderAdapterError> = {
     provider: PROVIDER,
-    login: () =>
+    login: (hasOwnedSessions = Effect.succeed(false)) =>
       Effect.gen(function* () {
         if (loginPending) return yield* invalid("login", AXIOM_LOGIN_ERRORS.pending);
         loginPending = true;
@@ -636,7 +636,18 @@ export const makeAxiomAdapter = Effect.fn("makeAxiomAdapter")(function* (
         }
         if (status.state !== "signed_out" && status.state !== "expired")
           return yield* invalid("login", AXIOM_LOGIN_ERRORS.account);
-        if (sessions.size > 0) return yield* invalid("login", AXIOM_LOGIN_ERRORS.busy);
+        if (
+          sessions.size > 0 ||
+          (yield* hasOwnedSessions.pipe(
+            Effect.timeout(15_000),
+            Effect.catchCause((cause) =>
+              Cause.hasInterrupts(cause)
+                ? Effect.interrupt
+                : Effect.fail(invalid("login", AXIOM_LOGIN_ERRORS.account)),
+            ),
+          ))
+        )
+          return yield* invalid("login", AXIOM_LOGIN_ERRORS.busy);
         const result = yield* control.client.raw
           .request("_axiom/account/native_login_start", {})
           .pipe(

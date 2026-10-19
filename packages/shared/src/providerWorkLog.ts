@@ -1,3 +1,64 @@
+import {
+  WORK_LOG_OPERATION_ID_MAX_LENGTH,
+  type WorkLogOperationIdentity,
+} from "@cafecode/contracts";
+
+/** Match the finite wire identity without admitting accessors or inherited data. */
+function ownValue(value: unknown, key: string): unknown {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) return undefined;
+  return Object.getOwnPropertyDescriptor(value, key)?.value;
+}
+
+export function readWorkLogOperationId(value: unknown): string | undefined {
+  if (typeof value !== "string") return undefined;
+  const id = value.trim();
+  return id.length > 0 &&
+    id.length <= WORK_LOG_OPERATION_ID_MAX_LENGTH &&
+    !/[\p{Cc}\p{Bidi_Control}]/u.test(id)
+    ? id
+    : undefined;
+}
+
+/**
+ * All current adapters preserve a native item id; ACP additionally carries a
+ * toolCallId. Prefer that explicit tool identity, then the native item id.
+ * Keep public summaries separate even when a provider reuses the same id.
+ * SQL history filtering follows this exact precedence and String.trim policy.
+ */
+export function readWorkLogOperationIdentity(activity: {
+  readonly kind: string;
+  readonly payload: unknown;
+}): WorkLogOperationIdentity | undefined {
+  const itemId = ownValue(activity.payload, "itemId");
+  if (activity.kind === "reasoning.summary") {
+    const id = readWorkLogOperationId(itemId);
+    return id ? { kind: "summary", id } : undefined;
+  }
+  if (
+    activity.kind !== "tool.started" &&
+    activity.kind !== "tool.updated" &&
+    activity.kind !== "tool.completed"
+  )
+    return undefined;
+  const toolCallId = ownValue(ownValue(activity.payload, "data"), "toolCallId");
+  const candidate =
+    typeof toolCallId === "string" && toolCallId.trim().length > 0 ? toolCallId : itemId;
+  const id = readWorkLogOperationId(candidate);
+  return id ? { kind: "tool", id } : undefined;
+}
+
+export function isExcludedWorkLogOperation(
+  activity: { readonly kind: string; readonly payload: unknown },
+  operations: ReadonlyArray<WorkLogOperationIdentity> | undefined,
+): boolean {
+  if (!operations?.length) return false;
+  const operation = readWorkLogOperationIdentity(activity);
+  return (
+    operation !== undefined &&
+    operations.some((excluded) => excluded.kind === operation.kind && excluded.id === operation.id)
+  );
+}
+
 /** Duplicate/polling observations stay in diagnostics; canonical receipts stay visible. */
 export const CODEX_STEER_PROGRESS_TASK_PREFIXES = [
   "codex-turn-steer:",
@@ -43,6 +104,21 @@ export const CODEX_ROUTINE_WARNING_FORMATS = [
   },
 ] as const;
 
+/**
+ * Exact Cafe-authored warnings that stay in durable diagnostics but no longer
+ * get their own Work Log row: the failure they describe now appears once as a
+ * categorized provider error ("Sign-in required"), or the warning reported a
+ * provider message Cafe now consumes quietly. Older persisted rows match the
+ * same exact text, so historical presence/count/page queries agree.
+ */
+export const HIDDEN_PROVIDER_WARNING_MESSAGES = [
+  "Claude authentication failed; suppressing Claude Code's synthetic assistant error and retiring this stale session.",
+  "Claude authentication failed; retiring this stale Claude session so the next turn starts with current login material.",
+  "Claude authentication retry failed with 401; Cafe will retire this session if Claude reports the turn as failed.",
+  "Unhandled Claude system message subtype 'dev_intent'.",
+  "Unhandled Claude system message subtype 'session_title_changed'.",
+] as const;
+
 export function readCodexRoutineWarningStatus(
   message: unknown,
 ): "steer-wait" | "turn-running" | null {
@@ -67,7 +143,10 @@ export function isRoutineProviderWorkLogActivity(activity: {
       ? (activity.payload as Record<string, unknown>)
       : null;
   if (activity.kind === "runtime.warning") {
-    return readCodexRoutineWarningStatus(payload?.message) !== null;
+    return (
+      readCodexRoutineWarningStatus(payload?.message) !== null ||
+      (HIDDEN_PROVIDER_WARNING_MESSAGES as ReadonlyArray<unknown>).includes(payload?.message)
+    );
   }
   if (activity.kind !== "task.progress") return false;
   const taskId = payload?.taskId;

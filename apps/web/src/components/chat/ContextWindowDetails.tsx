@@ -81,10 +81,12 @@ export function ContextWindowDetails(props: {
         layout === "panel" ? "flex min-h-0 flex-col gap-2.5" : "space-y-1.5",
       )}
     >
-      {layout === "popover" && (hasUsage || !hasSessionQuota) ? (
+      {layout === "popover" && (hasUsage || !hasSessionQuota || props.headerAction) ? (
         <div className="flex items-center justify-between gap-2">
           <div className="label-overline">
-            {uiText("Context window", undefined, undefined, uiLocale)}
+            {hasUsage || !hasSessionQuota
+              ? uiText("Context window", undefined, undefined, uiLocale)
+              : uiText("Usage", undefined, undefined, uiLocale)}
           </div>
           {props.headerAction}
         </div>

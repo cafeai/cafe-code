@@ -23,6 +23,7 @@ export function DataProfileSettings() {
   return (
     <SettingsSection title={uiText("Data profile", undefined, undefined, uiLocale)}>
       <SettingsRow
+        searchId="general.activeEnvironment"
         title={uiText("Active environment", undefined, undefined, uiLocale)}
         description={serverConfig?.environment.label}
         control={
@@ -36,6 +37,7 @@ export function DataProfileSettings() {
         )}
       />
       <SettingsRow
+        searchId="general.dataDirectory"
         title={uiText("Data directory", undefined, undefined, uiLocale)}
         control={
           <code className="max-w-full break-all text-xs">

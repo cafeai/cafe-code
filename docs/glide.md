@@ -22,15 +22,24 @@ provider and release-signing evidence is tracked separately below.
 2. Click the cursor-icon **Computer use** button immediately to the right of the
    thinking-level control in the composer. The highlighted, pressed button with
    a checkmark means on; click it again to turn it off. This setting is saved per
-   chat and persists across relaunches. There is no overflow entry or setup dialog.
+   chat and persists across relaunches. There is no overflow entry.
    In a new chat, you can enable it before typing or sending the first message.
    The draft retains its own choice across reloads. First-send bootstrap saves
    that exact chat's permission before admitting the provider turn; retries never
    overwrite an explicit permission already saved for the chat. New drafts start off.
 3. Enabling grants this chat access to desktop applications, including apps opened
    later. Full access and macOS Accessibility and Screen Recording remain required.
-   The button explains a missing permission; clicking opens its exact Settings pane.
-   Returning to Cafe refreshes status without capturing the screen or sending input.
+   If either permission is missing, the first click opens **Set up computer use**
+   instead of enabling. It lists each permission with its live native status and an
+   **Open Settings** action, plus the exact app bundle macOS must list, with **Copy
+   path** and (on the local desktop) **Show in Finder** for adding it with **+** when
+   it is absent. While the dialog is open, Cafe rechecks status every two seconds
+   (for at most ten minutes, then **Check again**) and on returning to Cafe; a row is
+   marked complete only when the native check confirms it, never because Settings
+   opened. When both are on, **Turn on for this chat** enables the chat (or a new
+   draft) that opened the dialog. Closing it changes nothing; click the button to
+   return. An enabled chat always turns off directly.
+   Status reads never capture the screen or send input.
    Native operations still select an exact running app from fresh trusted inventory
    and launch the helper with a bounded app allowlist, preserving window/process
    identity checks. Existing per-app grants are preserved until the switch changes.
@@ -54,8 +63,13 @@ macOS 14 or newer is required for screenshots. Accessibility and Screen Recordin
 must be granted to the responsible launching application under TCC. On macOS 27
 the former is labelled **Device Control and Data Access** under Privacy &
 Security; earlier systems use **Accessibility**. The source desktop bundle is
-`apps/desktop/.electron-runtime/Cafe Code.app`; a different installed copy does
-not identify that host. A stale entry after a development signing identity
+under `apps/desktop/.electron-runtime/` (for example the Debug profile's
+`debug/Cafe Code (Debug).app`); a different installed copy does not identify that
+host. The setup dialog's path comes from the helper's `--status --with-host`
+report of the TCC _responsible_ process (validated against PID reuse by start
+time), falling back to the owner runtime's own executable bundle. A source
+desktop started from a terminal rather than LaunchServices is attributed to that
+terminal, and the dialog says so by naming it. A stale entry after a development signing identity
 change may need removal and re-adding by the user. Glide never edits TCC or
 restarts Cafe to repair permissions.
 

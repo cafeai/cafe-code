@@ -59,6 +59,37 @@ afterEach(() => {
   vi.clearAllMocks();
 });
 describe("passive Claude session quota subscription", () => {
+  it("accepts native account allowances without a query and rejects an older owner's passive fallback", async () => {
+    const close = vi.fn();
+    subscribe.mockReturnValue(close);
+    const scope: ProviderQuotaContext = {
+      ...context,
+      input: { instanceId: context.input.instanceId },
+      nativeOnly: true,
+    };
+    const mounted = await render(<Harness scope={scope} />);
+    await expect.poll(() => subscribe.mock.calls.length).toBe(1);
+    expect(subscribe).toHaveBeenCalledWith(scope.input, expect.any(Function), expect.any(Object));
+    subscribe.mock.calls[0]![1](result);
+    await expect.element(page.getByTestId("status")).toHaveTextContent("unavailable");
+    await expect.element(page.getByTestId("received")).toHaveTextContent("none");
+    const native: ProviderSessionQuotaResult = {
+      report: { ...result.report!, source: "claude-cli" },
+    };
+    subscribe.mock.calls[0]![1](native);
+    await expect.element(page.getByTestId("status")).toHaveTextContent("available");
+    await mounted.rerender(<Harness scope={{ ...scope, selectedModel: "fable" }} />);
+    subscribe.mock.calls[0]![2].onResubscribe?.();
+    await expect.element(page.getByTestId("status")).toHaveTextContent("loading");
+    expect(subscribe).toHaveBeenCalledOnce();
+    const old = subscribe.mock.calls[0]![1];
+    await mounted.rerender(<Harness scope={{ ...scope, connected: false }} />);
+    old(native);
+    await expect.element(page.getByTestId("status")).toHaveTextContent("offline");
+    await expect.element(page.getByTestId("received")).toHaveTextContent("none");
+    expect(close).toHaveBeenCalledOnce();
+  });
+
   it("subscribes only while visible, using the exact environment and typed session", async () => {
     const close = vi.fn();
     subscribe.mockReturnValue(close);
@@ -112,7 +143,7 @@ describe("passive Claude session quota subscription", () => {
       await expect.element(page.getByTestId("status")).toHaveTextContent("loading");
     }
   });
-  it("does not borrow an instance-wide report when a Claude chat has no exact native query", async () => {
+  it("does not subscribe or retain a report when the Claude quota scope is explicitly denied", async () => {
     subscribe.mockReturnValue(vi.fn());
     const mounted = await render(<Harness scope={{ ...context, input: null }} />);
     await expect.element(page.getByTestId("status")).toHaveTextContent("unavailable");

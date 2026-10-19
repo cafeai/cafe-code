@@ -131,8 +131,10 @@ const readClaudeAccountQuotaFromEnvironment = (
 export const readClaudeAccountQuota = (binaryPath: string, environment: NodeJS.ProcessEnv) =>
   readClaudeAccountQuotaFromEnvironment(binaryPath, Effect.succeed(environment));
 
-/** Per-instance, shared single-flight cache includes unavailable results so
- * visible surfaces and provider invalidations cannot launch a probe storm. */
+/** Per-instance, shared single-flight cache includes unavailable and interrupted
+ * exits for the full TTL. Cancelling/reopening a view or reconnecting cannot
+ * launch another probe before that interval, even when its child was retired.
+ * This depends on the pinned Effect cache's exit caching, qualified in tests. */
 export const makeClaudeAccountQuotaReader = Effect.fn("makeClaudeAccountQuotaReader")(function* (
   binaryPath: string,
   resolveEnvironment: Effect.Effect<NodeJS.ProcessEnv>,

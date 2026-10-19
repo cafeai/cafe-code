@@ -244,7 +244,10 @@ export function UsageStatsPanel() {
       {loadError ? null : <UsageCostSection usage={initial} range={range} />}
 
       {loadError ? null : (
-        <SettingsSection title={uiText("Activity", undefined, undefined, uiLocale)}>
+        <SettingsSection
+          searchId="usage.activity"
+          title={uiText("Activity", undefined, undefined, uiLocale)}
+        >
           <div className="px-4 py-4 sm:px-5">
             {initial && !showSkeleton ? (
               <ActivityHeatmap
@@ -269,6 +272,7 @@ export function UsageStatsPanel() {
 
       <SettingsSection title={uiText("Data collection", undefined, undefined, uiLocale)}>
         <SettingsRow
+          searchId="usage.collect"
           title={
             <span className="inline-flex items-center gap-1.5">
               <UiMessage

@@ -282,10 +282,29 @@ layer("ProviderActivityDiagnostics", (it) => {
           providerDiagnosticOccurrenceKey(terminal),
         );
         assert.equal(yield* store.hasTerminalEcho(owner, terminal), true);
-        for (const changed of [
-          { ...terminal, snapshot: { ...terminal.snapshot, redacted: true } },
-          { ...terminal, snapshot: { ...terminal.snapshot, truncated: true } },
+        // Envelope-level flags describe unrelated omitted turn data; they
+        // cannot change the copied error both observations report.
+        for (const flagged of [
           { ...terminal, snapshot: { ...terminal.snapshot, omittedFields: true } },
+          { ...terminal, snapshot: { ...terminal.snapshot, redacted: true } },
+        ])
+          assert.equal(yield* store.hasTerminalEcho(owner, flagged), true);
+        const withErrorJson = (error: Record<string, unknown>) => ({
+          ...terminal,
+          snapshot: {
+            ...terminal.snapshot,
+            json: JSON.stringify({ turn: { id: "native-turn", status: "failed", error } }),
+          },
+        });
+        const receivedError = JSON.parse(received.snapshot.json).error as Record<string, unknown>;
+        for (const changed of [
+          // A capture marker inside the error object makes the copy ambiguous.
+          withErrorJson({ ...receivedError, message: "[Redacted: credential material]" }),
+          withErrorJson({ ...receivedError, detail: "[Omitted: unrelated or unsupported data]" }),
+          withErrorJson({
+            ...receivedError,
+            message: "Connection[Truncated: diagnostic capture limit]",
+          }),
           {
             ...terminal,
             snapshot: {
@@ -338,5 +357,109 @@ layer("ProviderActivityDiagnostics", (it) => {
         const retry = { ...received, summary: { ...received.summary, status: "retry" as const } };
         assert.equal(providerDiagnosticOccurrenceKey(retry), null);
       }),
+  );
+
+  it.effect("folds a Codex terminal turn whose envelope omits items and native timing fields", () =>
+    Effect.gen(function* () {
+      const sql = yield* SqlClient.SqlClient;
+      const store = makeProviderActivityDiagnosticStore(sql);
+      const owner = input("codex-terminal-shape");
+      yield* createThread(sql, owner);
+      yield* createActivity(sql, owner);
+      const error = {
+        message: "This content was flagged for possible cybersecurity risk.",
+        codexErrorInfo: "cyberPolicy",
+        additionalDetails: null,
+        misalignment: null,
+      };
+      const native = {
+        threadId: "native-root",
+        turnId: "native-turn",
+        subagentRuntimeId: "b9c6b24c-3323-4d5e-bc74-9df5b7806108",
+      };
+      const notification = makeProviderDiagnostic({
+        observedAt,
+        source: "codex.app-server.notification",
+        method: "error",
+        status: "error",
+        subject: { kind: "root" },
+        native: { eventId: "notification", ...native },
+        message: error.message,
+        payload: { threadId: "native-root", turnId: "native-turn", willRetry: false, error },
+      });
+      // Codex 0.157+ terminal turns carry items and timing; the adapter
+      // copies only the error envelope and marks the rest omitted.
+      const terminal = makeProviderDiagnostic({
+        observedAt,
+        source: "codex.app-server.notification",
+        method: "turn/completed",
+        status: "error",
+        subject: { kind: "root" },
+        native: { eventId: "terminal", ...native },
+        message: error.message,
+        payload: { threadId: "native-root", turn: { id: "native-turn", status: "failed", error } },
+        omittedFields: true,
+      });
+      assert.equal(terminal.snapshot.omittedFields, true);
+      assert.equal(yield* store.persist(owner, notification), true);
+      assert.equal(yield* store.hasTerminalEcho(owner, terminal), true);
+    }),
+  );
+
+  it.effect("folds a message-only terminal copy into the same runtime's exact error", () =>
+    Effect.gen(function* () {
+      const sql = yield* SqlClient.SqlClient;
+      const store = makeProviderActivityDiagnosticStore(sql);
+      const owner = input("message-echo");
+      yield* createThread(sql, owner);
+      yield* createActivity(sql, owner);
+      const runtimeId = "c5f0aa3a-8c0d-4a7f-9a8a-3d4d9a0c1e22";
+      const message = "Not logged in · Please run /login";
+      const runtimeError = makeProviderDiagnostic({
+        observedAt,
+        source: "claudeAgent",
+        method: "claude/result/error",
+        status: "error",
+        subject: { kind: "root" },
+        native: { eventId: "runtime-error", turnId: "cafe-turn", subagentRuntimeId: runtimeId },
+        message,
+        payload: { error: { message, errorType: "authentication_failed" } },
+      });
+      const terminal = (text: string, subagentRuntimeId = runtimeId) =>
+        makeProviderDiagnostic({
+          observedAt,
+          source: "claudeAgent",
+          status: "error",
+          subject: { kind: "unknown" },
+          native: { eventId: "terminal", turnId: "cafe-turn", subagentRuntimeId },
+          message: text,
+          payload: { error: { message: text } },
+        });
+      assert.equal(yield* store.persist(owner, runtimeError), true);
+      assert.equal(yield* store.hasTerminalEcho(owner, terminal(message)), true);
+      assert.equal(yield* store.hasTerminalEcho(owner, terminal("A different failure")), false);
+      assert.equal(
+        yield* store.hasTerminalEcho(
+          owner,
+          terminal(message, "0a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d"),
+        ),
+        false,
+      );
+      // Additional fields are evidence that could be lost; keep them distinct.
+      const richer = makeProviderDiagnostic({
+        observedAt,
+        source: "claudeAgent",
+        status: "error",
+        subject: { kind: "unknown" },
+        native: { eventId: "terminal", turnId: "cafe-turn", subagentRuntimeId: runtimeId },
+        message,
+        payload: { error: { message, detail: "more" } },
+      });
+      assert.equal(yield* store.hasTerminalEcho(owner, richer), false);
+      assert.equal(
+        yield* store.hasTerminalEcho({ ...owner, turnId: null }, terminal(message)),
+        false,
+      );
+    }),
   );
 });

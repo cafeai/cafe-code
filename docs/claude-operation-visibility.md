@@ -7,8 +7,10 @@ Last updated: 2026-10-09 13:03:52 JST (UTC+0900)
 Claude's received public updates belong in the operation history, not only its
 final answer. Ordinary assistant text keeps the existing message path. Readable
 thinking/progress blocks appear separately as **Claude summary** rows in the
-work log, in their received chronological position. Expand a row to read its
-retained text. A summary is not a final answer or proof that a tool succeeded.
+work log, in their received chronological position. Each row always shows its
+full retained text (bounded to 4,096 characters, with a note when truncated);
+there is no separate disclosure. A summary is not a final answer or proof that
+a tool succeeded.
 
 Anthropic can return readable summaries or brief progress notes, while omitted
 blocks contain no readable text. Which kind arrives depends on the selected

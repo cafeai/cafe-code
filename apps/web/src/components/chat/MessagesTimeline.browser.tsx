@@ -857,7 +857,6 @@ it("replays historical Claude operation rows through the existing bounded work-l
     await expect
       .element(page.getByText("Received historical summary.", { exact: true }))
       .toBeVisible();
-    await page.getByRole("button", { name: "Inspect summary", exact: true }).click();
     await expect
       .element(page.getByText("Summary truncated to the retained preview.", { exact: true }))
       .toBeVisible();

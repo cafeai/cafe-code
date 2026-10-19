@@ -1947,9 +1947,14 @@ describe(`ChatView full app (${chatViewBrowserPart})`, () => {
           turnId: source.latestTurn!.turnId,
           activityId,
         });
-        expect(document.querySelector("[data-provider-diagnostic-json]")?.textContent).toBe(
-          privateJson,
-        );
+        // Raw JSON stays behind the explicit Technical details disclosure.
+        expect(document.querySelector("[data-provider-diagnostic-json]")).toBeNull();
+        await page.getByRole("button", { name: "Technical details", exact: true }).click();
+        await vi.waitFor(() => {
+          expect(document.querySelector("[data-provider-diagnostic-json]")?.textContent).toBe(
+            privateJson,
+          );
+        });
         await inspect.click();
         expect(document.querySelector("[data-provider-diagnostic-json]")).toBeNull();
         expect(document.body.textContent).not.toContain(privateMessage);
@@ -6366,6 +6371,143 @@ describe(`ChatView full app (${chatViewBrowserPart})`, () => {
         await mounted.cleanup();
       }
     });
+
+    it.each(["ready", "running"] as const)(
+      "places a queued prompt after intervening replies when sent in a %s chat",
+      async (sessionStatus) => {
+        const queuedId = "queued-send-order";
+        const precedingMessageId = MessageId.make("reply-after-queueing");
+        const activeTurnId = TurnId.make("queued-send-order-turn");
+        const base = createSnapshotForTargetUser({
+          targetMessageId: MessageId.make("queued-send-order-original"),
+          targetText: "Original prompt",
+          sessionStatus: "running",
+        });
+        const snapshot: OrchestrationReadModel = {
+          ...base,
+          threads: base.threads.map((thread) => ({
+            ...thread,
+            messages: [
+              createUserMessage({
+                id: MessageId.make("queued-send-order-original"),
+                text: "Original prompt",
+                offsetSeconds: 0,
+              }),
+              createAssistantMessage({
+                id: precedingMessageId,
+                text: "Reply received after the follow-up was queued",
+                offsetSeconds: 2,
+              }),
+            ],
+            latestTurn: {
+              turnId: activeTurnId,
+              state: "running" as const,
+              requestedAt: NOW_ISO,
+              startedAt: NOW_ISO,
+              completedAt: null,
+              assistantMessageId: null,
+            },
+            session: { ...thread.session!, activeTurnId },
+          })),
+        };
+        const persistence = createFollowUpQueuePersistence();
+        expect(
+          (
+            await persistence.save(LOCAL_ENVIRONMENT_ID, [
+              {
+                id: queuedId,
+                environmentId: LOCAL_ENVIRONMENT_ID,
+                threadId: THREAD_ID,
+                promptText: "Send this after the reply",
+                images: [],
+                files: [],
+                provider: ProviderDriverKind.make("codex"),
+                model: "gpt-5",
+                promptEffort: null,
+                modelSelection: createModelSelection(ProviderInstanceId.make("codex"), "gpt-5"),
+                runtimeMode: "full-access",
+                interactionMode: "default",
+                queuedAt: isoAt(1),
+                blockedReason: null,
+              },
+            ])
+          ).ok,
+        ).toBe(true);
+        const beforeSend = Date.now();
+        const mounted = await mountChatView({
+          viewport: DEFAULT_VIEWPORT,
+          snapshot,
+          configureFixture: (testFixture) => {
+            testFixture.serverConfig = {
+              ...testFixture.serverConfig,
+              providers: testFixture.serverConfig.providers.map((provider) => ({
+                ...provider,
+                runtimeCapabilities: { liveSteer: "supported", threadGoals: "unsupported" },
+              })),
+            };
+          },
+          resolveRpc: (body) =>
+            body._tag === ORCHESTRATION_WS_METHODS.dispatchCommand ? { sequence: 3 } : undefined,
+        });
+        try {
+          await expect.element(page.getByText("1 message queued", { exact: true })).toBeVisible();
+          if (sessionStatus === "running") {
+            await page.getByRole("button", { name: "Send", exact: true }).click();
+          } else {
+            // Complete the original turn after the view has loaded, as happens
+            // when a waiting follow-up becomes eligible for automatic delivery.
+            const current = fixture.snapshot.threads[0]!;
+            const thread = {
+              ...current,
+              latestTurn: {
+                ...current.latestTurn!,
+                state: "completed" as const,
+                completedAt: isoAt(3),
+              },
+              session: { ...current.session!, status: "ready" as const, activeTurnId: null },
+            };
+            fixture.snapshot = { ...fixture.snapshot, snapshotSequence: 2, threads: [thread] };
+            rpcHarness.emitStreamValue(ORCHESTRATION_WS_METHODS.subscribeThread, {
+              kind: "snapshot",
+              snapshot: { snapshotSequence: 2, thread },
+            });
+          }
+          const commandType =
+            sessionStatus === "running" ? "thread.turn.steer" : "thread.turn.start";
+          await vi.waitFor(() =>
+            expect(wsRequests.filter((request) => request.type === commandType)).toHaveLength(1),
+          );
+          const command = wsRequests.find((request) => request.type === commandType)!;
+          expect(command.message).toMatchObject({
+            messageId: queuedId,
+            text: "Send this after the reply",
+          });
+          const sentAt = Date.parse(command.createdAt as string);
+          expect(sentAt).toBeGreaterThanOrEqual(beforeSend);
+          expect(sentAt).toBeLessThanOrEqual(Date.now());
+          await vi.waitFor(() => {
+            const preceding = document.querySelector(`[data-message-id="${precedingMessageId}"]`);
+            const sent = document.querySelector(`[data-message-id="${queuedId}"]`);
+            expect(preceding).not.toBeNull();
+            expect(sent).not.toBeNull();
+            expect(
+              preceding!.compareDocumentPosition(sent!) & Node.DOCUMENT_POSITION_FOLLOWING,
+            ).toBe(Node.DOCUMENT_POSITION_FOLLOWING);
+          });
+          expect(wsRequests.some((request) => request.type === "thread.turn.interrupt")).toBe(
+            false,
+          );
+          await vi.waitFor(() =>
+            expect(persistence.load(LOCAL_ENVIRONMENT_ID)).toEqual({
+              ok: true,
+              value: { pending: [], claimed: [] },
+            }),
+          );
+        } finally {
+          await mounted.cleanup();
+        }
+      },
+    );
 
     it("restores an uncertain queued dispatch as manual-only and removes its exact claim", async () => {
       const persistence = createFollowUpQueuePersistence();
@@ -11636,6 +11778,56 @@ describe(`ChatView full app (${chatViewBrowserPart})`, () => {
         }
       },
     );
+    it("shows each split chat's title in the top bar when Chat tabs is off", async () => {
+      const mounted = await mountChatView({
+        viewport: WIDE_FOOTER_VIEWPORT,
+        snapshot: withSecondThread(
+          createSnapshotForTargetUser({
+            targetMessageId: MessageId.make("hidden-desk-tabs"),
+            targetText: "Hidden tabs fixture",
+          }),
+        ),
+      });
+      try {
+        await splitChats();
+        const layout = useDeskStore.getState().desk.layout;
+        const groups = useDeskStore.getState().desk.groups;
+        applyClientSettingsUpdated({
+          ...getServerConfig()!.clientSettings,
+          showDeskTabs: false,
+        });
+        await vi.waitFor(() => {
+          expect(document.querySelector('[role="tablist"]')).toBeNull();
+          const bars = [...document.querySelectorAll<HTMLElement>(".desk-group-bar")];
+          expect(bars).toHaveLength(2);
+          const headings = bars.map((bar) =>
+            bar.querySelector<HTMLElement>("[data-chat-header-title]")!,
+          );
+          expect(headings.map((heading) => heading.textContent).toSorted()).toEqual(
+            [THREAD_TITLE, "Second Desk chat"].toSorted(),
+          );
+          for (const heading of headings) {
+            // Visible text, not the screen-reader-only title used beside tabs.
+            expect(heading.getBoundingClientRect().width).toBeGreaterThan(50);
+            expect(getComputedStyle(heading).clipPath).toBe("none");
+          }
+        });
+        expect(document.querySelectorAll(".desk-pane")).toHaveLength(2);
+        expect(useDeskStore.getState().desk.layout).toBe(layout);
+        expect(useDeskStore.getState().desk.groups).toBe(groups);
+
+        applyClientSettingsUpdated({
+          ...getServerConfig()!.clientSettings,
+          showDeskTabs: true,
+        });
+        await vi.waitFor(() =>
+          expect(document.querySelectorAll('[role="tablist"]')).toHaveLength(2),
+        );
+      } finally {
+        await mounted.cleanup();
+      }
+    });
+
     it.each(["project", "standalone"] as const)(
       "previews %s chat rows, keeps them on double-click and retains input when dismissed",
       async (kind) => {

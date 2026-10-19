@@ -302,7 +302,19 @@ function ownString(payload: unknown, key: string): string | undefined {
 }
 
 /** Undefined means the input is opaque, not permission to parse it as ICU. */
+/** Codex's official transport-fallback warning sentence (rust-v0.143.0+). */
+const CODEX_HTTPS_FALLBACK_PREFIX = "Falling back from WebSockets to HTTPS transport.";
+
 export function cafeWorkLogDisplayLabel(activity: OrchestrationThreadActivity): string | undefined {
+  // The Codex adapter already observes this exact upstream sentence as the
+  // fallback decision. Name the row by what happened; the received text stays
+  // the row's detail. Presentation only: no transport policy is changed here.
+  if (
+    activity.kind === "runtime.warning" &&
+    activity.summary === "Runtime warning" &&
+    ownString(activity.payload, "message")?.startsWith(CODEX_HTTPS_FALLBACK_PREFIX)
+  )
+    return uiText("Switched to HTTPS (WebSocket unavailable)");
   const labels = Object.hasOwn(CAFE_ACTIVITY_LABELS, activity.kind)
     ? CAFE_ACTIVITY_LABELS[activity.kind]
     : undefined;

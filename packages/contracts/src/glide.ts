@@ -13,7 +13,12 @@ export const GlideControlInput = Schema.Union([
   }).annotate(strict),
   Schema.Struct({
     threadId: Schema.optional(ThreadId),
-    action: Schema.Literals(["status", "open-accessibility", "open-screen-recording"]),
+    action: Schema.Literals([
+      "status",
+      "open-accessibility",
+      "open-screen-recording",
+      "reveal-host-app",
+    ]),
   }).annotate(strict),
   Schema.Struct({ threadId: ThreadId, action: Schema.Literal("stop") }).annotate(strict),
   Schema.Struct({
@@ -38,6 +43,18 @@ export const GlideControlResult = Schema.Struct({
     Schema.isMaxLength(256),
   ),
   message: Schema.String,
+  /** The app bundle macOS privacy settings must list for Glide, as reported by
+   * the trusted native helper (TCC responsible process) or the host executable.
+   * Absent when an older owner runtime or helper cannot determine it. */
+  hostApp: Schema.optional(
+    Schema.Struct({
+      path: Schema.String.check(Schema.isMaxLength(1024)),
+      name: Schema.String.check(Schema.isMaxLength(128)),
+      bundleId: Schema.optional(GlideBundleId),
+    }),
+  ),
+  /** Host macOS major version, used only to label Settings panes. */
+  osMajorVersion: Schema.optional(Schema.Int),
 });
 export type GlideControlResult = typeof GlideControlResult.Type;
 export class GlideError extends Schema.TaggedErrorClass<GlideError>()("GlideError", {

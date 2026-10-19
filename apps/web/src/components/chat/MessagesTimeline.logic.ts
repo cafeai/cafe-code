@@ -242,6 +242,27 @@ export interface HistoricalWorkLogDisplayState {
   readonly countIsLowerBound: boolean;
 }
 
+export type EarlierWorkLogPresenceFilters = Pick<
+  HistoricalWorkLogSummary,
+  "excludeActivityIds" | "excludeOperations" | "excludeTurnStartAck"
+>;
+
+/** Removing exclusions widens a growing earlier range, preserving positive proof. */
+export function preservesEarlierWorkLogPresence(
+  previous: EarlierWorkLogPresenceFilters,
+  current: EarlierWorkLogPresenceFilters,
+): boolean {
+  if (current.excludeTurnStartAck && !previous.excludeTurnStartAck) return false;
+  const ids = new Set(previous.excludeActivityIds ?? []);
+  if (current.excludeActivityIds?.some((id) => !ids.has(id))) return false;
+  const operations = new Set(
+    previous.excludeOperations?.map(({ kind, id }) => JSON.stringify([kind, id])),
+  );
+  return !current.excludeOperations?.some(
+    ({ kind, id }) => !operations.has(JSON.stringify([kind, id])),
+  );
+}
+
 export function filterHistoricalWorkLogSummariesByPresence(input: {
   summaries: ReadonlyMap<TurnId, HistoricalWorkLogSummary>;
   presenceByTurnId: ReadonlyMap<TurnId, boolean | undefined>;

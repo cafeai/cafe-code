@@ -756,6 +756,70 @@ describe("findSidebarProposedPlan", () => {
 });
 
 describe("deriveHistoricalWorkLogSummaries", () => {
+  it.each([
+    [
+      "Claude",
+      {
+        itemId: "native",
+        itemType: "command_execution",
+        data: { toolName: "Bash", commandInspectionVersion: 1, inspectionProvider: "claudeAgent" },
+      },
+    ],
+    ["Codex", { itemId: "native", itemType: "context_compaction" }],
+    [
+      "Grok",
+      { itemId: "native-item", itemType: "command_execution", data: { toolCallId: "native" } },
+    ],
+    ["Axiom", { itemId: "native", itemType: "web_search", data: { toolCallId: "native" } }],
+    ["OpenCode", { itemId: "native", itemType: "command_execution", data: { tool: "bash" } }],
+  ] as const)(
+    "carries the same %s exclusion through snapshot replacement until its operation is fully evicted",
+    (_provider, payload) => {
+      const turnId = TurnId.make("current");
+      const first = makeActivity({
+        id: "first-receipt",
+        sequence: 1,
+        turnId,
+        kind: "tool.updated",
+        payload,
+      });
+      const completed = makeActivity({
+        id: "completion",
+        sequence: 2,
+        turnId,
+        kind: "tool.completed",
+        payload,
+      });
+      const contexts = Array.from({ length: 500 }, (_, index) =>
+        makeActivity({
+          id: `context-${index}`,
+          sequence: index + 3,
+          turnId,
+          kind: "context-window.updated",
+        }),
+      );
+      const summarize = (activities: OrchestrationThreadActivity[]) =>
+        deriveHistoricalWorkLogSummaries({ messages: [], activities, latestTurnId: turnId }).get(
+          turnId,
+        );
+      const expected = [{ kind: "tool", id: "native" }];
+      expect(summarize([first, completed, ...contexts.slice(0, 498)])?.excludeOperations).toEqual(
+        expected,
+      );
+      expect(summarize([completed, ...contexts.slice(0, 499)])?.excludeOperations).toEqual(
+        expected,
+      );
+      expect(summarize(contexts)?.excludeOperations).toBeUndefined();
+      expect(
+        deriveHistoricalWorkLogSummaries({
+          messages: [],
+          activities: [completed, ...contexts.slice(0, 499)],
+          latestTurnId: TurnId.make("other-turn"),
+        }).get(TurnId.make("other-turn"))?.excludeOperations,
+      ).toBeUndefined();
+    },
+  );
+
   it("requests start-receipt exclusion only for valid same-turn Codex settings", () => {
     const turnId = TurnId.make("configured-current-turn");
     const configuration = {
@@ -2055,13 +2119,13 @@ describe("deriveWorkLogEntries", () => {
     };
     expect(
       retry({ ...privatePayload, nativeRetry: { observedCount: 12, timing: "unknown" } }),
-    ).toMatchObject({ label: "Provider retry · 12" });
+    ).toMatchObject({ label: "Reconnecting · 12" });
     expect(
       retry({
         ...privatePayload,
         nativeRetry: { observedCount: 1024, timing: "unknown", countLimited: true },
       }),
-    ).toMatchObject({ label: "Provider retry · 1024+" });
+    ).toMatchObject({ label: "Reconnecting · 1024+" });
     for (const nativeRetry of [
       undefined,
       { observedCount: 0, timing: "unknown" },
@@ -2074,7 +2138,7 @@ describe("deriveWorkLogEntries", () => {
       Object.create({ observedCount: 12, timing: "unknown" }),
     ]) {
       const row = retry({ ...privatePayload, nativeRetry });
-      expect(row.label).toBe("Provider retry");
+      expect(row.label).toBe("Reconnecting");
       expect(row).not.toHaveProperty("detail");
       expect(JSON.stringify(row)).not.toContain("private");
       expect(JSON.stringify(row)).not.toContain("1/5");
@@ -2087,7 +2151,7 @@ describe("deriveWorkLogEntries", () => {
         return 12;
       },
     });
-    expect(retry({ ...privatePayload, nativeRetry: accessor }).label).toBe("Provider retry");
+    expect(retry({ ...privatePayload, nativeRetry: accessor }).label).toBe("Reconnecting");
     expect(reads).toBe(0);
     const detail = {
       toJSON() {
@@ -2098,10 +2162,157 @@ describe("deriveWorkLogEntries", () => {
     expect(
       retry({ ...privatePayload, detail, nativeRetry: { observedCount: 12, timing: "unknown" } })
         .label,
-    ).toBe("Provider retry · 12");
+    ).toBe("Reconnecting · 12");
     expect(reads).toBe(0);
     // Prose alone is not a semantic retry flag or a cumulative count source.
     expect(retry({ message: "Reconnecting... 3/5" }).label).toBe("Provider transport retrying");
+  });
+
+  describe("provider diagnostic folding", () => {
+    const root = { kind: "root" } as const;
+    const retryRow = (id: string, count: number, createdAt: string) =>
+      makeActivity({
+        id,
+        kind: "runtime.warning",
+        tone: "info",
+        createdAt,
+        turnId: "failed-turn",
+        payload: {
+          retrying: true,
+          providerDiagnostic: {
+            version: 1,
+            status: "retry",
+            subject: root,
+            observedRetryCount: count,
+          },
+          providerDiagnosticCategory: "connection",
+        },
+      });
+    const errorRow = (id: string, createdAt: string, extra: Record<string, unknown> = {}) =>
+      makeActivity({
+        id,
+        kind: "runtime.error",
+        tone: "error",
+        createdAt,
+        turnId: "failed-turn",
+        payload: {
+          providerDiagnostic: { version: 1, status: "error", subject: root },
+          ...extra,
+        },
+      });
+
+    it("folds a reconnect run into the error it ended with", () => {
+      const entries = deriveWorkLogEntries(
+        [
+          retryRow("retry-1", 1, "2026-02-23T00:00:01.000Z"),
+          retryRow("retry-2", 2, "2026-02-23T00:00:02.000Z"),
+          retryRow("retry-5", 5, "2026-02-23T00:00:03.000Z"),
+          errorRow("error", "2026-02-23T00:00:04.000Z"),
+        ],
+        undefined,
+      );
+      expect(entries).toHaveLength(1);
+      expect(entries[0]).toMatchObject({
+        id: "error",
+        label: "Provider error · after 5 reconnects",
+        providerDiagnostic: { retriesBefore: { count: 5, countLimited: false } },
+      });
+    });
+
+    it("keeps only the newest of consecutive reconnect observations", () => {
+      const entries = deriveWorkLogEntries(
+        [
+          retryRow("retry-1", 1, "2026-02-23T00:00:01.000Z"),
+          retryRow("retry-3", 3, "2026-02-23T00:00:02.000Z"),
+        ],
+        undefined,
+      );
+      expect(entries.map((entry) => [entry.id, entry.label])).toEqual([
+        ["retry-3", "Reconnecting · 3"],
+      ]);
+    });
+
+    it("does not fold reconnects across different agents", () => {
+      const childRetry = makeActivity({
+        id: "child-retry",
+        kind: "runtime.warning",
+        createdAt: "2026-02-23T00:00:01.000Z",
+        turnId: "failed-turn",
+        payload: {
+          retrying: true,
+          providerDiagnostic: {
+            version: 1,
+            status: "retry",
+            subject: { kind: "subagent", id: "child", label: "Reviewer" },
+            observedRetryCount: 2,
+          },
+        },
+      });
+      const entries = deriveWorkLogEntries(
+        [childRetry, errorRow("error", "2026-02-23T00:00:02.000Z")],
+        undefined,
+      );
+      expect(entries.map((entry) => entry.id)).toEqual(["child-retry", "error"]);
+    });
+
+    it("folds an older build's duplicate terminal echo using only content-free hashes", () => {
+      const witness = {
+        providerErrorHash: "a".repeat(64),
+        providerErrorOwnerHash: "b".repeat(64),
+      };
+      const entries = deriveWorkLogEntries(
+        [
+          errorRow("first", "2026-02-23T00:00:01.000Z", {
+            ...witness,
+            providerDiagnosticCategory: "cyber-policy",
+          }),
+          errorRow("echo", "2026-02-23T00:00:02.000Z", witness),
+          errorRow("different", "2026-02-23T00:00:03.000Z", {
+            ...witness,
+            providerErrorHash: "c".repeat(64),
+          }),
+        ],
+        undefined,
+      );
+      expect(entries.map((entry) => [entry.id, entry.label])).toEqual([
+        ["first", "Blocked by cybersecurity policy"],
+        ["different", "Provider error"],
+      ]);
+      for (const entry of entries) expect(JSON.stringify(entry)).not.toContain("a".repeat(64));
+    });
+
+    it("carries the turn's recorded Daybreak choice to a cyber-policy error", () => {
+      const entries = deriveWorkLogEntries(
+        [
+          makeActivity({
+            id: "settings",
+            kind: "provider.turn.configuration",
+            tone: "info",
+            turnId: "failed-turn",
+            payload: {
+              turnConfiguration: {
+                version: 1,
+                provider: "codex",
+                providerInstanceId: "codex",
+                providerDisplayName: "Codex",
+                model: "gpt-6.1-sol",
+                daybreak: false,
+                runtimeMode: "full-access",
+                settingsSource: "submitted",
+              },
+            },
+          }),
+          errorRow("cyber", "2026-02-23T00:00:05.000Z", {
+            providerDiagnosticCategory: "cyber-policy",
+          }),
+        ],
+        undefined,
+      );
+      expect(entries.find((entry) => entry.id === "cyber")?.providerDiagnostic).toMatchObject({
+        category: "cyber-policy",
+        turnDaybreak: false,
+      });
+    });
   });
 
   it("keeps retry/error diagnostics out of previews and roster lifecycle folding", () => {
@@ -2139,7 +2350,7 @@ describe("deriveWorkLogEntries", () => {
     expect(entries).toHaveLength(2);
     expect(entries[0]).toMatchObject({
       id: "child-retry",
-      label: "Provider retry · 12",
+      label: "Reconnecting · 12",
       providerDiagnostic: {
         recorded: true,
         summary: { subject: { kind: "subagent", id: "exact-child", label: "Layout reviewer" } },

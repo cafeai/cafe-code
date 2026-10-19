@@ -156,6 +156,9 @@ export const CompactComposerControlsMenu = memo(function CompactComposerControls
   onTogglePlanSidebar: () => void;
   onRuntimeModeChange: (mode: RuntimeMode) => void;
   onOpenGoal?: () => void;
+  /** Optional controlled state so explicit shortcuts can open this menu. */
+  open?: boolean;
+  onOpenChange?: (open: boolean) => void;
 }) {
   const uiLocale = useUiLocale();
   const uiPresentation = useUiPresentation(UI_PRESENTATION_SOURCES);
@@ -176,7 +179,10 @@ export const CompactComposerControlsMenu = memo(function CompactComposerControls
   });
 
   return (
-    <Menu>
+    <Menu
+      {...(props.open !== undefined ? { open: props.open } : {})}
+      {...(props.onOpenChange ? { onOpenChange: props.onOpenChange } : {})}
+    >
       <MenuTrigger
         render={
           <Button

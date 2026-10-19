@@ -66,6 +66,24 @@ describe("work-log presentation localization boundary", () => {
     expect(receipt.summary).toBe("private prompt and correlation data");
   });
 
+  it("names Codex's exact HTTPS fallback warning and keeps its received text as detail", () => {
+    const message =
+      "Falling back from WebSockets to HTTPS transport. stream disconnected before completion";
+    expect(
+      cafeWorkLogDisplayLabel(activity("runtime.warning", "Runtime warning", { message })),
+    ).toBe("translated:Switched to HTTPS (WebSocket unavailable)");
+    expect(
+      cafeWorkLogDisplayLabel(
+        activity("runtime.warning", "Runtime warning", { message: `Note: ${message}` }),
+      ),
+    ).toBe("translated:Runtime warning");
+    const [row] = deriveWorkLogEntries(
+      [activity("runtime.warning", "Runtime warning", { message })],
+      undefined,
+    );
+    expect(row?.detail).toBe(message);
+  });
+
   it("localizes only an exact Cafe envelope, never arbitrary summaries or provider ICU", () => {
     expect(cafeWorkLogDisplayLabel(activity("approval.resolved", "Approval resolved"))).toBe(
       "translated:Approval resolved",

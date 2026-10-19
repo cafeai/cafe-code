@@ -73,7 +73,12 @@ export const glideOwnerOperationSchema = z.discriminatedUnion("kind", [
           .strict(),
         z
           .object({
-            action: z.enum(["status", "open-accessibility", "open-screen-recording"]),
+            action: z.enum([
+              "status",
+              "open-accessibility",
+              "open-screen-recording",
+              "reveal-host-app",
+            ]),
             threadId: z.string().min(1).max(200).optional(),
           })
           .strict(),
@@ -148,10 +153,23 @@ export async function resolveGlideHelper(): Promise<string | undefined> {
   }
   return undefined;
 }
+const hostAppSchema = z
+  .object({
+    path: z.string().startsWith("/").max(1024),
+    name: z.string().min(1).max(128),
+    bundleId: z
+      .string()
+      .regex(/^[A-Za-z0-9][A-Za-z0-9.-]{1,254}$/)
+      .optional(),
+  })
+  .strict();
+export type GlideHostApp = z.infer<typeof hostAppSchema>;
 const statusSchema = z
   .object({
     accessibility: z.boolean(),
     screenRecording: z.boolean(),
+    osMajorVersion: z.number().int().positive().max(1000).optional(),
+    responsibleApp: hostAppSchema.nullable().optional(),
     apps: z
       .array(
         z
@@ -166,11 +184,37 @@ const statusSchema = z
       .max(256),
   })
   .strict();
-export async function readGlideStatus(helperPath: string) {
-  return new Promise<z.infer<typeof statusSchema>>((yes, no) => {
+export type GlideNativeStatus = z.infer<typeof statusSchema>;
+export async function readGlideStatus(helperPath: string): Promise<GlideNativeStatus> {
+  try {
+    return await readGlideStatusMode(helperPath, ["--status", "--with-host"]);
+  } catch {
+    // A helper built before host identity rejects the additive flag; its
+    // original permission/inventory report remains authoritative.
+    return readGlideStatusMode(helperPath, ["--status"]);
+  }
+}
+
+/** The outermost `.app` bundle containing an executable, or undefined for a
+ * bare binary. Used only when the native helper cannot report the TCC
+ * responsible process; the owner runtime's own executable is the Electron
+ * binary of the desktop bundle that launched it (`ELECTRON_RUN_AS_NODE`). */
+export function glideHostAppFromExecutable(executablePath: string): GlideHostApp | undefined {
+  if (!executablePath.startsWith("/")) return undefined;
+  const components = executablePath.split("/");
+  const index = components.findIndex((component) => component.endsWith(".app"));
+  if (index <= 0) return undefined;
+  const path = components.slice(0, index + 1).join("/");
+  const name = components[index]!.slice(0, -".app".length);
+  const parsed = hostAppSchema.safeParse({ path, name: name.slice(0, 128) || "Application" });
+  return parsed.success ? parsed.data : undefined;
+}
+
+function readGlideStatusMode(helperPath: string, args: readonly string[]) {
+  return new Promise<GlideNativeStatus>((yes, no) => {
     execFile(
       helperPath,
-      ["--status"],
+      [...args],
       {
         timeout: 5000,
         maxBuffer: 256 * 1024,
@@ -239,7 +283,11 @@ export function makeGlideSessionRuntime(options: {
     policy: { enabled: boolean; apps: readonly string[]; desktop?: boolean },
   ): Promise<void>;
   nativeHost?: GlideNativeHost;
-  status?: typeof readGlideStatus;
+  status?: (helperPath: string) => Promise<GlideNativeStatus>;
+  /** Fallback host executable; defaults to this process's executable. */
+  hostExecutablePath?: string;
+  /** Reveals a server-derived bundle path; tests replace the native opener. */
+  reveal?: (path: string) => Promise<void>;
   runtimeFactory?: (
     bridge: ReturnType<GlideNativeHost["attach"]>,
     apps: readonly string[],
@@ -273,6 +321,9 @@ export function makeGlideSessionRuntime(options: {
   const publications = new Set<Promise<void>>();
   let metadata: ReturnType<typeof readGlideStatus> | undefined;
   let closed = false;
+  const hostApp = (status: GlideNativeStatus) =>
+    status.responsibleApp ??
+    glideHostAppFromExecutable(options.hostExecutablePath ?? process.execPath);
   const cancel = async (binding: Binding) => {
     binding.revision++;
     await binding.runtime?.reset();
@@ -479,6 +530,16 @@ export function makeGlideSessionRuntime(options: {
           );
         }
         const binding = input.threadId !== undefined ? current.get(input.threadId) : undefined;
+        if (input.action === "reveal-host-app") {
+          // Fresh native evidence, never a client-supplied path or the shared
+          // status cache, chooses what Finder reveals on this host.
+          if (!options.helperPath || (!options.reveal && process.platform !== "darwin"))
+            throw denied();
+          const fresh = await (options.status ?? readGlideStatus)(options.helperPath);
+          const application = hostApp(fresh);
+          if (!application) throw denied();
+          await (options.reveal ?? revealInFinder)(application.path);
+        }
         if (options.helperPath && !metadata) {
           const reading = (options.status ?? readGlideStatus)(options.helperPath);
           metadata = reading;
@@ -489,7 +550,12 @@ export function makeGlideSessionRuntime(options: {
             .catch(() => undefined);
         }
         const status = await metadata?.catch(() => undefined);
+        const application = status ? hostApp(status) : undefined;
         return {
+          ...(application ? { hostApp: application } : {}),
+          ...(status?.osMajorVersion !== undefined
+            ? { osMajorVersion: status.osMajorVersion }
+            : {}),
           available: !!options.helperPath,
           connected: !!binding?.active && !binding.revoked,
           enabled: policy.enabled,
@@ -588,6 +654,17 @@ export function makeGlideSessionRuntime(options: {
     },
   };
   return runtime;
+}
+
+function revealInFinder(path: string) {
+  return new Promise<void>((yes, no) =>
+    execFile(
+      "/usr/bin/open",
+      ["-R", path],
+      { timeout: 5000, maxBuffer: 4096, shell: false },
+      (error) => (error ? no(denied()) : yes()),
+    ),
+  );
 }
 
 async function remoteOperation(

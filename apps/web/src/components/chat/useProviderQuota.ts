@@ -9,9 +9,11 @@ import { subscribeMetadata } from "./metadataSubscription";
 
 export interface ProviderQuotaContext {
   readonly environmentId: EnvironmentId;
-  /** Null marks a Claude chat whose exact query is unavailable. Unlike Settings
-   * input without session, it must never borrow another chat's latest report. */
+  /** Null denies a subscription when the selected scope is unavailable. */
   readonly input: ProviderSessionQuotaInput | null;
+  /** A chat without its own query can read native account allowances, but
+   * cannot borrow another chat's passive report from an older remote owner. */
+  readonly nativeOnly?: boolean;
   readonly scopeRevision: string;
   readonly connected: boolean;
   /** Presentation only; changing models reuses the same account observation. */
@@ -37,6 +39,7 @@ export function useProviderQuota(
       ? {
           environmentId: context.environmentId,
           input: context.input,
+          nativeOnly: context.nativeOnly,
           scopeRevision: context.scopeRevision,
           connected: context.connected,
         }
@@ -64,8 +67,11 @@ export function useProviderQuota(
           scoped.environmentId,
         ).client.server.subscribeProviderQuota(
           input,
-          (result: ProviderSessionQuotaResult) =>
-            publish({ status: result.report ? "available" : "unavailable", report: result.report }),
+          (result: ProviderSessionQuotaResult) => {
+            const report =
+              scoped.nativeOnly && result.report?.source !== "claude-cli" ? null : result.report;
+            publish({ status: report ? "available" : "unavailable", report });
+          },
           { onResubscribe: awaiting, retryNonTransportErrors: false },
         );
       },

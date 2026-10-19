@@ -5,6 +5,7 @@ import { UiMessage } from "~/i18n";
 import { providerSkillsScopeRevision, useProviderSkills } from "./useProviderSkills";
 import { useProviderCommands } from "./useProviderCommands";
 import type { ProviderQuotaContext } from "./useProviderQuota";
+import { claudeChatQuotaScope } from "../../lib/claudeSessionQuota";
 import { useWsConnectionStatus } from "../../rpc/wsConnectionState";
 import { usePrimaryEnvironmentId } from "../../environments/primary";
 import { useSavedEnvironmentRuntimeStore } from "../../environments/runtime";
@@ -292,7 +293,7 @@ const ComposerFooterPrimaryActions = memo(function ComposerFooterPrimaryActions(
 }) {
   return (
     <>
-      {props.activeContextWindow && !props.sessionRailVisible ? (
+      {(props.activeContextWindow || props.quotaContext) && !props.sessionRailVisible ? (
         <ContextWindowMeter
           usage={props.activeContextWindow}
           codexRateLimits={props.codexRateLimits}
@@ -339,6 +340,8 @@ export interface ChatComposerHandle {
   focusAtEnd: () => void;
   focusAt: (cursor: number) => void;
   openModelPicker: () => void;
+  /** Opens the model options menu (effort, Fast, Daybreak, mode, …). */
+  openModelOptions: () => void;
   toggleModelPicker: () => void;
   isModelPickerOpen: () => boolean;
   readDebugState: () => {
@@ -1758,6 +1761,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
   const [isComposerFooterCompact, setIsComposerFooterCompact] = useState(false);
   const [isComposerPrimaryActionsCompact, setIsComposerPrimaryActionsCompact] = useState(false);
   const [isComposerModelPickerOpen, setIsComposerModelPickerOpen] = useState(false);
+  const [isComposerControlsMenuOpen, setIsComposerControlsMenuOpen] = useState(false);
   const [isComposerFocused, setIsComposerFocused] = useState(false);
   const [composerFocusRequestRevision, setComposerFocusRequestRevision] = useState(0);
   const [postSubmitInterruptGuardActive, setPostSubmitInterruptGuardActive] = useState(false);
@@ -1983,12 +1987,11 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
       ? {
           environmentId,
           selectedModel,
-          input: commandsInput
-            ? {
-                instanceId: commandsInput.instanceId,
-                session: { threadId: commandsInput.threadId, runtimeId: commandsInput.runtimeId },
-              }
-            : null,
+          ...claudeChatQuotaScope({
+            instanceId: selectedInstanceId,
+            threadId: isServerThread ? activeThreadId : null,
+            session: activeThread?.session,
+          }),
           scopeRevision: commandsScopeRevision,
           connected: commandsConnected,
         }
@@ -3468,6 +3471,10 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
       openModelPicker: () => {
         setIsComposerModelPickerOpen(true);
       },
+      openModelOptions: () => {
+        setIsComposerModelPickerOpen(false);
+        setIsComposerControlsMenuOpen(true);
+      },
       toggleModelPicker: () => {
         setIsComposerModelPickerOpen((open) => !open);
       },
@@ -4413,6 +4420,8 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                   onTogglePlanSidebar={togglePlanSidebar}
                   onRuntimeModeChange={handleRuntimeModeChange}
                   onOpenGoal={onOpenGoalDialog}
+                  open={isComposerControlsMenuOpen}
+                  onOpenChange={setIsComposerControlsMenuOpen}
                 />
                 {supportsGlide ? (
                   <GlideControl

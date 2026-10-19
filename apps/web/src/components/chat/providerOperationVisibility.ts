@@ -143,3 +143,23 @@ export function readClaudeCommandInspection(payload: unknown): ClaudeCommandInsp
     ...(completedAt ? { completedAt } : {}),
   };
 }
+
+/**
+ * Collapsed-row preview only: drop a leading `cd <workspace root> &&|;` that
+ * merely restates the chat's own working directory, so the row shows the
+ * command that matters (Codex receives its cwd separately and never shows it).
+ * The target must equal the workspace root exactly; any other directory, a
+ * bare `cd`, or a prefix with nothing after it is left untouched. The expanded
+ * disclosure always shows the complete received command.
+ */
+export function compactCommandPreview(command: string, workspaceRoot: string | undefined): string {
+  if (!workspaceRoot) return command;
+  const match = /^\s*cd\s+(?:"([^"]+)"|'([^']+)'|([^\s;&|"']+))\s*(?:&&|;)\s*/u.exec(command);
+  if (!match) return command;
+  const target = match[1] ?? match[2] ?? match[3] ?? "";
+  const trimSlash = (path: string) => (path.length > 1 ? path.replace(/[/\\]+$/u, "") : path);
+  const remainder = command.slice(match[0].length);
+  return trimSlash(target) === trimSlash(workspaceRoot) && remainder.trim().length > 0
+    ? remainder
+    : command;
+}

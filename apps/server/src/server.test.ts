@@ -1523,6 +1523,55 @@ const getWsServerUrl = (
   });
 
 it.layer(NodeServices.layer)("server router seam", (it) => {
+  for (const driver of ["axiom", "codex"]) {
+    it.effect(
+      `routes ${driver} login through the backend snapshot owner with actual daemon inventory`,
+      () =>
+        Effect.gen(function* () {
+          const instanceId = ProviderInstanceId.make(driver);
+          let loginCalls = 0;
+          let inventoryReads = 0;
+          yield* buildAppUnderTest({
+            layers: {
+              providerRegistry: {
+                loginProvider: (input, sessions) =>
+                  Effect.gen(function* () {
+                    assert.equal(input.instanceId, instanceId);
+                    assert.deepEqual(yield* sessions, []);
+                    loginCalls++;
+                    return {
+                      instanceId,
+                      provider: ProviderDriverKind.make(driver),
+                      command: "fixture sign-in",
+                      message: "Fixture browser opened",
+                      outcome: "started" as const,
+                    };
+                  }),
+              },
+              providerService: {
+                loginProvider: () =>
+                  Effect.die("Login must not refresh the daemon's separate snapshot"),
+                listSessions: () =>
+                  Effect.sync(() => {
+                    inventoryReads++;
+                    return [];
+                  }),
+              },
+            },
+          });
+          const wsUrl = yield* getWsServerUrl("/ws");
+          const result = yield* Effect.scoped(
+            withWsRpcClient(wsUrl, (client) =>
+              client[WS_METHODS.serverLoginProvider]({ instanceId }),
+            ),
+          );
+          assert.equal(result.outcome, "started");
+          assert.equal(loginCalls, 1);
+          assert.equal(inventoryReads, 1);
+        }).pipe(Effect.provide(makeHttpServerTestLayer())),
+    );
+  }
+
   it.effect("binds the router fixture to the exact IPv4 loopback client address", () =>
     Effect.gen(function* () {
       const server = yield* HttpServer.HttpServer;

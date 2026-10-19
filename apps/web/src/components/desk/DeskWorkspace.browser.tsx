@@ -35,6 +35,8 @@ const mocks = vi.hoisted(() => ({
   palette: vi.fn(),
   macPlatform: false,
   showSidebarTrigger: false,
+  // Per-test client setting overrides over the shared defaults.
+  settings: {} as Record<string, unknown>,
   openInEditor: vi.fn(async () => undefined),
   openTerminal: vi.fn(async () => undefined),
   // Status rendered by every tab's metadata; null keeps the fixture idle.
@@ -135,9 +137,9 @@ vi.mock("../../hooks/useThreadActions", () => ({
 vi.mock("../../hooks/useSettings", async () => {
   const { DEFAULT_UNIFIED_SETTINGS } = await import("@cafecode/contracts/settings");
   return {
-    getClientSettings: () => DEFAULT_UNIFIED_SETTINGS,
+    getClientSettings: () => ({ ...DEFAULT_UNIFIED_SETTINGS, ...mocks.settings }),
     useSettings: (select: (settings: typeof DEFAULT_UNIFIED_SETTINGS) => unknown) =>
-      select(DEFAULT_UNIFIED_SETTINGS),
+      select({ ...DEFAULT_UNIFIED_SETTINGS, ...mocks.settings }),
   };
 });
 vi.mock("../../threadRename", () => ({ renameThread: mocks.rename }));
@@ -203,10 +205,12 @@ vi.mock("../ChatView", async () => {
       threadId,
       draftId,
       navigationSlot,
+      navigationShowsTitle,
     }: {
       threadId: string;
       draftId?: string;
       navigationSlot?: (controls: import("react").ReactNode) => import("react").ReactNode;
+      navigationShowsTitle?: boolean;
     }) {
       const pane = useChatPane();
       return (
@@ -218,7 +222,10 @@ vi.mock("../ChatView", async () => {
           data-pane-visible={pane.visible}
         >
           {navigationSlot?.(
-            mocks.showSidebarTrigger ? <ContentSidebarTriggerWithUnreadDot /> : null,
+            <>
+              {mocks.showSidebarTrigger ? <ContentSidebarTriggerWithUnreadDot /> : null}
+              {navigationShowsTitle ? <h2 data-chat-header-title>Chat {threadId}</h2> : null}
+            </>,
           )}
           <div className="p-3">
             <p>Existing chat {threadId}</p>
@@ -259,6 +266,7 @@ beforeEach(async () => {
   mocks.primaryEnvironmentId = environmentId;
   mocks.macPlatform = false;
   mocks.showSidebarTrigger = false;
+  mocks.settings = {};
   mocks.openInEditor.mockClear();
   mocks.openTerminal.mockClear();
   mocks.composer.draftThreadsByThreadKey = {};
@@ -683,13 +691,15 @@ describe("Desk workspace navigation chrome", () => {
           expect(right).toBeLessThanOrEqual(width - controls);
         }
         const actions = bar.querySelector<HTMLElement>('button[aria-label="Main tab actions"]')!;
-        const focus = bar.querySelector<HTMLElement>(":scope > .desk-icon")!;
+        // The first trailing icon follows the reserved drag area. With one
+        // unfocused group that is the actions button (Focus group is hidden).
+        const firstTrailingIcon = bar.querySelector<HTMLElement>(":scope > .desk-icon")!;
         const strip = bar.querySelector<HTMLElement>(".desk-tab-strip")!;
         const usableRight = box.right - parseFloat(style.paddingRight);
         const dragWidth = (32 * scale) / 100;
         expect(usableRight - actions.getBoundingClientRect().right).toBeCloseTo(0, 1);
         expect(
-          focus.getBoundingClientRect().left - strip.getBoundingClientRect().right,
+          firstTrailingIcon.getBoundingClientRect().left - strip.getBoundingClientRect().right,
         ).toBeCloseTo(dragWidth, 1);
         // Hit-test the reserved area: no tab, action or overlay can intercept it.
         expect(
@@ -1333,6 +1343,60 @@ describe("Desk workspace navigation chrome", () => {
       }
     },
   );
+
+  it("shows the Focus group button only when it can change the layout", async () => {
+    const { screen, cleanup } = await setup(["one", "two"]);
+    try {
+      await expect.element(screen.getByRole("button", { name: "Main tab actions" })).toBeVisible();
+      await expect
+        .element(screen.getByRole("button", { name: "Focus Main", exact: true }))
+        .not.toBeInTheDocument();
+
+      useDeskStore.getState().dispatch({
+        type: "split",
+        tabKey: key("two"),
+        targetGroupId: "g1",
+        edge: "right",
+      });
+      await expect
+        .element(screen.getByRole("button", { name: "Focus Main", exact: true }))
+        .toBeVisible();
+      await screen.getByRole("button", { name: "Focus Group 2", exact: true }).click();
+      expect(useDeskStore.getState().desk.focusedGroupId).toBe("g2");
+
+      // Merging the focused group leaves one group that is still focused; the
+      // restore control stays available so that state can be cleared.
+      useDeskStore.getState().dispatch({ type: "merge", sourceGroupId: "g2", targetGroupId: "g1" });
+      const restore = screen.getByRole("button", { name: "Restore all groups", exact: true });
+      await expect.element(restore).toBeVisible();
+      await restore.click();
+      expect(useDeskStore.getState().desk.focusedGroupId).toBeNull();
+      await expect
+        .element(screen.getByRole("button", { name: "Focus Main", exact: true }))
+        .not.toBeInTheDocument();
+    } finally {
+      await cleanup();
+    }
+  });
+
+  it("keeps the bar and its actions for the shown chat when Chat tabs is off", async () => {
+    mocks.settings = { showDeskTabs: false };
+    const { screen, host, cleanup } = await setup(["one", "two"]);
+    try {
+      useDeskStore.getState().dispatch({ type: "select", tabKey: key("one") });
+      await expect.element(screen.getByRole("heading", { name: "Chat one" })).toBeVisible();
+      expect(host.querySelector('[role="tablist"]')).toBeNull();
+      const bar = host.querySelector<HTMLElement>(".desk-group-bar")!;
+      expect(bar.dataset.desktopTitlebar).toBe("true");
+      // The group menu still targets the displayed chat without a visible tab.
+      mocks.showMenu.mockResolvedValueOnce("close");
+      await screen.getByRole("button", { name: "Main tab actions" }).click();
+      await expect.element(screen.getByRole("heading", { name: "Chat two" })).toBeVisible();
+      expect(useDeskStore.getState().desk.groups.g1?.tabs).toEqual([key("two")]);
+    } finally {
+      await cleanup();
+    }
+  });
 
   it("moves a tab to another pane center without accidentally splitting", async () => {
     const { screen, cleanup } = await setup();

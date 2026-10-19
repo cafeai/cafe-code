@@ -149,6 +149,7 @@ export function TwoFactorManagementRow({
   return (
     <>
       <SettingsRow
+        searchId="connections.twoFactor"
         title={uiText("Two-factor authentication", undefined, undefined, locale)}
         description={
           status?.enabled

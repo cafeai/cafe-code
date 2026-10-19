@@ -1,8 +1,11 @@
 import { uiFormatDateTime, uiFormatNumber, uiText } from "@cafecode/shared/i18n";
 import {
   ProviderDriverKind,
+  type OrchestrationSessionStatus,
   type ProviderInstanceId,
+  type ProviderSessionQuotaInput,
   type ProviderSessionQuotaReport,
+  type ThreadId,
 } from "@cafecode/contracts";
 
 /** Resolve only the selected instance's driver. A retained session/status from
@@ -31,6 +34,43 @@ export function selectedQuotaDriver(input: {
   return input.session?.providerInstanceId === input.instanceId
     ? input.session.provider
     : undefined;
+}
+
+/** Account allowances exist before a chat's first native query. A matching
+ * query may also supply its passive fallback; without one, accept only the
+ * selected account's control-only report, including from older remote owners
+ * that might otherwise return another chat's passive report. */
+export function claudeChatQuotaScope(input: {
+  readonly instanceId: ProviderInstanceId;
+  readonly threadId: ThreadId | null;
+  readonly session?:
+    | {
+        readonly provider: ProviderDriverKind;
+        readonly providerInstanceId?: ProviderInstanceId | undefined;
+        readonly subagentRuntimeId?: string | null | undefined;
+        readonly orchestrationStatus: OrchestrationSessionStatus;
+      }
+    | null
+    | undefined;
+}): { readonly input: ProviderSessionQuotaInput; readonly nativeOnly: boolean } {
+  const session = input.session;
+  if (
+    input.threadId &&
+    session?.provider === "claudeAgent" &&
+    session.providerInstanceId === input.instanceId &&
+    session.orchestrationStatus !== "stopped" &&
+    session.orchestrationStatus !== "error" &&
+    session.subagentRuntimeId
+  ) {
+    return {
+      input: {
+        instanceId: input.instanceId,
+        session: { threadId: input.threadId, runtimeId: session.subagentRuntimeId },
+      },
+      nativeOnly: false,
+    };
+  }
+  return { input: { instanceId: input.instanceId }, nativeOnly: true };
 }
 
 /** A receipt age is presentation metadata, not a proof of endpoint freshness.

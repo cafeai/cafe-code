@@ -292,6 +292,11 @@ export const ClientSettingsSchema = Schema.Struct({
   chatClickBehavior: ChatClickBehavior.pipe(
     Schema.withDecodingDefault(Effect.succeed(DEFAULT_CHAT_CLICK_BEHAVIOR)),
   ),
+  // Desk shows open chats as tabs in the top bar. When off, wide layouts keep
+  // that bar (window controls, drag area, group actions) but show the active
+  // chat's full header instead of the tab strip, so its name stays visible.
+  // Presentation only: saved tabs, previews and splits are unchanged.
+  showDeskTabs: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(true))),
   // The persisted key predates the composer task-progress control. It now
   // applies only to completed authored-plan documents. Runtime checklists
   // stay in the composer popover unless the user docks the separate session
@@ -1123,6 +1128,7 @@ export type ServerSettingsPatch = typeof ServerSettingsPatch.Type;
 export const ClientSettingsPatch = Schema.Struct({
   languagePreference: Schema.optionalKey(UiLanguagePreference),
   chatClickBehavior: Schema.optionalKey(ChatClickBehavior),
+  showDeskTabs: Schema.optionalKey(Schema.Boolean),
   autoOpenPlanSidebar: Schema.optionalKey(Schema.Boolean),
   onboardingCompleted: Schema.optionalKey(Schema.Boolean),
   dismissedFirstRunHints: Schema.optionalKey(Schema.Array(TrimmedNonEmptyString)),

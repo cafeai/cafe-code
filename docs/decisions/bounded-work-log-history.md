@@ -3,7 +3,7 @@
 Decision status: Accepted within the authorized Work log repair
 Implementation status: Complete; final delivery gates tracked in plan149
 Created: 2026-10-11 13:14:45 JST (UTC+0900)
-Last updated: 2026-10-14 03:04:25 JST (UTC+0900)
+Last updated: 2026-10-18 (UTC)
 
 ## Context
 
@@ -56,6 +56,26 @@ absence of excluded rows. Relevant exclusion changes invalidate cached empty
 presence; token/context-only updates do not. Retained settings alone must not
 create a disclosure that becomes empty on expansion. Ordinary offset history
 remains unchanged.
+
+Earlier-range requests also carry bounded `excludeOperations` identities for
+operations already represented inline. Every provider uses an explicit ACP
+tool-call identity when present, otherwise its native item identity; public
+summaries have a separate identity kind. Presence, count and pages apply the
+same exact-turn exclusions before reading rows. Pages echo the captured list,
+and the reader rejects a missing/changed echo or an excluded operation. Native
+identities are presentation filters, not provider/session/control authority.
+No command text, output or label is carried in the exclusion contract.
+
+Exclusions have stable ordering independent of snapshot receipt ids and token
+updates. A newly received inline operation invalidates even positive presence
+proof, while complete eviction makes its saved work discoverable again.
+Removing exclusions widens the range and preserves positive proof and an opened
+reader without another presence read. Native item identity also prevents
+different OpenCode/Codex tools with identical presentation from collapsing
+together. Legacy operations without an admitted
+identity retain their older reader entry instead of losing it through an
+unproven label/detail match across the history/live boundary. The bounded
+reader still folds identified current snapshots before deriving display rows.
 
 Valid same-turn Codex settings also supply `excludeTurnStartAck` on the exact
 earlier cursor range. Presence, count and pages omit only that turn's

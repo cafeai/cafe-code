@@ -60,6 +60,8 @@ import {
 import { ArchivedToolPayloadRedactor } from "../archivedToolPrivacy.ts";
 import { parseCliArgs } from "@cafecode/shared/cliArgs";
 import { CLAUDE_RESPONSE_LIMIT_MESSAGE } from "@cafecode/shared/claudeResponseLimits";
+import { makeProviderDiagnostic } from "@cafecode/shared/providerDiagnostic";
+import { awaitProcessShutdownEvidence } from "../../processShutdownObservation.ts";
 import { sanitizeClaudeThinkingDiagnostics } from "../claudeThinkingDiagnostics.ts";
 import {
   appendClaudePublicSummary,
@@ -102,6 +104,7 @@ import {
   type ProviderInteractionMode,
   ProviderInstanceId,
   ProviderItemId,
+  type ProviderDiagnostic,
   type ProviderRuntimeEvent,
   type ProviderRuntimeTurnStatus,
   type ProviderSendTurnInput,
@@ -431,6 +434,74 @@ interface ClaudeResumeState {
   readonly forkMessageIdsInvalid?: true;
 }
 
+/**
+ * Typed Agent SDK assistant error codes (`SDKAssistantMessageError`, 0.3.295).
+ * Unknown/future spellings are not retained: they cannot select copy.
+ */
+const CLAUDE_TYPED_ASSISTANT_ERRORS = [
+  "authentication_failed",
+  "oauth_org_not_allowed",
+  "account_on_hold",
+  "verification_required",
+  "billing_error",
+  "rate_limit",
+  "overloaded",
+  "invalid_request",
+  "model_not_found",
+  "server_error",
+  "max_output_tokens",
+  "cloud_credential_error",
+] as const;
+type ClaudeTypedAssistantError = (typeof CLAUDE_TYPED_ASSISTANT_ERRORS)[number];
+
+function readClaudeTypedAssistantError(value: unknown): ClaudeTypedAssistantError | undefined {
+  return typeof value === "string" &&
+    (CLAUDE_TYPED_ASSISTANT_ERRORS as ReadonlyArray<string>).includes(value)
+    ? (value as ClaudeTypedAssistantError)
+    : undefined;
+}
+
+/**
+ * Cafe-built error envelope for a primary Claude failure. Only the final
+ * error text plus finite structured codes are copied; never transcript,
+ * prompts, tool data or raw SDK frames.
+ */
+interface ClaudeFailureDiagnostic {
+  readonly method: "claude/result/error" | "claude/stream/failed" | "claude/turn/failed";
+  /**
+   * Canonical lifecycle text (`lastError`/terminal `errorMessage`), which
+   * recovery classifiers still match. The body may carry a cleaner display
+   * message; this field only pairs the terminal echo with its error.
+   */
+  readonly lifecycleMessage: string;
+  readonly body: {
+    readonly message: string;
+    readonly errorType?: ClaudeTypedAssistantError;
+    readonly apiErrorStatus?: number;
+  };
+}
+
+function makeClaudeFailureDiagnostic(
+  turnState: ClaudeTurnState | undefined,
+  method: ClaudeFailureDiagnostic["method"],
+  message: string,
+  displayMessage: string = message,
+): ClaudeFailureDiagnostic {
+  return {
+    method,
+    lifecycleMessage: message,
+    body: {
+      message: displayMessage,
+      ...(turnState?.primaryAssistantError !== undefined
+        ? { errorType: turnState.primaryAssistantError }
+        : {}),
+      ...(turnState?.resultApiErrorStatus !== undefined
+        ? { apiErrorStatus: turnState.resultApiErrorStatus }
+        : {}),
+    },
+  };
+}
+
 interface ClaudeTurnState {
   readonly turnId: TurnId;
   readonly startedAt: string;
@@ -466,6 +537,20 @@ interface ClaudeTurnState {
         readonly promptUuids: ReadonlySet<string>;
       }
     | undefined;
+  /**
+   * Latest typed `SDKAssistantMessageError` code on an exact primary frame in
+   * this turn. Diagnostic presentation only (selects fixed Cafe copy such as
+   * "Sign-in required"); it never decides retries, liveness or completion.
+   */
+  primaryAssistantError?: ClaudeTypedAssistantError | undefined;
+  /** Structured `api_error_status` of a failed result in this turn, if any. */
+  resultApiErrorStatus?: number | undefined;
+  /**
+   * The error body already published for this turn's failure. The terminal
+   * turn event reuses the identical body so ingestion folds the two copies
+   * into one Work Log row instead of showing the same failure twice.
+   */
+  failureDiagnostic?: ClaudeFailureDiagnostic | undefined;
   readonly pendingAssistantSnapshots: Array<AssistantTextBlockState>;
   readonly reportedAssistantSnapshotKeys: Set<string>;
   readonly capturedProposedPlanKeys: Set<string>;
@@ -2944,6 +3029,20 @@ function isClaudeInterruptedCause(cause: Cause.Cause<{ readonly message: string 
   );
 }
 
+/**
+ * `ProviderAdapterProcessError.message` prefixes the Cafe chat id for logs
+ * ("Provider adapter process error (claudeAgent) for thread …: detail").
+ * A person needs only the detail, e.g. "Claude Code process exited with code 1".
+ */
+function claudeStreamFailureDetail(
+  cause: Cause.Cause<{ readonly message: string }>,
+): string | undefined {
+  const failure = Cause.squash(cause);
+  if (!(failure instanceof ProviderAdapterProcessError)) return undefined;
+  const detail = failure.detail.trim();
+  return detail.length > 0 ? detail : undefined;
+}
+
 function messageFromClaudeStreamCause(
   cause: Cause.Cause<{ readonly message: string }>,
   fallback: string,
@@ -5370,23 +5469,56 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     }
   });
 
+  /**
+   * The primary Claude query is the root of this chat's work, so its failures
+   * are attributed to the root. Diagnostic body/copy rules live with
+   * `ClaudeFailureDiagnostic`; native thread id is the Claude session id.
+   */
+  const claudeProviderDiagnostic = (
+    context: ClaudeSessionContext,
+    failure: ClaudeFailureDiagnostic,
+    stamp: { readonly eventId: string; readonly createdAt: string },
+    turnId: TurnId | undefined,
+  ): ProviderDiagnostic =>
+    makeProviderDiagnostic({
+      observedAt: stamp.createdAt,
+      source: PROVIDER,
+      method: failure.method,
+      status: "error",
+      subject: { kind: "root" },
+      native: {
+        eventId: stamp.eventId,
+        ...(context.lastThreadStartedId ? { threadId: context.lastThreadStartedId } : {}),
+        ...(turnId ? { turnId } : {}),
+        subagentRuntimeId: context.subagentRuntimeId,
+      },
+      message: failure.body.message,
+      payload: { error: failure.body },
+    });
+
   const emitRuntimeError = Effect.fn("emitRuntimeError")(function* (
     context: ClaudeSessionContext,
     message: string,
     cause?: unknown,
+    method: ClaudeFailureDiagnostic["method"] = "claude/result/error",
+    displayMessage: string = message,
   ) {
     if (cause !== undefined) {
       void cause;
     }
     const turnState = context.turnState;
     const stamp = yield* makeEventStamp();
+    const turnId = turnState ? asCanonicalTurnId(turnState.turnId) : undefined;
+    const failure = makeClaudeFailureDiagnostic(turnState, method, message, displayMessage);
+    if (turnState) turnState.failureDiagnostic = failure;
     yield* offerRuntimeEvent(context, {
       type: "runtime.error",
       eventId: stamp.eventId,
       provider: PROVIDER,
       createdAt: stamp.createdAt,
       threadId: context.session.threadId,
-      ...(turnState ? { turnId: asCanonicalTurnId(turnState.turnId) } : {}),
+      ...(turnId ? { turnId } : {}),
+      diagnostic: claudeProviderDiagnostic(context, failure, stamp, turnId),
       payload: {
         message,
         class: "provider_error",
@@ -5824,6 +5956,14 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     }
 
     const stamp = yield* makeEventStamp();
+    // A failed terminal edge repeats the already published error body, when
+    // one exists, so ingestion recognizes the echo and keeps a single row.
+    const failure =
+      status === "failed" && errorMessage
+        ? turnState.failureDiagnostic?.lifecycleMessage === errorMessage
+          ? turnState.failureDiagnostic
+          : makeClaudeFailureDiagnostic(turnState, "claude/turn/failed", errorMessage)
+        : undefined;
     yield* offerRuntimeEvent(context, {
       type: "turn.completed",
       eventId: stamp.eventId,
@@ -5831,6 +5971,16 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       createdAt: stamp.createdAt,
       threadId: context.session.threadId,
       turnId: turnState.turnId,
+      ...(failure
+        ? {
+            diagnostic: claudeProviderDiagnostic(
+              context,
+              failure,
+              stamp,
+              asCanonicalTurnId(turnState.turnId),
+            ),
+          }
+        : {}),
       payload: {
         state: status,
         ...(context.session.resumeCursor !== undefined
@@ -6635,6 +6785,12 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     if (message.type !== "assistant") {
       return;
     }
+    // Record only the exact primary frame's typed SDK error code. Nested
+    // agents' errors and arbitrary prose never classify the root failure.
+    const typedAssistantError = readClaudeTypedAssistantError(message.error);
+    if (context.turnState && typedAssistantError && hasExactPrimaryClaudeParent(message)) {
+      context.turnState.primaryAssistantError = typedAssistantError;
+    }
     if (context.turnState && isCurrentClaudeResponseLimitAssistantMessage(context, message)) {
       const promptUuids = knownClaudePromptUuids(context, message);
       const promptWitnesses = new Set(promptUuids);
@@ -6660,7 +6816,10 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       return;
     }
     if (isClaudeAuthFailureAssistantMessage(message)) {
-      if (context.turnState) context.turnState.responseLimitError = undefined;
+      if (context.turnState) {
+        context.turnState.responseLimitError = undefined;
+        context.turnState.primaryAssistantError ??= "authentication_failed";
+      }
       context.authFailureSeen = true;
       yield* emitRuntimeWarning(
         context,
@@ -6905,6 +7064,14 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     const status = turnStatusFromResult(message);
     const resultErrors = "errors" in message && Array.isArray(message.errors) ? message.errors : [];
     const authFailure = isClaudeAuthFailureResult(message);
+    if (status === "failed" && context.turnState) {
+      // Structured result evidence for diagnostic copy only.
+      const apiErrorStatus = (message as Record<string, unknown>).api_error_status;
+      if (typeof apiErrorStatus === "number" && Number.isInteger(apiErrorStatus)) {
+        context.turnState.resultApiErrorStatus = apiErrorStatus;
+      }
+      if (authFailure) context.turnState.primaryAssistantError ??= "authentication_failed";
+    }
     const responseLimitError = context.turnState?.responseLimitError;
     const resultPromptUuids = knownClaudePromptUuids(
       context,
@@ -7177,6 +7344,11 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       case "api_retry":
         if (isClaudeAuthFailureSystemMessage(message)) {
           context.authFailureSeen = true;
+          // Structured 401/authentication_failed retry evidence: lets this
+          // turn's eventual failure read "Sign-in required" instead of
+          // forwarding Claude Code's CLI-only "/login" advice unexplained.
+          if (context.turnState)
+            context.turnState.primaryAssistantError ??= "authentication_failed";
           yield* notifyAuthStatusChanged(true);
           yield* offerRuntimeEvent(context, {
             ...base,
@@ -8936,6 +9108,13 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       // identity. Nested/malformed/foreign/idle frames stay diagnostic-only.
       return;
     }
+    if (message.type === "system" && sdkMessageSubtype(message) === "dev_intent") {
+      // Claude Code product telemetry (observed shape: kind/trigger such as
+      // ios_app/ios_command plus uuid/session_id), absent from the published
+      // SDK union. It carries no chat content or lifecycle meaning, so it
+      // must not rebind identity or surface as an "unhandled" warning.
+      return;
+    }
     if (message.type === "system" && sdkMessageSubtype(message) === "session_title_changed") {
       // Claude Code 2.1.285 added this internal session-name notification,
       // which is still absent from the published SDK union. It may precede
@@ -9149,9 +9328,32 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
           );
         }
       } else {
-        const message = messageFromClaudeStreamCause(exit.cause, "Claude runtime stream failed.");
-        yield* emitRuntimeError(context, message, Cause.pretty(exit.cause));
-        yield* completeTurn(context, "failed", message);
+        // A planned Cafe restart can signal Claude Code (exit 143/SIGTERM)
+        // just before this process observes its own shutdown signal. Wait a
+        // short bounded window for that evidence before calling it a crash.
+        const shuttingDown = yield* awaitProcessShutdownEvidence;
+        if (context.stopped) return;
+        if (shuttingDown) {
+          if (context.turnState) {
+            yield* completeTurn(
+              context,
+              "interrupted",
+              "Claude stopped because Cafe is shutting down.",
+            );
+          }
+        } else {
+          // Lifecycle text stays canonical for existing recovery matching;
+          // only the private display copy drops Cafe's internal chat id.
+          const message = messageFromClaudeStreamCause(exit.cause, "Claude runtime stream failed.");
+          yield* emitRuntimeError(
+            context,
+            message,
+            Cause.pretty(exit.cause),
+            "claude/stream/failed",
+            claudeStreamFailureDetail(exit.cause) ?? message,
+          );
+          yield* completeTurn(context, "failed", message);
+        }
       }
     } else if (context.turnState) {
       yield* completeTurn(context, "interrupted", "Claude runtime stream ended.");
@@ -9283,7 +9485,12 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       }),
       Effect.catch((cause) => {
         context.queryClosureUncertain = true;
-        return emitRuntimeError(context, "Failed to close Claude runtime query.", cause);
+        return emitRuntimeError(
+          context,
+          "Failed to close Claude runtime query.",
+          cause,
+          "claude/turn/failed",
+        );
       }),
     );
 

@@ -1,5 +1,5 @@
-import { memo, useEffect, useLayoutEffect, useRef, useState } from "react";
-import { CircleAlertIcon, RotateCcwIcon } from "lucide-react";
+import { memo, useEffect, useId, useLayoutEffect, useRef, useState } from "react";
+import { ChevronRightIcon, CircleAlertIcon, RotateCcwIcon } from "lucide-react";
 import {
   EventId,
   type EnvironmentId,
@@ -9,6 +9,7 @@ import {
 } from "@cafecode/contracts";
 import type { TimestampFormat } from "@cafecode/contracts/settings";
 import { uiText } from "@cafecode/shared/i18n";
+import { deriveProviderDiagnosticCategory } from "@cafecode/shared/providerDiagnostic";
 import { useUiLocale } from "~/i18n";
 import { readEnvironmentApi } from "../../environmentApi";
 import {
@@ -22,12 +23,15 @@ import { getWsConnectionStatus, wsConnectionStatusAtom } from "../../rpc/wsConne
 import { copyTextToClipboard } from "../../lib/copyToClipboard";
 import { formatDiagnosticTimestamp } from "../../timestampFormat";
 import {
+  providerDiagnosticCategoryPresentation,
   providerDiagnosticCopyDetails,
   providerDiagnosticSubjectLabel,
   providerDiagnosticWorkLogLabel,
   readMatchingProviderDiagnosticResponse,
+  type ProviderDiagnosticAction,
   type ProviderDiagnosticWorkLogRecord,
 } from "../../providerDiagnostic";
+import { cn } from "~/lib/utils";
 import { SubagentAvatar } from "../subagents/SubagentAvatar";
 import { Button } from "../ui/button";
 import { InspectableWorkEntry } from "./InspectableWorkEntry";
@@ -53,6 +57,8 @@ export const ProviderDiagnosticWorkEntry = memo(function ProviderDiagnosticWorkE
   readonly activityId: string;
   readonly createdAt: string;
   readonly timestampFormat: TimestampFormat;
+  /** Opens existing controls for the owning chat; omitted outside a chat. */
+  readonly onAction?: (action: ProviderDiagnosticAction) => void;
 }) {
   const uiLocale = useUiLocale();
   const scope = JSON.stringify([
@@ -69,6 +75,11 @@ export const ProviderDiagnosticWorkEntry = memo(function ProviderDiagnosticWorkE
     scope: string;
     kind: "json" | "details" | "failed";
   } | null>(null);
+  // Technical details (IDs, JSON, copy) mount only on request and reset per
+  // occurrence, so the default view leads with what happened and what to do.
+  const [technical, setTechnical] = useState({ scope, open: false });
+  const technicalOpen = technical.scope === scope && technical.open;
+  const technicalPanelId = useId();
   const committedScope = useRef(scope);
   const readGeneration = useRef(0);
   const currentReadIsOwned = useRef<() => boolean>(() => false);
@@ -193,9 +204,21 @@ export const ProviderDiagnosticWorkEntry = memo(function ProviderDiagnosticWorkE
 
   const subject = props.diagnostic.summary.subject;
   const subjectLabel = providerDiagnosticSubjectLabel(props.diagnostic.summary, uiLocale);
-  const retryLabel = providerDiagnosticWorkLogLabel(props.diagnostic.summary, uiLocale);
+  const retryLabel = providerDiagnosticWorkLogLabel(props.diagnostic, uiLocale);
   const state = loaded?.scope === scope ? loaded : null;
   const snapshot = expanded && state?.status === "loaded" ? state.diagnostic : null;
+  const isRetry = props.diagnostic.summary.status === "retry";
+  // Older rows lack the published category; derive the same closed category
+  // from the structured fields of the already admitted private copy. The
+  // collapsed heading keeps its public label, so nothing private leaks there.
+  const category =
+    props.diagnostic.category ??
+    (snapshot ? deriveProviderDiagnosticCategory(snapshot) : undefined);
+  const presentation =
+    category !== undefined && !isRetry
+      ? providerDiagnosticCategoryPresentation(category, uiLocale)
+      : null;
+  const action = presentation?.action !== undefined && props.onAction ? presentation.action : null;
   const showLoading = useDelayedFlag(
     expanded &&
       props.diagnostic.recorded &&
@@ -235,6 +258,7 @@ export const ProviderDiagnosticWorkEntry = memo(function ProviderDiagnosticWorkE
           readGeneration.current += 1;
           setLoaded(null);
           setCopyState(null);
+          setTechnical({ scope, open: false });
         }
         setOpen({ scope, expanded: value });
       }}
@@ -281,7 +305,66 @@ export const ProviderDiagnosticWorkEntry = memo(function ProviderDiagnosticWorkE
       {/* Conditional mounting removes diagnostics immediately on collapse,
           rather than leaving private text in a hidden animated panel. */}
       {expanded ? (
-        <div data-provider-diagnostic-details="true" className="min-w-0 space-y-2">
+        <div data-provider-diagnostic-details="true" className="min-w-0 space-y-3">
+          {/* Cafe-authored guidance comes only from the public category, so
+              it is useful even while the private copy loads or is missing. */}
+          {presentation || isRetry || props.diagnostic.retriesBefore ? (
+            <section className="space-y-2" data-provider-diagnostic-guidance="true">
+              {presentation && category !== props.diagnostic.category ? (
+                <p className="font-medium text-foreground">{presentation.title}</p>
+              ) : null}
+              {presentation ? (
+                <p className="text-foreground [overflow-wrap:anywhere]">{presentation.guidance}</p>
+              ) : isRetry ? (
+                <p className="text-foreground">
+                  {uiText(
+                    "The provider lost its connection and is reconnecting. This usually recovers without any action.",
+                    undefined,
+                    undefined,
+                    uiLocale,
+                  )}
+                </p>
+              ) : null}
+              {category === "cyber-policy" && props.diagnostic.turnDaybreak !== undefined ? (
+                <p>
+                  {props.diagnostic.turnDaybreak
+                    ? uiText("Daybreak was on for this turn.", undefined, undefined, uiLocale)
+                    : uiText("Daybreak was off for this turn.", undefined, undefined, uiLocale)}
+                </p>
+              ) : null}
+              {props.diagnostic.retriesBefore ? (
+                <p>
+                  {props.diagnostic.retriesBefore.countLimited
+                    ? uiText(
+                        "Cafe saw at least {count} reconnect attempts before this error.",
+                        { count: props.diagnostic.retriesBefore.count },
+                        undefined,
+                        uiLocale,
+                      )
+                    : uiText(
+                        "Cafe saw {count, plural, one {# reconnect attempt} other {# reconnect attempts}} before this error.",
+                        { count: props.diagnostic.retriesBefore.count },
+                        undefined,
+                        uiLocale,
+                      )}
+                </p>
+              ) : null}
+              {action ? (
+                <Button
+                  size="xs"
+                  variant="outline"
+                  onClick={() => props.onAction?.(action)}
+                  data-provider-diagnostic-action={action}
+                >
+                  {action === "model-picker"
+                    ? uiText("Choose another model", undefined, undefined, uiLocale)
+                    : action === "model-options"
+                      ? uiText("Open model options", undefined, undefined, uiLocale)
+                      : uiText("Open provider settings", undefined, undefined, uiLocale)}
+                </Button>
+              ) : null}
+            </section>
+          ) : null}
           {!props.diagnostic.recorded ||
           props.threadId === null ||
           (state?.status === "loaded" && !snapshot) ? (
@@ -313,138 +396,144 @@ export const ProviderDiagnosticWorkEntry = memo(function ProviderDiagnosticWorkE
             </p>
           ) : snapshot ? (
             <>
-              <dl className="space-y-1 [overflow-wrap:anywhere]">
-                <DiagnosticField
-                  label={uiText("Source", undefined, undefined, uiLocale)}
-                  value={snapshot.source}
-                />
-                {snapshot.method ? (
-                  <DiagnosticField
-                    label={uiText("Method", undefined, undefined, uiLocale)}
-                    value={snapshot.method}
-                  />
-                ) : null}
-                <DiagnosticField
-                  label={uiText("Observed at", undefined, undefined, uiLocale)}
-                  value={formatDiagnosticTimestamp(
-                    snapshot.observedAt,
-                    props.timestampFormat,
-                    uiLocale,
-                  )}
-                />
-                {snapshot.native.eventId ? (
-                  <DiagnosticField
-                    label={uiText("Event receipt ID", undefined, undefined, uiLocale)}
-                    value={snapshot.native.eventId}
-                  />
-                ) : null}
-                {snapshot.native.threadId ? (
-                  <DiagnosticField
-                    label={uiText("Native thread ID", undefined, undefined, uiLocale)}
-                    value={snapshot.native.threadId}
-                  />
-                ) : null}
-                {snapshot.native.turnId ? (
-                  <DiagnosticField
-                    label={uiText("Native turn ID", undefined, undefined, uiLocale)}
-                    value={snapshot.native.turnId}
-                  />
-                ) : null}
-                {snapshot.native.subagentRuntimeId ? (
-                  <DiagnosticField
-                    label={uiText("Runtime generation", undefined, undefined, uiLocale)}
-                    value={snapshot.native.subagentRuntimeId}
-                  />
-                ) : null}
-                {snapshot.native.requestId ? (
-                  <DiagnosticField
-                    label={uiText("Native request ID", undefined, undefined, uiLocale)}
-                    value={snapshot.native.requestId}
-                  />
-                ) : null}
-              </dl>
               {snapshot.message ? (
                 <section aria-label={uiText("Provider message", undefined, undefined, uiLocale)}>
                   <p className="mb-1 text-2xs">
                     {uiText("Provider message", undefined, undefined, uiLocale)}
                   </p>
-                  <p className="whitespace-pre-wrap [overflow-wrap:anywhere]">{snapshot.message}</p>
+                  <p className="whitespace-pre-wrap text-foreground [overflow-wrap:anywhere]">
+                    {snapshot.message}
+                  </p>
                 </section>
               ) : null}
-              {props.diagnostic.summary.status === "retry" ? (
-                <p className="text-2xs">
-                  {uiText(
-                    "Retry observations do not record a retry deadline or prove recovery.",
-                    undefined,
-                    undefined,
-                    uiLocale,
-                  )}
-                </p>
-              ) : null}
-              <p className="text-2xs">
-                {uiText(
-                  "Diagnostic copy; secret fields are removed before storage. It is not an untouched complete provider payload.",
-                  undefined,
-                  undefined,
-                  uiLocale,
-                )}
-              </p>
-              {snapshot.redacted ? (
-                <p className="text-2xs">
-                  {uiText("Secret values were redacted.", undefined, undefined, uiLocale)}
-                </p>
-              ) : null}
-              {snapshot.truncated ? (
-                <p className="text-2xs">
-                  {uiText(
-                    "Diagnostic content was truncated to the retained size limit.",
-                    undefined,
-                    undefined,
-                    uiLocale,
-                  )}
-                </p>
-              ) : null}
-              {snapshot.omittedFields ? (
-                <p className="text-2xs">
-                  {uiText(
-                    "Some fields were omitted from this diagnostic copy.",
-                    undefined,
-                    undefined,
-                    uiLocale,
-                  )}
-                </p>
-              ) : null}
-              <section
-                aria-label={uiText(
-                  "Diagnostic JSON — secrets redacted",
-                  undefined,
-                  undefined,
-                  uiLocale,
-                )}
-              >
-                <p className="mb-1 text-2xs">
-                  {uiText("Diagnostic JSON — secrets redacted", undefined, undefined, uiLocale)}
-                </p>
-                <pre
-                  className="min-w-0 font-mono text-xs leading-5 whitespace-pre-wrap [overflow-wrap:anywhere]"
-                  data-provider-diagnostic-json="true"
+              <div className="min-w-0">
+                <button
+                  type="button"
+                  className="focus-ring group/technical -mx-1 flex items-center gap-1 rounded-sm px-1 py-0.5 text-2xs text-muted-foreground hover:text-foreground"
+                  aria-expanded={technicalOpen}
+                  aria-controls={technicalPanelId}
+                  onClick={() => setTechnical({ scope, open: !technicalOpen })}
                 >
-                  {snapshot.json}
-                </pre>
-              </section>
-              <div className="flex flex-wrap items-center gap-2">
-                <Button size="xs" variant="outline" onClick={() => copy("json")}>
-                  {uiText("Copy JSON", undefined, undefined, uiLocale)}
-                </Button>
-                <Button size="xs" variant="outline" onClick={() => copy("details")}>
-                  {uiText("Copy details", undefined, undefined, uiLocale)}
-                </Button>
-                {copyState?.scope === scope ? (
-                  <span role="status" className="text-2xs">
-                    {copyState.kind === "failed"
-                      ? uiText("Could not copy diagnostic details.", undefined, undefined, uiLocale)
-                      : uiText("Copied", undefined, undefined, uiLocale)}
-                  </span>
+                  <ChevronRightIcon
+                    aria-hidden
+                    className={cn(
+                      "size-3 shrink-0 transition-transform duration-(--duration-fast) motion-reduce:transition-none",
+                      technicalOpen && "rotate-90",
+                    )}
+                  />
+                  {uiText("Technical details", undefined, undefined, uiLocale)}
+                </button>
+                {technicalOpen ? (
+                  <div id={technicalPanelId} className="mt-2 min-w-0 space-y-2">
+                    <dl className="space-y-1 [overflow-wrap:anywhere]">
+                      <DiagnosticField
+                        label={uiText("Source", undefined, undefined, uiLocale)}
+                        value={snapshot.source}
+                      />
+                      {snapshot.method ? (
+                        <DiagnosticField
+                          label={uiText("Method", undefined, undefined, uiLocale)}
+                          value={snapshot.method}
+                        />
+                      ) : null}
+                      <DiagnosticField
+                        label={uiText("Observed at", undefined, undefined, uiLocale)}
+                        value={formatDiagnosticTimestamp(
+                          snapshot.observedAt,
+                          props.timestampFormat,
+                          uiLocale,
+                        )}
+                      />
+                      {snapshot.native.eventId ? (
+                        <DiagnosticField
+                          label={uiText("Event receipt ID", undefined, undefined, uiLocale)}
+                          value={snapshot.native.eventId}
+                        />
+                      ) : null}
+                      {snapshot.native.threadId ? (
+                        <DiagnosticField
+                          label={uiText("Native thread ID", undefined, undefined, uiLocale)}
+                          value={snapshot.native.threadId}
+                        />
+                      ) : null}
+                      {snapshot.native.turnId ? (
+                        <DiagnosticField
+                          label={uiText("Native turn ID", undefined, undefined, uiLocale)}
+                          value={snapshot.native.turnId}
+                        />
+                      ) : null}
+                      {snapshot.native.subagentRuntimeId ? (
+                        <DiagnosticField
+                          label={uiText("Runtime generation", undefined, undefined, uiLocale)}
+                          value={snapshot.native.subagentRuntimeId}
+                        />
+                      ) : null}
+                      {snapshot.native.requestId ? (
+                        <DiagnosticField
+                          label={uiText("Native request ID", undefined, undefined, uiLocale)}
+                          value={snapshot.native.requestId}
+                        />
+                      ) : null}
+                    </dl>
+                    {/* One honest line replaces three stacked disclaimers. */}
+                    <p className="text-2xs" data-provider-diagnostic-capture-note="true">
+                      {uiText(
+                        "Diagnostic copy with secrets removed before storage{redacted, select, yes {; secret values redacted} other {}}{omitted, select, yes {; some fields omitted} other {}}{truncated, select, yes {; truncated to the size limit} other {}}. Not the complete provider payload.",
+                        {
+                          redacted: snapshot.redacted ? "yes" : "no",
+                          omitted: snapshot.omittedFields ? "yes" : "no",
+                          truncated: snapshot.truncated ? "yes" : "no",
+                        },
+                        undefined,
+                        uiLocale,
+                      )}
+                    </p>
+                    {isRetry ? (
+                      <p className="text-2xs">
+                        {uiText(
+                          "Retry observations do not record a retry deadline or prove recovery.",
+                          undefined,
+                          undefined,
+                          uiLocale,
+                        )}
+                      </p>
+                    ) : null}
+                    <section
+                      aria-label={uiText(
+                        "Diagnostic JSON — secrets redacted",
+                        undefined,
+                        undefined,
+                        uiLocale,
+                      )}
+                    >
+                      <pre
+                        className="min-w-0 font-mono text-xs leading-5 whitespace-pre-wrap [overflow-wrap:anywhere]"
+                        data-provider-diagnostic-json="true"
+                      >
+                        {snapshot.json}
+                      </pre>
+                    </section>
+                    <div className="flex flex-wrap items-center gap-2">
+                      <Button size="xs" variant="outline" onClick={() => copy("details")}>
+                        {uiText("Copy details", undefined, undefined, uiLocale)}
+                      </Button>
+                      <Button size="xs" variant="outline" onClick={() => copy("json")}>
+                        {uiText("Copy JSON", undefined, undefined, uiLocale)}
+                      </Button>
+                      {copyState?.scope === scope ? (
+                        <span role="status" className="text-2xs">
+                          {copyState.kind === "failed"
+                            ? uiText(
+                                "Could not copy diagnostic details.",
+                                undefined,
+                                undefined,
+                                uiLocale,
+                              )
+                            : uiText("Copied", undefined, undefined, uiLocale)}
+                        </span>
+                      ) : null}
+                    </div>
+                  </div>
                 ) : null}
               </div>
             </>

@@ -74,6 +74,8 @@ import {
   getProviderVersionLabel,
   type ProviderStatusKey,
 } from "./providerStatus";
+import { settingsSearchAnchorProps } from "./settingsLayout";
+import { settingsSearchProviderAnchorId } from "./settingsSearchIndex";
 
 // Accent colours are user data (a per-account marker), not theme colours, so
 // these preset values are deliberately literal.
@@ -1357,6 +1359,7 @@ export function ProviderInstanceCard({
     <div
       className="@container/provider-card min-w-0 border-t border-border-subtle first:border-t-0"
       data-provider-card
+      {...settingsSearchAnchorProps(settingsSearchProviderAnchorId(instanceId), "card")}
     >
       <div className="px-4 py-3.5 sm:px-5">
         {/* Actions belong to the identity header, never the variable-height

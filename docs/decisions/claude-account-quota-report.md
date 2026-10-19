@@ -1,7 +1,7 @@
 # Claude subscription allowance reports
 
 Decision status: Accepted — native control-only reader with passive compatibility.
-Last updated: 2026-10-16.
+Last updated: 2026-10-18.
 Decision authority: explicit user request to implement the verified Claude Code
 `get_usage` subprocess approach. Supersedes the October 9 passive-only collection
 restriction; authentication, provider turns and usage accounting stay unchanged.
@@ -41,7 +41,9 @@ a 250 ms graceful interval and bounded force-kill escalation. No user/provider
 process outside this disposable child is interrupted.
 
 Each exact provider instance shares one single-flight cache for 60 seconds,
-including unavailable results. Only visible quota subscriptions trigger reads;
+including unavailable and interrupted results. Concurrent views, reopening and
+reconnection reuse that cache rather than restarting a cancelled probe. Only
+visible quota subscriptions trigger reads;
 a one-minute tick refreshes an open surface. Closing a surface stops its refresh
 stream. No background allowance scheduler is attached to chats or provider health.
 Replacing the configured instance drops its cache, and exact object identity is
@@ -76,7 +78,11 @@ command, transcript scan or model prompt is used to obtain the fallback.
 
 The existing owner-only `server.subscribeProviderQuota` stream validates the
 current authenticated owner and configured enabled Claude instance around reads.
-Settings may request that instance's allowances without any chat. An exact-chat
+Settings and chat surfaces may request that instance's allowances before any
+native chat query exists. The composer usage control remains available without
+context-token observations and does not invent context usage. Without an exact
+query, chat surfaces accept only `claude-cli` reports, rejecting passive reports
+from other chats even when connected to an older remote owner. An exact-chat
 request still requires its saved current runtime/workspace binding. Changed
 configuration, replaced instances, duplicate bindings and stale subscriptions
 cannot publish old results under a new scope. Reconnecting saved environments

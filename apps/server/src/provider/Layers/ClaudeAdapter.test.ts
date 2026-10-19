@@ -4,6 +4,8 @@ import { GENERATED_VISUALIZATION_INSTRUCTIONS } from "../../visualizations/mcp.t
 import { installVisualizationSessionRuntime } from "../../visualizations/sessionRuntime.ts";
 import { installGlideSessionRuntime } from "../../glide/sessionRuntime.ts";
 import { buildCafeInstructions } from "../CafeInstructions.ts";
+import { deriveProviderDiagnosticCategory } from "@cafecode/shared/providerDiagnostic";
+import { providerDiagnosticOccurrenceKey } from "../../persistence/Layers/ProviderActivityDiagnostics.ts";
 // @effect-diagnostics nodeBuiltinImport:off
 import {
   existsSync,
@@ -5720,6 +5722,14 @@ describe("ClaudeAdapterLive", () => {
             String(completed.payload.errorMessage),
             "Invalid authentication credentials",
           );
+          // The primary query's failure is the root's, and its typed SDK
+          // error selects Cafe's "Sign-in required" copy without prose parsing.
+          assert.equal(completed.diagnostic?.summary.subject.kind, "root");
+          assert.equal(
+            deriveProviderDiagnosticCategory(completed.diagnostic!.snapshot),
+            "sign-in-required",
+          );
+          assert.notInclude(completed.diagnostic!.snapshot.json, String(THREAD_ID));
         }
 
         assert.equal(
@@ -5728,6 +5738,69 @@ describe("ClaudeAdapterLive", () => {
         );
         assert.equal(harness.query.closeCalls, 1);
         assert.deepEqual(yield* adapter.listSessions(), []);
+      }).pipe(
+        Effect.provideService(Random.Random, makeDeterministicRandomService()),
+        Effect.provide(harness.layer),
+      );
+    },
+  );
+
+  it.effect(
+    "gives a CLI-worded auth failure and its terminal echo one identical root diagnostic",
+    () => {
+      const harness = makeHarness();
+      return Effect.gen(function* () {
+        const adapter = yield* ClaudeAdapter;
+        const runtimeEventsFiber = yield* adapter.streamEvents.pipe(
+          Stream.takeUntil((event) => event.type === "turn.completed"),
+          Stream.runCollect,
+          Effect.forkChild,
+        );
+        const session = yield* adapter.startSession({
+          threadId: THREAD_ID,
+          provider: ProviderDriverKind.make("claudeAgent"),
+          runtimeMode: "full-access",
+        });
+        yield* adapter.sendTurn({ threadId: session.threadId, input: "hello", attachments: [] });
+        harness.query.emit({
+          type: "assistant",
+          session_id: "signed-out-session",
+          uuid: "assistant-signed-out",
+          parent_tool_use_id: null,
+          error: "authentication_failed",
+          message: {
+            id: "synthetic-signed-out",
+            model: "<synthetic>",
+            role: "assistant",
+            content: [{ type: "text", text: "Not logged in · Please run /login" }],
+          },
+        } as unknown as SDKMessage);
+        // Claude Code's terminal result carries only CLI advice, no 401 status.
+        harness.query.emit({
+          type: "result",
+          subtype: "success",
+          is_error: true,
+          result: "Not logged in · Please run /login",
+          errors: [],
+          session_id: "signed-out-session",
+          uuid: "result-signed-out",
+        } as unknown as SDKMessage);
+
+        const runtimeEvents = Array.from(yield* Fiber.join(runtimeEventsFiber));
+        const completed = runtimeEvents.find((event) => event.type === "turn.completed");
+        assert.equal(completed?.type, "turn.completed");
+        const failure = completed?.diagnostic;
+        assert.isDefined(failure);
+        assert.equal(failure!.summary.subject.kind, "root");
+        assert.equal(deriveProviderDiagnosticCategory(failure!.snapshot), "sign-in-required");
+        const runtimeError = runtimeEvents.find((event) => event.type === "runtime.error");
+        if (runtimeError?.diagnostic) {
+          // Same body, runtime generation and turn: ingestion folds the echo.
+          assert.equal(
+            providerDiagnosticOccurrenceKey(runtimeError.diagnostic),
+            providerDiagnosticOccurrenceKey(failure!),
+          );
+        }
       }).pipe(
         Effect.provideService(Random.Random, makeDeterministicRandomService()),
         Effect.provide(harness.layer),
@@ -12604,101 +12677,104 @@ describe("ClaudeAdapterLive", () => {
     },
   );
 
-  it.effect.each([{ subtype: "thinking_tokens" }, { subtype: "session_title_changed" }])(
-    "silently consumes Claude $subtype telemetry without blocking later work",
-    ({ subtype }) => {
-      const harness = makeHarness();
-      return Effect.gen(function* () {
-        const context = yield* Effect.context<never>();
-        const runFork = Effect.runForkWith(context);
-        const adapter = yield* ClaudeAdapter;
-        const runtimeEvents: Array<ProviderRuntimeEvent> = [];
+  it.effect.each([
+    { subtype: "thinking_tokens" },
+    { subtype: "session_title_changed" },
+    { subtype: "dev_intent" },
+  ])("silently consumes Claude $subtype telemetry without blocking later work", ({ subtype }) => {
+    const harness = makeHarness();
+    return Effect.gen(function* () {
+      const context = yield* Effect.context<never>();
+      const runFork = Effect.runForkWith(context);
+      const adapter = yield* ClaudeAdapter;
+      const runtimeEvents: Array<ProviderRuntimeEvent> = [];
 
-        const runtimeEventsFiber = runFork(
-          Stream.runForEach(adapter.streamEvents, (event) =>
-            Effect.sync(() => {
-              runtimeEvents.push(event);
-            }),
-          ),
-        );
+      const runtimeEventsFiber = runFork(
+        Stream.runForEach(adapter.streamEvents, (event) =>
+          Effect.sync(() => {
+            runtimeEvents.push(event);
+          }),
+        ),
+      );
 
-        yield* adapter.startSession({
-          threadId: THREAD_ID,
-          provider: ProviderDriverKind.make("claudeAgent"),
-          runtimeMode: "full-access",
-        });
-        yield* Effect.yieldNow;
-        yield* Effect.yieldNow;
-        yield* Effect.yieldNow;
-        runtimeEvents.length = 0;
-        const sessionsBeforeTelemetry = yield* adapter.listSessions();
+      yield* adapter.startSession({
+        threadId: THREAD_ID,
+        provider: ProviderDriverKind.make("claudeAgent"),
+        runtimeMode: "full-access",
+      });
+      yield* Effect.yieldNow;
+      yield* Effect.yieldNow;
+      yield* Effect.yieldNow;
+      runtimeEvents.length = 0;
+      const sessionsBeforeTelemetry = yield* adapter.listSessions();
 
+      harness.query.emit({
+        type: "system",
+        subtype,
+        ...(subtype === "thinking_tokens"
+          ? { estimated_tokens: 50, estimated_tokens_delta: 50 }
+          : subtype === "dev_intent"
+            ? { kind: "ios_app", trigger: "ios_command" }
+            : { title: "Native session title must not rename the Cafe chat" }),
+        session_id: "sdk-session-thinking-tokens",
+        uuid: "thinking-tokens-1",
+      } as unknown as SDKMessage);
+      if (subtype === "session_title_changed") {
+        // Native title notifications can precede init and be duplicated. Even
+        // another native session id cannot establish or replace query identity.
         harness.query.emit({
           type: "system",
           subtype,
-          ...(subtype === "thinking_tokens"
-            ? { estimated_tokens: 50, estimated_tokens_delta: 50 }
-            : { title: "Native session title must not rename the Cafe chat" }),
-          session_id: "sdk-session-thinking-tokens",
+          title: "Native session title must not rename the Cafe chat",
+          session_id: "foreign-native-session",
           uuid: "thinking-tokens-1",
         } as unknown as SDKMessage);
-        if (subtype === "session_title_changed") {
-          // Native title notifications can precede init and be duplicated. Even
-          // another native session id cannot establish or replace query identity.
-          harness.query.emit({
-            type: "system",
-            subtype,
-            title: "Native session title must not rename the Cafe chat",
-            session_id: "foreign-native-session",
-            uuid: "thinking-tokens-1",
-          } as unknown as SDKMessage);
-        }
-        yield* Effect.yieldNow;
-        yield* Effect.yieldNow;
-        yield* Effect.yieldNow;
+      }
+      yield* Effect.yieldNow;
+      yield* Effect.yieldNow;
+      yield* Effect.yieldNow;
 
-        assert.equal(
-          runtimeEvents.some(
-            (event) =>
-              event.type === "runtime.warning" || event.type === "thread.token-usage.updated",
-          ),
-          false,
-        );
-        if (subtype === "session_title_changed") {
-          assert.deepEqual(yield* adapter.listSessions(), sessionsBeforeTelemetry);
-          assert.lengthOf(runtimeEvents, 0);
-        }
-
-        harness.query.emit({
-          type: "system",
-          subtype: "task_started",
-          task_id: "task-after-thinking-tokens",
-          description: "Visible work",
-          session_id: "sdk-session-thinking-tokens",
-          uuid: "task-after-thinking-tokens",
-        } as unknown as SDKMessage);
-        yield* Effect.yieldNow;
-        yield* Effect.yieldNow;
-        yield* Effect.yieldNow;
-
-        assert.equal(
-          runtimeEvents.some((event) => event.type === "task.started"),
-          true,
-        );
-        assert.equal(
-          runtimeEvents.some(
-            (event) =>
-              event.type === "runtime.warning" || event.type === "thread.token-usage.updated",
-          ),
-          false,
-        );
-        runtimeEventsFiber.interruptUnsafe();
-      }).pipe(
-        Effect.provideService(Random.Random, makeDeterministicRandomService()),
-        Effect.provide(harness.layer),
+      assert.equal(
+        runtimeEvents.some(
+          (event) =>
+            event.type === "runtime.warning" || event.type === "thread.token-usage.updated",
+        ),
+        false,
       );
-    },
-  );
+      if (subtype === "session_title_changed" || subtype === "dev_intent") {
+        assert.deepEqual(yield* adapter.listSessions(), sessionsBeforeTelemetry);
+        assert.lengthOf(runtimeEvents, 0);
+      }
+
+      harness.query.emit({
+        type: "system",
+        subtype: "task_started",
+        task_id: "task-after-thinking-tokens",
+        description: "Visible work",
+        session_id: "sdk-session-thinking-tokens",
+        uuid: "task-after-thinking-tokens",
+      } as unknown as SDKMessage);
+      yield* Effect.yieldNow;
+      yield* Effect.yieldNow;
+      yield* Effect.yieldNow;
+
+      assert.equal(
+        runtimeEvents.some((event) => event.type === "task.started"),
+        true,
+      );
+      assert.equal(
+        runtimeEvents.some(
+          (event) =>
+            event.type === "runtime.warning" || event.type === "thread.token-usage.updated",
+        ),
+        false,
+      );
+      runtimeEventsFiber.interruptUnsafe();
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
 
   it.effect("handles current Claude SDK system messages without generic warnings", () => {
     const harness = makeHarness();

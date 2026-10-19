@@ -10,6 +10,7 @@ import {
   type OrchestrationLatestTurn,
   type OrchestrationThreadActivity,
   type OrchestrationThreadActivityCursor,
+  type WorkLogOperationIdentity,
   THREAD_DETAIL_ACTIVITY_WINDOW_LIMIT,
   THREAD_TURN_ACTIVITY_PAGE_MAX_LIMIT,
   type ProviderTurnConfiguration,
@@ -26,10 +27,14 @@ import { summarizeToolArguments } from "@cafecode/shared/toolActivity";
 import { codexRecoveryWorkLogLabel, nativeRetryWorkLogLabel } from "./codexRecovery";
 import {
   deriveProviderDiagnosticWorkLogRecord,
+  providerDiagnosticEchoKey,
   providerDiagnosticWorkLogLabel,
   type ProviderDiagnosticWorkLogRecord,
 } from "./providerDiagnostic";
-import { isRoutineProviderWorkLogActivity } from "@cafecode/shared/providerWorkLog";
+import {
+  isRoutineProviderWorkLogActivity,
+  readWorkLogOperationIdentity,
+} from "@cafecode/shared/providerWorkLog";
 import { visualizationEntryIdentity } from "./components/visualizations/visualizationEntryIdentity";
 import { readTurnConfiguration, presentTurnConfiguration } from "./turnConfiguration";
 import {
@@ -163,6 +168,8 @@ export interface HistoricalWorkLogSummary {
   before?: OrchestrationThreadActivityCursor;
   /** Retention exceptions before the raw floor are already shown inline. */
   excludeActivityIds?: ReadonlyArray<OrchestrationThreadActivity["id"]>;
+  /** Older snapshots of these same operations are already represented inline. */
+  excludeOperations?: ReadonlyArray<WorkLogOperationIdentity>;
   /** Valid same-turn Codex settings already replace the native start receipt. */
   excludeTurnStartAck?: boolean;
   /** Current received snapshots win over separately fetched older versions. */
@@ -175,6 +182,8 @@ interface DerivedWorkLogEntry extends WorkLogEntry {
   activityKind: OrchestrationThreadActivity["kind"];
   collapseKey?: string;
   toolCallId?: string;
+  /** Content-free duplicate-occurrence witness; stripped before rendering. */
+  diagnosticEchoKey?: string;
 }
 
 export interface PendingApproval {
@@ -665,11 +674,16 @@ export function deriveWorkLogEntries(
   const latestTaskVisibility = new Map<string, "visible" | "ambient">();
   const configuredCodexTurns = new Set<TurnId>();
   const configurationByActivityId = new Map<string, ProviderTurnConfiguration>();
+  const configurationByTurnId = new Map<TurnId, ProviderTurnConfiguration>();
   for (const activity of ordered) {
     if (activity.kind === "provider.turn.configuration") {
       const configuration = readTurnConfiguration(activity.payload);
       if (configuration) {
         configurationByActivityId.set(activity.id, configuration);
+        // One stable configuration fact exists per turn; keep the first.
+        if (activity.turnId && !configurationByTurnId.has(activity.turnId)) {
+          configurationByTurnId.set(activity.turnId, configuration);
+        }
         if (activity.turnId && configuration.provider === "codex") {
           configuredCodexTurns.add(activity.turnId);
         }
@@ -737,9 +751,22 @@ export function deriveWorkLogEntries(
       const payload = asRecord(activity.payload);
       return payload?.taskId !== `codex-turn-start:${activity.turnId}`;
     })
-    .map((activity) => toDerivedWorkLogEntry(activity, configurationByActivityId.get(activity.id)));
-  const collapsed = collapseDerivedWorkLogEntries(foldClaudeOperationSnapshots(entries)).map(
-    ({ activityKind: _activityKind, collapseKey: _collapseKey, ...entry }) => entry,
+    .map((activity) =>
+      toDerivedWorkLogEntry(
+        activity,
+        configurationByActivityId.get(activity.id),
+        activity.turnId ? configurationByTurnId.get(activity.turnId) : undefined,
+      ),
+    );
+  const collapsed = collapseDerivedWorkLogEntries(
+    foldProviderDiagnosticEntries(foldClaudeOperationSnapshots(entries)),
+  ).map(
+    ({
+      activityKind: _activityKind,
+      collapseKey: _collapseKey,
+      diagnosticEchoKey: _diagnosticEchoKey,
+      ...entry
+    }) => entry,
   );
   return collapsed;
 }
@@ -998,6 +1025,23 @@ export function deriveHistoricalWorkLogSummaries(input: {
         .filter((entry) => entry.turnId === latestTurnId && retainedBeforeFloor.has(entry.id))
         .map((entry) => EventId.make(entry.id))
         .slice(0, THREAD_TURN_ACTIVITY_PAGE_MAX_LIMIT);
+      const activityById = new Map<string, OrchestrationThreadActivity>(
+        input.activities.map((activity) => [activity.id, activity]),
+      );
+      const operations = new Map<string, WorkLogOperationIdentity>();
+      for (const entry of workLogEntries) {
+        if (entry.turnId !== latestTurnId) continue;
+        const activity = activityById.get(entry.id);
+        const operation = activity && readWorkLogOperationIdentity(activity);
+        if (operation) operations.set(JSON.stringify([operation.kind, operation.id]), operation);
+      }
+      // Stable ordering ignores snapshot receipt ids, operation reordering and
+      // context-only churn. A newly inline/evicted operation changes the exact
+      // exclusion witness, including previously cached positive presence.
+      const excludeOperations = [...operations]
+        .toSorted(([left], [right]) => (left < right ? -1 : left > right ? 1 : 0))
+        .slice(0, THREAD_TURN_ACTIVITY_PAGE_MAX_LIMIT)
+        .map(([, operation]) => operation);
       summaries.set(latestTurnId, {
         turnId: latestTurnId,
         isHistoricalTurn: false,
@@ -1010,6 +1054,7 @@ export function deriveHistoricalWorkLogSummaries(input: {
         },
         liveActivities: input.activities.filter((activity) => activity.turnId === latestTurnId),
         ...(excludeActivityIds.length > 0 ? { excludeActivityIds } : {}),
+        ...(excludeOperations.length > 0 ? { excludeOperations } : {}),
         ...(workLogEntries.some(
           (entry) => entry.turnId === latestTurnId && entry.turnConfiguration?.provider === "codex",
         )
@@ -1074,6 +1119,8 @@ function isUserVisibleTaskStartedActivity(activity: OrchestrationThreadActivity)
 function toDerivedWorkLogEntry(
   activity: OrchestrationThreadActivity,
   turnConfiguration?: ProviderTurnConfiguration,
+  /** Accepted settings of the activity's own turn, when that record is loaded. */
+  turnSettings?: ProviderTurnConfiguration,
 ): DerivedWorkLogEntry {
   const deliveryLabel = codexSteerDeliveryWorkLogLabel(activity.kind);
   if (deliveryLabel) {
@@ -1094,14 +1141,24 @@ function toDerivedWorkLogEntry(
     // Diagnostic rows are not roster lifecycle rows. Keep only bounded public
     // identity/status here: raw provider messages/JSON must not enter ordinary
     // preview, tooltip, path extraction, or renderer debug snapshot surfaces.
+    const diagnosticEchoKey = providerDiagnosticEchoKey(activity);
+    const daybreak =
+      providerDiagnostic.category === "cyber-policy" && turnSettings?.provider === "codex"
+        ? turnSettings.daybreak
+        : undefined;
+    const record =
+      daybreak === undefined
+        ? providerDiagnostic
+        : { ...providerDiagnostic, turnDaybreak: daybreak };
     return {
       id: activity.id,
       turnId: activity.turnId,
       createdAt: activity.createdAt,
-      label: providerDiagnosticWorkLogLabel(providerDiagnostic.summary),
-      tone: providerDiagnostic.summary.status === "error" ? "error" : "info",
+      label: providerDiagnosticWorkLogLabel(record),
+      tone: record.summary.status === "error" ? "error" : "info",
       activityKind: activity.kind,
-      providerDiagnostic,
+      providerDiagnostic: record,
+      ...(diagnosticEchoKey !== null ? { diagnosticEchoKey } : {}),
     };
   }
   const retryLabel =
@@ -1159,7 +1216,7 @@ function toDerivedWorkLogEntry(
     : extractActivityDetail(activity.kind, payload, title ?? activity.summary);
   const toolCallId = isTaskActivity
     ? null
-    : (extractToolCallId(payload) ?? (compaction ? asTrimmedString(payload?.itemId) : null));
+    : (readWorkLogOperationIdentity(activity)?.id ?? extractToolCallId(payload));
   const entry: DerivedWorkLogEntry = {
     id: activity.id,
     turnId: activity.turnId,
@@ -1182,7 +1239,7 @@ function toDerivedWorkLogEntry(
     entry.tone = "info";
     entry.publicSummary = publicSummary;
     entry.detail = publicSummary.text;
-    const summaryItemId = asTrimmedString(payload?.itemId);
+    const summaryItemId = readWorkLogOperationIdentity(activity)?.id;
     if (summaryItemId) entry.toolCallId = summaryItemId;
   }
   const commandInspection = readClaudeCommandInspection(payload);
@@ -1200,10 +1257,9 @@ function toDerivedWorkLogEntry(
         ? { completedAt: activity.createdAt }
         : {}),
     };
-    // Claude's canonical item identity is not repeated inside data.toolCallId.
-    // Restrict this fallback to the admitted command contract, preserving the
-    // collapse behavior of all other providers and legacy tool rows.
-    const commandItemId = asTrimmedString(payload?.itemId);
+    // The admitted inspector and generic history reader use the same native
+    // operation identity, including explicit ACP tool identities when present.
+    const commandItemId = readWorkLogOperationIdentity(activity)?.id;
     if (commandItemId) entry.toolCallId = commandItemId;
   }
   if (turnConfiguration) {
@@ -1295,6 +1351,93 @@ function foldClaudeOperationSnapshots(entries: DerivedWorkLogEntry[]): DerivedWo
       continue;
     const merged = mergeDerivedWorkLogEntries(previous, entry);
     folded[position] = { ...merged, id: previous.id, createdAt: previous.createdAt };
+  }
+  return folded;
+}
+
+function providerDiagnosticSubjectKey(entry: DerivedWorkLogEntry): string | null {
+  const diagnostic = entry.providerDiagnostic;
+  if (!diagnostic) return null;
+  const subject = diagnostic.summary.subject;
+  return JSON.stringify([entry.turnId ?? null, subject.kind, subject.id ?? null]);
+}
+
+/**
+ * Presentation-only folding of provider diagnostic rows, applied to adjacent
+ * rows of one turn and one agent:
+ * - Consecutive reconnect observations keep only the newest row; its count
+ *   already carries the observed lower bound.
+ * - A reconnect run that ends in an error becomes part of that error row
+ *   ("… after 5 reconnects"), since the error is the outcome the person needs.
+ * - An error row whose content-free echo witness equals an earlier error row
+ *   in the same turn is the same failure recorded twice by an older build.
+ * Every activity and private copy stays persisted; nothing here changes
+ * lifecycle, retry or recovery state.
+ */
+function foldProviderDiagnosticEntries(
+  entries: ReadonlyArray<DerivedWorkLogEntry>,
+): DerivedWorkLogEntry[] {
+  const folded: DerivedWorkLogEntry[] = [];
+  const echoKeysByTurn = new Map<string, Set<string>>();
+  for (const entry of entries) {
+    const diagnostic = entry.providerDiagnostic;
+    if (diagnostic?.summary.status === "error" && entry.diagnosticEchoKey) {
+      const turnKey = String(entry.turnId ?? "");
+      const seen = echoKeysByTurn.get(turnKey) ?? new Set<string>();
+      if (seen.has(entry.diagnosticEchoKey)) continue;
+      seen.add(entry.diagnosticEchoKey);
+      echoKeysByTurn.set(turnKey, seen);
+    }
+    const previous = folded.at(-1);
+    const subjectKey = providerDiagnosticSubjectKey(entry);
+    if (
+      previous?.providerDiagnostic?.summary.status === "retry" &&
+      diagnostic &&
+      subjectKey !== null &&
+      providerDiagnosticSubjectKey(previous) === subjectKey
+    ) {
+      const retry = previous.providerDiagnostic.summary;
+      if (diagnostic.summary.status === "retry") {
+        // Counts are per-target lower bounds; keep the larger one if a newer
+        // row arrives without its own count.
+        const replacement =
+          diagnostic.summary.observedRetryCount === undefined &&
+          retry.observedRetryCount !== undefined
+            ? {
+                ...entry,
+                providerDiagnostic: {
+                  ...diagnostic,
+                  summary: {
+                    ...diagnostic.summary,
+                    observedRetryCount: retry.observedRetryCount,
+                    ...(retry.countLimited ? { countLimited: true as const } : {}),
+                  },
+                },
+              }
+            : entry;
+        folded[folded.length - 1] = {
+          ...replacement,
+          label: providerDiagnosticWorkLogLabel(replacement.providerDiagnostic!),
+        };
+        continue;
+      }
+      if (retry.observedRetryCount !== undefined) {
+        const withRetries = {
+          ...diagnostic,
+          retriesBefore: {
+            count: retry.observedRetryCount,
+            countLimited: retry.countLimited === true,
+          },
+        };
+        folded[folded.length - 1] = {
+          ...entry,
+          label: providerDiagnosticWorkLogLabel(withRetries),
+          providerDiagnostic: withRetries,
+        };
+        continue;
+      }
+    }
+    folded.push(entry);
   }
   return folded;
 }

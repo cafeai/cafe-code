@@ -146,6 +146,15 @@ function requestedUltracodeLabel(configuration: ProviderTurnConfiguration): stri
     : undefined;
 }
 
+/** Recorded Codex Daybreak choice only; absence is unknown, never Off. */
+function daybreakLabel(configuration: ProviderTurnConfiguration): string | undefined {
+  return configuration.provider === "codex" && configuration.daybreak !== undefined
+    ? configuration.daybreak
+      ? uiText("Daybreak on")
+      : uiText("Daybreak off")
+    : undefined;
+}
+
 /**
  * One-line work-log summary of the frozen snapshot, e.g.
  * "GPT-6.1 Sol · Ultra · Fast on · Codex Personal · Build · Full access".
@@ -176,13 +185,14 @@ export function presentTurnConfigurationSummary(configuration: ProviderTurnConfi
   const fast =
     routedTier !== undefined
       ? presentCompactServiceTier(routedTier)
-      : configuration.provider === "codex" || configuration.provider === "claudeAgent"
-        ? configuration.fastMode === undefined
-          ? uiText("Fast status not recorded")
-          : configuration.fastMode
-            ? uiText("Fast on")
-            : uiText("Fast off")
-        : undefined;
+      : // Unknown Fast state (older snapshots, or providers without the
+        // control) is omitted rather than labelled; only recorded states show.
+        configuration.fastMode === undefined ||
+          (configuration.provider !== "codex" && configuration.provider !== "claudeAgent")
+        ? undefined
+        : configuration.fastMode
+          ? uiText("Fast on")
+          : uiText("Fast off");
   const interactionMode =
     configuration.interactionMode === undefined
       ? uiText("Default mode")
@@ -200,6 +210,7 @@ export function presentTurnConfigurationSummary(configuration: ProviderTurnConfi
       effort,
       requestedUltracodeLabel(configuration),
       fast,
+      daybreakLabel(configuration),
       // The configured instance label, never an auth email or account id.
       configuration.providerDisplayName,
       ...modes,
@@ -245,13 +256,14 @@ export function presentTurnConfiguration(configuration: ProviderTurnConfiguratio
     configuration.provider === "codex" &&
     (configuration.resolvedServiceTier ?? configuration.serviceTier) !== undefined
       ? presentServiceTier((configuration.resolvedServiceTier ?? configuration.serviceTier)!)
-      : configuration.provider === "codex" || configuration.provider === "claudeAgent"
-        ? configuration.fastMode === undefined
-          ? uiText("Fast status not recorded")
-          : configuration.fastMode
-            ? uiText("Fast on")
-            : uiText("Fast off")
-        : undefined;
+      : // Unknown Fast state (older snapshots, or providers without the
+        // control) is omitted rather than labelled; only recorded states show.
+        configuration.fastMode === undefined ||
+          (configuration.provider !== "codex" && configuration.provider !== "claudeAgent")
+        ? undefined
+        : configuration.fastMode
+          ? uiText("Fast on")
+          : uiText("Fast off");
   const runtimeMode = RUNTIME_MODE_LABELS[configuration.runtimeMode];
   const interactionMode =
     configuration.interactionMode === undefined
@@ -260,7 +272,13 @@ export function presentTurnConfiguration(configuration: ProviderTurnConfiguratio
           configuration.interactionMode
         ];
   return {
-    settings: [model, effort, requestedUltracodeLabel(configuration), fast]
+    settings: [
+      model,
+      effort,
+      requestedUltracodeLabel(configuration),
+      fast,
+      daybreakLabel(configuration),
+    ]
       .filter((value) => value !== undefined)
       .join(" · "),
     // This is the configured instance label, deliberately not an auth email,

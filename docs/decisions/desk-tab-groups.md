@@ -114,6 +114,15 @@ focus destination without briefly refocusing another pane; retired cleanup
 cannot steal focus from its successor. These are local navigation fences, not
 new provider mutation permissions.
 
+The backend-authoritative `showDeskTabs` client setting (default on) only
+chooses what fills each pane's bar. Off keeps the same bar component, native
+titlebar reservations and focus/actions controls, and asks ChatView for its full
+header (visible title) in place of the tab strip and group grip. The title text
+is the drag area, so the separating drag strip that keeps overflowing tabs
+away from the actions is omitted.
+It never rewrites the layout, tabs, previews or reopen history, and narrow web
+clients keep their separate bar-free header.
+
 Each group has an independently persisted session-rail preference. An unset
 group preference inherits the existing global preference; pin/unpin creates
 an explicit group override. Splits inherit the source setting and merges keep

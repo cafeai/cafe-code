@@ -17,7 +17,9 @@ import {
   type OrchestrationThreadActivityCursor,
   type OrchestrationThreadTurnActivityPageInput,
   type OrchestrationThreadTurnWorkLogPresenceInput,
+  type WorkLogOperationIdentity,
 } from "@cafecode/contracts";
+import { isExcludedWorkLogOperation } from "@cafecode/shared/providerWorkLog";
 import { getUiLocale, setUiLocale, uiText } from "@cafecode/shared/i18n";
 import type { LegendListRef } from "@legendapp/list/react";
 import { createRef, type ComponentProps } from "react";
@@ -322,6 +324,7 @@ function installApi(data: Fixture) {
     turnId: TurnId;
     before?: OrchestrationThreadActivityCursor | undefined;
     excludeActivityIds?: ReadonlyArray<EventId> | undefined;
+    excludeOperations?: ReadonlyArray<WorkLogOperationIdentity> | undefined;
     excludeTurnStartAck?: boolean | undefined;
   }) =>
     data.allActivities.filter(
@@ -339,6 +342,7 @@ function installApi(data: Fixture) {
           activity.payload?.taskId === `codex-turn-start:${input.turnId}`
         ) &&
         precedes(activity, input.before) &&
+        !isExcludedWorkLogOperation(activity, input.excludeOperations) &&
         !input.excludeActivityIds?.includes(activity.id),
     );
   const getThreadTurnWorkLogPresence = vi.fn(
@@ -362,6 +366,7 @@ function installApi(data: Fixture) {
         : eligible.slice(input.offset, input.offset + input.limit),
       ...(input.before ? { before: input.before } : {}),
       ...(input.excludeActivityIds ? { excludeActivityIds: input.excludeActivityIds } : {}),
+      ...(input.excludeOperations ? { excludeOperations: input.excludeOperations } : {}),
       ...(input.excludeTurnStartAck !== undefined
         ? { excludeTurnStartAck: input.excludeTurnStartAck }
         : {}),
@@ -444,6 +449,81 @@ afterEach(async () => {
 });
 
 describe("Earlier work in a retained current turn", () => {
+  it.each(["claudeAgent", "codex"] as const)(
+    "omits duplicate %s snapshots before expansion and reveals work after the complete operation leaves the window",
+    async (provider) => {
+      const data = fixture(provider, 0, "operation-boundary");
+      const older = toolActivity(provider, 1, "Boundary command", "same-operation", "tool.updated");
+      const completed = toolActivity(provider, 2, "Boundary command", "same-operation");
+      const contexts = Array.from({ length: 500 }, (_, index) => contextActivity(index + 3));
+      data.allActivities.splice(
+        0,
+        data.allActivities.length,
+        older,
+        completed,
+        ...contexts.slice(0, 499),
+      );
+      const thread = { ...data.readThread(), activities: [completed, ...contexts.slice(0, 499)] };
+      const api = installApi(data);
+      const screen = await render(<TimelineFixture data={data} thread={thread} />);
+      try {
+        await vi.waitFor(() => expect(api.getThreadTurnWorkLogPresence).toHaveBeenCalledTimes(1));
+        expect(api.getThreadTurnWorkLogPresence.mock.calls[0]?.[0].excludeOperations).toEqual([
+          { kind: "tool", id: "same-operation" },
+        ]);
+        expect(page.getByRole("button", { name: /^Earlier work/ }).elements()).toHaveLength(0);
+        expect(api.getThreadTurnActivityPage).not.toHaveBeenCalled();
+        data.allActivities.push(contexts[499]!);
+        await screen.rerender(
+          <TimelineFixture data={data} thread={{ ...thread, activities: contexts }} />,
+        );
+        const earlier = page.getByRole("button", { name: /^Earlier work/ });
+        await expect.element(earlier).toBeVisible();
+        expect(api.getThreadTurnWorkLogPresence).toHaveBeenCalledTimes(2);
+        await earlier.click();
+        await vi.waitFor(() =>
+          expect(
+            document.querySelector('[data-historical-work-log-row="expanded"]')?.textContent,
+          ).toContain("Boundary command"),
+        );
+        expect(api.getThreadTurnActivityPage).toHaveBeenCalledTimes(1);
+      } finally {
+        await screen.unmount();
+      }
+    },
+  );
+
+  it("invalidates a positive presence receipt when a later snapshot makes its operation inline", async () => {
+    const data = fixture("claudeAgent", 0, "late-operation");
+    const older = toolActivity("claudeAgent", 1, "Late command", "same-operation", "tool.updated");
+    const contexts = Array.from({ length: 500 }, (_, index) => contextActivity(index + 2));
+    data.allActivities.splice(0, data.allActivities.length, older, ...contexts);
+    const thread = { ...data.readThread(), activities: contexts };
+    const api = installApi(data);
+    const screen = await render(<TimelineFixture data={data} thread={thread} />);
+    try {
+      await expect.element(page.getByRole("button", { name: /^Earlier work/ })).toBeVisible();
+      const completed = toolActivity("claudeAgent", 502, "Late command", "same-operation");
+      data.allActivities.push(completed);
+      await screen.rerender(
+        <TimelineFixture
+          data={data}
+          thread={{ ...thread, activities: [...contexts.slice(1), completed] }}
+        />,
+      );
+      await vi.waitFor(() =>
+        expect(page.getByRole("button", { name: /^Earlier work/ }).elements()).toHaveLength(0),
+      );
+      expect(api.getThreadTurnWorkLogPresence).toHaveBeenCalledTimes(2);
+      expect(api.getThreadTurnWorkLogPresence.mock.calls[1]?.[0].excludeOperations).toEqual([
+        { kind: "tool", id: "same-operation" },
+      ]);
+      expect(api.getThreadTurnActivityPage).not.toHaveBeenCalled();
+    } finally {
+      await screen.unmount();
+    }
+  });
+
   it.each(["disconnected", "failed"] as const)(
     "keeps an unverified Earlier work section hidden after a %s availability check",
     async (failure) => {

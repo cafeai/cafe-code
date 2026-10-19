@@ -129,7 +129,13 @@ describe("inspectable received Claude operation text", () => {
       status: "inProgress",
     };
     mounted = await render(<ClaudeCommandWorkEntry inspection={base} timestampFormat="24-hour" />);
-    await page.getByRole("button", { name: "Inspect command: yarn test" }).click();
+    const trigger = page.getByRole("button", { name: "Inspect command: yarn test" });
+    // Collapsed rows read like ordinary command rows; the full status lives in
+    // the disclosure.
+    await expect.element(trigger).toHaveTextContent("Running command… - yarn test");
+    expect(page.getByText("Running…", { exact: true }).elements()).toHaveLength(0);
+    await trigger.click();
+    await expect.element(page.getByText("Running…", { exact: true })).toBeVisible();
     await expect.element(page.getByText("No output received yet.", { exact: true })).toBeVisible();
     await expect.element(page.getByText("Timing not recorded.", { exact: true })).toBeVisible();
     await mounted.rerender(
@@ -158,7 +164,7 @@ describe("inspectable received Claude operation text", () => {
     await expect.element(page.getByText("Command not recorded.", { exact: true })).toBeVisible();
   });
 
-  it("shows received public summary text live and preserves a read-only disclosure on updates", async () => {
+  it("always shows received public summary text in full and updates it in place", async () => {
     mounted = await render(
       <div style={{ width: 430 }}>
         <ClaudeSummaryWorkEntry
@@ -175,10 +181,8 @@ describe("inspectable received Claude operation text", () => {
       .element(page.getByText("Checking the repository before editing.", { exact: true }))
       .toBeVisible();
     await expect.element(page.getByText("Updating…", { exact: true })).toBeVisible();
-    const trigger = page.getByRole("button", { name: "Inspect summary", exact: true });
-    trigger.element().focus();
-    await userEvent.keyboard("{Enter}");
-    await expect.element(trigger).toHaveAttribute("aria-expanded", "true");
+    // No disclosure: the summary is the row's content, not a hidden duplicate.
+    expect(document.querySelector("[data-claude-public-summary] button")).toBeNull();
     await mounted.rerender(
       <div style={{ width: 430 }}>
         <ClaudeSummaryWorkEntry
@@ -193,20 +197,16 @@ describe("inspectable received Claude operation text", () => {
     await expect
       .element(page.getByText("Summary truncated to the retained preview.", { exact: true }))
       .toBeVisible();
-    expect(document.querySelector("[data-summary-preview]")).toBeNull();
-    expect(document.querySelector("[data-summary-full-text]")?.textContent).toBe(
+    expect(document.querySelectorAll("[data-summary-text]")).toHaveLength(1);
+    expect(document.querySelector("[data-summary-text]")?.textContent).toBe(
       "Checks complete.\nProceeding with the fix.",
     );
-    await expect.element(trigger).toHaveAttribute("aria-expanded", "true");
     expect(document.querySelector("textarea, input, [contenteditable=true]")).toBeNull();
     const screenshotDirectory = import.meta.env.VITE_CLAUDE_OPERATION_SCREENSHOT_DIR;
     if (typeof screenshotDirectory === "string" && screenshotDirectory.length > 0) {
       document.documentElement.classList.add("dark");
       document.documentElement.style.fontSize = "130%";
       await page.viewport(454, 900);
-      await waitForExpandedPanelGeometry(
-        document.querySelector<HTMLElement>("[data-claude-public-summary]")!,
-      );
       await page.screenshot({
         path: `${screenshotDirectory}/summary-dark-430-130.png`,
         fullPage: true,

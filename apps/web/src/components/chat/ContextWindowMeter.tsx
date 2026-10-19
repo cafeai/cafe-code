@@ -23,7 +23,7 @@ function formatPercentage(value: number | null): string | null {
 }
 
 export function ContextWindowMeter(props: {
-  usage: ContextWindowSnapshot;
+  usage: ContextWindowSnapshot | null;
   codexRateLimits?: ServerProviderAccountRateLimits | null | undefined;
   quotaContext?: ProviderQuotaContext | undefined;
   onShowOnSide?: () => void;
@@ -35,8 +35,8 @@ export function ContextWindowMeter(props: {
   const { usage } = props;
   const [open, setOpen] = useState(false);
   const sessionQuota = useProviderQuota(props.quotaContext, open);
-  const usedPercentage = formatPercentage(usage.usedPercentage);
-  const normalizedPercentage = Math.max(0, Math.min(100, usage.usedPercentage ?? 0));
+  const usedPercentage = formatPercentage(usage?.usedPercentage ?? null);
+  const normalizedPercentage = Math.max(0, Math.min(100, usage?.usedPercentage ?? 0));
   const radius = 9.75;
   const circumference = 2 * Math.PI * radius;
   const dashOffset = circumference - (normalizedPercentage / 100) * circumference;
@@ -52,21 +52,23 @@ export function ContextWindowMeter(props: {
             type="button"
             className="focus-ring group inline-flex items-center justify-center rounded-full transition-opacity duration-(--duration-fast) hover:opacity-85"
             aria-label={
-              usage.maxTokens !== null && usedPercentage
-                ? uiText(
-                    "Context window {value0} used",
-                    { value0: usedPercentage },
-                    undefined,
-                    uiLocale,
-                  )
-                : uiText(
-                    "Context window {value0} tokens used",
-                    {
-                      value0: formatContextWindowTokens(usage.usedTokens),
-                    },
-                    undefined,
-                    uiLocale,
-                  )
+              !usage
+                ? uiText("Usage", undefined, undefined, uiLocale)
+                : usage.maxTokens !== null && usedPercentage
+                  ? uiText(
+                      "Context window {value0} used",
+                      { value0: usedPercentage },
+                      undefined,
+                      uiLocale,
+                    )
+                  : uiText(
+                      "Context window {value0} tokens used",
+                      {
+                        value0: formatContextWindowTokens(usage.usedTokens),
+                      },
+                      undefined,
+                      uiLocale,
+                    )
             }
           >
             <span className="relative flex h-6 w-6 items-center justify-center">
@@ -105,9 +107,11 @@ export function ContextWindowMeter(props: {
                   "text-muted-foreground",
                 )}
               >
-                {usage.usedPercentage !== null
-                  ? Math.round(usage.usedPercentage)
-                  : formatContextWindowTokens(usage.usedTokens)}
+                {!usage
+                  ? "—"
+                  : usage.usedPercentage !== null
+                    ? Math.round(usage.usedPercentage)
+                    : formatContextWindowTokens(usage.usedTokens)}
               </span>
             </span>
           </button>

@@ -229,7 +229,9 @@ export const AxiomDriver: ProviderDriver<AxiomSettings, AxiomDriverEnv> = {
       const adapter = yield* makeAxiomAdapter(config, {
         instanceId,
         environment: processEnvironment,
-        onAccountChanged: snapshot.refresh.pipe(Effect.asVoid),
+        onAccountChanged: (snapshot.refreshAfterAccountChange ?? snapshot.refresh).pipe(
+          Effect.asVoid,
+        ),
         configurationKey: axiomConfigurationKey(config, environment),
       });
       const textGeneration = yield* makeAxiomTextGeneration(config, processEnvironment);

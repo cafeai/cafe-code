@@ -18,6 +18,9 @@ import type {
   ProviderUsageResetError,
   ProviderSkillsResult,
   ProviderSessionQuotaReport,
+  ProviderSession,
+  ServerProviderLoginInput,
+  ServerProviderLoginResult,
 } from "@cafecode/contracts";
 import * as Context from "effect/Context";
 import type * as Effect from "effect/Effect";
@@ -25,10 +28,15 @@ import type * as Stream from "effect/Stream";
 import type { ProviderMaintenanceCapabilities } from "../providerMaintenance.ts";
 import type { ProviderInstance } from "../ProviderDriver.ts";
 import type { ProviderAdapterRequestError } from "../Errors.ts";
+import type { ProviderAdapterError } from "../Errors.ts";
 
 export type ProviderMaintenanceActionKind = "update";
 
 export interface ProviderRegistryShape {
+  readonly loginProvider?: (
+    input: ServerProviderLoginInput,
+    listSessions: Effect.Effect<ReadonlyArray<ProviderSession>>,
+  ) => Effect.Effect<ServerProviderLoginResult, ProviderAdapterError>;
   readonly readInstanceAccountQuota?: (
     instanceId: ProviderInstanceId,
   ) => Effect.Effect<ProviderSessionQuotaReport | null>;

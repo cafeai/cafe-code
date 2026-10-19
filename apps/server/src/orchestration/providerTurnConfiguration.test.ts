@@ -119,6 +119,35 @@ describe("snapshotProviderTurnConfiguration", () => {
     ).toBeUndefined();
   });
 
+  it("records the submitted Codex Daybreak choice and leaves unknown values unrecorded", () => {
+    const withDaybreak = (value: string) =>
+      snapshotProviderTurnConfiguration({
+        session,
+        request: {
+          ...request,
+          modelSelection: {
+            instanceId,
+            model: "gpt-6.1-sol",
+            options: [{ id: "cyberAccessProgram", value }],
+          },
+        },
+        instanceId,
+        settingsSource: "submitted",
+      })?.daybreak;
+    expect(withDaybreak("daybreakRed")).toBe(true);
+    expect(withDaybreak("daybreakBlue")).toBe(true);
+    expect(withDaybreak("standard")).toBe(false);
+    expect(withDaybreak("future-program")).toBeUndefined();
+    expect(
+      snapshotProviderTurnConfiguration({
+        session,
+        request,
+        instanceId,
+        settingsSource: "submitted",
+      }),
+    ).not.toHaveProperty("daybreak");
+  });
+
   it("freezes only known finite settings and cached presentation labels", () => {
     const result = snapshotProviderTurnConfiguration({
       session,

@@ -31,6 +31,16 @@ export interface CodexHomeLayout {
 
 export type CodexShadowHomeAuthSource = "shared" | "shadow";
 
+/** Login must write to the source used by subsequent auth-overlay refreshes. */
+export function codexLoginHomePath(
+  layout: CodexHomeLayout,
+  authSource: CodexShadowHomeAuthSource,
+): string {
+  return authSource === "shadow"
+    ? (layout.effectiveHomePath ?? layout.sharedHomePath)
+    : layout.sharedHomePath;
+}
+
 const KNOWN_SHARED_DIRECTORIES = [
   "sessions",
   "archived_sessions",

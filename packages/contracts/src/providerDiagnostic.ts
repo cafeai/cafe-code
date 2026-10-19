@@ -46,6 +46,42 @@ export const ProviderDiagnosticSnapshot = Schema.Struct({
 });
 export type ProviderDiagnosticSnapshot = typeof ProviderDiagnosticSnapshot.Type;
 
+/**
+ * Closed Cafe-authored presentation category for a provider retry/error.
+ *
+ * Derived only from structured fields in the bounded private copy (Codex
+ * `codexErrorInfo`/HTTP status, Claude typed SDK error codes, Cafe-owned
+ * process-exit facts), never from provider prose. It is published beside the
+ * summary as the activity payload key `providerDiagnosticCategory` rather than
+ * inside the strict v1 summary, so older renderers keep reading summaries.
+ * A category only selects fixed Cafe copy and navigation shortcuts; it never
+ * grants retry, recovery, permission or lifecycle authority.
+ */
+export const PROVIDER_DIAGNOSTIC_CATEGORIES = [
+  "cyber-policy",
+  "usage-policy",
+  "model-at-capacity",
+  "usage-limit",
+  "rate-limit",
+  "billing",
+  "account-on-hold",
+  "context-window",
+  "session-budget",
+  "sign-in-required",
+  "verification-required",
+  "model-unavailable",
+  "speed-tier-unavailable",
+  "connection",
+  "server-error",
+  "request-rejected",
+  "sandbox",
+  "too-many-denials",
+  "process-exit",
+  "response-limit",
+] as const;
+export const ProviderDiagnosticCategory = Schema.Literals(PROVIDER_DIAGNOSTIC_CATEGORIES);
+export type ProviderDiagnosticCategory = typeof ProviderDiagnosticCategory.Type;
+
 /** Server/provider transport only; do not embed this envelope in public activity payloads. */
 export const ProviderDiagnostic = Schema.Struct({
   summary: ProviderDiagnosticSummary,

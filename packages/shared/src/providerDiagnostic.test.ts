@@ -1,7 +1,10 @@
 import { describe, expect, it } from "vitest";
 import {
+  deriveProviderDiagnosticCategory,
   makeProviderDiagnostic,
   PROVIDER_DIAGNOSTIC_MAX_JSON_BYTES,
+  providerDiagnosticTextHasCaptureMarker,
+  readProviderDiagnosticErrorBody,
   readProviderDiagnosticSummary,
   redactProviderDiagnosticText,
 } from "./providerDiagnostic.ts";
@@ -228,5 +231,83 @@ describe("private provider diagnostic capture", () => {
       countLimited: true,
     };
     expect(readProviderDiagnosticSummary(summary)).toEqual(summary);
+  });
+});
+
+const categoryOf = (payload: unknown, method?: string) =>
+  deriveProviderDiagnosticCategory({
+    ...(method !== undefined ? { method } : {}),
+    json: capture(payload).snapshot.json,
+  });
+
+describe("provider diagnostic categories", () => {
+  it("maps exact Codex codexErrorInfo codes in notifications and terminal turns", () => {
+    expect(categoryOf({ error: { message: "x", codexErrorInfo: "cyberPolicy" } })).toBe(
+      "cyber-policy",
+    );
+    expect(
+      categoryOf({ turn: { status: "failed", error: { codexErrorInfo: "serverOverloaded" } } }),
+    ).toBe("model-at-capacity");
+    expect(categoryOf({ error: { codexErrorInfo: "usageLimitExceeded" } })).toBe("usage-limit");
+    expect(categoryOf({ error: { codexErrorInfo: "unauthorized" } })).toBe("sign-in-required");
+    expect(
+      categoryOf({
+        error: { codexErrorInfo: { responseStreamDisconnected: { httpStatusCode: null } } },
+      }),
+    ).toBe("connection");
+    // A structured HTTP status refines a connection variant.
+    expect(
+      categoryOf({ error: { codexErrorInfo: { httpConnectionFailed: { httpStatusCode: 401 } } } }),
+    ).toBe("sign-in-required");
+    expect(
+      categoryOf({ error: { codexErrorInfo: { httpConnectionFailed: { httpStatusCode: 429 } } } }),
+    ).toBe("rate-limit");
+  });
+
+  it("never classifies from provider prose, unknown codes or malformed variants", () => {
+    expect(
+      categoryOf({
+        error: {
+          message: "workspace routing discovery unauthorized (401)",
+          codexErrorInfo: "other",
+          additionalDetails: "401 unauthorized cyberPolicy",
+        },
+      }),
+    ).toBeUndefined();
+    expect(categoryOf({ error: { codexErrorInfo: "futureCode" } })).toBeUndefined();
+    expect(
+      categoryOf({ error: { codexErrorInfo: { a: {}, responseStreamDisconnected: {} } } }),
+    ).toBeUndefined();
+    expect(categoryOf({ error: { codexErrorInfo: "toString" } })).toBeUndefined();
+    expect(categoryOf({ message: "Not logged in · Please run /login" })).toBeUndefined();
+    expect(deriveProviderDiagnosticCategory({ json: "not json" })).toBeUndefined();
+  });
+
+  it("maps Claude typed SDK codes, structured statuses and Cafe process exits", () => {
+    expect(categoryOf({ error: { message: "x", errorType: "authentication_failed" } })).toBe(
+      "sign-in-required",
+    );
+    expect(categoryOf({ error: { errorType: "billing_error" } })).toBe("billing");
+    expect(categoryOf({ error: { errorType: "overloaded" } })).toBe("model-at-capacity");
+    expect(categoryOf({ error: { apiErrorStatus: 429 } })).toBe("rate-limit");
+    expect(categoryOf({ error: { errorType: "unknown" } })).toBeUndefined();
+    expect(categoryOf({ error: { message: "exit" } }, "process/exitedUnexpectedly")).toBe(
+      "process-exit",
+    );
+    expect(categoryOf({ error: { message: "exit" } }, "claude/stream/failed")).toBe("process-exit");
+  });
+
+  it("locates copied error bodies and recognizes capture markers", () => {
+    const redacted = capture({ error: { message: "Bearer abcdefghijklmnop" } }).snapshot.json;
+    const body = readProviderDiagnosticErrorBody(redacted);
+    expect(body).toBeDefined();
+    expect(providerDiagnosticTextHasCaptureMarker(JSON.stringify(body))).toBe(true);
+    expect(
+      providerDiagnosticTextHasCaptureMarker(
+        JSON.stringify(
+          readProviderDiagnosticErrorBody(capture({ error: { message: "ok" } }).snapshot.json),
+        ),
+      ),
+    ).toBe(false);
   });
 });

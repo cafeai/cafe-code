@@ -40,6 +40,10 @@ export const ProviderTurnConfiguration = Schema.Struct({
   // Requested orchestration mode, not proof of entitlement or a running workflow.
   ultracode: Schema.optional(Schema.Boolean),
   serviceTier: Schema.optional(EffortLabel),
+  // Codex Daybreak (cyber access program) as submitted: true for an On
+  // program, false for explicit Standard. Absent means not recorded/omitted,
+  // never Off. Not proof of entitlement or of native routing.
+  daybreak: Schema.optional(Schema.Boolean),
   resolvedServiceTier: Schema.optional(
     Schema.String.check(Schema.isPattern(/^[a-z][a-z0-9_-]{0,63}$/)),
   ),

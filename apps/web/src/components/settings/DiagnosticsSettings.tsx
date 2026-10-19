@@ -1772,6 +1772,7 @@ export function DiagnosticsSettingsPanel() {
   return (
     <SettingsPageContainer title={uiText("Diagnostics", undefined, undefined, uiLocale)}>
       <SettingsSection
+        searchId="diagnostics.runtimeOverview"
         title={uiText("Runtime overview", undefined, undefined, uiLocale)}
         headerAction={
           <DiagnosticsRefreshButton
@@ -2000,7 +2001,10 @@ export function DiagnosticsSettingsPanel() {
         <OrchestratorHealthTables data={runtimeData} loading={isRuntimeInitialLoading} />
       </SettingsSection>
 
-      <SettingsSection title={uiText("Provider daemon", undefined, undefined, uiLocale)}>
+      <SettingsSection
+        searchId="diagnostics.providerDaemon"
+        title={uiText("Provider daemon", undefined, undefined, uiLocale)}
+      >
         <StatsGrid>
           <StatBlock
             label={uiText("Reachable", undefined, undefined, uiLocale)}
@@ -2281,6 +2285,7 @@ export function DiagnosticsSettingsPanel() {
       </SettingsSection>
 
       <SettingsSection
+        searchId="diagnostics.liveProcesses"
         title={uiText("Live processes", undefined, undefined, uiLocale)}
         headerAction={
           <DiagnosticsRefreshButton
@@ -2350,6 +2355,7 @@ export function DiagnosticsSettingsPanel() {
       </SettingsSection>
 
       <SettingsSection
+        searchId="diagnostics.resourceHistory"
         title={uiText("Resource history", undefined, undefined, uiLocale)}
         headerAction={
           <div className="flex items-center gap-1.5">
@@ -2432,6 +2438,7 @@ export function DiagnosticsSettingsPanel() {
       </SettingsSection>
 
       <SettingsSection
+        searchId="diagnostics.traces"
         title={uiText("Traces", undefined, undefined, uiLocale)}
         headerAction={
           <div className="flex items-center gap-1.5">
@@ -2553,7 +2560,10 @@ export function DiagnosticsSettingsPanel() {
         ) : null}
       </SettingsSection>
 
-      <SettingsSection title={uiText("Latest failures", undefined, undefined, uiLocale)}>
+      <SettingsSection
+        searchId="diagnostics.latestFailures"
+        title={uiText("Latest failures", undefined, undefined, uiLocale)}
+      >
         {data && data.latestFailures.length > 0 ? (
           <DiagnosticsTable
             headers={[

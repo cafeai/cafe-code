@@ -5,6 +5,11 @@ import {
   type ThreadId,
   type TurnId,
 } from "@cafecode/contracts";
+import {
+  isExcludedWorkLogOperation,
+  readWorkLogOperationId,
+  readWorkLogOperationIdentity,
+} from "@cafecode/shared/providerWorkLog";
 import { Schema } from "effect";
 import { deriveWorkLogEntries, type WorkLogEntry } from "../../session-logic";
 import { activityCursor, compareActivityCursors } from "../../activityOrder";
@@ -27,6 +32,7 @@ export function validateEarlierWorkLogPage(input: {
   readonly before: OrchestrationThreadActivityCursor;
   readonly limit: number;
   readonly excludeActivityIds?: ReadonlyArray<OrchestrationThreadActivity["id"]>;
+  readonly excludeOperations?: OrchestrationThreadTurnActivityPage["excludeOperations"];
   readonly excludeTurnStartAck?: boolean;
 }): void {
   const { page, before, threadId, turnId, limit, excludeActivityIds } = input;
@@ -42,6 +48,8 @@ export function validateEarlierWorkLogPage(input: {
     !isActivityCursor(page.before) ||
     cursorKey(page.before) !== cursorKey(before) ||
     JSON.stringify(page.excludeActivityIds ?? []) !== JSON.stringify(excludeActivityIds ?? []) ||
+    JSON.stringify(page.excludeOperations ?? []) !==
+      JSON.stringify(input.excludeOperations ?? []) ||
     page.excludeTurnStartAck !== input.excludeTurnStartAck ||
     !Number.isSafeInteger(page.totalCount) ||
     page.totalCount < page.activities.length ||
@@ -56,6 +64,7 @@ export function validateEarlierWorkLogPage(input: {
       !isActivityCursor(cursor) ||
       activity.turnId !== turnId ||
       excludeActivityIds?.includes(activity.id) ||
+      isExcludedWorkLogOperation(activity, input.excludeOperations) ||
       (input.excludeTurnStartAck &&
         activity.kind === "task.progress" &&
         activity.payload?.taskId === `codex-turn-start:${turnId}`) ||
@@ -73,8 +82,9 @@ function operationKey(entry: WorkLogEntry): string {
   // Primary Claude snapshots preserve item identity while their raw activity
   // id changes. Including turn and operation type avoids conflating a summary
   // with a command or another turn's reused native id.
-  return entry.toolCallId
-    ? JSON.stringify([entry.turnId, entry.publicSummary ? "summary" : "tool", entry.toolCallId])
+  const id = readWorkLogOperationId(entry.toolCallId);
+  return id
+    ? JSON.stringify([entry.turnId, entry.publicSummary ? "summary" : "tool", id])
     : JSON.stringify([entry.turnId, "activity", entry.id]);
 }
 
@@ -92,7 +102,17 @@ export function deriveEarlierWorkLogEntries(input: {
   // Fold the authoritative current snapshots first, without pretending a live
   // turn is terminal. History is display data only; no child/liveness/control
   // observation is fed back into the application store.
-  return deriveWorkLogEntries([...received.values()], input.turnId).filter(
+  // A legacy operation without an admitted identity cannot prove that an
+  // older row duplicates a live operation. Do not let label/detail-based
+  // lifecycle collapse erase it across the history/live boundary. Identified
+  // live snapshots still fold before presentation, as do same-id replacements.
+  const foldable = [...received.values()].filter(
+    (activity) =>
+      pageIds.has(activity.id) ||
+      !(activity.kind.startsWith("tool.") || activity.kind === "reasoning.summary") ||
+      readWorkLogOperationIdentity(activity) !== undefined,
+  );
+  return deriveWorkLogEntries(foldable, input.turnId).filter(
     (entry) => pageIds.has(entry.id) && !inlineKeys.has(operationKey(entry)),
   );
 }

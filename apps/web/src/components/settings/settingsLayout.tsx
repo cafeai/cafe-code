@@ -9,6 +9,20 @@ import { Button } from "../ui/button";
 import { Spinner } from "../ui/spinner";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 
+/**
+ * DOM attributes that let the sidebar settings search find, scroll to and
+ * highlight a row, section card or provider card (settingsSearchLanding.ts).
+ * Presentation only: ids are static Cafe-owned keys, never received data.
+ */
+export function settingsSearchAnchorProps(
+  searchId: string | undefined,
+  target: "row" | "section" | "card",
+): { "data-settings-search-id"?: string; "data-settings-search-target"?: string } {
+  return searchId
+    ? { "data-settings-search-id": searchId, "data-settings-search-target": target }
+    : {};
+}
+
 /** Re-render every `intervalMs`; return a stable timestamp snapshot for render-time relative labels. */
 export function useRelativeTimeTick(intervalMs = 1_000) {
   const [nowMs, setNowMs] = useState(() => Date.now());
@@ -23,6 +37,7 @@ export function SettingsSection({
   title,
   icon,
   headerAction,
+  searchId,
   children,
   className,
   ...sectionProps
@@ -34,10 +49,16 @@ export function SettingsSection({
   title?: string;
   icon?: ReactNode;
   headerAction?: ReactNode;
+  /** Settings search anchor (settingsSearchIndex.ts); highlights the card. */
+  searchId?: string;
   children: ReactNode;
 }) {
   return (
-    <section {...sectionProps} className={cn("space-y-2.5", className)}>
+    <section
+      {...sectionProps}
+      {...settingsSearchAnchorProps(searchId, "section")}
+      className={cn("space-y-2.5", className)}
+    >
       {title || headerAction ? (
         <div className="flex items-center justify-between px-1">
           {title ? (
@@ -51,7 +72,10 @@ export function SettingsSection({
           <div className="flex h-5 min-w-5 items-center justify-end">{headerAction}</div>
         </div>
       ) : null}
-      <div className="relative overflow-hidden rounded-2xl border bg-card text-card-foreground shadow-sm/4 not-dark:bg-clip-padding before:pointer-events-none before:absolute before:inset-0 before:rounded-[calc(var(--radius-2xl)-1px)] before:shadow-[0_1px_--theme(--color-black/4%)] dark:shadow-none dark:before:shadow-[0_-1px_--theme(--color-white/6%)]">
+      <div
+        data-slot="settings-card"
+        className="relative overflow-hidden rounded-2xl border bg-card text-card-foreground shadow-sm/4 not-dark:bg-clip-padding before:pointer-events-none before:absolute before:inset-0 before:rounded-[calc(var(--radius-2xl)-1px)] before:shadow-[0_1px_--theme(--color-black/4%)] dark:shadow-none dark:before:shadow-[0_-1px_--theme(--color-white/6%)]"
+      >
         {children}
       </div>
     </section>
@@ -64,6 +88,7 @@ export function SettingsRow({
   status,
   resetAction,
   control,
+  searchId,
   children,
   className,
   ...rowProps
@@ -78,11 +103,17 @@ export function SettingsRow({
   status?: ReactNode;
   resetAction?: ReactNode;
   control?: ReactNode;
+  /**
+   * Settings search anchor (settingsSearchIndex.ts). Opening a search result
+   * scrolls to this row, briefly tints it and focuses its control.
+   */
+  searchId?: string;
   children?: ReactNode;
 }) {
   return (
     <div
       {...rowProps}
+      {...settingsSearchAnchorProps(searchId, "row")}
       className={cn(
         "border-t border-border-subtle px-4 first:border-t-0 sm:px-5",
         children ? "pt-3.5 pb-0" : "py-3.5",
@@ -90,7 +121,7 @@ export function SettingsRow({
       )}
     >
       <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-        <div className="min-w-0 flex-1 space-y-1">
+        <div className="min-w-0 flex-1 space-y-1" data-settings-row-heading="">
           <div className="flex min-h-5 items-center gap-1.5">
             <h3 className="text-ui font-semibold text-foreground">{title}</h3>
             <span className="inline-flex h-5 w-5 shrink-0 items-center justify-center">
@@ -101,7 +132,10 @@ export function SettingsRow({
           {status ? <div className="pt-0.5 text-2xs text-muted-foreground">{status}</div> : null}
         </div>
         {control ? (
-          <div className="flex w-full shrink-0 items-center gap-2 sm:w-auto sm:justify-end">
+          <div
+            className="flex w-full shrink-0 items-center gap-2 sm:w-auto sm:justify-end"
+            data-settings-row-control=""
+          >
             {control}
           </div>
         ) : null}

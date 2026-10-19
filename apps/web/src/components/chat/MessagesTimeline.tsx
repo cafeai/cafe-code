@@ -6,6 +6,7 @@ import { FileAttachmentPill } from "./FileAttachmentPill";
 import { TurnConfigurationWorkEntry } from "./TurnConfigurationWorkEntry";
 import { ClaudeCommandWorkEntry, ClaudeSummaryWorkEntry } from "./ProviderOperationWorkEntry";
 import { ProviderDiagnosticWorkEntry } from "./ProviderDiagnosticWorkEntry";
+import type { ProviderDiagnosticAction } from "../../providerDiagnostic";
 import {
   OrchestrationThreadTurnActivityPage,
   type EnvironmentId,
@@ -178,6 +179,8 @@ interface TimelineRowSharedState {
   onForkMessage?: ((messageId: MessageId) => void) | undefined;
   onImageExpand: (preview: ExpandedImagePreview) => void;
   onOpenSubagentDetail: (workEntry: WorkLogEntry, trigger: HTMLButtonElement) => void;
+  /** Opens this chat's own composer controls; absent where none exist. */
+  onProviderDiagnosticAction?: ((action: ProviderDiagnosticAction) => void) | undefined;
   /** Stable, mutable tracker of rows appended live after first ready. */
   rowEntrances: TimelineRowEntranceTracker;
 }
@@ -346,6 +349,11 @@ interface MessagesTimelineProps {
   selectedSubagent?: SubagentDetailSelection | null;
   onOpenSubagentDetail?: (workEntry: WorkLogEntry, trigger: HTMLButtonElement) => void;
   onCloseSubagentDetail?: () => void;
+  /**
+   * Navigation shortcuts from provider error guidance (model picker, model
+   * options, provider settings). Never retries, sends or changes settings.
+   */
+  onProviderDiagnosticAction?: ((action: ProviderDiagnosticAction) => void) | undefined;
 }
 
 // ---------------------------------------------------------------------------
@@ -396,6 +404,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
   selectedSubagent: controlledSelectedSubagent,
   onOpenSubagentDetail: controlledOpenSubagentDetail,
   onCloseSubagentDetail: controlledCloseSubagentDetail,
+  onProviderDiagnosticAction,
 }: MessagesTimelineProps) {
   const uiLocale = useUiLocale();
 
@@ -1302,6 +1311,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
       onForkMessage,
       onImageExpand,
       onOpenSubagentDetail: openSubagentDetail,
+      ...(onProviderDiagnosticAction ? { onProviderDiagnosticAction } : {}),
       rowEntrances,
     }),
     [
@@ -1324,6 +1334,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
       onForkMessage,
       onImageExpand,
       openSubagentDetail,
+      onProviderDiagnosticAction,
       rowEntrances,
     ],
   );
@@ -2250,7 +2261,7 @@ function compareHistoricalActivityRows(
 
 type EarlierWorkLogFilters = Pick<
   HistoricalWorkLogSummary,
-  "excludeActivityIds" | "excludeTurnStartAck" | "presenceRevision"
+  "excludeActivityIds" | "excludeOperations" | "excludeTurnStartAck" | "presenceRevision"
 >;
 
 interface EarlierWorkLogState {
@@ -2325,7 +2336,12 @@ const EarlierWorkLogSection = memo(function EarlierWorkLogSection({
     async (
       before: OrchestrationThreadActivityCursor,
       older: boolean,
-      { excludeActivityIds, excludeTurnStartAck, presenceRevision }: EarlierWorkLogFilters,
+      {
+        excludeActivityIds,
+        excludeOperations,
+        excludeTurnStartAck,
+        presenceRevision,
+      }: EarlierWorkLogFilters,
     ) => {
       if (pendingRef.current === owner) return;
       const generation = ++generationRef.current;
@@ -2342,6 +2358,7 @@ const EarlierWorkLogSection = memo(function EarlierWorkLogSection({
           before,
           older,
           ...(excludeActivityIds ? { excludeActivityIds } : {}),
+          ...(excludeOperations ? { excludeOperations } : {}),
           ...(excludeTurnStartAck !== undefined ? { excludeTurnStartAck } : {}),
           ...(presenceRevision !== undefined ? { presenceRevision } : {}),
         },
@@ -2356,6 +2373,7 @@ const EarlierWorkLogSection = memo(function EarlierWorkLogSection({
           limit,
           before,
           ...(excludeActivityIds ? { excludeActivityIds } : {}),
+          ...(excludeOperations ? { excludeOperations } : {}),
           ...(excludeTurnStartAck !== undefined ? { excludeTurnStartAck } : {}),
         });
         if (!stillOwned()) return;
@@ -2366,6 +2384,7 @@ const EarlierWorkLogSection = memo(function EarlierWorkLogSection({
           before,
           limit,
           ...(excludeActivityIds ? { excludeActivityIds } : {}),
+          ...(excludeOperations ? { excludeOperations } : {}),
           ...(excludeTurnStartAck !== undefined ? { excludeTurnStartAck } : {}),
         });
         setState((previous) => {
@@ -2422,6 +2441,8 @@ const EarlierWorkLogSection = memo(function EarlierWorkLogSection({
       current.lastRequest &&
       (current.lastRequest.presenceRevision !== row.summary.presenceRevision ||
         current.lastRequest.excludeTurnStartAck !== row.summary.excludeTurnStartAck ||
+        JSON.stringify(current.lastRequest.excludeOperations ?? []) !==
+          JSON.stringify(row.summary.excludeOperations ?? []) ||
         JSON.stringify(current.lastRequest.excludeActivityIds ?? []) !==
           JSON.stringify(row.summary.excludeActivityIds ?? []))
     ) {
@@ -2438,6 +2459,7 @@ const EarlierWorkLogSection = memo(function EarlierWorkLogSection({
     row.summary.presenceRevision,
     row.summary.excludeTurnStartAck,
     row.summary.excludeActivityIds,
+    row.summary.excludeOperations,
   ]);
   useEffect(() => {
     // An exhausted *captured* range cannot prove a later, larger range empty.
@@ -2449,6 +2471,8 @@ const EarlierWorkLogSection = memo(function EarlierWorkLogSection({
       before &&
       current.upper &&
       current.lastRequest?.excludeTurnStartAck === row.summary.excludeTurnStartAck &&
+      JSON.stringify(current.lastRequest?.excludeOperations ?? []) ===
+        JSON.stringify(row.summary.excludeOperations ?? []) &&
       JSON.stringify(current.lastRequest?.excludeActivityIds ?? []) ===
         JSON.stringify(row.summary.excludeActivityIds ?? []) &&
       cursorKey(before) === cursorKey(current.upper)
@@ -2464,6 +2488,7 @@ const EarlierWorkLogSection = memo(function EarlierWorkLogSection({
     onHistoricalWorkLogPresenceResolved,
     row.turnId,
     row.summary.excludeActivityIds,
+    row.summary.excludeOperations,
     row.summary.excludeTurnStartAck,
     visibleEntries.length,
   ]);
@@ -2609,6 +2634,7 @@ function validateHistoricalWorkLogPage(input: {
     page.limit !== limit ||
     page.before !== undefined ||
     page.excludeActivityIds !== undefined ||
+    page.excludeOperations !== undefined ||
     page.excludeTurnStartAck !== undefined ||
     !Number.isSafeInteger(page.totalCount) ||
     page.totalCount < 0 ||
@@ -3632,11 +3658,13 @@ const OrdinaryWorkEntryRow = memo(function OrdinaryWorkEntryRow(props: {
   workEntry: TimelineWorkEntry;
   workspaceRoot: string | undefined;
 }) {
-  const { activeThreadEnvironmentId, activeThreadId, timestampFormat } = use(TimelineRowCtx);
+  const { activeThreadEnvironmentId, activeThreadId, timestampFormat, onProviderDiagnosticAction } =
+    use(TimelineRowCtx);
   if (props.workEntry.providerDiagnostic)
     return (
       <ProviderDiagnosticWorkEntry
         diagnostic={props.workEntry.providerDiagnostic}
+        {...(onProviderDiagnosticAction ? { onAction: onProviderDiagnosticAction } : {})}
         environmentId={activeThreadEnvironmentId}
         threadId={activeThreadId}
         turnId={props.workEntry.turnId ?? null}
@@ -3713,6 +3741,7 @@ const OrdinaryWorkEntryContent = memo(function OrdinaryWorkEntryContent(props: {
           <ClaudeCommandWorkEntry
             inspection={workEntry.commandInspection}
             timestampFormat={timestampFormat}
+            workspaceRoot={workspaceRoot}
           />
         </div>
         {commandPathTokens.length > 0 ? (

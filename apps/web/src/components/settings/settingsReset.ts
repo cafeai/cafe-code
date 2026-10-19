@@ -45,6 +45,7 @@ export function getSettingsPageReset(
   const chats = {
     ambianceAtriumEnabled: uiText("Task Atrium", undefined, undefined, locale),
     chatClickBehavior: uiText("Clicking a chat", undefined, undefined, locale),
+    showDeskTabs: uiText("Chat tabs", undefined, undefined, locale),
     autoOpenPlanSidebar: uiText("Auto-open plan panel", undefined, undefined, locale),
     enableAssistantStreaming: uiText("Assistant output", undefined, undefined, locale),
     chatCopyFormat: uiText("Chat selection copy", undefined, undefined, locale),

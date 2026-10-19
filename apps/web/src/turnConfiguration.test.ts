@@ -117,13 +117,24 @@ describe("accepted turn configuration presentation", () => {
     });
   });
 
+  it("shows only a recorded Codex Daybreak choice", () => {
+    expect(presentTurnConfiguration({ ...configuration, daybreak: true }).settings).toBe(
+      "GPT-6.1 Sol · Effort: Ultra · Fast on · Daybreak on",
+    );
+    expect(
+      presentTurnConfigurationSummary({ ...configuration, daybreak: false }).summary,
+    ).toContain("Daybreak off");
+    // Absence is unknown, never Off.
+    expect(presentTurnConfiguration(configuration).settings).not.toContain("Daybreak");
+  });
+
   it("does not confuse explicit Fast off with inherited provider defaults", () => {
     expect(presentTurnConfiguration({ ...configuration, fastMode: false }).settings).toBe(
       "GPT-6.1 Sol · Effort: Ultra · Fast off",
     );
     const { fastMode: _fast, effort: _effort, ...defaults } = configuration;
     expect(presentTurnConfiguration(defaults).settings).toBe(
-      "GPT-6.1 Sol · Effort: provider default · Fast status not recorded",
+      "GPT-6.1 Sol · Effort: provider default",
     );
   });
 
@@ -278,11 +289,11 @@ describe("one-line work-log turn configuration summary", () => {
     ).toContain("Service tier: future_tier");
   });
 
-  it("states unknown Fast and provider defaults explicitly", () => {
+  it("omits unknown Fast while stating provider defaults explicitly", () => {
     const { fastMode: _fast, effort: _effort, interactionMode: _mode, ...defaults } = configuration;
     const { model: _model, modelDisplayName: _label, ...noModel } = defaults;
     expect(presentTurnConfigurationSummary(noModel).summary).toBe(
-      "Default model · Default effort · Fast status not recorded · Codex Personal · Default mode · Full access",
+      "Default model · Default effort · Codex Personal · Default mode · Full access",
     );
   });
 
