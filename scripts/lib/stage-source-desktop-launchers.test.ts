@@ -76,7 +76,12 @@ describe("published source desktop launcher dependencies", () => {
     const configuredHome = join(runtimeRoot, "private-home");
     const result = spawnSync(
       process.execPath,
-      ["--import", preload, join(desktop, "scripts", "start-electron.mjs"), "--cafe-debug"],
+      [
+        "--import",
+        pathToFileURL(preload).href,
+        join(desktop, "scripts", "start-electron.mjs"),
+        "--cafe-debug",
+      ],
       {
         env: {
           ...(process.env.SystemRoot ? { SystemRoot: process.env.SystemRoot } : {}),
