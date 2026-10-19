@@ -41,19 +41,20 @@ describe("Codex Daybreak", () => {
     expect(makeCodexDaybreakDescriptor([])).toBeUndefined();
     expect(makeCodexDaybreakDescriptor(["standard"])).toBeUndefined();
   });
-  it("offers Off/On and chooses the strongest supported program without opting in", () => {
+  it("offers only advertised levels without opting in or omitting an available lower level", () => {
     expect(models[0]?.capabilities?.optionDescriptors?.[0]).toMatchObject({
       currentValue: "standard",
       options: [
         { id: "standard", label: "Off" },
-        { id: "daybreakBlue", label: "On" },
+        { id: "daybreakBlue", label: "Blue" },
       ],
     });
     expect(models[1]?.capabilities?.optionDescriptors?.[0]).toMatchObject({
       currentValue: "standard",
       options: [
         { id: "standard", label: "Off" },
-        { id: "daybreakRed", label: "On" },
+        { id: "daybreakBlue", label: "Blue" },
+        { id: "daybreakRed", label: "Red" },
       ],
     });
     expect(resolveCodexDaybreak(selection("blue", "daybreakBlue"), account, models)).toEqual({
@@ -74,21 +75,28 @@ describe("Codex Daybreak", () => {
       {},
     );
   });
-  it("keeps On across models, using Red where supported and Blue otherwise", () => {
-    expect(resolveCodexDaybreak(selection("blue", "daybreakRed"), account, models)).toEqual({
+  it("submits the exact requested level without upgrading or downgrading it", () => {
+    expect(resolveCodexDaybreak(selection("red", "daybreakBlue"), account, models)).toEqual({
       cyberAccessProgram: "daybreakBlue",
     });
-    expect(resolveCodexDaybreak(selection("red", "daybreakBlue"), account, models)).toEqual({
+    expect(resolveCodexDaybreak(selection("red", "daybreakRed"), account, models)).toEqual({
       cyberAccessProgram: "daybreakRed",
     });
-    expect(resolveCodexDaybreak(selection("red-only", "daybreakBlue"), account, models)).toEqual({
-      cyberAccessProgram: "daybreakRed",
-    });
+    for (const [model, level] of [
+      ["blue", "daybreakRed"],
+      ["red-only", "daybreakBlue"],
+    ] as const) {
+      expect(resolveCodexDaybreak(selection(model, level), account, models)).toHaveProperty(
+        "error",
+      );
+    }
   });
   it("does not borrow another model or account's approval or manufacture Standard for a program-only model", () => {
     for (const [model, value] of [
       ["unknown", "daybreakBlue"],
       ["red-only", "standard"],
+      ["blue", "daybreakRed"],
+      ["red-only", "daybreakBlue"],
       ["blue", true],
       ["blue", "arbitrary"],
     ] as const) {

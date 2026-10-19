@@ -24,6 +24,7 @@
     "src/components/MermaidPreview.browser.tsx",
     "src/components/MermaidRendering.browser.tsx",
     "src/components/chat/ChatComposer.browser.tsx",
+    "src/components/chat/DaybreakPicker.browser.tsx",
     "src/components/chat/ComposerActivityStatus.browser.tsx",
     "src/components/chat/ScrollToBottomControl.browser.tsx",
     "src/components/chat/ChatPaneRuntime.browser.tsx",

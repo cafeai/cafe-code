@@ -166,6 +166,7 @@ function getTraitsSectionVisibility(input: {
   prompt: string;
   modelOptions: ProviderOptions | null | undefined;
   allowPromptInjectedEffort?: boolean;
+  section?: "all" | "model" | "daybreak";
 }) {
   const selected = getSelectedTraits(
     input.provider,
@@ -176,12 +177,19 @@ function getTraitsSectionVisibility(input: {
     input.allowPromptInjectedEffort ?? true,
   );
 
+  const includesDescriptor = (descriptor: ProviderOptionDescriptor) =>
+    input.section === "daybreak"
+      ? descriptor.id === "cyberAccessProgram"
+      : input.section === "model"
+        ? descriptor.id !== "cyberAccessProgram"
+        : true;
   const showEffort = selected.primarySelectDescriptor !== null;
   const showThinking = selected.thinkingDescriptor !== null;
   const showFastMode = selected.fastModeDescriptor !== null;
   const showContextWindow = selected.contextWindowDescriptor !== null;
   const showAgent = selected.agentDescriptor !== null;
   const hasUnavailableDaybreak =
+    input.section !== "model" &&
     input.provider === "codex" &&
     input.modelOptions?.some(
       (option) =>
@@ -192,19 +200,15 @@ function getTraitsSectionVisibility(input: {
 
   return {
     ...selected,
+    selectDescriptors: selected.selectDescriptors.filter(includesDescriptor),
+    booleanDescriptors: selected.booleanDescriptors.filter(includesDescriptor),
     showEffort,
     showThinking,
     showFastMode,
     showContextWindow,
     showAgent,
     hasUnavailableDaybreak,
-    hasAnyControls:
-      showEffort ||
-      showThinking ||
-      showFastMode ||
-      showContextWindow ||
-      showAgent ||
-      hasUnavailableDaybreak,
+    hasAnyControls: selected.descriptors.some(includesDescriptor) || hasUnavailableDaybreak,
   };
 }
 
@@ -215,6 +219,7 @@ export function shouldRenderTraitsControls(input: {
   prompt: string;
   modelOptions: ProviderOptions | null | undefined;
   allowPromptInjectedEffort?: boolean;
+  section?: "all" | "model" | "daybreak";
 }): boolean {
   return getTraitsSectionVisibility(input).hasAnyControls;
 }
@@ -231,10 +236,11 @@ export function getTraitsTriggerLabel(
         return uiText("Ultrathink");
       }
       if (descriptor.id === "cyberAccessProgram") {
-        return descriptor.currentValue === "daybreakBlue" ||
-          descriptor.currentValue === "daybreakRed"
-          ? uiText("Daybreak")
-          : undefined;
+        return descriptor.currentValue === "daybreakBlue"
+          ? uiText("Daybreak Blue")
+          : descriptor.currentValue === "daybreakRed"
+            ? uiText("Daybreak Red")
+            : undefined;
       }
       if (descriptor.type === "boolean") {
         if (descriptor.id === "ultracode") {
@@ -269,6 +275,7 @@ export interface TraitsMenuContentProps {
   onPromptChange: (prompt: string) => void;
   modelOptions?: ProviderOptions | null | undefined;
   allowPromptInjectedEffort?: boolean;
+  section?: "all" | "model" | "daybreak";
   triggerVariant?: VariantProps<typeof buttonVariants>["variant"];
   triggerClassName?: string;
 }
@@ -282,6 +289,7 @@ export const TraitsMenuContent = memo(function TraitsMenuContentImpl({
   onPromptChange,
   modelOptions,
   allowPromptInjectedEffort = true,
+  section = "all",
   ...persistence
 }: TraitsMenuContentProps & TraitsPersistence) {
   const uiLocale = useUiLocale();
@@ -321,6 +329,7 @@ export const TraitsMenuContent = memo(function TraitsMenuContentImpl({
     prompt,
     modelOptions,
     allowPromptInjectedEffort,
+    section,
   });
   const updateDescriptors = (nextDescriptors: ReadonlyArray<ProviderOptionDescriptor>) => {
     const nextOptions = buildProviderOptionSelectionsFromDescriptors(nextDescriptors);
@@ -367,7 +376,9 @@ export const TraitsMenuContent = memo(function TraitsMenuContentImpl({
           {index > 0 ? <MenuDivider /> : null}
           <MenuGroup>
             <div className="px-2 pt-1.5 pb-1 font-medium text-muted-foreground text-xs">
-              {descriptor.label}
+              {descriptor.id === "cyberAccessProgram"
+                ? uiText("Daybreak level", undefined, undefined, uiLocale)
+                : descriptor.label}
             </div>
             {descriptor.id === "serviceTier" &&
             descriptor.currentValue &&

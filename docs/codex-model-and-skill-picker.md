@@ -53,26 +53,30 @@ are settings records, not independent confirmation of effective routing or billi
 
 ## Daybreak
 
-Open the composer model settings to choose **Daybreak · Off / On**. The control
-appears only when the selected Codex account's model catalogue advertises Daybreak
-for that model. Standard-only and older catalogues do not imply access.
+Open the composer controls menu and find **Daybreak level** below **Access** and
+above **Goal**. It offers **Off**, **Blue** and **Red** only when the selected
+Codex account's model catalogue advertises each corresponding program. The
+section is hidden without advertised Daybreak access; Standard-only and older
+catalogues do not imply access.
 
-**On** uses Daybreak Red when the account and model advertise Red, and Daybreak
-Blue otherwise when Blue is supported. Switching between compatible models keeps
-the saved choice On and resolves the program for the new model. **Off** explicitly
-requests Standard. A model that accepts only Daybreak offers On; select a model
-that supports Standard to turn it off. Opening the settings menu never enables
-Daybreak. If an enabled choice loses its advertised support, sending fails with
-guidance to refresh and choose a supported model or setting. The model settings
-menu also offers **Turn unavailable Daybreak off** for a saved On choice after
-access disappears; it does not offer On without advertised support.
+**Off** explicitly requests Standard and remains the default on models that
+support Standard. **Blue** and **Red** submit that exact level; selecting Blue
+does not upgrade to Red when both are available. Switching models preserves the
+saved level. If the new account/model does not accept it, Cafe retains the choice
+for correction and refuses submission rather than silently changing levels.
+Existing saved Blue/Red options retain their recorded program identity.
+
+A model that accepts only Daybreak offers only its advertised levels and has no
+implicit selection; select a Standard-capable model to turn Daybreak off. Opening
+the menu never enables Daybreak. If access disappears entirely, the menu offers
+**Turn unavailable Daybreak off** without offering unavailable levels.
 
 The standalone Daybreak Blue/Red aliases are no longer selectable, including in
 cached and custom model lists. Saved chats retain their existing model identity;
 Cafe does not rewrite their history or silently replace their model.
 
 Cafe persists this choice with the chat's existing model options and sends the
-resolved `cyberAccessProgram` on ordinary Codex `turn/start` requests. Native
+selected `cyberAccessProgram` on ordinary Codex `turn/start` requests. Native
 `daybreakEnabled` thread metadata is a preference, not turn routing authority;
 Cafe does not synchronize its saved choice through that metadata. Native reviews
 retain their session settings, and one-shot title/branch helpers do not expose

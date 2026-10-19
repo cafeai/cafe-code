@@ -11,7 +11,9 @@ afterEach(async () => {
   for (const cleanup of cleanups.splice(0)) await cleanup();
 });
 
-function models(program?: "daybreakBlue" | "daybreakRed"): ReadonlyArray<ServerProviderModel> {
+function models(
+  programs: ReadonlyArray<"daybreakBlue" | "daybreakRed"> = [],
+): ReadonlyArray<ServerProviderModel> {
   return [
     {
       slug: "account-model",
@@ -25,17 +27,19 @@ function models(program?: "daybreakBlue" | "daybreakRed"): ReadonlyArray<ServerP
             type: "select",
             options: [{ id: "high", label: "High", isDefault: true }],
           },
-          ...(program
+          ...(programs.length > 0
             ? [
                 {
                   id: "cyberAccessProgram",
                   label: "Daybreak",
                   type: "select" as const,
                   currentValue: "standard",
-                  description: `On uses ${program}.`,
                   options: [
                     { id: "standard", label: "Off" },
-                    { id: program, label: "On" },
+                    ...programs.map((id) => ({
+                      id,
+                      label: id === "daybreakBlue" ? "Blue" : "Red",
+                    })),
                   ],
                 },
               ]
@@ -48,8 +52,10 @@ function models(program?: "daybreakBlue" | "daybreakRed"): ReadonlyArray<ServerP
 
 describe("Daybreak model settings", () => {
   it.each(["daybreakBlue", "daybreakRed"] as const)(
-    "saves %s On/Off without changing the model and restores the saved choice",
+    "offers only the advertised %s level and restores its saved choice",
     async (program) => {
+      const level = program === "daybreakBlue" ? "Blue" : "Red";
+      const unavailableLevel = program === "daybreakBlue" ? "Red" : "Blue";
       let saved: ReadonlyArray<ProviderOptionSelection> | undefined;
       const onChange = vi.fn((options: ReadonlyArray<ProviderOptionSelection> | undefined) => {
         saved = options;
@@ -57,7 +63,7 @@ describe("Daybreak model settings", () => {
       const props = {
         provider: ProviderDriverKind.make("codex"),
         model: "account-model",
-        models: models(program),
+        models: models([program]),
         prompt: "",
         onPromptChange: vi.fn(),
         onModelOptionsChange: onChange,
@@ -68,15 +74,18 @@ describe("Daybreak model settings", () => {
       await expect
         .element(page.getByRole("menuitemradio", { name: "Off", exact: true }))
         .toHaveAttribute("aria-checked", "true");
-      await page.getByRole("menuitemradio", { name: "On", exact: true }).click();
+      await expect
+        .element(page.getByRole("menuitemradio", { name: unavailableLevel, exact: true }))
+        .not.toBeInTheDocument();
+      await page.getByRole("menuitemradio", { name: level, exact: true }).click();
       expect(saved).toContainEqual({ id: "cyberAccessProgram", value: program });
       expect(onChange).toHaveBeenCalledTimes(1);
       await userEvent.keyboard("{Escape}");
       await expect.element(page.getByRole("menu")).not.toBeInTheDocument();
       await screen.rerender(<TraitsPicker {...props} modelOptions={saved} />);
-      await page.getByRole("button", { name: "High · Daybreak", exact: true }).click();
+      await page.getByRole("button", { name: `High · Daybreak ${level}`, exact: true }).click();
       await expect
-        .element(page.getByRole("menuitemradio", { name: "On", exact: true }))
+        .element(page.getByRole("menuitemradio", { name: level, exact: true }))
         .toHaveAttribute("aria-checked", "true");
       await page.getByRole("menuitemradio", { name: "Off", exact: true }).click();
       expect(saved).toContainEqual({ id: "cyberAccessProgram", value: "standard" });
@@ -93,19 +102,19 @@ describe("Daybreak model settings", () => {
       onPromptChange: vi.fn(),
       onModelOptionsChange: vi.fn(),
     };
-    const screen = await render(<TraitsPicker {...props} models={models("daybreakBlue")} />);
+    const screen = await render(<TraitsPicker {...props} models={models(["daybreakBlue"])} />);
     cleanups.push(() => screen.unmount());
     await page.getByRole("button", { name: "High", exact: true }).click();
-    await expect.element(page.getByText("Daybreak", { exact: true })).toBeVisible();
+    await expect.element(page.getByText("Daybreak level", { exact: true })).toBeVisible();
     await userEvent.keyboard("{Escape}");
     await expect.element(page.getByRole("menu")).not.toBeInTheDocument();
     await screen.rerender(<TraitsPicker {...props} models={models()} />);
     await page.getByRole("button", { name: "High", exact: true }).click();
-    await expect.element(page.getByText("Daybreak", { exact: true })).not.toBeInTheDocument();
+    await expect.element(page.getByText("Daybreak level", { exact: true })).not.toBeInTheDocument();
     expect(props.onModelOptionsChange).not.toHaveBeenCalled();
   });
 
-  it("keeps a saved On choice checked when the selected model changes program", async () => {
+  it("keeps the exact saved level unavailable when model access changes until the user chooses", async () => {
     const onChange = vi.fn();
     const props = {
       provider: ProviderDriverKind.make("codex"),
@@ -117,32 +126,48 @@ describe("Daybreak model settings", () => {
     const screen = await render(
       <TraitsPicker
         {...props}
-        models={models("daybreakBlue")}
+        models={models(["daybreakBlue"])}
         modelOptions={[{ id: "cyberAccessProgram", value: "daybreakRed" }]}
       />,
     );
     cleanups.push(() => screen.unmount());
-    await page.getByRole("button", { name: "High · Daybreak", exact: true }).click();
+    await page.getByRole("button", { name: "High · Daybreak Red", exact: true }).click();
     await expect
-      .element(page.getByRole("menuitemradio", { name: "On", exact: true }))
-      .toHaveAttribute("aria-checked", "true");
+      .element(page.getByRole("menuitemradio", { name: "Red", exact: true }))
+      .not.toBeInTheDocument();
+    await expect
+      .element(page.getByRole("menuitemradio", { name: "Blue", exact: true }))
+      .toHaveAttribute("aria-checked", "false");
+    await expect
+      .element(page.getByRole("status"))
+      .toHaveTextContent(
+        "This Daybreak setting is unavailable. Choose a supported setting before sending.",
+      );
     await userEvent.keyboard("{Escape}");
     await expect.element(page.getByRole("menu")).not.toBeInTheDocument();
     await screen.rerender(
       <TraitsPicker
         {...props}
-        models={models("daybreakRed")}
+        models={models(["daybreakBlue", "daybreakRed"])}
         modelOptions={[{ id: "cyberAccessProgram", value: "daybreakBlue" }]}
       />,
     );
-    await page.getByRole("button", { name: "High · Daybreak", exact: true }).click();
+    await page.getByRole("button", { name: "High · Daybreak Blue", exact: true }).click();
     await expect
-      .element(page.getByRole("menuitemradio", { name: "On", exact: true }))
+      .element(page.getByRole("menuitemradio", { name: "Blue", exact: true }))
       .toHaveAttribute("aria-checked", "true");
+    await expect
+      .element(page.getByRole("menuitemradio", { name: "Red", exact: true }))
+      .toHaveAttribute("aria-checked", "false");
     expect(onChange).not.toHaveBeenCalled();
+    await page.getByRole("menuitemradio", { name: "Red", exact: true }).click();
+    expect(onChange).toHaveBeenCalledExactlyOnceWith([
+      { id: "reasoningEffort", value: "high" },
+      { id: "cyberAccessProgram", value: "daybreakRed" },
+    ]);
   });
 
-  it("lets a saved On choice be explicitly turned off after access disappears without offering On", async () => {
+  it("lets a saved level be explicitly turned off after access disappears without offering levels", async () => {
     const onChange = vi.fn();
     const screen = await render(
       <TraitsPicker
@@ -160,7 +185,10 @@ describe("Daybreak model settings", () => {
     cleanups.push(() => screen.unmount());
     await page.getByRole("button", { name: "Model settings", exact: true }).click();
     await expect
-      .element(page.getByRole("menuitemradio", { name: "On", exact: true }))
+      .element(page.getByRole("menuitemradio", { name: "Blue", exact: true }))
+      .not.toBeInTheDocument();
+    await expect
+      .element(page.getByRole("menuitemradio", { name: "Red", exact: true }))
       .not.toBeInTheDocument();
     await page
       .getByRole("menuitem", { name: "Turn unavailable Daybreak off", exact: true })

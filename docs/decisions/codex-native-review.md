@@ -93,6 +93,14 @@ mode. Existing protocol, approval/sandbox and uncertain-acknowledgement boundari
 above are unchanged. New browser and release checks qualify this amendment
 separately from the historical released source noted above.
 
+### Composer shortcut removal — 2026-10-19
+
+The user requested removing **Codex review** from the composer dropdown. The
+**Code review** tools-tab action remains the entry point, with the same exact
+account/session admission, dialog ownership and submission behavior. Browser
+fixtures exercise that retained action and verify the duplicate menu item is
+absent. Daybreak levels occupy their own section below Access in the dropdown.
+
 ### Native protocol qualification
 
 Credential-free contract, decider, service, runtime and adapter fixtures qualify

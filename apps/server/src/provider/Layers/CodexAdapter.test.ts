@@ -1650,7 +1650,7 @@ const validationLayer = it.layer(
 
 validationLayer("CodexAdapterLive validation", (it) => {
   it.effect(
-    "routes Blue/Red On and explicit Off to the exact runtime and rejects lost access before send",
+    "routes exact Daybreak levels and explicit Off and rejects unavailable levels before send",
     () =>
       Effect.gen(function* () {
         const adapter = yield* CodexAdapter;
@@ -1669,11 +1669,16 @@ validationLayer("CodexAdapterLive validation", (it) => {
           assert.ok(runtime);
           runtime.sendTurnImpl.mockClear();
           yield* adapter.sendTurn({ threadId, input: "On", modelSelection: selection(program) });
-          yield* adapter.sendTurn({
-            threadId,
-            input: "On after changing models",
-            modelSelection: selection(program === "daybreakBlue" ? "daybreakRed" : "daybreakBlue"),
-          });
+          const unsupported = yield* Effect.exit(
+            adapter.sendTurn({
+              threadId,
+              input: "Unavailable level",
+              modelSelection: selection(
+                program === "daybreakBlue" ? "daybreakRed" : "daybreakBlue",
+              ),
+            }),
+          );
+          assert.equal(unsupported._tag, "Failure");
           yield* adapter.sendTurn({
             threadId,
             input: "Off",
@@ -1681,7 +1686,7 @@ validationLayer("CodexAdapterLive validation", (it) => {
           });
           assert.deepEqual(
             runtime.sendTurnImpl.mock.calls.map(([input]) => input.cyberAccessProgram),
-            [program, program, "standard"],
+            [program, "standard"],
           );
           const count = runtime.sendTurnImpl.mock.calls.length;
           const failed = yield* Effect.exit(

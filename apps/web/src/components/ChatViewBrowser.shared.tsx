@@ -9035,10 +9035,7 @@ describe(`ChatView full app (${chatViewBrowserPart})`, () => {
             } else {
               const prompt = "Keep this unsent review draft";
               useComposerDraftStore.getState().setPrompt(THREAD_REF, prompt);
-              await page
-                .getByRole("button", { name: "More composer controls", exact: true })
-                .click();
-              await page.getByRole("menuitem", { name: "Codex review", exact: true }).click();
+              await page.getByRole("button", { name: "Code review", exact: true }).click();
               await page.getByRole("button", { name: "Start review", exact: true }).click();
               await expect
                 .element(page.getByRole("dialog", { name: "Start a Codex review" }))

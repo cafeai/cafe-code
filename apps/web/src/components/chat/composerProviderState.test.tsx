@@ -76,7 +76,7 @@ describe("getComposerProviderState", () => {
     ]);
     const enabled = getComposerProviderState({ ...input, models: modelWith([descriptor]) });
     expect(enabled.modelOptionsForDispatch).toEqual(input.modelOptions);
-    expect(enabled.traitsTriggerLabel).toBe("Daybreak");
+    expect(enabled.traitsTriggerLabel).toBe("Daybreak Blue");
     const lost = getComposerProviderState({ ...input, models: modelWith([]) });
     expect(lost.modelOptionsForDispatch).toEqual(input.modelOptions);
     expect(lost.traitsTriggerLabel).toBeNull();

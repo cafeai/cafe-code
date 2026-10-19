@@ -1256,8 +1256,8 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     isSendBusy ||
     isConnecting ||
     environmentUnavailable !== null;
-  // The menu is transient, but the dialog must survive its closure and an ACK
-  // that makes the session busy. Identity/mode changes invalidate it instead;
+  // The dialog must survive an ACK that makes the session busy.
+  // Identity/mode changes invalidate it instead;
   // do not use updatedAt, which advances during ordinary review submission.
   const nativeReviewKey = JSON.stringify([
     environmentId,
@@ -1338,23 +1338,13 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                     uiLocale,
                   )
                 : undefined;
-  const providerActions =
-    nativeReviewAvailable && !nativeReviewDisabled ? (
-      <MenuItem
-        aria-haspopup="dialog"
-        className="[&>svg]:mx-0"
-        onClick={() => setNativeReviewState({ key: nativeReviewKey, open: true })}
-      >
-        <FileSearchIcon aria-hidden="true" className="size-4 shrink-0" />
-        {uiText("Codex review", undefined, undefined, uiLocale)}
-      </MenuItem>
-    ) : deliveryPriorityAvailable ? (
-      <ClaudeDeliveryPriorityPicker
-        value={deliveryPriority}
-        onChange={(priority) => setDeliveryChoice({ key: deliveryChoiceKey, priority })}
-        disabled={isSendBusy || isConnecting || environmentUnavailable !== null}
-      />
-    ) : null;
+  const providerActions = deliveryPriorityAvailable ? (
+    <ClaudeDeliveryPriorityPicker
+      value={deliveryPriority}
+      onChange={(priority) => setDeliveryChoice({ key: deliveryChoiceKey, priority })}
+      disabled={isSendBusy || isConnecting || environmentUnavailable !== null}
+    />
+  ) : null;
   const selectedCodexRateLimits = shouldSurfaceProviderAccountRateLimits(selectedProviderStatus)
     ? (selectedProviderStatus?.accountRateLimits ?? null)
     : null;
@@ -2284,7 +2274,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     [composerDraftTarget, promptRef, scheduleComposerFocus, setComposerDraftPrompt],
   );
 
-  const providerTraitsMenuContent = uiPresentation.renderProviderTraitsMenuContent({
+  const providerTraitsInput = {
     provider: selectedProvider,
     providerInstanceId: selectedInstanceId,
     ...(routeKind === "server" ? { threadRef: routeThreadRef } : {}),
@@ -2294,6 +2284,14 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     modelOptions: selectedComposerModelOptions,
     prompt,
     onPromptChange: setPromptFromTraits,
+  };
+  const providerTraitsMenuContent = uiPresentation.renderProviderTraitsMenuContent({
+    ...providerTraitsInput,
+    section: "model",
+  });
+  const providerDaybreakMenuContent = uiPresentation.renderProviderTraitsMenuContent({
+    ...providerTraitsInput,
+    section: "daybreak",
   });
   const pendingPrimaryAction = useMemo(
     () =>
@@ -4409,11 +4407,14 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                   showGoalControl={goalControlsSupported}
                   goalStatus={activeThread?.goal?.status ?? null}
                   traitsMenuContent={providerTraitsMenuContent}
+                  daybreakMenuContent={providerDaybreakMenuContent}
                   subagentConcurrencyControl={concurrencyMenuItem}
                   codexContextWindowControl={contextMenuItem}
                   providerActions={providerActions}
                   traitsTriggerLabel={
-                    providerTraitsMenuContent ? composerProviderState.traitsTriggerLabel : null
+                    providerTraitsMenuContent || providerDaybreakMenuContent
+                      ? composerProviderState.traitsTriggerLabel
+                      : null
                   }
                   onToggleInteractionMode={cycleComposerInteractionMode}
                   onNativePermissionModeChange={handleClaudePermissionModeChange}

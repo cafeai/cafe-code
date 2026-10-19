@@ -1,7 +1,7 @@
 # Native Codex review
 
-In an idle Codex chat, select **Code review** inside the shared composer tools tab. The
-existing model-options menu also keeps its **Codex review** shortcut. Choose one of:
+In an idle Codex chat, select **Code review** inside the shared composer tools tab.
+The composer dropdown does not contain a duplicate review shortcut. Choose one of:
 
 - **Uncommitted changes** in the chat's workspace.
 - **Changes against a base branch**, such as `main` or `origin/main`.
@@ -12,8 +12,7 @@ The tab shows **Code review** whenever Codex is selected in the composer, includ
 drafts and busy chats. The control is dimmed until the selected account matches the
 saved, ready Codex session, the server is connected, and the chat is idle. Work,
 a send, a connection or a checkpoint restore also makes it unavailable. Hover or
-focus the control to see its explanation and the reason it is unavailable. The
-existing menu shortcut appears only while review can run. Changing the chat,
+focus the control to see its explanation and the reason it is unavailable. Changing the chat,
 account or session binding closes the old review dialog; submission checks the
 current selection again. Selecting Claude replaces the tab's review control with
 message delivery. Providers without tab controls, such as Grok, hide the tab.
@@ -39,7 +38,7 @@ cancels the native turn. A busy chat rejects a new review rather than sending it
 as an instruction to the current task.
 
 For a separate review, create or open another Cafe-owned Codex chat in the desired
-workspace and use its Codex review menu action after its session is ready. Cafe does
+workspace and use its **Code review** tab action after its session is ready. Cafe does
 not create or adopt deprecated detached native review threads. Claude and Grok
 do not expose this Codex-specific action. Asking any model to review code in an
 ordinary message still works as an ordinary conversation request.

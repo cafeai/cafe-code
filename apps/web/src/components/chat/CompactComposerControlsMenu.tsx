@@ -146,6 +146,7 @@ export const CompactComposerControlsMenu = memo(function CompactComposerControls
   showGoalControl?: boolean;
   goalStatus?: ProviderThreadGoalStatus | null;
   traitsMenuContent?: ReactNode;
+  daybreakMenuContent?: ReactNode;
   subagentConcurrencyControl?: ReactNode;
   codexContextWindowControl?: ReactNode;
   /** Provider-specific actions stay inside this menu in every footer layout. */
@@ -169,6 +170,7 @@ export const CompactComposerControlsMenu = memo(function CompactComposerControls
     ? uiPresentation.CLAUDE_PERMISSION_MODE_OPTIONS
     : uiPresentation.GROK_PERMISSION_MODE_OPTIONS;
   const hasTraits = props.traitsMenuContent !== null && props.traitsMenuContent !== undefined;
+  const hasDaybreak = props.daybreakMenuContent !== null && props.daybreakMenuContent !== undefined;
   const hasSecondaryControls = Boolean(
     props.subagentConcurrencyControl || props.codexContextWindowControl || props.providerActions,
   );
@@ -302,12 +304,24 @@ export const CompactComposerControlsMenu = memo(function CompactComposerControls
             </MenuRadioGroup>
           </>
         ) : null}
-        {props.showGoalControl ? (
+        {hasDaybreak ? (
           <>
             {hasTraits ||
             hasSecondaryControls ||
             props.showInteractionModeToggle ||
             showAccessControls ? (
+              <MenuDivider />
+            ) : null}
+            {props.daybreakMenuContent}
+          </>
+        ) : null}
+        {props.showGoalControl ? (
+          <>
+            {hasTraits ||
+            hasSecondaryControls ||
+            props.showInteractionModeToggle ||
+            showAccessControls ||
+            hasDaybreak ? (
               <MenuDivider />
             ) : null}
             <MenuItem className="[&>svg]:mx-0" onClick={props.onOpenGoal}>
@@ -329,7 +343,8 @@ export const CompactComposerControlsMenu = memo(function CompactComposerControls
             hasSecondaryControls ||
             props.showInteractionModeToggle ||
             showAccessControls ||
-            props.showGoalControl ? (
+            props.showGoalControl ||
+            hasDaybreak ? (
               <MenuDivider />
             ) : null}
             <MenuItem className="[&>svg]:mx-0" onClick={props.onTogglePlanSidebar}>

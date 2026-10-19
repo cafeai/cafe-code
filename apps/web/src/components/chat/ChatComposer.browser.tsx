@@ -333,6 +333,97 @@ async function waitForTabEntrance() {
 }
 
 describe("provider-specific composer menu actions", () => {
+  it("places exact advertised Daybreak levels below Access and preserves the selected level on dispatch", async () => {
+    const statuses = providers.map((entry) =>
+      entry.instanceId === "codex"
+        ? {
+            ...entry,
+            models: entry.models.map((model) => ({
+              ...model,
+              slug: "daybreak-model",
+              capabilities: createModelCapabilities({
+                optionDescriptors: [
+                  {
+                    id: "reasoningEffort",
+                    label: "Reasoning",
+                    type: "select",
+                    currentValue: "high",
+                    options: [{ id: "high", label: "High" }],
+                  },
+                  {
+                    id: "cyberAccessProgram",
+                    label: "Daybreak",
+                    type: "select",
+                    currentValue: "standard",
+                    options: [
+                      { id: "standard", label: "Off" },
+                      { id: "daybreakBlue", label: "Blue" },
+                      { id: "daybreakRed", label: "Red" },
+                    ],
+                  },
+                ],
+              }),
+            })),
+          }
+        : entry,
+    );
+    const activeThread = thread();
+    activeThread.modelSelection = createModelSelection(
+      ProviderInstanceId.make("codex"),
+      "daybreak-model",
+    );
+    await using fixture = await mountComposer(1100, {
+      providerStatuses: statuses,
+      goalControlsSupported: true,
+      activeThread,
+      activeThreadModelSelection: activeThread.modelSelection,
+    });
+    const openControls = () =>
+      page.getByRole("button", { name: "More composer controls", exact: true }).click();
+    await openControls();
+    const heading = page.getByText("Daybreak level", { exact: true });
+    await expect.element(heading).toBeVisible();
+    await expect
+      .element(page.getByRole("menuitem", { name: "Codex review", exact: true }))
+      .not.toBeInTheDocument();
+    const access = page.getByRole("menuitemradio", { name: "Full access", exact: true });
+    const goal = page.getByRole("menuitem", { name: "Goal", exact: true });
+    expect(
+      access.element().compareDocumentPosition(heading.element()) &
+        Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+    expect(
+      heading.element().compareDocumentPosition(goal.element()) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+    await expect
+      .element(page.getByRole("menuitemradio", { name: "Off", exact: true }))
+      .toHaveAttribute("aria-checked", "true");
+    for (const [level, value] of [
+      ["Blue", "daybreakBlue"],
+      ["Red", "daybreakRed"],
+    ] as const) {
+      await page.getByRole("menuitemradio", { name: level, exact: true }).click();
+      await closeComposerControlsWithKeyboard();
+      expect(fixture.composerRef.current?.getSendContext().selectedModelSelection.options).toEqual([
+        { id: "reasoningEffort", value: "high" },
+        { id: "cyberAccessProgram", value },
+      ]);
+      await openControls();
+      await expect
+        .element(page.getByRole("menuitemradio", { name: level, exact: true }))
+        .toHaveAttribute("aria-checked", "true");
+    }
+    await closeComposerControlsWithKeyboard();
+    await fixture.select("codex-work");
+    await openControls();
+    await expect.element(heading).not.toBeInTheDocument();
+    await expect
+      .element(page.getByRole("menuitemradio", { name: "Red", exact: true }))
+      .not.toBeInTheDocument();
+    expect(fixture.onSend).not.toHaveBeenCalled();
+    expect(fixture.onStartCodeReview).not.toHaveBeenCalled();
+  });
+
   it.each(["draft", "server"] as const)(
     "opens Claude account limits from the %s composer before sending a prompt",
     async (routeKind) => {
@@ -839,9 +930,11 @@ describe("provider-specific composer menu actions", () => {
         .not.toBeInTheDocument();
       await waitForTabEntrance();
       await page.getByRole("button", { name: "More composer controls", exact: true }).click();
-      const review = page.getByRole("menuitem", { name: "Codex review", exact: true });
-      await expect.element(review).toBeVisible();
-      await review.click();
+      await expect
+        .element(page.getByRole("menuitem", { name: "Codex review", exact: true }))
+        .not.toBeInTheDocument();
+      await closeComposerControlsWithKeyboard();
+      await page.getByRole("button", { name: "Code review", exact: true }).click();
       await expect.element(page.getByRole("menu")).not.toBeInTheDocument();
       await expect
         .element(page.getByRole("dialog", { name: "Start a Codex review" }))
@@ -902,11 +995,8 @@ describe("provider-specific composer menu actions", () => {
       await closeComposerControlsWithKeyboard();
     }
     await fixture.select("codex");
-    const trigger = page.getByRole("button", { name: "More composer controls", exact: true });
-    // Keyboard activation must open the same menu without submitting the draft.
-    trigger.element().focus();
-    await userEvent.keyboard("{Enter}");
-    const review = page.getByRole("menuitem", { name: "Codex review", exact: true });
+    const review = page.getByRole("button", { name: "Code review", exact: true });
+    // Keyboard activation still opens review from its dedicated tab.
     await expect.element(review).toBeVisible();
     review.element().focus();
     await userEvent.keyboard("{Enter}");
@@ -920,8 +1010,7 @@ describe("provider-specific composer menu actions", () => {
     "invalidates an open dialog when another pane selects %s",
     async (id) => {
       await using fixture = await mountComposer(1100);
-      await page.getByRole("button", { name: "More composer controls", exact: true }).click();
-      await page.getByRole("menuitem", { name: "Codex review", exact: true }).click();
+      await page.getByRole("button", { name: "Code review", exact: true }).click();
       await page.getByRole("combobox", { name: "Review target" }).click();
       await page.getByRole("option", { name: "Custom instructions", exact: true }).click();
       await page
@@ -938,8 +1027,7 @@ describe("provider-specific composer menu actions", () => {
       await expect.element(page.getByRole("dialog")).not.toBeInTheDocument();
       expect(fixture.onStartCodeReview).not.toHaveBeenCalled();
       await fixture.select("codex");
-      await page.getByRole("button", { name: "More composer controls", exact: true }).click();
-      await page.getByRole("menuitem", { name: "Codex review", exact: true }).click();
+      await page.getByRole("button", { name: "Code review", exact: true }).click();
       await expect
         .element(page.getByRole("combobox", { name: "Review target" }))
         .toHaveTextContent("Uncommitted changes");

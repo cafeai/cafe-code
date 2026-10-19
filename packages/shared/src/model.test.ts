@@ -46,11 +46,12 @@ const codexCaps: ModelCapabilities = createModelCapabilities({
 });
 
 describe("native input capabilities", () => {
-  it("keeps a saved Daybreak On choice across compatible model changes without clearing lost access", () => {
+  it("preserves exact Daybreak levels across model changes, including unavailable choices", () => {
     for (const [saved, advertised, expected] of [
-      ["daybreakBlue", ["standard", "daybreakRed"], "daybreakRed"],
-      ["daybreakRed", ["standard", "daybreakBlue"], "daybreakBlue"],
-      ["daybreakBlue", ["standard", "daybreakBlue", "daybreakRed"], "daybreakRed"],
+      ["daybreakBlue", ["standard", "daybreakRed"], "daybreakBlue"],
+      ["daybreakRed", ["standard", "daybreakBlue"], "daybreakRed"],
+      ["daybreakBlue", ["standard", "daybreakBlue", "daybreakRed"], "daybreakBlue"],
+      ["daybreakRed", ["standard", "daybreakBlue", "daybreakRed"], "daybreakRed"],
       ["daybreakRed", ["standard"], "daybreakRed"],
       ["standard", ["daybreakRed"], "standard"],
     ] as const) {

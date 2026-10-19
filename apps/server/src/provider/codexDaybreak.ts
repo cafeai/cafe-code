@@ -13,28 +13,29 @@ export type CodexCyberAccessProgram = V2TurnStartParams__CyberAccessProgram;
  * Codex 0.159.1/0.162.0 model/list advertises caller-specific accepted programs.
  * Red approval does not make daybreakRed valid on a Blue-only mainline model:
  * https://developers.openai.com/api/docs/guides/daybreak
- * Use the strongest exact advertised choice, never infer access from a slug.
+ * Offer and submit only exact advertised levels, never infer access from a slug.
  */
 export function makeCodexDaybreakDescriptor(
   programs: ReadonlyArray<CodexCyberAccessProgram> | undefined,
 ): SelectProviderOptionDescriptor | undefined {
-  const enabled = programs?.includes("daybreakRed")
-    ? "daybreakRed"
-    : programs?.includes("daybreakBlue")
-      ? "daybreakBlue"
-      : undefined;
-  if (!enabled) return undefined;
+  const levels = (["daybreakBlue", "daybreakRed"] as const).filter((level) =>
+    programs?.includes(level),
+  );
+  if (levels.length === 0) return undefined;
   const canDisable = programs?.includes("standard") === true;
   return {
     id: "cyberAccessProgram",
     label: "Daybreak",
     type: "select",
-    description: canDisable
-      ? `On uses Daybreak ${enabled === "daybreakRed" ? "Red" : "Blue"} for this model.`
-      : "This model requires Daybreak. Choose a Standard-capable model to turn it off.",
+    ...(!canDisable
+      ? {
+          description:
+            "This model requires Daybreak. Choose a Standard-capable model to turn it off.",
+        }
+      : {}),
     options: [
       ...(canDisable ? [{ id: "standard", label: "Off" }] : []),
-      { id: enabled, label: "On" },
+      ...levels.map((id) => ({ id, label: id === "daybreakBlue" ? "Blue" : "Red" })),
     ],
     // Opening a menu must not opt a user in. A program-only model has no
     // Standard choice; leave its selection unset until explicitly selected.
@@ -51,7 +52,7 @@ export function resolveCodexDaybreak(
   const raw = getModelSelectionOptionValue(selection, "cyberAccessProgram");
   if (raw === undefined) return {};
   if (raw !== "standard" && raw !== "daybreakBlue" && raw !== "daybreakRed") {
-    return { error: "The Daybreak setting is invalid. Choose On or Off in model settings." };
+    return { error: "The Daybreak level is invalid. Choose a supported level in model settings." };
   }
   const descriptor = models
     ?.find((model) => model.slug === selection.model)
@@ -60,18 +61,8 @@ export function resolveCodexDaybreak(
   // catalogs. A known program-only model cannot accept this selection.
   if (raw === "standard" && descriptor === undefined) return { cyberAccessProgram: raw };
   if (descriptor?.type === "select") {
-    if (raw === "standard" && descriptor.options.some((option) => option.id === "standard")) {
-      return { cyberAccessProgram: "standard" };
-    }
-    if (raw !== "standard") {
-      // Blue/Red in Cafe's persisted option both mean On. Resolve against the
-      // selected account's current model, including callers with an old draft.
-      const program = descriptor.options.some((option) => option.id === "daybreakRed")
-        ? "daybreakRed"
-        : descriptor.options.some((option) => option.id === "daybreakBlue")
-          ? "daybreakBlue"
-          : undefined;
-      if (program) return { cyberAccessProgram: program };
+    if (descriptor.options.some((option) => option.id === raw)) {
+      return { cyberAccessProgram: raw };
     }
   }
   return {

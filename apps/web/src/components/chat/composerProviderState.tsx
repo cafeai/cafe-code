@@ -48,6 +48,7 @@ type TraitsRenderInput = {
   model: string;
   models: ReadonlyArray<ServerProviderModel>;
   modelOptions: ReadonlyArray<ProviderOptionSelection> | undefined;
+  section?: "model" | "daybreak";
   prompt: string;
   onPromptChange: (prompt: string) => void;
 };
@@ -110,11 +111,12 @@ function renderTraitsControl(
     modelOptions,
     prompt,
     onPromptChange,
+    section = "all",
   } = input;
   const hasTarget = threadRef !== undefined || draftId !== undefined;
   if (
     !hasTarget ||
-    !shouldRenderTraitsControls({ provider, models, model, modelOptions, prompt })
+    !shouldRenderTraitsControls({ provider, models, model, modelOptions, prompt, section })
   ) {
     return null;
   }
@@ -127,6 +129,7 @@ function renderTraitsControl(
       {...(draftId ? { draftId } : {})}
       model={model}
       modelOptions={modelOptions}
+      section={section}
       prompt={prompt}
       onPromptChange={onPromptChange}
     />

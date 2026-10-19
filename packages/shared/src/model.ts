@@ -124,18 +124,6 @@ function resolveDescriptorChoiceValue(
     return trimmed;
   }
   if (
-    descriptor.id === "cyberAccessProgram" &&
-    (trimmed === "daybreakBlue" || trimmed === "daybreakRed")
-  ) {
-    // The saved choice means On. Keep it On when changing models, resolving
-    // Red where advertised and Blue otherwise. Lost access stays invalid.
-    return (
-      descriptor.options.find((option) => option.id === "daybreakRed")?.id ??
-      descriptor.options.find((option) => option.id === "daybreakBlue")?.id ??
-      trimmed
-    );
-  }
-  if (
     descriptor.promptInjectedValues?.includes(trimmed) &&
     descriptor.options.some((option) => option.id === trimmed)
   ) {

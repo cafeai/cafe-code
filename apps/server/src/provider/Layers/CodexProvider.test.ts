@@ -667,14 +667,15 @@ describe("Codex picker model/list refresh", () => {
       currentValue: "standard",
       options: [
         { id: "standard", label: "Off" },
-        { id: "daybreakBlue", label: "On" },
+        { id: "daybreakBlue", label: "Blue" },
       ],
     });
     expect(options("red")).toMatchObject({
       currentValue: "standard",
       options: [
         { id: "standard", label: "Off" },
-        { id: "daybreakRed", label: "On" },
+        { id: "daybreakBlue", label: "Blue" },
+        { id: "daybreakRed", label: "Red" },
       ],
     });
     expect(options("ordinary")).toBeUndefined();
