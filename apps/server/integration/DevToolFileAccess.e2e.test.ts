@@ -1,5 +1,5 @@
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -23,7 +23,7 @@ const { createServer: createViteServer, normalizePath, version: viteVersion } =
   await import(entries.vite);
 const { createVitest, VitestPackageInstaller, version: vitestVersion } = await import(entries.vitest);
 const { playwright } = await import(entries.playwright);
-const fixtureRoot = realpathSync(process.cwd());
+const fixtureRoot = realpathSync.native(process.cwd());
 const servedRoot = join(fixtureRoot, "served");
 mkdirSync(join(servedRoot, ".git"), { recursive: true });
 writeFileSync(join(servedRoot, "package.json"), '{"private":true,"type":"module"}\n');
@@ -311,7 +311,14 @@ it("keeps Vite and multi-project Vitest Browser Mode file denials on real HTTP s
     playwright: pathToFileURL(webRequire.resolve("@vitest/browser-playwright")).href,
     browserProviderVersion,
   };
-  const fixtureTemp = mkdtempSync(join(tmpdir(), "cafe-dev-tool-file-access-"));
+  // Windows runner TEMP can contain an 8.3 alias such as RUNNER~1. Vite
+  // deliberately refuses short-name paths even inside fs.allow. Resolve our
+  // freshly owned directory through the OS before deriving any fixture roots,
+  // so the allowed controls exercise canonical paths without weakening that
+  // denial or changing the real servers' admission rules.
+  const fixtureTemp = realpathSync.native(
+    mkdtempSync(join(tmpdir(), "cafe-dev-tool-file-access-")),
+  );
   const fixtureScript = join(fixtureTemp, "qualify.mjs");
   const fixtureEnvironment: Record<string, string> = {
     PATH: process.env.PATH ?? "",
