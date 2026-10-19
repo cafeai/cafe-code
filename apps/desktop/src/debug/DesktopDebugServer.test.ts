@@ -334,6 +334,187 @@ describe("Daemon-local qualification debug summary", () => {
   });
 });
 
+describe("Content-free failed-root retirement refusal debug summary", () => {
+  const failure = (overrides: Record<string, unknown> = {}): Record<string, unknown> => ({
+    method: "sendTurn",
+    failedRootRetirementRefusal: "notifications-pending",
+    failedAt: "2026-10-19T04:00:00.000Z",
+    durationMs: 12.5,
+    ...overrides,
+  });
+  const projectRpc = (rpc: unknown): Record<string, unknown> | null => {
+    debugServer.reset();
+    debugServer.publishProviderDaemonSnapshot({ lastHealth: { rpc } });
+    const daemon = debugServer.buildCompactDebugSnapshot().providerDaemon as Record<
+      string,
+      unknown
+    >;
+    return (daemon.lastHealth as Record<string, unknown>).rpc as Record<string, unknown> | null;
+  };
+  const projectFailures = (recentFailures: unknown): Record<string, unknown> => {
+    const rpc = projectRpc({ totalRpcCount: 8, lastRpcMethod: "sendTurn", recentFailures });
+    assert.isNotNull(rpc);
+    return rpc!;
+  };
+
+  it("retains one newest received typed refusal and omits error bodies and private ownership", () => {
+    const older = failure({ failedAt: "2026-10-19T04:00:10.000Z", durationMs: 99 });
+    const newest = failure({
+      failedAt: "2026-10-19T03:59:59.000Z",
+      failedRootRetirementRefusal: "root-proof-changed",
+      commandId: "PRIVATE_COMMAND",
+      nativeSessionId: "PRIVATE_SESSION",
+      message: "PRIVATE_PROVIDER_ERROR",
+      diagnostics: { input: "PRIVATE_PROMPT", ownerPath: "/PRIVATE_OWNER_PATH" },
+    });
+    const rpc = projectFailures([older, newest]);
+    assert.equal(rpc.totalRpcCount, 8);
+    assert.equal(rpc.lastRpcMethod, "sendTurn");
+    assert.equal(rpc.recentFailureCount, 2);
+    // Received order, not wall-clock sorting, identifies the latest receipt.
+    assert.deepEqual(rpc.latestFailedRootRetirementRefusal, {
+      reason: "root-proof-changed",
+      method: "sendTurn",
+      failedAt: "2026-10-19T03:59:59.000Z",
+      durationMs: 12.5,
+    });
+    assert.notInclude(JSON.stringify(rpc), "PRIVATE_");
+  });
+
+  it("omits legacy, unknown, foreign-method and malformed refusal observations", () => {
+    const invalid = [
+      { failedRootRetirementRefusal: undefined },
+      { failedRootRetirementRefusal: "PRIVATE_UNKNOWN_REASON" },
+      { method: "stopSession" },
+      { method: undefined },
+      { failedAt: "2026-10-19T04:00:00Z" },
+      { failedAt: "2026-02-31T04:00:00.000Z" },
+      { failedAt: "PRIVATE_TIMESTAMP" },
+      ...[
+        undefined,
+        null,
+        "12",
+        -1,
+        Number.NaN,
+        Number.POSITIVE_INFINITY,
+        Number.MAX_SAFE_INTEGER + 1,
+      ].map((durationMs) => ({ durationMs })),
+    ];
+    for (const override of invalid) {
+      const rpc = projectFailures([failure(override)]);
+      assert.equal(rpc.recentFailureCount, 1);
+      assert.isFalse(Object.hasOwn(rpc, "latestFailedRootRetirementRefusal"));
+      assert.notInclude(JSON.stringify(rpc), "PRIVATE_");
+    }
+    const legacy = projectRpc({ totalRpcCount: 1 });
+    assert.equal(legacy!.recentFailureCount, 0);
+    assert.isFalse(Object.hasOwn(legacy!, "latestFailedRootRetirementRefusal"));
+    assert.isFalse(Object.hasOwn(projectFailures(null), "latestFailedRootRetirementRefusal"));
+    const inherited = projectFailures([Object.create(failure())]);
+    assert.equal(inherited.recentFailureCount, 1);
+    assert.isFalse(Object.hasOwn(inherited, "latestFailedRootRetirementRefusal"));
+  });
+
+  it("never executes received getters at the RPC, array or failure-field boundaries", () => {
+    let getterReads = 0;
+    const get = () => {
+      getterReads += 1;
+      throw new Error("PRIVATE_GETTER");
+    };
+    for (const key of ["method", "failedRootRetirementRefusal", "failedAt", "durationMs"]) {
+      const accessor = failure();
+      Object.defineProperty(accessor, key, { get });
+      assert.isFalse(
+        Object.hasOwn(projectFailures([accessor]), "latestFailedRootRetirementRefusal"),
+      );
+    }
+    const arrayAccessor = [failure()];
+    Object.defineProperty(arrayAccessor, "0", { get });
+    assert.isFalse(
+      Object.hasOwn(projectFailures(arrayAccessor), "latestFailedRootRetirementRefusal"),
+    );
+    const rpcAccessor: Record<string, unknown> = { totalRpcCount: 3 };
+    Object.defineProperty(rpcAccessor, "recentFailures", { get });
+    Object.defineProperty(rpcAccessor, "lastRpcMethod", { get });
+    const rpc = projectRpc(rpcAccessor)!;
+    assert.equal(rpc.totalRpcCount, 3);
+    assert.isNull(rpc.lastRpcMethod);
+    assert.equal(rpc.recentFailureCount, 0);
+    assert.isFalse(Object.hasOwn(rpc, "latestFailedRootRetirementRefusal"));
+    const healthAccessor = {};
+    Object.defineProperty(healthAccessor, "rpc", { get });
+    debugServer.reset();
+    debugServer.publishProviderDaemonSnapshot({ lastHealth: healthAccessor });
+    const daemon = debugServer.buildCompactDebugSnapshot().providerDaemon as Record<
+      string,
+      unknown
+    >;
+    assert.isNull((daemon.lastHealth as Record<string, unknown>).rpc);
+    assert.equal(getterReads, 0);
+  });
+
+  it("rejects proxy RPC records, failure arrays and entries without invoking traps", () => {
+    let trapCalls = 0;
+    const traps = {
+      get() {
+        trapCalls += 1;
+        throw new Error("PRIVATE_GET_TRAP");
+      },
+      getOwnPropertyDescriptor() {
+        trapCalls += 1;
+        throw new Error("PRIVATE_DESCRIPTOR_TRAP");
+      },
+      getPrototypeOf() {
+        trapCalls += 1;
+        throw new Error("PRIVATE_PROTOTYPE_TRAP");
+      },
+    };
+    assert.isNull(projectRpc(new Proxy({ recentFailures: [failure()] }, traps)));
+    const revokedRpc = Proxy.revocable({ recentFailures: [failure()] }, traps);
+    revokedRpc.revoke();
+    assert.isNull(projectRpc(revokedRpc.proxy));
+    const arrayRpc = projectFailures(new Proxy([failure()], traps));
+    assert.equal(arrayRpc.recentFailureCount, 0);
+    assert.isFalse(Object.hasOwn(arrayRpc, "latestFailedRootRetirementRefusal"));
+    assert.isFalse(
+      Object.hasOwn(
+        projectFailures([new Proxy(failure(), traps)]),
+        "latestFailedRootRetirementRefusal",
+      ),
+    );
+    const revoked = Proxy.revocable([failure()], traps);
+    revoked.revoke();
+    assert.equal(projectFailures(revoked.proxy).recentFailureCount, 0);
+    const revokedFailure = Proxy.revocable(failure(), traps);
+    revokedFailure.revoke();
+    assert.isFalse(
+      Object.hasOwn(projectFailures([revokedFailure.proxy]), "latestFailedRootRetirementRefusal"),
+    );
+    assert.equal(trapCalls, 0);
+  });
+
+  it("inspects only the twenty newest received failures and returns at most one refusal", () => {
+    const recentFailures = Array.from({ length: 21 }, () => ({}) as Record<string, unknown>);
+    recentFailures[0] = failure({ failedRootRetirementRefusal: "owner-changed" });
+    const outsideWindow = projectFailures(recentFailures);
+    assert.equal(outsideWindow.recentFailureCount, 21);
+    assert.isFalse(Object.hasOwn(outsideWindow, "latestFailedRootRetirementRefusal"));
+    recentFailures[1] = failure({ failedRootRetirementRefusal: "compaction-pending" });
+    assert.equal(
+      (projectFailures(recentFailures).latestFailedRootRetirementRefusal as Record<string, unknown>)
+        .reason,
+      "compaction-pending",
+    );
+    recentFailures[20] = failure({ failedRootRetirementRefusal: "closed" });
+    assert.deepEqual(projectFailures(recentFailures).latestFailedRootRetirementRefusal, {
+      reason: "closed",
+      method: "sendTurn",
+      failedAt: "2026-10-19T04:00:00.000Z",
+      durationMs: 12.5,
+    });
+  });
+});
+
 const makeLargeRendererSnapshot = (index: number) => ({
   debugSnapshotVersion: 50,
   source: "test",

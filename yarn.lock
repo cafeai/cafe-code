@@ -776,7 +776,7 @@ __metadata:
     "@effect/language-service": "catalog:"
     "@fontsource-variable/dm-sans": "npm:5.3.0"
     "@formkit/auto-animate": "npm:^0.10.0"
-    "@legendapp/list": "npm:3.0.0-beta.44"
+    "@legendapp/list": "patch:@legendapp/list@npm%3A3.0.0-beta.44#~/.yarn/patches/@legendapp-list-npm-3.0.0-beta.44-3d8b008deb.patch"
     "@lexical/react": "npm:^0.41.0"
     "@noble/hashes": "npm:2.4.0"
     "@pierre/diffs": "catalog:"
@@ -1433,6 +1433,22 @@ __metadata:
     react-native:
       optional: true
   checksum: 10c0/1a34db4ed02fdca87cc31a752ad6f651c6052cd11521bf1afe6c688fe0093bad645e8732a04b02355581849d88cadcad540ad60ec6640e27153c4a82516d01ff
+  languageName: node
+  linkType: hard
+
+"@legendapp/list@patch:@legendapp/list@npm%3A3.0.0-beta.44#~/.yarn/patches/@legendapp-list-npm-3.0.0-beta.44-3d8b008deb.patch":
+  version: 3.0.0-beta.44
+  resolution: "@legendapp/list@patch:@legendapp/list@npm%3A3.0.0-beta.44#~/.yarn/patches/@legendapp-list-npm-3.0.0-beta.44-3d8b008deb.patch::version=3.0.0-beta.44&hash=00638d"
+  dependencies:
+    use-sync-external-store: "npm:^1.5.0"
+  peerDependencies:
+    react: "*"
+  peerDependenciesMeta:
+    react-dom:
+      optional: true
+    react-native:
+      optional: true
+  checksum: 10c0/275c47b10d7df8edbbd5c04ddabda18354cb219e6452a8bd113bb0ec98bd3a31d60b189dcec40af2abc4c41d6b91b89142dd69f08318e462062ac33356b0b009
   languageName: node
   linkType: hard
 

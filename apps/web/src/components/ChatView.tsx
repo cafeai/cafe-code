@@ -8465,7 +8465,7 @@ export default function ChatView(props: ChatViewProps) {
           <ProviderStatusBanner status={activeProviderStatus} />
           {/* Messages Wrapper */}
           <div className="relative flex min-h-0 flex-1 flex-col">
-            {visualizations.hasOlder || visualizations.failed || visualizations.reviewingOlder ? (
+            {visualizations.failed ? (
               <div className="flex shrink-0 items-center justify-center gap-2 py-1 text-xs text-muted-foreground">
                 {visualizations.failed ? (
                   <>
@@ -8482,27 +8482,13 @@ export default function ChatView(props: ChatViewProps) {
                     </Button>
                   </>
                 ) : null}
-                {visualizations.hasOlder ? (
-                  <Button
-                    size="sm"
-                    variant="ghost"
-                    disabled={visualizations.loading}
-                    onClick={visualizations.loadOlder}
-                  >
-                    {uiText("Load older visualizations", undefined, undefined, uiLocale)}
-                  </Button>
-                ) : null}
-                {visualizations.reviewingOlder ? (
-                  <Button size="sm" variant="ghost" onClick={visualizations.returnToLatest}>
-                    {uiText("Return to latest", undefined, undefined, uiLocale)}
-                  </Button>
-                ) : null}
               </div>
             ) : null}
             {/* Messages — LegendList handles virtualization and scrolling internally */}
             <MessagesTimeline
               visualizationPane={visualizationPane}
               visualizationRuntimeMode={isServerThread ? serverThread.runtimeMode : null}
+              onVisualizationHistoryViewport={visualizations.observeViewport}
               key={activeThread.id}
               {...(pane.visible && scheduledFollowupsContext
                 ? { scheduledFollowups: scheduledFollowupsContext }

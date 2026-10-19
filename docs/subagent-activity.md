@@ -4,6 +4,13 @@ Select a subagent in Tasks or Atrium to open its detail. Cafe shows its saved as
 progress and status, available public messages, and an **Activity** section for
 verified Codex and Claude histories.
 
+Current native child-work updates reach both the chat timeline and Tasks.
+The subscription hub and WebSocket shell delivery share one event-admission policy,
+including starts, progress, completion and background/ambient retractions. An active
+child no longer needs an unrelated root/session event to refresh the sidebar count.
+Forwarding an observation does not make it current: replaced/stopped runtimes,
+unbound work and historical “Working” rows still cannot establish live ownership.
+
 Ordinary **Provider tasks** in the Tasks popover and docked rail use the owning
 subagent's same local avatar when the admitted source and current native runtime
 are known. Root rows leave the icon slot empty. Legacy, malformed, stale or

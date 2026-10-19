@@ -8,7 +8,6 @@ import {
   PROVIDER_PIPELINE_POLICY,
 } from "@cafecode/shared/providerPipelinePolicy";
 import { setProviderSubscriptionDiagnostics } from "@cafecode/shared/providerPipelineDiagnostics";
-import { readLiveWorkObservation } from "@cafecode/shared/liveWork";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Option from "effect/Option";
@@ -19,6 +18,7 @@ import * as Stream from "effect/Stream";
 
 import type { OrchestrationEngineShape } from "./OrchestrationEngine.ts";
 import { classifyOutboundOrchestrationEvent } from "../outboundEventPolicy.ts";
+import { doesOrchestrationEventAffectShell } from "../shellEventPolicy.ts";
 
 export type OrchestrationSubscriptionRoute =
   | { readonly kind: "shell" }
@@ -104,22 +104,6 @@ function isThreadDetailEvent(event: OrchestrationEvent): boolean {
   );
 }
 
-function doesActivityAffectShell(event: OrchestrationEvent): boolean {
-  if (event.type !== "thread.activity-appended") return true;
-  if (readLiveWorkObservation(event.payload.activity)) return true;
-  switch (event.payload.activity.kind) {
-    case "approval.requested":
-    case "approval.resolved":
-    case "provider.approval.respond.failed":
-    case "user-input.requested":
-    case "user-input.resolved":
-    case "provider.user-input.respond.failed":
-      return true;
-    default:
-      return false;
-  }
-}
-
 function eventMatchesRoute(
   event: OrchestrationEvent,
   route: OrchestrationSubscriptionRoute,
@@ -138,7 +122,7 @@ function eventMatchesRoute(
   ) {
     return false;
   }
-  return doesActivityAffectShell(event);
+  return doesOrchestrationEventAffectShell(event);
 }
 
 function subscriptionError(): OrchestrationGetSnapshotError {

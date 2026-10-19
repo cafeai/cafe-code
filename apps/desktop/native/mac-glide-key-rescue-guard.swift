@@ -139,6 +139,9 @@ final class GlideKeyRescueGuard: @unchecked Sendable {
   // keyboard tap run loop and the caller's original absolute deadline. A late
   // native creation is invalidated before it can enter the admitted stream set.
   func prepareAuxiliary(proof: BackgroundIncomingFocusProofPolicy.Proof, before deadline: UInt64) -> AuxiliaryPreparation? {
+    // Bind the immutable owner before either closure captures it. A later local
+    // binding shadows the stored property throughout this method in Swift.
+    let state = self.state
     guard DispatchTime.now().uptimeNanoseconds < deadline else { return nil }
     let request = AuxiliaryRequest(proof: proof, deadline: deadline)
     state.lock.lock()
@@ -152,7 +155,6 @@ final class GlideKeyRescueGuard: @unchecked Sendable {
     }
     guard state.processes.count < 3 else { state.lock.unlock(); return nil }
     state.lock.unlock()
-    let state = self.state
     CFRunLoopPerformBlock(loop, CFRunLoopMode.commonModes.rawValue) {
       defer { request.completed.signal() }
       request.lock.lock()

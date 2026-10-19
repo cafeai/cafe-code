@@ -2,11 +2,15 @@ import "../../index.css";
 import {
   EnvironmentId,
   MessageId,
+  ProviderDriverKind,
   ThreadId,
   TurnId,
   type EnvironmentApi,
 } from "@cafecode/contracts";
-import type { VisualizationTimelineEntry } from "@cafecode/contracts/visualizationApi";
+import type {
+  VisualizationListResult,
+  VisualizationTimelineEntry,
+} from "@cafecode/contracts/visualizationApi";
 import {
   GeneratedVisualizationReference,
   VisualizationArtifactId,
@@ -14,16 +18,25 @@ import {
 } from "@cafecode/contracts/visualizations";
 import * as Schema from "effect/Schema";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { page, userEvent } from "vitest/browser";
+import { cdp, page, userEvent } from "vitest/browser";
 import { render } from "vitest-browser-react";
-import { useLayoutEffect, useState } from "react";
-import { uiText } from "@cafecode/shared/i18n";
+import {
+  createRef,
+  useCallback,
+  useLayoutEffect,
+  useMemo,
+  useState,
+  type ComponentProps,
+} from "react";
+import type { LegendListRef } from "@legendapp/list/react";
+import { MessagesTimeline } from "../chat/MessagesTimeline";
 import {
   __resetEnvironmentApiOverridesForTests,
   __setEnvironmentApiOverrideForTests,
 } from "../../environmentApi";
 import { useThreadVisualizations } from "./useThreadVisualizations";
 import { visualizationEntryIdentity } from "./visualizationEntryIdentity";
+import type { VisualizationHistoryViewport } from "./visualizationHistoryController";
 import {
   acquireVisualizationPoster,
   readVisualizationPosterAccounting,
@@ -75,643 +88,403 @@ function deferred<Value>() {
   });
   return { promise, resolve, reject };
 }
-afterEach(() => {
-  __resetEnvironmentApiOverridesForTests();
-  vi.mocked(fileRequest).mockReset();
+const historyCleanups = new Set<() => Promise<void>>();
+afterEach(async () => {
+  try {
+    for (const cleanup of historyCleanups) await cleanup();
+  } finally {
+    historyCleanups.clear();
+    __resetEnvironmentApiOverridesForTests();
+    vi.mocked(fileRequest).mockReset();
+  }
 });
 
-/** A bounded received-page fixture; no private source or native host is started. */
-function historyValues(count: number): VisualizationTimelineEntry[] {
-  return Array.from({ length: count }, (_, index) => ({
+type TimelineProps = ComponentProps<typeof MessagesTimeline>;
+const ignore = () => undefined;
+const emptyReverts = new Map<MessageId, number>();
+const time = (seconds: number) => new Date(Date.UTC(2026, 9, 12, 0, 0, seconds)).toISOString();
+function historyValue(index: number, seconds: number): VisualizationTimelineEntry {
+  return {
     ...entry,
-    messageId: MessageId.make(`archive-message-${index + 1}`),
-    turnId: TurnId.make(`archive-turn-${index + 1}`),
-    originItemId: `archive-origin-${index + 1}`,
-    // Some oldest stored rows have newer display timestamps. Retention must
-    // still follow exact page admission rather than trust this presentation.
-    occurredAt: new Date(
-      Date.UTC(2026, 9, 12, 0, 0, index < 20 ? count + index : index),
-    ).toISOString(),
+    messageId: MessageId.make(`history-message-${index}`),
+    originItemId: `history-call-${index}`,
+    occurredAt: time(seconds),
     reference: {
       ...entry.reference,
       revisionId: VisualizationRevisionId.make(
-        `60000000-0000-4000-8000-${String(index + 1).padStart(12, "0")}`,
+        `60000000-0000-4000-8000-${String(index).padStart(12, "0")}`,
       ),
+      title: `Historical chart ${index}`,
     },
-  }));
-}
-
-function archivePage(values: readonly VisualizationTimelineEntry[], before = values.length + 1) {
-  const last = Math.min(values.length, before - 1);
-  const first = Math.max(1, last - 49);
-  return {
-    entries: values.slice(first - 1, last).toReversed(),
-    ...(first > 1
-      ? { nextCursor: `70000000-0000-4000-8000-${String(first).padStart(12, "0")}` }
-      : {}),
   };
 }
-
-function HistoryReviewFixture({
+function AutomaticHistoryFixture({
+  listRef,
+  onObserve,
+  onInitialLoad,
+  onHistoryViewport,
+}: {
+  listRef: TimelineProps["listRef"];
+  onObserve: (result: ReturnType<typeof useThreadVisualizations>) => void;
+  onInitialLoad: () => void;
+  onHistoryViewport: (value: VisualizationHistoryViewport) => void;
+}) {
+  const result = useThreadVisualizations(environmentId, threadId, true, "initial");
+  const [following, setFollowing] = useState(true);
+  const stopFollowing = useCallback(() => setFollowing(false), []);
+  const observeViewport = useCallback(
+    (value: VisualizationHistoryViewport) => {
+      onHistoryViewport(value);
+      result.observeViewport(value);
+    },
+    [onHistoryViewport, result.observeViewport],
+  );
+  useLayoutEffect(() => onObserve(result), [onObserve, result]);
+  const entries = useMemo<TimelineProps["timelineEntries"]>(
+    () =>
+      [
+        ...Array.from({ length: 40 }, (_, index) => ({
+          id: `visible-message-${index}`,
+          kind: "message" as const,
+          createdAt: index === 1 ? time(index * 10).replace(".000Z", "Z") : time(index * 10),
+          message: {
+            id: MessageId.make(`visible-message-${index}`),
+            // This is ordinary uncollapsed assistant content. A long user
+            // message deliberately collapses in production and cannot prove
+            // that its next chronological row is outside the viewport.
+            role: index === 1 ? ("assistant" as const) : ("user" as const),
+            text:
+              index === 1
+                ? `Historical long message\n\n${Array.from({ length: 24 }, (_, line) => `Retained historical paragraph ${line}.`).join("\n\n")}`
+                : `Historical message ${index}\nThe actual conversation owns scrolling.`,
+            createdAt: time(index * 10),
+            streaming: false,
+          },
+        })),
+        ...result.entries.map((value) => ({
+          id: `visualization:${visualizationEntryIdentity(value)}`,
+          kind: "visualization" as const,
+          createdAt: value.occurredAt,
+          visualization: value,
+        })),
+      ].toSorted((a, b) => a.createdAt.localeCompare(b.createdAt)),
+    [result.entries],
+  );
+  return (
+    <div className="h-full min-h-0" data-history-following={following}>
+      <MessagesTimeline
+        activeThreadId={threadId}
+        activeThreadEnvironmentId={environmentId}
+        activeProvider={ProviderDriverKind.make("codex")}
+        activeTurnId={null}
+        activeTurnInProgress={false}
+        activeTurnStartedAt={null}
+        autoFollowTail={following}
+        completionDividerAfterEntryId={null}
+        completionSummary={null}
+        isRevertingCheckpoint={false}
+        isWorking={false}
+        listRef={listRef}
+        markdownCwd={undefined}
+        onImageExpand={ignore}
+        onIsAtEndChange={ignore}
+        onRevertUserMessage={ignore}
+        onUserScrollIntent={stopFollowing}
+        onVisualizationHistoryViewport={observeViewport}
+        onDebugScrollEvent={(event) => {
+          if (event.reason === "initial-list-load") onInitialLoad();
+        }}
+        revertTurnCountByUserMessageId={emptyReverts}
+        stickToEndRevision={0}
+        timelineEntries={entries}
+        timestampFormat="24-hour"
+        workspaceRoot={undefined}
+      />
+    </div>
+  );
+}
+/** Trusted native wheel input; the existing provider-owned desktop context is unchanged. */
+async function wheel(scroller: HTMLElement, deltaY: number) {
+  const bounds = scroller.getBoundingClientRect();
+  let x = bounds.left + bounds.width / 2,
+    y = bounds.top + Math.min(bounds.height / 2, 100);
+  let frame = window.frameElement;
+  while (frame) {
+    const element = frame as HTMLElement,
+      rect = element.getBoundingClientRect();
+    x = rect.left + (x + element.clientLeft) * (rect.width / element.offsetWidth);
+    y = rect.top + (y + element.clientTop) * (rect.height / element.offsetHeight);
+    frame = frame.ownerDocument.defaultView?.frameElement ?? null;
+  }
+  await cdp().send("Input.dispatchMouseEvent", { type: "mouseMoved", x, y });
+  await cdp().send("Input.dispatchMouseEvent", { type: "mouseWheel", x, y, deltaX: 0, deltaY });
+}
+function HookFixture({
   onObserve,
 }: {
   onObserve: (result: ReturnType<typeof useThreadVisualizations>) => void;
 }) {
-  const [revision, setRevision] = useState(0);
-  const result = useThreadVisualizations(environmentId, threadId, true, String(revision));
+  const [revision, setRevision] = useState(0),
+    [thread, setThread] = useState(threadId);
+  const result = useThreadVisualizations(environmentId, thread, true, String(revision));
   useLayoutEffect(() => {
     onObserve(result);
   });
   return (
     <>
-      <button disabled={result.loading} onClick={result.loadOlder}>
-        Load older archive
-      </button>
       <button onClick={() => setRevision((value) => value + 1)}>New live event</button>
-      {result.reviewingOlder ? (
-        <button onClick={result.returnToLatest}>{uiText("Return to latest")}</button>
-      ) : null}
+      <button onClick={() => setThread(ThreadId.make("replacement-history-chat"))}>
+        Switch chat
+      </button>
       {result.failed ? <button onClick={result.refresh}>Retry archive</button> : null}
-      <output
-        data-review-mode={result.reviewingOlder}
-        data-reference-count={result.entries.length}
-      />
+      <output>{result.entries.map((value) => value.reference.title).join(",")}</output>
     </>
   );
 }
 
-describe("durable compact visualization history", () => {
-  it("makes every stored page reachable through a capped older-review window and explicit return to latest", async () => {
+describe("automatic compact visualization history", () => {
+  it("loads an older chart at its chronological location after native scroll, including publication during a long message", async () => {
     const api = installApi();
-    const values = historyValues(1_300);
-    let published = 1_250;
-    api.list.mockImplementation(async (input) =>
-      archivePage(
-        values.slice(0, published),
-        input.cursor ? Number(input.cursor.slice(-12)) : undefined,
-      ),
-    );
-    let observed: ReturnType<typeof useThreadVisualizations> | undefined;
-    let peakReferences = 0;
-    const started = performance.now();
-    const view = await render(
-      <HistoryReviewFixture
-        onObserve={(result) => {
-          observed = result;
-          peakReferences = Math.max(peakReferences, result.entries.length);
+    const old = historyValue(1, 15);
+    const values = [
+      old,
+      ...Array.from({ length: 50 }, (_, index) => historyValue(index + 2, 100 + index * 6)),
+    ];
+    const heldSeek = deferred<VisualizationListResult>();
+    let heldPage: VisualizationListResult | undefined;
+    api.list.mockImplementation(async (input) => {
+      const selected = values
+        .filter((value) => !input.atOrBefore || value.occurredAt <= input.atOrBefore)
+        .toReversed();
+      const page = {
+        entries: selected.slice(0, 50),
+        ...(selected.length > 50 ? { nextCursor: "70000000-0000-4000-8000-000000000001" } : {}),
+      };
+      if (input.atOrBefore !== undefined && heldPage === undefined) {
+        heldPage = page;
+        return heldSeek.promise;
+      }
+      return page;
+    });
+    const host = document.createElement("div");
+    host.style.width = "min(760px, 100vw)";
+    host.style.height = "360px";
+    const listRef = createRef<LegendListRef>();
+    let observed: ReturnType<typeof useThreadVisualizations> | undefined,
+      loaded = false,
+      reviewing = false,
+      receivedLongInterval = false;
+    let rendering: ReturnType<typeof render> | undefined;
+    let cleanupPromise: Promise<void> | undefined;
+    const cleanup = () =>
+      (cleanupPromise ??= (async () => {
+        try {
+          const view = await rendering;
+          await view?.unmount();
+        } finally {
+          heldSeek.resolve(heldPage ?? { entries: [] });
+          host.remove();
+        }
+      })());
+    // Own the held response and native render before either append/await. A
+    // hard test timeout must not leak a pending reader into the next fixture.
+    historyCleanups.add(cleanup);
+    document.body.append(host);
+    rendering = render(
+      <AutomaticHistoryFixture
+        listRef={listRef}
+        onObserve={(value) => {
+          observed = value;
+        }}
+        onInitialLoad={() => {
+          loaded = true;
+        }}
+        onHistoryViewport={(value) => {
+          if (
+            reviewing &&
+            value.oldestAt <= time(10) &&
+            value.newestAt === time(20) &&
+            value.visibleEntryKeys.length === 0
+          )
+            receivedLongInterval = true;
         }}
       />,
+      { container: host },
     );
     try {
-      await vi.waitFor(() => expect(observed?.entries).toHaveLength(50));
-      for (let pageIndex = 1; pageIndex < 20; pageIndex += 1) {
-        await userEvent.click(
-          page.getByRole("button", { name: "Load older archive", exact: true }),
+      await rendering;
+      await vi.waitFor(() => {
+        expect(loaded).toBe(true);
+        expect(observed?.entries).toHaveLength(50);
+        expect(observed?.loading).toBe(false);
+        const scroller = listRef.current?.getScrollableNode();
+        expect(scroller).toBeInstanceOf(HTMLElement);
+        expect(
+          scroller!.scrollHeight - scroller!.clientHeight - scroller!.scrollTop,
+        ).toBeLessThanOrEqual(2);
+      });
+      const scroller = listRef.current!.getScrollableNode()!;
+      const beforeReviewCalls = api.list.mock.calls.length;
+      reviewing = true;
+      await wheel(scroller, -1_000_000);
+      await vi.waitFor(() => {
+        expect(heldPage).toBeDefined();
+        expect(receivedLongInterval).toBe(true);
+        const viewport = scroller.getBoundingClientRect();
+        const long = host.querySelector<HTMLElement>('[data-timeline-row-id="visible-message-1"]');
+        expect(long).not.toBeNull();
+        const bounds = long!.getBoundingClientRect();
+        expect(bounds.bottom > viewport.top && bounds.top < viewport.bottom).toBe(true);
+        const next = host
+          .querySelector<HTMLElement>('[data-timeline-row-id="visible-message-2"]')
+          ?.getBoundingClientRect();
+        expect(!next || next.bottom <= viewport.top || next.top >= viewport.bottom).toBe(true);
+      });
+      // Admit the exact owned response only after the real list reports the
+      // long-message interval [10s,20s]. The 15s publication lies inside it;
+      // a start-time-only policy cannot produce this observed upper boundary.
+      // Transitional native measurements may have sought a wider valid edge.
+      heldSeek.resolve(heldPage!);
+      await vi.waitFor(() =>
+        expect(observed?.entries.some((value) => value.originItemId === old.originItemId)).toBe(
+          true,
+        ),
+      );
+      const seekCalls = api.list.mock.calls.slice(beforeReviewCalls);
+      expect(seekCalls.length).toBeGreaterThanOrEqual(1);
+      expect(seekCalls.length).toBeLessThanOrEqual(2);
+      expect(seekCalls.every(([input]) => input.atOrBefore !== undefined)).toBe(true);
+      expect(api.list.mock.calls.every(([input]) => input.cursor === undefined)).toBe(true);
+      const rows = listRef.current!.getState().data;
+      const oldIndex = rows.findIndex(
+        (row) => row.id === `visualization:${visualizationEntryIdentity(old)}`,
+      );
+      expect(oldIndex).toBeGreaterThan(rows.findIndex((row) => row.id === "visible-message-1"));
+      expect(oldIndex).toBeLessThan(rows.findIndex((row) => row.id === "visible-message-2"));
+      expect(
+        host.querySelector("[data-history-following]")?.getAttribute("data-history-following"),
+      ).toBe("false");
+      const long = host.querySelector<HTMLElement>('[data-timeline-row-id="visible-message-1"]');
+      expect(long).not.toBeNull();
+      // Use native wheel input past the actual long row, not a fixed amount
+      // which silently assumes typography or the collapsed user-message size.
+      await wheel(
+        scroller,
+        long!.getBoundingClientRect().bottom - scroller.getBoundingClientRect().top,
+      );
+      await vi.waitFor(() => {
+        const row = [...host.querySelectorAll<HTMLElement>("[data-timeline-row-id]")].find(
+          (node) =>
+            node.dataset.timelineRowId === `visualization:${visualizationEntryIdentity(old)}`,
         );
-        await vi.waitFor(() => expect(observed?.entries).toHaveLength((pageIndex + 1) * 50));
-      }
-      expect(observed?.hasOlder).toBe(true);
-      const retainedOverlap = observed!.entries.find(
-        (value) => value.originItemId === "archive-origin-500",
-      );
-      for (let pageIndex = 0; pageIndex < 5; pageIndex += 1) {
-        const calls = api.list.mock.calls.length + 1;
-        await userEvent.click(
-          page.getByRole("button", { name: "Load older archive", exact: true }),
-        );
-        await vi.waitFor(() => expect(api.list).toHaveBeenCalledTimes(calls));
-        await vi.waitFor(() => expect(observed?.loading).toBe(false));
-        expect(observed?.entries).toHaveLength(1_000);
-        expect(observed?.reviewingOlder).toBe(true);
-      }
-      expect(new Set(observed!.entries.map(visualizationEntryIdentity))).toEqual(
-        new Set(values.slice(0, 1_000).map(visualizationEntryIdentity)),
-      );
-      expect(observed?.entries.find((value) => value.originItemId === "archive-origin-500")).toBe(
-        retainedOverlap,
-      );
-      expect(observed?.hasOlder).toBe(false);
-      await expect
-        .element(page.getByRole("button", { name: "Return to latest", exact: true }))
-        .toBeVisible();
-      const reviewed = observed!.entries;
-      published = 1_300;
-      for (let event = 0; event < 3; event += 1)
-        await userEvent.click(page.getByRole("button", { name: "New live event", exact: true }));
-      expect(api.list).toHaveBeenCalledTimes(25);
-      expect(observed?.entries).toBe(reviewed);
-      await userEvent.click(page.getByRole("button", { name: "Return to latest", exact: true }));
-      await vi.waitFor(() => expect(observed?.entries).toHaveLength(50));
-      expect(new Set(observed!.entries.map(visualizationEntryIdentity))).toEqual(
-        new Set(values.slice(1_250).map(visualizationEntryIdentity)),
-      );
-      expect(observed?.reviewingOlder).toBe(false);
-      expect(api.list).toHaveBeenCalledTimes(26);
-      expect(peakReferences).toBe(1_000);
+        expect(row?.querySelector("[data-visualization-card]")).not.toBeNull();
+        const bounds = row!.getBoundingClientRect(),
+          viewport = scroller.getBoundingClientRect();
+        expect(bounds.bottom > viewport.top && bounds.top < viewport.bottom).toBe(true);
+      });
       expect(api.details).not.toHaveBeenCalled();
       expect(api.viewerTicket).not.toHaveBeenCalled();
-      expect(document.querySelector("iframe")).toBeNull();
-      console.info(
-        "visualization-sliding-history-qualification",
-        JSON.stringify({
-          storedReferences: published,
-          peakReferences,
-          explicitOlderPages: 24,
-          listRequests: api.list.mock.calls.length,
-          observedMs: Number((performance.now() - started).toFixed(2)),
-        }),
-      );
     } finally {
-      await view.unmount();
+      await cleanup();
+      historyCleanups.delete(cleanup);
     }
   });
-  it("revokes a deferred older page before one return-to-latest replacement, without overlapping requests", async () => {
+
+  it("retains root and child invocation identity and equal-time ordering across a live refresh", async () => {
     const api = installApi();
-    const values = historyValues(1_100);
-    const pending = deferred<Awaited<ReturnType<typeof api.list>>>();
-    let held: Awaited<ReturnType<typeof api.list>> | undefined;
-    let holdOlder = false;
-    let concurrent = 0;
-    let peakRequests = 0;
-    api.list.mockImplementation(async (input) => {
-      concurrent += 1;
-      peakRequests = Math.max(peakRequests, concurrent);
-      try {
-        const result = archivePage(
-          values,
-          input.cursor ? Number(input.cursor.slice(-12)) : undefined,
-        );
-        if (input.cursor && holdOlder) {
-          holdOlder = false;
-          held = result;
-          return await pending.promise;
-        }
-        return result;
-      } finally {
-        concurrent -= 1;
-      }
-    });
-    let observed: ReturnType<typeof useThreadVisualizations> | undefined;
-    const admittedSnapshots: string[][] = [];
-    const view = await render(
-      <HistoryReviewFixture
-        onObserve={(result) => {
-          observed = result;
-          admittedSnapshots.push(result.entries.map((value) => value.originItemId));
-        }}
-      />,
-    );
-    try {
-      await vi.waitFor(() => expect(observed?.entries).toHaveLength(50));
-      for (let pageIndex = 1; pageIndex < 20; pageIndex += 1) {
-        await userEvent.click(
-          page.getByRole("button", { name: "Load older archive", exact: true }),
-        );
-        await vi.waitFor(() => expect(observed?.entries).toHaveLength((pageIndex + 1) * 50));
-      }
-      holdOlder = true;
-      await userEvent.click(page.getByRole("button", { name: "Load older archive", exact: true }));
-      await vi.waitFor(() => expect(held).toBeDefined());
-      expect(observed?.reviewingOlder).toBe(true);
-      await userEvent.click(page.getByRole("button", { name: "Return to latest", exact: true }));
-      for (let event = 0; event < 3; event += 1)
-        await userEvent.click(page.getByRole("button", { name: "New live event", exact: true }));
-      expect(api.list).toHaveBeenCalledTimes(21);
-      pending.resolve(held!);
-      await vi.waitFor(() => expect(api.list).toHaveBeenCalledTimes(22));
-      await vi.waitFor(() => expect(observed?.entries).toHaveLength(50));
-      expect(observed?.reviewingOlder).toBe(false);
-      expect(admittedSnapshots.some((snapshot) => snapshot.includes("archive-origin-51"))).toBe(
-        false,
-      );
-      expect(new Set(observed!.entries.map(visualizationEntryIdentity))).toEqual(
-        new Set(values.slice(-50).map(visualizationEntryIdentity)),
-      );
-      expect(peakRequests).toBe(1);
-      expect(concurrent).toBe(0);
-    } finally {
-      pending.resolve(held ?? { entries: [] });
-      await view.unmount();
-    }
-  });
-  it.each(["empty", "failure"] as const)(
-    "keeps return-to-latest available after an older-review %s",
-    async (outcome) => {
-      const api = installApi();
-      const values = historyValues(1_100);
-      api.list.mockImplementation(async (input) =>
-        archivePage(values, input.cursor ? Number(input.cursor.slice(-12)) : undefined),
-      );
-      let observed: ReturnType<typeof useThreadVisualizations> | undefined;
-      const view = await render(
-        <HistoryReviewFixture
-          onObserve={(result) => {
-            observed = result;
-          }}
-        />,
-      );
-      try {
-        await vi.waitFor(() => expect(observed?.entries).toHaveLength(50));
-        for (let pageIndex = 1; pageIndex < 20; pageIndex += 1) {
-          await userEvent.click(
-            page.getByRole("button", { name: "Load older archive", exact: true }),
-          );
-          await vi.waitFor(() => expect(observed?.entries).toHaveLength((pageIndex + 1) * 50));
-        }
-        if (outcome === "empty") api.list.mockResolvedValueOnce({ entries: [] });
-        else api.list.mockRejectedValueOnce(new Error("private-history-failure"));
-        await userEvent.click(
-          page.getByRole("button", { name: "Load older archive", exact: true }),
-        );
-        await vi.waitFor(() => expect(api.list).toHaveBeenCalledTimes(21));
-        await vi.waitFor(() => expect(observed?.loading).toBe(false));
-        expect(observed?.entries).toHaveLength(1_000);
-        expect(observed?.reviewingOlder).toBe(true);
-        await expect
-          .element(page.getByRole("button", { name: "Return to latest", exact: true }))
-          .toBeVisible();
-        if (outcome === "failure") {
-          expect(document.body.textContent).not.toContain("private-history-failure");
-          await userEvent.click(page.getByRole("button", { name: "Retry archive", exact: true }));
-          await vi.waitFor(() => expect(api.list).toHaveBeenCalledTimes(22));
-          expect(api.list.mock.calls[21]?.[0]).toEqual(api.list.mock.calls[20]?.[0]);
-          await vi.waitFor(() => expect(observed?.loading).toBe(false));
-          expect(
-            observed?.entries.some((value) => value.originItemId === "archive-origin-51"),
-          ).toBe(true);
-        }
-        await userEvent.click(page.getByRole("button", { name: "Return to latest", exact: true }));
-        await vi.waitFor(() => expect(observed?.entries).toHaveLength(50));
-        expect(observed?.reviewingOlder).toBe(false);
-        expect(api.list.mock.calls.at(-1)?.[0]).toEqual({ threadId });
-      } finally {
-        await view.unmount();
-      }
-    },
-  );
-  it("retains separate exact root and child invocations of the same immutable revision across refreshes", async () => {
-    const api = installApi();
-    const root: VisualizationTimelineEntry = {
+    const root = { ...entry, actor: { type: "root" as const }, originItemId: "root-call" };
+    const child = {
       ...entry,
-      actor: { type: "root" },
-      originItemId: "root-call",
-    };
-    const child: VisualizationTimelineEntry = {
-      ...entry,
-      actor: { type: "child", id: "other-child" },
+      actor: { type: "child" as const, id: "other-child" },
       originItemId: "child-call",
     };
     api.list.mockResolvedValue({ entries: [root, child] });
     let observed: ReturnType<typeof useThreadVisualizations> | undefined;
     const view = await render(
-      <HistoryReviewFixture
-        onObserve={(result) => {
-          observed = result;
+      <HookFixture
+        onObserve={(value) => {
+          observed = value;
         }}
       />,
     );
     try {
       await vi.waitFor(() => expect(observed?.entries).toHaveLength(2));
       const initial = observed!.entries;
+      api.list.mockResolvedValue({ entries: [child, root] });
       await userEvent.click(page.getByRole("button", { name: "New live event", exact: true }));
-      await vi.waitFor(() => expect(api.list).toHaveBeenCalledTimes(2));
-      await vi.waitFor(() => expect(observed?.loading).toBe(false));
-      expect(observed?.entries).toHaveLength(2);
+      await vi.waitFor(() => {
+        expect(api.list).toHaveBeenCalledTimes(2);
+        expect(observed?.loading).toBe(false);
+      });
+      expect(observed?.entries).toEqual(initial);
       expect(observed?.entries[0]).toBe(initial[0]);
       expect(observed?.entries[1]).toBe(initial[1]);
       expect(new Set(observed!.entries.map(visualizationEntryIdentity)).size).toBe(2);
-      expect(observed?.entries.map((value) => value.actor.type)).toEqual(["root", "child"]);
       expect(api.details).not.toHaveBeenCalled();
       expect(api.viewerTicket).not.toHaveBeenCalled();
     } finally {
       await view.unmount();
     }
   });
-  it.each([50, 1_000])(
-    "fills a 120-reference refresh gap without dropping the %i-reference retained window",
-    async (initialCount) => {
-      const api = installApi();
-      const values = Array.from(
-        { length: initialCount + 120 },
-        (_, index): VisualizationTimelineEntry => ({
-          ...entry,
-          occurredAt: new Date(Date.UTC(2026, 9, 12, 0, 0, index)).toISOString(),
-          reference: {
-            ...entry.reference,
-            revisionId: VisualizationRevisionId.make(
-              `20000000-0000-4000-8000-${String(index + 1).padStart(12, "0")}`,
-            ),
-            title: `Burst chart ${index + 1}`,
-          },
-        }),
-      );
-      let publishedCount = initialCount;
-      const cursorFor = (index: number) =>
-        `30000000-0000-4000-8000-${String(index).padStart(12, "0")}`;
-      api.list.mockImplementation(async (input) => {
-        // Cursor identity is an immutable row boundary, not an offset that
-        // shifts when new rows arrive. This matches the actual list contract.
-        const before = input.cursor ? Number(input.cursor.slice(-12)) : publishedCount + 1;
-        const last = Math.min(publishedCount, before - 1);
-        const first = Math.max(1, last - 49);
-        return {
-          entries: values.slice(first - 1, last).toReversed(),
-          ...(first > 1 ? { nextCursor: cursorFor(first) } : {}),
-        };
-      });
-      let observed: ReturnType<typeof useThreadVisualizations> | undefined;
-      function History() {
-        const [revision, setRevision] = useState(0);
-        const result = useThreadVisualizations(environmentId, threadId, true, String(revision));
-        useLayoutEffect(() => {
-          observed = result;
-        });
-        return (
-          <>
-            <button onClick={result.loadOlder}>Older burst references</button>
-            <button onClick={() => setRevision((value) => value + 1)}>
-              Refresh burst references
-            </button>
-          </>
-        );
-      }
-      const view = await render(<History />);
-      try {
-        await vi.waitFor(() => expect(observed?.entries).toHaveLength(50));
-        for (let pageIndex = 1; pageIndex < initialCount / 50; pageIndex += 1) {
-          await userEvent.click(
-            page.getByRole("button", { name: "Older burst references", exact: true }),
-          );
-          await vi.waitFor(() => expect(observed?.entries).toHaveLength((pageIndex + 1) * 50));
-        }
-        expect(observed?.hasOlder).toBe(false);
-        publishedCount += 120;
-        await userEvent.click(
-          page.getByRole("button", { name: "Refresh burst references", exact: true }),
-        );
-        await vi.waitFor(() =>
-          expect(observed?.entries.at(-1)?.reference.revisionId).toBe(
-            values.at(-1)!.reference.revisionId,
-          ),
-        );
-        expect(observed?.hasOlder).toBe(true);
-        // One refresh plus two explicit pages reconnect to the original known
-        // head, including when retained memory is already at its 1,000-row cap.
-        for (let pageIndex = 0; pageIndex < 2; pageIndex += 1) {
-          const expectedCalls = api.list.mock.calls.length + 1;
-          await userEvent.click(
-            page.getByRole("button", { name: "Older burst references", exact: true }),
-          );
-          await vi.waitFor(() => expect(api.list).toHaveBeenCalledTimes(expectedCalls));
-          await vi.waitFor(() => expect(observed?.loading).toBe(false));
-        }
-        expect(observed?.entries.map((value) => value.reference.revisionId)).toEqual(
-          values.slice(-1_000).map((value) => value.reference.revisionId),
-        );
-        expect(observed?.hasOlder).toBe(initialCount === 1_000);
-        expect(api.list).toHaveBeenCalledTimes(initialCount / 50 + 3);
-        if (initialCount === 1_000) {
-          // Reconstructing the capped latest window evicted a known tail. Its
-          // original end cursor must not strand those rows; the exact gap page
-          // continuation remains explicitly browseable all the way to row one.
-          for (let pageIndex = 0; pageIndex < 20; pageIndex += 1) {
-            const calls = api.list.mock.calls.length + 1;
-            await userEvent.click(
-              page.getByRole("button", { name: "Older burst references", exact: true }),
-            );
-            await vi.waitFor(() => expect(api.list).toHaveBeenCalledTimes(calls));
-            await vi.waitFor(() => expect(observed?.loading).toBe(false));
-            expect(observed?.entries).toHaveLength(1_000);
-          }
-          expect(observed?.entries.map((value) => value.reference.revisionId)).toEqual(
-            values.slice(0, 1_000).map((value) => value.reference.revisionId),
-          );
-          expect(observed?.hasOlder).toBe(false);
-          expect(observed?.reviewingOlder).toBe(true);
-        }
-        expect(api.details).not.toHaveBeenCalled();
-        expect(api.viewerTicket).not.toHaveBeenCalled();
-      } finally {
-        await view.unmount();
-      }
-    },
-  );
-  it("retains the original gap boundary when a later burst refresh follows an in-flight older page", async () => {
-    const api = installApi();
-    const values = Array.from({ length: 250 }, (_, index): VisualizationTimelineEntry => ({
-      ...entry,
-      occurredAt: new Date(Date.UTC(2026, 9, 12, 0, 0, index)).toISOString(),
-      reference: {
-        ...entry.reference,
-        revisionId: VisualizationRevisionId.make(
-          `40000000-0000-4000-8000-${String(index + 1).padStart(12, "0")}`,
-        ),
-      },
-    }));
-    let publishedCount = 50;
-    let deferredOlder = false;
-    const pending = deferred<Awaited<ReturnType<typeof api.list>>>();
-    let pendingPage: Awaited<ReturnType<typeof api.list>> | undefined;
-    api.list.mockImplementation((input) => {
-      const before = input.cursor ? Number(input.cursor.slice(-12)) : publishedCount + 1;
-      const last = Math.min(publishedCount, before - 1);
-      const first = Math.max(1, last - 49);
-      const result = {
-        entries: values.slice(first - 1, last).toReversed(),
-        ...(first > 1
-          ? { nextCursor: `50000000-0000-4000-8000-${String(first).padStart(12, "0")}` }
-          : {}),
-      };
-      if (input.cursor && deferredOlder) {
-        deferredOlder = false;
-        pendingPage = result;
-        return pending.promise;
-      }
-      return Promise.resolve(result);
-    });
+
+  it("revokes late old-chat pages and their coalesced invalidation when the exact owner changes", async () => {
+    const api = installApi(),
+      pending = deferred<{ entries: VisualizationTimelineEntry[] }>();
+    api.list.mockImplementationOnce(() => pending.promise);
     let observed: ReturnType<typeof useThreadVisualizations> | undefined;
-    function History() {
-      const [revision, setRevision] = useState(0);
-      const result = useThreadVisualizations(environmentId, threadId, true, String(revision));
-      useLayoutEffect(() => {
-        observed = result;
-      });
-      return (
-        <>
-          <button onClick={result.loadOlder}>Older overlapping references</button>
-          <button onClick={() => setRevision((value) => value + 1)}>
-            Refresh overlapping references
-          </button>
-        </>
-      );
-    }
-    const view = await render(<History />);
-    try {
-      await vi.waitFor(() => expect(observed?.entries).toHaveLength(50));
-      publishedCount = 170;
-      await userEvent.click(
-        page.getByRole("button", { name: "Refresh overlapping references", exact: true }),
-      );
-      await vi.waitFor(() =>
-        expect(observed?.entries.at(-1)?.reference.revisionId).toBe(
-          values[169]!.reference.revisionId,
-        ),
-      );
-      deferredOlder = true;
-      await userEvent.click(
-        page.getByRole("button", { name: "Older overlapping references", exact: true }),
-      );
-      await vi.waitFor(() => expect(pendingPage).toBeDefined());
-      const beforeRefreshCalls = api.list.mock.calls.length;
-      publishedCount = 250;
-      await userEvent.click(
-        page.getByRole("button", { name: "Refresh overlapping references", exact: true }),
-      );
-      expect(api.list).toHaveBeenCalledTimes(beforeRefreshCalls);
-      pending.resolve(pendingPage!);
-      await vi.waitFor(() =>
-        expect(observed?.entries.at(-1)?.reference.revisionId).toBe(
-          values[249]!.reference.revisionId,
-        ),
-      );
-      expect(api.list).toHaveBeenCalledTimes(beforeRefreshCalls + 1);
-      for (let pageIndex = 0; pageIndex < 4; pageIndex += 1) {
-        const expectedCalls = api.list.mock.calls.length + 1;
-        await userEvent.click(
-          page.getByRole("button", { name: "Older overlapping references", exact: true }),
-        );
-        await vi.waitFor(() => expect(api.list).toHaveBeenCalledTimes(expectedCalls));
-        await vi.waitFor(() => expect(observed?.loading).toBe(false));
-      }
-      expect(observed?.entries.map((value) => value.reference.revisionId)).toEqual(
-        values.map((value) => value.reference.revisionId),
-      );
-      expect(observed?.hasOlder).toBe(false);
-      expect(api.list).toHaveBeenCalledTimes(8);
-      expect(api.details).not.toHaveBeenCalled();
-      expect(api.viewerTicket).not.toHaveBeenCalled();
-    } finally {
-      if (pendingPage) pending.resolve(pendingPage);
-      await view.unmount();
-    }
-  });
-  it("retains at most 1,000 compact references through explicit bounded pagination", async () => {
-    const api = installApi();
-    const values = Array.from({ length: 1_000 }, (_, index): VisualizationTimelineEntry => ({
-      ...entry,
-      reference: {
-        ...entry.reference,
-        revisionId: VisualizationRevisionId.make(
-          `00000000-0000-4000-8000-${String(index + 1).padStart(12, "0")}`,
-        ),
-        title: `Compact chart ${index + 1}`,
-      },
-    }));
-    // Synthetic retention stress exceeds the store's per-chat publication quota;
-    // it qualifies the reader bound, not permission to publish 1,000 artifacts.
-    const cursorFor = (index: number) =>
-      `10000000-0000-4000-8000-${String(index).padStart(12, "0")}`;
-    api.list.mockImplementation(async (input) => {
-      const offset = input.cursor ? Number(input.cursor.slice(-12)) : 0;
-      return {
-        entries: values.slice(offset, offset + 50),
-        ...(offset + 50 < values.length ? { nextCursor: cursorFor(offset + 50) } : {}),
-      };
-    });
-    let firstReference: VisualizationTimelineEntry | undefined;
-    let latestFirstReference: VisualizationTimelineEntry | undefined;
-    let observedCount = 0;
-    function History() {
-      const [revision, setRevision] = useState("one");
-      const result = useThreadVisualizations(environmentId, threadId, true, revision);
-      observedCount = result.entries.length;
-      firstReference ??= result.entries[0];
-      latestFirstReference = result.entries[0];
-      return (
-        <>
-          <button onClick={result.loadOlder}>Older compact references</button>
-          <button onClick={() => setRevision("two")}>Refresh compact references</button>
-          <output data-compact-count={result.entries.length} data-has-older={result.hasOlder} />
-        </>
-      );
-    }
-    const started = performance.now();
-    const view = await render(<History />);
-    try {
-      await vi.waitFor(() => expect(observedCount).toBe(50));
-      for (let pageIndex = 1; pageIndex < 20; pageIndex += 1) {
-        await userEvent.click(
-          page.getByRole("button", { name: "Older compact references", exact: true }),
-        );
-        await vi.waitFor(() => expect(observedCount).toBe((pageIndex + 1) * 50));
-      }
-      expect(api.list).toHaveBeenCalledTimes(20);
-      expect(document.querySelector("output")?.getAttribute("data-has-older")).toBe("false");
-      await userEvent.click(
-        page.getByRole("button", { name: "Older compact references", exact: true }),
-      );
-      expect(api.list).toHaveBeenCalledTimes(20);
-      await userEvent.click(
-        page.getByRole("button", { name: "Refresh compact references", exact: true }),
-      );
-      await vi.waitFor(() => expect(api.list).toHaveBeenCalledTimes(21));
-      expect(observedCount).toBe(1_000);
-      expect(latestFirstReference).toBe(firstReference);
-      expect(api.details).not.toHaveBeenCalled();
-      expect(api.viewerTicket).not.toHaveBeenCalled();
-      expect(document.querySelector("iframe")).toBeNull();
-      console.info(
-        "visualization-history-qualification",
-        JSON.stringify({
-          references: observedCount,
-          pageSize: 50,
-          listRequests: api.list.mock.calls.length,
-          compactJsonBytes: new TextEncoder().encode(JSON.stringify(values)).byteLength,
-          observedMs: Number((performance.now() - started).toFixed(2)),
-        }),
-      );
-    } finally {
-      await view.unmount();
-    }
-  });
-  it("coalesces a burst while one list request is in flight and ignores late old-chat results", async () => {
-    let complete!: (value: { entries: VisualizationTimelineEntry[] }) => void;
-    const api = installApi();
-    api.list.mockImplementationOnce(
-      () =>
-        new Promise((resolve) => {
-          complete = resolve;
-        }),
+    const view = await render(
+      <HookFixture
+        onObserve={(value) => {
+          observed = value;
+        }}
+      />,
     );
-    function History() {
-      const [revision, setRevision] = useState("one");
-      const [thread, setThread] = useState(threadId);
-      const result = useThreadVisualizations(environmentId, thread, true, revision);
-      return (
-        <>
-          <button
-            onClick={() => {
-              setRevision("two");
-            }}
-          >
-            New event
-          </button>
-          <button onClick={() => setThread(ThreadId.make("another-chat"))}>Switch chat</button>
-          <output>{result.entries.map((value) => value.reference.title).join(",")}</output>
-        </>
-      );
+    try {
+      await vi.waitFor(() => expect(api.list).toHaveBeenCalledTimes(1));
+      await userEvent.click(page.getByRole("button", { name: "New live event", exact: true }));
+      expect(api.list).toHaveBeenCalledTimes(1);
+      api.list.mockResolvedValue({ entries: [] });
+      await userEvent.click(page.getByRole("button", { name: "Switch chat", exact: true }));
+      await vi.waitFor(() => expect(api.list).toHaveBeenCalledTimes(2));
+      pending.resolve({ entries: [entry] });
+      await pending.promise;
+      expect(observed?.entries).toEqual([]);
+      expect(api.list).toHaveBeenCalledTimes(2);
+    } finally {
+      pending.resolve({ entries: [] });
+      await view.unmount();
     }
-    await render(<History />);
-    await vi.waitFor(() => expect(api.list).toHaveBeenCalledTimes(1));
-    await userEvent.click(page.getByRole("button", { name: "New event", exact: true }));
-    expect(api.list).toHaveBeenCalledTimes(1);
-    api.list.mockResolvedValue({ entries: [] });
-    await userEvent.click(page.getByRole("button", { name: "Switch chat", exact: true }));
-    await vi.waitFor(() => expect(api.list).toHaveBeenCalledTimes(2));
-    complete({ entries: [entry] });
-    await Promise.resolve();
-    expect(api.list).toHaveBeenCalledTimes(2);
-    expect(document.querySelector("output")!.textContent).toBe("");
+  });
+
+  it("keeps admitted references on failure and retries from the explicit refresh action", async () => {
+    const api = installApi();
+    let observed: ReturnType<typeof useThreadVisualizations> | undefined;
+    const view = await render(
+      <HookFixture
+        onObserve={(value) => {
+          observed = value;
+        }}
+      />,
+    );
+    try {
+      await vi.waitFor(() => expect(observed?.entries).toEqual([entry]));
+      api.list.mockRejectedValueOnce(new Error("private diagnostic"));
+      await userEvent.click(page.getByRole("button", { name: "New live event", exact: true }));
+      await expect
+        .element(page.getByRole("button", { name: "Retry archive", exact: true }))
+        .toBeVisible();
+      expect(observed?.entries).toEqual([entry]);
+      await userEvent.click(page.getByRole("button", { name: "Retry archive", exact: true }));
+      await vi.waitFor(() => {
+        expect(observed?.failed).toBe(false);
+        expect(api.list).toHaveBeenCalledTimes(3);
+      });
+      expect(observed?.entries).toEqual([entry]);
+      expect(api.details).not.toHaveBeenCalled();
+      expect(api.viewerTicket).not.toHaveBeenCalled();
+    } finally {
+      await view.unmount();
+    }
   });
 });
 

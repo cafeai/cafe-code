@@ -27,6 +27,7 @@ import * as crypto from "node:crypto";
 import * as fs from "node:fs/promises";
 import * as http from "node:http";
 import { performance } from "node:perf_hooks";
+import { types as utilTypes } from "node:util";
 
 import {
   PROVIDER_DAEMON_EVENTS_PATH,
@@ -40,6 +41,7 @@ import {
   type ProviderDaemonProcessDiagnostic,
   ProviderDaemonRpcRequest,
   ProviderDaemonSessionReconfigurationRefusal,
+  ProviderDaemonFailedRootRetirementRefusal,
   type ProviderDaemonCapability,
   type ProviderDaemonLeaseResponse,
   type ProviderDaemonRecentRpcFailure,
@@ -862,7 +864,15 @@ function readJsonBody(
   });
 }
 
-function toRpcError(error: unknown): Extract<ProviderDaemonRpcEnvelope, { readonly ok: false }> {
+function toRpcError(
+  error: unknown,
+  request?: ProviderDaemonRpcRequestValue,
+): Extract<ProviderDaemonRpcEnvelope, { readonly ok: false }> {
+  // A Proxy can forge descriptors around a typed error; a revoked Proxy can
+  // throw even during generic diagnostic inspection. Keep it opaque before
+  // either old or new semantic witnesses, and never retain it as a raw cause.
+  if (typeof error === "object" && error !== null && utilTypes.isProxy(error))
+    error = new Error("The provider request failed without a trusted error receipt.");
   const record =
     error !== null && typeof error === "object" ? (error as Record<string, unknown>) : {};
   const diagnostics = buildProviderDaemonErrorDiagnostics(error);
@@ -898,6 +908,33 @@ function toRpcError(error: unknown): Extract<ProviderDaemonRpcEnvelope, { readon
     Schema.is(ProviderDaemonSessionReconfigurationRefusal)(refusalDescriptor.value)
       ? refusalDescriptor.value
       : undefined;
+  const retirementDescriptor =
+    error instanceof ProviderAdapterRequestError
+      ? Object.getOwnPropertyDescriptor(error, "failedRootRetirementRefusal")
+      : undefined;
+  const expected = request?.method === "sendTurn" ? request.payload.expectedFailedRoot : undefined;
+  // The native adapter alone may certify that its guarded retirement refused
+  // before teardown or paid input. Couple that own-data witness to this decoded
+  // cold-send request, not another method, native error class or diagnostic tag.
+  // The command ledger binds its receipt to the complete canonical request in
+  // both directions; the finite diagnostic copy itself grants no authority.
+  const failedRootRetirementRefusal =
+    request?.method === "sendTurn" &&
+    expected?.restartSession === true &&
+    expected.providerInstanceId !== undefined &&
+    expected.observedAt !== undefined &&
+    error instanceof ProviderAdapterRequestError &&
+    providerDescriptor !== undefined &&
+    "value" in providerDescriptor &&
+    providerDescriptor.value === "codex" &&
+    methodDescriptor !== undefined &&
+    "value" in methodDescriptor &&
+    methodDescriptor.value === "turn/start" &&
+    retirementDescriptor !== undefined &&
+    "value" in retirementDescriptor &&
+    Schema.is(ProviderDaemonFailedRootRetirementRefusal)(retirementDescriptor.value)
+      ? retirementDescriptor.value
+      : undefined;
   return {
     ok: false,
     error: {
@@ -905,6 +942,7 @@ function toRpcError(error: unknown): Extract<ProviderDaemonRpcEnvelope, { readon
       message,
       diagnostics,
       ...(refusal !== undefined ? { sessionReconfigurationRefusal: refusal } : {}),
+      ...(failedRootRetirementRefusal === undefined ? {} : { failedRootRetirementRefusal }),
     },
   };
 }
@@ -1971,7 +2009,7 @@ export const runProviderDaemonServer = (
                         ok: true,
                         value: value === undefined ? null : value,
                       })),
-                      Effect.catch((error) => Effect.succeed(toRpcError(error))),
+                      Effect.catch((error) => Effect.succeed(toRpcError(error, rpcRequest))),
                     ),
                   ),
                 ),
@@ -2015,6 +2053,9 @@ export const runProviderDaemonServer = (
               message: envelope.error.message,
               ...(envelope.error.sessionReconfigurationRefusal !== undefined
                 ? { sessionReconfigurationRefusal: envelope.error.sessionReconfigurationRefusal }
+                : {}),
+              ...(envelope.error.failedRootRetirementRefusal !== undefined
+                ? { failedRootRetirementRefusal: envelope.error.failedRootRetirementRefusal }
                 : {}),
               ...(envelope.error.diagnostics === undefined
                 ? {}

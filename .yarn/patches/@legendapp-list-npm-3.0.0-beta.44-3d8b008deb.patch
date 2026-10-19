@@ -1,0 +1,132 @@
+diff --git a/react.js b/react.js
+index 78b664f9fb8637780c987dc5439bb48cd64ff5ab..e4d3f4610bc568022270fe10e12ba1f6503fd466 100644
+--- a/react.js
++++ b/react.js
+@@ -4141,8 +4141,8 @@ function calculateItemsInView(ctx, params = {}) {
+       scroll = Math.max(0, totalSize - scrollLength);
+     }
+     const previousStickyIndex = peek$(ctx, "activeStickyIndex");
+-    const currentStickyIdx = stickyIndicesArr.length > 0 ? findCurrentStickyIndex(stickyIndicesArr, scroll, state) : -1;
+-    const nextActiveStickyIndex = currentStickyIdx >= 0 ? stickyIndicesArr[currentStickyIdx] : -1;
++    let currentStickyIdx = stickyIndicesArr.length > 0 ? findCurrentStickyIndex(stickyIndicesArr, scroll, state) : -1;
++    let nextActiveStickyIndex = currentStickyIdx >= 0 ? stickyIndicesArr[currentStickyIdx] : -1;
+     if (currentStickyIdx >= 0 || previousStickyIndex >= 0) {
+       set$(ctx, "activeStickyIndex", nextActiveStickyIndex);
+     }
+@@ -4155,9 +4155,9 @@ function calculateItemsInView(ctx, params = {}) {
+       scrollBufferTop = drawDistance * 1.5;
+       scrollBufferBottom = drawDistance * 0.5;
+     }
+-    const scrollTopBuffered = scroll - scrollBufferTop;
+-    const scrollBottom = scroll + scrollLength + (scroll < 0 ? -scroll : 0);
+-    const scrollBottomBuffered = scrollBottom + scrollBufferBottom;
++    let scrollTopBuffered = scroll - scrollBufferTop;
++    let scrollBottom = scroll + scrollLength + (scroll < 0 ? -scroll : 0);
++    let scrollBottomBuffered = scrollBottom + scrollBufferBottom;
+     if (!suppressInitialScrollSideEffects && !dataChanged && !forceFullItemPositions && scrollForNextCalculateItemsInView) {
+       const { top, bottom } = scrollForNextCalculateItemsInView;
+       if (top === null && bottom === null) {
+@@ -4187,7 +4187,37 @@ function calculateItemsInView(ctx, params = {}) {
+     if (minIndexSizeChanged !== void 0) {
+       state.minIndexSizeChanged = void 0;
+     }
++    const scrollBeforeMVCP = state.scroll;
+     checkMVCP == null ? void 0 : checkMVCP();
++    const mvcpScrollDelta = state.scroll - scrollBeforeMVCP;
++    if (mvcpScrollDelta !== 0) {
++      // MVCP changes the logical scroll synchronously. Selecting rows
++      // with the old viewport would retire the retained anchor and measure
++      // unrelated rows; a later size pass could then anchor to the wrong key.
++      // Preserve the captured initial target and pending padding, applying
++      // only this pass's adjustment once (do not reread pending adjustments).
++      scroll = Math.round(scrollState + scrollExtra + scrollAdjustPad + mvcpScrollDelta);
++      if (scroll + scrollLength > totalSize) {
++        scroll = Math.max(0, totalSize - scrollLength);
++      }
++      if (speed > 0 || speed === 0 && scroll < Math.max(50, drawDistance)) {
++        scrollBufferTop = drawDistance * 0.5;
++        scrollBufferBottom = drawDistance * 1.5;
++      } else {
++        scrollBufferTop = drawDistance * 1.5;
++        scrollBufferBottom = drawDistance * 0.5;
++      }
++      scrollTopBuffered = scroll - scrollBufferTop;
++      scrollBottom = scroll + scrollLength + (scroll < 0 ? -scroll : 0);
++      scrollBottomBuffered = scrollBottom + scrollBufferBottom;
++      // Keep the earlier sticky update for ordinary cached-window returns,
++      // but downstream activation/recycling must use the adjusted viewport.
++      currentStickyIdx = stickyIndicesArr.length > 0 ? findCurrentStickyIndex(stickyIndicesArr, scroll, state) : -1;
++      nextActiveStickyIndex = currentStickyIdx >= 0 ? stickyIndicesArr[currentStickyIdx] : -1;
++      if (stickyIndicesArr.length > 0 || previousStickyIndex >= 0) {
++        set$(ctx, "activeStickyIndex", nextActiveStickyIndex);
++      }
++    }
+     let startNoBuffer = null;
+     let startBuffered = null;
+     let startBufferedId = null;
+diff --git a/react.mjs b/react.mjs
+index f221d68eef4efcf84811adf311f0911c6a26ac14..e3833557fa754c317dfc645a4222d8d642c8fa46 100644
+--- a/react.mjs
++++ b/react.mjs
+@@ -4120,8 +4120,8 @@ function calculateItemsInView(ctx, params = {}) {
+       scroll = Math.max(0, totalSize - scrollLength);
+     }
+     const previousStickyIndex = peek$(ctx, "activeStickyIndex");
+-    const currentStickyIdx = stickyIndicesArr.length > 0 ? findCurrentStickyIndex(stickyIndicesArr, scroll, state) : -1;
+-    const nextActiveStickyIndex = currentStickyIdx >= 0 ? stickyIndicesArr[currentStickyIdx] : -1;
++    let currentStickyIdx = stickyIndicesArr.length > 0 ? findCurrentStickyIndex(stickyIndicesArr, scroll, state) : -1;
++    let nextActiveStickyIndex = currentStickyIdx >= 0 ? stickyIndicesArr[currentStickyIdx] : -1;
+     if (currentStickyIdx >= 0 || previousStickyIndex >= 0) {
+       set$(ctx, "activeStickyIndex", nextActiveStickyIndex);
+     }
+@@ -4134,9 +4134,9 @@ function calculateItemsInView(ctx, params = {}) {
+       scrollBufferTop = drawDistance * 1.5;
+       scrollBufferBottom = drawDistance * 0.5;
+     }
+-    const scrollTopBuffered = scroll - scrollBufferTop;
+-    const scrollBottom = scroll + scrollLength + (scroll < 0 ? -scroll : 0);
+-    const scrollBottomBuffered = scrollBottom + scrollBufferBottom;
++    let scrollTopBuffered = scroll - scrollBufferTop;
++    let scrollBottom = scroll + scrollLength + (scroll < 0 ? -scroll : 0);
++    let scrollBottomBuffered = scrollBottom + scrollBufferBottom;
+     if (!suppressInitialScrollSideEffects && !dataChanged && !forceFullItemPositions && scrollForNextCalculateItemsInView) {
+       const { top, bottom } = scrollForNextCalculateItemsInView;
+       if (top === null && bottom === null) {
+@@ -4166,7 +4166,37 @@ function calculateItemsInView(ctx, params = {}) {
+     if (minIndexSizeChanged !== void 0) {
+       state.minIndexSizeChanged = void 0;
+     }
++    const scrollBeforeMVCP = state.scroll;
+     checkMVCP == null ? void 0 : checkMVCP();
++    const mvcpScrollDelta = state.scroll - scrollBeforeMVCP;
++    if (mvcpScrollDelta !== 0) {
++      // MVCP changes the logical scroll synchronously. Selecting rows
++      // with the old viewport would retire the retained anchor and measure
++      // unrelated rows; a later size pass could then anchor to the wrong key.
++      // Preserve the captured initial target and pending padding, applying
++      // only this pass's adjustment once (do not reread pending adjustments).
++      scroll = Math.round(scrollState + scrollExtra + scrollAdjustPad + mvcpScrollDelta);
++      if (scroll + scrollLength > totalSize) {
++        scroll = Math.max(0, totalSize - scrollLength);
++      }
++      if (speed > 0 || speed === 0 && scroll < Math.max(50, drawDistance)) {
++        scrollBufferTop = drawDistance * 0.5;
++        scrollBufferBottom = drawDistance * 1.5;
++      } else {
++        scrollBufferTop = drawDistance * 1.5;
++        scrollBufferBottom = drawDistance * 0.5;
++      }
++      scrollTopBuffered = scroll - scrollBufferTop;
++      scrollBottom = scroll + scrollLength + (scroll < 0 ? -scroll : 0);
++      scrollBottomBuffered = scrollBottom + scrollBufferBottom;
++      // Keep the earlier sticky update for ordinary cached-window returns,
++      // but downstream activation/recycling must use the adjusted viewport.
++      currentStickyIdx = stickyIndicesArr.length > 0 ? findCurrentStickyIndex(stickyIndicesArr, scroll, state) : -1;
++      nextActiveStickyIndex = currentStickyIdx >= 0 ? stickyIndicesArr[currentStickyIdx] : -1;
++      if (stickyIndicesArr.length > 0 || previousStickyIndex >= 0) {
++        set$(ctx, "activeStickyIndex", nextActiveStickyIndex);
++      }
++    }
+     let startNoBuffer = null;
+     let startBuffered = null;
+     let startBufferedId = null;

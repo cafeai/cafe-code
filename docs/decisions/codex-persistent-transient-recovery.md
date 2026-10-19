@@ -4,7 +4,7 @@ Decision status: Accepted within the current user-authorized repair
 Implementation status: Implemented; normal rebuilt-runtime adoption required
 Verification status: Combined source/renderer qualification passed locally; forced build remains the final release gate; no live provider qualification
 Created: 2026-10-10 21:31:04 JST (UTC+0900)
-Last updated: 2026-10-11 02:38:08 JST (UTC+0900)
+Last updated: 2026-10-19 12:16:05 JST (UTC+0900)
 Decision authority: the user's request for persistent backed-off recovery until
 explicit Stop, correct surviving-child presentation, and compact Stop/restart UI.
 Partially supersedes: the failed-root availability assumption in
@@ -16,6 +16,10 @@ Partially superseded by: [failed-root session restart](codex-failed-root-session
 for automatic continuation's retention of the failed native context and children.
 That successor requires exact guarded retirement and same-history reopening;
 the remaining classifiers, observation, control and at-most-once rules here remain.
+Also partially superseded by: [proven unsubmitted retry](codex-failed-root-unsubmitted-retry.md)
+for a consumed attempt with a new exact typed pre-retirement refusal receipt.
+Unknown acknowledgment remains reconciliation, and every individual claim remains
+one-use; historical prose and legacy attempts gain no retrospective authority.
 
 ## Context
 

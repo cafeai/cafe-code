@@ -1238,6 +1238,8 @@ describe("incremental orchestration updates", () => {
     };
     for (const patch of [
       {},
+      { payload: { recovery: "codex-transient-continuation-resubmit-attempted" } },
+      { payload: { recovery: "codex-transient-continuation-unsubmitted" } },
       { kind: "runtime.error", payload: { message: "Late root diagnostic" } },
       { kind: "task.progress", payload: { subagent: { threadId: "child", status: "active" } } },
     ]) {
@@ -1257,6 +1259,21 @@ describe("incremental orchestration updates", () => {
     for (const [patch, commandId] of [
       [{ kind: "tool.completed", payload: {} }, CommandId.make("server:real-tool")],
       [{}, CommandId.make("client:untrusted-recovery")],
+      [
+        { payload: { recovery: "codex-transient-continuation-resubmit-attempted" } },
+        CommandId.make("client:untrusted-resubmit"),
+      ],
+      [
+        { payload: { recovery: "codex-transient-continuation-unsubmitted" } },
+        CommandId.make("client:untrusted-unsubmitted"),
+      ],
+      [
+        {
+          kind: "tool.completed",
+          payload: { recovery: "codex-transient-continuation-unsubmitted" },
+        },
+        CommandId.make("server:real-tool-shaped-recovery"),
+      ],
       [
         { kind: "task.progress", payload: { subagent: { threadId: "child", status: "bogus" } } },
         CommandId.make("server:invalid-child"),

@@ -105,6 +105,13 @@ import {
   saturateRuntimeRecoveryAttempt,
 } from "../providerRuntimeRecovery.ts";
 import {
+  codexFailedRootRetryClaimCommandId,
+  codexFailedRootRetryRefusalCommandId,
+  codexFailedRootRetryRequestCommitment,
+  makeCodexFailedRootRetryReader,
+  readCodexFailedRootRetirementRefusal,
+} from "../codexFailedRootRetry.ts";
+import {
   composeProviderContinuationBootstrapInput,
   ProviderContinuationInputTooLargeError,
 } from "../providerContinuationBootstrap.ts";
@@ -556,6 +563,7 @@ const make = Effect.gen(function* () {
   const readProviderTurnRecoveryEvidence = yield* makeProviderTurnRecoveryEvidenceReader;
   const readRuntimeRecoveryBarrier = yield* makeRuntimeRecoveryBarrierReader;
   const readCodexTransientRecoveryChain = yield* makeCodexTransientRecoveryChainReader;
+  const readCodexFailedRootRetry = yield* makeCodexFailedRootRetryReader;
   // One scoped wait per immutable intent/marker. Timers never occupy the
   // global serial worker; explicit controls cancel them immediately, and
   // durable barriers still deny already-enqueued wakeups after cancellation.
@@ -5937,11 +5945,20 @@ const make = Effect.gen(function* () {
           recoveryIntentSequence: event.sequence,
         });
       if (!(yield* permitted())) return;
-      const attemptCommandId = CommandId.make(`server:runtime-recovery-attempt:${event.sequence}`);
-      const attempted = yield* sql<{ readonly present: number }>`
-      SELECT 1 AS present FROM orchestration_events WHERE command_id = ${attemptCommandId} LIMIT 1
-    `;
-      if (attempted.length > 0) return;
+      // A consumed send remains one-use unless its exact authenticated result
+      // durably proves that retirement and submission never began. The indexed
+      // reader authenticates that receipt and refuses an already consumed next
+      // claim; neither a warning, a timer nor an unknown ACK grants a resend.
+      const retryState = yield* readCodexFailedRootRetry({
+        intentSequence: event.sequence,
+        sourceEventSequence: recovery.sourceEventSequence,
+        threadId,
+        turnId: recovery.turnId,
+        providerInstanceId: transient.providerInstanceId,
+        subagentRuntimeId: transient.subagentRuntimeId,
+        sessionUpdatedAt: recovery.sessionUpdatedAt,
+      });
+      if (retryState.status === "consumed") return;
       transientRecoveryContexts.set(threadId, {
         turnId: recovery.turnId,
         providerInstanceId: transient.providerInstanceId,
@@ -5949,7 +5966,12 @@ const make = Effect.gen(function* () {
         sessionUpdatedAt: recovery.sessionUpdatedAt,
       });
       if (!delayElapsed) {
-        yield* scheduleTransientRecoveryWait(event, transient.retryAttempt, 1);
+        const nextAttempt = retryState.status === "refused" ? retryState.nextPreparationAttempt : 1;
+        yield* scheduleTransientRecoveryWait(
+          event,
+          saturateRuntimeRecoveryAttempt(transient.retryAttempt + nextAttempt - 1),
+          nextAttempt,
+        );
         return;
       }
       const threadMatches = (thread: OrchestrationThread | undefined) =>
@@ -6061,21 +6083,45 @@ const make = Effect.gen(function* () {
       }
       if (!(yield* permitted()) || !threadMatches(yield* resolveThread(threadId))) return;
       const now = DateTime.formatIso(yield* DateTime.now);
-      const attemptOwnerId = crypto.randomUUID();
+      const requestCommitment = codexFailedRootRetryRequestCommitment(prepared.request);
+      if (retryState.status === "refused" && retryState.requestCommitment !== requestCommitment)
+        return;
+      // Acceptance-chain ownership is stable across definite refusals. Each
+      // individual send nevertheless consumes a distinct immutable winning
+      // claim, so concurrent/restarted backends cannot both submit the retry.
+      const attemptOwnerId =
+        retryState.status === "refused" ? retryState.attemptOwnerId : crypto.randomUUID();
+      const claimOwnerId = retryState.status === "fresh" ? attemptOwnerId : crypto.randomUUID();
+      const attemptCommandId = CommandId.make(
+        codexFailedRootRetryClaimCommandId(
+          event.sequence,
+          retryState.status === "refused" ? retryState.refusalSequence : undefined,
+        ),
+      );
+      const claimKind =
+        retryState.status === "fresh"
+          ? "codex-transient-continuation-attempted"
+          : "codex-transient-continuation-resubmit-attempted";
       yield* orchestrationEngine.dispatch({
         type: "thread.activity.append",
         commandId: attemptCommandId,
         threadId,
         activity: {
-          id: EventId.make(`runtime-recovery-attempt:${event.sequence}`),
+          id: EventId.make(attemptCommandId),
           kind: "runtime.warning",
           tone: "info",
           summary: "Continuing after a temporary Codex failure",
           turnId: recovery.turnId,
           payload: {
-            recovery: "codex-transient-continuation-attempted",
+            recovery: claimKind,
+            recoveryIntentSequence: event.sequence,
             sourceEventSequence: recovery.sourceEventSequence,
             attemptOwnerId,
+            claimOwnerId,
+            requestCommitment,
+            ...(retryState.status === "refused"
+              ? { previousRefusalSequence: retryState.refusalSequence }
+              : {}),
             providerInstanceId: transient.providerInstanceId,
             subagentRuntimeId: transient.subagentRuntimeId,
             sessionUpdatedAt: recovery.sessionUpdatedAt,
@@ -6097,22 +6143,30 @@ const make = Effect.gen(function* () {
         },
         createdAt: now,
       });
-      const winner = yield* sql<{ readonly ownerId: string | null }>`
-      SELECT json_extract(payload_json, '$.activity.payload.attemptOwnerId') AS ownerId
+      const winner = yield* sql<{ readonly sequence: number; readonly ownerId: string | null }>`
+      SELECT sequence, json_extract(payload_json, '$.activity.payload.claimOwnerId') AS ownerId
       FROM orchestration_events WHERE command_id = ${attemptCommandId}
         AND aggregate_kind = 'thread' AND stream_id = ${threadId}
         AND actor_kind = 'server' AND event_type = 'thread.activity-appended'
         AND json_extract(payload_json, '$.activity.kind') = 'runtime.warning'
         AND json_extract(payload_json, '$.activity.turnId') = ${recovery.turnId}
         AND json_extract(payload_json, '$.activity.payload.sourceEventSequence') = ${recovery.sourceEventSequence}
-        AND json_extract(payload_json, '$.activity.payload.recovery') = 'codex-transient-continuation-attempted' LIMIT 1
+        AND json_extract(payload_json, '$.activity.payload.recoveryIntentSequence') = ${event.sequence}
+        AND json_extract(payload_json, '$.activity.payload.attemptOwnerId') = ${attemptOwnerId}
+        AND json_extract(payload_json, '$.activity.payload.requestCommitment') = ${requestCommitment}
+        AND json_extract(payload_json, '$.activity.payload.providerInstanceId') = ${transient.providerInstanceId}
+        AND json_extract(payload_json, '$.activity.payload.subagentRuntimeId') = ${transient.subagentRuntimeId}
+        AND json_extract(payload_json, '$.activity.payload.sessionUpdatedAt') = ${recovery.sessionUpdatedAt}
+        AND json_extract(payload_json, '$.activity.payload.recovery') = ${claimKind} LIMIT 1
     `;
       if (
-        winner[0]?.ownerId !== attemptOwnerId ||
+        winner[0]?.ownerId !== claimOwnerId ||
+        !Number.isSafeInteger(winner[0]?.sequence) ||
         !(yield* permitted()) ||
         !threadMatches(yield* resolveThread(threadId))
       )
         return;
+      const claimSequence = winner[0]!.sequence;
       // The immutable claim is consumed even on timeout/unknown ACK. Native's
       // final semaphore checks exact failed root/generation again before I/O.
       const inFlight = { intentSequence: event.sequence, cancel: Effect.void };
@@ -6130,8 +6184,74 @@ const make = Effect.gen(function* () {
           return;
         return yield* sendPreparedProviderTurn(prepared).pipe(
           Effect.timeout("30 seconds"),
+          Effect.catchCause((cause) =>
+            Effect.gen(function* () {
+              const refusal = readCodexFailedRootRetirementRefusal(cause);
+              if (refusal === undefined) return yield* Effect.failCause(cause);
+              // This catch surrounds provider submission alone. Errors after an
+              // ACK, teardown, opening, timeout or unknown transport delivery
+              // cannot enter it with an authenticated pre-retirement witness.
+              // Preserve both the old consumed claim and its exact no-submit
+              // outcome before allowing a distinct, one-use next claim.
+              const refusedAt = DateTime.formatIso(yield* DateTime.now);
+              const receiptId = codexFailedRootRetryRefusalCommandId(event.sequence, claimSequence);
+              const nextPreparationAttempt = saturateRuntimeRecoveryAttempt(
+                Math.max(
+                  preparationAttempt + 1,
+                  retryState.status === "refused" ? retryState.nextPreparationAttempt + 1 : 1,
+                ),
+              );
+              yield* orchestrationEngine.dispatch({
+                type: "thread.activity.append",
+                commandId: CommandId.make(receiptId),
+                threadId,
+                activity: {
+                  id: EventId.make(receiptId),
+                  kind: "runtime.warning",
+                  tone: "info",
+                  summary: "Codex recovery was not submitted; retrying safely",
+                  turnId: recovery.turnId,
+                  payload: {
+                    recovery: "codex-transient-continuation-unsubmitted",
+                    recoveryIntentSequence: event.sequence,
+                    sourceEventSequence: recovery.sourceEventSequence,
+                    attemptOwnerId,
+                    claimCommandId: attemptCommandId,
+                    claimOwnerId,
+                    requestCommitment,
+                    nativeConversationCommitment: codexRecoveryConversationCommitment({
+                      threadId,
+                      providerInstanceId: transient.providerInstanceId,
+                      providerThreadId: prepared.request.expectedFailedRoot!.providerThreadId,
+                    }),
+                    providerInstanceId: transient.providerInstanceId,
+                    subagentRuntimeId: transient.subagentRuntimeId,
+                    sessionUpdatedAt: recovery.sessionUpdatedAt,
+                    failedRootRetirementRefusal: refusal,
+                    nextPreparationAttempt,
+                  },
+                  createdAt: refusedAt,
+                },
+                createdAt: refusedAt,
+              });
+              if (
+                transientRecoverySubmissions.get(threadId) === inFlight &&
+                (yield* permitted()) &&
+                threadMatches(yield* resolveThread(threadId))
+              )
+                yield* scheduleTransientRecoveryWait(
+                  event,
+                  saturateRuntimeRecoveryAttempt(
+                    transient.retryAttempt + nextPreparationAttempt - 1,
+                  ),
+                  nextPreparationAttempt,
+                );
+              return undefined;
+            }),
+          ),
           Effect.flatMap((turn) =>
             Effect.gen(function* () {
+              if (turn === undefined) return;
               const replacement = turn.recoverySession;
               if (
                 turn.threadId !== threadId ||

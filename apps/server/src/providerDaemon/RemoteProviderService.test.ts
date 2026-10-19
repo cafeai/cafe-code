@@ -198,6 +198,215 @@ describe("RemoteProviderService", () => {
     },
   );
 
+  it("preserves retirement refusal only from a decoded response to a complete cold send", () => {
+    const request = {
+      method: "sendTurn" as const,
+      payload: {
+        threadId: ThreadId.make("retirement-refusal-thread"),
+        input: "Continue existing work.",
+        expectedFailedRoot: {
+          turnId: TurnId.make("retirement-refusal-turn"),
+          providerThreadId: "retirement-private-history",
+          subagentRuntimeId: SubagentRuntimeId.make("00000000-0000-4000-8000-000000000188"),
+          providerInstanceId: ProviderInstanceId.make("codex"),
+          observedAt: "2026-10-19T01:00:00.000Z",
+          restartSession: true as const,
+        },
+      },
+    };
+    const reasons = [
+      "invalid-request",
+      "owner-changed",
+      "native-context-unavailable",
+      "history-unavailable",
+      "compaction-pending",
+      "root-start-pending",
+      "closed",
+      "root-proof-changed",
+      "notifications-pending",
+    ] as const;
+    for (const reason of reasons) {
+      const response = new ProviderDaemonRpcResponseError(
+        "ProviderAdapterRequestError",
+        "Fixed refusal.",
+        undefined,
+        reason,
+      );
+      const accepted = toRemoteRequestError("sendTurn", response, request);
+      assert.equal(accepted.failedRootRetirementRefusal, reason);
+      assert.equal(accepted.remoteErrorTag, "ProviderAdapterRequestError");
+      assert.strictEqual(accepted.cause, response);
+      // The actual request, rather than a matching method name, must carry the
+      // complete cold-recovery identity. Legacy ordinary sends remain unknown.
+      for (const unqualified of [
+        undefined,
+        { method: "stopSession" as const, payload: { threadId: request.payload.threadId } },
+        {
+          ...request,
+          payload: { threadId: request.payload.threadId, input: request.payload.input },
+        },
+        {
+          ...request,
+          payload: {
+            ...request.payload,
+            expectedFailedRoot: {
+              ...request.payload.expectedFailedRoot,
+              restartSession: undefined,
+            },
+          },
+        },
+        {
+          ...request,
+          payload: {
+            ...request.payload,
+            expectedFailedRoot: {
+              ...request.payload.expectedFailedRoot,
+              providerInstanceId: undefined,
+            },
+          },
+        },
+        {
+          ...request,
+          payload: {
+            ...request.payload,
+            expectedFailedRoot: { ...request.payload.expectedFailedRoot, observedAt: undefined },
+          },
+        },
+      ]) {
+        assert.equal(
+          toRemoteRequestError("sendTurn", response, unqualified).failedRootRetirementRefusal,
+          undefined,
+        );
+      }
+      for (const method of ["startSession", "steerTurn", "stopSession", "getCapabilities"])
+        assert.equal(
+          toRemoteRequestError(method, response, request).failedRootRetirementRefusal,
+          undefined,
+        );
+      const wrongOuter = new ProviderDaemonRpcResponseError(
+        "ProviderUnsupportedError",
+        "Fixed refusal.",
+        undefined,
+        reason,
+      );
+      assert.equal(
+        toRemoteRequestError("sendTurn", wrongOuter, request).failedRootRetirementRefusal,
+        undefined,
+      );
+      const unauthorized = Object.assign(new ProviderDaemonAuthenticationError(401), {
+        failedRootRetirementRefusal: reason,
+      });
+      assert.equal(
+        toRemoteRequestError("sendTurn", unauthorized, request).failedRootRetirementRefusal,
+        undefined,
+      );
+      const legacy = new ProviderDaemonRpcResponseError("ProviderAdapterRequestError", reason);
+      assert.equal(
+        toRemoteRequestError("sendTurn", legacy, request).failedRootRetirementRefusal,
+        undefined,
+      );
+      const plain = Object.assign(new Error("Fixed refusal."), {
+        remoteErrorTag: "ProviderAdapterRequestError",
+        failedRootRetirementRefusal: reason,
+      });
+      assert.equal(
+        toRemoteRequestError("sendTurn", plain, request).failedRootRetirementRefusal,
+        undefined,
+      );
+      // Native tags/prose, transport failures and an inherited/accessor field
+      // are not an authenticated finite pre-input witness.
+      const tagOnly = new ProviderDaemonRpcResponseError(reason, "Fixed refusal.");
+      assert.equal(
+        toRemoteRequestError("sendTurn", tagOnly, request).failedRootRetirementRefusal,
+        undefined,
+      );
+      let getterReads = 0;
+      const accessor = new ProviderDaemonRpcResponseError(
+        "ProviderAdapterRequestError",
+        "Fixed refusal.",
+      );
+      Object.defineProperty(accessor, "failedRootRetirementRefusal", {
+        get: () => {
+          getterReads += 1;
+          return reason;
+        },
+      });
+      assert.equal(
+        toRemoteRequestError("sendTurn", accessor, request).failedRootRetirementRefusal,
+        undefined,
+      );
+      const outerAccessor = new ProviderDaemonRpcResponseError(
+        "ProviderAdapterRequestError",
+        "Fixed refusal.",
+        undefined,
+        reason,
+      );
+      Object.defineProperty(outerAccessor, "remoteErrorTag", {
+        get: () => {
+          getterReads += 1;
+          return "ProviderAdapterRequestError";
+        },
+      });
+      assert.equal(
+        toRemoteRequestError("sendTurn", outerAccessor, request).failedRootRetirementRefusal,
+        undefined,
+      );
+      const inherited = new ProviderDaemonRpcResponseError(
+        "ProviderAdapterRequestError",
+        "Fixed refusal.",
+      );
+      Object.setPrototypeOf(
+        inherited,
+        Object.create(Object.getPrototypeOf(inherited), {
+          failedRootRetirementRefusal: { value: reason },
+        }),
+      );
+      assert.equal(
+        toRemoteRequestError("sendTurn", inherited, request).failedRootRetirementRefusal,
+        undefined,
+      );
+      let proxyReads = 0;
+      const proxy = new Proxy(response, {
+        get: () => {
+          proxyReads += 1;
+          throw Error("Must not inspect proxy.");
+        },
+        getOwnPropertyDescriptor: () => {
+          proxyReads += 1;
+          throw Error("Must not inspect proxy.");
+        },
+        getPrototypeOf: () => {
+          proxyReads += 1;
+          throw Error("Must not inspect proxy.");
+        },
+      });
+      assert.equal(
+        toRemoteRequestError("sendTurn", proxy, request).failedRootRetirementRefusal,
+        undefined,
+      );
+      const revoked = Proxy.revocable(response, {});
+      revoked.revoke();
+      assert.equal(
+        toRemoteRequestError("sendTurn", revoked.proxy, request).failedRootRetirementRefusal,
+        undefined,
+      );
+      assert.equal(proxyReads, 0);
+      assert.equal(getterReads, 0);
+      for (const malformed of [null, false, 7, {}, [], "unknown", `${reason} `]) {
+        const invalid = new ProviderDaemonRpcResponseError(
+          "ProviderAdapterRequestError",
+          "Fixed refusal.",
+          undefined,
+          malformed as never,
+        );
+        assert.equal(
+          toRemoteRequestError("sendTurn", invalid, request).failedRootRetirementRefusal,
+          undefined,
+        );
+      }
+    }
+  });
+
   it.effect(
     "cold failed-root RPC requires the exact authenticated owner capability and complete failure identity before delivery",
     () =>

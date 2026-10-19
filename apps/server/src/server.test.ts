@@ -23,6 +23,8 @@ import {
   MessageId,
   ExternalLauncherError,
   type OrchestrationThreadShell,
+  type OrchestrationShellStreamItem,
+  type OrchestrationThreadActivity,
   type OrchestrationCommand,
   type OrchestrationEvent,
   type OrchestrationThreadActivityDiagnosticInput,
@@ -59,6 +61,7 @@ import * as ManagedRuntime from "effect/ManagedRuntime";
 import * as Option from "effect/Option";
 import * as Path from "effect/Path";
 import * as PubSub from "effect/PubSub";
+import * as Queue from "effect/Queue";
 import * as Ref from "effect/Ref";
 import * as Stream from "effect/Stream";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
@@ -75,6 +78,7 @@ import { OtlpSerialization, OtlpTracer } from "effect/unstable/observability";
 import { RpcClient, RpcSerialization } from "effect/unstable/rpc";
 import * as Socket from "effect/unstable/socket/Socket";
 import { vi } from "vitest";
+import { deriveLiveWorkObservations } from "@cafecode/shared/liveWork";
 
 const TEST_EPOCH = DateTime.makeUnsafe("1970-01-01T00:00:00.000Z");
 
@@ -6541,6 +6545,166 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
         assert.equal(items[1].event.sequence, 11);
       }
     }).pipe(Effect.provide(makeHttpServerTestLayer())),
+  );
+
+  it.effect(
+    "streams current native child starts and retractions to the shell without an unrelated root event",
+    () =>
+      Effect.gen(function* () {
+        const threadId = ThreadId.make("shell-native-child-thread");
+        const turnId = TurnId.make("shell-native-child-root");
+        const runtimeId = SubagentRuntimeId.make("00000000-0000-4000-8000-000000000321");
+        const foreignRuntimeId = SubagentRuntimeId.make("00000000-0000-4000-8000-000000000322");
+        const at = "2026-10-19T03:00:00.000Z";
+        let session: NonNullable<OrchestrationThreadShell["session"]> = {
+          threadId,
+          subagentRuntimeId: runtimeId,
+          status: "ready",
+          providerName: "codex",
+          providerInstanceId: ProviderInstanceId.make("codex"),
+          runtimeMode: "full-access",
+          activeTurnId: null,
+          lastError: null,
+          updatedAt: at,
+        };
+        const activities: OrchestrationThreadActivity[] = [];
+        const events = yield* Queue.unbounded<OrchestrationEvent>();
+        const received = yield* Queue.unbounded<OrchestrationShellStreamItem>();
+        const shellReads: number[] = [];
+        let sequence = 0;
+        // The routing test uses the same native-work projection policy as the
+        // renderer. The query remains authoritative: forwarding a stale event
+        // must not promote a retired owner or a stopped session into live work.
+        const currentShell = () => {
+          const live = deriveLiveWorkObservations(activities, {
+            subagentRuntimeId: session.subagentRuntimeId,
+            orchestrationStatus: session.status,
+          });
+          return makeDefaultOrchestrationThreadShell({
+            id: threadId,
+            session,
+            ...(session.status === "stopped" || session.status === "error"
+              ? {}
+              : {
+                  liveWork: {
+                    runtimeId,
+                    taskCount: live.filter(({ observation }) => !observation.agent).length,
+                    agentCount: live.filter(({ observation }) => observation.agent).length,
+                  },
+                }),
+          });
+        };
+        const append = (kind: string, payload: unknown) =>
+          Effect.gen(function* () {
+            sequence += 1;
+            const activity: OrchestrationThreadActivity = {
+              id: EventId.make(`shell-child-activity-${sequence}`),
+              sequence,
+              kind,
+              tone: "info",
+              summary: "Native child",
+              payload,
+              turnId,
+              createdAt: at,
+            };
+            activities.push(activity);
+            yield* Queue.offer(events, {
+              sequence,
+              eventId: EventId.make(`shell-child-event-${sequence}`),
+              type: "thread.activity-appended",
+              aggregateKind: "thread",
+              aggregateId: threadId,
+              occurredAt: at,
+              commandId: null,
+              causationEventId: null,
+              correlationId: null,
+              metadata: {},
+              payload: { threadId, activity },
+            });
+          });
+        const child = (status: "active" | "waiting" | "completed", owner = runtimeId) => ({
+          taskId: "native-child",
+          subagent: { threadId: "native-child", runtimeId: owner, status },
+        });
+        yield* buildAppUnderTest({
+          layers: {
+            orchestrationEngine: { streamDomainEvents: Stream.fromQueue(events) },
+            projectionSnapshotQuery: {
+              getShellSnapshot: () =>
+                Effect.sync(() => ({
+                  snapshotSequence: 0,
+                  projects: [],
+                  threads: [currentShell()],
+                  updatedAt: at,
+                })),
+              getThreadShellById: (id) =>
+                Effect.sync(() => {
+                  assert.equal(id, threadId);
+                  shellReads.push(sequence);
+                  return Option.some(currentShell());
+                }),
+            },
+          },
+        });
+        const wsUrl = yield* getWsServerUrl("/ws");
+        yield* Effect.scoped(
+          withWsRpcClient(wsUrl, (client) =>
+            Effect.gen(function* () {
+              const reading = yield* client[ORCHESTRATION_WS_METHODS.subscribeShell]({}).pipe(
+                Stream.tap((item) => Queue.offer(received, item)),
+                Stream.runDrain,
+                Effect.forkScoped,
+              );
+              const initial = yield* Queue.take(received);
+              assert.equal(initial.kind, "snapshot");
+              if (initial.kind !== "snapshot")
+                return yield* Effect.die("Expected initial shell snapshot");
+              assert.equal(initial.snapshot.threads[0]?.liveWork?.agentCount, 0);
+              const expectUpdate = (count: number) =>
+                Effect.gen(function* () {
+                  const update = yield* Queue.take(received);
+                  assert.equal(update.kind, "thread-upserted");
+                  if (update.kind !== "thread-upserted")
+                    return yield* Effect.die("Expected native shell refresh");
+                  assert.equal(update.sequence, sequence);
+                  assert.equal(update.thread.id, threadId);
+                  assert.equal(update.thread.liveWork?.agentCount ?? 0, count);
+                });
+              yield* append("task.started", child("active"));
+              yield* expectUpdate(1);
+              yield* append("task.progress", child("waiting"));
+              yield* expectUpdate(1);
+              yield* append("task.completed", child("completed"));
+              yield* expectUpdate(0);
+              yield* append("task.started", child("active", foreignRuntimeId));
+              yield* expectUpdate(0);
+              session = { ...session, status: "stopped" };
+              yield* append("task.started", child("active"));
+              yield* expectUpdate(0);
+              session = { ...session, status: "ready" };
+              yield* append("task.started", child("active"));
+              yield* expectUpdate(1);
+              yield* append("task.progress", { ...child("active"), visibility: "ambient" });
+              yield* expectUpdate(0);
+              // These non-observations must not trigger a shell query. The exact
+              // next native terminal event is the ordered delivery barrier, without
+              // sleeps, a fresh root/session event or a snapshot reload.
+              yield* append("task.started", {
+                taskId: "native-child",
+                subagent: { threadId: "native-child", runtimeId: "invalid", status: "active" },
+              });
+              yield* append("task.progress", {
+                taskId: "codex-turn-start:root",
+                nativeWorkRuntimeId: runtimeId,
+              });
+              yield* append("task.completed", child("completed"));
+              yield* expectUpdate(0);
+              assert.deepEqual(shellReads, [1, 2, 3, 4, 5, 6, 7, 10]);
+              yield* Fiber.interrupt(reading);
+            }),
+          ),
+        );
+      }).pipe(Effect.provide(makeHttpServerTestLayer())),
   );
 
   it.effect("routes websocket rpc orchestration shell snapshot errors", () =>

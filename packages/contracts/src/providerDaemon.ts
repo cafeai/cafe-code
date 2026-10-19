@@ -107,6 +107,24 @@ export const ProviderDaemonSessionReconfigurationRefusal = Schema.Literals([
 export type ProviderDaemonSessionReconfigurationRefusal =
   typeof ProviderDaemonSessionReconfigurationRefusal.Type;
 
+/** A Cafe-authored failed-root retirement refusal proves that this exact cold
+ * continuation did not cross its retirement or paid-input boundary. It is not
+ * a generic retry flag: authenticated request/owner admission must be repeated
+ * before another attempt, and legacy omission leaves the outcome unknown. */
+export const ProviderDaemonFailedRootRetirementRefusal = Schema.Literals([
+  "invalid-request",
+  "owner-changed",
+  "native-context-unavailable",
+  "history-unavailable",
+  "compaction-pending",
+  "root-start-pending",
+  "closed",
+  "root-proof-changed",
+  "notifications-pending",
+]);
+export type ProviderDaemonFailedRootRetirementRefusal =
+  typeof ProviderDaemonFailedRootRetirementRefusal.Type;
+
 export const ProviderDaemonCommandDiagnostic = Schema.Struct({
   commandId: Schema.String,
   method: Schema.String,
@@ -118,6 +136,7 @@ export const ProviderDaemonCommandDiagnostic = Schema.Struct({
   responseSummary: Schema.optional(Schema.Unknown),
   errorTag: Schema.optional(Schema.String),
   sessionReconfigurationRefusal: Schema.optional(ProviderDaemonSessionReconfigurationRefusal),
+  failedRootRetirementRefusal: Schema.optional(ProviderDaemonFailedRootRetirementRefusal),
   errorMessage: Schema.optional(Schema.String),
 });
 export type ProviderDaemonCommandDiagnostic = typeof ProviderDaemonCommandDiagnostic.Type;
@@ -259,6 +278,7 @@ export const ProviderDaemonRecentRpcFailure = Schema.Struct({
   tag: Schema.String,
   message: Schema.String,
   sessionReconfigurationRefusal: Schema.optional(ProviderDaemonSessionReconfigurationRefusal),
+  failedRootRetirementRefusal: Schema.optional(ProviderDaemonFailedRootRetirementRefusal),
   diagnostics: Schema.optional(ProviderDaemonErrorDiagnostics),
 });
 export type ProviderDaemonRecentRpcFailure = typeof ProviderDaemonRecentRpcFailure.Type;
@@ -532,6 +552,7 @@ export const ProviderDaemonRpcError = Schema.Struct({
   tag: Schema.String,
   message: Schema.String,
   sessionReconfigurationRefusal: Schema.optional(ProviderDaemonSessionReconfigurationRefusal),
+  failedRootRetirementRefusal: Schema.optional(ProviderDaemonFailedRootRetirementRefusal),
   diagnostics: Schema.optional(ProviderDaemonErrorDiagnostics),
 });
 export type ProviderDaemonRpcError = typeof ProviderDaemonRpcError.Type;

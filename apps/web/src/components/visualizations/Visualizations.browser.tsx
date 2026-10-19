@@ -313,9 +313,13 @@ function frameElement() {
   return document.querySelector<HTMLIFrameElement>("[data-visualization-card] iframe");
 }
 async function loadedFrame() {
-  await vi.waitFor(() =>
-    expect(frameElement()?.contentDocument?.getElementById("counter")).toBeTruthy(),
-  );
+  // The counter precedes the output and authored handlers in the real parser.
+  // Replacement documents must finish loading before their state is inspected.
+  await vi.waitFor(() => {
+    const child = frameElement()?.contentDocument;
+    expect(child?.getElementById("counter")).toBeTruthy();
+    expect(child?.readyState).toBe("complete");
+  });
   return frameElement()!;
 }
 async function loadedSelectFrame() {

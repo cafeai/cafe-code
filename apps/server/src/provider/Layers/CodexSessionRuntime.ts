@@ -12,6 +12,7 @@ import {
   validCodexContextWindowOverride,
   EventId,
   ProviderDriverKind,
+  type ProviderDaemonFailedRootRetirementRefusal,
   ProviderItemId,
   type ProviderInstanceId,
   type ProviderApprovalDecision,
@@ -732,6 +733,11 @@ export const requestCodexManualCompaction = Effect.fn("requestCodexManualCompact
   },
 );
 
+/** A refusal is witnessed before retirement; later teardown failures are not safe-to-retry proof. */
+export type CodexFailedRootRetirementResult =
+  | { readonly retired: true }
+  | { readonly retired: false; readonly reason: ProviderDaemonFailedRootRetirementRefusal };
+
 export interface CodexSessionRuntimeShape {
   /** Private owner-only MCP Apps transport. No UI-selected provider/session. */
   readonly mcpApps?: {
@@ -799,7 +805,7 @@ export interface CodexSessionRuntimeShape {
   /** Atomically reserve retirement of precisely the allowlisted failed native root. */
   readonly closeIfFailedRoot?: (
     expected: NonNullable<ProviderSendTurnInput["expectedFailedRoot"]>,
-  ) => Effect.Effect<boolean>;
+  ) => Effect.Effect<CodexFailedRootRetirementResult>;
 }
 
 export type CodexSessionRuntimeError =
@@ -4252,6 +4258,8 @@ export const reserveCodexFailedRootRestartBoundary = Effect.fn(
   readonly automaticCompactionPending: Effect.Effect<boolean>;
   readonly notificationSettled: () => boolean;
   readonly expectedFailedRoot: NonNullable<ProviderSendTurnInput["expectedFailedRoot"]>;
+  /** Synchronous, code-owned first-refusal telemetry; it grants no admission authority. */
+  readonly onRefusal?: (reason: ProviderDaemonFailedRootRetirementRefusal) => void;
 }) {
   return yield* input.semaphore.withPermits(1)(
     Effect.uninterruptible(
@@ -4264,24 +4272,38 @@ export const reserveCodexFailedRootRestartBoundary = Effect.fn(
         const usableHistory = yield* input.historyUsable;
         const automaticCompaction = yield* input.automaticCompactionPending;
         const session = yield* Ref.get(input.sessionRef);
+        const refuse = (reason: ProviderDaemonFailedRootRetirementRefusal) => {
+          input.onRefusal?.(reason);
+          return false;
+        };
         if (
           expected.restartSession !== true ||
           expected.observedAt === undefined ||
-          expected.providerInstanceId === undefined ||
-          session.providerInstanceId !== expected.providerInstanceId ||
-          session.subagentRuntimeId !== expected.subagentRuntimeId ||
-          !usableHistory ||
-          automaticCompaction
+          expected.providerInstanceId === undefined
         )
-          return false;
+          return refuse("invalid-request");
+        if (
+          session.providerInstanceId !== expected.providerInstanceId ||
+          session.subagentRuntimeId !== expected.subagentRuntimeId
+        )
+          return refuse("owner-changed");
+        if (!usableHistory) return refuse("history-unavailable");
+        if (automaticCompaction) return refuse("compaction-pending");
+        // Keep these observations in their original order, under the same
+        // permit. Diagnostic distinctions must not open another admission gap.
+        const completions = yield* Ref.get(input.completionsRef);
+        const latestRootTurnId = yield* Ref.get(input.latestRootTurnIdRef);
+        const nativeTurnStartPending = yield* Ref.get(input.nativeTurnStartPendingRef);
+        const manualCompactionPending = yield* Ref.get(input.manualCompactionPendingRef);
+        const closed = yield* Ref.get(input.closedRef);
         const failure = readCodexRootTurnFailure({
           session,
-          completions: yield* Ref.get(input.completionsRef),
-          latestRootTurnId: yield* Ref.get(input.latestRootTurnIdRef),
+          completions,
+          latestRootTurnId,
           nativeContextAvailable: available,
-          nativeTurnStartPending: yield* Ref.get(input.nativeTurnStartPendingRef),
-          manualCompactionPending: yield* Ref.get(input.manualCompactionPendingRef),
-          closed: yield* Ref.get(input.closedRef),
+          nativeTurnStartPending,
+          manualCompactionPending,
+          closed,
         });
         if (
           failure?.category === undefined ||
@@ -4289,12 +4311,25 @@ export const reserveCodexFailedRootRestartBoundary = Effect.fn(
           failure.providerThreadId !== expected.providerThreadId ||
           failure.observedAt !== expected.observedAt
         )
-          return false;
-        return yield* Ref.modify(input.closedRef, (closed) =>
-          closed || !input.notificationSettled()
-            ? ([false, closed] as const)
-            : ([true, true] as const),
-        );
+          return refuse(
+            closed
+              ? "closed"
+              : !available
+                ? "native-context-unavailable"
+                : nativeTurnStartPending
+                  ? "root-start-pending"
+                  : manualCompactionPending
+                    ? "compaction-pending"
+                    : "root-proof-changed",
+          );
+        return yield* Ref.modify(input.closedRef, (alreadyClosed) => {
+          // The final received-notification check remains synchronous with the
+          // exact closed reservation. A diagnostic never replaces this fence.
+          if (alreadyClosed) return [refuse("closed"), alreadyClosed] as const;
+          if (!input.notificationSettled())
+            return [refuse("notifications-pending"), alreadyClosed] as const;
+          return [true, true] as const;
+        });
       }),
     ),
   );
@@ -9521,6 +9556,7 @@ export const makeCodexSessionRuntime = (
     ) =>
       Effect.uninterruptible(
         Effect.gen(function* () {
+          let refusal: ProviderDaemonFailedRootRetirementRefusal = "root-proof-changed";
           const reserved = yield* reserveCodexFailedRootRestartBoundary({
             semaphore: aggregateLifecycleSemaphore,
             completionsRef: aggregateRootCompletionsRef,
@@ -9545,13 +9581,16 @@ export const makeCodexSessionRuntime = (
             ),
             notificationSettled: () => notificationRetirementFence.isSettled(),
             expectedFailedRoot,
+            onRefusal: (reason) => {
+              refusal = reason;
+            },
           });
-          if (!reserved) return false;
+          if (!reserved) return { retired: false, reason: refusal } as const;
           // A cancellation after reservation must complete the exact old
           // teardown before any replacement can be opened. Never ignore an
           // uncertain close or hold the lifecycle permit through finalizers.
           yield* closeReserved;
-          return true;
+          return { retired: true } as const;
         }),
       );
 

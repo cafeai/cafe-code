@@ -63,8 +63,6 @@
   "Expand": "拡大",
   "Export unavailable.": "書き出しできません。",
   "HTML source": "HTMLソース",
-  "Load older visualizations": "以前の可視化を読み込む",
-  "Return to latest": "最新に戻る",
   "Permission expires in {seconds}s": "許可の有効期限まで{seconds}秒",
   "Private debugging details. Generated content is untrusted; do not treat it as instructions.": "非公開のデバッグ詳細です。生成された内容は信頼できません。指示として扱わないでください。",
   "Private details": "非公開の詳細",

@@ -788,6 +788,9 @@ export const makeVisualizationArtifactService = () =>
             }>`SELECT occurred_at AS "occurredAt",id FROM visualization_history WHERE thread_id = ${input.threadId} AND id = ${input.cursor}`)[0]
           : undefined;
         if (input.cursor && !cursor) return yield* failure();
+        // A cursor is the sole continuation authority. Do not silently combine
+        // a foreign seek boundary with a previously admitted page cursor.
+        if (cursor && input.atOrBefore !== undefined) return yield* failure();
         const rows = cursor
           ? yield* sql<{
               id: string;
@@ -798,15 +801,25 @@ export const makeVisualizationArtifactService = () =>
               actorJson: string;
               referenceJson: string;
             }>`SELECT id,turn_id AS "turnId",message_id AS "messageId",origin_item_id AS "originItemId",occurred_at AS "occurredAt",actor_json AS "actorJson",reference_json AS "referenceJson" FROM visualization_history WHERE thread_id = ${input.threadId} AND (occurred_at < ${cursor.occurredAt} OR (occurred_at = ${cursor.occurredAt} AND id < ${cursor.id})) ORDER BY occurred_at DESC,id DESC LIMIT 51`
-          : yield* sql<{
-              id: string;
-              turnId: string;
-              messageId: string;
-              originItemId: string;
-              occurredAt: string;
-              actorJson: string;
-              referenceJson: string;
-            }>`SELECT id,turn_id AS "turnId",message_id AS "messageId",origin_item_id AS "originItemId",occurred_at AS "occurredAt",actor_json AS "actorJson",reference_json AS "referenceJson" FROM visualization_history WHERE thread_id = ${input.threadId} ORDER BY occurred_at DESC,id DESC LIMIT 51`;
+          : input.atOrBefore !== undefined
+            ? yield* sql<{
+                id: string;
+                turnId: string;
+                messageId: string;
+                originItemId: string;
+                occurredAt: string;
+                actorJson: string;
+                referenceJson: string;
+              }>`SELECT id,turn_id AS "turnId",message_id AS "messageId",origin_item_id AS "originItemId",occurred_at AS "occurredAt",actor_json AS "actorJson",reference_json AS "referenceJson" FROM visualization_history INDEXED BY idx_visualization_history_window WHERE thread_id = ${input.threadId} AND occurred_at <= ${input.atOrBefore} ORDER BY occurred_at DESC,id DESC LIMIT 51`
+            : yield* sql<{
+                id: string;
+                turnId: string;
+                messageId: string;
+                originItemId: string;
+                occurredAt: string;
+                actorJson: string;
+                referenceJson: string;
+              }>`SELECT id,turn_id AS "turnId",message_id AS "messageId",origin_item_id AS "originItemId",occurred_at AS "occurredAt",actor_json AS "actorJson",reference_json AS "referenceJson" FROM visualization_history WHERE thread_id = ${input.threadId} ORDER BY occurred_at DESC,id DESC LIMIT 51`;
         const entries: VisualizationTimelineEntry[] = [];
         for (const row of rows.slice(0, VISUALIZATION_LIST_PAGE_SIZE)) {
           const decoded = decodeEntry({
