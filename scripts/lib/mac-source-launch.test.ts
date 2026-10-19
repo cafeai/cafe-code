@@ -9,6 +9,7 @@ describe("macOS source app launch", () => {
   const root = join(tmpdir(), "Cafe source launch fixture");
   const input = {
     appBundlePath: join(root, "Cafe Code.app"),
+    runtimeBundlePath: join(root, "mutable-runtime", "Cafe Code (Debug).app"),
     entryPath: join(root, "dist-electron", "main.cjs"),
     stdoutPath: join(root, "source.stdout.log"),
     stderrPath: join(root, "source.stderr.log"),
@@ -32,13 +33,23 @@ describe("macOS source app launch", () => {
       "--env",
       "CAFE_CODE_DATA_PROFILE=debug",
       "--args",
+      "--cafe-source-runtime",
+      input.runtimeBundlePath,
+      "--cafe-source-entry",
       input.entryPath,
       "--cafe-debug",
       "argument with spaces",
     ]);
   });
 
-  it.each(["appBundlePath", "entryPath", "stdoutPath", "stderrPath", "configuredBaseDir"] as const)(
+  it.each([
+    "appBundlePath",
+    "runtimeBundlePath",
+    "entryPath",
+    "stdoutPath",
+    "stderrPath",
+    "configuredBaseDir",
+  ] as const)(
     "rejects a relative %s instead of depending on a LaunchServices working directory",
     (key) => {
       expect(() => macSourceLaunchArgs({ ...input, [key]: "relative path" })).toThrow(

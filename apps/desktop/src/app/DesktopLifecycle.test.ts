@@ -76,6 +76,7 @@ function makeLifecycleHarness(options?: {
   readonly dataProfile?: "production" | "debug";
   readonly stateDir?: string;
   readonly pendingEarlyRestart?: boolean;
+  readonly nativeSourceHostVersion?: string;
 }) {
   let beforeQuitListener: BeforeQuitListener | undefined;
   let secondInstanceListener: SecondInstanceListener | undefined;
@@ -91,6 +92,7 @@ function makeLifecycleHarness(options?: {
   return Effect.gen(function* () {
     const overlaySent = yield* Deferred.make<void>();
     const relaunched = yield* Deferred.make<void>();
+    const exited = yield* Deferred.make<number>();
 
     const electronAppLayer = Layer.succeed(ElectronApp.ElectronApp, {
       metadata: Effect.die("unexpected metadata"),
@@ -100,8 +102,9 @@ function makeLifecycleHarness(options?: {
         quitCount += 1;
       }),
       exit: (code) =>
-        Effect.sync(() => {
+        Effect.gen(function* () {
           exitCodes.push(code);
+          yield* Deferred.succeed(exited, code);
         }),
       requestSingleInstanceLock: Effect.succeed(true),
       relaunch: () =>
@@ -184,6 +187,8 @@ function makeLifecycleHarness(options?: {
     const desktopEnvironmentLayer = Layer.succeed(DesktopEnvironment.DesktopEnvironment, {
       platform: "darwin",
       isDevelopment: false,
+      isPackaged: options?.dataProfile === "production",
+      nativeSourceHostVersion: options?.nativeSourceHostVersion,
       dataProfile: options?.dataProfile ?? "debug",
       configuredBaseDir: "/synthetic/cafe",
       stateDir: options?.stateDir ?? "/synthetic/cafe/.debug/userdata",
@@ -240,6 +245,7 @@ function makeLifecycleHarness(options?: {
       layer,
       overlaySent,
       relaunched,
+      exited,
       getBeforeQuitListener: () => beforeQuitListener,
       getSecondInstanceListener: () => secondInstanceListener,
       getActivateCount: () => activateCount,
@@ -452,6 +458,26 @@ describe("DesktopLifecycle", () => {
         assert.equal(harness.getProviderDaemonStopCount(), 0);
       }).pipe(Effect.scoped, Effect.provide(harness.layer));
     }),
+  );
+
+  it.effect(
+    "hands a hosted Debug restart to its parent only after graceful shutdown completes",
+    () =>
+      Effect.gen(function* () {
+        const harness = yield* makeLifecycleHarness({ nativeSourceHostVersion: "1" });
+        yield* Effect.gen(function* () {
+          const lifecycle = yield* DesktopLifecycle.DesktopLifecycle;
+          const shutdown = yield* DesktopLifecycle.DesktopShutdown;
+          yield* lifecycle.relaunch("native-host-fixture");
+          yield* shutdown.awaitRequest;
+          assert.deepEqual(harness.getExitCodes(), []);
+          assert.equal(harness.getRelaunchCount(), 0);
+          yield* shutdown.markComplete;
+          assert.equal(yield* Deferred.await(harness.exited), 75);
+          assert.equal(harness.getRelaunchCount(), 0);
+          assert.equal(harness.getProviderDaemonStopCount(), 0);
+        }).pipe(Effect.scoped, Effect.provide(harness.layer));
+      }),
   );
 
   it.effect("does not stop Production for a Debug request or an unproved argv flag", () =>

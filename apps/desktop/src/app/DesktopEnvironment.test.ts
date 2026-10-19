@@ -37,6 +37,19 @@ const makeEnvironment = (
   }).pipe(Effect.provide(makeEnvironmentLayer(overrides, env)));
 
 describe("DesktopEnvironment", () => {
+  it.effect("keeps native host supervision confined to source macOS launches", () =>
+    Effect.gen(function* () {
+      const env = { CAFE_CODE_MAC_SOURCE_HOST_VERSION: "1" };
+      const source = yield* makeEnvironment({}, env);
+      assert.equal(source.nativeSourceHostVersion, "1");
+      const packaged = yield* makeEnvironment({ isPackaged: true }, env);
+      assert.equal(packaged.nativeSourceHostVersion, undefined);
+      assert.equal(packaged.dataProfile, "production");
+      const linux = yield* makeEnvironment({ platform: "linux" }, env);
+      assert.equal(linux.nativeSourceHostVersion, undefined);
+    }),
+  );
+
   it.effect("derives state paths and development identity inside Effect", () =>
     Effect.gen(function* () {
       const environment = yield* makeEnvironment(

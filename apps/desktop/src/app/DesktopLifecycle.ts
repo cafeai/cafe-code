@@ -23,6 +23,7 @@ import { DesktopDataProfileStartup } from "./DesktopDataProfile.ts";
 import { acceptsDesktopRestartRequest, desktopRelaunchArguments } from "./DesktopProfileControl.ts";
 import * as DesktopWindow from "../window/DesktopWindow.ts";
 import * as IpcChannels from "../ipc/channels.ts";
+import { usesDesktopRestartSupervisor } from "./DesktopRelaunchPolicy.ts";
 
 export interface DesktopShutdownShape {
   readonly request: Effect.Effect<void>;
@@ -275,7 +276,14 @@ const relaunchDesktop = Effect.fn("desktop.lifecycle.relaunch")(function* (reaso
   yield* Effect.gen(function* () {
     yield* Effect.yieldNow;
     yield* requestDesktopShutdownAndWait();
-    if (environment.isDevelopment) {
+    if (
+      usesDesktopRestartSupervisor({
+        isDevelopment: environment.isDevelopment,
+        isPackaged: environment.isPackaged,
+        platform: environment.platform,
+        nativeHostVersion: environment.nativeSourceHostVersion,
+      })
+    ) {
       yield* electronApp.exit(75);
       return;
     }

@@ -71,13 +71,44 @@ fail LAN admission even when the settings switch is enabled. Updating the source
 launcher rebuilds that cache on the next launch; the installed Electron package
 and packaged release signing are separate. This development signature does not
 grant Local Network access or provide an Apple-issued persistent signing identity.
-Default `yarn restart:desktop` launches the Mac source app through LaunchServices
-after its graceful shutdown, using the absolute main entrypoint and clearing
-inherited Electron Node-only mode. This also avoids carrying the identity of a
-terminal that has exited into repeated provider-triggered restarts. App output
+Default `yarn start:desktop` and `yarn restart:desktop` launch a small native
+Debug host through LaunchServices. The host lives at
+`~/Library/Application Support/Cafe Code Source Hosts/v1-<arch>/Cafe Code (Debug).app`
+and has the distinct identity `com.cafeai.cafecode.debug.source-host.v1`. It is
+compiled and ad-hoc signed once, with its own main executable UUID. It launches
+the separately verified Debug Electron bundle directly as its child and stays
+alive for that child's lifetime. Electron opens the network connections itself;
+there is no forwarding service or tunnel.
+
+macOS attributes helper networking to the responsible parent app. Keeping this
+small signed bundle unchanged gives ordinary source rebuilds a stable responsible
+identity, even when the Electron runtime or JavaScript changes. Allow **Cafe Code
+(Debug)** when the new host first requests Local Network access. The launcher
+verifies the cached host's signature, versioned source/plist receipt, ownership,
+and UUID, and refuses to replace or re-sign an existing identity when those
+inputs differ. A change to the native host protocol or its signed metadata
+requires a deliberate host version bump and new consent. It does not inherit
+Production's grant or use a weaker custom code-signing requirement.
+
+After the existing profile owner finishes graceful shutdown, a hosted Debug
+restart exits with code 75. Its native parent waits for the actual child exit
+before launching the successor, retaining the same responsible app and permission.
+The absolute main entrypoint and configured Debug home remain fixed, and inherited
+Electron Node-only mode is cleared. Packaged release relaunch is unchanged. App output
 remains in private `source-launch-*.stdout.log` / `*.stderr.log` files under Cafe's
 restart log directory. An explicit custom restart command retains its chosen
 launch context.
+
+This is a source-development identity policy, not a general macOS privacy reset.
+[Apple TN3179](https://developer.apple.com/documentation/technotes/tn3179-understanding-local-network-privacy)
+documents responsible-app attribution, ad-hoc signing limitations, UUID collisions,
+and the absence of a supported per-app reset before macOS 27.2. Native qualification
+must exercise the branded app's actual LAN TLS operation after consent and again
+after a native restart. Shell curl/SSH and localhost TLS tests do not qualify this
+permission boundary. A small isolated GUI Electron fixture on macOS 27.0.1 qualified
+direct TLS through the v1 host before and after an exit-75 restart, with the same
+native parent and certificate fingerprint. This does not establish every macOS
+version's behavior or replace an end-to-end saved-environment pairing check.
 
 For a self-signed HTTPS server, the desktop app asks for certificate approval
 before sending a sign-in credential. Compare the displayed SHA-256 fingerprint

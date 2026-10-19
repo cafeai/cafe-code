@@ -38,6 +38,7 @@ export interface DesktopEnvironmentShape {
   readonly processArch: string;
   readonly isPackaged: boolean;
   readonly isDevelopment: boolean;
+  readonly nativeSourceHostVersion: string | undefined;
   readonly appVersion: string;
   readonly appPath: string;
   readonly resourcesPath: string;
@@ -204,6 +205,10 @@ const makeDesktopEnvironment = Effect.fn("desktop.environment.make")(function* (
     processArch: input.processArch,
     isPackaged: input.isPackaged,
     isDevelopment,
+    nativeSourceHostVersion:
+      input.platform === "darwin" && !input.isPackaged
+        ? Option.getOrUndefined(config.nativeSourceHostVersion)
+        : undefined,
     appVersion: input.appVersion,
     appPath: input.appPath,
     resourcesPath,

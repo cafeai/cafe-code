@@ -12,16 +12,19 @@ import {
 const LAUNCHER_FILES = [
   "apps/desktop/scripts/start-electron.mjs",
   "apps/desktop/scripts/start-electron-launchservices.mjs",
+  "apps/desktop/scripts/desktop-child-env.mjs",
   "apps/desktop/scripts/electron-launcher.mjs",
   "apps/desktop/scripts/build-mac-dictation-helper.mjs",
   "apps/desktop/scripts/linux-safe-storage.mjs",
   "apps/desktop/scripts/chromium-tls-log-filter.mjs",
   "apps/desktop/src/app/DesktopProfileControl.ts",
   "apps/desktop/native/mac-dictation-target.swift",
+  "apps/desktop/native/mac-source-host.m",
   "packages/shared/src/sourceDebugBuild.ts",
   "packages/shared/src/dataProfileStorage.ts",
   "scripts/lib/mac-source-runtime-signing.ts",
   "scripts/lib/mac-source-launch.ts",
+  "scripts/lib/mac-source-host.ts",
 ] as const;
 
 /** Resolve reviewed locale copy while building, not from a missing workspace

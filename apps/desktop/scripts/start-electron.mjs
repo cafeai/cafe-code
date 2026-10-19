@@ -9,6 +9,9 @@ import { linuxSafeStorageElectronArgs } from "./linux-safe-storage.mjs";
 import { forwardChromiumStderr } from "./chromium-tls-log-filter.mjs";
 import { DESKTOP_RESTART_EXISTING_FLAG } from "../src/app/DesktopProfileControl.ts";
 import { assertSourceDebugDesktopBuilds } from "../../../packages/shared/src/sourceDebugBuild.ts";
+import { buildDesktopChildEnv } from "./desktop-child-env.mjs";
+
+export { buildDesktopChildEnv } from "./desktop-child-env.mjs";
 
 const isolateChildProcessGroup = process.platform !== "win32";
 const forcedShutdownTimeoutMs = 5_000;
@@ -19,18 +22,6 @@ function hasServerModeArg(args) {
   return args.some(
     (arg, index) => arg === "--mode" || arg.startsWith("--mode=") || args[index - 1] === "--mode",
   );
-}
-
-export function buildDesktopChildEnv(env) {
-  const childEnv = { ...env };
-  delete childEnv.ELECTRON_RUN_AS_NODE;
-  delete childEnv.CAFE_CODE_DESKTOP_DEV;
-  delete childEnv.VITE_DEV_SERVER_URL;
-  delete childEnv.CAFE_CODE_DEV_URL;
-  // These are source-only launchers. Retain an explicit profile when Linux
-  // selects its headless server branch, where Electron metadata is unavailable.
-  childEnv.CAFE_CODE_DATA_PROFILE = "debug";
-  return childEnv;
 }
 
 export function hasDisplayServer(environment, platform = process.platform) {
@@ -138,12 +129,19 @@ function spawnLaunchPlan(plan, childEnv) {
   });
 }
 
-export function runStartElectron({
+export async function runStartElectron({
   args = process.argv.slice(2),
   environment = process.env,
   cwd = process.cwd(),
 } = {}) {
   assertSourceDebugDesktopBuilds(desktopDir);
+  if (process.platform === "darwin") {
+    // A stable, LaunchServices-owned native parent retains the ad hoc Local
+    // Network identity while Electron and the JS build remain replaceable.
+    const { runStartElectronLaunchServices } = await import("./start-electron-launchservices.mjs");
+    await runStartElectronLaunchServices({ args, environment });
+    return;
+  }
   const childEnv = buildDesktopChildEnv(environment);
   const plan = resolveLaunchPlan({ args, environment: childEnv, cwd });
   if (plan.type === "electron") {
@@ -218,5 +216,5 @@ export function runStartElectron({
 }
 
 if (process.argv[1] !== undefined && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
-  runStartElectron();
+  await runStartElectron();
 }

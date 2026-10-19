@@ -17,6 +17,7 @@ export function resolveMacSourceConfiguredHome(
 
 export function macSourceLaunchArgs(input: {
   readonly appBundlePath: string;
+  readonly runtimeBundlePath: string;
   readonly entryPath: string;
   readonly stdoutPath: string;
   readonly stderrPath: string;
@@ -26,6 +27,7 @@ export function macSourceLaunchArgs(input: {
   // LaunchServices does not inherit the source launcher's working directory.
   for (const path of [
     input.appBundlePath,
+    input.runtimeBundlePath,
     input.entryPath,
     input.stdoutPath,
     input.stderrPath,
@@ -53,6 +55,9 @@ export function macSourceLaunchArgs(input: {
     "--env",
     "CAFE_CODE_DATA_PROFILE=debug",
     "--args",
+    "--cafe-source-runtime",
+    input.runtimeBundlePath,
+    "--cafe-source-entry",
     input.entryPath,
     ...input.args,
   ];
