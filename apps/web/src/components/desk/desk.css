@@ -124,10 +124,12 @@
      sits beside it instead of leaving a second gap. */
   padding-inline: 0.75rem 0.25rem;
 }
-/* A visible sidebar trigger starts at the bar edge exactly as in the tab
-   layout; the macOS traffic-light reservation stays on the bar itself. */
+/* Visible sidebar controls start at the bar edge exactly as in the tab
+   layout; hidden controls stay mounted, so retain the title's normal inset
+   while navigation is open. The macOS traffic-light reservation stays on
+   the bar itself. */
 .desk-group-bar[data-window-left="true"][data-window-top="true"]
-  .desk-title-header:has([data-sidebar="trigger"]) {
+  .desk-title-header:has([data-sidebar="content-controls"]:not([hidden])) {
   padding-inline-start: 0;
 }
 .desk-title-header[data-preview="true"] [data-chat-header-title] {
