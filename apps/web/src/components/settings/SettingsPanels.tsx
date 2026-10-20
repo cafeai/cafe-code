@@ -2679,8 +2679,7 @@ export function ProviderSettingsPanel() {
               onLogIn={
                 canLogInProvider
                   ? () =>
-                      row.driver === "codex" &&
-                      (remote || liveProvider?.authActions?.deviceCodeLogin)
+                      row.driver === "codex" && remote && remoteRole === "client"
                         ? setDeviceLogin({
                             environmentId,
                             instanceId: row.instanceId,
@@ -2703,7 +2702,7 @@ export function ProviderSettingsPanel() {
                         undefined,
                         uiLocale,
                       )
-                    : !liveProvider?.authActions?.deviceCodeLogin
+                    : remoteRole === "client" && !liveProvider?.authActions?.deviceCodeLogin
                       ? uiText(
                           "Update Cafe and Codex on the server to use device-code sign-in.",
                           undefined,

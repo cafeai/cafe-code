@@ -751,6 +751,66 @@ function installProviderAccountSettings(config: ServerConfig) {
   return updateSettings;
 }
 
+function installRemoteProviderAccountSettings(
+  config: ServerConfig,
+  role: "owner" | "client" | null,
+  server: Pick<LocalApi["server"], "loginProvider" | "subscribeProviderDeviceLogin">,
+) {
+  installProviderAccountSettings(createBaseServerConfig());
+  const environmentId = EnvironmentId.make("remote-codex-login");
+  remoteDeviceLoginHarness.environmentId = environmentId;
+  remoteDeviceLoginHarness.connection = { client: { server } as unknown as LocalApi };
+  const environment = { ...config.environment, environmentId };
+  useSavedEnvironmentRegistryStore.setState({
+    byId: {
+      [environmentId]: {
+        environmentId,
+        label: "Remote Codex",
+        httpBaseUrl: "https://remote.example",
+        wsBaseUrl: "wss://remote.example",
+        createdAt: "2026-10-20T00:00:00.000Z",
+        lastConnectedAt: null,
+      },
+    },
+  });
+  useSavedEnvironmentRuntimeStore.getState().patch(environmentId, {
+    connectionState: "connected",
+    role,
+    descriptor: environment,
+    serverConfig: { ...config, environment },
+  });
+  selectWorkspaceEnvironment(environmentId);
+  return environmentId;
+}
+
+function createCodexLoginSettings(deviceCodeLogin: boolean): ServerConfig {
+  const base = createBaseServerConfig();
+  const instanceId = ProviderInstanceId.make("codex_work");
+  return {
+    ...base,
+    settings: {
+      ...base.settings,
+      providerInstances: {
+        [instanceId]: {
+          driver: ProviderDriverKind.make("codex"),
+          enabled: true,
+          displayName: "Work Codex",
+        },
+      },
+    },
+    providers: [
+      {
+        ...createOutdatedProvider("codex"),
+        instanceId,
+        driver: ProviderDriverKind.make("codex"),
+        displayName: "Work Codex",
+        auth: { status: "unauthenticated" },
+        authActions: { login: true, deviceCodeLogin },
+      },
+    ],
+  };
+}
+
 describe("settings panels", () => {
   let mounted:
     | (Awaited<ReturnType<typeof render>> & {
@@ -2702,124 +2762,72 @@ describe("settings panels", () => {
     }
   });
 
-  it.each(["local", "remote-owner", "remote-client"] as const)(
-    "opens Codex device-code sign-in from %s and cancels its own one-shot stream",
-    async (scope) => {
-      const base = createBaseServerConfig();
-      const instanceId = ProviderInstanceId.make("codex_work");
-      const config: ServerConfig = {
-        ...base,
-        settings: {
-          ...base.settings,
-          providerInstances: {
-            [instanceId]: {
-              driver: ProviderDriverKind.make("codex"),
-              enabled: true,
-              displayName: "Work Codex",
-            },
-          },
-        },
-        providers: [
-          {
-            ...createOutdatedProvider("codex"),
-            instanceId,
-            driver: ProviderDriverKind.make("codex"),
-            displayName: "Work Codex",
-            installed: true,
-            auth: { status: "unauthenticated" },
-            authActions: { login: true, deviceCodeLogin: true },
-          },
-        ],
-      };
-      installProviderAccountSettings(scope === "local" ? config : base);
-      let publish!: (event: ServerProviderDeviceLoginEvent) => void;
-      const cancel = vi.fn();
-      const subscribe = vi
-        .fn<LocalApi["server"]["subscribeProviderDeviceLogin"]>()
-        .mockImplementation((_input, listener) => {
-          publish = listener;
-          return cancel;
-        });
-      const primarySubscribe = vi.fn<LocalApi["server"]["subscribeProviderDeviceLogin"]>();
-      window.nativeApi!.server.subscribeProviderDeviceLogin =
-        scope === "local" ? subscribe : primarySubscribe;
-      if (scope !== "local") {
-        const environmentId = EnvironmentId.make("remote-codex-device-login");
-        remoteDeviceLoginHarness.environmentId = environmentId;
-        remoteDeviceLoginHarness.connection = {
-          client: { server: { subscribeProviderDeviceLogin: subscribe } } as unknown as LocalApi,
-        };
-        const environment = { ...config.environment, environmentId };
-        useSavedEnvironmentRegistryStore.setState({
-          byId: {
-            [environmentId]: {
-              environmentId,
-              label: "Remote Codex",
-              httpBaseUrl: "https://remote.example",
-              wsBaseUrl: "wss://remote.example",
-              createdAt: "2026-10-20T00:00:00.000Z",
-              lastConnectedAt: null,
-            },
-          },
-        });
-        useSavedEnvironmentRuntimeStore.getState().patch(environmentId, {
-          connectionState: "connected",
-          role: scope === "remote-client" ? "client" : "owner",
-          descriptor: environment,
-          serverConfig: { ...config, environment },
-        });
-        selectWorkspaceEnvironment(environmentId);
-      }
-      const browserLogin = vi.fn<LocalApi["server"]["loginProvider"]>();
-      window.nativeApi!.server.loginProvider = browserLogin;
-      const openExternal = vi.fn<LocalApi["shell"]["openExternal"]>().mockResolvedValue(undefined);
-      window.nativeApi!.shell = {
-        openExternal,
-        openInEditor: vi.fn().mockResolvedValue(undefined),
-        openTerminal: vi.fn().mockResolvedValue(undefined),
-        openPath: vi.fn().mockResolvedValue(undefined),
-        revealPath: vi.fn().mockResolvedValue(undefined),
-      };
-      const copy = vi.spyOn(navigator.clipboard, "writeText").mockResolvedValue(undefined);
-      try {
-        mounted = await renderWithTestRouter(
-          <AppAtomRegistryProvider>
-            <WorkspaceEnvironmentProvider>
-              <ProviderSettingsPanel />
-            </WorkspaceEnvironmentProvider>
-          </AppAtomRegistryProvider>,
-        );
-        await page.getByRole("button", { name: "Log in", exact: true }).click();
-        await expect.element(page.getByRole("dialog")).toBeVisible();
-        expect(subscribe).toHaveBeenCalledExactlyOnceWith(
-          { instanceId },
-          expect.any(Function),
-          expect.any(Function),
-        );
-        publish({
-          type: "device-code",
-          verificationUrl: "https://auth.openai.com/codex/device",
-          userCode: "ABCD-12345",
-        });
-        await expect.element(page.getByText("ABCD-12345", { exact: true })).toBeVisible();
-        await page.getByRole("button", { name: "Copy code", exact: true }).click();
-        await vi.waitFor(() => expect(copy).toHaveBeenCalledExactlyOnceWith("ABCD-12345"));
-        await page.getByRole("button", { name: "Open verification page", exact: true }).click();
-        expect(openExternal).toHaveBeenCalledExactlyOnceWith(
-          "https://auth.openai.com/codex/device",
-        );
-        expect(browserLogin).not.toHaveBeenCalled();
-        expect(primarySubscribe).not.toHaveBeenCalled();
-        await page.getByRole("button", { name: "Cancel", exact: true }).click();
-        await vi.waitFor(() => expect(cancel).toHaveBeenCalledOnce());
-        publish({ type: "authenticated" });
-        await expect.element(page.getByRole("dialog")).not.toBeInTheDocument();
-        expect(subscribe).toHaveBeenCalledOnce();
-      } finally {
-        copy.mockRestore();
-      }
-    },
-  );
+  it("opens Codex device-code sign-in from a remote Client and cancels its own one-shot stream", async () => {
+    const instanceId = ProviderInstanceId.make("codex_work");
+    const config = createCodexLoginSettings(true);
+    let publish!: (event: ServerProviderDeviceLoginEvent) => void;
+    const cancel = vi.fn();
+    const subscribe = vi
+      .fn<LocalApi["server"]["subscribeProviderDeviceLogin"]>()
+      .mockImplementation((_input, listener) => {
+        publish = listener;
+        return cancel;
+      });
+    const primarySubscribe = vi.fn<LocalApi["server"]["subscribeProviderDeviceLogin"]>();
+    const browserLogin = vi.fn<LocalApi["server"]["loginProvider"]>();
+    installRemoteProviderAccountSettings(config, "client", {
+      loginProvider: browserLogin,
+      subscribeProviderDeviceLogin: subscribe,
+    });
+    const primaryLogin = vi.fn<LocalApi["server"]["loginProvider"]>();
+    window.nativeApi!.server.loginProvider = primaryLogin;
+    window.nativeApi!.server.subscribeProviderDeviceLogin = primarySubscribe;
+    const openExternal = vi.fn<LocalApi["shell"]["openExternal"]>().mockResolvedValue(undefined);
+    window.nativeApi!.shell = {
+      openExternal,
+      openInEditor: vi.fn().mockResolvedValue(undefined),
+      openTerminal: vi.fn().mockResolvedValue(undefined),
+      openPath: vi.fn().mockResolvedValue(undefined),
+      revealPath: vi.fn().mockResolvedValue(undefined),
+    };
+    const copy = vi.spyOn(navigator.clipboard, "writeText").mockResolvedValue(undefined);
+    try {
+      mounted = await renderWithTestRouter(
+        <AppAtomRegistryProvider>
+          <WorkspaceEnvironmentProvider>
+            <ProviderSettingsPanel />
+          </WorkspaceEnvironmentProvider>
+        </AppAtomRegistryProvider>,
+      );
+      await page.getByRole("button", { name: "Log in", exact: true }).click();
+      await expect.element(page.getByRole("dialog")).toBeVisible();
+      expect(subscribe).toHaveBeenCalledExactlyOnceWith(
+        { instanceId },
+        expect.any(Function),
+        expect.any(Function),
+      );
+      publish({
+        type: "device-code",
+        verificationUrl: "https://auth.openai.com/codex/device",
+        userCode: "ABCD-12345",
+      });
+      await expect.element(page.getByText("ABCD-12345", { exact: true })).toBeVisible();
+      await page.getByRole("button", { name: "Copy code", exact: true }).click();
+      await vi.waitFor(() => expect(copy).toHaveBeenCalledExactlyOnceWith("ABCD-12345"));
+      await page.getByRole("button", { name: "Open verification page", exact: true }).click();
+      expect(openExternal).toHaveBeenCalledExactlyOnceWith("https://auth.openai.com/codex/device");
+      expect(browserLogin).not.toHaveBeenCalled();
+      expect(primaryLogin).not.toHaveBeenCalled();
+      expect(primarySubscribe).not.toHaveBeenCalled();
+      await page.getByRole("button", { name: "Cancel", exact: true }).click();
+      await vi.waitFor(() => expect(cancel).toHaveBeenCalledOnce());
+      publish({ type: "authenticated" });
+      await expect.element(page.getByRole("dialog")).not.toBeInTheDocument();
+      expect(subscribe).toHaveBeenCalledOnce();
+    } finally {
+      copy.mockRestore();
+    }
+  });
 
   it("clears the device code after native completion without starting another login", async () => {
     const instanceId = ProviderInstanceId.make("codex_work");
@@ -2893,34 +2901,16 @@ describe("settings panels", () => {
     expect(subscribe).toHaveBeenCalledOnce();
   });
 
-  it.each(["started", "authenticated"] as const)(
-    "opens the selected Codex browser login and presents its %s outcome",
-    async (outcome) => {
-      const base = createBaseServerConfig();
+  it.each([
+    { scope: "local", deviceCodeLogin: true, outcome: "started" },
+    { scope: "local", deviceCodeLogin: false, outcome: "authenticated" },
+    { scope: "remote-owner", deviceCodeLogin: true, outcome: "started" },
+    { scope: "remote-owner", deviceCodeLogin: false, outcome: "authenticated" },
+  ] as const)(
+    "uses normal Codex login for $scope with device-code support $deviceCodeLogin and presents $outcome",
+    async ({ scope, deviceCodeLogin, outcome }) => {
       const instanceId = ProviderInstanceId.make("codex_work");
-      const config = {
-        ...base,
-        settings: {
-          ...base.settings,
-          providerInstances: {
-            [instanceId]: {
-              driver: ProviderDriverKind.make("codex"),
-              enabled: true,
-              displayName: "Work Codex",
-            },
-          },
-        },
-        providers: [
-          {
-            ...createOutdatedProvider("codex"),
-            instanceId,
-            displayName: "Work Codex",
-            auth: { status: "unauthenticated" as const },
-            authActions: { login: true },
-          },
-        ],
-      };
-      installProviderAccountSettings(config);
+      const config = createCodexLoginSettings(deviceCodeLogin);
       let acknowledge!: (value: Awaited<ReturnType<LocalApi["server"]["loginProvider"]>>) => void;
       const loginProvider = vi.fn<LocalApi["server"]["loginProvider"]>().mockImplementation(
         () =>
@@ -2928,17 +2918,37 @@ describe("settings panels", () => {
             acknowledge = resolve;
           }),
       );
-      window.nativeApi!.server.loginProvider = loginProvider;
+      const subscribe = vi.fn<LocalApi["server"]["subscribeProviderDeviceLogin"]>();
+      const primaryLogin = vi.fn<LocalApi["server"]["loginProvider"]>();
+      const primarySubscribe = vi.fn<LocalApi["server"]["subscribeProviderDeviceLogin"]>();
+      const remoteId =
+        scope === "remote-owner"
+          ? installRemoteProviderAccountSettings(config, "owner", {
+              loginProvider,
+              subscribeProviderDeviceLogin: subscribe,
+            })
+          : undefined;
+      if (!remoteId) installProviderAccountSettings(config);
+      window.nativeApi!.server.loginProvider = remoteId ? primaryLogin : loginProvider;
+      window.nativeApi!.server.subscribeProviderDeviceLogin = remoteId
+        ? primarySubscribe
+        : subscribe;
       const toast = vi.spyOn(toastManager, "add");
       try {
-        mounted = await render(
+        mounted = await renderWithTestRouter(
           <AppAtomRegistryProvider>
-            <ProviderSettingsPanel />
+            <WorkspaceEnvironmentProvider>
+              <ProviderSettingsPanel />
+            </WorkspaceEnvironmentProvider>
           </AppAtomRegistryProvider>,
         );
         const button = page.getByRole("button", { name: "Log in", exact: true });
         await button.click();
         expect(loginProvider).toHaveBeenCalledExactlyOnceWith({ instanceId });
+        expect(subscribe).not.toHaveBeenCalled();
+        expect(primaryLogin).not.toHaveBeenCalled();
+        expect(primarySubscribe).not.toHaveBeenCalled();
+        await expect.element(page.getByRole("dialog")).not.toBeInTheDocument();
         await expect.element(button).toBeDisabled();
         expect(toast).not.toHaveBeenCalled();
         acknowledge({
@@ -2957,15 +2967,22 @@ describe("settings panels", () => {
               description:
                 outcome === "authenticated"
                   ? "Provider status has been refreshed."
-                  : "Complete sign-in in your browser. Provider status refreshes automatically when sign-in succeeds.",
+                  : remoteId
+                    ? "Complete sign-in in the browser on the server computer. Provider status refreshes automatically when sign-in succeeds."
+                    : "Complete sign-in in your browser. Provider status refreshes automatically when sign-in succeeds.",
             }),
           ),
         );
         await expect.element(button).toBeEnabled();
-        setServerConfigSnapshot({
-          ...config,
-          providers: [{ ...config.providers[0]!, auth: { status: "authenticated" } }],
-        });
+        const providers: ServerConfig["providers"] = [
+          { ...config.providers[0]!, auth: { status: "authenticated" } },
+        ];
+        if (remoteId) {
+          const current = useSavedEnvironmentRuntimeStore.getState().byId[remoteId]!.serverConfig!;
+          useSavedEnvironmentRuntimeStore
+            .getState()
+            .patch(remoteId, { serverConfig: { ...current, providers } });
+        } else setServerConfigSnapshot({ ...config, providers });
         await expect.element(button).not.toBeInTheDocument();
         expect(loginProvider).toHaveBeenCalledOnce();
       } finally {
@@ -2978,6 +2995,39 @@ describe("settings panels", () => {
         });
         toast.mockRestore();
       }
+    },
+  );
+
+  it.each([
+    {
+      role: "client",
+      capability: false,
+      reason: "Update Cafe and Codex on the server to use device-code sign-in.",
+    },
+    { role: null, capability: true, reason: "Connect to this server before signing in." },
+  ] as const)(
+    "keeps Codex login disabled for remote role $role with device-code support $capability",
+    async ({ role, capability, reason }) => {
+      const loginProvider = vi.fn<LocalApi["server"]["loginProvider"]>();
+      const subscribeProviderDeviceLogin =
+        vi.fn<LocalApi["server"]["subscribeProviderDeviceLogin"]>();
+      installRemoteProviderAccountSettings(createCodexLoginSettings(capability), role, {
+        loginProvider,
+        subscribeProviderDeviceLogin,
+      });
+      mounted = await renderWithTestRouter(
+        <AppAtomRegistryProvider>
+          <WorkspaceEnvironmentProvider>
+            <ProviderSettingsPanel />
+          </WorkspaceEnvironmentProvider>
+        </AppAtomRegistryProvider>,
+      );
+      await expect
+        .element(page.getByRole("button", { name: "Log in", exact: true }))
+        .toBeDisabled();
+      await expect.element(page.getByText(reason, { exact: true })).toBeVisible();
+      expect(loginProvider).not.toHaveBeenCalled();
+      expect(subscribeProviderDeviceLogin).not.toHaveBeenCalled();
     },
   );
 

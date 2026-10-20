@@ -24,7 +24,13 @@ protocol compatibility, not an account entitlement or proof that an organization
 enables device authorization. An account or workspace administrator may need to
 enable device-code login.
 
-An explicit Log in gesture opens a dialog with the code and the exact official
+The Log in button uses the existing normal browser flow for Owners, including
+saved remote Owner connections and local desktop Owners. Device-code support
+does not override that choice or disable normal Owner login. A saved remote
+Client connection uses device-code login and requires the server's advertised
+device-code capability; it never falls back to the Owner-only browser launcher.
+
+An explicit Client Log in gesture opens a dialog with the code and the exact official
 `https://auth.openai.com/codex/device` address. Copy and Open verification page
 operate on the client computer. Show waiting, success or finite local failure
 feedback. Clear instructions on failure or success. Do not infer a provider code

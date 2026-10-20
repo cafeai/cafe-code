@@ -57,7 +57,7 @@
   },
   " · Created ": {
     "message": " · Created ",
-    "locations": ["apps/web/src/components/settings/SettingsPanels.tsx:3213"]
+    "locations": ["apps/web/src/components/settings/SettingsPanels.tsx:3212"]
   },
   " · Environment: {value0}": {
     "message": " · Environment: {value0}",
@@ -910,10 +910,10 @@
       "apps/web/src/components/ChatMarkdown.tsx:742",
       "apps/web/src/components/PlanSidebar.tsx:95",
       "apps/web/src/components/Sidebar.tsx:2739",
-      "apps/web/src/components/settings/SettingsPanels.tsx:2875",
-      "apps/web/src/components/settings/SettingsPanels.tsx:2969",
-      "apps/web/src/components/settings/SettingsPanels.tsx:3040",
-      "apps/web/src/components/settings/SettingsPanels.tsx:3059"
+      "apps/web/src/components/settings/SettingsPanels.tsx:2874",
+      "apps/web/src/components/settings/SettingsPanels.tsx:2968",
+      "apps/web/src/components/settings/SettingsPanels.tsx:3039",
+      "apps/web/src/components/settings/SettingsPanels.tsx:3058"
     ]
   },
   "An instance named ''{id}'' already exists.": {
@@ -1050,7 +1050,7 @@
     "locations": [
       "apps/web/src/components/Sidebar.tsx:1160",
       "apps/web/src/components/Sidebar.tsx:926",
-      "apps/web/src/components/settings/SettingsPanels.tsx:2814",
+      "apps/web/src/components/settings/SettingsPanels.tsx:2813",
       "apps/web/src/components/settings/settingsSearchIndex.ts:675"
     ]
   },
@@ -1079,7 +1079,7 @@
   },
   "Archived {archived} · Created {created}": {
     "message": "Archived {archived} · Created {created}",
-    "locations": ["apps/web/src/components/settings/SettingsPanels.tsx:2936"]
+    "locations": ["apps/web/src/components/settings/SettingsPanels.tsx:2935"]
   },
   "Arguments (JSON array)": {
     "message": "Arguments (JSON array)",
@@ -1917,7 +1917,7 @@
   },
   "Chat history": {
     "message": "Chat history",
-    "locations": ["apps/web/src/components/settings/SettingsPanels.tsx:2807"]
+    "locations": ["apps/web/src/components/settings/SettingsPanels.tsx:2806"]
   },
   "Chat override": {
     "message": "Chat override",
@@ -1992,8 +1992,8 @@
       "apps/web/src/components/CommandPalette.logic.ts:271",
       "apps/web/src/components/Sidebar.tsx:1284",
       "apps/web/src/components/settings/SettingsPanels.tsx:1486",
-      "apps/web/src/components/settings/SettingsPanels.tsx:2913",
-      "apps/web/src/components/settings/SettingsPanels.tsx:3185",
+      "apps/web/src/components/settings/SettingsPanels.tsx:2912",
+      "apps/web/src/components/settings/SettingsPanels.tsx:3184",
       "apps/web/src/components/settings/SettingsSidebarNav.tsx:96",
       "apps/web/src/components/settings/settingsSearchIndex.ts:335"
     ]
@@ -2873,7 +2873,7 @@
   },
   "Connect to this server before signing in.": {
     "message": "Connect to this server before signing in.",
-    "locations": ["apps/web/src/components/settings/SettingsPanels.tsx:2700"]
+    "locations": ["apps/web/src/components/settings/SettingsPanels.tsx:2699"]
   },
   "Connected": {
     "message": "Connected",
@@ -3396,7 +3396,7 @@
     "message": "Could not delete chat",
     "locations": [
       "apps/web/src/components/Sidebar.tsx:1112",
-      "apps/web/src/components/settings/SettingsPanels.tsx:3055"
+      "apps/web/src/components/settings/SettingsPanels.tsx:3054"
     ]
   },
   "Could not delete selected chats": {
@@ -3424,7 +3424,7 @@
   },
   "Could not empty Recycle Bin": {
     "message": "Could not empty Recycle Bin",
-    "locations": ["apps/web/src/components/settings/SettingsPanels.tsx:3103"]
+    "locations": ["apps/web/src/components/settings/SettingsPanels.tsx:3102"]
   },
   "Could not fetch the latest branch hash from origin.": {
     "message": "Could not fetch the latest branch hash from origin.",
@@ -3460,11 +3460,11 @@
   },
   "Could not load archived chats": {
     "message": "Could not load archived chats",
-    "locations": ["apps/web/src/components/settings/SettingsPanels.tsx:2903"]
+    "locations": ["apps/web/src/components/settings/SettingsPanels.tsx:2902"]
   },
   "Could not load deleted chats": {
     "message": "Could not load deleted chats",
-    "locations": ["apps/web/src/components/settings/SettingsPanels.tsx:3175"]
+    "locations": ["apps/web/src/components/settings/SettingsPanels.tsx:3174"]
   },
   "Could not load diagnostic details. Reconnect and try again.": {
     "message": "Could not load diagnostic details. Reconnect and try again.",
@@ -3588,7 +3588,7 @@
   },
   "Could not restore chat": {
     "message": "Could not restore chat",
-    "locations": ["apps/web/src/components/settings/SettingsPanels.tsx:3036"]
+    "locations": ["apps/web/src/components/settings/SettingsPanels.tsx:3035"]
   },
   "Could not revoke client access": {
     "message": "Could not revoke client access",
@@ -3678,8 +3678,8 @@
   "Could not unarchive chat": {
     "message": "Could not unarchive chat",
     "locations": [
-      "apps/web/src/components/settings/SettingsPanels.tsx:2871",
-      "apps/web/src/components/settings/SettingsPanels.tsx:2960"
+      "apps/web/src/components/settings/SettingsPanels.tsx:2870",
+      "apps/web/src/components/settings/SettingsPanels.tsx:2959"
     ]
   },
   "Could not update HTTPS": {
@@ -4253,7 +4253,7 @@
   },
   "Delete forever": {
     "message": "Delete forever",
-    "locations": ["apps/web/src/components/settings/SettingsPanels.tsx:3021"]
+    "locations": ["apps/web/src/components/settings/SettingsPanels.tsx:3020"]
   },
   "Delete its chats first, or delete the project anyway.": {
     "message": "Delete its chats first, or delete the project anyway.",
@@ -4292,11 +4292,11 @@
   },
   "Deleted {count} {count, plural, one {chat} other {chats}} forever.": {
     "message": "Deleted {count} {count, plural, one {chat} other {chats}} forever.",
-    "locations": ["apps/web/src/components/settings/SettingsPanels.tsx:3122"]
+    "locations": ["apps/web/src/components/settings/SettingsPanels.tsx:3121"]
   },
   "Deleted {deleted} of {count} {count, plural, one {chat} other {chats}}. {detail}": {
     "message": "Deleted {deleted} of {count} {count, plural, one {chat} other {chats}}. {detail}",
-    "locations": ["apps/web/src/components/settings/SettingsPanels.tsx:3104"]
+    "locations": ["apps/web/src/components/settings/SettingsPanels.tsx:3103"]
   },
   "Delivery is uncertain. Waiting for a provider update; this action will not be repeated automatically.": {
     "message": "Delivery is uncertain. Waiting for a provider update; this action will not be repeated automatically.",
@@ -4837,7 +4837,7 @@
   },
   "Empty Recycle Bin": {
     "message": "Empty Recycle Bin",
-    "locations": ["apps/web/src/components/settings/SettingsPanels.tsx:3158"]
+    "locations": ["apps/web/src/components/settings/SettingsPanels.tsx:3157"]
   },
   "Enable": {
     "message": "Enable",
@@ -6100,8 +6100,8 @@
     "message": "History",
     "locations": [
       "apps/web/src/components/atrium/TaskAtrium.tsx:645",
-      "apps/web/src/components/settings/SettingsPanels.tsx:2891",
-      "apps/web/src/components/settings/SettingsPanels.tsx:3163",
+      "apps/web/src/components/settings/SettingsPanels.tsx:2890",
+      "apps/web/src/components/settings/SettingsPanels.tsx:3162",
       "apps/web/src/components/settings/SettingsSidebarNav.tsx:173",
       "apps/web/src/components/settings/settingsSearchIndex.ts:51"
     ]
@@ -6770,7 +6770,7 @@
   },
   "Loading chats": {
     "message": "Loading chats",
-    "locations": ["apps/web/src/components/settings/SettingsPanels.tsx:2761"]
+    "locations": ["apps/web/src/components/settings/SettingsPanels.tsx:2760"]
   },
   "Loading conversation…": {
     "message": "Loading conversation…",
@@ -7269,7 +7269,7 @@
       "apps/web/src/components/Sidebar.logic.ts:74",
       "apps/web/src/components/Sidebar.tsx:1165",
       "apps/web/src/components/desk/useDeskChatActions.ts:32",
-      "apps/web/src/components/settings/SettingsPanels.tsx:2856"
+      "apps/web/src/components/settings/SettingsPanels.tsx:2855"
     ]
   },
   "Move to Recycle Bin ({value0})": {
@@ -7307,7 +7307,7 @@
   },
   "Moved to Recycle Bin": {
     "message": "Moved to Recycle Bin",
-    "locations": ["apps/web/src/components/settings/SettingsPanels.tsx:3211"]
+    "locations": ["apps/web/src/components/settings/SettingsPanels.tsx:3210"]
   },
   "Moving…": {
     "message": "Moving…",
@@ -7630,7 +7630,7 @@
   },
   "No archived chats": {
     "message": "No archived chats",
-    "locations": ["apps/web/src/components/settings/SettingsPanels.tsx:2904"]
+    "locations": ["apps/web/src/components/settings/SettingsPanels.tsx:2903"]
   },
   "No available editors found.": {
     "message": "No available editors found.",
@@ -9457,7 +9457,7 @@
   "Recently deleted": {
     "message": "Recently deleted",
     "locations": [
-      "apps/web/src/components/settings/SettingsPanels.tsx:2822",
+      "apps/web/src/components/settings/SettingsPanels.tsx:2821",
       "apps/web/src/components/settings/settingsSearchIndex.ts:684"
     ]
   },
@@ -9583,11 +9583,11 @@
   },
   "Recycle Bin emptied": {
     "message": "Recycle Bin emptied",
-    "locations": ["apps/web/src/components/settings/SettingsPanels.tsx:3121"]
+    "locations": ["apps/web/src/components/settings/SettingsPanels.tsx:3120"]
   },
   "Recycle Bin is empty": {
     "message": "Recycle Bin is empty",
-    "locations": ["apps/web/src/components/settings/SettingsPanels.tsx:3176"]
+    "locations": ["apps/web/src/components/settings/SettingsPanels.tsx:3175"]
   },
   "Redeem 1 reset": {
     "message": "Redeem 1 reset",
@@ -10116,7 +10116,7 @@
   },
   "Restore": {
     "message": "Restore",
-    "locations": ["apps/web/src/components/settings/SettingsPanels.tsx:3018"]
+    "locations": ["apps/web/src/components/settings/SettingsPanels.tsx:3017"]
   },
   "Restore all groups": {
     "message": "Restore all groups",
@@ -13298,8 +13298,8 @@
   "Unarchive": {
     "message": "Unarchive",
     "locations": [
-      "apps/web/src/components/settings/SettingsPanels.tsx:2853",
-      "apps/web/src/components/settings/SettingsPanels.tsx:2976"
+      "apps/web/src/components/settings/SettingsPanels.tsx:2852",
+      "apps/web/src/components/settings/SettingsPanels.tsx:2975"
     ]
   },
   "Unassigned": {
@@ -13362,7 +13362,7 @@
   },
   "Unknown deletion error.": {
     "message": "Unknown deletion error.",
-    "locations": ["apps/web/src/components/settings/SettingsPanels.tsx:3094"]
+    "locations": ["apps/web/src/components/settings/SettingsPanels.tsx:3093"]
   },
   "Unknown error force-removing project.": {
     "message": "Unknown error force-removing project.",
@@ -13457,7 +13457,7 @@
   },
   "Update Cafe and Codex on the server to use device-code sign-in.": {
     "message": "Update Cafe and Codex on the server to use device-code sign-in.",
-    "locations": ["apps/web/src/components/settings/SettingsPanels.tsx:2707"]
+    "locations": ["apps/web/src/components/settings/SettingsPanels.tsx:2706"]
   },
   "Update Codex to use device-code sign-in on this server.": {
     "message": "Update Codex to use device-code sign-in on this server.",
