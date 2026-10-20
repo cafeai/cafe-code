@@ -1,6 +1,6 @@
 # Desktop Releases And Updates
 
-Last updated: 2026-10-20 15:35:22 JST (UTC+0900)
+Last updated: 2026-10-20 20:51:54 JST (UTC+0900)
 
 Cafe Code publishes desktop artifacts from version tags. macOS apps are Developer ID signed and
 notarized; Windows and Linux artifacts remain unsigned. Stable tags use
@@ -26,13 +26,30 @@ It does not change local machines or packaged apps, and signature, Gatekeeper
 and stapled-ticket validation remain mandatory. Remove the workaround once the
 upstream Intel runner network issue is resolved and qualified.
 
-A release branch can run this workflow before its tag exists. Substitute the
-deliberately selected, unused version and prepared branch in this template:
-`gh workflow run release.yml --ref release/X.Y.Z -f version=vX.Y.Z -f publish_release=true`.
-The manual run pins the branch's event commit and creates the tag only after
-normal CI, signed builds, artifact identity checks and manifest validation pass.
-It never force-updates an existing tag. Omitting `publish_release=true` builds and
-validates artifacts without creating a tag or GitHub release.
+Every new desktop release requires a matching `release/<version>` branch alongside
+its `v<version>` tag, both identifying the exact frozen, qualified source commit.
+Use the complete version without the tag's leading `v` for the branch, including
+nightly suffixes: for example, `release/0.2.4` and `v0.2.4`. After approval for the
+specific release, create the remote branch only if it is absent; otherwise verify
+its exact current commit. If an existing branch points elsewhere, stop rather
+than moving, resetting or force-updating it. Branch admission is an operational
+preflight check, not a new workflow bypass or automatic enforcement claim.
+
+Normally dispatch from the matching release branch before its tag exists.
+Substitute the deliberately selected, unused version and verified branch in this
+template:
+`gh workflow run release.yml --ref release/X.Y.Z -f version=vX.Y.Z -f publish_release=true -f build_only=false`.
+Bind the actual event SHA and the workflow's prepared source SHA to the frozen
+commit; a matching branch name alone is not source evidence. The manual run creates
+the tag only after normal CI, signed builds, artifact identity checks and manifest
+validation pass. It never force-updates an existing tag. Omitting
+`publish_release=true` builds and validates artifacts without creating a tag or
+GitHub release.
+
+If an approved release run was already dispatched from another ref, retain its
+original event commit and create or verify the matching release branch at that
+same commit before publication. Do not retarget or redispatch an in-flight run
+merely to change its ref.
 
 Additional process-lifecycle, native installer/runtime and packaged update-feed
 probes run separately as optional qualification. They are not required by the
@@ -98,11 +115,14 @@ authorized, unused newer release, not replacement payloads under its old tag.
 1. Obtain approval for the specific release and choose an unused stable or
    nightly version. Check the existing remote tag and GitHub release before
    selecting it; never force a tag or overwrite published assets.
-2. Freeze the intended release source commit. If using a release branch, bind
-   that branch and the workflow's prepared source SHA to this commit; do not
-   qualify a moving branch name against results from an older head. Updating
-   `main` to the release source is a separate, explicitly requested operation,
-   not an automatic side effect of publishing from `dev` or a release branch.
+2. Freeze the intended release source commit and create or verify the remote
+   `release/<version>` branch at that exact commit before publication. Never
+   reuse a different existing branch by moving or force-updating it. Normally
+   dispatch from this matching branch, and bind both the actual event SHA and
+   the workflow's prepared source SHA to the frozen commit; do not qualify a
+   moving branch name against results from an older head. Updating `main` or
+   aligning `dev` with it remains a separate, explicitly requested operation,
+   not an automatic side effect of creating the release branch or publishing.
 3. Use normal release mode for normal publication: require its exact-source
    reusable CI gate and all four release artifacts
    (`cafe-code-release-windows-x64`, `cafe-code-release-macos-arm64`,
@@ -115,10 +135,11 @@ authorized, unused newer release, not replacement payloads under its old tag.
    payloads for the selected channel; do not substitute a diagnostic archive
    or a result from a different source commit.
 5. Let the workflow publish only the artifacts qualified by that exact run and
-   commit. Record the final version, tag, source commit, workflow result and
-   download/update artifacts. Do not silently rebuild or replace the published
-   payload after verification. Real native upgrade/relaunch tests, when run,
-   are separate qualification and must be reported as such.
+   commit. Verify that the matching release branch and tag both resolve to that
+   source, and record the final version, branch, tag, source commit, workflow
+   result and download/update artifacts. Do not silently rebuild or replace the
+   published payload after verification. Real native upgrade/relaunch tests,
+   when run, are separate qualification and must be reported as such.
 6. Treat `CafeCode.sh` updates as separate scope and inspect the website's own
    repository and deployment configuration.
    This desktop workflow does not establish that website downloads, release
