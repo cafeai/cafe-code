@@ -1,6 +1,6 @@
 # Desktop Releases And Updates
 
-Last updated: 2026-10-20 20:51:54 JST (UTC+0900)
+Last updated: 2026-10-20 21:56:16 JST (UTC+0900)
 
 Cafe Code publishes desktop artifacts from version tags. macOS apps are Developer ID signed and
 notarized; Windows and Linux artifacts remain unsigned. Stable tags use
@@ -62,6 +62,50 @@ macOS signing/notarization, native signature/ticket verification, exact-source
 artifact hashes and update-manifest checks. It does not establish that normal CI
 passed. Never move an existing release tag or silently replace published binaries;
 withdrawal or replacement remains a separately authorized release action.
+
+## Release notes and post-publication checks
+
+Every release needs reviewed notes describing what changed since the previous
+published release, not only the workflow's generic installer paragraph. Prepare
+the notes from the frozen source comparison before publication, then verify and
+publish the reviewed body after the normal workflow finishes and before calling
+the release complete. This is a required maintainer step: the current workflow
+does not automatically produce a reviewed changelog. An ordinary dev push does
+not publish a release or authorize editing an earlier release's notes.
+
+For a stable release, select the preceding published, non-draft stable release,
+excluding the current release and prereleases. For a nightly, deliberately choose
+and record the preceding published nightly on that channel; if none exists, state
+the selected stable baseline or that this is the first release. Do not infer the
+baseline from a moving branch, tag spelling or creation time alone. Resolve the
+baseline tag to its exact source commit, peeling annotated tags, and compare it
+with the new frozen source SHA before dispatch. After the workflow creates the
+new tag, resolve it too and verify that it identifies that same frozen source;
+do not precreate the tag to prepare notes. Inspect the complete commit and file
+comparison. If the comparison is not
+an ordinary ancestor range, explain the divergence instead of presenting it as
+a simple incremental update.
+
+Write concise user-facing changes first, followed by relevant developer/testing
+improvements, migration or breaking changes, and known limitations. Link the
+exact GitHub comparison and supporting commits where helpful. Commit subjects
+are discovery hints, not sufficient evidence: inspect the corresponding source
+and tests. Exclude features already present in the baseline and commits added
+after the frozen release source. Do not turn a timing goal into a measured
+performance claim or claim native installation, update or live adoption from
+build/feed tests alone. Retain macOS signing/notarization, Windows/Linux unsigned
+status and `SHA256SUMS.txt` guidance.
+
+After publication, retain the existing release body and complete asset inventory,
+then update only the body of that exact release with the reviewed notes, for
+example using `nice -n 15 gh release edit "$RELEASE_TAG" --repo cafeai/cafe-code
+--notes-file "$REVIEWED_NOTES"`. The notes file is reviewed prose, never a shell
+script assembled from untrusted commit text. Re-read the published body and
+confirm the exact intended text and comparison, release ID/version/channel,
+tag and matching branch commits, and unchanged asset IDs, names, sizes and
+digests. A notes-only correction never moves a tag, creates another release,
+rebuilds or replaces assets. Website deployment and main/dev alignment retain
+their separate authority and verification requirements.
 
 ## Application version identity
 
@@ -146,6 +190,11 @@ authorized, unused newer release, not replacement payloads under its old tag.
    text or deployment changed. Verify the website's actual release/deployment
    procedure and obtain its required authority before making those changes;
    do not assume a desktop tag deploys the website.
+7. Complete the [release-notes procedure](#release-notes-and-post-publication-checks):
+   publish reviewed differences from the exact preceding release source, keep
+   platform/checksum and migration guidance, and verify the resulting public
+   body without changing the already qualified tag, branch or payloads. A
+   generic packaging paragraph or automatic commit list alone is not completion.
 
 ## Windows managed providers
 
